@@ -85,25 +85,38 @@ in `gcc-driver.full`. A call site's caller is the latest emitted start of its
 enclosing subprogram at or below the return address. A cross-unit callee is
 resolved only through an oracle alias name that maps to exactly one function.
 Both endpoints must be scoreable oracle functions. Tail calls are kept and
-counted. A recovered edge is scored only when both endpoints are scoreable and
-the caller has at least one DWARF call site. Callers without call-site
-information, such as prebuilt libiberty and libstdc++ objects, would otherwise
-count every recovered call as fabricated.
+counted. Every recovered edge with scoreable endpoints remains in the
+precision population. A caller without complete negative call evidence cannot
+turn an unmatched recovered edge into a proven fabrication.
 
-The stripped twin scores precision 5780/6197 (0.932709) and recall 5780/5860
-(0.986348) over 5860 oracle edges. With the caller restriction lifted,
-precision is 0.83841 over 6894 scored edges. Most of the 417 fabricated edges
-are calls into constructor and destructor exception-cleanup paths that DWARF
-does not record as call sites. 79 of the 80 missing edges target
-`string_slice::strcmp`. The report retains every oracle, missing and fabricated
-edge. The coverage generator rescores the retained binding-verified recovered
-model against the full artifact's DWARF and requires exact report equality,
-including provenance, every outcome, counts, tail-call total and ratios. It
-records the bounded report snapshot and the verified model, binding and
-qualification snapshots as evidence. It rejects a report whose endpoints are not scoreable or
-whose callers have no call site. It also rejects a report bound to another
-manifest, stripped input or full artifact. The dimension is
-`measured-not-release-eligible` for the same #679 gate:
+The v2 report retains all 8,905 recovered edges: 6,894 have scoreable oracle
+endpoints, and 2,011 are explicitly listed with endpoint exclusion reasons.
+The eligible population partitions into 5,780 known matches, two proven
+fabricated edges, and 1,112 unknown edges. All 5,860 known oracle edges stay in
+the recall population, including positive observations from partial callers;
+recall is 5,780/5,860 (0.986348), with 80 missing edges retained.
+
+Precision is **not established**. Its lower bound is 5,780/6,894 (0.838410)
+and its upper bound is 6,892/6,894 (0.999710). The exact `precision` field is
+null while unknowns remain, and the unchanged 90% precision requirement is
+`unproven`. Unknown edges are neither confirmed false positives nor accepted
+matches. This corrects the historical v1 caller restriction, which reported
+5,780/6,197 as exact precision merely because a caller had at least one site.
+
+Negative authority requires concrete emitted-subprogram `DW_AT_call_all_calls`
+or stronger `DW_AT_call_all_source_calls` evidence (or the equivalent GNU
+attribute), together with resolved targets for every potentially relevant
+site. A tail-only flag, inherited abstract/specification-only flag, unresolved
+indirect/virtual/external target or unlocated site leaves negative coverage
+unproven. The report retains these facts and reasons for every scoreable caller.
+See [DWARF 5 section 3.3.1.3](https://dwarfstd.org/doc/DWARF5.pdf).
+
+The coverage generator rescores the retained binding-verified recovered model
+against full-artifact DWARF and requires exact report equality, including the
+complete partition, provenance and bounds. It records the bounded report
+snapshot and the validated model, binding and qualification snapshots. Both
+metrics remain `measured-not-release-eligible`; production admission under
+#679 and an established precision threshold remain outstanding.
 
 ```bash
 python3 oracle/gcc/report_call_edges.py \

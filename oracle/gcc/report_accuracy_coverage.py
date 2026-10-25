@@ -429,7 +429,7 @@ def _function_start_score(
 
 
 CALL_EDGE_REPORT = "call-edge-score.json"
-CALL_EDGE_REPORT_ID = "gcc-driver-call-edge-score-v1"
+CALL_EDGE_REPORT_ID = "gcc-driver-call-edge-score-v2"
 
 
 def _call_edge_score(
@@ -464,92 +464,7 @@ def _call_edge_score(
         raise CoverageError("call edge report is bound to another input")
     if provenance.get("fullArtifactSha256") != full_sha256:
         raise CoverageError("call edge report is bound to another full artifact")
-    scoreable = {
-        function.rva
-        for function in loaded_oracle.functions
-        if function.rva is not None and function.exclusion is None
-    }
-    oracle = _required_mapping(report.get("oracle"), "call edge oracle")
     summary = _required_mapping(report.get("summary"), "call edge summary")
-    raw = {
-        key: report.get(key)
-        for key in (
-            "oracleEdges",
-            "missingEdges",
-            "fabricatedEdges",
-            "callerWithoutCallSiteEdges",
-            "callersWithCallSites",
-        )
-    }
-    if not all(isinstance(value, list) for value in raw.values()):
-        raise CoverageError("call edge report outcomes must be arrays")
-
-    def pairs(items: list[Any]) -> list[tuple[int, int]]:
-        return [(int(item["callerRva"], 16), int(item["calleeRva"], 16)) for item in items]
-
-    try:
-        reference_list = pairs(raw["oracleEdges"])
-        tail_flags = [item["tailCall"] for item in raw["oracleEdges"]]
-        missing_list = pairs(raw["missingEdges"])
-        fabricated_list = pairs(raw["fabricatedEdges"])
-        unchecked_list = pairs(raw["callerWithoutCallSiteEdges"])
-        callers = {int(rva, 16) for rva in raw["callersWithCallSites"]}
-        true_positives = int(summary["truePositives"])
-        scored_recovered = int(summary["scoredRecoveredCount"])
-    except (KeyError, TypeError, ValueError) as error:
-        raise CoverageError("call edge report outcome is malformed") from error
-    if not all(isinstance(flag, bool) for flag in tail_flags):
-        raise CoverageError("call edge report outcome is malformed")
-    reference = set(reference_list)
-    missing = set(missing_list)
-    fabricated = set(fabricated_list)
-    unchecked = set(unchecked_list)
-    if (
-        len(reference) != len(reference_list)
-        or len(missing) != len(missing_list)
-        or len(fabricated) != len(fabricated_list)
-        or len(unchecked) != len(unchecked_list)
-        or len(callers) != len(raw["callersWithCallSites"])
-    ):
-        raise CoverageError("call edge report repeats an edge or caller")
-    endpoints = {
-        rva for pair in reference | fabricated | unchecked for rva in pair
-    } | callers
-    if not endpoints <= scoreable:
-        raise CoverageError("call edge report endpoints are not scoreable oracle functions")
-    if any(caller not in callers for caller, _ in reference | fabricated):
-        raise CoverageError("call edge report caller has no retained call site")
-    if any(caller in callers for caller, _ in unchecked):
-        raise CoverageError("call edge unscored edge has a caller with call sites")
-    if not missing <= reference:
-        raise CoverageError("call edge missing edges are not oracle edges")
-    if fabricated & reference:
-        raise CoverageError("call edge fabricated edges include oracle edges")
-    if (
-        true_positives + len(missing) != len(reference)
-        or true_positives + len(fabricated) != scored_recovered
-        or summary.get("referenceCount") != len(reference)
-        or summary.get("falseNegatives") != len(missing)
-        or summary.get("falsePositives") != len(fabricated)
-        or oracle.get("edgeCount") != len(reference)
-        or oracle.get("tailCallEdgeCount") != sum(tail_flags)
-        or oracle.get("callersWithCallSites") != len(callers)
-    ):
-        raise CoverageError("call edge report summary disagrees with outcomes")
-    precision = _ratio(true_positives, scored_recovered)
-    recall = _ratio(true_positives, len(reference))
-    if summary.get("precision") != precision or summary.get("recall") != recall:
-        raise CoverageError("call edge report ratios disagree with outcomes")
-    # Every oracle caller has a call site, so unscored edges are all fabricated
-    # and the unrestricted figures follow from the retained outcomes.
-    unrestricted_count = scored_recovered + len(unchecked)
-    unrestricted = {
-        "scoredRecoveredCount": unrestricted_count,
-        "precision": _ratio(true_positives, unrestricted_count),
-        "recall": recall,
-    }
-    if summary.get("unrestricted") != unrestricted:
-        raise CoverageError("call edge unrestricted summary disagrees with outcomes")
     qualification = _required_mapping(
         provenance.get("qualification"), "call edge qualification"
     )
@@ -577,24 +492,20 @@ def _call_edge_score(
         )
     return {
         "status": "measured",
-        "precision": precision,
-        "recall": recall,
-        "unrestricted": unrestricted,
+        "precision": summary["precision"],
+        "precisionStatus": summary["precisionStatus"],
+        "precisionBounds": summary["precisionBounds"],
+        "unknownRecoveredCount": summary["unknownRecoveredCount"],
+        "thresholdAssessment": summary["thresholdAssessment"],
+        "recall": summary["recall"],
         "productionVerified": False,
         "reasonCode": "recovered-model-not-release-eligible",
         "releaseEligible": False,
-        "oracle": {
-            "edgeCount": len(reference),
-            "tailCallEdgeCount": sum(tail_flags),
-            "callersWithCallSites": len(callers),
-            "populationDefinition": report.get("populationDefinition"),
-        },
+        "oracle": {**scored.report["oracle"], "populationDefinition": report["populationDefinition"]},
         "evidence": {
             **report_record,
             **scored.evidence,
-            "programModelSha256": _required_mapping(
-                provenance.get("programModel"), "call edge program model"
-            ).get("sha256"),
+            "programModelSha256": scored.report["provenance"]["programModel"]["sha256"],
         },
     }
 
@@ -854,6 +765,11 @@ def _start_suffix(score: dict[str, Any]) -> str:
         return ""
     precision = score["precision"]
     recall = score["recall"]
+    if precision is None:
+        bounds = score["precisionBounds"]
+        return (f", precision bounds {bounds['lower']['numerator']}..{bounds['upper']['numerator']}/"
+                f"{bounds['lower']['denominator']} ({score['unknownRecoveredCount']} unknown), "
+                f"recall {recall['numerator']}/{recall['denominator']}")
     return (
         f", precision {precision['numerator']}/{precision['denominator']}"
         f", recall {recall['numerator']}/{recall['denominator']}"

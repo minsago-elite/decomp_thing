@@ -34,6 +34,15 @@ class RetainedCallEdgeTest(unittest.TestCase):
         self.assertEqual(summary["referenceCount"], len(self.report["oracleEdges"]))
         self.assertEqual(summary["falsePositives"], len(self.report["fabricatedEdges"]))
         self.assertEqual(summary["falseNegatives"], len(self.report["missingEdges"]))
+        partitions = [
+            {(edge["callerRva"], edge["calleeRva"]) for edge in self.report[key]}
+            for key in ("matchedEdges", "fabricatedEdges", "unknownRecoveredEdges", "excludedRecoveredEdges")
+        ]
+        self.assertEqual([len(part) for part in partitions], [5780, 2, 1112, 2011])
+        self.assertEqual(len(set.union(*partitions)), summary["rawRecoveredCount"])
+        self.assertEqual(summary["rawRecoveredCount"], 8905)
+        self.assertEqual(sum(map(len, partitions[:3])), summary["scoredRecoveredCount"])
+        self.assertEqual(summary["scoredRecoveredCount"], 6894)
         self.assertFalse(self.report["productionVerified"])
 
     def test_accuracy_coverage_reports_measured_edges(self) -> None:
@@ -41,10 +50,13 @@ class RetainedCallEdgeTest(unittest.TestCase):
         score = dimension["currentScore"]
         self.assertEqual(dimension["status"], "measured-not-release-eligible")
         self.assertEqual(dimension["oracle"]["edgeCount"], 5860)
-        self.assertEqual(
-            score["precision"],
-            {"numerator": 5780, "denominator": 6197, "value": 0.932709},
-        )
+        self.assertIsNone(score["precision"])
+        self.assertEqual(score["precisionStatus"], "bounded-with-unknowns")
+        self.assertEqual(score["precisionBounds"]["lower"],
+                         {"numerator": 5780, "denominator": 6894, "value": 0.83841})
+        self.assertEqual(score["precisionBounds"]["upper"],
+                         {"numerator": 6892, "denominator": 6894, "value": 0.99971})
+        self.assertEqual(score["thresholdAssessment"]["precision"], "unproven")
         self.assertEqual(
             score["recall"],
             {"numerator": 5780, "denominator": 5860, "value": 0.986348},
@@ -74,7 +86,32 @@ class RetainedCallEdgeTest(unittest.TestCase):
 
 
 class TamperedCallEdgeTest(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls) -> None:
+        from oracle.gcc import report_call_edges
+        from oracle.gcc.bound_recovered_model import load_bound_stripped_model
+
+        # All tamper cases reuse the same authenticated full artifact/oracle.
+        # Decode that immutable DWARF once; retained and semantic tests exercise
+        # extraction independently, while each tamper case still rescores its
+        # binding-verified model and compares every retained outcome.
+        bound = load_bound_stripped_model(
+            PROFILE, PROFILE / "stripped-recovered-program-model.json",
+            PROFILE / "surviving-symbol-identity-binding.json",
+            PROFILE / "surviving-symbol-identity-qualification.json",
+        )
+        payload, _ = report_call_edges._full_artifact(PROFILE, bound.provenance["artifactManifestSha256"])
+        scored = {f.rva for f in bound.oracle.functions if f.rva is not None and f.exclusion is None}
+        excluded = {f.rva for f in bound.oracle.functions if f.rva is not None and f.exclusion is not None}
+        cls.oracle_population = report_call_edges._oracle_edges(payload, bound.oracle, scored, excluded)
+        cls.extract_oracle = staticmethod(report_call_edges._oracle_edges)
+
     def setUp(self) -> None:
+        self.oracle_patch = mock.patch(
+            "oracle.gcc.report_call_edges._oracle_edges", return_value=self.oracle_population
+        )
+        self.oracle_patch.start()
+        self.addCleanup(self.oracle_patch.stop)
         parent = REPOSITORY_ROOT / "build/python-test-tmp"
         parent.mkdir(exist_ok=True, parents=True)
         self.directory = tempfile.TemporaryDirectory(
@@ -102,21 +139,21 @@ class TamperedCallEdgeTest(unittest.TestCase):
         self.assertEqual(dimension["oracle"]["status"], "unavailable")
 
     def test_rejects_consistent_outcome_edit_not_backed_by_model(self) -> None:
-        self.report["missingEdges"] = []
-        self.report["fabricatedEdges"] = []
+        # Promote an unknown into a known match while keeping the full recovered
+        # partition and all precision interval arithmetic internally consistent.
+        edge = self.report["unknownRecoveredEdges"].pop()
+        edge.pop("reasonCodes")
+        self.report["matchedEdges"].append(edge)
         summary = self.report["summary"]
-        count = len(self.report["oracleEdges"])
-        summary.update(truePositives=count, scoredRecoveredCount=count,
-                       falseNegatives=0, falsePositives=0)
-        ratio = {"numerator": count, "denominator": count, "value": 1.0}
-        summary.update(precision=ratio, recall=ratio)
-        unrestricted = count + len(self.report["callerWithoutCallSiteEdges"])
-        summary["unrestricted"] = {
-            "scoredRecoveredCount": unrestricted,
-            "precision": {"numerator": count, "denominator": unrestricted,
-                          "value": round(count / unrestricted, 6)},
-            "recall": ratio,
+        summary["truePositives"] += 1
+        summary["unknownRecoveredCount"] -= 1
+        count = summary["scoredRecoveredCount"]
+        positive = summary["truePositives"]
+        summary["precisionBounds"]["lower"] = {
+            "numerator": positive, "denominator": count, "value": round(positive / count, 6)
         }
+        summary["recall"] = {"numerator": positive, "denominator": summary["referenceCount"],
+                             "value": round(positive / summary["referenceCount"], 6)}
         self._rewrite()
         with self.assertRaisesRegex(CoverageError, "rescore of its retained recovered model"):
             build_coverage(self.profile)
@@ -223,9 +260,7 @@ class TamperedCallEdgeTest(unittest.TestCase):
         # One independently supplied oracle edge is enough to exercise the
         # projection guard; decoder behavior is covered by the retained test.
         with mock.patch.object(report_call_edges, "MAX_REPORT_BYTES", 1024), \
-             mock.patch.object(report_call_edges, "_oracle_edges", return_value=(
-                 {(0x3980, 0xed570): {False}}, {0x3980}, Counter()
-             )):
+             mock.patch.object(report_call_edges, "_oracle_edges", return_value=self.oracle_population):
             with self.assertRaisesRegex(CoverageError, "projected output byte limit"):
                 report_call_edges.build_report(
                     self.profile,
@@ -246,7 +281,7 @@ class TamperedCallEdgeTest(unittest.TestCase):
                                return_value=replace(bound, provenance=provenance)), \
              mock.patch.object(report_call_edges, "_recovered_edges", return_value=set()), \
              mock.patch.object(report_call_edges, "_oracle_edges",
-                               return_value=({}, set(), Counter())):
+                               return_value=report_call_edges.OracleCallPopulation({}, set(), Counter(), {})):
             with self.assertRaisesRegex(CoverageError, "projected output byte limit"):
                 report_call_edges.build_report(
                     self.profile,
@@ -258,7 +293,7 @@ class TamperedCallEdgeTest(unittest.TestCase):
     def test_rejects_unscoreable_endpoint(self) -> None:
         self.report["fabricatedEdges"][0]["calleeRva"] = "0x1"
         self._rewrite()
-        with self.assertRaisesRegex(CoverageError, "not scoreable oracle functions"):
+        with self.assertRaisesRegex(CoverageError, "rescore of its retained recovered model"):
             build_coverage(self.profile)
 
     def test_rejects_missing_edge_outside_oracle(self) -> None:
@@ -267,7 +302,7 @@ class TamperedCallEdgeTest(unittest.TestCase):
             callerRva=fabricated["callerRva"], calleeRva=fabricated["calleeRva"]
         )
         self._rewrite()
-        with self.assertRaisesRegex(CoverageError, "missing edges are not oracle edges"):
+        with self.assertRaisesRegex(CoverageError, "rescore of its retained recovered model"):
             build_coverage(self.profile)
 
     def test_rejects_fabricated_oracle_edge(self) -> None:
@@ -276,20 +311,20 @@ class TamperedCallEdgeTest(unittest.TestCase):
             callerRva=edge["callerRva"], calleeRva=edge["calleeRva"]
         )
         self._rewrite()
-        with self.assertRaisesRegex(CoverageError, "include oracle edges"):
+        with self.assertRaisesRegex(CoverageError, "rescore of its retained recovered model"):
             build_coverage(self.profile)
 
     def test_rejects_dropped_fabricated_edge(self) -> None:
         del self.report["fabricatedEdges"][-1]
         self._rewrite()
-        with self.assertRaisesRegex(CoverageError, "summary disagrees"):
+        with self.assertRaisesRegex(CoverageError, "rescore of its retained recovered model"):
             build_coverage(self.profile)
 
     def test_rejects_hidden_tail_call(self) -> None:
         tail = next(edge for edge in self.report["oracleEdges"] if edge["tailCall"])
         tail["tailCall"] = False
         self._rewrite()
-        with self.assertRaisesRegex(CoverageError, "summary disagrees"):
+        with self.assertRaisesRegex(CoverageError, "rescore of its retained recovered model"):
             build_coverage(self.profile)
 
     def test_rejects_swapped_tail_call(self) -> None:
@@ -317,34 +352,35 @@ class TamperedCallEdgeTest(unittest.TestCase):
 
     def test_rejects_unpinned_decoder(self) -> None:
         with mock.patch.object(elftools, "__version__", "0.0"):
-            with self.assertRaisesRegex(CoverageError, "requires pyelftools"):
-                build_coverage(self.profile)
+            with mock.patch("oracle.gcc.report_call_edges._oracle_edges", self.extract_oracle):
+                with self.assertRaisesRegex(CoverageError, "requires pyelftools"):
+                    build_coverage(self.profile)
 
     def test_rejects_inflated_ratio(self) -> None:
         self.report["summary"]["recall"]["value"] = 1.0
         self._rewrite()
-        with self.assertRaisesRegex(CoverageError, "ratios disagree"):
+        with self.assertRaisesRegex(CoverageError, "rescore of its retained recovered model"):
             build_coverage(self.profile)
 
-    def test_rejects_inflated_unrestricted_precision(self) -> None:
-        self.report["summary"]["unrestricted"]["precision"]["value"] = 1.0
+    def test_rejects_inflated_precision_bound(self) -> None:
+        self.report["summary"]["precisionBounds"]["lower"]["value"] = 1.0
         self._rewrite()
-        with self.assertRaisesRegex(CoverageError, "unrestricted summary disagrees"):
+        with self.assertRaisesRegex(CoverageError, "rescore of its retained recovered model"):
             build_coverage(self.profile)
 
     def test_rejects_dropped_unscored_edge(self) -> None:
-        del self.report["callerWithoutCallSiteEdges"][-1]
+        del self.report["unknownRecoveredEdges"][-1]
         self._rewrite()
-        with self.assertRaisesRegex(CoverageError, "unrestricted summary disagrees"):
+        with self.assertRaisesRegex(CoverageError, "rescore of its retained recovered model"):
             build_coverage(self.profile)
 
-    def test_rejects_unscored_edge_from_caller_with_call_sites(self) -> None:
+    def test_rejects_unknown_edge_that_is_known_positive(self) -> None:
         edge = self.report["oracleEdges"][0]
-        self.report["callerWithoutCallSiteEdges"][0].update(
+        self.report["unknownRecoveredEdges"][0].update(
             callerRva=edge["callerRva"], calleeRva=edge["calleeRva"]
         )
         self._rewrite()
-        with self.assertRaisesRegex(CoverageError, "caller with call sites"):
+        with self.assertRaisesRegex(CoverageError, "rescore of its retained recovered model"):
             build_coverage(self.profile)
 
     def test_rejects_foreign_manifest(self) -> None:
