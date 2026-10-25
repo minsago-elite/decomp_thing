@@ -3479,19 +3479,8 @@ private fun PlanEntryStatus.toContractStatus(): AgentPlanStatus = when (this) {
     PlanEntryStatus.COMPLETED -> AgentPlanStatus.COMPLETED
 }
 
-private fun renderPrompt(request: AgentExecutionRequest): String = buildString {
-    appendLine(request.objective)
-    if (request.contextInputs.isNotEmpty()) {
-        appendLine()
-        appendLine("Context inputs (immutable):")
-        request.contextInputs.forEach { context ->
-            append("--- ").append(context.id).append(" [").append(context.mediaType).append(']')
-            context.description?.let { append(" — ").append(it) }
-            appendLine()
-            appendLine(context.content)
-        }
-    }
-}
+private fun renderPrompt(request: AgentExecutionRequest): String =
+    decompengine.agent.renderAgentPrompt(request.objective, request.contextInputs)
 
 private fun tokenLimitExceeded(request: AgentExecutionRequest, usage: AgentUsage): Boolean =
     request.limits.maxInputTokens?.let { requireNotNull(usage.inputTokens) > it } == true ||

@@ -286,6 +286,114 @@ internal class GeneratedCDeclarationContextCache {
     }
 }
 
+/**
+ * Select whole recovered declarations by their named dependencies. Names inside comments and
+ * literals are not evidence. Tag names use C's separate namespace; ordinary names are a
+ * conservative lexical dependency because recovered bodies need not be parseable C yet.
+ * A recovered record can contain several declarations and remains an indivisible evidence unit.
+ */
+internal fun selectRequiredGeneratedCTypes(types: List<RecoveredType>, evidence: List<String>): List<RecoveredType> {
+    data class Export(val type: RecoveredType, val signature: List<String>, val definition: Boolean)
+    val identifier = Regex("[A-Za-z_][A-Za-z0-9_]*")
+    val aggregateKeywords = setOf("struct", "union", "enum")
+    val exports = linkedMapOf<String, MutableList<Export>>()
+    val references = linkedMapOf<String, Set<String>>()
+    var characters = 0L
+    var exportCount = 0
+
+    fun names(tokens: List<CToken>): Set<String> = buildSet {
+        tokens.forEachIndexed { index, token ->
+            if (token.text.matches(identifier) && token.text !in aggregateKeywords) {
+                add(if (tokens.getOrNull(index - 1)?.text in aggregateKeywords) "tag:${token.text}" else "name:${token.text}")
+            }
+        }
+    }
+
+    fun export(key: String, type: RecoveredType, signature: List<String>, definition: Boolean = true) {
+        require(++exportCount <= 131_072) { "recovered type dependency inventory exceeds its bound" }
+        exports.getOrPut(key) { mutableListOf() } += Export(type, signature, definition)
+    }
+
+    for (type in types.sortedBy { it.id }) declarationFor(type.id) {
+        characters += type.declaration.length.toLong()
+        require(type.declaration.length <= 1024 * 1024 && characters <= 64L * 1024 * 1024) {
+            "recovered type dependency context exceeds its source bounds"
+        }
+        require(generatedCAttributionPreprocessorIssue(type.declaration, allowIncludes = false) == null) {
+            "preprocessor-dependent type declarations cannot establish dependencies"
+        }
+        val tokens = cDeclarationTokens(type.declaration)
+        require(tokens.none { it.text == "#" }) { "preprocessor-dependent type declarations cannot establish dependencies" }
+        references[type.id] = names(tokens)
+        for (statement in splitCTypeSource(type.declaration, ";")) {
+            val statementTokens = cDeclarationTokens(statement)
+            if (statementTokens.any { it.text == "typedef" }) {
+                val parts = splitCTypeSource(aliasParsingView(statement), ",")
+                val first = CDeclarationParser(parts.first()).parse()
+                val prefix = first.source.substring(0, first.declaratorOffset)
+                for (declaration in listOf(first) + parts.drop(1).map { CDeclarationParser(prefix + it).parse() }) {
+                    val name = requireNotNull(declaration.name) { "typedef has no alias name" }.text
+                    // Preserve the aggregate body in the identity: the parser's temporary tag
+                    // replacement must never make two different anonymous structs equivalent.
+                    export("name:$name", type, statementTokens.map { it.text })
+                }
+            }
+            statementTokens.forEachIndexed { index, token ->
+                if (token.text !in aggregateKeywords) return@forEachIndexed
+                val tag = statementTokens.getOrNull(index + 1)?.takeIf { it.text.matches(identifier) }
+                val body = index + if (tag == null) 1 else 2
+                if (statementTokens.getOrNull(body)?.text == "{") {
+                    val end = matchingCTypeBody(statementTokens, body)
+                    val signature = statementTokens.subList(index, end + 1).map { it.text }
+                    if (tag != null) export("tag:${tag.text}", type, signature)
+                    if (token.text == "enum") {
+                        val bodyText = statement.substring(statementTokens[body].end, statementTokens[end].start)
+                        for (entry in splitCTypeSource(bodyText, ",")) {
+                            val enumerator = cDeclarationTokens(entry).firstOrNull()
+                            require(enumerator?.text?.matches(identifier) == true) { "enum member lacks an identifier" }
+                            export("name:${enumerator!!.text}", type, signature)
+                        }
+                    }
+                } else if (tag != null && index == 0 && body == statementTokens.size) {
+                    export("tag:${tag.text}", type, statementTokens.map { it.text }, definition = false)
+                }
+            }
+        }
+    }
+
+    val pending = ArrayDeque<String>()
+    var evidenceCharacters = 0L
+    evidence.forEach { source ->
+        evidenceCharacters += source.length.toLong()
+        require(evidenceCharacters <= 64L * 1024 * 1024) { "recovered type dependency evidence exceeds its source bound" }
+        names(cDeclarationTokens(source)).sorted().forEach(pending::addLast)
+    }
+    val visited = hashSetOf<String>()
+    val selected = linkedMapOf<String, RecoveredType>()
+    while (pending.isNotEmpty()) {
+        val name = pending.removeFirst()
+        if (!visited.add(name)) continue
+        val candidates = exports[name].orEmpty()
+        if (candidates.isEmpty()) continue // Built-in, standard-header, or unrecovered names remain explicit source evidence.
+        val definitions = candidates.filter { it.definition }.ifEmpty { candidates }
+        require(definitions.map { it.signature }.distinct().size == 1) {
+            "ambiguous recovered type dependency $name in ${definitions.map { it.type.id }.distinct().sorted()}"
+        }
+        val type = definitions.minBy { it.type.id }.type
+        if (selected.putIfAbsent(type.id, type) == null) references.getValue(type.id).sorted().forEach(pending::addLast)
+    }
+    return selected.values.sortedBy { it.id }
+}
+
+private fun matchingCTypeBody(tokens: List<CToken>, start: Int): Int {
+    var depth = 0
+    for (index in start until tokens.size) when (tokens[index].text) {
+        "{" -> { require(++depth <= 64) { "recovered type aggregate nesting exceeds 64" } }
+        "}" -> if (--depth == 0) return index
+    }
+    error("unclosed recovered type aggregate")
+}
+
 private fun splitCTypeSource(source: String, separator: String): List<String> {
     val tokens = cDeclarationTokens(source)
     val stack = mutableListOf<String>()

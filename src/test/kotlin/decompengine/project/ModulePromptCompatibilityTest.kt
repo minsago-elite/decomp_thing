@@ -26,7 +26,7 @@ import kotlinx.serialization.json.jsonPrimitive
 
 class ModulePromptCompatibilityTest {
     @Test
-    fun `generated C prompt commitments remain stable for Make and Ninja`() {
+    fun `generated C selected prompt commitments bind complete context for Make and Ninja`() {
         for (base in ReconstructionProfiles.builtIn) {
             for ((configuredBudget, profileBudget) in listOf(4096 to 120000, 120000 to 4096, 4096 to 4096)) {
                 val profile = withBudget(base, profileBudget)
@@ -37,9 +37,10 @@ class ModulePromptCompatibilityTest {
                 val failure = assertFailsWith<ModuleContextBudgetExceededException> {
                     reconstructor.reconstruct(request(profile, Path.of("unused-workspace")))
                 }
-                // Recorded from the production prompt path before extraction into the adapter.
-                assertEquals(5515, failure.promptCharacters)
-                assertEquals("b85179ae06e54680ce7c5d5113e8d39169bfc2a2bab34bc24acdb9276180a064", failure.promptSha256)
+                val selected = modulePromptEvidence(request(profile, Path.of("unused-workspace"))).text
+                assertTrue(selected.length > 4096)
+                assertEquals(selected.length, failure.promptCharacters)
+                assertEquals(sha256(selected.toByteArray()), failure.promptSha256)
                 assertEquals(4096, failure.promptBudgetCharacters)
                 assertTrue(":context-4096:" in reconstructor.cacheIdentity(profile))
                 assertEquals(profileBudget, profile.budgets.reconstructionMaximumContextCharacters)
@@ -109,22 +110,36 @@ class ModulePromptCompatibilityTest {
     }
 
     @Test
-    fun `exact profile prompt limit is dispatched and recorded on cancellation`() {
+    fun `exact selected context limit dispatches while one character less rejects`() {
         for (base in ReconstructionProfiles.builtIn) {
-            val profile = withBudget(base, 5515)
-            var calls = 0
-            val reconstructor = BoundedLlmModuleReconstructor(AgentHarness { _, _ ->
-                calls++
-                AgentExecutionResult(AgentStopReason.CANCELLED)
-            })
-            val failure = assertFailsWith<ModuleReconstructionInterruptedException> {
-                reconstructor.reconstruct(request(profile, createTempDirectory("exact-prompt-budget-")))
+            val workspace = createTempDirectory("exact-prompt-budget-")
+            val characters = modulePromptEvidence(request(base, workspace)).text.length
+            for (difference in listOf(-1, 0, 1)) {
+                val budget = characters + difference
+                val profile = withBudget(base, budget)
+                var calls = 0
+                val reconstructor = BoundedLlmModuleReconstructor(AgentHarness { _, _ ->
+                    calls++
+                    AgentExecutionResult(AgentStopReason.CANCELLED)
+                })
+                if (difference < 0) {
+                    val failure = assertFailsWith<ModuleContextBudgetExceededException> {
+                        reconstructor.reconstruct(request(profile, workspace))
+                    }
+                    assertEquals(characters, failure.promptCharacters)
+                    assertEquals(budget, failure.promptBudgetCharacters)
+                    assertEquals(0, calls)
+                } else {
+                    val failure = assertFailsWith<ModuleReconstructionInterruptedException> {
+                        reconstructor.reconstruct(request(profile, workspace))
+                    }
+                    assertEquals(1, calls)
+                    assertEquals(characters, failure.promptCharacters)
+                    assertEquals(budget, failure.promptBudgetCharacters)
+                }
+                assertTrue(":context-$budget:" in reconstructor.cacheIdentity(profile))
+                assertEquals(reconstructor.cacheIdentity(), reconstructor.cacheIdentity(base))
             }
-            assertEquals(1, calls)
-            assertEquals(5515, failure.promptCharacters)
-            assertEquals(5515, failure.promptBudgetCharacters)
-            assertTrue(":context-5515:" in reconstructor.cacheIdentity(profile))
-            assertEquals(reconstructor.cacheIdentity(), reconstructor.cacheIdentity(base))
         }
     }
 
@@ -161,8 +176,8 @@ class ModulePromptCompatibilityTest {
                     error("oversized observation must not dispatch")
                 }, maximumContextCharacters = 4_096)
                 val observations = listOf(
-                    "x".repeat(MAXIMUM_RETAINED_MODULE_OBSERVATION_BYTES + 1),
-                    "é".repeat(MAXIMUM_RETAINED_MODULE_OBSERVATION_BYTES / 2 + 1),
+                    retainedObservation(MAXIMUM_RETAINED_MODULE_OBSERVATION_BYTES + 1, multibyte = false),
+                    retainedObservation(MAXIMUM_RETAINED_MODULE_OBSERVATION_BYTES + 1, multibyte = true),
                 )
                 for ((index, observed) in observations.withIndex()) {
                     for (target in listOf(project, temp.resolve("${profile.id}-fresh-$index"))) {
@@ -191,7 +206,7 @@ class ModulePromptCompatibilityTest {
         Files.createDirectories(scratch)
         val temp = Files.createTempDirectory(scratch, "observation-retention-boundary-")
         try {
-            val observation = "é".repeat(MAXIMUM_RETAINED_MODULE_OBSERVATION_BYTES / 2)
+            val observation = retainedObservation(MAXIMUM_RETAINED_MODULE_OBSERVATION_BYTES, multibyte = true)
             assertEquals(MAXIMUM_RETAINED_MODULE_OBSERVATION_BYTES, observation.toByteArray(Charsets.UTF_8).size)
             for (profile in ReconstructionProfiles.builtIn) {
                 val project = temp.resolve(profile.id)
@@ -206,7 +221,7 @@ class ModulePromptCompatibilityTest {
                 assertEquals(JsonPrimitive(observation), checkpoint.getValue("preDispatchObservedBehavior"))
                 assertEquals(listOf("fn_alpha"), ArchivalProjectAuditor.audit(project, profile).unresolvedEntityIds)
                 val accepted = SourceTreeGenerator.generate(model(), project, profile = profile,
-                    reconstructor = EvidenceModuleReconstructor(true), observedBehavior = observation + "é")
+                    reconstructor = EvidenceModuleReconstructor(true), observedBehavior = observation + " ")
                 assertTrue(accepted.unresolvedImplementationIds.isEmpty())
                 assertFalse("preDispatchObservedBehavior" in Json.parseToJsonElement(checkpointPath.readText()).jsonObject)
             }
@@ -228,7 +243,7 @@ class ModulePromptCompatibilityTest {
             )
             val manifest = SourceTreeGenerator.generate(
                 model(), project, profile = profile, reconstructor = reconstructor,
-                observedBehavior = "x".repeat(4_096),
+                observedBehavior = observation(4_096),
             )
             assertEquals(listOf("fn_alpha"), manifest.unresolvedImplementationIds)
             val module = DeterministicModulePlanner(layout = profile.layout).plan(model()).modules.single()
@@ -300,7 +315,7 @@ class ModulePromptCompatibilityTest {
                 val manifest = SourceTreeGenerator.generate(model(), project, profile = profile,
                     reconstructor = BoundedLlmModuleReconstructor(
                         AgentHarness { _, _ -> error("must not execute") }, maximumContextCharacters = 4_096),
-                    observedBehavior = "x".repeat(4_096))
+                    observedBehavior = observation(4_096))
                 assertFalse(Files.exists(project.resolve("reports")))
                 val limits = ArchivalBundleLimits(maximumEntries = manifest.files.size + 1)
                 assertEquals(listOf("fn_alpha"),
@@ -336,7 +351,7 @@ class ModulePromptCompatibilityTest {
                 val manifest = SourceTreeGenerator.generate(model(), project, profile = profile,
                     reconstructor = BoundedLlmModuleReconstructor(
                         AgentHarness { _, _ -> error("must not execute") }, maximumContextCharacters = 4_096),
-                    observedBehavior = "x".repeat(4_096))
+                    observedBehavior = observation(4_096))
                 Files.createDirectory(project.resolve("reports"))
                 assertEquals(listOf("fn_alpha"), ArchivalProjectAuditor.audit(project, profile).unresolvedEntityIds)
                 val priorAudit = project.resolve("reports/archival_audit.json").readText()
@@ -525,7 +540,7 @@ class ModulePromptCompatibilityTest {
             )
             val manifest = SourceTreeGenerator.generate(
                 model(), project, profile = profile, reconstructor = reconstructor,
-                observedBehavior = "x".repeat(8_192),
+                observedBehavior = observation(8_192),
             )
             val source = manifest.files.single { ProjectFileRole.MODULE_IMPLEMENTATION in it.roles }
             val module = DeterministicModulePlanner(layout = profile.layout).plan(model()).modules.single()
@@ -610,7 +625,7 @@ class ModulePromptCompatibilityTest {
                 reconstructor = BoundedLlmModuleReconstructor(
                     AgentHarness { _, _ -> error("must not execute") }, maximumContextCharacters = 4_096,
                 ),
-                observedBehavior = "x".repeat(4_096),
+                observedBehavior = observation(4_096),
             )
             assertEquals(listOf("fn_alpha"), generated.unresolvedImplementationIds)
             val module = DeterministicModulePlanner(layout = profile.layout).plan(model()).modules.single()
@@ -788,11 +803,22 @@ class ModulePromptCompatibilityTest {
     ))
 
     private fun request(profile: ReconstructionProfile, workspace: Path): ModuleReconstructionRequest {
-        val model = model()
-        val module = DeterministicModulePlanner(layout = profile.layout).plan(model).modules.single()
-        return ModuleReconstructionRequest(module, model, "x".repeat(4096),
-            "int alpha_run(void);", "/* private interface */", mapOf("include/modules/dep.h" to "int dep(void);"),
-            workspace, observedBehavior = "authored observation", profile = profile)
+        val model = model().let { original -> original.copy(functions = original.functions.map { function ->
+            function.copy(decompiledC = "int alpha_run(void) { /* ${"x".repeat(4096)} */ return 7; }")
+        }) }
+        val plan = DeterministicModulePlanner(layout = profile.layout).plan(model)
+        return ProfileModulePromptInputs(model, plan, profile).request(plan.modules.single().id, workspace, null)
+    }
+
+    private fun observation(payloadCharacters: Int, multibyte: Boolean = false): String =
+        ModuleObservedBehavior.envelope(model().inputSha256, listOf(ModuleObservedCase(
+            "observed-alpha", ModuleObservationAttribution(listOf("fn_alpha"), "b".repeat(64)),
+            (if (multibyte) "é" else "x").repeat(payloadCharacters).chunked(1024), "", 0, "", "",
+        ))).toString()
+
+    private fun retainedObservation(bytes: Int, multibyte: Boolean): String {
+        val observation = observation(8192, multibyte)
+        return observation + " ".repeat(bytes - observation.toByteArray(Charsets.UTF_8).size)
     }
 
     private fun withBudget(base: ReconstructionProfile, budget: Int) = ReconstructionProfile(

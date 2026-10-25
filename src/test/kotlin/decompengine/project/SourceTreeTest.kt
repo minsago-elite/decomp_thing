@@ -640,7 +640,7 @@ class SourceTreeTest {
         ).cacheIdentity()
 
         assertNotEquals(first, second)
-        assertTrue(first.endsWith(":v3"))
+        assertTrue(first.endsWith(":v4"))
         assertFalse(first.contains(firstDescriptor))
     }
 
@@ -729,17 +729,13 @@ class SourceTreeTest {
                 onEvent: (AgentExecutionEvent) -> Unit,
             ): AgentExecutionResult {
                 assertTrue(request.objective.contains("src/modules/parse.c"))
-                assertTrue(request.contextInputs.single { it.id == "observed-behavior" }.content.contains("case default: stdout=ok"))
+                assertTrue(request.contextInputs.single { it.id == "observed-behavior" }.content.contains("legacy or opaque exploration is unscoped"))
                 val instructions = request.objective
                 assertTrue(instructions.contains("-Werror"))
                 assertTrue(instructions.contains("-c src/modules/parse.c -o /dev/null"))
                 val path = AgentWorkspacePath("project", "src/modules/parse.c")
                 val expectedRules = mapOf(
-                    "include/decomp_types.h" to setOf(AgentOperation.READ_FILE),
-                    "include/modules/parse.h" to setOf(AgentOperation.READ_FILE),
-                    "src/modules/parse_internal.h" to setOf(AgentOperation.READ_FILE),
                     "src/modules/parse.c" to setOf(
-                        AgentOperation.READ_FILE,
                         AgentOperation.WRITE_FILE,
                         AgentOperation.CREATE_FILE,
                     ),
@@ -810,21 +806,12 @@ class SourceTreeTest {
             error("a profile-hidden context file must not be sent to the agent")
         }
 
-        val manifest = SourceTreeGenerator.generate(
-            oneModuleModel(),
-            project,
-            reconstructor = BoundedLlmModuleReconstructor(harness),
-            profile = alternateProfile,
-        )
-
+        assertFailsWith<IllegalArgumentException> {
+            SourceTreeGenerator.generate(oneModuleModel(), project,
+                reconstructor = BoundedLlmModuleReconstructor(harness), profile = alternateProfile)
+        }
         assertFalse(called)
-        assertTrue("fn_0000000000401000" in manifest.unresolvedImplementationIds)
-        assertFalse(
-            ProjectFileRole.VIEWABLE in manifest.files.single { it.path == "src/modules/parse_internal.h" }.roles,
-        )
-        val checkpoint = project.resolve("reports/modules/parse.json").readText()
-        assertTrue(checkpoint.contains("\"accepted\": false"))
-        assertTrue(checkpoint.contains("\"code\": \"reconstruction-failed\""))
+        assertFalse(project.resolve("reports/modules/parse.json").exists())
     }
 
     @Test
@@ -861,8 +848,8 @@ class SourceTreeTest {
             assertTrue(request.accessPolicy.allows(target, AgentOperation.WRITE_FILE))
             assertTrue(request.accessPolicy.allows(target, AgentOperation.CREATE_FILE))
             val continuation = requireNotNull(request.sessionContinuation)
-            assertFalse(target in continuation.workspaceFiles)
-            assertTrue(continuation.workspaceFiles.keys.all { request.accessPolicy.allows(it, AgentOperation.READ_FILE) })
+            assertEquals(setOf(target), continuation.workspaceFiles.keys)
+            assertTrue(continuation.workspaceFiles.keys.none { request.accessPolicy.allows(it, AgentOperation.READ_FILE) })
             val source = "#include \"modules/parse.h\"\n/* fn_0000000000401000 */\nint parse_input(void) { return 17; }\n"
             target.resolve(request.workspaceRoots).writeText(source)
             AgentExecutionResult(
@@ -956,9 +943,10 @@ class SourceTreeTest {
         assertNull(first.acceptedRevisionSha256)
         assertFalse(first.directory.startsWith(project))
         assertTrue(AgentWorkspacePath("project", "src/modules/parse.c") in first.workspaceFiles)
-        assertTrue(first.workspaceFiles.keys.all { requests[0].accessPolicy.allows(it, AgentOperation.READ_FILE) })
-        assertNotEquals(first.workflowSha256, second.workflowSha256)
-        assertNotEquals(first.directory, second.directory)
+        assertTrue(first.workspaceFiles.keys.none { requests[0].accessPolicy.allows(it, AgentOperation.READ_FILE) })
+        // Different opaque whole-program observations supply no selected module evidence.
+        assertEquals(first.workflowSha256, second.workflowSha256)
+        assertEquals(first.directory, second.directory)
     }
 
     @Test

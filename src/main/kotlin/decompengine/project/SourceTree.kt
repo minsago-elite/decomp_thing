@@ -58,6 +58,8 @@ data class ModuleReconstructionRequest(
     val profile: ReconstructionProfile = GeneratedCMakeReconstructionProfile.descriptor,
     val sessionEvidenceFingerprint: String? = null,
     val acceptedSourceSha256: String? = null,
+    /** Recovered ownership used to select only required cross-module interfaces. */
+    val modulePlan: ModulePlan? = null,
 )
 
 data class ReconstructedModule(
@@ -121,10 +123,10 @@ class BoundedLlmModuleReconstructor(
 
     override fun cacheIdentity(profile: ReconstructionProfile): String = cacheIdentity(contextBudget(profile))
 
-    // v3 rejects checkpoints created before declared-role validation was enforced.
+    // v4 binds dependency-minimal inline context and removes readable workspace context.
     private fun cacheIdentity(contextCharacters: Int): String =
         "agent:${harness.implementationIdentifier() ?: "unspecified"}:context-$contextCharacters:" +
-            "factory-${harnessProvenanceSha256 ?: "unbound"}:v3"
+            "factory-${harnessProvenanceSha256 ?: "unbound"}:v4"
 
     private fun contextBudget(profile: ReconstructionProfile): Int =
         minOf(maximumContextCharacters, profile.budgets.reconstructionMaximumContextCharacters)
@@ -151,14 +153,7 @@ class BoundedLlmModuleReconstructor(
         val fingerprint = request.sessionEvidenceFingerprint ?: return null
         if (harnessProvenanceSha256 == null) return null
         val root = request.workspaceRoot.toAbsolutePath().normalize()
-        val implementationViewable = ProjectFileRole.VIEWABLE in
-            request.profile.layout.declaration("module-implementation").roles
-        val paths = (listOf(
-            request.profile.layout.declaration("shared-interface").materialize(),
-            request.module.headerPath,
-            request.profile.layout.declaration("module-private-interface").materialize(mapOf("module" to request.module.id)),
-        ) + (if (implementationViewable) listOf(request.module.sourcePath) else emptyList()) +
-            request.dependencyHeaders.keys).distinct()
+        val paths = listOf(request.module.sourcePath)
         val files = try {
             AgentSessionJournal.captureWorkspaceFiles(
                 paths.map { AgentWorkspacePath("project", it) }, listOf(AgentWorkspaceRoot("project", root)),
@@ -166,8 +161,8 @@ class BoundedLlmModuleReconstructor(
         } catch (failure: Exception) {
             throw AgentSessionRecoveryException("could not capture the bounded reconstruction session inventory", failure)
         }
-        // v2 isolates journals created before declared-role inventory enforcement.
-        val workflowSha256 = sha256(("module-reconstruction-session-v2\n" + request.model.inputSha256 + "\n" +
+        // v3 isolates journals created before minimal inline context enforcement.
+        val workflowSha256 = sha256(("module-reconstruction-session-v3\n" + request.model.inputSha256 + "\n" +
             request.profile.sha256 + "\n" + fingerprint).toByteArray())
         return AgentSessionContinuation(
             directory = root.parent.resolve(".decomp-agent-sessions")
@@ -203,11 +198,9 @@ class BoundedLlmModuleReconstructor(
 
     override fun reconstruct(request: ModuleReconstructionRequest): ReconstructedModule {
         val target = request.module.sourcePath
-        val implementation = request.profile.layout.declaration("module-implementation")
         val prompt = modulePromptEvidence(request)
         val objective = prompt.objective
         val evidence = prompt.evidence
-        val files = prompt.files
         val observed = prompt.observed
         val promptEvidence = prompt.text
         val contextSize = promptEvidence.length
@@ -216,14 +209,10 @@ class BoundedLlmModuleReconstructor(
         val promptSha256 = sha256(promptEvidence.toByteArray())
         val workspaceRoot = request.workspaceRoot.toAbsolutePath().normalize()
         val root = AgentWorkspaceRoot("project", workspaceRoot)
-        val readRules = files.keys.map { path ->
-            AgentPathRule(AgentWorkspacePath(root.id, path), setOf(AgentOperation.READ_FILE))
-        }
         val targetPath = AgentWorkspacePath(root.id, target)
         val sourcePath = targetPath.resolve(listOf(root))
         val before = sourcePath.takeIf { it.exists() }?.readBytes()
-        val targetOperations = setOf(AgentOperation.WRITE_FILE, AgentOperation.CREATE_FILE) +
-            if (ProjectFileRole.VIEWABLE in implementation.roles) setOf(AgentOperation.READ_FILE) else emptySet()
+        val targetOperations = setOf(AgentOperation.WRITE_FILE, AgentOperation.CREATE_FILE)
         var invocationEvidence: ReconstructionAgentExecutionEvidence? = null
         try {
             val agentRequest = AgentExecutionRequest(
@@ -234,10 +223,10 @@ class BoundedLlmModuleReconstructor(
                     AgentContextInput("observed-behavior", observed),
                 ),
                 accessPolicy = AgentAccessPolicy(
-                    readRules + AgentPathRule(
+                    listOf(AgentPathRule(
                         targetPath,
                         targetOperations,
-                    ),
+                    )),
                 ),
                 sessionContinuation = sessionContinuation(request),
             )
@@ -594,7 +583,7 @@ object SourceTreeGenerator {
                 }
                 selectedReconstructor.requireRetainableFallbackObservation(ModuleReconstructionRequest(
                     module, model, typesHeader, headers.getValue(module.id), privateHeaders.getValue(module.id),
-                    dependencyHeaders, projectDir, observedBehavior, profile = profile,
+                    dependencyHeaders, projectDir, observedBehavior, profile = profile, modulePlan = plan,
                 ))
             }
         }
@@ -637,6 +626,10 @@ object SourceTreeGenerator {
         moduleDependencyOrder(dependenciesByModule).map(moduleById::getValue).forEachIndexed { index, module ->
             val dependencies = dependenciesByModule.getValue(module.id)
             val dependencyHeaders = dependencies.associate { dependency -> moduleById.getValue(dependency).headerPath to headers.getValue(dependency) }
+            val promptRequest = ModuleReconstructionRequest(
+                module, model, typesHeader, headers.getValue(module.id), privateHeaders.getValue(module.id),
+                dependencyHeaders, projectDir, observedBehavior, profile = profile, modulePlan = plan,
+            )
             val localFingerprint = moduleFingerprint(
                 module,
                 model,
@@ -648,7 +641,9 @@ object SourceTreeGenerator {
                 profile.sha256,
                 compilationPolicy.id,
             )
-            val fingerprint = sha256(("transitive-interfaces-v2\n" + localFingerprint + "\n" +
+            val fingerprint = if (selectedReconstructor is BoundedLlmModuleReconstructor)
+                selectedModuleInputFingerprint(promptRequest)
+            else sha256(("transitive-interfaces-v2\n" + localFingerprint + "\n" +
                 interfaceFingerprints.getValue(module.id)).toByteArray())
             val sourcePath = projectDir.resolve(module.sourcePath)
             val checkpointPath = projectDir.resolve(profile.layout.declaration("module-evidence").materialize(mapOf("module" to module.id)))
@@ -714,6 +709,7 @@ object SourceTreeGenerator {
                 profile = profile,
                 sessionEvidenceFingerprint = fingerprint,
                 acceptedSourceSha256 = verifiedPreviousAcceptance?.sourceSha256,
+                modulePlan = plan,
             )
             val cacheIdentity = selectedReconstructor.cacheIdentity(profile)
             val cached = recordedCheckpoint?.takeIf { checkpoint ->
@@ -914,7 +910,7 @@ object SourceTreeGenerator {
                 append("{\"sourcePath\":\"").append(module.sourcePath.jsonEscape()).append("\",")
                 append("\"sourceSha256\":\"").append(checkpoint.sourceSha256).append("\",")
                 append("\"inputFingerprint\":\"").append(checkpoint.fingerprint).append("\",")
-                append("\"inputFingerprintProvider\":\"").append(INPUT_FINGERPRINT_PROVIDER).append("\",")
+                append("\"inputFingerprintProvider\":\"").append(archivedModuleInputFingerprintProvider(checkpoint.reconstructorIdentity)).append("\",")
                 append("\"inputBinarySha256\":\"").append(model.inputSha256.jsonEscape()).append("\",")
                 append("\"modelSchemaVersion\":").append(model.schemaVersion).append(',')
                 append("\"checkpointPath\":\"").append(checkpointEvidencePath.jsonEscape()).append("\",")

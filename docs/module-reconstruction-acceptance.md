@@ -4,7 +4,8 @@ The configured ACP harness receives the deterministic module target, recovered
 evidence for its owned entities, the supplied observed behavior, required module
 interfaces, and explicit build and acceptance instructions. The implementation
 target must match the profile's editable `module-implementation` declaration.
-Interfaces are readable and the one implementation is writable. The workflow
+Selected interfaces are inline prompt snapshots; the one implementation is
+writable and no project files are readable by the provider. The workflow
 retains the invocation receipt before interpreting the agent's result.
 
 A successful agent turn is a candidate revision. Acceptance requires exact
@@ -68,18 +69,38 @@ then requires wrapper termination, restored accepted source/checkpoint/manifest
 bytes, preserved cancellation and reuse without another reconstruction call.
 This is a local interruption fixture, not production compiler qualification.
 
-Module input fingerprint version 2 uses structured JSON containing the selected
-module model (including input-binary SHA-256 and model schema version), exact
-shared/module/private interfaces, sorted dependency interfaces, observed-behavior
-text, profile digest and compiler policy. The model's deterministic serialization
-retains every selected function/global/type field. Null and empty observations
-remain distinct. Changing binary identity or model contract invalidates cached
-reconstruction even when extracted source fields are otherwise unchanged.
+Current bounded-agent requests use contract `v4` and input fingerprint provider
+`module-reconstruction-input-v3`. The fingerprint binds the input binary/model
+schema, profile, compiler policy and exact selected prompt. Incoming recovered
+callers are summarized separately from outgoing callees. Caller summaries retain
+identity, address, prototype and edges into the owned module, without importing
+caller implementations. Outgoing functions and referenced globals supply only
+required interfaces. The Generated-C adapter selects the transitive recovered
+typedef/tag/enum declarations referenced by those interfaces and local evidence.
+Unrelated entities and unrelated observed cases do not enter the prompt or hash.
+Recovered type records are atomic: a record containing several declarations is
+retained whole when any declaration is needed. Lexical type selection may retain
+a same-named alias when a local variable shadows it; it does not invent missing
+types or infer executable behavior from names.
 
-Existing fingerprints use the historical encoding and therefore miss the new
-cache key once; regeneration produces the new key. Unchanged current inputs still
-reuse accepted checkpoints. This input binding does not make observed-behavior
-prose a validated measurement or establish production executable identity.
+Selected shared, module, private and dependency interface snapshots are included
+inline in `recovered-module-evidence`, alongside the owned recovered functions and
+globals. The objective and both context inputs, including ACP ID/media-type framing and
+separators, are assembled and bounded before agent dispatch using the same text
+renderer as the ACP transport. The only workspace permissions are write/create on the owned
+implementation; headers and prior source cannot expand the readable context.
+Complete project headers remain compiler inputs. The provider must replace the
+owned implementation from recovered evidence, while the workflow retains prior
+source for rollback and acceptance. Durable session inventory captures hashes of
+authorized writable paths without granting the provider permission to read them. The archive verifier independently rejects
+v4 receipt policies granting header or prior-source reads.
+
+Historical `v3` requests retain their original prompt rendering and structured
+`module-reconstruction-input-v2` plus transitive-interface fingerprint replay.
+Custom/evidence-only reconstructors retain that historical input contract. Fresh
+bounded reconstruction does not reuse a v3 checkpoint as v4 evidence. Archive
+fallback replay selects the renderer by the exact versioned reconstructor identity;
+relabeling an old fallback with the current contract fails verification.
 
 Each module's confidence `revisionEvidence` exposes `inputBinarySha256`,
 `modelSchemaVersion` and `inputFingerprintProvider` beside `inputFingerprint`.
@@ -266,15 +287,27 @@ an increased context request, both default entry points, unchanged identities an
 explicit host authorization. Individual phases still need their own measured
 resource enforcement; admission alone does not prove complete phase budgeting.
 
-Optional `exploration.json` is checked before analysis starts. The service reads a
-stable regular file under a byte bound of the smaller of 16 MiB and four times the
-profile's reconstruction context character limit, decodes strict UTF-8, then checks
-the decoded string length against that character limit. It rejects excessive or
-malformed input rather than truncating it or loading an unbounded report. Missing
-exploration input remains optional, and admitted text is forwarded unchanged.
-This text is prompt context; it does not authenticate behavioral claims or create
-measured behavior evidence. Complete module prompts retain their separate budget
-check after interfaces and other context are assembled.
+Optional `module-observations.json` is preferred over legacy `exploration.json`.
+Its bounded schema binds an input SHA-256 and unique cases containing inputs,
+exit status, stdout/stderr bytes and producer-supplied recovered-function entry
+trace attribution (function IDs and evidence digest). The service validates a
+stable regular UTF-8 file under a 4 MiB corpus limit; prompt selection rejects
+wrong binary identities or unknown function IDs, and includes only cases whose
+traced functions intersect the owned module. Whole-execution outputs remain
+non-authoritative context: trace attribution is neither module-only output
+attribution nor coverage, equivalence or authenticated oracle evidence.
+
+A real trace integration can supply `ModuleObservationAttributor` to
+`AutomaticExplorer`, publish an existing `ExplorationReport` through
+`writeModuleObservations`, or call `ModuleObservedBehavior.write` with retained
+traced cases. `AutomaticExplorer` checks the input digest before and after its
+observation run. It has no default function-entry tracer; absent actual trace
+evidence, it produces no guessed attribution. Legacy opaque exploration therefore
+contributes an explicit unavailable/unscoped statement to current bounded-agent
+prompts. Historical replay and custom reconstructors retain their original text.
+Legacy input still uses the smaller of 16 MiB and four times the profile character
+limit, with a decoded-character check. Complete selected prompts have a separate
+budget check after all interface and observation context is assembled.
 
 The service tests verify Unicode context forwarding and rejection of character
 excess, byte excess and malformed UTF-8 before analyzer invocation, source-tree
@@ -288,12 +321,13 @@ retains the workflow-owned target/role checks, context-size gate, workspace rule
 receipt capture, exact-change validation and rollback. Moving prompt formatting does
 not grant the adapter acceptance or filesystem authority.
 
-`ModulePromptCompatibilityTest` records an authored prompt from the pre-extraction
-production path and verifies its unchanged 5,515-character length and SHA-256 for
-both built-in profiles. Its deliberately oversized context is rejected before any
-agent invocation. This is prompt-byte and budget-gate compatibility evidence, not a
-live ACP interoperability result. Legacy request field names and the remaining
-profile-budget/neutrality migration are separate work.
+`HistoricalModulePromptReplayTest` preserves the old 5,515-character prompt and
+SHA-256 for both built-in profiles and replays retained v3 fallback artifacts.
+`ModulePromptCompatibilityTest` checks current selected prompt commitments and the
+exact budget boundary. `ModuleMinimalContextTest` distinguishes incoming callers,
+excludes unrelated entities, and compares the measured text with the actual agent
+request. These are deterministic contract fixtures, not live ACP or behavioral
+qualification.
 
 The complete module prompt now uses the smaller of the selected profile's
 `reconstructionMaximumContextCharacters` and the reconstructor's configured

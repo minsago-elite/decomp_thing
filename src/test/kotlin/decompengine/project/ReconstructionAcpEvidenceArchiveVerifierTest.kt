@@ -15,6 +15,9 @@ import decompengine.acp.AcpProducedOutputEvidence
 import decompengine.acp.AcpRuntimeClosureLimits
 import decompengine.acp.AcpSandboxEvidence
 import decompengine.acp.AcpSandboxResourceLimits
+import decompengine.agent.AgentAccessPolicy
+import decompengine.agent.AgentOperation
+import decompengine.agent.AgentPathRule
 import decompengine.agent.AgentExecutionEvent
 import decompengine.agent.AgentExecutionRequest
 import decompengine.agent.AgentExecutionRequestBinding
@@ -71,7 +74,8 @@ class ReconstructionAcpEvidenceArchiveVerifierTest {
                 base.budgets.copy(reconstructionMaximumContextCharacters = 600_000), base.adapterConfiguration)
             val project = temp.resolve("project")
             val harness = ArchiveEvidenceHarness(accepted = true)
-            val observation = "x".repeat(MAXIMUM_RETAINED_MODULE_OBSERVATION_BYTES + 1)
+            val observation = attributedObservation(stdoutHex = "78".repeat(16_384), cases = 17)
+            assertTrue(observation.toByteArray().size > MAXIMUM_RETAINED_MODULE_OBSERVATION_BYTES)
             val manifest = SourceTreeGenerator.generate(
                 model = RecoveredProgramModel(inputSha256 = "a".repeat(64), functions = listOf(
                     RecoveredFunction("fn_0000000000401000", "parse_input", 0x401000UL, "int parse_input(void)"))),
@@ -231,6 +235,71 @@ class ReconstructionAcpEvidenceArchiveVerifierTest {
     }
 
     @Test
+    fun `v4 archive rejects rehashed header and prior-source read grants on accepted receipts`() {
+        val scratch = Path.of("build/test-tmp").toAbsolutePath().normalize()
+        Files.createDirectories(scratch)
+        val temp = Files.createTempDirectory(scratch, "v4-policy-replay-")
+        try {
+            for (profile in ReconstructionProfiles.builtIn) {
+                val profileRoot = temp.resolve(profile.id)
+                val harness = ArchiveEvidenceHarness(accepted = true)
+                val baseline = createAgentProject(profileRoot.resolve("baseline"), accepted = true,
+                    profile = profile, harness = harness)
+                val originalRequest = harness.executedRequest
+                val originalPolicy = AgentExecutionRequestBinding.capture(originalRequest).accessPolicySha256
+                val originalSource = baseline.resolve(SOURCE_PATH).readBytes()
+                assertEquals(setOf(AgentOperation.WRITE_FILE, AgentOperation.CREATE_FILE),
+                    originalRequest.accessPolicy.allowedOperations)
+                assertEquals(1, originalRequest.accessPolicy.pathRules.size)
+                val baselineManifest = SourceTreeManifestReader.read(baseline, profile)
+                assertEquals(1, ReconstructionAcpEvidenceArchiveVerifier.verify(baseline,
+                    baselineManifest.files.associate { it.path to sha256(baseline.resolve(it.path).readBytes()) },
+                    baselineManifest.files.associate { it.path to Files.size(baseline.resolve(it.path)) },
+                    baselineManifest, profile).size)
+
+                for ((name, path) in listOf("header-read" to "include/modules/parse.h", "prior-source-read" to SOURCE_PATH)) {
+                    val project = profileRoot.resolve(name)
+                    copyTree(baseline, project)
+                    val broaderRequest = AgentExecutionRequest(
+                        objective = originalRequest.objective,
+                        workspaceRoots = originalRequest.workspaceRoots,
+                        contextInputs = originalRequest.contextInputs,
+                        accessPolicy = AgentAccessPolicy(originalRequest.accessPolicy.pathRules + AgentPathRule(
+                            AgentWorkspacePath("project", path), setOf(AgentOperation.READ_FILE))),
+                        limits = originalRequest.limits,
+                        sessionContinuation = originalRequest.sessionContinuation,
+                    )
+                    val broaderBinding = AgentExecutionRequestBinding.capture(broaderRequest)
+                    assertTrue(broaderBinding.accessPolicySha256 != originalPolicy)
+                    rewriteEvidenceAndBindings(project) { text ->
+                        val receipt = Json.parseToJsonElement(text).jsonObject
+                        val request = receipt.getValue("request").jsonObject
+                        JsonObject(receipt + ("request" to JsonObject(request + mapOf(
+                            "accessPolicySha256" to JsonPrimitive(broaderBinding.accessPolicySha256),
+                            "requestSha256" to JsonPrimitive(broaderBinding.requestSha256),
+                        )))).toString() + "\n"
+                    }
+                    val checkpoint = Json.parseToJsonElement(project.resolve(CHECKPOINT_PATH).readText()).jsonObject
+                    rewriteCheckpointConfidenceAndManifest(project, JsonObject(checkpoint +
+                        ("executionRequestSha256" to JsonPrimitive(broaderBinding.requestSha256))))
+                    assertTrue(originalSource.contentEquals(project.resolve(SOURCE_PATH).readBytes()))
+                    val manifest = SourceTreeManifestReader.read(project, profile)
+                    val failure = assertFailsWith<IllegalArgumentException>("${profile.id}/$name") {
+                        ReconstructionAcpEvidenceArchiveVerifier.verify(project,
+                            manifest.files.associate { it.path to sha256(project.resolve(it.path).readBytes()) },
+                            manifest.files.associate { it.path to Files.size(project.resolve(it.path)) }, manifest, profile)
+                    }
+                    assertEquals("module-minimal ACP receipt differs from its owned-source write policy", failure.message)
+                }
+            }
+        } finally {
+            Files.walk(temp).use { paths ->
+                paths.sorted(java.util.Comparator.reverseOrder()).forEach { Files.deleteIfExists(it) }
+            }
+        }
+    }
+
+    @Test
     fun `archive gate rejects checkpoint path and digest ambiguity`() {
         val temp = createTempDirectory("acp-archive-checkpoint-")
         val baseline = createAgentProject(temp.resolve("baseline"), accepted = true)
@@ -257,8 +326,8 @@ class ReconstructionAcpEvidenceArchiveVerifierTest {
                         "\"executionTerminalOutcome\": \"returned-refused\"",
                     )
                     else -> checkpoint.replace(
-                        Regex("factory-[0-9a-f]{64}:v3"),
-                        "factory-${"0".repeat(64)}:v3",
+                        Regex("factory-[0-9a-f]{64}:v4"),
+                        "factory-${"0".repeat(64)}:v4",
                     )
                 }
             }
@@ -413,7 +482,7 @@ class ReconstructionAcpEvidenceArchiveVerifierTest {
                 val name = if (paddedObservation) "padded-observation" else "fabricated-prompt"
                 val project = temp.resolve(name)
                 copyTree(baseline, project)
-                val observed = if (paddedObservation) "x".repeat(4_096) else null
+                val observed = if (paddedObservation) attributedObservation(stdoutHex = "78".repeat(2_048)) else null
                 val request = inputs.request("parse", project, observed)
                 val prompt = modulePromptEvidence(request).text
                 assertEquals(paddedObservation, prompt.length > 4_096)
@@ -667,12 +736,19 @@ class ReconstructionAcpEvidenceArchiveVerifierTest {
         }
     }
 
+    private fun attributedObservation(stdoutHex: String, cases: Int = 1): String =
+        ModuleObservedBehavior.envelope("a".repeat(64), (0 until cases).map { index ->
+            ModuleObservedCase("case-$index",
+                ModuleObservationAttribution(listOf("fn_0000000000401000"), "b".repeat(64)),
+                emptyList(), "", 0, stdoutHex, "")
+        }).toString()
+
     private fun createAgentProject(
         project: Path,
         accepted: Boolean,
         profile: ReconstructionProfile = GeneratedCMakeReconstructionProfile.descriptor,
+        harness: ArchiveEvidenceHarness = ArchiveEvidenceHarness(accepted),
     ): Path {
-        val harness = ArchiveEvidenceHarness(accepted)
         SourceTreeGenerator.generate(
             RecoveredProgramModel(
                 inputSha256 = "a".repeat(64),
@@ -793,6 +869,8 @@ class ReconstructionAcpEvidenceArchiveVerifierTest {
     private class ArchiveEvidenceHarness(private val accepted: Boolean) : AgentHarness {
         private var evidence: AcpExecutionEvidenceSnapshot? = null
         private lateinit var requestBinding: AgentExecutionRequestBinding
+        lateinit var executedRequest: AgentExecutionRequest
+            private set
         val factoryProvenance = AcpHarnessProvenance(
             harness = "acp",
             implementationId = IMPLEMENTATION_ID,
@@ -809,6 +887,7 @@ class ReconstructionAcpEvidenceArchiveVerifierTest {
             request: AgentExecutionRequest,
             onEvent: (AgentExecutionEvent) -> Unit,
         ): AgentExecutionResult {
+            executedRequest = request
             requestBinding = AgentExecutionRequestBinding.capture(request)
             val target = request.accessPolicy.pathRules.single { rule ->
                 decompengine.agent.AgentOperation.WRITE_FILE in rule.operations
