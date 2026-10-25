@@ -13,7 +13,7 @@ const maximumPolls = 300;
 interface Observed { listing: GitRepositories; workspace: GitWorkspace | null; revisionId: string | null }
 
 function branchLabel(workspace: GitWorkspace): string {
-  const name = workspace.headRefName?.replace(/^refs\/heads\//, '') ?? '';
+  const name = workspace.headRefName?.startsWith('refs/heads/') ? workspace.headRefName.slice('refs/heads/'.length) : workspace.headRefName ?? '';
   switch (workspace.headState) {
     case 'attached': return textMessage(copy.onBranch, { branch: name });
     case 'unborn': return textMessage(copy.unbornBranch, { branch: name });
