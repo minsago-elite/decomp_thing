@@ -93,7 +93,7 @@ it('keeps an older recorded parent selectable and loads older attempts only on r
   expect(fetcher.mock.calls[3]?.[0] as string).toContain('/runs?limit=200&cursor=cursor_older_1');
   expect(screen.getByText(/All 4 retained attempts of this job were read/u)).toBeTruthy();
   expect(screen.queryByRole('button', { name: 'Load older attempts' })).toBeNull();
-  expect((screen.getByLabelText('Base revision')).value).toBe('run_old/revision_old');
+  expect(screen.getByLabelText<HTMLSelectElement>('Base revision').value).toBe('run_old/revision_old');
 });
 
 it('suggests the recorded parent attempt but leaves the choice explicit', async () => {
