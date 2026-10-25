@@ -100,18 +100,18 @@ jobs:
         run: bash scripts/ci-prepare-oracle-runtime.sh
       - name: Build once and install the application through the existing provisioner
         run: bash scripts/ci-prepare-bundled-ghidra-runtime.sh --application
-      - name: Provision the existing authenticated root session controller
+      - name: Provision the existing ordinary-UID systemd controller session
         run: |
-          touch "$DECOMP_GCC_METADATA_EVIDENCE_ROOT/root-session.env"
-          sudo -n env GITHUB_ENV="$DECOMP_GCC_METADATA_EVIDENCE_ROOT/root-session.env" \
+          touch "$DECOMP_GCC_METADATA_EVIDENCE_ROOT/controller-session.env"
+          env GITHUB_ENV="$DECOMP_GCC_METADATA_EVIDENCE_ROOT/controller-session.env" \
             bash scripts/ci-prepare-acp-sandbox.sh
       - name: Provision the first dedicated bounded ext4 lease
         run: |
-          sudo -n env GITHUB_ENV="$GITHUB_ENV" RUNNER_TEMP="$GITHUB_WORKSPACE/build/gcc-metadata-reference/tmp" \
+          env GITHUB_ENV="$GITHUB_ENV" RUNNER_TEMP="$GITHUB_WORKSPACE/build/gcc-metadata-reference/tmp" \
             bash scripts/ci-prepare-oracle-ext4-scratch.sh --gcc-metadata-reference-first
       - name: Provision the independent replay ext4 lease
         run: |
-          sudo -n env GITHUB_ENV="$GITHUB_ENV" RUNNER_TEMP="$GITHUB_WORKSPACE/build/gcc-metadata-reference/tmp" \
+          env GITHUB_ENV="$GITHUB_ENV" RUNNER_TEMP="$GITHUB_WORKSPACE/build/gcc-metadata-reference/tmp" \
             bash scripts/ci-prepare-oracle-ext4-scratch.sh --gcc-metadata-reference-replay
       - name: Run the installed Kotlin owner and independent frozen-reference replay
         id: capture

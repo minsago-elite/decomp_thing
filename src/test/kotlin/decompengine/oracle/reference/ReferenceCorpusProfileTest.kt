@@ -37,7 +37,11 @@ class ReferenceCorpusProfileTest {
             assertEquals("e51bf6e3f3300d31ce9713e2160c6fe5895d1e4914fb25562c3542b161427905", profile.artifact("frontend").sha256)
             assertEquals(41_935_768, profile.artifact("frontend").content.size)
             assertEquals(profile.artifact("frontend").sha256, OracleArtifacts.sha256(profile.artifact("frontend").content))
-            assertEquals(8, profile.inputBindings.size)
+            assertEquals(9, profile.inputBindings.size)
+            assertEquals(profile.imageConfigSha256, profile.nativeRuntimeSelection.imageConfigSha256)
+            assertEquals("5cfe8f249600c95e14577138881a6f509e848a0c8e3420ed3ea0bec8fdb62520", profile.nativeRuntimeSelection.sha256)
+            assertEquals(44, profile.nativeRuntimeSelection.configurationTreeRoots.size)
+            assertEquals(59, profile.nativeRuntimeSelection.configurationNodes.size)
             assertTrue(profile.definition.cases.all { "PATH" in it.environment })
             assertFalse(profile.canonicalBytes.decodeToString().contains("\"expected\""))
             profile.requireCurrent("positive profile test")
@@ -132,6 +136,44 @@ class ReferenceCorpusProfileTest {
             val canonical = profile.canonicalBytes
             canonical[0] = 0
             assertEquals(profile.profileSha256, OracleArtifacts.sha256(profile.canonicalBytes))
+            val selection = profile.nativeRuntimeSelection
+            selection.canonicalBytes.fill(0)
+            assertEquals(selection.sha256, OracleArtifacts.sha256(selection.canonicalBytes))
+            assertFailsWith<UnsupportedOperationException> { (selection.configurationNodes as MutableList<String>).add("/etc/shadow") }
+            assertFailsWith<UnsupportedOperationException> { (selection.configurationTreeRoots as MutableList<String>).clear() }
+        }
+    }
+
+    @Test
+    fun `native runtime selection rejects widening ambiguous paths and unbounded definitions`() {
+        val bytes = Files.readAllBytes(PROFILE_ROOT.resolve("native-runtime-selection-v1.json"))
+        val raw = OracleJson.parse(bytes) as JsonObject
+        val mutations = listOf<(JsonObject) -> JsonObject>(
+            { JsonObject(it + ("expected" to JsonObject(emptyMap()))) },
+            { JsonObject(it + ("imageConfigSha256" to JsonPrimitive("unbound"))) },
+            { JsonObject(it + ("treePrefixes" to JsonArray(listOf(JsonPrimitive("/usr"))))) },
+            { JsonObject(it + ("configurationTreeRoots" to JsonArray(listOf(JsonPrimitive("/etc"))))) },
+            { JsonObject(it + ("configurationNodes" to JsonArray(listOf(JsonPrimitive("/etc/../etc/passwd"))))) },
+            { JsonObject(it + ("configurationNodes" to JsonArray(listOf(JsonPrimitive("/etc"), JsonPrimitive("/etc"))))) },
+            { JsonObject(it + ("configurationNodes" to JsonArray(listOf(JsonPrimitive("/etc"), JsonPrimitive("/etc/absent/child"))))) },
+            { JsonObject(it + ("configurationNodes" to JsonArray(listOf(JsonPrimitive("/etc"), JsonPrimitive("/etc/alternatives"))))) },
+            { JsonObject(it + ("configurationTreeRoots" to JsonArray(listOf(JsonPrimitive("/etc/a"), JsonPrimitive("/etc/a/child"))))) },
+            { JsonObject(it + ("configurationNodes" to JsonArray((0..2048).map { n -> JsonPrimitive("/etc/node$n") }))) },
+        )
+        mutations.forEachIndexed { index, mutation ->
+            assertFailsWith<ReferenceCorpusProfileException>("selection mutation $index") {
+                ReferenceNativeRuntimeSelection.parse(OracleJson.canonicalBytes(mutation(raw)))
+            }
+        }
+        assertFailsWith<ReferenceCorpusProfileException> { ReferenceNativeRuntimeSelection.parse(bytes + byteArrayOf(10)) }
+        withFixture { fixture ->
+            GccMetadataReferenceProfile.open(fixture).use { profile ->
+                val selected = fixture.resolve("native-runtime-selection-v1.json")
+                val replacement = fixture.resolve("replacement-selection.json")
+                Files.copy(selected, replacement)
+                Files.move(replacement, selected, StandardCopyOption.ATOMIC_MOVE, StandardCopyOption.REPLACE_EXISTING)
+                assertFailsWith<Exception> { profile.requireCurrent("after runtime selection path replacement") }
+            }
         }
     }
 

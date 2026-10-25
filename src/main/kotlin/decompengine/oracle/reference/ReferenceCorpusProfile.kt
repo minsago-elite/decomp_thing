@@ -216,6 +216,67 @@ internal class ReferenceCorpusDefinition private constructor(
 
 internal data class ReferenceCorpusSourceBinding(val id: String, val path: Path, val bytes: Long, val sha256: String)
 
+/** A bounded, immutable projection definition. Parsing alone grants no runtime authority. */
+internal class ReferenceNativeRuntimeSelection private constructor(
+    val imageConfigSha256: String,
+    treePrefixes: List<String>,
+    configurationTreeRoots: List<String>,
+    configurationNodes: List<String>,
+    canonicalBytes: ByteArray,
+) {
+    val treePrefixes: List<String> = immutableList(treePrefixes)
+    val configurationTreeRoots: List<String> = immutableList(configurationTreeRoots)
+    val configurationNodes: List<String> = immutableList(configurationNodes)
+    private val stored = canonicalBytes.copyOf()
+    val canonicalBytes: ByteArray get() = stored.copyOf()
+    val sha256: String = OracleArtifacts.sha256(stored)
+
+    fun selectsConfiguration(path: String): Boolean = path in configurationNodes ||
+        configurationTreeRoots.any { path == it || path.startsWith("$it/") }
+
+    companion object {
+        fun parse(canonicalBytes: ByteArray): ReferenceNativeRuntimeSelection = profileTranslate {
+            val root = OracleJson.parseCanonical(canonicalBytes, PROFILE_JSON_LIMITS).obj("native runtime selection")
+            root.fields("schemaVersion", "imageConfigSha256", "treePrefixes", "configurationTreeRoots", "configurationNodes")
+            require(root.number("schemaVersion") == 1L) { "unsupported native runtime selection version" }
+            fun paths(name: String, maximum: Int): List<String> = root.strings(name, maximum).also { paths ->
+                require(paths == paths.distinct().sorted()) { "native runtime selection paths must be sorted and unique" }
+                paths.forEach { path ->
+                    require(path.startsWith('/') && path != "/" && path.length <= 4096 &&
+                        path.all { it.code in 33..126 && it != '\\' } &&
+                        path.split('/').drop(1).all { it.isNotEmpty() && it != "." && it != ".." } &&
+                        path.split('/').size <= 64 && Path.of(path).normalize().toString() == path) {
+                        "native runtime selection path is invalid"
+                    }
+                }
+            }
+            val trees = paths("treePrefixes", 5)
+            require(trees == listOf("/bin", "/lib", "/lib64", "/sbin", "/usr")) {
+                "native runtime selection must retain the complete Linux tool and ABI trees"
+            }
+            val configurationTrees = paths("configurationTreeRoots", 1024)
+            val configurationNodes = paths("configurationNodes", 2048)
+            require("/etc" in configurationNodes && configurationTrees.all { it.startsWith("/etc/") } &&
+                configurationNodes.all { it == "/etc" || it.startsWith("/etc/") }) {
+                "native runtime configuration selection must be explicit beneath /etc"
+            }
+            require(configurationTrees.none { tree -> configurationTrees.any { it != tree && tree.startsWith("$it/") } } &&
+                configurationNodes.none { node -> configurationTrees.any { node == it || node.startsWith("$it/") } }) {
+                "native runtime configuration selection overlaps"
+            }
+            (configurationTrees + configurationNodes).forEach { selected ->
+                var ancestor = Path.of(selected).parent
+                while (ancestor != null && ancestor != Path.of("/")) {
+                    require(ancestor.toString() in configurationNodes) { "native runtime configuration ancestor is absent" }
+                    ancestor = ancestor.parent
+                }
+            }
+            ReferenceNativeRuntimeSelection(root.string("imageConfigSha256").digest("native runtime image config"),
+                trees, configurationTrees, configurationNodes, canonicalBytes)
+        }
+    }
+}
+
 internal class ReferenceCorpusArtifact internal constructor(
     val role: String,
     val sourcePath: Path,
@@ -240,6 +301,7 @@ internal class AuthenticatedReferenceCorpusProfile private constructor(
     val registrationId: String,
     val profilePath: Path,
     val definition: ReferenceCorpusDefinition,
+    val nativeRuntimeSelection: ReferenceNativeRuntimeSelection,
     private val guards: List<StableControlFile>,
     inputBindings: List<ReferenceCorpusSourceBinding>,
     artifacts: List<ReferenceCorpusArtifact>,
@@ -285,8 +347,8 @@ internal class AuthenticatedReferenceCorpusProfile private constructor(
             } ?: throw ReferenceCorpusProfileException("reference registration is not embedded in the application")
             require(registrationBytes.size <= MAXIMUM_PROFILE_BYTES)
             val registration = OracleJson.parseCanonical(registrationBytes, PROFILE_JSON_LIMITS).obj("registration")
-            registration.fields("schemaVersion", "id", "profileBinding", "sourceLockBinding", "bindings", "artifacts")
-            require(registration.number("schemaVersion") == 1L && registration.string("id") == registrationId)
+            registration.fields("schemaVersion", "id", "profileBinding", "nativeRuntimeSelectionBinding", "sourceLockBinding", "bindings", "artifacts")
+            require(registration.number("schemaVersion") == 2L && registration.string("id") == registrationId)
             require(profileRoot.isAbsolute && profileRoot.normalize() == profileRoot && profileRoot.toRealPath() == profileRoot)
             require(Files.isDirectory(profileRoot, LinkOption.NOFOLLOW_LINKS))
             val opened = ArrayList<StableControlFile>()
@@ -318,6 +380,8 @@ internal class AuthenticatedReferenceCorpusProfile private constructor(
                 fun document(id: String) = OracleJson.parse(content(id), PROFILE_JSON_LIMITS).obj("reference $id")
                 val profileId = registration.string("profileBinding")
                 val definition = ReferenceCorpusDefinition.parse(content(profileId))
+                val selection = ReferenceNativeRuntimeSelection.parse(content(registration.string("nativeRuntimeSelectionBinding")))
+                require(selection.imageConfigSha256 == definition.imageConfigSha256) { "native runtime selection image differs from the reference profile" }
                 val sourceId = registration.string("sourceLockBinding")
                 val sourceBinding = binding(sourceId).first
                 val source = document(sourceId)
@@ -363,7 +427,7 @@ internal class AuthenticatedReferenceCorpusProfile private constructor(
                 require(artifacts.size in 1..16 && artifacts.size == artifacts.map { it.role }.distinct().size &&
                     artifacts.map { it.role }.toSet() == definition.artifacts.keys) { "registered artifact roles differ from the profile" }
                 opened.forEach { it.verifyUnchanged("reference profile admitted") }
-                AuthenticatedReferenceCorpusProfile(registrationId, binding(profileId).first.path, definition,
+                AuthenticatedReferenceCorpusProfile(registrationId, binding(profileId).first.path, definition, selection,
                     immutableList(opened), bindings.map { it.first }, artifacts)
             } catch (failure: Throwable) {
                 opened.asReversed().forEach { runCatching(it::close).exceptionOrNull()?.let(failure::addSuppressed) }

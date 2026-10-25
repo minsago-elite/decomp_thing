@@ -31,23 +31,25 @@ import kotlinx.serialization.json.jsonPrimitive
 object GccMetadataReferenceQualificationCli {
     private const val USAGE = "Usage: qualify <profileRoot> <ociLayout> <runtimeRoot> <deploymentJson> " +
         "<firstJournalRoot> <firstScratchMount> <replayJournalRoot> <replayScratchMount> <reportPath> | " +
-        "provision <profileRoot> <ociLayout> <freshRuntimeRoot> <jdkRoot> <deploymentJson>"
+        "provision <profileRoot> <ociLayout> <freshRuntimeRoot> <jdkRoot> <deploymentJson> <controllerUid>"
 
     @JvmStatic
     fun main(arguments: Array<String>) {
         require(arguments.isNotEmpty()) { USAGE }
         require((arguments[0] == "qualify" && arguments.size == 10) ||
-            (arguments[0] == "provision" && arguments.size == 6)) { USAGE }
-        val paths = arguments.drop(1).map(::qualificationPath)
-        require((Files.getAttribute(Path.of("/proc/self"), "unix:uid") as Number).toLong() == 0L) {
-            "metadata reference qualification requires the installed root controller"
-        }
+            (arguments[0] == "provision" && arguments.size == 7)) { USAGE }
         if (arguments[0] == "provision") {
-            GccMetadataReferenceProvisioning.provision(paths[0], paths[1], paths[2], paths[3], paths[4])
-        } else qualify(paths)
+            val paths = arguments.slice(1..5).map(::qualificationPath)
+            GccMetadataReferenceProvisioning.provision(paths[0], paths[1], paths[2], paths[3], paths[4],
+                metadataReferenceControllerUid(arguments[6]))
+        } else {
+            val session = GccMetadataReferenceControllerSession.forUid(
+                (Files.getAttribute(Path.of("/proc/self"), "unix:uid") as Number).toLong())
+            qualify(arguments.drop(1).map(::qualificationPath), session)
+        }
     }
 
-    private fun qualify(paths: List<Path>) {
+    private fun qualify(paths: List<Path>, session: GccMetadataReferenceControllerSession) {
         val (profileRoot, ociLayout, runtimeRoot, deploymentPath) = paths
         val journalRoots = listOf(paths[4], paths[6])
         val scratchMounts = listOf(paths[5], paths[7])
@@ -56,7 +58,7 @@ object GccMetadataReferenceQualificationCli {
         require(operationRoots.indices.all { i -> operationRoots.drop(i + 1).none { overlaps(operationRoots[i], it) } }) {
             "qualification operations require distinct disjoint journal and scratch roots"
         }
-        operationRoots.forEach { requirePrivateQualificationDirectory(it) }
+        operationRoots.forEach { requirePrivateQualificationDirectory(it, session.uid) }
         journalRoots.forEach { root -> Files.list(root).use { require(it.findAny().isEmpty) { "qualification journal root is not fresh" } } }
         require(Files.getAttribute(scratchMounts[0], "unix:dev") != Files.getAttribute(scratchMounts[1], "unix:dev")) {
             "independent replay requires two separately provisioned scratch filesystems"
@@ -64,12 +66,13 @@ object GccMetadataReferenceQualificationCli {
         require((operationRoots + listOf(profileRoot, ociLayout, runtimeRoot, deploymentPath)).none { overlaps(reportPath, it) }) {
             "qualification report overlaps an input or retained operation"
         }
-        requirePrivateQualificationDirectory(reportPath.parent)
+        requirePrivateQualificationDirectory(reportPath.parent, session.uid)
         require(!Files.exists(reportPath, NOFOLLOW_LINKS)) { "qualification report already exists" }
         GccMetadataReferenceInstalledController.open().use { controller ->
             StableControlFile.open(deploymentPath, 256 * 1024L, "qualification deployment").use { deploymentGuard ->
                 deploymentGuard.requireSingleLink("qualification deployment")
                 val deployment = ReferenceCorpusDeployment.open(deploymentPath)
+                session.requireDeployment(deployment)
                 controller.requireDeployment(deployment.configuration)
                 val deploymentBytes = deploymentGuard.readExactly(0, deploymentGuard.size.toInt(), "qualification deployment")
                 deploymentGuard.verifyUnchanged("qualification deployment admission")
@@ -335,12 +338,40 @@ internal fun qualificationPath(value: String): Path {
     require(value.isNotEmpty() && value.length <= 4096 && value.none { it.code < 32 || it.code == 127 })
     return Path.of(value).also { require(it.isAbsolute && it.normalize() == it && it.toString() == value && it != Path.of("/")) }
 }
-private fun requirePrivateQualificationDirectory(path: Path) {
+internal fun requirePrivateQualificationDirectory(path: Path, controllerUid: Int) {
+    require(controllerUid > 0) { "qualification requires an ordinary controller UID" }
     require(path.toRealPath() == path && Files.isDirectory(path, NOFOLLOW_LINKS))
-    require((Files.getAttribute(path, "unix:uid", NOFOLLOW_LINKS) as Number).toLong() == 0L &&
-        (Files.getAttribute(path, "unix:mode", NOFOLLOW_LINKS) as Number).toInt() and 0x1ff == 0x1c0) {
-        "qualification directory must be root-owned and owner-only: $path"
+    require((Files.getAttribute(path, "unix:uid", NOFOLLOW_LINKS) as Number).toLong() == controllerUid.toLong() &&
+        (Files.getAttribute(path, "unix:mode", NOFOLLOW_LINKS) as Number).toInt() and 0xfff == 0x1c0) {
+        "qualification directory must belong to the ordinary controller and have mode 0700: $path"
     }
+}
+
+/** Closed session selection only; these values never confer deployment or execution authority. */
+internal class GccMetadataReferenceControllerSession private constructor(val uid: Int) {
+    val runtimeDirectory: Path = Path.of("/run/user/$uid")
+    val cgroupParent: String = "/user.slice/user-$uid.slice/user@$uid.service/app.slice"
+
+    fun requireDeployment(deployment: ReferenceCorpusDeployment) {
+        require(deployment.configuration.systemdUserRuntimeDirectory == runtimeDirectory &&
+            deployment.expectedCgroupParent == cgroupParent) {
+            "metadata deployment session differs from the ordinary controller UID"
+        }
+    }
+
+    companion object {
+        fun forUid(uid: Long): GccMetadataReferenceControllerSession {
+            require(uid in 1..Int.MAX_VALUE.toLong()) {
+                "metadata reference qualification requires an ordinary non-root controller UID"
+            }
+            return GccMetadataReferenceControllerSession(uid.toInt())
+        }
+    }
+}
+
+internal fun metadataReferenceControllerUid(value: String): Int {
+    require(value.matches(Regex("[1-9][0-9]{0,9}"))) { "controller UID must be a positive canonical integer" }
+    return requireNotNull(value.toIntOrNull()) { "controller UID exceeds the supported integer range" }
 }
 private fun overlaps(a: Path, b: Path) = a.startsWith(b) || b.startsWith(a)
 private fun fileIdentity(path: Path, bytes: ByteArray) = JsonObject(mapOf("path" to JsonPrimitive(path.toString()),

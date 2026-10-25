@@ -1,6 +1,7 @@
 package decompengine.oracle.gcc
 
 import decompengine.acp.LinuxFilesystemSyscalls
+import decompengine.acp.permissions
 import decompengine.oracle.core.DescriptorBoundAtomicStateFile
 import decompengine.oracle.core.OracleArtifacts
 import decompengine.oracle.core.OracleJson
@@ -23,14 +24,19 @@ import kotlinx.serialization.json.jsonPrimitive
 
 /** Provisioning chooses no program or image: the fixed profile and installed controller supply both. */
 internal object GccMetadataReferenceProvisioning {
-    fun provision(profileRoot: Path, ociLayout: Path, freshRuntimeRoot: Path, jdkRoot: Path, deploymentPath: Path) {
-        require((Files.getAttribute(Path.of("/proc/self"), "unix:uid") as Number).toLong() == 0L)
+    fun provision(profileRoot: Path, ociLayout: Path, freshRuntimeRoot: Path, jdkRoot: Path, deploymentPath: Path,
+        controllerUid: Int) {
+        require((Files.getAttribute(Path.of("/proc/self"), "unix:uid") as Number).toLong() == 0L) {
+            "metadata runtime provisioning requires root ownership authority"
+        }
+        val session = GccMetadataReferenceControllerSession.forUid(controllerUid.toLong())
         listOf(profileRoot, ociLayout).forEach { require(it.toRealPath() == it && Files.isDirectory(it, NOFOLLOW_LINKS)) }
         listOf(freshRuntimeRoot.parent, jdkRoot, deploymentPath.parent).forEach(::requireTrustedMetadataPath)
         require(!Files.exists(freshRuntimeRoot, NOFOLLOW_LINKS) && !Files.exists(deploymentPath, NOFOLLOW_LINKS)) {
             "reference provisioning requires fresh runtime and deployment destinations"
         }
         require(!deploymentPath.startsWith(freshRuntimeRoot) && !freshRuntimeRoot.startsWith(deploymentPath))
+        var publishedDeployment: ByteArray? = null
         GccMetadataReferenceInstalledController.open().use { controller ->
             GccMetadataReferenceProfile.open(profileRoot).use { profile ->
                 val stage = ReferenceNativeRuntime.materialize(ociLayout, freshRuntimeRoot, profile)
@@ -75,7 +81,7 @@ internal object GccMetadataReferenceProvisioning {
                             "javaExecutable" to JsonPrimitive(java.toString()), "expectedJavaSha256" to JsonPrimitive(javaSha),
                             "javaRuntime" to mount(jdkRoot, jdkRoot, javaManifest),
                             "systemLibraryMounts" to JsonArray(listOf(mount(libraryRoot, Path.of("/usr"), libraryManifest))),
-                            "systemdUserRuntimeDirectory" to JsonPrimitive("/run/user/0"),
+                            "systemdUserRuntimeDirectory" to JsonPrimitive(session.runtimeDirectory.toString()),
                             "workerClassPath" to JsonArray(controller.manifest.getValue("entries").jsonArray.map { value ->
                                 val entry = value.jsonObject
                                 JsonObject(mapOf("path" to entry.getValue("path"), "expectedSha256" to entry.getValue("sha256")))
@@ -84,8 +90,8 @@ internal object GccMetadataReferenceProvisioning {
                             pins.map { (role, pin) -> "expected${role.replaceFirstChar(Char::uppercaseChar)}Sha256" to JsonPrimitive(pin) }.toMap())
                         val bytes = OracleJson.canonicalBytes(JsonObject(mapOf(
                             "schemaVersion" to JsonPrimitive("reference-corpus-deployment-v1"), "configuration" to configuration,
-                            "expectedCgroupParent" to JsonPrimitive("/user.slice/user-0.slice/user@0.service/app.slice"))))
-                        ReferenceCorpusDeployment.parseCanonical(bytes)
+                            "expectedCgroupParent" to JsonPrimitive(session.cgroupParent))))
+                        session.requireDeployment(ReferenceCorpusDeployment.parseCanonical(bytes))
                         controller.requireCurrent("deployment provisioning")
                         admitted.requireCurrent("deployment provisioning")
                         require(calculateFullTreeObservationRuntimeManifestSha256(jdkRoot) == javaManifest)
@@ -95,10 +101,14 @@ internal object GccMetadataReferenceProvisioning {
                             require(Files.isSameFile(deploymentPath.parent, LinuxFilesystemSyscalls.descriptorPath(parent)))
                         }
                         ReferenceCorpusDeployment.open(deploymentPath)
+                        publishedDeployment = bytes
                     } finally { guards.asReversed().forEach(StableControlFile::close) }
                 }
             }
         }
+        // Close the admission guards before the intentional parent-mode transition, then
+        // authenticate the same published inode and bytes across the final readable handoff.
+        finalizeReadableMetadataDeployment(deploymentPath, checkNotNull(publishedDeployment))
         println("Provisioned fixed metadata reference runtime and deployment: $deploymentPath")
     }
 
@@ -122,6 +132,55 @@ internal object GccMetadataReferenceProvisioning {
             }
         }
         return root to java.util.Collections.unmodifiableList(descendants)
+    }
+}
+
+/** Root-owned deployment remains immutable to the ordinary controller after private publication. */
+internal fun finalizeReadableMetadataDeployment(path: Path, expectedBytes: ByteArray) {
+    require((Files.getAttribute(Path.of("/proc/self"), "unix:uid") as Number).toLong() == 0L) {
+        "metadata deployment finalization requires root ownership authority"
+    }
+    requireTrustedMetadataPath(path)
+    LinuxFilesystemSyscalls.openRoot(path.parent).use { parent ->
+        require(parent.identity.uid == 0 && parent.identity.mode.permissions == 0x1c0) {
+            "metadata deployment must be published beneath its private root-owned extension"
+        }
+        val published = requireNotNull(DescriptorBoundAtomicStateFile.readOrNull(parent, path.fileName.toString(), 256 * 1024))
+        require(published.bytes.contentEquals(expectedBytes)) { "published metadata deployment bytes changed" }
+        requireNotNull(LinuxFilesystemSyscalls.openRegularFileAtOrNull(parent.fd, path.fileName.toString())).use { file ->
+            require(file.identity == published.identity) { "published metadata deployment inode changed" }
+            LinuxFilesystemSyscalls.openReadableFrom(file).use { readable ->
+                LinuxFilesystemSyscalls.chmod(readable, 0x124)
+                LinuxFilesystemSyscalls.synchronize(readable)
+            }
+            LinuxFilesystemSyscalls.chmod(parent, 0x1ed)
+            LinuxFilesystemSyscalls.synchronize(parent)
+            fun requireFinalIdentity() {
+                val currentParent = LinuxFilesystemSyscalls.identity(parent.fd)
+                require(currentParent == parent.identity.copy(mode = (parent.identity.mode and 0xfff.inv()) or 0x1ed) &&
+                    Files.isSameFile(path.parent, LinuxFilesystemSyscalls.descriptorPath(parent))) {
+                    "metadata deployment extension identity changed during readable handoff"
+                }
+                val expectedIdentity = published.identity.copy(mode = (published.identity.mode and 0xfff.inv()) or 0x124)
+                require(LinuxFilesystemSyscalls.identity(file.fd) == expectedIdentity) {
+                    "metadata deployment identity changed during readable handoff"
+                }
+                requireNotNull(LinuxFilesystemSyscalls.openRegularFileAtOrNull(parent.fd, path.fileName.toString())).use { named ->
+                    require(named.identity == expectedIdentity) { "metadata deployment pathname changed during readable handoff" }
+                }
+                requireTrustedMetadataPath(path)
+            }
+            requireFinalIdentity()
+            StableControlFile.open(path, 256 * 1024L, "readable metadata deployment").use { guard ->
+                guard.requireSingleLink("readable metadata deployment")
+                require(guard.readExactly(0, guard.size.toInt(), "readable metadata deployment").contentEquals(expectedBytes)) {
+                    "metadata deployment bytes changed during readable handoff"
+                }
+                ReferenceCorpusDeployment.open(path)
+                guard.verifyUnchanged("readable metadata deployment handoff")
+                requireFinalIdentity()
+            }
+        }
     }
 }
 

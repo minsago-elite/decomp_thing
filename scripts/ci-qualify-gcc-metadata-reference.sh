@@ -8,10 +8,17 @@ if (($# != 1)) || [[ ! "$1" =~ ^(capture|collect|cleanup)$ ]]; then
   exit 64
 fi
 mode="$1"
+controller_uid="$(id -u)"
+[[ "$controller_uid" =~ ^[1-9][0-9]{0,9}$ ]] && ((controller_uid <= 2147483647)) || {
+  echo 'metadata qualification orchestration requires an ordinary nonzero controller UID' >&2
+  exit 1
+}
+controller_gid="$(id -g)"
 project_root="$(cd "$(dirname "$0")/.." && pwd -P)"
 work="$project_root/build/gcc-metadata-reference"
 evidence="$work/evidence"
 private="$work/private"
+provision_private="$work/provision-private"
 [[ "$(realpath -m -- "$work")" == "$work" && "$(realpath -m -- "$evidence")" == "$evidence" ]]
 trusted_java=/var/lib/decomp-oracle-ci-java
 : "${GITHUB_RUN_ID:?GitHub run identity is required}"
@@ -34,7 +41,7 @@ replay=/var/lib/decomp-gcc-metadata-reference-replay-ci/scratch
 require_private_directory() {
   local selected="$1"
   [[ -d "$selected" && ! -L "$selected" && "$(realpath -e -- "$selected")" == "$selected" ]] || return 1
-  [[ "$(stat --format='%u:%g:%a' -- "$selected")" == '0:0:700' ]]
+  [[ "$(stat --format='%u:%g:%a' -- "$selected")" == "$controller_uid:$controller_gid:700" ]]
 }
 require_trusted_directory() {
   local selected="$1" selected_mode
@@ -44,11 +51,12 @@ require_trusted_directory() {
   (((8#$selected_mode & 8#022) == 0))
 }
 owner_text() {
-  printf 'decomp-gcc-metadata-reference-ci-v1\nrun_id=%s\nrun_attempt=%s\ninstallation=%s\n' \
-    "$GITHUB_RUN_ID" "$GITHUB_RUN_ATTEMPT" "$installation"
+  printf 'decomp-gcc-metadata-reference-ci-v2\nrun_id=%s\nrun_attempt=%s\ninstallation=%s\ncontroller_uid=%s\ncontroller_gid=%s\n' \
+    "$GITHUB_RUN_ID" "$GITHUB_RUN_ATTEMPT" "$installation" "$controller_uid" "$controller_gid"
 }
 require_extension_owner() {
-  require_private_directory "$extension"
+  require_trusted_directory "$extension"
+  [[ "$(stat --format='%a' -- "$extension")" =~ ^(700|755)$ ]]
   sudo -n test -f "$owner"
   ! sudo -n test -L "$owner"
   [[ "$(sudo -n stat --format='%u:%g:%a:%h' -- "$owner")" == '0:0:600:1' ]]
@@ -147,7 +155,8 @@ require_trusted_directory "$trusted_java"
 require_private_directory "$first"
 require_private_directory "$replay"
 [[ "$(stat --format='%d' -- "$first")" != "$(stat --format='%d' -- "$replay")" ]]
-[[ ! -e "$extension" && ! -L "$extension" && ! -e "$private" && ! -L "$private" ]]
+[[ ! -e "$extension" && ! -L "$extension" && ! -e "$private" && ! -L "$private" &&
+   ! -e "$provision_private" && ! -L "$provision_private" ]]
 mkdir -p "$evidence" "$work/tmp"
 umask 077
 
@@ -175,27 +184,36 @@ for name in "${jar_names[@]}"; do
 done
 # The installed entrypoint authenticates this exact ordered classpath against the retained sidecar.
 # Shell discovery alone supplies neither installed controller authority nor worker approval.
-sudo -n install -d -o root -g root -m 0700 -- "$extension" "$private" \
+sudo -n install -d -o root -g root -m 0700 -- "$extension" "$provision_private" \
+  "$provision_private/home" "$provision_private/tmp"
+install -d -m 0700 -- "$private" \
   "$private/home" "$private/tmp" "$private/report" "$private/journals" \
   "$private/journals/first" "$private/journals/replay"
+require_private_directory "$private"
 owner_text | sudo -n tee "$owner" >/dev/null
 sudo -n chmod 0600 -- "$owner"
 require_extension_owner
 
 java=("$trusted_java/bin/java" -Xms64m -Xmx3g -XX:-UsePerfData -XX:+DisableAttachMechanism
-  "-Djava.io.tmpdir=$private/tmp" "-Duser.home=$private/home"
   -Djna.nosys=true -Djna.nounpack=true "-Djna.boot.library.path=$trusted_java/lib/decomp-oracle-native"
-  "-Dorg.sqlite.lib.path=$trusted_java/lib/decomp-oracle-native" -Dorg.sqlite.lib.name=libsqlitejdbc.so
-  -cp "$classpath" decompengine.oracle.gcc.GccMetadataReferenceQualificationCli)
-run_installed() {
-  sudo -n env -i HOME="$private/home" TMPDIR="$private/tmp" USER=root LOGNAME=root \
+  "-Dorg.sqlite.lib.path=$trusted_java/lib/decomp-oracle-native" -Dorg.sqlite.lib.name=libsqlitejdbc.so)
+entry=(-cp "$classpath" decompengine.oracle.gcc.GccMetadataReferenceQualificationCli)
+run_provisioner() {
+  sudo -n env -i HOME="$provision_private/home" TMPDIR="$provision_private/tmp" USER=root LOGNAME=root \
     PATH=/usr/bin:/bin LANG=C.UTF-8 LC_ALL=C.UTF-8 TZ=UTC \
-    XDG_RUNTIME_DIR=/run/user/0 DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/0/bus \
-    "${java[@]}" "$@"
+    "${java[@]}" "-Djava.io.tmpdir=$provision_private/tmp" "-Duser.home=$provision_private/home" \
+    "${entry[@]}" "$@"
 }
-run_installed provision "$project_root/oracle/gcc/16.2.0" "$work/oci" "$native" "$trusted_java" "$deployment" \
+run_controller() {
+  env -i HOME="$private/home" TMPDIR="$private/tmp" PATH=/usr/bin:/bin LANG=C.UTF-8 LC_ALL=C.UTF-8 TZ=UTC \
+    XDG_RUNTIME_DIR="/run/user/$controller_uid" DBUS_SESSION_BUS_ADDRESS="unix:path=/run/user/$controller_uid/bus" \
+    "${java[@]}" "-Djava.io.tmpdir=$private/tmp" "-Duser.home=$private/home" "${entry[@]}" "$@"
+}
+run_provisioner provision "$project_root/oracle/gcc/16.2.0" "$work/oci" "$native" "$trusted_java" "$deployment" "$controller_uid" \
   2>&1 | tee "$evidence/provision.log"
-run_installed qualify "$project_root/oracle/gcc/16.2.0" "$work/oci" "$native" "$deployment" \
+require_extension_owner
+[[ "$(stat --format='%u:%a:%h' -- "$deployment")" == '0:444:1' ]]
+run_controller qualify "$project_root/oracle/gcc/16.2.0" "$work/oci" "$native" "$deployment" \
   "$private/journals/first" "$first" "$private/journals/replay" "$replay" "$private/report/qualification.json" \
   2>&1 | tee "$evidence/qualification.log"
-sudo -n test -s "$private/report/qualification.json"
+test -s "$private/report/qualification.json"

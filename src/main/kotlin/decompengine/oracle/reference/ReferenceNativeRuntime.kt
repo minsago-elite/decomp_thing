@@ -60,11 +60,12 @@ internal data class ReferenceNativeRuntimeProvisioningEntry(
  * --uncompressed --format oci-dir`). Config bytes and every diffID remain the profile's exact image
  * identity; a registry digest is not replaced by a caller's extraction receipt. File reads are at
  * most 4 MiB, and every output byte is checked against the measured merged namespace.
- * Admission requires a principal able to read the entire exact root-owned selection, including
- * image-private /etc entries. It never changes source permissions to accommodate the caller.
+ * The retained profile fixes the configuration projection before any filesystem access. Every
+ * selected node must be readable by an ordinary principal with its original image permissions;
+ * selection never depends on the current caller's permissions, and no source mode is rewritten.
  */
 internal object ReferenceNativeRuntime {
-    private val PREFIXES = listOf("/usr", "/lib", "/lib64", "/etc", "/bin", "/sbin")
+    private val MOUNT_PREFIXES = listOf("/usr", "/lib", "/lib64", "/etc", "/bin", "/sbin")
     private val PLAIN_LAYERS = setOf("application/vnd.oci.image.layer.v1.tar", "application/vnd.oci.image.layer.nondistributable.v1.tar", "application/vnd.docker.image.rootfs.diff.tar")
     private const val MAXIMUM_ENTRIES = 200_000
     private const val MAXIMUM_DEPTH = 64
@@ -74,7 +75,7 @@ internal object ReferenceNativeRuntime {
 
     fun materialize(ociLayout: Path, stagingRoot: Path, profile: AuthenticatedReferenceCorpusProfile): ReferenceNativeRuntimeStage {
         profile.requireCurrent("before native runtime materialization")
-        val result = materializeTransport(ociLayout, stagingRoot, profile.imageConfigSha256, profile.originalArtifacts)
+        val result = materializeTransport(ociLayout, stagingRoot, profile.nativeRuntimeSelection, profile.originalArtifacts)
         profile.requireCurrent("after native runtime materialization")
         return result
     }
@@ -83,10 +84,10 @@ internal object ReferenceNativeRuntime {
     internal fun materializeTransport(
         ociLayout: Path,
         stagingRoot: Path,
-        expectedConfigSha256: String,
+        selection: ReferenceNativeRuntimeSelection,
         artifacts: List<ReferenceCorpusArtifact>,
     ): ReferenceNativeRuntimeStage = LlvmBehaviorNativeOciImageV2.openLayout(ociLayout).use { image ->
-        val plan = plan(image, expectedConfigSha256, artifacts)
+        val plan = plan(image, selection, artifacts)
         val root = newRoot(stagingRoot)
         // No archive symlink is installed until all directories and regular files have been written.
         // Same-UID writers remain within the cooperating staging boundary; staging is never authority.
@@ -143,9 +144,9 @@ internal object ReferenceNativeRuntime {
         AdmittedReferenceNativeRuntime.admit(ociLayout, provisionedRoot, profile)
 
     /** Re-derives the expected tree from measured OCI; useful for transport verification only. */
-    internal fun verifyTransport(ociLayout: Path, stagedRoot: Path, expectedConfigSha256: String, artifacts: List<ReferenceCorpusArtifact>) {
+    internal fun verifyTransport(ociLayout: Path, stagedRoot: Path, selection: ReferenceNativeRuntimeSelection, artifacts: List<ReferenceCorpusArtifact>) {
         LlvmBehaviorNativeOciImageV2.openLayout(ociLayout).use { image ->
-            verify(canonicalDirectory(stagedRoot), plan(image, expectedConfigSha256, artifacts), trustedOwnership = false)
+            verify(canonicalDirectory(stagedRoot), plan(image, selection, artifacts), trustedOwnership = false)
             image.requireCurrent()
         }
     }
@@ -158,15 +159,35 @@ internal object ReferenceNativeRuntime {
     internal data class PlannedMount(val relative: String, val guest: String, val role: String)
     internal data class Plan(val nodes: List<Node>, val mounts: List<PlannedMount>, val canonicalBytes: ByteArray)
 
-    internal fun plan(image: LlvmBehaviorNativeOciImageV2.MeasuredImage, config: String, artifacts: List<ReferenceCorpusArtifact>): Plan {
+    internal fun plan(image: LlvmBehaviorNativeOciImageV2.MeasuredImage, selection: ReferenceNativeRuntimeSelection, artifacts: List<ReferenceCorpusArtifact>): Plan {
+        val config = selection.imageConfigSha256
         require(config.matches(Regex("[0-9a-f]{64}")) && image.configSha256 == config) { "native runtime image config differs from approved profile" }
         require(image.layers.all { it.mediaType in PLAIN_LAYERS }) { "native runtime staging requires uncompressed OCI layers; decode transport before staging" }
-        val resolved = PREFIXES.associateWith { prefix ->
+        val resolved = MOUNT_PREFIXES.associateWith { prefix ->
             image.resolve(prefix).also { require(it.kind == "directory") { "native runtime prefix is not a directory: $prefix" } }.path
         }
-        val roots = (PREFIXES + resolved.values).distinct()
-        val selected = image.namespace.values.filter { entry -> roots.any { entry.path == it || entry.path.startsWith("$it/") } }.sortedBy { it.path }
+        require(resolved.getValue("/etc") == "/etc" && image.namespace["/etc"]?.kind == "directory") {
+            "native runtime configuration root must be a direct image directory"
+        }
+        val roots = (selection.treePrefixes + selection.treePrefixes.map { resolved.getValue(it) }).distinct()
+        require(roots.none { it == "/etc" || it.startsWith("/etc/") || "/etc".startsWith("$it/") }) {
+            "native runtime tool or ABI tree overlaps the configuration projection"
+        }
+        selection.configurationTreeRoots.forEach { root ->
+            require(image.namespace[root]?.kind == "directory") { "native runtime selected configuration tree is absent or indirect: $root" }
+        }
+        selection.configurationNodes.forEach { node ->
+            require(node in image.namespace) { "native runtime selected configuration node is absent: $node" }
+        }
+        val selected = image.namespace.values.filter { entry ->
+            roots.any { entry.path == it || entry.path.startsWith("$it/") } || selection.selectsConfiguration(entry.path)
+        }.sortedBy { it.path }
         require(selected.size in 1..MAXIMUM_ENTRIES) { "native runtime entry count exceeds its bound" }
+        val selectedInodes = selected.filter { it.kind == "regular" }.map { it.inode }.toSet()
+        require(image.namespace.values.none { entry -> entry.kind == "regular" && entry.path.startsWith("/etc/") &&
+            !selection.selectsConfiguration(entry.path) && entry.inode in selectedInodes }) {
+            "native runtime selected alias reaches an omitted configuration inode"
+        }
         val nodes = linkedMapOf<String, Node>()
         fun directory(relative: String) {
             nodes.putIfAbsent(relative, Node(relative, "directory", 0x1ed, 0, 0, FileTime.fromMillis(0)))
@@ -180,6 +201,11 @@ internal object ReferenceNativeRuntime {
             require(entry.kind in setOf("directory", "regular", "symlink")) { "native runtime contains unsupported special node: ${entry.path}" }
             require(entry.uid == 0L && entry.gid in 0..Int.MAX_VALUE.toLong()) { "native runtime requires root-owned image nodes" }
             require(entry.mode in 0..0xfff && (entry.kind == "symlink" || entry.mode.toInt() and 0x12 == 0)) { "native runtime contains a writable image node: ${entry.path}" }
+            require(when (entry.kind) {
+                "directory" -> entry.mode.toInt() and 0x5 == 0x5
+                "regular" -> entry.mode.toInt() and 0x4 == 0x4
+                else -> true
+            }) { "native runtime selected image node is not readable by an ordinary principal: ${entry.path}" }
             require(entry.xattrs.isEmpty() && entry.pax.keys.all { it in setOf("atime", "ctime") }) { "native runtime contains unsupported extended metadata: ${entry.path}" }
             require(entry.size in 0..MAXIMUM_FILE_BYTES) { "native runtime file exceeds byte bound" }
             if (entry.kind == "regular") total = Math.addExact(total, entry.size)
@@ -193,7 +219,7 @@ internal object ReferenceNativeRuntime {
         artifacts.forEach { artifact ->
             require(artifact.role.matches(Regex("[a-z][a-z0-9-]{0,63}"))) { "invalid original runtime artifact role" }
             val guest = Path.of("/${safeAbsolute(artifact.guestPath)}")
-            require(guest.parent != Path.of("/") && PREFIXES.none { guest.startsWith(it) }) { "original artifact overlaps pinned image namespace" }
+            require(guest.parent != Path.of("/") && MOUNT_PREFIXES.none { guest.startsWith(it) }) { "original artifact overlaps pinned image namespace" }
             require(artifact.bytes in 1..MAXIMUM_FILE_BYTES && artifact.sha256.matches(Regex("[0-9a-f]{64}"))) { "invalid original runtime artifact identity" }
             val bytes = artifact.content
             require(bytes.size.toLong() == artifact.bytes && OracleArtifacts.sha256(bytes) == artifact.sha256) { "original runtime artifact content differs from manifest" }
@@ -220,9 +246,11 @@ internal object ReferenceNativeRuntime {
         }
         // The full authenticated merged namespace digest retains metadata beyond this selected projection.
         val bytes = OracleJson.canonicalBytes(JsonObject(mapOf(
-            "schemaVersion" to JsonPrimitive("reference-native-runtime-projection-v1"),
+            "schemaVersion" to JsonPrimitive("reference-native-runtime-projection-v2"),
             "imageConfigSha256" to JsonPrimitive(config), "imageNamespaceSha256" to JsonPrimitive(image.namespaceSha256),
-            "selectedPrefixes" to JsonArray(PREFIXES.map(::JsonPrimitive)),
+            "selectionSha256" to JsonPrimitive(selection.sha256),
+            "selection" to OracleJson.parseCanonical(selection.canonicalBytes),
+            "selectedConfigurationPaths" to JsonArray(selected.filter { it.path == "/etc" || it.path.startsWith("/etc/") }.map { JsonPrimitive(it.path) }),
             "entries" to JsonPrimitive(nodes.size), "regularBytes" to JsonPrimitive(total),
             "artifacts" to JsonArray(artifacts.sortedBy { it.role }.map { JsonObject(mapOf(
                 "role" to JsonPrimitive(it.role), "guestPath" to JsonPrimitive(it.guestPath), "bytes" to JsonPrimitive(it.bytes), "sha256" to JsonPrimitive(it.sha256),
@@ -431,7 +459,7 @@ internal class AdmittedReferenceNativeRuntime private constructor(
             val image = LlvmBehaviorNativeOciImageV2.openLayout(ociLayout)
             var descriptor: LinuxDescriptor? = null
             try {
-                val plan = ReferenceNativeRuntime.plan(image, profile.imageConfigSha256, profile.originalArtifacts)
+                val plan = ReferenceNativeRuntime.plan(image, profile.nativeRuntimeSelection, profile.originalArtifacts)
                 val root = ReferenceNativeRuntime.canonicalDirectory(provisionedRoot)
                 descriptor = LinuxFilesystemSyscalls.openRoot(root)
                 // Establish root ownership BEFORE trusting any path walk or content measurement.

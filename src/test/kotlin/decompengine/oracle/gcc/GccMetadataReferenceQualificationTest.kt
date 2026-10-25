@@ -3,9 +3,11 @@ package decompengine.oracle.gcc
 import decompengine.oracle.core.OracleArtifacts
 import decompengine.oracle.core.OracleJson
 import decompengine.oracle.reference.ReferenceCorpusDefinition
+import decompengine.oracle.reference.ReferenceCorpusDeployment
 import decompengine.oracle.reference.ReferenceNativeRuntimeProvisioningEntry
 import java.nio.file.Files
 import java.nio.file.Path
+import java.nio.file.attribute.PosixFilePermissions
 import java.util.Base64
 import kotlin.test.Test
 import kotlin.test.assertContentEquals
@@ -142,6 +144,87 @@ class GccMetadataReferenceQualificationTest {
         assertFails { requireRootMetadataSidecarIdentity(0, 420, 2, true, false) }
         assertFails { requireRootMetadataSidecarIdentity(0, 420, 1, false, false) }
         assertFails { requireRootMetadataSidecarIdentity(0, 420, 1, false, true) }
+    }
+
+    @Test
+    fun `qualification refuses root and binds both session identities to the ordinary controller`() {
+        for (uid in listOf(0L, -1L, Int.MAX_VALUE.toLong() + 1)) {
+            assertFails { GccMetadataReferenceControllerSession.forUid(uid) }
+        }
+        val session = GccMetadataReferenceControllerSession.forUid(1001)
+        assertEquals(Path.of("/run/user/1001"), session.runtimeDirectory)
+        assertEquals("/user.slice/user-1001.slice/user@1001.service/app.slice", session.cgroupParent)
+        session.requireDeployment(deploymentForSession(1001, 1001))
+        // The former root deployment, and either independently mismatched binding, must fail
+        // before the qualifier can enter the production contained-command launcher.
+        for ((runtimeUid, cgroupUid) in listOf(0 to 0, 0 to 1001, 1001 to 0, 1002 to 1001, 1001 to 1002)) {
+            assertFails { session.requireDeployment(deploymentForSession(runtimeUid, cgroupUid)) }
+        }
+    }
+
+    @Test
+    fun `provisioning accepts only a closed positive controller uid argument`() {
+        assertEquals(1001, metadataReferenceControllerUid("1001"))
+        assertEquals(Int.MAX_VALUE, metadataReferenceControllerUid(Int.MAX_VALUE.toString()))
+        for (value in listOf("0", "-1", "+1", "01", " 1", "1 ", "1\n", "1.0", "2147483648", "99999999999")) {
+            assertFails(value) { metadataReferenceControllerUid(value) }
+        }
+        assertFails { GccMetadataReferenceQualificationCli.main(arrayOf("provision", "/p", "/o", "/r", "/j", "/d")) }
+        assertFails { GccMetadataReferenceQualificationCli.main(arrayOf("provision", "/p", "/o", "/r", "/j", "/d", "0")) }
+    }
+
+    @Test
+    fun `private qualifier state requires the controller owner exact mode and direct path`() {
+        val uid = (Files.getAttribute(Path.of("/proc/self"), "unix:uid") as Number).toInt()
+        require(uid > 0) { "this fixture exercises the ordinary qualification controller" }
+        val parent = Path.of("build/task-tmp/metadata-controller-test").toAbsolutePath().normalize()
+        Files.createDirectories(parent)
+        val root = Files.createTempDirectory(parent, "private-", PosixFilePermissions.asFileAttribute(PosixFilePermissions.fromString("rwx------")))
+        val alias = root.resolveSibling("${root.fileName}-alias")
+        try {
+            requirePrivateQualificationDirectory(root, uid)
+            assertFails { requirePrivateQualificationDirectory(root, 0) }
+            assertFails { requirePrivateQualificationDirectory(root, if (uid == 1001) 1002 else 1001) }
+            Files.setPosixFilePermissions(root, PosixFilePermissions.fromString("rwx---r-x"))
+            assertFails { requirePrivateQualificationDirectory(root, uid) }
+            Files.setAttribute(root, "unix:mode", 0x3c0)
+            assertFails { requirePrivateQualificationDirectory(root, uid) }
+            Files.setPosixFilePermissions(root, PosixFilePermissions.fromString("rwx------"))
+            Files.createSymbolicLink(alias, root.fileName)
+            assertFails { requirePrivateQualificationDirectory(alias, uid) }
+            val untrustedDeployment = Files.write(root.resolve("deployment.json"), byteArrayOf(1, 2, 3))
+            Files.setPosixFilePermissions(untrustedDeployment, PosixFilePermissions.fromString("r--------"))
+            assertFails { finalizeReadableMetadataDeployment(untrustedDeployment, byteArrayOf(1, 2, 3)) }
+            assertEquals(PosixFilePermissions.fromString("r--------"), Files.getPosixFilePermissions(untrustedDeployment))
+            assertEquals(PosixFilePermissions.fromString("rwx------"), Files.getPosixFilePermissions(root))
+        } finally {
+            Files.deleteIfExists(alias)
+            Files.walk(root).use { paths -> paths.sorted(Comparator.reverseOrder()).forEach(Files::delete) }
+        }
+    }
+
+    /** Shape-valid fixture only; no file, process, or installed deployment is authenticated here. */
+    private fun deploymentForSession(runtimeUid: Int, cgroupUid: Int): ReferenceCorpusDeployment {
+        val digest = JsonPrimitive("a".repeat(64))
+        fun mount(name: String) = JsonObject(mapOf("source" to JsonPrimitive("/reference-test/$name"),
+            "destination" to JsonPrimitive("/$name"), "expectedManifestSha256" to digest))
+        val configuration = JsonObject(mapOf(
+            "javaExecutable" to JsonPrimitive("/reference-test/jvm/bin/java"), "javaRuntime" to mount("jvm"),
+            "systemLibraryMounts" to JsonArray(listOf(mount("lib"))),
+            "bubblewrapExecutable" to JsonPrimitive("/reference-test/bwrap"),
+            "resourceLimiterExecutable" to JsonPrimitive("/reference-test/prlimit"),
+            "scopeSupervisorExecutable" to JsonPrimitive("/reference-test/systemd-run"),
+            "scopeInspectorExecutable" to JsonPrimitive("/reference-test/systemctl"),
+            "systemdBusControllerExecutable" to JsonPrimitive("/reference-test/busctl"),
+            "systemdUserRuntimeDirectory" to JsonPrimitive("/run/user/$runtimeUid"),
+            "workerClassPath" to JsonArray(listOf(JsonObject(mapOf("path" to JsonPrimitive("/reference-test/app.jar"),
+                "expectedSha256" to digest)))),
+            "expectedJavaSha256" to digest, "expectedBubblewrapSha256" to digest, "expectedResourceLimiterSha256" to digest,
+            "expectedScopeSupervisorSha256" to digest, "expectedScopeInspectorSha256" to digest,
+            "expectedSystemdBusControllerSha256" to digest))
+        return ReferenceCorpusDeployment.parseCanonical(OracleJson.canonicalBytes(JsonObject(mapOf(
+            "schemaVersion" to JsonPrimitive("reference-corpus-deployment-v1"), "configuration" to configuration,
+            "expectedCgroupParent" to JsonPrimitive("/user.slice/user-$cgroupUid.slice/user@$cgroupUid.service/app.slice")))))
     }
 
     private fun compare(fixture: Fixture, report: JsonObject) = GccMetadataReferenceComparison.verify(

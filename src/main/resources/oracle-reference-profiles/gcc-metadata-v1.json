@@ -65,10 +65,17 @@
       "id": "frontend",
       "path": "artifacts/gcc-cc1.stripped.xz",
       "sha256": "bb522fda64760e6be7890954f40cb032422c1dc02299aa212899a8810f39bcd1"
+    },
+    {
+      "bytes": 2586,
+      "id": "native-runtime-selection",
+      "path": "native-runtime-selection-v1.json",
+      "sha256": "5cfe8f249600c95e14577138881a6f509e848a0c8e3420ed3ea0bec8fdb62520"
     }
   ],
   "id": "gcc-metadata-v1",
+  "nativeRuntimeSelectionBinding": "native-runtime-selection",
   "profileBinding": "profile",
-  "schemaVersion": 1,
+  "schemaVersion": 2,
   "sourceLockBinding": "source-lock"
 }

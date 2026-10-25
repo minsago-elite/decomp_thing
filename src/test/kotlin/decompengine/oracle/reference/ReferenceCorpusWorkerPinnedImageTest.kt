@@ -50,7 +50,7 @@ class ReferenceCorpusWorkerPinnedImageTest {
         val profileRoot = repository.resolve("oracle/gcc/16.2.0")
         AuthenticatedReferenceCorpusProfile.open(profileRoot, "gcc-metadata-v1").use { profile ->
             LlvmBehaviorNativeOciImageV2.openLayout(oci).use { image ->
-                val plan = ReferenceNativeRuntime.plan(image, profile.imageConfigSha256, profile.originalArtifacts)
+                val plan = ReferenceNativeRuntime.plan(image, profile.nativeRuntimeSelection, profile.originalArtifacts)
                 ReferenceNativeRuntime.verify(stage, plan, trustedOwnership = false)
                 val nativeLibraries = repository.resolve("build/native/oracle").toRealPath()
                 val classPath = minimalWorkerClassPath()

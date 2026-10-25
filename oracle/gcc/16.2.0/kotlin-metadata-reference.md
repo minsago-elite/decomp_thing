@@ -53,15 +53,32 @@ and admits root ownership and ancestry before launching a worker. It has no
 fallback to running directly from the staging directory. A root-owned directory
 under a user-owned checkout is insufficient; its ancestors remain untrusted.
 
-The initial projection includes the image's selected `/etc` tree. A deployment
-must also make its exact authenticated regular files readable to the capture
-controller. For example, image files owned by root with group 42 and mode 0640
-are not readable by a normal unrelated user. Relaxing their modes, omitting
-files, or claiming staging as admission is not supported. This constraint needs
-an actual supported provisioned-host qualification, such as a root-side
-controller with a separately authenticated `/run/user/0` session bus and usable
-user-namespace/cgroup policy. Root ownership alone does not establish those
-capabilities. Local parser/unit tests do not establish production capture.
+The compiled registration authenticates `native-runtime-selection-v1.json`
+(2,586 bytes, SHA-256
+`5cfe8f249600c95e14577138881a6f509e848a0c8e3420ed3ea0bec8fdb62520`).
+This fixed positive selection retains the complete `/usr`, `/lib`, `/lib64`,
+`/bin` and `/sbin` trees and 697 of this image's 704 `/etc` nodes. Its 44 recursive
+configuration roots and 59 exact nodes select configuration before filesystem
+access. Every selected file must retain its original readable permissions and
+every selected directory its original readable/traversable permissions; an
+unreadable selected entry fails admission instead of being skipped.
+
+The seven fixed omissions are `/etc/.pwd.lock`, `/etc/gshadow`, `/etc/gshadow-`,
+`/etc/passwd-`, `/etc/shadow`, `/etc/security/opasswd` and the empty
+`/etc/ssl/private` directory. Selection is independent of their current
+readability. The full original OCI config, layer identities and merged namespace
+remain authenticated, including those omitted entries. The projection-v2 record
+binds the selection bytes/hash, full image identity and actual selected
+configuration paths. Source bytes, modes and original driver/frontend pins are
+unchanged. In this profile, the preserved literal `/usr/lib/ssl/private` symlink
+is dangling because its empty target directory is omitted; this is a profile
+observation, not a claim about other programs' runtime requirements.
+
+Capture runs as an ordinary nonzero UID using that user's authenticated systemd
+session and finite user-owned ext4 leases. Root installs the immutable runtime
+and deployment but does not execute the capture controller. The shared security
+boundary continues to reject caller-writable executable ancestors. Local
+parser/unit tests do not establish production capture.
 
 ## Trusted deployment file
 
@@ -149,20 +166,32 @@ memory/PID event evidence or supply another consumer's terminal lifecycle proof.
 ## Installed qualification and independent replay
 
 `decompengine.oracle.gcc.GccMetadataReferenceQualificationCli` is the separate
-installed qualification entrypoint. It requires the root controller, the exact
-ordered installed classpath, and its adjacent root-owned, single-link classpath
-authority. Development classpath overrides are rejected. Its closed forms are:
+installed qualification entrypoint. Capture requires an ordinary nonzero UID,
+the exact ordered installed classpath, and its adjacent root-owned, single-link
+classpath authority. Development classpath overrides are rejected. Its closed
+forms are:
 
 ```text
-provision <profileRoot> <ociLayout> <freshRuntimeRoot> <jdkRoot> <deploymentJson>
+provision <profileRoot> <ociLayout> <freshRuntimeRoot> <jdkRoot> <deploymentJson> <controllerUid>
 qualify <profileRoot> <ociLayout> <runtimeRoot> <deploymentJson> <firstJournalRoot> <firstScratchMount> <replayJournalRoot> <replayScratchMount> <reportPath>
 ```
 
-Provisioning consumes the Kotlin materializer's typed entries, restores their
-exact metadata, and independently admits the result before publishing the
-trusted deployment. It does not consume a caller-written staging receipt as
-authority. The installed controller and worker use the same authenticated
-classpath closure and JVM.
+Provisioning runs as root, consumes the Kotlin materializer's typed entries,
+restores their exact metadata, and independently admits the result before
+publishing the trusted deployment. The canonical positive controller UID fixes
+both `/run/user/<uid>` and `/user.slice/user-<uid>.slice/user@<uid>.service/app.slice`.
+It does not consume a caller-written staging receipt as authority. Publication
+starts privately at root-owned mode 0400 under mode 0700; the provisioner retains
+descriptors, verifies identity and bytes, and finalizes the deployment at mode
+0444 under mode 0755 for ordinary-controller access. Neither location becomes
+writable by that controller. The installed controller and worker use the same
+authenticated classpath closure and JVM.
+
+Qualification derives its session from the actual process UID and rejects UID 0
+or a deployment naming another user's bus or cgroup parent. Journal, scratch and
+report directories must belong to that UID and have exact mode 0700. The existing
+contained worker's user-namespace and capability policy is unchanged; the
+qualification entrypoint introduces no root-worker mode or permission bypass.
 
 Qualification performs two fresh coordinator captures on distinct dedicated
 filesystems. Both successful captures retain their journal, scratch lease and
