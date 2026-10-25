@@ -102,8 +102,8 @@ function Functions({ selected, basePath, search }: { selected: SourceSelection; 
   };
   const offset = query.cursor ? Number(query.cursor.split('_')[1]) : 0;
   const unscoped = withField(withField(query, 'module', ''), 'cursor', '');
-  return <Frame selected={selected} data={data} read={read} onRefresh={() => { moveFocus.current = true; if (query.cursor) go(query); else refresh(); }}>
-    <p><a href={structureListPath(basePath, selected, 'modules')}>{copy.browseModules}</a></p>
+  return <Frame selected={selected} data={data} read={read} onRefresh={() => { moveFocus.current = true; if (query.cursor) go(query); else refresh(); }}
+    navigation={<p><a href={structureListPath(basePath, selected, 'modules')}>{copy.browseModules}</a></p>}>
     <form class="job-filters" aria-label={copy.filters} onSubmit={event => { event.preventDefault(); go({ ...draft }); }}>
       <label>{copy.search}<input name="search" type="search" maxLength={256} value={draft.search ?? ''} aria-describedby="structure-search-hint"
         onInput={event => { const value = event.currentTarget.value; setDraft(current => withField(current, 'search', value)); }} /></label>
@@ -161,8 +161,7 @@ function Modules({ selected, basePath, search }: { selected: SourceSelection; ba
   const summary = data?.summary;
   return <Frame selected={selected} data={data} read={read} pinned={version !== undefined} onRefresh={() => {
     if (cursor || version) { moveFocus.current = true; location.route(structureListPath(basePath, selected, 'modules')); } else refresh();
-  }}>
-    <p><a href={structureListPath(basePath, selected, 'functions')}>{copy.browseFunctions}</a></p>
+  }} navigation={<p><a href={structureListPath(basePath, selected, 'functions')}>{copy.browseFunctions}</a></p>}>
     {summary && <>
       <div class="structure-table"><table>
         <caption>{copy.summaryTitle}</caption>
@@ -237,8 +236,9 @@ function Module({ selected, basePath, selector, search }: { selected: SourceSele
   };
   const offset = cursor ? Number(cursor.split('_')[1]) : 0;
   const kindLabel = copy.ownedKinds[kind as typeof OWNED_KINDS[number]];
-  return <Frame selected={selected} data={data} read={read} pinned={version !== undefined} onRefresh={() => { if (cursor) route({ kind }); else refresh(); }}>
-    <p><a href={structureListPath(basePath, selected, 'modules')}>{copy.returnModules}</a></p>
+  return <Frame selected={selected} data={data} read={read} pinned={version !== undefined} onRefresh={() => {
+    if (cursor || version) { moveFocus.current = true; location.route(`${base}?kind=${kind}`); } else refresh();
+  }} navigation={<p><a href={structureListPath(basePath, selected, 'modules')}>{copy.returnModules}</a></p>}>
     {module && data && <>
       <h2><bdi>{module.moduleId}</bdi></h2>
       <dl class="job-facts">
@@ -307,6 +307,7 @@ function References({ title, value, basePath, selected, version }: {
 function Entity({ selected, basePath, kind, selector, search }: {
   selected: SourceSelection; basePath: string; kind: 'function' | 'global' | 'type'; selector: string; search: string;
 }) {
+  const location = useLocation();
   const { client } = usePrivateTransport(basePath);
   const { version } = listLocation(search);
   const key = [selected.jobId, selected.runId, selected.revisionId, kind, selector, search].join('/');
@@ -318,8 +319,9 @@ function Entity({ selected, basePath, kind, selector, search }: {
   });
   const data = read.state === 'ready' ? read.value : null;
   const entity = data?.entity;
-  return <Frame selected={selected} data={data} read={read} pinned={version !== undefined} onRefresh={refresh}>
-    <p><a href={structureListPath(basePath, selected, 'functions')}>{copy.returnFunctions}</a></p>
+  return <Frame selected={selected} data={data} read={read} pinned={version !== undefined}
+    onRefresh={() => { if (version) location.route(structureItemPath(basePath, selected, ITEM[kind], selector)); else refresh(); }}
+    navigation={<p><a href={structureListPath(basePath, selected, 'functions')}>{copy.returnFunctions}</a></p>}>
     {entity && data && <>
       <h2><bdi>{entity.name ?? entity.entityId}</bdi></h2>
       {entity.kind === 'function' && entity.selector && <p>

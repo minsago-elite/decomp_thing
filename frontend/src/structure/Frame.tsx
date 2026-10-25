@@ -53,13 +53,15 @@ function States({ data }: { data: StructureHeader }) {
 }
 
 /** Revision context, the boundary statement, refresh, read status and the recorded model/plan states. */
-export function Frame({ selected, data, read, onRefresh, pinned, boundary = copy.boundary, children }: {
+/** Navigation stays outside the read gate so a failed or changed pinned read can still reach current records. */
+export function Frame({ selected, data, read, onRefresh, pinned, boundary = copy.boundary, navigation, children }: {
   selected: SourceSelection; data: StructureHeader | null; read: SourceReadState<unknown>; onRefresh: () => void; pinned?: boolean;
-  boundary?: string; children?: ComponentChildren;
+  boundary?: string; navigation?: ComponentChildren; children?: ComponentChildren;
 }) {
   return <>
     <Context selected={selected} data={data} />
     <p>{boundary}</p>
+    {navigation}
     {pinned && <p>{copy.pinnedNotice}</p>}
     <button type="button" disabled={read.state === 'loading'} onClick={onRefresh}>{copy.refresh}</button>
     {read.state === 'loading' && <p role="status">{copy.loading}</p>}
