@@ -333,4 +333,19 @@ class GitIntegrationTest {
         assertEquals(GitStorage.sha256(bytes), GitIntegrations.contentDigest(file))
         assertEquals("absent", GitIntegrations.contentDigest(f.repositories.root.resolve("missing")))
     }
+
+    @Test fun `an oversized conflict is refused at completion without being loaded`(): Unit = Fixture().use { f ->
+        f.cloned()
+        val large = "x".repeat(GitIntegrations.MAX_TEXT_BYTES)
+        f.localCommit("line one\nlocal two\n$large\n")
+        Files.writeString(f.seed.resolve("README.md"), "line one\nremote two\n$large\n"); f.remoteCommit("remote edit")
+        fetch()
+        sync(GitOperationAction.MERGE, merge("merge"))
+        val fileId = service.conflicts(jobId, repositoryId, null).files.single().path.fileId(service.workspace(jobId, repositoryId).worktreeId)
+        val detail = service.conflictFile(jobId, repositoryId, null, fileId)
+        assertNull(detail.current, "an oversized current file is not offered as text")
+        refused("UNSUPPORTED_CONFLICT", GitOperationAction.CONFLICT_COMPLETE, content = "$fileId ${detail.currentSha256}\n")
+        assertEquals(null, GitIntegrations.fileText(f.workTree().resolve("README.md")))
+        assertEquals("", GitIntegrations.fileText(f.workTree().resolve("missing.txt")))
+    }
 }

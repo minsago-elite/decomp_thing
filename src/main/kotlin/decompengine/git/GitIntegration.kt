@@ -123,6 +123,16 @@ internal object GitIntegrations {
         return utf8(runner.run(GitInvocation("cat-file", listOf("blob", objectId), gitDir = gitDir, limits = LIMITS)).stdout)
     }
 
+    /**
+     * A work-tree file as text, reading at most one byte beyond the bound, so an oversized file is
+     * reported as unsupported without ever being loaded. An absent file is empty text.
+     */
+    fun fileText(file: Path): String? {
+        if (!Files.isRegularFile(file, NOFOLLOW_LINKS)) return ""
+        val bytes = Files.newInputStream(file, NOFOLLOW_LINKS).use { it.readNBytes(MAX_TEXT_BYTES + 1) }
+        return utf8(bytes)
+    }
+
     fun utf8(bytes: ByteArray): String? = if (bytes.size > MAX_TEXT_BYTES || bytes.any { it == 0.toByte() }) null else try {
         Charsets.UTF_8.newDecoder().onMalformedInput(CodingErrorAction.REPORT).onUnmappableCharacter(CodingErrorAction.REPORT)
             .decode(ByteBuffer.wrap(bytes)).toString()

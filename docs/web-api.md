@@ -1056,7 +1056,8 @@ A merge that stops with conflicts leaves Git's merge state in place (#597):
 - `GET G/conflicts/{fileId}` returns each side and the current file as text, with the current
   file's SHA-256 (or `absent`) as its concurrency token. A side that is binary, deleted or larger
   than 256 KiB is reported with `supported: false` and a reason, never as an editable file. The
-  token is computed by streaming, so a large file is never loaded to digest it.
+  token is computed by streaming, and completion reads at most one byte beyond the bound, so a
+  large file is never loaded.
 
 These actions resolve or end the merge:
 
@@ -1111,7 +1112,8 @@ stays in the editor, and only the concurrency token is refreshed.
 - an executable file that stays executable through a saved resolution;
 - signing policy, which refuses merges and keeps fast-forwards;
 - wide conflict markers set by attribute;
-- the streamed content digest.
+- the streamed content digest, and an oversized conflict refused at completion without being
+  loaded.
 
 ### Git workspace view and packaged journey
 

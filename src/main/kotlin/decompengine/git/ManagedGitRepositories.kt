@@ -799,7 +799,8 @@ class ManagedGitRepositories(
             val entry = GitIntegrations.conflicts(runner, located.gitDir, located.workTree).singleOrNull { it.path.fileId(located.worktreeId) == fileId }
                 ?: GitWorkspaceMutations.refuse("NOT_FOUND", "The file is not an unresolved conflict in this work tree.")
             val file = entry.path.exact?.let(located.workTree::resolve)
-            val bytes = file?.takeIf { Files.isRegularFile(it, NOFOLLOW_LINKS) && Files.size(it) <= GitIntegrations.MAX_TEXT_BYTES }?.let(Files::readAllBytes)
+            val bytes = file?.takeIf { Files.isRegularFile(it, NOFOLLOW_LINKS) }
+                ?.let { Files.newInputStream(it, NOFOLLOW_LINKS).use { input -> input.readNBytes(GitIntegrations.MAX_TEXT_BYTES + 1) } }
             fun stage(objectId: String?) = objectId?.let { GitIntegrations.blobText(runner, located.commonDir, it) }
             GitConflictFileView(located.worktreeId, entry, stage(entry.baseObjectId), stage(entry.oursObjectId), stage(entry.theirsObjectId),
                 bytes?.let(GitIntegrations::utf8), file?.let(GitIntegrations::contentDigest) ?: "absent",
@@ -898,7 +899,7 @@ class ManagedGitRepositories(
                     val file = conflictPath(runner, located, conflictFor(runner, located, fileId))
                     if (GitIntegrations.contentDigest(file) != sha256) GitWorkspaceMutations.refuse("CONTENT_CHANGED",
                         "A file changed since it was reviewed. Read it again before marking it resolved.")
-                    val text = if (Files.isRegularFile(file, NOFOLLOW_LINKS)) GitIntegrations.utf8(Files.readAllBytes(file)) else ""
+                    val text = GitIntegrations.fileText(file)
                     if (text == null) GitWorkspaceMutations.refuse("UNSUPPORTED_CONFLICT", "A reviewed file is binary or too large to resolve in the workbench.")
                     val size = GitIntegrations.markerSize(runner, located.gitDir, located.workTree, checkNotNull(conflictFor(runner, located, fileId).path.exact))
                     if (GitIntegrations.hasMarkers(text, size)) GitWorkspaceMutations.refuse("UNRESOLVED_MARKERS",
