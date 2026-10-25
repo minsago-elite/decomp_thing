@@ -401,8 +401,8 @@ class ManagedGitRepositories(
         for ((key, value) in listOf("user.name" to policy.identityName, "user.email" to policy.identityEmail, "user.useConfigOnly" to "true")) {
             runner.run(GitInvocation("config", listOf("--file", config, key, value)))
         }
-        GitStorage.directories(gitDir, "info")
-        GitStorage.replaceAtomically(gitDir.resolve("info").resolve("exclude"), GitTrackingPolicy.excludeFile().toByteArray())
+        // Source-only exclusions plus the attribute file that keeps checkout byte-exact.
+        GitManagedLayout.prepare(gitDir)
         GitConfigurationAudit.requireManaged(runner, gitDir)
     }
 

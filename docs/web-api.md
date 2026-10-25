@@ -671,8 +671,9 @@ and `HEAD`/`objects`/`refs` at the top level is a bare one. A `.git` file or lin
 `objects/info`), the branch and tag refs (loose and packed) and HEAD. Configuration, hooks, `info/`,
 the index, reflogs, remotes, worktrees, submodule repositories and uncommitted working-tree changes
 are not copied. `git fsck --connectivity-only` must succeed (otherwise `REPOSITORY_CORRUPT`). A
-HEAD commit is then checked out with `read-tree --reset -u` under the server configuration, so
-no hook, filter, fsmonitor or submodule recursion can run. Attached, detached and unborn HEADs
+HEAD commit is then checked out with `read-tree --reset -u` under the server configuration and
+the neutral `info/attributes`. No hook, filter, fsmonitor or submodule recursion can run, and no
+attribute conversion can rewrite bytes. Attached, detached and unborn HEADs
 are preserved and reported as such, and SHA-256 repositories keep their format. Failed
 validation becomes a `failed` operation with a fixed path-free message. The imported directory
 itself is only read.

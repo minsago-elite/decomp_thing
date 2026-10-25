@@ -228,7 +228,9 @@ class ManagedGitRepositoriesTest {
             val g = f.repositories
             val source = Files.createDirectories(importRoot.resolve("hostile"))
             g.git("init", "-q", "--initial-branch=develop", source.toString())
-            Files.writeString(source.resolve(".gitattributes"), "* filter=evil\n")
+            Files.writeString(source.resolve(".gitattributes"), "* filter=evil\nlf.c text eol=crlf\nid.c ident\n")
+            Files.write(source.resolve("lf.c"), "int x;\n".toByteArray())
+            Files.write(source.resolve("id.c"), "/* \$Id\$ */\n".toByteArray())
             Files.writeString(source.resolve(".gitmodules"), "[submodule \"vendor\"]\n\tpath = vendor\n\turl = ${g.root.resolve("elsewhere")}\n")
             Files.write(source.resolve("raw source.c"), "int raw = 1;\r\n".toByteArray())
             g.git("add", "-A", cwd = source)
@@ -265,6 +267,10 @@ class ManagedGitRepositoriesTest {
             val directory = f.repositoryDirectory(completed.repositoryId)
             val workTree = directory.resolve("worktree")
             assertContentEquals("int raw = 1;\r\n".toByteArray(), Files.readAllBytes(workTree.resolve("raw source.c")))
+            // Imported eol/ident attributes cannot rewrite checked-out bytes.
+            assertContentEquals("int x;\n".toByteArray(), Files.readAllBytes(workTree.resolve("lf.c")))
+            assertContentEquals("/* \$Id\$ */\n".toByteArray(), Files.readAllBytes(workTree.resolve("id.c")))
+            assertEquals(GitManagedLayout.ATTRIBUTES, Files.readString(directory.resolve("repository.git/info/attributes")))
             assertFalse(workTree.resolve("vendor/.git").exists())
             val gitDir = directory.resolve("repository.git")
             val keys = GitConfigurationAudit.read(g.runner, gitDir.resolve("config")).map { it.first }.toSet()
