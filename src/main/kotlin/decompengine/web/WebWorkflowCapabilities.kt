@@ -34,7 +34,8 @@ internal fun webWorkflowCapabilities(adapters: List<DurableWebWorkflowAdapter>, 
         val (state, reason, message) = when {
             adapter.requirements.isNotEmpty() && prerequisites == null -> Triple("unknown", readiness.reasonCode ?: "PROBE_FAILED",
                 "Runtime prerequisites could not be determined, so this workflow's availability is unknown. Refresh readiness to check again.")
-            unmet != null -> Triple("unavailable", unmet.reasonCode, unmet.message)
+            // An unchecked prerequisite (passive page load) is unknown, never supported.
+            unmet != null -> Triple(if (unmet.unknown) "unknown" else "unavailable", unmet.reasonCode, unmet.message)
             else -> Triple("supported", null, "Every prerequisite this workflow declares was present at the last readiness check.")
         }
         capability(webWorkflowCapabilityId(adapter), state, reason, message, listOf(adapter.workflow),

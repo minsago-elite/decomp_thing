@@ -380,7 +380,8 @@ internal class WebApiController(
     }
 
     // Configuration-only and cached: reports whether a harness is selectable, never that a workflow can run.
-    private fun readiness(): WebHarnessReadiness = harnessReadiness.current().withAgentInspection(agentPreflight.snapshot().status)
+    // Passive on page load: helper checks fold in only from a recent explicit operator inspection.
+    private fun readiness(): WebHarnessReadiness = harnessReadiness.current().withAgentInspection(agentPreflight.snapshot())
 
     private fun harnessCapability(readiness: WebHarnessReadiness): JsonObject {
         return buildJsonObject {
