@@ -652,7 +652,8 @@ currently expose v1 job routes, so no successor link or sunset date is advertise
 Existing persisted `job.json`
 files stay readable through a versioned, recoverable migration; public response changes do not
 rewrite raw report bytes. Legacy URLs redirect/map per the navigation/parity contract and never
-auto-start a workflow. Unsupported legacy automation dependencies receive a documented migration
+auto-start a workflow; the per-route outcomes, upgrade writes and rollback rules are in
+[legacy migration](web-legacy-migration.md). Unsupported legacy automation dependencies receive a documented migration
 error, not an empty success response.
 
 The optional upload progress transport, state semantics and bounded retention are defined
