@@ -41,6 +41,13 @@ export GENERATED_C_MODULE_COMPILE_CONFIG_DIRECTORY=/opt/decomp-generated-c-valid
 export GENERATED_C_MODULE_COMPILE_PROFILE=generated-c-make-v1
 export GENERATED_C_MODULE_COMPILE_REQUIRE=true
 ./gradlew --no-daemon --console=plain -I "$init" moduleCompilationLiveQualification
+python3 - <<'PYTHON'
+import json
+from pathlib import Path
+inventory = json.loads(Path('build/module-compilation-qualification/compiled-live-tests.json').read_text())
+required = ('decompengine.acp.AcpAgentHarnessTest', 'public Make and Ninja archival reconstruction follows ACP file roles through verified rebuild')
+assert required in {(test['class'], test['method']) for test in inventory['tests']}, 'required transferred ACP positive is absent'
+PYTHON
 python3 scripts/verify-module-compilation-live-tests.py \
   --inventory "$qualification_root/compiled-live-tests.json" \
   --reports "$project_root/build/test-results/moduleCompilationLiveQualification" \

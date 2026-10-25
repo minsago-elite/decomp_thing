@@ -65,7 +65,11 @@ whole-project linking, entrypoint correctness, recovered ABI truth, behavior, pr
 ACP execution, or release readiness. The public generated-C repair validator remains
 behind its separate qualification guard.
 
-The `Contained module compilation` Actions workflow uses the existing installed Java,
+The reusable `Contained module compilation` Actions workflow is a prerequisite of
+the always-running ACP required gate on the same revision. The ACP gate explicitly fails
+when that prerequisite fails or is skipped. Its original Make/Ninja archive positive
+runs in the compiler lane; every other ACP control retains the no-skip contract.
+The workflow uses the existing installed Java,
 generated-C runtime, and ext4 scratch helpers. New project artifacts and reports remain
 under `build/module-compilation-qualification` and `build/reports`. Its required tests
 exercise valid compilation, source/header binding, rejection rollback, real compiler

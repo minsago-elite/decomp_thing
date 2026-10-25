@@ -5,6 +5,10 @@ import java.security.MessageDigest
 allprojects {
     afterEvaluate { project ->
         if (project != rootProject) return
+        if (providers.gradleProperty('deferContainedModuleAcceptance').orNull == 'true') {
+            // One explicit required ACP positive is owned by the successful configured prerequisite.
+            tasks.named('test', Test) { useJUnitPlatform { excludeTags 'ci-contained-module' } }
+        }
         tasks.register('moduleCompilerDeploymentManifest') {
             dependsOn tasks.named('jar'), tasks.named('stageOracleNativeLibraries')
             def output = layout.buildDirectory.file('module-compilation-qualification/worker-classpath.json')
@@ -76,6 +80,8 @@ allprojects {
             systemProperty 'decompengine.acp.gateHelperExecutable', file('build/native/acp/decomp-acp-gate-helper').absolutePath
             systemProperty 'decompengine.acp.gateHelperChecksum', file('build/native/acp/decomp-acp-gate-helper.sha256').absolutePath
             environment 'GENERATED_C_MODULE_COMPILE_REQUIRE', 'true'
+            environment 'DECOMP_REQUIRE_LIVE_ACP_CONTRACT', '1'
+            environment 'DECOMP_ACP_PARENT_SECRET_CANARY', 'decomp-acp-parent-secret-canary-must-not-cross-the-sandbox'
             environment 'DECOMP_REQUIRE_ORACLE_EXT4_SCRATCH', 'true'
             filter {
                 def classes = file('scripts/module-compilation-live-classes.txt').readLines().findAll { !it.isBlank() }

@@ -41,6 +41,7 @@ import decompengine.project.RecoveredFunction
 import decompengine.project.RecoveredProgramModel
 import decompengine.project.ReconstructionAdapters
 import decompengine.project.budgetedAnalyzer
+import decompengine.project.requireHostedModuleCompiler
 import java.nio.file.Path
 import java.nio.file.Files
 import java.security.MessageDigest
@@ -67,10 +68,19 @@ import kotlin.test.assertNull
 import kotlin.test.assertSame
 import kotlin.test.assertTrue
 import kotlinx.coroutines.flow.collect
+import org.junit.jupiter.api.BeforeEach
+import org.junit.jupiter.api.Tag
+import org.junit.jupiter.api.TestInfo
 import org.junit.jupiter.api.Timeout
+import org.junit.jupiter.api.parallel.Execution
+import org.junit.jupiter.api.parallel.ExecutionMode
+import org.junit.jupiter.api.parallel.ResourceLock
 
 @Timeout(value = 60, unit = TimeUnit.SECONDS)
 class AcpAgentHarnessTest {
+    @BeforeEach
+    fun requireConfiguredCompilerForHostedAcceptance(test: TestInfo) = requireHostedModuleCompiler(test)
+
     private fun assertFixtureManifestAcquisitionBounds() {
         val events = List(3) { java.io.IOException("host mounts changed during runtime manifest") }
         var attempts = 0
@@ -1028,8 +1038,15 @@ class AcpAgentHarnessTest {
     }
 
     @Test
+    @Tag("ci-live")
+    @Tag("ci-contained-module")
+    @Execution(ExecutionMode.SAME_THREAD)
+    @ResourceLock("contained-module-compilation-runtime")
+    @Timeout(value = 5, unit = TimeUnit.MINUTES)
     fun `public Make and Ninja archival reconstruction follows ACP file roles through verified rebuild`() {
-        val temp = createTempDirectory("acp-archival-role-workflow-")
+        val temp = Files.createTempDirectory(
+            Path.of("build", "test-tmp").toAbsolutePath().normalize().createDirectories(), "acp-archival-role-workflow-",
+        )
         val binary = temp.resolve("authored.elf")
         val binaryBytes = byteArrayOf(9, 8, 7)
         Files.write(binary, binaryBytes)

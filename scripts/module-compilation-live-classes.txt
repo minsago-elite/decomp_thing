@@ -17,3 +17,4 @@ decompengine.project.ProfiledReconstructionPipelineTest
 decompengine.validation.BehaviorValidationTest
 decompengine.integration.ArchivalProjectScaleIntegrationTest
 decompengine.oracle.behavior.LlvmBehaviorCandidateFourWayBindingV2VerifierTest
+decompengine.acp.AcpAgentHarnessTest

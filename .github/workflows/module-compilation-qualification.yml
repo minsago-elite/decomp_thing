@@ -2,18 +2,11 @@ name: Contained module compilation
 
 on:
   workflow_dispatch:
-  pull_request:
-    paths:
-      - 'src/**'
-      - 'config/acp-host-prerequisites/**'
-      - 'build.gradle.kts'
-      - 'gradle.lockfile'
-      - 'scripts/*module-compil*'
-      - 'scripts/ci-prepare-generated-c-validation.py'
-      - 'scripts/ci-prepare-oracle-runtime.sh'
-      - 'scripts/ci-prepare-acp-sandbox.sh'
-      - 'scripts/*oracle*scratch*'
-      - '.github/workflows/module-compilation-qualification.yml'
+  workflow_call:
+    outputs:
+      inventory-sha256:
+        description: Exact compiled inventory of required tests executed in this workflow
+        value: ${{ jobs.exact-module-runtime.outputs.inventory-sha256 }}
 
 permissions:
   contents: read
@@ -24,6 +17,8 @@ concurrency:
 
 jobs:
   exact-module-runtime:
+    outputs:
+      inventory-sha256: ${{ steps.qualify.outputs.inventory-sha256 }}
     runs-on: ubuntu-24.04
     timeout-minutes: 45
     env:
@@ -67,7 +62,14 @@ jobs:
           bash scripts/ci-prepare-oracle-ext4-scratch.sh --module-compile
           bash scripts/ci-prepare-oracle-ext4-scratch.sh
       - name: Qualify exact modules and failure rollback through actual containment
-        run: bash scripts/qualify-contained-module-compilation.sh
+        id: qualify
+        run: |
+          bash scripts/qualify-contained-module-compilation.sh
+          python3 - <<'PYTHON' >> "$GITHUB_OUTPUT"
+          import hashlib
+          from pathlib import Path
+          print('inventory-sha256=' + hashlib.sha256(Path('build/module-compilation-qualification/compiled-live-tests.json').read_bytes()).hexdigest())
+          PYTHON
       - name: Release owned finite scratch mounts
         if: always()
         env:
