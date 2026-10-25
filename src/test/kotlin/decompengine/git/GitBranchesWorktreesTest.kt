@@ -160,6 +160,14 @@ class GitBranchesWorktreesTest {
         assertEquals("experiment output\n", Files.readString(path.resolve("result.log")))
         Files.delete(path.resolve("result.log"))
         val linkedGit = f.gitDir().resolve("worktrees/$linked")
+        // Files inside an uninitialized gitlink directory are invisible to status but still protected.
+        f.raw("update-index", "--add", "--cacheinfo", "160000,$base,vendor", worktree = path, gitDir = linkedGit)
+        f.raw("commit", "-q", "-m", "gitlink", worktree = path, gitDir = linkedGit)
+        Files.createDirectories(path.resolve("vendor")); Files.writeString(path.resolve("vendor/result.dat"), "output\n")
+        assertTrue(service.workspace(jobId, repositoryId, linked).observation.status.entries.isEmpty())
+        refused("WORKTREE_DIRTY", GitRefRequest(GitOperationAction.WORKTREE_REMOVE, linked, guards(linked).second))
+        assertEquals("output\n", Files.readString(path.resolve("vendor/result.dat")))
+        Files.delete(path.resolve("vendor/result.dat"))
         f.raw("checkout", "-q", "--detach", worktree = path, gitDir = linkedGit)
         Files.writeString(path.resolve("src/extra.c"), "int extra = 2;\n")
         f.raw("commit", "-q", "-am", "detached only", worktree = path, gitDir = linkedGit)
@@ -227,7 +235,12 @@ class GitBranchesWorktreesTest {
         refused("BRANCH_CURRENT", GitRefRequest(GitOperationAction.SWITCH, linked, guards(linked).second, refId = refId("refs/heads/trunk")))
         // Branch identities beyond the first 200 refs still resolve.
         (1..210).forEach { f.repositories.git("--git-dir=${f.gitDir()}", "branch", "b%03d".format(it), base) }
-        val switched = run(GitRefRequest(GitOperationAction.SWITCH, linked, guards(linked).second, refId = refId("refs/heads/b205")))
+        // Past the observed refs bound the guards cannot cover the destination: its reviewed tip is required.
+        refused("VALIDATION_FAILED", GitRefRequest(GitOperationAction.SWITCH, linked, guards(linked).second, refId = refId("refs/heads/b205")))
+        f.repositories.git("--git-dir=${f.gitDir()}", "update-ref", "refs/heads/b206", f.repositories.git("--git-dir=${f.gitDir()}", "commit-tree",
+            "-p", base, "-m", "moved", "$base^{tree}").trim())
+        refused("REF_CHANGED", GitRefRequest(GitOperationAction.SWITCH, linked, guards(linked).second, refId = refId("refs/heads/b206"), objectId = base))
+        val switched = run(GitRefRequest(GitOperationAction.SWITCH, linked, guards(linked).second, refId = refId("refs/heads/b205"), objectId = base))
         assertEquals(GitOperationState.COMPLETED, switched.state, switched.message)
         assertEquals("refs/heads/b205", service.workspace(jobId, repositoryId, linked).observation.head.refName)
         // A commit in the linked work tree that crashes after Git ran is classified by that work tree's HEAD.
@@ -313,8 +326,22 @@ class GitBranchesWorktreesTest {
         assertContentEquals(first.bytes, service.export(jobId, repositoryId, base).bytes)
         java.util.zip.ZipInputStream(first.bytes.inputStream()).use { zip ->
             generateSequence { zip.nextEntry }.forEach {
-                assertFalse(it.name.contains(".git"), it.name); assertEquals(java.time.LocalDateTime.of(1980, 1, 1, 0, 0), it.timeLocal)
+                assertFalse(it.name.contains(".git"), it.name); assertEquals(java.time.LocalDateTime.of(1980, 1, 2, 0, 0), it.timeLocal)
             }
+        }
+        // The archive bytes do not depend on the JVM's default time zone, and no entry carries an extra field.
+        val zone = java.util.TimeZone.getDefault()
+        try {
+            for (id in listOf("UTC", "Asia/Seoul", "America/New_York", "Pacific/Kiritimati")) {
+                java.util.TimeZone.setDefault(java.util.TimeZone.getTimeZone(id))
+                assertContentEquals(first.bytes, service.export(jobId, repositoryId, base).bytes, id)
+            }
+        } finally { java.util.TimeZone.setDefault(zone) }
+        var offset = 0
+        val buffer = java.nio.ByteBuffer.wrap(first.bytes).order(java.nio.ByteOrder.LITTLE_ENDIAN)
+        while (buffer.getInt(offset) == 0x04034b50) {
+            assertEquals(0, buffer.getShort(offset + 28).toInt(), "local header extra field")
+            offset += 30 + buffer.getShort(offset + 26) + buffer.getInt(offset + 18)
         }
         // A tampered payload fails verification; a moved ref changes no identity.
         val tampered = first.bytes.copyOf().also { bytes -> val at = String(bytes, Charsets.ISO_8859_1).indexOf("return 0"); bytes[at + 7] = '1'.code.toByte() }

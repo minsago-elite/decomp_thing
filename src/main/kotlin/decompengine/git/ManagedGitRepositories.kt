@@ -766,11 +766,18 @@ class ManagedGitRepositories(
                 if (entries.any { it.staged != GitIndexChange.NONE || it.unstaged != GitIndexChange.NONE }) {
                     GitRefOperations.refuse("WORKTREE_DIRTY", "The work tree has uncommitted changes. Commit them, or unstage and keep them, before switching; switching never discards or stashes work.")
                 }
-                if ((request.refId == null) == (request.objectId == null)) {
-                    GitRefOperations.refuse("VALIDATION_FAILED", "A switch names exactly one branch or one commit.")
+                if (request.refId == null && request.objectId == null) {
+                    GitRefOperations.refuse("VALIDATION_FAILED", "A switch names a branch (with its reviewed tip) or one commit.")
                 }
                 val target = request.refId?.let { refId ->
                     val (name, tip) = branchFor(runner, located, refId)
+                    // The guards cover only the bounded ref observation; the reviewed tip covers the
+                    // destination itself, so a branch that moved after review is never checked out.
+                    if (request.objectId != null && request.objectId != tip) {
+                        GitRefOperations.refuse("REF_CHANGED", "The branch moved since it was reviewed; nothing was checked out. Read it again first.")
+                    }
+                    if (request.objectId == null && observation.refsTruncated) GitRefOperations.refuse("VALIDATION_FAILED",
+                        "This repository has more refs than one review covers, so a branch switch must name the branch's reviewed tip.")
                     // An imported name such as `--detach` would be read as a switch option; refuse it.
                     if (name.removePrefix("refs/heads/").startsWith("-")) {
                         GitRefOperations.refuse("VALIDATION_FAILED", "That branch name starts with '-' and cannot be switched to by the workbench.")
@@ -817,6 +824,15 @@ class ManagedGitRepositories(
                 // and they are often experiment output. An incomplete status is never clean.
                 if (observation.status.entries.isNotEmpty() || !observation.status.complete) GitRefOperations.refuse("WORKTREE_DIRTY",
                     "The work tree has uncommitted, untracked or ignored local files. Commit or move them first; nothing is force-removed.")
+                // Status ignores submodules, so files inside a gitlink's directory are invisible to it;
+                // look at those directories directly (nothing is initialized or executed).
+                GitRefOperations.gitlinkPaths(runner, located.gitDir, located.workTree).forEach { path ->
+                    val directory = path?.let(located.workTree::resolve)
+                    val occupied = directory == null || (Files.isDirectory(directory, NOFOLLOW_LINKS) &&
+                        Files.newDirectoryStream(directory).use { it.iterator().hasNext() })
+                    if (occupied) GitRefOperations.refuse("WORKTREE_DIRTY",
+                        "A submodule directory in the work tree holds local files. Move them first; nothing is force-removed.")
+                }
                 val head = observation.head
                 if (head.state == GitHeadState.DETACHED) {
                     val unmerged = GitRefOperations.unmergedCount(runner, located.commonDir, checkNotNull(head.objectId), null)
