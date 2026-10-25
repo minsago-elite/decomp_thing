@@ -153,6 +153,13 @@ internal class GccBundledNativeCallOperation(
         check(constructionPermit === GCC_BUNDLED_PREPARED_OPERATION_PERMIT) {
             "GCC native call operation requires retained coordinator ownership"
         }
+        val selected = OracleJson.parseCanonical(intent).let { it as JsonObject }
+        require(selected["engineId"] == JsonPrimitive(snapshot.target.engineId) &&
+            snapshot.target.inputSha256 == model.inputSha256 && snapshot.target.inputBytes == model.inputBytes &&
+            snapshot.summary.bindings.programModelSha256 == model.programModelSha256 &&
+            snapshot.summary.bindings.programModelBytes == model.programModelBytes) {
+            "native operation differs from its retained target or paired model"
+        }
     }
 }
 
@@ -286,9 +293,9 @@ internal class GccBundledPreparedOperation internal constructor(
     /** Captures both outputs only after the contained worker and its cgroup are absent. */
     @Synchronized
     fun executeNativeCallObservations(): GccBundledNativeCallOperation {
-        check(intent.bundledRuntime.invocationVersion == 8 && intent.engineId == "cc1" &&
+        check(intent.bundledRuntime.invocationVersion == 8 && intent.engineId in setOf("cc1", "driver") &&
             intent.runKind == GccCompilerEngineContainmentRunKind.FRESH_CONTROL && intent.cliInvocation != null
-        ) { "native observations require the retained fresh pinned cc1 CLI operation" }
+        ) { "native observations require the retained fresh pinned cc1 or driver CLI operation" }
         return executeRun(GccCompilerEngineContainmentRunKind.FRESH_CONTROL, null) { borrowed, execution ->
             val receipt = journal.recordExecution(execution.canonicalBytes)
             val deadline = checkNotNull(operationDeadline)
