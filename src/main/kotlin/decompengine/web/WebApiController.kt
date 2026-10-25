@@ -58,7 +58,13 @@ internal class WebApiController(
         val path = exchange.requestURI.rawPath
         if (!path.startsWith("${assets.basePath}api/")) return false
         val audited = if (path.startsWith(prefix)) WebAuditRecorder.versionedAction(exchange.requestMethod, path.removePrefix(prefix)) else null
-        return auditRecorder.around(exchange, audited?.first, audited?.second ?: WebAuditTarget()) { dispatch(exchange) }
+        var target = audited?.second ?: WebAuditTarget()
+        if (audited?.first == WebAuditAction.SUPPORT_EXPORT) {
+            // A job-scoped export is access to that job's support data; attribute it to the validated job.
+            val scope = try { WebSupportExportScope.parse(exchange.requestURI.rawQuery) } catch (_: WebAccessDenied) { null }
+            if (scope is WebSupportExportScope.Job) target = target.copy(jobId = scope.jobId)
+        }
+        return auditRecorder.around(exchange, audited?.first, target) { dispatch(exchange) }
     }
 
     private fun dispatch(exchange: HttpExchange): Boolean {
