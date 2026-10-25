@@ -25,7 +25,7 @@ class GitWorkspaceMutationsTest {
             }
         }
         fun open(policy: GitRepositoryPolicy = GitRepositoryPolicy(defaultBranch = "trunk")) = ManagedGitRepositories(store,
-            GitRuntime.detect(), { _, run, revision -> GitSourceSnapshot(snapshot, run, revision, "a".repeat(64)) },
+            GitRuntime.detect(), { _, run, revision -> GitSourceSnapshot(snapshot, run, revision, "a".repeat(64), listOf("src/main.c", "src/util.c").associateWith { GitSourceCommitment(GitSourceCopy.digestOf(snapshot.resolve(it)), Files.size(snapshot.resolve(it))) }) },
             policy = policy, crash = { hook(it) },
             acceptance = { _, revision, _ -> if (accepted && revision == "revision_1") "accepted" to "artifact_1" else "not-evaluated" to null },
         ).also(opened::add)
