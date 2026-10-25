@@ -351,18 +351,51 @@ object GitReads {
             starts.mapIndexed { index, start -> text.substring(start, starts.getOrElse(index + 1) { text.length }) }
         }
         val zero = "0".repeat(file.oldObjectId?.length ?: file.newObjectId?.length ?: 40)
+        fun index(section: String) = Regex("(?m)^index ([0-9a-f]+)\\.\\.([0-9a-f]+)").find(section)?.let { it.groupValues[1] to it.groupValues[2] }
         val matching = sections.filter { section ->
-            val index = Regex("(?m)^index ([0-9a-f]+)\\.\\.([0-9a-f]+)").find(section) ?: return@filter false
-            index.groupValues[1] == (file.oldObjectId ?: zero) && (file.newObjectId == null || index.groupValues[2] == file.newObjectId)
+            val (old, new) = index(section) ?: return@filter false
+            old == (file.oldObjectId ?: zero) && (file.newObjectId == null || new == file.newObjectId)
         }
-        // Pure renames and mode-only changes have no index line; identify them by their exact header.
-        val header = "diff --git a/${file.originalPath?.exact ?: path} b/$path\n"
-        val selected = matching.firstOrNull()
+        // Git prints a type change (file to symlink and back) as a deletion section followed by an
+        // addition section; one listing record owns both, so both are kept in order.
+        val typeChange = if (file.change == GitIndexChange.TYPE_CHANGED && file.oldObjectId != null && file.newObjectId != null) {
+            val deletion = sections.firstOrNull { index(it) == (file.oldObjectId to zero) }
+            val addition = sections.firstOrNull { index(it) == (zero to file.newObjectId) }
+            if (deletion != null && addition != null) deletion + addition else null
+        } else null
+        // Pure renames and mode-only changes have no index line; identify them by their exact
+        // header, quoted the way Git quotes unusual names.
+        val header = "diff --git ${quoted("a/" + (file.originalPath?.exact ?: path))} ${quoted("b/$path")}\n"
+        val selected = typeChange ?: matching.firstOrNull()
             ?: sections.firstOrNull { it.startsWith(header) && !Regex("(?m)^index ").containsMatchIn(it) } ?: ""
         val bytes = selected.toByteArray(Charsets.UTF_8)
         val cut = bytes.size > MAX_PATCH_BYTES || (result.stdoutTruncated && selected === sections.lastOrNull())
         return GitPatch(if (bytes.size > MAX_PATCH_BYTES) bytes.copyOf(MAX_PATCH_BYTES).toString(Charsets.UTF_8).trimEnd('\uFFFD') else selected,
             cut, binary = false)
+    }
+
+    /**
+     * A diff header path as Git prints it with the default `core.quotePath`: a name holding a
+     * quote, backslash, control character or any byte above 0x7f is wrapped in quotes with C
+     * escapes and octal bytes.
+     */
+    internal fun quoted(name: String): String {
+        val bytes = name.toByteArray(Charsets.UTF_8)
+        fun special(value: Int) = value < 0x20 || value == 0x7f || value >= 0x80 || value == '"'.code || value == '\\'.code
+        if (bytes.none { special(it.toInt() and 0xff) }) return name
+        return buildString {
+            append('"')
+            for (byte in bytes) {
+                val value = byte.toInt() and 0xff
+                when (value) {
+                    7 -> append("\\a"); 8 -> append("\\b"); 9 -> append("\\t"); 10 -> append("\\n")
+                    11 -> append("\\v"); 12 -> append("\\f"); 13 -> append("\\r")
+                    '"'.code -> append("\\\""); '\\'.code -> append("\\\\")
+                    else -> if (special(value)) append('\\').append(value.toString(8).padStart(3, '0')) else append(value.toChar())
+                }
+            }
+            append('"')
+        }
     }
 
     /** Branches and tags with peeled tag targets, at most [limit] after [skip]. */

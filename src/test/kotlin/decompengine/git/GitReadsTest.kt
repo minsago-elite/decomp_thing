@@ -194,6 +194,35 @@ class GitReadsTest {
         assertNotEquals(before, GitRepositoryInspector.inspect(f.runner, gitDir, workTree).statusDigest)
     }
 
+    @Test fun `metadata-only patches with quoted names and type changes keep their sections`(): Unit = GitTestRepositories().use { f ->
+        val (gitDir, workTree) = f.managed("quoted")
+        val names = listOf("\u00fcnicode.c", "tab\tname.c", "quote\"name.c", "back\\slash.c")
+        names.forEach { f.write(workTree, it, "int value;\n") }
+        f.write(workTree, "link.c", "int target;\n")
+        f.commitAll(gitDir, workTree, "base")
+        names.forEach { f.raw(gitDir, workTree, "update-index", "--chmod=+x", "--", it) }
+        val staged = GitReads.diff(f.runner, gitDir, workTree, GitObjectFormat.SHA1, GitDiffScope.STAGED, null, null)
+        for (name in names) {
+            val file = staged.files.single { it.path.exact == name }
+            val patch = GitReads.patch(f.runner, gitDir, workTree, GitDiffScope.STAGED, null, null, file)
+            assertTrue(patch.text.contains("new mode 100755"), "$name: ${patch.text}")
+            assertFalse(patch.truncated)
+        }
+        assertEquals("\"a/\\303\\274nicode.c\"", GitReads.quoted("a/\u00fcnicode.c"))
+        assertEquals("a/plain.c", GitReads.quoted("a/plain.c"))
+        // A file replaced by a symlink is one type-change record whose patch has both sections.
+        f.raw(gitDir, workTree, "commit", "-q", "-m", "modes")
+        Files.delete(workTree.resolve("link.c"))
+        Files.createSymbolicLink(workTree.resolve("link.c"), Path.of("target.c"))
+        f.raw(gitDir, workTree, "add", "--", "link.c")
+        val typed = GitReads.diff(f.runner, gitDir, workTree, GitObjectFormat.SHA1, GitDiffScope.STAGED, null, null)
+            .files.single { it.path.exact == "link.c" }
+        assertEquals(GitIndexChange.TYPE_CHANGED, typed.change)
+        val patch = GitReads.patch(f.runner, gitDir, workTree, GitDiffScope.STAGED, null, null, typed)
+        assertTrue(patch.text.contains("deleted file mode 100644") && patch.text.contains("-int target;"), patch.text)
+        assertTrue(patch.text.contains("new file mode 120000") && patch.text.contains("+target.c"), patch.text)
+    }
+
     @Test fun `staged diff works on an unborn branch`(): Unit = GitTestRepositories().use { f ->
         val (gitDir, workTree) = f.managed("unborn")
         f.write(workTree, "first.c", "int first;\n")
