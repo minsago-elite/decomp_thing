@@ -32,7 +32,7 @@ function CapabilityReport({ capability }: { capability: Capability }) {
   </li>;
 }
 
-/** Display the last authenticated report. It cannot admit work or select a harness. */
+/** Display the last authenticated report. It neither admits work nor selects a harness; the start form does. */
 export function WorkflowAvailability({ runtime }: { runtime: RuntimeSnapshot }) {
   const generalCapabilities = runtime.capabilities.filter(capability => capability.workflows.length === 0);
   return <section aria-labelledby="job-workflow-availability-title">
@@ -50,9 +50,11 @@ export function WorkflowAvailability({ runtime }: { runtime: RuntimeSnapshot }) 
     <ul aria-label={copy.workflowAvailability}>
       {workflows.map(workflow => {
         const capabilities = runtime.capabilities.filter(capability => capability.workflows.includes(workflow));
+        const launchable = capabilities.filter(capability => capability.launch !== null);
         return <li key={workflow}>
           <h4>{labels[workflow]}</h4>
-          <p><strong>{copy.startUnavailable}</strong></p>
+          <p><strong>{launchable.length === 0 ? copy.startUnavailable
+            : launchable.some(capability => capability.state === 'supported') ? copy.startReady : copy.startNotReady}</strong></p>
           {capabilities.length === 0 ? <p>{copy.noCapabilityForThisWorkflow}</p> : <ul>
             {capabilities.map(capability => <CapabilityReport key={capability.id} capability={capability} />)}
           </ul>}

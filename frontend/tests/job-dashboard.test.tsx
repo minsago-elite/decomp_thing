@@ -303,7 +303,7 @@ it.each(['unavailable', 'unsupported', 'unknown', 'missing', 'empty'] as const)(
       await session.initialize({ kind: 'absent' });
       render(<App basePath="/nested" session={session} />);
       expect(await screen.findByRole('heading', { name: selected.displayFilename })).toBeTruthy();
-      expect(screen.getByText('Starting exploration, reconstruction, builds, validation or repair is unavailable in this preview.')).toBeTruthy();
+      expect(screen.getByText(/reported no workflow option that can be started/)).toBeTruthy();
       expect(screen.getAllByRole('button').map(button => button.textContent)).toEqual(['Display preferences', 'Sign out', 'Refresh job']);
       fireEvent.click(screen.getByRole('link', { name: 'View reported workflow availability' }));
       expect(await screen.findByRole('heading', { level: 1, name: 'Runtime status' })).toBeTruthy();

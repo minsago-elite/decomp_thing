@@ -9,10 +9,13 @@ import type { BrowserSession, RuntimeSnapshot } from '../session/session';
 import { useSession } from '../session/useSession';
 import { JobSummary } from '../jobs/JobSummary';
 import { WorkflowAvailability } from '../jobs/WorkflowAvailability';
+import { WorkflowLaunch } from '../jobs/WorkflowLaunch';
+import { useLocation } from 'preact-iso/router';
 import { canRetainMetadata, metadataFailureKind } from '../shared/retainMetadata';
 
-function JobDetails({ jobId, basePath, runtime }: { jobId: string; basePath: string; runtime: RuntimeSnapshot }) {
+function JobDetails({ jobId, basePath, runtime, session }: { jobId: string; basePath: string; runtime: RuntimeSnapshot; session: BrowserSession }) {
   const { client } = usePrivateTransport(basePath);
+  const location = useLocation();
   const binding = useMemo(() => ({ client, basePath, jobId }), [client, basePath, jobId]);
   const [stored, setStored] = useState<{ binding: typeof binding; data: JobData | null; error: string; loading: boolean }>(
     { binding, data: null, error: '', loading: true });
@@ -62,8 +65,10 @@ function JobDetails({ jobId, basePath, runtime }: { jobId: string; basePath: str
       </dl>
       <p>{copy.completionIsAnAttemptOutcomeOnlyTheRecordedAcceptedRevision}</p>
       <p>{copy.theAttemptPageRetainsItsExactIdentityAsNewerWork}</p>
-      <p>{copy.startingExplorationReconstructionBuildsValidationOrRepairIsUnavailableIn}</p>
       <WorkflowAvailability runtime={runtime} />
+      <WorkflowLaunch key={`${job.jobId}/${job.version}`} job={job} runtime={runtime} basePath={basePath} session={session}
+        onRefresh={() => { setRefresh(value => value + 1); }}
+        onStarted={path => { if (location.url) location.route(path); else window.location.assign(path); }} />
       <a href={appPath(basePath, '/runtime')}>{copy.viewReportedWorkflowAvailability}</a>
     </>}
   </>;
@@ -74,7 +79,7 @@ export default function Job({ jobId, basePath, session }: { jobId: string; baseP
   return <section aria-labelledby="job-title">
     <h1 id="job-title">{copy.jobOverview}</h1>
     <a href={appPath(basePath, '/')}>{copy.returnToJobs}</a>
-    {state?.status === 'authenticated' ? <JobDetails key={`${state.generation}/${jobId}`} jobId={jobId} basePath={basePath} runtime={state.runtime} />
+    {session && state?.status === 'authenticated' ? <JobDetails key={`${state.generation}/${jobId}`} jobId={jobId} basePath={basePath} runtime={state.runtime} session={session} />
       : <p>{copy.connectALocalSessionToViewThisJob}</p>}
   </section>;
 }

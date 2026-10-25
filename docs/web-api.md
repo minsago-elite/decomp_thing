@@ -908,6 +908,32 @@ injected string lookups. Actual source HTTP/browser qualification and physical
 D0 time/memory/workload evidence remain unproved; no new actual context trial is
 introduced by those controls.
 
+## SPA workflow launch form
+
+The job overview renders a start form from the last authenticated bootstrap. It lists
+only capabilities with `launch` facts and exactly one workflow; every option shows its
+reported state and reason, whether it runs the uploaded binary or contacts the configured
+agent (with its contract version), and the tools it requires. Options that are not
+`supported` stay visible but cannot be selected, and nothing is preselected: a harness or
+evidence-only reconstruction is always an explicit choice, and evidence-only shows its
+limitations. Settings start from the server-approved defaults. Adjustable limits accept
+whole decimal values no larger than each default (positive for time and output, and an
+idle limit no larger than the wall clock); fixed limits are read-only. Options whose input
+policy is `recorded-required` load the job's attempt history once and offer the accepted
+revision and completed candidates; the form never accepts a typed revision or path.
+
+Before submitting, the form shows the exact body it will send (workflow, option,
+harness capability, input revision and limits). Submitting sends one `POST J/runs` with
+the job's strong `If-Match` and an `Idempotency-Key`. One unchanged intent (job version and
+body) keeps one key, so pressing start again after a lost answer, a timeout, a 429 or an
+uncertain 503 replays the same request instead of starting twice; a changed configuration,
+a stale job (412), an active or conflicting attempt (409) or an unavailable option or
+input (503 `CAPABILITY_UNAVAILABLE`, 422) uses a fresh key after review. Double activation
+is ignored while a request is pending. A busy job (`queued` or `running`) disables the
+form and links its active attempt. A successful answer must name the same job and workflow;
+the form then opens the attempt, whose overview shows the recorded workflow, harness
+capability, input revision and limits. The form never retries automatically.
+
 ## SPA recorded source navigation
 
 The attempt page links a recorded result revision to

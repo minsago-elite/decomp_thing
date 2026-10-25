@@ -131,6 +131,24 @@ it('has no automated WCAG A/AA violations with display preferences open', async 
   expect(await violations()).toEqual([]);
 });
 
+it('has no automated WCAG A/AA violations on the workflow launch form with settings and summary', async () => {
+  const launch = fixture('bootstrap-workflow-launch').data as unknown as Bootstrap;
+  const value = createBrowserSession({
+    bootstrap: () => Promise.resolve({ ...launch, basePath: '/nested/', sessionExpiresAt: new Date(Date.now() + 60000).toISOString() }),
+    exchange: vi.fn(), logout: () => Promise.resolve(),
+  }, '/nested');
+  sessions.push(value);
+  await value.initialize({ kind: 'absent' });
+  history.replaceState(null, '', `/nested/jobs/${jobId}`);
+  render(<App basePath="/nested" session={value} />);
+  fireEvent.click(await screen.findByLabelText('Exploration: local tools'));
+  await settle();
+  expect(screen.getByRole('region', { name: 'Configuration to submit' })).toBeTruthy();
+  fireEvent.input(screen.getByLabelText('Wall-clock limit (ms)'), { target: { value: 'invalid' } });
+  await settle();
+  expect(await violations()).toEqual([]);
+});
+
 it('has no automated WCAG A/AA violations when a job read fails', async () => {
   transport.get.mockImplementation(() => Promise.reject(new ApiClientError('http_error', { serverCode: 'NOT_FOUND' })));
   const auth = await session();
