@@ -58,6 +58,8 @@ internal class WebSourceCatalogEvidence(
                 val selected = resolveRevisionSourceFile(snapshot, fileId)
                 val profile = profiles.getValue(manifest.profileId to manifest.profileSha256)
                 val files = WebRecordedModuleProvenance.evidenceFiles(profile, manifest, selected)
+                var unavailableReason = if (ProjectFileRole.MODULE_IMPLEMENTATION !in selected.evidence.roles)
+                    "not-module" else "recorded-evidence-unavailable"
                 val recorded = try { files?.let { declarations ->
                     fun read(entry: GeneratedFileEvidence): StableRegularFile {
                         val path = "reports/runs/${reference.runId}/source-tree/${entry.path}"
@@ -75,8 +77,9 @@ internal class WebSourceCatalogEvidence(
                     requireSame(plan, read(declarations.plan))
                     requireSame(generation, read(declarations.generation))
                     result
-                } } catch (_: RepairBudgetExceededException) { null }
-                WebRevisionFileMetadataSnapshot(snapshot, recorded)
+                } } catch (_: RepairBudgetExceededException) { unavailableReason = "metadata-byte-limit"; null }
+                WebRevisionFileMetadataSnapshot(snapshot, recorded, WebRecordedRecoveryAssessment.project(profile, manifest),
+                    if (recorded == null) unavailableReason else null)
             }
         }
     }

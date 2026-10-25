@@ -7,6 +7,7 @@ import decompengine.project.ModulePlanJson
 import decompengine.project.ProjectContentKind
 import decompengine.project.ProjectFileRole
 import decompengine.project.ReconstructionProfile
+import decompengine.project.RecoveryAssessmentProjectionV1
 import decompengine.project.SourceTreeManifest
 import java.util.concurrent.CancellationException
 import kotlinx.serialization.json.*
@@ -14,6 +15,8 @@ import kotlinx.serialization.json.*
 internal data class WebRevisionFileMetadataSnapshot(
     val source: WebRevisionSourceSnapshot,
     val recordedModule: JsonObject?,
+    val recordedRecovery: JsonObject = WebRecordedRecoveryAssessment.unavailable(),
+    val recordedModuleUnavailableReason: String? = if (recordedModule == null) "recorded-evidence-unavailable" else null,
 )
 
 /** A manifest-bound generation declaration, never an execution or acceptance attestation. */
@@ -81,7 +84,29 @@ internal object WebRecordedModuleProvenance {
             .materialize(mapOf("module" to module.id)))
         val root = OracleJson.parse(generationBytes, LIMITS) as? JsonObject
             ?: error("Generation record is unavailable.")
-        require(root.number("schemaVersion") == 2L)
+        val recovery = when (manifest.schemaVersion) {
+            3 -> { require(root.number("schemaVersion") == 2L); null }
+            4 -> {
+                require(root.number("schemaVersion") == 3L)
+                val assessment = RecoveryAssessmentProjectionV1.parsePassive(
+                    root.objectField("recoveryAssessment").toString().toByteArray(Charsets.UTF_8), MAXIMUM_BYTES)
+                require(root.text("recoveryAssessmentSha256") == assessment.sha256)
+                require(assessment.publicSummary(files.generation.sha256).canonicalBytes.contentEquals(
+                    requireNotNull(manifest.recordedRecoverySummary).canonicalBytes))
+                val row = assessment.document.getValue("modules").jsonArray.map { it.jsonObject }
+                    .single { it.text("moduleId") == module.id }
+                val population = row.objectField("population")
+                require(population.number("functionCount") == module.functionIds.size.toLong() &&
+                    population.number("globalCount") == module.globalIds.size.toLong() &&
+                    population.number("typeCount") == module.typeIds.size.toLong())
+                buildJsonObject {
+                    put("schemaVersion", 1); put("authority", "reported-assessment")
+                    put("origin", "recorded-origin-unverified"); put("projectionSha256", assessment.sha256)
+                    put("population", population); put("candidateMeasurements", row.getValue("candidateMeasurements"))
+                }
+            }
+            else -> error("Generation record version is unavailable.")
+        }
         val generation = root.objectField("sourceGenerationBudgetEvidence")
         require(generation.number("schemaVersion") == 1L)
         val declaredProfile = generation.objectField("selectedProfile")
@@ -116,6 +141,7 @@ internal object WebRecordedModuleProvenance {
             put("planSha256", files.plan.sha256); put("generationEvidenceSha256", files.generation.sha256)
             put("promptCharacters", characters?.let { JsonPrimitive(it.toString()) } ?: JsonNull)
             put("promptBudgetCharacters", maximum?.let { JsonPrimitive(it.toString()) } ?: JsonNull)
+            recovery?.let { put("recoveryAssessment", it) }
             recordedValidation(profile, manifest, module.id, selected, revision)?.let { put("validation", it) }
         }
     }

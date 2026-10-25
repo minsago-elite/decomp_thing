@@ -8,6 +8,9 @@ import decompengine.project.ModulePlan
 import decompengine.project.PlannedModule
 import decompengine.project.ProjectContentKind
 import decompengine.project.ProjectFileRole
+import decompengine.project.ProgramAnalysisResult
+import decompengine.project.RecoveredProgramModel
+import decompengine.project.RecoveryAssessmentProjectionV1
 import decompengine.project.SourceTreeManifest
 import decompengine.repair.RepairBudgetExceededException
 import decompengine.repair.StableRegularFile
@@ -26,16 +29,22 @@ class WebRecordedModuleProvenanceTest {
         val plan: ByteArray, val generation: ByteArray)
 
     private fun captured(change: (JsonObject) -> JsonObject = { it }, planChange: (ModulePlan) -> ModulePlan = { it },
-        accepted: Boolean = true, counts: Boolean = true): Captured {
+        accepted: Boolean = true, counts: Boolean = true, fresh: Boolean = false): Captured {
         val sourcePath = profile.layout.declaration("module-implementation").materialize(mapOf("module" to moduleId))
         val headerPath = profile.layout.declaration("module-interface").materialize(mapOf("module" to moduleId))
         val selected = WebRevisionSourceFile(GeneratedFileEvidence(sourcePath, implementationSha, privateText,
             acceptedImplementation = accepted, roles = profile.layout.declaration("module-implementation").roles,
             contentKind = ProjectContentKind.UTF8_TEXT), 12)
-        val plan = planChange(ModulePlan(modules = listOf(PlannedModule(moduleId, sourcePath, headerPath,
-            emptyList(), emptyList(), emptyList(), listOf(privateText))))).toJson().toByteArray(Charsets.UTF_8)
+        val modulePlan = planChange(ModulePlan(modules = listOf(PlannedModule(moduleId, sourcePath, headerPath,
+            emptyList(), emptyList(), emptyList(), listOf(privateText)))))
+        val plan = modulePlan.toJson().toByteArray(Charsets.UTF_8)
+        val analysis = ProgramAnalysisResult.fromModel(RecoveredProgramModel(inputSha256 = inputSha, functions = emptyList()))
+        val assessment = if (fresh) RecoveryAssessmentProjectionV1.derive(analysis, modulePlan) else null
         val generation = change(buildJsonObject {
-            put("schemaVersion", 2); put("raw", privateText)
+            put("schemaVersion", if (fresh) 3 else 2); put("raw", privateText)
+            assessment?.let {
+                put("recoveryAssessment", it.document); put("recoveryAssessmentSha256", it.sha256)
+            }
             put("modules", buildJsonArray { add(buildJsonObject {
                 put("id", moduleId)
                 put("revisionEvidence", buildJsonObject {
@@ -58,9 +67,11 @@ class WebRecordedModuleProvenanceTest {
             WebExplorationArtifact.sha256(bytes), "fixture", roles = profile.layout.declaration(id).roles, contentKind = ProjectContentKind.UTF8_TEXT)
         val build = GeneratedFileEvidence(profile.layout.declaration("build-definition").materialize(), "f".repeat(64), "fixture",
             roles = profile.layout.declaration("build-definition").roles, contentKind = ProjectContentKind.UTF8_TEXT)
-        val manifest = SourceTreeManifest(profileId = profile.id, profileSha256 = profile.sha256, inputSha256 = inputSha,
-            files = listOf(build, selected.evidence, evidence("module-plan-evidence", plan), evidence("confidence-evidence", generation)),
-            unresolvedEntityIds = emptyList())
+        val manifest = SourceTreeManifest(schemaVersion = if (fresh) 4 else 3,
+            profileId = profile.id, profileSha256 = profile.sha256, inputSha256 = inputSha,
+            files = listOf(build, selected.evidence, evidence("module-plan-evidence", plan), evidence("confidence-evidence", generation)) +
+                if (fresh) listOf(evidence("program-model-evidence", analysis.canonicalModelBytes)) else emptyList(),
+            unresolvedEntityIds = emptyList(), recordedRecoverySummary = assessment?.publicSummary(WebExplorationArtifact.sha256(generation)))
         return Captured(manifest, selected, plan, generation)
     }
 
@@ -93,6 +104,24 @@ class WebRecordedModuleProvenanceTest {
             assertEquals(JsonNull, record["promptBudgetCharacters"])
             assertFalse(record.containsKey("acceptance")); assertFalse(record.containsKey("harness"))
         }
+    }
+
+    @Test fun `confidence three projects generation only with the manifest four assessment commitment`() {
+        val value = captured(fresh = true)
+        val record = assertNotNull(project(value))
+        assertEquals("reported-generation", record.getValue("authority").jsonPrimitive.content)
+        assertEquals(WebExplorationArtifact.sha256(value.generation), record.getValue("generationEvidenceSha256").jsonPrimitive.content)
+        assertEquals("recorded-origin-unverified", record.getValue("recoveryAssessment").jsonObject.getValue("origin").jsonPrimitive.content)
+        assertEquals(JsonNull, record.getValue("recoveryAssessment").jsonObject["candidateMeasurements"])
+        assertNull(project(captured(fresh = true, change = { JsonObject(it + ("schemaVersion" to JsonPrimitive(2))) })))
+        assertNull(project(captured(change = { JsonObject(it + ("schemaVersion" to JsonPrimitive(3))) })))
+        assertNull(project(captured(fresh = true, change = {
+            JsonObject(it + ("recoveryAssessmentSha256" to JsonPrimitive("f".repeat(64))))
+        })))
+        assertNull(project(captured(fresh = true, change = {
+            val projection = it.getValue("recoveryAssessment").jsonObject
+            JsonObject(it + ("recoveryAssessment" to JsonObject(projection + ("productionVerified" to JsonPrimitive(true)))))
+        })))
     }
 
     @Test fun `manifest digest and explicit module source binding refuse stale or ambiguous joins`() {
@@ -165,8 +194,9 @@ class WebRecordedModuleProvenanceTest {
         val fileId: String, val reads: MutableMap<String, Int>)
 
     /** Existing capture machinery with memory-only callbacks; no filesystem or native identity sampling. */
-    private fun captureControl(change: (String, Int, StableRegularFile) -> StableRegularFile = { _, _, value -> value }): CaptureControl {
-        val value = captured(); val job = "a".repeat(32); val run = "run_1"
+    private fun captureControl(fresh: Boolean = false,
+        change: (String, Int, StableRegularFile) -> StableRegularFile = { _, _, value -> value }): CaptureControl {
+        val value = captured(fresh = fresh); val job = "a".repeat(32); val run = "run_1"
         val inputs = value.manifest.files.filter { ProjectFileRole.BUILD_INPUT in it.roles }
         fun size(file: GeneratedFileEvidence): Long = if (file === value.selected.evidence) 12 else 0
         val canonical = inputs.joinToString("") { "${it.path.length}:${it.path}:${size(it)}:${it.sha256}\n" }
@@ -205,10 +235,55 @@ class WebRecordedModuleProvenanceTest {
         val control = captureControl()
         val result = control.source.readFileMetadata(control.reference, control.fileId)
         assertNotNull(result.recordedModule)
+        assertNull(result.recordedModuleUnavailableReason)
         assertEquals(5, control.reads.size)
         assertTrue(control.reads.values.all { it == 2 })
         assertTrue(control.reads.keys.none { it.contains("modules/") || it.contains("agent-executions/") })
         assertEquals(control.reference, result.source.reference)
+    }
+
+    @Test fun `manifest four summary is captured without opening model overlay source or private receipts`() {
+        val control = captureControl(fresh = true)
+        val result = control.source.readFileMetadata(control.reference, control.fileId)
+        assertNotNull(result.recordedModule)
+        assertEquals("recorded", result.recordedRecovery.getValue("state").jsonPrimitive.content)
+        assertEquals("recorded-origin-unverified", result.recordedRecovery.getValue("origin").jsonPrimitive.content)
+        assertEquals(JsonNull, result.recordedRecovery.getValue("summary").jsonObject["measurements"])
+        assertEquals(5, control.reads.size)
+        assertTrue(control.reads.values.all { it == 2 })
+        assertTrue(control.reads.keys.none { it.contains("program_model") || it.contains("modules/") || it.contains("agent-executions/") })
+        var reads = 0
+        val response = WebRevisionFileMetadata { job, run, revision, file ->
+            assertEquals(control.reference.jobId, job); assertEquals(control.reference.runId, run)
+            assertEquals(control.reference.revisionId, revision); assertEquals(control.fileId, file)
+            reads++; result
+        }.read(control.reference.jobId, control.reference.runId, control.reference.revisionId, control.fileId)
+        assertEquals(1, reads)
+        assertEquals(result.recordedRecovery, response["recordedRecovery"])
+        assertEquals("source-input-commitments", response.getValue("authority").jsonPrimitive.content)
+        assertEquals("not-performed", response.getValue("contentVerification").jsonPrimitive.content)
+        assertFalse(response.toString().contains(privateText))
+    }
+
+    @Test fun `manifest summary remains available for nonmodule files and over budget module reports`() {
+        val plain = captureControl(fresh = true)
+        val buildPath = profile.layout.declaration("build-definition").materialize()
+        val build = plain.source.readFileMetadata(plain.reference, revisionSourceFileId(plain.reference, 0, buildPath))
+        assertNull(build.recordedModule)
+        assertEquals("recorded", build.recordedRecovery.getValue("state").jsonPrimitive.content)
+        assertEquals(3, plain.reads.size)
+        for (name in listOf("module_plan.json", "confidence.json")) for (refusedRead in 1..2) {
+            val control = captureControl(fresh = true) { path, count, record ->
+                if (path.endsWith("/reports/$name") && count == refusedRead) throw RepairBudgetExceededException(privateText)
+                record
+            }
+            val result = control.source.readFileMetadata(control.reference, control.fileId)
+            assertNull(result.recordedModule)
+            assertEquals("metadata-byte-limit", result.recordedModuleUnavailableReason)
+            assertEquals("recorded", result.recordedRecovery.getValue("state").jsonPrimitive.content)
+            assertEquals(build.recordedRecovery, result.recordedRecovery)
+            assertTrue(control.reads.keys.none { it.contains("program_model") || it.contains("agent-executions/") })
+        }
     }
 
     @Test fun `memory-only evidence identity or bytes replacement withholds the entire captured projection`() {

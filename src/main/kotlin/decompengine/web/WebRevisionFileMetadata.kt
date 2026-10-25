@@ -32,6 +32,8 @@ internal class WebRevisionFileMetadata(
                 null -> "not-classified"
             })
             put("recordedModule", captured.recordedModule ?: JsonNull)
+            put("recordedModuleUnavailableReason", captured.recordedModuleUnavailableReason?.let(::JsonPrimitive) ?: JsonNull)
+            put("recordedRecovery", captured.recordedRecovery)
             put("item", buildJsonObject {
                 put("fileId", fileId); put("displayName", entry.path); put("sizeBytes", file.sizeBytes.toString())
                 put("sha256", entry.sha256); put("declaredUtf8Text", entry.contentKind == ProjectContentKind.UTF8_TEXT)
