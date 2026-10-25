@@ -43,6 +43,18 @@ internal class WebJobMutationBoundary(
         val session = checkNotNull(access.authorize(exchange, WebEndpointPolicy.jsonMutation("POST")))
         return AuthorizedWebCancellation(session, jobs)
     }
+
+    fun authorizeGitRepository(exchange: HttpExchange): AuthorizedWebGitRepository {
+        checkNotNull(access.authorize(exchange, WebEndpointPolicy.jsonMutation("POST")))
+        return AuthorizedWebGitRepository()
+    }
+}
+
+/** Repository-creation capability; the body selects only typed intent, never a path or command. */
+internal class AuthorizedWebGitRepository internal constructor() {
+    fun request(repositories: decompengine.git.ManagedGitRepositories, jobId: String,
+        request: decompengine.git.GitRepositoryRequest, requestKey: String, precondition: () -> Unit,
+    ): decompengine.git.GitOperationAdmission = repositories.request(jobId, request, requestKey, precondition)
 }
 
 /** Upload-only capability shared by the legacy and versioned HTTP adapters. */

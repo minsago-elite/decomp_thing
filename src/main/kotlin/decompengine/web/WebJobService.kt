@@ -713,6 +713,22 @@ class WebJobService(
         return store.readSourceInput(jobId, runId, path, maximumBytes)
     }
 
+    /**
+     * The recorded source snapshot of one ended attempt's persisted candidate, for managed
+     * repository initialization. The directory is only ever read by the Git service.
+     */
+    @Synchronized
+    internal fun gitSourceSnapshot(jobId: String, runId: String, revisionId: String): decompengine.git.GitSourceSnapshot {
+        fun unavailable(): Nothing = throw decompengine.git.ManagedGitException("SOURCE_REVISION_UNAVAILABLE",
+            "The selected attempt has no recorded source snapshot for that revision.")
+        requireInitializedRead()
+        val attempt = try { getAttempt(jobId, runId) } catch (_: WebJobServiceException) { unavailable() }
+        val candidate = attempt.candidate?.takeIf { it.revisionId == revisionId && attempt.endedAt != null } ?: unavailable()
+        val directory = try { store.runReportsDirectory(jobId, runId).resolve("source-tree") } catch (_: Exception) { unavailable() }
+        if (!java.nio.file.Files.isDirectory(directory, java.nio.file.LinkOption.NOFOLLOW_LINKS)) unavailable()
+        return decompengine.git.GitSourceSnapshot(directory, runId, revisionId, candidate.sourceSha256)
+    }
+
     /** Shared fixed-path journal read for both HTTP adapters; absence is not empty history. */
     @Synchronized
     internal fun readProgressJournal(jobId: String, runId: String? = null): ByteArray {

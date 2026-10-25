@@ -9,9 +9,10 @@ import type { BrowserSession, RuntimeSnapshot } from '../session/session';
 import { useSession } from '../session/useSession';
 import { JobSummary } from '../jobs/JobSummary';
 import { WorkflowAvailability } from '../jobs/WorkflowAvailability';
+import { GitRepositoryPanel } from '../jobs/GitRepositoryPanel';
 import { canRetainMetadata, metadataFailureKind } from '../shared/retainMetadata';
 
-function JobDetails({ jobId, basePath, runtime }: { jobId: string; basePath: string; runtime: RuntimeSnapshot }) {
+function JobDetails({ jobId, basePath, runtime, session }: { jobId: string; basePath: string; runtime: RuntimeSnapshot; session: BrowserSession }) {
   const { client } = usePrivateTransport(basePath);
   const binding = useMemo(() => ({ client, basePath, jobId }), [client, basePath, jobId]);
   const [stored, setStored] = useState<{ binding: typeof binding; data: JobData | null; error: string; loading: boolean }>(
@@ -64,6 +65,7 @@ function JobDetails({ jobId, basePath, runtime }: { jobId: string; basePath: str
       <p>{copy.theAttemptPageRetainsItsExactIdentityAsNewerWork}</p>
       <p>{copy.startingExplorationReconstructionBuildsValidationOrRepairIsUnavailableIn}</p>
       <WorkflowAvailability runtime={runtime} />
+      <GitRepositoryPanel job={job} capabilities={runtime.capabilities} basePath={basePath} session={session} />
       <a href={appPath(basePath, '/runtime')}>{copy.viewReportedWorkflowAvailability}</a>
     </>}
   </>;
@@ -74,7 +76,7 @@ export default function Job({ jobId, basePath, session }: { jobId: string; baseP
   return <section aria-labelledby="job-title">
     <h1 id="job-title">{copy.jobOverview}</h1>
     <a href={appPath(basePath, '/')}>{copy.returnToJobs}</a>
-    {state?.status === 'authenticated' ? <JobDetails key={`${state.generation}/${jobId}`} jobId={jobId} basePath={basePath} runtime={state.runtime} />
+    {state?.status === 'authenticated' && session ? <JobDetails key={`${state.generation}/${jobId}`} jobId={jobId} basePath={basePath} runtime={state.runtime} session={session} />
       : <p>{copy.connectALocalSessionToViewThisJob}</p>}
   </section>;
 }

@@ -171,11 +171,12 @@ internal storage optimization and must not merge identity, permissions or histor
 | `GET J/artifacts`, `GET J/artifacts/{artifactId}` | `200 artifacts`, `200 artifact` | Optional run/revision filters validated together; #165/#192 |
 | `GET`/`HEAD J/artifacts/{artifactId}/content` | `200` or `206` bytes | Immutable digest binding, contained stream; #164/#192 |
 | `POST V/archive-verifications` | `202 operation` | Explicit bounded integrity verification, no binary execution; #193 |
-| `GET G`, `GET G/worktrees/{worktreeId}` | `200 gitWorkspace` | Capability-gated repository/worktree registry; #200/#202 |
+| `GET J/repositories` | `200 gitRepositories` | Capability-gated repository summary and latest 20 operations; implemented by #201 |
+| `GET G`, `GET G/worktrees/{worktreeId}` | `200 gitWorkspace` | Capability-gated repository/worktree registry; `GET G` implemented by #201, worktrees #202 |
 | `GET G/{status,diff,history,refs,worktrees,remotes,conflicts}` | Bounded typed Git read | Scoped worktree/ref/object IDs; #202/#204/#207/#210/#211 |
-| `POST J/repositories` | `202 operation` | Explicit init/attach/clone, validated configuration; #201/#209 |
+| `POST J/repositories` | `202 operation` | Strict `gitRepositoryInit`/`gitRepositoryAttach`, session/Origin/CSRF, job If-Match and idempotency; init/attach implemented by #201, clone #209 |
 | `POST G/operations` | `202 operation` | Named action, selected IDs, guards, idempotency; #203–#212 |
-| `GET G/operations/{operationId}` | `200 operation` | Durable outcome/recovery state; #209 |
+| `GET G/operations/{operationId}` | `200 operation` | Durable outcome/recovery state; init/attach operations implemented by #201, others #209 |
 | `POST G/operations/{operationId}/cancel` | `202 operation` or terminal `200` | Explicit cancellation, optimistic guard; #209 |
 
 Schemas cover representative `session`, `bootstrap`, `job(s)`, `run`, `snapshot`, `events`,
@@ -572,9 +573,9 @@ optional runtime prerequisite. At startup the first absolute `git` on the server
 is resolved to its real path and probed with `git version`. Versions older than 2.36.0
 (needed for `GIT_CONFIG_GLOBAL` and repository ownership checks) are unsupported.
 Bootstrap reports `runtime.gitVersion` as the bare numeric version, or `null` when none is
-detected, and a `git` capability. The capability is `unavailable` with `GIT_NOT_FOUND`,
-`GIT_VERSION_UNSUPPORTED` or `GIT_PROBE_FAILED`, or `supported` once the managed repository routes
-are served. Every Git endpoint answers `503 CAPABILITY_UNAVAILABLE` with that reason's message when
+detected, plus `git` and `git-import` capabilities. `git` is `unavailable` with `GIT_NOT_FOUND`,
+`GIT_VERSION_UNSUPPORTED` or `GIT_PROBE_FAILED`, and `supported` when the managed repository
+routes below are served. Every Git endpoint answers `503 CAPABILITY_UNAVAILABLE` with that reason's message when
 Git is unusable. The executable path never leaves the server.
 
 - **Argument safety.** `ProcessBuilder` receives a separate argv; no shell is involved. Callers
@@ -622,8 +623,89 @@ Git is unusable. The executable path never leaves the server.
 paths with spaces and non-ASCII characters, SHA-1 and SHA-256 formats and a non-`main` branch. It
 also uses fake executables for missing, old, slow, noisy and failing Git. Tripwire hooks,
 fsmonitor and filter scripts show that nothing in repository content runs. This covers the
-adapter boundary only. Repository initialization, import and their HTTP routes are separate
-D8.2 work.
+adapter boundary only.
+
+### Managed repository initialization, import and recovery
+
+`GET J/repositories`, `POST J/repositories`, `GET G` and `GET G/operations/{operationId}` are
+served when the `git` capability is `supported` (#571-#573). Each of them returns `503
+CAPABILITY_UNAVAILABLE` with the capability's reason message when Git is missing or too old.
+They follow the shared session rules. A read discloses repository facts only after the job
+resolves, and never runs a write, fetch or checkout. The POST uses the shared mutation boundary
+(session, Origin, JSON and CSRF) before any body or service read. It also needs one strong job
+`If-Match`, one 16-128 character `Idempotency-Key`, no query and a strict body of at most 2048
+bytes:
+
+- `{"action":"git.init","runId":…,"revisionId":…,"initialBranch":null|"name"}` copies the recorded
+  `source-tree` snapshot of that attempt's candidate into a new work tree. `initialBranch` must
+  pass `check-ref-format`; `null` selects the server's configured default branch.
+- `{"action":"git.attach","sourceName":"name"}` imports one repository that the operator placed
+  directly under the server's import root (`web --git-import-root <directory>`). The value is a
+  single validated name, never a path. Without a configured root, `git-import` is `unavailable`
+  (`GIT_IMPORT_UNCONFIGURED`) and the request is refused with 503.
+
+An admitted request returns `202 operation`, a `Location` for `G/operations/{operationId}` and a
+strong ETag. The operation is durably recorded as `queued` before any work starts. Replaying the
+same key returns the original operation with `Idempotency-Replayed: true`, even with a stale
+guard; the key lookup precedes the fresh job-version check. A key reused with a different body
+is `409 IDEMPOTENCY_CONFLICT`. A stale job guard is `412`, and a missing one `428`. A job that
+already has a repository is `409 REPOSITORY_EXISTS`, and one with a queued or running operation
+is `409 WORKTREE_BUSY`. Exhausted capacity is `429`. An unknown run or revision, an invalid
+branch or an import name with no admitted repository is `422`. A refused request creates no
+operation record.
+
+Initialization copies regular files byte for byte, preserving executable bits. It omits the
+top-level `build` root and refuses links, special files and nested `.git` entries. Every file is
+re-hashed on both sides after the copy. The managed Git directory is a bare repository with the
+server's configuration: identity from configured policy, `user.useConfigOnly`, the source-only
+`info/exclude` and nothing else. No file is staged and no commit is created, so the workspace
+reads as an `unborn` branch with untracked files (`dirty: true`). Its `candidateRevisionId`
+names the copied revision.
+
+Import validates the admitted directory as data. A `.git` directory is a non-bare repository,
+and `HEAD`/`objects`/`refs` at the top level is a bare one. A `.git` file or link, alternates,
+`commondir`, a shallow file, format version above 1, or an extension other than `objectFormat`,
+`worktreeConfig`, `noop` and `preciousObjects` (for example reftable or partial clone) gives
+`REPOSITORY_UNSUPPORTED`. The repository configuration is read only with `git config --file …
+--no-includes`. A fresh managed repository then receives the object store (without
+`objects/info`), the branch and tag refs (loose and packed) and HEAD. Configuration, hooks, `info/`,
+the index, reflogs, remotes, worktrees, submodule repositories and uncommitted working-tree changes
+are not copied. `git fsck --connectivity-only` must succeed (otherwise `REPOSITORY_CORRUPT`). A
+HEAD commit is then checked out with `read-tree --reset -u` under the server configuration, so
+no hook, filter, fsmonitor or submodule recursion can run. Attached, detached and unborn HEADs
+are preserved and reported as such, and SHA-256 repositories keep their format. Failed
+validation becomes a `failed` operation with a fixed path-free message. The imported directory
+itself is only read.
+
+Each operation works in a private staging tree under the job's `git/staging/<operationId>`. The
+registration record is written inside that tree before one atomic rename publishes it as
+`git/repositories/<repositoryId>`, and an existing name is never replaced. Readers therefore see
+either no repository or a complete one. Nothing is written under `reports/`, so a recorded or
+accepted source snapshot cannot be overwritten. On restart, and before an instance first uses a
+job, non-terminal records are reconciled. A published repository makes its operation
+`completed`. Otherwise the staging tree is removed and the operation becomes `interrupted` with
+`recoveryRequired: false`. If removal fails, it becomes `recovery-required` and the tree is kept
+for inspection. Reconciliation never repeats work. Replaying the original key reports the
+interrupted operation, and a new key starts a fresh, explicit initialization.
+
+`GET J/repositories` returns `gitRepositories`: the job's repository summary (at most one) and
+its latest 20 operations. `GET G` returns `gitWorkspace` from a fresh bounded inspection. Its
+`worktreeVersion` doubles as its ETag and changes with any observed status or HEAD change.
+`repositoryVersion` changes with refs, and `refId` is stable per repository and ref name.
+`mapping` stays `null` until an explicit commit records a validated source mapping (#203).
+
+`ManagedGitRepositoriesTest` covers byte-exact initialization (spaces, non-ASCII names, executable
+bits), the ignore policy against real `git status --ignored`, the absence of commits, replay and
+conflicts, refused requests that leave no record, linked snapshots, and unusable Git. It also
+covers every crash point (after the running record, after staging, before publication and after
+publication), with recovery checked on a new instance. Import is checked on a hostile repository
+whose filters, fsmonitor, hooks, hooksPath, includes and submodule never run, and whose bytes are
+unchanged. Bare/detached, unborn, SHA-256, corrupt, alternates, gitfile, partial-clone, plain and
+linked sources are checked as well. `WebGitControllerTest` covers the HTTP contract: bootstrap
+capability states, guards, strict bodies, path-free responses and the unavailable answers. The
+job page's minimal Git panel (`GitRepositoryPanel`) shows availability, the observed HEAD and a
+single initialization action from the latest attempt's candidate. The full Git UI belongs to
+#583.
 
 ## Legacy compatibility
 

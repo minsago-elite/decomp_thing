@@ -213,6 +213,8 @@ class UploadServer(
     // Test-owned clocks exercise expiry through the real HTTP/browser path; production uses the system clock.
     webAccessClock: WebAccessClock? = null,
     private val startupCancellation: () -> Boolean = { false },
+    // Operator-admitted directory whose immediate children may be imported by name; never browser-selected.
+    gitImportRoot: Path? = null,
 ) {
     init {
         require(listenBacklog in 1..4096) { "HTTP listen backlog must be between 1 and 4096" }
@@ -292,8 +294,12 @@ class UploadServer(
             }
         }) { "Server is stopping" }
     }
+    private val gitAvailability = decompengine.git.GitRuntime.detect()
+    private val gitRepositories = decompengine.git.ManagedGitRepositories(store.storageRoot, gitAvailability,
+        jobs::gitSourceSnapshot, gitImportRoot)
     private val api = spaAssets?.let { WebApiController(access, it, jobs, jobMutations, streamResources,
-        harnessReadiness = harnessReadiness, agentPreflight = agentPreflight) }
+        harnessReadiness = harnessReadiness, agentPreflight = agentPreflight,
+        git = WebGitCapability(gitAvailability, gitRepositories)) }
     // A request that finds every worker and queue slot taken is answered by this tiny pool with a stable 429
     // instead of a reset connection. It has no queue, so overload still never buffers more than the main pool does;
     // when it too is busy the rejection propagates and the dispatcher closes the connection, as before.
@@ -337,6 +343,8 @@ class UploadServer(
         }
         try {
             jobs.initializeExistingStorage(startupRecoveryLimitsForWeb(uiMode)) { stopRequested.get() || startupCancellation() }
+            // Interrupted repository operations become explicit outcomes before any request is served.
+            gitRepositories.recover(store.jobIds())
         } catch (failure: Throwable) {
             stopRequested.set(true)
             stopping = true
@@ -449,6 +457,7 @@ class UploadServer(
         harnessReadiness.close()
         agentPreflight.close()
         access.close()
+        gitRepositories.close()
         jobs.close()
         var inspectionWaitInterrupted = false
         try {
