@@ -11,6 +11,7 @@ import { jobPath, runPath, runViewPath, sourceDirectoryPath, type RunView } from
 import type { BrowserSession } from '../session/session';
 import { Activity } from '../jobs/Activity';
 import { ProgressPin } from '../jobs/ProgressPin';
+import { AttemptControls } from '../jobs/AttemptControls';
 import { ExplorationEvidence } from '../jobs/ExplorationEvidence';
 import { RecordedValidationEvidence } from '../jobs/RecordedValidationEvidence';
 import type { ValidationNavigation } from '../jobs/validationNavigation';
@@ -101,6 +102,8 @@ function Details({ jobId, runId, basePath, session, view, navigation }: {
       </dl> : <p>{copy.usageWasNotReportedForThisAttempt}</p>}
       </>}
       {view !== 'evidence' && <>
+        <AttemptControls key={`controls/${jobId}/${runId}`} jobId={jobId} runId={runId} basePath={basePath} session={session}
+          run={run} onChanged={() => { setRefresh(value => value + 1); }} />
         <ProgressPin key={`pin/${jobId}/${runId}`} jobId={jobId} runId={runId} basePath={basePath} session={session} />
         <Activity key={`activity/${jobId}/${runId}`} jobId={jobId} runId={runId} basePath={basePath} {...(view === 'activity' && navigation !== undefined ? { navigation } : {})} />
       </>}
