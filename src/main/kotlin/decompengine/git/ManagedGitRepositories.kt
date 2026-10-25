@@ -699,6 +699,13 @@ class ManagedGitRepositories(
         val sourceSha256 = record.sourceSha256 ?: return null
         val snapshot = try { sources.resolve(record.jobId, runId, revisionId) } catch (_: Exception) { return null }
         if (snapshot.sourceSha256 != sourceSha256) return null
+        // The retained snapshot must still hold its canonical build-input commitments; a changed
+        // snapshot cannot lend the original revision's identity to a commit.
+        for ((path, commitment) in snapshot.commitments) {
+            val file = snapshot.directory.resolve(path)
+            if (!Files.isRegularFile(file, NOFOLLOW_LINKS) || Files.size(file) != commitment.sizeBytes ||
+                GitSourceCopy.digestOf(file) != commitment.sha256) return null
+        }
         // Policy-excluded files are copied but can never be committed, so they are not expected.
         val copied = GitWorkspaceMutations.snapshotBlobs(snapshot.directory, record.objectFormat) ?: return null
         val expected = copied - GitTrackingPolicy.excluded(runner, copied.keys)

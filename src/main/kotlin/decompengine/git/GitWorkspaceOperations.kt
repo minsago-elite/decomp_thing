@@ -139,14 +139,29 @@ internal object GitWorkspaceMutations {
     private fun pathspecs(paths: List<String>): ByteArray = paths.joinToString("") { "$it\u0000" }.toByteArray(Charsets.UTF_8)
     private val FROM_STDIN = listOf("--pathspec-from-file=-", "--pathspec-file-nul")
 
+    /**
+     * A pathspec is not an index-entry identity: `add` of a deleted file whose name is now a
+     * directory would also add everything beneath it. Deletions are therefore staged with an
+     * index-only `rm --cached` (which never recurses), and every other path must still be a
+     * regular file or link, never a directory.
+     */
     fun stage(runner: GitCommandRunner, gitDir: Path, workTree: Path, entries: List<GitStatusEntry>) {
-        runner.run(GitInvocation("add", FROM_STDIN, gitDir = gitDir, workTree = workTree,
-            input = pathspecs(entries.map { checkNotNull(it.path.exact) }), limits = COMMIT_LIMITS))
+        val (deletions, others) = entries.partition { it.unstaged == GitIndexChange.DELETED }
+        for (entry in others) {
+            if (Files.isDirectory(workTree.resolve(checkNotNull(entry.path.exact)), NOFOLLOW_LINKS)) {
+                refuse("SELECTION_CHANGED", "A selected path is now a directory; read the current status before staging.")
+            }
+        }
+        if (deletions.isNotEmpty()) runner.run(GitInvocation("rm", listOf("--cached", "-q") + FROM_STDIN, gitDir = gitDir, workTree = workTree,
+            input = pathspecs(deletions.map { checkNotNull(it.path.exact) }), limits = COMMIT_LIMITS))
+        if (others.isNotEmpty()) runner.run(GitInvocation("add", FROM_STDIN, gitDir = gitDir, workTree = workTree,
+            input = pathspecs(others.map { checkNotNull(it.path.exact) }), limits = COMMIT_LIMITS))
     }
 
     fun unstage(runner: GitCommandRunner, gitDir: Path, workTree: Path, entries: List<GitStatusEntry>, unborn: Boolean) {
         val paths = pathspecs(entries.flatMap { listOfNotNull(it.originalPath?.exact, it.path.exact) }.distinct())
-        if (unborn) runner.run(GitInvocation("rm", listOf("--cached", "-q") + FROM_STDIN, gitDir = gitDir, workTree = workTree,
+        // `-f` only overrides rm's up-to-date check; `--cached` keeps the work tree untouched.
+        if (unborn) runner.run(GitInvocation("rm", listOf("--cached", "-f", "-q") + FROM_STDIN, gitDir = gitDir, workTree = workTree,
             input = paths, limits = COMMIT_LIMITS))
         else runner.run(GitInvocation("reset", listOf("-q") + FROM_STDIN + "HEAD", gitDir = gitDir, workTree = workTree,
             input = paths, allowedExitCodes = setOf(0, 1), limits = COMMIT_LIMITS))

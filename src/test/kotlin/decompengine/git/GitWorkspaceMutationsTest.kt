@@ -24,8 +24,12 @@ class GitWorkspaceMutationsTest {
                 Files.createDirectories(snapshot.resolve(name).parent); Files.writeString(snapshot.resolve(name), text)
             }
         }
+        /** Recorded once, like a completed attempt's build-input commitments. */
+        val commitments = listOf("src/main.c", "src/util.c").associateWith {
+            GitSourceCommitment(GitSourceCopy.digestOf(snapshot.resolve(it)), Files.size(snapshot.resolve(it)))
+        }
         fun open(policy: GitRepositoryPolicy = GitRepositoryPolicy(defaultBranch = "trunk")) = ManagedGitRepositories(store,
-            GitRuntime.detect(), { _, run, revision -> GitSourceSnapshot(snapshot, run, revision, "a".repeat(64), listOf("src/main.c", "src/util.c").associateWith { GitSourceCommitment(GitSourceCopy.digestOf(snapshot.resolve(it)), Files.size(snapshot.resolve(it))) }) },
+            GitRuntime.detect(), { _, run, revision -> GitSourceSnapshot(snapshot, run, revision, "a".repeat(64), commitments) },
             policy = policy, crash = { hook(it) },
             acceptance = { _, revision, _ -> if (accepted && revision == "revision_1") "accepted" to "artifact_1" else "not-evaluated" to null },
         ).also(opened::add)
@@ -170,6 +174,50 @@ class GitWorkspaceMutationsTest {
         assertEquals("STATUS_INCOMPLETE", assertFailsWith<GitOperationRefusal> {
             GitWorkspaceMutations.requireStagedSet(view.record, incomplete, listOf("file_" + "0".repeat(32)))
         }.code)
+    }
+
+    @Test fun `deletions never stage replacement directories and unborn unstaging keeps edits`(): Unit = Fixture().use { f ->
+        val service = f.open()
+        val repositoryId = service.initialized()
+        val workTree = f.store.resolve("$jobId/git/repositories/$repositoryId/worktree")
+        // Staged then edited again on the unborn branch: unstaging still works and keeps the edit.
+        val (initial, guards) = service.guards(repositoryId)
+        service.run(repositoryId, GitStageRequest(initial.record.worktreeId, guards, initial.ids { it.path.exact == "src/main.c" }, true), "stage_key_0000030")
+        Files.writeString(workTree.resolve("src/main.c"), "int main(void) { return 5; }\n")
+        val (edited, editedGuards) = service.guards(repositoryId)
+        val unstaged = service.run(repositoryId, GitStageRequest(edited.record.worktreeId, editedGuards, edited.ids { it.path.exact == "src/main.c" }, false), "unstage_key_00030")
+        assertEquals(GitOperationState.COMPLETED, unstaged.state, unstaged.message)
+        assertTrue(service.workspace(jobId, repositoryId).observation.status.entries.single { it.path.exact == "src/main.c" }.untracked)
+        assertEquals("int main(void) { return 5; }\n", Files.readString(workTree.resolve("src/main.c")))
+        // Commit, then replace a file by a directory: staging the deletion must not add the directory.
+        val (all, allGuards) = service.guards(repositoryId)
+        service.run(repositoryId, GitStageRequest(all.record.worktreeId, allGuards, all.ids { it.untracked }, true), "stage_key_0000031")
+        val (staged, stagedGuards) = service.guards(repositoryId)
+        service.run(repositoryId, GitCommitRequest(staged.record.worktreeId, stagedGuards, staged.ids { it.staged != GitIndexChange.NONE }, "base"), "commit_key_000031")
+        Files.delete(workTree.resolve("src/util.c"))
+        Files.createDirectories(workTree.resolve("src/util.c")); Files.writeString(workTree.resolve("src/util.c/extra.c"), "int unselected;\n")
+        val (replaced, replacedGuards) = service.guards(repositoryId)
+        val deletion = replaced.ids { it.path.exact == "src/util.c" && it.unstaged == GitIndexChange.DELETED }
+        assertEquals(1, deletion.size)
+        val stagedDeletion = service.run(repositoryId, GitStageRequest(replaced.record.worktreeId, replacedGuards, deletion, true), "stage_key_0000032")
+        assertEquals(GitOperationState.COMPLETED, stagedDeletion.state, stagedDeletion.message)
+        val after = service.workspace(jobId, repositoryId).observation.status.entries
+        assertEquals(GitIndexChange.DELETED, after.single { it.path.exact == "src/util.c" }.staged)
+        assertTrue(after.single { it.path.exact == "src/util.c/extra.c" }.untracked)
+    }
+
+    @Test fun `a snapshot changed after initialization never lends its revision to a commit`(): Unit = Fixture().use { f ->
+        val service = f.open()
+        val repositoryId = service.initialized()
+        val workTree = f.store.resolve("$jobId/git/repositories/$repositoryId/worktree")
+        Files.writeString(f.snapshot.resolve("src/main.c"), "int main(void) { return 42; }\n")
+        Files.writeString(workTree.resolve("src/main.c"), "int main(void) { return 42; }\n")
+        val (view, guards) = service.guards(repositoryId)
+        service.run(repositoryId, GitStageRequest(view.record.worktreeId, guards, view.ids { it.untracked }, true), "stage_key_0000040")
+        val (staged, stagedGuards) = service.guards(repositoryId)
+        val commit = service.run(repositoryId, GitCommitRequest(staged.record.worktreeId, stagedGuards, staged.ids { it.staged != GitIndexChange.NONE }, "drifted"), "commit_key_000040")
+        assertEquals(GitOperationState.COMPLETED, commit.state)
+        assertNull(service.workspace(jobId, repositoryId).mapping)
     }
 
     @Test fun `an external edit between admission and execution fails the operation instead of committing it`(): Unit = Fixture().use { f ->
