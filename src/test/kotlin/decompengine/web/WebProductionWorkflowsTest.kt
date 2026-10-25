@@ -420,6 +420,24 @@ class WebProductionWorkflowsTest {
     }
 
     @Test
+    fun `a failed agent inspection blocks agent options even when sandbox helpers are missing`() = withRoot { root ->
+        val environment = mapOf("ACP_HARNESS" to "legacy-openai", "BASE_URL" to "https://example.invalid/v1",
+            "API_KEY" to "legacy-key", "MODEL" to "legacy-model")
+        // No helper files exist: the aggregate harness state is already SANDBOX_HELPER_MISSING.
+        val passive = WebHarnessReadinessProjector.passiveReadiness(environment, root.resolve("bwrap"), root.resolve("timeout"), { true })
+        assertEquals("SANDBOX_HELPER_MISSING", passive.reasonCode); assertTrue(passive.prerequisites!!.agent.available)
+        val failed = passive.withAgentInspection(WebAgentPreflightSnapshot("failed", "inspection_1", WebAgentPreflight.REASON_FAILED,
+            passive.configurationIdentity))
+        assertEquals(WebAgentPreflight.REASON_FAILED, failed.prerequisites!!.agent.reasonCode)
+        val reported = webWorkflowCapabilities(adapters(FakeEngines()), failed).associateBy { it.getValue("id").jsonPrimitive.content }
+        assertEquals("unavailable", reported.getValue("workflow-reconstruct-agent").getValue("state").jsonPrimitive.content)
+        assertEquals(WebAgentPreflight.REASON_FAILED, reported.getValue("workflow-reconstruct-agent").getValue("reasonCode").jsonPrimitive.content)
+        // An inspection of a different configuration says nothing about the current agent.
+        val foreign = passive.withAgentInspection(WebAgentPreflightSnapshot("failed", "inspection_2", WebAgentPreflight.REASON_FAILED, "other_configuration"))
+        assertTrue(foreign.prerequisites!!.agent.available)
+    }
+
+    @Test
     fun `retry keeps recorded limits and rechecks prerequisites while replay stays read-only`() = withRoot { root ->
         val store = JobStore(root); val job = store.createFromUpload("retry-limits.elf", elfFixture())
         val engines = FakeEngines()

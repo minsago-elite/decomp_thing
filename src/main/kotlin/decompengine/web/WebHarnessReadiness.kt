@@ -64,11 +64,16 @@ internal data class WebHarnessReadiness(
         if (configurationIdentity != null && configurationIdentity != snapshot.configurationIdentity) {
             return withAgentInspection(null)
         }
-        if (state == "unknown" && reasonCode == "SANDBOX_HELPER_UNCHECKED" && snapshot.status == "failed") {
-            return failedInspection()
-        }
-        return withAgentInspection(snapshot.status)
+        val folded = if (state == "unknown" && reasonCode == "SANDBOX_HELPER_UNCHECKED" && snapshot.status == "failed") failedInspection()
+            else withAgentInspection(snapshot.status)
+        // The agent fact is independent of the aggregate harness state: a matching failed inspection
+        // blocks agent options even when another prerequisite already made the harness unavailable.
+        return if (snapshot.status == "failed") folded.withFailedAgentFact() else folded
     }
+
+    private fun withFailedAgentFact(): WebHarnessReadiness = prerequisites?.takeIf { it.agent.available }?.let { facts ->
+        copy(prerequisites = facts.copy(agent = FAILED_AGENT))
+    } ?: this
 
     /**
      * Folds the last explicit agent preflight into a configured harness. Bootstrap never starts the
@@ -83,8 +88,11 @@ internal data class WebHarnessReadiness(
 
     private fun failedInspection() = WebHarnessReadiness("unavailable", WebAgentPreflight.REASON_FAILED,
         "The last operator inspection could not start the configured agent. Inspect the agent configuration and retry.",
-        prerequisites = prerequisites?.copy(agent = WebPrerequisite(false, WebAgentPreflight.REASON_FAILED,
-            "The last operator inspection could not start the configured agent.")))
+        prerequisites = prerequisites?.copy(agent = FAILED_AGENT))
+
+    private companion object {
+        val FAILED_AGENT = WebPrerequisite(false, WebAgentPreflight.REASON_FAILED, "The last operator inspection could not start the configured agent.")
+    }
 }
 
 /** Atomically expires queued work or retains an admitted callback until its final exit. */
@@ -290,11 +298,11 @@ internal class WebHarnessReadinessProjector(
                 return WebHarnessReadiness("unavailable", "HARNESS_CONFIGURATION_INVALID", "The agent harness configuration is invalid.",
                     prerequisites = facts(agentMissing("HARNESS_CONFIGURATION_INVALID", "The agent harness configuration is invalid."), null))
             }
+            val identity = if (bindObservation) selection.provenance.stableDescriptor else null
             if (!helpersPresent) {
                 return WebHarnessReadiness("unavailable", "SANDBOX_HELPER_MISSING", "The sandbox helpers required to run analyzed binaries are not available.",
-                    prerequisites = facts(WebPrerequisite.AVAILABLE, false))
+                    identity, prerequisites = facts(WebPrerequisite.AVAILABLE, false))
             }
-            val identity = if (bindObservation) selection.provenance.stableDescriptor else null
             val key = if (bindObservation) observationKey(selection, bubblewrap, timeoutHelper) else null
             val jsonStatus = jsonStatusSupported(bubblewrap)
             if (jsonStatus == false) {
