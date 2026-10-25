@@ -989,8 +989,8 @@ class ManagedGitRepositories(
                 val binding = checkNotNull(checkNotNull(github).binding(remote))
                 val head = request.text("headBranch"); val base = request.text("baseBranch"); val title = request.text("title")
                 val intents = GitStorage.directories(directory, PULL_INTENTS)
-                // Pull requests that already exist for these branches can never be this creation's result.
-                val listed = client.pulls(binding, head, base)
+                // Pull requests that already exist for this head, on any base, can never be this creation's result.
+                val listed = client.pulls(binding, head)
                 fun audit(outcome: String, detail: String?) = GitRemoteStore.audit(directory, GitRemoteStore.auditEntry("github.pr.create",
                     operation.operationId, outcome, remote, clock.instant(), ref = "refs/heads/$head", detail = detail))
                 // An open pull request for these branches already exists: report it and never write.
@@ -1028,12 +1028,15 @@ class ManagedGitRepositories(
                 val remote = remoteFor(located, intent.remoteId)
                 // Look in the repository that was actually contacted, whatever the remote is bound to now.
                 val binding = GitHubBinding(remote.location.display, intent.owner, intent.repository)
-                val candidates = client.pulls(binding, intent.head, intent.base).filter { it.number !in intent.existing }
-                // The correlation comment identifies the result even after a title edit; the title digest is the fallback.
+                // Every base is searched: a collaborator may have retargeted the created pull request.
+                val candidates = client.pulls(binding, intent.head).filter { it.number !in intent.existing }
+                // The correlation comment identifies the result even after a title edit or retargeting; the
+                // title digest on the original base is the fallback. Another operation's correlation is never ours.
                 val found = candidates.firstOrNull { it.correlation == intent.operationId }
-                    ?: candidates.firstOrNull { it.correlation == null && GitStorage.sha256(it.title) == intent.titleSha256 }
-                if (found == null && candidates.isNotEmpty()) throw GitOperationRefusal("PR_AMBIGUOUS",
-                    "Pull request(s) ${candidates.joinToString { "#${it.number}" }} were created for these branches since, but none carries " +
+                    ?: candidates.firstOrNull { it.correlation == null && it.baseRef == intent.base && GitStorage.sha256(it.title) == intent.titleSha256 }
+                val unidentified = candidates.filter { it.correlation == null }
+                if (found == null && unidentified.isNotEmpty()) throw GitOperationRefusal("PR_AMBIGUOUS",
+                    "Pull request(s) ${unidentified.joinToString { "#${it.number}" }} were created for this head since, but none carries " +
                         "this creation's identity or title. The creation stays unconfirmed; check them on GitHub.")
                 val (state, code, message) = if (found != null) Triple(GitOperationState.COMPLETED, null,
                     "Reconciliation found pull request #${found.number}: ${found.url}")

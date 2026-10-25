@@ -1216,11 +1216,13 @@ existed for those branches.
 - Any other outcome becomes `recovery-required` with `PR_UNCONFIRMED`. Examples are a dropped
   connection, a stalled or unreadable response, or a server error.
 - `github.pr.reconcile` with `prOperationId` looks in the recorded repository, even if the
-  remote's binding has since changed. It ignores pull requests that already existed. It matches
-  by the correlation comment, which survives a title edit, and otherwise by the title digest. It
+  remote's binding has since changed. It searches every base, because the pull request may have
+  been retargeted, and ignores pull requests that already existed for the head. It matches by the
+  correlation comment, which survives a title edit or retargeting. Otherwise it matches by the
+  title digest on the original base. It
   settles the original operation as `completed`, or as `failed` with `PR_NOT_CREATED` when no new
-  pull request exists, and it never repeats the write. When new pull requests exist but none can
-  be identified, the reconciliation fails with `PR_AMBIGUOUS`, and the creation stays
+  pull request exists, and it never repeats the write. A new pull request may carry no correlation
+  and still not match. The reconciliation then fails with `PR_AMBIGUOUS`, and the creation stays
   unconfirmed.
 - Completion messages are bounded to the record's 500 characters, so a long provider link never
   makes the operation record unreadable.
@@ -1245,8 +1247,8 @@ remote, branches and commits.
 - an older pull request with the same title that is never taken as the result;
 - reconciliation in the recorded repository after the binding changes;
 - refusal to remove a remote with an unconfirmed creation;
-- confirmation by correlation after a title edit, and `PR_AMBIGUOUS` for an unidentifiable pull
-  request;
+- confirmation by correlation after a title edit or retargeting, and `PR_AMBIGUOUS` for an
+  unidentifiable pull request;
 - an existing open pull request reported without writing, and GitHub's `custom` duplicate error;
 - a long provider link bounded in the record, and a moved reviewed commit refused.
 

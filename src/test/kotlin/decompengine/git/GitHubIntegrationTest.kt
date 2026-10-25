@@ -384,4 +384,21 @@ class GitHubIntegrationTest {
             assertTrue(fake.requests.none { it.startsWith("POST") })
         }
     }
+
+    @Test fun `a created pull request is confirmed by its correlation after it is retargeted`(): Unit = Fixture().use { f ->
+        FakeGitHub(token).use { fake ->
+            f.cloned(configuration(fake, f.repositories.root, writable = true))
+            fake.dropAfterCreate = true
+            val uncertain = run(create())
+            assertEquals("PR_UNCONFIRMED", uncertain.failureCode, uncertain.message)
+            fake.dropAfterCreate = false
+            // A collaborator retargets the pull request to another base before reconciliation.
+            val created = fake.pulls.single()
+            fake.pulls[0] = kotlinx.serialization.json.JsonObject(created + ("base" to buildJsonObject { put("ref", "release") }))
+            val reconciled = reconcile(uncertain.operationId)
+            assertEquals(GitOperationState.COMPLETED, reconciled.state, reconciled.message)
+            assertTrue(reconciled.message.contains("#1"), reconciled.message)
+            assertEquals(GitOperationState.COMPLETED, service.operation(jobId, repositoryId, uncertain.operationId).state)
+        }
+    }
 }
