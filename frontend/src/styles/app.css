@@ -250,6 +250,33 @@ main a + button, main button + button, main button + a { margin-inline-start: 0.
 .upload-drop p { color: var(--muted); }
 .upload-panel progress { width: 100%; }
 
+/* State marks: the shape repeats the label (filled, half, dot, ring, outline, dashed) so tone never relies on colour. */
+.state-mark { display: inline-flex; align-items: baseline; gap: 0.45em; font-weight: 600; }
+.state-mark::before { content: ""; flex: none; width: 0.65em; height: 0.65em; border: 2px solid currentColor; border-radius: 2px; transform: translateY(0.05em); }
+.state-mark[data-tone="settled"] { color: var(--accent); }
+.state-mark[data-tone="settled"]::before { background: currentColor; }
+.state-mark[data-tone="active"] { color: var(--attention); }
+.state-mark[data-tone="active"]::before { background: linear-gradient(to top, currentColor 50%, transparent 50%); }
+.state-mark[data-tone="stopped"] { color: var(--danger); }
+.state-mark[data-tone="stopped"]::before { background: currentColor; border-radius: 50%; }
+.state-mark[data-tone="blocked"] { color: var(--text); }
+.state-mark[data-tone="blocked"]::before { border-color: var(--muted); border-radius: 50%; }
+.state-mark[data-tone="pending"] { color: var(--text); }
+.state-mark[data-tone="unknown"] { color: var(--muted); font-weight: 500; }
+.state-mark[data-tone="unknown"]::before { border-style: dashed; }
+
+/* Workflow availability reads as a ruled table of workflows with their capability reports. */
+.availability-list { list-style: none; margin: 1rem 0; padding: 0; border: 1px solid var(--line); border-radius: var(--radius-panel); background: var(--surface); }
+.availability-list > li { display: grid; grid-template-columns: minmax(8rem, 12rem) minmax(0, 1fr); gap: 0.25rem 1.25rem; max-width: none; padding: 0.85rem 1.25rem; }
+.availability-list > li + li { border-top: 1px solid var(--line); }
+.availability-list > li > h4 { margin: 0; }
+.availability-list p { margin: 0 0 0.35rem; }
+.capability-reports { list-style: none; margin: 0.5rem 0; padding: 0; }
+.capability-reports > li { max-width: none; padding: 0.5rem 0 0.5rem 0.85rem; border-left: 2px solid var(--line); }
+.capability-reports > li + li { margin-top: 0.5rem; }
+.capability-reports .job-facts { margin: 0.35rem 0 0; font-size: 0.875rem; }
+.capability-heading { font-weight: 600; }
+
 /* Activity and retained evidence */
 .activity-filters { min-width: 0; display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 13rem), 1fr)); gap: 0.85rem 1rem; margin: 1.5rem 0; padding: 1rem; border: 1px solid var(--control-line); border-radius: var(--radius-panel); background: var(--surface); }
 .activity-filters label { display: grid; gap: 0.35rem; min-width: 0; }
@@ -296,6 +323,7 @@ main a + button, main button + button, main button + a { margin-inline-start: 0.
   main { padding: 1.5rem 1rem 3rem; }
   main dl:not([class]), .job-facts { grid-template-columns: minmax(0, 1fr); gap: 0.1rem; }
   main dl:not([class]) dd + dt, .job-facts dd + dt { margin-top: 0.5rem; }
+  .availability-list > li { grid-template-columns: minmax(0, 1fr); padding: 0.85rem 1rem; }
   .source-row { grid-template-columns: 4.5rem minmax(0, 1fr); }
   .app-footer { padding: 1rem; }
 }
