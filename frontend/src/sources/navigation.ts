@@ -158,3 +158,12 @@ export function beginSourceRead<T>(key: string, read: (signal: AbortSignal) => P
   });
   return () => { controller.abort(); };
 }
+
+/**
+ * A non-empty download attribute keeps the router from treating the attachment link as an
+ * in-app route (preact-iso skips only truthy `link.download`, and `download=""` is falsy).
+ * The server's Content-Disposition still names the saved file.
+ */
+export function sourceDownloadName(displayName: string): string {
+  return displayName.split('/').filter(Boolean).at(-1) ?? 'source';
+}
