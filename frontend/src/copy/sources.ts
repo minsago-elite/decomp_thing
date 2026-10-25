@@ -1,7 +1,8 @@
+import { sourceTitleCopy } from './sourceTitles';
+
 /** Source navigation copy. IDs, labels and committed values remain separate display data. */
 export const sourceCopy = {
-  title: 'Recorded source inputs',
-  fileTitle: 'Recorded source file',
+  ...sourceTitleCopy,
   browse: 'Browse recorded source inputs',
   noRevision: 'No recorded result revision is available for source browsing.',
   returnAttempt: 'Return to this attempt',

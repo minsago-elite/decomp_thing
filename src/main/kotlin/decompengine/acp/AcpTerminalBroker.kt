@@ -88,6 +88,8 @@ internal class AcpTerminalAuditRecorder(
     private val records = mutableListOf<AcpTerminalAuditRecord>()
     private var sequence = 0L
     private var overflowFailure: AcpProtocolFailure? = null
+    private val launchFailures = java.util.ArrayDeque<AcpTerminalFailureObservation>(8)
+    private var launchFailureDiagnosticsUnavailable = false
 
     init {
         require(maximumRecords > 0) { "maximum terminal audit records must be positive" }
@@ -104,6 +106,7 @@ internal class AcpTerminalAuditRecorder(
         retainedOutputBytes: Int? = null,
         producedOutputBytes: Long? = null,
         outputTruncated: Boolean? = null,
+        launchFailure: AcpTerminalLaunchFailureContext? = null,
     ) = synchronized(records) {
         if (overflowFailure != null) return@synchronized
         if (records.size >= maximumRecords) {
@@ -112,7 +115,7 @@ internal class AcpTerminalAuditRecorder(
             )
             return@synchronized
         }
-        records += AcpTerminalAuditRecord(
+        val entry = AcpTerminalAuditRecord(
             sequence = sequence++,
             sessionId = sessionId,
             method = method,
@@ -126,7 +129,26 @@ internal class AcpTerminalAuditRecorder(
             producedOutputBytes = producedOutputBytes,
             outputTruncated = outputTruncated,
         )
+        records += entry
+        // Supplemental failure-only display data never changes the original audit or overflow decision.
+        if (reason == AcpTerminalAuditReason.LAUNCH_FAILED) {
+            try {
+                if (launchFailure == null) launchFailureDiagnosticsUnavailable = true
+                else {
+                    if (launchFailures.size == 8) launchFailures.removeFirst()
+                    launchFailures.addLast(AcpTerminalFailureObservation(entry.sequence, launchFailure))
+                }
+            } catch (_: Throwable) { launchFailureDiagnosticsUnavailable = true }
+        }
+        Unit
     }
+
+    fun launchFailureContext(): String = try {
+        synchronized(records) {
+            if (launchFailureDiagnosticsUnavailable) TERMINAL_FAILURE_CONTEXT_UNAVAILABLE
+            else formatTerminalLaunchFailures(launchFailures.toList())
+        }
+    } catch (_: Throwable) { TERMINAL_FAILURE_CONTEXT_UNAVAILABLE }
 
     fun snapshot(): List<AcpTerminalAuditRecord> = synchronized(records) {
         Collections.unmodifiableList(ArrayList(records))
@@ -305,9 +327,10 @@ internal sealed class AcpTerminalBroker protected constructor(
             } catch (failure: AcpCleanupProofFailure) {
                 fatalCleanupFailure.compareAndSet(null, failure)
                 throw failure
-            } catch (_: IOException) {
+            } catch (failure: IOException) {
                 reservationReleaseProven = true
-                reject(AcpTerminalAuditReason.LAUNCH_FAILED, "terminal sandbox failed safely")
+                reject(AcpTerminalAuditReason.LAUNCH_FAILED, "terminal sandbox failed safely",
+                    captureTerminalLaunchFailure(AcpTerminalFailureSite.SANDBOX_LAUNCH, failure))
             } catch (failure: Throwable) {
                 // The boundary does not return until every pre-commit resource is cleaned. A
                 // cleanup-proof failure above deliberately retains the pending reservation.
@@ -473,6 +496,7 @@ internal sealed class AcpTerminalBroker protected constructor(
                 null,
                 AcpTerminalAuditOutcome.DENIED,
                 rejected.reason,
+                launchFailure = rejected.launchFailure,
             )
             throw AcpExpectedError(rejected.safeMessage)
         } catch (_: InvalidPathException) {
@@ -501,9 +525,10 @@ internal sealed class AcpTerminalBroker protected constructor(
                 null,
                 AcpTerminalAuditOutcome.FAILED,
                 AcpTerminalAuditReason.LAUNCH_FAILED,
+                launchFailure = captureTerminalLaunchFailure(AcpTerminalFailureSite.CREATE_CHECK, failure),
             )
             throw AcpExpectedError("terminal sandbox failed safely")
-        } catch (_: IllegalStateException) {
+        } catch (failure: IllegalStateException) {
             audit.record(
                 callbackSessionId,
                 CREATE_METHOD,
@@ -512,6 +537,7 @@ internal sealed class AcpTerminalBroker protected constructor(
                 null,
                 AcpTerminalAuditOutcome.FAILED,
                 AcpTerminalAuditReason.LAUNCH_FAILED,
+                launchFailure = captureTerminalLaunchFailure(AcpTerminalFailureSite.CREATE_CHECK, failure),
             )
             throw AcpExpectedError("terminal staging authority changed and launch failed safely")
         } finally {
@@ -1175,6 +1201,7 @@ private class BoundedTerminalOutput(
 private class TerminalRejected(
     val reason: AcpTerminalAuditReason,
     val safeMessage: String,
+    val launchFailure: AcpTerminalLaunchFailureContext? = null,
 ) : RuntimeException(safeMessage)
 
 private class TerminalPostCommitFailure(cause: Throwable) : RuntimeException(
@@ -1182,8 +1209,11 @@ private class TerminalPostCommitFailure(cause: Throwable) : RuntimeException(
     cause,
 )
 
-private fun reject(reason: AcpTerminalAuditReason, safeMessage: String): Nothing =
-    throw TerminalRejected(reason, safeMessage)
+private fun reject(
+    reason: AcpTerminalAuditReason,
+    safeMessage: String,
+    launchFailure: AcpTerminalLaunchFailureContext? = null,
+): Nothing = throw TerminalRejected(reason, safeMessage, launchFailure)
 
 private fun requireEnvironment(values: List<EnvVariable>): Map<String, String> {
     val result = LinkedHashMap<String, String>()
