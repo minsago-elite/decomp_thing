@@ -477,6 +477,70 @@ class ExternalCallComponentEvidenceTest(unittest.TestCase):
         with self.assertRaises(VERIFY.VerificationError):
             self.verify()
 
+    def test_unresolved_transfer_opcode_and_index_remain_closed_typed_and_paired(self) -> None:
+        site = self.report["sites"][0]
+        site.update(relocationBinding=None, externalTargetId=None, compositionDisposition="unresolved-memory-transfer",
+                    targetBindingDisposition="unresolved-memory-transfer")
+        site["memoryTransfer"].update(pointerSlotAddress=None, pointerWidthBytes=None, relationship="unresolved",
+            rawReadOpcode=None, rawReadOpIndex=None, unresolvedReason="register-transfer")
+        for counts in (self.report["counts"], self.evidence["counts"]):
+            counts["dispositions"] = {"unresolved-memory-transfer": 1}
+        self.write_payloads()
+        self.verify()
+        original = copy.deepcopy(site["memoryTransfer"])
+        for change in ({"rawTransferOpcode": value} for value in (None, {}, [], 0, True, "CALLIND", "UNKNOWN")):
+            with self.subTest(change=change):
+                site["memoryTransfer"] = original | change
+                self.write_payloads()
+                with self.assertRaises(VERIFY.VerificationError):
+                    self.verify()
+        for value in (None, {}, [], True, "0", -1, 4096):
+            with self.subTest(index=value):
+                site["memoryTransfer"] = original | {"rawTransferOpIndex": value}
+                self.write_payloads()
+                with self.assertRaises(VERIFY.VerificationError):
+                    self.verify()
+        site["memoryTransfer"] = original | {"rawTransferOpcode": None, "rawTransferOpIndex": None}
+        self.write_payloads()
+        self.verify()
+
+    def test_write_coverage_optional_witnesses_are_typed_and_match_flags(self) -> None:
+        original = copy.deepcopy(self.report)
+        for flag, locator in (("overlappingWrite", "overlapLocator"), ("unknownWriteWidth", "unknownWidthLocator"),
+                              ("writeAddressOverflow", "overflowLocator")):
+            for value in ({}, [], True, 7, "", "rela:2:0"):
+                with self.subTest(flag=flag, witness=value):
+                    self.report = copy.deepcopy(original)
+                    self.report["sites"][0]["relocationBinding"]["writeCoverage"][locator] = value
+                    self.write_payloads()
+                    with self.assertRaises(VERIFY.VerificationError):
+                        self.verify()
+            # Rehash a negative assessment with a true uncertainty flag but no locator witness.
+            self.report = copy.deepcopy(original)
+            site = self.report["sites"][0]
+            site.update(compositionDisposition="unresolved-relocation-write-coverage", targetBindingDisposition="unresolved-relocation-write-coverage")
+            site["relocationBinding"]["writeCoverage"].update({flag: True, "safeForStaticSlotAssociation": False})
+            for counts in (self.report["counts"], self.evidence["counts"]):
+                counts["dispositions"] = {"unresolved-relocation-write-coverage": 1}
+            self.write_payloads()
+            with self.assertRaises(VERIFY.VerificationError):
+                self.verify()
+            # The scalar envelope accepts a bounded named witness with its matching flag.
+            site["relocationBinding"]["writeCoverage"][locator] = "rela:2:0"
+            self.write_payloads()
+            self.verify()
+            self.evidence["counts"]["dispositions"] = {"static-import-request-reference": 1}
+
+    def test_binding_numeric_commitments_reject_python_boolean_integer_equivalence(self) -> None:
+        original = copy.deepcopy(self.report["sites"][0]["relocationBinding"])
+        for key, value in (("symbolTableSectionIndex", True), ("symbolIndex", True), ("relocationAddend", False),
+                           ("slotFileOffset", False), ("slotLoadIndices", [False])):
+            with self.subTest(field=key):
+                self.report["sites"][0]["relocationBinding"] = original | {key: value}
+                self.write_payloads()
+                with self.assertRaises(VERIFY.VerificationError):
+                    self.verify()
+
 
 if __name__ == "__main__":
     unittest.main()

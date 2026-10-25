@@ -601,6 +601,12 @@ def verify_external_site(site: dict, location: int, symbols: dict, relocations: 
             transfer["rawCopyOpIndices"] == sorted(set(transfer["rawCopyOpIndices"])), "invalid copy opcode inventory")
     for index in transfer["rawCopyOpIndices"]:
         integer(index, 0, 4095)
+    transfer_opcode, transfer_index = transfer["rawTransferOpcode"], transfer["rawTransferOpIndex"]
+    expected_opcode = {"indirect-call": "CALLIND", "indirect-jump": "BRANCHIND"}.get(transfer["classification"])
+    require((transfer_opcode is None) == (transfer_index is None), "transfer opcode/index pairing differs")
+    if transfer_opcode is not None:
+        require(type(transfer_opcode) is str and transfer_opcode == expected_opcode, "transfer opcode/classification differs")
+        integer(transfer_index, 0, 4095)
     slot = address(transfer["pointerSlotAddress"], nullable=True)
     if slot is None:
         require(transfer["relationship"] == "unresolved" and transfer["pointerWidthBytes"] is None and transfer["unresolvedReason"] in TRANSFER_REFUSALS and
@@ -635,7 +641,7 @@ def verify_external_site(site: dict, location: int, symbols: dict, relocations: 
     for target, source in (("relocationType", "type"), ("relocationAddend", "addend"), ("relocationDispositions", "dispositions"),
             ("dynamicTables", "dynamicTables"), ("slotLoadIndices", "slotLoadIndices"), ("slotFileOffset", "slotFileOffset"),
             ("symbolTableSectionIndex", "symbolTableSectionIndex"), ("symbolIndex", "symbolIndex")):
-        require(binding[target] == relocation[source], "relocation binding differs from inventory")
+        require(canonical_bytes(binding[target]) == canonical_bytes(relocation[source]), "relocation binding differs from inventory")
     key = (relocation["symbolTableSectionIndex"], relocation["symbolIndex"])
     require(binding["symbolLocator"] == symbols[key]["locator"] and site["externalTargetId"] == imports.get(key), "external symbol identity differs")
     coverage = fields(binding["writeCoverage"], {"kind", "slotAddress", "candidateLocator", "candidateActive", "candidateCoversSlot", "slotAddressOverflow",
@@ -645,6 +651,10 @@ def verify_external_site(site: dict, location: int, symbols: dict, relocations: 
             coverage["candidateLocator"] == binding["relocationLocator"] and coverage["negativeCompleteness"] is False, "write coverage boundary differs")
     flags = ("candidateActive", "candidateCoversSlot", "slotAddressOverflow", "unknownWriteWidth", "writeAddressOverflow", "overlappingWrite", "safeForStaticSlotAssociation")
     require(all(type(coverage[key]) is bool for key in flags), "write coverage flags must be booleans")
+    for flag, locator in (("overlappingWrite", "overlapLocator"), ("unknownWriteWidth", "unknownWidthLocator"), ("writeAddressOverflow", "overflowLocator")):
+        if coverage[locator] is not None:
+            text(coverage[locator])
+        require(coverage[flag] is (coverage[locator] is not None), "write coverage flag/witness differs")
     safe = coverage["candidateActive"] and coverage["candidateCoversSlot"] and not any(coverage[key] for key in flags[2:6])
     require(coverage["safeForStaticSlotAssociation"] is safe, "write coverage summary differs")
     if site["targetBindingDisposition"] == "static-import-request-reference":
