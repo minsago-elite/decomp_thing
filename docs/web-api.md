@@ -1057,7 +1057,11 @@ is deleted that was not detached. Cleanup that meets an entry outside owned stor
 differs from the job root) stops with `recoveryRequired: true`, preserves the remaining bytes and
 keeps the tombstone, since the job was already detached. Only one purge pass runs per operation,
 and maintenance rotates through pending operations so one failing purge cannot starve the rest.
-A collection snapshot whose scan overlapped a deletion is discarded and collected again.
+A collection snapshot whose scan overlapped a deletion is discarded and collected again. Removed bytes are charged only after an unlink succeeds, so retries never inflate the audit
+count. A keyed upload retry whose original job was deleted is refused with `410 RESOURCE_GONE`
+before its body is read, rather than recreating storage behind the tombstone; upload again with
+a new key. The maintenance preview checks its five-second and 64 MiB budgets before every
+journal read and holds the service monitor only for that read.
 
 The operation record keeps the job identity, a domain-separated session digest, request
 digests, times, outcome and the removed byte/entry counts; it never keeps the filename, label,

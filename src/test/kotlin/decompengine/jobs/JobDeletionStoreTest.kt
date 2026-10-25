@@ -30,6 +30,35 @@ class JobDeletionStoreTest {
         } finally { root.toFile().deleteRecursively() }
     }
 
+    @Test fun `bytes are charged only after unlink succeeds so retries never double-count`() {
+        if (System.getProperty("user.name") == "root") return
+        val root = Files.createTempDirectory("job-deletion-store-")
+        try {
+            val job = JobStore(root).createFromUpload("inert.elf", elfFixture())
+            val locked = Files.createDirectories(root.resolve("${job.id}/reports/locked"))
+            locked.resolve("kept.bin").writeBytes(ByteArray(5000))
+            val expected = Files.walk(root.resolve(job.id)).use { paths -> paths.filter { Files.isRegularFile(it) }.mapToLong { Files.size(it) }.sum() }
+            val store = JobDeletionStore(root).also { it.load() }
+            val running = store.detach(store.admit(job.id, digest, "1".repeat(64), "2".repeat(64)))
+            val detachedLocked = root.resolve("${JobDeletionStore.DIRECTORY}/${running.operationId}.removing/reports/locked")
+            java.nio.file.Files.setPosixFilePermissions(detachedLocked, java.nio.file.attribute.PosixFilePermissions.fromString("r-x------"))
+            var current = running
+            repeat(2) {
+                val pass = store.purge(current, { true })
+                assertFalse(pass.complete); assertEquals("STORAGE_UNAVAILABLE", pass.failureCode)
+                current = store.record(current, pass)
+            }
+            assertTrue(current.removedBytes <= expected - 5000, "the unremovable file is never charged")
+            java.nio.file.Files.setPosixFilePermissions(detachedLocked, java.nio.file.attribute.PosixFilePermissions.fromString("rwx------"))
+            val finished = store.record(current, store.purge(current, { true }))
+            assertEquals(JobDeletionState.COMPLETED, finished.state)
+            assertEquals(expected, finished.removedBytes, "the audit count equals the bytes that existed")
+        } finally {
+            Files.walk(root).use { paths -> paths.forEach { runCatching { java.nio.file.Files.setPosixFilePermissions(it, java.nio.file.attribute.PosixFilePermissions.fromString("rwx------")) } } }
+            root.toFile().deleteRecursively()
+        }
+    }
+
     @Test fun `a deletion that failed before detachment is not a tombstone`() {
         val root = Files.createTempDirectory("job-deletion-store-")
         try {

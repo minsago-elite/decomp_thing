@@ -307,6 +307,51 @@ class WebJobLifecycleTest {
         }
     }
 
+    @Test fun `a keyed upload retry never recreates a job behind its deletion tombstone`() = Fixture().start().use { f ->
+        fun upload(key: String): HttpResponse<String> {
+            val boundary = "lifecycle_upload_fixture"
+            val body = "--$boundary\r\nContent-Disposition: form-data; name=\"binary\"; filename=\"keyed.elf\"\r\n\r\n".toByteArray() +
+                elfFixture() + "\r\n--$boundary--\r\n".toByteArray()
+            val request = HttpRequest.newBuilder(URI("${f.origin}/workbench/api/v1/jobs")).timeout(Duration.ofSeconds(10))
+                .POST(HttpRequest.BodyPublishers.ofByteArray(body))
+                .header("Accept", "application/json").header("Origin", f.origin).header("Cookie", f.cookie).header("X-CSRF-Token", f.csrf)
+                .header("Content-Type", "multipart/form-data; boundary=$boundary").header("Idempotency-Key", key).build()
+            return f.client.send(request, HttpResponse.BodyHandlers.ofString())
+        }
+        val created = data(upload("upload_key_retired_0001"), "job", 201)
+        val jobId = created.getValue("jobId").jsonPrimitive.content
+        assertEquals(created.getValue("jobId"), data(upload("upload_key_retired_0001"), "job", 201).getValue("jobId"), "replay before deletion")
+        data(f.delete(jobId, "delete_key_keyed_upload"), "operation", 202)
+        error(upload("upload_key_retired_0001"), 410, "RESOURCE_GONE")
+        assertFalse(Files.exists(f.root.resolve(jobId)), "the deleted identity is not republished")
+        error(f.read("/jobs/$jobId"), 410, "RESOURCE_GONE")
+        val fresh = data(upload("upload_key_retired_0002"), "job", 201)
+        assertNotEquals(jobId, fresh.getValue("jobId").jsonPrimitive.content)
+    }
+
+    @Test fun `maintenance preview enforces its budget between attempts of one job`() = Fixture().start().use { f ->
+        val job = f.store.createFromUpload("inert.elf", elfFixture())
+        f.service.close()
+        WorkflowAttemptStore.open(f.root, Clock.fixed(Instant.now().minusSeconds(90_000), ZoneOffset.UTC)).use { owner ->
+            repeat(3) {
+                val view = (owner.inspect(job.id) as WorkflowJobInspection.Available).snapshot
+                val queued = owner.create(job.id, view.version, NewWorkflowAttempt(WorkflowKind.RECONSTRUCT, WorkflowExecutionLimits(60000u, 15000u, 1048576u, 16u))).attempt
+                val running = owner.transition(job.id, queued.runId, queued.version, WorkflowTransition.Start).attempt
+                val done = owner.transition(job.id, running.runId, running.version,
+                    WorkflowTransition.Finish(WorkflowRunState.COMPLETED, WorkflowTerminalReason.NO_CHANGES)).attempt
+                AgentProgressJournal(f.root.resolve("${job.id}/reports/runs/${done.runId}"), "reconstruct").use { }
+            }
+        }
+        Fixture(f.root).start().use { g ->
+            assertEquals(3, g.service.maintenancePreview().actions.size)
+            var tick = 0L
+            // Two seconds per budget check: the job admits, the first attempt fits, the second exceeds five seconds.
+            val bounded = g.service.maintenancePreview { tick.also { tick += 2_000_000_000L } }
+            assertFalse(bounded.complete)
+            assertTrue(bounded.actions.size in 1..2, "the budget stops work inside the job, not only before it")
+        }
+    }
+
     @Test fun `interrupted purge resumes after restart and a crash before removal retains the job`() {
         val root = Files.createTempDirectory("web-job-lifecycle-restart-")
         var hits = 0

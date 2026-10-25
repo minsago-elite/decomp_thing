@@ -873,6 +873,11 @@ class WebJobService(
             if (uploads.size >= 2 || worker in uploads) throw WebJobServiceException("UPLOAD_CAPACITY", "Two uploads are already in progress. Retry later.")
             if (active.isNotEmpty()) throw WebJobServiceException("UPLOAD_CAPACITY", "Wait for active workflows before uploading.")
             if (deletionWorkers.isNotEmpty()) throw WebJobServiceException("UPLOAD_CAPACITY", "Wait for job deletion cleanup before uploading.")
+            // A keyed retry derives its original job identity; never recreate a job behind a retained tombstone.
+            // Deletion is refused while this upload is registered, so the check holds through publication.
+            if (idempotencyKey != null && deletedJob(decompengine.jobs.StagedJobUpload.keyedJobId(idempotencyKey)) != null) {
+                throw WebJobServiceException("UPLOAD_KEY_RETIRED", "The job created with this upload key was deleted. Upload again with a new key.")
+            }
             CountDownLatch(1).also { uploads[worker] = it }
         }
         var reservation: AutoCloseable? = null
@@ -1302,28 +1307,38 @@ class WebJobService(
                     scan.pendingDeletions[operation.operationId]?.bytes ?: 0, if (retentionWorker != null) "periodic" else "startup")
             }
         }
-        for (id in ids) {
-            if (nanoTime() - started > 5_000_000_000L || readBytes > 64L * 1024 * 1024 || Thread.currentThread().isInterrupted) { complete = false; break }
-            synchronized(this) {
+        // Budgets are checked before every bounded unit; each journal read holds the monitor alone,
+        // and parsing happens after it is released, so status reads and shutdown interleave.
+        fun exhausted() = nanoTime() - started > 5_000_000_000L || readBytes > 64L * 1024 * 1024 || Thread.currentThread().isInterrupted
+        val threshold = now.minus(decompengine.jobs.AgentProgressJournalRetention.DEFAULT_TERMINAL_RETENTION)
+        jobs@ for (id in ids) {
+            if (exhausted()) { complete = false; break }
+            val candidates = synchronized(this) {
                 requireInitializedRead()
-                val owner = attempts ?: return@synchronized
+                val owner = attempts ?: return@synchronized emptyList()
                 val inspection = try { inspectStoredJob(owner, id) } catch (_: Exception) { null }
                 val snapshot = (inspection as? WorkflowJobInspection.Available)?.snapshot
-                if (snapshot == null) { complete = false; return@synchronized }
+                if (snapshot == null) { complete = false; return@synchronized emptyList() }
                 val protections = protectionsLocked(id, snapshot)
                 if (protections.isNotEmpty()) protectedJobs += id to protections
-                if (active.containsKey(id)) return@synchronized
-                for (attempt in snapshot.attempts) {
-                    if (!attempt.state.terminal || attempt.publicationPending || attempt.progressRetentionPinned) continue
-                    val path = "reports/runs/${attempt.runId}/${decompengine.jobs.AgentProgressJournal.FILE_NAME}"
-                    val bytes = try { store.readArtifact(id, path, decompengine.jobs.AgentProgressJournal.MAXIMUM_READ_BYTES.toLong()).bytes }
-                        catch (_: Exception) { null } ?: continue
-                    readBytes += bytes.size
-                    val replacement = try { decompengine.jobs.AgentProgressJournalRetention.expiredSnapshot(attempt, bytes, now) }
-                        catch (_: Exception) { complete = false; null } ?: continue
-                    actions += WebMaintenanceAction("progress-journal-expiry", id, attempt.runId,
-                        maxOf(0L, bytes.size.toLong() - replacement.size), if (retentionWorker != null) "periodic" else "not-scheduled")
+                if (active.containsKey(id)) emptyList() else snapshot.attempts.filter { attempt ->
+                    attempt.state.terminal && !attempt.publicationPending && !attempt.progressRetentionPinned &&
+                        attempt.endedAt?.let { !it.isAfter(threshold) } == true
                 }
+            }
+            for (attempt in candidates) {
+                if (exhausted()) { complete = false; break@jobs }
+                val path = "reports/runs/${attempt.runId}/${decompengine.jobs.AgentProgressJournal.FILE_NAME}"
+                val bytes = synchronized(this) {
+                    requireInitializedRead()
+                    try { store.readArtifact(id, path, decompengine.jobs.AgentProgressJournal.MAXIMUM_READ_BYTES.toLong()).bytes }
+                    catch (_: Exception) { null }
+                } ?: continue
+                readBytes += bytes.size
+                val replacement = try { decompengine.jobs.AgentProgressJournalRetention.expiredSnapshot(attempt, bytes, now) }
+                    catch (_: Exception) { complete = false; null } ?: continue
+                actions += WebMaintenanceAction("progress-journal-expiry", id, attempt.runId,
+                    maxOf(0L, bytes.size.toLong() - replacement.size), if (retentionWorker != null) "periodic" else "not-scheduled")
             }
         }
         return WebMaintenancePreview(now, complete, retentionWorker != null, actions, protectedJobs)

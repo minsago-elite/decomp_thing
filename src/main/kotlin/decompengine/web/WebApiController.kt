@@ -336,6 +336,8 @@ internal class WebApiController(
             if (failure.code == "RECOVERY_REQUIRED" && uncertain != null && uncertain.jobId.matches(Regex("[a-f0-9]{32}"))) {
                 exchange.responseHeaders.set("Location", "${assets.basePath}api/v1/jobs/${uncertain.jobId}")
                 access.sendDenied(exchange, WebAccessDenied(409, "RECOVERY_REQUIRED", publicWebDiagnosticMessage(failure.code)))
+            } else if (failure.code == "UPLOAD_KEY_RETIRED") {
+                access.sendDenied(exchange, WebAccessDenied(410, "RESOURCE_GONE", "The job created with this upload key was deleted. Upload again with a new key."))
             } else if (failure.code in setOf("JOB_NOT_FOUND", "RUN_NOT_FOUND") && deletedJobResource(resource)) {
                 access.sendDenied(exchange, WebAccessDenied(410, "RESOURCE_GONE", "This job was deleted. Only its deletion record is retained."))
             } else {

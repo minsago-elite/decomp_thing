@@ -250,8 +250,9 @@ internal class JobDeletionStore(
                                         Linux.removeDirectory(directory.fd, child)
                                     } else {
                                         // Links (symbolic or hard) are removed as names; their targets are never opened.
-                                        if (current.isRegularFile && !current.isSymbolicLink) bytes += Files.size(Linux.descriptorPath(selected))
+                                        val size = if (current.isRegularFile && !current.isSymbolicLink) Files.size(Linux.descriptorPath(selected)) else 0L
                                         Linux.unlink(directory.fd, child)
+                                        bytes += size // Charged only once the name is really gone, so retries never double-count.
                                     }
                                     entries++
                                 }
