@@ -38,6 +38,38 @@ function canonicalPlan(modules) {
   return `{\n  "schemaVersion": 2,\n  "modules": [${blocks.join(',')}\n  ],\n  "dependencyCycles": []\n}\n`;
 }
 
+// StructuralRecoveryScore: the mean of extraction-label weights, rendered like Kotlin "%.4f" on the same double.
+const WEIGHT = { recovered: 1.0, partial: 0.6, synthetic: 0.25, failed: 0.0 };
+const score = (labels) => (labels.length ? labels.reduce((sum, label) => sum + WEIGHT[label], 0) / labels.length : 0).toFixed(4);
+
+/** The producer's schema-2 confidence layout for the seeded model and plan (#541); identity lists are only counted by the reader. */
+function confidence(model, modules, inputSha256) {
+  const parsed = JSON.parse(model);
+  const labels = new Map([...parsed.functions, ...parsed.globals, ...parsed.types].map((entity) => [entity.id, entity.extractionStatus]));
+  const accepted = modules.filter((module) => module.sourcePath.endsWith('0.c')).length;
+  return JSON.stringify({
+    schemaVersion: 2,
+    basis: 'recovery evidence only; behavioral equivalence is not implied',
+    scoreMeaning: 'structural recovery heuristic; not implementation acceptance or measured behavioral confidence',
+    scoreInterpretation: { schemaVersion: 1, kind: 'structural-recovery', calibrationStatus: 'uncalibrated', calibratedProbability: null,
+      calibrationArtifactSha256: null, empiricalSampleCount: null },
+    recoveryAssessment: { schemaVersion: 1, state: 'unassessed', modelSchemaVersion: 2, modelSha256: sha(model),
+      unassessedEntityIds: [...labels.keys()].sort(), assessedEntityIds: [] },
+    projectScore: '__PROJECT_SCORE__',
+    modules: modules.map((module) => ({ id: module.id,
+      score: `__SCORE_${module.id}__`, unresolvedRecoveryEntityIds: [], unresolvedImplementationIds: module.functionIds.includes(functionId(1)) ? [functionId(1)] : [],
+      revisionEvidence: { sourcePath: module.sourcePath, inputBinarySha256: inputSha256 } })),
+    unresolvedRecoveryEntityIds: [], unresolvedImplementationIds: [functionId(1)], unresolvedEntityIds: [functionId(1)],
+    semanticPlanningBudgetEvidence: { schemaVersion: 1 },
+    sourceGenerationBudgetEvidence: { schemaVersion: 1, outcome: { plannedModules: modules.length, completedModules: modules.length,
+      acceptedModules: accepted, unresolvedModules: modules.length - accepted }, modules: [] },
+  }).replace('"__PROJECT_SCORE__"', score([...labels.values()]))
+    .replace(/"__SCORE_([^"]+)__"/g, (_, id) => {
+      const module = modules.find((item) => item.id === id);
+      return score([...module.functionIds, ...module.globalIds, ...module.typeIds].map((entity) => labels.get(entity)));
+    });
+}
+
 /** Test-only persisted revision written before server ownership; no workflow, compiler or model runs. */
 export async function seedStructure(root) {
   await fs.mkdir(root, { mode: 0o700 });
@@ -80,6 +112,7 @@ export async function seedStructure(root) {
     ['include/decomp_types.h', '#pragma once\n'],
     ['reports/program_model.json', model],
     ['reports/module_plan.json', canonicalPlan(modules)],
+    ['reports/confidence.json', confidence(model, modules, sha(input))],
   ]);
   for (const module of modules) {
     files.set(module.sourcePath, `/* ${module.id}: synthetic recorded source */\n#include "../../include/modules/${module.id}.h"\n`);
@@ -126,9 +159,11 @@ export async function qualifyStructure({ fixture, makeTarget, cdp, evaluate, rea
   const tab = await makeTarget();
   await cdp.call('Performance.enable', {}, tab.sessionId);
   const inventoryReads = [];
+  const graphReads = [];
   cdp.on('Network.requestWillBeSent', (event) => {
     const url = new URL(event.request.url);
     if (/\/api\/v1\/jobs\/[^/]+\/runs\/[^/]+\/revisions\/[^/]+\/functions$/.test(url.pathname)) inventoryReads.push(url.searchParams.get('limit'));
+    if (/\/api\/v1\/jobs\/[^/]+\/runs\/[^/]+\/revisions\/[^/]+\/graph$/.test(url.pathname)) graphReads.push(url.search);
   }, tab.sessionId);
   let peakBrowserHeapBytes = 0;
   const heap = async () => {
@@ -182,6 +217,47 @@ export async function qualifyStructure({ fixture, makeTarget, cdp, evaluate, rea
   assert.ok(await evaluate(tab, `document.body.innerText.includes('Recovery assessment: unassessed')`));
   await evaluate(tab, `[...document.querySelectorAll('a')].find(a => a.textContent === 'synthetic_function_99998').click()`);
   await ready(tab, `document.querySelector('main h2')?.textContent === 'synthetic_function_99998'`, 'caller cross-link within the pinned structure version');
+  // Bounded call neighborhood (#537, #538): explicit limits on the wire, a worker-drawn layout and equivalent keyboard tables.
+  started = performance.now();
+  await evaluate(tab, `[...document.querySelectorAll('a')].find(a => a.textContent === 'Explore its recorded call neighborhood').click()`);
+  await ready(tab, `document.querySelector('table caption')?.textContent === 'Nodes' && [...document.querySelectorAll('table')].some(table => table.querySelector('caption')?.textContent === 'Relationships')`, 'call neighborhood tables');
+  const graphTablesMs = performance.now() - started;
+  await ready(tab, `document.querySelector('svg[role="img"] .graph-node') !== null`, 'call neighborhood drawing');
+  const graphDrawnMs = performance.now() - started;
+  assert.match(graphReads.at(-1), /^\?view=calls&focus=fn_[0-9a-f]{16}&direction=both&depth=1&nodeLimit=60&edgeLimit=150&unresolved=include&structureVersion=[a-f0-9]{64}$/);
+  assert.ok(await evaluate(tab, `document.body.innerText.includes('Complete within the requested depth')`));
+  await evaluate(tab, `[...document.querySelectorAll('button')].find(b => b.textContent === 'Inspect synthetic_function_99999').focus()`);
+  await enter();
+  await ready(tab, `document.activeElement?.textContent === 'Selected' && document.body.innerText.includes('Selected node synthetic_function_99999.')`, 'keyboard inspection of a neighborhood node');
+  assert.match(await evaluate(tab, `[...document.querySelectorAll('a')].find(a => a.textContent.startsWith('Open the recorded function'))?.getAttribute('href')`),
+    new RegExp(`^${revision}/functions/fn_[0-9a-f]{16}\\?structureVersion=[a-f0-9]{64}$`));
+  assert.match(await evaluate(tab, `[...document.querySelectorAll('a')].find(a => a.textContent === 'Download the program model record')?.getAttribute('href')`),
+    /\/records\/program-model\?structureVersion=[a-f0-9]{64}$/);
+  assert.ok(await evaluate(tab, `document.querySelectorAll('tr').length`) <= 500, 'Mounted neighborhood rows exceed the D0 DOM budget');
+  await heap();
+  await cdp.call('Page.navigate', { url: browserOrigin + `${revision}/graph?view=modules&focus=${fixture.moduleId(0)}&depth=2&nodeLimit=200&edgeLimit=400` }, tab.sessionId);
+  // Module 0 owns every global, so a hundred modules depend on it: the node table pages its 200 rows.
+  await ready(tab, `document.body.innerText.includes('Module dependencies') && document.querySelector('table caption')?.textContent === 'Nodes (Rows 1–100 of 200)'`, 'module dependency neighborhood');
+  assert.ok(await evaluate(tab, `document.body.innerText.includes('Truncated: this is not the complete neighborhood. the node limit was reached.')`));
+  assert.ok(await evaluate(tab, `document.querySelectorAll('tr').length`) <= 500, 'Mounted module neighborhood rows exceed the D0 DOM budget');
+  await ready(tab, `document.querySelector('svg[role="img"] .graph-node') !== null`, 'module dependency drawing');
+  await heap();
+  // Recorded scorecard (#541): measured, unmeasured and reconciled values from the committed confidence report.
+  started = performance.now();
+  await cdp.call('Page.navigate', { url: browserOrigin + `${revision}/scorecard` }, tab.sessionId);
+  await ready(tab, `[...document.querySelectorAll('table caption')].some(caption => caption.textContent === 'Measures') && document.body.innerText.includes('Showing 1–50 of ${fixture.modules} modules.')`, 'recorded scorecard');
+  const scorecardMs = performance.now() - started;
+  assert.ok(await evaluate(tab, `document.body.innerText.includes('Not measured: the score is uncalibrated, so no probability is recorded')`));
+  assert.ok(await evaluate(tab, `[...document.querySelectorAll('tr')].some(row => row.textContent.startsWith('Structural recovery score (heuristic)Measured'))`),
+    'The seeded project score must reproduce from its recorded labels');
+  assert.ok(await evaluate(tab, `document.body.innerText.includes('The module sums plus excluded entities, less shared memberships, equal the project numerator and denominator.')`));
+  assert.ok(await evaluate(tab, `document.querySelector('svg[role="img"][aria-label^="Bar chart"]') !== null`));
+  await ready(tab, `document.body.innerText.includes('No other attempt of this job has a result revision to compare.')`, 'scorecard baseline listing');
+  assert.match(await evaluate(tab, `[...document.querySelectorAll('a')].find(a => a.textContent === 'Download the confidence report')?.getAttribute('href')`),
+    /\/records\/confidence\?structureVersion=[a-f0-9]{64}$/);
+  await heap();
+  await cdp.call('Page.navigate', { url: browserOrigin + `${revision}/functions/${fixture.functionId(99998)}` }, tab.sessionId);
+  await ready(tab, `document.querySelector('main h2')?.textContent === 'synthetic_function_99998'`, 'function detail before module navigation');
   const module = fixture.moduleId(Math.floor(99998 / 24));
   await evaluate(tab, `[...document.querySelectorAll('a')].find(a => a.textContent === ${JSON.stringify(module)}).click()`);
   await ready(tab, `document.querySelector('main h2')?.textContent === ${JSON.stringify(module)} && document.querySelector('table caption')?.textContent === 'Functions'`, 'owning module detail');
@@ -206,5 +282,7 @@ export async function qualifyStructure({ fixture, makeTarget, cdp, evaluate, rea
   return { recordedFunctions: fixture.functions, modules: fixture.modules, modelBytes: fixture.modelBytes, rowsPerPage: 100,
     pagesVisited: 21, maximumMountedRows: 100, firstPageMs: Math.round(firstPageMs), pageMsP50: Math.round(pageMs[10]),
     pageMsP95: Math.round(pageMs[18]), searchMs: Math.round(searchMs), peakBrowserHeapBytes, cursorReload: true,
-    pinnedCrossLinks: true, moduleSourceLink: true, narrowReflow: true, boundedInventoryReads: inventoryReads.length, mutationRequests: 0 };
+    pinnedCrossLinks: true, moduleSourceLink: true, narrowReflow: true, boundedInventoryReads: inventoryReads.length, mutationRequests: 0,
+    graphTablesMs: Math.round(graphTablesMs), graphDrawnMs: Math.round(graphDrawnMs), boundedGraphReads: graphReads.length,
+    scorecardMs: Math.round(scorecardMs) };
 }
