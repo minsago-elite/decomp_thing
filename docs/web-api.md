@@ -154,7 +154,8 @@ internal storage optimization and must not merge identity, permissions or histor
 | `POST /agent/preflight` | `202 agentPreflight`, `409` while one runs | Strict `agentPreflightRequest` (`{"action":"inspect"}`), session/Origin/CSRF; starts one single-flight `preflight(WEB)`; #493 |
 | `POST J/runs` | `202 run`, `Location: R` | `workflowStart` request, capability/limits/input checks, job If-Match; #163 |
 | `POST R/cancel` | `202 run` or `200 run` if already terminal | Closed `workflowCancel` request, idempotent recorded intent, run If-Match; #163 |
-| `POST R/recover` | `202 run`, `Location` of a new attempt | Explicit `retry` or capability-gated `resume`; If-Match; #163 |
+| `POST R/recover` | `202 run`, `Location` of a new attempt | Closed `recover` request; explicit `retry` or capability-gated `resume`; run If-Match and idempotency; #486 |
+| `GET R/controls` | `200 attemptControls`, strong run ETag | Read-only cancel/retry/resume eligibility with closed reasons; reserves nothing; #528/#529 |
 | `GET R/snapshot` | `200 snapshot`, ETag | Run state and consistent event watermark; #174 |
 | `GET R/events` | `200 text/event-stream` | Resume with `Last-Event-ID` or `after`, never both; #174 |
 | `GET R/events?transport=poll` | `200 events` | Same retention/cursor semantics, bounded page; #174 |
@@ -263,6 +264,52 @@ a new session after a full listener restart. These authored methods await their
 own Actions qualification; browser and production-adapter/runtime qualification
 remain unfinished. Bootstrap continues to report workflows unavailable, and
 fresh starts without registrations or retained start receipts retain 405.
+
+The recovery transport accepts only the closed `recover` data object (not its
+fixture wrapper), bounded to 1024 bytes: `mode` is `retry` or `resume`, and
+`expectedInputRevisionId` is the predecessor's recorded input revision or null for
+the original upload. It uses the same shared session/Origin/JSON/CSRF boundary
+before any body or service read, one strong run `If-Match`, one 16–128 character
+`Idempotency-Key` and no query or other conditional header. Workflow, limits,
+harness, checkpoint and paths are never caller fields; they come from the
+trusted registration and the predecessor attempt.
+
+Only the latest unsuccessful (failed, cancelled or interrupted) attempt can be
+recovered, and only while its recorded input is the original upload or the
+job's current accepted revision. A different expected input is 409
+`INPUT_REVISION_CONFLICT`; an input that is no longer trusted evidence is 409
+`INPUT_UNVERIFIED`, so recovery never silently starts from an unverified
+workspace. `retry` always publishes a new queued attempt linked through
+`previousRunId`, with `recovery.mode: retry` and no restored state. `resume`
+requires the registered adapter's trusted checkpoint policy, the exact recorded
+harness identity and a verified checkpoint; the new attempt records
+`recovery.restores` (`agent-session` or `project-evidence`) and the checkpoint
+digest, and the adapter receives the predecessor's workflow-owned report
+directory. Unsupported or unsafe resume is 409 with a specific code
+(`RESUME_UNSUPPORTED`, `HARNESS_CHANGED`, `CHECKPOINT_MISSING`,
+`CHECKPOINT_MISMATCH`, `CHECKPOINT_UNVERIFIED`, `WORKSPACE_UNVERIFIED`,
+`SESSION_QUARANTINED`, `CLEANUP_UNVERIFIED`). A newer attempt is 409
+`ATTEMPT_SUPERSEDED`, unfinished or completed predecessors 409
+`ATTEMPT_ACTIVE`/`ATTEMPT_COMPLETED`, a stale run guard 412, a key reused for
+different intent 409, admission capacity 429 and an unavailable workflow 503.
+
+Success is `202 run` for the new attempt with its `Location` and ETag. The
+recovery receipt shares the atomic attempt publication; its replay identity is
+the predecessor, its version, the mode and the expected input, so a keyed replay
+returns the same new attempt with `Idempotency-Replayed: true` before any
+eligibility, capacity or capability check, and never schedules again. Without
+registered workflows or retained keyed receipts the route answers 503
+`CAPABILITY_UNAVAILABLE` without reading the body. Production adapters remain
+unregistered and none declares a checkpoint policy yet, so packaged builds
+report retry and resume unavailable; ACP session continuation through the
+shared `AgentSessionJournal` policy still needs a registered adapter (#68).
+
+`GET R/controls` returns `attemptControls`: the run version and state, the
+recorded input revision, `cancel`, `retry` and `resume` each with `available`
+and a closed `reason`, the scope a resume would restore and any linked
+`successorRunId`. It is computed from durable state and current owned work, is
+private and read-only, and is not a reservation; each command re-checks its
+guards. Browsers read it explicitly and never send a command on load or reload.
 
 Errors carry `code`, safe `message`, `retryable`, optional field-level `details` and
 `retryAfterMs`; the correlation ID connects to redacted server logs. A detail contains a JSON
