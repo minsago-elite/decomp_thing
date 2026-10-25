@@ -31,18 +31,19 @@ function navigationMedia(initial: boolean) {
 }
 
 describe('public workbench shell', () => {
-  it('exposes navigation and truthful availability without contacting APIs', () => {
+  it('exposes navigation and truthful availability without contacting APIs', async () => {
     const fetch = vi.fn();
     vi.stubGlobal('fetch', fetch);
     render(<App />);
     expect(screen.getByRole('navigation', { name: 'Main navigation' })).toBeTruthy();
     expect(screen.getByRole('main')).toBeTruthy();
     expect(screen.getByRole('link', { name: 'Skip to content' }).getAttribute('href')).toBe('#main');
-    expect(screen.getByRole('heading', { level: 1, name: 'Your work, with its evidence' })).toBeTruthy();
+    // The workspace is a lazy route like the others; the shell renders before it.
+    expect(await screen.findByRole('heading', { level: 1, name: 'Your work, with its evidence' })).toBeTruthy();
     expect(screen.getByText(/does not read jobs or start workflows/)).toBeTruthy();
     expect(fetch).not.toHaveBeenCalled();
     expect(document.title).toBe('Jobs · Decomp Workbench');
-    expect(document.activeElement).toBe(screen.getByRole('heading', { level: 1 }));
+    await waitFor(() => expect(document.activeElement).toBe(screen.getByRole('heading', { level: 1 })));
     const skip = screen.getByRole('link', { name: 'Skip to content' });
     skip.focus();
     fireEvent.click(skip);
@@ -78,7 +79,7 @@ describe('public workbench shell', () => {
     const fetch = vi.fn(); vi.stubGlobal('fetch', fetch);
     window.history.replaceState(null, '', '/tools/decomp/upload');
     render(<App basePath="/tools/decomp" />);
-    expect(screen.getByRole('heading', { level: 1, name: 'Upload a binary' })).toBeTruthy();
+    expect(await screen.findByRole('heading', { level: 1, name: 'Upload a binary' })).toBeTruthy();
     expect(document.title).toBe('Upload a binary · Decomp Workbench');
     expect(screen.getByRole('navigation', { name: 'Breadcrumbs' }).textContent).toContain('All jobs');
     expect(screen.getByRole('link', { name: 'Upload' }).getAttribute('aria-current')).toBe('page');
