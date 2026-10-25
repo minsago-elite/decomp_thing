@@ -6,7 +6,7 @@ but has its own corpus and report schema, because the OCI schema hard-requires a
 runtime, image and cgroup policy that a stock hosted runner cannot provide.
 
 Every sandboxed process runs under
-``bwrap --unshare-all --die-with-parent --new-session --cap-drop ALL --clearenv`` with an empty host
+``bwrap --unshare-all --unshare-user --disable-userns --die-with-parent --new-session --cap-drop ALL --clearenv`` with an empty host
 environment, ``RLIMIT_CPU``/``RLIMIT_AS``/``RLIMIT_NOFILE``/``RLIMIT_FSIZE``/``RLIMIT_CORE`` limits,
 a wall-clock process-group kill and bounded stdout/stderr retention. Aggregate host impact is bounded
 as well:
@@ -14,8 +14,9 @@ as well:
 * ``RLIMIT_NPROC`` is set to this user's current task count plus ``limits.processes`` before
   bubblewrap creates its user namespace. Since Linux 5.14 the limit is charged per user namespace
   and checked against every ancestor, so the sandbox cannot raise this user's task total by more
-  than ``processes``; aggregate memory is therefore at most ``processes`` times the address-space
-  limit. The backend refuses to run as root, for whom the limit is not enforced.
+  than ``processes`` relative to that admission baseline. The storage namespace is created
+  under the same task ceiling. Root execution is refused. Per-process address-space limits
+  and the separate filesystem quota are not a cgroup total-memory measurement.
 * The sandbox root is remounted read-only and no ``/dev`` is mounted. The workspace and ``/tmp``
   share one private kernel tmpfs with hard byte and inode quotas. Retained namespace/root handles
   preserve ownership through artifact collection; open-unlinked files remain charged. A polling
