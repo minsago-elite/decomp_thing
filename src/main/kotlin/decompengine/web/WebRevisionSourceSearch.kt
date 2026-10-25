@@ -179,7 +179,8 @@ internal class WebRevisionSourceSearch(
             if (scannedBytes > 0 && scannedBytes + file.sizeBytes > maximumScannedBytes) { stop = Stop("byte-limit", fileIndex, from); break }
             val bytes = read(file)
             progressed = true; resumeOffset = 0; position++
-            if (bytes == null) { unavailable++; continue }
+            // A read can fail its final revalidation after reading the whole body; charge its committed size either way.
+            if (bytes == null) { unavailable++; scannedBytes += file.sizeBytes; continue }
             check(bytes.size.toLong() == file.sizeBytes)
             scannedFiles++; scannedBytes += bytes.size
             if (WebRevisionSourceContent.textFallback(bytes) != null) { unsearchableText++; continue }

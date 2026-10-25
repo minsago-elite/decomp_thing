@@ -870,7 +870,7 @@ count as `progress.unsearchableText`; unreadable bodies count as
 signed continuations, so a final continued page cannot report complete coverage after an
 earlier page skipped a file.
 
-Each page reads at most 32 MiB of bodies (at least one file is always read), stops after
+Each page reads at most 32 MiB of bodies (failed reads are charged their committed size; at least one file is always read), stops after
 2,000 ms of elapsed work (checked between files and before every 256 lines or 64 KiB of
 lines, so one line of at most 256 KiB is the largest unit between checks) and returns at most `limit` matches below a 900,000-byte item
 ceiling. `status: "partial"` with `stopReason` `result-limit`, `byte-limit` or
