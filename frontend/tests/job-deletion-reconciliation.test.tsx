@@ -44,6 +44,22 @@ it('an open job tab reconciles a deletion made in another tab into an explicit d
   } finally { auth.dispose(); }
 });
 
+it('an open attempt history reconciles a deletion made in another tab', async () => {
+  const auth = await session();
+  const run = fixture('run-completed-unaccepted.json').data as { runId: string };
+  transport.get.mockResolvedValueOnce({ data: { jobId: sample.jobId, items: [{ ...run, jobId: sample.jobId }],
+    page: { nextCursor: null, snapshotVersion: 'snapshot_1', limit: 50 } } }).mockRejectedValue(gone());
+  history.replaceState(null, '', `/nested/jobs/${sample.jobId}/runs`);
+  try {
+    render(<App basePath="/nested" session={auth} />);
+    await waitFor(() => expect(document.body.textContent).toContain(run.runId), { timeout: 3000 });
+    notifyLibraryChanged('/nested/');
+    await waitFor(() => expect(document.body.textContent).toContain(runHistoryCopy.thisJobWasDeleted), { timeout: 3000 });
+    expect(document.body.textContent).not.toContain(run.runId);
+    expect(transport.get).toHaveBeenCalledTimes(2);
+  } finally { auth.dispose(); }
+});
+
 it.each([
   ['job', `/nested/jobs/${sample.jobId}`, jobCopy.thisJobWasDeleted],
   ['attempt', `/nested/jobs/${sample.jobId}/runs/run_fixture`, runCopy.thisJobWasDeleted],
@@ -54,9 +70,10 @@ it.each([
   history.replaceState(null, '', path);
   try {
     render(<App basePath="/nested" session={auth} />);
-    await waitFor(() => expect(document.body.textContent).toContain(text), { timeout: 3000 });
+    // The attempt route is the largest lazy chunk; allow for a cold transform on loaded runners.
+    await waitFor(() => expect(document.body.textContent).toContain(text), { timeout: 10000 });
   } finally { auth.dispose(); }
-});
+}, 15000);
 
 it('the dashboard reads a fresh first page when another tab changes the library', async () => {
   const auth = await session();

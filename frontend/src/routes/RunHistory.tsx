@@ -10,6 +10,7 @@ import { jobPath, runPath } from '../app/paths';
 import type { BrowserSession } from '../session/session';
 import { useSession } from '../session/useSession';
 import { canRetainMetadata, isDeletedJob, metadataFailureKind } from '../shared/retainMetadata';
+import { onLibraryChange } from '../jobs/libraryChannel';
 
 function History({ jobId, basePath, session }: { jobId: string; basePath: string; session: BrowserSession }) {
   const location = useLocation();
@@ -33,6 +34,8 @@ function History({ jobId, basePath, session }: { jobId: string; basePath: string
   const heading = useRef<HTMLHeadingElement>(null);
   const moveFocus = useRef(false);
   const path = `${jobPath(basePath, jobId)}/runs`;
+  // A deletion in another tab must clear this history instead of leaving its attempts on screen.
+  useEffect(() => onLibraryChange(basePath, () => setRefresh(value => value + 1)), [basePath]);
   useEffect(() => {
     const controller = new AbortController();
     const current = () => !controller.signal.aborted && window.location.pathname === binding.pathname && window.location.search === binding.search;
