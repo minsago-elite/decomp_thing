@@ -3,6 +3,7 @@ import { message as displayMessage } from '../shared/messages';
 import { usePrivateTransport } from '../session/PrivateTransport';
 import { useEffect, useMemo, useState } from 'preact/hooks';
 import { withApiFailureReference } from '../api/client';
+import { AcceptedWork } from '../jobs/AcceptedWork';
 import type { Job as JobData } from '../api/generated';
 import { appPath, jobPath, runPath } from '../app/paths';
 import type { BrowserSession, RuntimeSnapshot } from '../session/session';
@@ -59,6 +60,7 @@ function JobDetails({ jobId, basePath, runtime, runtimeReceipt }: { jobId: strin
       <JobSummary job={job} />
       <p><a href={`${jobPath(basePath, job.jobId)}/runs`}>{copy.browseAttemptHistory}</a></p>
       {job.latestRunId && <a href={runPath(basePath, job.jobId, job.latestRunId)}>{copy.openLatestRecordedAttempt}</a>}
+      <AcceptedWork key={`${job.jobId}/${job.acceptedRevisionId ?? ''}`} job={job} basePath={basePath} />
       <h3>{copy.binaryMetadata}</h3>
       <dl class="job-facts">
         <dt>{copy.format}</dt><dd>{job.binary.format}</dd><dt>{copy.machine}</dt><dd>{job.binary.machine}</dd>

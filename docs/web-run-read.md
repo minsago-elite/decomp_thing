@@ -119,6 +119,35 @@ mock transport tests and from live workflow execution. Evidence/source/artifact
 navigation, active history changes and broader fixture families remain outstanding.
 
 
+## Earlier-attempt and accepted-work navigation
+
+Each attempt-history row now links that exact attempt's **Activity** and **Evidence and
+report snapshots** views, and its result revision's source browser when a result revision
+is recorded (a row without one says so). Link names include the attempt and revision
+identities, so rows stay distinguishable to assistive technology. These are the existing
+read-only routes; no request is made until a link is followed.
+
+The job overview has a **Current and accepted work** section that keeps the two apart:
+
+- **Latest attempt** links the latest recorded attempt's activity and evidence. Its
+  progress and reports belong to that attempt only.
+- **Accepted reconstruction** reads at most two newest-first history pages (100 attempts)
+  to find the attempt whose own recorded acceptance is exactly the job's
+  `acceptedRevisionId`. A candidate with the same revision identity but no recorded
+  acceptance, or an attempt accepted for another revision, is never substituted. When
+  found, it links that attempt, its evidence and report snapshots, and the accepted
+  revision's sources. Otherwise it states that the attempt is not among the newest 100
+  and points to attempt history. A read failure is an alert with an explicit retry and
+  shows no attempt. With no accepted revision, no history read is made.
+
+Browser history restores the saved history page after opening an earlier attempt or one
+of its named views, and Forward returns to that view. This is covered by
+`frontend/tests/attempt-navigation.test.tsx` and by the packaged `history` journey in
+`scripts/packaged-browser-history.mjs`. The general artifact catalog (progress journal,
+manifest, build contract, source archive) is not linked yet; it depends on the catalog
+route proposed in #1698. Per-attempt artifacts reachable today are the exploration and
+validation reports in the evidence view and source-file downloads.
+
 ## Recorded harness identity
 
 The attempt metadata includes its persisted `harnessCapabilityId` beside the
