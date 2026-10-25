@@ -30,7 +30,7 @@ class GitAdapterTest {
         listOf("", "version 2.40.0", "git version two", "git version 2.40.0/../../etc").forEach { assertNull(GitVersion.parse(it), it) }
     }
 
-    @Test fun `startup detection reports installed missing old and unrecognizable executables`() = GitTestRepositories().use { f ->
+    @Test fun `startup detection reports installed missing old and unrecognizable executables`(): Unit = GitTestRepositories().use { f ->
         val installed = GitRuntime.detect()
         assertTrue(installed is GitAvailability.Available)
         assertTrue(installed.version >= GitVersion.MINIMUM)
@@ -46,7 +46,7 @@ class GitAdapterTest {
         assertFalse(garbage.message.contains("PRIVATE_CANARY"))
     }
 
-    @Test fun `argv is passed without a shell and the child environment is fixed`() = GitTestRepositories().use { f ->
+    @Test fun `argv is passed without a shell and the child environment is fixed`(): Unit = GitTestRepositories().use { f ->
         val marker = f.root.resolve("shell-ran")
         val echo = fakeGit(f.root.resolve("echo"), "for argument in \"\$@\"; do printf '[%s]\\n' \"\$argument\"; done; env | LC_ALL=C sort")
         val runner = GitCommandRunner(echo, f.environment)
@@ -70,7 +70,7 @@ class GitAdapterTest {
         assertFailsWith<IllegalArgumentException> { GitInvocation("status", workTree = f.root) }
     }
 
-    @Test fun `time and output bounds terminate the child`() = GitTestRepositories().use { f ->
+    @Test fun `time and output bounds terminate the child`(): Unit = GitTestRepositories().use { f ->
         val slow = GitCommandRunner(fakeGit(f.root.resolve("slow"), "sleep 30"), f.environment)
         val started = System.nanoTime()
         val timeout = assertFailsWith<GitCommandException> {
@@ -94,7 +94,7 @@ class GitAdapterTest {
         assertFalse(failure.message!!.contains("PRIVATE_CANARY"))
     }
 
-    @Test fun `branch names are validated by local syntax and check-ref-format`() = GitTestRepositories().use { f ->
+    @Test fun `branch names are validated by local syntax and check-ref-format`(): Unit = GitTestRepositories().use { f ->
         listOf("main", "trunk", "feature/one", "release-1.2", "功能", "x_y").forEach {
             assertEquals(it, GitRefNames.requireBranchName(f.runner, it))
         }
@@ -115,7 +115,7 @@ class GitAdapterTest {
         assertEquals(GitObjectFormat.SHA256, GitObjectFormat.fromGit("sha256\n"))
     }
 
-    @Test fun `source-only tracking policy excludes job state and keeps intended sources`() = GitTestRepositories().use { f ->
+    @Test fun `source-only tracking policy excludes job state and keeps intended sources`(): Unit = GitTestRepositories().use { f ->
         val (gitDir, workTree) = f.managed("policy")
         Files.createDirectories(gitDir.resolve("info"))
         Files.writeString(gitDir.resolve("info/exclude"), GitTrackingPolicy.excludeFile())
@@ -138,7 +138,7 @@ class GitAdapterTest {
             "job-runtime-state", "private-transcripts", "native-build-output", "transient-evidence")))
     }
 
-    @Test fun `system and global configuration never reach a managed repository command`() = GitTestRepositories().use { f ->
+    @Test fun `system and global configuration never reach a managed repository command`(): Unit = GitTestRepositories().use { f ->
         val (gitDir, _) = f.managed("scopes")
         val scopes = f.runner.run(GitInvocation("config", listOf("--list", "--show-scope"), gitDir = gitDir)).text
             .lineSequence().filter { it.isNotEmpty() }.map { it.substringBefore('\t') }.toSet()
@@ -149,7 +149,7 @@ class GitAdapterTest {
         assertFalse(gitDir.resolve("hooks").exists() && Files.list(gitDir.resolve("hooks")).use { it.count() } > 0)
     }
 
-    @Test fun `inspection reports unborn attached dirty detached and sha256 states without assuming main`() = GitTestRepositories().use { f ->
+    @Test fun `inspection reports unborn attached dirty detached and sha256 states without assuming main`(): Unit = GitTestRepositories().use { f ->
         val (gitDir, workTree) = f.managed("states", branch = "trunk")
         val unborn = GitRepositoryInspector.inspect(f.runner, gitDir, workTree)
         assertEquals(GitHeadObservation(GitHeadState.UNBORN, "refs/heads/trunk", null), unborn.head)
@@ -176,7 +176,7 @@ class GitAdapterTest {
         assertEquals(wideCommit, wide.head.objectId)
     }
 
-    @Test fun `missing corrupt and unreviewed repositories have distinct outcomes`() = GitTestRepositories().use { f ->
+    @Test fun `missing corrupt and unreviewed repositories have distinct outcomes`(): Unit = GitTestRepositories().use { f ->
         val missing = assertFailsWith<GitRepositoryException> {
             GitRepositoryInspector.inspect(f.runner, f.root.resolve("absent.git"), f.root)
         }
@@ -203,7 +203,7 @@ class GitAdapterTest {
         }
     }
 
-    @Test fun `hooks attribute filters submodules and fsmonitor in repository content stay inert`() = GitTestRepositories().use { f ->
+    @Test fun `hooks attribute filters submodules and fsmonitor in repository content stay inert`(): Unit = GitTestRepositories().use { f ->
         val marker = f.root.resolve("tripwire-ran")
         val (gitDir, workTree) = f.managed("inert")
         Files.writeString(workTree.resolve(".gitattributes"), "* filter=evil diff=evil merge=evil\n")
