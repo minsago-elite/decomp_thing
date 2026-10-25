@@ -575,7 +575,10 @@ internal class GccBundledPreparedOperation internal constructor(
             )))
             LinuxFilesystemSyscalls.openRoot(cli.options.output).use { output ->
                 cli.requireCurrent()
-                decompengine.oracle.core.DescriptorBoundAtomicStateFile.publishNoReplace(output, "result.json", document, 256 * 1024)
+                decompengine.oracle.core.DescriptorBoundAtomicStateFile.publishNoReplace(
+                    output, "result.json", document, 256 * 1024,
+                    beforePublication = deadline::requireCurrent,
+                )
                 cli.requireCurrent()
             }
             inputs.verify("after CLI result publication")
