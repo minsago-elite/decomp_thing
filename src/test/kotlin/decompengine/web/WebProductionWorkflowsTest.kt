@@ -614,7 +614,7 @@ class WebProductionWorkflowsTest {
         assertEquals(120_000 to 4_096, scope.defaultContextCharacters to scope.minimumContextCharacters)
         val evidenceScope = assertNotNull(adapters(engines)[2].reconstruction)
         assertNull(evidenceScope.defaultContextCharacters); assertNotEquals(scope.profileSha256, evidenceScope.profileSha256)
-        val facts = webWorkflowCapabilities(adapters(engines), WebHarnessReadiness("supported", null, "ready", harnessPrerequisites(ACP_PROVENANCE)))
+        val facts = webWorkflowCapabilities(adapters(engines), WebHarnessReadiness("supported", null, "ready", prerequisites = harnessPrerequisites(ACP_PROVENANCE)))
             .associateBy { it.getValue("id").jsonPrimitive.content }
         val reported = facts.getValue("workflow-reconstruct-agent-acp").getValue("launch").jsonObject.getValue("reconstruction").jsonObject
         assertEquals("all-planned", reported.getValue("moduleSelection").jsonPrimitive.content)

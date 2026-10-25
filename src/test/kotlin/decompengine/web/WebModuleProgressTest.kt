@@ -91,7 +91,7 @@ class WebModuleProgressTest {
         fun recovery(attempt: WorkflowAttempt, harness: WebHarnessProvenance? = acp, plan: Boolean = true,
             progress: String = """{"phase":"modules","completed":2,"total":3}"""): JsonObject {
             val prerequisites = WebWorkflowPrerequisites(WebPrerequisite.AVAILABLE, WebPrerequisite.AVAILABLE, WebPrerequisite.AVAILABLE,
-                if (harness == null) emptyMap() else mapOf(WebAgentHarness.ACP to WebHarnessFacts(WebPrerequisite.AVAILABLE, harness, true)))
+                harnesses = if (harness == null) emptyMap() else mapOf(WebAgentHarness.ACP to WebHarnessFacts(WebPrerequisite.AVAILABLE, harness, true)))
             return webModuleProgress(JOB, WebModuleProgressCapture(attempt, progress.toByteArray(), null, if (plan) PLAN.toByteArray() else null,
                 null), adapters, prerequisites).getValue("recovery").jsonObject
         }
