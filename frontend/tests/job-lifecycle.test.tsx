@@ -146,3 +146,21 @@ it('delivers bounded library-change hints without job or session material', asyn
   expect(received).toHaveBeenCalledOnce();
   raw.close(); stop(); stopOther();
 });
+
+it('re-enables deletion controls after a hidden tab abandons a pending preview', async () => {
+  client.get.mockImplementationOnce(() => new Promise(() => undefined)).mockResolvedValueOnce({ data: preview() });
+  render(<JobDeletion job={job()} client={typed} basePath="/" session={session} onDeleted={vi.fn()} />);
+  fireEvent.click(screen.getByRole('button', { name: 'Review what would be deleted' }));
+  await waitFor(() => expect(screen.getByRole('button', { name: 'Review what would be deleted' })).toHaveProperty('disabled', true));
+  const visibility = (value: string) => {
+    Object.defineProperty(document, 'visibilityState', { configurable: true, value });
+    document.dispatchEvent(new Event('visibilitychange'));
+  };
+  visibility('hidden');
+  expect(await screen.findByText(/paused while this tab is hidden/)).toBeTruthy();
+  visibility('visible');
+  await waitFor(() => expect(screen.getByRole('button', { name: 'Review what would be deleted' })).toHaveProperty('disabled', false));
+  expect(client.get.mock.calls[0]?.[2].signal.aborted).toBe(true);
+  fireEvent.click(screen.getByRole('button', { name: 'Review what would be deleted' }));
+  expect(await screen.findByText('Source snapshots')).toBeTruthy();
+});

@@ -109,7 +109,10 @@ export function JobDeletion({ job, client, basePath, session, onDeleted }: {
   const heading = useRef<HTMLHeadingElement>(null);
   // Any newer job version invalidates a reviewed preview and its typed confirmation.
   useEffect(() => { setPreview(null); setConfirm(''); }, [job.jobId, job.version]);
-  useEffect(() => () => { active.current?.abort(); active.current = null; }, [job.jobId, available]);
+  // Hiding the tab or going offline abandons the pending read or request; its handler then skips cleanup.
+  useEffect(() => () => {
+    if (active.current) { active.current.abort(); active.current = null; setBusy(false); }
+  }, [job.jobId, available]);
   async function review(signal?: AbortSignal) {
     const controller = signal ? null : new AbortController();
     if (controller) { if (active.current) return; active.current = controller; setBusy(true); setNotice(copy.reading); }
