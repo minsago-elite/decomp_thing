@@ -3,7 +3,6 @@ package decompengine.oracle.reference
 import decompengine.acp.LinuxFileIdentity
 import decompengine.acp.LinuxFilesystemSyscalls
 import decompengine.acp.permissions
-import decompengine.oracle.core.DescriptorBoundAtomicStateFile
 import decompengine.oracle.core.OracleArtifacts
 import decompengine.oracle.core.OracleJson
 import decompengine.oracle.core.StrictJsonLimits
@@ -16,6 +15,7 @@ import decompengine.oracle.fulltree.FullTreeDiskScratchPolicy
 import decompengine.oracle.fulltree.FullTreeDiskScratchRunRoot
 import decompengine.oracle.fulltree.FullTreeFunctionObservationIsolationConfiguration
 import decompengine.oracle.fulltree.FullTreeFunctionObservationRuntimeMount
+import decompengine.oracle.fulltree.KotlinSystemdCgroupCommandExecution
 import decompengine.oracle.fulltree.KotlinSystemdCgroupCommandExecutionException
 import decompengine.oracle.fulltree.KotlinSystemdCgroupCommandInput
 import decompengine.oracle.fulltree.KotlinSystemdCgroupCommandLauncher
@@ -150,7 +150,7 @@ internal object ReferenceCorpusCoordinator {
                     val identity = checkNotNull(execution.controlDirectoryIdentity)
                     completedControls[controlName] = identity
                     journal.recordExecution(batch, execution.canonicalBytes)
-                    val report = readReport(borrowed, controlName, identity)
+                    val report = readReport(borrowed, controlName, identity, execution)
                     val verified = ReferenceCorpusWorkerObservations.verify(profile.definition, request, report)
                     capturedOutputBytes = Math.addExact(capturedOutputBytes, verified.capturedOutputBytes)
                     require(capturedOutputBytes <= profile.definition.limits.maximumAggregateOutputBytes) {
@@ -319,19 +319,34 @@ private fun prepareRoot(borrowed: FullTreeDiskScratchBorrowedRunRoot): Map<Strin
         }.also { LinuxFilesystemSyscalls.synchronize(root) }
     }
 
-private fun readReport(borrowed: FullTreeDiskScratchBorrowedRunRoot, control: String, expected: LinuxFileIdentity): ByteArray =
-    borrowed.withPinnedDescriptor { root ->
+private fun readReport(
+    borrowed: FullTreeDiskScratchBorrowedRunRoot,
+    control: String,
+    expected: LinuxFileIdentity,
+    execution: KotlinSystemdCgroupCommandExecution,
+): ByteArray {
+    // This receipt is the launcher result already authenticated before cgroup absence.
+    val outcome = OracleJson.parseCanonical(execution.canonicalBytes).jsonObject.getValue("outcome").jsonObject
+    fun size(name: String): Long = outcome.getValue(name).jsonPrimitive.let {
+        require(!it.isString && it.content.matches(Regex("0|[1-9][0-9]*")))
+        it.content.toLong()
+    }
+    return borrowed.withPinnedDescriptor { root ->
         LinuxFilesystemSyscalls.openDirectoryAt(root.fd, control).use { selected ->
             require(LinuxFilesystemSyscalls.identity(selected.fd) == expected)
             LinuxFilesystemSyscalls.openDirectoryAt(selected.fd, "reports").use { reports ->
                 require(reports.identity.isDirectory && reports.identity.mode.permissions == 448 &&
-                    reports.identity.uid == root.identity.uid && reports.identity.mountId == root.identity.mountId)
-                require(LinuxFilesystemSyscalls.directoryEntryNames(reports, 2) == listOf(ReferenceCorpusWorker.OBSERVATIONS_FILE))
-                checkNotNull(DescriptorBoundAtomicStateFile.readManifestOrNull(reports, ReferenceCorpusWorker.OBSERVATIONS_FILE,
-                    ReferenceCorpusWorker.MAXIMUM_OBSERVATION_BYTES)).bytes
+                    reports.identity.uid == root.identity.uid && reports.identity.gid == root.identity.gid &&
+                    reports.identity.mountId == root.identity.mountId)
+                val bytes = ReferenceCorpusReportReader.read(reports, size("stdoutBytes"), size("stderrBytes"))
+                require(LinuxFilesystemSyscalls.identity(selected.fd) == expected)
+                LinuxFilesystemSyscalls.openDirectoryAt(root.fd, control).use { named -> require(named.identity == expected) }
+                LinuxFilesystemSyscalls.openDirectoryAt(selected.fd, "reports").use { named -> require(named.identity == reports.identity) }
+                bytes
             }
         }
     }
+}
 
 private fun withNativeRuntime(base: FullTreeFunctionObservationIsolationConfiguration,
     mounts: List<FullTreeFunctionObservationRuntimeMount>) = FullTreeFunctionObservationIsolationConfiguration(
