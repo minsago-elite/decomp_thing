@@ -218,14 +218,25 @@ export function SourceFileDiff({ selected, basePath, search }: { selected: Sourc
   }, [current?.state, key]);
   if (!selection) return <p role="alert">{copy.diffInvalid}</p>;
   const chosen = selection;
-  function hunk(value: number) { moveFocus.current = true; location.route(sourceFileDiffPath(basePath, selected, { ...chosen, hunk: value })); }
+  // Hunk pages carry both observed metadata versions, so an offset is never applied to a changed comparison.
+  function hunk(value: number) {
+    if (!data) return;
+    moveFocus.current = true;
+    location.route(sourceFileDiffPath(basePath, selected, { ...chosen, hunk: value,
+      pin: { metadataVersion: data.metadataVersion, baseMetadataVersion: data.baseMetadataVersion } }));
+  }
   const name = data ? (data.headFile ?? data.baseFile)!.displayName : null;
   const previous = data ? Math.max(0, data.hunkOffset - 20) : 0;
   return <section class="source-diff" aria-labelledby="source-file-diff-title" aria-busy={current?.state === 'loading'}>
     <Revisions selected={selected} base={chosen.base} data={data} />
     <p><a href={sourceDiffPath(basePath, selected, chosen.base)}>{copy.diffReturn}</a></p>
     <h2 id="source-file-diff-title" ref={heading} tabIndex={-1}>{name ? <bdi>{name}</bdi> : copy.diffFileTitle}</h2>
-    <button type="button" disabled={current?.state === 'loading'} onClick={() => { moveFocus.current = true; setRefresh(value => value + 1); }}>{copy.diffRefresh}</button>
+    {/* A pinned page of an expired comparison restarts from its first change group without the old pin. */}
+    <button type="button" disabled={current?.state === 'loading'} onClick={() => {
+      moveFocus.current = true;
+      if (chosen.pin || chosen.hunk > 0) location.route(sourceFileDiffPath(basePath, selected, { base: chosen.base, baseFileId: chosen.baseFileId, headFileId: chosen.headFileId }));
+      else setRefresh(value => value + 1);
+    }}>{copy.diffRefresh}</button>
     {current?.state === 'loading' && <p role="status">{copy.diffLoading}</p>}
     {current?.state === 'failed' && <p role="alert">{sourceReadMessage(current.failure)}</p>}
     {data && <>
@@ -240,7 +251,8 @@ export function SourceFileDiff({ selected, basePath, search }: { selected: Sourc
         : data.representation === 'binary' ? copy.diffFallback[data.fallbackReason!] : copy.diffRepresentation[data.representation]}</p>
       {data.representation !== 'text' && data.representation !== 'identical' && <p>{copy.diffEvidence}</p>}
       {data.representation === 'text' && data.totalHunks === 0 && <p>{copy.diffEmptyExistence}</p>}
-      {data.patchAvailable && <p><a href={apiPath(basePath, sourcePatchRoute(selected, chosen))} download="">{copy.diffPatch}</a> {copy.diffPatchNotice}</p>}
+      {data.patchAvailable && <p><a href={apiPath(basePath, sourcePatchRoute(selected, { ...chosen,
+        pin: { metadataVersion: data.metadataVersion, baseMetadataVersion: data.baseMetadataVersion } }))} download="">{copy.diffPatch}</a> {copy.diffPatchNotice}</p>}
       {data.hunks.map((item, index) => <div class="source-diff-hunk" key={`${data.hunkOffset + index}`}>
         {item.unchangedBefore > 0 && <p class="source-diff-omitted">{message(copy.diffOmitted, { count: item.unchangedBefore })}</p>}
         <p class="source-diff-header"><code>{`@@ -${item.baseStart},${item.baseCount} +${item.headStart},${item.headCount} @@`}</code></p>

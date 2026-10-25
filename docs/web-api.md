@@ -953,7 +953,9 @@ newline is part of the last line's identity. Hunks have three context lines, mer
 at most six unchanged lines separate changes, and are split at 128 rows so every row stays
 reachable. A page holds at most 20 hunks, 2,000 rows and 768 KiB of serialized UTF-8 lines
 (including JSON escapes), and always at least one hunk. A 128-row hunk of 1,000-unit lines
-stays below the 1 MiB response ceiling even when every unit escapes to six bytes. `nextHunk` continues it; an offset past the end is
+stays below the 1 MiB response ceiling even when every unit escapes to six bytes. `nextHunk` continues it. Continued pages and the
+patch may carry the observed `metadataVersion` and `baseMetadataVersion` pair (the SPA always
+sends it); a changed side returns `410 CURSOR_EXPIRED` before any body read. An offset past the end is
 `416 SOURCE_DIFF_RANGE_INVALID`. Each hunk reports exact 1-based starts and counts per
 side and `unchangedBefore`; the response reports `unchangedAfter`, so omitted unchanged
 ranges are counted. Line text is cut at 1,000 UTF-16 units without splitting a surrogate

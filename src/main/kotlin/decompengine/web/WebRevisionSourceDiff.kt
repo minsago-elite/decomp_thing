@@ -55,6 +55,8 @@ internal fun classifyRevisionSourceDiff(base: WebRevisionSourceSnapshot, head: W
 internal data class WebSourceDiffQuery(
     val baseRunId: String, val baseRevisionId: String, val baseFileId: String?, val headFileId: String?,
     val limit: Int, val cursor: String?, val hunk: Int,
+    /** Optional pin of both observed metadata versions; continued hunk pages and patches must match it. */
+    val metadataVersion: String? = null, val baseMetadataVersion: String? = null,
 ) {
     companion object {
         private val ID = Regex("[A-Za-z0-9][A-Za-z0-9_-]{0,127}")
@@ -78,12 +80,15 @@ internal data class WebSourceDiffQuery(
             val limit = fields["limit"]?.let { if (!it.matches(Regex("[1-9][0-9]{0,2}"))) invalid(); it.toInt() } ?: 50
             if (limit !in 1..200) invalid()
             val hunk = fields["hunk"]?.let { if (!it.matches(Regex("0|[1-9][0-9]{0,5}"))) invalid(); it.toInt() } ?: 0
-            return WebSourceDiffQuery(baseRun, baseRevision, fields["baseFileId"], fields["headFileId"], limit, fields["cursor"], hunk)
+            val pinned = listOf(fields["metadataVersion"], fields["baseMetadataVersion"])
+            if (pinned.count { it != null } == 1 || pinned.any { it != null && !it.matches(Regex("[a-f0-9]{64}")) }) invalid()
+            return WebSourceDiffQuery(baseRun, baseRevision, fields["baseFileId"], fields["headFileId"], limit, fields["cursor"], hunk,
+                pinned[0], pinned[1])
         }
 
         private fun invalid(): Nothing = throw WebAccessDenied(422, "VALIDATION_FAILED",
             "Source diffs accept baseRunId and baseRevisionId, with limit (1–200) and cursor for the file list, " +
-                "or baseFileId and/or headFileId with an optional hunk offset for one file.")
+                "or baseFileId and/or headFileId with an optional hunk offset and an optional pair of metadata versions for one file.")
     }
 }
 
@@ -285,6 +290,14 @@ internal class WebRevisionSourceDiffs(
         }
     }
 
+    /** A hunk offset or patch is meaningful only for the comparison it was observed in; a changed side expires it. */
+    private fun requirePinned(pair: RevisionPair, query: WebSourceDiffQuery) {
+        if (query.metadataVersion == null) return
+        if (query.metadataVersion != pair.head.metadataVersion || query.baseMetadataVersion != pair.base.metadataVersion) {
+            throw WebAccessDenied(410, "CURSOR_EXPIRED", "A compared revision changed. Reopen this file comparison from its first change group.")
+        }
+    }
+
     /** The classified entry named by both file identities; a pair outside the classification is unavailable. */
     private fun select(pair: RevisionPair, query: WebSourceDiffQuery): WebSourceDiffEntry {
         val base = query.baseFileId?.let { id -> pair.base.files.indices.firstOrNull {
@@ -351,8 +364,10 @@ internal class WebRevisionSourceDiffs(
     private class Fallback(val reason: String) : RuntimeException(null, null, false, false)
 
     fun file(jobId: String, runId: String, revisionId: String, rawQuery: String?): JsonObject {
-        val query = WebSourceDiffQuery.parse(rawQuery, setOf("baseRunId", "baseRevisionId", "baseFileId", "headFileId", "hunk"))
+        val query = WebSourceDiffQuery.parse(rawQuery, setOf("baseRunId", "baseRevisionId", "baseFileId", "headFileId", "hunk",
+            "metadataVersion", "baseMetadataVersion"))
         val pair = capture(jobId, runId, revisionId, query)
+        requirePinned(pair, query)
         val entry = select(pair, query)
         val comparison = compare(pair, entry)
         if (comparison.hunks.isNotEmpty() && query.hunk >= comparison.hunks.size || comparison.hunks.isEmpty() && query.hunk != 0) {
@@ -418,8 +433,10 @@ internal class WebRevisionSourceDiffs(
     class Patch(val fileName: String, val bytes: ByteArray, val headers: Map<String, String>)
 
     fun patch(jobId: String, runId: String, revisionId: String, rawQuery: String?): Patch {
-        val query = WebSourceDiffQuery.parse(rawQuery, setOf("baseRunId", "baseRevisionId", "baseFileId", "headFileId"))
+        val query = WebSourceDiffQuery.parse(rawQuery, setOf("baseRunId", "baseRevisionId", "baseFileId", "headFileId",
+            "metadataVersion", "baseMetadataVersion"))
         val pair = capture(jobId, runId, revisionId, query)
+        requirePinned(pair, query)
         val entry = select(pair, query)
         val comparison = compare(pair, entry)
         if (!patchAvailable(comparison)) throw WebAccessDenied(409, "SOURCE_DIFF_NOT_TEXT",

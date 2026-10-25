@@ -11,7 +11,9 @@ export const SOURCE_DIFF_PAGE_LIMIT = 50;
 /** The other exact revision of the same job. A base never comes from a display label. */
 export interface SourceDiffBase { runId: string; revisionId: string }
 export interface SourceDiffSelection { base: SourceDiffBase | null; cursor: string | null }
-export interface SourceFileDiffSelection { base: SourceDiffBase; baseFileId: string | null; headFileId: string | null; hunk: number }
+/** Both observed metadata versions; continued hunk pages and the patch must belong to that comparison. */
+export interface SourceDiffPin { metadataVersion: string; baseMetadataVersion: string }
+export interface SourceFileDiffSelection { base: SourceDiffBase; baseFileId: string | null; headFileId: string | null; hunk: number; pin?: SourceDiffPin }
 
 function invalid(): never { throw new ApiClientError('invalid_request'); }
 
@@ -43,13 +45,17 @@ export function sourceDiffSelection(search: string): SourceDiffSelection {
 }
 
 export function sourceFileDiffSelection(search: string): SourceFileDiffSelection {
-  const values = fields(search, ['baseRunId', 'baseRevisionId', 'baseFileId', 'headFileId', 'hunk']);
+  const values = fields(search, ['baseRunId', 'baseRevisionId', 'baseFileId', 'headFileId', 'hunk', 'metadataVersion', 'baseMetadataVersion']);
   const selected = base(values);
   const baseFileId = values.get('baseFileId') ?? null, headFileId = values.get('headFileId') ?? null;
   const hunk = values.get('hunk') ?? '0';
   if (!selected || (baseFileId === null && headFileId === null) || (baseFileId !== null && !FILE_ID.test(baseFileId))
     || (headFileId !== null && !FILE_ID.test(headFileId)) || !/^(0|[1-9][0-9]{0,5})$/.test(hunk)) invalid();
-  return { base: selected, baseFileId, headFileId, hunk: Number(hunk) };
+  const metadataVersion = values.get('metadataVersion'), baseMetadataVersion = values.get('baseMetadataVersion');
+  if ((metadataVersion === undefined) !== (baseMetadataVersion === undefined)
+    || [metadataVersion, baseMetadataVersion].some(value => value !== undefined && !/^[a-f0-9]{64}$/.test(value))) invalid();
+  return { base: selected, baseFileId, headFileId, hunk: Number(hunk),
+    ...(metadataVersion !== undefined && baseMetadataVersion !== undefined ? { pin: { metadataVersion, baseMetadataVersion } } : {}) };
 }
 
 function revisionPath(basePath: string, selected: SourceSelection): string {
@@ -67,6 +73,7 @@ function fileQuery(selection: Omit<SourceFileDiffSelection, 'hunk'> & { hunk?: n
   if (selection.baseFileId !== null) parts.push(`baseFileId=${selection.baseFileId}`);
   if (selection.headFileId !== null) parts.push(`headFileId=${selection.headFileId}`);
   if (selection.hunk !== undefined && selection.hunk > 0) parts.push(`hunk=${selection.hunk}`);
+  if (selection.pin) parts.push(`metadataVersion=${selection.pin.metadataVersion}`, `baseMetadataVersion=${selection.pin.baseMetadataVersion}`);
   const query = `?${parts.join('&')}`;
   sourceFileDiffSelection(query);
   return query;
@@ -90,7 +97,8 @@ export function sourceFileDiffPath(basePath: string, selected: SourceSelection, 
 
 export function sourcePatchRoute(selected: SourceSelection, selection: Omit<SourceFileDiffSelection, 'hunk'>): string {
   // The patch is the complete comparison; a page offset would select nothing and is refused by the server.
-  return `${revisionPath('', selected)}/source-diff/patch${fileQuery({ base: selection.base, baseFileId: selection.baseFileId, headFileId: selection.headFileId })}`;
+  return `${revisionPath('', selected)}/source-diff/patch${fileQuery({ base: selection.base, baseFileId: selection.baseFileId,
+    headFileId: selection.headFileId, ...(selection.pin ? { pin: selection.pin } : {}) })}`;
 }
 
 function checkIdentity(data: SourceDiff | SourceFileDiff, selected: SourceSelection, diffBase: SourceDiffBase): void {
@@ -115,6 +123,9 @@ export function bindSourceFileDiff(data: SourceFileDiff, selected: SourceSelecti
   checkSourceFileDiff(data);
   if ((data.baseFile?.fileId ?? null) !== selection.baseFileId || (data.headFile?.fileId ?? null) !== selection.headFileId
     || data.hunkOffset !== selection.hunk) throw new ApiClientError('invalid_response');
+  if (selection.pin && (selection.pin.metadataVersion !== data.metadataVersion || selection.pin.baseMetadataVersion !== data.baseMetadataVersion)) {
+    throw new ApiClientError('http_error', { serverCode: 'CURSOR_EXPIRED' });
+  }
   return data;
 }
 

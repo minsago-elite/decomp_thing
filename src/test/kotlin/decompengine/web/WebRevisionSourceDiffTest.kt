@@ -233,6 +233,22 @@ class WebRevisionSourceDiffTest {
         assertEquals("CURSOR_EXPIRED", assertFailsWith<WebAccessDenied> { diffs(fixture).patch(jobId, "run_2", "revision_2", fileQuery(entry)) }.code)
     }
 
+    @Test fun `pinned hunk pages and patches refuse a comparison whose metadata changed`() {
+        val fixture = fixture(listOf(side("src/a.c", "1\n")), listOf(side("src/a.c", "2\n")))
+        val entry = items(diffs(fixture).summary("owner", jobId, "run_2", "revision_2", base)).single()
+        val head = fixture.snapshots.getValue("run_2" to "revision_2"); val baseSnapshot = fixture.snapshots.getValue("run_1" to "revision_1")
+        val pinned = "&metadataVersion=${head.metadataVersion}&baseMetadataVersion=${baseSnapshot.metadataVersion}"
+        assertEquals(1, diffs(fixture).file(jobId, "run_2", "revision_2", fileQuery(entry) + pinned).getValue("totalHunks").jsonPrimitive.int)
+        assertTrue(diffs(fixture).patch(jobId, "run_2", "revision_2", fileQuery(entry) + pinned).bytes.isNotEmpty())
+        val stale = "&metadataVersion=${"0".repeat(64)}&baseMetadataVersion=${baseSnapshot.metadataVersion}"
+        val reads = fixture.reads
+        assertEquals("CURSOR_EXPIRED", assertFailsWith<WebAccessDenied> { diffs(fixture).file(jobId, "run_2", "revision_2", fileQuery(entry) + stale) }.code)
+        assertEquals("CURSOR_EXPIRED", assertFailsWith<WebAccessDenied> { diffs(fixture).patch(jobId, "run_2", "revision_2", fileQuery(entry) + stale) }.code)
+        assertEquals(reads, fixture.reads, "an expired pin is refused before any body read")
+        assertEquals(422, assertFailsWith<WebAccessDenied> {
+            diffs(fixture).file(jobId, "run_2", "revision_2", fileQuery(entry) + "&metadataVersion=${head.metadataVersion}") }.status)
+    }
+
     @Test fun `myers edits are minimal on known pairs and bounded by the edit budget`() {
         fun edits(a: String, b: String, budget: Int = 100) = revisionLineEdits(a.map { it.code }.toIntArray(), b.map { it.code }.toIntArray(), budget) { false }
         val ops = assertNotNull(edits("ABCABBA", "CBABAC"))

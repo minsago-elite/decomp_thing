@@ -159,14 +159,16 @@ it('renders bounded hunks as inert text with line numbers, omitted ranges and a 
   expect(region.querySelectorAll('.source-diff-removed')).toHaveLength(1);
   expect(region.textContent).toContain('removed');
   const patch = screen.getByRole('link', { name: 'Download the complete unified diff' });
-  expect(patch.getAttribute('href')).toBe(`/nested/api/v1/jobs/${jobId}/runs/run_2/revisions/revision_2/source-diff/patch${search}`);
+  // The patch and later hunk pages are pinned to the two metadata versions this page observed.
+  const pin = `metadataVersion=${document.data.metadataVersion}&baseMetadataVersion=${document.data.baseMetadataVersion}`;
+  expect(patch.getAttribute('href')).toBe(`/nested/api/v1/jobs/${jobId}/runs/run_2/revisions/revision_2/source-diff/patch${search}&${pin}`);
   expect(patch.hasAttribute('download')).toBe(true);
   const head = screen.getByRole('link', { name: 'Open the compared file' });
   expect(head.getAttribute('href')).toContain(`/runs/run_2/revisions/revision_2/source-files/${document.data.headFile!.fileId}?sourceSha256=`);
   const baseLink = screen.getByRole('link', { name: 'Open the base file' });
   expect(baseLink.getAttribute('href')).toContain(`/runs/run_1/revisions/revision_1/source-files/${document.data.baseFile!.fileId}?sourceSha256=${document.data.baseSourceSha256}`);
   fireEvent.click(screen.getByRole('button', { name: 'Next change groups' }));
-  await waitFor(() => { expect(location.search).toBe(`${search}&hunk=1`); });
+  await waitFor(() => { expect(location.search).toBe(`${search}&hunk=1&${pin}`); });
 });
 
 it('explains binary and identical comparisons without hunks or a patch', async () => {
@@ -190,6 +192,15 @@ it('explains an added empty file without offering a patch that could not recreat
   mount('file', search);
   await screen.findByText(/An empty file was added or removed/u);
   expect(screen.queryByRole('link', { name: 'Download the complete unified diff' })).toBeNull();
+});
+
+it('refuses a continued hunk page whose comparison changed since the pinned observation', () => {
+  const text = fixture('source-file-diff-text', 'sourceFileDiff').data;
+  const selection = sourceFileDiffSelection(`?baseRunId=run_1&baseRevisionId=revision_1&baseFileId=${text.baseFile!.fileId}&headFileId=${text.headFile!.fileId}`
+    + `&metadataVersion=${'0'.repeat(64)}&baseMetadataVersion=${text.baseMetadataVersion}`);
+  expect(selection.pin).toEqual({ metadataVersion: '0'.repeat(64), baseMetadataVersion: text.baseMetadataVersion });
+  expect(() => bindSourceFileDiff(text, selected, selection)).toThrow(expect.objectContaining({ serverCode: 'CURSOR_EXPIRED' }));
+  expect(() => sourceFileDiffSelection(`?baseRunId=run_1&baseRevisionId=revision_1&headFileId=${text.headFile!.fileId}&metadataVersion=${'0'.repeat(64)}`)).toThrow(ApiClientError);
 });
 
 it('accepts a modification that changes only the declared content kind', () => {
