@@ -94,5 +94,6 @@ export const gitRepositoryCopy = {
   "commitIsNotValidation": "Commits and branches record source state only. They are not validation or acceptance evidence.",
   "refresh": "Refresh repository",
   "initialize": "Initialize repository from the latest candidate",
-  "noCandidate": "The latest attempt has no recorded candidate revision to initialize from."
+  "noCandidate": "The latest attempt has no recorded candidate revision to initialize from.",
+  "openWorkspace": "Open the repository workspace"
 };

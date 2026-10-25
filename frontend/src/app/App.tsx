@@ -48,6 +48,7 @@ function Shell({ basePath, identity, recovery, reload, session }: ShellProps) {
   const Run = useMemo(() => lazyRoute(() => import('../routes/Run'), recovery), [recovery]);
   const Runtime = useMemo(() => lazyRoute(() => import('../routes/Runtime'), recovery), [recovery]);
   const Sources = useMemo(() => lazyRoute(() => import('../routes/Sources'), recovery), [recovery]);
+  const Git = useMemo(() => lazyRoute(() => import('../routes/Git'), recovery), [recovery]);
   const location = useLocation();
   const main = useRef<HTMLElement>(null);
   const navigation = useRef<HTMLElement>(null);
@@ -76,12 +77,13 @@ function Shell({ basePath, identity, recovery, reload, session }: ShellProps) {
   const isRunActivity = location.path.startsWith(`${basePath}/jobs/`) && /\/runs\/[^/]+\/activity$/.test(location.path);
   const isRunEvidence = location.path.startsWith(`${basePath}/jobs/`) && /\/runs\/[^/]+\/evidence$/.test(location.path);
   const isHistory = location.path.startsWith(`${basePath}/jobs/`) && /^[^/]+\/runs$/.test(location.path.slice(`${basePath}/jobs/`.length));
+  const isGit = location.path.startsWith(`${basePath}/jobs/`) && /^[^/]+\/git$/.test(location.path.slice(`${basePath}/jobs/`.length));
   const isSourceDirectory = new RegExp(`^${basePath}/jobs/[^/]+/runs/[^/]+/revisions/[^/]+/sources/[^/]+$`).test(location.path);
   const isSourceFile = new RegExp(`^${basePath}/jobs/[^/]+/runs/[^/]+/revisions/[^/]+/source-files/[^/]+$`).test(location.path);
   const pageTitle = atHome ? copy.jobs : location.path === uploadPath ? copy.uploadABinary
     : location.path === runtimePath ? copy.runtimeStatus : isJob ? copy.jobOverview
       : isRunActivity ? copy.attemptActivity : isRunEvidence ? copy.attemptEvidence
-        : isRun ? copy.workflowAttempt : isHistory ? copy.attemptHistory
+        : isRun ? copy.workflowAttempt : isHistory ? copy.attemptHistory : isGit ? copy.sourceRepository
       : isSourceDirectory ? sourceCopy.title : isSourceFile ? sourceCopy.fileTitle : copy.pageUnavailable;
 
   function focusRouteHeading(url: string) {
@@ -190,6 +192,7 @@ function Shell({ basePath, identity, recovery, reload, session }: ShellProps) {
               <Route path={`${basePath}/jobs/:jobId/runs/:runId/revisions/:revisionId/sources/:directoryId`} component={Sources} resource="directory" basePath={basePath} session={session} />
               <Route path={`${basePath}/jobs/:jobId/runs/:runId/revisions/:revisionId/source-files/:fileId`} component={Sources} resource="file" basePath={basePath} session={session} />
               <Route path={`${basePath}/jobs/:jobId/runs`} component={RunHistory} basePath={basePath} session={session} />
+              <Route path={`${basePath}/jobs/:jobId/git`} component={Git} basePath={basePath} session={session} />
               <Route path={`${basePath}/jobs/:jobId/runs/:runId/activity`} component={Run} view="activity" basePath={basePath} session={session} />
               <Route path={`${basePath}/jobs/:jobId/runs/:runId/evidence`} component={Run} view="evidence" basePath={basePath} session={session} />
               <Route path={`${basePath}/jobs/:jobId/runs/:runId`} component={Run} basePath={basePath} session={session} />
