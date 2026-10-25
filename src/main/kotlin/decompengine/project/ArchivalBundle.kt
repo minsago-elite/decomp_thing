@@ -74,6 +74,7 @@ object ArchivalPackager {
         profile: ReconstructionProfile = GeneratedCMakeReconstructionProfile.descriptor,
         requiredCorpusSha256: Set<String> = emptySet(),
         hostSafetyLimits: ReconstructionHostSafetyLimits = ReconstructionHostSafetyLimits.DEFAULT,
+        analysisResult: ProgramAnalysisResult? = null,
     ): ArchivalBundle {
         hostSafetyLimits.requireAllows(profile.budgets)
         val effectiveLimits = limits.constrainedTo(profile)
@@ -107,6 +108,7 @@ object ArchivalPackager {
         )
         val audit = ArchivalProjectAuditor.audit(
             projectDir, profile, requiredCorpora, hostSafetyLimits, publication, effectiveLimits,
+            analysisResult = analysisResult,
         )
         require(audit.provenanceComplete) { "archive project has incomplete model or source provenance" }
         require(audit.moduleConfidenceEvidenceProblems.isEmpty()) {
@@ -134,7 +136,14 @@ object ArchivalPackager {
             """.trimIndent() + "\n",
         )
         val payload = collectPayload(projectDir, archiveDestination, effectiveLimits, transport)
+        require(payload.singleOrNull { it.relativePath == "source_tree_manifest.json" }?.sha256 == audit.sourceManifestSha256) {
+            "source manifest changed between assessment audit and archive capture"
+        }
         validateSourceManifest(projectDir, payload.associateBy { it.relativePath }, profile)
+        require(payload.singleOrNull { it.relativePath == "reports/archival_audit.json" }?.sha256 ==
+            sha256(audit.toJson().toByteArray(Charsets.UTF_8))) {
+            "archival audit changed before archive capture"
+        }
         val archivedBehaviorHashes = payload.asSequence()
             .filter { it.relativePath.endsWith(".behavior.json") }
             .associate { it.relativePath to it.sha256 }
@@ -484,13 +493,6 @@ private fun validateSourceManifest(
     require(oracleSha256.matches(Regex("[a-f0-9]{64}"))) {
         "source tree manifest has an invalid oracle SHA-256"
     }
-    val modelPath = expectedProfile.layout.declaration("program-model-evidence").materialize()
-    val modelOracleSha256 = Json.parseToJsonElement(projectDir.resolve(modelPath).readText())
-        .jsonObject["inputSha256"]?.jsonPrimitive?.contentOrNull
-        ?: error("program model is missing its oracle identity")
-    require(modelOracleSha256 == oracleSha256) {
-        "program model and source tree manifest identify different oracle binaries"
-    }
     manifest.files.forEach { file ->
         validateRelativePath(file.path)
         val archived = payload[file.path] ?: error("source tree manifest path is missing from archive: ${file.path}")
@@ -498,6 +500,18 @@ private fun validateSourceManifest(
         require(ProjectFileRole.MODULE_IMPLEMENTATION !in file.roles || file.acceptedImplementation != null) {
             "source tree manifest does not classify module implementation: ${file.path}"
         }
+    }
+    val modelPath = expectedProfile.layout.declaration("program-model-evidence").materialize()
+    val modelSnapshot = decompengine.repair.readStableRegularFile(projectDir, modelPath,
+        minOf(expectedProfile.budgets.archiveMaximumFileBytes, ProgramAnalysisResult.MAXIMUM_MODEL_BYTES.toLong()))
+    require(modelSnapshot.sha256 == payload.getValue(modelPath).sha256) {
+        "program model changed after archive payload capture"
+    }
+    val modelOracleSha256 = Json.parseToJsonElement(modelSnapshot.bytes.decodeToString(throwOnInvalidSequence = true))
+        .jsonObject["inputSha256"]?.jsonPrimitive?.contentOrNull
+        ?: error("program model is missing its oracle identity")
+    require(modelOracleSha256 == oracleSha256) {
+        "program model and source tree manifest identify different oracle binaries"
     }
     val repairLineage = RepairAcpEvidenceArchiveVerifier.verifyIfPresent(
         projectDir = projectDir,
@@ -676,7 +690,9 @@ internal fun writeProjectEvidenceAtomically(path: Path, content: ByteArray) =
 
 private fun writeProjectEvidenceAtomically(path: Path, writer: (OutputStream) -> Unit) {
     val parent = requireNotNull(path.parent) { "project evidence path has no parent: $path" }
-    val temporary = Files.createTempFile(parent, ".${path.fileName}.", ".tmp")
+    // Declared evidence names may already occupy the filesystem's full component
+    // budget. A fixed sibling prefix preserves atomic replacement for those names.
+    val temporary = Files.createTempFile(parent, ".project-evidence-", ".tmp")
     try {
         Files.newOutputStream(temporary, StandardOpenOption.TRUNCATE_EXISTING).use(writer)
         try {

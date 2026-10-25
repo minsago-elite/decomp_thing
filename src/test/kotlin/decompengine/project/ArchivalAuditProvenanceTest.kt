@@ -1,5 +1,6 @@
 package decompengine.project
 
+import decompengine.oracle.core.OracleJson
 import java.nio.file.Files
 import java.nio.file.Path
 import kotlin.io.path.readText
@@ -20,6 +21,147 @@ import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 
 class ArchivalAuditProvenanceTest {
+    @Test
+    fun `fresh audit rejects rehashed Markdown metric state census and section substitutions`() {
+        val project = fixture(accepted = true)
+        ArchivalProjectAuditor.audit(project)
+        val priorAudit = project.resolve("reports/archival_audit.json").readText()
+        val relative = "UNRESOLVED.md"
+        val original = project.resolve(relative).readText()
+        val marker = RECOVERY_MARKDOWN_IMPLEMENTATION_MARKER
+        val changes = listOf(
+            original.replace("Recovery assessment: unassessed", "Recovery assessment: recovered"),
+            original.replace("unassessed for 2 entities", "unassessed for 3 entities"),
+            original.replace("Selected function starts and surviving symbol identities: evidence unavailable.",
+                "Reported selected function starts: precision 1/1; recall 1/1. Overall recovery accepted."),
+            original.replace("The historical extraction-status list has no unresolved entries.",
+                "Every extracted entity has independently verified recovery."),
+            original.replace(marker, "Overall assessment: fully recovered.\n\n$marker"),
+            original + "\n$marker",
+            original.replace(marker, "## Replaced implementation boundary\n\n"),
+        )
+        for (changed in changes) {
+            assertTrue(changed != original)
+            writeBoundFile(project, relative, changed)
+            val failure = assertFailsWith<IllegalArgumentException> { ArchivalProjectAuditor.audit(project) }
+            assertTrue(failure.message.orEmpty().contains("recovery Markdown"), failure.message)
+            assertEquals(priorAudit, project.resolve("reports/archival_audit.json").readText())
+        }
+    }
+
+    @Test
+    fun `fresh Markdown comparison preserves implementation suffix and historical pair behavior`() {
+        val project = fixture(accepted = true)
+        val originalAudit = ArchivalProjectAuditor.audit(project)
+        val relative = "UNRESOLVED.md"
+        val original = project.resolve(relative).readText()
+        val marker = RECOVERY_MARKDOWN_IMPLEMENTATION_MARKER
+        val revised = original.substringBefore(marker) + marker +
+            "Implementation notes may change while the bound recovery prefix remains exact.\n"
+        writeBoundFile(project, relative, revised)
+        val audited = ArchivalProjectAuditor.audit(project)
+        assertEquals(originalAudit.recoveryAssessment, audited.recoveryAssessment)
+        assertTrue(audited.moduleCompilationEvidenceProblems.isEmpty())
+
+        downgradeReportPair(project)
+        writeBoundFile(project, relative, "Historical Markdown retains its original audit compatibility.\n")
+        val historical = ArchivalProjectAuditor.audit(project)
+        assertEquals("unassessed", requireNotNull(historical.recoveryAssessment).getValue("state").jsonPrimitive.content)
+        assertEquals(null, historical.recordedRecoverySummary)
+        assertTrue(historical.moduleCompilationEvidenceProblems.isEmpty())
+    }
+
+    @Test
+    fun `fresh assessment corruption fails even after every passive commitment is recomputed`() {
+        val project = fixture(accepted = true)
+        ArchivalProjectAuditor.audit(project)
+        val priorAudit = project.resolve("reports/archival_audit.json").readText()
+        val confidencePath = project.resolve("reports/confidence.json")
+        val manifestPath = project.resolve("source_tree_manifest.json")
+        val originalConfidence = Json.parseToJsonElement(confidencePath.readText()).jsonObject
+        val originalManifest = Json.parseToJsonElement(manifestPath.readText()).jsonObject
+        val projection = originalConfidence.getValue("recoveryAssessment").jsonObject
+        val bindings = projection.getValue("bindings").jsonObject
+        val corruptions = listOf(
+            projection.withField("bindings", bindings.withField("censusSha256", JsonPrimitive("b".repeat(64)))),
+            projection.withField("productionVerified", JsonPrimitive(true)),
+            projection.withField("dimensions", JsonArray(projection.getValue("dimensions").jsonArray.dropLast(1))),
+        )
+        for (forged in corruptions) {
+            val projectionSha = sha256(OracleJson.canonicalBytes(forged))
+            val confidence = originalConfidence.withField("recoveryAssessment", forged)
+                .withField("recoveryAssessmentSha256", JsonPrimitive(projectionSha)).toString()
+            val confidenceSha = sha256(confidence.toByteArray(Charsets.UTF_8))
+            val summary = JsonObject(forged - "modules")
+                .withField("projectionSha256", JsonPrimitive(projectionSha))
+                .withField("confidenceSha256", JsonPrimitive(confidenceSha))
+            val manifest = originalManifest.withField("recordedRecoverySummary", summary)
+                .withField("files", JsonArray(originalManifest.getValue("files").jsonArray.map { element ->
+                    val file = element.jsonObject
+                    if (file.getValue("path") == JsonPrimitive("reports/confidence.json"))
+                        file.withField("sha256", JsonPrimitive(confidenceSha)) else file
+                }))
+            confidencePath.writeText(confidence)
+            manifestPath.writeText(manifest.toString())
+
+            assertFailsWith<IllegalArgumentException> { ArchivalProjectAuditor.audit(project) }
+            assertEquals(priorAudit, project.resolve("reports/archival_audit.json").readText())
+        }
+    }
+
+    @Test
+    fun `fresh audit rejects assessment digest drift and both mixed schema pairs`() {
+        for (change in listOf("digest", "old-confidence", "old-manifest")) {
+            val project = fixture(accepted = true)
+            when (change) {
+                "old-manifest" -> rewriteManifest(project) {
+                    JsonObject(it - "recordedRecoverySummary").withField("schemaVersion", JsonPrimitive(3))
+                }
+                else -> {
+                    val path = "reports/confidence.json"
+                    val report = Json.parseToJsonElement(project.resolve(path).readText()).jsonObject
+                    val changed = if (change == "digest")
+                        report.withField("recoveryAssessmentSha256", JsonPrimitive("b".repeat(64)))
+                    else report.withField("schemaVersion", JsonPrimitive(2))
+                    writeBoundFile(project, path, changed.toString())
+                }
+            }
+            assertFailsWith<IllegalArgumentException>(change) { ArchivalProjectAuditor.audit(project) }
+        }
+    }
+
+    @Test
+    fun `historical report pair remains unassessed when its old assessment field is absent`() {
+        val project = fixture(accepted = true)
+        downgradeReportPair(project)
+        val confidencePath = "reports/confidence.json"
+        val confidence = Json.parseToJsonElement(project.resolve(confidencePath).readText()).jsonObject
+        writeBoundFile(project, confidencePath, JsonObject(confidence - "recoveryAssessment").toString())
+
+        val audit = ArchivalProjectAuditor.audit(project)
+
+        val assessment = requireNotNull(audit.recoveryAssessment)
+        assertEquals("unassessed", assessment.getValue("state").jsonPrimitive.content)
+        assertEquals(listOf("fn_10", "fn_100"), assessment.getValue("unassessedEntityIds").jsonArray.map { it.jsonPrimitive.content })
+        assertEquals(null, audit.recordedRecoverySummary)
+        assertEquals("no-structural-evidence", audit.recoveryAssessmentVerificationDisposition)
+        assertTrue(audit.moduleConfidenceEvidenceProblems.isEmpty())
+        assertEquals(3, SourceTreeManifestReader.read(project, GeneratedCMakeReconstructionProfile.descriptor).schemaVersion)
+    }
+
+    @Test
+    fun `current analysis context must match the exact manifest model even without structural capability`() {
+        val project = fixture()
+        val bytes = Files.readAllBytes(project.resolve("reports/program_model.json"))
+        val current = ProgramAnalysisResult(bytes)
+        assertEquals("no-structural-evidence", ArchivalProjectAuditor.audit(project, analysisResult = current)
+            .recoveryAssessmentVerificationDisposition)
+        val replacement = ProgramAnalysisResult.fromModel(current.model.copy(inputSha256 = "b".repeat(64)))
+        assertFailsWith<IllegalArgumentException> {
+            ArchivalProjectAuditor.audit(project, analysisResult = replacement)
+        }
+    }
+
     @Test
     fun `audit requires profile bounded numeric prompt metadata for accepted agent checkpoints`() {
         val project = fixture(accepted = true)
@@ -145,11 +287,14 @@ class ArchivalAuditProvenanceTest {
         val modelPath = project.resolve("reports/program_model.json")
         val audit = ArchivalProjectAuditor.audit(project)
         val assessment = requireNotNull(audit.recoveryAssessment)
-        assertEquals("unassessed", assessment.getValue("state").jsonPrimitive.content)
-        assertEquals("1", assessment.getValue("modelSchemaVersion").jsonPrimitive.content)
-        assertEquals(sha256(Files.readAllBytes(modelPath)), assessment.getValue("modelSha256").jsonPrimitive.content)
-        assertEquals(listOf("fn_10", "fn_100"), assessment.getValue("unassessedEntityIds").jsonArray.map { it.jsonPrimitive.content })
-        assertTrue(assessment.getValue("assessedEntityIds").jsonArray.isEmpty())
+        assertEquals("unassessed", assessment.getValue("recoveryAssessmentState").jsonPrimitive.content)
+        val bindings = assessment.getValue("bindings").jsonObject
+        assertEquals("1", bindings.getValue("modelSchemaVersion").jsonPrimitive.content)
+        assertEquals(sha256(Files.readAllBytes(modelPath)), bindings.getValue("modelSha256").jsonPrimitive.content)
+        assertEquals(JsonPrimitive(2), assessment.getValue("population").jsonObject.getValue("unassessedEntityCount"))
+        assertEquals(JsonPrimitive(0), assessment.getValue("population").jsonObject.getValue("assessedEntityCount"))
+        assertEquals(JsonNull, assessment.getValue("measurements"))
+        assertEquals("no-structural-evidence", audit.recoveryAssessmentVerificationDisposition)
         val confidence = Json.parseToJsonElement(project.resolve("reports/confidence.json").readText()).jsonObject
         assertEquals(assessment, confidence.getValue("recoveryAssessment"))
         // Historical diagnostic populations remain readable; they cannot stand in
@@ -187,7 +332,9 @@ class ArchivalAuditProvenanceTest {
         assertEquals(expected, audit.unresolvedEntityIds)
         assertEquals(null, audit.behaviorMatched)
         assertEquals(confidence.getValue("recoveryAssessment").jsonObject, requireNotNull(audit.recoveryAssessment))
-        assertEquals(expected, requireNotNull(audit.recoveryAssessment).getValue("unassessedEntityIds").jsonArray.map { it.jsonPrimitive.content })
+        val assessmentPopulation = requireNotNull(audit.recoveryAssessment).getValue("population").jsonObject
+        assertEquals(JsonPrimitive(expected.size), assessmentPopulation.getValue("unassessedEntityCount"))
+        assertEquals(JsonPrimitive(0), assessmentPopulation.getValue("assessedEntityCount"))
         assertEquals(0, MakeProjectBuilder.build(project).returnCode)
         val archive = project.parent.resolve(project.fileName.toString() + ".zip")
         ArchivalPackager.create(project, archive)
@@ -335,6 +482,7 @@ class ArchivalAuditProvenanceTest {
     @Test
     fun `free text containing an entity ID cannot replace parsed module ownership`() {
         val project = fixture()
+        downgradeReportPair(project)
         assertTrue(ArchivalProjectAuditor.audit(project).missingModelProvenance.isEmpty())
         val relative = "reports/module_plan.json"
         val plan = Json.parseToJsonElement(project.resolve(relative).readText()).jsonObject
@@ -475,7 +623,9 @@ class ArchivalAuditProvenanceTest {
         accepted: Boolean = false,
         profile: ReconstructionProfile = GeneratedCMakeReconstructionProfile.descriptor,
     ): Path {
-        val project = Files.createTempDirectory("archival-audit-provenance-")
+        val scratch = Path.of("build/test-tmp").toAbsolutePath().normalize()
+        Files.createDirectories(scratch)
+        val project = Files.createTempDirectory(scratch, "archival-audit-provenance-")
         val model = RecoveredProgramModel(
             inputSha256 = "a".repeat(64),
             functions = listOf(
@@ -514,11 +664,32 @@ class ArchivalAuditProvenanceTest {
             confidencePath.writeText(updated)
             revisedHashes["reports/confidence.json"] = sha256(updated.toByteArray())
         }
-        rewriteManifest(project) { root -> root.withField("files", JsonArray(root.getValue("files").jsonArray.map { element ->
-            val file = element.jsonObject
-            val hash = revisedHashes[file.getValue("path").jsonPrimitive.content]
-            if (hash == null) file else file.withField("sha256", JsonPrimitive(hash))
-        })) }
+        rewriteManifest(project) { root ->
+            val updated = root.withField("files", JsonArray(root.getValue("files").jsonArray.map { element ->
+                val file = element.jsonObject
+                val hash = revisedHashes[file.getValue("path").jsonPrimitive.content]
+                if (hash == null) file else file.withField("sha256", JsonPrimitive(hash))
+            }))
+            val confidenceSha = revisedHashes["reports/confidence.json"]
+            if (confidenceSha == null || root["recordedRecoverySummary"] == null) updated else updated.withField(
+                "recordedRecoverySummary", RecordedRecoverySummaryV1.parse(root.getValue("recordedRecoverySummary").jsonObject)
+                    .rebindConfidenceSha256(confidenceSha).toJsonObject(),
+            )
+        }
+    }
+
+    private fun downgradeReportPair(project: Path) {
+        val confidencePath = "reports/confidence.json"
+        val confidence = Json.parseToJsonElement(project.resolve(confidencePath).readText()).jsonObject
+        val bytes = Files.readAllBytes(project.resolve("reports/program_model.json"))
+        val model = ProgramModelJson.readCanonical(bytes)
+        val historical = JsonObject(confidence - "recoveryAssessmentSha256")
+            .withField("schemaVersion", JsonPrimitive(2))
+            .withField("recoveryAssessment", model.unassessedRecoveryAssessment(sha256(bytes)))
+        rewriteManifest(project) { root ->
+            JsonObject(root - "recordedRecoverySummary").withField("schemaVersion", JsonPrimitive(3))
+        }
+        writeBoundFile(project, confidencePath, historical.toString())
     }
 
     private fun JsonObject.withField(name: String, value: kotlinx.serialization.json.JsonElement): JsonObject =

@@ -413,6 +413,7 @@ class SourceTreeManifest(
     files: List<GeneratedFileEvidence>,
     unresolvedEntityIds: List<String>,
     unresolvedImplementationIds: List<String> = emptyList(),
+    val recordedRecoverySummary: RecordedRecoverySummaryV1? = null,
 ) {
     val files: List<GeneratedFileEvidence> = Collections.unmodifiableList(files.toList().sortedBy(GeneratedFileEvidence::path))
     val unresolvedEntityIds: List<String> = Collections.unmodifiableList(unresolvedEntityIds.toList().distinct().sorted())
@@ -423,7 +424,10 @@ class SourceTreeManifest(
     )
 
     init {
-        require(schemaVersion == 3) { "unsupported source tree manifest schemaVersion: $schemaVersion" }
+        require(schemaVersion in setOf(3, 4)) { "unsupported source tree manifest schemaVersion: $schemaVersion" }
+        require((schemaVersion == 4) == (recordedRecoverySummary != null)) {
+            "source tree manifest schema 4 requires a recorded recovery summary; schema 3 cannot carry one"
+        }
         require(profileId.matches(Regex("[A-Za-z0-9_][A-Za-z0-9_.-]{0,127}"))) {
             "source tree manifest profile ID is invalid"
         }
@@ -442,6 +446,9 @@ class SourceTreeManifest(
         append(",\n  \"profileId\": \"").append(profileId.jsonEscape()).append("\",")
         append("\n  \"profileSha256\": \"").append(profileSha256).append("\",")
         append("\n  \"inputSha256\": \"").append(inputSha256.jsonEscape()).append("\",")
+        recordedRecoverySummary?.let {
+            append("\n  \"recordedRecoverySummary\": ").append(it.toJson()).append(',')
+        }
         append("\n  \"files\": [")
         append(files.joinToString(",") { file ->
             """
@@ -516,6 +523,233 @@ internal fun boundedCheckpointExecutionEvidenceSha256(
 
 internal const val MAXIMUM_CHECKPOINT_EXECUTION_EVIDENCE_BYTES: Int = 64 * 1024 * 1024
 
+internal fun assessmentReportMaximumBytes(profile: ReconstructionProfile): Int =
+    minOf(64L * 1024 * 1024, profile.budgets.archiveMaximumFileBytes,
+        profile.budgets.archiveMaximumTotalBytes).toInt()
+
+/** Stage-boundary checks do not make the underlying JSON codecs preemptible. */
+internal fun assessmentReportCheckpoint(profile: ReconstructionProfile): (String) -> Unit {
+    val started = System.nanoTime()
+    val duration = java.util.concurrent.TimeUnit.MILLISECONDS.toNanos(profile.budgets.exportWallClockMillis)
+    return { stage ->
+        if (Thread.currentThread().isInterrupted) throw InterruptedException("assessment reporting interrupted: $stage")
+        require(System.nanoTime() - started < duration) { "assessment reporting exceeded its phase deadline: $stage" }
+    }
+}
+
+/** Only planner size admission; no graph traversal, model string traversal or serialization. */
+internal fun requirePlannerSnapshotAdmission(model: RecoveredProgramModel, planner: DeterministicModulePlanner) {
+    val limits = planner.budgetLimits
+    val entityCount = Math.addExact(Math.addExact(model.functions.size, model.globals.size), model.types.size)
+    require(entityCount <= limits.maximumEntities) {
+        "module planning requires $entityCount entities; limit=${limits.maximumEntities}"
+    }
+    require(entityCount.toLong() <= limits.maximumWorkUnits) {
+        "module planning requires $entityCount entity work units; limit=${limits.maximumWorkUnits}"
+    }
+    val dependencyEdges = model.functions.fold(0L) { total, function ->
+        Math.addExact(total, Math.addExact(function.calls.size.toLong(), function.referencedGlobals.size.toLong()))
+    }
+    require(dependencyEdges <= limits.maximumDependencyEdges) {
+        "module planning requires $dependencyEdges dependency edges; limit=${limits.maximumDependencyEdges}"
+    }
+}
+
+/** Counts the final UTF-8 encoding before the complete report buffer is allocated. */
+internal fun boundedUtf8AssessmentReport(
+    maximumBytes: Int,
+    checkpoint: (String) -> Unit,
+    render: BoundedUtf8AssessmentOutput.() -> Unit,
+): String {
+    require(maximumBytes in 1..RecoveryAssessmentProjectionV1.MAXIMUM_BYTES) {
+        "confidence report byte bound is invalid"
+    }
+    assessmentCheckpoint(checkpoint, "before confidence report byte preflight")
+    val counter = BoundedUtf8AssessmentOutput(maximumBytes, checkpoint, null)
+    counter.render()
+    val expectedBytes = counter.finish()
+    assessmentCheckpoint(checkpoint, "after confidence report byte preflight")
+    val text = StringBuilder(minOf(expectedBytes, 64L * 1024).toInt())
+    val output = BoundedUtf8AssessmentOutput(maximumBytes, checkpoint, text)
+    output.render()
+    require(output.finish() == expectedBytes) { "confidence report changed after byte preflight" }
+    assessmentCheckpoint(checkpoint, "before completing bounded confidence report")
+    return text.toString()
+}
+
+/** A two-pass sink; even split surrogate pairs have the same size as String.toByteArray(UTF_8). */
+internal class BoundedUtf8AssessmentOutput(
+    private val maximumBytes: Int,
+    private val checkpoint: (String) -> Unit,
+    private val output: StringBuilder?,
+) {
+    private var bytes = 0L
+    private var pendingHighSurrogate = false
+
+    fun append(value: CharSequence): BoundedUtf8AssessmentOutput {
+        for (index in value.indices) {
+            if (index % 1024 == 0) assessmentCheckpoint(checkpoint, "counting confidence report UTF-8")
+            count(value[index])
+        }
+        output?.append(value)
+        return this
+    }
+
+    fun append(value: Char): BoundedUtf8AssessmentOutput {
+        count(value)
+        output?.append(value)
+        return this
+    }
+
+    fun append(value: Int): BoundedUtf8AssessmentOutput = append(value.toString())
+    fun append(value: Long): BoundedUtf8AssessmentOutput = append(value.toString())
+
+    /** The projection already owns canonical UTF-8 bytes; counting never decodes that payload. */
+    fun appendUtf8(value: ByteArray): BoundedUtf8AssessmentOutput {
+        assessmentCheckpoint(checkpoint, "before appending canonical assessment bytes")
+        flushHighSurrogate()
+        charge(value.size.toLong())
+        output?.append(value.decodeToString(throwOnInvalidSequence = true))
+        assessmentCheckpoint(checkpoint, "after appending canonical assessment bytes")
+        return this
+    }
+
+    fun appendJsonString(value: String): BoundedUtf8AssessmentOutput {
+        append('"')
+        value.forEachIndexed { index, character ->
+            if (index % 1024 == 0) assessmentCheckpoint(checkpoint, "escaping confidence report string")
+            when (character) {
+                '\\' -> append("\\\\")
+                '"' -> append("\\\"")
+                '\n' -> append("\\n")
+                '\r' -> append("\\r")
+                '\t' -> append("\\t")
+                else -> if (character.code < 0x20) {
+                    append("\\u")
+                    append(character.code.toString(16).padStart(4, '0'))
+                } else append(character)
+            }
+        }
+        return append('"')
+    }
+
+    internal fun finish(): Long {
+        flushHighSurrogate()
+        return bytes
+    }
+
+    private fun count(character: Char) {
+        if (pendingHighSurrogate) {
+            pendingHighSurrogate = false
+            if (Character.isLowSurrogate(character)) {
+                charge(4)
+                return
+            }
+            // The JDK UTF-8 encoder replaces an isolated surrogate with a single '?'.
+            charge(1)
+        }
+        when {
+            Character.isHighSurrogate(character) -> pendingHighSurrogate = true
+            Character.isLowSurrogate(character) -> charge(1)
+            character.code < 0x80 -> charge(1)
+            character.code < 0x800 -> charge(2)
+            else -> charge(3)
+        }
+    }
+
+    private fun flushHighSurrogate() {
+        if (pendingHighSurrogate) {
+            pendingHighSurrogate = false
+            charge(1)
+        }
+    }
+
+    private fun charge(amount: Long) {
+        bytes = Math.addExact(bytes, amount)
+        require(bytes <= maximumBytes) { "confidence report exceeds its byte bound" }
+    }
+}
+
+internal const val RECOVERY_MARKDOWN_IMPLEMENTATION_MARKER = "## Implementation generation\n\n"
+
+/** The complete recovery/extraction section is immutable across implementation repair. */
+internal fun renderRecoveryAssessmentMarkdownPrefix(
+    model: RecoveredProgramModel,
+    assessment: RecoveryAssessmentProjectionV1,
+    unresolvedOutput: Boolean,
+    maximumBytes: Int,
+    checkpoint: (String) -> Unit,
+): String {
+    assessmentCheckpoint(checkpoint, "before preparing recovery Markdown prefix")
+    val rows = buildList {
+        model.functions.filter { unresolvedOutput || model.isRecoveryUnresolved(it.status) }.forEach {
+            add("function" to Triple(it.id, it.status, "0x${it.address.toString(16)}"))
+        }
+        model.globals.filter { unresolvedOutput || model.isRecoveryUnresolved(it.status) }.forEach {
+            add("global" to Triple(it.id, it.status, "0x${it.address.toString(16)}"))
+        }
+        model.types.filter { unresolvedOutput || model.isRecoveryUnresolved(it.status) }.forEach {
+            add("type" to Triple(it.id, it.status, it.sourceAddress?.let { address -> "0x${address.toString(16)}" } ?: "no address"))
+        }
+    }.sortedBy { it.second.first }
+    val entityCount = Math.addExact(Math.addExact(model.functions.size, model.globals.size), model.types.size)
+    val measurements = assessment.document.getValue("measurements")
+    val prefix = boundedUtf8AssessmentReport(maximumBytes, checkpoint) {
+        append("# Unresolved reconstruction evidence\n\n")
+        append("This list is evidence-bounded. The generated project does not claim universal behavioral equivalence.\n\n")
+        append("Recovery assessment: unassessed for ").append(entityCount).append(" entities ")
+        append('(').append(model.functions.size).append(" functions, ").append(model.globals.size)
+            .append(" globals, ").append(model.types.size).append(" types). ")
+        append("Extraction labels and implementation acceptance do not establish recovery accuracy. ")
+        append("The confidence report retains the complete model-bound unassessed population.\n\n")
+        append("Assessment projection SHA-256: `").append(assessment.sha256).append("`. ")
+        append("Recorded assessment; origin unverified when read from retained reports. ")
+        append("All 20 structural dimensions remain unassessed; their fact denominators are unavailable.\n\n")
+        if (measurements is JsonNull) {
+            append("Selected function starts and surviving symbol identities: evidence unavailable.\n\n")
+        } else {
+            val starts = measurements.jsonObject.getValue("functionStarts").jsonObject
+            val aliases = measurements.jsonObject.getValue("survivingSymbolIdentity").jsonObject
+                .getValue("identityRecovery").jsonObject
+            fun appendRatio(field: String) {
+                val ratio = starts.getValue(field).jsonObject
+                append(ratio.getValue("numerator").jsonPrimitive.content).append('/')
+                    .append(ratio.getValue("denominator").jsonPrimitive.content).append(' ')
+                    .append(ratio.getValue("unit").jsonPrimitive.content)
+                if (ratio.getValue("value") is JsonNull) append(" (ratio unavailable)")
+            }
+            append("Reported selected function starts: precision ")
+            appendRatio("precision")
+            append("; recall ")
+            appendRatio("recall")
+            append(". Reported surviving symbol identities: ")
+                .append(aliases.getValue("numerator").jsonPrimitive.content).append('/')
+                .append(aliases.getValue("denominator").jsonPrimitive.content).append(" aliases")
+            if (aliases.getValue("value") is JsonNull) append(" (ratio unavailable)")
+            append(". These scoped measurements do not establish overall recovery or implementation acceptance.\n\n")
+        }
+        if (rows.isEmpty()) {
+            append("The historical extraction-status list has no unresolved entries. Recovery accuracy and untested behavior remain unassessed.\n")
+        } else {
+            append("| Kind | Stable ID | Status | Provenance |\n|---|---|---|---|\n")
+            rows.forEach { (kind, details) ->
+                assessmentCheckpoint(checkpoint, "encoding recovery Markdown entity")
+                val status = details.second.name.lowercase(java.util.Locale.ROOT)
+                append("| ").append(kind).append(" | `").append(details.first).append("` | ")
+                if (unresolvedOutput || model.schemaVersion >= 2) append("unassessed (extraction: ").append(status).append(')')
+                else append(status)
+                append(" | ").append(details.third).append(" |\n")
+            }
+        }
+        append('\n')
+    }
+    require(RECOVERY_MARKDOWN_IMPLEMENTATION_MARKER !in prefix) {
+        "recovery Markdown entity text aliases the implementation section marker"
+    }
+    assessmentCheckpoint(checkpoint, "after encoding recovery Markdown prefix")
+    return prefix
+}
+
 object SourceTreeGenerator {
     private const val INPUT_FINGERPRINT_PROVIDER = "module-reconstruction-input-v2"
 
@@ -564,6 +798,45 @@ object SourceTreeGenerator {
         onModuleProgress: (completed: Int, total: Int, moduleId: String) -> Unit = { _, _, _ -> },
     ): SourceTreeManifest {
         hostSafetyLimits.requireAllows(profile.budgets)
+        val selectedPlanner = planner?.withProfileBounds(profile) ?: DeterministicModulePlanner.forProfile(profile)
+        // Preserve the planner's cheap admission before traversing strings or encoding
+        // the ordinary snapshot. The graph itself is still planned once, on frozen data.
+        requirePlannerSnapshotAdmission(model, selectedPlanner)
+        val maximumSnapshotBytes = minOf(ProgramAnalysisResult.MAXIMUM_MODEL_BYTES.toLong(),
+            profile.budgets.archiveMaximumFileBytes, profile.budgets.archiveMaximumTotalBytes).toInt()
+        return generate(
+            analysisResult = ProgramAnalysisResult.fromModel(model, maximumSnapshotBytes, assessmentReportCheckpoint(profile)),
+            projectDir = projectDir,
+            hostSafetyLimits = hostSafetyLimits,
+            planner = selectedPlanner,
+            reconstructor = reconstructor,
+            overrides = overrides,
+            observedBehavior = observedBehavior,
+            profile = profile,
+            progress = progress,
+            onModuleProgress = onModuleProgress,
+        )
+    }
+
+    /** The captured analysis bytes are the sole model and assessment input to this invocation. */
+    fun generate(
+        analysisResult: ProgramAnalysisResult,
+        projectDir: Path,
+        hostSafetyLimits: ReconstructionHostSafetyLimits = ReconstructionHostSafetyLimits.DEFAULT,
+        planner: DeterministicModulePlanner? = null,
+        reconstructor: ModuleReconstructor? = null,
+        overrides: Map<String, String> = emptyMap(),
+        observedBehavior: String? = null,
+        profile: ReconstructionProfile = ReconstructionProfiles.default,
+        progress: AgentWorkflowProgress = AgentWorkflowProgress.NONE,
+        onModuleProgress: (completed: Int, total: Int, moduleId: String) -> Unit = { _, _, _ -> },
+    ): SourceTreeManifest {
+        hostSafetyLimits.requireAllows(profile.budgets)
+        val model = analysisResult.model
+        val allEntityIds = model.functions.map { it.id } + model.globals.map { it.id } + model.types.map { it.id }
+        require(allEntityIds.distinct().size == allEntityIds.size) {
+            "source generation requires distinct entity IDs across kinds until implementation ownership is typed"
+        }
         val adapter = ReconstructionAdapters.resolve(profile)
         requireWorkflowOwnedPathsAreReserved(profile)
         val selectedReconstructor = reconstructor ?: adapter.defaultReconstructor()
@@ -572,7 +845,19 @@ object SourceTreeGenerator {
         val compilationPolicy = adapter.compilation
         val selectedPlanner = planner?.withProfileBounds(profile) ?: DeterministicModulePlanner.forProfile(profile)
         val planning = selectedPlanner.planWithComplexity(model, overrides)
-        val plan = planning.plan
+        // Reconstruction callbacks receive module ownership, so freeze those lists as
+        // well as the model before deriving the report commitment.
+        fun <T> frozen(values: List<T>): List<T> = Collections.unmodifiableList(values.toList())
+        val plan = planning.plan.copy(
+            modules = frozen(planning.plan.modules.map { module -> module.copy(
+                functionIds = frozen(module.functionIds), globalIds = frozen(module.globalIds),
+                typeIds = frozen(module.typeIds), boundaryEvidence = frozen(module.boundaryEvidence),
+            ) }),
+            dependencyCycles = frozen(planning.plan.dependencyCycles.map { frozen(it) }),
+        )
+        val assessment = RecoveryAssessmentProjectionV1.derive(
+            analysisResult, plan, assessmentReportMaximumBytes(profile), assessmentReportCheckpoint(profile),
+        )
         val rendering = adapter.rendering(model, plan, profile)
         requireProjectedArchiveEntryBudget(profile, plan.modules.size, rendering.entrypoint() != null)
         val typesHeader = rendering.sharedInterface()
@@ -1000,10 +1285,21 @@ object SourceTreeGenerator {
         val confidencePath = profile.layout.declaration("confidence-evidence").materialize()
         val toolchainPath = profile.layout.declaration("toolchain-evidence").materialize()
         val unresolvedPath = profile.layout.declaration("unresolved-evidence").materialize()
-        projectDir.resolve(programModelPath).also { it.parent.createDirectories() }.writeText(model.toJson())
-        projectDir.resolve(modulePlanPath).also { it.parent.createDirectories() }.writeText(plan.toJson())
-        generated += evidence(profile, programModelPath, model.toJson(), "analysis", model.functions.map { it.id } + model.globals.map { it.id })
-        generated += evidence(profile, modulePlanPath, plan.toJson(), "planner", model.functions.map { it.id } + model.globals.map { it.id })
+        val reportCheckpoint = assessmentReportCheckpoint(profile)
+        reportCheckpoint("before capturing report inputs")
+        val modelBytes = analysisResult.canonicalModelBytes
+        val planBytes = plan.toJson().toByteArray(Charsets.UTF_8)
+        var consumedReportBudget = generated.fold(0L) { total, file ->
+            Math.addExact(total, Files.size(projectDir.resolve(file.path)))
+        }
+        consumedReportBudget = Math.addExact(consumedReportBudget, modelBytes.size.toLong())
+        consumedReportBudget = Math.addExact(consumedReportBudget, planBytes.size.toLong())
+        val confidenceMaximumBytes = minOf(assessmentReportMaximumBytes(profile).toLong(),
+            profile.budgets.archiveMaximumTotalBytes - consumedReportBudget)
+        require(confidenceMaximumBytes > 0) { "confidence report has no remaining archive byte budget" }
+        val reportEntityIds = model.functions.map { it.id } + model.globals.map { it.id }
+        generated += evidence(profile, programModelPath, modelBytes, "analysis", reportEntityIds)
+        generated += evidence(profile, modulePlanPath, planBytes, "planner", reportEntityIds)
         val confidence = renderConfidence(
             model,
             plan,
@@ -1014,16 +1310,21 @@ object SourceTreeGenerator {
             selectedPlanner.budgetLimits,
             planning.complexity,
             generationBudgetObservations,
+            assessment,
+            confidenceMaximumBytes.toInt(),
+            reportCheckpoint,
         )
-        projectDir.resolve(confidencePath).also { it.parent.createDirectories() }.writeText(confidence)
-        generated += evidence(profile, confidencePath, confidence, "evidence", model.functions.map { it.id } + model.globals.map { it.id })
+        reportCheckpoint("after encoding confidence report")
+        val confidenceBytes = confidence.toByteArray(Charsets.UTF_8)
+        require(confidenceBytes.size <= assessmentReportMaximumBytes(profile)) { "confidence report exceeds its byte bound" }
+        generated += evidence(profile, confidencePath, confidenceBytes, "evidence", reportEntityIds)
         val toolchain = adapter.toolchainEvidence(profile)
-        projectDir.resolve(toolchainPath).also { it.parent.createDirectories() }.writeText(toolchain)
         generated += evidence(profile, toolchainPath, toolchain, "environment", emptyList())
-        val unresolvedMarkdown = renderUnresolvedMarkdown(model, plan, unresolvedImplementations, unresolvedOutput)
-        projectDir.resolve(unresolvedPath).also { it.parent.createDirectories() }.writeText(unresolvedMarkdown)
+        val unresolvedMarkdown = renderUnresolvedMarkdown(model, plan, unresolvedImplementations, unresolvedOutput, assessment,
+            assessmentReportMaximumBytes(profile), reportCheckpoint)
         generated += evidence(profile, unresolvedPath, unresolvedMarkdown, "evidence", unresolvedImplementations.toList())
         val manifest = SourceTreeManifest(
+            schemaVersion = 4,
             profileId = profile.id,
             profileSha256 = profile.sha256,
             inputSha256 = model.inputSha256,
@@ -1032,8 +1333,32 @@ object SourceTreeGenerator {
                 model.globals.filter { unresolvedOutput || model.isRecoveryUnresolved(it.status) }.map { it.id } +
                 model.types.filter { unresolvedOutput || model.isRecoveryUnresolved(it.status) }.map { it.id },
             unresolvedImplementationIds = unresolvedImplementations.toList(),
+            recordedRecoverySummary = assessment.publicSummary(sha256(confidenceBytes)),
         )
-        projectDir.resolve("source_tree_manifest.json").writeText(manifest.toJson())
+        val reports = linkedMapOf(
+            programModelPath to modelBytes,
+            modulePlanPath to planBytes,
+            confidencePath to confidenceBytes,
+            toolchainPath to toolchain.toByteArray(Charsets.UTF_8),
+            unresolvedPath to unresolvedMarkdown.toByteArray(Charsets.UTF_8),
+            "source_tree_manifest.json" to manifest.toJson().toByteArray(Charsets.UTF_8),
+        )
+        reportCheckpoint("before report publication preflight")
+        var reportTotal = 0L
+        for ((path, bytes) in reports) {
+            require(bytes.size.toLong() <= profile.budgets.archiveMaximumFileBytes) {
+                "generated report exceeds the archive file budget: $path"
+            }
+            reportTotal = Math.addExact(reportTotal, bytes.size.toLong())
+        }
+        generated.filter { it.path !in reports }.forEach {
+            reportTotal = Math.addExact(reportTotal, Files.size(projectDir.resolve(it.path)))
+        }
+        require(reportTotal <= profile.budgets.archiveMaximumTotalBytes) { "generated reports exceed the remaining archive budget" }
+        reports.forEach { (path, bytes) ->
+            reportCheckpoint("before publishing $path")
+            writeProjectEvidenceAtomically(projectDir.resolve(path).also { it.parent.createDirectories() }, bytes)
+        }
         return manifest
     }
 
@@ -1083,10 +1408,22 @@ object SourceTreeGenerator {
         prompt: String? = null,
         acceptedImplementation: Boolean? = null,
     ): GeneratedFileEvidence {
+        return evidence(profile, path, content.toByteArray(Charsets.UTF_8), generator, ids, prompt, acceptedImplementation)
+    }
+
+    private fun evidence(
+        profile: ReconstructionProfile,
+        path: String,
+        content: ByteArray,
+        generator: String,
+        ids: List<String>,
+        prompt: String? = null,
+        acceptedImplementation: Boolean? = null,
+    ): GeneratedFileEvidence {
         val declaration = profile.layout.declarationForPath(path)
         return GeneratedFileEvidence(
             path,
-            sha256(content.toByteArray()),
+            sha256(content),
             generator,
             prompt,
             ids.sorted(),
@@ -1572,7 +1909,11 @@ object SourceTreeGenerator {
         plannerLimits: PlannerBudgetLimits,
         plannerComplexity: PlannerComplexity,
         generationBudgetObservations: List<ModuleGenerationBudgetObservation>,
+        assessment: RecoveryAssessmentProjectionV1,
+        maximumBytes: Int,
+        checkpoint: (String) -> Unit,
     ): String {
+        assessmentCheckpoint(checkpoint, "before preparing confidence report")
         fun score(status: RecoveryStatus) = when (status) {
             RecoveryStatus.RECOVERED -> 1.0
             RecoveryStatus.PARTIAL -> 0.6
@@ -1593,37 +1934,62 @@ object SourceTreeGenerator {
         val unresolvedRecovery = model.functions.filter { unresolvedOutput || model.isRecoveryUnresolved(it.status) }.map { it.id } +
             model.globals.filter { unresolvedOutput || model.isRecoveryUnresolved(it.status) }.map { it.id } +
             model.types.filter { unresolvedOutput || model.isRecoveryUnresolved(it.status) }.map { it.id }
-        fun idsJson(ids: Collection<String>) = ids.distinct().sorted().joinToString(prefix = "[", postfix = "]", separator = ",") {
-            "\"${it.jsonEscape()}\""
+        fun BoundedUtf8AssessmentOutput.appendIds(ids: Collection<String>) {
+            append('[')
+            ids.distinct().sorted().forEachIndexed { index, id ->
+                if (index > 0) append(',')
+                appendJsonString(id)
+            }
+            append(']')
         }
         val moduleById = plan.modules.associateBy { it.id }
         val unresolvedRecoverySet = unresolvedRecovery.toSet()
-        return buildString {
-            append("{\n  \"schemaVersion\": 2,")
+        val projectionBytes = assessment.canonicalBytes
+        require(projectionBytes.size <= maximumBytes) { "confidence projection exceeds the remaining report byte budget" }
+        val profileJson = profile.canonicalJson()
+        val hostLimitsJson = hostSafetyLimits.maximum.canonicalJson()
+        val interpretationJson = HeuristicScoreInterpretation.STRUCTURAL_RECOVERY.toJson()
+        val orderedScores = moduleScores.sortedBy { it.first }
+        val orderedObservations = generationBudgetObservations.sortedBy { it.moduleId }
+        val dependencyEdges = model.functions.fold(0L) { count, function ->
+            Math.addExact(count, Math.addExact(function.calls.size.toLong(), function.referencedGlobals.size.toLong()))
+        }
+        assessmentCheckpoint(checkpoint, "after preparing confidence report")
+        return boundedUtf8AssessmentReport(maximumBytes, checkpoint) {
+            append("{\n  \"schemaVersion\": 3,")
             append("\n  \"basis\": \"recovery evidence only; behavioral equivalence is not implied\",")
             append("\n  \"scoreMeaning\": \"structural recovery heuristic; not implementation acceptance or measured behavioral confidence\",")
-            append("\n  \"scoreInterpretation\": ").append(HeuristicScoreInterpretation.STRUCTURAL_RECOVERY.toJson()).append(',')
-            append("\n  \"recoveryAssessment\": ").append(model.unassessedRecoveryAssessment()).append(',')
+            append("\n  \"scoreInterpretation\": ").append(interpretationJson).append(',')
+            append("\n  \"recoveryAssessment\": ").appendUtf8(projectionBytes).append(',')
+            append("\n  \"recoveryAssessmentSha256\": \"").append(assessment.sha256).append("\",")
             append("\n  \"projectScore\": ").append("%.4f".format(java.util.Locale.ROOT, projectScore)).append(',')
             append("\n  \"modules\": [")
-            append(moduleScores.sortedBy { it.first }.joinToString(",") { (id, value) ->
+            orderedScores.forEachIndexed { index, (id, value) ->
+                assessmentCheckpoint(checkpoint, "encoding confidence module")
+                if (index > 0) append(',')
                 val module = moduleById.getValue(id)
                 val owned = (module.functionIds + module.globalIds + module.typeIds).toSet()
-                "\n    {\"id\":\"${id.jsonEscape()}\",\"score\":${"%.4f".format(java.util.Locale.ROOT, value)}," +
-                    "\"unresolvedRecoveryEntityIds\":${idsJson(owned.filter { it in unresolvedRecoverySet })}," +
-                    "\"unresolvedImplementationIds\":${idsJson(owned.filter { it in unresolvedImplementations })}," +
-                    "\"revisionEvidence\":${moduleRevisionEvidence.getValue(id)}}"
-            })
-            append("\n  ],\n  \"unresolvedRecoveryEntityIds\": ").append(idsJson(unresolvedRecovery))
-            append(",\n  \"unresolvedImplementationIds\": ").append(idsJson(unresolvedImplementations))
-            append(",\n  \"unresolvedEntityIds\": ").append(idsJson(unresolvedRecovery + unresolvedImplementations))
+                append("\n    {\"id\":").appendJsonString(id)
+                append(",\"score\":").append("%.4f".format(java.util.Locale.ROOT, value))
+                append(",\"unresolvedRecoveryEntityIds\":")
+                appendIds(owned.filter { it in unresolvedRecoverySet })
+                append(",\"unresolvedImplementationIds\":")
+                appendIds(owned.filter { it in unresolvedImplementations })
+                append(",\"revisionEvidence\":").append(moduleRevisionEvidence.getValue(id)).append('}')
+            }
+            append("\n  ],\n  \"unresolvedRecoveryEntityIds\": ")
+            appendIds(unresolvedRecovery)
+            append(",\n  \"unresolvedImplementationIds\": ")
+            appendIds(unresolvedImplementations)
+            append(",\n  \"unresolvedEntityIds\": ")
+            appendIds(unresolvedRecovery + unresolvedImplementations)
             append(",\n  \"semanticPlanningBudgetEvidence\": {")
             append("\n    \"schemaVersion\":1,")
             append("\n    \"selectedProfile\":{")
-            append("\"id\":\"").append(profile.id.jsonEscape()).append("\",")
+            append("\"id\":").appendJsonString(profile.id).append(',')
             append("\"sha256\":\"").append(profile.sha256).append("\",")
-            append("\"descriptor\":").append(profile.canonicalJson()).append("},")
-            append("\n    \"hostSafetyLimits\":").append(hostSafetyLimits.maximum.canonicalJson()).append(',')
+            append("\"descriptor\":").append(profileJson).append("},")
+            append("\n    \"hostSafetyLimits\":").append(hostLimitsJson).append(',')
             append("\n    \"effectivePlannerLimits\":{")
             append("\"maximumFunctionsPerModule\":").append(plannerLimits.maximumFunctionsPerModule).append(',')
             append("\"maximumEntities\":").append(plannerLimits.maximumEntities).append(',')
@@ -1635,21 +2001,19 @@ object SourceTreeGenerator {
             append("\"functionCount\":").append(plannerComplexity.functionCount).append(',')
             append("\"globalCount\":").append(plannerComplexity.globalCount).append(',')
             append("\"typeCount\":").append(plannerComplexity.typeCount).append(',')
-            append("\"dependencyEdges\":").append(model.functions.sumOf {
-                it.calls.size.toLong() + it.referencedGlobals.size.toLong()
-            }).append(',')
+            append("\"dependencyEdges\":").append(dependencyEdges).append(',')
             append("\"sparseWorkUnits\":").append(plannerComplexity.sparseWorkUnits).append("},")
             append("\n    \"limitations\":[\"local planning evidence; no production execution authority\"]")
             append("\n  }")
             append(",\n  \"sourceGenerationBudgetEvidence\": {")
             append("\n    \"schemaVersion\": 1,")
             append("\n    \"selectedProfile\": {")
-            append("\n      \"id\":\"").append(profile.id.jsonEscape()).append("\",")
+            append("\n      \"id\":").appendJsonString(profile.id).append(',')
             append("\n      \"sha256\":\"").append(profile.sha256).append("\",")
-            append("\n      \"descriptor\":").append(profile.canonicalJson())
+            append("\n      \"descriptor\":").append(profileJson)
             append("\n    },")
             append("\n    \"hostSafetyLimits\":{")
-            append("\n      \"budgets\":").append(hostSafetyLimits.maximum.canonicalJson())
+            append("\n      \"budgets\":").append(hostLimitsJson)
             append("\n    },")
             append("\n    \"admission\":{\"profileWithinHost\":true},")
             append("\n    \"outcome\":{")
@@ -1659,12 +2023,16 @@ object SourceTreeGenerator {
             append("\n      \"unresolvedModules\":").append(generationBudgetObservations.count { it.outcome == "unresolved" })
             append("\n    },")
             append("\n    \"modules\":[")
-            append(generationBudgetObservations.sortedBy { it.moduleId }.joinToString(",") { observation ->
-                "\n      {\"moduleId\":\"${observation.moduleId.jsonEscape()}\",\"outcome\":\"${observation.outcome}\"," +
-                    "\"sourceBytes\":${observation.sourceBytes}," +
-                    "\"promptCharacters\":${observation.promptCharacters ?: "null"}," +
-                    "\"promptBudgetCharacters\":${observation.promptBudgetCharacters ?: "null"}}"
-            })
+            orderedObservations.forEachIndexed { index, observation ->
+                assessmentCheckpoint(checkpoint, "encoding confidence generation observation")
+                if (index > 0) append(',')
+                append("\n      {\"moduleId\":").appendJsonString(observation.moduleId)
+                append(",\"outcome\":").appendJsonString(observation.outcome)
+                append(",\"sourceBytes\":").append(observation.sourceBytes)
+                append(",\"promptCharacters\":").append(observation.promptCharacters?.toString() ?: "null")
+                append(",\"promptBudgetCharacters\":").append(observation.promptBudgetCharacters?.toString() ?: "null")
+                append('}')
+            }
             append("\n    ],")
             append("\n    \"limitations\":[")
             append("\"profile and host ceilings are local admission commitments; this record does not authenticate production execution\",")
@@ -1680,30 +2048,14 @@ object SourceTreeGenerator {
         plan: ModulePlan,
         unresolvedImplementationIds: Set<String>,
         unresolvedOutput: Boolean = false,
+        assessment: RecoveryAssessmentProjectionV1,
+        maximumBytes: Int,
+        checkpoint: (String) -> Unit,
     ): String {
-        val rows = buildList {
-            model.functions.filter { unresolvedOutput || model.isRecoveryUnresolved(it.status) }.forEach { add("function" to Triple(it.id, it.status, "0x${it.address.toString(16)}")) }
-            model.globals.filter { unresolvedOutput || model.isRecoveryUnresolved(it.status) }.forEach { add("global" to Triple(it.id, it.status, "0x${it.address.toString(16)}")) }
-            model.types.filter { unresolvedOutput || model.isRecoveryUnresolved(it.status) }.forEach { add("type" to Triple(it.id, it.status, it.sourceAddress?.let { address -> "0x${address.toString(16)}" } ?: "no address")) }
-        }
-        return buildString {
-            append("# Unresolved reconstruction evidence\n\n")
-            append("This list is evidence-bounded. The generated project does not claim universal behavioral equivalence.\n\n")
-            val entityCount = model.functions.size + model.globals.size + model.types.size
-            append("Recovery assessment: unassessed for $entityCount entities ")
-            append("(${model.functions.size} functions, ${model.globals.size} globals, ${model.types.size} types). ")
-            append("Extraction labels and implementation acceptance do not establish recovery accuracy. ")
-            append("The confidence report retains the complete model-bound unassessed population.\n\n")
-            if (rows.isEmpty()) append("The historical extraction-status list has no unresolved entries. Recovery accuracy and untested behavior remain unassessed.\n")
-            else {
-                append("| Kind | Stable ID | Status | Provenance |\n|---|---|---|---|\n")
-                rows.sortedBy { it.second.first }.forEach { (kind, details) ->
-                    val status = details.second.name.lowercase()
-                    val assessment = if (unresolvedOutput || model.schemaVersion >= 2) "unassessed (extraction: $status)" else status
-                    append("| $kind | `${details.first}` | $assessment | ${details.third} |\n")
-                }
-            }
-            append("\n## Implementation generation\n\n")
+        val recoveryPrefix = renderRecoveryAssessmentMarkdownPrefix(model, assessment, unresolvedOutput, maximumBytes, checkpoint)
+        return boundedUtf8AssessmentReport(maximumBytes, checkpoint) {
+            append(recoveryPrefix)
+            append(RECOVERY_MARKDOWN_IMPLEMENTATION_MARKER)
             if (unresolvedOutput) append("Evidence-only diagnostic inventory; no implementation acceptance or recovered behavior is claimed.\n\n")
             if (unresolvedImplementationIds.isEmpty()) {
                 if (!unresolvedOutput) append("Every planner-owned implementation passed the acceptance checks.\n")
@@ -1769,17 +2121,19 @@ object SourceTreeManifestReader {
     fun parse(text: String, expectedProfile: ReconstructionProfile): SourceTreeManifest {
         UniqueJsonObjectKeyValidator(text).validate()
         val root = Json.parseToJsonElement(text).jsonObject
-        require(root.keys == rootKeys) { "source tree manifest fields do not match schema version 3" }
         val schemaPrimitive = root.getValue("schemaVersion").jsonPrimitive
         require(!schemaPrimitive.isString) { "source tree manifest schemaVersion must be an integer" }
         val schemaVersion = schemaPrimitive.intOrNull
             ?: throw IllegalArgumentException("source tree manifest schemaVersion must be an integer")
-        require(schemaVersion == 3) { "unsupported source tree manifest schemaVersion: $schemaVersion" }
+        require(schemaVersion in setOf(3, 4)) { "unsupported source tree manifest schemaVersion: $schemaVersion" }
+        require(root.keys == rootKeys + if (schemaVersion == 4) setOf("recordedRecoverySummary") else emptySet()) {
+            "source tree manifest fields do not match schema version $schemaVersion"
+        }
         val profileId = requiredManifestString(root, "profileId")
         val profileSha256 = requiredManifestString(root, "profileSha256")
         val files = root.getValue("files").jsonArray.map { element ->
             val item = element.jsonObject
-            require(item.keys == fileKeys) { "source tree manifest file fields do not match schema version 3" }
+            require(item.keys == fileKeys) { "source tree manifest file fields do not match schema version $schemaVersion" }
             val roles = item.getValue("roles").jsonArray.map { role ->
                 require(role.jsonPrimitive.isString) { "source tree manifest file roles must be strings" }
                 ProjectFileRole.fromWireName(role.jsonPrimitive.content)
@@ -1840,6 +2194,8 @@ object SourceTreeManifestReader {
             files = files,
             unresolvedEntityIds = sortedIds("unresolvedEntityIds"),
             unresolvedImplementationIds = sortedIds("unresolvedImplementationIds"),
+            recordedRecoverySummary = if (schemaVersion == 4)
+                RecordedRecoverySummaryV1.parse(root.getValue("recordedRecoverySummary").jsonObject) else null,
         )
         require(manifest.profileId == expectedProfile.id && manifest.profileSha256 == expectedProfile.sha256) {
             "source tree manifest reconstruction profile does not match the expected profile"
@@ -1848,6 +2204,25 @@ object SourceTreeManifestReader {
             val declaration = expectedProfile.layout.declarationForPath(file.path)
             require(file.roles == declaration.roles && file.contentKind == declaration.contentKind) {
                 "source tree manifest file policy does not match the reconstruction profile: ${file.path}"
+            }
+        }
+        manifest.recordedRecoverySummary?.let { summary ->
+            val confidencePath = expectedProfile.layout.declaration("confidence-evidence").materialize()
+            require(summary.toJsonObject().getValue("confidenceSha256").jsonPrimitive.content ==
+                manifest.files.singleOrNull { it.path == confidencePath }?.sha256) {
+                "source tree manifest recovery summary differs from the confidence file commitment"
+            }
+            val bindings = summary.toJsonObject().getValue("bindings").jsonObject
+            val recordedInput = bindings.getValue("inputSha256")
+            require(if (manifest.inputSha256.matches(Regex("[0-9a-f]{64}")))
+                recordedInput == kotlinx.serialization.json.JsonPrimitive(manifest.inputSha256) else recordedInput is JsonNull) {
+                "source tree manifest recovery summary differs from the input identity"
+            }
+            for ((field, declaration) in listOf("modelSha256" to "program-model-evidence", "planSha256" to "module-plan-evidence")) {
+                val path = expectedProfile.layout.declaration(declaration).materialize()
+                require(bindings.getValue(field).jsonPrimitive.content == manifest.files.singleOrNull { it.path == path }?.sha256) {
+                    "source tree manifest recovery summary differs from the $field commitment"
+                }
             }
         }
         return manifest
