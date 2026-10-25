@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Unprivileged transport/deadline controls; these do not qualify mounted reset."""
 import copy
+import contextlib
 import importlib.util
 import json
 import os
@@ -148,6 +149,67 @@ class FixtureTests(unittest.TestCase):
             with self.assertRaises(FIXTURE.QualificationError):
                 FIXTURE.artifact(types.SimpleNamespace(active={'finished':True}), '../state.json')
         read.assert_not_called()
+
+    def case(self, number):
+        active={'caseId':number,'sessionToken':'a'*64,'events':[],
+                'observations':FIXTURE.empty_observations(number),'formatterCount':0,
+                'before':{'scratch':'/owned/scratch'},'after':{},'outcome':'prepared'}
+        return FIXTURE.Case({'active':active},number)
+
+    def test_both_alias_restorations_are_required_and_reported(self):
+        case=self.case('K23')
+        calls=[]
+        @contextlib.contextmanager
+        def mutation(name):
+            calls.append(name)
+            yield {'canaryBeforeSha256':'b'*64,'canaryAfterSha256':'b'*64,'cleanup':True}
+        with mock.patch.object(case,'mutation',side_effect=mutation), \
+             mock.patch.object(case,'unsafe_before_request'), mock.patch.object(case,'reset'), \
+             mock.patch.object(case,'save'), mock.patch.object(FIXTURE,'snapshot',return_value={}):
+            case.exercise()
+        self.assertEqual(['visible_alias','nested_mount'],calls)
+        self.assertEqual(['alias','nested-mount'],[item['label'] for item in case.observations['canaries']])
+        self.assertIs(True,case.observations['facts']['restored'])
+
+    def test_teardown_instance_is_authenticated_before_replacement_then_reused(self):
+        case=self.case('K30'); calls=[]
+        MutationError=type('MutationError',(RuntimeError,),{})
+        def fence():
+            calls.append('fence')
+            if calls.count('fence')==1:
+                raise MutationError('original filesystem mount differs')
+            return {'disposition':'RESERVED_UNMOUNTED'}
+        cleanup=types.SimpleNamespace(fence_and_unmount=fence)
+        def construct():
+            calls.append('authenticate'); return cleanup
+        @contextlib.contextmanager
+        def replacement(name):
+            self.assertEqual(['authenticate'],calls)
+            calls.append('replace')
+            yield {'canaryBeforeSha256':'b'*64,'canaryAfterSha256':'b'*64,'cleanup':True}
+            calls.append('restore')
+        authority=types.SimpleNamespace(mount_table=lambda:[],loop_identity=lambda *args:{'path':'/dev/loop1'})
+        with mock.patch.object(case,'mutations',side_effect=construct), \
+             mock.patch.object(case,'mutation',side_effect=replacement), \
+             mock.patch.object(case,'unsafe_before_request'), mock.patch.object(case,'save'), \
+             mock.patch.object(FIXTURE,'core',return_value=authority), \
+             mock.patch.object(FIXTURE,'state',return_value={'loop':{'path':'/dev/loop1'},'owner':{}}):
+            case.exercise()
+        self.assertEqual(['authenticate','replace','fence','restore','fence'],calls)
+        self.assertTrue(case.observations['facts']['retainedReservation'])
+
+    def test_arbitrary_teardown_failure_cannot_count_as_alien_refusal(self):
+        case=self.case('K30')
+        @contextlib.contextmanager
+        def replacement(name):
+            yield {}
+        cleanup=types.SimpleNamespace(fence_and_unmount=mock.Mock(side_effect=RuntimeError('unrelated failure')))
+        with mock.patch.object(case,'mutations',return_value=cleanup), \
+             mock.patch.object(case,'mutation',side_effect=replacement), \
+             mock.patch.object(case,'unsafe_before_request'):
+            with self.assertRaisesRegex(FIXTURE.QualificationError,'unexpected reason'):
+                case.exercise()
+        self.assertFalse(case.events)
 
     def test_probe_canary_matches_operation_identity(self):
         token='a'*64

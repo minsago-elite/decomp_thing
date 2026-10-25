@@ -892,18 +892,22 @@ class Case:
                 with self.mutation(method) as facts:
                     self.unsafe_before_request()
                 self.record_canary('alias' if method == 'visible_alias' else 'nested-mount', facts)
+            self.observations['facts']['restored'] = True
             self.reset()
         elif number == 'K30':
+            cleanup = self.mutations()
             with self.mutation('mount_replacement') as facts:
                 self.unsafe_before_request()
                 try:
-                    self.mutations().fence_and_unmount()
-                except (RuntimeError, OSError, ValueError):
-                    self.event('fixture-teardown', time.monotonic_ns(), 1, reason='owned mount was replaced')
+                    cleanup.fence_and_unmount()
+                except RuntimeError as error:
+                    require(type(error).__name__ == 'MutationError' and str(error) == 'original filesystem mount differs',
+                            'teardown refused for an unexpected reason: ' + str(error))
+                    self.event('fixture-teardown', time.monotonic_ns(), 1, reason=str(error))
                 else:
                     raise QualificationError('teardown accepted an alien mount replacement')
             self.record_canary('teardown-replacement', facts)
-            finished = self.mutations().fence_and_unmount()
+            finished = cleanup.fence_and_unmount()
             require(finished['disposition'] == 'RESERVED_UNMOUNTED', 'teardown released a reserved allocation')
             self.event('fixture-teardown', time.monotonic_ns(), 0, reason='public mount removed; allocation reserved')
             self.observations['facts'].update(restored=True, removedOwnedFixture=True, retainedReservation=True)
