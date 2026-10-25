@@ -173,6 +173,27 @@ class FormatterArgumentTests(unittest.TestCase):
                 reset.formatter_argv(descriptor, uuid)
 
 
+class TracerArgumentTests(unittest.TestCase):
+    def test_signal_records_are_suppressed_without_changing_fixed_syscall_evidence(self):
+        normal = reset.tracer_argv(10,11,12,13,UUID)
+        self.assertEqual(normal[:9],['/proc/self/fd/10','-f','-qq','-s','256','-v','-y','-e',
+            'trace=execve,stat,newfstatat,fstat,openat,openat2,write,pwrite64,writev,pwritev,ioctl,close'])
+        self.assertEqual(normal[9:14],['-e','signal=none','-o','/proc/self/fd/11','--'])
+        self.assertEqual(normal[14:],['/proc/self/fd/12',*reset.formatter_argv(13,UUID)])
+        paused = reset.tracer_argv(10,11,12,13,UUID,pause=True)
+        injection = '--inject=pwrite64:signal=SIGSTOP:when=1'
+        self.assertEqual(paused.count(injection),1)
+        self.assertEqual([item for item in paused if item != injection],normal)
+
+    def test_tracer_options_and_descriptor_paths_are_not_caller_selectable(self):
+        for replacement in ('--signal=all',True,-1,'/tmp/output'):
+            with self.subTest(descriptor=replacement),self.assertRaises(reset.ResetError):
+                reset.tracer_argv(replacement,11,12,13,UUID)
+        for replacement in ('--inject=write:error=0',1,None):
+            with self.subTest(pause=replacement),self.assertRaises(reset.ResetError):
+                reset.tracer_argv(10,11,12,13,UUID,pause=replacement)
+
+
 class CanonicalProtocolTests(unittest.TestCase):
     def test_canonical_payload_is_deterministic_and_ascii(self):
         expected = b'{"a":1,"z":"\\u00e9"}'

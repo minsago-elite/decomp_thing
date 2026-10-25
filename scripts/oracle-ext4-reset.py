@@ -313,6 +313,18 @@ def formatter_argv(loop_fd, filesystem_uuid):
             '-E', 'nodiscard,lazy_itable_init=0,lazy_journal_init=0', f'/proc/self/fd/{loop_fd}', '16384']
 
 
+def tracer_argv(tracer_fd,trace_fd,formatter_fd,loop_fd,filesystem_uuid,*,pause=False):
+    for fd in (tracer_fd,trace_fd,formatter_fd):
+        integer(fd,0,2**31-1,'tracer descriptor')
+    if type(pause) is not bool:
+        fail('formatter pause is not a closed boolean')
+    injection = ['--inject=pwrite64:signal=SIGSTOP:when=1'] if pause else []
+    return [f'/proc/self/fd/{tracer_fd}','-f','-qq','-s','256','-v','-y','-e',
+        'trace=execve,stat,newfstatat,fstat,openat,openat2,write,pwrite64,writev,pwritev,ioctl,close',
+        '-e','signal=none','-o',f'/proc/self/fd/{trace_fd}',*injection,'--',
+        f'/proc/self/fd/{formatter_fd}',*formatter_argv(loop_fd,filesystem_uuid)]
+
+
 def run_process(argv, *, timeout=5.0, pass_fds=(), env=None, maximum_output=MAX_OUTPUT,
                 capture_pipe=None, capture_sink=None, maximum_capture=MAX_TRACE):
     """Bounded transport, also exercised with real unprivileged test processes."""
@@ -1451,7 +1463,7 @@ def format_once(store,state,loop_fd,image_fd):
         tracer_fd = store.open_file(tracer['resolved'])
         if fd_identity(exe) != formatter['identity'] or fd_identity(tracer_fd) != tracer['identity']:
             fail('formatter/tracer descriptor differs')
-        injection = []
+        pause_formatter = False
         if 'fault.json' in _entries(store.private):
             fault = parse_canonical(store.read('fault.json',4096))
             exact(fault,('version','id','generation','barrier'),'qualification fault')
@@ -1461,12 +1473,11 @@ def format_once(store,state,loop_fd,image_fd):
             if fault['barrier'] not in BARRIERS:
                 fail('qualification barrier differs')
             if fault['barrier'] == 'FORMAT_RUNNING' and fault['generation'] == state['previousGeneration']:
-                injection = ['--inject=pwrite64:signal=SIGSTOP:when=1']
+                pause_formatter = True
         pipe = os.pipe2(os.O_CLOEXEC)
         try:
-            run_process([f'/proc/self/fd/{tracer_fd}','-f','-qq','-s','256','-v','-y','-e',
-                'trace=execve,stat,newfstatat,fstat,openat,openat2,write,pwrite64,writev,pwritev,ioctl,close','-o',f'/proc/self/fd/{pipe[1]}',
-                *injection,'--',f'/proc/self/fd/{exe}',*argv],timeout=min(35,store.deadline-time.monotonic()),
+            run_process(tracer_argv(tracer_fd,pipe[1],exe,loop_fd,state['targetUuid'],pause=pause_formatter),
+                timeout=min(35,store.deadline-time.monotonic()),
                 pass_fds=(loop_fd,exe,tracer_fd,pipe[1],store.lock),capture_pipe=pipe,capture_sink=trace,
                 env={'PATH':'/usr/sbin:/usr/bin:/sbin:/bin','LC_ALL':'C','LANG':'C',
                     'MKE2FS_CONFIG':str(CONFIG_FILE),'E2FSPROGS_UNDO_DIR':'none'})
