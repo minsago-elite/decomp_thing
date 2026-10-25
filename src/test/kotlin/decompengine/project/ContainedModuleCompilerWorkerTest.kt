@@ -1,6 +1,8 @@
 package decompengine.project
 
 import decompengine.oracle.fulltree.OracleNativeLibraries
+import decompengine.oracle.core.OracleJson
+import kotlinx.serialization.json.JsonObject
 import java.io.File
 import java.nio.file.Files
 import java.nio.file.Path
@@ -14,8 +16,12 @@ import kotlin.test.assertTrue
 /** Real child/process fixtures, deliberately without a keeper receipt or acceptance authority. */
 class ContainedModuleCompilerWorkerTest {
     @Test
-    fun `real native compiler produces exact profile bound ET_REL observation for both built in profiles`() = withRoot { root ->
-        for ((index, profile) in ReconstructionProfiles.builtIn.withIndex()) {
+    fun `real native compiler produces exact profile bound ET_REL observation for built ins and budget variants`() = withRoot { root ->
+        val profiles = ReconstructionProfiles.builtIn.flatMap { base -> listOf(base,
+            ReconstructionProfile(base.schemaVersion, base.id, base.layout,
+                base.budgets.copy(buildWallClockMillis = 12_345, buildMaximumOutputBytes = 65536,
+                    reconstructionMaximumContextCharacters = 4096), base.adapterConfiguration)) }
+        for ((index, profile) in profiles.withIndex()) {
             val fixture = fixture(root.resolve("profile-$index"), profile = profile)
             val execution = launch(fixture)
             assertEquals(0, execution.exitCode, execution.stderr)
@@ -140,7 +146,7 @@ class ContainedModuleCompilerWorkerTest {
         }
         val request = ContainedModuleCompilerRequest("a".repeat(64), profile.id, profile.sha256, snapshot,
             "src/modules/alpha.c", inputs, compiler, sha256(Files.readAllBytes(compiler)), output,
-            maximumWallMillis, maximumOutputBytes)
+            maximumWallMillis, maximumOutputBytes, OracleJson.parse(profile.canonicalJson().toByteArray()) as JsonObject)
         return Fixture(root, request)
     }
 

@@ -32,7 +32,19 @@ import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 
+import org.junit.jupiter.api.BeforeEach
+import org.junit.jupiter.api.Tag
+import org.junit.jupiter.api.TestInfo
+import org.junit.jupiter.api.parallel.Execution
+import org.junit.jupiter.api.parallel.ExecutionMode
+import org.junit.jupiter.api.parallel.ResourceLock
+
+@Execution(ExecutionMode.SAME_THREAD)
+@ResourceLock("contained-module-compilation-runtime")
 class GeneratedCEvidenceCarrierTest {
+    @BeforeEach
+    fun requireConfiguredCompiler(test: TestInfo) = requireHostedModuleCompiler(test)
+
     @Test
     fun `carrier type commitments follow canonical model order without mutating caller facts`() = fixture { root ->
         val unsorted = rawModel().copy(types = listOf(
@@ -259,6 +271,7 @@ class GeneratedCEvidenceCarrierTest {
     }
 
     @Test
+    @Tag("ci-live")
     fun `carrier and implementation purposes cannot reuse one another's workspace checkpoints`() = fixture { root ->
         val base = BASE_PROFILES.first()
         val carrier = GeneratedCEvidenceCarrier.profile(base)

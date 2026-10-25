@@ -63,8 +63,14 @@ import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 
+@org.junit.jupiter.api.parallel.Execution(org.junit.jupiter.api.parallel.ExecutionMode.SAME_THREAD)
+@org.junit.jupiter.api.parallel.ResourceLock("contained-module-compilation-runtime")
 class ReconstructionAcpEvidenceArchiveVerifierTest {
+    @org.junit.jupiter.api.BeforeEach
+    fun requireConfiguredCompilerForLiveAcceptance(test: org.junit.jupiter.api.TestInfo) = requireHostedModuleCompiler(test)
+
     @Test
+    @org.junit.jupiter.api.Tag("ci-live")
     fun `authorized large observations dispatch successfully without retained fallback input`() {
         val scratch = Path.of("build/test-tmp").toAbsolutePath().normalize()
         Files.createDirectories(scratch)
@@ -106,6 +112,44 @@ class ReconstructionAcpEvidenceArchiveVerifierTest {
     }
 
     @Test
+    fun `authorized large observations dispatch with the complete prompt commitment`() {
+        val scratch = Path.of("build/test-tmp").toAbsolutePath().normalize()
+        Files.createDirectories(scratch)
+        val temp = Files.createTempDirectory(scratch, "large-authorized-observation-")
+        try {
+            val base = GeneratedCMakeReconstructionProfile.descriptor
+            val profile = ReconstructionProfile(base.schemaVersion, base.id, base.layout,
+                base.budgets.copy(reconstructionMaximumContextCharacters = 600_000), base.adapterConfiguration)
+            val project = temp.resolve("project")
+            val harness = ArchiveEvidenceHarness(accepted = true)
+            val observation = attributedObservation(stdoutHex = "78".repeat(16_384), cases = 17)
+            assertTrue(observation.toByteArray().size > MAXIMUM_RETAINED_MODULE_OBSERVATION_BYTES)
+            val model = RecoveredProgramModel(inputSha256 = "a".repeat(64), functions = listOf(
+                RecoveredFunction("fn_0000000000401000", "parse_input", 0x401000UL, "int parse_input(void)")))
+            val plan = DeterministicModulePlanner(layout = profile.layout).plan(model)
+            Files.createDirectories(project.resolve(SOURCE_PATH).parent)
+            val request = ProfileModulePromptInputs(model, plan, profile).request("parse", project, null)
+                .copy(observedBehavior = observation)
+            val reconstructed = BoundedLlmModuleReconstructor(harness, maximumContextCharacters = 600_000,
+                harnessProvenanceDescriptor = harness.factoryProvenance.stableDescriptor).reconstruct(request)
+            val prompt = modulePromptEvidence(request).text
+            assertEquals(sha256(prompt.toByteArray()), reconstructed.promptSha256)
+            assertEquals(prompt.length, reconstructed.promptCharacters)
+            assertEquals(600_000, reconstructed.promptBudgetCharacters)
+            assertTrue(reconstructed.issues.isEmpty())
+            assertTrue(reconstructed.agentExecutionEvidence != null)
+            assertEquals(reconstructed.promptSha256, sha256(renderAgentPrompt(
+                harness.executedRequest.objective, harness.executedRequest.contextInputs).toByteArray()))
+            // Direct dispatch proves prompt budgeting; it grants no module compiler acceptance.
+            assertFalse(project.resolve(CHECKPOINT_PATH).exists())
+        } finally {
+            Files.walk(temp).use { paths ->
+                paths.sorted(java.util.Comparator.reverseOrder()).forEach { Files.deleteIfExists(it) }
+            }
+        }
+    }
+
+    @Test
     fun `archive rejects semantically incomplete retained ACP receipts after every commitment is rebound`() {
         val scratch = Path.of("build/test-tmp").toAbsolutePath().normalize()
         Files.createDirectories(scratch)
@@ -113,7 +157,7 @@ class ReconstructionAcpEvidenceArchiveVerifierTest {
         try {
             for (profile in ReconstructionProfiles.builtIn) {
                 val profileRoot = temp.resolve(profile.id)
-                val baseline = createAgentProject(profileRoot.resolve("baseline"), accepted = true, profile = profile)
+                val baseline = createHistoricalAgentProject(profileRoot.resolve("baseline"), accepted = true, profile = profile)
                 val sourceBytes = baseline.resolve(SOURCE_PATH).readBytes()
                 val buildContractPath = ReconstructionAdapters.resolve(profile).archiveBuild.contractPaths(profile).contractPath
                 val buildContractBytes = baseline.resolve(buildContractPath).readBytes()
@@ -155,7 +199,7 @@ class ReconstructionAcpEvidenceArchiveVerifierTest {
     @Test
     fun `archive gate rejects closed-schema and semantic ACP evidence tampering`() {
         val temp = createTempDirectory("acp-archive-tampering-")
-        val baseline = createAgentProject(temp.resolve("baseline"), accepted = true)
+        val baseline = createHistoricalAgentProject(temp.resolve("baseline"), accepted = true)
         val sourceSha256 = sha256(baseline.resolve(SOURCE_PATH).readBytes())
         val sourceBytes = Files.size(baseline.resolve(SOURCE_PATH))
         val acceptedChangeAggregate = agentFileChangeSetSha256(
@@ -236,6 +280,7 @@ class ReconstructionAcpEvidenceArchiveVerifierTest {
     }
 
     @Test
+    @org.junit.jupiter.api.Tag("ci-live")
     fun `fresh mismatched wire prompt retains receipt and rolls back candidate to unresolved source`() {
         val scratch = Path.of("build/test-tmp").toAbsolutePath().normalize()
         Files.createDirectories(scratch)
@@ -288,6 +333,7 @@ class ReconstructionAcpEvidenceArchiveVerifierTest {
     }
 
     @Test
+    @org.junit.jupiter.api.Tag("ci-live")
     fun `v4 archive rejects a different wire prompt after every receipt commitment is rebound`() {
         val scratch = Path.of("build/test-tmp").toAbsolutePath().normalize()
         Files.createDirectories(scratch)
@@ -327,6 +373,7 @@ class ReconstructionAcpEvidenceArchiveVerifierTest {
     }
 
     @Test
+    @org.junit.jupiter.api.Tag("ci-live")
     fun `v4 archive rejects rehashed header and prior-source read grants on accepted receipts`() {
         val scratch = Path.of("build/test-tmp").toAbsolutePath().normalize()
         Files.createDirectories(scratch)
@@ -394,7 +441,7 @@ class ReconstructionAcpEvidenceArchiveVerifierTest {
     @Test
     fun `archive gate rejects checkpoint path and digest ambiguity`() {
         val temp = createTempDirectory("acp-archive-checkpoint-")
-        val baseline = createAgentProject(temp.resolve("baseline"), accepted = true)
+        val baseline = createHistoricalAgentProject(temp.resolve("baseline"), accepted = true)
 
         listOf("path", "digest", "factory-cache-identity", "request-binding", "terminal-outcome").forEach { mutation ->
             val project = temp.resolve(mutation)
@@ -433,7 +480,7 @@ class ReconstructionAcpEvidenceArchiveVerifierTest {
     @Test
     fun `archive release gate rejects schema-v3 checkpoint downgrade`() {
         val temp = createTempDirectory("acp-archive-downgrade-")
-        val project = createAgentProject(temp.resolve("project"), accepted = true)
+        val project = createHistoricalAgentProject(temp.resolve("project"), accepted = true)
         rewriteCheckpointAndManifest(project) { checkpoint ->
             checkpoint.replaceFirst("\"schemaVersion\": 6", "\"schemaVersion\": 3")
         }
@@ -445,9 +492,9 @@ class ReconstructionAcpEvidenceArchiveVerifierTest {
     }
 
     @Test
-    fun `archive gate binds compiler acceptance to the profile and source bytes`() {
+    fun `historical archive gate binds local compiler facts to the profile and source bytes`() {
         val temp = createTempDirectory("acp-archive-compiler-")
-        val baseline = createAgentProject(temp.resolve("baseline"), accepted = true)
+        val baseline = createHistoricalAgentProject(temp.resolve("baseline"), accepted = true)
         val mutations = mapOf<String, (String) -> String>(
             "failed" to { it.replace("\"outcome\":\"passed\"", "\"outcome\":\"failed\"") },
             "source" to {
@@ -473,7 +520,7 @@ class ReconstructionAcpEvidenceArchiveVerifierTest {
     @Test
     fun `independently verified historical v4 archives remain readable`() {
         val temp = createTempDirectory("acp-archive-historical-v4-")
-        val project = createAgentProject(temp.resolve("project"), accepted = true)
+        val project = createHistoricalAgentProject(temp.resolve("project"), accepted = true)
         rewriteCheckpointAndManifest(project) { checkpoint ->
             checkpoint.replace("\"schemaVersion\": 6", "\"schemaVersion\": 4")
                 .lineSequence().filterNot { line ->
@@ -486,6 +533,7 @@ class ReconstructionAcpEvidenceArchiveVerifierTest {
     }
 
     @Test
+    @org.junit.jupiter.api.Tag("ci-live")
     fun `compiler read failure restores accepted ACP receipt and retains the failed attempt receipt`() {
         val scratch = Path.of("build/test-tmp").toAbsolutePath().normalize()
         Files.createDirectories(scratch)
@@ -509,6 +557,7 @@ class ReconstructionAcpEvidenceArchiveVerifierTest {
                             candidateReceipt = project.resolve(EVIDENCE_PATH).readBytes()
                             assertFalse(before.getValue(EVIDENCE_PATH).contentEquals(candidateReceipt))
                             Files.delete(project.resolve(SOURCE_PATH))
+                            Files.readAllBytes(project.resolve(SOURCE_PATH))
                         }
                     }
                 }
@@ -543,6 +592,7 @@ class ReconstructionAcpEvidenceArchiveVerifierTest {
     }
 
     @Test
+    @org.junit.jupiter.api.Tag("ci-live")
     fun `rejected ACP revision retains its receipt and restores accepted release evidence`() {
         val temp = createTempDirectory("acp-rejected-revision-")
         val project = createAgentProject(temp.resolve("project"), accepted = true)
@@ -578,7 +628,7 @@ class ReconstructionAcpEvidenceArchiveVerifierTest {
     @Test
     fun `archive gate rejects missing and extra ACP evidence artifacts`() {
         val temp = createTempDirectory("acp-archive-cardinality-")
-        val baseline = createAgentProject(temp.resolve("baseline"), accepted = true)
+        val baseline = createHistoricalAgentProject(temp.resolve("baseline"), accepted = true)
 
         val missing = temp.resolve("missing")
         copyTree(baseline, missing)
@@ -597,6 +647,7 @@ class ReconstructionAcpEvidenceArchiveVerifierTest {
     }
 
     @Test
+    @org.junit.jupiter.api.Tag("ci-live")
     fun `archive gate rejects an agent-generated unresolved module`() {
         val temp = createTempDirectory("acp-archive-unresolved-")
         val project = createAgentProject(temp.resolve("project"), accepted = false)
@@ -609,6 +660,7 @@ class ReconstructionAcpEvidenceArchiveVerifierTest {
     }
 
     @Test
+    @org.junit.jupiter.api.Tag("ci-live")
     fun `rehashed rejected ACP candidates cannot impersonate undispatched budget fallbacks`() {
         val scratch = Path.of("build/test-tmp").toAbsolutePath().normalize()
         Files.createDirectories(scratch)
@@ -788,12 +840,18 @@ class ReconstructionAcpEvidenceArchiveVerifierTest {
     }
 
     @Test
-    fun `all fallback and mixed accepted archives reject rehashed confidence claims`() {
+    fun `all fallback archives reject rehashed confidence claims`() = verifyFallbackConfidence(withAccepted = false)
+
+    @Test
+    @org.junit.jupiter.api.Tag("ci-live")
+    fun `mixed current accepted archives reject rehashed confidence claims`() = verifyFallbackConfidence(withAccepted = true)
+
+    private fun verifyFallbackConfidence(withAccepted: Boolean) {
         val scratch = Path.of("build/test-tmp").toAbsolutePath().normalize()
         Files.createDirectories(scratch)
         val temp = Files.createTempDirectory(scratch, "fallback-confidence-")
         try {
-            for (withAccepted in listOf(false, true)) {
+            run {
                 val project = temp.resolve(if (withAccepted) "mixed" else "all-fallback")
                 val harness = ArchiveEvidenceHarness(accepted = true)
                 val oversizedEvidence = "/* ${"context".repeat(2_000)} */"
@@ -891,6 +949,31 @@ class ReconstructionAcpEvidenceArchiveVerifierTest {
                 ModuleObservationAttribution(listOf("fn_0000000000401000"), "b".repeat(64)),
                 emptyList(), "", 0, stdoutHex, "")
         }).toString()
+
+    /** Exact pinned schema-six producer output: this never runs a current compiler or mints a permit. */
+    private fun createHistoricalAgentProject(
+        project: Path,
+        accepted: Boolean,
+        profile: ReconstructionProfile = GeneratedCMakeReconstructionProfile.descriptor,
+    ): Path {
+        require(accepted)
+        val bytes = requireNotNull(javaClass.getResourceAsStream(
+            "/project/historical-module-local-v6/${profile.id}.zip")).use { it.readBytes() }
+        val expected = when (profile.id) {
+            "generated-c-make-v1" -> "f5ea388c658d49c19176b0bd85d2315769c053d90094377c48a7d94741a5b891"
+            "generated-c-ninja-v1" -> "fb2cb1658e73294f74b0fcd765e65a450e26541a6b0c38263e0a4dd95e8e95bd"
+            else -> error("no pinned historical fixture for ${profile.id}")
+        }
+        assertEquals(expected, sha256(bytes))
+        Files.createDirectories(project.parent)
+        val archive = project.resolveSibling("${project.fileName}.historical.zip")
+        Files.write(archive, bytes)
+        ArchivalBundleVerifier.extractAndVerify(archive, project, profile = profile)
+        // The portable fixture intentionally omits host build outputs. Rebuild only the
+        // archive build artifact; the retained schema-six compiler record stays untouched.
+        assertEquals(0, ReconstructionAdapters.resolve(profile).build(project, profile).returnCode)
+        return project
+    }
 
     private fun createAgentProject(
         project: Path,

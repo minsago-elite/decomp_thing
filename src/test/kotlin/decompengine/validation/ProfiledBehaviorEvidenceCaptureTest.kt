@@ -121,7 +121,16 @@ class ProfiledBehaviorEvidenceCaptureTest {
             )),
         )
         val manifest = SourceTreeGenerator.generate(model, project,
-            reconstructor = RecoveredCModuleReconstructor(), profile = profile)
+            reconstructor = decompengine.project.ModuleReconstructor { request ->
+                // Authored behavior input is deliberately unresolved for module acceptance.
+                RecoveredCModuleReconstructor().reconstruct(request).let { candidate ->
+                    candidate.copy(issues = candidate.issues + decompengine.project.ModuleReconstructionIssue(
+                        "authored-behavior-fixture", "authored source for behavior and build-binding tests only",
+                        request.module.functionIds + request.module.globalIds))
+                }
+            }, profile = profile)
+        assertEquals(listOf("fn_1000"), manifest.unresolvedImplementationIds)
+        assertEquals(false, manifest.files.single { ProjectFileRole.MODULE_IMPLEMENTATION in it.roles }.acceptedImplementation)
         assertEquals(0, ReconstructionAdapters.resolve(profile).build(project, profile).returnCode)
         val inputs = manifest.files.filter { ProjectFileRole.BUILD_INPUT in it.roles }.map { it.path }.sorted()
         val moduleSource = manifest.files.single { ProjectFileRole.MODULE_IMPLEMENTATION in it.roles }.path

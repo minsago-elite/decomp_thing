@@ -34,7 +34,9 @@ internal class ContainedModuleCompilerRequest(
     val outputDirectory: Path,
     val maximumWallMillis: Long,
     val maximumOutputBytes: Long,
+    profileRecord: JsonObject = OracleJson.parse(ReconstructionProfiles.named(profileId).canonicalJson().toByteArray()) as JsonObject,
 ) {
+    val profile: ReconstructionProfile
     val inputs: List<ContainedModuleCompilerInput>
     val snapshotSha256: String
     val sourceSha256: String
@@ -51,8 +53,8 @@ internal class ContainedModuleCompilerRequest(
             "module compiler input, executable and writable output must be separate"
         }
         requireCompilerRelativePath(sourcePath)
-        val profile = ReconstructionProfiles.named(profileId)
-        require(profile.sha256 == profileSha256) { "module compiler requires the exact registered built-in profile" }
+        profile = parseContainedModuleCompilerProfile(profileRecord)
+        require(profile.id == profileId && profile.sha256 == profileSha256) { "module compiler profile record differs from its exact identity" }
         require(maximumWallMillis in 1..minOf(MAXIMUM_WALL_MILLIS, profile.budgets.buildWallClockMillis)) {
             "module compiler wall bound exceeds its registered policy"
         }
@@ -87,6 +89,7 @@ internal class ContainedModuleCompilerRequest(
         encoded = OracleJson.canonicalBytes(JsonObject(mapOf(
             "provider" to JsonPrimitive("contained-module-compiler-request-v1"), "schemaVersion" to JsonPrimitive(1),
             "nonce" to JsonPrimitive(nonce), "profileId" to JsonPrimitive(profileId), "profileSha256" to JsonPrimitive(profileSha256),
+            "profile" to OracleJson.parse(profile.canonicalJson().toByteArray()),
             "snapshotRoot" to JsonPrimitive(snapshotRoot.toString()), "sourcePath" to JsonPrimitive(sourcePath),
             "inputs" to JsonArray(this.inputs.map { it.json() }), "snapshotSha256" to JsonPrimitive(snapshotSha256),
             "compilerPath" to JsonPrimitive(compilerPath.toString()), "compilerSha256" to JsonPrimitive(compilerSha256),
@@ -110,7 +113,7 @@ internal class ContainedModuleCompilerRequest(
 
         fun parse(bytes: ByteArray): ContainedModuleCompilerRequest {
             val root = OracleJson.parseCanonical(bytes, COMPILER_REQUEST_LIMITS).compilerObject()
-            root.compilerKeys("provider", "schemaVersion", "nonce", "profileId", "profileSha256", "snapshotRoot", "sourcePath",
+            root.compilerKeys("provider", "schemaVersion", "nonce", "profileId", "profileSha256", "profile", "snapshotRoot", "sourcePath",
                 "inputs", "snapshotSha256", "compilerPath", "compilerSha256", "outputDirectory", "maximumWallMillis", "maximumOutputBytes")
             require(root.compilerText("provider") == "contained-module-compiler-request-v1" && root.compilerLong("schemaVersion") == 1L) {
                 "unsupported module compiler request"
@@ -123,7 +126,7 @@ internal class ContainedModuleCompilerRequest(
                     input.compilerKeys("path", "sha256", "bytes")
                     ContainedModuleCompilerInput(input.compilerText("path"), input.compilerText("sha256"), input.compilerLong("bytes"))
                 }, Path.of(root.compilerText("compilerPath")), root.compilerText("compilerSha256"), Path.of(root.compilerText("outputDirectory")),
-                root.compilerLong("maximumWallMillis"), root.compilerLong("maximumOutputBytes")).also {
+                root.compilerLong("maximumWallMillis"), root.compilerLong("maximumOutputBytes"), root.getValue("profile").compilerObject()).also {
                 require(it.snapshotSha256 == root.compilerText("snapshotSha256") && it.canonicalBytes.contentEquals(bytes)) {
                     "module compiler request changed during decoding"
                 }
@@ -147,7 +150,8 @@ internal class ContainedModuleCompilerResult(
     init {
         listOf(requestSha256, nonce, profileSha256, snapshotSha256, sourceSha256, compilerSha256, stdoutSha256, stderrSha256)
             .forEach(::requireCompilerDigest)
-        require(ReconstructionProfiles.named(profileId).sha256 == profileSha256) { "module compiler result profile differs from registration" }
+        // A passive result carries only an identity claim; requireBinding supplies the validated full profile.
+        ReconstructionProfiles.named(profileId)
         require(outcome in setOf("compiled-object", "compiler-failed", "compiler-signaled", "timed-out", "output-limit-exceeded",
             "execution-failed", "input-changed", "object-invalid")) { "unknown module compiler outcome" }
         require(exitCode == null || exitCode in 0..255) { "invalid raw compiler exit code" }
@@ -227,7 +231,7 @@ private fun JsonObject.compilerOptionalLong(name: String) = if (getValue(name) =
 private fun JsonObject.compilerOptionalText(name: String) = if (getValue(name) == JsonNull) null else compilerText(name)
 private val COMPILER_REQUEST_LIMITS = StrictJsonLimits(maximumInputBytes = ContainedModuleCompilerRequest.MAXIMUM_REQUEST_BYTES,
     maximumCanonicalBytes = ContainedModuleCompilerRequest.MAXIMUM_REQUEST_BYTES, maximumDepth = 8, maximumNodes = 40000,
-    maximumStringBytes = 4096, maximumTotalStringBytes = ContainedModuleCompilerRequest.MAXIMUM_REQUEST_BYTES, maximumNumberCharacters = 16)
+    maximumStringBytes = 4096, maximumTotalStringBytes = ContainedModuleCompilerRequest.MAXIMUM_REQUEST_BYTES, maximumNumberCharacters = 20)
 private val COMPILER_RESULT_LIMITS = StrictJsonLimits(maximumInputBytes = ContainedModuleCompilerResult.MAXIMUM_RESULT_BYTES,
     maximumCanonicalBytes = ContainedModuleCompilerResult.MAXIMUM_RESULT_BYTES, maximumDepth = 4, maximumNodes = 64,
     maximumStringBytes = 256, maximumTotalStringBytes = 4096, maximumNumberCharacters = 16)

@@ -1,0 +1,88 @@
+import groovy.json.JsonOutput
+import java.security.MessageDigest
+
+// Explicit hosted qualification tasks; ordinary tests never acquire production compiler authority.
+allprojects {
+    afterEvaluate { project ->
+        if (project != rootProject) return
+        tasks.register('moduleCompilerDeploymentManifest') {
+            dependsOn tasks.named('jar'), tasks.named('stageOracleNativeLibraries')
+            def output = layout.buildDirectory.file('module-compilation-qualification/worker-classpath.json')
+            inputs.file(tasks.named('jar').flatMap { it.archiveFile })
+            inputs.files(configurations.runtimeClasspath)
+            outputs.file(output)
+            doLast {
+                def required = ['kotlin-stdlib', 'kotlinx-serialization-core-jvm', 'kotlinx-serialization-json-jvm', 'jna', 'sqlite-jdbc'] as Set
+                def optional = ['kotlin-reflect', 'slf4j-api', 'slf4j-simple'] as Set
+                def artifacts = configurations.runtimeClasspath.resolvedConfiguration.resolvedArtifacts
+                def selected = artifacts.findAll { required.contains(it.name) || optional.contains(it.name) }
+                assert selected.collect { it.name }.containsAll(required): 'module compiler deployment dependency is absent'
+                assert selected.collect { it.name }.unique().size() == selected.size(): 'module compiler deployment dependency duplicates'
+                def staged = file('build/module-compilation-qualification/deployment')
+                assert !staged.exists(): 'refusing to replace staged compiler deployment'
+                staged.mkdirs()
+                def sources = [tasks.named('jar').get().archiveFile.get().asFile] + selected.sort { it.name }.collect { it.file }
+                long total = 0
+                def entries = sources.withIndex().collect { source, index ->
+                    assert source.isFile() && source.name.endsWith('.jar') && source.length() > 0
+                    total = Math.addExact(total, source.length())
+                    assert total <= 256L * 1024 * 1024: 'module compiler deployment exceeds finite bound'
+                    def target = new File(staged, String.format('%03d-%s', index, source.name))
+                    java.nio.file.Files.copy(source.toPath(), target.toPath())
+                    def digest = MessageDigest.getInstance('SHA-256')
+                    target.withInputStream { input ->
+                        byte[] buffer = new byte[65536]
+                        for (int count; (count = input.read(buffer)) >= 0;) if (count > 0) digest.update(buffer, 0, count)
+                    }
+                    [path: target.canonicalPath, bytes: target.length(), sha256: digest.digest().encodeHex().toString()]
+                }
+                output.get().asFile.text = JsonOutput.toJson([schemaVersion: 1, entries: entries]) + '\n'
+            }
+        }
+        tasks.register('moduleCompilerWriteConfig', JavaExec) {
+            dependsOn tasks.named('testClasses'), tasks.named('stageOracleNativeLibraries')
+            classpath = sourceSets.test.runtimeClasspath
+            mainClass = 'decompengine.project.ContainedModuleCompilationQualificationCli'
+            systemProperty 'java.io.tmpdir', file('build/module-compilation-qualification/tmp').absolutePath
+            systemProperty 'decompengine.oracle.nativeLibraryDirectory', file('build/native/oracle').absolutePath
+            doFirst {
+                args 'write-config', file('build/module-compilation-qualification/config').absolutePath
+            }
+        }
+        tasks.register('moduleCompilerLiveInventory', JavaExec) {
+            dependsOn tasks.named('testClasses')
+            classpath = sourceSets.test.runtimeClasspath
+            mainClass = 'decompengine.project.ContainedModuleCompilationTestInventory'
+            systemProperty 'java.io.tmpdir', file('build/module-compilation-qualification/tmp').absolutePath
+            doFirst {
+                args file('scripts/module-compilation-live-classes.txt').absolutePath,
+                    file('build/module-compilation-qualification/compiled-live-tests.json').absolutePath
+            }
+        }
+        tasks.register('moduleCompilationLiveQualification', Test) {
+            dependsOn tasks.named('testClasses'), tasks.named('generateAcpGateHelperChecksum'), tasks.named('stageOracleNativeLibraries'), tasks.named('moduleCompilerLiveInventory')
+            outputs.upToDateWhen { false }
+            outputs.doNotCacheIf('hosted compiler authority must execute in this attempt') { true }
+            doFirst {
+                assert !file('build/test-results/moduleCompilationLiveQualification').exists(): 'refusing existing hosted compiler test reports'
+            }
+            testClassesDirs = sourceSets.test.output.classesDirs
+            classpath = sourceSets.test.runtimeClasspath
+            useJUnitPlatform { includeTags 'ci-live' }
+            maxHeapSize = '3g'
+            maxParallelForks = 1
+            systemProperty 'java.io.tmpdir', file('build/module-compilation-qualification/tmp').absolutePath
+            systemProperty 'decompengine.oracle.nativeLibraryDirectory', file('build/native/oracle').absolutePath
+            systemProperty 'decompengine.acp.gateHelperExecutable', file('build/native/acp/decomp-acp-gate-helper').absolutePath
+            systemProperty 'decompengine.acp.gateHelperChecksum', file('build/native/acp/decomp-acp-gate-helper.sha256').absolutePath
+            environment 'GENERATED_C_MODULE_COMPILE_REQUIRE', 'true'
+            environment 'DECOMP_REQUIRE_ORACLE_EXT4_SCRATCH', 'true'
+            filter {
+                def classes = file('scripts/module-compilation-live-classes.txt').readLines().findAll { !it.isBlank() }
+                assert classes.size() == classes.toSet().size() && !classes.isEmpty()
+                classes.each { includeTestsMatching it }
+                failOnNoMatchingTests = true
+            }
+        }
+    }
+}

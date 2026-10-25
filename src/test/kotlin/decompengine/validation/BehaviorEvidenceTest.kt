@@ -704,14 +704,22 @@ class BehaviorEvidenceTest {
         val output = compile.inputStream.readAllBytes().decodeToString()
         check(compile.waitFor() == 0) { output }
         val project = root.resolve("project")
-        SourceTreeGenerator.generate(
+        val manifest = SourceTreeGenerator.generate(
             RecoveredProgramModel(
                 inputSha256 = OracleArtifacts.sha256(original.readBytes()),
                 functions = listOf(RecoveredFunction("fn_1000", "main", 0x1000UL,
                     "int main(int argc, char **argv)", decompiledC = source)),
             ),
-            project, reconstructor = RecoveredCModuleReconstructor(),
+            project, reconstructor = decompengine.project.ModuleReconstructor { request ->
+                // Authored behavior input is deliberately unresolved for module acceptance.
+                RecoveredCModuleReconstructor().reconstruct(request).let { candidate ->
+                    candidate.copy(issues = candidate.issues + decompengine.project.ModuleReconstructionIssue(
+                        "authored-behavior-fixture", "authored source for behavior and build-binding tests only",
+                        request.module.functionIds + request.module.globalIds))
+                }
+            },
         )
+        assertEquals(listOf("fn_1000"), manifest.unresolvedImplementationIds)
         MakeProjectBuilder.build(project)
         val runner = root.resolve("authored-runner-shim").also { path ->
             path.writeText("""

@@ -69,7 +69,8 @@ class HistoricalModulePromptReplayTest {
                 val request = inputs.request(module.id, project, observation)
                 val prompt = modulePromptEvidence(request, legacy = true).text
                 val promptHash = sha256(prompt.toByteArray())
-                val fingerprint = inputs.fingerprint(request, legacy = true)
+                val fingerprint = inputs.fingerprint(request, legacy = true,
+                    compilerPolicyId = ReconstructionCompilationPolicies.resolve(profile).fingerprintIdentity(6))
                 assertNotEquals(fingerprint, inputs.fingerprint(request))
                 val checkpointPath = profile.layout.declaration("module-evidence")
                     .materialize(mapOf("module" to module.id))
@@ -78,8 +79,9 @@ class HistoricalModulePromptReplayTest {
                 val legacyIdentity = checkpoint.getValue("reconstructorIdentity").jsonPrimitive.content
                     .replace(Regex(":v[34]$"), ":v3")
 
-                fun retainVersion(identity: String, provider: String) {
+                fun retainVersion(identity: String, provider: String, schemaVersion: Int = 6) {
                     val revisedCheckpoint = JsonObject(LinkedHashMap(checkpoint).apply {
+                        put("schemaVersion", JsonPrimitive(schemaVersion))
                         put("generator", JsonPrimitive("unresolved:$identity"))
                         put("reconstructorIdentity", JsonPrimitive(identity))
                         put("fingerprint", JsonPrimitive(fingerprint))
@@ -137,6 +139,9 @@ class HistoricalModulePromptReplayTest {
                 assertTrue(verify().isEmpty())
                 assertTrue(ArchivalProjectAuditor.audit(project, profile, publish = false)
                     .moduleConfidenceEvidenceProblems.isEmpty())
+                retainVersion(legacyIdentity, "module-reconstruction-input-v2", schemaVersion = 7)
+                val promoted = assertFailsWith<IllegalArgumentException> { verify() }
+                assertTrue(promoted.message.orEmpty().contains("requires the v4 agent context contract"))
                 retainVersion(legacyIdentity, "module-reconstruction-input-v3")
                 val providerFailure = assertFailsWith<IllegalArgumentException> {
                     ArchivalProjectAuditor.audit(project, profile, publish = false)

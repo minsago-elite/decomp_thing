@@ -7,8 +7,10 @@ import kotlin.test.assertContentEquals
 import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
 import kotlin.test.assertFalse
+import kotlin.test.assertNotEquals
 import kotlin.test.assertTrue
 import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonPrimitive
 
 class ContainedModuleCompilerProtocolTest {
@@ -34,7 +36,7 @@ class ContainedModuleCompilerProtocolTest {
     }
 
     @Test
-    fun `request rejects profile variants arbitrary path roles duplicate members and excessive bounds`() {
+    fun `request rejects identity mismatches arbitrary path roles duplicate members and excessive bounds`() {
         val profile = ReconstructionProfiles.default
         assertFailsWith<IllegalArgumentException> { request(profileSha256 = "0".repeat(64)) }
         assertFailsWith<IllegalArgumentException> { request(profileId = "unregistered") }
@@ -54,6 +56,100 @@ class ContainedModuleCompilerProtocolTest {
     }
 
     @Test
+    fun `budget variants of both registered profiles retain commands and bind their full requested identities`() {
+        for (base in ReconstructionProfiles.builtIn) {
+            val variant = variant(base, base.budgets.copy(buildWallClockMillis = 12_345, buildMaximumOutputBytes = 8192,
+                plannerMaximumEntities = 4096, reconstructionMaximumContextCharacters = 2048))
+            val original = request(base, maximumOutputBytes = 8192)
+            val requested = request(variant, maximumOutputBytes = 8192)
+            val parsed = ContainedModuleCompilerRequest.parse(requested.canonicalBytes)
+            assertEquals(variant.canonicalJson(), parsed.profile.canonicalJson())
+            assertEquals(variant.sha256, parsed.profileSha256)
+            assertNotEquals(base.sha256, parsed.profileSha256)
+            assertNotEquals(original.sha256, parsed.sha256)
+            assertEquals(original.command, parsed.command)
+            assertEquals(original.snapshotSha256, parsed.snapshotSha256)
+            val result = ContainedModuleCompilerResult.parse(result(parsed).canonicalBytes)
+            result.requireBinding(parsed)
+            assertFailsWith<IllegalArgumentException> { result.requireBinding(original) }
+            assertFailsWith<IllegalArgumentException> { result.requireBinding(request(
+                variant(base, variant.budgets.copy(plannerMaximumEntities = 4095)), maximumOutputBytes = 8192)) }
+            assertFailsWith<IllegalArgumentException> { request(variant, maximumWallMillis = 12_346, maximumOutputBytes = 8192) }
+            assertFailsWith<IllegalArgumentException> { request(variant, maximumOutputBytes = 8193) }
+        }
+    }
+
+    @Test
+    fun `profile admission rejects every nonbudget change through constructors and closed records`() {
+        val base = ReconstructionProfiles.default
+        val record = profileRecord(base)
+        val budgets = record.getValue("budgets") as JsonObject
+        val layout = record.getValue("layout") as JsonObject
+        val configuration = record.getValue("adapterConfiguration") as JsonObject
+        val mutations = listOf(
+            JsonObject(record + ("schemaVersion" to JsonPrimitive(2))),
+            JsonObject(record + ("id" to JsonPrimitive("unregistered"))),
+            JsonObject(record + ("id" to JsonPrimitive(GeneratedCNinjaReconstructionProfile.PROFILE_ID))),
+            JsonObject(record + ("layout" to JsonObject(layout + ("schemaVersion" to JsonPrimitive(2))))),
+            JsonObject(record + ("layout" to JsonObject(layout + ("files" to JsonArray(emptyList()))))),
+            JsonObject(record + ("adapterConfiguration" to JsonObject(configuration + ("compiler-flags" to JsonArray(listOf(JsonPrimitive("-include/evil.h"))))))),
+            JsonObject(record + ("adapterConfiguration" to JsonObject(configuration + ("compiler-driver" to JsonArray(listOf(JsonPrimitive("evil"))))))),
+            JsonObject(record + ("adapterConfiguration" to JsonObject(configuration + ("extra" to JsonArray(listOf(JsonPrimitive("value"))))))),
+            JsonObject(record + ("budgets" to JsonObject(budgets + ("extra" to JsonPrimitive(1))))),
+            JsonObject(record + ("extra" to JsonPrimitive(true))),
+        ) + record.keys.map { JsonObject(record - it) } + budgets.keys.map {
+            JsonObject(record + ("budgets" to JsonObject(budgets - it)))
+        }
+        mutations.forEach { invalid ->
+            assertFailsWith<IllegalArgumentException> { parseContainedModuleCompilerProfile(invalid) }
+            assertFailsWith<IllegalArgumentException> { request(profileRecord = invalid) }
+        }
+        assertFailsWith<IllegalArgumentException> {
+            requireContainedModuleCompilerProfile(ReconstructionProfile(base.schemaVersion, base.id, base.layout, base.budgets,
+                base.adapterConfiguration + ("compiler-driver" to listOf("evil"))))
+        }
+        assertFailsWith<IllegalArgumentException> {
+            requireContainedModuleCompilerProfile(ReconstructionProfile(base.schemaVersion, base.id,
+                GeneratedCNinjaReconstructionProfile.descriptor.layout, base.budgets, base.adapterConfiguration))
+        }
+    }
+
+    @Test
+    fun `all budget fields require positive bounded integers independently of compiler hard ceilings`() {
+        val base = ReconstructionProfiles.default
+        val record = profileRecord(base)
+        val budgets = record.getValue("budgets") as JsonObject
+        for (field in budgets.keys) {
+            for (invalid in listOf(JsonPrimitive(0), JsonPrimitive(-1), JsonPrimitive("1"), JsonPrimitive(true),
+                JsonPrimitive(1.5), OracleJson.parse("9223372036854775808".toByteArray()))) {
+                val changed = JsonObject(record + ("budgets" to JsonObject(budgets + (field to invalid))))
+                assertFailsWith<IllegalArgumentException>(field) { parseContainedModuleCompilerProfile(changed) }
+            }
+        }
+        val unsupported = variant(base, base.budgets.copy(buildMaximumOutputBytes = 1))
+        assertEquals(unsupported.sha256, requireContainedModuleCompilerProfile(unsupported).sha256)
+        assertFailsWith<IllegalArgumentException> { request(unsupported, maximumOutputBytes = 1) }
+        val small = variant(base, base.budgets.copy(buildWallClockMillis = 1500))
+        assertEquals(1500L, request(small, maximumWallMillis = 1500).maximumWallMillis)
+        assertFailsWith<IllegalArgumentException> { request(small, maximumWallMillis = 1501) }
+        assertFailsWith<IllegalArgumentException> { moduleCompilerOperationWallMillis(small) }
+        assertEquals(12_000L, moduleCompilerOperationWallMillis(variant(base, base.budgets.copy(buildWallClockMillis = 12_345))))
+        assertEquals(120_000L, moduleCompilerOperationWallMillis(base))
+        // Host admission belongs to the caller's selected policy. A larger unrelated context budget
+        // must not inherit DEFAULT's ceiling here; native execution retains its own fixed caps.
+        val larger = variant(base, base.budgets.copy(reconstructionMaximumContextCharacters = 600_000,
+            buildWallClockMillis = Long.MAX_VALUE, buildMaximumOutputBytes = Long.MAX_VALUE))
+        val largerRequest = ContainedModuleCompilerRequest.parse(request(larger).canonicalBytes)
+        assertEquals(larger.sha256, largerRequest.profile.sha256)
+        assertEquals(120_000L, moduleCompilerOperationWallMillis(larger))
+        val overInt = JsonObject(record + ("budgets" to JsonObject(budgets + ("plannerMaximumEntities" to JsonPrimitive(1L + Int.MAX_VALUE)))))
+        assertFailsWith<IllegalArgumentException> { parseContainedModuleCompilerProfile(overInt) }
+        val variant = variant(base, base.budgets.copy(plannerMaximumEntities = 12))
+        assertFailsWith<IllegalArgumentException> { request(variant, maximumWallMillis = ContainedModuleCompilerRequest.MAXIMUM_WALL_MILLIS + 1) }
+        assertFailsWith<IllegalArgumentException> { request(variant, maximumOutputBytes = ContainedModuleCompilerRequest.MAXIMUM_OUTPUT_BYTES + 1) }
+    }
+
+    @Test
     fun `canonical request parser rejects duplicate unknown and altered digest claims`() {
         val request = request()
         val root = OracleJson.parseCanonical(request.canonicalBytes) as JsonObject
@@ -62,6 +158,9 @@ class ContainedModuleCompilerProtocolTest {
             JsonObject(root + ("snapshotSha256" to JsonPrimitive("0".repeat(64)))),
             JsonObject(root + ("schemaVersion" to JsonPrimitive(2))),
             JsonObject(root + ("maximumWallMillis" to JsonPrimitive("1000"))),
+            JsonObject(root - "profile"),
+            JsonObject(root + ("profile" to profileRecord(variant(ReconstructionProfiles.default,
+                ReconstructionProfiles.default.budgets.copy(plannerMaximumEntities = 12))))),
         )) assertFailsWith<IllegalArgumentException> { ContainedModuleCompilerRequest.parse(OracleJson.canonicalBytes(changed)) }
         assertFailsWith<IllegalArgumentException> { ContainedModuleCompilerRequest.parse(request.canonicalBytes + byteArrayOf(10)) }
         assertFailsWith<IllegalArgumentException> {
@@ -100,8 +199,13 @@ class ContainedModuleCompilerProtocolTest {
         profileId: String = profile.id, profileSha256: String = profile.sha256,
         maximumWallMillis: Long = 1000, maximumOutputBytes: Long = 65536,
         snapshotRoot: Path = root.resolve("snapshot"), nonce: String = "3".repeat(64),
+        profileRecord: JsonObject = profileRecord(profile),
     ) = ContainedModuleCompilerRequest(nonce, profileId, profileSha256, snapshotRoot, source.path, inputs,
-        Path.of("/pinned/compiler"), "4".repeat(64), root.resolve("output"), maximumWallMillis, maximumOutputBytes)
+        Path.of("/pinned/compiler"), "4".repeat(64), root.resolve("output"), maximumWallMillis, maximumOutputBytes, profileRecord)
+
+    private fun variant(base: ReconstructionProfile, budgets: ReconstructionBudgets) =
+        ReconstructionProfile(base.schemaVersion, base.id, base.layout, budgets, base.adapterConfiguration)
+    private fun profileRecord(profile: ReconstructionProfile) = OracleJson.parse(profile.canonicalJson().toByteArray()) as JsonObject
 
     private fun result(request: ContainedModuleCompilerRequest, outcome: String = "compiled-object", exitCode: Int? = 0,
         signal: Int? = null, objectSha256: String? = "5".repeat(64), objectBytes: Long? = 128) =

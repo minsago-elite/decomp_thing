@@ -69,11 +69,42 @@ internal class ContainedModuleCompilationRuntimeConfiguration private constructo
 
     companion object {
         const val ENVIRONMENT = "GENERATED_C_MODULE_COMPILE_CONFIG_FILE"
+        const val DIRECTORY_ENVIRONMENT = "GENERATED_C_MODULE_COMPILE_CONFIG_DIRECTORY"
+        const val PROFILE_ENVIRONMENT = "GENERATED_C_MODULE_COMPILE_PROFILE"
 
         fun loadFromEnvironment(): ContainedModuleCompilationRuntimeConfiguration {
-            val configured = System.getenv(ENVIRONMENT)
-                ?: throw SandboxUnavailableException("$ENVIRONMENT must name the provisioned contained module compiler runtime")
-            return load(Path.of(configured))
+            val environment = System.getenv()
+            val profile = if (environment[DIRECTORY_ENVIRONMENT] != null)
+                environment[PROFILE_ENVIRONMENT] ?: GeneratedCMakeReconstructionProfile.PROFILE_ID else null
+            return load(configuredPath(environment, profile)).also {
+                require(profile == null || it.profileId == profile) { "contained compiler runtime belongs to a different profile" }
+            }
+        }
+
+        fun loadFromEnvironment(profileId: String): ContainedModuleCompilationRuntimeConfiguration =
+            load(configuredPath(System.getenv(), profileId)).also {
+                require(it.profileId == profileId) { "contained compiler runtime belongs to a different profile" }
+            }
+
+        /** Pure path selection only; loading still requires root-owned configuration and pins. */
+        internal fun configuredPath(environment: Map<String, String>, profileId: String? = null): Path {
+            profileId?.let(::requireRegisteredProfile)
+            val file = environment[ENVIRONMENT]
+            val directory = environment[DIRECTORY_ENVIRONMENT]
+            require(file == null || directory == null) { "module compiler file and directory configuration are mutually exclusive" }
+            if (file != null) return canonicalPath(file, ENVIRONMENT)
+            if (directory != null) {
+                val selected = profileId ?: environment[PROFILE_ENVIRONMENT] ?: GeneratedCMakeReconstructionProfile.PROFILE_ID
+                requireRegisteredProfile(selected)
+                return canonicalPath(directory, DIRECTORY_ENVIRONMENT).resolve("$selected.json")
+            }
+            throw SandboxUnavailableException("$ENVIRONMENT or $DIRECTORY_ENVIRONMENT must select the provisioned contained module compiler runtime")
+        }
+
+        private fun requireRegisteredProfile(profileId: String) {
+            require(profileId in setOf(GeneratedCMakeReconstructionProfile.PROFILE_ID, GeneratedCNinjaReconstructionProfile.PROFILE_ID)) {
+                "contained module compiler requires a registered generated-C profile"
+            }
         }
 
         internal fun load(path: Path): ContainedModuleCompilationRuntimeConfiguration {
@@ -106,9 +137,7 @@ internal class ContainedModuleCompilationRuntimeConfiguration private constructo
             document.exact(ROOT_FIELDS, "runtime")
             require(document.integer("schemaVersion") == 1L) { "unsupported contained module compiler runtime schema" }
             val profileId = document.text("profileId")
-            require(profileId in setOf(GeneratedCMakeReconstructionProfile.PROFILE_ID, GeneratedCNinjaReconstructionProfile.PROFILE_ID)) {
-                "contained module compiler requires a registered generated-C profile"
-            }
+            requireRegisteredProfile(profileId)
             val isolation = parseIsolation(document.objectField("isolation"))
             val compiler = document.objectField("compiler").also { it.exact(setOf("path", "sha256"), "compiler") }
             val compilerPath = compiler.path("path")
@@ -135,23 +164,34 @@ internal class ContainedModuleCompilationRuntimeConfiguration private constructo
                 isolation.scopeInspectorExecutable, isolation.systemdBusControllerExecutable) + isolation.workerClassPath.map { it.path }
             require(hostFiles.none { overlaps(scratch, it) }) { "module scratch overlaps keeper deployment files" }
             baseMounts.forEach { mount ->
-                require(mount.source !in BROAD_DIRECTORIES && reserved.none { overlaps(mount.source, it) || overlaps(mount.destination, it) }) {
+                val loaderAlias = mount in isolation.systemLibraryMounts && mount.source in LOADER_DIRECTORIES &&
+                    mount.destination in LOADER_DIRECTORIES
+                require((mount.source !in BROAD_DIRECTORIES || loaderAlias) &&
+                    reserved.none { overlaps(mount.source, it) || overlaps(mount.destination, it) }) {
                     "keeper runtime exposes a broad host tree or reserved namespace"
                 }
             }
             mounts.forEachIndexed { index, mount ->
-                require(mount.source == mount.destination) { "compiler runtime mounts must retain their absolute paths" }
-                require(mount.source !in BROAD_DIRECTORIES) { "compiler runtime cannot expose a broad host tree" }
-                require((basePaths + reserved + listOf(scratch) + hostFiles).none { overlaps(mount.source, it) }) {
+                require(mount.source !in BROAD_DIRECTORIES && mount.destination !in BROAD_DIRECTORIES) {
+                    "compiler runtime cannot expose a broad host tree"
+                }
+                require((basePaths + reserved + listOf(scratch) + hostFiles).none {
+                    overlaps(mount.source, it) || overlaps(mount.destination, it)
+                }) {
                     "compiler runtime overlaps keeper, scratch, or reserved authority"
                 }
-                require(mounts.drop(index + 1).none { overlaps(mount.source, it.source) }) {
+                require(mounts.drop(index + 1).none {
+                    overlaps(mount.source, it.source) || overlaps(mount.destination, it.destination)
+                }) {
                     "compiler runtime trees must be disjoint"
                 }
             }
-            require(mounts.count { compilerPath != it.source && compilerPath.startsWith(it.source) } == 1) {
-                "compiler executable must belong to exactly one declared compiler runtime tree"
+            val compilerMount = mounts.singleOrNull { compilerPath != it.source && compilerPath.startsWith(it.source) }
+            require(compilerMount != null && compilerMount.source == compilerMount.destination) {
+                "compiler executable must belong to exactly one same-path compiler runtime tree"
             }
+            // Curated headers and compiler internals may retain their toolchain's compiled-in
+            // lookup paths through explicit aliases. The executable's own path stays canonical.
             return Declaration(document, profileId, isolation, compilerPath, compilerSha256, mounts, scratch,
                 scratchPolicy, managerControlGroup)
         }
@@ -286,6 +326,7 @@ internal class ContainedModuleCompilationRuntimeConfiguration private constructo
         private val SHA256 = Regex("[0-9a-f]{64}")
         private val BROAD_DIRECTORIES = setOf("/", "/usr", "/bin", "/sbin", "/usr/bin", "/usr/sbin", "/lib", "/lib64",
             "/usr/lib", "/usr/lib64", "/usr/libexec", "/etc", "/var", "/run", "/home", "/root", "/opt", "/tmp").mapTo(hashSetOf(), Path::of)
+        private val LOADER_DIRECTORIES = setOf(Path.of("/lib64"), Path.of("/usr/lib64"))
         private val ROOT_FIELDS = setOf("schemaVersion", "profileId", "isolation", "compiler", "compilerRuntimeMounts",
             "scratchMount", "scratchPolicy", "managerControlGroup")
         private val SCRATCH_FIELDS = setOf("requiredAvailableBytes", "maximumFilesystemBytes", "requiredAvailableInodes", "maximumFilesystemInodes")

@@ -5,7 +5,8 @@ import decompengine.agent.AgentWorkflowPhase
 
 import java.nio.file.Files
 import java.util.concurrent.TimeUnit
-import kotlin.io.path.createTempDirectory
+import java.nio.file.Path
+import kotlin.io.path.createDirectories
 import kotlin.io.path.exists
 import kotlin.io.path.readBytes
 import kotlin.io.path.readText
@@ -23,7 +24,23 @@ import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonPrimitive
 
+import org.junit.jupiter.api.BeforeEach
+import org.junit.jupiter.api.Tag
+import org.junit.jupiter.api.TestInfo
+import org.junit.jupiter.api.parallel.Execution
+import org.junit.jupiter.api.parallel.ExecutionMode
+import org.junit.jupiter.api.parallel.ResourceLock
+
+@Execution(ExecutionMode.SAME_THREAD)
+@ResourceLock("contained-module-compilation-runtime")
 class GeneratedCNinjaIntegrationTest {
+    @BeforeEach
+    fun requireConfiguredCompiler(test: TestInfo) = requireHostedModuleCompiler(test)
+
+    private fun createTempDirectory(prefix: String): Path = Files.createTempDirectory(
+        Path.of("build", "tmp", "generated-c-ninja-tests").toAbsolutePath().normalize().createDirectories(), prefix,
+    )
+
     private fun model() = RecoveredProgramModel(
         inputSha256 = "a".repeat(64),
         functions = listOf(
@@ -35,6 +52,7 @@ class GeneratedCNinjaIntegrationTest {
     )
 
     @Test
+    @Tag("ci-live")
     fun `Ninja profile generates validates archives extracts and rebuilds accepted modules without Make`() {
         val temp = createTempDirectory("ninja-reconstruction-")
         val profile = GeneratedCNinjaReconstructionProfile.descriptor
@@ -88,6 +106,7 @@ class GeneratedCNinjaIntegrationTest {
     }
 
     @Test
+    @Tag("ci-live")
     fun `Ninja archive rejects command dependency and budget records from another build policy`() {
         val profile = GeneratedCNinjaReconstructionProfile.descriptor
         val temp = createTempDirectory("ninja-build-record-")
@@ -115,6 +134,7 @@ class GeneratedCNinjaIntegrationTest {
     }
 
     @Test
+    @Tag("ci-live")
     fun `Ninja build rejects an unowned source before accepting an artifact`() {
         val profile = GeneratedCNinjaReconstructionProfile.descriptor
         val project = createTempDirectory("ninja-unowned-source-")

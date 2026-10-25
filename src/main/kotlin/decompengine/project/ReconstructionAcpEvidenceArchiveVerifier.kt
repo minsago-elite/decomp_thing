@@ -227,6 +227,7 @@ internal object ReconstructionAcpEvidenceArchiveVerifier {
                         "pre-dispatch fallback prompt budget differs from the reconstruction profile or reconstructor identity: $moduleId"
                     }
                     val request = promptInputs.request(moduleId, projectDir, checkpoint.preDispatchObservedBehavior)
+                        .copy(compilationCheckpointVersion = checkpoint.schemaVersion.toInt())
                     require(request.module.sourcePath == source.path &&
                         (request.module.functionIds + request.module.globalIds).sorted() == source.entityIds) {
                         "pre-dispatch fallback differs from the retained module plan: $moduleId"
@@ -235,7 +236,9 @@ internal object ReconstructionAcpEvidenceArchiveVerifier {
                     val prompt = modulePromptEvidence(request, legacy = legacy).text
                     require(prompt.length.toLong() == checkpoint.promptCharacters &&
                         sha256(prompt.toByteArray(StandardCharsets.UTF_8)) == checkpoint.promptSha256 &&
-                        promptInputs.fingerprint(request, legacy = legacy) == checkpoint.fingerprint) {
+                        promptInputs.fingerprint(request, legacy = legacy,
+                            compilerPolicyId = ReconstructionCompilationPolicies.resolve(profile)
+                                .fingerprintIdentity(checkpoint.schemaVersion.toInt())) == checkpoint.fingerprint) {
                         "pre-dispatch fallback prompt differs from independently rendered inputs: $moduleId"
                     }
                     // Retained observation text is caller input, not proof of historical dispatch.
@@ -268,7 +271,7 @@ internal object ReconstructionAcpEvidenceArchiveVerifier {
                 require(source.entityIds.none(manifest.unresolvedImplementationIds::contains)) {
                     "agent-generated module is unresolved at the archive release gate: $moduleId"
                 }
-                require(checkpoint.schemaVersion in setOf(4L, 5L, 6L) &&
+                require(checkpoint.schemaVersion in setOf(4L, 5L, 6L, 7L) &&
                     checkpoint.executionEvidenceSchemaVersion == 2L &&
                     checkpoint.executionReleaseComplete == true &&
                     checkpoint.executionTerminalOutcome == "returned-completed"
@@ -405,17 +408,19 @@ internal object ReconstructionAcpEvidenceArchiveVerifier {
     ): ReconstructionCheckpoint {
         val root = strictObject(bytes, CHECKPOINT_JSON_LIMITS, "module checkpoint")
         val schemaVersion = root.requiredLong("schemaVersion", "module checkpoint")
-        require(schemaVersion in setOf(4L, 5L, 6L)) {
+        require(schemaVersion in setOf(4L, 5L, 6L, 7L)) {
             "unsupported module checkpoint schema for ACP archive evidence: $moduleId"
         }
         val expectedFields = when (schemaVersion) {
+            7L -> CHECKPOINT_V6_FIELDS + "workflowOrigin"
             6L -> CHECKPOINT_V6_FIELDS
             5L -> CHECKPOINT_V5_FIELDS
             else -> CHECKPOINT_V4_FIELDS
         }
         require(root.keys == expectedFields || schemaVersion == 6L &&
             (root.keys == expectedFields + "workflowOrigin" ||
-                root.keys == expectedFields + setOf("workflowOrigin", "preDispatchObservedBehavior"))) {
+                root.keys == expectedFields + setOf("workflowOrigin", "preDispatchObservedBehavior")) ||
+            schemaVersion == 7L && root.keys == expectedFields + "preDispatchObservedBehavior") {
             "module checkpoint has unsupported fields: $moduleId"
         }
         if (schemaVersion >= 6L) {
@@ -442,6 +447,10 @@ internal object ReconstructionAcpEvidenceArchiveVerifier {
                 .also(::requireRetainableModuleObservation)
         } else null // Older null-observation fallbacks can still pass exact prompt replay.
         val reconstructorIdentity = root.requiredString("reconstructorIdentity", "module checkpoint")
+        require(schemaVersion < 7L || !moduleClaimsAgentExecution(generator, reconstructorIdentity) ||
+            reconstructorIdentity.endsWith(":v4")) {
+            "current module checkpoint requires the v4 agent context contract: $moduleId"
+        }
         val promptSha256 = root.requiredSha256("promptSha256", "module checkpoint")
         val promptCharacters = root.optionalNonNegativeLong("promptCharacters", "module checkpoint")
         val promptBudgetCharacters = root.optionalNonNegativeLong("promptBudgetCharacters", "module checkpoint")
@@ -495,27 +504,7 @@ internal object ReconstructionAcpEvidenceArchiveVerifier {
                 ?.requiredObject("module compilation")
             require(!accepted || compilation != null) { "accepted module lacks compiler evidence: $moduleId" }
             compilation?.let { value ->
-                value.requireExactKeys(COMPILATION_FIELDS, "module compilation")
-                require(value.requiredSha256("sourceSha256", "module compilation") == sourceSha256) {
-                    "module compiler evidence does not bind the checkpoint source: $moduleId"
-                }
-                val command = value.requiredArray("command", "module compilation")
-                    .map { it.requiredString("module compiler argument") }
-                require(command == ReconstructionCompilationPolicies.resolve(profile).command(profile, source.path)) {
-                    "module compiler command differs from its reconstruction profile: $moduleId"
-                }
-                val outcome = value.requiredString("outcome", "module compilation")
-                require(outcome in setOf("passed", "failed", "failed-to-start", "timed-out", "source-changed", "output-limit-exceeded")) {
-                    "module compiler outcome is unsupported: $moduleId"
-                }
-                val returnCode = value.optionalNonNegativeLong("returnCode", "module compilation")
-                require(!accepted || (outcome == "passed" && returnCode == 0L)) {
-                    "accepted module did not pass its compiler gate: $moduleId"
-                }
-                value.requiredSha256("diagnosticsSha256", "module compilation")
-                require(value.requiredLong("diagnosticsBytes", "module compilation") in 0..profile.budgets.buildMaximumOutputBytes) {
-                    "module compiler diagnostics exceed the profile budget: $moduleId"
-                }
+                ModuleCompilationEvidence.decode(value, schemaVersion.toInt(), profile, source.path, sourceSha256, accepted)
             }
         }
 
@@ -586,6 +575,38 @@ internal object ReconstructionAcpEvidenceArchiveVerifier {
             root["compilation"]?.let { it !is JsonNull } == true,
             preDispatchBudgetFailure,
         )
+    }
+
+    /** Reusing source avoids a new ACP turn, not strict replay of the retained invocation. */
+    fun verifyReusableModuleInvocation(
+        projectDir: Path,
+        module: PlannedModule,
+        sourceSha256: String,
+        generator: String,
+        promptSha256: String,
+        profile: ReconstructionProfile,
+        inputBinarySha256: String,
+        modelSchemaVersion: Int,
+    ) {
+        val declaration = profile.layout.declaration("module-implementation")
+        val source = GeneratedFileEvidence(module.sourcePath, sourceSha256, generator, promptSha256,
+            (module.functionIds + module.globalIds).sorted(), true, declaration.roles, declaration.contentKind)
+        val sourceBytes = readBoundedRegularFile(projectDir, module.sourcePath,
+            minOf(profile.budgets.archiveMaximumFileBytes, Int.MAX_VALUE.toLong() - 1L).toInt())
+        require(sha256(sourceBytes) == sourceSha256) { "cached module source changed during receipt replay" }
+        val checkpointPath = profile.layout.declaration("module-evidence").materialize(mapOf("module" to module.id))
+        val checkpoint = parseCheckpoint(readBoundedRegularFile(projectDir, checkpointPath,
+            MAXIMUM_RECONSTRUCTION_CHECKPOINT_BYTES), module.id, source, null, profile, inputBinarySha256, modelSchemaVersion)
+        require(checkpoint.schemaVersion == 7L && checkpoint.accepted) { "cached module lacks current recorded acceptance" }
+        val evidencePath = profile.layout.declaration("module-agent-execution-evidence").materialize(mapOf("module" to module.id))
+        require(checkpoint.executionEvidencePath == evidencePath && checkpoint.executionEvidenceSchemaVersion == 2L &&
+            checkpoint.executionReleaseComplete == true && checkpoint.executionTerminalOutcome == "returned-completed") {
+            "cached module lacks its exact completed ACP invocation"
+        }
+        val bytes = readBoundedRegularFile(projectDir, evidencePath, MAXIMUM_RECONSTRUCTION_ACP_EVIDENCE_BYTES)
+        require(sha256(bytes) == checkpoint.executionEvidenceSha256) { "cached ACP receipt differs from its checkpoint" }
+        verifyExecutionReceipt(bytes, module.id, source, sourceBytes.size.toLong(), checkpoint,
+            if (checkpoint.reconstructorIdentity.endsWith(":v4")) ownedModuleAccessPolicySha256(projectDir, source.path) else null)
     }
 
     // A v4 receipt may write/create only its owned implementation. Interface snapshots
@@ -1674,9 +1695,6 @@ internal object ReconstructionAcpEvidenceArchiveVerifier {
     private val CHECKPOINT_V5_FIELDS = CHECKPOINT_V4_FIELDS + "compilation"
     private val CHECKPOINT_V6_FIELDS = CHECKPOINT_V5_FIELDS + setOf(
         "inputBinarySha256", "modelSchemaVersion", "profileSha256",
-    )
-    private val COMPILATION_FIELDS = setOf(
-        "sourceSha256", "command", "outcome", "returnCode", "diagnosticsSha256", "diagnosticsBytes",
     )
     private val ENTITY_STATUS_FIELDS = setOf("id", "status")
     private val CHECKPOINT_ISSUE_FIELDS = setOf("code", "message", "entityIds")

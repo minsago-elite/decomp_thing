@@ -2,9 +2,9 @@ package decompengine.project
 
 import decompengine.analysis.GhidraJvmAnalyzer
 import decompengine.jobs.elfFixture
+import java.nio.file.Files
 import java.nio.file.Path
 import kotlin.io.path.createDirectories
-import kotlin.io.path.createTempDirectory
 import kotlin.io.path.exists
 import kotlin.io.path.isExecutable
 import kotlin.io.path.readText
@@ -20,9 +20,25 @@ import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 import kotlinx.serialization.json.long
+import org.junit.jupiter.api.BeforeEach
+import org.junit.jupiter.api.Tag
+import org.junit.jupiter.api.TestInfo
+import org.junit.jupiter.api.parallel.Execution
+import org.junit.jupiter.api.parallel.ExecutionMode
+import org.junit.jupiter.api.parallel.ResourceLock
 
+@Execution(ExecutionMode.SAME_THREAD)
+@ResourceLock("contained-module-compilation-runtime")
 class ProfiledReconstructionPipelineTest {
+    @BeforeEach
+    fun requireConfiguredCompiler(test: TestInfo) = requireHostedModuleCompiler(test)
+
+    private fun createTempDirectory(prefix: String): Path = Files.createTempDirectory(
+        Path.of("build", "tmp", "profiled-pipeline-tests").toAbsolutePath().normalize().createDirectories(), prefix,
+    )
+
     @Test
+    @Tag("ci-live")
     fun `pipeline carries the admitted profile through export generation and build`() {
         for (base in ReconstructionProfiles.builtIn) {
             val root = createTempDirectory("profiled-pipeline-")
@@ -31,7 +47,8 @@ class ProfiledReconstructionPipelineTest {
                 val binary = root.resolve("authored.elf").also { it.writeBytes(bytes) }
                 val work = root.resolve("work")
                 val budgets = base.budgets.copy(
-                    exportWallClockMillis = 1_234,
+                    // Report staging starts an isolated JVM even for the authored model.
+                    exportWallClockMillis = 30_000,
                     exportMaximumResidentBytes = 64L * 1024 * 1024,
                     maximumFunctionsPerModule = 1,
                     reconstructionMaximumContextCharacters = 120_001,
@@ -66,6 +83,9 @@ class ProfiledReconstructionPipelineTest {
                 val manifest = SourceTreeManifestReader.read(report.projectDir, profile)
                 assertEquals(profile.sha256, manifest.profileSha256)
                 assertTrue(manifest.unresolvedImplementationIds.isEmpty())
+                val implementationFiles = manifest.files.filter { ProjectFileRole.MODULE_IMPLEMENTATION in it.roles }
+                assertEquals(2, implementationFiles.size)
+                assertTrue(implementationFiles.all { it.acceptedImplementation == true })
                 val planPath = profile.layout.declaration("module-plan-evidence").materialize()
                 val plan = Json.parseToJsonElement(report.projectDir.resolve(planPath).readText()).jsonObject
                 assertEquals(2, plan.getValue("modules").jsonArray.size)

@@ -13,12 +13,41 @@ import kotlinx.serialization.json.JsonPrimitive
 
 class ContainedModuleCompilationRuntimeConfigurationTest {
     @Test
+    fun `environment directory selects only fixed registered profile filenames without granting load authority`() {
+        val file = ContainedModuleCompilationRuntimeConfiguration.ENVIRONMENT
+        val directory = ContainedModuleCompilationRuntimeConfiguration.DIRECTORY_ENVIRONMENT
+        val selector = ContainedModuleCompilationRuntimeConfiguration.PROFILE_ENVIRONMENT
+        val root = Path.of("/opt/module-configurations")
+        assertEquals(root.resolve("generated-c-make-v1.json"),
+            ContainedModuleCompilationRuntimeConfiguration.configuredPath(mapOf(directory to root.toString())))
+        assertEquals(root.resolve("generated-c-ninja-v1.json"),
+            ContainedModuleCompilationRuntimeConfiguration.configuredPath(mapOf(directory to root.toString(), selector to "generated-c-ninja-v1")))
+        assertEquals(root.resolve("generated-c-ninja-v1.json"),
+            ContainedModuleCompilationRuntimeConfiguration.configuredPath(mapOf(directory to root.toString()), "generated-c-ninja-v1"))
+        assertEquals(Path.of("/opt/legacy-file.json"), ContainedModuleCompilationRuntimeConfiguration.configuredPath(
+            mapOf(file to "/opt/legacy-file.json", selector to "generated-c-ninja-v1")))
+        assertFailsWith<IllegalArgumentException> { ContainedModuleCompilationRuntimeConfiguration.configuredPath(
+            mapOf(file to "/opt/legacy-file.json", directory to root.toString())) }
+        for (profile in listOf("../other", "other-profile", "generated-c-make-v1/extra")) {
+            assertFailsWith<IllegalArgumentException> { ContainedModuleCompilationRuntimeConfiguration.configuredPath(
+                mapOf(directory to root.toString(), selector to profile)) }
+            assertFailsWith<IllegalArgumentException> { ContainedModuleCompilationRuntimeConfiguration.configuredPath(
+                mapOf(directory to root.toString()), profile) }
+        }
+        assertFailsWith<IllegalArgumentException> { ContainedModuleCompilationRuntimeConfiguration.configuredPath(mapOf(directory to "relative")) }
+    }
+
+    @Test
     fun `closed declaration preserves exact compiler identity and allows curated loader alias`() {
         val make = parse(valid())
         assertEquals(GeneratedCMakeReconstructionProfile.PROFILE_ID, make.profileId)
         assertEquals(Path.of("/opt/module-compiler/bin/cc"), make.compilerExecutable)
         assertEquals(DIGEST, make.compilerSha256)
         assertEquals(Path.of("/lib64"), make.isolation.systemLibraryMounts.single().destination)
+        val installedLoader = parse(update(valid(), "isolation") {
+            it + ("systemLibraryMounts" to JsonArray(listOf(runtime("/usr/lib64", "/lib64"))))
+        })
+        assertEquals(Path.of("/usr/lib64"), installedLoader.isolation.systemLibraryMounts.single().source)
         assertEquals("/user.slice/user-1000.slice/user@1000.service", make.managerControlGroup)
         assertEquals(8L * 1024 * 1024 * 1024, make.scratchPolicy.maximumFilesystemBytes)
         val ninja = parse(valid() + ("profileId" to JsonPrimitive(GeneratedCNinjaReconstructionProfile.PROFILE_ID)))
@@ -88,8 +117,24 @@ class ContainedModuleCompilationRuntimeConfigurationTest {
     }
 
     @Test
-    fun `compiler closure has exactly one disjoint same-path root and excludes broad host trees`() {
-        listOf("/usr", "/usr/bin", "/usr/lib", "/lib64", "/opt", "/etc", "/run", "/home").forEach { root ->
+    fun `compiler executable retains its path while curated header and internal aliases are explicit`() {
+        val runtimeMounts = JsonArray(listOf(runtime("/opt/module-compiler"), runtime("/opt/module-headers", "/usr/include"),
+            runtime("/opt/module-gcc", "/usr/lib/gcc/x86_64-linux-gnu/12")))
+        val parsed = parse(valid() + ("compilerRuntimeMounts" to runtimeMounts))
+        assertEquals(Path.of("/usr/include"), parsed.compilerRuntimeMounts[1].destination)
+        assertEquals(Path.of("/usr/lib/gcc/x86_64-linux-gnu/12"), parsed.compilerRuntimeMounts[2].destination)
+        for (destination in listOf("/usr", "/usr/lib", "/usr/bin", "/opt/module-compiler/alias", "/keeper-java/alias",
+            "/srv/module-scratch/alias", "/proc/alias", "/dev/alias", "/run/user/1000/alias")) {
+            reject(valid() + ("compilerRuntimeMounts" to JsonArray(listOf(runtime("/opt/module-compiler"),
+                runtime("/opt/module-headers", destination)))))
+        }
+        reject(valid() + ("compilerRuntimeMounts" to JsonArray(listOf(runtime("/opt/module-compiler"),
+            runtime("/opt/module-headers", "/usr/include"), runtime("/opt/module-other-headers", "/usr/include/nested")))))
+    }
+
+    @Test
+    fun `compiler closure has exactly one executable root and excludes broad host trees`() {
+        listOf("/usr", "/usr/bin", "/usr/lib", "/lib64", "/usr/lib64", "/opt", "/etc", "/run", "/home").forEach { root ->
             reject(valid() + ("compilerRuntimeMounts" to JsonArray(listOf(runtime(root)))))
         }
         reject(valid() + ("compilerRuntimeMounts" to JsonArray(listOf(runtime("/opt/module-compiler", "/compiler")))))

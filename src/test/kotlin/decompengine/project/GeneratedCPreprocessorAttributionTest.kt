@@ -15,8 +15,21 @@ import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 
+import org.junit.jupiter.api.BeforeEach
+import org.junit.jupiter.api.Tag
+import org.junit.jupiter.api.TestInfo
+import org.junit.jupiter.api.parallel.Execution
+import org.junit.jupiter.api.parallel.ExecutionMode
+import org.junit.jupiter.api.parallel.ResourceLock
+
+@Execution(ExecutionMode.SAME_THREAD)
+@ResourceLock("contained-module-compilation-runtime")
 class GeneratedCPreprocessorAttributionTest {
+    @BeforeEach
+    fun requireConfiguredCompiler(test: TestInfo) = requireHostedModuleCompiler(test)
+
     @Test
+    @Tag("ci-live")
     fun `continued string and character literals retain attribution bytes and strict compilation`() {
         for (newline in listOf("\n", "\r\n")) {
             val text = "\"a\\" + newline + "b\""
@@ -224,6 +237,7 @@ class GeneratedCPreprocessorAttributionTest {
     }
 
     @Test
+    @Tag("ci-live")
     fun `unconditional generated definitions with referenced globals remain accepted and link`() {
         for ((type, body) in listOf("int" to "return item + 17;", "int (* const)(int)" to "return item == 0 ? 17 : 18;")) {
             val project = project()

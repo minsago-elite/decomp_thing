@@ -48,8 +48,7 @@ object ContainedModuleCompilerWorker {
     }
 
     private fun execute(request: ContainedModuleCompilerRequest): ContainedModuleCompilerResult {
-        val profile = ReconstructionProfiles.named(request.profileId)
-        require(profile.sha256 == request.profileSha256) { "module compiler profile changed registration" }
+        requireContainedModuleCompilerProfile(request.profile)
         // Nondumpable processes can have root-owned /proc entries; ask libc for the effective UID.
         val currentUid = CompilerWorkerProtection.currentUid()
         requireOwnedDirectory(request.snapshotRoot, currentUid)
