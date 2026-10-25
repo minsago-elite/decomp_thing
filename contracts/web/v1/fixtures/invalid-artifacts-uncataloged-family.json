@@ -1,0 +1,40 @@
+{
+  "apiVersion": 1,
+  "kind": "artifacts",
+  "requestId": "request_artifacts_2",
+  "data": {
+    "binding": {
+      "jobId": "1234567890abcdef1234567890abcdef",
+      "runId": "run_example_1",
+      "revisionId": "revision_example_1"
+    },
+    "catalogedFamilies": [
+      "source-archive"
+    ],
+    "unavailableFiles": 0,
+    "items": [
+      {
+        "artifactId": "contract_0123456789abcdef0123456789abcdef_dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+        "binding": {
+          "jobId": "1234567890abcdef1234567890abcdef",
+          "runId": "run_example_1",
+          "revisionId": "revision_example_1"
+        },
+        "displayName": "build_contract.json",
+        "mediaType": "application/json",
+        "sizeBytes": "512",
+        "sha256": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+        "contentHref": "/api/v1/jobs/1234567890abcdef1234567890abcdef/artifacts/contract_0123456789abcdef0123456789abcdef_dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd/content",
+        "role": "source",
+        "derivedFromArtifactId": null,
+        "family": "build-contract",
+        "verification": "revision-commitment"
+      }
+    ],
+    "page": {
+      "limit": 50,
+      "snapshotVersion": "9999999999999999999999999999999999999999999999999999999999999999",
+      "nextCursor": null
+    }
+  }
+}

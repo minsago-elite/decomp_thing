@@ -45,6 +45,10 @@ internal class WebApiController(
     private val revisionDirectoryPages = WebRevisionDirectoryPages(jobs::readRevisionSources)
     private val revisionFileMetadata = WebRevisionFileMetadata(jobs::readRevisionFileMetadata)
     private val revisionSourceSearch = WebRevisionSourceSearch(jobs::searchRevisionSources)
+    private val artifactStore = WebJobArtifactStore(jobs)
+    private val artifactCatalog = WebArtifactCatalog(artifactStore)
+    private val artifactContent = WebArtifactContent(artifactStore)
+    internal val artifactDownloads = WebArtifactDownloads()
     private val revisionValidationReports = WebRevisionValidationReports(jobs::readRecordedValidationReport)
     private val eventStream = WebEventStream(access, streamResources, progressPages, read = { jobId, runId ->
         readWebProgress(jobs, jobId, runId).second
@@ -55,7 +59,7 @@ internal class WebApiController(
         val path = exchange.requestURI.rawPath
         if (!path.startsWith("${assets.basePath}api/")) return false
         val resource = path.removePrefix(prefix)
-        if (!path.startsWith(prefix) || !(resource in setOf("session", "bootstrap", "jobs", "recovery", "agent/preflight") || resource.matches(Regex("(?:jobs|uploads)/[^/]+|jobs/[^/]+/runs(?:/[^/]+(?:/reports/(?:exploration|revision-validation)|/validation-history|/source-catalog|/revisions/[^/]+/(?:sources|source-search|source-directories/[^/]+|source-files/[^/]+(?:/(?:chunk|content))?)|/snapshot|/events|/progress-pin|/cancel)?)?|jobs/[^/]+/artifacts/[^/]+/content")))) {
+        if (!path.startsWith(prefix) || !(resource in setOf("session", "bootstrap", "jobs", "recovery", "agent/preflight") || resource.matches(Regex("(?:jobs|uploads)/[^/]+|jobs/[^/]+/runs(?:/[^/]+(?:/reports/(?:exploration|revision-validation)|/validation-history|/source-catalog|/revisions/[^/]+/(?:sources|source-search|source-directories/[^/]+|source-files/[^/]+(?:/(?:chunk|content))?)|/snapshot|/events|/progress-pin|/cancel)?)?|jobs/[^/]+/artifacts(?:/[^/]+(?:/content)?)?")))) {
             try {
                 val policy = if (exchange.requestMethod in setOf("POST", "PUT", "PATCH", "DELETE")) {
                     WebEndpointPolicy.jsonMutation(exchange.requestMethod)
@@ -112,27 +116,25 @@ internal class WebApiController(
                     })
                 }
                 resource.matches(Regex("jobs/[^/]+/artifacts/[^/]+/content")) -> {
-                    access.authorize(exchange, WebEndpointPolicy.privateRead(allowHead = true))
+                    val session = checkNotNull(access.authorize(exchange, WebEndpointPolicy.privateRead(allowHead = true)))
                     requireNoWebApiQuery(exchange)
                     if (!acceptsWebMediaType(exchange, "application/octet-stream")) {
                         throw WebAccessDenied(406, "NOT_ACCEPTABLE", "This endpoint returns application/octet-stream.")
                     }
-                    if (exchange.requestHeaders.keys.any { it.equals("Range", true) || it.startsWith("If-", true) }) {
-                        throw WebAccessDenied(400, "UNSUPPORTED_HEADER", "This bounded artifact endpoint does not support Range or conditional requests.")
-                    }
                     val parts = resource.split('/')
-                    val bytes = WebExplorationArtifact.read(jobs, parts[1], parts[3])
-                    webApiHeaders(exchange, UUID.randomUUID().toString())
-                    exchange.responseHeaders.set("Content-Type", "application/octet-stream")
-                    exchange.responseHeaders.set("Content-Disposition", "attachment; filename=\"exploration.json\"")
-                    exchange.responseHeaders.set("Content-Length", bytes.size.toString())
-                    try {
-                        if (exchange.requestMethod == "HEAD" || bytes.isEmpty()) exchange.sendResponseHeaders(200, -1)
-                        else {
-                            exchange.sendResponseHeaders(200, bytes.size.toLong())
-                            exchange.responseBody.use { it.write(bytes) }
-                        }
-                    } finally { exchange.close() }
+                    artifactDownloads.admit(session.sessionId) { artifactContent.send(exchange, parts[1], parts[3]) }
+                }
+                resource.matches(Regex("jobs/[^/]+/artifacts/[^/]+")) -> {
+                    access.authorize(exchange, WebEndpointPolicy.privateRead(allowHead = true))
+                    requireNoWebApiQuery(exchange); requireJsonAccept(exchange)
+                    val parts = resource.split('/')
+                    sendWebApiResponse(exchange, 200, "artifact", artifactCatalog.detail(parts[1], parts[3], assets.basePath))
+                }
+                resource.matches(Regex("jobs/[^/]+/artifacts")) -> {
+                    val session = checkNotNull(access.authorize(exchange, WebEndpointPolicy.privateRead(allowHead = true)))
+                    requireJsonAccept(exchange)
+                    sendWebApiResponse(exchange, 200, "artifacts", artifactCatalog.page(session.sessionId, resource.split('/')[1],
+                        exchange.requestURI.rawQuery, assets.basePath))
                 }
                 resource == "agent/preflight" -> agentPreflights.handle(exchange)
                 resource.matches(Regex("jobs/[^/]+/runs/[^/]+/cancel")) -> {

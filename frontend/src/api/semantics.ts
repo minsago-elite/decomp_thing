@@ -1,4 +1,4 @@
-import type { ContractDocument, Page, RevisionDirectory, Run, SourceChunk, SourceSearch, ValidationBytePreview, ValidationCases, ValidationFailure, ValidationHistory, ValidationSummary } from './generated';
+import type { Artifact, ContractDocument, Page, RevisionDirectory, Run, SourceChunk, SourceSearch, ValidationBytePreview, ValidationCases, ValidationFailure, ValidationHistory, ValidationSummary } from './generated';
 import { ApiClientError } from './errors';
 import { normalizeBasePath, validateResourceHref } from '../app/paths';
 import type { ApiResource } from '../app/paths';
@@ -237,6 +237,8 @@ export function checkSourceChunk(data: SourceChunk): void {
 }
 
 const codePoints = (value: string): number => Array.from(value).length;
+const ARTIFACT_CODES = { 'exploration-report': 'exploration', 'progress-journal': 'progress', 'source-manifest': 'manifest',
+  'build-contract': 'contract', 'source-archive': 'archive' } as const;
 
 export function checkSourceSearch(data: SourceSearch): void {
   const { page, limits, scope, progress, query, items } = data;
@@ -277,6 +279,17 @@ export function checkSourceSearch(data: SourceSearch): void {
 export function checkSemantics(document: ContractDocument, basePath = '/'): void {
   function checkHref(href: string, resource: ApiResource) {
     try { validateResourceHref(basePath, href, resource); } catch { throw new ApiClientError('invalid_response'); }
+  }
+  // Catalog entries carry family and verification together; only revision-bound source metadata is verified.
+  function checkCatalogArtifact(item: Artifact) {
+    checkHref(item.contentHref, { kind: 'artifact-content', jobId: item.binding.jobId, artifactId: item.artifactId });
+    requireValue((item.family === undefined) === (item.verification === undefined));
+    if (item.family === undefined) return;
+    requireValue(item.artifactId === `${ARTIFACT_CODES[item.family]}_${item.artifactId.split('_')[1] ?? ''}_${item.sha256}`
+      && /^[a-z]+_[a-f0-9]{32}_[a-f0-9]{64}$/u.test(item.artifactId) && item.binding.runId !== null);
+    if (item.verification === 'revision-commitment') {
+      requireValue((item.family === 'source-manifest' || item.family === 'build-contract') && item.binding.revisionId !== null);
+    }
   }
   switch (document.kind) {
     case 'validationHistory':
@@ -411,10 +424,20 @@ export function checkSemantics(document: ContractDocument, basePath = '/'): void
       break;
     }
     case 'artifact':
-      checkHref(document.data.contentHref, {
-        kind: 'artifact-content', jobId: document.data.binding.jobId, artifactId: document.data.artifactId,
-      });
+      checkCatalogArtifact(document.data);
       break;
+    case 'artifacts': {
+      const { binding, items, page, catalogedFamilies } = document.data;
+      requireValue((binding.revisionId === null || binding.runId !== null) && items.length <= page.limit
+        && new Set(items.map(item => item.artifactId)).size === items.length);
+      for (const item of items) {
+        checkCatalogArtifact(item);
+        requireValue(item.family !== undefined && catalogedFamilies.includes(item.family) && item.binding.jobId === binding.jobId
+          && (binding.runId === null || item.binding.runId === binding.runId)
+          && (binding.revisionId === null || item.binding.revisionId === binding.revisionId));
+      }
+      break;
+    }
     case 'event':
       if (document.type === 'retention.gap') checkHref(document.payload.snapshotHref, {
         kind: 'snapshot', jobId: document.jobId, runId: document.runId,

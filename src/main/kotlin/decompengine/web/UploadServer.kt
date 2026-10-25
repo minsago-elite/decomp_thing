@@ -287,6 +287,8 @@ class UploadServer(
     }
     private val api = spaAssets?.let { WebApiController(access, it, jobs, jobMutations, streamResources,
         harnessReadiness = harnessReadiness, agentPreflight = agentPreflight) }
+    /** Admitted artifact downloads that have not yet released their stream; test evidence helper. */
+    internal fun activeArtifactDownloads(): Int = api?.artifactDownloads?.activeCount() ?: 0
     // A request that finds every worker and queue slot taken is answered by this tiny pool with a stable 429
     // instead of a reset connection. It has no queue, so overload still never buffers more than the main pool does;
     // when it too is busy the rejection propagates and the dispatcher closes the connection, as before.
@@ -361,8 +363,9 @@ class UploadServer(
             }
             val upload = exchange.requestMethod == "POST" &&
                 exchange.requestHeaders.getFirst("Content-Type")?.startsWith("multipart/form-data", true) == true
-            val deadline = requestDeadlines.schedule({ exchange.close() }, if (upload) 120 else 30, TimeUnit.SECONDS)
-            try { route(exchange) } finally { deadline.cancel(false) }
+            val deadline = WebRequestDeadline(requestDeadlines, exchange, if (upload) 120_000 else 30_000)
+            exchange.setAttribute(WebRequestDeadline.ATTRIBUTE, deadline)
+            try { route(exchange) } finally { deadline.cancel() }
         }
     }
 

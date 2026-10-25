@@ -823,6 +823,26 @@ class WebJobService(
         return store.resolveArtifact(jobId, relativePath)
     }
 
+    /**
+     * Authorize one fixed attempt artifact under the service monitor, then hash or stream it through pinned
+     * descriptors without holding the monitor, so workflow publication and retention are never blocked by a reader.
+     */
+    internal fun streamRunArtifact(jobId: String, runId: String, artifactPath: String, declaredSize: (Long) -> Unit,
+        consume: (ByteArray, Int) -> Unit, cancellationCheck: () -> Unit): decompengine.repair.StableFileDigest {
+        val relative = "reports/runs/$runId/$artifactPath"
+        canonicalReportSegments(relative)
+        synchronized(this) { requireInitializedRead(); getAttempt(jobId, runId) }
+        return store.streamArtifact(jobId, relative, declaredSize, consume, cancellationCheck)
+    }
+
+    /** Presence only: a regular file at the fixed attempt path. It is never opened or trusted for content. */
+    @Synchronized
+    internal fun runArtifactPresent(jobId: String, runId: String, artifactPath: String): Boolean {
+        requireInitializedRead()
+        getAttempt(jobId, runId)
+        return try { store.resolveRunArtifact(jobId, runId, artifactPath); true } catch (_: decompengine.jobs.JobStoreException) { false }
+    }
+
     /** Validate the report namespace and attempt ownership before a bounded retained-descriptor read. */
     @Synchronized
     internal fun readArtifact(jobId: String, relativePath: String, maximumBytes: Long): decompengine.repair.StableRegularFile {

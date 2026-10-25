@@ -168,8 +168,8 @@ internal storage optimization and must not merge identity, permissions or histor
 | `GET J/revisions`, `GET V` | `200 revisions`, `200 revision` | Immutable source/acceptance bindings; #165/#199 |
 | `GET V/sources`, `GET V/sources/{fileId}` | `200 files`, `200 file` | Bounded tree/page/read; #165/#188/#189 |
 | `GET`, `HEAD R/revisions/{revisionId}/source-search` | `200 sourceSearch` | Explicit revision and query/byte/result/deadline bounds over canonical inputs; replaces the reserved `V/search`; #547, #548 |
-| `GET J/artifacts`, `GET J/artifacts/{artifactId}` | `200 artifacts`, `200 artifact` | Optional run/revision filters validated together; #165/#192 |
-| `GET`/`HEAD J/artifacts/{artifactId}/content` | `200` or `206` bytes | Immutable digest binding, contained stream; #164/#192 |
+| `GET`, `HEAD J/artifacts`, `J/artifacts/{artifactId}` | `200 artifacts`, `200 artifact` | Fixed attempt families; optional `runId`, with `revisionId` only together with `runId`; #551 |
+| `GET`/`HEAD J/artifacts/{artifactId}/content` | `200`, `206`, `304` bytes | Digest-bound pinned stream, single byte range, strong ETag preconditions; #552 |
 | `POST V/archive-verifications` | `202 operation` | Explicit bounded integrity verification, no binary execution; #193 |
 | `GET G`, `GET G/worktrees/{worktreeId}` | `200 gitWorkspace` | Capability-gated repository/worktree registry; #200/#202 |
 | `GET G/{status,diff,history,refs,worktrees,remotes,conflicts}` | Bounded typed Git read | Scoped worktree/ref/object IDs; #202/#204/#207/#210/#211 |
@@ -908,6 +908,79 @@ Pure Kotlin controls compare results to independent byte-offset truth over Unico
 CRLF and markup text, multi-megabyte files and paged continuations, and exercise the
 deadline, byte budget, cursor binding and digest refusal; they do not measure physical
 latency or memory on the D0 workload.
+
+## Attempt artifact catalog and streamed downloads
+
+`GET`/`HEAD /api/v1/jobs/{jobId}/artifacts` lists the fixed artifact families retained for a
+job's attempts through the private session read policy. The families are the exploration
+report (`exploration.json`), progress journal (`agent-progress.json`), source manifest
+(`source-tree/source_tree_manifest.json`), build contract (`source-tree/reports/build_contract.json`)
+and source archive (`source-tree.zip`) under each attempt's own report namespace. Other
+retained files are not cataloged. No request supplies a path: the catalog considers only
+attempts in the job's durable snapshot and only these names, and entries never contain host
+paths. `runId` restricts the catalog to one attempt; `revisionId` is accepted only together
+with `runId`, must equal that attempt's persisted candidate revision, and restricts the
+catalog to the revision-bound source families. Unknown attempts and mismatched revisions
+return 404; other parameters, repeated keys and invalid limits return 422.
+
+Each page inspects at most 200 candidates in attempt creation order and fixed family
+order, returns at most `limit` (default 50, maximum 200) entries and hashes at most 512 MiB of
+current bytes through descriptor-pinned reads; at least one file is always hashed so every
+continuation advances. Absent files are not listed. Files that exist but cannot be read
+consistently or exceed the 4 GiB ceiling are counted in `unavailableFiles` and not listed.
+The signed cursor binds the session, job, filters, page size and an attempt-set version;
+another session or filter returns `400 INVALID_CURSOR`, and a changed attempt set or
+candidate revision returns `410 CURSOR_EXPIRED`.
+
+Entries reuse the `artifact` DTO with `family` and `verification`. `sizeBytes` and `sha256`
+are measured from the current bytes during the listing. `verification: "revision-commitment"`
+appears only for the source manifest or build contract of a revision-bound attempt when the
+revision source capture verified that the same manifest and build contract reproduce the
+persisted candidate's source commitment. Every other entry is `not-verified`: an available
+file whose digest the server observed but no producer or revision commitment has validated.
+Neither state verifies compilation, behavior, archive contents or accepted reconstruction.
+The artifact ID is `<family>_<job/run binding>_<sha256>`, so it is stable for the same bytes
+and the existing exploration report descriptor names the same artifact. `GET`/`HEAD
+J/artifacts/{artifactId}` re-hashes the current bytes: missing artifacts return 404 and
+changed bytes return `409 ARTIFACT_CHANGED`.
+
+`GET`/`HEAD J/artifacts/{artifactId}/content` accepts no query and returns an
+`application/octet-stream` attachment whatever the listed media type, with
+`Content-Disposition: attachment; filename="…"; filename*=UTF-8''…`, `no-store`, `nosniff`, frame
+denial and the sandboxed inert CSP. Active content is therefore never served as trusted UI.
+A first pinned pass must reproduce the ID's digest before any header is sent; otherwise
+the response is 409. `ETag` is the strong `"<sha256>"`, and `Accept-Ranges: bytes`,
+`X-Decomp-Artifact-ID` and `X-Decomp-Content-SHA256` repeat that identity. HEAD performs
+the same verification and returns headers only. `If-None-Match` with the current ETag (or
+`*`) returns 304; a non-matching `If-Match` returns 412. A single `bytes=a-b`, `bytes=a-` or
+`bytes=-n` range returns 206 with `Content-Range`. An unsatisfiable range returns 416 with
+`Content-Range: bytes */<size>`. Multiple ranges or malformed syntax are ignored and return
+the complete 200 representation. `If-Range` honors a range only for the current strong ETag.
+Date preconditions (`If-Modified-Since`, `If-Unmodified-Since`) are refused with
+`400 UNSUPPORTED_HEADER`, because no modification time is part of the identity.
+
+The body is streamed from a second pinned pass in 64 KiB chunks without retaining the file
+in memory. The final chunk is withheld until that pass has also reproduced the digest and
+unchanged file identity. If bytes change, the connection closes short of `Content-Length`,
+so a browser never completes a different file under the listed digest. Each request is
+bounded by the 30 s request deadline. While bytes flow, a download renews it in idle
+intervals of `downloadIdleMs` (120 s), up to one hour. The server admits four concurrent
+downloads, at most two per session (`429 DOWNLOAD_LIMIT`). A client abort, stalled reader,
+deadline or shutdown interrupt closes the exchange and releases descriptors and admission.
+Authorization runs under the job service monitor, but streaming does not hold it, so
+workflow publication, retention and deletion are never blocked by a reader. A deleted file
+ends an in-progress download short of its length.
+
+The attempt evidence view lists the catalog only after an explicit action. It can restrict
+the list to the result revision, pages with explicit controls, shows exact size, SHA-256,
+declared type and revision binding, and distinguishes a verified digest from an available
+file that is not verified. Downloads use ordinary browser attachment links (`<a download>`),
+never a whole-file JavaScript blob. JVM controls cover family selection, filters, cursor
+binding and expiry, page budgets, verification and change refusal. A real-listener test
+streams a 24 MiB archive with range, precondition, HEAD and change semantics. Other
+real-listener tests abort and run concurrent downloads, checking that admission and file
+descriptors are released, and change bytes during a 48 MiB stream to confirm the download
+never completes. Physical D0 throughput and heap budgets are not measured.
 
 ## SPA recorded source navigation
 

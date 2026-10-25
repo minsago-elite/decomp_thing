@@ -216,7 +216,9 @@ class WebSessionRealRoutesTest {
                 Shape("$revision/source-files/file_1", head = true, status = 404, code = "SOURCE_FILE_NOT_FOUND"),
                 Shape("$revision/source-files/file_1/chunk", head = true, status = 404, code = "SOURCE_FILE_NOT_FOUND"),
                 Shape("$revision/source-files/file_1/content", accept = bytes, head = true, status = 404, code = "SOURCE_FILE_NOT_FOUND"),
-                Shape("$api/jobs/${job.id}/artifacts/artifact_1/content", accept = bytes, head = true, status = 404, code = "NOT_FOUND"),
+                Shape("$api/jobs/${job.id}/artifacts", head = true, status = 200),
+                Shape("$api/jobs/${job.id}/artifacts/artifact_1", head = true, status = 404, code = "NOT_FOUND"),
+                Shape("$api/jobs/${job.id}/artifacts/artifact_1/content",accept = bytes, head = true, status = 404, code = "NOT_FOUND"),
             )
             fun get(shape: Shape, cookie: String?, method: String = "GET"): HttpResponse<String> {
                 val builder = HttpRequest.newBuilder(URI(origin + shape.path)).timeout(Duration.ofSeconds(5)).header("Accept", shape.accept)

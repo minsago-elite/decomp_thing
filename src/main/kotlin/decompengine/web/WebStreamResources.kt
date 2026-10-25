@@ -127,3 +127,45 @@ internal class WebStreamResources(
 
     override fun close() { shutdown() }
 }
+
+/**
+ * Per-request close deadline. A streaming download renews it while it makes progress: each renewal allows another
+ * idle interval, never beyond an absolute lifetime, so a stalled or abandoned client releases its descriptors.
+ */
+internal class WebRequestDeadline(
+    private val scheduler: java.util.concurrent.ScheduledExecutorService,
+    private val target: AutoCloseable,
+    initialMs: Long,
+    private val idleMs: Long = DOWNLOAD_IDLE_MS,
+    private val maximumMs: Long = DOWNLOAD_MAXIMUM_MS,
+    private val nanoTime: () -> Long = System::nanoTime,
+) {
+    private val started = nanoTime()
+    private var lastRenewal = started
+    @Volatile var expired = false
+        private set
+    private var future: ScheduledFuture<*>? = schedule(initialMs)
+
+    private fun schedule(delayMs: Long): ScheduledFuture<*>? = try {
+        scheduler.schedule({ expired = true; try { target.close() } catch (_: Exception) {} }, delayMs, TimeUnit.MILLISECONDS)
+    } catch (_: java.util.concurrent.RejectedExecutionException) { expired = true; null }
+
+    /** Called after successful progress; renewals are coalesced to at most one per second. */
+    fun renew() = synchronized(this) {
+        val now = nanoTime()
+        if (expired || now - lastRenewal < 1_000_000_000L) return@synchronized
+        val remaining = maximumMs - (now - started) / 1_000_000
+        if (remaining <= 0 || future?.cancel(false) != true) return@synchronized
+        lastRenewal = now
+        future = schedule(minOf(idleMs, remaining))
+    }
+
+    fun cancel() = synchronized(this) { future?.cancel(false); Unit }
+
+    companion object {
+        const val ATTRIBUTE = "decomp.web.requestDeadline"
+        /** Matches the bootstrap `downloadIdleMs` limit. */
+        const val DOWNLOAD_IDLE_MS = 120_000L
+        const val DOWNLOAD_MAXIMUM_MS = 60L * 60 * 1000
+    }
+}

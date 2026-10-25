@@ -189,6 +189,10 @@ button:disabled { opacity: 0.65; cursor: wait; }
 .source-search-results pre { margin: .25rem 0 0; white-space: pre-wrap; overflow-wrap: anywhere; tab-size: 4; unicode-bidi: isolate; }
 .source-search-results mark { background: var(--selected); color: inherit; outline: 1px solid var(--accent); }
 .source-search nav { display: flex; flex-wrap: wrap; gap: .5rem; margin-block: 1rem; }
+.artifact-catalog { min-width: 0; overflow-wrap: anywhere; }
+.artifact-catalog nav { display: flex; flex-wrap: wrap; gap: .5rem; margin-block: 1rem; }
+.artifact-verified { border-inline-start: .3rem solid var(--accent); padding-inline-start: .5rem; }
+.artifact-unverified { border-inline-start: .3rem solid var(--focus); padding-inline-start: .5rem; }
 .source-token-keyword { color: var(--accent); font-weight: 650; }
 .source-token-string { color: var(--accent); }
 .source-token-comment { color: var(--muted); font-style: italic; }
