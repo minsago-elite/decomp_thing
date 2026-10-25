@@ -600,8 +600,11 @@ Git is unusable. The executable path never leaves the server.
   `core.bare=true`, `core.ignorecase`, `core.precomposeunicode`, `core.logallrefupdates`,
   `extensions.objectformat`, `user.*`). Otherwise the read fails with `REPOSITORY_CONFIG_UNTRUSTED`.
   Alternates, `commondir` and shallow files are `REPOSITORY_UNSUPPORTED`. Hooks never run because
-  of the empty `core.hooksPath`. Attribute files can name a filter, but no driver exists, so
-  content is checked out byte for byte. Submodule paths stay empty gitlinks. No command fetches
+  of the empty `core.hooksPath`. Attribute files can name a filter, but no driver exists. Built-in
+  conversions need no driver (`text`/`eol` line endings, `ident`, `working-tree-encoding`), so
+  every managed Git directory carries a server-owned `info/attributes`, which has the highest
+  attribute precedence: `* -text !eol -crlf -ident -filter !working-tree-encoding`. The audit
+  refuses a repository whose file differs, so checkout and status always see the exact blob bytes. Submodule paths stay empty gitlinks. No command fetches
   or contacts a remote. No exceptions exist yet. Any future hook, filter, submodule or helper
   support needs its own reviewed design and capability.
 - **States.** A read reports `unborn`, `attached`, `detached`, `dirty` and the object format,

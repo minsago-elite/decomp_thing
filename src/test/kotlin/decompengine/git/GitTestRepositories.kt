@@ -41,6 +41,7 @@ internal class GitTestRepositories : AutoCloseable {
         val gitDir = root.resolve("$name.git")
         val workTree = Files.createDirectories(root.resolve("$name work"))
         runner.run(GitInvocation("init", listOf("--quiet", "--bare", "--initial-branch=$branch", "--object-format=$format", gitDir.toString())))
+        GitManagedLayout.prepare(gitDir)
         return gitDir to workTree
     }
 

@@ -250,14 +250,16 @@ class GitCommandRunner internal constructor(val executable: Path, val environmen
                 }
                 process.waitFor(minOf(remaining, TimeUnit.MILLISECONDS.toNanos(20)), TimeUnit.NANOSECONDS)
             }
-            val truncated = stdout.overflowed && invocation.truncateStdout
-            if (truncated) terminate(process)
+            if (stdout.overflowed && invocation.truncateStdout) terminate(process)
             readers.forEach { it.join(TimeUnit.NANOSECONDS.toMillis(maxOf(deadline - System.nanoTime(), 0)) + 1000) }
             if (readers.any { it.isAlive }) {
                 terminate(process)
                 throw GitCommandException(GitCommandException.Kind.TIMED_OUT, "Git output did not close within its time bound.")
             }
-            if (!truncated && (stdout.overflowed || stderr.overflowed)) {
+            // The readers can still be draining when the process exits, so only their final state
+            // decides truncation. Stderr keeps its own limit either way.
+            val truncated = stdout.overflowed && invocation.truncateStdout
+            if (stderr.overflowed || (stdout.overflowed && !truncated)) {
                 throw GitCommandException(GitCommandException.Kind.OUTPUT_LIMIT, "Git output exceeded its bound.")
             }
             val exit = if (truncated) -1 else process.exitValue()

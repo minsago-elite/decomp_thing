@@ -84,6 +84,13 @@ class GitAdapterTest {
         }.kind)
         val truncated = loud.run(GitInvocation("status", truncateStdout = true, limits = GitExecutionLimits(maxStdoutBytes = 4096)))
         assertTrue(truncated.stdoutTruncated); assertEquals(4096, truncated.stdout.size)
+        // A child that exits immediately after slightly overrunning the bound races its own reader;
+        // truncation must still be reported, never an output-limit failure.
+        val brief = GitCommandRunner(fakeGit(f.root.resolve("brief"), "head -c 5000 /dev/zero"), f.environment)
+        repeat(200) {
+            val result = brief.run(GitInvocation("status", truncateStdout = true, limits = GitExecutionLimits(maxStdoutBytes = 4096)))
+            assertTrue(result.stdoutTruncated); assertEquals(4096, result.stdout.size)
+        }
         val noisy = GitCommandRunner(fakeGit(f.root.resolve("noisy"), "head -c 4000000 /dev/zero >&2"), f.environment)
         assertEquals(GitCommandException.Kind.OUTPUT_LIMIT, assertFailsWith<GitCommandException> {
             noisy.run(GitInvocation("status", limits = GitExecutionLimits(maxStderrBytes = 4096)))
@@ -117,8 +124,7 @@ class GitAdapterTest {
 
     @Test fun `source-only tracking policy excludes job state and keeps intended sources`(): Unit = GitTestRepositories().use { f ->
         val (gitDir, workTree) = f.managed("policy")
-        Files.createDirectories(gitDir.resolve("info"))
-        Files.writeString(gitDir.resolve("info/exclude"), GitTrackingPolicy.excludeFile())
+        assertEquals(GitTrackingPolicy.excludeFile(), Files.readString(gitDir.resolve("info/exclude")))
         val kept = listOf("src/main.c", "src/core/state.c", "src/tmp/helper.c", "src/sessions/table.c", "include/module.h",
             "CMakeLists.txt", "Makefile", "README.md", "source_tree_manifest.json", "src/reports/format.c", "cmake/toolchain.cmake",
             "src/build/rules.c", "docs/design.md")
@@ -206,7 +212,13 @@ class GitAdapterTest {
     @Test fun `hooks attribute filters submodules and fsmonitor in repository content stay inert`(): Unit = GitTestRepositories().use { f ->
         val marker = f.root.resolve("tripwire-ran")
         val (gitDir, workTree) = f.managed("inert")
-        Files.writeString(workTree.resolve(".gitattributes"), "* filter=evil diff=evil merge=evil\n")
+        // Driver attributes have no driver; built-in conversions (EOL, ident, encoding) are unset by
+        // the server's highest-precedence info/attributes, so checkout keeps the exact blob bytes.
+        Files.writeString(workTree.resolve(".gitattributes"),
+            "* filter=evil diff=evil merge=evil text eol=crlf\nid.c ident\nwide.c working-tree-encoding=UTF-16LE\n")
+        Files.write(workTree.resolve("lf.c"), "int x;\n".toByteArray())
+        Files.write(workTree.resolve("id.c"), "/* \$Id\$ */\n".toByteArray())
+        Files.write(workTree.resolve("wide.c"), "abc\n".toByteArray())
         Files.writeString(workTree.resolve(".gitmodules"), "[submodule \"x\"]\n\tpath = vendor\n\turl = ${f.root.resolve("elsewhere")}\n")
         Files.write(workTree.resolve("source.c"), "int value = 1;\r\n".toByteArray())
         val commit = f.commitAll(gitDir, workTree, "attributes")
@@ -216,11 +228,12 @@ class GitAdapterTest {
         for (hook in listOf("post-checkout", "post-index-change", "reference-transaction", "pre-auto-gc")) {
             Files.copy(f.tripwire("$hook.sh", marker), gitDir.resolve("hooks/$hook"))
         }
-        Files.createDirectories(gitDir.resolve("info"))
-        Files.writeString(gitDir.resolve("info/attributes"), "* filter=evil\n")
         val tree = Files.createDirectories(f.root.resolve("checkout tree"))
         f.runner.run(GitInvocation("read-tree", listOf("--reset", "-u", commit), gitDir = gitDir, workTree = tree))
         assertContentEquals("int value = 1;\r\n".toByteArray(), Files.readAllBytes(tree.resolve("source.c")))
+        assertContentEquals("int x;\n".toByteArray(), Files.readAllBytes(tree.resolve("lf.c")))
+        assertContentEquals("/* \$Id\$ */\n".toByteArray(), Files.readAllBytes(tree.resolve("id.c")))
+        assertContentEquals("abc\n".toByteArray(), Files.readAllBytes(tree.resolve("wide.c")))
         assertFalse(tree.resolve("vendor").resolve(".git").exists())
         GitRepositoryInspector.inspect(f.runner, gitDir, tree)
         // Bypass the audit to show the command-line values alone neutralize these repository keys.
@@ -231,5 +244,11 @@ class GitAdapterTest {
         f.runner.run(GitInvocation("status", listOf("--porcelain=v1", "-z"), gitDir = gitDir, workTree = tree))
         f.runner.run(GitInvocation("read-tree", listOf("--reset", "-u", commit), gitDir = gitDir, workTree = tree))
         assertFalse(marker.exists())
+        // A managed repository whose attribute neutralization was changed is refused before Git runs.
+        val (tampered, tamperedTree) = f.managed("tampered")
+        Files.writeString(tampered.resolve("info/attributes"), "* text eol=crlf\n")
+        assertEquals("REPOSITORY_CONFIG_UNTRUSTED", assertFailsWith<GitRepositoryException> {
+            GitRepositoryInspector.inspect(f.runner, tampered, tamperedTree)
+        }.code)
     }
 }

@@ -55,6 +55,34 @@ object GitConfigurationAudit {
                 throw GitRepositoryException("REPOSITORY_UNSUPPORTED", "The managed repository links outside its own storage.")
             }
         }
+        val attributes = gitDir.resolve("info").resolve("attributes")
+        val neutral = Files.isRegularFile(attributes, NOFOLLOW_LINKS) && Files.size(attributes) <= 4096 &&
+            Files.readString(attributes) == GitManagedLayout.ATTRIBUTES
+        if (!neutral) throw GitRepositoryException("REPOSITORY_CONFIG_UNTRUSTED",
+            "The managed repository does not neutralize content conversions.")
+    }
+}
+
+/**
+ * Server-owned files in every managed Git directory. Built-in attribute conversions (`text`/`eol`
+ * line endings, `ident` expansion, `working-tree-encoding`) need no configured driver, so the
+ * repository's own `.gitattributes` could otherwise change checked-out bytes. `info/attributes`
+ * has the highest attribute precedence, and this file unsets every converting attribute for all
+ * paths, so checkout and status always see the exact blob bytes.
+ */
+object GitManagedLayout {
+    const val ATTRIBUTES = "* -text !eol -crlf -ident -filter !working-tree-encoding\n"
+
+    fun prepare(gitDir: Path) {
+        val info = gitDir.resolve("info")
+        if (!Files.exists(info, NOFOLLOW_LINKS)) Files.createDirectory(info)
+        if (!Files.isDirectory(info, NOFOLLOW_LINKS)) throw GitRepositoryException("REPOSITORY_UNSUPPORTED", "The managed repository layout is invalid.")
+        for ((name, content) in listOf("attributes" to ATTRIBUTES, "exclude" to GitTrackingPolicy.excludeFile())) {
+            val temporary = info.resolve(".$name.tmp")
+            Files.deleteIfExists(temporary)
+            Files.writeString(temporary, content)
+            Files.move(temporary, info.resolve(name), java.nio.file.StandardCopyOption.ATOMIC_MOVE, java.nio.file.StandardCopyOption.REPLACE_EXISTING)
+        }
     }
 }
 
