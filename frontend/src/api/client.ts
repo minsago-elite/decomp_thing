@@ -159,19 +159,11 @@ export function createApiClient(options: ClientOptions) {
         || (requestKind === 'agentPreflightRequest' && kind !== 'agentPreflight')) throw new ApiClientError('invalid_request');
       return await request(kind, path, 'POST', encodeRequest(requestKind, data), settings, session) as ResponseOf<K>;
     },
-    async put<K extends ResponseKind, Q extends RequestKind>(kind: K, path: string, requestKind: Q, data: RequestData<Q>, settings: MutationOptions = {}): Promise<ResponseOf<K>> {
-      if (requestKind === 'agentPreflightRequest') throw new ApiClientError('invalid_request');
-      return await request(kind, path, 'PUT', encodeRequest(requestKind, data), settings) as ResponseOf<K>;
-    },
-    /** Allowlisted job metadata change; If-Match, idempotency key and CSRF are mandatory. */
-    async patch<K extends ResponseKind, Q extends RequestKind>(kind: K, path: string, requestKind: Q, data: RequestData<Q>, settings: MutationOptions = {}): Promise<ResponseOf<K>> {
-      if (requestKind !== 'jobOrganizationRequest') throw new ApiClientError('invalid_request');
-      return await request(kind, path, 'PATCH', encodeRequest(requestKind, data), settings) as ResponseOf<K>;
-    },
-    /** Guarded resource deletion with a closed confirmation body; never the session route. */
-    async remove<K extends ResponseKind, Q extends RequestKind>(kind: K, path: string, requestKind: Q, data: RequestData<Q>, settings: MutationOptions = {}): Promise<ResponseOf<K>> {
-      if (requestKind !== 'jobDeletionRequest' || path === '/session') throw new ApiClientError('invalid_request');
-      return await request(kind, path, 'DELETE', encodeRequest(requestKind, data), settings) as ResponseOf<K>;
+    /** PUT by default; PATCH/DELETE carry only their closed job organization/deletion bodies. */
+    async put<K extends ResponseKind, Q extends RequestKind>(kind: K, path: string, requestKind: Q, data: RequestData<Q>, settings: MutationOptions = {}, method: 'PUT' | 'PATCH' | 'DELETE' = 'PUT'): Promise<ResponseOf<K>> {
+      if (requestKind === 'agentPreflightRequest' || (method !== 'PUT') !== /^job(Organization|Deletion)Request$/.test(requestKind)
+        || (method === 'PATCH') !== (requestKind === 'jobOrganizationRequest')) throw new ApiClientError('invalid_request');
+      return await request(kind, path, method, encodeRequest(requestKind, data), settings) as ResponseOf<K>;
     },
     async upload(file: File, settings: MutationOptions): Promise<ResponseOf<'job'>> {
       const body = new FormData();

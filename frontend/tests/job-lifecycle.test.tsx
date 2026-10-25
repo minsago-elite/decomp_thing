@@ -4,7 +4,8 @@ import { ApiClientError } from '../src/api/client';
 import type { createApiClient } from '../src/api/client';
 import type { Job, JobDeletionPreview, Operation } from '../src/api/generated';
 import { JobDeletion, JobOrganization } from '../src/jobs/JobLifecycle';
-import { notifyLibraryChanged, onLibraryChange } from '../src/jobs/libraryChannel';
+import { onLibraryChange } from '../src/jobs/libraryChannel';
+import { notifyLibraryChanged } from '../src/jobs/libraryNotify';
 
 const jobId = '1234567890abcdef1234567890abcdef';
 const job = (overrides: Partial<Job> = {}): Job => ({
@@ -27,13 +28,12 @@ const operation = (state: Operation['state']): Operation => ({
 });
 const client = {
   get: vi.fn<(kind: string, path: string, settings: { signal: AbortSignal }) => Promise<{ data: unknown }>>(),
-  patch: vi.fn<(kind: string, path: string, request: string, data: unknown, settings: Record<string, unknown>) => Promise<{ data: unknown }>>(),
-  remove: vi.fn<(kind: string, path: string, request: string, data: unknown, settings: Record<string, unknown>) => Promise<{ data: unknown }>>(),
+  put: vi.fn<(kind: string, path: string, request: string, data: unknown, settings: Record<string, unknown>, method: string) => Promise<{ data: unknown }>>(),
 };
 const typed = client as unknown as ReturnType<typeof createApiClient>;
 const session = { csrf: () => 'a'.repeat(43) };
 beforeEach(() => {
-  client.get.mockReset(); client.patch.mockReset(); client.remove.mockReset();
+  client.get.mockReset(); client.put.mockReset();
   Object.defineProperty(navigator, 'onLine', { configurable: true, value: true });
   Object.defineProperty(document, 'visibilityState', { configurable: true, value: 'visible' });
 });
@@ -41,7 +41,7 @@ beforeEach(() => {
 it('saves only allowlisted label and archive changes with the job guard, then adopts a fresh read', async () => {
   const changed = vi.fn();
   const fresh = job({ label: 'Router firmware', archived: true, version: 'version_2' });
-  client.patch.mockResolvedValueOnce({ data: fresh });
+  client.put.mockResolvedValueOnce({ data: fresh });
   client.get.mockResolvedValueOnce({ data: fresh });
   const received = vi.fn();
   const stop = onLibraryChange('/nested/', received);
@@ -51,9 +51,10 @@ it('saves only allowlisted label and archive changes with the job guard, then ad
   fireEvent.click(screen.getByLabelText('Archived (hidden from the default job list)'));
   fireEvent.click(screen.getByRole('button', { name: 'Save organization' }));
   await waitFor(() => expect(changed).toHaveBeenCalledWith(fresh));
-  expect(client.patch.mock.calls[0]?.slice(0, 4)).toEqual(['job', `/jobs/${jobId}`, 'jobOrganizationRequest', { label: 'Router firmware', archived: true }]);
-  expect(client.patch.mock.calls[0]?.[4]).toMatchObject({ ifMatch: '"version_1"', csrfToken: session.csrf() });
-  expect(String(client.patch.mock.calls[0]?.[4].idempotencyKey)).toMatch(/^[A-Za-z0-9_-]{16,128}$/);
+  expect(client.put.mock.calls[0]?.[5]).toBe('PATCH');
+  expect(client.put.mock.calls[0]?.slice(0, 4)).toEqual(['job', `/jobs/${jobId}`, 'jobOrganizationRequest', { label: 'Router firmware', archived: true }]);
+  expect(client.put.mock.calls[0]?.[4]).toMatchObject({ ifMatch: '"version_1"', csrfToken: session.csrf() });
+  expect(String(client.put.mock.calls[0]?.[4].idempotencyKey)).toMatch(/^[A-Za-z0-9_-]{16,128}$/);
   expect(await screen.findByText('Saved. The job was read again from the server.')).toBeTruthy();
   await waitFor(() => expect(received).toHaveBeenCalledOnce());
   stop();
@@ -61,18 +62,18 @@ it('saves only allowlisted label and archive changes with the job guard, then ad
 
 it('reports a stale guard, re-reads the job and never retries the change automatically', async () => {
   const changed = vi.fn();
-  client.patch.mockRejectedValueOnce(new ApiClientError('http_error', { status: 412, serverCode: 'VERSION_CONFLICT' }));
+  client.put.mockRejectedValueOnce(new ApiClientError('http_error', { status: 412, serverCode: 'VERSION_CONFLICT' }));
   client.get.mockResolvedValueOnce({ data: job({ version: 'version_9', label: 'Other tab' }) });
   render(<JobOrganization job={job()} client={typed} basePath="/" session={session} onChanged={changed} />);
   fireEvent.input(screen.getByLabelText('Display label (optional)'), { target: { value: 'Mine' } });
   fireEvent.click(screen.getByRole('button', { name: 'Save organization' }));
   expect(await screen.findByText(/changed in another tab or request/)).toBeTruthy();
   await waitFor(() => expect(changed).toHaveBeenCalledWith(expect.objectContaining({ version: 'version_9' })));
-  expect(client.patch).toHaveBeenCalledOnce();
+  expect(client.put).toHaveBeenCalledOnce();
 });
 
 it('keeps previous organization visible when storage is read-only', async () => {
-  client.patch.mockRejectedValueOnce(new ApiClientError('http_error', { status: 503, serverCode: 'STORAGE_UNAVAILABLE' }));
+  client.put.mockRejectedValueOnce(new ApiClientError('http_error', { status: 503, serverCode: 'STORAGE_UNAVAILABLE' }));
   render(<JobOrganization job={job({ label: 'Kept' })} client={typed} basePath="/" session={session} onChanged={vi.fn()} />);
   fireEvent.click(screen.getByLabelText('Archived (hidden from the default job list)'));
   fireEvent.click(screen.getByRole('button', { name: 'Save organization' }));
@@ -82,7 +83,7 @@ it('keeps previous organization visible when storage is read-only', async () => 
 it('shows affected storage, retained audit and finality, and requires the typed file name before one guarded DELETE', async () => {
   const deleted = vi.fn();
   client.get.mockResolvedValueOnce({ data: preview() });
-  client.remove.mockResolvedValueOnce({ data: operation('completed') });
+  client.put.mockResolvedValueOnce({ data: operation('completed') });
   render(<JobDeletion job={job()} client={typed} basePath="/" session={session} onDeleted={deleted} />);
   expect(screen.getByText(/There is no undo and no trash/)).toBeTruthy();
   fireEvent.click(screen.getByRole('button', { name: 'Review what would be deleted' }));
@@ -98,9 +99,10 @@ it('shows affected storage, retained audit and finality, and requires the typed 
   expect(button).toHaveProperty('disabled', false);
   fireEvent.click(button); fireEvent.click(button);
   await waitFor(() => expect(deleted).toHaveBeenCalledWith(expect.objectContaining({ state: 'completed' })));
-  expect(client.remove).toHaveBeenCalledOnce();
-  expect(client.remove.mock.calls[0]?.slice(0, 4)).toEqual(['operation', `/jobs/${jobId}`, 'jobDeletionRequest', { confirmJobId: jobId }]);
-  expect(client.remove.mock.calls[0]?.[4]).toMatchObject({ ifMatch: '"version_1"' });
+  expect(client.put).toHaveBeenCalledOnce();
+  expect(client.put.mock.calls[0]?.[5]).toBe('DELETE');
+  expect(client.put.mock.calls[0]?.slice(0, 4)).toEqual(['operation', `/jobs/${jobId}`, 'jobDeletionRequest', { confirmJobId: jobId }]);
+  expect(client.put.mock.calls[0]?.[4]).toMatchObject({ ifMatch: '"version_1"' });
 });
 
 it('explains each protection and offers no deletion control while the job is protected', async () => {
@@ -119,14 +121,14 @@ it('re-reads protections after a retention conflict and reports a still-running 
   client.get.mockResolvedValueOnce({ data: preview() })
     .mockResolvedValueOnce({ data: preview({ deletable: false, protections: [
       { code: 'DOWNLOAD_IN_PROGRESS', source: 'download', message: 'A download from this job is still being delivered. Wait for it to finish.' }] }) });
-  client.remove.mockRejectedValueOnce(new ApiClientError('http_error', { status: 409, serverCode: 'RETENTION_PROTECTED' }));
+  client.put.mockRejectedValueOnce(new ApiClientError('http_error', { status: 409, serverCode: 'RETENTION_PROTECTED' }));
   render(<JobDeletion job={job()} client={typed} basePath="/" session={session} onDeleted={vi.fn()} />);
   fireEvent.click(screen.getByRole('button', { name: 'Review what would be deleted' }));
   fireEvent.input(await screen.findByLabelText(/Type the file name/), { target: { value: 'router.elf' } });
   fireEvent.click(screen.getByRole('button', { name: 'Delete permanently' }));
   expect(await screen.findByText(/still being delivered/)).toBeTruthy();
   expect(screen.getByText(/protected by its retention policy/)).toBeTruthy();
-  expect(client.remove).toHaveBeenCalledOnce();
+  expect(client.put).toHaveBeenCalledOnce();
 });
 
 it('delivers bounded library-change hints without job or session material', async () => {

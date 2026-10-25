@@ -366,7 +366,6 @@ export function Dashboard({ basePath }: { basePath: string }) {
     {data && <ul ref={list} class="job-list" aria-label={copy.uploadedJobs}>
       {data.items.map(job => <li key={job.jobId}>
         <h4><a href={jobPath(basePath, job.jobId)}>{job.label ?? job.displayFilename}</a></h4>
-        {job.label && <p>{displayMessage(copy.fileName, { name: job.displayFilename })}</p>}
         {job.archived && <p>{copy.archivedMark}</p>}
         <JobSummary job={job} />
       </li>)}

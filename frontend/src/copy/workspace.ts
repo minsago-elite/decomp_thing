@@ -20,8 +20,7 @@ export const dashboardCopy = {
   "hideArchived": "Hidden",
   "includeArchived": "Included",
   "onlyArchived": "Only archived",
-  "archivedMark": "Archived (organization only)",
-  "fileName": "File: {name}",
+  "archivedMark": "Archived",
   "newestFirst": "Newest first",
   "oldestFirst": "Oldest first",
   "jobsPerPage": "Jobs per page",
@@ -133,5 +132,5 @@ export const queryCopy = {
   "status": "Choose a listed workflow state.",
   "date": "Enter a valid calendar date and time with a time zone, for example 2026-09-05T00:00:00Z.",
   "dateOrder": "Created before must be later than Created at or after.",
-  "archived": "Choose whether archived jobs are hidden, included or shown alone."
+  "archived": "Choose how archived jobs are shown."
 } as const;

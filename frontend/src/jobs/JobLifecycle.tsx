@@ -10,7 +10,7 @@ import type { Job, JobDeletionPreview, Operation } from '../api/generated';
 import type { BrowserSession } from '../session/session';
 import { useBrowserAvailability } from '../session/useBrowserAvailability';
 import { formatExactBytes } from './metadataFormat';
-import { notifyLibraryChanged } from './libraryChannel';
+import { notifyLibraryChanged } from './libraryNotify';
 
 // These contracts are decoded only on this lazily loaded route.
 registerContractExtension(lazyContractSchema);
@@ -48,9 +48,9 @@ export function JobOrganization({ job, client, basePath, session, onChanged }: {
     const controller = new AbortController(); active.current = controller;
     setBusy(true); setNotice(copy.saving);
     try {
-      await client.patch('job', `/jobs/${job.jobId}`, 'jobOrganizationRequest', change, {
+      await client.put('job', `/jobs/${job.jobId}`, 'jobOrganizationRequest', change, {
         csrfToken, ifMatch: `"${job.version}"`, idempotencyKey: crypto.randomUUID(), signal: controller.signal,
-      });
+      }, 'PATCH');
       notifyLibraryChanged(basePath);
       const fresh = await client.get('job', `/jobs/${job.jobId}`, { signal: controller.signal });
       if (controller.signal.aborted) return;
@@ -135,9 +135,9 @@ export function JobDeletion({ job, client, basePath, session, onDeleted }: {
     const controller = new AbortController(); active.current = controller;
     setBusy(true); setNotice(copy.deleting);
     try {
-      let result = (await client.remove('operation', `/jobs/${job.jobId}`, 'jobDeletionRequest', { confirmJobId: job.jobId }, {
+      let result = (await client.put('operation', `/jobs/${job.jobId}`, 'jobDeletionRequest', { confirmJobId: job.jobId }, {
         csrfToken, ifMatch: `"${preview.version}"`, idempotencyKey: crypto.randomUUID(), signal: controller.signal,
-      })).data;
+      }, 'DELETE')).data;
       if (result.jobId !== job.jobId || result.action !== 'job.delete') throw new ApiClientError('invalid_response');
       notifyLibraryChanged(basePath);
       // Bounded observation of the purge; an unfinished cleanup is truthfully reported as running.

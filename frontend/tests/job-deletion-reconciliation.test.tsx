@@ -9,7 +9,7 @@ import { App } from '../src/app/App';
 import { runCopy } from '../src/copy/attempt';
 import { runHistoryCopy } from '../src/copy/history';
 import { jobCopy } from '../src/copy/job';
-import { notifyLibraryChanged } from '../src/jobs/libraryChannel';
+import { notifyLibraryChanged } from '../src/jobs/libraryNotify';
 import { createBrowserSession } from '../src/session/session';
 
 const transport = vi.hoisted(() => ({ get: vi.fn<(kind: string, path: string, options: { signal: AbortSignal }) => Promise<unknown>>() }));
@@ -69,7 +69,6 @@ it('the dashboard reads a fresh first page when another tab changes the library'
   try {
     render(<App basePath="/nested" session={auth} />);
     expect(await screen.findByRole('link', { name: 'Router firmware' })).toBeTruthy();
-    expect(screen.getByText(`File: ${sample.displayFilename}`)).toBeTruthy();
     const reads = () => transport.get.mock.calls.filter(([kind]) => kind === 'jobs').length;
     const before = reads();
     transport.get.mockImplementation((kind) => Promise.resolve(kind === 'recovery'
