@@ -101,13 +101,17 @@ class NativeInferredInterfaceObservationsV1Test {
     @Test
     fun `every binding and fixed inference configuration is compared to the exact frozen listing`() {
         val base = InferredInterfaceFixture.fixture()
-        for (name in listOf("collectorSha256", "wrapperSha256", "nativeDecompilerSha256", "listingSha256", "listingManifestSha256", "configurationSha256"))
+        for (name in listOf("collectorSha256", "wrapperSha256", "nativeDecompilerSha256", "listingSha256", "listingManifestSha256", "configurationSha256", "typeGraphSha256"))
             InferredInterfaceFixture.reject(InferredInterfaceFixture.set(base, JsonPrimitive("f".repeat(64)), "bindings", name))
         InferredInterfaceFixture.reject(InferredInterfaceFixture.set(base, JsonPrimitive(61), "configuration", "maximumSecondsPerFunction"))
         InferredInterfaceFixture.reject(InferredInterfaceFixture.set(base, JsonPrimitive(false), "configuration", "syntaxTree"))
         assertFails { InferredInterfaceFixture.assess(base, expected = InferredInterfaceFixture.bindings().copy(configurationSha256 = "f".repeat(64))) }
         assertFails { InferredInterfaceFixture.assess(base, listingManifest = InferredInterfaceFixture.listingManifest() + byteArrayOf(10)) }
         assertFails { InferredInterfaceFixture.assess(base, model = InferredInterfaceFixture.model + byteArrayOf(10)) }
+        val content = InferredInterfaceFixture.bytes(base)
+        val forgedManifest = InferredInterfaceFixture.set(OracleJson.parseCanonical(InferredInterfaceFixture.manifest(content)).jsonObject,
+            JsonPrimitive("f".repeat(64)), "typeGraphSha256")
+        assertFails { InferredInterfaceFixture.assessBytes(content, InferredInterfaceFixture.bytes(forgedManifest)) }
         InferredInterfaceFixture.reject(InferredInterfaceFixture.set(base, JsonPrimitive("other"), "addressSpaces", 1, "name"))
         InferredInterfaceFixture.reject(InferredInterfaceFixture.set(base, JsonPrimitive(0), "bindings", "listingBindings", "programModelBytes"))
     }
@@ -216,7 +220,7 @@ internal object InferredInterfaceFixture {
     val model = RecoveredProgramModel(inputSha256 = input, functions = listOf(RecoveredFunction("found", "unrelated", 0x10uL, "display only"), RecoveredFunction("missing", "same", 0x30uL, "display only"))).toJson().toByteArray()
     val spaces = listOf(space(0, "EXTERNAL", 10), space(1, "ram", 1), space(2, "register", 4))
     val listingBytes: ByteArray get() = bytes(listing())
-    fun bindings() = NativeInferredInterfaceBindingsV1(listingBindings(), "e".repeat(64), "6".repeat(64), "7".repeat(64), listingBytes.size.toLong(), sha(listingBytes), sha(listingManifest()), NativeInferredInterfaceObservationsV1.configurationSha256)
+    fun bindings() = NativeInferredInterfaceBindingsV1(listingBindings(), "e".repeat(64), "6".repeat(64), "7".repeat(64), listingBytes.size.toLong(), sha(listingBytes), sha(listingManifest()), NativeInferredInterfaceObservationsV1.configurationSha256, "8".repeat(64))
     fun listingBindings() = NativeInterfaceBindingsV1("b".repeat(64), "gcc", "c".repeat(64), NativeInterfaceAddressV1(1, "0000000000000000"), input, "x86:LE:64:default", model.size.toLong(), "d".repeat(64), sha(model))
     fun fixture(): JsonObject = obj("addressSpaces" to spaces, "bindings" to bindingJson(), "configuration" to NativeInferredInterfaceObservationsV1.configurationJson,
         "dataOrganization" to organization(), "policy" to "ghidra-native-inferred-interface-observations-v1", "schemaVersion" to 1,
@@ -294,9 +298,9 @@ internal object InferredInterfaceFixture {
     private fun listedType(id: Int) = obj("recordKind" to "type", "ordinal" to id, "kind" to "integer", "nativeClass" to "authored.integer", "name" to "same", "path" to "/same", "length" to 4,
         "alignedLength" to 4, "alignment" to 4, "undefined" to false, "notYetDefined" to false, "signedness" to "signed", "layout" to "not-captured", "typeClosure" to "not-captured")
     private fun listingBindingJson() = obj("collectorSha256" to "b".repeat(64), "compilerSpecId" to "gcc", "ghidraArchiveSha256" to "c".repeat(64), "imageBase" to addr(1,0), "inputSha256" to input, "languageId" to "x86:LE:64:default", "programModelBytes" to model.size, "programModelExporterSha256" to "d".repeat(64), "programModelSha256" to sha(model))
-    private fun bindingJson() = obj("listingBindings" to listingBindingJson(), "collectorSha256" to "e".repeat(64), "wrapperSha256" to "6".repeat(64), "nativeDecompilerSha256" to "7".repeat(64), "listingBytes" to listingBytes.size, "listingSha256" to sha(listingBytes), "listingManifestSha256" to sha(listingManifest()), "configurationSha256" to NativeInferredInterfaceObservationsV1.configurationSha256)
+    private fun bindingJson() = obj("listingBindings" to listingBindingJson(), "collectorSha256" to "e".repeat(64), "wrapperSha256" to "6".repeat(64), "nativeDecompilerSha256" to "7".repeat(64), "listingBytes" to listingBytes.size, "listingSha256" to sha(listingBytes), "listingManifestSha256" to sha(listingManifest()), "configurationSha256" to NativeInferredInterfaceObservationsV1.configurationSha256, "typeGraphSha256" to "8".repeat(64))
     fun listingManifest() = bytes(obj("bytes" to listingBytes.size, "collectorSha256" to "b".repeat(64), "file" to "native-interfaces.json", "inputSha256" to input, "kind" to "ghidra-native-interface-observation-manifest-v1", "programModelSha256" to sha(model), "schemaVersion" to 1, "sha256" to sha(listingBytes)))
-    fun manifest(content: ByteArray) = bytes(obj("bytes" to content.size, "collectorSha256" to "e".repeat(64), "configurationSha256" to NativeInferredInterfaceObservationsV1.configurationSha256, "file" to "native-inferred-interfaces.json", "inputSha256" to input, "kind" to "ghidra-native-inferred-interface-observation-manifest-v1", "listingSha256" to sha(listingBytes), "programModelSha256" to sha(model), "schemaVersion" to 1, "sha256" to sha(content)))
+    fun manifest(content: ByteArray) = bytes(obj("bytes" to content.size, "collectorSha256" to "e".repeat(64), "configurationSha256" to NativeInferredInterfaceObservationsV1.configurationSha256, "file" to "native-inferred-interfaces.json", "inputSha256" to input, "kind" to "ghidra-native-inferred-interface-observation-manifest-v1", "listingSha256" to sha(listingBytes), "programModelSha256" to sha(model), "schemaVersion" to 1, "sha256" to sha(content), "typeGraphSha256" to "8".repeat(64)))
     fun assess(doc: JsonObject = fixture(), limits: NativeInferredInterfaceObservationLimitsV1 = NativeInferredInterfaceObservationLimitsV1(), expected: NativeInferredInterfaceBindingsV1 = bindings(), model: ByteArray = this.model, listingManifest: ByteArray = listingManifest(), consume: (NativeInferredInterfaceRecordV1) -> Unit = {}): NativeInferredInterfaceSummaryV1 {
         val content = bytes(doc)
         return NativeInferredInterfaceObservationsV1.validate(manifest(content), expected, model, listingManifest, limits, {}, { ByteArrayInputStream(listingBytes) }, { ByteArrayInputStream(content) }, consume)

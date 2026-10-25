@@ -52,7 +52,7 @@ class NativeInferredInterfaceCollectorRealTest {
             "compile-controls", Duration.ofSeconds(45))
         run(root, listOf(javaBin.resolve("java").toString(), "-Xmx1g") + javaProperties +
             listOf("-cp", "$classes${System.getProperty("path.separator")}$classpath", "NativeInferredInterfaceControls",
-                release.toString(), root.toString(), collector.toString(), listingCollector.toString(), exporter.toString(), dispatch.toString()),
+                release.toString(), root.toString(), collector.toString(), listingCollector.toString(), exporter.toString(), dispatch.toString(), typeGraph.toString()),
             "native-control", Duration.ofSeconds(120))
         val controls = Files.readString(root.resolve("verified-controls.txt"))
         for (required in listOf("actual-bundled-native-decompilation", "model-unchanged", "listing-unchanged", "program-unchanged", "same-census-mutation-rejected"))
@@ -77,7 +77,7 @@ class NativeInferredInterfaceCollectorRealTest {
         val ninth = nativeRows.single { it.getValue("authoredLabel").jsonPrimitive.content == "ninth_sse" }
         assertEquals(8, ninth.getValue("inferredParameterCount").jsonPrimitive.int)
         assertFalse(controlReceipt.getValue("productionInterfacesAdmitted").jsonPrimitive.boolean)
-        validateActual(root, collector, listingCollector, exporter, dispatch, nativeDecompiler)
+        validateActual(root, collector, listingCollector, typeGraph, exporter, dispatch, nativeDecompiler)
         val windows = root.resolve("windows-inferred")
         assertTrue(Files.readString(windows.resolve("verified-controls.txt")).contains("independent-real-native-prototype-symbol-comparison"))
         val windowsReceipt = Json.parseToJsonElement(Files.readString(windows.resolve("verified-control-receipt.json"))).jsonObject
@@ -93,10 +93,10 @@ class NativeInferredInterfaceCollectorRealTest {
         assertEquals("unavailable-native-api", windowsReceipt.getValue("formalEffectiveMeaning").jsonPrimitive.content)
         assertEquals("unavailable-for-plain-decoded-storage", windowsReceipt.getValue("forcedIndirectMeaning").jsonPrimitive.content)
         assertFalse(windowsReceipt.getValue("productionInterfacesAdmitted").jsonPrimitive.boolean)
-        validateActual(windows, collector, listingCollector, exporter, dispatch, nativeDecompiler)
+        validateActual(windows, collector, listingCollector, typeGraph, exporter, dispatch, nativeDecompiler)
     }
 
-    private fun validateActual(root: Path, collector: Path, listingCollector: Path, exporter: Path, dispatch: Path, nativeDecompiler: Path) {
+    private fun validateActual(root: Path, collector: Path, listingCollector: Path, typeGraph: Path, exporter: Path, dispatch: Path, nativeDecompiler: Path) {
         val native = Json.parseToJsonElement(Files.readString(root.resolve("native-properties.json"))).jsonObject
         val document = Json.parseToJsonElement(Files.readString(root.resolve("first-inferred/native-inferred-interfaces.json"))).jsonObject
         val imageSpace = document.getValue("addressSpaces").jsonArray.map { it.jsonObject }
@@ -113,8 +113,9 @@ class NativeInferredInterfaceCollectorRealTest {
         )
         val configurationSha = NativeInferredInterfaceObservationsV1.configurationSha256
         val bindings = NativeInferredInterfaceBindingsV1(
-            listingBindings, sha256(collector), sha256(dispatch), sha256(nativeDecompiler), Files.size(listing), sha256(listing),
-            sha256(listingManifest), configurationSha,
+            listingBindings = listingBindings, collectorSha256 = sha256(collector), wrapperSha256 = sha256(dispatch),
+            nativeDecompilerSha256 = sha256(nativeDecompiler), listingBytes = Files.size(listing), listingSha256 = sha256(listing),
+            listingManifestSha256 = sha256(listingManifest), configurationSha256 = configurationSha, typeGraphSha256 = sha256(typeGraph),
         )
         val seen = mutableListOf<NativeInferredInterfaceRecordV1>()
         val receipt = NativeInferredInterfaceObservationsV1.validate(

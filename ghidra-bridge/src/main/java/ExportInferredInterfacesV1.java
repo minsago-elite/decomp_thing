@@ -71,14 +71,14 @@ public final class ExportInferredInterfacesV1 extends GhidraScript {
         };
     }
     private void export(String[] arguments) throws Exception {
-        if (arguments.length != 10) throw new IllegalArgumentException("expected seven digest bindings, model, listing directory and output directory");
+        if (arguments.length != 11) throw new IllegalArgumentException("expected eight digest bindings, model, listing directory and output directory");
         String input = digest(arguments[0]), exporter = digest(arguments[1]), archive = digest(arguments[2]);
-        String listingCollector = digest(arguments[3]), collector = digest(arguments[4]), wrapper = digest(arguments[5]);
-        String decompiler = digest(arguments[6]);
+        String listingCollector = digest(arguments[3]), collector = digest(arguments[4]), typeGraph = digest(arguments[5]);
+        String wrapper = digest(arguments[6]), decompiler = digest(arguments[7]);
         if (!input.equals(digest(program.getExecutableSHA256()))) throw new IllegalArgumentException("inferred input differs from imported Program");
-        Path model = Path.of(arguments[7]).toAbsolutePath().normalize();
-        Path listingDirectory = Path.of(arguments[8]).toAbsolutePath().normalize();
-        Path directory = Path.of(arguments[9]).toAbsolutePath().normalize();
+        Path model = Path.of(arguments[8]).toAbsolutePath().normalize();
+        Path listingDirectory = Path.of(arguments[9]).toAbsolutePath().normalize();
+        Path directory = Path.of(arguments[10]).toAbsolutePath().normalize();
         if (directory.getParent() == null || !directory.getParent().toRealPath().equals(directory.getParent()) ||
             Files.exists(directory, LinkOption.NOFOLLOW_LINKS) || model.startsWith(directory) || listingDirectory.startsWith(directory))
             throw new IllegalArgumentException("inferred output must be absent, private and distinct from inputs");
@@ -107,7 +107,7 @@ public final class ExportInferredInterfacesV1 extends GhidraScript {
             "compilerSpecId", text(program.getCompilerSpec().getCompilerSpecID().getIdAsString()), "ghidraArchiveSha256", archive,
             "imageBase", address(program.getImageBase()), "inputSha256", input, "languageId", text(program.getLanguageID().getIdAsString()),
             "programModelBytes", modelBefore.bytes, "programModelExporterSha256", exporter, "programModelSha256", modelBefore.sha256);
-        Map<String,Object> bindings = object("listingBindings", listingBindings, "collectorSha256", collector,
+        Map<String,Object> bindings = object("listingBindings", listingBindings, "collectorSha256", collector, "typeGraphSha256", typeGraph,
             "wrapperSha256", wrapper, "nativeDecompilerSha256", decompiler, "listingBytes", listingBefore.bytes,
             "listingSha256", listingBefore.sha256, "listingManifestSha256", manifestBefore.sha256, "configurationSha256", configurationSha);
         Path stage = null, manifestStage = null;
@@ -158,7 +158,7 @@ public final class ExportInferredInterfacesV1 extends GhidraScript {
             requireUnchanged(modelBefore, hashFile(model, MAXIMUM_MODEL_BYTES));
             requireUnchanged(listingBefore, hashFile(listing, MAXIMUM_BYTES)); requireUnchanged(manifestBefore, hashFile(listingManifest, 65536));
             requireProgramUnchanged(modification); checkpoint();
-            byte[] manifest = canonical(object("bytes", bytes, "collectorSha256", collector, "configurationSha256", configurationSha,
+            byte[] manifest = canonical(object("bytes", bytes, "collectorSha256", collector, "typeGraphSha256", typeGraph, "configurationSha256", configurationSha,
                 "file", "native-inferred-interfaces.json", "inputSha256", input,
                 "kind", "ghidra-native-inferred-interface-observation-manifest-v1", "listingSha256", listingBefore.sha256,
                 "programModelSha256", modelBefore.sha256, "schemaVersion", 1, "sha256", HexFormat.of().formatHex(outputDigest.digest())), 65536);

@@ -27,11 +27,11 @@ sealed interface NativeInferredInterfaceRecordV1
 data class NativeInferredInterfaceBindingsV1(
     val listingBindings: NativeInterfaceBindingsV1, val collectorSha256: String, val wrapperSha256: String,
     val nativeDecompilerSha256: String, val listingBytes: Long, val listingSha256: String,
-    val listingManifestSha256: String, val configurationSha256: String,
+    val listingManifestSha256: String, val configurationSha256: String, val typeGraphSha256: String,
 )
 data class NativeInferredInterfaceManifestV1(
     val bytes: Long, val collectorSha256: String, val configurationSha256: String, val inputSha256: String,
-    val listingSha256: String, val programModelSha256: String, val sha256: String,
+    val listingSha256: String, val programModelSha256: String, val sha256: String, val typeGraphSha256: String,
 )
 data class NativeInferredInterfaceResultV1(
     val completed: Boolean, val valid: Boolean, val timedOut: Boolean, val cancelled: Boolean,
@@ -147,9 +147,9 @@ object NativeInferredInterfaceObservationsV1 {
         val manifest = parseManifest(objectValue(OracleJson.parseCanonical(manifestBytes, jsonLimits(manifestBytes.size, limits))))
         val expected = expectedBindings
         for (value in listOf(expected.collectorSha256, expected.wrapperSha256, expected.nativeDecompilerSha256, expected.listingSha256,
-            expected.listingManifestSha256, expected.configurationSha256)) require(SHA.matches(value))
+            expected.listingManifestSha256, expected.configurationSha256, expected.typeGraphSha256)) require(SHA.matches(value))
         require(expected.configurationSha256 == configurationSha256 && manifest.configurationSha256 == configurationSha256)
-        require(manifest.collectorSha256 == expected.collectorSha256 && manifest.listingSha256 == expected.listingSha256 &&
+        require(manifest.typeGraphSha256 == expected.typeGraphSha256 && manifest.collectorSha256 == expected.collectorSha256 && manifest.listingSha256 == expected.listingSha256 &&
             manifest.inputSha256 == expected.listingBindings.inputSha256 && manifest.programModelSha256 == expected.listingBindings.programModelSha256)
         require(sha256(listingManifestBytes) == expected.listingManifestSha256) { "inferred observation does not bind the exact listing manifest" }
         val totalBytes = Math.addExact(programModelBytes.size.toLong(), Math.addExact(listingManifestBytes.size.toLong(),
@@ -410,10 +410,10 @@ object NativeInferredInterfaceObservationsV1 {
     }
 
     private fun parseManifest(node: JsonObject): NativeInferredInterfaceManifestV1 {
-        fields(node, "bytes", "collectorSha256", "configurationSha256", "file", "inputSha256", "kind", "listingSha256", "programModelSha256", "schemaVersion", "sha256")
+        fields(node, "bytes", "collectorSha256", "configurationSha256", "file", "inputSha256", "kind", "listingSha256", "programModelSha256", "schemaVersion", "sha256", "typeGraphSha256")
         require(text(node, "file") == "native-inferred-interfaces.json" && text(node, "kind") == "ghidra-native-inferred-interface-observation-manifest-v1" && number(node.getValue("schemaVersion")) == 1L)
         return NativeInferredInterfaceManifestV1(count(node, "bytes"), digest(node, "collectorSha256"), digest(node, "configurationSha256"),
-            digest(node, "inputSha256"), digest(node, "listingSha256"), digest(node, "programModelSha256"), digest(node, "sha256"))
+            digest(node, "inputSha256"), digest(node, "listingSha256"), digest(node, "programModelSha256"), digest(node, "sha256"), digest(node, "typeGraphSha256"))
     }
     private fun parseSummary(node: JsonObject): NativeInferredInterfaceScanV1 {
         fields(node, "functions", "internalFunctions", "externalFunctions", "thunks", "attempted", "observed", "parameters", "storageVarnodes", "roots", "graphNodes", "graphEdges", "graphWork", "dispositions", "coverage", "authoritativeOracleEvidence", "recoveredModelScored", "productionInterfacesAdmitted", "releaseEligible", "abiClassification", "sourceTypeIdentity")
@@ -429,7 +429,7 @@ object NativeInferredInterfaceObservationsV1 {
         "languageId" to JsonPrimitive(b.languageId), "programModelBytes" to JsonPrimitive(b.programModelBytes), "programModelExporterSha256" to JsonPrimitive(b.programModelExporterSha256), "programModelSha256" to JsonPrimitive(b.programModelSha256))
     private fun bindingJson(b: NativeInferredInterfaceBindingsV1) = jsonObject("listingBindings" to listingBindingJson(b.listingBindings), "collectorSha256" to JsonPrimitive(b.collectorSha256),
         "wrapperSha256" to JsonPrimitive(b.wrapperSha256), "nativeDecompilerSha256" to JsonPrimitive(b.nativeDecompilerSha256), "listingBytes" to JsonPrimitive(b.listingBytes),
-        "listingSha256" to JsonPrimitive(b.listingSha256), "listingManifestSha256" to JsonPrimitive(b.listingManifestSha256), "configurationSha256" to JsonPrimitive(b.configurationSha256))
+        "listingSha256" to JsonPrimitive(b.listingSha256), "listingManifestSha256" to JsonPrimitive(b.listingManifestSha256), "configurationSha256" to JsonPrimitive(b.configurationSha256), "typeGraphSha256" to JsonPrimitive(b.typeGraphSha256))
     private fun spacesJson(spaces: List<NativeInterfaceAddressSpaceV1>) = JsonArray(spaces.map { jsonObject("index" to JsonPrimitive(it.index), "name" to JsonPrimitive(it.name), "type" to JsonPrimitive(it.type),
         "sizeBits" to JsonPrimitive(it.sizeBits), "addressableUnitSize" to JsonPrimitive(it.addressableUnitSize), "overlay" to JsonPrimitive(it.overlay), "signedOffsets" to JsonPrimitive(it.signedOffsets)) })
     private fun addressJson(a: NativeInterfaceAddressV1): JsonObject = if (a.isNoAddress) jsonObject("kind" to JsonPrimitive("no-address")) else jsonObject("kind" to JsonPrimitive("address"), "spaceIndex" to JsonPrimitive(a.spaceIndex!!), "offsetBits" to JsonPrimitive(a.offsetBits!!))

@@ -34,15 +34,16 @@ import java.util.*;
 public final class NativeInferredInterfaceControls {
     private static final TaskMonitor MONITOR = TaskMonitor.DUMMY;
     private static final String ARCHIVE_SHA = "93a5d11a9ad510622acaaf908c556a7b9b764d338e78a7567f3689bf5081fd54";
-    private static Path root, collectorSource, listingSource, modelSource, wrapperSource, nativeDecompiler, input, model, listing;
+    private static Path root, collectorSource, listingSource, modelSource, wrapperSource, typeGraphSource, nativeDecompiler, input, model, listing;
 
     public static void main(String[] arguments) throws Exception {
-        require(arguments.length == 6, "expected release, control root, inferred collector, listing collector, model exporter and wrapper source");
+        require(arguments.length == 7, "expected release, control root, inferred collector, listing collector, model exporter, wrapper and type graph source");
         root = Path.of(arguments[1]).toAbsolutePath();
         collectorSource = Path.of(arguments[2]).toAbsolutePath();
         listingSource = Path.of(arguments[3]).toAbsolutePath();
         modelSource = Path.of(arguments[4]).toAbsolutePath();
         wrapperSource = Path.of(arguments[5]).toAbsolutePath();
+        typeGraphSource = Path.of(arguments[6]).toAbsolutePath();
         nativeDecompiler = Path.of(arguments[0]).resolve("Ghidra/Features/Decompiler/os/linux_x86_64/decompile");
         require(Files.isExecutable(nativeDecompiler), "bundled native decompiler unavailable");
         require(Path.of("").toRealPath().equals(root.toRealPath()), "control cwd differs from owned root");
@@ -595,7 +596,7 @@ public final class NativeInferredInterfaceControls {
         Files.copy(listing.resolve("manifest.json"), changed.resolve("manifest.json"));
         Path destination = root.resolve("changed-listing-inferred");
         String[] arguments = collectorArguments(destination);
-        arguments[8] = changed.toString();
+        arguments[9] = changed.toString();
         boolean rejected = false;
         try { ExportInferredInterfacesV1.collect(program, MONITOR, arguments); }
         catch (IllegalArgumentException | IllegalStateException expected) { rejected = true; }
@@ -604,7 +605,7 @@ public final class NativeInferredInterfaceControls {
 
     private static String[] collectorArguments(Path destination) throws Exception {
         return new String[] {sha256(input), sha256(modelSource), ARCHIVE_SHA, sha256(listingSource), sha256(collectorSource),
-            sha256(wrapperSource), sha256(nativeDecompiler), model.toString(), listing.toString(), destination.toString()};
+            sha256(typeGraphSource), sha256(wrapperSource), sha256(nativeDecompiler), model.toString(), listing.toString(), destination.toString()};
     }
 
     private static String addressKey(JsonObject address) {

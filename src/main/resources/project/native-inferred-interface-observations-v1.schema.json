@@ -298,7 +298,8 @@
         "listingBytes",
         "listingSha256",
         "listingManifestSha256",
-        "configurationSha256"
+        "configurationSha256",
+        "typeGraphSha256"
       ],
       "properties": {
         "listingBindings": {
@@ -330,6 +331,10 @@
           "pattern": "^[0-9a-f]{64}$"
         },
         "configurationSha256": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "typeGraphSha256": {
           "type": "string",
           "pattern": "^[0-9a-f]{64}$"
         }
