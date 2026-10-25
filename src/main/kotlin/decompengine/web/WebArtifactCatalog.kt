@@ -126,20 +126,22 @@ internal class WebArtifactCatalog(
             val (attempt, family) = candidates[position]
             if (!store.present(jobId, attempt.runId, family.path)) { position++; continue }
             var size = -1L
+            var consumed = 0L
             val digest = try {
                 store.stream(jobId, attempt.runId, family.path, { declared ->
                     if (declared > maximumArtifactBytes) throw WebArtifactTooLarge()
                     // Keep at least one hash per page so every continuation advances.
                     if (hashed > 0 && hashed + declared > maximumPageHashBytes) throw PageBudget()
                     size = declared
-                }, { _, _ -> }, {})
+                }, { _, count -> consumed += count }, {})
             } catch (_: PageBudget) { break }
             catch (failure: Exception) {
                 if (failure is WebAccessDenied) throw failure
-                unavailable++; position++; continue
+                // A read that fails late still did its hashing work; charge it so unstable files cannot bypass the budget.
+                hashed += consumed; unavailable++; position++; continue
             }
             check(digest.size == size)
-            hashed += digest.size; position++
+            hashed += consumed; position++
             val selection = WebArtifactSelection(jobId, attempt, family, digest.sha256)
             val verified = selection.revisionId?.let { revision ->
                 val recorded = commitments.getOrPut(attempt.runId) { store.revisionCommitments(jobId, attempt.runId, revision) }

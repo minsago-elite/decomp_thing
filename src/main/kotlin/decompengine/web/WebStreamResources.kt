@@ -163,7 +163,11 @@ internal class WebRequestDeadline(
     fun cancel() = synchronized(this) { future?.cancel(false); Unit }
 
     companion object {
-        const val ATTRIBUTE = "decomp.web.requestDeadline"
+        // Identity-keyed per request: HttpExchange attributes are shared by every exchange of one HttpContext.
+        private val active = java.util.Collections.synchronizedMap(java.util.IdentityHashMap<Any, WebRequestDeadline>())
+        fun register(exchange: Any, deadline: WebRequestDeadline) { active[exchange] = deadline }
+        fun release(exchange: Any) { active.remove(exchange) }
+        fun of(exchange: Any): WebRequestDeadline? = active[exchange]
         /** Matches the bootstrap `downloadIdleMs` limit. */
         const val DOWNLOAD_IDLE_MS = 120_000L
         const val DOWNLOAD_MAXIMUM_MS = 60L * 60 * 1000

@@ -21,6 +21,7 @@ class WebArtifactCatalogTest {
     private class Store(var attempts: List<WorkflowAttempt>, val files: MutableMap<Pair<String, String>, ByteArray>) : WebArtifactStore {
         var hashedBytes = 0L
         val failing = mutableSetOf<Pair<String, String>>()
+        val lateFailing = mutableSetOf<Pair<String, String>>()
         var commitments: (String) -> Pair<String, String>? = { null }
         override fun attempts(jobId: String) = attempts
         override fun present(jobId: String, runId: String, path: String) = (runId to path) in files
@@ -30,6 +31,8 @@ class WebArtifactCatalogTest {
             declaredSize(bytes.size.toLong())
             if ((runId to path) in failing) throw IllegalArgumentException("stable hash file changed during reading")
             bytes.toList().chunked(4096).forEach { chunk -> cancellationCheck(); consume(chunk.toByteArray(), chunk.size) }
+            // Final revalidation failure after the whole body was hashed.
+            if ((runId to path) in lateFailing) throw IllegalArgumentException("stable hash file changed during reading")
             hashedBytes += bytes.size
             return StableFileDigest(WebExplorationArtifact.sha256(bytes), bytes.size.toLong(),
                 LinuxFileIdentity(LinuxFileKey(1, 1), 0x8180, 1000, 1000, 1, 1, true, false, false))
@@ -120,6 +123,32 @@ class WebArtifactCatalogTest {
         // run_2's oversized exploration report and run_3's changing archive are counted, never listed.
         assertEquals(listOf("run_1", "run_2", "run_4"), all.map { it.getValue("binding").jsonObject.getValue("runId").jsonPrimitive.content })
         assertEquals(2, unavailable)
+    }
+
+    @Test fun `reads that fail after hashing are charged to the page budget`() {
+        val attempts = (1..3).map { attempt("run_$it", it.toLong()) }
+        val store = Store(attempts, attempts.associate { (it.runId to "source-tree.zip") to ByteArray(6_000) }.toMutableMap())
+        store.lateFailing += "run_1" to "source-tree.zip"
+        val catalog = WebArtifactCatalog(store, maximumPageHashBytes = 10_000)
+        val first = catalog.page("s", jobId, null, "/")
+        // 6,000 failed bytes plus the next 6,000-byte file would exceed the 10,000-byte page budget.
+        assertTrue(items(first).isEmpty()); assertEquals(1, first.getValue("unavailableFiles").jsonPrimitive.int)
+        val second = catalog.page("s", jobId, "cursor=${next(first)!!}", "/")
+        assertEquals(listOf("run_2"), items(second).map { it.getValue("binding").jsonObject.getValue("runId").jsonPrimitive.content })
+    }
+
+    @Test fun `request deadlines are keyed by exchange identity rather than shared attributes`() {
+        val scheduler = java.util.concurrent.ScheduledThreadPoolExecutor(1)
+        try {
+            val first = Any(); val second = Any()
+            val a = WebRequestDeadline(scheduler, AutoCloseable {}, 60_000); val b = WebRequestDeadline(scheduler, AutoCloseable {}, 60_000)
+            WebRequestDeadline.register(first, a); WebRequestDeadline.register(second, b)
+            assertSame(a, WebRequestDeadline.of(first)); assertSame(b, WebRequestDeadline.of(second))
+            WebRequestDeadline.release(second)
+            assertSame(a, WebRequestDeadline.of(first)); assertNull(WebRequestDeadline.of(second))
+            WebRequestDeadline.release(first); a.cancel(); b.cancel()
+            assertNull(WebRequestDeadline.of(first))
+        } finally { scheduler.shutdownNow() }
     }
 
     @Test fun `detail rehashes current bytes and distinguishes missing from changed artifacts`() {

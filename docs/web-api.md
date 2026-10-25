@@ -924,7 +924,7 @@ catalog to the revision-bound source families. Unknown attempts and mismatched r
 return 404; other parameters, repeated keys and invalid limits return 422.
 
 Each page inspects at most 200 candidates in attempt creation order and fixed family
-order, returns at most `limit` (default 50, maximum 200) entries and hashes at most 512 MiB of
+order, returns at most `limit` (default 50, maximum 200) entries and hashes at most 512 MiB (reads that fail late are still charged) of
 current bytes through descriptor-pinned reads; at least one file is always hashed so every
 continuation advances. Absent files are not listed. Files that exist but cannot be read
 consistently or exceed the 4 GiB ceiling are counted in `unavailableFiles` and not listed.

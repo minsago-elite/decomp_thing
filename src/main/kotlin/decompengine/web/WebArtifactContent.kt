@@ -93,7 +93,7 @@ internal class WebArtifactContent(private val store: WebArtifactStore,
         val selection = resolveWebArtifact(store, jobId, artifactId)
         if (!store.present(jobId, selection.attempt.runId, selection.family.path)) webArtifactUnavailable()
         val cancellation = cancellationCheck(exchange)
-        val deadline = exchange.getAttribute(WebRequestDeadline.ATTRIBUTE) as? WebRequestDeadline
+        val deadline = WebRequestDeadline.of(exchange)
         var size = -1L
         val observed = try {
             store.stream(jobId, selection.attempt.runId, selection.family.path, {
@@ -141,7 +141,7 @@ internal class WebArtifactContent(private val store: WebArtifactStore,
 
     private fun stream(exchange: HttpExchange, selection: WebArtifactSelection, size: Long, range: WebByteRange, cancellation: () -> Unit) {
         val output = exchange.responseBody
-        val deadline = exchange.getAttribute(WebRequestDeadline.ATTRIBUTE) as? WebRequestDeadline
+        val deadline = WebRequestDeadline.of(exchange)
         var pending: ByteArray? = null
         var position = 0L
         var written = 0L
@@ -164,7 +164,7 @@ internal class WebArtifactContent(private val store: WebArtifactStore,
     }
 
     private fun cancellationCheck(exchange: HttpExchange): () -> Unit {
-        val deadline = exchange.getAttribute(WebRequestDeadline.ATTRIBUTE) as? WebRequestDeadline
+        val deadline = WebRequestDeadline.of(exchange)
         return {
             if (Thread.currentThread().isInterrupted) throw CancellationException("download interrupted")
             if (deadline?.expired == true) throw CancellationException("download deadline expired")

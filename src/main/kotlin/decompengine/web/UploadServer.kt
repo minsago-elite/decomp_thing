@@ -364,8 +364,9 @@ class UploadServer(
             val upload = exchange.requestMethod == "POST" &&
                 exchange.requestHeaders.getFirst("Content-Type")?.startsWith("multipart/form-data", true) == true
             val deadline = WebRequestDeadline(requestDeadlines, exchange, if (upload) 120_000 else 30_000)
-            exchange.setAttribute(WebRequestDeadline.ATTRIBUTE, deadline)
-            try { route(exchange) } finally { deadline.cancel() }
+            // Exchange attributes live in the shared HttpContext; keep the deadline keyed by this exchange instead.
+            WebRequestDeadline.register(exchange, deadline)
+            try { route(exchange) } finally { WebRequestDeadline.release(exchange); deadline.cancel() }
         }
     }
 
