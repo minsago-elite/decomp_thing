@@ -84,27 +84,32 @@ async function violations() {
   }));
 }
 
-const privateRoutes: [string, string][] = [
-  ['workspace with uploaded jobs', '/nested/'],
-  ['upload page', '/nested/upload'],
-  ['runtime status', '/nested/runtime'],
-  ['job overview', `/nested/jobs/${jobId}`],
-  ['attempt history', `/nested/jobs/${jobId}/runs`],
-  ['attempt overview', `/nested/jobs/${jobId}/runs/${runId}`],
-  ['attempt activity', `/nested/jobs/${jobId}/runs/${runId}/activity`],
-  ['attempt evidence', `/nested/jobs/${jobId}/runs/${runId}/evidence`],
-  ['source directory', `/nested/jobs/${jobId}/runs/${runId}/revisions/${revisionId}/sources/root`],
-  ['source file', `/nested/jobs/${jobId}/runs/${runId}/revisions/${revisionId}/source-files/file_1`],
-  ['unknown page', '/nested/not-a-route'],
+const fileId = (fixture('revision-file-root').data.item as { fileId: string }).fileId;
+
+// Each case names text that only the populated view renders, so a failed read cannot pass as the view.
+const privateRoutes: [name: string, path: string, rendered: string | RegExp][] = [
+  ['workspace with uploaded jobs', '/nested/', 'synthetic.elf'],
+  ['upload page', '/nested/upload', 'Binary file'],
+  ['runtime status', '/nested/runtime', 'Page build identity'],
+  ['job overview', `/nested/jobs/${jobId}`, 'Binary metadata'],
+  ['attempt history', `/nested/jobs/${jobId}/runs`, /run_example_1/],
+  ['attempt overview', `/nested/jobs/${jobId}/runs/${runId}`, 'Attempt identity'],
+  ['attempt activity', `/nested/jobs/${jobId}/runs/${runId}/activity`, 'Attempt identity'],
+  ['attempt evidence', `/nested/jobs/${jobId}/runs/${runId}/evidence`, 'Attempt identity'],
+  ['source directory', `/nested/jobs/${jobId}/runs/${runId}/revisions/${revisionId}/sources/root`, 'é space'],
+  ['source file', `/nested/jobs/${jobId}/runs/${runId}/revisions/${revisionId}/source-files/${fileId}`, 'Makefile'],
+  ['unknown page', '/nested/not-a-route', 'Page unavailable'],
 ];
 
-for (const [name, path] of privateRoutes) {
+for (const [name, path, rendered] of privateRoutes) {
   it(`has no automated WCAG A/AA violations on the ${name}`, async () => {
     const auth = await session();
     history.replaceState(null, '', path);
     render(<App basePath="/nested" session={auth} />);
     await screen.findByRole('heading', { level: 1 });
     await settle();
+    expect(document.querySelector('main [role="alert"]')).toBeNull();
+    expect(screen.getAllByText(rendered).length).toBeGreaterThan(0);
     expect(await violations()).toEqual([]);
   });
 }
