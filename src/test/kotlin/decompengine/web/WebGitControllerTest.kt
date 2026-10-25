@@ -21,7 +21,7 @@ class WebGitControllerTest {
         .jsonObject.getValue("definitions").jsonObject
 
     private class Fixture(availability: GitAvailability = GitRuntime.detect()) : AutoCloseable {
-        val root: Path = Files.createTempDirectory("web git http ")
+        val root: Path = Files.createTempDirectory(Files.createDirectories(Path.of("build/test-tmp/git").toAbsolutePath()), "web git http ")
         val store = JobStore(root)
         val job = store.createFromUpload("inert.elf", elfFixture())
         lateinit var owner: WorkflowAttemptStore
