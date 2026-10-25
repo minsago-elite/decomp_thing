@@ -84,7 +84,10 @@ internal object GitIntegrations {
         val identity = mapOf("GIT_AUTHOR_NAME" to policy.identityName, "GIT_AUTHOR_EMAIL" to policy.identityEmail,
             "GIT_COMMITTER_NAME" to policy.identityName, "GIT_COMMITTER_EMAIL" to policy.identityEmail)
         val mode = if (strategy == GitIntegrationStrategy.FAST_FORWARD) listOf("--ff-only") else listOf("--no-ff", "-m", message)
+        // --no-overwrite-ignore: ignored local output (experiment results, builds) is never replaced
+        // by an incoming tracked file; Git refuses instead and nothing changes.
         val result = runner.run(GitInvocation("merge", listOf("-q", "--no-verify", "--no-gpg-sign", "--no-edit", "--no-stat", "--no-log",
+            "--no-overwrite-ignore",
             "--no-squash", "--no-signoff", "--no-autostash", "--no-rerere-autoupdate", "--no-progress") + mode + listOf(target),
             gitDir = gitDir, workTree = workTree, variables = identity, allowedExitCodes = setOf(0, 1, 2, 128), limits = LIMITS))
         if (result.exitCode == 0) return false
@@ -125,10 +128,38 @@ internal object GitIntegrations {
             .decode(ByteBuffer.wrap(bytes)).toString()
     } catch (_: Exception) { null }
 
-    /** Digest of a work-tree file's current bytes, or `absent`; the concurrency token of a resolution. */
-    fun contentDigest(file: Path): String =
-        if (!Files.isRegularFile(file, NOFOLLOW_LINKS)) "absent" else GitStorage.sha256(Files.readAllBytes(file))
+    /**
+     * Digest of a work-tree file's current bytes, or `absent`; the concurrency token of a resolution.
+     * Streamed with a bounded buffer, so an unsupported large file is never loaded to digest it.
+     */
+    fun contentDigest(file: Path): String {
+        if (!Files.isRegularFile(file, NOFOLLOW_LINKS)) return "absent"
+        val digest = java.security.MessageDigest.getInstance("SHA-256")
+        Files.newInputStream(file, NOFOLLOW_LINKS).use { input ->
+            val buffer = ByteArray(64 * 1024)
+            while (true) { val count = input.read(buffer); if (count < 0) break; digest.update(buffer, 0, count) }
+        }
+        return digest.digest().joinToString("") { "%02x".format(it) }
+    }
 
-    /** A conflict marker at a line start means the file is not resolved yet. */
-    fun hasMarkers(text: String): Boolean = text.lineSequence().any { it.startsWith("<<<<<<< ") || it.startsWith(">>>>>>> ") || it == "=======" }
+    const val DEFAULT_MARKER_SIZE = 7
+
+    /** The `conflict-marker-size` attribute in effect for [path]; Git's default when unset or invalid. */
+    fun markerSize(runner: GitCommandRunner, gitDir: Path, workTree: Path, path: String): Int {
+        val result = runner.run(GitInvocation("check-attr", listOf("-z", "conflict-marker-size", "--", path), gitDir = gitDir,
+            workTree = workTree, limits = LIMITS))
+        val value = result.stdout.toString(Charsets.UTF_8).split('\u0000').getOrNull(2)
+        return value?.toIntOrNull()?.takeIf { it in 1..1024 } ?: DEFAULT_MARKER_SIZE
+    }
+
+    /**
+     * A conflict marker at a line start means the file is not resolved yet. Markers of the effective
+     * [size] and of Git's default width are both detected.
+     */
+    fun hasMarkers(text: String, size: Int = DEFAULT_MARKER_SIZE): Boolean = text.lineSequence().any { line ->
+        setOf(size, DEFAULT_MARKER_SIZE).any { width ->
+            listOf('<', '>', '|').any { marker -> line.startsWith(marker.toString().repeat(width)) && (line.length == width || line[width] == ' ') } ||
+                line == "=".repeat(width)
+        }
+    }
 }

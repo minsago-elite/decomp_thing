@@ -2388,7 +2388,7 @@
             "$ref": "#/definitions/id"
           },
           "maxItems": 200,
-          "minItems": 1,
+          "minItems": 0,
           "uniqueItems": true
         },
         "message": {

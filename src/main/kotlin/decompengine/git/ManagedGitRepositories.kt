@@ -751,7 +751,8 @@ class ManagedGitRepositories(
     }
 
     data class GitDivergenceView(val worktreeId: String, val localRef: String, val localObjectId: String, val tracking: GitRefEntry,
-        val remote: GitRemoteRecord?, val fetchedAt: Instant?, val divergence: GitDivergence, val mergeInProgress: Boolean)
+        val remote: GitRemoteRecord?, val fetchedAt: Instant?, val divergence: GitDivergence, val mergeInProgress: Boolean,
+        val signingRequired: Boolean = false)
 
     /** Divergence of the work tree's branch from one remote-tracking ref, from fetched state only (#595). */
     fun divergence(jobId: String, repositoryId: String, worktreeId: String?, trackingRefId: String): GitDivergenceView {
@@ -769,7 +770,7 @@ class ManagedGitRepositories(
             GitDivergenceView(located.worktreeId, local, checkNotNull(head.objectId), tracking, remote,
                 remote?.let { fetchState(directory, it.remoteId)?.first },
                 GitIntegrations.divergence(runner, located.commonDir, checkNotNull(head.objectId), tracking.objectId),
-                GitIntegrations.mergeInProgress(located.gitDir))
+                GitIntegrations.mergeInProgress(located.gitDir), policy.requireSignedCommits)
         }
     }
 
@@ -845,6 +846,9 @@ class ManagedGitRepositories(
                     ?: GitWorkspaceMutations.refuse("VALIDATION_FAILED", "The strategy is fast-forward or merge.")
                 if (strategy == GitIntegrationStrategy.REBASE) GitWorkspaceMutations.refuse("STRATEGY_UNSUPPORTED",
                     "Rebasing rewrites history and is not supported by the workbench. Use a fast-forward or a merge.")
+                // A merge creates a commit, which the policy would require signed; a fast-forward creates none.
+                if (strategy == GitIntegrationStrategy.MERGE && policy.requireSignedCommits) GitWorkspaceMutations.refuse("SIGNING_UNAVAILABLE",
+                    "Policy requires signed commits, but this server has no signing capability. A fast-forward is still possible when available.")
                 if (merging) GitWorkspaceMutations.refuse("MERGE_IN_PROGRESS", "A merge is already in progress. Resolve and commit it, or abort it, first.")
                 if (observation.head.state == GitHeadState.UNBORN) GitWorkspaceMutations.refuse("NO_COMMITS",
                     "The branch has no commits yet. Commit first, or clone the remote into a new repository.")
@@ -896,7 +900,8 @@ class ManagedGitRepositories(
                         "A file changed since it was reviewed. Read it again before marking it resolved.")
                     val text = if (Files.isRegularFile(file, NOFOLLOW_LINKS)) GitIntegrations.utf8(Files.readAllBytes(file)) else ""
                     if (text == null) GitWorkspaceMutations.refuse("UNSUPPORTED_CONFLICT", "A reviewed file is binary or too large to resolve in the workbench.")
-                    if (GitIntegrations.hasMarkers(text)) GitWorkspaceMutations.refuse("UNRESOLVED_MARKERS",
+                    val size = GitIntegrations.markerSize(runner, located.gitDir, located.workTree, checkNotNull(conflictFor(runner, located, fileId).path.exact))
+                    if (GitIntegrations.hasMarkers(text, size)) GitWorkspaceMutations.refuse("UNRESOLVED_MARKERS",
                         "A reviewed file still contains conflict markers. Finish resolving it first.")
                 }
             }
@@ -953,7 +958,11 @@ class ManagedGitRepositories(
                     }
                 }
                 Files.createDirectories(file.parent)
-                GitStorage.replaceAtomically(file, bytes)
+                // Keep the file's mode: resolving text never makes a script or build helper non-executable.
+                val permissions = if (Files.isRegularFile(file, NOFOLLOW_LINKS)) try {
+                    Files.getPosixFilePermissions(file, NOFOLLOW_LINKS)
+                } catch (_: UnsupportedOperationException) { null } else null
+                GitStorage.replaceAtomically(file, bytes, permissions)
                 null to "Saved the resolution of ${entry.path.display}. It is not staged; mark it resolved when the review is complete."
             }
             GitOperationAction.CONFLICT_COMPLETE -> {
@@ -1178,7 +1187,8 @@ class ManagedGitRepositories(
                 if (policy.requireSignedCommits) GitWorkspaceMutations.refuse("SIGNING_UNAVAILABLE",
                     "Policy requires signed commits, but this server has no signing capability. Nothing was committed.")
                 GitWorkspaceMutations.checkGuards(located.record, observation, request.guards)
-                GitWorkspaceMutations.requireStagedSet(located.record, observation, request.fileIds, located.worktreeId)
+                GitWorkspaceMutations.requireStagedSet(located.record, observation, request.fileIds, located.worktreeId,
+                    mergeInProgress = GitIntegrations.mergeInProgress(located.gitDir))
             }
             is GitRefRequest -> validateRef(runner, located, observation, request)
             is GitSyncRequest -> validateSync(runner, located, observation, request)

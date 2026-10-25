@@ -54,6 +54,7 @@ export const gitCopy = {
   noParent: 'This will be the first commit on the branch.',
   message: 'Commit message',
   commitAction: 'Commit staged files',
+  mergeUnchanged: 'The resolved merge matches the current commit. Committing records the merge with both parents.',
   nothingStaged: 'Stage files to review a commit.',
   history: 'History',
   noHistory: 'No commits yet.',

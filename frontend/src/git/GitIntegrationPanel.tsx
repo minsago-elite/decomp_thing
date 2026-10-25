@@ -1,4 +1,4 @@
-import { useState } from 'preact/hooks';
+import { useRef, useState } from 'preact/hooks';
 import { gitIntegrationCopy as copy } from '../copy/git';
 import { textMessage } from '../shared/messages';
 import { StateMark } from '../shared/StateMark';
@@ -17,23 +17,39 @@ const states = { current: 'settled', stale: 'pending', unknown: 'unknown' } as c
  * fast-forward or merge (rebase is never offered), and conflict review with concurrency-checked
  * resolutions, explicit staging and abort. The final commit stays in the commit review.
  */
-export function GitIntegrationPanel({ remotes, conflicts, writable, readDivergence, readConflict, onAction }: {
+export function GitIntegrationPanel({ remotes, conflicts, destination, writable, readDivergence, readConflict, onAction }: {
   remotes: GitRemotes | null; conflicts: GitConflicts | null; writable: boolean;
+  /** The work tree, branch and HEAD integration would change; a review of any other one is never shown. */
+  destination: { worktreeId: string; headRefName: string | null; headObjectId: string | null };
   readDivergence: (trackingRefId: string) => Promise<GitDivergence | null>;
   readConflict: (fileId: string) => Promise<GitConflictFile | null>;
   onAction: (action: IntegrationAction) => Promise<boolean>;
 }) {
   const tracking = remotes?.remotes.flatMap(remote => remote.trackingRefs) ?? [];
   const [chosen, setChosen] = useState('');
-  const [divergence, setDivergence] = useState<GitDivergence | null>(null);
+  const [loadedDivergence, setDivergence] = useState<GitDivergence | null>(null);
   const [detail, setDetail] = useState<GitConflictFile | null>(null);
   const [draft, setDraft] = useState('');
   const [reviewed, setReviewed] = useState<Record<string, string>>({});
+  // Only the newest divergence read may land.
+  const divergenceReads = useRef(0);
+  // A resolution whose save failed stays the draft until a save succeeds.
+  const unsaved = useRef<{ fileId: string; text: string } | null>(null);
   const selected = chosen || tracking[0]?.refId || '';
+  // A review describes one destination: switching work tree or branch, or a moved HEAD, hides it.
+  const divergence = loadedDivergence && loadedDivergence.worktreeId === destination.worktreeId
+    && loadedDivergence.localRefName === destination.headRefName && loadedDivergence.localObjectId === destination.headObjectId
+    ? loadedDivergence : null;
+
+  function review() {
+    const read = ++divergenceReads.current;
+    void readDivergence(selected).then(result => { if (read === divergenceReads.current) setDivergence(result); });
+  }
 
   async function open(fileId: string) {
     const file = await readConflict(fileId);
-    setDetail(file); setDraft(file?.current ?? '');
+    setDetail(file);
+    if (file) setDraft(unsaved.current?.fileId === fileId ? unsaved.current.text : file.current ?? '');
   }
 
   async function save(resolution: 'ours' | 'theirs' | 'base' | 'text') {
@@ -43,8 +59,11 @@ export function GitIntegrationPanel({ remotes, conflicts, writable, readDivergen
     // old digest, and the file is read again (on failure too) before it can be.
     setDetail(null);
     setReviewed(previous => { const next = { ...previous }; delete next[reviewed.file.fileId]; return next; });
-    await onAction({ kind: 'gitConflictSaveRequest', fileId: reviewed.file.fileId, expectedSha256: reviewed.currentSha256,
-      resolution, content: resolution === 'text' ? draft : null });
+    const submitted = draft;
+    const saved = await onAction({ kind: 'gitConflictSaveRequest', fileId: reviewed.file.fileId, expectedSha256: reviewed.currentSha256,
+      resolution, content: resolution === 'text' ? submitted : null });
+    // On failure the draft survives the re-read, which only refreshes the concurrency token.
+    unsaved.current = saved ? null : { fileId: reviewed.file.fileId, text: submitted };
     await open(reviewed.file.fileId);
   }
 
@@ -52,10 +71,10 @@ export function GitIntegrationPanel({ remotes, conflicts, writable, readDivergen
     <h3 id="git-integration-title">{copy.title}</h3>
     <p>{copy.note}</p>
     {tracking.length === 0 ? <p>{copy.noTracking}</p> : <>
-      <label>{copy.tracking} <select value={selected} onChange={event => { setChosen(event.currentTarget.value); setDivergence(null); }}>
+      <label>{copy.tracking} <select value={selected} onChange={event => { divergenceReads.current++; setChosen(event.currentTarget.value); setDivergence(null); }}>
         {tracking.map(ref => <option key={ref.refId} value={ref.refId}>{ref.name}</option>)}
       </select></label>
-      {' '}<button type="button" onClick={() => { void readDivergence(selected).then(setDivergence); }}>{copy.review}</button>
+      {' '}<button type="button" onClick={review}>{copy.review}</button>
     </>}
     {divergence && <div>
       <dl class="job-facts">

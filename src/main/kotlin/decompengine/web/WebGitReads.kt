@@ -90,7 +90,7 @@ internal class WebGitReads(private val repositories: () -> ManagedGitRepositorie
             put("mergeInProgress", view.mergeInProgress)
             put("strategies", JsonArray(listOf(
                 strategy("fast-forward", blocked ?: if (ahead > 0) "The branch has $ahead local commit(s), so it cannot be fast-forwarded." else null),
-                strategy("merge", blocked),
+                strategy("merge", blocked ?: if (view.signingRequired) "Policy requires signed commits, and a merge would create an unsigned commit." else null),
                 strategy("rebase", "Rebasing rewrites history and is not supported by the workbench. Use a fast-forward or a merge."))))
         }
     }

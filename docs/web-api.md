@@ -1024,8 +1024,9 @@ work tree's branch with one remote-tracking ref, using fetched state only. It re
 - the remote's freshness: `current`, `stale` (fetched more than an hour ago) or `unknown` (never
   fetched);
 - each strategy and whether it is available. `fast-forward` needs no local commits. `merge` needs
-  remote commits to integrate. `rebase` is never available, because history rewriting is not
-  supported and nothing ever force-updates a remote.
+  remote commits to integrate, and it is unavailable when policy requires signed commits, because
+  it would create an unsigned commit. `rebase` is never available, because history rewriting is
+  not supported and nothing ever force-updates a remote.
 
 Integration is the separate, reviewed `git.merge` action (#596). Its fields are `trackingRefId`,
 `targetObjectId` and `strategy` (`fast-forward` or `merge`), plus the full guards. The server
@@ -1037,9 +1038,13 @@ refuses:
 - a tracking ref that moved since review with `REF_CHANGED`;
 - a merge already in progress with `MERGE_IN_PROGRESS`;
 - nothing to integrate with `NOTHING_TO_INTEGRATE`, and a fast-forward over local commits with
-  `FAST_FORWARD_UNAVAILABLE`.
+  `FAST_FORWARD_UNAVAILABLE`;
+- a `merge` when policy requires signed commits with `SIGNING_UNAVAILABLE`; a fast-forward creates
+  no commit and stays available.
 
-Git runs with hooks, signing, autostash and rerere off, under the server identity. The base and
+Git runs with hooks, signing, autostash and rerere off, under the server identity. It never
+overwrites an ignored local file, such as experiment output, with an incoming tracked one. Git
+refuses instead (`MERGE_REFUSED`) and nothing changes. The base and
 target are recorded before Git runs. A clean merge or fast-forward returns the new HEAD. It is a new
 source candidate: it is never mapped to or accepted as an existing revision, and it needs the normal
 validation.
@@ -1050,18 +1055,23 @@ A merge that stops with conflicts leaves Git's merge state in place (#597):
   unresolved path with its base, ours and theirs blob IDs.
 - `GET G/conflicts/{fileId}` returns each side and the current file as text, with the current
   file's SHA-256 (or `absent`) as its concurrency token. A side that is binary, deleted or larger
-  than 256 KiB is reported with `supported: false` and a reason, never as an editable file.
+  than 256 KiB is reported with `supported: false` and a reason, never as an editable file. The
+  token is computed by streaming, so a large file is never loaded to digest it.
 
 These actions resolve or end the merge:
 
 - `git.conflict.save` writes one conflicted file. Its `resolution` is `ours`, `theirs` or `base`,
   or `text` with `content`. Its `expectedSha256` must still match the file, so a newer worker or
   user change is never overwritten (`CONTENT_CHANGED`). Only policy-admitted plain files inside the
-  work tree can be written, and nothing is staged.
+  work tree can be written, and nothing is staged. The file keeps its permissions, so an
+  executable script stays executable.
 - `git.conflict.complete` (#598) stages exactly the reviewed `files`, each with the digest it was
-  reviewed at. A file that still has conflict markers is refused with `UNRESOLVED_MARKERS`. The
-  final commit stays the explicit `git.commit` review: it lists every staged file and creates the
-  merge commit.
+  reviewed at. A file that still has conflict markers is refused with `UNRESOLVED_MARKERS`. Markers
+  are detected at the file's effective `conflict-marker-size` attribute and at Git's default width
+  of 7. The final commit stays the explicit `git.commit` review: it lists every staged file and
+  creates the merge commit. When the resolution matches the current commit, nothing is staged. The
+  commit then takes an empty `selectedFileIds` and still records the merge with both parents.
+  Outside a merge, an empty selection is `NOTHING_TO_COMMIT`.
 - `git.merge.abort` runs `merge --abort`, which restores the branch and the work tree that the
   clean-work-tree precondition guaranteed. Accepted snapshots and audit entries are untouched.
 
@@ -1086,12 +1096,22 @@ The workspace's **Integrate remote changes** panel works through these steps:
    reviewed.
 4. Offer **Abort merge**.
 
+A divergence review is shown only while its work tree, branch and HEAD are still the destination.
+A late answer to an older read is discarded. If a save is refused or fails, the edited resolution
+stays in the editor, and only the concurrency token is refreshed.
+
 `GitIntegrationTest` covers:
 
 - divergence from fetched state only, the refusals, and a fast-forward to an unmapped candidate;
 - a real conflict that is reviewed, refused while it has markers or a stale digest, saved, staged
   and committed as a two-parent merge;
-- abort, and restart with Git's merge state retained or not yet created.
+- abort, and restart with Git's merge state retained or not yet created;
+- ignored local output that survives a refused fast-forward;
+- a merge resolved to the current tree that is committed with both parents;
+- an executable file that stays executable through a saved resolution;
+- signing policy, which refuses merges and keeps fast-forwards;
+- wide conflict markers set by attribute;
+- the streamed content digest.
 
 ### Git workspace view and packaged journey
 

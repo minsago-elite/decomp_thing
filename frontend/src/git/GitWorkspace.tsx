@@ -401,7 +401,7 @@ export function GitWorkspace({ jobId, basePath, session, capabilities, pollInter
         </section>}
       </section>
       {groups.staged.length > MAX_SELECTION && <p role="alert">{textMessage(copy.commitTooLarge, { max: MAX_SELECTION, count: groups.staged.length })}</p>}
-      <CommitForm staged={groups.staged} parent={statusData.headObjectId}
+      <CommitForm staged={groups.staged} parent={statusData.headObjectId} merging={loaded.conflicts?.mergeInProgress ?? false}
         disabled={!writable || !statusData.complete || groups.conflicted.length > 0 || groups.staged.length > MAX_SELECTION}
         onCommit={message => act('gitCommitRequest', copy.commitAction, guarded => ({ action: 'git.commit', worktreeId, guards: guarded,
           selectedFileIds: groups.staged.map(entry => entry.fileId), message }))} />
@@ -431,6 +431,7 @@ export function GitWorkspace({ jobId, basePath, session, capabilities, pollInter
         </section>}
       </section>
       <GitIntegrationPanel remotes={loaded.remotes} conflicts={loaded.conflicts} writable={writable}
+        destination={{ worktreeId: statusData.worktreeId, headRefName: statusData.headRefName, headObjectId: statusData.headObjectId }}
         readDivergence={readDivergence} readConflict={readConflict} onAction={integrationAction} />
       <GitRemotesPanel capability={remoting} remotes={loaded.remotes} audit={loaded.audit} writable={writable} running={running}
         onAction={remoteAction} onCancel={operation => { void cancelTransfer(operation); }} />
@@ -487,14 +488,15 @@ function NameForm({ label, action, disabled, onSubmit }: { label: string; action
   </form>;
 }
 
-function CommitForm({ staged, parent, disabled, onCommit }: {
-  staged: GitStatusEntry[]; parent: string | null; disabled: boolean; onCommit: (message: string) => Promise<boolean>;
+function CommitForm({ staged, parent, merging, disabled, onCommit }: {
+  staged: GitStatusEntry[]; parent: string | null; merging: boolean; disabled: boolean; onCommit: (message: string) => Promise<boolean>;
 }) {
   const [message, setMessage] = useState('');
   return <section aria-labelledby="git-commit-form-title">
     <h3 id="git-commit-form-title">{copy.commitTitle}</h3>
-    {staged.length === 0 ? <p>{copy.nothingStaged}</p> : <>
-      <p>{copy.commitFiles}</p>
+    {/* A pending merge is committed even when its resolved tree matches the current commit. */}
+    {staged.length === 0 && !merging ? <p>{copy.nothingStaged}</p> : <>
+      {staged.length === 0 ? <p>{copy.mergeUnchanged}</p> : <p>{copy.commitFiles}</p>}
       <ul aria-label={copy.commitFiles}>{staged.map(entry => <li key={entry.fileId}><code>{entry.path}</code> {entry.staged}</li>)}</ul>
       <p>{parent ? textMessage(copy.parent, { object: parent }) : copy.noParent}</p>
       <form onSubmit={event => { event.preventDefault(); if (message.trim()) void onCommit(message).then(done => { if (done) setMessage(''); }); }}>
