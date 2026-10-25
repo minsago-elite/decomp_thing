@@ -14,7 +14,12 @@ import java.util.UUID
 import java.util.concurrent.atomic.AtomicBoolean
 
 /** Public, fixed-vocabulary view of the last explicit agent preflight. */
-internal data class WebAgentPreflightSnapshot(val status: String, val inspectionId: String?, val reasonCode: String?)
+internal data class WebAgentPreflightSnapshot(
+    val status: String,
+    val inspectionId: String?,
+    val reasonCode: String?,
+    val configurationIdentity: String? = null,
+)
 
 /**
  * Single-flight, operator-triggered agent preflight. Nothing here runs unless [start] is called, so
@@ -22,7 +27,12 @@ internal data class WebAgentPreflightSnapshot(val status: String, val inspection
  * throw; its exception text, and anything it returns, is discarded so no environment or
  * configuration value can reach a response.
  */
-internal class WebAgentPreflight(private val inspect: (AgentCancellation) -> Unit) : AutoCloseable {
+internal class WebAgentPreflight(
+    private val configurationIdentity: () -> String?,
+    private val inspect: (AgentCancellation) -> Unit,
+) : AutoCloseable {
+    constructor(inspect: (AgentCancellation) -> Unit) : this({ null }, inspect)
+
     sealed interface Start {
         data class Started(val snapshot: WebAgentPreflightSnapshot) : Start
         data class Busy(val snapshot: WebAgentPreflightSnapshot) : Start
@@ -56,17 +66,19 @@ internal class WebAgentPreflight(private val inspect: (AgentCancellation) -> Uni
     private fun run(id: String) {
         val outcome = try {
             inspect(AgentCancellation { cancelled.get() })
-            WebAgentPreflightSnapshot("ready", id, null)
+            WebAgentPreflightSnapshot("ready", id, null, knownConfigurationIdentity())
         } catch (_: AcpPreflightCancelledException) {
             WebAgentPreflightSnapshot("cancelled", id, null)
         } catch (_: Throwable) {
-            WebAgentPreflightSnapshot("failed", id, REASON_FAILED)
+            WebAgentPreflightSnapshot("failed", id, REASON_FAILED, knownConfigurationIdentity())
         }
         synchronized(lock) {
             if (current.inspectionId == id) current = if (cancelled.get())
                 WebAgentPreflightSnapshot("cancelled", id, null) else outcome
         }
     }
+
+    private fun knownConfigurationIdentity(): String? = try { configurationIdentity() } catch (_: Throwable) { null }
 
     /** Publish cancellation without waiting; close retains the provider-owned cleanup lifetime. */
     fun requestStop() {

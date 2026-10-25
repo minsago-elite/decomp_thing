@@ -1,11 +1,13 @@
 package decompengine.web
 
 import decompengine.acp.AcpHarnessFactory
-import decompengine.acp.AcpHarnessKind
+import decompengine.acp.AcpHarnessSelection
 import decompengine.analysis.BundledGhidra
 import decompengine.validation.BwrapCapability
 import java.nio.file.Files
 import java.nio.file.Path
+import java.nio.file.attribute.BasicFileAttributes
+import java.security.MessageDigest
 import java.util.concurrent.Callable
 import java.util.concurrent.ExecutorService
 import java.util.concurrent.Future
@@ -14,15 +16,20 @@ import java.util.concurrent.TimeUnit
 import java.util.concurrent.TimeoutException
 import java.util.concurrent.atomic.AtomicReference
 
-/** One runtime prerequisite as a fixed public reason; never exception text or configuration values. */
-internal data class WebPrerequisite(val available: Boolean, val reasonCode: String?, val message: String) {
-    init { require(available == (reasonCode == null)) }
+/**
+ * One runtime prerequisite as a fixed public reason; never exception text or configuration values.
+ * [unknown] marks a prerequisite that only an explicit operator inspection can establish.
+ */
+internal data class WebPrerequisite(val available: Boolean, val reasonCode: String?, val message: String,
+    val unknown: Boolean = false) {
+    init { require(available == (reasonCode == null) && !(available && unknown)) }
     companion object { val AVAILABLE = WebPrerequisite(true, null, "Available.") }
 }
 
 /**
- * Independent workflow prerequisites from the same cached probe as harness readiness. Admission
- * rechecks a fresh snapshot; a probe that did not finish yields no snapshot, never a supported one.
+ * Independent workflow prerequisites from the same passive or explicitly inspected observation as
+ * harness readiness. Admission refuses an unavailable or unchecked prerequisite; a probe that did
+ * not finish yields no snapshot, never a supported one.
  */
 internal data class WebWorkflowPrerequisites(
     val agent: WebPrerequisite,
@@ -44,21 +51,40 @@ internal data class WebWorkflowPrerequisites(
 }
 
 /** Public harness availability; [state] uses the contract's capability state vocabulary. */
-internal data class WebHarnessReadiness(val state: String, val reasonCode: String?, val message: String,
-    val prerequisites: WebWorkflowPrerequisites? = null) {
+internal data class WebHarnessReadiness(
+    val state: String,
+    val reasonCode: String?,
+    val message: String,
+    val configurationIdentity: String? = null,
+    val observationKey: String? = null,
+    val prerequisites: WebWorkflowPrerequisites? = null,
+) {
+    /** Internal identities never enter the public capability or preflight JSON. */
+    fun withAgentInspection(snapshot: WebAgentPreflightSnapshot): WebHarnessReadiness {
+        if (configurationIdentity != null && configurationIdentity != snapshot.configurationIdentity) {
+            return withAgentInspection(null)
+        }
+        if (state == "unknown" && reasonCode == "SANDBOX_HELPER_UNCHECKED" && snapshot.status == "failed") {
+            return failedInspection()
+        }
+        return withAgentInspection(snapshot.status)
+    }
+
     /**
      * Folds the last explicit agent preflight into a configured harness. Bootstrap never starts the
      * agent, so an absent, running or cancelled inspection leaves readiness unproven rather than assumed.
      */
     fun withAgentInspection(status: String?): WebHarnessReadiness = when {
         state != "supported" -> this
-        status == "failed" -> WebHarnessReadiness("unavailable", WebAgentPreflight.REASON_FAILED,
-            "The last operator inspection could not start the configured agent. Inspect the agent configuration and retry.",
-            prerequisites?.copy(agent = WebPrerequisite(false, WebAgentPreflight.REASON_FAILED,
-                "The last operator inspection could not start the configured agent.")))
+        status == "failed" -> failedInspection()
         status == "ready" -> copy(message = "An agent harness and sandbox helpers are available; the last operator inspection started the configured agent.")
         else -> copy(message = "An agent harness and sandbox helpers are available. The agent has not been started by an operator inspection, so its readiness is unproven.")
     }
+
+    private fun failedInspection() = WebHarnessReadiness("unavailable", WebAgentPreflight.REASON_FAILED,
+        "The last operator inspection could not start the configured agent. Inspect the agent configuration and retry.",
+        prerequisites = prerequisites?.copy(agent = WebPrerequisite(false, WebAgentPreflight.REASON_FAILED,
+            "The last operator inspection could not start the configured agent.")))
 }
 
 /** Atomically expires queued work or retains an admitted callback until its final exit. */
@@ -85,33 +111,54 @@ internal class WebHarnessProbeAdmission {
  * and environment values are never copied into the projection.
  */
 internal class WebHarnessReadinessProjector(
-    private val probe: () -> WebHarnessReadiness = ::probeEnvironment,
+    private val probe: () -> WebHarnessReadiness = ::passiveEnvironment,
     private val timeoutMillis: Long = 5_000,
     private val ttlNanos: Long = TimeUnit.SECONDS.toNanos(10),
     private val nanoTime: () -> Long = System::nanoTime,
+    private val inspectionProbe: () -> WebHarnessReadiness = ::inspectEnvironment,
 ) {
     private var executor: ExecutorService = newExecutor()
     private var closed = false
     private var cached: WebHarnessReadiness? = null
     private var cachedAt = 0L
     private var abandoned: WebHarnessProbeAdmission? = null
+    private var inspected: WebHarnessReadiness? = null
+    private var inspectedAt = 0L
 
     @Synchronized
     fun current(): WebHarnessReadiness {
         val now = nanoTime()
-        cached?.let { if (now - cachedAt < ttlNanos) return it }
-        val result = refresh()
+        cached?.let { if (now - cachedAt < ttlNanos) return withObservation(it, now) }
+        val result = refresh(probe)
         cached = result
         cachedAt = now
+        return withObservation(result, nanoTime())
+    }
+
+    /** Only an explicit operator inspection may run the existing execution-capable helper check. */
+    @Synchronized
+    fun inspect(): WebHarnessReadiness {
+        val result = refresh(inspectionProbe)
+        inspected = result
+        inspectedAt = nanoTime()
         return result
     }
 
-    private fun refresh(): WebHarnessReadiness {
+    private fun withObservation(base: WebHarnessReadiness, now: Long): WebHarnessReadiness {
+        if (base.state != "unknown" || base.reasonCode != "SANDBOX_HELPER_UNCHECKED") return base
+        val observation = inspected ?: return base
+        if (base.configurationIdentity == null || base.configurationIdentity != observation.configurationIdentity ||
+            base.observationKey == null || base.observationKey != observation.observationKey ||
+            now - inspectedAt >= ttlNanos) return base
+        return observation
+    }
+
+    private fun refresh(callback: () -> WebHarnessReadiness): WebHarnessReadiness {
         if (closed) return FAILED
         if (abandoned?.isRunning == true) return TIMED_OUT
         abandoned = null
         val admission = WebHarnessProbeAdmission()
-        val future = executor.submit(Callable { admission.tryRun(probe) ?: TIMED_OUT })
+        val future = executor.submit(Callable { admission.tryRun(callback) ?: TIMED_OUT })
         return try {
             future.get(timeoutMillis, TimeUnit.MILLISECONDS)
         } catch (_: TimeoutException) {
@@ -160,42 +207,108 @@ internal class WebHarnessReadinessProjector(
             jsonStatusSupported: (Path) -> Boolean = BwrapCapability::jsonStatusSupported,
             ghidraPresent: () -> Boolean = ::bundledGhidraPresent,
             repairValidatorQualified: () -> Boolean = decompengine.project.LinuxGeneratedCRepairValidationBoundary::productionQualified,
+        ): WebHarnessReadiness = environmentReadiness(environment, bubblewrap, timeoutHelper,
+            jsonStatusSupported, ghidraPresent, bindObservation = false, repairValidatorQualified)
+
+        /** Passive page-load facts for tests: helper capability stays unchecked, nothing is launched. */
+        internal fun passiveReadiness(
+            environment: Map<String, String>, bubblewrap: Path, timeoutHelper: Path, ghidraPresent: () -> Boolean,
+            repairValidatorQualified: () -> Boolean = decompengine.project.LinuxGeneratedCRepairValidationBoundary::productionQualified,
+        ): WebHarnessReadiness = environmentReadiness(environment, bubblewrap, timeoutHelper, { null }, ghidraPresent,
+            bindObservation = true, repairValidatorQualified)
+
+        /** Configuration and file metadata only; a page load cannot launch a helper or agent. */
+        private fun passiveEnvironment(): WebHarnessReadiness = environmentReadiness(
+            System.getenv(), BUBBLEWRAP, TIMEOUT, { null }, ::bundledGhidraPresent, bindObservation = true)
+
+        private fun inspectEnvironment(): WebHarnessReadiness = environmentReadiness(
+            System.getenv(), BUBBLEWRAP, TIMEOUT, BwrapCapability::inspectJsonStatusSupported,
+            ::bundledGhidraPresent, bindObservation = true)
+
+        private fun environmentReadiness(
+            environment: Map<String, String>,
+            bubblewrap: Path,
+            timeoutHelper: Path,
+            jsonStatusSupported: (Path) -> Boolean?,
+            ghidraPresent: () -> Boolean,
+            bindObservation: Boolean,
+            repairValidatorQualified: () -> Boolean = decompengine.project.LinuxGeneratedCRepairValidationBoundary::productionQualified,
         ): WebHarnessReadiness {
-            val agent = agentPrerequisite(environment)
-            val sandbox = if (!Files.isExecutable(bubblewrap) || !Files.isExecutable(timeoutHelper) || !jsonStatusSupported(bubblewrap)) {
-                WebPrerequisite(false, "SANDBOX_HELPER_MISSING", "The sandbox helpers required to run analyzed binaries are not available.")
-            } else WebPrerequisite.AVAILABLE
-            val ghidra = if (!ghidraPresent()) {
-                WebPrerequisite(false, "GHIDRA_MISSING", "The bundled Ghidra distribution is not present; reinstall the complete application.")
-            } else WebPrerequisite.AVAILABLE
-            // The production repair validator refuses every candidate until its qualification gate opens.
+            // Workflow facts are independent of the harness precedence below. Ghidra and helper
+            // executability are file metadata only; helper capability (null = unchecked) is known only
+            // from an explicit inspection, which runs after a configured agent starts.
+            val helpersPresent = Files.isExecutable(bubblewrap) && Files.isExecutable(timeoutHelper)
+            val ghidra = if (ghidraPresent()) WebPrerequisite.AVAILABLE
+                else WebPrerequisite(false, "GHIDRA_MISSING", "The bundled Ghidra distribution is not present; reinstall the complete application.")
             val repairValidator = if (repairValidatorQualified()) WebPrerequisite.AVAILABLE
                 else WebPrerequisite(false, "REPAIR_VALIDATOR_UNQUALIFIED",
                     "The contained repair validator is not yet qualified for production use, so repair cannot run on this server.")
-            val prerequisites = WebWorkflowPrerequisites(agent, sandbox, ghidra, repairValidator)
-            // Harness readiness keeps its established precedence: harness, sandbox, then Ghidra.
-            val first = listOf(agent, sandbox, ghidra).firstOrNull { !it.available }
-                ?: return WebHarnessReadiness("supported", null, "An agent harness, sandbox helpers and bundled Ghidra are available.", prerequisites)
-            val state = if (first.reasonCode == "HARNESS_UNSUPPORTED") "unsupported" else "unavailable"
-            return WebHarnessReadiness(state, first.reasonCode, first.message, prerequisites)
-        }
-
-        private fun agentPrerequisite(environment: Map<String, String>): WebPrerequisite {
+            fun facts(agent: WebPrerequisite, helperStatus: Boolean?): WebWorkflowPrerequisites = WebWorkflowPrerequisites(agent, when {
+                !helpersPresent || helperStatus == false -> WebPrerequisite(false, "SANDBOX_HELPER_MISSING",
+                    "The sandbox helpers required to run analyzed binaries are not available.")
+                helperStatus == null -> WebPrerequisite(false, "SANDBOX_HELPER_UNCHECKED",
+                    "Sandbox helpers are checked only by an explicit agent inspection. Inspect the agent on the Runtime page, then start within a few seconds.",
+                    unknown = true)
+                else -> WebPrerequisite.AVAILABLE
+            }, ghidra, repairValidator)
+            fun agentMissing(reason: String, message: String) = WebPrerequisite(false, reason, message)
             val selected = environment["ACP_HARNESS"]
             if (selected != null && selected != "acp" && selected != "legacy-openai") {
-                return WebPrerequisite(false, "HARNESS_UNSUPPORTED", "The configured harness selection is not supported.")
+                return WebHarnessReadiness("unsupported", "HARNESS_UNSUPPORTED", "The configured harness selection is not supported.",
+                    prerequisites = facts(agentMissing("HARNESS_UNSUPPORTED", "The configured harness selection is not supported."), null))
             }
             if ((selected == null || selected == "acp") && environment["ACP_CONFIG_FILE"].isNullOrBlank()) {
-                return WebPrerequisite(false, "HARNESS_NOT_CONFIGURED", "No agent harness is configured.")
+                return WebHarnessReadiness("unavailable", "HARNESS_NOT_CONFIGURED", "No agent harness is configured.",
+                    prerequisites = facts(agentMissing("HARNESS_NOT_CONFIGURED", "No agent harness is configured."), null))
             }
-            return try {
-                val selection = AcpHarnessFactory.fromEnvironment(environment)
-                // The legacy adapter defers its environment validation to harness creation.
-                if (selection.kind == AcpHarnessKind.LEGACY_OPENAI) selection.createHarness()
-                WebPrerequisite.AVAILABLE
+            val selection = try {
+                val configured = AcpHarnessFactory.fromEnvironment(environment)
+                configured.validateConfiguration()
+                configured
             } catch (_: Exception) {
-                WebPrerequisite(false, "HARNESS_CONFIGURATION_INVALID", "The agent harness configuration is invalid.")
+                return WebHarnessReadiness("unavailable", "HARNESS_CONFIGURATION_INVALID", "The agent harness configuration is invalid.",
+                    prerequisites = facts(agentMissing("HARNESS_CONFIGURATION_INVALID", "The agent harness configuration is invalid."), null))
             }
+            if (!helpersPresent) {
+                return WebHarnessReadiness("unavailable", "SANDBOX_HELPER_MISSING", "The sandbox helpers required to run analyzed binaries are not available.",
+                    prerequisites = facts(WebPrerequisite.AVAILABLE, false))
+            }
+            val identity = if (bindObservation) selection.provenance.stableDescriptor else null
+            val key = if (bindObservation) observationKey(selection, bubblewrap, timeoutHelper) else null
+            val jsonStatus = jsonStatusSupported(bubblewrap)
+            if (jsonStatus == false) {
+                return WebHarnessReadiness("unavailable", "SANDBOX_HELPER_MISSING", "The sandbox helpers required to run analyzed binaries are not available.", identity, key,
+                    facts(WebPrerequisite.AVAILABLE, false))
+            }
+            if (!ghidraPresent()) {
+                return WebHarnessReadiness("unavailable", "GHIDRA_MISSING", "The bundled Ghidra distribution is not present; reinstall the complete application.",
+                    prerequisites = facts(WebPrerequisite.AVAILABLE, jsonStatus))
+            }
+            if (jsonStatus == null) {
+                return WebHarnessReadiness("unknown", "SANDBOX_HELPER_UNCHECKED",
+                    "A harness is configured. Inspect the agent to check helper readiness.", identity, key, facts(WebPrerequisite.AVAILABLE, null))
+            }
+            if (bindObservation && (key == null || key != observationKey(selection, bubblewrap, timeoutHelper))) {
+                return WebHarnessReadiness("unknown", "SANDBOX_HELPER_UNCHECKED",
+                    "Helper identity changed during inspection. Inspect the agent again to check readiness.", identity,
+                    prerequisites = facts(WebPrerequisite.AVAILABLE, null))
+            }
+            return WebHarnessReadiness("supported", null, "An agent harness, sandbox helpers and bundled Ghidra are available.", identity, key,
+                facts(WebPrerequisite.AVAILABLE, true))
+        }
+
+        /** A short-lived observation key, never execution or admission authority. */
+        private fun observationKey(selection: AcpHarnessSelection, vararg helpers: Path): String? {
+            return try {
+                val parts = listOf(selection.provenance.stableDescriptor) + helpers.map { helper ->
+                    val attributes = Files.readAttributes(helper, BasicFileAttributes::class.java)
+                    val fileKey = attributes.fileKey() ?: return null
+                    listOf(helper.toString(), fileKey.toString(), attributes.size().toString(),
+                        attributes.lastModifiedTime().toString()).joinToString("\u0000")
+                }
+                MessageDigest.getInstance("SHA-256").digest(parts.joinToString("\u0001").toByteArray(Charsets.UTF_8))
+                    .joinToString("") { "%02x".format(it) }
+            } catch (_: Exception) { null }
         }
 
         /** Stable public identity of the configured agent selection; never a path or configuration value. */

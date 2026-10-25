@@ -132,7 +132,7 @@ class WebProductionWorkflowsTest {
         val prerequisites = WebWorkflowPrerequisites(ready, ready, ready, WebHarnessReadinessProjector.probeEnvironment(emptyMap(),
             root.resolve("bwrap"), root.resolve("timeout"), { true }, { true }).prerequisites!!.repairValidator)
         assertEquals("REPAIR_VALIDATOR_UNQUALIFIED", prerequisites.repairValidator.reasonCode)
-        val reported = webWorkflowCapabilities(adapters(FakeEngines()), WebHarnessReadiness("supported", null, "ready", prerequisites))
+        val reported = webWorkflowCapabilities(adapters(FakeEngines()), WebHarnessReadiness("supported", null, "ready", prerequisites = prerequisites))
             .associateBy { it.getValue("id").jsonPrimitive.content }
         assertEquals("unavailable", reported.getValue("workflow-repair-agent").getValue("state").jsonPrimitive.content)
         assertEquals("REPAIR_VALIDATOR_UNQUALIFIED", reported.getValue("workflow-repair-agent").getValue("reasonCode").jsonPrimitive.content)
@@ -147,6 +147,43 @@ class WebProductionWorkflowsTest {
             }
         }
         assertEquals(0, engines.calls.get())
+    }
+
+    @Test
+    fun `passive bootstrap facts leave helper-dependent options unknown until an explicit inspection`() = withRoot { root ->
+        val bwrap = root.resolve("bwrap").also { Files.createFile(it).toFile().setExecutable(true) }
+        val timeout = root.resolve("timeout").also { Files.createFile(it).toFile().setExecutable(true) }
+        // No agent configured: page load reads file metadata only and launches no helper.
+        val passive = WebHarnessReadinessProjector.passiveReadiness(emptyMap(), bwrap, timeout, { true })
+        val facts = assertNotNull(passive.prerequisites)
+        assertTrue(facts.sandbox.unknown); assertEquals("SANDBOX_HELPER_UNCHECKED", facts.sandbox.reasonCode)
+        assertTrue(facts.ghidra.available)
+        val reported = webWorkflowCapabilities(adapters(FakeEngines()), passive).associateBy { it.getValue("id").jsonPrimitive.content }
+        fun state(id: String) = reported.getValue(id).getValue("state").jsonPrimitive.content to
+            reported.getValue(id)["reasonCode"]?.takeUnless { it == JsonNull }?.jsonPrimitive?.content
+        assertEquals("unknown" to "SANDBOX_HELPER_UNCHECKED", state("workflow-explore-tools"))
+        assertEquals("supported" to null, state("workflow-reconstruct-evidence-only"))
+        assertEquals("unavailable" to "HARNESS_NOT_CONFIGURED", state("workflow-reconstruct-agent"))
+        val store = JobStore(root.resolve("jobs")); val job = store.createFromUpload("passive.elf", elfFixture())
+        val engines = FakeEngines()
+        service(store, adapters(engines)).use { service ->
+            service.initializeExistingStorage()
+            val explore = NewWorkflowAttempt(WorkflowKind.EXPLORE, WebWorkflowDefaults.EXPLORE)
+            val refused = assertFailsWith<WebJobServiceException> {
+                service.requestDurableStart(job.id, version(service, job.id), explore, "explore_unchecked_helpers", facts)
+            }
+            assertEquals("WORKFLOW_PREREQUISITE_UNAVAILABLE", refused.code)
+            assertTrue(refused.message.orEmpty().contains("Inspect the agent"))
+            assertEquals(0, engines.calls.get())
+            // A fresh explicit inspection that checked the helpers admits the same request.
+            val inspected = facts.copy(sandbox = WebPrerequisite.AVAILABLE)
+            assertEquals(WorkflowRunState.COMPLETED, service.requestDurableStart(job.id, version(service, job.id), explore,
+                "explore_inspected_helpers", inspected).attempt.state)
+        }
+        // The execution-capable check is the explicit path; its result makes helpers available.
+        val checked = WebHarnessReadinessProjector.probeEnvironment(mapOf("ACP_HARNESS" to "legacy-openai",
+            "BASE_URL" to "https://example.invalid/v1", "API_KEY" to "legacy-key", "MODEL" to "legacy-model"), bwrap, timeout, { true }, { true })
+        assertTrue(assertNotNull(checked.prerequisites).sandbox.available)
     }
 
     @Test
@@ -231,7 +268,7 @@ class WebProductionWorkflowsTest {
     fun `capabilities report each option, its prerequisites and unimplemented workflows without paths`() {
         val adapters = adapters(FakeEngines())
         val readiness = WebHarnessReadiness("unavailable", "HARNESS_NOT_CONFIGURED", "No agent harness is configured.",
-            WebWorkflowPrerequisites(WebPrerequisite(false, "HARNESS_NOT_CONFIGURED", "No agent harness is configured."),
+            prerequisites = WebWorkflowPrerequisites(WebPrerequisite(false, "HARNESS_NOT_CONFIGURED", "No agent harness is configured."),
                 WebPrerequisite.AVAILABLE, WebPrerequisite(false, "GHIDRA_MISSING", "The bundled Ghidra distribution is not present.")))
         val reported = webWorkflowCapabilities(adapters, readiness).associateBy { it.getValue("id").jsonPrimitive.content }
         assertEquals(setOf("workflow-explore-tools", "workflow-reconstruct-agent", "workflow-reconstruct-evidence-only",
