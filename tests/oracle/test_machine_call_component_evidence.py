@@ -304,12 +304,14 @@ class ExternalCallComponentEvidenceTest(unittest.TestCase):
             "info": 18, "other": 0, "type": 2, "binding": 1, "visibility": 0, "rawSectionIndex": 0, "resolvedSectionIndex": 0,
             "sectionKind": "undefined", "value": "0x0", "size": "0x0", "version": None}
         relocation = {"sectionIndex": 2, "relocationIndex": 0, "fileOffset": 0, "locator": "rela:2:0", "symbolTableSectionIndex": 1,
-            "symbolIndex": 1, "offset": "0x3000", "type": 7, "addend": 0, "dynamicTables": ["DT_JMPREL"],
+            "symbolIndex": 1, "offset": "0x3000", "type": 7, "addend": 0, "dynamicTables": ["jmprel"],
             "slotFileOffset": 0, "slotLoadIndices": [0], "dispositions": []}
         inventory = {"schemaVersion": 1, "kind": "independent-elf-dynamic-bindings-v1", "authority": "diagnostic-authenticated-elf-metadata",
             "inputSha256": input_sha, "elfClass": 2, "byteOrder": 1, "elfType": "ET_DYN", "machine": 62, "imageBase": "0x1000",
             "activeSymbolTableSectionIndex": 1, "symbolPopulationBasis": "section-declared-dynsym", "complete": False,
-            "releaseEligible": False, "negativeCompleteness": False, "sections": [], "programHeaders": [], "dynamicEntries": [],
+            "releaseEligible": False, "negativeCompleteness": False, "sections": [], "programHeaders": [{"index": 0, "type": 1,
+                "flags": 6, "offset": "0x0", "virtualAddress": "0x3000", "physicalAddress": "0x3000", "fileSize": "0x8",
+                "memorySize": "0x8", "alignment": "0x1"}], "dynamicEntries": [],
             "dynamicSymbols": [symbol], "relocations": [relocation], "versionRequirements": [], "versionDefinitions": [],
             "neededLibraries": ["libexample.so"], "unsupportedReasons": ["runtime-provider-and-interposition-unresolved"]}
         identity = {"schemaVersion": 1, "namespace": "elf-static-import-request-v1", "inputSha256": input_sha,
@@ -325,7 +327,7 @@ class ExternalCallComponentEvidenceTest(unittest.TestCase):
             "writeAddressOverflow": False, "overlappingWrite": False, "overlapLocator": None, "unknownWidthLocator": None,
             "overflowLocator": None, "safeForStaticSlotAssociation": True, "negativeCompleteness": False}
         binding = {"slotAddress": "0x3000", "relocationLocator": "rela:2:0", "relocationType": 7, "relocationAddend": 0,
-            "dynamicTables": ["DT_JMPREL"], "slotLoadIndices": [0], "slotFileOffset": 0, "relocationDispositions": [],
+            "dynamicTables": ["jmprel"], "slotLoadIndices": [0], "slotFileOffset": 0, "relocationDispositions": [],
             "writeCoverage": coverage, "symbolTableSectionIndex": 1, "symbolIndex": 1, "symbolLocator": "dynsym:1:1",
             "runtimeImplementationAvailable": False, "runtimeProviderAvailable": False}
         transfer = {"address": "0x2000", "length": 6, "bytes": "ff25fa0f0000", "classification": "indirect-jump",
@@ -538,6 +540,127 @@ class ExternalCallComponentEvidenceTest(unittest.TestCase):
             with self.subTest(field=key):
                 self.report["sites"][0]["relocationBinding"] = original | {key: value}
                 self.write_payloads()
+                with self.assertRaises(VERIFY.VerificationError):
+                    self.verify()
+
+    def test_static_import_rejects_irelative_after_rehash(self) -> None:
+        for kind in (6, 7):
+            self.report["dynamicInventory"]["relocations"][0]["type"] = kind
+            self.report["sites"][0]["relocationBinding"]["relocationType"] = kind
+            self.write_payloads()
+            self.verify()
+        self.report["dynamicInventory"]["relocations"][0]["type"] = 37
+        self.report["sites"][0]["relocationBinding"]["relocationType"] = 37
+        self.write_payloads()
+        with self.assertRaises(VERIFY.VerificationError):
+            self.verify()
+
+    def test_static_import_checks_active_binding_and_slot_metadata_after_rehash(self) -> None:
+        original = copy.deepcopy(self.report)
+        for field, binding_field, value in (("type", "relocationType", 8), ("type", "relocationType", 36),
+                ("dynamicTables", "dynamicTables", []), ("dynamicTables", "dynamicTables", ["rela", "jmprel"]),
+                ("dynamicTables", "dynamicTables", ["invented"]), ("slotLoadIndices", "slotLoadIndices", []),
+                ("slotLoadIndices", "slotLoadIndices", [0, 1]), ("slotLoadIndices", "slotLoadIndices", [1]),
+                ("slotFileOffset", "slotFileOffset", None), ("slotFileOffset", "slotFileOffset", 1)):
+            with self.subTest(field=field, value=value):
+                self.report = copy.deepcopy(original)
+                self.report["dynamicInventory"]["relocations"][0][field] = value
+                self.report["sites"][0]["relocationBinding"][binding_field] = value
+                self.write_payloads()
+                with self.assertRaises(VERIFY.VerificationError):
+                    self.verify()
+        changes = [lambda inv: inv.update(activeSymbolTableSectionIndex=2),
+            lambda inv: inv["unsupportedReasons"].append("packed-relr-relocations-not-expanded"),
+            lambda inv: inv["unsupportedReasons"].append("android-packed-relocations-not-expanded"),
+            lambda inv: inv["unsupportedReasons"].append("unclassified-dynamic-tag"),
+            lambda inv: inv["dynamicSymbols"][0].update(info=17),
+            lambda inv: inv["dynamicSymbols"][0].update(other=1),
+            lambda inv: inv["dynamicSymbols"][0].update(rawSectionIndex=4),
+            lambda inv: inv["dynamicSymbols"][0].update(resolvedSectionIndex=4),
+            lambda inv: inv["programHeaders"][0].update(fileSize="0x7"),
+            lambda inv: inv["programHeaders"].append(inv["programHeaders"][0] | {"index": 1})]
+        for index, change in enumerate(changes):
+            with self.subTest(metadata=index):
+                self.report = copy.deepcopy(original)
+                change(self.report["dynamicInventory"])
+                self.write_payloads()
+                with self.assertRaises(VERIFY.VerificationError):
+                    self.verify()
+
+    def test_static_import_recomputes_competing_writes_instead_of_trusting_safe_flags(self) -> None:
+        original = copy.deepcopy(self.report)
+        # The original candidate always falsely retains safe=true in the rejecting cases.
+        cases = [(2, 0x2ffc, ["rela"], True), (2, 0x2ffd, ["rela"], False),
+                 (8, 0x3008, ["rela"], True), (8, 0x3007, ["rela"], False),
+                 (36, 0x2ff8, ["rela"], False), (7, 0x3000, ["rela"], False),
+                 (1, (1 << 64) - 1, ["rela"], False), (777, 0x9000, ["rela"], False),
+                 (5, 0x9000, ["rela"], False), (0, 0x9000, ["rela"], True), (777, 0x9000, [], True)]
+        for kind, slot, tables, accepted in cases:
+            with self.subTest(kind=kind, slot=hex(slot), tables=tables):
+                self.report = copy.deepcopy(original)
+                inventory = self.report["dynamicInventory"]
+                inventory["relocations"].append(inventory["relocations"][0] | {"relocationIndex": 1, "locator": "rela:2:1",
+                    "fileOffset": 24, "offset": hex(slot), "type": kind, "dynamicTables": tables,
+                    "slotFileOffset": None, "slotLoadIndices": []})
+                self.write_payloads()
+                if accepted:
+                    self.verify()
+                else:
+                    with self.assertRaises(VERIFY.VerificationError):
+                        self.verify()
+        self.report = copy.deepcopy(original)
+        inventory = self.report["dynamicInventory"]
+        inventory["sections"] = [{"index": 4, "name": ".bss", "type": 8, "flags": "0x2", "address": "0x2fe0", "offset": 0,
+            "size": "0x40", "link": 0, "info": 0, "alignment": "0x8", "entrySize": "0x0"}]
+        inventory["dynamicSymbols"].append(inventory["dynamicSymbols"][0] | {"symbolIndex": 2, "locator": "dynsym:1:2",
+            "name": "copy_storage", "info": 17, "type": 1, "rawSectionIndex": 4, "resolvedSectionIndex": 4,
+            "sectionKind": "defined", "value": "0x2fe0", "size": "0x40"})
+        for index, kind, slot, symbol in ((1, 5, 0x2fe0, 2), (2, 2, 0x2ff0, 1)):
+            inventory["relocations"].append(inventory["relocations"][0] | {"relocationIndex": index, "locator": f"rela:2:{index}",
+                "offset": hex(slot), "type": kind, "symbolIndex": symbol, "dynamicTables": ["rela"], "slotFileOffset": None, "slotLoadIndices": []})
+        self.write_payloads()
+        # Earlier COPY encloses the slot although the immediately preceding short write does not.
+        with self.assertRaises(VERIFY.VerificationError):
+            self.verify()
+
+    def test_static_import_requires_consistent_retained_version_identity(self) -> None:
+        inventory = self.report["dynamicInventory"]
+        inventory["sections"] = [{"index": index, "name": name, "type": kind, "flags": "0x2", "address": "0x0", "offset": 0,
+            "size": "0x0", "link": link, "info": 0, "alignment": "0x1", "entrySize": "0x0"}
+            for index, name, kind, link in ((1, ".dynsym", 11, 2), (2, ".dynstr", 3, 0),
+                                           (3, ".gnu.version", 0x6fffffff, 1), (4, ".gnu.version_r", 0x6ffffffe, 2))]
+        inventory["dynamicSymbols"][0]["version"] = {"sectionIndex": 3, "fileOffset": 0, "raw": 2, "index": 2, "hidden": False,
+            "kind": "required-version", "name": "VER_1", "providerRequest": "libexample.so"}
+        inventory["versionRequirements"] = [{"sectionIndex": 4, "stringSectionIndex": 2, "recordOffset": 0, "auxiliaryOffset": 16,
+            "providerRequest": "libexample.so", "name": "VER_1", "rawIndex": 2, "index": 2, "flags": 0, "hash": 0x5aa821}]
+
+        def rehash_identity() -> None:
+            version = self.report["dynamicInventory"]["dynamicSymbols"][0]["version"]
+            entry = self.report["externalNamespace"]["entries"][0]
+            entry["identity"]["version"] = {key: value for key, value in version.items() if key not in {"sectionIndex", "fileOffset"}}
+            entry["id"] = "ext-" + sha256(VERIFY.canonical_bytes(entry["identity"])).hexdigest()
+            self.report["sites"][0]["externalTargetId"] = entry["id"]
+            self.report["externalNamespaceSha256"] = sha256(VERIFY.canonical_bytes(self.report["externalNamespace"])).hexdigest()
+            self.write_payloads()
+
+        rehash_identity()
+        self.verify()
+        original = copy.deepcopy(self.report)
+        changes = [lambda inv: inv["dynamicSymbols"][0]["version"].update(name=None),
+            lambda inv: inv["dynamicSymbols"][0]["version"].update(providerRequest=None),
+            lambda inv: inv["dynamicSymbols"][0]["version"].update(kind="defined-version"),
+            lambda inv: inv["dynamicSymbols"][0]["version"].update(raw=3),
+            lambda inv: inv["dynamicSymbols"][0]["version"].update(hidden=True),
+            lambda inv: inv["versionRequirements"].clear(),
+            lambda inv: inv["versionRequirements"].append(copy.deepcopy(inv["versionRequirements"][0])),
+            lambda inv: inv["versionRequirements"][0].update(providerRequest="other.so"),
+            lambda inv: inv["versionRequirements"][0].update(rawIndex=3),
+            lambda inv: inv["sections"][0].update(link=9), lambda inv: inv["sections"][2].update(link=9)]
+        for index, change in enumerate(changes):
+            with self.subTest(version=index):
+                self.report = copy.deepcopy(original)
+                change(self.report["dynamicInventory"])
+                rehash_identity()
                 with self.assertRaises(VERIFY.VerificationError):
                     self.verify()
 

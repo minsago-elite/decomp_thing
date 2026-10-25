@@ -489,6 +489,118 @@ def verify_external_inventory(inventory: dict, namespace: dict, checksum: str, i
     return symbols, relocations, imports
 
 
+class RetainedRelocationIndex:
+    """Recheck positive metadata claims; no ELF reads or instruction decoding occur here.
+
+    Widths mirror ElfRelocationWriteCoverageV1. Sorting once and prefix maximum ends
+    make each candidate's competing-write check constant time, excluding itself.
+    """
+    def __init__(self, inventory: dict, symbols: dict, input_bytes: int):
+        self.inventory = inventory
+        self.mechanism_uncertain = any(reason in {"packed-relr-relocations-not-expanded", "android-packed-relocations-not-expanded", "unclassified-dynamic-tag"}
+                                       for reason in inventory["unsupportedReasons"])
+        self.sections = {row["index"]: row for row in inventory["sections"]}
+        require(len(self.sections) == len(inventory["sections"]), "duplicate retained section index")
+        self.requirements = {}
+        for row in inventory["versionRequirements"]:
+            self.requirements.setdefault((row["stringSectionIndex"], row["index"]), []).append(row)
+        self.supported_versions = {key for key, symbol in symbols.items() if self.import_version(symbol)}
+        self.loads, self.load_positions, self.load_prefix_ends = [], {}, []
+        for row in inventory["programHeaders"]:
+            if row["type"] != 1:
+                continue
+            start, size, file_size, offset = (address(row[key]) for key in ("virtualAddress", "memorySize", "fileSize", "offset"))
+            require(file_size <= size and start + size <= (1 << 64) - 1 and offset + file_size <= input_bytes,
+                    "retained load bounds differ")
+            if size:
+                self.loads.append((start, row["index"], start + size - 1, file_size, offset))
+        self.loads.sort()
+        for index, row in enumerate(self.loads):
+            require(row[1] not in self.load_positions, "duplicate retained load index")
+            self.load_positions[row[1]] = index
+            self.load_prefix_ends.append(max(row[2], self.load_prefix_ends[-1] if self.load_prefix_ends else 0))
+        self.slot_counts, self.active, self.positions = {}, {}, {}
+        self.unknown = self.overflow = False
+        self.writes = []
+        identities = set()
+        for row in inventory["relocations"]:
+            slot = address(row["offset"])
+            self.slot_counts[slot] = self.slot_counts.get(slot, 0) + 1
+            if not row["dynamicTables"] or row["symbolTableSectionIndex"] != inventory["activeSymbolTableSectionIndex"]:
+                continue
+            require(len(row["dynamicTables"]) <= 3 and all(name in {"rela", "rel", "jmprel"} for name in row["dynamicTables"]),
+                    "invalid active dynamic relocation membership")
+            identity = (row["sectionIndex"], row["relocationIndex"])
+            require(identity not in identities, "duplicate active relocation identity")
+            identities.add(identity)
+            kind = row["type"]
+            width = 0 if kind == 0 else 8 if kind in {1, 6, 7, 8, 16, 17, 18, 33, 37, 38} else 4 if kind in {2, 10, 32} else 16 if kind == 36 else None
+            if kind == 5:
+                symbol = symbols[(row["symbolTableSectionIndex"], row["symbolIndex"])]
+                section = self.sections.get(symbol["resolvedSectionIndex"])
+                if symbol["sectionKind"] == "defined" and address(symbol["value"]) == slot and section is not None and address(section["flags"]) & 2:
+                    width = address(symbol["size"])
+            self.active[row["locator"]] = (slot, width)
+            if width is None:
+                self.unknown = True
+            elif width and slot + width - 1 > (1 << 64) - 1:
+                self.overflow = True
+            elif width:
+                self.writes.append((slot, *identity, row["locator"], slot + width - 1))
+        self.writes.sort()
+        self.prefix_ends = []
+        for index, row in enumerate(self.writes):
+            self.positions[row[3]] = index
+            self.prefix_ends.append(max(row[4], self.prefix_ends[-1] if self.prefix_ends else 0))
+
+    def safe_slot(self, locator: str, slot: int) -> bool:
+        if self.unknown or self.overflow or self.active.get(locator) != (slot, 8) or slot > (1 << 64) - 8:
+            return False
+        index = self.positions[locator]
+        return ((index == 0 or self.prefix_ends[index - 1] < slot) and
+                (index + 1 == len(self.writes) or self.writes[index + 1][0] > slot + 7))
+
+    def owned_slot(self, relocation: dict, slot: int) -> bool:
+        if len(relocation["slotLoadIndices"]) != 1 or relocation["slotFileOffset"] is None:
+            return False
+        index = self.load_positions.get(relocation["slotLoadIndices"][0])
+        if index is None:
+            return False
+        start, _, end, file_size, offset = self.loads[index]
+        return (start <= slot and slot + 7 <= end and slot + 8 <= start + file_size and
+                offset + slot - start == relocation["slotFileOffset"] and
+                (index == 0 or self.load_prefix_ends[index - 1] < slot) and
+                (index + 1 == len(self.loads) or self.loads[index + 1][0] > slot + 7))
+
+    def import_version(self, symbol: dict) -> bool:
+        version = symbol["version"]
+        if version is None:
+            return True
+        raw, index = version["raw"], version["index"]
+        if not 0 <= raw <= 65535 or index != raw & 0x7fff or version["hidden"] is not bool(raw & 0x8000):
+            return False
+        if index <= 1:
+            return (version["kind"] == ("local" if index == 0 else "global-unversioned") and
+                    version["name"] is None and version["providerRequest"] is None)
+        table = self.sections.get(symbol["tableSectionIndex"])
+        versym = self.sections.get(version["sectionIndex"])
+        if table is None or table["type"] != 11 or versym is None or versym["type"] != 0x6fffffff or versym["link"] != table["index"]:
+            return False
+        requirements = self.requirements.get((table["link"], index), [])
+        return (version["kind"] == "required-version" and bool(version["name"]) and bool(version["providerRequest"]) and
+                len(requirements) == 1 and requirements[0]["name"] == version["name"] and
+                requirements[0]["providerRequest"] == version["providerRequest"] and requirements[0]["rawIndex"] & 0x7fff == index)
+
+    def static_import(self, relocation: dict, symbol: dict, slot: int) -> bool:
+        return (not self.mechanism_uncertain and self.slot_counts[slot] == 1 and len(relocation["dynamicTables"]) == 1 and
+                self.owned_slot(relocation, slot) and relocation["symbolTableSectionIndex"] == self.inventory["activeSymbolTableSectionIndex"] and
+                relocation["type"] in {6, 7} and relocation["symbolIndex"] != 0 and self.safe_slot(relocation["locator"], slot) and
+                symbol["sectionKind"] == "undefined" and symbol["rawSectionIndex"] == 0 and symbol["resolvedSectionIndex"] == 0 and
+                symbol["binding"] == 1 and symbol["type"] == 2 and symbol["visibility"] == 0 and
+                symbol["info"] == 18 and symbol["other"] & 3 == 0 and bool(symbol["name"]) and
+                (symbol["tableSectionIndex"], symbol["symbolIndex"]) in self.supported_versions)
+
+
 def verify_external_bindings(evidence: dict, request: dict, report: dict, source: dict,
         source_request_bytes: bytes, source_report_bytes: bytes, source_request: dict, source_report: dict) -> None:
     fields(request, {"schemaVersion", "kind", "richFile", "sourceReport", "sourceRequest", "runtime", "outputPath", "limits", "metadataPolicy"}, "external request")
@@ -536,6 +648,7 @@ def verify_external_bindings(evidence: dict, request: dict, report: dict, source
     canonical_addresses = {base + address(row["rva"]) for row in expected_canonical if row["rva"] is not None}
     symbols, relocations, imports = verify_external_inventory(report["dynamicInventory"], report["externalNamespace"],
         report["externalNamespaceSha256"], report["inputSha256"], report["imageBase"])
+    relocation_index = RetainedRelocationIndex(report["dynamicInventory"], symbols, report["inputBytes"])
     sites = inventory_rows(report["sites"], SITE_KEYS, limits["maximumCalls"], "external sites")
     require(len(sites) == len(source_report["calls"]), "source physical calls were omitted or duplicated")
     counts = {}
@@ -570,14 +683,14 @@ def verify_external_bindings(evidence: dict, request: dict, report: dict, source
                     all(site[key] is None for key in ("memoryProbe", "memoryTransfer", "relocationBinding", "externalTargetId")),
                     "canonical/source-boundary site gained external evidence")
         counts[status] = counts.get(status, 0) + 1
-        verify_external_site(site, location, symbols, relocations, imports)
+        verify_external_site(site, location, symbols, relocations, imports, relocation_index)
     expected_counts = {"sourcePhysicalSites": len(sites), "composedSiteRecords": len(sites), "namespaceEntries": len(imports), "dispositions": counts}
     fields(report["counts"], EXTERNAL_COUNTS, "external report counts")
     require(canonical_bytes(report["counts"]) == canonical_bytes(expected_counts) == canonical_bytes(evidence["counts"]),
             "external counts differ from retained populations")
 
 
-def verify_external_site(site: dict, location: int, symbols: dict, relocations: dict, imports: dict) -> None:
+def verify_external_site(site: dict, location: int, symbols: dict, relocations: dict, imports: dict, relocation_index: RetainedRelocationIndex) -> None:
     probe, transfer, binding = (site[key] for key in ("memoryProbe", "memoryTransfer", "relocationBinding"))
     if site["targetBindingDisposition"] == "static-import-request-reference":
         require(binding is not None and site["externalTargetId"] is not None, "static import disposition has no binding")
@@ -658,7 +771,8 @@ def verify_external_site(site: dict, location: int, symbols: dict, relocations: 
     safe = coverage["candidateActive"] and coverage["candidateCoversSlot"] and not any(coverage[key] for key in flags[2:6])
     require(coverage["safeForStaticSlotAssociation"] is safe, "write coverage summary differs")
     if site["targetBindingDisposition"] == "static-import-request-reference":
-        require(safe and site["externalTargetId"] is not None and symbols[key]["binding"] == 1 and symbols[key]["type"] == 2,
+        require(safe and site["externalTargetId"] is not None and relocation_index.static_import(relocation, symbols[key], slot) and
+                transfer["classification"] == ("indirect-jump" if site["viaForwarder"] else "indirect-call"),
                 "static import disposition contradicts retained binding")
 
 
