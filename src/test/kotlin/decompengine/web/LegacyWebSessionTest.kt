@@ -102,6 +102,13 @@ class LegacyWebSessionTest {
             }
             assertContentEquals(before, Files.readAllBytes(record))
             assertEquals(storageBefore, storageSnapshot(root), "denied legacy mutations must not create or rewrite retained state")
+            // Each refusal is audited, without any job state change.
+            // An entry is written as its handler exits, after the response bytes.
+            val auditDeadline = System.nanoTime() + 10_000_000_000L
+            while (WebAuditLog(root).read().entries.size < 9 && System.nanoTime() < auditDeadline) Thread.sleep(10)
+            val audited = WebAuditLog(root).read().entries
+            assertEquals(9, audited.size)
+            assertTrue(audited.all { it.outcome == WebAuditOutcome.REJECTED })
             assertEquals(0, executions)
             val logout = request("/api/v1/session", "DELETE", session + mapOf("Origin" to origin, "Content-Type" to "application/json"))
             assertEquals(204, logout.statusCode())
@@ -115,7 +122,8 @@ class LegacyWebSessionTest {
     }
 
     private fun storageSnapshot(root: Path): Map<String, Pair<String, List<Byte>>> = Files.walk(root).use { paths ->
-        paths.iterator().asSequence().filter { it != root }.associate { path ->
+        // The sensitive-action audit is append-only server evidence, not job state.
+        paths.iterator().asSequence().filter { it != root && !root.relativize(it).startsWith(WebAuditLog.DIRECTORY) }.associate { path ->
             val kind = when {
                 Files.isRegularFile(path, NOFOLLOW_LINKS) -> "file"
                 Files.isDirectory(path, NOFOLLOW_LINKS) -> "directory"
