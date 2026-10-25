@@ -14,7 +14,8 @@ export function ActivityStages({ run, events, onSelectTask }: {
   run: Pick<Run, 'state' | 'acceptance'> | null; events: readonly WebEvent[]; onSelectTask?: (digest: string) => void;
 }) {
   const stages = taskStages(events);
-  const counts = stageCounts(stages);
+  // Attempt-wide observations keep their own row but are never counted as a task.
+  const counts = stageCounts(stages.filter(stage => stage.taskDigest !== null));
   const finished = finalStates.reduce((sum, state) => sum + counts[state], 0);
   // No producer declares a complete task total yet, so the measure stays a count.
   const measure = progressMeasure(BigInt(finished), null);
@@ -25,7 +26,7 @@ export function ActivityStages({ run, events, onSelectTask }: {
     <p>{copy.attempt}: {attempt ? <StateMark tone={stageTone(attempt)}>{stageLabels[attempt]}</StateMark> : copy.attemptUnknown}</p>
     <p>{copy.attemptAuthority}</p>
     {stages.length === 0 ? <p>{copy.noTasks}</p> : <>
-      <p>{displayMessage(copy.counts, { total: stages.length, summary: reported.map(state => textMessage(copy.countPart, { label: stageLabels[state], count: counts[state] })).join('; ') })}</p>
+      <p>{displayMessage(copy.counts, { total: stages.filter(stage => stage.taskDigest !== null).length, summary: reported.map(state => textMessage(copy.countPart, { label: stageLabels[state], count: counts[state] })).join('; ') })}</p>
       <p>{measure.kind === 'percent'
         ? displayMessage(copy.progressPercent, { completed: measure.completed.toString(), total: measure.total.toString(), percent: measure.percent })
         : displayMessage(copy.progressCount, { completed: measure.completed.toString() })}</p>

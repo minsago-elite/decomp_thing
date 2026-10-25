@@ -113,6 +113,21 @@ describe('activity stages view', () => {
     expect(screen.getByLabelText<HTMLInputElement>('Task digest contains').value).toBe(taskB);
   });
 
+  it('keeps attempt-wide observations out of task totals and finished-task progress', async () => {
+    const { current } = mount({ state: 'running', startedAt: '2026-09-05T00:00:01Z' });
+    transport.get.mockResolvedValueOnce(current).mockResolvedValueOnce(page([
+      observation(0, 'run_started', {}),
+      observation(1, 'workflow_phase', { taskIdSha256: 'a'.repeat(64), phase: 'completed' }),
+      observation(2, 'workflow_phase', { phase: 'completed' }),
+    ]));
+    fireEvent.click(screen.getByRole('button', { name: 'Follow activity' }));
+    const table = await screen.findByRole('table', { name: 'Reported task stages' });
+    expect(within(table).getAllByRole('row')).toHaveLength(3);
+    expect(within(table).getByText('No recorded task')).toBeTruthy();
+    expect(screen.getByText(/^Observed tasks: 1\./)).toBeTruthy();
+    expect(screen.getByText(/^1 observed tasks reached a final reported stage/)).toBeTruthy();
+  });
+
   it('links a matching result revision and previous attempt, and labels every other reference', async () => {
     const { current } = mount({ state: 'completed', startedAt: '2026-09-05T00:00:01Z', endedAt: '2026-09-05T00:00:02Z',
       terminalReason: 'COMPLETED', acceptance: 'accepted', resultRevisionId: 'rev_result_1', previousRunId: 'run_previous_1' });
