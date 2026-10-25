@@ -210,7 +210,8 @@ internal class RepairWorkflowAdapter(
     override val limits = WebWorkflowDefaults.REPAIR
     // The tool-call ceiling is structural (iterations times the per-invocation agent limit), so it is fixed.
     override val limitsAdjustable = false
-    override val requirements = setOf(WebWorkflowRequirement.SANDBOX, WebWorkflowRequirement.AGENT_HARNESS)
+    override val requirements = setOf(WebWorkflowRequirement.SANDBOX, WebWorkflowRequirement.AGENT_HARNESS,
+        WebWorkflowRequirement.REPAIR_VALIDATOR)
     override val input = DurableWebWorkflowInput.RECORDED_REQUIRED
     override val launch = DurableWebWorkflowLaunch(DurableWebWorkflowMode.AGENT, executesBinary = true, contactsAgent = true,
         requiredTools = listOf("sandbox", "agent-harness", "c-toolchain"))

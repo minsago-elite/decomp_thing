@@ -91,7 +91,7 @@ class PythonAngrExplorer(
         val process = ProcessBuilder(command).start()
         val stdoutFuture = CompletableFuture.supplyAsync { process.inputStream.bufferedReader().readText() }
         val stderrFuture = CompletableFuture.supplyAsync { process.errorStream.bufferedReader().readText() }
-        val exitCode = process.waitFor()
+        val exitCode = awaitOwnedProcess(process)
         val stdout = stdoutFuture.join()
         val stderr = stderrFuture.join()
         if (exitCode != 0) {
@@ -254,7 +254,7 @@ class StaticHintGenerator(
             .redirectErrorStream(true)
             .start()
         val output = process.inputStream.bufferedReader().readText()
-        val exitCode = process.waitFor()
+        val exitCode = awaitOwnedProcess(process)
         if (exitCode != 0) error("strings failed with exit code $exitCode: $output")
         val hints = output.lineSequence()
             .map(String::trim)
@@ -450,6 +450,29 @@ class AutomaticExplorer(
         reportPath.writeText(report.toJson())
         return report
     }
+}
+
+/**
+ * Waits for an owned helper. Interruption (cancellation or an exhausted workflow limit) kills its
+ * whole process tree and waits for every member to exit before rethrowing, so no helper outlives
+ * the workflow that started it.
+ */
+internal fun awaitOwnedProcess(process: Process): Int = try {
+    process.waitFor()
+} catch (interrupted: InterruptedException) {
+    val members = process.descendants().toList() + process.toHandle()
+    members.forEach { it.destroyForcibly() }
+    var reinterrupt = false
+    for (member in members) {
+        while (member.isAlive) {
+            try { member.onExit().get(1, java.util.concurrent.TimeUnit.SECONDS) }
+            catch (_: InterruptedException) { reinterrupt = true }
+            catch (_: java.util.concurrent.TimeoutException) { member.destroyForcibly() }
+            catch (_: java.util.concurrent.ExecutionException) { }
+        }
+    }
+    if (reinterrupt) Thread.currentThread().interrupt()
+    throw interrupted
 }
 
 private fun ExplorationReport.toJson(): String = """
