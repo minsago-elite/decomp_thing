@@ -14,7 +14,7 @@ import kotlinx.serialization.json.*
  * revision binding, record digests and model/plan states; an unavailable record never yields empty rows.
  */
 internal class WebProgramStructurePages(
-    private val read: (String, String, String, (WebProgramStructureIndex, () -> ByteArray) -> JsonObject) -> JsonObject,
+    private val read: (String, String, String, (WebProgramStructureIndex, WebStructureRecordReader) -> JsonObject) -> JsonObject,
 ) {
     private val secret = ByteArray(32).also(SecureRandom()::nextBytes)
 
@@ -194,14 +194,15 @@ internal class WebProgramStructurePages(
 
     fun entity(kind: WebStructureKind, jobId: String, runId: String, revisionId: String, selector: String, rawQuery: String?): JsonObject {
         val query = parse(rawQuery, emptySet(), paged = false)
-        return read(jobId, runId, revisionId) { index, readModel ->
+        return read(jobId, runId, revisionId) { index, records ->
             pinned(index, query)
             header(index).apply {
                 if (!index.available) { put("entity", JsonNull); return@apply }
                 val table = index.table(kind)
                 val row = table.index[selector]?.takeIf { addressable(selector) } ?: throw WebAccessDenied(404,
                     "ENTITY_NOT_FOUND", "The requested ${kind.wire} is not recorded in this revision's program model.")
-                val fields = readWebStructureEntity(readModel(), table.offsets[row])
+                val fields = readWebStructureEntity(records.read(checkNotNull(index.model), WebProgramStructureBuilder.MAXIMUM_MODEL_BYTES),
+                    table.offsets[row])
                 put("entity", fitDetail(JsonObject(entityItem(index, table, row) + detail(index, table, row, fields))))
             }.let(::JsonObject)
         }

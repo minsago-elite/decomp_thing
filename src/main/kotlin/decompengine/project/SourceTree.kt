@@ -1930,6 +1930,14 @@ internal class UniqueJsonObjectKeyValidator(private val source: String) {
 
     private fun parseString(): String {
         require(consumeIf('"')) { "source tree manifest JSON string is invalid" }
+        // Fast path for the common unescaped string; any escape or control character takes the decoding loop.
+        var end = cursor
+        while (end < source.length) {
+            val character = source[end]
+            if (character == '"') return source.substring(cursor, end).also { cursor = end + 1 }
+            if (character == '\\' || character.code < 0x20) break
+            end++
+        }
         val decoded = StringBuilder()
         while (cursor < source.length) {
             val character = source[cursor++]
