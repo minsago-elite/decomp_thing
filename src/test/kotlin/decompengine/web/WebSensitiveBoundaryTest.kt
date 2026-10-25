@@ -103,9 +103,10 @@ class WebSensitiveBoundaryTest {
             val jobSections = sections(jobExport)
             assertEquals(listOf("job", "runs", "audit"), jobSections.keys.toList())
             val entries = jobSections.getValue("audit").getValue("entries").jsonArray.map { it.jsonObject }
+            // Entries are sequenced as each handler exits, which need not match the order responses arrived.
             assertEquals(listOf("job.upload:accepted:201", "job.upload:replayed:201", "run.cancel:rejected:404"), entries.map {
                 "${it.getValue("action").jsonPrimitive.content}:${it.getValue("outcome").jsonPrimitive.content}:${it.getValue("status")}"
-            })
+            }.sorted())
             assertTrue(entries.all { it.getValue("target").jsonObject.getValue("jobId").jsonPrimitive.content == jobId })
 
             // Server-wide audit includes refused requests, attributed by digest only.
@@ -122,7 +123,7 @@ class WebSensitiveBoundaryTest {
                 "job.upload:replayed:null", "run.cancel:rejected:NOT_FOUND", "support.export:rejected:VALIDATION_FAILED",
                 "support.export:rejected:VALIDATION_FAILED", "support.export:rejected:VALIDATION_FAILED",
                 "support.export:rejected:NOT_FOUND", "support.export:accepted:null", "support.export:accepted:null",
-                "support.export:accepted:null"), summary)
+                "support.export:accepted:null").sorted(), summary.sorted())
             val digests = audit.map { it.getValue("actor").jsonObject.getValue("sessionDigest").jsonPrimitive.content }.toSet()
             assertEquals(1, digests.size, "one browser session performed every audited action")
             val cancelEntry = audit.single { it.getValue("action").jsonPrimitive.content == "run.cancel" }
