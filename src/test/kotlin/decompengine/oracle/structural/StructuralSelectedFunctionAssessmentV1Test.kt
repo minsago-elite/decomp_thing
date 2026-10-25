@@ -7,6 +7,9 @@ import decompengine.project.RecoveredGlobal
 import decompengine.project.RecoveredProgramModel
 import decompengine.project.RecoveredType
 import decompengine.project.RecoveryStatus
+import decompengine.project.ReferencedDataByteEvidence
+import decompengine.project.ReferencedDataByteOrigin
+import decompengine.project.ReferencedDataByteWindow
 import kotlin.test.Test
 import kotlin.test.assertContentEquals
 import kotlin.test.assertEquals
@@ -70,21 +73,32 @@ class StructuralSelectedFunctionAssessmentV1Test {
 
     @Test
     fun `canonical historical and current extraction models produce deterministic defensive passive bytes`() {
-        for (version in listOf(1, 2, 4)) {
-            val fixture = fixture(model = model().copy(schemaVersion = version))
-            val modelBefore = fixture.modelBytes.copyOf()
-            val scoreBefore = fixture.scoreBytes.copyOf()
-            val first = StructuralSelectedFunctionAssessmentV1.derive(fixture.modelBytes, fixture.scoreBytes)
+        for (version in 1..4) {
+            val original = model()
+            val globals = original.globals.map { global ->
+                if (version != 3) global else global.copy(byteEvidence = ReferencedDataByteEvidence(
+                    windows = listOf(ReferencedDataByteWindow(global.address, null,
+                        ReferencedDataByteOrigin(BASE + 0x10UL, global.address, null, "unknown_width"), "unknown", emptyList())),
+                    omissionReason = "unknown_access_width"))
+            }
+            val fixture = fixture(model = original.copy(schemaVersion = version, globals = globals))
+            val modelInput = fixture.modelBytes
+            val scoreInput = fixture.scoreBytes
+            val modelBefore = modelInput.copyOf()
+            val scoreBefore = scoreInput.copyOf()
+            val first = StructuralSelectedFunctionAssessmentV1.derive(modelInput, scoreInput)
+            assertContentEquals(modelBefore, modelInput)
+            assertContentEquals(scoreBefore, scoreInput)
             val retained = first.copyOf()
             first.fill(0)
-            val second = StructuralSelectedFunctionAssessmentV1.derive(fixture.modelBytes, fixture.scoreBytes)
+            val second = StructuralSelectedFunctionAssessmentV1.derive(modelInput, scoreInput)
             assertContentEquals(retained, second)
-            assertContentEquals(modelBefore, fixture.modelBytes)
-            assertContentEquals(scoreBefore, fixture.scoreBytes)
+            assertContentEquals(modelBefore, modelInput)
+            assertContentEquals(scoreBefore, scoreInput)
             val bindings = doc(second).obj("bindings")
             assertEquals(JsonPrimitive(version), bindings["modelSchemaVersion"])
-            assertEquals(JsonPrimitive(sha(fixture.modelBytes)), bindings["programModelSha256"])
-            assertEquals(JsonPrimitive(sha(fixture.scoreBytes)), bindings["selectedBoundaryScoreSha256"])
+            assertEquals(JsonPrimitive(sha(modelInput)), bindings["programModelSha256"])
+            assertEquals(JsonPrimitive(sha(scoreInput)), bindings["selectedBoundaryScoreSha256"])
         }
     }
 
