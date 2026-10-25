@@ -52,7 +52,7 @@ internal class WebProgramStructurePages(
     private fun offset(owner: String, route: String, index: WebProgramStructureIndex, query: Query, total: Int): Int {
         val cursor = query.cursor ?: return 0
         val parts = cursor.split('_')
-        if (!MessageDigest.isEqual(signature(owner, route, query.fields.toString(), query.limit, parts[0], parts[1]).toByteArray(),
+        if (!MessageDigest.isEqual(signature(owner, route, query.fields.toSortedMap().toString(), query.limit, parts[0], parts[1]).toByteArray(),
                 parts[2].toByteArray())) invalidCursor()
         if (parts[0] != index.structureVersion) {
             throw WebAccessDenied(410, "CURSOR_EXPIRED", "The structure records changed. Refresh the first page.")
@@ -63,7 +63,7 @@ internal class WebProgramStructurePages(
     private fun page(owner: String, route: String, index: WebProgramStructureIndex, query: Query, next: Int?): JsonObject = buildJsonObject {
         put("limit", query.limit); put("snapshotVersion", index.structureVersion)
         put("nextCursor", next?.let { JsonPrimitive("${index.structureVersion}_${it}_${signature(owner, route,
-            query.fields.toString(), query.limit, index.structureVersion, it)}") } ?: JsonNull)
+            query.fields.toSortedMap().toString(), query.limit, index.structureVersion, it)}") } ?: JsonNull)
     }
 
     fun functions(owner: String, jobId: String, runId: String, revisionId: String, rawQuery: String?): JsonObject {
