@@ -36,11 +36,11 @@ qualification_provisioned=true
   -PgeneratedCQualificationAction=write-config \
   "-PgeneratedCQualificationOutput=$qualification_root/config"
 sudo -n install --owner=root --group=root --mode=0444 \
-  "$qualification_root/config/runtime.json" /opt/decomp-generated-c-validation-ci/runtime.json
+  "$qualification_root/config/runtime.json" /var/lib/decomp-generated-c-runtime-ci/runtime.json
 sudo -n install --owner=root --group=root --mode=0444 \
-  "$qualification_root/config/sandbox.json" /opt/decomp-generated-c-validation-ci/sandbox.json
+  "$qualification_root/config/sandbox.json" /var/lib/decomp-generated-c-runtime-ci/sandbox.json
 
-export GENERATED_C_REPAIR_CONFIG_FILE=/opt/decomp-generated-c-validation-ci/runtime.json
+export GENERATED_C_REPAIR_CONFIG_FILE=/var/lib/decomp-generated-c-runtime-ci/runtime.json
 export ACP_CONFIG_FILE="$qualification_root/config/acp.json"
 export ACP_HARNESS=acp
 ./gradlew --no-daemon --console=plain generatedCRepairQualification \

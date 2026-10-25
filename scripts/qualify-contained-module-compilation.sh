@@ -35,9 +35,9 @@ provisioned=true
 ./gradlew --no-daemon --console=plain -I "$init" moduleCompilerWriteConfig
 for profile in generated-c-make-v1 generated-c-ninja-v1; do
   sudo -n install --owner=root --group=root --mode=0444 \
-    "$qualification_root/config/$profile.json" "/opt/decomp-generated-c-validation-ci/$profile.json"
+    "$qualification_root/config/$profile.json" "/var/lib/decomp-generated-c-runtime-ci/$profile.json"
 done
-export GENERATED_C_MODULE_COMPILE_CONFIG_DIRECTORY=/opt/decomp-generated-c-validation-ci
+export GENERATED_C_MODULE_COMPILE_CONFIG_DIRECTORY=/var/lib/decomp-generated-c-runtime-ci
 export GENERATED_C_MODULE_COMPILE_PROFILE=generated-c-make-v1
 export GENERATED_C_MODULE_COMPILE_REQUIRE=true
 ./gradlew --no-daemon --console=plain -I "$init" moduleCompilationLiveQualification

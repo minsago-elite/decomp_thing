@@ -25,7 +25,7 @@ import kotlinx.serialization.json.JsonPrimitive
  * itself. The operator installs its output root-owned before the production factory can load it.
  */
 object ContainedModuleCompilationQualificationCli {
-    private val runtimeRoot = Path.of("/opt/decomp-generated-c-validation-ci")
+    private val runtimeRoot = Path.of("/var/lib/decomp-generated-c-runtime-ci")
     private val provisionedJavaRoot = Path.of("/var/lib/decomp-oracle-ci-java")
     private const val SCRATCH_ENVIRONMENT = "DECOMP_TEST_MODULE_COMPILE_EXT4_SCRATCH"
     private const val MAXIMUM_WORKER_BYTES = 256L * 1024 * 1024

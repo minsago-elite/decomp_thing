@@ -15,8 +15,9 @@ import stat
 import subprocess
 import sys
 
-RUNTIME = Path('/opt/decomp-generated-c-validation-ci')
+RUNTIME = Path('/var/lib/decomp-generated-c-runtime-ci')
 MOUNTS = Path('/var/lib/decomp-generated-c-validation-ci')
+COMPILER_SUBPROGRAMS = ('cc1', 'collect2')
 MAX_BYTES = 768 * 1024 * 1024
 MAX_ENTRIES = 100_000
 MAX_WORKER_BYTES = 256 * 1024 * 1024
@@ -174,6 +175,53 @@ def trusted(path):
     return path
 
 
+def compiler_subprogram(gcc, role):
+    """Resolve only the two reviewed GCC subprocesses, never a PATH-selected command."""
+    if role not in COMPILER_SUBPROGRAMS:
+        raise ValueError('unsupported compiler subprogram role')
+    gcc = trusted(gcc)
+    gcc_info = gcc.stat()
+    if not stat.S_ISREG(gcc_info.st_mode) or not gcc_info.st_mode & 0o111:
+        raise ValueError('selected GCC must be a trusted regular executable')
+    value = command([str(gcc), f'-print-prog-name={role}'])
+    if (not value or len(value.encode()) > 4096 or
+            any(ord(char) < 32 or ord(char) == 127 for char in value)):
+        raise ValueError('compiler subprogram path is malformed or exceeds its bound')
+    path = Path(value)
+    if not path.is_absolute() or path.name != role:
+        raise ValueError('compiler subprogram must have its exact absolute role path')
+    # GCC may print an absolute search path containing ../ components. Retain only
+    # its canonical, trusted target; relative answers never fall back to PATH.
+    path = trusted(path)
+    info = path.stat()
+    if path.name != role or not stat.S_ISREG(info.st_mode) or not info.st_mode & 0o111:
+        raise ValueError('compiler subprogram must be a trusted regular executable for its role')
+    return path
+
+
+def copy_compiler_subprograms(gcc, copier):
+    subprograms = {role: compiler_subprogram(gcc, role) for role in COMPILER_SUBPROGRAMS}
+    mounts = []
+    for role, source in subprograms.items():
+        destination = RUNTIME / 'tools' / role
+        copier.copy(source, destination)
+        # The module compiler mounts tools as one finite tree. The shared repair
+        # runtime binds its closed tools individually, so retain these two exact
+        # additional files at its existing -B prefix without adding tool roles.
+        mounts.append({'source': str(destination), 'destination': f'/decomp-generated-c-tools/{role}'})
+    return subprograms, mounts
+
+
+def require_fresh_qualification_roots():
+    # Admit every existing parent before creating either root. Never repair or
+    # change ownership/permissions of a deployment ancestor such as /opt.
+    for root in (RUNTIME, MOUNTS):
+        if trusted(root.parent) != root.parent or not root.parent.is_dir():
+            raise ValueError('qualification target parent is not a canonical trusted directory')
+        if root.exists() or root.is_symlink():
+            raise ValueError(f'refusing to adopt existing qualification target: {root}')
+
+
 class Copier:
     def __init__(self):
         self.entries = 0
@@ -240,9 +288,7 @@ def cleanup(run_id):
 def prepare(args):
     if args.uid <= 0 or args.gid < 0:
         raise ValueError('qualification must run as a distinct non-root application user')
-    for root in (RUNTIME, MOUNTS):
-        if root.exists() or root.is_symlink():
-            raise ValueError(f'refusing to adopt existing qualification target: {root}')
+    require_fresh_qualification_roots()
     worker = None
     if args.module_worker_classpath is not None:
         worker = read_module_worker_classpath(Path(args.module_worker_classpath),
@@ -268,9 +314,10 @@ def prepare(args):
             copier.copy(source, destination)
             tools[role] = {'source': str(destination), 'destination': f'/decomp-generated-c-tools/{destination.name}'}
         gcc = trusted(Path('/usr/bin/gcc'))
+        subprograms, subprogram_mounts = copy_compiler_subprograms(gcc, copier)
         gcc_runtime = trusted(Path(command([str(gcc), '-print-libgcc-file-name'])).parent)
         copier.copy(gcc_runtime, RUNTIME / 'gcc')
-        build = [{'source': str(RUNTIME / 'gcc'), 'destination': str(gcc_runtime)}]
+        build = [{'source': str(RUNTIME / 'gcc'), 'destination': str(gcc_runtime)}] + subprogram_mounts
         # The qualification image intentionally retains only the system headers needed by the
         # fixed benign stdio/stddef/stdint fixture. A general deployment supplies its own reviewed closure.
         dependency_text = command([str(gcc), '-M', '-x', 'c', '-'], input_text=FIXTURE_SOURCE)
@@ -298,7 +345,7 @@ def prepare(args):
         libraries = {}
         # ldd only inspects immutable operator-supplied host tools and compiler internals.
         # Candidate or rebuilt executables are never passed to this provisioning helper.
-        elf_inputs = [Path('/usr/bin') / name for name in names.values()] + [gcc_runtime / 'cc1', gcc_runtime / 'collect2']
+        elf_inputs = [Path('/usr/bin') / name for name in names.values()] + list(subprograms.values())
         for executable in elf_inputs:
             output = command(['/usr/bin/ldd', str(trusted(executable))])
             for line in output.splitlines():
@@ -344,8 +391,12 @@ def prepare(args):
             summary.update({'moduleWorkerManifest': str(RUNTIME / 'module-worker-classpath.json'),
                             'moduleWorkerEntries': len(worker), 'moduleWorkerBytes': sum(entry['bytes'] for entry in worker)})
         print(json.dumps(summary))
-    except BaseException:
-        cleanup(args.run_id)
+    except BaseException as failure:
+        try:
+            cleanup(args.run_id)
+        except BaseException as cleanup_failure:
+            failure.add_note(f'Qualification cleanup also failed; cleanup is not proved: '
+                             f'{type(cleanup_failure).__name__}: {cleanup_failure}')
         raise
 
 
