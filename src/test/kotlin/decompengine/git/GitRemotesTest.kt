@@ -1,0 +1,280 @@
+package decompengine.git
+
+import java.nio.file.Files
+import java.nio.file.Path
+import java.util.concurrent.CountDownLatch
+import kotlin.test.Test
+import kotlin.test.assertEquals
+import kotlin.test.assertFailsWith
+import kotlin.test.assertFalse
+import kotlin.test.assertNotNull
+import kotlin.test.assertNull
+import kotlin.test.assertTrue
+
+class GitRemotesTest {
+    private val jobId = "0123456789abcdef0123456789abcdef"
+
+    private class Fixture(val repositories: GitTestRepositories = GitTestRepositories()) : AutoCloseable {
+        val store: Path = Files.createDirectories(repositories.root.resolve("store"))
+        val admitted: Path = Files.createDirectories(repositories.root.resolve("admitted remotes")).toRealPath()
+        val snapshot: Path = Files.createDirectories(store.resolve("0123456789abcdef0123456789abcdef/reports/runs/run_1/source-tree"))
+        private val opened = mutableListOf<ManagedGitRepositories>()
+        var hook: (GitOperationCrashPoint) -> Unit = {}
+        init {
+            Files.createDirectories(snapshot.resolve("src")); Files.writeString(snapshot.resolve("src/main.c"), "int main(void) { return 0; }\n")
+        }
+        fun open(policy: GitRemotePolicy = GitRemotePolicy(admittedRoot = admitted)) = ManagedGitRepositories(store, GitRuntime.detect(),
+            { _, run, revision -> GitSourceSnapshot(snapshot, run, revision, "a".repeat(64), mapOf("src/main.c" to GitSourceCommitment(
+                GitSourceCopy.digestOf(snapshot.resolve("src/main.c")), Files.size(snapshot.resolve("src/main.c"))))) },
+            policy = GitRepositoryPolicy(defaultBranch = "main"), crash = { hook(it) }, remotePolicy = policy).also(opened::add)
+
+        /** A bare remote with two commits on `main` and one on `topic`, populated with raw fixture Git. */
+        fun remote(name: String = "upstream"): Path {
+            val bare = admitted.resolve("$name.git")
+            repositories.git("init", "-q", "--bare", "--initial-branch=main", bare.toString())
+            val work = Files.createDirectories(repositories.root.resolve("$name seed"))
+            repositories.git("init", "-q", "--initial-branch=main", work.toString())
+            Files.writeString(work.resolve("README.md"), "remote\n")
+            repositories.git("-C", work.toString(), "add", "-A"); repositories.git("-C", work.toString(), "commit", "-q", "-m", "one")
+            Files.writeString(work.resolve("util.c"), "int util;\n")
+            repositories.git("-C", work.toString(), "add", "-A"); repositories.git("-C", work.toString(), "commit", "-q", "-m", "two")
+            repositories.git("-C", work.toString(), "branch", "topic")
+            repositories.git("-C", work.toString(), "push", "-q", bare.toString(), "main", "topic")
+            // A hook in the remote never runs on the client side; a tripwire proves it.
+            Files.writeString(bare.resolve("hooks/post-update"), "#!/bin/sh\ntouch '${repositories.root.resolve("hook-ran")}'\n")
+            bare.resolve("hooks/post-update").toFile().setExecutable(true)
+            return bare
+        }
+
+        override fun close() { opened.forEach { it.close() }; repositories.close() }
+    }
+
+    private lateinit var service: ManagedGitRepositories
+    private lateinit var repositoryId: String
+    private var keys = 0
+    private fun key() = "remote_key_${(++keys).toString().padStart(8, '0')}"
+
+    private fun guards(): Pair<GitWorkspaceView, GitGuards> {
+        val view = service.workspace(jobId, repositoryId)
+        return view to GitGuards(GitWorkspaceVersions.repositoryVersion(view.record, view.observation),
+            GitWorkspaceVersions.worktreeVersion(view.observation), view.observation.head.objectId,
+            GitWorkspaceVersions.headRefId(view.record, view.observation), null)
+    }
+
+    private fun sync(action: GitOperationAction, vararg parameters: Pair<String, String?>): GitOperationRecord {
+        val (view, guards) = guards()
+        val admission = service.requestWorkspace(jobId, repositoryId, GitSyncRequest(action, view.worktreeId, guards, mapOf(*parameters)), key())
+        assertTrue(service.awaitIdle(60_000))
+        return service.operation(jobId, repositoryId, admission.operation.operationId)
+    }
+
+    private fun refused(code: String, action: GitOperationAction, vararg parameters: Pair<String, String?>) {
+        val (view, guards) = guards()
+        assertEquals(code, assertFailsWith<ManagedGitException> {
+            service.requestWorkspace(jobId, repositoryId, GitSyncRequest(action, view.worktreeId, guards, mapOf(*parameters)), key())
+        }.code)
+    }
+
+    private fun Fixture.initialized() {
+        service = open()
+        val admission = service.request(jobId, GitRepositoryRequest.Init("run_1", "revision_1", null), "init_key_00000001")
+        assertTrue(service.awaitIdle(60_000)); repositoryId = admission.operation.repositoryId
+    }
+
+    private fun parse(url: String, policy: GitRemotePolicy) = GitRemoteUrls.parse(url, policy)
+    private fun refusedUrl(code: String, url: String, policy: GitRemotePolicy) =
+        assertEquals(code, assertFailsWith<GitOperationRefusal>(url) { parse(url, policy) }.code, url)
+
+    @Test fun `remote URLs allow only documented transports, allowlisted hosts and no embedded secrets`(): Unit = Fixture().use { f ->
+        f.remote()
+        val policy = GitRemotePolicy(allowedHosts = setOf("git.example.org"), admittedRoot = f.admitted)
+        for (url in listOf("ext::sh%20-c%20touch", "fd::17", "transport::anything", "/srv/repo.git", "./relative", "file:///etc",
+            "http://git.example.org/a.git", "git://git.example.org/a.git", "ftp://git.example.org/a.git")) {
+            refusedUrl("TRANSPORT_UNSUPPORTED", url, policy)
+        }
+        refusedUrl("CREDENTIAL_IN_URL", "https://user:secret@git.example.org/a.git", policy)
+        refusedUrl("CREDENTIAL_IN_URL", "https://ghp_token@git.example.org/a.git", policy)
+        refusedUrl("CREDENTIAL_IN_URL", "ssh://git:pw@git.example.org/a.git", policy)
+        refusedUrl("DESTINATION_NOT_ALLOWED", "https://elsewhere.example.org/a.git", policy)
+        refusedUrl("DESTINATION_NOT_ALLOWED", "admitted:missing", policy)
+        refusedUrl("VALIDATION_FAILED", "ssh://-oProxyCommand=touch/a.git", policy)
+        refusedUrl("VALIDATION_FAILED", "-oProxyCommand=x@git.example.org:a.git", policy)
+        refusedUrl("VALIDATION_FAILED", "git@git.example.org:-a.git", policy)
+        refusedUrl("VALIDATION_FAILED", "https://git.example.org/a.git?token=x", policy)
+        refusedUrl("VALIDATION_FAILED", "https://git.example.org/../a.git", policy)
+        refusedUrl("VALIDATION_FAILED", "https://git.example.org/a b.git", policy)
+        assertEquals("ssh://git@git.example.org/~/team/a.git", parse("git@git.example.org:team/a.git", policy).url)
+        assertEquals("https://git.example.org:8443/a.git", parse("https://GIT.example.org:8443/a.git", policy).display)
+        val admitted = parse("admitted:upstream.git", policy)
+        assertEquals(GitTransport.ADMITTED, admitted.transport)
+        assertEquals("admitted:upstream.git", admitted.display)
+        assertFalse(admitted.display.contains(f.admitted.toString()))
+        refusedUrl("TRANSPORT_UNSUPPORTED", "admitted:upstream.git", GitRemotePolicy(allowedHosts = setOf("git.example.org")))
+    }
+
+    @Test fun `credentials stay in the child environment and SSH always verifies host keys`(): Unit = Fixture().use { f ->
+        val token = f.repositories.root.resolve("token")
+        Files.writeString(token, "canary-secret-7f3a\n")
+        val known = f.repositories.root.resolve("known_hosts").also { Files.writeString(it, "") }
+        val credentials = GitCredentialStore(listOf(GitCredential.Https("git.example.org", "bot", token, null),
+            GitCredential.Ssh("git.example.org", null, known)))
+        val policy = GitRemotePolicy(allowedHosts = setOf("git.example.org", "other.example.org"), credentials = credentials)
+        val https = GitTransports.context(parse("https://git.example.org/a.git", policy), policy)
+        val invocation = GitInvocation("ls-remote", listOf("--", "https://git.example.org/a.git"), transport = https)
+        val argv = f.repositories.runner.argv(invocation).joinToString(" ")
+        assertFalse(argv.contains("canary") || argv.contains("Y2FuYXJ5") || argv.contains("Authorization"), argv)
+        assertTrue(argv.contains("protocol.https.allow=always") && argv.contains("http.sslVerify=true") && argv.contains("http.followRedirects=false"))
+        assertFalse(https.toString().contains("canary") || invocation.toString().contains("canary"))
+        assertTrue(https.environment().getValue("GIT_CONFIG_VALUE_0").startsWith("Authorization: Basic "))
+        assertEquals("http.https://git.example.org/.extraHeader", https.environment().getValue("GIT_CONFIG_KEY_0"))
+        val ssh = GitTransports.context(parse("git@git.example.org:a.git", policy), policy)
+        val command = ssh.configuration.single { it.first == "core.sshCommand" }.second
+        for (option in listOf("BatchMode=yes", "StrictHostKeyChecking=yes", "GlobalKnownHostsFile=/dev/null", "-F /dev/null")) {
+            assertTrue(command.contains(option), command)
+        }
+        assertEquals("HOST_KEY_UNVERIFIED", assertFailsWith<GitOperationRefusal> {
+            GitTransports.context(parse("ssh://other.example.org/a.git", policy), policy)
+        }.code)
+        assertEquals("configured", credentials.describe(parse("https://git.example.org/a.git", policy)))
+        assertEquals("none", credentials.describe(parse("https://other.example.org/a.git", policy)))
+        // The operator file format is parsed strictly; secret material is never read at load time.
+        val file = f.repositories.root.resolve("credentials.json")
+        Files.writeString(file, """{"https":[{"host":"git.example.org","username":"bot","passwordFile":"$token"}],"ssh":[{"host":"git.example.org","knownHostsFile":"$known"}]}""")
+        assertEquals("GitCredentialStore(2 entries)", GitCredentialStore.load(file).toString())
+        Files.writeString(file, """{"https":[{"host":"git.example.org","username":"bot","password":"inline"}]}""")
+        assertFailsWith<IllegalArgumentException> { GitCredentialStore.load(file) }
+    }
+
+    @Test fun `admitted remotes fetch only remote-tracking refs and leave local work untouched`(): Unit = Fixture().use { f ->
+        f.remote()
+        f.initialized()
+        val workTree = f.store.resolve("$jobId/git/repositories/$repositoryId/worktree")
+        Files.writeString(workTree.resolve("src/local.c"), "int local_work;\n")
+        val before = service.workspace(jobId, repositoryId).observation
+        refused("VALIDATION_FAILED", GitOperationAction.REMOTE_ADD, "name" to "bad name", "url" to "admitted:upstream.git")
+        refused("TRANSPORT_UNSUPPORTED", GitOperationAction.REMOTE_ADD, "name" to "upstream", "url" to "/etc")
+        val added = sync(GitOperationAction.REMOTE_ADD, "name" to "upstream", "url" to "admitted:upstream.git")
+        assertEquals(GitOperationState.COMPLETED, added.state, added.message)
+        refused("REMOTE_EXISTS", GitOperationAction.REMOTE_ADD, "name" to "upstream", "url" to "admitted:upstream.git")
+        val remote = service.remotes(jobId, repositoryId).single()
+        assertEquals("admitted:upstream.git", remote.record.location.display)
+        assertEquals("not-required", remote.credential)
+        assertNull(remote.fetchedAt)
+        val fetched = sync(GitOperationAction.FETCH, "remoteId" to remote.record.remoteId)
+        assertEquals(GitOperationState.COMPLETED, fetched.state, fetched.message)
+        val after = service.remotes(jobId, repositoryId).single()
+        assertEquals(setOf("refs/remotes/upstream/main", "refs/remotes/upstream/topic"), after.tracking.map { it.name }.toSet())
+        assertNotNull(after.fetchedAt)
+        // Fetch never moved HEAD, a local branch, the index or the work tree, and no tags arrived.
+        val observed = service.workspace(jobId, repositoryId).observation
+        assertEquals(before.head, observed.head)
+        assertEquals(before.refs.filter { !it.name.startsWith("refs/remotes/") }, observed.refs.filter { !it.name.startsWith("refs/remotes/") })
+        assertEquals(GitWorkspaceVersions.worktreeVersion(before), GitWorkspaceVersions.worktreeVersion(observed))
+        assertEquals("int local_work;\n", Files.readString(workTree.resolve("src/local.c")))
+        assertFalse(Files.exists(f.repositories.root.resolve("hook-ran")))
+        assertFalse(Files.exists(f.store.resolve("$jobId/git/repositories/$repositoryId/repository.git/FETCH_HEAD")))
+        GitConfigurationAudit.requireManaged(f.repositories.runner, f.store.resolve("$jobId/git/repositories/$repositoryId/repository.git"))
+        val audit = service.auditLog(jobId, repositoryId, 10)
+        assertEquals(listOf("fetch", "remote.add"), audit.map { it.getValue("action").toString().trim('"') })
+        assertFalse(audit.toString().contains(f.admitted.toString()))
+        val removed = sync(GitOperationAction.REMOTE_REMOVE, "remoteId" to remote.record.remoteId)
+        assertEquals(GitOperationState.COMPLETED, removed.state, removed.message)
+        assertTrue(service.remotes(jobId, repositoryId).isEmpty())
+        assertTrue(service.workspace(jobId, repositoryId).observation.refs.none { it.name.startsWith("refs/remotes/") })
+    }
+
+    @Test fun `clone publishes a complete managed repository from an admitted remote`(): Unit = Fixture().use { f ->
+        f.remote()
+        service = f.open()
+        assertEquals("TRANSPORT_UNSUPPORTED", assertFailsWith<ManagedGitException> {
+            service.request(jobId, GitCloneRequest("file:///etc", "origin", null), "clone_key_0000000")
+        }.code)
+        val admission = service.request(jobId, GitCloneRequest("admitted:upstream.git", "origin", null), "clone_key_0000001")
+        assertTrue(service.awaitIdle(60_000))
+        val operation = service.operation(jobId, admission.operation.repositoryId, admission.operation.operationId)
+        assertEquals(GitOperationState.COMPLETED, operation.state, operation.message)
+        repositoryId = admission.operation.repositoryId
+        val view = service.workspace(jobId, repositoryId)
+        assertEquals("cloned", view.record.origin)
+        assertEquals("refs/heads/main", view.observation.head.refName)
+        assertEquals(view.observation.head.objectId, operation.resultObjectId)
+        assertEquals("int util;\n", Files.readString(f.store.resolve("$jobId/git/repositories/$repositoryId/worktree/util.c")))
+        assertTrue(view.observation.status.entries.none { !it.ignored })
+        assertEquals("origin", service.remotes(jobId, repositoryId).single().record.name)
+        assertFalse(Files.exists(f.repositories.root.resolve("hook-ran")))
+        assertTrue(Files.list(f.store.resolve("$jobId/git/staging")).use { it.count() } == 0L)
+    }
+
+    @Test fun `https transfers verify certificates, use server credentials, and stop on cancel and bounds`(): Unit = Fixture().use { f ->
+        val bare = f.remote()
+        val token = f.repositories.root.resolve("token").also { Files.writeString(it, "canary-secret-7f3a\n") }
+        GitHttpsFixture(f.admitted, f.repositories.root.resolve("https fixture"), "bot", "canary-secret-7f3a").use { server ->
+            val url = server.url(bare.fileName.toString())
+            fun policy(ca: Boolean, password: Path = token, limits: GitTransferLimits = GitTransferLimits()) = GitRemotePolicy(
+                allowedHosts = setOf("localhost"), limits = limits,
+                credentials = GitCredentialStore(listOf(GitCredential.Https("localhost", "bot", password, if (ca) server.certificate else null))))
+            fun clone(policy: GitRemotePolicy, key: String): GitOperationRecord {
+                service = f.open(policy)
+                val admission = service.request(jobId, GitCloneRequest(url, "origin", null), key)
+                assertTrue(service.awaitIdle(120_000))
+                return service.operation(jobId, admission.operation.repositoryId, admission.operation.operationId)
+            }
+            val untrusted = clone(policy(ca = false), "https_key_0000001")
+            assertEquals("CERTIFICATE_INVALID", untrusted.failureCode, untrusted.message)
+            val wrong = f.repositories.root.resolve("wrong").also { Files.writeString(it, "not-the-secret\n") }
+            val denied = clone(policy(ca = true, password = wrong), "https_key_0000002")
+            assertEquals("AUTHENTICATION_REQUIRED", denied.failureCode, denied.message)
+            assertFalse(denied.message.contains("canary") || denied.message.contains("not-the-secret"))
+            val limited = clone(policy(ca = true, limits = GitTransferLimits(maxRepositoryBytes = 1024)), "https_key_0000003")
+            assertEquals("TRANSFER_LIMIT", limited.failureCode, limited.message)
+            // A stalled server: cancellation stops the process and the operation ends cancelled.
+            server.stall = CountDownLatch(1)
+            service = f.open(policy(ca = true))
+            val stalled = service.request(jobId, GitCloneRequest(url, "origin", null), "https_key_0000004")
+            Thread.sleep(500)
+            assertEquals(GitOperationState.CANCELLING, service.cancel(jobId, stalled.operation.repositoryId, stalled.operation.operationId).state)
+            assertTrue(service.awaitIdle(60_000))
+            val cancelled = service.operation(jobId, stalled.operation.repositoryId, stalled.operation.operationId)
+            assertEquals(GitOperationState.CANCELLED, cancelled.state, cancelled.message)
+            server.stall?.countDown(); server.stall = null
+            assertTrue(service.listing(jobId).repositories.isEmpty())
+            val cloned = clone(policy(ca = true), "https_key_0000005")
+            assertEquals(GitOperationState.COMPLETED, cloned.state, cloned.message)
+            repositoryId = cloned.repositoryId
+            assertEquals("configured", service.remotes(jobId, repositoryId).single().credential)
+            val fetched = sync(GitOperationAction.FETCH, "remoteId" to service.remotes(jobId, repositoryId).single().record.remoteId)
+            assertEquals(GitOperationState.COMPLETED, fetched.state, fetched.message)
+            // Nothing persisted by the server holds the credential.
+            Files.walk(f.store).use { paths ->
+                paths.filter { Files.isRegularFile(it) && Files.size(it) < 4 * 1024 * 1024 }.forEach { file ->
+                    val text = Files.readAllBytes(file).toString(Charsets.ISO_8859_1)
+                    assertFalse(text.contains("canary-secret") || text.contains("Y2FuYXJ5"), file.toString())
+                }
+            }
+        }
+    }
+
+    @Test fun `an interrupted fetch is reconciled without repeating it`(): Unit = Fixture().use { f ->
+        f.remote()
+        f.initialized()
+        sync(GitOperationAction.REMOTE_ADD, "name" to "upstream", "url" to "admitted:upstream.git")
+        val remoteId = service.remotes(jobId, repositoryId).single().record.remoteId
+        // A process death after the fetch was marked running, with a partial pack left behind.
+        f.hook = { point -> if (point == GitOperationCrashPoint.AFTER_RUNNING) throw SimulatedGitCrash() }
+        val (view, guards) = guards()
+        val admission = service.requestWorkspace(jobId, repositoryId, GitSyncRequest(GitOperationAction.FETCH, view.worktreeId, guards,
+            mapOf("remoteId" to remoteId)), key())
+        assertTrue(service.awaitIdle(60_000))
+        f.hook = {}
+        service.close()
+        val pack = f.store.resolve("$jobId/git/repositories/$repositoryId/repository.git/objects/pack/tmp_pack_partial")
+        Files.writeString(pack, "partial")
+        service = f.open()
+        val reconciled = service.operation(jobId, repositoryId, admission.operation.operationId)
+        assertEquals(GitOperationState.INTERRUPTED, reconciled.state, reconciled.message)
+        assertFalse(Files.exists(pack))
+        assertTrue(service.remotes(jobId, repositoryId).single().tracking.isEmpty())
+        // The explicit retry is a new operation; nothing was repeated automatically.
+        assertEquals(GitOperationState.COMPLETED, sync(GitOperationAction.FETCH, "remoteId" to remoteId).state)
+    }
+}

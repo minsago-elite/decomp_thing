@@ -1120,7 +1120,7 @@ class ManagedGitRepositories(
                 is GitCommandException -> when {
                     failure.kind == GitCommandException.Kind.INTERRUPTED -> "INTERRUPTED" to INTERRUPTED_MESSAGE
                     queued.request is GitSyncRequest -> GitTransports.classify(failure, failure.diagnostic,
-                        located.record.let { GitTransport.HTTPS })
+                        try { remoteFor(located, (queued.request as GitSyncRequest).parameters["remoteId"]).location.transport } catch (_: Exception) { GitTransport.HTTPS })
                     else -> "REPOSITORY_UNAVAILABLE" to "Git did not complete within its bounds. Read the current status before trying again."
                 }
                 else -> "STORAGE_FAILED" to "Repository storage could not be written. Read the current status before trying again."

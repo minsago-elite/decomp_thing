@@ -163,7 +163,11 @@ object GitRemoteUrls {
             val match = Regex("^(?:([^@/:]+)@)?([^@/:]+):(.+)$").matchEntire(raw)
                 ?: refuse("TRANSPORT_UNSUPPORTED", "Local filesystem paths are not allowed. Use an https://, ssh:// or admitted remote.")
             val (user, host, path) = match.destructured
+            if (path.startsWith("-")) refuse("VALIDATION_FAILED", "The SSH repository path cannot start with -.")
             return ssh(user.ifEmpty { null }, host.lowercase(), null, if (path.startsWith("/")) path else "/~/$path", policy)
+        }
+        if (scheme !in setOf("https", "ssh")) {
+            refuse("TRANSPORT_UNSUPPORTED", "Only https://, ssh:// and admitted remotes are supported; $scheme:// is not.")
         }
         val uri = try { URI(raw) } catch (_: URISyntaxException) { refuse("VALIDATION_FAILED", "The remote URL is malformed.") }
         if (uri.rawQuery != null || uri.rawFragment != null) refuse("VALIDATION_FAILED", "Remote URLs cannot carry a query or fragment.")
