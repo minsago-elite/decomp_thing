@@ -537,14 +537,18 @@ class ArchivalReconstructionService(
         progressPath.writeText("{\"phase\":\"planning\",\"completed\":0,\"total\":0}\n")
         progress.phase(AgentWorkflowPhase.PLANNING)
         var moduleTotal = 0
-        SourceTreeGenerator.generate(
+        SourceTreeGenerator.generateObserved(
             model,
             project,
-            hostSafetyLimits = hostSafetyLimits,
-            reconstructor = reconstructor,
-            observedBehavior = observedBehavior,
-            profile = profile,
-            progress = progress,
+            hostSafetyLimits,
+            null,
+            reconstructor,
+            emptyMap(),
+            observedBehavior,
+            profile,
+            progress,
+            // Generation is observable before the first module finishes, even for a single long module.
+            { total -> progressPath.writeText("{\"phase\":\"modules\",\"completed\":0,\"total\":$total}\n") },
         ) { completed, total, module ->
             moduleTotal = total
             progressPath.writeText("{\"phase\":\"modules\",\"completed\":$completed,\"total\":$total,\"module\":\"$module\"}\n")

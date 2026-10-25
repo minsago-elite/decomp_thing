@@ -45,6 +45,13 @@ class WebModuleProgressTest {
         val generation = generating.getValue("stages").jsonArray[2].jsonObject
         assertEquals("1" to "3", generation.getValue("completedUnits").jsonPrimitive.content to generation.getValue("totalUnits").jsonPrimitive.content)
         assertEquals("3", generating.getValue("plan").jsonObject.getValue("moduleCount").jsonPrimitive.content)
+        // Generation start is recorded before the first module finishes, so a single long module shows generation.
+        val firstModule = stages(attempt(WorkflowRunState.RUNNING), progress = """{"phase":"modules","completed":0,"total":1}""")
+        assertEquals("completed", states(firstModule)["planning"]); assertEquals("active", states(firstModule)["generation"])
+        assertEquals(JsonNull, firstModule.getValue("lastGeneratedModuleId"))
+        val interruptedFirst = stages(attempt(WorkflowRunState.INTERRUPTED, reason = WorkflowTerminalReason.PROCESS_INTERRUPTED),
+            progress = """{"phase":"modules","completed":0,"total":1}""")
+        assertEquals("stopped", states(interruptedFirst)["generation"]); assertEquals("not-reached", states(interruptedFirst)["validation"])
         // Every module finished generating; the profile build is the active stage.
         val building = stages(attempt(WorkflowRunState.RUNNING), progress = """{"phase":"modules","completed":3,"total":3,"module":"module_c"}""", plan = true)
         assertEquals("completed", states(building)["generation"]); assertEquals("active", states(building)["validation"])
