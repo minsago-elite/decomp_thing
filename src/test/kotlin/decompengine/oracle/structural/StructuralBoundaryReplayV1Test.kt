@@ -738,7 +738,7 @@ private class BoundaryReplayFixture(
     }
 }
 
-private fun <T> withReplayFixture(block: (BoundaryReplayFixture) -> T): T = withStructuralFixture { files ->
+private fun withReplayFixture(block: (BoundaryReplayFixture) -> Unit): Unit = withStructuralFixture { files ->
     val loaded = files.load()
     val modelBytes = boundaryReplayResource("rich-model.json")
     val model = ProgramModelJson.readCanonical(modelBytes)
