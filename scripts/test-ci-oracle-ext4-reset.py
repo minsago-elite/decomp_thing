@@ -150,6 +150,24 @@ class FixtureTests(unittest.TestCase):
                 FIXTURE.artifact(types.SimpleNamespace(active={'finished':True}), '../state.json')
         read.assert_not_called()
 
+    def test_partial_installation_inspection_records_service_uncertainty_without_mutation(self):
+        processes=[]
+        def popen(argv,**kwargs):
+            processes.append(argv); return object()
+        with mock.patch.object(FIXTURE.Path,'lstat',side_effect=FileNotFoundError('absent')), \
+             mock.patch.object(FIXTURE.subprocess,'Popen',side_effect=popen), \
+             mock.patch.object(FIXTURE,'collect_process',return_value=(0,b'LoadState=not-found\n',b'')):
+            result=FIXTURE.inspect_partial_installation()
+        self.assertFalse(result['ownershipAuthenticated'])
+        self.assertFalse(result['capacityReleased'])
+        self.assertFalse(result['cleanupAttempted'])
+        self.assertEqual('RESERVATION_STATUS_UNVERIFIED',result['disposition'])
+        self.assertEqual(2,len(processes))
+        self.assertTrue(all(argv[:3]==['/usr/bin/systemctl','show','--no-pager'] for argv in processes))
+        self.assertEqual({'decomp-oracle-ext4-reset-ci.service','decomp-oracle-ext4-reset-retain.target'},
+                         {argv[-1] for argv in processes})
+        self.assertEqual(5,len(result['errors']))
+
     def case(self, number):
         active={'caseId':number,'sessionToken':'a'*64,'events':[],
                 'observations':FIXTURE.empty_observations(number),'formatterCount':0,

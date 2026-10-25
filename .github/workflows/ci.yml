@@ -353,6 +353,7 @@ jobs:
           python3 -B scripts/test-oracle-ext4-reset-report.py --verbose
           python3 -B scripts/test-ci-oracle-ext4-reset.py --verbose
           python3 -B scripts/test-ci-oracle-ext4-reset-registration.py --verbose
+          python3 -B scripts/test-ci-oracle-ext4-reset-state-replacement.py --verbose
       - name: Check pinned Goose archive acquisition controls
         if: matrix.shard == 'core'
         run: python3 scripts/test-goose-archive-download.py

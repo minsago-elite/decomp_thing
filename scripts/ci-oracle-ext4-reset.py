@@ -532,7 +532,7 @@ class Case:
     def mutation(self, name):
         allowed = ('held_filesystem_file', 'owned_hidden_namespace_holder', 'unrelated_loop',
                    'mount_replacement', 'visible_alias', 'nested_mount', 'backing_path_replacement',
-                   'gate_directory_replacement', 'candidate_intent_replacement')
+                   'state_anchor_replacement', 'gate_directory_replacement', 'candidate_intent_replacement')
         require(name in allowed, 'unknown physical mutation')
         module = self.mutations()
         with getattr(module, name)() as facts:
@@ -708,6 +708,96 @@ class Case:
     def unsafe_before_request(self):
         return self.broker('request', state()['generation'], refuse=True)
 
+    def replaced_state_refusal(self):
+        """K25: reject the actual closed state-canary replacement before mutation."""
+        self.no_oracle_probe()
+        module = core()
+        path = PRIVATE / 'state.json'
+        canary = b'owned-ext4-reset-qualification-canary-v1\n'
+        descriptor = None
+        stable = ('ActiveState', 'SubState', 'Job', 'InvocationID', 'ExecMainPID',
+                  'ExecMainCode', 'ExecMainStatus', 'Result')
+
+        def observation(record):
+            current = record['candidate'] if record['phase'] == 'PUBLISHED' else record['old']
+            gate = module.generation_path(current['generation'])
+            scratch = gate / 'scratch'
+            rows = module.current_inventory(record, {str(scratch): current['mount']['id']})
+            diagnostics = {}
+            for name, bound in (('diagnostic.json', MAX_JSON), ('diagnostic.next', MAX_JSON),
+                                ('formatter.trace', MAX_TRACE), ('state.next', MAX_JSON)):
+                diagnostic = PRIVATE / name
+                try:
+                    identity = module.file_identity(diagnostic)
+                except FileNotFoundError:
+                    diagnostics[name] = None
+                else:
+                    diagnostics[name] = (identity, digest(read_regular(diagnostic, bound)))
+            return {'gate': module.file_identity(gate), 'scratch': module.file_identity(scratch),
+                    'mount': module.mount_at(rows, scratch), 'diagnostics': diagnostics}
+
+        try:
+            with module.opened_store() as store:
+                before = store.load()
+                require(before['phase'] in ('REGISTERED', 'PUBLISHED'), 'state replacement requires an admitted generation')
+                module.verify_base(store, before)
+                service_before = module.inactive_snapshot(store, before)
+                original = read_regular(path, MAX_JSON)
+                require(module.parse_record(original) == before, 'registration changed before state replacement')
+                descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC)
+                original_identity = module.fd_identity(descriptor)
+                require(module.file_identity(path) == original_identity, 'original registration descriptor differs')
+                physical_before = observation(before)
+            # self.mutation constructs Mutations while registration is still
+            # canonical. Inside this context no state()-dependent wrapper runs.
+            with self.mutation('state_anchor_replacement') as facts:
+                require(facts['kind'] == 'state-anchor-replacement' and facts['original'] == original_identity and
+                        module.file_identity(path) == facts['replacement'] and read_regular(path, MAX_JSON) == canary and
+                        facts['canaryBeforeSha256'] == digest(canary), 'state replacement is not the closed owned canary')
+                pace_submission()
+                started = time.monotonic_ns()
+                process = subprocess.Popen(['/usr/bin/python3', '-I', '-S', str(CORE), 'request', str(before['generation'])],
+                    stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE, close_fds=True,
+                    process_group=0, env={'PATH': '/usr/sbin:/usr/bin:/sbin:/bin', 'LC_ALL': 'C'})
+                code, stdout, stderr = collect_process(process)
+                require(code == 1 and not stderr and stdout.endswith(b'\n') and stdout.count(b'\n') == 1,
+                        'state replacement did not yield the actual bounded broker refusal')
+                response = module.parse_canonical(stdout[:-1])
+                require(set(response) == {'ok', 'error', 'disposition'} and response['ok'] is False and
+                        response['disposition'] == 'RESERVED' and response['error'] == 'invalid JSON',
+                        'broker refused for a reason other than the fixed invalid state canary')
+                with module.opened_store() as store:
+                    module.verify_base(store, before)
+                    service_after = module.inactive_snapshot(store, before)
+                    require(all(service_after[key] == service_before[key] for key in stable) and
+                            observation(before) == physical_before,
+                            'state replacement changed service, gate, mount or formatter evidence')
+                    require(module.fd_identity(descriptor) == original_identity and
+                            os.pread(descriptor, MAX_JSON + 1, 0) == original and
+                            module.file_identity(path) == facts['replacement'] and read_regular(path, MAX_JSON) == canary,
+                            'state replacement changed original registration or its canary')
+            # Only the physical helper's exact no-clobber restoration permits
+            # recording this negative control. Unknown replacements stay owned.
+            with module.opened_store() as store:
+                require(facts.get('cleanup') is True and module.file_identity(path) == original_identity and
+                        read_regular(path, MAX_JSON) == original and store.load() == before,
+                        'state replacement did not restore the exact original registration')
+                module.verify_base(store, before)
+                service_after = module.inactive_snapshot(store, before)
+                require(all(service_after[key] == service_before[key] for key in stable) and
+                        observation(before) == physical_before,
+                        'state replacement restoration changed service or slot evidence')
+            self.event('broker-request', started, code, reason='state-anchor-replacement',
+                       phaseBefore=before['phase'], phaseAfter=before['phase'], invocationId=before['submission']['invocation'])
+            self.observations['attempts'].append({'action': 'request', 'exitCode': code,
+                'phaseBefore': before['phase'], 'phaseAfter': before['phase'],
+                'invocationId': before['submission']['invocation'], 'formatterCount': self.active['formatterCount']})
+            self.record_canary('state-anchor', facts)
+            self.observations['facts'].update(stateAnchorReplacementRefused=True, stateAnchorRestored=True)
+        finally:
+            if descriptor is not None:
+                os.close(descriptor)
+
     def missing_registration_refusal(self):
         """K27: invoke the real broker with only its exact registration absent.
 
@@ -879,6 +969,8 @@ class Case:
         elif number in BARRIERS and number not in ('K31', 'K32'):
             self.crash_barrier(BARRIERS[number], publication=number == 'K21')
         elif number in ('K22', 'K24', 'K25'):
+            if number == 'K25':
+                self.replaced_state_refusal()
             method, label = {'K22': ('mount_replacement', 'mount-replacement'),
                              'K24': ('backing_path_replacement', 'image-replacement'),
                              'K25': ('gate_directory_replacement', 'anchor-replacement')}[number]
@@ -1151,7 +1243,8 @@ def artifact(case, name):
 def inspect_retained():
     """Read-only failure evidence; never translate missing evidence into release."""
     result = {'schemaVersion': 1, 'root': str(ROOT), 'retainedReservation': True,
-              'capacityReleased': False, 'disposition': 'RESERVED_AMBIGUOUS', 'observations': {}, 'errors': []}
+              'capacityReleased': False, 'disposition': 'RESERVED_AMBIGUOUS', 'observations': {}, 'errors': [],
+              'partialInstallationObservation': inspect_partial_installation()}
     for name, path in (('root', ROOT), ('private', PRIVATE), ('image', PRIVATE / 'image')):
         try:
             result['observations'][name] = core().file_identity(path)
@@ -1188,6 +1281,40 @@ def inspect_retained():
     return result
 
 
+def inspect_partial_installation():
+    """Bounded read-only observations even when bootstrap never installed us.
+
+    A partial or absent manifest cannot authenticate ownership. These lstat and
+    manager observations document uncertainty without granting cleanup/release.
+    """
+    result = {'schemaVersion': 1, 'root': str(ROOT), 'ownershipAuthenticated': False,
+              'capacityReleased': False, 'cleanupAttempted': False,
+              'disposition': 'RESERVATION_STATUS_UNVERIFIED', 'observations': {}, 'errors': []}
+    for name, path in (('root', ROOT), ('private', PRIVATE), ('image', PRIVATE / 'image'),
+                       ('state', PRIVATE / 'state.json'), ('manifest', PRIVATE / 'manifest.json')):
+        try:
+            obj = path.lstat()
+            result['observations'][name] = {'device': obj.st_dev, 'inode': obj.st_ino, 'uid': obj.st_uid,
+                'gid': obj.st_gid, 'mode': stat.S_IMODE(obj.st_mode), 'size': obj.st_size,
+                'kind': 'symlink' if stat.S_ISLNK(obj.st_mode) else 'directory' if stat.S_ISDIR(obj.st_mode)
+                        else 'file' if stat.S_ISREG(obj.st_mode) else 'other'}
+        except OSError as error:
+            result['errors'].append({'observation': name, 'reason': str(error)[:256]})
+    properties = 'LoadState,ActiveState,SubState,FragmentPath,DropInPaths,Job,MainPID,InvocationID,ExecMainPID,ExecMainCode,ExecMainStatus,Result,ControlGroup'
+    for unit in ('decomp-oracle-ext4-reset-ci.service', 'decomp-oracle-ext4-reset-retain.target'):
+        try:
+            process = subprocess.Popen(['/usr/bin/systemctl', 'show', '--no-pager', '--property=' + properties, unit],
+                stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE, close_fds=True,
+                process_group=0, env={'PATH':'/usr/sbin:/usr/bin:/sbin:/bin','LC_ALL':'C'})
+            code, stdout, stderr = collect_process(process, timeout=12, maximum=MAX_JSON)
+            result['observations'][unit] = {'exitCode':code, 'properties':stdout.decode('utf-8','strict'),
+                                           'stderr':stderr.decode('utf-8','strict')}
+        except (OSError, RuntimeError, ValueError) as error:
+            result['errors'].append({'observation':unit,'reason':str(error)[:256]})
+    require(len(canonical(result)) <= MAX_ARTIFACT, 'partial installation observation exceeds bound')
+    return result
+
+
 def main(arguments=None):
     arguments = list(sys.argv[1:] if arguments is None else arguments)
     try:
@@ -1204,6 +1331,8 @@ def main(arguments=None):
                 require(arguments[2] in ARTIFACTS, 'unknown artifact')
         if action == 'prepare':
             raw = canonical(prepare()) + b'\n'
+        elif action == 'inspect' and Path(__file__).resolve() != INSTALLED and not INSTALLED.is_file():
+            raw = canonical(inspect_partial_installation()) + b'\n'
         elif Path(__file__).resolve() != INSTALLED:
             # All post-install actions execute the root-private captured helper.
             require(INSTALLED.is_file() and not INSTALLED.is_symlink(), 'fixed installation is unavailable')
