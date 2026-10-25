@@ -15,7 +15,8 @@ import { ExplorationEvidence } from '../jobs/ExplorationEvidence';
 import { RecordedValidationEvidence } from '../jobs/RecordedValidationEvidence';
 import type { ValidationNavigation } from '../jobs/validationNavigation';
 import { useSession } from '../session/useSession';
-import { canRetainMetadata, metadataFailureKind } from '../shared/retainMetadata';
+import { canRetainMetadata, isDeletedJob, metadataFailureKind } from '../shared/retainMetadata';
+import { onLibraryChange } from '../jobs/libraryChannel';
 
 function Details({ jobId, runId, basePath, session, view, navigation }: {
   jobId: string; runId: string; basePath: string; session: BrowserSession; view: RunView; navigation?: ValidationNavigation;
@@ -26,6 +27,7 @@ function Details({ jobId, runId, basePath, session, view, navigation }: {
     { binding, data: null, error: '', loading: true });
   const { data: run, error, loading } = stored.binding === binding ? stored : { data: null, error: '', loading: true };
   const [refresh, setRefresh] = useState(0);
+  useEffect(() => onLibraryChange(basePath, () => setRefresh(value => value + 1)), [basePath]);
   useEffect(() => {
     const controller = new AbortController();
     setStored(previous => ({ binding, data: previous.binding === binding ? previous.data : null, error: '', loading: true }));
@@ -38,7 +40,7 @@ function Details({ jobId, runId, basePath, session, view, navigation }: {
     }).catch((failure: unknown) => {
       if (!controller.signal.aborted) setStored(previous => ({ binding,
         data: previous.binding === binding && canRetainMetadata(failure) ? previous.data : null,
-        error: withApiFailureReference({
+        error: withApiFailureReference(isDeletedJob(failure) ? copy.thisJobWasDeleted : {
           session: copy.reconnectToReadThisAttempt, denied: copy.attemptAccessDenied,
           missing: copy.thisAttemptIsUnavailableForThisJob, unsupported: copy.incompatibleAttemptResponse,
           unverified: copy.attemptMetadataCouldNotBeVerified,

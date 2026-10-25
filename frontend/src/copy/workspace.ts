@@ -10,12 +10,18 @@ export const dashboardCopy = {
   "newestExplanation": "Newest jobs first. Completion does not establish validated reconstruction.",
   "pageCount": "{count} jobs on this page. No total count is available.",
   "uploadedJobs": "Uploaded jobs",
-  "filenameSearch": "Filename search",
+  "filenameSearch": "Filename or label search",
   "workflowState": "Workflow state",
   "allStates": "All states",
   "createdAtOrAfter": "Created at or after",
   "createdBefore": "Created before",
   "sortBy": "Sort by",
+  "archivedJobs": "Archived jobs",
+  "hideArchived": "Hidden",
+  "includeArchived": "Included",
+  "onlyArchived": "Only archived",
+  "archivedMark": "Archived (organization only)",
+  "fileName": "File: {name}",
   "newestFirst": "Newest first",
   "oldestFirst": "Oldest first",
   "jobsPerPage": "Jobs per page",
@@ -126,5 +132,6 @@ export const queryCopy = {
   "sort": "Choose newest first or oldest first.",
   "status": "Choose a listed workflow state.",
   "date": "Enter a valid calendar date and time with a time zone, for example 2026-09-05T00:00:00Z.",
-  "dateOrder": "Created before must be later than Created at or after."
+  "dateOrder": "Created before must be later than Created at or after.",
+  "archived": "Choose whether archived jobs are hidden, included or shown alone."
 } as const;

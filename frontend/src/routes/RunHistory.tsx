@@ -9,7 +9,7 @@ import type { Runs } from '../api/generated';
 import { jobPath, runPath } from '../app/paths';
 import type { BrowserSession } from '../session/session';
 import { useSession } from '../session/useSession';
-import { canRetainMetadata, metadataFailureKind } from '../shared/retainMetadata';
+import { canRetainMetadata, isDeletedJob, metadataFailureKind } from '../shared/retainMetadata';
 
 function History({ jobId, basePath, session }: { jobId: string; basePath: string; session: BrowserSession }) {
   const location = useLocation();
@@ -55,7 +55,7 @@ function History({ jobId, basePath, session }: { jobId: string; basePath: string
       if (!current()) return;
       const expired = failure instanceof ApiClientError && ['CURSOR_EXPIRED', 'INVALID_CURSOR'].includes(failure.serverCode ?? '');
       const kind = metadataFailureKind(failure);
-      const message = expired ? copy.attemptHistoryChangedOrThisPageExpiredRefreshHistoryTo : {
+      const message = expired ? copy.attemptHistoryChangedOrThisPageExpiredRefreshHistoryTo : isDeletedJob(failure) ? copy.thisJobWasDeleted : {
         session: copy.reconnectToReadAttemptHistory, denied: copy.attemptHistoryAccessDenied,
         missing: copy.attemptHistoryIsUnavailableCheckTheJobAndLocalSession,
         unsupported: copy.incompatibleHistoryResponse, unverified: copy.attemptHistoryCouldNotBeVerified,
