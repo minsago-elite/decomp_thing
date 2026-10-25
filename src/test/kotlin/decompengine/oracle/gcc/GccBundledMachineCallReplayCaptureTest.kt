@@ -11,6 +11,7 @@ import decompengine.oracle.machinecalls.withMachineCallComponentFixtureV1
 import decompengine.oracle.structural.VerifiedStructuralInputsV1
 import java.nio.file.Files
 import java.nio.file.Path
+import java.nio.file.StandardCopyOption
 import java.nio.file.attribute.PosixFilePermissions
 import kotlin.test.*
 import kotlinx.serialization.json.*
@@ -73,6 +74,32 @@ class GccBundledMachineCallReplayCaptureTest {
             assertTrue(IndependentMachineCallRequestV1::class.java in parameters)
             assertFails { constructor.newInstance(*arrayOfNulls<Any>(parameters.size)) }
         }
+    }
+
+    @Test fun `retained producer capture rejects identical-byte substitution before external composition`() = fixture { f ->
+        val capture = f.capture()
+        val replacement = Files.write(f.root.resolve("replacement"), f.bytes)
+        Files.setPosixFilePermissions(replacement, PosixFilePermissions.fromString("rw-------"))
+        Files.move(replacement, f.request.outputPath, StandardCopyOption.REPLACE_EXISTING)
+        LinuxFilesystemSyscalls.openRoot(f.root).use { run ->
+            assertFails { GccBundledMachineCallReplayOutputCapture.requireUnchanged(run, capture) }
+        }
+    }
+
+    @Test fun `last producer capture callback cannot replace a previously checked report`() = fixture { f ->
+        var total = 0
+        f.capture(checkpoint = { total++ })
+        var seen = 0
+        assertFails {
+            f.capture(checkpoint = {
+                if (++seen == total) {
+                    val replacement = Files.write(f.root.resolve("replacement"), f.bytes)
+                    Files.setPosixFilePermissions(replacement, PosixFilePermissions.fromString("rw-------"))
+                    Files.move(replacement, f.request.outputPath, StandardCopyOption.REPLACE_EXISTING)
+                }
+            })
+        }
+        assertEquals(total, seen)
     }
 
     private class Fixture(val root: Path, val reports: Path, val controlName: String,

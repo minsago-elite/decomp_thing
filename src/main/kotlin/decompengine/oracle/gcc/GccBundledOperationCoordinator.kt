@@ -14,11 +14,14 @@ import decompengine.oracle.structural.StructuralReplayAdapterRegistry
 import decompengine.oracle.structural.VerifiedStructuralInputsV1
 import decompengine.oracle.structural.FrozenNativeRecoveredCallPopulationV1
 import decompengine.oracle.structural.StructuralSelectedBoundaryProjectionV1
+import decompengine.oracle.structural.StructuralNativeExternalCallProjectionV1
+import decompengine.oracle.structural.StructuralNativeExternalCallProjectionResultV1
 import decompengine.oracle.machinecalls.IndependentMachineCallRequestV1
 import decompengine.oracle.machinecalls.IndependentMachineCallWorkerV1
 import decompengine.oracle.machinecalls.MachineCallFileV1
 import decompengine.oracle.machinecalls.MachineCallLimitsV1
 import decompengine.oracle.machinecalls.MachineCallRuntimeV1
+import decompengine.oracle.externalcalls.*
 import decompengine.oracle.fulltree.StableControlFile
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
@@ -32,6 +35,8 @@ import decompengine.oracle.fulltree.FullTreeFunctionObservationRuntimeMount
 import decompengine.oracle.fulltree.KotlinSystemdCgroupCommandCleanup
 import decompengine.oracle.fulltree.KotlinSystemdCgroupCommandExecution
 import decompengine.oracle.fulltree.KotlinSystemdCgroupCommandExecutionException
+import decompengine.oracle.fulltree.KotlinContainedCommandRetainedInput
+import decompengine.oracle.fulltree.ContainedCommandRetainedInputVisibility
 import decompengine.oracle.fulltree.KotlinSystemdCgroupCommandInput
 import decompengine.oracle.fulltree.KotlinSystemdCgroupCommandLauncher
 import decompengine.oracle.fulltree.KotlinSystemdCgroupCommandResources
@@ -142,6 +147,7 @@ internal class GccBundledStructuralReplayOperation(
 internal class GccBundledNativeClaimFreezeOperation(
     val native: GccBundledNativeCallOperation,
     val population: FrozenNativeRecoveredCallPopulationV1,
+    val externalClaims: FrozenNativeExternalClaimsSnapshotV1,
     constructionPermit: Any,
 ) {
     private val binding: ByteArray
@@ -161,9 +167,10 @@ internal class GccBundledNativeClaimFreezeOperation(
             population.rawRecordCount == summary.records && population.rawSiteCount.toLong() == summary.scanSummary.sites) {
             "native claim freeze substitutes its exact captured model, observations or census"
         }
+        requireGccDualNativeFreezeMatches(population, externalClaims, summary.bindings)
         claimsSha256 = OracleArtifacts.sha256(population.canonicalEvidenceBytes)
         binding = OracleJson.canonicalBytes(JsonObject(mapOf(
-            "provider" to JsonPrimitive("gcc-native-recovered-claim-freeze-v1"), "schemaVersion" to JsonPrimitive(1),
+            "provider" to JsonPrimitive("gcc-native-recovered-claim-freeze-v2"), "schemaVersion" to JsonPrimitive(2),
             "phase" to JsonPrimitive("after-native-absence-before-boundary-oracle"),
             "nativeBindingSha256" to JsonPrimitive(OracleArtifacts.sha256(GccNativeCallReceiptLineage.createBinding(native))),
             "inputSha256" to JsonPrimitive(population.inputSha256),
@@ -174,6 +181,9 @@ internal class GccBundledNativeClaimFreezeOperation(
             "nativeManifestSha256" to JsonPrimitive(OracleArtifacts.sha256(native.snapshot.manifestBytes)),
             "rawRecordCount" to JsonPrimitive(population.rawRecordCount), "rawSiteCount" to JsonPrimitive(population.rawSiteCount),
             "claimsSha256" to JsonPrimitive(claimsSha256),
+            "externalClaimsSha256" to JsonPrimitive(externalClaims.evidenceSha256),
+            "externalClaimsBytes" to JsonPrimitive(externalClaims.evidenceBytes),
+            "externalClaimsPolicySha256" to JsonPrimitive(externalClaims.policySha256),
             "callAuthority" to JsonPrimitive("unavailable-pending-population-and-external-composition"),
             "negativeCompleteness" to JsonPrimitive(false), "scored" to JsonPrimitive(false),
             "complete" to JsonPrimitive(false), "releaseEligible" to JsonPrimitive(false),
@@ -209,6 +219,72 @@ internal class GccBundledMachineCallReplayOperation(
         }
         projectedPopulation = frozenNativeClaims.population.project(StructuralSelectedBoundaryProjectionV1.project(selectedInputs))
         require(OracleArtifacts.sha256(frozenNativeClaims.population.canonicalEvidenceBytes) == frozenNativeClaims.claimsSha256)
+    }
+}
+
+/** Same-process combined execution. Held source descriptors remain live through final publication. */
+internal class GccBundledExternalCallReplayOperation(
+    val machine: GccBundledMachineCallReplayOperation,
+    val independentRequest: IndependentExternalCallRequestV1,
+    val recoveredRequest: RecoveredExternalNamespaceRequestV1,
+    val independentCapture: GccBundledExternalCallReplayCapture,
+    val recoveredCapture: GccBundledExternalCallReplayCapture,
+    independentAttachment: ByteArray, independentExecution: ByteArray,
+    recoveredAttachment: ByteArray, recoveredExecution: ByteArray,
+    val pair: ElfExternalNamespacePairV1,
+    heldSources: List<StableControlFile>,
+    private val deadline: ContainedCommandOperationDeadline,
+    constructionPermit: Any,
+) : AutoCloseable {
+    private val sources = heldSources.toList()
+    private val ia = independentAttachment.copyOf()
+    private val ie = independentExecution.copyOf()
+    private val ra = recoveredAttachment.copyOf()
+    private val re = recoveredExecution.copyOf()
+    private var closed = false
+    val projection: StructuralNativeExternalCallProjectionResultV1
+    val independentAttachmentBytes: ByteArray get() = ia.copyOf()
+    val independentExecutionBytes: ByteArray get() = ie.copyOf()
+    val recoveredAttachmentBytes: ByteArray get() = ra.copyOf()
+    val recoveredExecutionBytes: ByteArray get() = re.copyOf()
+    init {
+        check(constructionPermit === GCC_BUNDLED_PREPARED_OPERATION_PERMIT) {
+            "external call replay requires retained live coordinator ownership"
+        }
+        require(independentRequest.sourceReport.sha256 == OracleArtifacts.sha256(machine.capture.reportBytes) &&
+            independentRequest.sourceRequest.sha256 == OracleArtifacts.sha256(machine.request.canonicalBytes) &&
+            independentRequest.runtime == machine.request.runtime && recoveredRequest.runtime == machine.request.runtime &&
+            recoveredRequest.expectedNativeBindings == machine.native.snapshot.summary.bindings &&
+            independentRequest.richFile == machine.request.richFile && recoveredRequest.richFile == machine.request.richFile)
+        requireGccExternalExecutionLineage(independentRequest.canonicalBytes, ia, ie)
+        requireGccExternalExecutionLineage(recoveredRequest.canonicalBytes, ra, re)
+        requireCurrent()
+        projection = StructuralNativeExternalCallProjectionV1.project(machine.frozenNativeClaims.population,
+            machine.frozenNativeClaims.externalClaims, StructuralSelectedBoundaryProjectionV1.project(machine.selectedInputs),
+            machine.capture.reportBytes, independentCapture.reportBytes, recoveredCapture.reportBytes, pair.richNamespace) { deadline.requireCurrent() }
+        requireCurrent()
+    }
+    fun requireCurrent() {
+        check(!closed)
+        deadline.requireCurrent()
+        pair.requireCurrent()
+        sources.forEach { it.verifyUnchanged("external call retained source") }
+        // Callback-free metadata pass after the final descriptor hashing callback.
+        requireFinalMetadata()
+    }
+    fun requireFinalMetadata() {
+        check(!closed)
+        sources.forEach { it.requirePathAndIdentity("external call final source identity") }
+    }
+    override fun close() {
+        if (!closed) {
+            closed = true
+            var failure: Throwable? = null
+            sources.asReversed().forEach { source -> try { source.close() } catch (e: Throwable) {
+                if (failure == null) failure = e else failure!!.addSuppressed(e)
+            } }
+            failure?.let { throw it }
+        }
     }
 }
 
@@ -1062,6 +1138,7 @@ internal class GccBundledPreparedOperation internal constructor(
                             readOnlyControlDirectories = completedControls.toMap(),
                             readOnlyStateDirectory = protectedDirectories.getValue("state"),
                             readOnlyReportsDirectory = protectedDirectories.getValue("reports"), operationDeadline = deadline,
+                            retainedInputVisibility = emptyList(),
                             beforeStart = { attachment ->
                                 lease.requireCurrentOperationRunRootAfterScopeAttachment(runRoot)
                                 requireFrozenInputs()
@@ -1105,6 +1182,206 @@ internal class GccBundledPreparedOperation internal constructor(
         }
     }
 
+    /** Both fixed workers consume independently selected inputs; recovery never sees call-oracle rows. */
+    private fun replayNativeExternalCalls(machine: GccBundledMachineCallReplayOperation,
+        profile: GccDriverStructuralInputsV1): GccBundledExternalCallReplayOperation {
+        val cli = checkNotNull(intent.cliInvocation)
+        val deadline = checkNotNull(operationDeadline)
+        val original = GccCompilerEngineContainmentContract.parseDefinitionForLiveController(definition)
+        val configuration = deriveRuntimeConfiguration(original, inputs.classPathEntries)
+        val sources = arrayListOf<StableControlFile>()
+        var transferred = false
+        var pendingFailure: Throwable? = null
+        fun hold(file: MachineCallFileV1, label: String): StableControlFile =
+            StableControlFile.openWithCheckpoint(file.path, file.bytes, label, checkpoint = { deadline.requireCurrent() }).also {
+                sources += it
+                require(it.size == file.bytes && it.authenticatedSha256 == file.sha256)
+                it.requireSingleLink(label)
+            }
+        fun publish(name: String, bytes: ByteArray) {
+            deadline.requireCurrent()
+            LinuxFilesystemSyscalls.openRoot(cli.options.output).use { output ->
+                cli.requireCurrent()
+                DescriptorBoundAtomicStateFile.publishNoReplace(output, name, bytes, 256 * 1024)
+                cli.requireCurrent()
+            }
+        }
+        try {
+            val machineRequestPath = cli.options.output.resolve("independent-machine-call-request.json")
+            val sourceRequest = MachineCallFileV1(machineRequestPath, machine.request.canonicalBytes.size.toLong(),
+                OracleArtifacts.sha256(machine.request.canonicalBytes))
+            val sourceReport = MachineCallFileV1(machine.request.outputPath, machine.capture.reportBytes.size.toLong(),
+                OracleArtifacts.sha256(machine.capture.reportBytes))
+            hold(sourceRequest, "original contained machine-call request")
+            hold(sourceReport, "original contained machine-call report")
+            val frozen = machine.frozenNativeClaims.externalClaims
+            val nativeManifest = MachineCallFileV1(original.outputLease.path.resolve("reports/native-calls-v1/manifest.json"),
+                frozen.manifestBytes, frozen.manifestSha256)
+            val nativeObservations = MachineCallFileV1(original.outputLease.path.resolve("reports/native-calls-v1/native-calls.json"),
+                frozen.observationBytes, frozen.observationsSha256)
+            val nativeManifestFile = hold(nativeManifest, "frozen original native manifest")
+            val nativeObservationFile = hold(nativeObservations, "frozen original native stream")
+            // Actual held-descriptor reread is mandatory; neither saved bindings nor snapshots can replace sources.
+            val refrozen = FrozenNativeExternalClaimsV1.freeze(
+                nativeManifestFile.readExactly(0, Math.toIntExact(nativeManifestFile.size), "native manifest re-freeze") { deadline.requireCurrent() },
+                nativeObservationFile.readExactly(0, Math.toIntExact(nativeObservationFile.size), "native stream re-freeze") { deadline.requireCurrent() },
+                machine.native.snapshot.summary.bindings, checkpoint = { deadline.requireCurrent() })
+            require(refrozen.canonicalEvidenceBytes.contentEquals(frozen.canonicalEvidenceBytes))
+            requireGccDualNativeFreezeMatches(machine.frozenNativeClaims.population, refrozen, machine.native.snapshot.summary.bindings)
+            // Profile and pair metadata are opened only after both recovery selections already exist.
+            val manifestFile = StableControlFile.openWithCheckpoint(profile.root.resolve("oracle-manifest.json"), 2L * 1024 * 1024,
+                "external namespace artifact manifest", checkpoint = { deadline.requireCurrent() }).also { sources += it }
+            require(manifestFile.authenticatedSha256 == profile.artifactManifestSha256)
+            manifestFile.requireSingleLink("external namespace artifact manifest")
+            val artifactManifest = MachineCallFileV1(profile.root.resolve("oracle-manifest.json"), manifestFile.size, profile.artifactManifestSha256)
+            val rich = hold(machine.request.richFile, "external namespace rich ELF")
+            val strippedInput = intent.artifacts.single { it.role == GccCompilerEngineContainmentArtifactRole.ENGINE_BINARY }
+            val strippedFile = MachineCallFileV1(strippedInput.path, strippedInput.bytes, strippedInput.sha256)
+            val stripped = hold(strippedFile, "external namespace stripped ELF")
+            val pair = ElfExternalNamespacePairV1.prove(manifestFile, profile.artifactManifestSha256, rich, stripped,
+                checkpoint = { deadline.requireCurrent() })
+            return lease.withCurrentOperationRunRootForContainedExecution(runRoot) { borrowed ->
+                fun requireFrozenInputs() {
+                    deadline.requireCurrent()
+                    inputs.verify("native external replay")
+                    journal.verify("native external replay")
+                    pair.requireCurrent()
+                    sources.forEach { it.verifyUnchanged("native external source") }
+                    borrowed.withPinnedDescriptor { run ->
+                        GccBundledNativeCallCapture.requireUnchanged(run, machine.native.snapshot, machine.native.model, intent.artifacts) { deadline.requireCurrent() }
+                        GccBundledMachineCallReplayOutputCapture.requireUnchanged(run, machine.capture)
+                    }
+                    sources.forEach { it.requirePathAndIdentity("native external final source metadata") }
+                    deadline.requireCurrent()
+                }
+                val runtime = intent.bundledRuntime.root
+                val runtimeMount = FullTreeFunctionObservationRuntimeMount(runtime, runtime,
+                    calculateFullTreeObservationRuntimeManifestSha256(runtime))
+                val archive = intent.artifacts.single { it.role == GccCompilerEngineContainmentArtifactRole.GHIDRA_ARCHIVE }
+                val nativeBinding = OracleArtifacts.sha256(GccNativeCallReceiptLineage.createBinding(machine.native))
+                fun control(prefix: String) = "control-" + OracleArtifacts.sha256(
+                    (prefix + "\n" + intent.requestSha256 + "\n" + nativeBinding).toByteArray())
+                val independentControl = control("independent-external-calls-v1")
+                val independent = IndependentExternalCallRequestV1(machine.request.richFile, sourceReport, sourceRequest,
+                    machine.request.runtime, original.outputLease.path.resolve(independentControl).resolve("reports")
+                        .resolve(GccBundledExternalCallReplayOutputCapture.INDEPENDENT_NAME),
+                    ExternalCallLimitsV1(maximumWallMillis = deadline.remainingWholeSecondsMillis(300_000)))
+                data class Executed(val attachment: ByteArray, val execution: ByteArray, val capture: GccBundledExternalCallReplayCapture)
+                fun execute(prefix: String, controlName: String, worker: String, requestBytes: ByteArray,
+                    mountedInputs: List<MachineCallFileV1>, visibleRetainedInputs: List<MachineCallFileV1>, maximumWallMillis: Long, maximumOutputBytes: Int,
+                    capture: (decompengine.acp.LinuxDescriptor, LinuxFileIdentity) -> GccBundledExternalCallReplayCapture): Executed {
+                    val requestSha = OracleArtifacts.sha256(requestBytes)
+                    val requestPath = cli.options.output.resolve("$prefix-request.json")
+                    publish(requestPath.fileName.toString(), requestBytes)
+                    val path = original.outputLease.path.resolve(controlName)
+                    val command = listOf(configuration.javaExecutable.toString(),
+                        "-Xmx${minOf(intent.budgets.maximumResidentBytes / (1024 * 1024) * 3 / 4, 3072)}m",
+                        "-XX:+DisableAttachMechanism", "-Duser.home=${path.resolve("state")}",
+                        "-Djava.io.tmpdir=${path.resolve("tmp")}", "-cp",
+                        inputs.classPathEntries.indices.joinToString(java.io.File.pathSeparator) {
+                            path.resolve("runtime/classpath-$it.jar").toString()
+                        }, worker, requestPath.toString(), requestSha)
+                    requireFrozenInputs()
+                    val directories = borrowed.withPinnedDescriptor { run -> listOf("state", "reports").associateWith {
+                        LinuxFilesystemSyscalls.openDirectoryAt(run.fd, it).use { directory -> directory.identity }
+                    } }
+                    val visibility = visibleRetainedInputs.map { file ->
+                        require(file.path.startsWith(original.outputLease.path))
+                        KotlinContainedCommandRetainedInput(original.outputLease.path.relativize(file.path).toString(), file.bytes, file.sha256)
+                    }
+                    val visibilityDocument = ContainedCommandRetainedInputVisibility(controlName,
+                        completedControls.keys + setOf("state", "reports"), visibility).canonicalIdentity()
+                    var attachment: ByteArray? = null
+                    val unit = "decomp-external-calls-${requestSha.take(32)}.scope"
+                    val execution = KotlinSystemdCgroupCommandLauncher.execute(borrowed, configuration, unit,
+                        original.expectedControlGroup.substringBeforeLast('/') + "/" + unit, requestSha, command, original.environment,
+                        (listOf(MachineCallFileV1(requestPath, requestBytes.size.toLong(), requestSha),
+                            MachineCallFileV1(archive.path, archive.bytes, archive.sha256)) + mountedInputs).distinctBy { it.path }
+                            .map { KotlinSystemdCgroupCommandInput(it.path, it.bytes, it.sha256) },
+                        listOf(runtimeMount), KotlinSystemdCgroupCommandResources(
+                            deadline.remainingWholeSecondsMillis(maximumWallMillis),
+                            minOf(intent.budgets.maximumResidentBytes, 4L * 1024 * 1024 * 1024), intent.budgets.pidsMax,
+                            maximumOutputBytes.toLong()), inputs.deploymentClosureSha256,
+                        controlDirectoryName = controlName, readOnlyControlDirectories = completedControls.toMap(),
+                        readOnlyStateDirectory = directories.getValue("state"), readOnlyReportsDirectory = directories.getValue("reports"),
+                        operationDeadline = deadline, retainedInputVisibility = visibility, beforeStart = { actual ->
+                            lease.requireCurrentOperationRunRootAfterScopeAttachment(runRoot)
+                            requireFrozenInputs()
+                            attachment = actual.canonicalBytes
+                            publish("$prefix-attachment.json", actual.canonicalBytes)
+                            publish("$prefix-start-authorized.json", OracleJson.canonicalBytes(JsonObject(mapOf(
+                                "provider" to JsonPrimitive("$prefix-start-authorized-v1"),
+                                "operationRequestSha256" to JsonPrimitive(intent.requestSha256),
+                                "requestSha256" to JsonPrimitive(requestSha),
+                                "attachmentSha256" to JsonPrimitive(OracleArtifacts.sha256(actual.canonicalBytes)),
+                                "nativeClaimFreezeSha256" to JsonPrimitive(OracleArtifacts.sha256(machine.frozenNativeClaims.canonicalBytes)),
+                                "nativeExternalClaimsSha256" to JsonPrimitive(frozen.evidenceSha256),
+                                "pairProofSha256" to JsonPrimitive(pair.receiptSha256),
+                                "retainedInputVisibility" to visibilityDocument,
+                                "retainedInputVisibilitySha256" to JsonPrimitive(OracleArtifacts.sha256(OracleJson.canonicalBytes(visibilityDocument)))))))
+                            requireFrozenInputs()
+                            lease.requireCurrentOperationRunRootAfterScopeAttachment(runRoot)
+                        })
+                    lease.requireCurrentOperationRunRootAfterCgroupAbsence(runRoot)
+                    requireFrozenInputs()
+                    publish("$prefix-execution.json", execution.canonicalBytes)
+                    val captured = borrowed.withPinnedDescriptor { run -> capture(run, checkNotNull(execution.controlDirectoryIdentity)) }
+                    requireFrozenInputs()
+                    borrowed.withPinnedDescriptor { run -> GccBundledExternalCallReplayOutputCapture.requireUnchanged(run, captured) }
+                    publish("$prefix-capture.json", captured.assessmentBytes)
+                    completedControls[controlName] = checkNotNull(execution.controlDirectoryIdentity)
+                    return Executed(checkNotNull(attachment), execution.canonicalBytes, captured)
+                }
+                // Source report is visible only through its retained read-only completed control directory.
+                val independentRun = execute("independent-external-call", independentControl,
+                    IndependentExternalCallWorkerV1::class.java.name, independent.canonicalBytes,
+                    listOf(independent.richFile, independent.sourceRequest), listOf(independent.sourceReport), independent.limits.maximumWallMillis,
+                    independent.limits.maximumOutputBytes) { run, identity ->
+                    GccBundledExternalCallReplayOutputCapture.captureIndependent(run, independentControl, identity, independent) { deadline.requireCurrent() }
+                }
+                val recoveredControl = control("recovered-external-calls-v1")
+                val recovered = RecoveredExternalNamespaceRequestV1(nativeManifest, nativeObservations, artifactManifest,
+                    machine.request.richFile, strippedFile, machine.native.snapshot.summary.bindings, machine.request.runtime,
+                    original.outputLease.path.resolve(recoveredControl).resolve("reports")
+                        .resolve(GccBundledExternalCallReplayOutputCapture.RECOVERED_NAME),
+                    RecoveredExternalNamespaceLimitsV1(maximumWallMillis = deadline.remainingWholeSecondsMillis(300_000)))
+                // Raw native files are visible through the retained read-only reports directory; no call-oracle input is supplied.
+                val recoveredRun = execute("recovered-external-call", recoveredControl,
+                    RecoveredExternalNamespaceWorkerV1::class.java.name, recovered.canonicalBytes,
+                    listOf(recovered.artifactManifest, recovered.richFile, recovered.strippedFile),
+                    listOf(recovered.nativeManifest, recovered.nativeObservations), recovered.limits.maximumWallMillis,
+                    recovered.limits.maximumOutputBytes) { run, identity ->
+                    GccBundledExternalCallReplayOutputCapture.captureRecovered(run, recoveredControl, identity, recovered,
+                        refrozen, pair) { deadline.requireCurrent() }
+                }
+                requireFrozenInputs()
+                borrowed.withPinnedDescriptor { run ->
+                    GccBundledExternalCallReplayOutputCapture.requireUnchanged(run, independentRun.capture)
+                    GccBundledExternalCallReplayOutputCapture.requireUnchanged(run, recoveredRun.capture)
+                }
+                GccBundledExternalCallReplayOperation(machine, independent, recovered, independentRun.capture, recoveredRun.capture,
+                    independentRun.attachment, independentRun.execution, recoveredRun.attachment, recoveredRun.execution,
+                    pair, sources, deadline, GCC_BUNDLED_PREPARED_OPERATION_PERMIT).also { transferred = true }
+            }
+        } catch (failure: Throwable) {
+            pendingFailure = failure
+            poisoned = true
+            if (failure is KotlinSystemdCgroupCommandExecutionException) pendingCleanup = failure.cleanup
+            throw failure
+        } finally {
+            if (!transferred) {
+                var closeFailure: Throwable? = null
+                sources.asReversed().forEach { source -> try { source.close() } catch (failure: Throwable) {
+                    if (closeFailure == null) closeFailure = failure else closeFailure!!.addSuppressed(failure)
+                } }
+                closeFailure?.let { failure ->
+                    val primary = pendingFailure
+                    if (primary == null) throw failure else primary.addSuppressed(failure)
+                }
+            }
+        }
+    }
+
     /** Result pointers bind the unchanged model tree and native bytes under this same owner. */
     @Synchronized
     fun publishNativeCallCliResult(): Path {
@@ -1113,6 +1390,7 @@ internal class GccBundledPreparedOperation internal constructor(
         val cli = checkNotNull(intent.cliInvocation)
         val operation = checkNotNull(completedNativeCalls) { "operation has no completed native capture" }
         cliPublicationAttempted = true
+        var externalReplay: GccBundledExternalCallReplayOperation? = null
         try {
             val deadline = checkNotNull(operationDeadline)
             val original = GccCompilerEngineContainmentContract.parseDefinitionForLiveController(definition)
@@ -1134,6 +1412,7 @@ internal class GccBundledPreparedOperation internal constructor(
             val bindingName = "native-call-observation-binding.json"
             val treeName = GccBundledFullExportCliResultV2.TREE_MANIFEST_NAME
             var boundaryEvidence: GccDriverStructuralBoundaryEvidenceV1? = null
+            var selectedProfile: GccDriverStructuralInputsV1? = null
             val replay = if (intent.engineId == "driver") {
                 // Recovery selection is frozen before loading profile, boundary or oracle data.
                 val population = lease.withCurrentOperationRunRootBeforeLaunch(runRoot) { borrowed ->
@@ -1142,19 +1421,27 @@ internal class GccBundledPreparedOperation internal constructor(
                             intent.artifacts, checkpoint = { deadline.requireCurrent() })
                     }
                 }
-                val frozenClaims = GccBundledNativeClaimFreezeOperation(operation, population,
+                requireCapturedOutputs()
+                val externalClaims = FrozenNativeExternalClaimsV1.freeze(population.rawManifestBytes,
+                    population.rawObservationBytes, operation.snapshot.summary.bindings,
+                    checkpoint = { deadline.requireCurrent() })
+                requireCapturedOutputs()
+                val frozenClaims = GccBundledNativeClaimFreezeOperation(operation, population, externalClaims,
                     GCC_BUNDLED_PREPARED_OPERATION_PERMIT)
                 requireCapturedOutputs()
                 LinuxFilesystemSyscalls.openRoot(cli.options.output).use { output ->
                     cli.requireCurrent()
                     DescriptorBoundAtomicStateFile.publishManifestNoReplace(output, GccBundledNativeStructuralEvidenceV1.CLAIMS_NAME,
                         population.canonicalEvidenceBytes, 64 * 1024 * 1024)
+                    DescriptorBoundAtomicStateFile.publishManifestNoReplace(output, GccBundledExternalCallEvidenceV1.EXTERNAL_CLAIMS_NAME,
+                        externalClaims.canonicalEvidenceBytes, 64 * 1024 * 1024)
                     DescriptorBoundAtomicStateFile.publishNoReplace(output, GccBundledNativeStructuralEvidenceV1.FREEZE_NAME,
                         frozenClaims.canonicalBytes, 256 * 1024)
                     cli.requireCurrent()
                 }
                 requireCapturedOutputs()
                 val profile = GccDriverStructuralInputsV1.load(cli.options.profile.parent, "driver")
+                selectedProfile = profile
                 val authenticated = GccDriverStructuralAuthenticatedFullExportV1.captureNative(profile, operation)
                 val hostBoundary = GccDriverStructuralBoundaryEvidenceV1.capture(profile, authenticated)
                 boundaryEvidence = hostBoundary
@@ -1170,9 +1457,25 @@ internal class GccBundledPreparedOperation internal constructor(
                 requireCapturedOutputs()
                 replayNativeMachineCalls(frozenClaims, selected, profile).also { requireCapturedOutputs() }
             } else null
+            externalReplay = replay?.let { replayNativeExternalCalls(it, checkNotNull(selectedProfile)) }
+            val external = externalReplay
+            fun requireAllCapturedOutputs() {
+                external?.requireCurrent()
+                requireCapturedOutputs()
+                external?.requireFinalMetadata()
+                lease.withCurrentOperationRunRootBeforeLaunch(runRoot) { borrowed -> borrowed.withPinnedDescriptor { run ->
+                    external?.let {
+                        GccBundledMachineCallReplayOutputCapture.requireUnchanged(run, it.machine.capture)
+                        GccBundledExternalCallReplayOutputCapture.requireUnchanged(run, it.independentCapture)
+                        GccBundledExternalCallReplayOutputCapture.requireUnchanged(run, it.recoveredCapture)
+                    }
+                } }
+                cli.requireCurrent()
+            }
+            requireAllCapturedOutputs()
             val replayBinding = replay?.let(GccBundledNativeStructuralEvidenceV1::create)
             val result = GccBundledNativeCallCliResult.create(operation, binding,
-                journal.path, original.outputLease.path, cli.options.output, deadline.snapshot(), replay)
+                journal.path, original.outputLease.path, cli.options.output, deadline.snapshot(), replay, external)
             LinuxFilesystemSyscalls.openRoot(cli.options.output).use { output ->
                 cli.requireCurrent()
                 DescriptorBoundAtomicStateFile.publishManifestNoReplace(output, treeName,
@@ -1195,13 +1498,21 @@ internal class GccBundledPreparedOperation internal constructor(
                     DescriptorBoundAtomicStateFile.publishManifestNoReplace(output, GccBundledMachineCallReplayOutputCapture.REPORT_NAME,
                         it.capture.reportBytes, it.request.limits.maximumOutputBytes)
                 }
+                external?.let {
+                    for ((name, bytes) in GccBundledExternalCallEvidenceV1.payloads(it)) {
+                        requireAllCapturedOutputs()
+                        DescriptorBoundAtomicStateFile.publishManifestNoReplace(output, name, bytes, 64 * 1024 * 1024)
+                    }
+                }
                 GccBundledNativeCallCliPublication.publishResultMarker(output, result,
-                    beforeCommit = { requireCapturedOutputs(); cli.requireCurrent() })
+                    beforeCommit = { requireAllCapturedOutputs() })
             }
             return cli.options.output.resolve("result.json")
         } catch (failure: Throwable) {
             poisoned = true
             throw failure
+        } finally {
+            externalReplay?.close()
         }
     }
 
