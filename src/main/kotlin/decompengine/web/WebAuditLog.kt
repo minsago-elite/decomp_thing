@@ -194,7 +194,11 @@ internal class WebAuditLog(
     private val append: (FileChannel, ByteBuffer) -> Unit = { channel, buffer -> while (buffer.hasRemaining()) channel.write(buffer) },
 ) {
     init { require(segmentEntries in 1..65_536) }
-    private val directory = root.toAbsolutePath().normalize().resolve(DIRECTORY)
+    private val storeRoot = root.toAbsolutePath().normalize()
+    private val directory = storeRoot.resolve(DIRECTORY)
+    // Session and refused-request entries made before any job storage exists are held here (bounded) and
+    // written first once storage appears: auditing never creates job storage by itself.
+    private val pending = ArrayDeque<WebAuditEntry>()
     private val current = directory.resolve("current.jsonl")
     private val previous = directory.resolve("previous.jsonl")
     private val lock = Any()
@@ -213,28 +217,15 @@ internal class WebAuditLog(
         requestId: String?,
     ): WebAuditEntry? = synchronized(lock) {
         try {
-            open()
-            val entry = WebAuditEntry(nextSequence, clock.instant(), requestId?.takeIf(REQUEST_ID::matches), actor, action,
+            fun entry(sequence: Long) = WebAuditEntry(sequence, clock.instant(), requestId?.takeIf(REQUEST_ID::matches), actor, action,
                 target.sanitized(), outcome, status.takeIf { it in 100..599 } ?: 500, reasonCode?.takeIf(REASON_CODE::matches))
-            if (currentEntries >= segmentEntries) rotate()
-            val line = (buildJsonObject { put("schemaVersion", 1); put("entry", entry.toJson()) }.toString() + "\n")
-                .toByteArray(Charsets.UTF_8)
-            check(line.size <= MAXIMUM_LINE_BYTES)
-            FileChannel.open(current, CREATE, WRITE, NOFOLLOW_LINKS).use { channel ->
-                val boundary = channel.size()
-                try {
-                    channel.position(boundary)
-                    append(channel, ByteBuffer.wrap(line))
-                    channel.force(true)
-                } catch (failure: Exception) {
-                    // Restore the last complete record so a later append never extends a torn line.
-                    try { channel.truncate(boundary); channel.force(true) } catch (cleanup: Exception) { failure.addSuppressed(cleanup) }
-                    throw failure
-                }
+            if (!opened && !Files.isDirectory(storeRoot, NOFOLLOW_LINKS)) {
+                if (pending.size >= MAXIMUM_PENDING_ENTRIES) { unrecorded++; return null }
+                return entry((pending.lastOrNull()?.sequence ?: 0L) + 1).also(pending::addLast)
             }
-            nextSequence++
-            currentEntries++
-            entry
+            open()
+            flushPending()
+            entry(nextSequence).also(::appendEntry)
         } catch (failure: Exception) {
             if (failure is InterruptedException) Thread.currentThread().interrupt()
             unrecorded++
@@ -244,14 +235,46 @@ internal class WebAuditLog(
         }
     }
 
+    private fun appendEntry(entry: WebAuditEntry) {
+        if (currentEntries >= segmentEntries) rotate()
+        val line = (buildJsonObject { put("schemaVersion", 1); put("entry", entry.toJson()) }.toString() + "\n")
+            .toByteArray(Charsets.UTF_8)
+        check(line.size <= MAXIMUM_LINE_BYTES)
+        FileChannel.open(current, CREATE, WRITE, NOFOLLOW_LINKS).use { channel ->
+            val boundary = channel.size()
+            try {
+                channel.position(boundary)
+                append(channel, ByteBuffer.wrap(line))
+                channel.force(true)
+            } catch (failure: Exception) {
+                // Restore the last complete record so a later append never extends a torn line.
+                try { channel.truncate(boundary); channel.force(true) } catch (cleanup: Exception) { failure.addSuppressed(cleanup) }
+                throw failure
+            }
+        }
+        nextSequence++
+        currentEntries++
+    }
+
+    /** Write held pre-storage entries in order, renumbered after any entries already on disk. */
+    private fun flushPending() {
+        while (pending.isNotEmpty()) {
+            appendEntry(pending.first().copy(sequence = nextSequence))
+            pending.removeFirst()
+        }
+    }
+
     /** Newest-last entries, optionally scoped to one job, at most [limit] of them. */
     fun read(jobId: String? = null, limit: Int = 200): WebAuditPage = synchronized(lock) {
         require(limit in 1..MAXIMUM_READ_ENTRIES)
+        if (pending.isNotEmpty() && Files.isDirectory(storeRoot, NOFOLLOW_LINKS)) {
+            try { open(); flushPending() } catch (_: Exception) { opened = false }
+        }
         var complete = true
         val segments = listOf(previous, current).map { path ->
             try { readSegment(path) } catch (_: Exception) { complete = false; emptyList() }
         }
-        val all = segments.flatten()
+        val all = segments.flatten() + if (segments.flatten().isEmpty()) pending.toList() else emptyList()
         val first = all.firstOrNull()?.sequence ?: if (opened) nextSequence else 1L
         val scoped = if (jobId == null) all else all.filter { it.target.jobId == jobId }
         val selected = scoped.takeLast(limit)
@@ -315,6 +338,7 @@ internal class WebAuditLog(
         const val DIRECTORY = ".web-audit"
         const val DEFAULT_SEGMENT_ENTRIES = 2048
         const val MAXIMUM_READ_ENTRIES = 500
+        const val MAXIMUM_PENDING_ENTRIES = 256
         private const val MAXIMUM_LINE_BYTES = 1024
     }
 }

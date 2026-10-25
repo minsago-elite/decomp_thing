@@ -127,6 +127,25 @@ class WebAuditLogTest {
         } finally { root.toFile().deleteRecursively() }
     }
 
+    @Test fun `auditing never creates job storage and writes held entries once storage exists`() {
+        val parent = root("absent")
+        val store = parent.resolve("jobs")
+        try {
+            var prepared = 0
+            val log = WebAuditLog(store, clock, prepareStorage = { prepared++ })
+            assertEquals(1, log.cancel()?.sequence)
+            assertEquals(2, log.record(WebAuditActor.UNAUTHENTICATED, WebAuditAction.SESSION_START, WebAuditTarget(),
+                WebAuditOutcome.REJECTED, 401, "SESSION_REQUIRED", null)?.sequence)
+            assertFalse(Files.exists(store), "no job storage is created for audit alone")
+            assertEquals(0, prepared)
+            assertEquals(listOf(1L, 2L), log.read().entries.map { it.sequence })
+            Files.createDirectories(store)
+            assertEquals(3, log.cancel()?.sequence)
+            assertEquals(1, prepared)
+            assertEquals(listOf(1L, 2L, 3L), WebAuditLog(store, clock).read().entries.map { it.sequence }, "held entries became durable first")
+        } finally { parent.toFile().deleteRecursively() }
+    }
+
     @Test fun `versioned and legacy routes map to the closed action vocabulary`() {
         val run = WebAuditRecorder.versionedAction("POST", "jobs/$job/runs/run_1/cancel")
         assertEquals(WebAuditAction.RUN_CANCEL to WebAuditTarget(job, "run_1"), run)
