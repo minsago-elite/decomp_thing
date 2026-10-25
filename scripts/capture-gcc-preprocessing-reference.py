@@ -2,11 +2,12 @@
 """Capture real GCC 16.2.0 metadata, diagnostic, preprocessing and dependency references.
 
 Every case runs in the pinned official base image that `build-toolchain.Dockerfile`
-builds on. Driver-only metadata cases run the authenticated oracle driver mounted at
-its configured bindir; every other case runs the image's installed `gcc`. Runs have
-no network, a read-only root
-filesystem, no capabilities, and only staged include roots; preprocessing and
-dependency cases add `-nostdinc`, metadata cases invoke the driver as users do. Each
+builds on. Every metadata case runs the authenticated oracle driver mounted at
+its configured bindir; frontend cases mount its manifest-pinned cc1. Preprocessing,
+dependency and orchestration cases run the image's installed `gcc`. Runs have
+no network, a read-only root filesystem and no capabilities. Preprocessing and
+dependency cases add `-nostdinc` and use staged include roots; metadata and
+orchestration cases use the driver's default include search. Each
 case is executed twice in fresh workspaces; any byte difference fails the
 capture. `--check` re-captures and compares with the checked-in records.
 """
@@ -17,6 +18,7 @@ import argparse
 import base64
 import hashlib
 import json
+import lzma
 import os
 import re
 import shlex
@@ -37,6 +39,8 @@ BUILD_RECORD = ORACLE / "build-record.json"
 ORACLE_DRIVER = ORACLE / "artifacts/gcc-driver.stripped"
 RUNTIME_PROBE = ROOT / "oracle/gcc/reference_runtime_probe.py"
 RUNTIME_PROBE_BYTES = RUNTIME_PROBE.read_bytes()
+ORACLE_FRONTEND_MANIFEST = ORACLE / "cc1-oracle-manifest.json"
+ORACLE_FRONTEND_ARCHIVE = ORACLE / "artifacts/gcc-cc1.stripped.xz"
 IMAGE = "docker.io/library/gcc@sha256:2e6f4ae27ab8ad6f9617b46f0468889d368fdd91f2ea29aff98e4d5d1a3637f0"
 IMAGE_CONFIG = "sha256:103614947d5ebe34fc48305dcee29625bcf37fbe12d5d4bbca60e00fa601a22f"
 ENVIRONMENT = {"LC_ALL": "C", "SOURCE_DATE_EPOCH": "1786060800", "TZ": "UTC"}
@@ -202,12 +206,20 @@ MALFORMED_C = b"int main(void) { return 0 }\n"
 
 
 # Metadata cases exercise the driver as invoked by users, so none passes -nostdinc.
-# Driver-only cases run the authenticated oracle driver, so target, configuration and
-# search-directory output are the oracle's own. The oracle install tree is not retained,
-# so cases whose output comes from cc1, collect2 or ld run the image's GCC instead.
-def metadata_case(case_id, arguments, categories, inputs=None, driver="oracle"):
+# Every metadata case runs the authenticated oracle driver. Frontend cases mount
+# the same-build manifest-pinned cc1; the malformed-link case selects pinned-image
+# collect2 and runtime libraries explicitly because the original install tree is absent.
+METADATA_LINK_ENVIRONMENT = {
+    "COMPILER_PATH": "/usr/local/libexec/gcc/x86_64-linux-gnu/16.2.0",
+    "LIBRARY_PATH": "/usr/local/lib/gcc/x86_64-linux-gnu/16.2.0",
+}
+
+
+def metadata_case(case_id, arguments, categories, inputs=None, frontend=False, link=False):
     spec = case(case_id, arguments, inputs or {}, categories=categories, nostdinc=False)
-    spec["driver"] = driver
+    spec["driver"] = "oracle"
+    spec["frontend"] = frontend
+    spec["environment"] = dict(METADATA_LINK_ENVIRONMENT) if link else {}
     return spec
 
 
@@ -222,7 +234,7 @@ METADATA_CASES = [
     metadata_case("print-libgcc-file-name", ["-print-libgcc-file-name"], ["search-directory"]),
     metadata_case("help", ["--help"], ["help"]),
     metadata_case("no-input", [], ["missing-input"]),
-    metadata_case("missing-input-file", ["-c", "absent.c"], ["missing-input"], driver="image"),
+    metadata_case("missing-input-file", ["-c", "absent.c"], ["missing-input"], frontend=True),
     metadata_case("option-missing-argument", ["-o"], ["option-validation", "missing-input"]),
     metadata_case(
         "option-invalid-language",
@@ -241,7 +253,7 @@ METADATA_CASES = [
         ["-march=bogus", "-c", "source.c"],
         ["option-validation"],
         {"source.c": SOURCE_C},
-        driver="image",
+        frontend=True,
     ),
     metadata_case("unsupported-long-option", ["--bogus-long"], ["unsupported-option", "missing-input"]),
     metadata_case(
@@ -250,13 +262,13 @@ METADATA_CASES = [
         ["unsupported-option"],
         {"source.c": SOURCE_C},
     ),
-    metadata_case("malformed-source", ["-c", "bad.c"], ["malformed-input"], {"bad.c": MALFORMED_C}, driver="image"),
+    metadata_case("malformed-source", ["-c", "bad.c"], ["malformed-input"], {"bad.c": MALFORMED_C}, frontend=True),
     metadata_case(
         "malformed-link-input",
         ["data.bin"],
         ["malformed-input"],
         {"data.bin": b"\x00not an object\n"},
-        driver="image",
+        link=True,
     ),
 ]
 
@@ -556,6 +568,7 @@ def oracle_install_prefix() -> str:
 # The oracle driver is mounted at its configured bindir so its prefixes are not relocated.
 ORACLE_PREFIX = oracle_install_prefix()
 ORACLE_DRIVER_PATH = f"{ORACLE_PREFIX}/bin/gcc"
+ORACLE_FRONTEND_PATH = f"{ORACLE_PREFIX}/libexec/gcc/x86_64-pc-linux-gnu/16.2.0/cc1"
 
 IDENTITY_SUBSTITUTIONS = [
     {
@@ -707,10 +720,14 @@ def execute(runtime: str, scratch: Path, spec: dict, attempt: str, alternate: bo
     oracle = spec.get("driver") == "oracle"
     driver = ORACLE_DRIVER_PATH if oracle else "gcc"
     mounts = ((ORACLE_DRIVER, ORACLE_DRIVER_PATH),) if oracle else ()
+    if spec.get("frontend"):
+        mounts += ((scratch / "oracle-cc1", ORACLE_FRONTEND_PATH),)
     command = [driver, *spec["arguments"]]
     if alternate:
         script = 'ln -s "$(command -v "$1")" "$0" && shift && exec "$0" "$@"'
         command = ["sh", "-c", script, ALTERNATE_DRIVER, driver, *spec["arguments"]]
+    if spec.get("environment"):
+        command = ["env", *(f"{key}={value}" for key, value in sorted(spec["environment"].items())), *command]
     result = run_container(runtime, workspace, command, spec["stdin"], mounts)
     if alternate:
         (workspace / Path(ALTERNATE_DRIVER).relative_to(WORKDIR)).unlink(missing_ok=True)
@@ -732,7 +749,8 @@ def capture_case(runtime: str, scratch: Path, spec: dict) -> dict:
         **({"driver": spec["driver"]} if "driver" in spec else {}),
         "categories": spec["categories"],
         "arguments": spec["arguments"],
-        "environment": ENVIRONMENT,
+        "environment": {**ENVIRONMENT, **spec.get("environment", {})},
+        **({"frontend": "manifest-pinned-oracle-cc1"} if spec.get("frontend") else {}),
         "inputs": [
             {"path": path, "bytes": len(data), "sha256": digest(data)}
             for path, data in sorted(spec["inputs"].items())
@@ -770,7 +788,71 @@ def oracle_driver_identity() -> dict:
         "sha256": stripped["sha256"],
         "manifest": {"path": "oracle/gcc/16.2.0/oracle-manifest.json", "sha256": digest(ORACLE_MANIFEST.read_bytes())},
         "mountedAt": ORACLE_DRIVER_PATH,
-        "installTree": "not retained; only the driver is mounted, read-only, in the pinned image",
+        "installTree": "not retained; the driver and required manifest-pinned frontend are mounted read-only per metadata case",
+    }
+
+
+def prepare_oracle_frontend(scratch: Path, archive: Path = ORACLE_FRONTEND_ARCHIVE) -> dict:
+    manifest = json.loads(ORACLE_FRONTEND_MANIFEST.read_text())
+    driver_manifest = json.loads(ORACLE_MANIFEST.read_text())
+    if manifest["oracle"] != driver_manifest["oracle"] or manifest["inputs"]["sourceLock"] != driver_manifest["inputs"]["sourceLock"]:
+        raise SystemExit("frontend and driver oracle source identities differ")
+    for role in ("sourceLock", "buildRecord"):
+        item = manifest["inputs"][role]
+        data = (ORACLE / item["path"]).read_bytes()
+        if (len(data), digest(data)) != (item["bytes"], item["sha256"]):
+            raise SystemExit(f"frontend {role} does not match its manifest")
+    artifact = manifest["artifacts"]["stripped"]
+    with archive.open("rb") as source:
+        compressed = source.read(artifact["bytes"] + 1)
+    if len(compressed) > artifact["bytes"]:
+        raise SystemExit("frontend archive exceeds the artifact size bound")
+    decoder = lzma.LZMADecompressor(memlimit=128 * 1024 * 1024)
+    try:
+        data = decoder.decompress(compressed, max_length=artifact["bytes"] + 1)
+    except lzma.LZMAError as error:
+        raise SystemExit(f"invalid frontend archive: {error}") from error
+    if not decoder.eof or decoder.unused_data or (len(data), digest(data)) != (artifact["bytes"], artifact["sha256"]):
+        raise SystemExit("frontend archive does not contain exactly the manifest-pinned artifact")
+    target = scratch / "oracle-cc1"
+    target.write_bytes(data)
+    target.chmod(0o555)
+    return {
+        "role": "cc1",
+        "artifact": f"oracle/gcc/16.2.0/{artifact['path']}",
+        "bytes": artifact["bytes"],
+        "sha256": artifact["sha256"],
+        "archive": {"path": "oracle/gcc/16.2.0/artifacts/gcc-cc1.stripped.xz", "bytes": len(compressed), "sha256": digest(compressed)},
+        "manifest": {"path": "oracle/gcc/16.2.0/cc1-oracle-manifest.json", "sha256": digest(ORACLE_FRONTEND_MANIFEST.read_bytes())},
+        "source": manifest["oracle"],
+        "sourceLock": manifest["inputs"]["sourceLock"],
+        "mountedAt": ORACLE_FRONTEND_PATH,
+        "scope": "read-only mount for missing-input-file, option-invalid-frontend-value and malformed-source only",
+    }
+
+
+def metadata_link_support(runtime: str, scratch: Path) -> dict:
+    workspace = scratch / "metadata-link-identity"
+    workspace.mkdir()
+    stage(workspace, {})
+    paths = {
+        "collect2": f"{METADATA_LINK_ENVIRONMENT['COMPILER_PATH']}/collect2",
+        "ld": "/usr/bin/ld",
+    }
+    script = 'set -eu; for path do printf "%s\\t%s\\t%s\\t%s\\n" "$path" "$(readlink -f "$path")" "$(stat -Lc %s "$path")" "$(sha256sum < "$path" | cut -d" " -f1)"; done'
+    result = run_container(runtime, workspace, ["sh", "-c", script, "metadata-link-identity", *paths.values()], b"")
+    if result.returncode != 0:
+        raise SystemExit(f"metadata linker identity query failed: {result.stderr.decode(errors='replace')}")
+    lines = [line.split("\t") for line in result.stdout.decode().splitlines()]
+    if len(lines) != len(paths) or any(len(line) != 4 for line in lines):
+        raise SystemExit("metadata linker identity query returned malformed output")
+    return {
+        "image": IMAGE,
+        "imageConfig": IMAGE_CONFIG,
+        "scope": "malformed-link-input only; image collect2 and ld selected by explicit environment",
+        "environment": METADATA_LINK_ENVIRONMENT,
+        "tools": [{"role": role, "path": row[0], "resolvedPath": row[1], "bytes": int(row[2]), "sha256": row[3]}
+                  for role, row in zip(paths, lines)],
     }
 
 
@@ -809,6 +891,8 @@ def toolchain_identity(runtime: str, scratch: Path) -> dict:
 def records(runtime: str, scratch: Path) -> tuple[dict, dict, dict, dict]:
     identity = toolchain_identity(runtime, scratch)
     oracle_driver = oracle_driver_identity()
+    oracle_frontend = prepare_oracle_frontend(scratch)
+    link_support = metadata_link_support(runtime, scratch)
     metadata = [capture_case(runtime, scratch, spec) for spec in METADATA_CASES]
     for spec, captured in zip(METADATA_CASES, metadata):
         check_driver_name_substitution(runtime, scratch, spec, captured["observed"])
@@ -861,13 +945,17 @@ def records(runtime: str, scratch: Path) -> tuple[dict, dict, dict, dict]:
             "status": "captured",
             "scope": "real-driver-metadata-and-diagnostics",
             "toolchain": {
-                **identity,
+                **{key: identity[key] for key in ("image", "imageConfig", "baseOf", "platform", "sandbox")},
+                "scope": "image runtime; metadata executable owners are oracleDriver, oracleFrontend and linkSupport",
                 "includeSearch": "the driver's default include search; no metadata case passes -nostdinc",
             },
             "oracleDriver": oracle_driver,
+            "oracleFrontend": oracle_frontend,
+            "linkSupport": link_support,
             "driverSelection": (
-                "cases with driver `oracle` run the authenticated oracle driver; cases with driver "
-                "`image` need cc1, collect2 or ld, which the oracle does not retain, and run the image's gcc"
+                "every metadata case runs the authenticated oracle driver; frontend cases mount the "
+                "same-source manifest-pinned cc1; malformed-link-input selects pinned-image collect2 "
+                "and ld with the recorded COMPILER_PATH and LIBRARY_PATH"
             ),
             "capture": capture,
             "cases": metadata,

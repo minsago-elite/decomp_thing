@@ -2,10 +2,14 @@ from __future__ import annotations
 
 import base64
 import json
+import hashlib
+import lzma
 import re
 from pathlib import Path
 import runpy
 import unittest
+import tempfile
+from unittest.mock import patch
 
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
@@ -40,6 +44,11 @@ class MetadataDiagnosticReferenceTest(unittest.TestCase):
         self.assertNotRegex(RECORD["toolchain"]["includeSearch"], r"^-nostdinc")
         self.assertIn("no metadata case passes -nostdinc", RECORD["toolchain"]["includeSearch"])
 
+    def test_metadata_runtime_inventory_does_not_claim_image_execution_owners(self) -> None:
+        for field in ("driver", "frontend", "target", "resourceIncludeDirectory"):
+            self.assertNotIn(field, RECORD["toolchain"])
+        self.assertIn("metadata executable owners", RECORD["toolchain"]["scope"])
+
     def test_driver_only_cases_agree_with_the_authenticated_corpus(self) -> None:
         cases = {tuple(case["arguments"]): case for case in RECORD["cases"]}
         compared = []
@@ -72,16 +81,63 @@ class MetadataDiagnosticReferenceTest(unittest.TestCase):
             if configuration & set(case["categories"]):
                 self.assertEqual(case["driver"], "oracle", case["id"])
 
-    def test_image_cases_carry_no_image_configuration(self) -> None:
-        image = [case for case in RECORD["cases"] if case["driver"] == "image"]
-        self.assertEqual(
-            {case["id"] for case in image},
-            {"missing-input-file", "option-invalid-frontend-value", "malformed-source", "malformed-link-input"},
-        )
-        for case in image:
-            for name, data in streams(case):
-                for identity in (RECORD["toolchain"]["target"], "/usr/local", "gcc:"):
-                    self.assertNotIn(identity.encode(), data, f"{case['id']} {name}")
+    def test_every_metadata_case_executes_the_authenticated_driver(self) -> None:
+        self.assertTrue(all(case["driver"] == "oracle" for case in RECORD["cases"]))
+        expected_frontend = {"missing-input-file", "option-invalid-frontend-value", "malformed-source"}
+        self.assertEqual({case["id"] for case in RECORD["cases"] if case.get("frontend")}, expected_frontend)
+        for spec in CAPTURE["METADATA_CASES"]:
+            self.assertEqual(spec["driver"], "oracle")
+            self.assertEqual(spec["frontend"], spec["id"] in expected_frontend)
+
+    def test_frontend_and_link_support_are_bound_to_recorded_identity(self) -> None:
+        frontend = RECORD["oracleFrontend"]
+        manifest = json.loads((ORACLE / "cc1-oracle-manifest.json").read_text())
+        driver = json.loads((ORACLE / "oracle-manifest.json").read_text())
+        self.assertEqual(frontend["source"], driver["oracle"])
+        self.assertEqual(frontend["sourceLock"], driver["inputs"]["sourceLock"])
+        self.assertEqual(frontend["sha256"], manifest["artifacts"]["stripped"]["sha256"])
+        self.assertEqual(frontend["bytes"], manifest["artifacts"]["stripped"]["bytes"])
+        link_case = next(case for case in RECORD["cases"] if case["id"] == "malformed-link-input")
+        self.assertEqual(link_case["environment"], {**CAPTURE["ENVIRONMENT"], **RECORD["linkSupport"]["environment"]})
+        self.assertEqual({tool["role"] for tool in RECORD["linkSupport"]["tools"]}, {"collect2", "ld"})
+        self.assertEqual(RECORD["linkSupport"]["imageConfig"], CAPTURE["IMAGE_CONFIG"])
+
+    def test_frontend_archive_is_verified_before_extraction_is_published(self) -> None:
+        prepare = CAPTURE["prepare_oracle_frontend"]
+        with tempfile.TemporaryDirectory() as directory:
+            scratch = Path(directory)
+            identity = prepare(scratch)
+            artifact = scratch / "oracle-cc1"
+            self.assertEqual(hashlib.sha256(artifact.read_bytes()).hexdigest(), identity["sha256"])
+            self.assertEqual(artifact.stat().st_mode & 0o777, 0o555)
+        compressed = CAPTURE["ORACLE_FRONTEND_ARCHIVE"].read_bytes()
+        invalid_archives = {
+            "wrong-content": lzma.compress(b"not the authenticated frontend"),
+            "trailing-bytes": compressed + b"unbound trailing data",
+            "truncated": compressed[:-8],
+            "oversize-output": lzma.compress(bytes(RECORD["oracleFrontend"]["bytes"] + 1)),
+        }
+        for name, data in invalid_archives.items():
+            with self.subTest(name=name), tempfile.TemporaryDirectory() as directory:
+                scratch = Path(directory)
+                archive = scratch / "bad.xz"
+                archive.write_bytes(data)
+                with self.assertRaises(SystemExit):
+                    prepare(scratch, archive)
+                self.assertFalse((scratch / "oracle-cc1").exists())
+
+    def test_frontend_rejects_an_unbound_source_revision(self) -> None:
+        prepare = CAPTURE["prepare_oracle_frontend"]
+        manifest = json.loads(CAPTURE["ORACLE_FRONTEND_MANIFEST"].read_text())
+        manifest["oracle"]["sourceRevision"] = "0" * 40
+        with tempfile.TemporaryDirectory() as directory:
+            scratch = Path(directory)
+            changed = scratch / "manifest.json"
+            changed.write_text(json.dumps(manifest))
+            with patch.dict(prepare.__globals__, {"ORACLE_FRONTEND_MANIFEST": changed}):
+                with self.assertRaisesRegex(SystemExit, "source identities differ"):
+                    prepare(scratch)
+            self.assertFalse((scratch / "oracle-cc1").exists())
 
     def test_record_substitutions_match_capture_script(self) -> None:
         self.assertEqual(RECORD["identitySubstitutions"], CAPTURE["IDENTITY_SUBSTITUTIONS"])
