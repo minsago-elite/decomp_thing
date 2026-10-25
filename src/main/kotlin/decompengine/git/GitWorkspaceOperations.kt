@@ -102,9 +102,10 @@ internal object GitWorkspaceMutations {
     }
 
     /** Map reviewed file identities to the current status entries, refusing anything not selectable. */
-    fun select(record: GitRepositoryRecord, observation: GitWorkspaceObservation, fileIds: List<String>, stage: Boolean): List<GitStatusEntry> {
+    fun select(record: GitRepositoryRecord, observation: GitWorkspaceObservation, fileIds: List<String>, stage: Boolean,
+        worktreeId: String = record.worktreeId): List<GitStatusEntry> {
         if (!observation.status.complete) refuse("STATUS_INCOMPLETE", "The status is too large to review completely; selection is unavailable.")
-        val byId = observation.status.entries.associateBy { it.path.fileId(record.worktreeId) }
+        val byId = observation.status.entries.associateBy { it.path.fileId(worktreeId) }
         return fileIds.map { id ->
             val entry = byId[id] ?: refuse("SELECTION_CHANGED", "A selected file is no longer in the current status.")
             if (entry.ignored) refuse("EXCLUDED_PATH", "A selected file is excluded by the source-only tracking policy and cannot be staged.")
@@ -135,11 +136,12 @@ internal object GitWorkspaceMutations {
     }
 
     /** The reviewed selection must be exactly today's staged set: nothing swept in, nothing left out. */
-    fun requireStagedSet(record: GitRepositoryRecord, observation: GitWorkspaceObservation, fileIds: List<String>) {
+    fun requireStagedSet(record: GitRepositoryRecord, observation: GitWorkspaceObservation, fileIds: List<String>,
+        worktreeId: String = record.worktreeId) {
         // A truncated status can hide staged files beyond its bound; never commit an unreviewable index.
         if (!observation.status.complete) refuse("STATUS_INCOMPLETE", "The status is too large to review completely; the staged set cannot be confirmed.")
         if (observation.status.entries.any { it.conflict != null }) refuse("CONFLICTED", "Resolve conflicted files before committing.")
-        val staged = observation.status.entries.filter { it.staged != GitIndexChange.NONE }.map { it.path.fileId(record.worktreeId) }.toSet()
+        val staged = observation.status.entries.filter { it.staged != GitIndexChange.NONE }.map { it.path.fileId(worktreeId) }.toSet()
         if (staged.isEmpty()) refuse("NOTHING_TO_COMMIT", "No changes are staged.")
         if (staged != fileIds.toSet()) refuse("INDEX_CHANGED", "The staged files differ from the reviewed selection. Review the staged diff again.")
     }

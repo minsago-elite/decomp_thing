@@ -3,6 +3,8 @@ package decompengine.web
 import com.sun.net.httpserver.HttpExchange
 import decompengine.git.GitCommitRequest
 import decompengine.git.GitGuards
+import decompengine.git.GitOperationAction
+import decompengine.git.GitRefRequest
 import decompengine.git.GitRepositoryRequest
 import decompengine.git.GitStageRequest
 import decompengine.git.ManagedGitException
@@ -74,11 +76,34 @@ internal class WebGitOperations(private val repositories: () -> ManagedGitReposi
         val expected = when (action) {
             "git.stage", "git.unstage" -> setOf("action", "worktreeId", "guards", "selectedFileIds")
             "git.commit" -> setOf("action", "worktreeId", "guards", "selectedFileIds", "message")
+            "git.branch.create" -> setOf("action", "worktreeId", "guards", "name", "startObjectId")
+            "git.switch" -> setOf("action", "worktreeId", "guards", "refId", "objectId")
+            "git.branch.delete" -> setOf("action", "worktreeId", "guards", "refId", "expectedObjectId")
+            "git.tag" -> setOf("action", "worktreeId", "guards", "name", "targetObjectId")
+            "git.worktree.add" -> setOf("action", "worktreeId", "guards", "startObjectId", "branchName", "runId")
+            "git.worktree.remove" -> setOf("action", "worktreeId", "guards")
             else -> invalid()
         }
         if (body.keys != expected) invalid()
         val worktreeId = id(body["worktreeId"])
         val guards = guards(body["guards"])
+        GitOperationAction.entries.singleOrNull { it.wireName == action && it in GitRefRequest.ACTIONS }?.let { kind ->
+            fun nullableId(key: String) = body[key].let { if (it == JsonNull) null else id(it) }
+            fun name(key: String) = body[key].let { if (it == JsonNull) null else text(it).takeIf { name -> name.length in 1..200 } ?: invalid() }
+            val request = when (kind) {
+                GitOperationAction.BRANCH_CREATE -> GitRefRequest(kind, worktreeId, guards, name = name("name") ?: invalid(),
+                    objectId = objectId(body["startObjectId"]) ?: invalid())
+                GitOperationAction.SWITCH -> GitRefRequest(kind, worktreeId, guards, refId = nullableId("refId"), objectId = objectId(body["objectId"]))
+                GitOperationAction.BRANCH_DELETE -> GitRefRequest(kind, worktreeId, guards, refId = nullableId("refId") ?: invalid(),
+                    objectId = objectId(body["expectedObjectId"]) ?: invalid())
+                GitOperationAction.TAG -> GitRefRequest(kind, worktreeId, guards, name = name("name") ?: invalid(),
+                    objectId = objectId(body["targetObjectId"]) ?: invalid())
+                GitOperationAction.WORKTREE_ADD -> GitRefRequest(kind, worktreeId, guards, name = name("branchName"),
+                    objectId = objectId(body["startObjectId"]) ?: invalid(), runId = nullableId("runId"))
+                else -> GitRefRequest(kind, worktreeId, guards)
+            }
+            return request to guards
+        }
         val files = (body["selectedFileIds"] as? JsonArray)?.map { element ->
             text(element).takeIf { it.matches(Regex("file_[0-9a-f]{32}")) } ?: invalid()
         }?.takeIf { it.size in 1..200 && it.toSet().size == it.size } ?: invalid()
@@ -86,6 +111,9 @@ internal class WebGitOperations(private val repositories: () -> ManagedGitReposi
             else GitStageRequest(worktreeId, guards, files, action == "git.stage")
         return request to guards
     }
+
+    private fun objectId(element: JsonElement?): String? = if (element == JsonNull) null
+        else text(element).takeIf { it.matches(Regex("[0-9a-f]{40}|[0-9a-f]{64}")) } ?: invalid()
 
     private fun guards(value: JsonElement?): GitGuards {
         val guards = value as? JsonObject ?: invalid()
@@ -100,7 +128,7 @@ internal class WebGitOperations(private val repositories: () -> ManagedGitReposi
     private fun id(value: JsonElement?): String = text(value).takeIf { it.matches(Regex("[A-Za-z0-9][A-Za-z0-9_-]{0,127}")) } ?: invalid()
     private fun tooLarge(): Nothing = throw WebAccessDenied(413, "BODY_TOO_LARGE", "The repository change exceeds its 64 KiB limit.")
     private fun invalid(): Nothing = throw WebAccessDenied(422, "VALIDATION_FAILED",
-        "The repository change must contain only a declared action, its work tree, full guards, selected file identities and, for a commit, a message.")
+        "The repository change must contain only a declared action, its work tree, full guards and that action's declared fields.")
 
     private companion object { const val MAX_BODY = 64 * 1024 }
 }

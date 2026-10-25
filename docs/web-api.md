@@ -172,11 +172,13 @@ internal storage optimization and must not merge identity, permissions or histor
 | `GET`/`HEAD J/artifacts/{artifactId}/content` | `200` or `206` bytes | Immutable digest binding, contained stream; #164/#192 |
 | `POST V/archive-verifications` | `202 operation` | Explicit bounded integrity verification, no binary execution; #193 |
 | `GET J/repositories` | `200 gitRepositories` | Capability-gated repository summary and latest 20 operations; implemented by #201 |
-| `GET G`, `GET G/worktrees/{worktreeId}` | `200 gitWorkspace` | Capability-gated repository/worktree registry; `GET G` implemented by #201, worktrees #202 |
+| `GET G`, `GET G/worktrees/{worktreeId}` | `200 gitWorkspace` | Capability-gated repository/worktree registry; implemented by #201 and #204 |
 | `GET G/{status,history,diff,refs}` | `200 gitStatus`, `gitHistory`, `gitDiff`, `gitRefs` | Bounded, anchored pages; full object IDs; opaque file IDs; implemented by #202 |
-| `GET G/{worktrees,remotes,conflicts}` | Bounded typed Git read | Scoped worktree/ref/object IDs; #204/#207/#210/#211 |
+| `GET G/worktrees` | `200 gitWorktrees` | Primary and linked work trees with owner and HEAD; implemented by #204 |
+| `GET G/provenance/{objectId}`, `GET G/exports/{objectId}` | `200 gitProvenance`, `200 application/zip` | Exact-object provenance envelope and deterministic tree export; implemented by #205 |
+| `GET G/{remotes,conflicts}` | Bounded typed Git read | Scoped worktree/ref/object IDs; #207/#210/#211 |
 | `POST J/repositories` | `202 operation` | Strict `gitRepositoryInit`/`gitRepositoryAttach`, session/Origin/CSRF, job If-Match and idempotency; init/attach implemented by #201, clone #209 |
-| `POST G/operations` | `202 operation` | Named action, selected file IDs, full guards, work-tree If-Match, idempotency; stage/unstage/commit implemented by #203, others #204–#212 |
+| `POST G/operations` | `202 operation` | Named action, selected file IDs, full guards, work-tree If-Match, idempotency; stage/unstage/commit by #203, branch/switch/worktree by #204, tag by #205, others #207–#212 |
 | `GET G/operations/{operationId}` | `200 operation` | Durable outcome/recovery state; init/attach operations implemented by #201, others #209 |
 | `POST G/operations/{operationId}/cancel` | `202 operation` or terminal `200` | Explicit cancellation, optimistic guard; #209 |
 
@@ -820,6 +822,79 @@ hold for a dirty work tree or for unmapped commits is left as a follow-up once i
 
 `WebGitControllerTest` covers the HTTP guards, `If-Match` binding, strict bodies and the mapping
 shown on the workspace and in history.
+
+### Branches, linked work trees, tags and source exports
+
+`POST G/operations` also accepts the actions below (#578, #579, #581). Each carries the reviewed
+`guards` of its target work tree and the same `If-Match`, idempotency and two-phase recheck as
+staging and committing.
+
+| Action | Body fields | Effect and refusals |
+| --- | --- | --- |
+| `git.branch.create` | `name`, `startObjectId` | `update-ref refs/heads/<name> <id> ""` creates the branch only if absent (`409 BRANCH_EXISTS`); nothing is checked out |
+| `git.switch` | `refId` or `objectId` (exactly one) | `switch --no-guess --no-recurse-submodules` (or `--detach`). Refused with `409 WORKTREE_DIRTY` for staged or unstaged changes, `CONFLICTED`, or `ACTIVE_RUN` while a lease is held. Nothing is stashed or discarded, and untracked files are kept. Git's own refusal is `SWITCH_REFUSED`. The target tree must fit the checkout bound. |
+| `git.branch.delete` | `refId`, `expectedObjectId` | `update-ref -d` with the expected tip. Refused with `BRANCH_CURRENT` when any work tree has it checked out, `REF_CHANGED` when it moved, or `BRANCH_UNMERGED` (with a count) when commits are reachable only from it. Never forced. |
+| `git.tag` | `name`, `targetObjectId` | A lightweight tag with no timestamps, created only if absent (`409 TAG_EXISTS`); existing tags are never overwritten |
+| `git.worktree.add` | `startObjectId`, `branchName` or null, `runId` or null | `git worktree add` under the repository's private `worktrees/<worktreeId>`. At most four linked work trees, a checkout-size bound, and an optional owning attempt that must belong to the job. The new identity is the operation's `worktreeId`. |
+| `git.worktree.remove` | none | Removes a linked work tree. Refused with `WORKTREE_PRIMARY`, `ACTIVE_RUN` while its owner runs, `WORKTREE_DIRTY` for any uncommitted or untracked file, or `WORKTREE_UNMERGED` for detached commits that no branch or tag reaches. Uses `git worktree remove` without `--force`. |
+
+Leases: the primary work tree is leased to every active workflow attempt of the job, and a linked
+work tree to the attempt that owns it. While a lease is held, switch and removal answer `409
+ACTIVE_RUN`, so checkout never replaces files under a running worker. At most one Git operation
+runs per job, on a single executor.
+
+`GET G/worktrees` (`gitWorktrees`) lists the primary and linked work trees with HEAD, dirty state,
+version and owner. `GET G/worktrees/{worktreeId}` returns that work tree's `gitWorkspace`.
+`G/status`, `G/history` and `G/diff` accept `worktree=<id>`, and every mutation names its target
+`worktreeId`. Each linked work tree has its own index and guards. Its administrative directory is
+audited: it must point back to the common repository and carry no configuration, hooks or info
+files of its own.
+
+Restart reconciliation compares each intent with the actual refs and never repeats it:
+
+- A branch or tag that exists at the requested object is `completed`; an absent one is
+  `interrupted`; one at a different object is `recovery-required` (`REF_CONFLICT`).
+- A delete is `completed` when the ref is gone and `interrupted` otherwise.
+- A switch is `completed` when HEAD is at the target and `interrupted` when HEAD is still at the
+  reviewed state. Otherwise it is `recovery-required`, with the HEAD state named. A HEAD left on a
+  branch that no longer exists is reported as `REF_DELETED` (unborn).
+- A work-tree creation without its registration is removed again and becomes `interrupted`.
+- A removal whose directory is gone is `completed`.
+
+Reconciliation never touches recorded source snapshots.
+
+`GET G/provenance/{objectId}` (`gitProvenance`) is the envelope for one exact commit. It carries
+the object format, commit time and subject, the recorded revision mapping (with `acceptance`
+derived at read time) and `worktreeDirtyAtCommit`. `refNames` lists the branches and tags that
+currently name the commit, as display labels only. It also describes the deterministic export:
+digest, size, file count, skipped non-file entries and its verification. Moving a branch or tag
+changes only `refNames`; the object ID, mapping and export digest stay the same.
+
+`GET G/exports/{objectId}` (`application/zip`) returns the deterministic source export of that
+commit's tree (#582). It contains only the tree's regular files, in unsigned byte order of their
+paths. Entries are stored uncompressed with a fixed 1980-01-01 DOS timestamp and no extra fields,
+and there is no `.git`, reflog, configuration, commit message, author or timestamp. Equal trees
+therefore export identical bytes whatever their commit metadata or work-tree state. Submodule
+links and symbolic links are omitted and counted in `skippedEntries`. File modes are not
+represented. The provenance envelope travels separately and is never inside the payload.
+
+`GitSourceExports.verify` checks an export independently. It recomputes every entry's Git blob ID
+from the archive bytes and compares the set with the commit tree; it needs no remote and trusts no
+ref name. The reconstruction pipeline's own deterministic `source-tree.zip` is unchanged: it is
+still built from recorded snapshots, and its packager still refuses any `.git` path. A Git
+repository is never an input to it.
+
+`GitBranchesWorktreesTest` covers:
+- branch creation, refusals and dirty and leased switches, with untracked files kept;
+- current-branch, moved-branch and unmerged deletes, and tag non-overwrite;
+- linked work-tree containment, ownership, independent staging and committing, and every removal
+  refusal and the quota;
+- restart reconciliation, including a deleted branch left as an unborn HEAD and a half-created
+  work tree that is cleaned up;
+- byte-identical exports across commit metadata and dirty work, `.git` exclusion, fixed
+  timestamps, tamper detection, and identity unchanged by moved refs.
+
+`WebGitControllerTest` covers the HTTP endpoints and the downloaded export digest.
 
 ## Legacy compatibility
 

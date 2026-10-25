@@ -43,6 +43,20 @@ object GitConfigurationAudit {
         }
     }
 
+    /**
+     * A linked work tree shares the audited common repository; its private administrative
+     * directory must point back at it and may not carry its own configuration.
+     */
+    fun requireManagedWorktree(runner: GitCommandRunner, commonDir: Path, linkedDir: Path) {
+        requireManaged(runner, commonDir)
+        val commondir = linkedDir.resolve("commondir")
+        val valid = linkedDir.parent == commonDir.resolve("worktrees") && Files.isDirectory(linkedDir, NOFOLLOW_LINKS) &&
+            Files.isRegularFile(commondir, NOFOLLOW_LINKS) && Files.size(commondir) <= 64 &&
+            Files.readString(commondir).trim() == "../.." &&
+            listOf("config", "config.worktree", "hooks", "info").none { Files.exists(linkedDir.resolve(it), NOFOLLOW_LINKS) }
+        if (!valid) throw GitRepositoryException("REPOSITORY_CONFIG_UNTRUSTED", "The linked work tree is not owned by its managed repository.")
+    }
+
     fun requireManaged(runner: GitCommandRunner, gitDir: Path) {
         val entries = read(runner, gitDir.resolve("config"))
         val values = entries.groupBy({ it.first }, { it.second })
@@ -158,8 +172,9 @@ object GitRepositoryInspector {
     }
 
     /** Status never fetches, refreshes optional locks, descends into submodules or runs hooks. */
-    fun inspect(runner: GitCommandRunner, gitDir: Path, workTree: Path): GitWorkspaceObservation {
-        GitConfigurationAudit.requireManaged(runner, gitDir)
+    fun inspect(runner: GitCommandRunner, gitDir: Path, workTree: Path, commonDir: Path = gitDir): GitWorkspaceObservation {
+        if (commonDir == gitDir) GitConfigurationAudit.requireManaged(runner, gitDir)
+        else GitConfigurationAudit.requireManagedWorktree(runner, commonDir, gitDir)
         try {
             val format = objectFormat(runner, gitDir)
             if (format == GitObjectFormat.UNKNOWN) throw GitRepositoryException("REPOSITORY_UNSUPPORTED", "The repository object format is not supported.")

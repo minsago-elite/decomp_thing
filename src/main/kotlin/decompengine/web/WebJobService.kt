@@ -745,6 +745,12 @@ class WebJobService(
             is WorkflowJobInspection.Unavailable -> "unknown" to null
         }
 
+    /** Every attempt of a job and whether it is still active, for Git work-tree leases. */
+    internal fun gitRunActivity(jobId: String): Map<String, Boolean> = when (val inspected = inspectDurableJob(jobId)) {
+        is WorkflowJobInspection.Available -> inspected.snapshot.attempts.associate { it.runId to !it.state.terminal }
+        is WorkflowJobInspection.Unavailable -> emptyMap()
+    }
+
     /** Shared fixed-path journal read for both HTTP adapters; absence is not empty history. */
     @Synchronized
     internal fun readProgressJournal(jobId: String, runId: String? = null): ByteArray {
