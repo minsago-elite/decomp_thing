@@ -161,15 +161,37 @@ class GitReadsTest {
         f.raw(gitDir, workTree, "add", "-A")
         val complete = GitReads.diff(f.runner, gitDir, workTree, GitObjectFormat.SHA1, GitDiffScope.STAGED, null, null)
         assertTrue(complete.complete); assertEquals(60, complete.files.size)
-        for (bound in listOf(1500, 1537, 2000, 4097)) {
+        // Every cut point, through raw headers, paths and numstat counts alike, yields a clean prefix.
+        for (bound in (300..6000 step 23)) {
             val cut = GitReads.diff(f.runner, gitDir, workTree, GitObjectFormat.SHA1, GitDiffScope.STAGED, null, null, maxOutputBytes = bound)
-            assertFalse(cut.complete, "bound $bound"); assertTrue(cut.files.size in 1..59, "bound $bound")
+            assertFalse(cut.complete, "bound $bound"); assertTrue(cut.files.size in 0..59, "bound $bound")
             assertEquals(complete.files.take(cut.files.size).map { it.path }, cut.files.map { it.path })
         }
         val unreadable = complete.files.first().copy(path = GitPath.of(byteArrayOf('a'.code.toByte(), 0xff.toByte())))
         assertEquals("PATCH_UNAVAILABLE", kotlin.test.assertFailsWith<ManagedGitException> {
             GitReads.patch(f.runner, gitDir, workTree, GitDiffScope.STAGED, null, null, unreadable)
         }.code)
+    }
+
+    @Test fun `a selected patch holds only its exact record and modes are part of the version`(): Unit = GitTestRepositories().use { f ->
+        val (gitDir, workTree) = f.managed("exact")
+        f.write(workTree, "old.c", (1..20).joinToString("") { "int line_$it = $it;\n" })
+        f.write(workTree, "tool.sh", "echo hi\n")
+        f.commitAll(gitDir, workTree, "base")
+        f.raw(gitDir, workTree, "mv", "old.c", "new.c")
+        f.write(workTree, "old.c/other.c", "int unrelated_secret_change;\n")
+        f.raw(gitDir, workTree, "add", "--", "old.c/other.c")
+        val staged = GitReads.diff(f.runner, gitDir, workTree, GitObjectFormat.SHA1, GitDiffScope.STAGED, null, null)
+        val renamed = staged.files.single { it.change == GitIndexChange.RENAMED }
+        val patch = GitReads.patch(f.runner, gitDir, workTree, GitDiffScope.STAGED, null, null, renamed)
+        assertTrue(patch.text.contains("rename to new.c"), patch.text)
+        assertFalse(patch.text.contains("unrelated_secret_change"), patch.text)
+        // A mode-only index change on a file with other staged and unstaged edits changes the version.
+        f.write(workTree, "tool.sh", "echo staged\n"); f.raw(gitDir, workTree, "add", "--", "tool.sh")
+        f.write(workTree, "tool.sh", "echo unstaged\n")
+        val before = GitRepositoryInspector.inspect(f.runner, gitDir, workTree).statusDigest
+        f.raw(gitDir, workTree, "update-index", "--chmod=+x", "--", "tool.sh")
+        assertNotEquals(before, GitRepositoryInspector.inspect(f.runner, gitDir, workTree).statusDigest)
     }
 
     @Test fun `staged diff works on an unborn branch`(): Unit = GitTestRepositories().use { f ->

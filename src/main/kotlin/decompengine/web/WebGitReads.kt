@@ -51,8 +51,14 @@ internal class WebGitReads(private val repositories: () -> ManagedGitRepositorie
         val busy = service.busy(jobId)
         val workspace = webGitWorkspace(view)
         val version = (workspace.getValue("worktreeVersion") as JsonPrimitive).content
-        val offset = anchoredOffset(cursor, version)
         val entries = view.observation.status.entries
+        // The version ignores ignored-file noise, but pages list ignored entries too: anchor pages to
+        // the version plus every listed path and state, so any change to the listing ends the walk.
+        val anchor = "status_v_" + decompengine.git.GitStorage.sha256(buildString {
+            append(version).append('\n')
+            entries.forEach { append(it.path.fileId(view.record.worktreeId)).append(it.ignored).append(it.untracked).append(it.staged).append(it.unstaged).append('\n') }
+        }).take(32)
+        val offset = anchoredOffset(cursor, anchor)
         val counts = buildJsonObject {
             put("staged", entries.count { it.staged != decompengine.git.GitIndexChange.NONE })
             put("unstaged", entries.count { it.unstaged != decompengine.git.GitIndexChange.NONE })
@@ -80,7 +86,7 @@ internal class WebGitReads(private val repositories: () -> ManagedGitRepositorie
             put("counts", counts)
             put("notices", JsonArray(notices.map { (code, message) -> buildJsonObject { put("code", code); put("message", message) } }))
             put("entries", JsonArray(page))
-            put("nextCursor", next?.let { JsonPrimitive("$version~${offset + it}") } ?: JsonNull)
+            put("nextCursor", next?.let { JsonPrimitive("$anchor~${offset + it}") } ?: JsonNull)
         }
     }
 

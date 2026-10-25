@@ -230,6 +230,10 @@ class WebGitControllerTest {
             val statusCursor = data(f.read("$base/status?limit=1"), 200, "gitStatus").getValue("nextCursor")
             Files.writeString(workTree.resolve("src/extra.c"), "int extra;\n")
             error(f.read("$base/status?cursor=${statusCursor!!.jsonPrimitive.content}"), 409, "REF_CHANGED")
+            // Ignored files never change the work-tree version, but they do end a status page walk.
+            val ignoredCursor = data(f.read("$base/status?limit=1"), 200, "gitStatus").getValue("nextCursor").jsonPrimitive.content
+            Files.writeString(workTree.resolve("aaa.log"), "noise\n")
+            error(f.read("$base/status?cursor=$ignoredCursor"), 409, "REF_CHANGED")
             error(f.read("$base/history?start=${head.take(12)}"), 422, "VALIDATION_FAILED")
             error(f.read("$base/history?start=$head&cursor=$cursor"), 400, "INVALID_CURSOR")
             error(f.read("$base/history?start=${"0".repeat(40)}"), 404, "NOT_FOUND")

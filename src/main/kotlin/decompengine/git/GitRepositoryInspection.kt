@@ -171,7 +171,7 @@ object GitRepositoryInspector {
                 update("git-workspace-status-v2\n${head.state.wireName}\n${head.refName ?: ""}\n${head.objectId ?: ""}\n${status.complete}\n".toByteArray())
                 for (entry in relevant) {
                     update(entry.path.bytes); update(0)
-                    update("${entry.originalPath?.display ?: ""}\u0000${entry.staged}\u0000${entry.unstaged}\u0000${entry.untracked}\u0000${entry.conflict}\u0000${entry.indexObjectId ?: ""}\u0000".toByteArray())
+                    update("${entry.originalPath?.display ?: ""}\u0000${entry.staged}\u0000${entry.unstaged}\u0000${entry.untracked}\u0000${entry.conflict}\u0000${entry.indexObjectId ?: ""}\u0000${entry.indexMode ?: ""}\u0000${entry.worktreeMode ?: ""}\u0000".toByteArray())
                     // Re-editing an already modified file changes no status code; its size and time do.
                     val file = entry.path.exact?.let { runCatching { workTree.resolve(it) }.getOrNull() }
                     val stat = file?.let { runCatching { Files.readAttributes(it, java.nio.file.attribute.BasicFileAttributes::class.java, NOFOLLOW_LINKS) }.getOrNull() }

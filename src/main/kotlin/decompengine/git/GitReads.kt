@@ -81,6 +81,9 @@ data class GitStatusEntry(
     val submodule: Boolean,
     /** Index blob for tracked entries, so re-staging different content is observable. */
     val indexObjectId: String? = null,
+    /** Index and work-tree file modes, so a mode-only change is observable too. */
+    val indexMode: String? = null,
+    val worktreeMode: String? = null,
 )
 
 data class GitStatusSnapshot(val entries: List<GitStatusEntry>, val complete: Boolean)
@@ -171,12 +174,12 @@ object GitReads {
             when (record[0].toInt().toChar()) {
                 '1' -> {
                     val (values, path) = fields(record, 9)
-                    entries += ordinary(values[1], values[2], GitPath.of(path), null, values[7])
+                    entries += ordinary(values[1], values[2], GitPath.of(path), null, values[7], values[4], values[5])
                 }
                 '2' -> {
                     val (values, path) = fields(record, 10)
                     if (index >= records.size) break
-                    entries += ordinary(values[1], values[2], GitPath.of(path), GitPath.of(records[index++]), values[7])
+                    entries += ordinary(values[1], values[2], GitPath.of(path), GitPath.of(records[index++]), values[7], values[4], values[5])
                 }
                 'u' -> {
                     val (values, path) = fields(record, 11)
@@ -194,10 +197,11 @@ object GitReads {
         return GitStatusSnapshot(entries, !result.stdoutTruncated)
     }
 
-    private fun ordinary(code: String, submodule: String, path: GitPath, original: GitPath?, index: String): GitStatusEntry {
+    private fun ordinary(code: String, submodule: String, path: GitPath, original: GitPath?, index: String,
+        indexMode: String, worktreeMode: String): GitStatusEntry {
         if (code.length != 2) throw GitRepositoryException("REPOSITORY_CORRUPT", "Git status output is malformed.")
         return GitStatusEntry(path, original, GitIndexChange.of(code[0]), GitIndexChange.of(code[1]), false, false, null,
-            submodule != "N...", index.takeIf { it.isNotEmpty() && it.any { char -> char != '0' } })
+            submodule != "N...", index.takeIf { it.isNotEmpty() && it.any { char -> char != '0' } }, indexMode, worktreeMode)
     }
 
     /** First-page start is fixed by the caller, so moving refs cannot shift later pages. */
@@ -245,12 +249,15 @@ object GitReads {
         val counts = HashMap<GitPath, Pair<Long?, Long?>>()
         run {
             val records = records(numstat.stdout)
+            // A truncated final record may hold only part of its counts or path; drop it.
+            if (numstat.stdoutTruncated && records.isNotEmpty()) records.removeAt(records.lastIndex)
             var index = 0
             while (index < records.size) {
                 val record = records[index++]
                 if (record.isEmpty()) continue
                 val text = String(record, Charsets.ISO_8859_1)
                 val added = text.substringBefore('\t'); val deleted = text.substringAfter('\t').substringBefore('\t')
+                if (text.count { it == '\t' } < 2) break
                 val pathBytes = record.copyOfRange(added.length + deleted.length + 2, record.size)
                 // A rename or copy has an empty path field followed by its original and new paths.
                 val path = if (pathBytes.isEmpty()) {
@@ -320,10 +327,28 @@ object GitReads {
             "This file name is not valid UTF-8, so its patch cannot be read through the workbench. Its listing entry stays exact.")
         val paths = listOfNotNull(file.originalPath?.exact, path)
         val (command, selection) = comparison(scope, commit, parent)
-        val result = runner.run(GitInvocation(command, selection + DIFF_OPTIONS + listOf("-p", "-U3", "--") + paths,
+        // Path filters are not record selectors (a path can now be a directory with other changes),
+        // so the patch is read with full blob IDs and only the section for this exact record is kept.
+        val result = runner.run(GitInvocation(command, selection + DIFF_OPTIONS + listOf("-p", "-U3", "--full-index", "--") + paths,
             gitDir = gitDir, workTree = if (scope == GitDiffScope.COMMIT) null else workTree, truncateStdout = true,
-            limits = LIMITS.copy(maxStdoutBytes = MAX_PATCH_BYTES)))
-        return GitPatch(result.stdout.toString(Charsets.UTF_8), result.stdoutTruncated, binary = false)
+            limits = LIMITS.copy(maxStdoutBytes = MAX_PATCH_BYTES * 4)))
+        val text = result.stdout.toString(Charsets.UTF_8)
+        val sections = Regex("(?m)^diff --git ").findAll(text).map { it.range.first }.toList().let { starts ->
+            starts.mapIndexed { index, start -> text.substring(start, starts.getOrElse(index + 1) { text.length }) }
+        }
+        val zero = "0".repeat(file.oldObjectId?.length ?: file.newObjectId?.length ?: 40)
+        val matching = sections.filter { section ->
+            val index = Regex("(?m)^index ([0-9a-f]+)\\.\\.([0-9a-f]+)").find(section) ?: return@filter false
+            index.groupValues[1] == (file.oldObjectId ?: zero) && (file.newObjectId == null || index.groupValues[2] == file.newObjectId)
+        }
+        // Pure renames and mode-only changes have no index line; identify them by their exact header.
+        val header = "diff --git a/${file.originalPath?.exact ?: path} b/$path\n"
+        val selected = matching.firstOrNull()
+            ?: sections.firstOrNull { it.startsWith(header) && !Regex("(?m)^index ").containsMatchIn(it) } ?: ""
+        val bytes = selected.toByteArray(Charsets.UTF_8)
+        val cut = bytes.size > MAX_PATCH_BYTES || (result.stdoutTruncated && selected === sections.lastOrNull())
+        return GitPatch(if (bytes.size > MAX_PATCH_BYTES) bytes.copyOf(MAX_PATCH_BYTES).toString(Charsets.UTF_8).trimEnd('\uFFFD') else selected,
+            cut, binary = false)
     }
 
     /** Branches and tags with peeled tag targets, at most [limit] after [skip]. */
