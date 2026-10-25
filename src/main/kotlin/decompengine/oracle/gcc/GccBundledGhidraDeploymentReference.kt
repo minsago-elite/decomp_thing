@@ -32,6 +32,7 @@ internal class GccBundledGhidraReference private constructor(
     val exporterBytes: Long,
     val exporterSha256: String,
     val nativeCallCollector: GccBundledNativeCallCollectorIdentityV1?,
+    val interfaceCollector: GccBundledInterfaceRuntimeIdentityV1?,
 ) {
     val entries: Map<String, GccBundledGhidraReferenceEntry> = Collections.unmodifiableMap(LinkedHashMap(entries))
     val classPath: List<String> = Collections.unmodifiableList(ArrayList(classPath))
@@ -64,6 +65,11 @@ internal class GccBundledGhidraReference private constructor(
         require(exporter.path.fileName.toString() == "ExportProgramModel.java" &&
             exporter.bytes == exporterBytes && exporter.sha256 == exporterSha256
         ) { "bundled candidate exporter differs from the independent application resource" }
+        if (runtime.invocationVersion == 9) {
+            require(interfaceCollector != null && runtime.interfaceCollector == interfaceCollector) {
+                "bundled interface collector differs from the independent deployment reference"
+            }
+        }
         if (runtime.invocationVersion == 8) {
             require(nativeCallCollector != null && runtime.nativeCallCollector == nativeCallCollector) {
                 "bundled native call collector differs from the independent deployment reference"
@@ -78,7 +84,8 @@ internal class GccBundledGhidraReference private constructor(
             root.exactFields(setOf(
                 "schemaVersion", "provider", "ghidraVersion", "ghidraRelease", "archive", "rootMode", "entries",
                 "classPath", "bridgePath", "exportGuardPath", "exporter", "closureSha256",
-            ) + if ("nativeCallCollector" in root) setOf("nativeCallCollector") else emptySet())
+            ) + (if ("nativeCallCollector" in root) setOf("nativeCallCollector") else emptySet()) +
+                (if ("interfaceCollector" in root) setOf("interfaceCollector") else emptySet()))
             require(root.number("schemaVersion") == 1L && root.string("provider") == REFERENCE_PROVIDER) {
                 "bundled Ghidra deployment reference version is invalid"
             }
@@ -153,6 +160,10 @@ internal class GccBundledGhidraReference private constructor(
                 GccBundledNativeCallCollectorIdentityV1(source.number("bytes"), source.string("sha256"),
                     checkNotNull(compiled.bytes), checkNotNull(compiled.sha256))
             } else null
+            val interfaces = if ("interfaceCollector" in root) GccBundledInterfaceRuntimeIdentityV1.parse(
+                root.objectValue("interfaceCollector")).also {
+                    it.requireReference(entries, exporter.number("bytes"), exporter.string("sha256"))
+                } else null
             val declaredClassPath = root.arrayValue("classPath").map { value ->
                 (value as? JsonPrimitive)?.takeIf { it.isString }?.content
                     ?: throw IllegalArgumentException("bundled Ghidra reference classpath must contain strings")
@@ -169,7 +180,7 @@ internal class GccBundledGhidraReference private constructor(
             require(digest == OracleArtifacts.sha256(OracleJson.canonicalBytes(JsonObject(root - "closureSha256"), REFERENCE_LIMITS))) {
                 "bundled Ghidra deployment reference commitment is invalid"
             }
-            return GccBundledGhidraReference(digest, entries, declaredClassPath, exporter.number("bytes"), exporter.string("sha256"), collector)
+            return GccBundledGhidraReference(digest, entries, declaredClassPath, exporter.number("bytes"), exporter.string("sha256"), collector, interfaces)
         }
     }
 }
@@ -270,6 +281,23 @@ internal class GccBundledGhidraDeploymentReference private constructor(
                     require(collector.size.toLong() == identity.sourceBytes && OracleArtifacts.sha256(collector) == identity.sourceSha256) {
                         "bundled native call collector reference differs from the loaded application resource"
                     }
+                }
+                parsed.interfaceCollector?.let { identity ->
+                    if (development) {
+                        for (source in identity.sources) {
+                            val resources = GccBundledGhidraDeploymentReference::class.java.classLoader
+                                .getResources(source.resourcePath.removePrefix("/")).asSequence().take(2).toList()
+                            require(resources.size == 1) { "interface source resource is missing or shadowed" }
+                            val content = resources.single().openStream().use { it.readNBytes(MAXIMUM_EXPORTER_BYTES + 1) }
+                            require(content.size.toLong() == source.bytes && OracleArtifacts.sha256(content) == source.sha256) {
+                                "interface source differs from its independent application resource"
+                            }
+                        }
+                    } else {
+                        JarFile(codeSource.toFile(), false).use(identity::requireApplicationSources)
+                        checkNotNull(applicationGuard).verifyUnchanged("after reading interface source resources")
+                    }
+                    identity.requireExecutedClasses(bundleRoot, parsed.classPath, parsed.entries)
                 }
                 return GccBundledGhidraDeploymentReference(parsed, bundleRoot, guard, captured, applicationGuard).also { it.verify("after opening") }
             } catch (failure: Throwable) {

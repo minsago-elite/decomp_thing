@@ -153,7 +153,7 @@ internal object GccBundledFullExportCapture {
         artifacts: List<GccCompilerEngineContainmentArtifactIdentity>,
         limits: GccResumeByteValidationLimits = GccResumeByteValidationLimits(),
         expectedDecompilerWorkers: Int = 1,
-    ): GccBundledFullExportSnapshot = captureExact(run, expectedReports, artifacts, limits, false, expectedDecompilerWorkers)
+    ): GccBundledFullExportSnapshot = captureExact(run, expectedReports, artifacts, limits, SiblingInventory.NONE, expectedDecompilerWorkers)
 
     /** Fixed native-operation sibling only; ordinary full exports retain their exact inventory. */
     internal fun captureWithNativeCallSibling(
@@ -162,14 +162,25 @@ internal object GccBundledFullExportCapture {
         artifacts: List<GccCompilerEngineContainmentArtifactIdentity>,
         limits: GccResumeByteValidationLimits = GccResumeByteValidationLimits(),
         checkpoint: () -> Unit = {},
-    ): GccBundledFullExportSnapshot = captureExact(run, expectedReports, artifacts, limits, true, 1, checkpoint)
+    ): GccBundledFullExportSnapshot = captureExact(run, expectedReports, artifacts, limits, SiblingInventory.NATIVE_CALLS, 1, checkpoint)
+
+    /** Fixed interface-operation pair only; no caller-selected sibling names are admitted. */
+    internal fun captureWithInterfaceSiblings(
+        run: LinuxDescriptor,
+        expectedReports: LinuxFileIdentity,
+        artifacts: List<GccCompilerEngineContainmentArtifactIdentity>,
+        limits: GccResumeByteValidationLimits = GccResumeByteValidationLimits(),
+        checkpoint: () -> Unit = {},
+    ): GccBundledFullExportSnapshot = captureExact(run, expectedReports, artifacts, limits, SiblingInventory.INTERFACES, 1, checkpoint)
+
+    private enum class SiblingInventory { NONE, NATIVE_CALLS, INTERFACES }
 
     private fun captureExact(
         run: LinuxDescriptor,
         expectedReports: LinuxFileIdentity,
         artifacts: List<GccCompilerEngineContainmentArtifactIdentity>,
         limits: GccResumeByteValidationLimits,
-        nativeCallSibling: Boolean,
+        siblings: SiblingInventory,
         expectedDecompilerWorkers: Int,
         checkpoint: () -> Unit = {},
     ): GccBundledFullExportSnapshot {
@@ -177,7 +188,7 @@ internal object GccBundledFullExportCapture {
         require(expectedDecompilerWorkers == 1 || expectedDecompilerWorkers == 4) {
             "GCC full export capture worker count is unsupported"
         }
-        require(!nativeCallSibling || expectedDecompilerWorkers == 1) { "native call capture requires its serial runtime" }
+        require(siblings == SiblingInventory.NONE || expectedDecompilerWorkers == 1) { "native sibling capture requires its serial runtime" }
         val byRole = artifacts.associateBy { it.role }
         require(byRole.size == artifacts.size) { "GCC full export capture contains duplicate invocation roles" }
         val expectedInput = byRole.getValue(GccCompilerEngineContainmentArtifactRole.ENGINE_BINARY).sha256
@@ -192,7 +203,11 @@ internal object GccBundledFullExportCapture {
             }
             val expectedReportNames = setOf(
                 "program_model.json.export", "program_model.json", "program_model.json.progress.json",
-            ) + if (nativeCallSibling) setOf("native-calls-v1") else emptySet()
+            ) + when (siblings) {
+                SiblingInventory.NONE -> emptySet()
+                SiblingInventory.NATIVE_CALLS -> setOf("native-calls-v1")
+                SiblingInventory.INTERFACES -> setOf("native-interfaces-v1", "native-inferred-interfaces-v1")
+            }
             require(LinuxFilesystemSyscalls.directoryEntryNames(reports, expectedReportNames.size + 1).toSet() ==
                 expectedReportNames
             ) { "GCC full export reports contain missing, extra or uncommitted entries" }

@@ -92,9 +92,9 @@ internal class GccBundledGhidraRetainedRuntime private constructor(
             var descriptor: LinuxDescriptor? = null
             var nativeProfile: GccRetainedCompilerEngineProfile? = null
             try {
-                if (runtime.invocationVersion == 8) {
-                    require(selectedEngineId in setOf("cc1", "driver")) {
-                        "native call runtime admission requires the selected cc1 or driver operation engine"
+                if (runtime.invocationVersion in setOf(8, 9)) {
+                    require(if (runtime.invocationVersion == 9) selectedEngineId == "driver" else selectedEngineId in setOf("cc1", "driver")) {
+                        "native observation runtime admission requires its independently selected operation engine"
                     }
                     val selectedBudget = requireNotNull(budgets) { "native call runtime admission requires independently bound resource ceilings" }
                     val path = artifacts.single { it.role == GccCompilerEngineContainmentArtifactRole.BENCHMARK_PROFILE }.path
@@ -102,7 +102,8 @@ internal class GccBundledGhidraRetainedRuntime private constructor(
                     nativeProfile = profile
                     profile.requireDisjoint(excludedRoots + runtime.root)
                     profile.bindInvocation(checkNotNull(selectedEngineId), artifacts, selectedBudget,
-                        bundledRuntime = runtime, nativeCallObservations = true)
+                        bundledRuntime = runtime, nativeCallObservations = runtime.invocationVersion == 8,
+                        nativeInterfaceObservations = runtime.invocationVersion == 9)
                 }
                 deployment.reference.requireCandidate(runtime, artifacts)
                 require(excludedRoots.none { runtime.root.startsWith(it) || it.startsWith(runtime.root) }) {
