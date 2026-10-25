@@ -27,5 +27,9 @@ done
 
 project_root="$(cd "$(dirname "$0")/.." && pwd -P)"
 export DECOMP_REQUIRE_GCC_ENGINE_CLI=true
-exec "$project_root/gradlew" --no-daemon -p "$project_root" test \
+export RUN_REAL_GHIDRA=true
+# Reuse the installDist build outputs so the expected BOOT classpath reference matches DECOMP_GCC_CLI_INSTALLATION;
+# see scripts/ci-qualify-gcc-cc1-full-export.sh for why the native helper builds are excluded.
+exec "$project_root/gradlew" --no-daemon -p "$project_root" test --rerun \
+  -x buildAnalysisIoHelper -x buildAcpGateHelper -x buildLlvmBehaviorHelper \
   --tests decompengine.oracle.gcc.GccBundledCliQualificationTest

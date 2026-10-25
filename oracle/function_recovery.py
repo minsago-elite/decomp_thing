@@ -16,6 +16,7 @@ from __future__ import annotations
 from array import array
 from dataclasses import dataclass
 from decimal import Decimal, InvalidOperation
+import hashlib
 import json
 import math
 import os
@@ -796,8 +797,14 @@ def load_program_model(
     twin: str,
     artifact: Artifact,
     model_image_base: int,
+    expected_sha256: str | None = None,
 ) -> RecoveredModel:
-    """Project schema-1/2 model functions into diagnostic boundary/name inputs."""
+    """Project schema-1/2 model functions into diagnostic boundary/name inputs.
+
+    When ``expected_sha256`` is supplied, the exact snapshot that is parsed
+    must hash to it, so a caller's digest binding cannot be raced by a file
+    replaced between hashing and parsing.
+    """
 
     if twin not in _TWIN_NAMES:
         raise ScoringError(f"unknown twin: {twin}")
@@ -809,6 +816,11 @@ def load_program_model(
     ):
         raise ScoringError(f"{twin} model image base must be an unsigned 64-bit integer")
     payload = _read_regular_snapshot(path, f"{twin} program model", MAX_JSON_INPUT_BYTES)
+    if (
+        expected_sha256 is not None
+        and hashlib.sha256(payload).hexdigest() != expected_sha256
+    ):
+        raise ScoringError(f"{twin} program model snapshot does not match its bound SHA-256")
     try:
         admit_program_model_bytes(payload)
     except (ValueError, UnicodeDecodeError) as error:

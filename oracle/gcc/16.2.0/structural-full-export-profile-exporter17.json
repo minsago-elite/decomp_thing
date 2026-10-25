@@ -1,0 +1,9 @@
+{
+  "compilerEngineProfileSha256": "f2d65184425a328df900b5fe47a8b09ea4d1bd36b258ca6cd7e25abaf9d7d4f4",
+  "exporterSha256": "0ee91d684d310357363cbf8516b2dc65b5f56c4b38c62d4c9e09304eb3ecafaf",
+  "exporterVersion": 17,
+  "ghidraArchiveSha256": "93a5d11a9ad510622acaaf908c556a7b9b764d338e78a7567f3689bf5081fd54",
+  "provider": "gcc-driver-structural-full-export-profile-v1",
+  "recoveryMode": "full",
+  "schemaVersion": 1
+}

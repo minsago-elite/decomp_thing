@@ -7,7 +7,16 @@ import type { Plugin, UserConfig } from 'vite';
 const outputRoot = fileURLToPath(new URL('../build/frontend/', import.meta.url));
 const displayBootstrapSource = fileURLToPath(new URL('./src/app/display-preferences-bootstrap.js', import.meta.url));
 const displayBootstrapName = 'display-preferences-bootstrap';
-interface ModuleOwner { chunk: string; owner: string }
+interface ModuleOwner { chunk: string; owner: string; feature?: DeferredFeature }
+type DeferredFeature = 'sources' | 'graph';
+
+/** Application areas that must load on demand (#622); recorded without host paths. */
+function deferredFeature(id: string): DeferredFeature | undefined {
+  const normalized = id.replaceAll('\\', '/');
+  if (normalized.includes('/frontend/src/sources/')) return 'sources';
+  if (normalized.includes('/frontend/src/graph/')) return 'graph';
+  return undefined;
+}
 
 function productionModuleOwner(id: string, renderedLength: number): string {
   const normalized = id.replaceAll('\\', '/');
@@ -28,7 +37,8 @@ function workerComposition(records: ModuleOwner[]): Plugin {
         if (entry.type !== 'chunk') continue;
         for (const [id, module] of Object.entries(entry.modules)) {
           const owner = productionModuleOwner(id, module.renderedLength);
-          if (module.renderedLength > 0) records.push({ chunk: entry.fileName, owner });
+          const feature = deferredFeature(id);
+          if (module.renderedLength > 0) records.push({ chunk: entry.fileName, owner, ...(feature ? { feature } : {}) });
         }
       }
     },
@@ -73,11 +83,12 @@ function bundleComposition(workerModules: ModuleOwner[]): Plugin {
           return {
             chunk: entry.fileName,
             owner: productionModuleOwner(id, module.renderedLength),
+            feature: deferredFeature(id),
             renderedBytes: module.renderedLength,
           };
         }))
         .filter((entry) => entry.renderedBytes > 0)
-        .map(({ chunk, owner }) => ({ chunk, owner }))
+        .map(({ chunk, owner, feature }): ModuleOwner => ({ chunk, owner, ...(feature ? { feature } : {}) }))
         .concat(workerModules)
         .sort((left, right) => `${left.chunk}/${left.owner}`.localeCompare(`${right.chunk}/${right.owner}`));
       await mkdir(outputRoot, { recursive: true });

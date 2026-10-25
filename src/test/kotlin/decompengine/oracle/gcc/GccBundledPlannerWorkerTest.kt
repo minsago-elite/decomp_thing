@@ -29,7 +29,7 @@ import kotlinx.serialization.json.jsonPrimitive
 class GccBundledPlannerWorkerTest {
     @Test
     fun `worker JVM derives deterministic ownership from a retained profile request`() = fixture { root ->
-        val profilePath = Path.of(System.getProperty("user.dir")).resolve("oracle/gcc/16.2.0/compiler-engines-exporter13.json")
+        val profilePath = Path.of(System.getProperty("user.dir")).resolve("oracle/gcc/16.2.0/compiler-engines-exporter17.json")
         GccRetainedCompilerEngineProfile.open(profilePath).use { profile ->
             val model = model(profile.suite.engine("cc1").strippedArtifact.sha256)
             val bytes = model.toJson().toByteArray()

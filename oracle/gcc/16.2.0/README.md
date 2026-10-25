@@ -70,7 +70,7 @@ python3 scripts/verify-gcc-oracle-source.py \
 Run the mutation-focused unit tests with:
 
 ```bash
-python3 -m unittest discover -s tests/oracle -v
+python3 -m unittest discover -s tests/oracle -t . -v
 ```
 
 ## Scope of this checkpoint
@@ -96,6 +96,9 @@ defaults. The compiler-engine implementation imports the driver rebuild module
 directly; benchmark versions and artifact names stay in the owned package.
 
 ## Compiler-engine benchmark twins
+
+The active generation is exporter 17: see [docs/gcc-exporter-generation-17.md](../../../docs/gcc-exporter-generation-17.md)
+for its serial default, the explicit parallel profile and the measured budgets.
 
 `compiler-engines.json` extends the same authenticated source and toolchain
 profile to the installed `cc1` and `lto1` programs. It supplies the benchmark
@@ -143,7 +146,7 @@ authenticated stripped twin with a distinct durable output directory:
 ```bash
 build/install/llm_bin_patch/bin/llm_bin_patch gcc-engine-plan cc1 \
   /absolute/path/to/gcc-cc1.stripped \
-  --profile oracle/gcc/16.2.0/compiler-engines-exporter13.json \
+  --profile oracle/gcc/16.2.0/compiler-engines-exporter17.json \
   --ghidra-archive /absolute/path/to/ghidra_12.1.3_PUBLIC_20260817.zip \
   --output /absolute/path/to/cc1-plan
 ```

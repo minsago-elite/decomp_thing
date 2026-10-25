@@ -84,6 +84,11 @@ setter responses carry no selected-state field in ACP v1; for config options, th
 SDK state installed from it must both preserve the complete configured prefix before the next setter or prompt is
 allowed.
 
+Rejected setter RPCs and invalid setter responses screen the complete rendered diagnostic, including fixed wording,
+against the full configured environment and all private preference identifiers, including preferences not yet applied.
+They retain their protocol failure kind, preference category/index and numeric RPC code when present. Peer error text
+is not copied into these setter diagnostics; a screened nonblank indicator is used if ordinary wording is unsafe.
+
 Provision the components in this order:
 
 1. Create a dedicated, uncompromised service account. Enable and start its user systemd manager, ensure its live

@@ -1,7 +1,8 @@
+import { sourceTitleCopy } from './sourceTitles';
+
 /** Source navigation copy. IDs, labels and committed values remain separate display data. */
 export const sourceCopy = {
-  title: 'Recorded source inputs',
-  fileTitle: 'Recorded source file',
+  ...sourceTitleCopy,
   browse: 'Browse recorded source inputs',
   noRevision: 'No recorded result revision is available for source browsing.',
   returnAttempt: 'Return to this attempt',
@@ -31,6 +32,19 @@ export const sourceCopy = {
   notReported: 'Not reported',
   planDigest: 'Plan record SHA-256',
   generationDigest: 'Generation record SHA-256',
+  validationReference: 'Reported module validation reference',
+  validationNotice: 'These are reported checkpoint and compiler records. This view does not verify compilation or revision acceptance.',
+  validationUnavailable: 'A bound module validation reference is not reported for this file.',
+  checkpointDigest: 'Checkpoint commitment SHA-256',
+  compilationOutcome: 'Reported compiler outcome',
+  compilationUnavailable: 'A consistent source-bound compiler result is not reported.',
+  compilerReturnCode: 'Reported compiler return code',
+  diagnosticsDigest: 'Compiler diagnostics commitment SHA-256',
+  diagnosticsSize: 'Reported compiler diagnostics size',
+  compilationOutcomes: {
+    passed: 'Passed', failed: 'Failed', 'failed-to-start': 'Failed to start',
+    'timed-out': 'Timed out', 'output-limit-exceeded': 'Output limit exceeded', 'source-changed': 'Source changed',
+  },
   emptyDirectories: 'Empty physical directories are not recorded in this input inventory.',
   loading: 'Loading recorded inputs…',
   readingFile: 'Loading recorded file metadata…',

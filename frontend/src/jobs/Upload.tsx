@@ -11,6 +11,10 @@ import { createUploadRecovery } from './uploadRecovery';
 import type { UploadTicket } from './uploadRecovery';
 import { useSession } from '../session/useSession';
 
+import { receive } from '../shared/receiptTime';
+import type { Received } from '../shared/receiptTime';
+import { MetadataReceipt } from '../shared/MetadataReceipt';
+
 type Attempt = { file: File; ticket: UploadTicket };
 
 function failureMessage(error: unknown): string {
@@ -40,7 +44,8 @@ export function Upload({ basePath, session }: { basePath: string; session: Brows
   const [retained, setRetained] = useState(() => recovery.read());
   const [attempt, setAttempt] = useState<Attempt | null>(null);
   const [phase, setPhase] = useState<'idle' | 'pending' | 'retry'>(retained.kind === 'empty' ? 'idle' : 'retry');
-  const [progress, setProgress] = useState<UploadProgress | null>(null);
+  const [observation, setProgress] = useState<Received<UploadProgress> | null>(null);
+  const progress = observation?.value;
   const [feedback, setFeedback] = useState<{ message: string; kind: 'status' | 'error' | 'input-error' }>({ message: '', kind: 'status' });
   const [rejectedFileMessage, setRejectedFileMessage] = useState<string | null>(null);
   const active = useRef<AbortController | null>(null);
@@ -60,9 +65,15 @@ export function Upload({ basePath, session }: { basePath: string; session: Brows
     return () => { live.current = false; active.current?.abort(); };
   }, []);
   useEffect(() => session.onInvalidated((remote) => {
-    active.current?.abort();
+    const previous = active.current;
+    active.current = null;
+    previous?.abort();
     if (!remote) {
       setProgress(null);
+      if (previous) {
+        setPhase('retry');
+        setFeedback({ message: copy.reconnectYourLocalSessionThenRetryThisFileItsRetry, kind: 'status' });
+      }
       return;
     }
     const next = recovery.read();
@@ -105,20 +116,20 @@ export function Upload({ basePath, session }: { basePath: string; session: Brows
     const poll = async () => {
       try {
         const response = await client.get('uploadProgress', `/uploads/${uploadId}`, { signal: controller.signal });
-        if (live.current && !controller.signal.aborted && response.data.uploadId === uploadId) setProgress(response.data);
+        if (live.current && !controller.signal.aborted && response.data.uploadId === uploadId) setProgress(receive(response.data));
       } catch { if (live.current && !controller.signal.aborted) setProgress(null); }
       finally { if (live.current && !controller.signal.aborted) pollTimer = setTimeout(() => { void poll(); }, 1000); }
     };
     pollTimer = setTimeout(() => { void poll(); }, 500);
     try {
       const result = await client.upload(attempt.file, { csrfToken, idempotencyKey: attempt.ticket.key, uploadId, signal: controller.signal });
-      if (!live.current || controller.signal.aborted) return;
+      if (!live.current || controller.signal.aborted || active.current !== controller) return;
       try { recovery.clear(); } catch { /* The confirmed job remains navigable; retained ticket can replay it safely. */ }
       setRejectedFileMessage(null);
       setFeedback({ message: copy.jobPublicationConfirmedOpeningTheJob, kind: 'status' });
       location.route(jobPath(basePath, result.data.jobId));
     } catch (error) {
-      if (!live.current) return;
+      if (!live.current || active.current !== controller) return;
       const invalidInput = error instanceof ApiClientError && ['INVALID_ELF', 'UPLOAD_TOO_LARGE'].includes(error.serverCode ?? '');
       const message = withApiFailureReference(failureMessage(error), error);
       if (invalidInput) setRejectedFileMessage(message);
@@ -162,6 +173,7 @@ export function Upload({ basePath, session }: { basePath: string; session: Brows
           : progress?.state === 'validating' ? copy.requestReceivedValidatingTheFileAndPublishingTheJob
           : progress?.state === 'unconfirmed' ? copy.publicationIsUnconfirmedWaitingForTheUploadResponse
           : copy.transferringTheFileReceivedBytesDoNotConfirmJobPublication}</p></div>}
+      {phase === 'pending' && progress && <MetadataReceipt kind="upload" receipt={observation?.receipt} />}
       <p id="upload-feedback" role={errorFeedback ? 'alert' : 'status'}
         class={errorFeedback ? 'notice notice-error' : undefined}>{feedbackMessage}</p>
       {phase === 'retry' && <p>{copy.retryKeepsTheSameJobIdentityChoosingAnotherFileDiscards}</p>}

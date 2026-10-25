@@ -38,8 +38,9 @@ specification. Accepted function records or a contiguous prefix of authenticated
 before a planning checkpoint can leave fragments or deterministic `.pending` files only for the first incomplete
 batch; those incomplete artifacts are regenerated, while missing, extra, reordered, stale, cross-inventory, or
 cross-mode checkpoints are rejected. A mismatched binary or exporter is rejected instead of mixing evidence; start a
-new output directory when intentionally changing either. Legacy schema-1 state has no whole-program semantic binding
-and is deliberately not migrated into reusable schema-2 state.
+new output directory when intentionally changing either. Current state and GCC profile admission select exporter
+version 16 and its exact source digest; version-15 and earlier state is historical and rejected. Legacy schema-1 state
+has no whole-program semantic binding and is deliberately not migrated into reusable schema-2 state.
 
 The reference GCC-driver budget is one 10-minute invocation and 4 GiB peak RSS. The Kotlin process adapter enforces the
 10-minute wall-clock ceiling and leaves completed records resumable on timeout. A benchmark profile supplies the exact
@@ -48,13 +49,38 @@ NSA's Ghidra 12.1.3 release archive (569,445,154 bytes; SHA-256
 `93a5d11a9ad510622acaaf908c556a7b9b764d338e78a7567f3689bf5081fd54`) and allows 30 minutes and 16 GiB for
 authenticated export plus ownership planning. The bundled direct-API worker caps its Java heap at 2 GiB independently;
 the Kotlin monitor measures the JVM and its complete descendant process tree against the profile ceiling.
-Each full function decompilation has a 60-second timeout, and full export is deliberately single-function staged so its
-live C body memory is bounded by the largest individual function rather than the complete program. Planning batches
+Each full function decompilation has a 60-second timeout and one 180-second retry for a native timeout. The
+current version-16 exporter requests C output without transferring the native syntax-tree/high-variable graph and renders
+each successful result once. Metadata still comes from the analyzed program. This optimization is specific to the
+exporter's C-text consumer; consumers of high variables, p-code, or token addresses require the syntax tree.
+An authored native fixture for historical version 15 preserved exact C and all model records against the version-14
+behavior. This is bounded equivalence evidence, not full cc1 throughput, parallel-worker, cancellation, or
+interrupted-resume qualification.
+The default four-argument export remains serial. The explicitly selected bundled runtime v6 uses the checked cc1 throughput
+policy: four CPUs, four analysis threads, and four independent native decompilers. The public `ubuntu-24.04` reference
+runner supplies four CPUs and 16 GB of RAM ([GitHub runner specifications](https://docs.github.com/en/actions/reference/runners/github-hosted-runners)).
+The host independently caps admission at four CPUs, checks the attached scope's actual affinity and ancestor quotas
+before START, and retains those observations with its attachment receipt. The kernel cgroup and systemd quota must
+match the selected count. Aggregate CPU time retains its existing ceiling; a live process-tree CPU monitor stops
+before that ceiling to reserve monitoring and forced-cleanup time, and final frozen accounting must also pass.
+
+Metadata collection and first-owner global/type sidecars remain in address order. At most four jobs, including
+completed results awaiting publication, are retained. Native workers return bounded immutable outcomes; the single
+coordinator publishes independent function records as they complete, then assembles the sorted model. A metadata
+failure stops dispatch beyond that address until its retry decision finishes, preserving first-owner evidence even
+when metadata recovery is retried. Cancellation stops every native worker before publication can finish. The full
+checkpoint state binds the selected worker count. Planning batches
 contain no decompiled C: fragments are bounded to 64 MiB, evidence records to 1 MiB, and fan-in to 256 batches
 (131,072 functions). Assembly precomputes the exact model size and enforces the same 512 MiB limit through a counting
 output stream before atomic publication. Semantic preflight canonical bytes are capped at 1 GiB, with unique retained
 global/type/failure evidence capped at 512 MiB. The preflight repeats planning-visible analysis traversal but performs
 no decompilation and writes no export state before the complete binding is available.
+
+The cc1 full-recovery diagnostic ceiling remains 9,000 seconds. It does not satisfy the 30-minute reference budget:
+the live throughput qualification separately checks the complete operation against 1,800 seconds after retaining
+the model and resource receipts. A successful full capture remains unscored and release-ineligible. Full capture
+currently requires a fresh run with no reused records; planning resume evidence does not qualify full-recovery
+interrupted/resumed equivalence.
 
 The JVM consumer reads the completed model through a stable regular-file snapshot capped at 512 MiB, then requires the
 exact canonical UTF-8 fields, entity order, set order, whitespace, and bytes before planning. A merely parseable JSON
@@ -70,7 +96,7 @@ full decompiled C bodies; those bodies belong to the later reconstruction phase:
 
 ```bash
 llm_bin_patch gcc-engine-plan cc1 /path/to/gcc-cc1.stripped \
-  --profile oracle/gcc/16.2.0/compiler-engines-exporter13.json \
+  --profile oracle/gcc/16.2.0/compiler-engines-exporter17.json \
   --ghidra-archive /path/to/ghidra_12.1.3_PUBLIC_20260817.zip \
   --output /path/to/cc1-plan
 ```
@@ -110,3 +136,33 @@ caps, prelaunch cancellation and live worker cancellation. Selected existing exp
 tests cover model reading, timeout diagnostics, parser size bounds and profile-derived
 limits. These local checks do not rerun historical GCC exports or qualify cc1/lto1
 fresh-versus-resumed semantic equivalence.
+
+### Contained cc1 runtime diagnostics
+
+The manual **GCC oracle model** Actions operation `cc1-runtime-diagnostics` reuses the contained cc1 setup and selects
+`gcc-engine-runtime-diagnostic`. Its closed runtime 7 operation, `analyze-diagnostics-v1`, enables the fixed
+`jvm-mxbean-stdout-v1` observer. Ordinary runtimes 1–6 keep their commands and behavior. Diagnostic intent 4 and
+containment definition 4 cannot enter full-export qualification, planning, resume, or structural assessment.
+
+The observer records initialization, import-and-analysis, guarded exporter, finalization, and terminal phases, plus
+JVM process CPU, heap and memory-pool usage, and collector count/time counters every 15 seconds. JVM CPU excludes
+native decompilers. Collector elapsed time is not GC CPU time and overlapping collector counters must not be added.
+Unsupported metrics are explicit nulls. The import-and-analysis phase includes import; existing analyzer timing
+output provides finer detail. The worker heap stays 2 GiB, concurrency stays four CPUs/analysis threads/decompilers,
+and containment stays 16 GiB with the existing aggregate CPU ceiling and cleanup reserve. The 9,000-second contained
+and 9,900-second launcher diagnostic ceilings do not change the 1,800-second complete-operation acceptance check.
+
+One daemon owns sampling, encoding, and writes through a dedicated stdout descriptor. Phase callbacks do not wait
+for it. The queue admits at most 14 ordinary events, reserving two of its 16 logical slots for loss and terminal
+records. At most 640 records and 5 MiB are permitted, including reserved records; each encoded frame is capped at
+4,096 bytes including framing and newlines. Shutdown waits at most 250 ms and preserves the original outcome.
+Queue loss, cap exhaustion, unavailable output, interruption, or forced termination can leave incomplete telemetry.
+A terminal record describes prior record accounting; it cannot certify completion of its own write or final drain.
+
+Capture retains at most 16 MiB from each of stdout and stderr, and an allowlist of operation/profile/deployment
+metadata before scratch cleanup. It checks the intended authorization chain against actual retained inputs and the
+installed runtime. Those checks do not authenticate individual stdout markers, which another writer can imitate.
+Malformed, interleaved, truncated, or gapped frames remain visible as incomplete diagnostics. Capture hashes identify
+the retained bytes; they are not execution receipts. The diagnostic summary remains incomplete, unscored, and
+release-ineligible, never writes `qualification.json`, and preserves a failing command's original failure. A single
+reviewed Actions capture supplies observations for the next performance change; it does not qualify cc1 throughput.

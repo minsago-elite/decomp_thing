@@ -10,6 +10,27 @@ import decompengine.jobs.ProgressRedactor
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonPrimitive
 
+/** Screen the whole setter diagnostic, including fixed labels; keep protocol control metadata. */
+internal fun sessionPreferenceSetterFailure(
+    kind: String,
+    index: Int?,
+    sensitiveValues: Collection<String>,
+    privatePreferences: Collection<String>,
+    rpcCode: String? = null,
+): AgentExecutionException = AgentExecutionException(AgentFailure(
+    AgentFailureKind.PROTOCOL,
+    redactedSessionPreferenceDiagnostic(
+        if (rpcCode == null) "ACP session preference setter returned an invalid response"
+        else "ACP session preference setter was rejected",
+        "", sensitiveValues, privatePreferences,
+    ),
+    details = buildMap {
+        put("preference", kind)
+        index?.let { put("preferenceIndex", it.toString()) }
+        rpcCode?.let { put("rpcCode", it) }
+    },
+))
+
 /** A setter replaces the complete inventory; prior applied values must remain selectable too. */
 @OptIn(UnstableApi::class)
 internal fun requireAppliedSessionConfigPreferences(
