@@ -116,7 +116,22 @@ internal object GitWorkspaceMutations {
             val changed = if (stage) entry.untracked || entry.unstaged != GitIndexChange.NONE else entry.staged != GitIndexChange.NONE
             if (!changed) refuse("NOTHING_SELECTED", if (stage) "A selected file has no unstaged change." else "A selected file has no staged change.")
             entry
+        }.also { selected -> refuseOverlap(observation, selected) }
+    }
+
+    /**
+     * Pathspecs match descendants: a selected path (or a rename's original path) that is now a
+     * directory holding other tracked or staged entries would act on those too. Refuse instead.
+     */
+    private fun refuseOverlap(observation: GitWorkspaceObservation, selected: List<GitStatusEntry>) {
+        val chosen = selected.toSet()
+        val prefixes = selected.flatMap { listOfNotNull(it.path.exact, it.originalPath?.exact) }.map { "$it/" }
+        val overlapping = observation.status.entries.any { entry ->
+            entry !in chosen && !entry.ignored && !entry.untracked && listOfNotNull(entry.path.exact, entry.originalPath?.exact).any { path ->
+                prefixes.any { path.startsWith(it) }
+            }
         }
+        if (overlapping) refuse("SELECTION_OVERLAP", "A selected path is now a directory containing other changes. Select those entries explicitly or resolve the overlap first.")
     }
 
     /** The reviewed selection must be exactly today's staged set: nothing swept in, nothing left out. */

@@ -206,6 +206,28 @@ class GitWorkspaceMutationsTest {
         assertTrue(after.single { it.path.exact == "src/util.c/extra.c" }.untracked)
     }
 
+    @Test fun `unstaging a rename never touches staged entries beneath its original path`(): Unit = Fixture().use { f ->
+        val service = f.open()
+        val repositoryId = service.initialized()
+        val workTree = f.store.resolve("$jobId/git/repositories/$repositoryId/worktree")
+        val (all, allGuards) = service.guards(repositoryId)
+        service.run(repositoryId, GitStageRequest(all.record.worktreeId, allGuards, all.ids { it.untracked }, true), "stage_key_0000050")
+        val (staged, stagedGuards) = service.guards(repositoryId)
+        service.run(repositoryId, GitCommitRequest(staged.record.worktreeId, stagedGuards, staged.ids { it.staged != GitIndexChange.NONE }, "base"), "commit_key_000050")
+        val gitDir = f.store.resolve("$jobId/git/repositories/$repositoryId/repository.git")
+        fun raw(vararg args: String) = f.repositories.git("--git-dir=$gitDir", "--work-tree=$workTree", *args, cwd = workTree)
+        raw("mv", "src/util.c", "src/moved.c")
+        Files.createDirectories(workTree.resolve("src/util.c")); Files.writeString(workTree.resolve("src/util.c/extra.c"), "int extra;\n")
+        raw("add", "--", "src/util.c/extra.c")
+        val (view, guards) = service.guards(repositoryId)
+        val rename = view.ids { it.staged == GitIndexChange.RENAMED }
+        assertEquals(1, rename.size)
+        assertEquals("SELECTION_OVERLAP", assertFailsWith<ManagedGitException> {
+            service.requestWorkspace(jobId, repositoryId, GitStageRequest(view.record.worktreeId, guards, rename, false), "overlap_key_000051")
+        }.code)
+        assertEquals(GitIndexChange.ADDED, service.workspace(jobId, repositoryId).observation.status.entries.single { it.path.exact == "src/util.c/extra.c" }.staged)
+    }
+
     @Test fun `a snapshot changed after initialization never lends its revision to a commit`(): Unit = Fixture().use { f ->
         val service = f.open()
         val repositoryId = service.initialized()
