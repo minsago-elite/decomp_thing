@@ -1,0 +1,28 @@
+[Unit]
+Description=Trusted finite ext4 scratch generation reset custodian
+
+[Service]
+Type=exec
+ExitType=cgroup
+User=root
+Group=root
+ExecStart=/usr/bin/python3 -I -S /var/lib/decomp-oracle-ext4-reset-ci/private/oracle-ext4-reset.py service-run
+WorkingDirectory=/var/lib/decomp-oracle-ext4-reset-ci/private
+UMask=0077
+KillMode=control-group
+KillSignal=SIGKILL
+SendSIGKILL=no
+Restart=no
+RemainAfterExit=no
+TimeoutStartSec=5s
+RuntimeMaxSec=60s
+TimeoutStopSec=5s
+Delegate=no
+TasksMax=32
+LimitNOFILE=64
+LimitCORE=0
+MemoryMax=256M
+NoNewPrivileges=yes
+StandardInput=null
+StandardOutput=journal
+StandardError=journal
