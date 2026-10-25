@@ -213,6 +213,8 @@ class UploadServer(
     // Test-owned clocks exercise expiry through the real HTTP/browser path; production uses the system clock.
     webAccessClock: WebAccessClock? = null,
     private val startupCancellation: () -> Boolean = { false },
+    // Null selects the production registrations for the SPA; admission still follows runtime readiness.
+    durableAdapters: List<DurableWebWorkflowAdapter>? = null,
 ) {
     init {
         require(listenBacklog in 1..4096) { "HTTP listen backlog must be between 1 and 4096" }
@@ -267,6 +269,7 @@ class UploadServer(
             WorkflowAttemptStore.open(root)
         },
         progressRetentionIntervalMs = if (uiMode == WebUiMode.SPA) 1000 else null,
+        durableAdapters = durableAdapters ?: if (uiMode == WebUiMode.SPA) productionDurableWebWorkflows(sensitiveValues = sensitiveValues) else emptyList(),
         shutdownTimeoutMs = 5000, failureDiagnostic = { diagnostic(it, "Background operation failed") },
         sourceProfiles = admittedSourceProfiles)
     private val sourceEvidence = WebSourceEvidence(store, admittedSourceProfiles, jobs::readArtifact)

@@ -70,8 +70,8 @@ internal class AuthorizedLegacyWebJobStart internal constructor(
 /** Versioned start capability; caller input cannot select paths, adapters or commands. */
 internal class AuthorizedWebWorkflowStart internal constructor(private val jobs: WebJobService) {
     fun request(jobId: String, expectedJobVersion: String, request: NewWorkflowAttempt,
-        requestKey: String): DurableWebWorkflowStartResult =
-        jobs.requestDurableStart(jobId, expectedJobVersion, request, requestKey)
+        requestKey: String, prerequisites: WebWorkflowPrerequisites?): DurableWebWorkflowStartResult =
+        jobs.requestDurableStart(jobId, expectedJobVersion, request, requestKey, prerequisites)
 }
 
 /** Cancellation-only capability; the body cannot select the authenticated actor. */

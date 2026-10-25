@@ -30,7 +30,7 @@ internal class WebApiController(
     private val sessions = WebSessionController(access)
     private val uploadProgress = WebUploadProgress()
     private val progressPins = WebProgressPinController(access, jobs, jobMutations)
-    private val workflowStarts = WebWorkflowStartController(jobs, jobMutations, assets.basePath)
+    private val workflowStarts = WebWorkflowStartController(jobs, jobMutations, assets.basePath) { readiness().prerequisites }
     private val cancellations = WebCancellationController(jobMutations, assets.basePath)
     private val agentPreflights = WebAgentPreflightController(access, agentPreflight, assets.basePath)
     private val runPages = WebRunPages { jobId ->
@@ -343,15 +343,8 @@ internal class WebApiController(
         put("readiness", "degraded")
         put("sessionExpiresAt", credentials.session.expiresAt.toString())
         put("csrfToken", credentials.csrfToken)
-        put("capabilities", JsonArray(listOf(buildJsonObject {
-            put("id", "workflows")
-            put("state", "unavailable")
-            put("reasonCode", "PREVIEW_UNAVAILABLE")
-            put("message", "Workflow actions are unavailable in this preview.")
-            put("workflows", JsonArray(emptyList()))
-            put("agentContractVersion", JsonNull)
-            put("limits", JsonNull)
-        }, harnessCapability())))
+        val readiness = readiness()
+        put("capabilities", JsonArray(webWorkflowCapabilities(jobs.durableRegistrations(), readiness) + harnessCapability(readiness)))
         // Configured ceilings for the API profile; unavailable resources remain
         // unavailable until their adapters enforce these limits and are enabled.
         put("limits", buildJsonObject {
@@ -387,8 +380,9 @@ internal class WebApiController(
     }
 
     // Configuration-only and cached: reports whether a harness is selectable, never that a workflow can run.
-    private fun harnessCapability(): JsonObject {
-        val readiness = harnessReadiness.current().withAgentInspection(agentPreflight.snapshot().status)
+    private fun readiness(): WebHarnessReadiness = harnessReadiness.current().withAgentInspection(agentPreflight.snapshot().status)
+
+    private fun harnessCapability(readiness: WebHarnessReadiness): JsonObject {
         return buildJsonObject {
             put("id", "harness")
             put("state", readiness.state)
@@ -397,6 +391,7 @@ internal class WebApiController(
             put("workflows", JsonArray(emptyList()))
             put("agentContractVersion", JsonNull)
             put("limits", JsonNull)
+            put("launch", JsonNull)
         }
     }
 

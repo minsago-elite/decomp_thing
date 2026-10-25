@@ -80,6 +80,35 @@ data class WorkflowAttempt(
     val publicationPending: Boolean get() = state == WorkflowRunState.COMPLETED && candidate != null && acceptedRevision == null
 }
 
+/**
+ * How a restarted server must treat an attempt, derived only from durable state. Startup recovery
+ * turns unfinished attempts into interrupted ones; the start time distinguishes queued work that
+ * never executed from interrupted active work. Neither is ever resumed or re-executed implicitly.
+ */
+enum class WorkflowRecoveryDisposition {
+    /** Still queued, running or cancelling (an owning live server, before any restart). */
+    UNFINISHED,
+    /** Interrupted before it started: no binary or model execution happened for it. */
+    QUEUED_NOT_STARTED,
+    /** Interrupted after it started; its partial evidence is retained, never resumed automatically. */
+    INTERRUPTED_ACTIVE,
+    /** Completed with a candidate that has no recorded acceptance. */
+    COMPLETED_UNPUBLISHED,
+    /** Bound to a validated accepted revision; immutable and never published twice. */
+    ACCEPTED,
+    /** Any other terminal outcome. */
+    TERMINAL,
+}
+
+val WorkflowAttempt.recoveryDisposition: WorkflowRecoveryDisposition get() = when {
+    !state.terminal -> WorkflowRecoveryDisposition.UNFINISHED
+    acceptedRevision != null -> WorkflowRecoveryDisposition.ACCEPTED
+    publicationPending -> WorkflowRecoveryDisposition.COMPLETED_UNPUBLISHED
+    state == WorkflowRunState.INTERRUPTED && startedAt == null -> WorkflowRecoveryDisposition.QUEUED_NOT_STARTED
+    state == WorkflowRunState.INTERRUPTED -> WorkflowRecoveryDisposition.INTERRUPTED_ACTIVE
+    else -> WorkflowRecoveryDisposition.TERMINAL
+}
+
 sealed interface WorkflowTransition {
     data object Start : WorkflowTransition
     data object RequestCancellation : WorkflowTransition

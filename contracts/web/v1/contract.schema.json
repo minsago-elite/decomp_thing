@@ -164,6 +164,97 @@
       ],
       "additionalProperties": false
     },
+    "workflowLaunch": {
+      "type": "object",
+      "description": "Server-reported launch facts for one registered workflow option. They describe the adapter; admission rechecks capability, limits and readiness.",
+      "properties": {
+        "harnessCapabilityId": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/id"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "mode": {
+          "type": "string",
+          "enum": [
+            "tools",
+            "agent",
+            "evidence-only"
+          ]
+        },
+        "executesBinary": {
+          "type": "boolean"
+        },
+        "contactsAgent": {
+          "type": "boolean"
+        },
+        "requiredTools": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "enum": [
+              "sandbox",
+              "ghidra",
+              "agent-harness",
+              "c-toolchain",
+              "angr"
+            ]
+          },
+          "maxItems": 8,
+          "uniqueItems": true
+        },
+        "input": {
+          "type": "string",
+          "enum": [
+            "none",
+            "accepted-optional",
+            "recorded-required"
+          ]
+        },
+        "limitsAdjustable": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "harnessCapabilityId",
+        "mode",
+        "executesBinary",
+        "contactsAgent",
+        "requiredTools",
+        "input",
+        "limitsAdjustable"
+      ],
+      "additionalProperties": false,
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "mode": {
+                "const": "agent"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "contactsAgent": {
+                "const": true
+              }
+            }
+          },
+          "else": {
+            "properties": {
+              "contactsAgent": {
+                "const": false
+              }
+            }
+          }
+        }
+      ]
+    },
     "capability": {
       "type": "object",
       "properties": {
@@ -228,6 +319,16 @@
               "type": "null"
             }
           ]
+        },
+        "launch": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/workflowLaunch"
+            },
+            {
+              "type": "null"
+            }
+          ]
         }
       },
       "required": [
@@ -237,9 +338,35 @@
         "message",
         "workflows",
         "agentContractVersion",
-        "limits"
+        "limits",
+        "launch"
       ],
-      "additionalProperties": false
+      "additionalProperties": false,
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "launch": {
+                "type": "object"
+              }
+            },
+            "required": [
+              "launch"
+            ]
+          },
+          "then": {
+            "properties": {
+              "workflows": {
+                "minItems": 1,
+                "maxItems": 1
+              },
+              "limits": {
+                "$ref": "#/definitions/executionLimits"
+              }
+            }
+          }
+        }
+      ]
     },
     "bootstrap": {
       "type": "object",
