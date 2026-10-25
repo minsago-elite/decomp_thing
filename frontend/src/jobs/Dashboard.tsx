@@ -8,6 +8,7 @@ import type { Jobs } from '../api/generated';
 import { jobPath } from '../app/paths';
 import { DEFAULT_FILTERS, JOB_STATUSES, JobFilterError, filterSearch, jobFilters, jobLocation, jobPageSearch } from './query';
 import type { JobFilters } from './query';
+import { rememberFilterDraft, restoreFilterDraft } from './filterDraft';
 import { JobSummary } from './JobSummary';
 import { receive } from '../shared/receiptTime';
 import type { Received } from '../shared/receiptTime';
@@ -28,9 +29,10 @@ function snapshotPagination(page: Jobs['page'] | undefined): page is Jobs['page'
     typeof page.pageNumber === 'number' && Number.isSafeInteger(page.pageNumber) && page.pageNumber >= 1 && page.pageNumber <= 10000;
 }
 
-export function Dashboard({ basePath }: { basePath: string }) {
+export function Dashboard({ basePath, draftOwner = null }: { basePath: string; draftOwner?: object | null }) {
   const [selection, setSelection] = useState(currentFilters);
-  const [draft, setDraft] = useState(selection.filters);
+  const [draft, setDraft] = useState(() => restoreFilterDraft(draftOwner, basePath, filterSearch(selection.filters)) ?? selection.filters);
+  useEffect(() => { rememberFilterDraft(draftOwner, basePath, filterSearch(selection.filters), draft); }, [draftOwner, basePath, selection, draft]);
   const [cursors, setCursors] = useState<(string | null)[]>([null]);
   const [pageIndex, setPageIndex] = useState(0);
   const [displayedPageIndex, setDisplayedPageIndex] = useState<number | null>(null);
