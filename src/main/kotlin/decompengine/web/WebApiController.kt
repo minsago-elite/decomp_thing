@@ -23,6 +23,7 @@ internal class WebApiController(
     private val harnessReadiness: WebHarnessReadinessProjector = WebHarnessReadinessProjector(),
     private val agentPreflight: WebAgentPreflight = WebAgentPreflight { error("No agent preflight is configured.") },
     audit: WebAuditLog? = null,
+    private val capacity: (() -> JsonObject)? = null,
 ) {
     private val auditRecorder = WebAuditRecorder(access, audit)
     private val supportExport = WebSupportExport(jobs, audit, ::runtimeJson, ::limitsJson, ::capabilitiesJson, clock)
@@ -63,7 +64,7 @@ internal class WebApiController(
     private fun dispatch(exchange: HttpExchange): Boolean {
         val path = exchange.requestURI.rawPath
         val resource = path.removePrefix(prefix)
-        if (!path.startsWith(prefix) || !(resource in setOf("session", "bootstrap", "jobs", "recovery", "agent/preflight", "support-export") || resource.matches(Regex("(?:jobs|uploads)/[^/]+|jobs/[^/]+/runs(?:/[^/]+(?:/reports/(?:exploration|revision-validation)|/validation-history|/source-catalog|/revisions/[^/]+/(?:sources|source-directories/[^/]+|source-files/[^/]+(?:/(?:chunk|content))?)|/snapshot|/events|/progress-pin|/cancel)?)?|jobs/[^/]+/artifacts/[^/]+/content")))) {
+        if (!path.startsWith(prefix) || !(resource in setOf("session", "bootstrap", "jobs", "recovery", "agent/preflight", "support-export", "capacity") || resource.matches(Regex("(?:jobs|uploads)/[^/]+|jobs/[^/]+/runs(?:/[^/]+(?:/reports/(?:exploration|revision-validation)|/validation-history|/source-catalog|/revisions/[^/]+/(?:sources|source-directories/[^/]+|source-files/[^/]+(?:/(?:chunk|content))?)|/snapshot|/events|/progress-pin|/cancel)?)?|jobs/[^/]+/artifacts/[^/]+/content")))) {
             try {
                 val policy = if (exchange.requestMethod in setOf("POST", "PUT", "PATCH", "DELETE")) {
                     WebEndpointPolicy.jsonMutation(exchange.requestMethod)
@@ -143,6 +144,12 @@ internal class WebApiController(
                     } finally { exchange.close() }
                 }
                 resource == "agent/preflight" -> agentPreflights.handle(exchange)
+                resource == "capacity" -> {
+                    access.authorize(exchange, WebEndpointPolicy.privateRead(allowHead = true))
+                    requireNoWebApiQuery(exchange); requireJsonAccept(exchange)
+                    val sample = capacity ?: throw WebAccessDenied(404, "NOT_FOUND", "The requested API route is unavailable.")
+                    sendWebApiResponse(exchange, 200, "capacity", sample())
+                }
                 resource == "support-export" -> {
                     access.authorize(exchange, WebEndpointPolicy.privateRead())
                     requireJsonAccept(exchange)

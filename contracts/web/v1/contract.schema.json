@@ -5224,6 +5224,208 @@
         "omittedSections"
       ],
       "additionalProperties": false
+    },
+    "capacity": {
+      "type": "object",
+      "description": "Aggregate listener capacity and outcome counts for one listener lifetime. Counts and fixed public error codes only; no request, job or credential content.",
+      "properties": {
+        "schemaVersion": {
+          "const": 1
+        },
+        "sampledAt": {
+          "$ref": "#/definitions/instant"
+        },
+        "since": {
+          "$ref": "#/definitions/instant"
+        },
+        "http": {
+          "type": "object",
+          "properties": {
+            "workerLimit": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 256
+            },
+            "activeWorkers": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 256
+            },
+            "queueCapacity": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 4096
+            },
+            "queuedRequests": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 4096
+            },
+            "responderLimit": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 16
+            },
+            "activeResponders": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 16
+            },
+            "listenBacklog": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 4096
+            },
+            "headerDeadlineMs": {
+              "$ref": "#/definitions/uint64"
+            },
+            "requestDeadlineMs": {
+              "$ref": "#/definitions/uint64"
+            },
+            "uploadDeadlineMs": {
+              "$ref": "#/definitions/uint64"
+            },
+            "maxHeaderCount": {
+              "type": "integer",
+              "minimum": 8,
+              "maximum": 200
+            },
+            "maxHeaderBytes": {
+              "type": "integer",
+              "minimum": 1024,
+              "maximum": 65536
+            },
+            "maxJsonResponseBytes": {
+              "$ref": "#/definitions/uint64"
+            },
+            "maxUploadBytes": {
+              "$ref": "#/definitions/uint64"
+            }
+          },
+          "required": [
+            "workerLimit",
+            "activeWorkers",
+            "queueCapacity",
+            "queuedRequests",
+            "responderLimit",
+            "activeResponders",
+            "listenBacklog",
+            "headerDeadlineMs",
+            "requestDeadlineMs",
+            "uploadDeadlineMs",
+            "maxHeaderCount",
+            "maxHeaderBytes",
+            "maxJsonResponseBytes",
+            "maxUploadBytes"
+          ],
+          "additionalProperties": false
+        },
+        "streams": {
+          "type": "object",
+          "properties": {
+            "limit": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 16
+            },
+            "perSessionLimit": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 2
+            },
+            "active": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 16
+            },
+            "lifetimeMs": {
+              "$ref": "#/definitions/uint64"
+            }
+          },
+          "required": [
+            "limit",
+            "perSessionLimit",
+            "active",
+            "lifetimeMs"
+          ],
+          "additionalProperties": false
+        },
+        "outcomes": {
+          "type": "object",
+          "properties": {
+            "successful": {
+              "$ref": "#/definitions/uint64"
+            },
+            "clientErrors": {
+              "$ref": "#/definitions/uint64"
+            },
+            "serverErrors": {
+              "$ref": "#/definitions/uint64"
+            },
+            "closedWithoutResponse": {
+              "$ref": "#/definitions/uint64"
+            },
+            "overloadResponses": {
+              "$ref": "#/definitions/uint64"
+            },
+            "overloadConnectionsClosed": {
+              "$ref": "#/definitions/uint64"
+            },
+            "headerDeadlineClosures": {
+              "$ref": "#/definitions/uint64"
+            },
+            "requestDeadlineClosures": {
+              "$ref": "#/definitions/uint64"
+            },
+            "headerLimitRejections": {
+              "$ref": "#/definitions/uint64"
+            }
+          },
+          "required": [
+            "successful",
+            "clientErrors",
+            "serverErrors",
+            "closedWithoutResponse",
+            "overloadResponses",
+            "overloadConnectionsClosed",
+            "headerDeadlineClosures",
+            "requestDeadlineClosures",
+            "headerLimitRejections"
+          ],
+          "additionalProperties": false
+        },
+        "failureReasons": {
+          "type": "array",
+          "maxItems": 128,
+          "items": {
+            "type": "object",
+            "properties": {
+              "code": {
+                "type": "string",
+                "pattern": "^[A-Z][A-Z0-9_]{0,63}$"
+              },
+              "count": {
+                "$ref": "#/definitions/uint64"
+              }
+            },
+            "required": [
+              "code",
+              "count"
+            ],
+            "additionalProperties": false
+          }
+        }
+      },
+      "required": [
+        "schemaVersion",
+        "sampledAt",
+        "since",
+        "http",
+        "streams",
+        "outcomes",
+        "failureReasons"
+      ],
+      "additionalProperties": false
     }
   },
   "oneOf": [
@@ -5980,6 +6182,30 @@
         },
         "data": {
           "$ref": "#/definitions/supportExport"
+        }
+      },
+      "required": [
+        "apiVersion",
+        "kind",
+        "requestId",
+        "data"
+      ],
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "properties": {
+        "apiVersion": {
+          "const": 1
+        },
+        "kind": {
+          "const": "capacity"
+        },
+        "requestId": {
+          "$ref": "#/definitions/requestId"
+        },
+        "data": {
+          "$ref": "#/definitions/capacity"
         }
       },
       "required": [

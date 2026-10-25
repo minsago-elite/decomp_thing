@@ -783,6 +783,20 @@
       "file": "fixtures/invalid-support-export-audit-complete.json",
       "valid": false,
       "reason": "A page with unrecorded entries cannot claim completeness."
+    },
+    {
+      "file": "fixtures/capacity-saturated.json",
+      "valid": true
+    },
+    {
+      "file": "fixtures/invalid-capacity-reason-text.json",
+      "valid": false,
+      "reason": "Failure reasons are fixed public error codes, never request text."
+    },
+    {
+      "file": "fixtures/invalid-capacity-extra-field.json",
+      "valid": false,
+      "reason": "Capacity is closed; no job or path detail can be added."
     }
   ]
 }

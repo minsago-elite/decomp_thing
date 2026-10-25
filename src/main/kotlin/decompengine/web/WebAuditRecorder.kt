@@ -16,7 +16,7 @@ internal class WebAuditRecorder(
     fun <T> around(exchange: HttpExchange, action: WebAuditAction?, target: WebAuditTarget, handle: () -> T): T {
         if (action == null || log == null) return handle()
         val before = try { access.auditSessionId(exchange) } catch (_: Exception) { null }
-        WebDeniedResponseTrace.begin()
+        val traced = WebDeniedResponseTrace.begin()
         var thrown = false
         try {
             return handle()
@@ -26,13 +26,14 @@ internal class WebAuditRecorder(
         } finally {
             // Auditing never changes the response or turns a handled request into a failure.
             try { record(exchange, action, target, before, thrown) } catch (_: Exception) { }
+            WebDeniedResponseTrace.end(traced)
         }
     }
 
     private fun record(exchange: HttpExchange, action: WebAuditAction, target: WebAuditTarget, before: String?, thrown: Boolean) {
         val log = log ?: return
         run {
-            val reason = WebDeniedResponseTrace.end()
+            val reason = WebDeniedResponseTrace.current()
             val sessionId = before ?: access.auditIssuedSessionId(exchange)
             val status = exchange.responseCode.takeIf { it in 100..599 } ?: 500
             val headers = exchange.responseHeaders
@@ -113,7 +114,13 @@ internal class WebAuditRecorder(
 internal object WebDeniedResponseTrace {
     private val code = ThreadLocal<String?>()
     private val active = ThreadLocal<Boolean>()
-    fun begin() { active.set(true); code.remove() }
+    /** Opens a request scope unless one is already open; returns whether this caller owns it. */
+    fun begin(): Boolean {
+        if (active.get() == true) return false
+        active.set(true); code.remove()
+        return true
+    }
     fun note(value: String) { if (active.get() == true) code.set(value) }
-    fun end(): String? = code.get().also { code.remove(); active.remove() }
+    fun current(): String? = code.get()
+    fun end(owned: Boolean) { if (owned) { code.remove(); active.remove() } }
 }

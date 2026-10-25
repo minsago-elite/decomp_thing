@@ -31,6 +31,8 @@ internal class WebStreamResources(
     }.apply { removeOnCancelPolicy = true }
 
     internal data class Snapshot(val active: Int, val cleanupFailures: Int, val stopped: Boolean)
+    internal data class Limits(val maximumConnections: Int, val maximumPerSession: Int, val lifetimeMs: Long)
+    internal val limits = Limits(maximumConnections, maximumPerSession, lifetimeMs)
     fun snapshot(): Snapshot = synchronized(gate) {
         Snapshot(leases.size, leases.count { it.cleanupFailed }, stopped)
     }

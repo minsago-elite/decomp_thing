@@ -214,12 +214,17 @@ class UploadServer(
     // Test-owned clocks exercise expiry through the real HTTP/browser path; production uses the system clock.
     webAccessClock: WebAccessClock? = null,
     private val startupCancellation: () -> Boolean = { false },
+    // Worker/queue/deadline/header defaults; tests shorten deadlines to exercise slow clients.
+    admissionLimits: WebAdmissionLimits = WebAdmissionLimits(),
 ) {
     init {
         require(listenBacklog in 1..4096) { "HTTP listen backlog must be between 1 and 4096" }
         require(requestShutdownTimeoutMs in 0..5000) { "HTTP request shutdown wait must be between zero and five seconds" }
         check(!Thread.currentThread().isInterrupted && !startupCancellation()) { "Web server startup cancelled" }
     }
+    private val limits = admissionLimits.copy(listenBacklog = listenBacklog)
+    internal val capacity = WebCapacityMetrics()
+    private val lastOverloadLog = java.util.concurrent.atomic.AtomicLong(Long.MIN_VALUE)
     internal val redaction = WebRedactionPolicy.create(redactionEnvironment, sensitiveValues,
         WebRedactionPolicy.defaultPrivateRoots(dataDir))
     private val authenticationInspectionLock = Any()
@@ -297,21 +302,25 @@ class UploadServer(
         }) { "Server is stopping" }
     }
     private val api = spaAssets?.let { WebApiController(access, it, jobs, jobMutations, streamResources,
-        harnessReadiness = harnessReadiness, agentPreflight = agentPreflight, audit = audit) }
+        harnessReadiness = harnessReadiness, agentPreflight = agentPreflight, audit = audit,
+        capacity = ::capacitySnapshot) }
     // A request that finds every worker and queue slot taken is answered by this tiny pool with a stable 429
     // instead of a reset connection. It has no queue, so overload still never buffers more than the main pool does;
     // when it too is busy the rejection propagates and the dispatcher closes the connection, as before.
     private val overloadResponders = ThreadPoolExecutor(
-        2, 2, 0, TimeUnit.MILLISECONDS, java.util.concurrent.SynchronousQueue(),
+        limits.responderThreads, limits.responderThreads, 0, TimeUnit.MILLISECONDS, java.util.concurrent.SynchronousQueue(),
         { task -> Thread(task, OVERLOAD_RESPONDER_THREAD).apply { isDaemon = true } },
         ThreadPoolExecutor.AbortPolicy(),
     )
     private val requestExecutor = ThreadPoolExecutor(
-        16, 16, 0, TimeUnit.MILLISECONDS, ArrayBlockingQueue(64),
+        limits.workerThreads, limits.workerThreads, 0, TimeUnit.MILLISECONDS, ArrayBlockingQueue(limits.queueCapacity),
         { task -> Thread(task, "decomp-web-http").apply { isDaemon = true } },
         { task, executor ->
             if (executor.isShutdown) throw java.util.concurrent.RejectedExecutionException("web request executor is shut down")
-            overloadResponders.execute(task)
+            try { overloadResponders.execute(task) } catch (failure: java.util.concurrent.RejectedExecutionException) {
+                capacity.overloadConnectionsClosed.incrementAndGet()
+                throw failure
+            }
         },
     )
     private val requestDeadlines = ScheduledThreadPoolExecutor(1) { task ->
@@ -362,20 +371,95 @@ class UploadServer(
             if (cleanup { jobs.close() }) cleanup { ownership.close() }
             throw failure
         }
-        server.executor = requestExecutor
+        // Every connection task, including one refused to the responder tier, is bounded while it reads its
+        // request line and headers; the JDK parses them on the worker before any handler can install a deadline.
+        server.executor = java.util.concurrent.Executor { task -> requestExecutor.execute(HeaderDeadlineTask(task)) }
         val context = server.createContext("/") { exchange ->
-            if (Thread.currentThread().name == OVERLOAD_RESPONDER_THREAD) {
-                // Admitted only to be refused: no routing, no deadline, no session or storage access.
-                exchange.responseHeaders.set("Connection", "close")
-                access.sendDenied(exchange, WebAccessDenied(429, "SERVER_BUSY", "The workbench is handling its maximum number of requests. Retry shortly."))
-                return@createContext
+            currentHeaderDeadline.get()?.enterHandler()
+            val traced = WebDeniedResponseTrace.begin()
+            try {
+                handleAdmitted(exchange)
+            } finally {
+                capacity.recordResponse(exchange.responseCode, WebDeniedResponseTrace.current())
+                WebDeniedResponseTrace.end(traced)
             }
-            val upload = exchange.requestMethod == "POST" &&
-                exchange.requestHeaders.getFirst("Content-Type")?.startsWith("multipart/form-data", true) == true
-            val deadline = requestDeadlines.schedule({ exchange.close() }, if (upload) 120 else 30, TimeUnit.SECONDS)
-            try { route(exchange) } finally { deadline.cancel(false) }
         }
         WebRedactionPolicy.install(context, redaction)
+    }
+
+    private fun handleAdmitted(exchange: HttpExchange) {
+        if (Thread.currentThread().name == OVERLOAD_RESPONDER_THREAD) {
+            // Admitted only to be refused: no routing, no deadline, no session or storage access.
+            capacity.overloadResponses.incrementAndGet()
+            logOverload()
+            exchange.responseHeaders.set("Connection", "close")
+            access.sendDenied(exchange, WebAccessDenied(429, "SERVER_BUSY", "The workbench is handling its maximum number of requests. Retry shortly."))
+            return
+        }
+        val headers = exchange.requestHeaders
+        val headerBytes = headers.entries.sumOf { (name, values) -> values.sumOf { name.length + it.length + 4L } }
+        if (headers.values.sumOf { it.size } > limits.maxHeaderCount || headerBytes > limits.maxHeaderBytes) {
+            capacity.headerLimitRejections.incrementAndGet()
+            exchange.responseHeaders.set("Connection", "close")
+            access.sendDenied(exchange, WebAccessDenied(431, "HEADERS_TOO_LARGE", "The request headers exceed their limit."))
+            return
+        }
+        val upload = exchange.requestMethod == "POST" &&
+            headers.getFirst("Content-Type")?.startsWith("multipart/form-data", true) == true
+        val finished = java.util.concurrent.atomic.AtomicBoolean(false)
+        val deadline = try {
+            requestDeadlines.schedule({
+                // A slow or vanished client cannot keep a worker, a staged upload or a read descriptor past this point.
+                if (!finished.get()) { capacity.requestDeadlineClosures.incrementAndGet(); exchange.close() }
+            }, if (upload) limits.uploadDeadlineMs else limits.requestDeadlineMs, TimeUnit.MILLISECONDS)
+        } catch (_: java.util.concurrent.RejectedExecutionException) {
+            exchange.close(); return
+        }
+        try { route(exchange) } finally { finished.set(true); deadline.cancel(false) }
+    }
+
+    /** Overload transitions are logged at most once a minute, with counts only. */
+    private fun logOverload() {
+        val now = System.nanoTime()
+        val previous = lastOverloadLog.get()
+        if (previous != Long.MIN_VALUE && now - previous < TimeUnit.MINUTES.toNanos(1)) return
+        if (!lastOverloadLog.compareAndSet(previous, now)) return
+        val sample = admissionSample()
+        recordWebCapacityEvent("web-overload active_workers=${sample.activeWorkers} queued_requests=${sample.queuedRequests} " +
+            "active_responders=${sample.activeResponders} overload_responses=${capacity.overloadResponses.get()}", requestDiagnosticOutput)
+    }
+
+    internal fun admissionSample() = WebAdmissionSample(requestExecutor.activeCount, requestExecutor.queue.size, overloadResponders.activeCount)
+
+    internal fun capacitySnapshot(): kotlinx.serialization.json.JsonObject =
+        capacity.snapshot(limits, admissionSample(), streamResources.snapshot(), streamResources.limits)
+
+    /**
+     * Interrupting a worker blocked in a socket-channel read closes that channel, so a client that never
+     * finishes its header block releases the worker at [WebAdmissionLimits.headerDeadlineMs]. Once the
+     * handler is entered the per-exchange deadline applies instead and no interrupt can be delivered.
+     */
+    private inner class HeaderDeadlineTask(private val task: Runnable) : Runnable, WebHandlerEntry {
+        private var state = HEADERS
+        override fun enterHandler() { synchronized(this) { if (state == HEADERS) state = HANDLER } }
+        override fun run() {
+            val worker = Thread.currentThread()
+            val watchdog = try {
+                requestDeadlines.schedule({
+                    synchronized(this) {
+                        if (state == HEADERS) { state = TIMED_OUT; capacity.headerDeadlineClosures.incrementAndGet(); worker.interrupt() }
+                    }
+                }, limits.headerDeadlineMs, TimeUnit.MILLISECONDS)
+            } catch (_: java.util.concurrent.RejectedExecutionException) { null }
+            currentHeaderDeadline.set(this)
+            try { task.run() } finally {
+                synchronized(this) { state = DONE }
+                watchdog?.cancel(false)
+                currentHeaderDeadline.remove()
+                // A late watchdog interrupt belongs to this task only; never leak it to the next one.
+                Thread.interrupted()
+            }
+        }
     }
 
     fun start() {
@@ -447,6 +531,7 @@ class UploadServer(
         }
         val streamsClosed = streamResources.shutdown()
         server.stop(delaySeconds)
+        recordWebCapacityEvent(capacity.summaryLine(), requestDiagnosticOutput)
         if (!streamsClosed && !streamResources.shutdown()) System.err.println("Event stream shutdown did not complete cleanly.")
         requestExecutor.shutdownNow()
         overloadResponders.shutdownNow()
@@ -1128,6 +1213,10 @@ class UploadServer(
     private fun decode(value: String): String = URLDecoder.decode(value, StandardCharsets.UTF_8)
 
     private companion object {
+        const val HEADERS = 0
+        const val HANDLER = 1
+        const val TIMED_OUT = 2
+        const val DONE = 3
         const val MAX_ARTIFACT_BYTES = 64L * 1024 * 1024
         const val MAX_REPAIR_EVIDENCE_PRESENTATION_BYTES = 16L * 1024 * 1024
     }
@@ -1135,6 +1224,9 @@ class UploadServer(
 
 private const val MAX_UPLOAD_BYTES = 32L * 1024 * 1024
 private const val OVERLOAD_RESPONDER_THREAD = "decomp-web-overload"
+
+private fun interface WebHandlerEntry { fun enterHandler() }
+private val currentHeaderDeadline = ThreadLocal<WebHandlerEntry?>()
 
 private fun encodeJob(job: Job): String = Json.encodeToString(JsonElement.serializer(), legacyJobPresentation(job))
 
