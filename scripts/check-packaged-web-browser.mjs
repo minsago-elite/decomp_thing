@@ -12,6 +12,7 @@ import { seedLive, qualifyLive } from './packaged-browser-live.mjs';
 import { seedHistory, qualifyHistory } from './packaged-browser-history.mjs';
 import { seedLegacy, qualifyLegacy } from './packaged-browser-legacy.mjs';
 import { qualifyUpgrade, qualifyUpgradeCache } from './packaged-browser-upgrade.mjs';
+import { seedGit, qualifyGit, qualifyGitRestart } from './packaged-browser-git.mjs';
 
 // Test driver only: the application is launched with a separate Node-free PATH.
 const repo = resolve(dirname(fileURLToPath(import.meta.url)), '..');
@@ -28,9 +29,10 @@ const { values } = parseArgs({ options: {
   help: { type: 'boolean', default: false },
 } });
 if (values.help) {
-  console.log('Usage: node scripts/check-packaged-web-browser.mjs --archive /absolute/distribution.zip --chrome /absolute/chrome --java-home /absolute/jdk [--mode public|session|upload|metadata|history|scale|live|proxy|upgrade|legacy] [--previous-archive /absolute/previous.zip] [--work-parent /absolute/scratch] [--keep-workdir] [--python /absolute/python3] [--no-sandbox]');
+  console.log('Usage: node scripts/check-packaged-web-browser.mjs --archive /absolute/distribution.zip --chrome /absolute/chrome --java-home /absolute/jdk [--mode public|session|upload|metadata|history|scale|live|proxy|upgrade|legacy|git] [--previous-archive /absolute/previous.zip] [--work-parent /absolute/scratch] [--keep-workdir] [--python /absolute/python3] [--no-sandbox]');
   console.log('public: packaged home/Runtime/recovery; session: public plus local session journey; upload: session plus inert upload and lost-response retry; history: session plus preseeded inert multi-page attempts; scale: session plus 10,000 persisted jobs and keyboard pagination; proxy: real Vite HMR and session journey against packaged JVM; upgrade: previous JVM to current JVM on one origin with an old tab.');
   console.log('legacy: inert legacy HTML/polling with explicit test-owned state edits; no workflow execution.');
+  console.log('git: session plus a disposable admitted repository: keyboard import, external edit, stage, commit, export digest against provenance, and a JVM restart; needs git >= 2.36 on PATH and no network.');
   console.log('metadata: session plus one inert header upload/retry, real packaged job metadata, maximum uint64 address, and simulated malformed-response recovery; no workflow execution or upload quota/scale measurement.');
   console.log('live: session plus authored inert job changes and real background listing reads; preserves focused row order and applies new jobs on explicit refresh.');
   console.log('upgrade requires --previous-archive and distinct manifest builds with the old Runtime chunk absent from --archive. Its previous extraction is always removed before the current extraction, even with --keep-workdir.');
@@ -44,7 +46,7 @@ for (const option of ['archive', 'chrome', 'java-home', 'python']) {
   assert.ok(values[option] && isAbsolute(values[option]), `--${option} must name an absolute existing path; see --help`);
   await fs.access(values[option]);
 }
-assert.ok(['public', 'session', 'upload', 'metadata', 'history', 'scale', 'live', 'proxy', 'upgrade', 'legacy'].includes(values.mode), '--mode must be public, session, upload, metadata, history, scale, live, proxy, upgrade or legacy');
+assert.ok(['public', 'session', 'upload', 'metadata', 'history', 'scale', 'live', 'proxy', 'upgrade', 'legacy', 'git'].includes(values.mode), '--mode must be public, session, upload, metadata, history, scale, live, proxy, upgrade, legacy or git');
 if (values.mode === 'upgrade') {
   assert.ok(values['previous-archive'] && isAbsolute(values['previous-archive']), 'upgrade requires --previous-archive as an absolute existing ZIP path');
   await fs.access(values['previous-archive']);
@@ -89,6 +91,8 @@ let applicationError = '';
 let applicationOutput = '';
 let browserError = '';
 let viteError = '';
+let gitImportRoot;
+let gitFixture;
 const report = { status: 'running', mode: values.mode, testDirectory: root, driverNode: nodeVersion,
   tools: { node: process.execPath, chrome: chromeBinary, javaHome, python: values.python }, requests: {} };
 const launchErrors = new WeakMap();
@@ -400,7 +404,8 @@ async function prepareArchive(archivePath) {
   const working = join(work, 'unrelated working directory');
   await fs.mkdir(bins);
   await fs.mkdir(working);
-  for (const name of ['uname', 'ls', 'xargs', 'sed', 'tr']) {
+  // Git is an optional runtime prerequisite: only the Git journey puts it on the application PATH.
+  for (const name of ['uname', 'ls', 'xargs', 'sed', 'tr', ...(values.mode === 'git' ? ['git'] : [])]) {
     const executable = execFileSync('/bin/sh', ['-c', `command -v ${name}`], { encoding: 'utf8' }).trim();
     await fs.symlink(executable, join(bins, name));
   }
@@ -430,7 +435,8 @@ async function launchApplication(installation, port = '0', frontendOrigin) {
   applicationOutput = '';
   applicationError = '';
   application = startOwned(join(installation.app, 'bin/llm_bin_patch'), ['web', '--ui', values.mode === 'legacy' ? 'legacy' : 'spa', '--host', '127.0.0.1', '--port', port,
-    '--base-path', values.mode === 'legacy' ? '/' : '/nested/', '--data-dir', installation.data, ...(frontendOrigin ? ['--dev-frontend-origin', frontendOrigin] : [])], {
+    '--base-path', values.mode === 'legacy' ? '/' : '/nested/', '--data-dir', installation.data, ...(frontendOrigin ? ['--dev-frontend-origin', frontendOrigin] : []),
+    ...(gitImportRoot ? ['--git-import-root', gitImportRoot] : [])], {
     cwd: installation.working, env: installation.environment, stdio: ['ignore', 'pipe', 'pipe'],
   });
   application.stdout.on('data', (chunk) => { applicationOutput = (applicationOutput + chunk).slice(-1048576); });
@@ -460,6 +466,8 @@ try {
   const historyFixture = values.mode === 'history' ? await seedHistory(data) : null;
   const scaleFixture = values.mode === 'scale' ? await seedScale(data) : null;
   const liveFixture = values.mode === 'live' ? await seedLive(data) : null;
+  gitFixture = values.mode === 'git' ? await seedGit(values['work-parent']) : null;
+  gitImportRoot = gitFixture?.importRoot;
   const populated = !!(historyFixture || scaleFixture || liveFixture);
   const libraryText = historyFixture ? 'synthetic-history.elf' : scaleFixture ? 'synthetic-project-09999.elf'
     : liveFixture ? 'live-dashboard-2.elf' : 'No uploaded jobs yet.';
@@ -619,7 +627,7 @@ try {
     report.requests.upgradeCacheWarm = cacheProbe.requests;
     report.jobDataCreated = false;
   }
-  if (values.mode === 'public' || values.mode === 'session' || values.mode === 'upload' || values.mode === 'metadata' || values.mode === 'history' || values.mode === 'scale' || values.mode === 'live') {
+  if (values.mode === 'public' || values.mode === 'session' || values.mode === 'upload' || values.mode === 'metadata' || values.mode === 'history' || values.mode === 'scale' || values.mode === 'live' || values.mode === 'git') {
     const identityExpression = `(() => ({ buildId: document.querySelector('meta[name="decomp-ui-build"]')?.content, applicationVersion: document.querySelector('meta[name="decomp-application-version"]')?.content, page: location.pathname, text: document.body.innerText }))()`;
     const home = await makeTarget();
     await cdp.call('Page.navigate', { url: `${origin}/nested/` }, home.sessionId);
@@ -776,7 +784,7 @@ try {
     report.requests = {};
   }
 
-  if (values.mode === 'session' || values.mode === 'upload' || values.mode === 'metadata' || values.mode === 'history' || values.mode === 'scale' || values.mode === 'live' || values.mode === 'proxy') {
+  if (values.mode === 'session' || values.mode === 'upload' || values.mode === 'metadata' || values.mode === 'history' || values.mode === 'scale' || values.mode === 'live' || values.mode === 'proxy' || values.mode === 'git') {
     const bootstrapUrl = await waitFor(() => applicationOutput.split(/\s+/).find((part) => part.startsWith(browserOrigin + '/nested/#bootstrap=')), 'local bootstrap handoff');
     const token = new URL(bootstrapUrl).hash.slice('#bootstrap='.length);
     sensitiveValues.push(token);
@@ -911,6 +919,10 @@ try {
       report.populatedHistory = await qualifyHistory({ fixture: historyFixture, makeTarget, cdp, evaluate, ready, browserOrigin });
       report.jobDataCreated = true;
     }
+    if (gitFixture) {
+      report.git = await qualifyGit({ fixture: gitFixture, makeTarget, cdp, evaluate, ready, browserOrigin, data });
+      report.jobDataCreated = true;
+    }
     if (values.mode === 'metadata') {
       report.upload = await qualifyUpload({ makeTarget, cdp, evaluate, ready, browserOrigin, data });
       report.jobDataCreated = true;
@@ -1002,9 +1014,21 @@ try {
     assert.equal(await evaluate(authenticated, 'localStorage.length + sessionStorage.length'), 0);
     assert.ok(authenticated.requests.every((request) => request.url.startsWith(browserOrigin + '/')));
     assert.ok(authenticated.requests.every((request) => ['GET', 'HEAD'].includes(request.method) || request.url === browserOrigin + '/nested/api/v1/session'));
-    assert.equal(await fs.stat(data).then(() => true, () => false), values.mode === 'upload' || values.mode === 'metadata' || populated);
-    report.session = { authenticated: true, cookie: { httpOnly: true, sameSite: 'Strict', path: '/nested/', secure: false }, fragmentRemovedBeforeFetch: true, restoredAfterReload: true, explicitLogoutRequests: 1, successfulExchangeRequests: 1, consumedLinkRequests: 1, automaticMutationRetries: 0, storageEntries: 0, installationUnchanged: true, jobDataCreated: values.mode === 'upload' || values.mode === 'metadata' || populated };
+    const createsJobs = values.mode === 'upload' || values.mode === 'metadata' || values.mode === 'git' || populated;
+    assert.equal(await fs.stat(data).then(() => true, () => false), createsJobs);
+    report.session = { authenticated: true, cookie: { httpOnly: true, sameSite: 'Strict', path: '/nested/', secure: false }, fragmentRemovedBeforeFetch: true, restoredAfterReload: true, explicitLogoutRequests: 1, successfulExchangeRequests: 1, consumedLinkRequests: 1, automaticMutationRetries: 0, storageEntries: 0, installationUnchanged: true, jobDataCreated: createsJobs };
     report.requests.authenticated = authenticated.requests;
+  }
+
+  if (gitFixture) {
+    // Durability: replace the JVM on the same origin and read the same repository with a new session.
+    await stop(application);
+    const restarted = await launchApplication(installation, new URL(origin).port);
+    assert.equal(restarted, origin, 'Restarted JVM did not preserve the origin');
+    const bootstrapUrl = await waitFor(() => applicationOutput.split(/\s+/).find((part) => part.startsWith(browserOrigin + '/nested/#bootstrap=')), 'restarted bootstrap handoff');
+    sensitiveValues.push(new URL(bootstrapUrl).hash.slice('#bootstrap='.length));
+    report.gitRestart = await qualifyGitRestart({ fixture: gitFixture, objectId: report.git.objectId, exportSha256: report.git.exportSha256,
+      bootstrapUrl, makeTarget, cdp, evaluate, ready, browserOrigin });
   }
 
   // Let the final DevTools events drain before taking the evidence snapshot.
@@ -1057,6 +1081,7 @@ try {
 } finally {
   if (cdp) await cdp.call('Browser.close').catch(() => {});
   const cleanup = await Promise.allSettled([stop(browser), stop(application), stop(vite)]);
+  if (gitFixture) await gitFixture.dispose().catch((error) => { report.gitFixtureCleanupError = safeDiagnostic(error.stack); process.exitCode = 1; });
   report.shutdownConfirmed = cleanup.every((result) => result.status === 'fulfilled');
   if (!report.shutdownConfirmed) {
     report.status = 'failed';

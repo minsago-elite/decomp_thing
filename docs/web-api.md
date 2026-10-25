@@ -896,6 +896,58 @@ repository is never an input to it.
 
 `WebGitControllerTest` covers the HTTP endpoints and the downloaded export digest.
 
+### Git workspace view and packaged journey
+
+The SPA route `/jobs/{jobId}/git` (#583) is a lazily loaded view over the endpoints above. The job
+page's repository panel links to it. Viewing it never mutates anything. Every change sends the
+guards of the status it was reviewed against, waits for the durable operation, and then reads the
+repository again. The view has these parts:
+
+- **Capability.** When Git is unavailable, unsupported or not reported, the view says so with the
+  reported reason and sends no request. Source and evidence routes are unaffected.
+- **Repository.** With no repository it explains initialization, which stays on the job page, and
+  offers import by name when `git-import` is supported. Otherwise it shows the repository, work
+  tree, HEAD, object format and status notices.
+- **Changes.** Changes are grouped as staged, not staged, untracked and conflicted. Ignored files
+  are only counted. Selection is per group, so a file with both staged and unstaged changes is
+  chosen separately for each action. A diff is shown for the chosen file.
+- **Commit review.** It lists exactly the staged files and the parent commit before the message is
+  accepted. Staging, unstaging and committing are disabled while the status is incomplete, the
+  repository is busy, or (for a commit) conflicts remain.
+- **History.** History pages with **Older commits**. Each commit shows whether it is mapped to a
+  reconstruction revision and that revision's acceptance. A mapped commit links to the recorded
+  source revision and attempt. Inspecting a commit shows its files, provenance, export digest and
+  verification, and offers the export download and a tag form.
+- **Branches and work trees.** Branches show their exact object IDs. Switching is disabled, with
+  the reason shown, while the work tree has changes or an operation is running. Linked work trees
+  show their owning attempt, and removal is offered only for the selected, clean one.
+
+All controls are native buttons, checkboxes and forms. Outcomes are announced in a polite status
+region.
+
+`node scripts/check-packaged-web-browser.mjs --mode git` (#584) runs the packaged journey in the
+`web-packaged` CI job. It runs the session journey, then:
+
+1. Creates a disposable repository with `scripts/web-git-fixtures.mjs`. Its pre-commit hook always
+   fails. The repository lives under the work parent and is admitted with `--git-import-root`.
+2. Puts the system `git` on the packaged application's otherwise minimal `PATH`.
+
+In the browser, the journey:
+
+- uploads an inert ELF from the keyboard and follows the job page's link to the workspace;
+- imports the repository by name from the keyboard;
+- edits the managed work tree on disk and checks that a policy-excluded `helper.o` is only counted;
+- selects and stages one file with Space and Enter, and checks that the review lists exactly that
+  file;
+- commits it, so the failing hook also proves hooks are inert.
+
+It then downloads the commit's export and checks that its SHA-256 equals the displayed provenance
+digest, that its entries are stored, sorted and free of `.git` and excluded files, and that the
+admitted repository is unchanged. Finally it replaces the JVM on the same origin and, with a new
+session, loads `/jobs/{jobId}/git` directly. It confirms that the commit, the unstaged change and
+the export digest are still there. The route is a server-classified SPA document path, so a direct
+load or reload gets the shell. No network access or credentials are used.
+
 ## Legacy compatibility
 
 `GET /api/jobs/{id}` and JSON-requested POST `/jobs` success responses use an explicit
