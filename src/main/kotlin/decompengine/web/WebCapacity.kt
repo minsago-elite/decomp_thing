@@ -35,6 +35,40 @@ data class WebAdmissionLimits(
     }
 }
 
+/**
+ * Per-request outcome accounting. The listener installs a recorder for the request thread; a handler
+ * that hands its exchange to another thread (an event stream) takes the recorder, defers the request
+ * thread's sample and records the status that worker actually sent, so a stream is never counted as
+ * closed without a response because its headers were written later.
+ */
+internal object WebResponseAccounting {
+    private class Scope(val record: (Int, String?) -> Unit) { var deferred = false }
+    private val scope = ThreadLocal<Scope?>()
+
+    fun <T> around(record: (Int, String?) -> Unit, exchange: com.sun.net.httpserver.HttpExchange, handle: () -> T): T {
+        val current = Scope(record)
+        scope.set(current)
+        val traced = WebDeniedResponseTrace.begin()
+        try { return handle() } finally {
+            scope.remove()
+            if (!current.deferred) record(exchange.responseCode, WebDeniedResponseTrace.current())
+            WebDeniedResponseTrace.end(traced)
+        }
+    }
+
+    fun current(): ((Int, String?) -> Unit)? = scope.get()?.record
+    fun deferCurrent() { scope.get()?.deferred = true }
+
+    /** Run asynchronously owned exchange work and record its final status with [record]. */
+    fun recordAfter(record: ((Int, String?) -> Unit)?, exchange: com.sun.net.httpserver.HttpExchange, work: () -> Unit) {
+        val traced = WebDeniedResponseTrace.begin()
+        try { work() } finally {
+            try { record?.invoke(exchange.responseCode, WebDeniedResponseTrace.current()) } catch (_: Exception) { }
+            WebDeniedResponseTrace.end(traced)
+        }
+    }
+}
+
 /** Point-in-time executor occupancy, sampled independently (approximate under concurrency). */
 internal data class WebAdmissionSample(val activeWorkers: Int, val queuedRequests: Int, val activeResponders: Int)
 

@@ -205,6 +205,12 @@ class WebAdmissionBoundsTest {
                 "{\"token\":\"$token\"}")
             val cookie = login.headers.getValue("set-cookie").substringBefore(';')
             get(port, path = "/w/api/v1/jobs/${"a".repeat(32)}?private=/home/secret", headers = "Cookie: $cookie\r\n")
+            // An event stream answers from its own worker after the HTTP handler returned; it is still counted once.
+            val stream = send(port, "GET /w/api/v1/jobs/${"b".repeat(32)}/runs/run_missing/events HTTP/1.1\r\nHost: 127.0.0.1:$port\r\n" +
+                "Accept: text/event-stream\r\nCookie: $cookie\r\nConnection: close\r\n\r\n")
+            assertEquals(404, stream.status, stream.failure)
+            await("the stream outcome to be recorded") { reasons(Json.parseToJsonElement(get(port, path = "/w/api/v1/capacity",
+                headers = "Cookie: $cookie\r\n").body).jsonObject.getValue("data").jsonObject)["NOT_FOUND"] == 1L }
             val response = get(port, path = "/w/api/v1/capacity", headers = "Cookie: $cookie\r\n")
             assertEquals(200, response.status, response.body)
             val body = Json.parseToJsonElement(response.body).jsonObject
@@ -224,6 +230,7 @@ class WebAdmissionBoundsTest {
             assertEquals(2, streams.getValue("perSessionLimit").jsonPrimitive.content.toInt())
             val outcomes = data.getValue("outcomes").jsonObject
             assertEquals("1", outcomes.getValue("headerLimitRejections").jsonPrimitive.content)
+            assertEquals("0", outcomes.getValue("closedWithoutResponse").jsonPrimitive.content, "no stream is miscounted as unanswered")
             assertTrue(outcomes.getValue("clientErrors").jsonPrimitive.content.toLong() >= 2)
             val reasons = reasons(data)
             assertEquals(1L, reasons["HEADERS_TOO_LARGE"])

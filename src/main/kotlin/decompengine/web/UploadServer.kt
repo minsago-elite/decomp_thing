@@ -376,13 +376,7 @@ class UploadServer(
         server.executor = java.util.concurrent.Executor { task -> requestExecutor.execute(HeaderDeadlineTask(task)) }
         val context = server.createContext("/") { exchange ->
             currentHeaderDeadline.get()?.enterHandler()
-            val traced = WebDeniedResponseTrace.begin()
-            try {
-                handleAdmitted(exchange)
-            } finally {
-                capacity.recordResponse(exchange.responseCode, WebDeniedResponseTrace.current())
-                WebDeniedResponseTrace.end(traced)
-            }
+            WebResponseAccounting.around(capacity::recordResponse, exchange) { handleAdmitted(exchange) }
         }
         WebRedactionPolicy.install(context, redaction)
     }
