@@ -435,11 +435,15 @@ harness and, for repair, a production-qualified contained repair validator) was
 established by the current readiness observation. Workflow prerequisites follow the
 same passive rule as harness readiness: a page load reads configuration and file
 metadata only (helper executability, bundled Ghidra presence) and launches no
-helper. Sandbox helper capability is known only from a recent explicit
-`POST /api/v1/agent/preflight` inspection (which runs after a configured agent
-starts), so options that execute the binary report `unknown` with
-`SANDBOX_HELPER_UNCHECKED` until then, and admission refuses them with
-`503 CAPABILITY_UNAVAILABLE` until a fresh inspection result is folded in.
+helper. Options that execute the binary therefore report `unknown` with
+`SANDBOX_HELPER_UNCHECKED` ("checked when this workflow starts") unless a recent
+explicit agent preflight already checked the helpers. Starting a workflow is itself
+an explicit operator action: when the selected option needs the sandbox, its other
+prerequisites hold and the helpers are unchecked, `POST J/runs` runs the same
+bounded helper check (at most five seconds) before admission; a keyed replay still
+returns its recorded run whatever the check reports. It needs no configured agent and no prior
+preflight. Only a failed or timed-out check refuses the start, with
+`503 CAPABILITY_UNAVAILABLE` and its fixed reason message; nothing is recorded.
 Evidence-only reconstruction needs only Ghidra presence. Until the secure repair
 runtime's validator qualification gate opens, repair reports
 `REPAIR_VALIDATOR_UNQUALIFIED` and is refused at admission. A missing prerequisite

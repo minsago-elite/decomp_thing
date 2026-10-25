@@ -173,13 +173,36 @@ class WebProductionWorkflowsTest {
                 service.requestDurableStart(job.id, version(service, job.id), explore, "explore_unchecked_helpers", facts)
             }
             assertEquals("WORKFLOW_PREREQUISITE_UNAVAILABLE", refused.code)
-            assertTrue(refused.message.orEmpty().contains("Inspect the agent"))
+            assertTrue(refused.message.orEmpty().contains("checked when this workflow starts"))
             assertEquals(0, engines.calls.get())
-            // A fresh explicit inspection that checked the helpers admits the same request.
-            val inspected = facts.copy(sandbox = WebPrerequisite.AVAILABLE)
+            // The HTTP start runs the bounded helper check itself; no agent or prior preflight is needed.
+            val inspections = AtomicInteger()
+            val admitted = webAdmissionPrerequisites(adapters(engines), explore, facts) { inspections.incrementAndGet(); WebPrerequisite.AVAILABLE }
+            assertEquals(1, inspections.get())
             assertEquals(WorkflowRunState.COMPLETED, service.requestDurableStart(job.id, version(service, job.id), explore,
-                "explore_inspected_helpers", inspected).attempt.state)
+                "explore_inspected_helpers", admitted).attempt.state)
+            // A failed check refuses with its own reason and starts nothing.
+            val missing = WebPrerequisite(false, "SANDBOX_HELPER_MISSING", "The sandbox helpers required to run analyzed binaries are not available.")
+            val failed = assertFailsWith<WebJobServiceException> {
+                service.requestDurableStart(job.id, version(service, job.id), explore, "explore_helper_check_fail",
+                    webAdmissionPrerequisites(adapters(engines), explore, facts) { missing })
+            }
+            assertEquals("WORKFLOW_PREREQUISITE_UNAVAILABLE", failed.code); assertTrue(failed.message.orEmpty().contains("not available"))
+            assertEquals(1, engines.calls.get())
+            // Options that do not need the sandbox, or that already miss another prerequisite, never run the check.
+            val evidence = NewWorkflowAttempt(WorkflowKind.RECONSTRUCT, WebWorkflowDefaults.RECONSTRUCT_EVIDENCE, harnessCapabilityId = EVIDENCE_ONLY_CAPABILITY)
+            val repair = NewWorkflowAttempt(WorkflowKind.REPAIR, WebWorkflowDefaults.REPAIR, "source_any", "agent-acp")
+            for (request in listOf(evidence, repair)) assertEquals(facts, webAdmissionPrerequisites(adapters(engines), request, facts) { error("checked") })
+            assertNull(webAdmissionPrerequisites(adapters(engines), explore, null) { error("checked") })
         }
+        // The projector's admission check is bounded and independent of any agent configuration.
+        val projector = WebHarnessReadinessProjector(probe = { passive }, sandboxProbe = { WebPrerequisite.AVAILABLE })
+        val hung = WebHarnessReadinessProjector(probe = { passive }, timeoutMillis = 100,
+            sandboxProbe = { Thread.sleep(10_000); WebPrerequisite.AVAILABLE })
+        try {
+            assertTrue(projector.inspectSandbox().available)
+            assertEquals("PROBE_TIMEOUT", hung.inspectSandbox().reasonCode)
+        } finally { projector.close(); hung.close() }
         // The execution-capable check is the explicit path; its result makes helpers available.
         val checked = WebHarnessReadinessProjector.probeEnvironment(mapOf("ACP_HARNESS" to "legacy-openai",
             "BASE_URL" to "https://example.invalid/v1", "API_KEY" to "legacy-key", "MODEL" to "legacy-model"), bwrap, timeout, { true }, { true })

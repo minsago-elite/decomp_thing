@@ -30,7 +30,9 @@ internal class WebApiController(
     private val sessions = WebSessionController(access)
     private val uploadProgress = WebUploadProgress()
     private val progressPins = WebProgressPinController(access, jobs, jobMutations)
-    private val workflowStarts = WebWorkflowStartController(jobs, jobMutations, assets.basePath) { readiness().prerequisites }
+    private val workflowStarts = WebWorkflowStartController(jobs, jobMutations, assets.basePath) { request ->
+        webAdmissionPrerequisites(jobs.durableRegistrations(), request, readiness().prerequisites, harnessReadiness::inspectSandbox)
+    }
     private val cancellations = WebCancellationController(jobMutations, assets.basePath)
     private val agentPreflights = WebAgentPreflightController(access, agentPreflight, assets.basePath)
     private val runPages = WebRunPages { jobId ->

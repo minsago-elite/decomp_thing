@@ -116,6 +116,7 @@ internal class WebHarnessReadinessProjector(
     private val ttlNanos: Long = TimeUnit.SECONDS.toNanos(10),
     private val nanoTime: () -> Long = System::nanoTime,
     private val inspectionProbe: () -> WebHarnessReadiness = ::inspectEnvironment,
+    private val sandboxProbe: () -> WebPrerequisite = ::inspectSandboxHelpers,
 ) {
     private var executor: ExecutorService = newExecutor()
     private var closed = false
@@ -142,6 +143,19 @@ internal class WebHarnessReadinessProjector(
         inspected = result
         inspectedAt = nanoTime()
         return result
+    }
+
+    /**
+     * Admission-time helper check. Starting a workflow is itself an explicit operator action, so it
+     * may run the execution-capable helper check, bounded like every probe and independent of any
+     * agent configuration. Page loads never call this.
+     */
+    @Synchronized
+    fun inspectSandbox(): WebPrerequisite {
+        val result = refresh { WebHarnessReadiness("supported", null, "", prerequisites =
+            WebWorkflowPrerequisites(WebPrerequisite.AVAILABLE, sandboxProbe(), WebPrerequisite.AVAILABLE)) }
+        return result.prerequisites?.sandbox ?: WebPrerequisite(false, result.reasonCode ?: "PROBE_FAILED",
+            "The sandbox helper check did not finish in time. Nothing was started; retry the start.")
     }
 
     private fun withObservation(base: WebHarnessReadiness, now: Long): WebHarnessReadiness {
@@ -221,6 +235,13 @@ internal class WebHarnessReadinessProjector(
         private fun passiveEnvironment(): WebHarnessReadiness = environmentReadiness(
             System.getenv(), BUBBLEWRAP, TIMEOUT, { null }, ::bundledGhidraPresent, bindObservation = true)
 
+        private val SANDBOX_MISSING = WebPrerequisite(false, "SANDBOX_HELPER_MISSING",
+            "The sandbox helpers required to run analyzed binaries are not available.")
+
+        private fun inspectSandboxHelpers(): WebPrerequisite =
+            if (Files.isExecutable(BUBBLEWRAP) && Files.isExecutable(TIMEOUT) && BwrapCapability.inspectJsonStatusSupported(BUBBLEWRAP))
+                WebPrerequisite.AVAILABLE else SANDBOX_MISSING
+
         private fun inspectEnvironment(): WebHarnessReadiness = environmentReadiness(
             System.getenv(), BUBBLEWRAP, TIMEOUT, BwrapCapability::inspectJsonStatusSupported,
             ::bundledGhidraPresent, bindObservation = true)
@@ -247,7 +268,7 @@ internal class WebHarnessReadinessProjector(
                 !helpersPresent || helperStatus == false -> WebPrerequisite(false, "SANDBOX_HELPER_MISSING",
                     "The sandbox helpers required to run analyzed binaries are not available.")
                 helperStatus == null -> WebPrerequisite(false, "SANDBOX_HELPER_UNCHECKED",
-                    "Sandbox helpers are checked only by an explicit agent inspection. Inspect the agent on the Runtime page, then start within a few seconds.",
+                    "Sandbox helpers are checked when this workflow starts; loading a page never runs them.",
                     unknown = true)
                 else -> WebPrerequisite.AVAILABLE
             }, ghidra, repairValidator)
