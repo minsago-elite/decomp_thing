@@ -324,6 +324,11 @@ def mkdir_exact(path, mode):
     os.mkdir(path, mode)
     os.chown(path, 0, 0)
     os.chmod(path, mode)
+    created = os.open(path, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC)
+    try:
+        os.fsync(created)
+    finally:
+        os.close(created)
     parent = os.open(path.parent, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC)
     try:
         os.fsync(parent)
