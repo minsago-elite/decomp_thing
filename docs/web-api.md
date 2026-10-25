@@ -854,11 +854,11 @@ staging and committing.
 | Action | Body fields | Effect and refusals |
 | --- | --- | --- |
 | `git.branch.create` | `name`, `startObjectId` | `update-ref refs/heads/<name> <id> ""` creates the branch only if absent (`409 BRANCH_EXISTS`); nothing is checked out |
-| `git.switch` | `refId` or `objectId` (exactly one) | `switch --no-guess --no-recurse-submodules` (or `--detach`). Refused with `409 WORKTREE_DIRTY` for staged or unstaged changes, `CONFLICTED`, or `ACTIVE_RUN` while a lease is held. Nothing is stashed or discarded, and untracked files are kept. Git's own refusal is `SWITCH_REFUSED`. The target tree must fit the checkout bound. |
+| `git.switch` | `refId` with the branch's reviewed tip as `objectId`, or `objectId` alone for a detached switch | `switch --no-guess --no-recurse-submodules` (or `--detach`). A branch that moved since review is `REF_CHANGED`. The tip may be omitted only while the repository's refs fit the 200-ref observation that the guards cover. Refused with `409 WORKTREE_DIRTY` for staged or unstaged changes, `CONFLICTED`, or `ACTIVE_RUN` while a lease is held. Nothing is stashed or discarded, and untracked files are kept. Git's own refusal is `SWITCH_REFUSED`. The target tree must fit the checkout bound. |
 | `git.branch.delete` | `refId`, `expectedObjectId` | `update-ref -d` with the expected tip. Refused with `BRANCH_CURRENT` when any work tree has it checked out, `REF_CHANGED` when it moved, or `BRANCH_UNMERGED` (with a count) when commits are reachable only from it. Never forced. |
 | `git.tag` | `name`, `targetObjectId` | A lightweight tag with no timestamps, created only if absent (`409 TAG_EXISTS`); existing tags are never overwritten |
 | `git.worktree.add` | `startObjectId`, `branchName` or null, `runId` or null | `git worktree add` under the repository's private `worktrees/<worktreeId>`. At most four linked work trees, a checkout-size bound, and an optional owning attempt that must belong to the job. The new identity is the operation's `worktreeId`. |
-| `git.worktree.remove` | none | Removes a linked work tree. Refused with `WORKTREE_PRIMARY`, `ACTIVE_RUN` while its owner runs, `WORKTREE_DIRTY` for any uncommitted, untracked or ignored local file (Git would delete ignored files), or `WORKTREE_UNMERGED` for detached commits that no branch or tag reaches. Uses `git worktree remove` without `--force`. |
+| `git.worktree.remove` | none | Removes a linked work tree. Refused with `WORKTREE_PRIMARY`, `ACTIVE_RUN` while its owner runs, `WORKTREE_DIRTY` for any uncommitted, untracked or ignored local file (Git would delete ignored files) or for files inside a submodule (gitlink) directory, or `WORKTREE_UNMERGED` for detached commits that no branch or tag reaches. Uses `git worktree remove` without `--force`. |
 
 Leases: the primary work tree is leased to every active workflow attempt of the job, and a linked
 work tree to the attempt that owns it. While a lease is held, switch and removal answer `409
@@ -894,7 +894,7 @@ changes only `refNames`; the object ID, mapping and export digest stay the same.
 
 `GET G/exports/{objectId}` (`application/zip`) returns the deterministic source export of that
 commit's tree (#582). It contains only the tree's regular files, in unsigned byte order of their
-paths. Entries are stored uncompressed with a fixed 1980-01-01 DOS timestamp and no extra fields,
+paths. Entries are stored uncompressed with a fixed 1980-01-02 DOS timestamp (1980-01-01 00:00 is the JDK's "before 1980" sentinel, which would add a time-zone-dependent extended timestamp) and no extra fields,
 and there is no `.git`, reflog, configuration, commit message, author or timestamp. Equal trees
 therefore export identical bytes whatever their commit metadata or work-tree state. Submodule
 links and symbolic links are omitted and counted in `skippedEntries`. File modes are not

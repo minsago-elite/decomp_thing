@@ -378,9 +378,14 @@ object GitReads {
         }
         // Git prints a type change (file to symlink and back) as a deletion section followed by an
         // addition section; one listing record owns both, so both are kept in order.
-        val typeChange = if (file.change == GitIndexChange.TYPE_CHANGED && file.oldObjectId != null && file.newObjectId != null) {
-            val deletion = sections.firstOrNull { index(it) == (file.oldObjectId to zero) }
-            val addition = sections.firstOrNull { index(it) == (zero to file.newObjectId) }
+        // An unstaged comparison has no stored blob for the work-tree side, so each section is
+        // matched by this record's own header and whichever blob IDs the listing does name.
+        val own = "diff --git ${quoted("a/$path")} ${quoted("b/$path")}\n"
+        val typeChange = if (file.change == GitIndexChange.TYPE_CHANGED) {
+            val deletion = sections.firstOrNull { section -> section.startsWith(own) &&
+                index(section)?.let { (old, new) -> new == zero && (file.oldObjectId == null || old == file.oldObjectId) } == true }
+            val addition = sections.firstOrNull { section -> section.startsWith(own) &&
+                index(section)?.let { (old, new) -> old == zero && (file.newObjectId == null || new == file.newObjectId) } == true }
             if (deletion != null && addition != null) deletion + addition else null
         } else null
         // Pure renames and mode-only changes have no index line; identify them by their exact

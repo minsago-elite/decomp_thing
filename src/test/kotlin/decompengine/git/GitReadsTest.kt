@@ -221,6 +221,20 @@ class GitReadsTest {
         val patch = GitReads.patch(f.runner, gitDir, workTree, GitDiffScope.STAGED, null, null, typed)
         assertTrue(patch.text.contains("deleted file mode 100644") && patch.text.contains("-int target;"), patch.text)
         assertTrue(patch.text.contains("new file mode 120000") && patch.text.contains("+target.c"), patch.text)
+        // The same change left unstaged has no stored work-tree blob; both sections are still kept.
+        f.raw(gitDir, workTree, "commit", "-q", "-m", "symlink")
+        Files.delete(workTree.resolve("link.c"))
+        f.write(workTree, "link.c", "int restored;\n")
+        f.raw(gitDir, workTree, "commit", "-q", "-am", "regular again")
+        Files.delete(workTree.resolve("link.c"))
+        Files.createSymbolicLink(workTree.resolve("link.c"), Path.of("other.c"))
+        val unstaged = GitReads.diff(f.runner, gitDir, workTree, GitObjectFormat.SHA1, GitDiffScope.UNSTAGED, null, null)
+            .files.single { it.path.exact == "link.c" }
+        assertEquals(GitIndexChange.TYPE_CHANGED, unstaged.change)
+        assertNull(unstaged.newObjectId)
+        val pending = GitReads.patch(f.runner, gitDir, workTree, GitDiffScope.UNSTAGED, null, null, unstaged)
+        assertTrue(pending.text.contains("-int restored;") && pending.text.contains("+other.c"), pending.text)
+        assertFalse(pending.truncated)
     }
 
     @Test fun `a cached removal is one entry and a conflicted file shows its combined patch`(): Unit = GitTestRepositories().use { f ->
