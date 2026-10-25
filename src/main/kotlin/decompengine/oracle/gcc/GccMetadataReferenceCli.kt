@@ -69,9 +69,11 @@ object GccMetadataReferenceCli {
 
     /** Streaming JSON keeps even the maximum staged namespace from requiring a second large tree. */
     internal fun writeStage(stage: ReferenceNativeRuntimeStage, output: PrintStream) {
-        output.println("{")
-        output.println("  \"executionAdmitted\": false,")
-        output.println("  \"provisioningEntries\": [")
+        // PrintStream.print uses the console's charset; protocol bytes must always remain UTF-8.
+        fun writeUtf8(value: String) = output.write(value.toByteArray(Charsets.UTF_8))
+        writeUtf8("{\n")
+        writeUtf8("  \"executionAdmitted\": false,\n")
+        writeUtf8("  \"provisioningEntries\": [\n")
         stage.provisioningEntries.forEachIndexed { index, entry ->
             val bytes = OracleJson.canonicalBytes(JsonObject(mapOf(
                 "relativePath" to JsonPrimitive(entry.relativePath), "kind" to JsonPrimitive(entry.kind),
@@ -79,17 +81,17 @@ object GccMetadataReferenceCli {
             )))
             val lines = bytes.decodeToString().trimEnd('\n').lines()
             lines.forEachIndexed { lineIndex, line ->
-                output.print("    $line")
-                if (lineIndex == lines.lastIndex && index != stage.provisioningEntries.lastIndex) output.print(",")
-                output.println()
+                writeUtf8("    $line")
+                if (lineIndex == lines.lastIndex && index != stage.provisioningEntries.lastIndex) writeUtf8(",")
+                writeUtf8("\n")
             }
         }
-        output.println("  ],")
+        writeUtf8("  ],\n")
         val tail = OracleJson.canonicalBytes(JsonObject(mapOf(
             "root" to JsonPrimitive(stage.root.toString()), "schemaVersion" to JsonPrimitive("reference-native-runtime-stage-v1"),
             "stageIdentitySha256" to JsonPrimitive(stage.identitySha256),
         ))).decodeToString().trimEnd('\n').lines()
-        tail.drop(1).forEach(output::println)
+        tail.drop(1).forEach { writeUtf8("$it\n") }
         check(!output.checkError()) { "could not write reference staging plan" }
     }
 }

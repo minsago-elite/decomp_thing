@@ -7,6 +7,7 @@ import java.io.ByteArrayOutputStream
 import java.io.PrintStream
 import java.nio.file.Path
 import kotlin.test.Test
+import kotlin.test.assertContentEquals
 import kotlin.test.assertEquals
 import kotlin.test.assertFails
 import kotlin.test.assertIs
@@ -53,5 +54,26 @@ class GccMetadataReferenceCliTest {
         val entries = result.getValue("provisioningEntries") as JsonArray
         assertEquals(JsonPrimitive(42), (entries[1] as JsonObject).getValue("gid"))
         assertEquals(JsonPrimitive("reference-native-runtime-stage-v1"), result.getValue("schemaVersion"))
+    }
+
+    @Test
+    fun `stage remains canonical utf8 through a non utf8 print stream`() {
+        val stage = ReferenceNativeRuntimeStage(Path.of("/단계-é"), "projection".encodeToByteArray(), listOf(
+            ReferenceNativeRuntimeProvisioningEntry("image/usr/라이브러리", "directory", 0, 42, 493),
+        ))
+        val bytes = ByteArrayOutputStream()
+        PrintStream(bytes, false, Charsets.UTF_16LE).use { GccMetadataReferenceCli.writeStage(stage, it) }
+        val expected = OracleJson.canonicalBytes(JsonObject(mapOf(
+            "executionAdmitted" to JsonPrimitive(false),
+            "provisioningEntries" to JsonArray(listOf(JsonObject(mapOf(
+                "relativePath" to JsonPrimitive("image/usr/라이브러리"), "kind" to JsonPrimitive("directory"),
+                "uid" to JsonPrimitive(0), "gid" to JsonPrimitive(42), "mode" to JsonPrimitive(493),
+            )))),
+            "root" to JsonPrimitive("/단계-é"),
+            "schemaVersion" to JsonPrimitive("reference-native-runtime-stage-v1"),
+            "stageIdentitySha256" to JsonPrimitive(stage.identitySha256),
+        )))
+        assertContentEquals(expected, bytes.toByteArray())
+        OracleJson.parseCanonical(bytes.toByteArray())
     }
 }
