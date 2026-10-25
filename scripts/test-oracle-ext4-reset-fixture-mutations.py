@@ -37,6 +37,7 @@ class FileMutationTests(unittest.TestCase):
         self.patcher.start()
         self.subject = object.__new__(mut.Mutations)
         self.subject.core = core
+        self.subject.before_cleanup = lambda: None
         self.subject.state = {'image': core.file_identity(self.original)}
         # These ordinary test files are deliberately unprivileged. The live
         # constructor and replacement checks still require root ownership.
@@ -92,6 +93,20 @@ class FileMutationTests(unittest.TestCase):
             context.__exit__(None, None, None)
         self.assertEqual(b'changed', self.original.read_bytes())
         self.assertTrue((self.private / 'fixture-old-image').exists())
+
+    def test_live_probe_guard_blocks_cleanup_and_preserves_both_inodes(self):
+        context = self.subject.backing_path_replacement()
+        context.__enter__()
+        def refuse():
+            raise mut.MutationError('live oracle probe')
+        self.subject.before_cleanup = refuse
+        with patch.object(mut.os, 'unlink') as unlink, patch.object(mut, 'rename_noreplace') as rename, \
+                self.assertRaisesRegex(mut.MutationError, 'live oracle probe'):
+            context.__exit__(None, None, None)
+        unlink.assert_not_called()
+        rename.assert_not_called()
+        self.assertEqual(mut.CANARY, self.original.read_bytes())
+        self.assertEqual(b'original backing bytes', (self.private / 'fixture-old-image').read_bytes())
 
     def test_same_size_changed_canary_is_refused_by_bytes(self):
         context = self.subject.backing_path_replacement()
@@ -230,6 +245,7 @@ class PhysicalContractTests(unittest.TestCase):
     def test_final_cleanup_requires_current_state_and_inactive_custodian_under_lock(self):
         subject = object.__new__(mut.Mutations)
         subject.state = {'phase': 'PUBLISHED', 'sequence': 7}
+        subject.before_cleanup = lambda: None
         events = []
         @contextlib.contextmanager
         def opened():
@@ -248,6 +264,36 @@ class PhysicalContractTests(unittest.TestCase):
         subject.mount_replacement = lambda: self.fail('must not start mutation')
         with self.assertRaises(mut.MutationError):
             subject.candidate_intent_replacement()
+
+    def test_final_unmount_inherits_only_parent_filesystem_broker_lock(self):
+        subject = object.__new__(mut.Mutations)
+        subject.gate = Path('/fixed/gate')
+        subject.scratch = subject.gate / 'scratch'
+        subject.state = {'loop': {'path': '/dev/loop12'}, 'owner': {}, 'image': {'id': 'image'}}
+        subject.record = {'gate': {'mode': 0o711}, 'underlying': {'id': 'underlying'}}
+        events = []
+        row = {'id': 42, 'device': '7:12'}
+        subject.core = types.SimpleNamespace(
+            loop_identity=lambda *args: subject.state['loop'],
+            current_inventory=lambda *args: None,
+            fd_identity=lambda fd: {'mode': 0} if 'fence' in events else subject.record['gate'],
+            mount_table=lambda: [])
+        subject._expect = lambda *args: None
+        subject._original_mount = lambda path: row
+        subject._row = lambda *args: row
+        def command(role, *args, pass_fds=()):
+            self.assertEqual(['fence', 'fsync', 'close-gate'], events)
+            self.assertEqual((99,), pass_fds)
+            self.assertNotIn(77, pass_fds)
+            events.append('umount')
+        subject._run = command
+        with patch.object(mut.os, 'open', return_value=77), \
+                patch.object(mut.os, 'fchmod', side_effect=lambda *args: events.append('fence')), \
+                patch.object(mut.os, 'fsync', side_effect=lambda *args: events.append('fsync')), \
+                patch.object(mut.os, 'close', side_effect=lambda fd: events.append('close-gate')):
+            facts = subject._fence_and_unmount(99)
+        self.assertEqual(['fence', 'fsync', 'close-gate', 'umount'], events)
+        self.assertEqual('RESERVED_UNMOUNTED', facts['disposition'])
 
     def test_final_fence_refuses_changed_loop_before_chmod_or_command(self):
         subject = object.__new__(mut.Mutations)

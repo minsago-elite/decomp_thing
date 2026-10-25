@@ -80,8 +80,11 @@ def companion_identity(core, fd, path):
 
 
 class Mutations:
-    def __init__(self, core, state, runner):
+    def __init__(self, core, state, runner, *, before_cleanup=None):
         require(os.geteuid() == 0, 'physical qualification requires root')
+        require(callable(before_cleanup), 'trusted no-oracle census guard is required')
+        self.before_cleanup = before_cleanup
+        self._guard()
         require(core.ROOT == ROOT and core.PRIVATE == PRIVATE, 'fixed deployment differs')
         profile = core.parse_canonical(core._read_root_file(PRIVATE / 'profile.json', 16384))
         require(profile == core.profile_document(True), 'physical faults require qualification profile')
@@ -115,6 +118,11 @@ class Mutations:
                 # inserted into the protected record or used as reset authority.
                 self.record = dict(self.record, mount=row, root=root)
         self._original_mount(self.scratch)
+
+    def _guard(self):
+        # Must run inside each context's own finally. An outer with-wrapper
+        # raising cannot suppress a generator context manager's cleanup.
+        self.before_cleanup()
 
     def _run(self, role, *args, pass_fds=()):
         require(role in TOOLS, 'unknown physical fixture tool')
@@ -194,6 +202,7 @@ class Mutations:
             try:
                 yield facts
             finally:
+                self._guard()
                 facts['canaryAfterSha256'] = self._check_canary(directory, fd, identity)
                 os.unlink('fixture-canary', dir_fd=directory)
                 facts['cleanup'] = True
@@ -282,6 +291,7 @@ class Mutations:
             try:
                 yield facts
             finally:
+                self._guard()
                 require(os.write(stop_w, b'C') == 1, 'holder observation request failed')
                 require(select.select([ready_r], [], [], 5)[0], 'holder canary observation deadline')
                 require(os.read(ready_r, 65) == CANARY_SHA.encode('ascii'), 'hidden canary changed')
@@ -333,6 +343,7 @@ class Mutations:
             try:
                 yield facts
             finally:
+                self._guard()
                 self._expect(path, image)
                 require(companion_identity(self.core, loop_fd, path_loop) == association, 'companion changed before retirement')
                 require(self.core.loop_identity(self.state['loop']['path'], self.state['owner']) == self.state['loop'],
@@ -367,6 +378,7 @@ class Mutations:
         try:
             yield facts
         finally:
+            self._guard()
             self._row(self.scratch, replacement); self._expect(self.scratch, root)
             self._row(saved, moved); self._original_mount(saved)
             directory = os.open(self.scratch, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC)
@@ -401,6 +413,7 @@ class Mutations:
         try:
             yield facts
         finally:
+            self._guard()
             self._row(target, row); self._expect(target, root)
             self._run('umount', '--no-canonicalize', target)
             self._rmdir(target, underneath)
@@ -434,6 +447,7 @@ class Mutations:
         try:
             yield facts
         finally:
+            self._guard()
             self._expect(saved, original); self._expect(path, replacement)
             fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC)
             try:
@@ -472,6 +486,7 @@ class Mutations:
         try:
             yield facts
         finally:
+            self._guard()
             self._expect(saved, original); self._expect(self.gate, replacement)
             self._row(saved / 'scratch', moved)
             directory = os.open(self.gate, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC)
@@ -490,6 +505,7 @@ class Mutations:
 
     def fence_and_unmount(self):
         """Final cleanup under production lock with no live custodian/cgroup."""
+        self._guard()
         require(self.state['phase'] in ('REGISTERED', 'PUBLISHED'), 'final cleanup requires a published slot')
         with self.core.opened_store() as store:
             require(store.load() == self.state, 'final cleanup source state changed')
