@@ -1167,7 +1167,8 @@ Bootstrap reports `github` as `unavailable` with `GITHUB_UNCONFIGURED`, as `supp
 `GITHUB_READ_ONLY` when there is no token, or as `supported` with write access. Local Git and
 remotes never depend on it. The token is read per request and sent only as the `Authorization`
 header to the configured API. It never reaches records, audit, responses or logs. The client
-follows no redirects and bounds time and response size.
+follows no redirects and bounds response size. It also bounds time, including a deadline for
+receiving the response body after the headers.
 
 `GET G/github?remote=<remoteId>&branch=<head>&base=<base>` reports:
 
@@ -1194,19 +1195,27 @@ explicit write, refused when:
 - a branch is not on the remote as last fetched, with `BRANCH_NOT_PUBLISHED`;
 - an earlier creation for the same branches is unconfirmed, with `PR_UNCONFIRMED`.
 
-The creation intent is recorded before GitHub is contacted, and every outcome is audited:
+The creation intent is recorded before GitHub is contacted, and every outcome is audited. The
+intent records the GitHub repository contacted and the numbers of pull requests that already
+existed for those branches.
 
 - A duplicate (`already_exists`) is resolved by finding the existing open pull request.
-- An uncertain outcome, such as a dropped connection, becomes `recovery-required` with
-  `PR_UNCONFIRMED`.
-- `github.pr.reconcile` with `prOperationId` looks for the pull request by branches and title
-  digest. It settles the original operation as `completed`, or as `failed` with
-  `PR_NOT_CREATED`, and never repeats the write.
+- Only definite refusals fail the operation: unauthorized, forbidden, not found, validation,
+  read-only, missing credential and rate limited.
+- Any other outcome becomes `recovery-required` with `PR_UNCONFIRMED`. Examples are a dropped
+  connection, a stalled or unreadable response, or a server error.
+- `github.pr.reconcile` with `prOperationId` looks in the recorded repository, even if the
+  remote's binding has since changed. It matches by branches and title digest and ignores pull
+  requests that already existed. It settles the original operation as `completed`, or as
+  `failed` with `PR_NOT_CREATED`, and never repeats the write.
+- A remote with an unconfirmed creation cannot be removed (`PR_UNCONFIRMED`).
 
 The workspace's **GitHub pull requests** panel lists the pull requests and their commit binding.
 It shows the access state and provider problems, and it reviews the repository, branches, commit
 range, title and description before **Create pull request**. It also offers reconciliation of
-uncertain creations.
+uncertain creations. With several remotes, a selector chooses the remote. Changing the remote or
+the head branch hides the reviewed status, a late answer to an older read is discarded, and
+creation sends exactly the reviewed remote and branches.
 
 `GitHubIntegrationTest` runs against a loopback fake with the shape of
 `scripts/web-github-fixture.mjs`. It covers:
@@ -1214,7 +1223,11 @@ uncertain creations.
 - the absent, read-only and rate-limited states;
 - explicit creation tied to the pushed commit, and duplicate resolution;
 - a credential that never appears in storage or provider requests;
-- reconciliation of a dropped creation.
+- reconciliation of a dropped creation and of an unreadable creation answer;
+- a stalled response body bounded by the deadline;
+- an older pull request with the same title that is never taken as the result;
+- reconciliation in the recorded repository after the binding changes;
+- refusal to remove a remote with an unconfirmed creation.
 
 The separate `github-optional` CI lane runs these tests and the fixture's own test with no
 secrets or network credentials (#612).

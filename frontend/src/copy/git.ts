@@ -178,6 +178,7 @@ export const gitHubCopy = {
   notReported: 'The server did not report GitHub support.',
   note: 'Optional. Pull requests are tied to the bound remote, branch and pushed commit. Local Git and remotes work without them.',
   check: 'Check pull requests',
+  remote: 'Remote',
   access: { unavailable: 'Not configured', unbound: 'This remote is not bound to a GitHub repository', 'read-only': 'Read-only: listing only', write: 'Can create pull requests' },
   retryAfter: 'Retry after {seconds} seconds.',
   unconfirmed: 'An earlier pull request creation did not report its outcome. Reconcile it before creating another.',

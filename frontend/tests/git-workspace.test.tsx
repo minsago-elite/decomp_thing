@@ -93,7 +93,7 @@ function serve(kind: string, path: string): Promise<unknown> {
       export: { sha256: 'e'.repeat(64), sizeBytes: 512, files: 1, skippedEntries: 0, verification: 'tree-blob-ids-match' } };
     if (route === `${base}/remotes`) return { repositoryId, configured: true, remotes: remoteList };
     if (route === `${base}/conflicts`) return conflictState;
-    if (route === `${base}/github`) return { repositoryId, remoteId: 'remote_1', access: 'write', repository: 'fixture-owner/fixture-repo',
+    if (route === `${base}/github`) return { repositoryId, remoteId: new URLSearchParams(query).get('remote'), access: 'write', repository: 'fixture-owner/fixture-repo',
       headBranch: new URLSearchParams(query).get('branch'), pushedObjectId: head, baseBranch: new URLSearchParams(query).get('base'),
       baseObjectId: other, commitCount: '1', commits: [{ objectId: head, subject: 'Work in progress' }],
       pulls: [{ number: 3, state: 'open', title: 'Review the parser', url: 'https://fixture.invalid/fixture-owner/fixture-repo/pull/3',
@@ -422,6 +422,27 @@ it('lists pull requests tied to the pushed commit and creates one only after rev
   await waitFor(() => expect(transport.post).toHaveBeenCalledOnce());
   expect(transport.post.mock.calls[0]?.slice(2, 4)).toEqual(['gitHubPullCreateRequest', expect.objectContaining({ action: 'github.pr.create',
     remoteId: 'remote_1', headBranch: 'main', baseBranch: 'release', title: 'Review the parser', body: '' })]);
+});
+
+it('reviews pull requests for the chosen remote and drops a review when the remote changes', async () => {
+  const tracking = (name: string) => [{ refId: `ref_${name}_main`, name: `refs/remotes/${name}/main`, objectId: head },
+    { refId: `ref_${name}_release`, name: `refs/remotes/${name}/release`, objectId: other }];
+  remoteList = [{ ...(remoteList[0] as object), trackingRefs: tracking('origin') },
+    { ...(remoteList[0] as object), remoteId: 'remote_2', name: 'upstream', trackingRefs: tracking('upstream') }];
+  transport.post.mockResolvedValueOnce(operation('completed', 'github.pr.create'));
+  mount([...supported, capability('github', 'supported')]);
+  const panel = within(await screen.findByRole('region', { name: 'GitHub pull requests' }));
+  fireEvent.click(panel.getByRole('button', { name: 'Check pull requests' }));
+  expect(await panel.findByRole('button', { name: 'Create pull request' })).toBeTruthy();
+  // Choosing another remote discards the review made for the first one.
+  fireEvent.change(panel.getByLabelText('Remote'), { target: { value: 'remote_2' } });
+  await waitFor(() => expect(panel.queryByRole('button', { name: 'Create pull request' })).toBeNull());
+  fireEvent.click(panel.getByRole('button', { name: 'Check pull requests' }));
+  expect(transport.get).toHaveBeenCalledWith('gitHubStatus', `${base}/github?remote=remote_2&branch=main&base=release`);
+  fireEvent.input(await panel.findByLabelText('Title'), { target: { value: 'Review upstream' } });
+  fireEvent.click(panel.getByRole('button', { name: 'Create pull request' }));
+  await waitFor(() => expect(transport.post).toHaveBeenCalledOnce());
+  expect(transport.post.mock.calls[0]?.[3]).toMatchObject({ action: 'github.pr.create', remoteId: 'remote_2', headBranch: 'main', baseBranch: 'release' });
 });
 
 it('explains an absent GitHub integration without affecting local Git', async () => {

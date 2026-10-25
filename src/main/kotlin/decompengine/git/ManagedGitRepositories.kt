@@ -740,6 +740,8 @@ class ManagedGitRepositories(
                 val remote = remoteFor(located, request.parameters["remoteId"])
                 if (GitPushes.list(directory).any { it.remoteId == remote.remoteId }) GitWorkspaceMutations.refuse("PUSH_UNCONFIRMED",
                     "A push to this remote is unconfirmed. Reconcile it before removing the remote.")
+                if (pullIntents(directory).any { it.remoteId == remote.remoteId }) GitWorkspaceMutations.refuse("PR_UNCONFIRMED",
+                    "A pull request creation for this remote is unconfirmed. Reconcile it before removing the remote.")
             }
             GitOperationAction.FETCH -> allowedLocation(remoteFor(located, request.parameters["remoteId"]))
             GitOperationAction.PUSH -> {
@@ -893,16 +895,23 @@ class ManagedGitRepositories(
         val pushedObjectId: String?, val pulls: List<GitHubPull>, val problem: GitHubException?, val unconfirmed: List<GitPullIntent>,
         val base: String? = null, val baseObjectId: String? = null, val range: Pair<List<Pair<String, String>>, Long>? = null)
 
-    /** A pull-request creation intent; retained while its outcome is unconfirmed. */
-    data class GitPullIntent(val operationId: String, val remoteId: String, val head: String, val base: String, val titleSha256: String)
+    /**
+     * A pull-request creation intent; retained while its outcome is unconfirmed. It records the
+     * hosting repository actually contacted and the pull requests that already existed, so
+     * reconciliation looks in the same place and never mistakes an older pull request for this one.
+     */
+    data class GitPullIntent(val operationId: String, val remoteId: String, val head: String, val base: String, val titleSha256: String,
+        val owner: String, val repository: String, val existing: Set<Int>)
 
     private fun pullIntents(directory: Path): List<GitPullIntent> {
         val intents = directory.resolve(PULL_INTENTS)
         if (!Files.isDirectory(intents, NOFOLLOW_LINKS)) return emptyList()
         return Files.newDirectoryStream(intents).use { entries ->
             entries.filter { it.fileName.toString().matches(Regex("operation_[0-9a-f]{32}\\.json")) }.take(64).map { file ->
-                val value = Json.parseToJsonElement(GitStorage.read(file, 4096).toString(Charsets.UTF_8)).jsonObject
-                GitPullIntent(value.text("operationId"), value.text("remoteId"), value.text("head"), value.text("base"), value.text("titleSha256"))
+                val value = Json.parseToJsonElement(GitStorage.read(file, 16 * 1024).toString(Charsets.UTF_8)).jsonObject
+                GitPullIntent(value.text("operationId"), value.text("remoteId"), value.text("head"), value.text("base"), value.text("titleSha256"),
+                    value.text("owner"), value.text("repository"),
+                    (value.getValue("existing") as kotlinx.serialization.json.JsonArray).map { (it as JsonPrimitive).content.toInt() }.toSet())
             }
         }
     }
@@ -975,20 +984,23 @@ class ManagedGitRepositories(
                 val binding = checkNotNull(checkNotNull(github).binding(remote))
                 val head = request.text("headBranch"); val base = request.text("baseBranch"); val title = request.text("title")
                 val intents = GitStorage.directories(directory, PULL_INTENTS)
+                // Pull requests that already exist for these branches can never be this creation's result.
+                val existing = client.pulls(binding, head, base).map { it.number }
                 GitStorage.replaceAtomically(intents.resolve("${operation.operationId}.json"), buildJsonObject {
                     put("operationId", operation.operationId); put("remoteId", remote.remoteId); put("head", head); put("base", base)
-                    put("titleSha256", GitStorage.sha256(title))
+                    put("titleSha256", GitStorage.sha256(title)); put("owner", binding.owner); put("repository", binding.repository)
+                    put("existing", kotlinx.serialization.json.JsonArray(existing.map(::JsonPrimitive)))
                 }.toString().toByteArray())
                 fun audit(outcome: String, detail: String?) = GitRemoteStore.audit(directory, GitRemoteStore.auditEntry("github.pr.create",
                     operation.operationId, outcome, remote, clock.instant(), ref = "refs/heads/$head", detail = detail))
                 crash(GitOperationCrashPoint.AFTER_STAGING)
                 val pull = try { client.create(binding, head, base, title, request.content ?: "") } catch (failure: GitHubException) {
-                    when (failure.code) {
-                        "GITHUB_UNREACHABLE" -> {
+                    when {
+                        !client.definiteRefusal(failure.code) && failure.code != "GITHUB_PR_EXISTS" -> {
                             audit("unconfirmed", null)
                             throw GitOperationRefusal("PR_UNCONFIRMED", "GitHub did not report the outcome. Reconcile before creating it again; nothing is claimed.")
                         }
-                        "GITHUB_PR_EXISTS" -> client.pulls(binding, head, base).firstOrNull { it.state == "open" && it.baseRef == base }
+                        failure.code == "GITHUB_PR_EXISTS" -> client.pulls(binding, head, base).firstOrNull { it.state == "open" && it.baseRef == base }
                             ?.also { Files.deleteIfExists(intents.resolve("${operation.operationId}.json")); audit("existed", "#${it.number}") }
                             ?.let { return null to "A pull request already existed for these branches: #${it.number} ${it.url}" }
                             ?: run { Files.deleteIfExists(intents.resolve("${operation.operationId}.json")); audit("rejected", failure.code.lowercase()); throw failure }
@@ -1002,8 +1014,10 @@ class ManagedGitRepositories(
             GitOperationAction.GITHUB_PR_RECONCILE -> {
                 val intent = pullIntents(directory).single { it.operationId == request.parameters["prOperationId"] }
                 val remote = remoteFor(located, intent.remoteId)
-                val binding = checkNotNull(checkNotNull(github).binding(remote))
-                val found = client.pulls(binding, intent.head, intent.base).firstOrNull { GitStorage.sha256(it.title) == intent.titleSha256 }
+                // Look in the repository that was actually contacted, whatever the remote is bound to now.
+                val binding = GitHubBinding(remote.location.display, intent.owner, intent.repository)
+                val found = client.pulls(binding, intent.head, intent.base)
+                    .firstOrNull { GitStorage.sha256(it.title) == intent.titleSha256 && it.number !in intent.existing }
                 val (state, code, message) = if (found != null) Triple(GitOperationState.COMPLETED, null,
                     "Reconciliation found pull request #${found.number}: ${found.url}")
                     else Triple(GitOperationState.FAILED, "PR_NOT_CREATED", "Reconciliation found no such pull request; it was not created.")

@@ -34,6 +34,12 @@ class GitHubIntegrationTest {
         val requests = mutableListOf<String>()
         @Volatile var rateLimited = false
         @Volatile var dropAfterCreate = false
+        /** Record the pull request but answer creation with a body the client cannot read. */
+        @Volatile var malformedCreate = false
+        /** Answer creation with a server error without creating anything. */
+        @Volatile var failCreate = false
+        /** Send listing headers and part of a body, then stall. */
+        @Volatile var stallBody = false
         private val server = HttpServer.create(InetSocketAddress("127.0.0.1", 0), 8)
         init {
             server.createContext("/repos/fixture-owner/fixture-repo/pulls") { exchange ->
@@ -44,6 +50,11 @@ class GitHubIntegrationTest {
                 }
                 val authorization = exchange.requestHeaders.getFirst("Authorization")
                 when {
+                    stallBody -> {
+                        exchange.sendResponseHeaders(200, 0)
+                        exchange.responseBody.write("[".toByteArray()); exchange.responseBody.flush()
+                        try { Thread.sleep(3_000) } catch (_: InterruptedException) { }
+                    }
                     rateLimited -> reply(403, "{\"message\":\"rate limited\"}", mapOf("X-RateLimit-Remaining" to "0", "Retry-After" to "60"))
                     authorization != null && authorization != "Bearer $token" -> reply(401, "{\"message\":\"bad credential\"}")
                     exchange.requestMethod == "GET" -> {
@@ -57,7 +68,8 @@ class GitHubIntegrationTest {
                     else -> {
                         val input = Json.parseToJsonElement(exchange.requestBody.readBytes().toString(Charsets.UTF_8)).jsonObject
                         val head = input.getValue("head").jsonPrimitive.content; val base = input.getValue("base").jsonPrimitive.content
-                        if (pulls.any { it.getValue("head").jsonObject.getValue("ref").jsonPrimitive.content == head &&
+                        if (failCreate) { reply(502, "{\"message\":\"bad gateway\"}"); exchange.close(); return@createContext }
+                        if (pulls.any { it.getValue("state").jsonPrimitive.content == "open" && it.getValue("head").jsonObject.getValue("ref").jsonPrimitive.content == head &&
                                 it.getValue("base").jsonObject.getValue("ref").jsonPrimitive.content == base }) {
                             reply(422, "{\"message\":\"exists\",\"errors\":[{\"code\":\"already_exists\"}]}")
                         } else {
@@ -70,6 +82,7 @@ class GitHubIntegrationTest {
                             }
                             pulls += pull
                             if (dropAfterCreate) { exchange.close(); return@createContext }
+                            if (malformedCreate) { reply(201, "{\"number\":\"one\"}"); exchange.close(); return@createContext }
                             reply(201, pull.toString())
                         }
                     }
@@ -202,6 +215,84 @@ class GitHubIntegrationTest {
             assertEquals(1, fake.pulls.size)
             assertNotNull(service.githubStatus(jobId, repositoryId, null, remoteId(), "feature").pulls.singleOrNull())
             assertTrue(service.githubStatus(jobId, repositoryId, null, remoteId(), "feature").unconfirmed.isEmpty())
+        }
+    }
+
+    private fun reconcile(operationId: String): GitOperationRecord {
+        val view = service.workspace(jobId, repositoryId)
+        val guards = GitGuards(GitWorkspaceVersions.repositoryVersion(view.record, view.observation), GitWorkspaceVersions.worktreeVersion(view.observation),
+            view.observation.head.objectId, null, null)
+        return run(GitSyncRequest(GitOperationAction.GITHUB_PR_RECONCILE, view.worktreeId, guards, mapOf("prOperationId" to operationId)))
+    }
+
+    private fun closedPull(number: Int, title: String) = buildJsonObject {
+        put("number", number); put("state", "closed"); put("title", title)
+        put("html_url", "https://fixture.invalid/fixture-owner/fixture-repo/pull/$number")
+        put("head", buildJsonObject { put("ref", "feature") }); put("base", buildJsonObject { put("ref", "main") })
+    }
+
+    @Test fun `a stalled response body is bounded by the deadline`(): Unit = FakeGitHub(token).use { fake ->
+        fake.stallBody = true
+        val client = GitHubClient(GitHubConfiguration(fake.url, null, emptyList()), bodyTimeout = java.time.Duration.ofMillis(300))
+        val started = System.nanoTime()
+        val failure = assertFailsWith<GitHubException> { client.pulls(GitHubBinding("admitted:upstream.git", "fixture-owner", "fixture-repo"), "feature") }
+        assertEquals("GITHUB_UNREACHABLE", failure.code)
+        assertTrue(System.nanoTime() - started < 2_500_000_000L, "the stalled body must not hold the operation")
+        fake.stallBody = false
+    }
+
+    @Test fun `an unreadable creation answer is unconfirmed and reconciles to the created pull request`(): Unit = Fixture().use { f ->
+        FakeGitHub(token).use { fake ->
+            f.cloned(configuration(fake, f.repositories.root, writable = true))
+            fake.malformedCreate = true
+            val uncertain = run(create())
+            assertEquals(GitOperationState.RECOVERY_REQUIRED, uncertain.state, uncertain.message)
+            assertEquals("PR_UNCONFIRMED", uncertain.failureCode)
+            // The remote cannot be removed while the creation is unconfirmed.
+            val view = service.workspace(jobId, repositoryId)
+            val guards = GitGuards(GitWorkspaceVersions.repositoryVersion(view.record, view.observation), GitWorkspaceVersions.worktreeVersion(view.observation),
+                view.observation.head.objectId, null, null)
+            assertEquals("PR_UNCONFIRMED", assertFailsWith<ManagedGitException> {
+                service.requestWorkspace(jobId, repositoryId, GitSyncRequest(GitOperationAction.REMOTE_REMOVE, view.worktreeId, guards, mapOf("remoteId" to remoteId())), key())
+            }.code)
+            fake.malformedCreate = false
+            val reconciled = reconcile(uncertain.operationId)
+            assertEquals(GitOperationState.COMPLETED, reconciled.state, reconciled.message)
+            assertTrue(reconciled.message.contains("#1"), reconciled.message)
+            assertEquals(1, fake.pulls.size)
+        }
+    }
+
+    @Test fun `an older pull request with the same title is never taken as this creation`(): Unit = Fixture().use { f ->
+        FakeGitHub(token).use { fake ->
+            fake.pulls += closedPull(1, "Review the feature")
+            f.cloned(configuration(fake, f.repositories.root, writable = true))
+            fake.failCreate = true
+            val uncertain = run(create())
+            assertEquals("PR_UNCONFIRMED", uncertain.failureCode, uncertain.message)
+            fake.failCreate = false
+            val reconciled = reconcile(uncertain.operationId)
+            assertEquals(GitOperationState.COMPLETED, reconciled.state, reconciled.message)
+            val settled = service.operation(jobId, repositoryId, uncertain.operationId)
+            assertEquals(GitOperationState.FAILED, settled.state, settled.message)
+            assertEquals("PR_NOT_CREATED", settled.failureCode)
+        }
+    }
+
+    @Test fun `reconciliation looks in the repository that was contacted even after the binding changes`(): Unit = Fixture().use { f ->
+        FakeGitHub(token).use { fake ->
+            f.cloned(configuration(fake, f.repositories.root, writable = true))
+            fake.dropAfterCreate = true
+            val uncertain = run(create())
+            assertEquals("PR_UNCONFIRMED", uncertain.failureCode, uncertain.message)
+            fake.dropAfterCreate = false
+            // After a restart the operator binds the remote elsewhere; the fake has no such repository.
+            val rebound = configuration(fake, f.repositories.root, writable = true).let { it.copy(bindings = listOf(GitHubBinding("admitted:upstream.git", "other-owner", "other-repo"))) }
+            service = f.open(rebound)
+            val reconciled = reconcile(uncertain.operationId)
+            assertEquals(GitOperationState.COMPLETED, reconciled.state, reconciled.message)
+            assertEquals(GitOperationState.COMPLETED, service.operation(jobId, repositoryId, uncertain.operationId).state)
+            assertTrue(fake.requests.none { it.contains("other-owner") })
         }
     }
 }

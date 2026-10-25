@@ -77,7 +77,9 @@ class GitHubException(val code: String, message: String, val retryAfterSeconds: 
 
 /** Bounded, redirect-free provider client. Requests and errors never carry the token. */
 class GitHubClient(private val configuration: GitHubConfiguration,
-    private val http: HttpClient = HttpClient.newBuilder().followRedirects(HttpClient.Redirect.NEVER).connectTimeout(Duration.ofSeconds(10)).build()) {
+    private val http: HttpClient = HttpClient.newBuilder().followRedirects(HttpClient.Redirect.NEVER).connectTimeout(Duration.ofSeconds(10)).build(),
+    /** Overall bound for receiving one response body after its headers. */
+    private val bodyTimeout: Duration = Duration.ofSeconds(20)) {
 
     private fun token(): String? = configuration.tokenFile?.let { file ->
         try { GitStorage.read(file, 4096).toString(Charsets.UTF_8).trim() } catch (_: IOException) {
@@ -98,7 +100,18 @@ class GitHubClient(private val configuration: GitHubConfiguration,
         } catch (_: InterruptedException) {
             Thread.currentThread().interrupt(); throw GitHubException("GITHUB_UNREACHABLE", "The GitHub request was interrupted.")
         }
-        val bytes = response.body().use { it.readNBytes(1024 * 1024 + 1) }
+        // The request timeout covers only the headers; the body is read under the same overall deadline.
+        val stream = response.body()
+        val reading = java.util.concurrent.CompletableFuture.supplyAsync { stream.use { it.readNBytes(1024 * 1024 + 1) } }
+        val bytes = try { reading.get(bodyTimeout.toMillis(), java.util.concurrent.TimeUnit.MILLISECONDS) } catch (_: java.util.concurrent.TimeoutException) {
+            try { stream.close() } catch (_: IOException) { }
+            reading.cancel(true)
+            throw GitHubException("GITHUB_UNREACHABLE", "GitHub stopped sending its response. Local Git work is unaffected; try again later.")
+        } catch (_: java.util.concurrent.ExecutionException) {
+            throw GitHubException("GITHUB_UNREACHABLE", "GitHub's response could not be read. Local Git work is unaffected; try again later.")
+        } catch (_: InterruptedException) {
+            Thread.currentThread().interrupt(); reading.cancel(true); throw GitHubException("GITHUB_UNREACHABLE", "The GitHub request was interrupted.")
+        }
         if (bytes.size > 1024 * 1024) throw GitHubException("GITHUB_RESPONSE_INVALID", "GitHub returned an oversized response.")
         val parsed = try { if (bytes.isEmpty()) null else Json.parseToJsonElement(bytes.toString(Charsets.UTF_8)) } catch (_: Exception) {
             throw GitHubException("GITHUB_RESPONSE_INVALID", "GitHub returned a response the workbench cannot read.")
@@ -116,7 +129,14 @@ class GitHubClient(private val configuration: GitHubConfiguration,
         return status to parsed
     }
 
-    private fun pull(value: kotlinx.serialization.json.JsonElement): GitHubPull {
+    private fun pull(value: kotlinx.serialization.json.JsonElement): GitHubPull = try { parsePull(value) } catch (failure: GitHubException) {
+        throw failure
+    } catch (_: RuntimeException) {
+        // A missing or mistyped field is an unreadable answer, never an internal failure.
+        throw GitHubException("GITHUB_RESPONSE_INVALID", "GitHub returned a pull request the workbench cannot read.")
+    }
+
+    private fun parsePull(value: kotlinx.serialization.json.JsonElement): GitHubPull {
         val item = value.jsonObject
         fun text(name: String) = item.getValue(name).jsonPrimitive.content
         val head = item.getValue("head").jsonObject
@@ -127,6 +147,10 @@ class GitHubClient(private val configuration: GitHubConfiguration,
             item.getValue("base").jsonObject.getValue("ref").jsonPrimitive.content,
             head["sha"]?.jsonPrimitive?.contentOrNull?.takeIf { it.matches(Regex("[0-9a-f]{40}|[0-9a-f]{64}")) })
     }
+
+    /** Whether a creation failure is a definite refusal; anything else may have created the pull request. */
+    fun definiteRefusal(code: String) = code in setOf("GITHUB_UNAUTHORIZED", "GITHUB_FORBIDDEN", "GITHUB_NOT_FOUND",
+        "GITHUB_VALIDATION_FAILED", "GITHUB_READ_ONLY", "GITHUB_CREDENTIAL_UNAVAILABLE", "GITHUB_RATE_LIMITED")
 
     /** Pull requests whose head is [head] in the bound repository (same-repository heads only). */
     fun pulls(binding: GitHubBinding, head: String, base: String? = null): List<GitHubPull> {
@@ -143,7 +167,8 @@ class GitHubClient(private val configuration: GitHubConfiguration,
             put("head", head); put("base", base); put("title", title); put("body", body)
         }, write = true)
         if (status == 422) {
-            val exists = response?.jsonObject?.get("errors")?.jsonArray?.any { it.jsonObject["code"]?.jsonPrimitive?.content == "already_exists" } == true
+            val exists = ((response as? JsonObject)?.get("errors") as? JsonArray)
+                ?.any { ((it as? JsonObject)?.get("code") as? kotlinx.serialization.json.JsonPrimitive)?.contentOrNull == "already_exists" } == true
             throw GitHubException(if (exists) "GITHUB_PR_EXISTS" else "GITHUB_VALIDATION_FAILED",
                 if (exists) "A pull request for this head and base already exists." else "GitHub rejected the pull request; check that both branches exist.")
         }

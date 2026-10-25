@@ -1,4 +1,4 @@
-import { useState } from 'preact/hooks';
+import { useRef, useState } from 'preact/hooks';
 import { gitHubCopy as copy } from '../copy/git';
 import { textMessage } from '../shared/messages';
 import { StateMark, capabilityTone } from '../shared/StateMark';
@@ -19,12 +19,17 @@ export function GitHubPanel({ capability, remotes, branch, writable, readStatus,
   onCreate: (draft: PullRequestDraft) => Promise<boolean>;
   onReconcile: (prOperationId: string) => Promise<boolean>;
 }) {
-  const [status, setStatus] = useState<GitHubStatus | null>(null);
+  const [loaded, setStatus] = useState<GitHubStatus | null>(null);
   const [base, setBase] = useState('');
   const [title, setTitle] = useState('');
   const [body, setBody] = useState('');
-  const remote = remotes?.remotes[0];
+  const [remoteId, setRemoteId] = useState('');
+  // Only the newest read may land; an older answer arriving late is discarded.
+  const reads = useRef(0);
+  const remote = remotes?.remotes.find(item => item.remoteId === remoteId) ?? remotes?.remotes[0];
   const head = branch?.startsWith('refs/heads/') ? branch.slice('refs/heads/'.length) : branch;
+  // A status belongs to one remote and head; once either changes it is no longer shown or usable.
+  const status = loaded && remote && loaded.remoteId === remote.remoteId && loaded.headBranch === head ? loaded : null;
   if (capability?.state !== 'supported') {
     return <section aria-labelledby="git-github-title">
       <h3 id="git-github-title">{copy.title}</h3>
@@ -34,10 +39,18 @@ export function GitHubPanel({ capability, remotes, branch, writable, readStatus,
   if (!remote || !head) return null;
   const bases = remote.trackingRefs.map(ref => ref.name.slice(`refs/remotes/${remote.name}/`.length)).filter(name => name && name !== head);
   const chosenBase = base || bases[0] || '';
-  const refresh = () => readStatus(remote.remoteId, head, chosenBase || null).then(setStatus);
+  const refresh = () => {
+    const read = ++reads.current;
+    return readStatus(remote.remoteId, head, chosenBase || null).then(result => { if (read === reads.current) setStatus(result); });
+  };
+  const reviewed = status !== null && status.remoteId === remote.remoteId && status.headBranch === head && status.baseBranch === chosenBase;
   return <section aria-labelledby="git-github-title">
     <h3 id="git-github-title">{copy.title}</h3>
     <p>{copy.note}</p>
+    {(remotes?.remotes.length ?? 0) > 1 && <label>{copy.remote} <select value={remote.remoteId}
+      onChange={event => { setRemoteId(event.currentTarget.value); setBase(''); }}>
+      {remotes?.remotes.map(item => <option key={item.remoteId} value={item.remoteId}>{item.name}</option>)}
+    </select></label>}
     <button type="button" onClick={() => { void refresh(); }}>{copy.check}</button>
     {status && <div>
       <p><StateMark tone={status.access === 'write' ? 'settled' : status.access === 'read-only' ? 'pending' : 'blocked'}>{copy.access[status.access]}</StateMark>
@@ -54,7 +67,8 @@ export function GitHubPanel({ capability, remotes, branch, writable, readStatus,
       <p>{copy.notAcceptance}</p>
       {status.access === 'write' && bases.length > 0 && <form onSubmit={event => {
         event.preventDefault();
-        if (title.trim()) void onCreate({ remoteId: remote.remoteId, headBranch: head, baseBranch: chosenBase, title: title.trim(), body })
+        // Submit exactly what was reviewed: the status's own remote, head and base.
+        if (title.trim() && reviewed) void onCreate({ remoteId: status.remoteId, headBranch: status.headBranch, baseBranch: chosenBase, title: title.trim(), body })
           .then(done => { if (done) { setTitle(''); setBody(''); void refresh(); } });
       }}>
         <h4>{copy.createTitle}</h4>
@@ -71,8 +85,8 @@ export function GitHubPanel({ capability, remotes, branch, writable, readStatus,
         <label>{copy.prTitle} <input value={title} maxLength={256} required onInput={event => { setTitle(event.currentTarget.value); }} /></label>
         <label for="git-github-body">{copy.body}</label>
         <textarea id="git-github-body" value={body} maxLength={65536} onInput={event => { setBody(event.currentTarget.value); }} />
-        <button type="submit" disabled={!writable || status.baseBranch !== chosenBase}>{copy.create}</button>
-        {status.baseBranch !== chosenBase && <p>{copy.reviewFirst}</p>}
+        <button type="submit" disabled={!writable || !reviewed}>{copy.create}</button>
+        {!reviewed && <p>{copy.reviewFirst}</p>}
       </form>}
     </div>}
   </section>;
