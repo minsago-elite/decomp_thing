@@ -101,8 +101,9 @@ internal object GitRefOperations {
 
     /** Switch without guessing, recursing into submodules or running hooks. */
     fun switch(runner: GitCommandRunner, gitDir: Path, workTree: Path, branch: String?, objectId: String?) {
-        val arguments = if (branch != null) listOf("--no-guess", "--no-recurse-submodules", branch)
-            else listOf("--no-recurse-submodules", "--detach", checkNotNull(objectId))
+        // Ignored local files (experiment outputs) are never overwritten by a tracked destination file.
+        val arguments = if (branch != null) listOf("--no-guess", "--no-recurse-submodules", "--no-overwrite-ignore", branch)
+            else listOf("--no-recurse-submodules", "--no-overwrite-ignore", "--detach", checkNotNull(objectId))
         val result = runner.run(GitInvocation("switch", listOf("-q") + arguments, gitDir = gitDir, workTree = workTree,
             allowedExitCodes = setOf(0, 1, 128), limits = LIMITS))
         if (result.exitCode != 0) refuse("SWITCH_REFUSED", "Git refused the switch, for example because a file would be overwritten or the branch is checked out elsewhere. Nothing was discarded.")

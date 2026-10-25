@@ -442,7 +442,7 @@ class ManagedGitRepositories(
         return reading {
             val format = located.record.objectFormat
             val commit = GitReads.history(runner, located.commonDir, format, objectId, 0, 1).entries.single()
-            val (refs, _) = GitReads.refs(runner, located.commonDir, format, 0, 200)
+            val refs = GitReads.allRefs(runner, located.commonDir, format)
             GitProvenanceView(located.record, commit, refs.filter { (it.peeledObjectId ?: it.objectId) == objectId }.map { it.name },
                 mappingView(jobId, located.record, objectId), export, GitSourceExports.verify(export.bytes, format, export.blobs))
         }
@@ -771,6 +771,10 @@ class ManagedGitRepositories(
                 }
                 val target = request.refId?.let { refId ->
                     val (name, tip) = branchFor(runner, located, refId)
+                    // An imported name such as `--detach` would be read as a switch option; refuse it.
+                    if (name.removePrefix("refs/heads/").startsWith("-")) {
+                        GitRefOperations.refuse("VALIDATION_FAILED", "That branch name starts with '-' and cannot be switched to by the workbench.")
+                    }
                     // The bare common layout hides the primary checkout from Git's own check; use ours.
                     if (name != observation.head.refName && name in checkedOutBranches(runner, located)) {
                         GitRefOperations.refuse("BRANCH_CURRENT", "That branch is checked out in another work tree. Use a new branch or switch that work tree first.")

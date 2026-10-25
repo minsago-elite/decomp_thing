@@ -243,6 +243,28 @@ class GitBranchesWorktreesTest {
         assertEquals(base, service.workspace(jobId, repositoryId).observation.head.objectId)
     }
 
+    @Test fun `switches keep ignored files, refuse option-like names and provenance sees every ref`(): Unit = Fixture().use { f ->
+        val base = f.prepare()
+        val worktree = service.workspace(jobId, repositoryId).worktreeId
+        // A branch whose tree tracks a file that is ignored here must not overwrite the local copy.
+        f.raw("checkout", "-q", "-b", "with-result")
+        Files.writeString(f.workTree().resolve("result.dat"), "tracked on the other branch\n")
+        f.raw("add", "-f", "--", "result.dat"); f.raw("commit", "-q", "-m", "track result")
+        f.raw("checkout", "-q", "trunk")
+        Files.writeString(f.workTree().resolve(".gitignore"), "result.dat\n")
+        f.raw("add", "--", ".gitignore"); f.raw("commit", "-q", "-m", "ignore result")
+        Files.writeString(f.workTree().resolve("result.dat"), "local experiment output\n")
+        val refusedSwitch = run(GitRefRequest(GitOperationAction.SWITCH, worktree, guards().second, refId = refId("refs/heads/with-result")))
+        assertEquals(GitOperationState.FAILED, refusedSwitch.state); assertEquals("SWITCH_REFUSED", refusedSwitch.failureCode)
+        assertEquals("local experiment output\n", Files.readString(f.workTree().resolve("result.dat")))
+        // An imported branch named like an option is never passed to switch as an option.
+        f.repositories.git("--git-dir=${f.gitDir()}", "update-ref", "refs/heads/--detach", f.repositories.git("--git-dir=${f.gitDir()}", "rev-parse", "with-result").trim())
+        refused("VALIDATION_FAILED", GitRefRequest(GitOperationAction.SWITCH, worktree, guards().second, refId = refId("refs/heads/--detach")))
+        // Provenance resolves every ref naming the commit, beyond the first page.
+        (1..210).forEach { f.repositories.git("--git-dir=${f.gitDir()}", "branch", "p%03d".format(it), base) }
+        assertEquals(210, service.provenance(jobId, repositoryId, base).refNames.count { it.startsWith("refs/heads/p") })
+    }
+
     @Test fun `an interrupted named work-tree addition rolls back its new branch`(): Unit = Fixture().use { f ->
         val base = f.prepare()
         val primary = service.workspace(jobId, repositoryId).worktreeId
