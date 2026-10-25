@@ -127,6 +127,18 @@ class WebRedactionPolicyTest {
         assertFalse(policy.json(buildJsonObject { put("basePath", "/w/$canary/") }).toString().contains(canary))
     }
 
+    @Test fun `exact-byte validation previews keep their text consistent with their recorded bytes`() {
+        val preview = buildJsonObject {
+            put("totalBytes", "12"); put("prefixBytes", 12)
+            put("hex", "2f 74 6d 70 2f 65 78 61 6d 70 6c 65"); put("text", "/tmp/example")
+            put("textBytes", 12); put("truncated", false)
+        }
+        val report = buildJsonObject { put("message", "see /tmp/example"); put("expected", preview) }
+        val safe = policy.json(report).jsonObject
+        assertEquals(preview, safe.getValue("expected"))
+        assertEquals("see [private-path]", safe.getValue("message").jsonPrimitive.content)
+    }
+
     @Test fun `persisted diagnostics also redact short configured values before storage`() {
         val diagnostic = WebRedactionPolicy.create(emptyMap(), listOf("s3cr"), emptyList())
         assertEquals("value [redacted] at [private-path]", diagnostic.diagnostic("value s3cr at /home/x/y"))

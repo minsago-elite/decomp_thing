@@ -90,6 +90,7 @@ internal class BuiltinTerminalDispatcher private constructor(
     }
 
     fun audit(): List<AcpTerminalAuditRecord> = audit.snapshot()
+    fun launchFailureContext(): String = audit.launchFailureContext()
     fun sandboxEvidence(): AcpSandboxEvidence = boundary.evidence(policy, audit.snapshot())
     fun finish() { broker.finishSession(SESSION); broker.throwIfFailed() }
 
