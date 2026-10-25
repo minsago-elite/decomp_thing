@@ -192,24 +192,85 @@ class Mutations:
     @contextlib.contextmanager
     def held_filesystem_file(self):
         self._original_mount(self.scratch)
-        directory = os.open(self.scratch, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC)
-        fd = None
+        ready_r, ready_w = os.pipe2(os.O_CLOEXEC)
+        stop_r, stop_w = os.pipe2(os.O_CLOEXEC)
+        pid = os.fork()
+        if pid == 0:
+            try:
+                os.close(ready_r); os.close(stop_w)
+                inherited = [int(name) for name in os.listdir('/proc/self/fd')]
+                require(len(inherited) <= 256, 'inherited descriptor bound exceeded')
+                for descriptor in inherited:
+                    if descriptor > 2 and descriptor not in (ready_w, stop_r):
+                        with contextlib.suppress(OSError):
+                            os.close(descriptor)
+                # Only this direct child acquires the filesystem descriptors.
+                # The controller retains no busy reference to the old mount.
+                directory = os.open(self.scratch, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC)
+                fd, identity = self._canary(directory)
+                message = json.dumps({'pid': os.getpid(), 'startTicks': process_start(os.getpid()),
+                    'root': self.core.fd_identity(directory), 'file': identity,
+                    'canarySha256': self._check_canary(directory, fd, identity)},
+                    separators=(',', ':')).encode()
+                require(len(message) <= 4096 and os.write(ready_w, message) == len(message),
+                        'holder readiness exceeds bound')
+                require(select.select([stop_r], [], [], 60)[0], 'file holder lifetime exceeded')
+                if os.read(stop_r, 1) == b'C':
+                    result = self._check_canary(directory, fd, identity).encode('ascii')
+                    os.unlink('fixture-canary', dir_fd=directory)
+                    require(os.write(ready_w, result) == len(result), 'short file holder receipt')
+                    # Keep both FDs held until the parent sends its pinned kill;
+                    # bounded fallback also covers controller death after C.
+                    time.sleep(10)
+                os._exit(0)
+            except BaseException:
+                os._exit(1)
+        os.close(ready_w); os.close(stop_r)
+        pidfd = None
+        facts = None
         try:
-            fd, identity = self._canary(directory)
-            facts = {'kind': 'held-filesystem-file', 'holderPid': os.getpid(),
-                     'holderStartTicks': process_start(os.getpid()), 'root': self.core.fd_identity(directory),
-                     'file': identity, 'canaryBeforeSha256': CANARY_SHA, 'cleanup': False}
+            pidfd = os.pidfd_open(pid, 0)
+            start = process_start(pid)
+            require(select.select([ready_r], [], [], 5)[0], 'file holder readiness deadline')
+            raw = os.read(ready_r, 4097)
+            require(raw and len(raw) <= 4096, 'file holder readiness failed')
+            observed = json.loads(raw)
+            require(observed['pid'] == pid and observed['startTicks'] == start and
+                    same_object(observed['root'], self.record['root']) and
+                    observed['file']['kind'] == 'file' and observed['file']['links'] == 1 and
+                    observed['file']['mountId'] == observed['root']['mountId'] and
+                    observed['canarySha256'] == CANARY_SHA, 'file holder identity differs')
+            facts = {'kind': 'held-filesystem-file', 'holderPid': pid, 'holderStartTicks': start,
+                     'root': observed['root'], 'file': observed['file'], 'pidfdPinned': True,
+                     'reaped': False, 'canaryBeforeSha256': CANARY_SHA, 'cleanup': False}
             try:
                 yield facts
             finally:
                 self._guard()
-                facts['canaryAfterSha256'] = self._check_canary(directory, fd, identity)
-                os.unlink('fixture-canary', dir_fd=directory)
-                facts['cleanup'] = True
+                require(os.write(stop_w, b'C') == 1, 'file holder observation request failed')
+                require(select.select([ready_r], [], [], 5)[0], 'file holder canary deadline')
+                require(os.read(ready_r, 65) == CANARY_SHA.encode('ascii'), 'held file canary changed')
+                facts['canaryAfterSha256'] = CANARY_SHA
         finally:
-            if fd is not None:
-                os.close(fd)
-            os.close(directory)
+            os.close(stop_w); os.close(ready_r)
+            if pidfd is not None:
+                with contextlib.suppress(ProcessLookupError):
+                    signal.pidfd_send_signal(pidfd, signal.SIGKILL)
+                try:
+                    require(select.select([pidfd], [], [], 5)[0], 'file holder death deadline')
+                    waited, status = os.waitpid(pid, 0)
+                finally:
+                    os.close(pidfd)
+                require(waited == pid, 'file holder reap differs')
+                if facts is not None:
+                    facts.update(reaped=True, cleanup='canaryAfterSha256' in facts, waitStatus=status)
+            else:
+                # The unreaped direct child keeps its PID reserved.
+                os.kill(pid, signal.SIGKILL)
+                deadline = time.monotonic() + 5
+                while os.waitpid(pid, os.WNOHANG)[0] != pid:
+                    require(time.monotonic() < deadline, 'file holder fallback death deadline')
+                    time.sleep(0.01)
 
     @contextlib.contextmanager
     def owned_hidden_namespace_holder(self):
@@ -405,18 +466,43 @@ class Mutations:
         original = self._original_mount(self.scratch)
         target = self.scratch / 'fixture-nested' if nested else PRIVATE / 'fixture-alias'
         underneath = self._mkdir(target)
+        directory = os.open(self.scratch, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC)
+        try:
+            fd, identity = self._canary(directory)
+            os.close(fd)
+        finally:
+            os.close(directory)
         self._run('mount', '--bind', self.scratch, target)
         row = self._row(target)
         require(row['device'] == original['device'] and row['id'] != original['id'], 'alias is not same-device distinct mount')
         root = self._id(target)
-        facts = {'kind': 'nested-mount' if nested else 'visible-alias', 'mount': row, 'root': root, 'cleanup': False}
+        facts = {'kind': 'nested-mount' if nested else 'visible-alias', 'mount': row, 'root': root,
+                 'canaryBeforeSha256': CANARY_SHA, 'cleanup': False}
         try:
             yield facts
         finally:
             self._guard()
             self._row(target, row); self._expect(target, root)
+            # Read only through the original root; the same inode is also
+            # visible through the bind. No root FD survives ordinary umount.
+            directory = os.open(self.scratch, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC)
+            fd = os.open('fixture-canary', os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC, dir_fd=directory)
+            try:
+                require(same_object(self.core.fd_identity(directory), self.record['root']), 'original alias root changed')
+                facts['canaryAfterRefusalSha256'] = self._check_canary(directory, fd, identity)
+            finally:
+                os.close(fd); os.close(directory)
             self._run('umount', '--no-canonicalize', target)
             self._rmdir(target, underneath)
+            require(self._original_mount(self.scratch) == original, 'original mount changed after alias restoration')
+            directory = os.open(self.scratch, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC)
+            fd = os.open('fixture-canary', os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC, dir_fd=directory)
+            try:
+                require(same_object(self.core.fd_identity(directory), self.record['root']), 'restored alias root changed')
+                facts['canaryAfterSha256'] = self._check_canary(directory, fd, identity)
+                os.unlink('fixture-canary', dir_fd=directory)
+            finally:
+                os.close(fd); os.close(directory)
             facts['cleanup'] = True
 
     def visible_alias(self):

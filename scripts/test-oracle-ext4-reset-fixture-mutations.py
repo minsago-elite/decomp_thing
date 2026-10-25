@@ -4,6 +4,7 @@ import contextlib
 import errno
 import importlib.util
 import os
+import signal
 from pathlib import Path
 import struct
 import tempfile
@@ -54,6 +55,100 @@ class FileMutationTests(unittest.TestCase):
     def tearDown(self):
         self.patcher.stop()
         self.temp.cleanup()
+
+    def prepare_plain_scratch(self):
+        self.subject.scratch = self.root / 'scratch'
+        self.subject.scratch.mkdir()
+        self.subject.record = {'root': self.subject._id(self.subject.scratch)}
+        self.subject._original_mount = lambda path: {'path': str(self.subject.scratch), 'id': 42, 'device': '7:12'}
+
+    def test_real_unprivileged_holder_child_retains_renamed_root_then_is_reaped(self):
+        self.prepare_plain_scratch()
+        retained = self.root / 'retained-root'
+        with self.subject.held_filesystem_file() as facts:
+            self.assertNotEqual(os.getpid(), facts['holderPid'])
+            self.assertEqual(facts['holderStartTicks'], mut.process_start(facts['holderPid']))
+            self.assertTrue(facts['pidfdPinned'])
+            self.assertFalse(facts['reaped'])
+            with os.scandir('/proc/self/fd') as descriptors:
+                for entry in descriptors:
+                    with contextlib.suppress(FileNotFoundError):
+                        current = os.stat(entry.path)
+                        self.assertNotIn((current.st_dev, current.st_ino),
+                            ((facts['root']['device'], facts['root']['inode']),
+                             (facts['file']['device'], facts['file']['inode'])))
+            self.subject.scratch.rename(retained)
+            self.assertEqual(mut.CANARY, (retained / 'fixture-canary').read_bytes())
+        self.assertTrue(facts['reaped'])
+        self.assertTrue(os.WIFSIGNALED(facts['waitStatus']))
+        self.assertEqual(signal.SIGKILL, os.WTERMSIG(facts['waitStatus']))
+        self.assertTrue(facts['cleanup'])
+        self.assertEqual(facts['canaryBeforeSha256'], facts['canaryAfterSha256'])
+        self.assertFalse((retained / 'fixture-canary').exists())
+        with self.assertRaises(ChildProcessError):
+            os.waitpid(facts['holderPid'], os.WNOHANG)
+
+    def test_live_probe_guard_reaps_holder_but_preserves_canary(self):
+        self.prepare_plain_scratch()
+        context = self.subject.held_filesystem_file()
+        facts = context.__enter__()
+        def refuse():
+            raise mut.MutationError('live oracle probe')
+        self.subject.before_cleanup = refuse
+        with self.assertRaisesRegex(mut.MutationError, 'live oracle probe'):
+            context.__exit__(None, None, None)
+        self.assertTrue(facts['reaped'])
+        self.assertFalse(facts['cleanup'])
+        self.assertEqual(mut.CANARY, (self.subject.scratch / 'fixture-canary').read_bytes())
+        with self.assertRaises(ChildProcessError):
+            os.waitpid(facts['holderPid'], os.WNOHANG)
+
+    def prepare_alias_model(self):
+        self.prepare_plain_scratch()
+        calls = []
+        def mkdir(path):
+            path.mkdir(mode=0o700)
+            return self.subject._id(path)
+        self.subject._mkdir = mkdir
+        self.subject._row = lambda path, expected=None: {'path': str(path), 'id': 43, 'device': '7:12'}
+        def run(role, *args, **kwargs):
+            # This models only mount transport. It never calls a mount utility.
+            calls.append(role)
+            if role == 'umount':
+                self.assertEqual(mut.CANARY, (self.subject.scratch / 'fixture-canary').read_bytes())
+                # All filesystem descriptors must be closed before unmount.
+                with os.scandir('/proc/self/fd') as entries:
+                    for entry in entries:
+                        with contextlib.suppress(FileNotFoundError):
+                            obj = os.stat(entry.path)
+                            self.assertNotEqual((obj.st_dev, obj.st_ino),
+                                (self.subject.record['root']['device'], self.subject.record['root']['inode']))
+        self.subject._run = run
+        return calls
+
+    def test_alias_and_nested_canary_survive_refusal_and_restoration(self):
+        for nested in (False, True):
+            with self.subTest(nested=nested):
+                calls = self.prepare_alias_model()
+                with self.subject._alias(nested) as facts:
+                    self.assertEqual(mut.CANARY, (self.subject.scratch / 'fixture-canary').read_bytes())
+                self.assertEqual(['mount', 'umount'], calls)
+                self.assertTrue(facts['cleanup'])
+                self.assertEqual(mut.CANARY_SHA, facts['canaryAfterRefusalSha256'])
+                self.assertEqual(facts['canaryBeforeSha256'], facts['canaryAfterSha256'])
+                self.assertFalse((self.subject.scratch / 'fixture-canary').exists())
+                self.subject.scratch.rmdir()
+
+    def test_changed_alias_canary_refuses_unmount_and_preserves_bytes(self):
+        calls = self.prepare_alias_model()
+        context = self.subject.visible_alias()
+        context.__enter__()
+        canary = self.subject.scratch / 'fixture-canary'
+        canary.chmod(0o600); canary.write_bytes(b'X' * len(mut.CANARY)); canary.chmod(0o400)
+        with self.assertRaisesRegex(mut.MutationError, 'canary changed'):
+            context.__exit__(None, None, None)
+        self.assertEqual(['mount'], calls)
+        self.assertEqual(b'X' * len(mut.CANARY), canary.read_bytes())
 
     def test_no_clobber_rename_preserves_both_files(self):
         target = self.private / 'occupied'
