@@ -65,10 +65,12 @@ function serve(kind: string, path: string): Promise<unknown> {
       { worktreeId, primary: true, ownerRunId: null, worktreeVersion: 'tree_v1', headState: 'attached', headObjectId: head, headRefName: 'refs/heads/main', dirty: entries.length > 0 },
       { worktreeId: linkedId, primary: false, ownerRunId: 'run_2', worktreeVersion: 'tree_v2', headState: 'detached', headObjectId: older, headRefName: null, dirty: false },
     ] };
-    if (route === `${base}/refs`) return { repositoryId, nextCursor: null, refs: [
-      { refId: 'ref_main', kind: 'branch', displayName: 'refs/heads/main', objectId: head, peeledObjectId: null, version: 'v1', current: true },
-      { refId: 'ref_topic', kind: 'branch', displayName: 'refs/heads/topic', objectId: other, peeledObjectId: null, version: 'v2', current: false },
-    ] };
+    if (route === `${base}/refs`) {
+      const main = { refId: 'ref_main', kind: 'branch', displayName: 'refs/heads/main', objectId: head, peeledObjectId: null, version: 'v1', current: true };
+      const topic = { refId: 'ref_topic', kind: 'branch', displayName: 'refs/heads/topic', objectId: other, peeledObjectId: null, version: 'v2', current: false };
+      if (new URLSearchParams(query).get('cursor') === 'refs_page_2') return { repositoryId, nextCursor: null, refs: [topic] };
+      return paged ? { repositoryId, nextCursor: 'refs_page_2', refs: [main] } : { repositoryId, nextCursor: null, refs: [main, topic] };
+    }
     if (route === `${base}/history`) {
       const page = historyPages[new URLSearchParams(query).get('cursor') ?? 'first'];
       if (!page) throw new ApiClientError('http_error', { status: 409 });
@@ -194,7 +196,7 @@ it('disables switching while the work tree is dirty and switches to the exact re
   expect(screen.getByText('No changes.')).toBeTruthy();
   fireEvent.click(cleanSwitch);
   await waitFor(() => expect(transport.post).toHaveBeenCalledOnce());
-  expect(transport.post.mock.calls[0]?.slice(2, 4)).toEqual(['gitSwitchRequest', { action: 'git.switch', worktreeId, refId: 'ref_topic', objectId: null,
+  expect(transport.post.mock.calls[0]?.slice(2, 4)).toEqual(['gitSwitchRequest', { action: 'git.switch', worktreeId, refId: 'ref_topic', objectId: other,
     guards: { repositoryVersion: 'repo_v1', worktreeVersion: 'tree_v1', expectedHeadObjectId: head, expectedRefId: null, expectedRefObjectId: null } }]);
   expect(screen.getByText(/owned by attempt run_2/)).toBeTruthy();
   expect(screen.getByRole('button', { name: `Remove ${linkedId}` })).toHaveProperty('disabled', true);
@@ -286,3 +288,25 @@ it('clones a new repository from a remote URL when the job has none', async () =
   expect(transport.post.mock.calls[0]?.slice(1, 4)).toEqual([`/jobs/${jobId}/repositories`, 'gitRepositoryCloneRequest',
     { action: 'git.clone', url: 'https://git.example.org/team/project.git', remoteName: 'origin', branch: null }]);
 });
+
+it('follows ref pages so every branch stays reachable, and drops a displayed diff when the status is read again', async () => {
+  paged = true;
+  entries = [entry('file_s', 'src/util.c', 'modified', 'none')];
+  mount();
+  expect(await screen.findByRole('button', { name: 'Switch to topic' })).toBeTruthy();
+  expect(transport.get).toHaveBeenCalledWith('gitRefs', `${base}/refs?limit=200&cursor=refs_page_2`, expect.anything());
+  fireEvent.click(within(screen.getByRole('group', { name: 'Staged' })).getByRole('button', { name: 'Show diff for src/util.c' }));
+  expect(await screen.findByText(/\+int b;/)).toBeTruthy();
+  fireEvent.click(screen.getByRole('button', { name: 'Refresh repository' }));
+  await waitFor(() => expect(screen.queryByText(/\+int b;/)).toBeNull());
+});
+
+it('explains and disables a commit or selection beyond the 200-file request bound', async () => {
+  entries = Array.from({ length: 201 }, (_, index) => entry(`file_${index}`, `src/f${index}.c`, 'added', 'none'));
+  mount();
+  expect(await screen.findByText(/201 files are staged, but one commit can include at most 200/)).toBeTruthy();
+  expect(screen.getByRole('button', { name: 'Commit staged files' })).toHaveProperty('disabled', true);
+  document.querySelectorAll<HTMLInputElement>('input[type="checkbox"]').forEach(box => { fireEvent.click(box); });
+  expect(screen.getByText(/At most 200 files can be staged or unstaged in one action/)).toBeTruthy();
+  expect(screen.getByRole('button', { name: 'Unstage selected' })).toHaveProperty('disabled', true);
+}, 20_000);

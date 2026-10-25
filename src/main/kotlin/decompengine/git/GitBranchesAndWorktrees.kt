@@ -109,6 +109,14 @@ internal object GitRefOperations {
         if (result.exitCode != 0) refuse("SWITCH_REFUSED", "Git refused the switch, for example because a file would be overwritten or the branch is checked out elsewhere. Nothing was discarded.")
     }
 
+    /** Index paths recorded as gitlinks (mode 160000); null for a name that is not valid UTF-8. */
+    fun gitlinkPaths(runner: GitCommandRunner, gitDir: Path, workTree: Path): List<String?> {
+        val result = runner.run(GitInvocation("ls-files", listOf("--stage", "-z"), gitDir = gitDir, workTree = workTree, limits = LIMITS))
+        return result.stdout.toString(Charsets.ISO_8859_1).split('\u0000').filter { it.startsWith("160000 ") }.map { record ->
+            GitPath.of(record.substringAfter('\t').toByteArray(Charsets.ISO_8859_1)).exact
+        }
+    }
+
     fun addWorktree(runner: GitCommandRunner, commonDir: Path, path: Path, objectId: String, branch: String?) {
         val arguments = listOf("add", "-q") + (if (branch != null) listOf("-b", branch) else listOf("--detach")) + listOf(path.toString(), objectId)
         runner.run(GitInvocation("worktree", arguments, gitDir = commonDir, limits = LIMITS))

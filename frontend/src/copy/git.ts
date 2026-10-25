@@ -40,6 +40,8 @@ export const gitCopy = {
   noChanges: 'No changes.',
   incomplete: 'This status is incomplete; selection is unavailable until it fits its bound.',
   stageSelected: 'Stage selected',
+  selectionTooLarge: 'At most {max} files can be staged or unstaged in one action. Select fewer files.',
+  commitTooLarge: '{count} files are staged, but one commit can include at most {max}. Unstage some files and commit in parts.',
   unstageSelected: 'Unstage selected',
   select: 'Select {path} ({group})',
   showDiff: 'Show diff for {path}',

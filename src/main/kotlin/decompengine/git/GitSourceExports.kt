@@ -42,7 +42,9 @@ object GitSourceExports {
     const val MAX_BYTES = 48 * 1024 * 1024
     private const val BATCH_BYTES = 32L * 1024 * 1024
     const val MAX_FILES = 20_000
-    private val FIXED_TIME: LocalDateTime = LocalDateTime.of(1980, 1, 1, 0, 0)
+    // 1980-01-01 00:00 is the JDK's "before 1980" sentinel and would add a time-zone-dependent extended
+    // timestamp; one day later is an ordinary DOS time with no extra field in every zone.
+    private val FIXED_TIME: LocalDateTime = LocalDateTime.of(1980, 1, 2, 0, 0)
 
     fun build(runner: GitCommandRunner, gitDir: Path, format: GitObjectFormat, commit: String): GitSourceExport {
         val listing = runner.run(GitInvocation("ls-tree", listOf("-r", "-z", "-l", "--full-tree", format.requireObjectId(commit)), gitDir = gitDir,
