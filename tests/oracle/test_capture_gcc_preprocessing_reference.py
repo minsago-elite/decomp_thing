@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import runpy
 import subprocess
+import tempfile
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -56,6 +57,23 @@ class PhaseCommandTest(unittest.TestCase):
 
 
 class ContainerSandboxTest(unittest.TestCase):
+    def test_orchestration_uses_original_driver_frontend_and_closed_environment(self):
+        scratch_parent = REPOSITORY_ROOT / "build/tmp"
+        scratch_parent.mkdir(parents=True, exist_ok=True)
+        with tempfile.TemporaryDirectory(dir=scratch_parent) as directory:
+            scratch = Path(directory)
+            run_gcc = CAPTURE["run_gcc"]
+            with mock.patch.dict(run_gcc.__globals__, {"run_container": mock.Mock()}) as globals_:
+                run_gcc("podman", scratch, CAPTURE["ORCHESTRATION_CASES"][0], "plan", ["-###"])
+                call = globals_["run_container"].call_args
+        command = call.args[2]
+        self.assertEqual(command[:2], ["env", "-i"])
+        self.assertIn(CAPTURE["ORACLE_DRIVER_PATH"], command)
+        environment = {part.split("=", 1)[0]: part.split("=", 1)[1] for part in command[2:] if "=" in part}
+        self.assertEqual(environment, {**CAPTURE["ENVIRONMENT"], **CAPTURE["ORCHESTRATION_ENVIRONMENT"]})
+        self.assertEqual(call.args[4], ((CAPTURE["ORACLE_DRIVER"], CAPTURE["ORACLE_DRIVER_PATH"]),
+                                        (scratch / "oracle-cc1", CAPTURE["ORACLE_FRONTEND_PATH"])))
+
     def test_driver_temporaries_get_a_writable_tmp_on_every_runtime(self):
         for runtime in ("docker", "podman"):
             with mock.patch("subprocess.run") as run:
@@ -118,6 +136,15 @@ class ContainerSandboxTest(unittest.TestCase):
         toolchain = json.loads(ORCHESTRATION_RECORD.read_text())["toolchain"]
         for identity in [toolchain["driver"], *toolchain["phaseTools"].values()]:
             self.assertEqual(toolchain["runtimeClosure"][identity["path"]]["elf"]["sha256"], identity["sha256"])
+
+    def test_orchestration_owners_are_manifest_pinned_original_artifacts(self):
+        record = json.loads(ORCHESTRATION_RECORD.read_text())
+        for owner, name in (("oracleDriver", "oracle-manifest.json"), ("oracleFrontend", "cc1-oracle-manifest.json")):
+            manifest = json.loads((ORCHESTRATION_RECORD.parent / name).read_text())
+            self.assertEqual(record[owner]["sha256"], manifest["artifacts"]["stripped"]["sha256"])
+        self.assertEqual(record["toolchain"]["driver"]["sha256"], record["oracleDriver"]["sha256"])
+        self.assertEqual(record["toolchain"]["phaseTools"]["compile"]["sha256"], record["oracleFrontend"]["sha256"])
+        self.assertEqual(record["toolchain"]["target"], "x86_64-pc-linux-gnu")
 
 
 if __name__ == "__main__":
