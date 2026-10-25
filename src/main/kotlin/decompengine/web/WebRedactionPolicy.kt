@@ -32,8 +32,8 @@ import java.nio.file.Path
  * Opaque protocol values (cursors, CSRF tokens, identities, digests and versions) keep their
  * exact bytes unless they contain a configured literal: a substituted cursor would silently
  * break pagination, and those fields are closed-syntax values that cannot carry a path.
- * Committed job content (source chunks and source downloads) is digest-bound user data, not
- * server configuration, and is served verbatim under job authorization.
+ * Committed job content (source chunks, source downloads and exact-byte validation output previews) is
+ * digest-bound user data, not server configuration, and is served verbatim under job authorization.
  */
 internal class WebRedactionPolicy private constructor(
     private val literals: List<String>,
@@ -93,7 +93,10 @@ internal class WebRedactionPolicy private constructor(
     private fun leaksLiteral(value: String): Boolean = literals.any { value.contains(it) }
 
     private fun json(value: JsonElement, opaque: Boolean, routing: Boolean = false): JsonElement = when (value) {
-        is JsonObject -> JsonObject(value.mapValues { (key, child) -> json(child, opaqueKey(key), routingKey(key)) })
+        // Exact-byte previews of recorded program output are digest-bound job content: their text is checked
+        // against the hexadecimal bytes, so a substitution would corrupt the record without hiding the bytes.
+        is JsonObject -> if (value.keys == BYTE_PREVIEW_KEYS) value
+            else JsonObject(value.mapValues { (key, child) -> json(child, opaqueKey(key), routingKey(key)) })
         is JsonArray -> JsonArray(value.map { json(it, opaque, routing) })
         is JsonNull -> value
         is JsonPrimitive -> if (!value.isString) value else {
@@ -137,6 +140,7 @@ internal class WebRedactionPolicy private constructor(
             "(?i)(?:^|_)(?:API|AUTH|AUTHORIZATION|TOKEN|SECRET|PASS|PASSWORD|PASSWD|PASSPHRASE|CREDENTIAL|CREDENTIALS|" +
                 "COOKIE|PRIVATE|KEY|PAT|DSN|WEBHOOK|SIGNING|BEARER)(?:_|$)|(?i)(?:APIKEY|ACCESSKEY|SECRETKEY)")
         private val OPAQUE_SYNTAX = Regex("[A-Za-z0-9_.:+=-]{1,512}")
+        private val BYTE_PREVIEW_KEYS = setOf("totalBytes", "prefixBytes", "hex", "text", "textBytes", "truncated")
         /** A same-origin URL path (optionally with a query): what basePath and *Href fields carry. */
         private val ROUTE_SYNTAX = Regex("/(?:[A-Za-z0-9._~!$&'()*+,;=:@%-]+/?)*(?:\\?[A-Za-z0-9._~!$&'()*+,;=:@%/?-]*)?")
         private val URL_USER_INFO = Regex("(?i)\\b([a-z][a-z0-9+.-]{1,31}://)[^/\\s:@\"'<>]{1,256}:[^/\\s@\"'<>]{1,512}@")

@@ -1004,8 +1004,8 @@ paths (the storage root, home, temporary, working and Java directories plus the 
 directory families) with `[private-path]`. Closed-syntax protocol fields (`*Id`, `*Cursor`, `*Token`, `*Sha256`,
 `version` and similar) keep their exact bytes unless they contain a configured literal, so cursors and ETags stay
 valid. A download is byte-identical when nothing needs redaction, and the exploration artifact digest is computed
-over the same projection the download serves. Committed job content (`sourceChunk` and source-file downloads) is
-digest-bound user data, not server configuration, and is served verbatim under job authorization. Progress events
+over the same projection the download serves. Committed job content (`sourceChunk`, source-file downloads and the exact-byte
+validation output previews in reports) is digest-bound user data, not server configuration, and is served verbatim under job authorization. Progress events
 remain allowlisted projections: journal prose, paths, usage that was not reported and any agent reasoning are never
 requested or displayed (the activity view shows "Not reported").
 
