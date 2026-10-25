@@ -14,7 +14,8 @@ import { SOURCE_SEARCH_PATH_LIMIT, SOURCE_SEARCH_QUERY_LIMIT, bindSourceSearch, 
 import type { SourceSearchRequest } from './search';
 import { visibleSourceText } from './viewer';
 
-function SearchStatus({ data }: { data: SourceSearchPage }) {
+/** A continued page shows only its own matches, so empty continued pages never claim the whole search found nothing. */
+function SearchStatus({ data, continued }: { data: SourceSearchPage; continued: boolean }) {
   const skipped = sourceSearchSkipped(data);
   const missing = skipped.reduce((total, entry) => total + entry.count, 0);
   const complete = data.status === 'complete';
@@ -22,17 +23,18 @@ function SearchStatus({ data }: { data: SourceSearchPage }) {
   const searched = data.scope.searchableFiles - unread;
   const reason = data.stopReason ? copy.searchStopped[data.stopReason] : '';
   return <div class={`source-search-status ${complete && missing === 0 ? 'source-search-status-complete' : 'source-search-status-incomplete'}`}
-    role="status" data-search-state={complete ? (data.items.length ? 'complete' : 'no-matches') : (data.items.length ? 'partial' : 'partial-empty')}>
+    role="status" data-search-state={complete ? (data.items.length ? 'complete' : continued ? 'no-further-matches' : 'no-matches') : (data.items.length ? 'partial' : 'partial-empty')}>
     {complete
       ? <p><strong>{data.scope.searchableFiles === 0 ? copy.searchNothingSearchable
         : data.items.length ? message(copy.searchCompleteMatches, { count: data.items.length })
+          : continued ? copy.searchNoFurtherMatches
           : unread ? message(copy.searchNoMatchesSearched, { count: searched })
             : message(copy.searchNoMatches, { count: data.scope.searchableFiles })}</strong> {data.scope.searchableFiles > 0 && (unread
           ? message(copy.searchCompleteUnread, { count: unread, total: data.scope.searchableFiles })
           : message(copy.searchComplete, { count: data.scope.searchableFiles }))}</p>
       : <p><strong>{data.items.length
         ? message(copy.searchIncomplete, { reason, count: data.progress.remainingFiles })
-        : message(copy.searchIncompleteEmpty, { reason, count: data.progress.remainingFiles })}</strong></p>}
+        : message(continued ? copy.searchIncompleteNoFurther : copy.searchIncompleteEmpty, { reason, count: data.progress.remainingFiles })}</strong></p>}
     {missing > 0 && <>
       <p><strong>{message(copy.searchSkipped, { count: missing })}</strong></p>
       <ul>{skipped.map(entry => <li key={entry.reason}>{message(copy.searchSkippedReasons[entry.reason], { count: entry.count })}</li>)}</ul>
@@ -127,7 +129,7 @@ export function SourceSearch({ selected, basePath, search }: { selected: SourceS
     {current?.state === 'loading' && <p role="status">{copy.searching}</p>}
     {current?.state === 'failed' && <p role="alert">{sourceReadMessage(current.failure)}</p>}
     {data && request && <>
-      <SearchStatus data={data} />
+      <SearchStatus data={data} continued={request.cursor !== null} />
       {request.cursor !== null && <p>{copy.searchContinued}</p>}
       <p>{message(copy.searchLimits, { results: data.limits.maxResults, bytes: data.limits.maxScannedBytes, deadline: data.limits.deadlineMs })}</p>
       {data.items.length > 0 && <>

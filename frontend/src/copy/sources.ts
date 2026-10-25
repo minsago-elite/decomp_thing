@@ -139,6 +139,8 @@ export const sourceCopy = {
   searchComplete: 'Search finished. All {count} searchable files in scope were checked.',
   searchCompleteMatches: 'Showing {count} matches on this page.',
   searchNoMatches: 'No matches in the {count} searchable files in scope.',
+  searchNoFurtherMatches: 'No further matches on this continued page. Matches on earlier pages are not repeated here.',
+  searchIncompleteNoFurther: 'No further matches on this page, and the search is still incomplete. {reason} {count} searchable files have not been fully checked.',
   searchNoMatchesSearched: 'No matches in the {count} files that could be searched.',
   searchCompleteUnread: 'Search finished, but {count} of the {total} searchable files could not be read as text and were not searched.',
   searchTooLong: 'This search is too long once encoded for the address. Shorten the text or path filter.',
