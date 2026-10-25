@@ -59,6 +59,11 @@ internal object GccBundledInterfaceCliResultV1 {
             outcome.number("childExitCode") == 0L && outcome.boolean("unitAbsent") && outcome.boolean("cgroupAbsent") &&
             outcome.boolean("processesAbsent") && !outcome.boolean("releaseEligible"))
         require(outcome.digest("executionSha256") == OracleArtifacts.sha256(OracleJson.canonicalBytes(JsonObject(outcome - "executionSha256"))))
+        val workerOutcome = outcome.getValue("outcome").jsonObject
+        require(workerOutcome.number("stdoutBytes") == snapshot.stdoutByteCount &&
+            workerOutcome.number("stderrBytes") == snapshot.stderrByteCount) {
+            "owned interface stream byte counts differ from the authenticated worker outcome"
+        }
         val assessed = assessment.second
         require(assessed.text("provider") == "gcc-bundled-descriptor-inferred-interface-assessment-v1" &&
             assessed.number("schemaVersion") == 1L && !assessed.boolean("complete") && !assessed.boolean("scored") &&

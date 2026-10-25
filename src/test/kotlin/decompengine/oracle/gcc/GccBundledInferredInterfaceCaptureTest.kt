@@ -12,6 +12,9 @@ import java.nio.file.Files
 import java.nio.file.Path
 import java.nio.file.StandardCopyOption
 import java.nio.file.attribute.PosixFilePermissions
+import java.nio.ByteBuffer
+import java.nio.channels.FileChannel
+import java.nio.file.StandardOpenOption.WRITE
 import kotlin.test.*
 import kotlinx.serialization.json.*
 
@@ -143,12 +146,13 @@ class GccBundledInferredInterfaceCaptureTest {
         var checkpoints=0
         fixture { f -> f.capture(checkpoint={checkpoints++}) }
         assertTrue(checkpoints>0)
-        fixture { f ->
+        for (relative in listOf("reports/program_model.json.export/functions/fn_0000000000400010.json",
+            "$CONTROL/reports/contained-command.stderr")) fixture { f ->
             var calls=0
             assertFails {
                 f.capture(checkpoint={
                     if (++calls==checkpoints) {
-                        val path=f.reportsPath.resolve("program_model.json.export/functions/fn_0000000000400010.json")
+                        val path=f.root.resolve(relative)
                         Files.write(path,Files.readAllBytes(path))
                     }
                 })
@@ -171,6 +175,8 @@ class GccBundledInferredInterfaceCaptureTest {
     @Test
     fun `one aggregate charges full tree duplication and all siblings before allocating their bytes`() {
         fixture { f ->
+            Files.write(f.root.resolve("$CONTROL/reports/contained-command.stdout"),ByteArray(17) { 1 })
+            Files.write(f.root.resolve("$CONTROL/reports/contained-command.stderr"),ByteArray(23) { 2 })
             val captured=f.capture()
             val exact=NativeInferredInterfaceObservationLimitsV1(maximumCombinedBytes=captured.capturedBytes)
             assertEquals(captured.capturedBytes,f.capture(limits=exact).capturedBytes)
@@ -179,6 +185,69 @@ class GccBundledInferredInterfaceCaptureTest {
             assertFails { f.capture(limits=exact.copy(maximumFunctions=1)) }
             assertFails { f.capture(limits=exact.copy(maximumManifestBytes=1)) }
             assertFails { f.capture(limits=exact.copy(maximumModelBytes=captured.model.programModelBytes.toInt()-1)) }
+        }
+    }
+
+    @Test
+    fun `both zero and nonempty command streams are immutable receipt assessment inputs`() {
+        fixture { f ->
+            val empty = f.capture()
+            assertEquals(0L, empty.stdoutByteCount); assertEquals(0L, empty.stderrByteCount)
+            assertEquals(OracleArtifacts.sha256(byteArrayOf()), empty.stdoutSha256)
+            val stdout = "owned stdout\n".toByteArray()
+            val stderr = "owned stderr\n".toByteArray()
+            Files.write(f.root.resolve("$CONTROL/reports/contained-command.stdout"), stdout)
+            Files.write(f.root.resolve("$CONTROL/reports/contained-command.stderr"), stderr)
+            val captured = f.capture()
+            assertContentEquals(stdout, captured.stdoutBytes); assertContentEquals(stderr, captured.stderrBytes)
+            captured.stdoutBytes.fill(0); captured.stderrBytes.fill(0)
+            assertContentEquals(stdout, captured.stdoutBytes); assertContentEquals(stderr, captured.stderrBytes)
+            assertEquals(empty.capturedBytes + stdout.size + stderr.size, captured.capturedBytes)
+            val assessment = OracleJson.parseCanonical(captured.assessmentBytes).jsonObject
+            assertEquals(JsonPrimitive(stdout.size), assessment["stdoutBytes"])
+            assertEquals(JsonPrimitive(stderr.size), assessment["stderrBytes"])
+            assertEquals(JsonPrimitive(OracleArtifacts.sha256(stdout)), assessment["stdoutSha256"])
+            assertEquals(JsonPrimitive(OracleArtifacts.sha256(stderr)), assessment["stderrSha256"])
+            f.requireUnchanged(captured)
+            Files.write(f.root.resolve("$CONTROL/reports/contained-command.stderr"), ByteArray(stderr.size) { 'x'.code.toByte() })
+            assertFails { f.requireUnchanged(captured) }
+            assertContentEquals(stderr, captured.stderrBytes)
+        }
+    }
+
+    @Test
+    fun `stream substitutions aliases and extra control reports fail closed`() {
+        for (mutation in listOf<(Fixture) -> Unit>(
+            { f -> Files.delete(f.root.resolve("$CONTROL/reports/contained-command.stdout")) },
+            { f -> Files.writeString(f.root.resolve("$CONTROL/reports/uncommitted"), "extra") },
+            { f -> val path = f.root.resolve("$CONTROL/reports/contained-command.stderr")
+                Files.delete(path); Files.createLink(path, f.root.resolve("$CONTROL/reports/contained-command.stdout")) },
+            { f -> val path = f.root.resolve("$CONTROL/reports/contained-command.stderr")
+                Files.delete(path); Files.createSymbolicLink(path, f.reportsPath.resolve("program_model.json")) },
+            { f -> Files.setPosixFilePermissions(f.root.resolve("$CONTROL/reports"), PosixFilePermissions.fromString("rwxr-xr-x")) },
+        )) fixture { f -> mutation(f); assertFails { f.capture() } }
+        fixture { f ->
+            val stdout = f.root.resolve("$CONTROL/reports/contained-command.stdout")
+            val stderr = f.root.resolve("$CONTROL/reports/contained-command.stderr")
+            Files.writeString(stdout, "first"); Files.writeString(stderr, "other")
+            val captured = f.capture()
+            val temporary = stdout.resolveSibling("swap")
+            Files.move(stdout, temporary); Files.move(stderr, stdout); Files.move(temporary, stderr)
+            assertFails { f.requireUnchanged(captured) }
+        }
+    }
+
+    @Test
+    fun `each stream retains the existing exact byte ceiling and rejects one byte over before reading`() {
+        for (name in listOf("stdout", "stderr")) fixture { f ->
+            val path = f.root.resolve("$CONTROL/reports/contained-command.$name")
+            val maximum = GccBundledInferredInterfaceCapture.MAXIMUM_STREAM_BYTES
+            FileChannel.open(path, WRITE).use { it.position(maximum.toLong()); it.write(ByteBuffer.wrap(byteArrayOf(1))) }
+            assertFails { f.capture() }
+            FileChannel.open(path, WRITE).use { it.truncate(maximum.toLong()) }
+            val captured = f.capture()
+            assertEquals(maximum.toLong(), if (name == "stdout") captured.stdoutByteCount else captured.stderrByteCount)
+            f.requireUnchanged(captured)
         }
     }
 
@@ -355,6 +424,11 @@ class GccBundledInferredInterfaceCaptureTest {
             Files.writeString(export.resolve("state.json"),"{\"schemaVersion\":2,\"exporterVersion\":17,\"exporterSha256\":\"$EXPORTER\",\"analysisToolSha256\":\"$ARCHIVE\",\"recoveryMode\":\"full\",\"decompilationWorkers\":1,\"inputSha256\":\"$INPUT\",\"language\":\"x86:LE:64:default\",\"compilerSpec\":\"gcc\",\"semanticStateBinding\":null}\n")
             Files.writeString(reports.resolve("program_model.json.progress.json"),"{\"schemaVersion\":1,\"phase\":\"complete\",\"completed\":1,\"total\":1,\"recovered\":1,\"partial\":0,\"failed\":0,\"reused\":0,\"currentFunction\":null}\n")
             privateDirectory(Files.createDirectory(root.resolve(CONTROL)))
+            val commandReports=privateDirectory(Files.createDirectory(root.resolve("$CONTROL/reports")))
+            for (name in listOf("stdout","stderr")) {
+                val path=commandReports.resolve("contained-command.$name")
+                Files.write(path,byteArrayOf());privateFile(path)
+            }
             privateDirectory(Files.createDirectory(reports.resolve("native-interfaces-v1")))
             privateDirectory(Files.createDirectory(reports.resolve("native-inferred-interfaces-v1")))
             LinuxFilesystemSyscalls.openRoot(root).use {run->LinuxFilesystemSyscalls.openDirectoryAt(run.fd,"reports").use {rd->LinuxFilesystemSyscalls.openDirectoryAt(run.fd,CONTROL).use {control->
@@ -373,7 +447,8 @@ class GccBundledInferredInterfaceCaptureTest {
         private val SPACES=listOf(space(0,"EXTERNAL",10),space(1,"ram",1),space(2,"register",4),space(3,"overlay",1,true))
         private val STATES=listOf("not-attempted-external","high-function-observed","not-attempted-unsupported-body","decompile-timeout","decompile-cancelled","decompiler-start-failed","decompiler-error","completed-without-high-function","unsupported-high-representation","not-attempted-unsupported-body")
         private val FILES=listOf("reports/program_model.json","reports/program_model.json.progress.json","reports/program_model.json.export/state.json","reports/program_model.json.export/functions/fn_0000000000400010.json",
-            "reports/native-interfaces-v1/manifest.json","reports/native-interfaces-v1/native-interfaces.json","reports/native-inferred-interfaces-v1/manifest.json","reports/native-inferred-interfaces-v1/native-inferred-interfaces.json")
+            "reports/native-interfaces-v1/manifest.json","reports/native-interfaces-v1/native-interfaces.json","reports/native-inferred-interfaces-v1/manifest.json","reports/native-inferred-interfaces-v1/native-inferred-interfaces.json",
+            "$CONTROL/reports/contained-command.stdout","$CONTROL/reports/contained-command.stderr")
         private fun artifacts()=listOf(GccCompilerEngineContainmentArtifactIdentity(GccCompilerEngineContainmentArtifactRole.ENGINE_BINARY,Path.of("/fixture/engine"),1,INPUT),
             GccCompilerEngineContainmentArtifactIdentity(GccCompilerEngineContainmentArtifactRole.EXPORTER_SOURCE,Path.of("/fixture/exporter"),1,EXPORTER),
             GccCompilerEngineContainmentArtifactIdentity(GccCompilerEngineContainmentArtifactRole.GHIDRA_ARCHIVE,Path.of("/fixture/archive"),1,ARCHIVE))

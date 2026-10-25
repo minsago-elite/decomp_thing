@@ -47,7 +47,9 @@ internal data class GccInterfaceCapturedDirectoryV1(val identity: LinuxFileIdent
 
 /**
  * Immutable recovered bytes and complete descriptor-set commitments. This is deliberately raw
- * evidence: only the live coordinator's separate private permit can issue an owned operation.
+ * evidence: only factory membership and the exact live completed owner can issue an owned operation.
+ * Command streams are descriptor-owned content commitments in the later assessment; the worker
+ * outcome independently authenticates their lengths, not their content hashes.
  */
 internal class GccBundledInferredInterfaceSnapshot internal constructor(
     val model: GccBundledFullExportSnapshot,
@@ -63,6 +65,8 @@ internal class GccBundledInferredInterfaceSnapshot internal constructor(
     listingObservations: ByteArray,
     inferredManifest: ByteArray,
     inferredObservations: ByteArray,
+    stdout: ByteArray,
+    stderr: ByteArray,
     assessment: ByteArray,
 ) {
     val target = target.copy(executableRanges = java.util.List.copyOf(target.executableRanges))
@@ -76,11 +80,19 @@ internal class GccBundledInferredInterfaceSnapshot internal constructor(
     private val listingObservationsValue = listingObservations.copyOf()
     private val inferredManifestValue = inferredManifest.copyOf()
     private val inferredObservationsValue = inferredObservations.copyOf()
+    private val stdoutValue = stdout.copyOf()
+    private val stderrValue = stderr.copyOf()
     private val assessmentValue = assessment.copyOf()
     val listingManifestBytes: ByteArray get() = listingManifestValue.copyOf()
     val listingObservationsBytes: ByteArray get() = listingObservationsValue.copyOf()
     val inferredManifestBytes: ByteArray get() = inferredManifestValue.copyOf()
     val inferredObservationsBytes: ByteArray get() = inferredObservationsValue.copyOf()
+    val stdoutBytes: ByteArray get() = stdoutValue.copyOf()
+    val stderrBytes: ByteArray get() = stderrValue.copyOf()
+    val stdoutByteCount: Long = stdoutValue.size.toLong()
+    val stderrByteCount: Long = stderrValue.size.toLong()
+    val stdoutSha256: String = OracleArtifacts.sha256(stdoutValue)
+    val stderrSha256: String = OracleArtifacts.sha256(stderrValue)
     val programModelBytes: ByteArray get() = model.programModel
     val assessmentBytes: ByteArray get() = assessmentValue.copyOf()
     val completeObservedNativeCensus = true
@@ -93,7 +105,9 @@ internal class GccBundledInferredInterfaceSnapshot internal constructor(
 
 /**
  * The caller retains the same live run lease and has already authenticated worker/unit/cgroup
- * absence. No callback can run after the final complete metadata sweep. No path reopener escapes.
+ * absence. The complete reports tree and the two fixed control/report streams share one aggregate;
+ * zero-length streams remain required regular files. No callback can run after the final complete
+ * metadata sweep. No path reopener escapes.
  */
 internal object GccBundledInferredInterfaceCapture {
     internal const val LISTING_DIRECTORY = "native-interfaces-v1"
@@ -107,7 +121,9 @@ internal object GccBundledInferredInterfaceCapture {
     private const val LISTING_MANIFEST = "$LISTING/manifest.json"
     private const val INFERRED_FILE = "$INFERRED/native-inferred-interfaces.json"
     private const val INFERRED_MANIFEST = "$INFERRED/manifest.json"
-    private const val MAXIMUM_FILES = 300_007
+    private const val MAXIMUM_FILES = 300_009
+    internal const val MAXIMUM_STREAM_BYTES = 64 * 1024 * 1024
+    private val STREAM_NAMES = setOf("contained-command.stdout", "contained-command.stderr")
     private val REPORT_NAMES = setOf("program_model.json.export", "program_model.json", "program_model.json.progress.json", LISTING_DIRECTORY, INFERRED_DIRECTORY)
     private val EXPORT_NAMES = setOf("state.json", "planning-batches", "functions", "globals", "types", "failures")
     private val DATA_DIRECTORIES = listOf("functions", "globals", "types", "failures")
@@ -138,10 +154,11 @@ internal object GccBundledInferredInterfaceCapture {
                 model.language == target.languageId && model.compilerSpec == target.compilerSpecId) {
                 "interface capture target differs from the admitted complete model"
             }
-            val siblingBytes = SIDECARS.sumOf { size(pinned.files.getValue(it)) }
+            val streamPaths = STREAM_NAMES.map { "$controlName/reports/$it" }
+            val siblingBytes = (SIDECARS + streamPaths).sumOf { size(pinned.files.getValue(it)) }
             require(model.capturedBytes <= limits.maximumCombinedBytes - siblingBytes &&
-                model.capturedBytes + siblingBytes == pinned.bytes && model.outputFileCount + SIDECARS.size == pinned.files.size.toLong()) {
-                "interface capture aggregate does not include exactly the complete full-export tree and both siblings"
+                model.capturedBytes + siblingBytes == pinned.bytes && model.outputFileCount + SIDECARS.size + STREAM_NAMES.size == pinned.files.size.toLong()) {
+                "interface capture aggregate does not include exactly the complete full-export tree, both siblings and both command streams"
             }
             val modelBytes = model.programModel
             require(OracleArtifacts.sha256(modelBytes) == model.programModelSha256)
@@ -149,6 +166,10 @@ internal object GccBundledInferredInterfaceCapture {
             val listingBytes = readPinned(tree, LISTING_FILE, pinned.files.getValue(LISTING_FILE), remainingFileBound(limits, pinned, LISTING_FILE), checkpoint)
             val inferredManifest = readPinned(tree, INFERRED_MANIFEST, pinned.files.getValue(INFERRED_MANIFEST), limits.maximumManifestBytes, checkpoint)
             val inferredBytes = readPinned(tree, INFERRED_FILE, pinned.files.getValue(INFERRED_FILE), remainingFileBound(limits, pinned, INFERRED_FILE), checkpoint)
+            val stdoutPath = "$controlName/reports/contained-command.stdout"
+            val stderrPath = "$controlName/reports/contained-command.stderr"
+            val stdout = readPinned(tree, stdoutPath, pinned.files.getValue(stdoutPath), MAXIMUM_STREAM_BYTES, checkpoint, allowEmpty = true)
+            val stderr = readPinned(tree, stderrPath, pinned.files.getValue(stderrPath), MAXIMUM_STREAM_BYTES, checkpoint, allowEmpty = true)
             // The report's ordinal cannot authenticate a native address space. Select it only by
             // the independently admitted full descriptor, then reuse the complete mapping reader.
             val listingSummary = NativeInterfaceObservationsV1.validateBoundToSpaces(listingManifest,
@@ -170,9 +191,10 @@ internal object GccBundledInferredInterfaceCapture {
             val summary = NativeInferredInterfaceObservationsV1.validate(inferredManifest, expected, modelBytes,
                 listingManifest, limits, checkpoint, { ByteArrayInputStream(listingBytes) }, { ByteArrayInputStream(inferredBytes) })
             require(summary.listing == listingSummary) { "interface validation changed the exact listing/model census" }
-            val assessment = assessment(model, summary, target, runtime, controlName, runIdentity, pinned, listingManifest, inferredManifest, checkpoint)
+            val assessment = assessment(model, summary, target, runtime, controlName, runIdentity, pinned,
+                listingManifest, inferredManifest, stdout, stderr, checkpoint)
             val snapshot = GccBundledInferredInterfaceSnapshot(model, summary, target, runtime, runIdentity, controlName,
-                pinned.directories, pinned.files, pinned.bytes, listingManifest, listingBytes, inferredManifest, inferredBytes, assessment)
+                pinned.directories, pinned.files, pinned.bytes, listingManifest, listingBytes, inferredManifest, inferredBytes, stdout, stderr, assessment)
             checkpoint()
             verifyWholeSet(run, tree, runIdentity, pinned.directories, pinned.files)
             // No user/owner callback, hashing, parsing, or mutation-capable action follows this sweep.
@@ -200,6 +222,8 @@ internal object GccBundledInferredInterfaceCapture {
                 LISTING_FILE to captured.summary.bindings.listingSha256,
                 INFERRED_MANIFEST to OracleArtifacts.sha256(captured.inferredManifestBytes),
                 INFERRED_FILE to captured.summary.manifest.sha256,
+                "${captured.controlName}/reports/contained-command.stdout" to captured.stdoutSha256,
+                "${captured.controlName}/reports/contained-command.stderr" to captured.stderrSha256,
             )
             for ((path, digest) in expectedDigests) {
                 requireDigest(tree, path, captured.files.getValue(path), digest, checkpoint)
@@ -230,6 +254,7 @@ internal object GccBundledInferredInterfaceCapture {
                 return descriptor
             }
             require(directory(controlName, true).identity == expectedControl) { "interface control directory differs from completed execution" }
+            directory("$controlName/reports", true).also { requireNames(it, STREAM_NAMES) }
             val reports = directory(REPORTS, true)
             require(reports.identity.copy(linkCount = expectedReports.linkCount) == expectedReports) { "interface reports directory changed identity" }
             requireNames(reports, REPORT_NAMES)
@@ -251,6 +276,10 @@ internal object GccBundledInferredInterfaceCapture {
         for ((path, directory) in tree.descriptors) {
             checkpoint()
             val names = when {
+                path.startsWith("control-") && path.endsWith("/reports") -> {
+                    paths += STREAM_NAMES.sorted().map { "$path/$it" }
+                    STREAM_NAMES
+                }
                 path.startsWith("control-") -> null
                 path == REPORTS -> REPORT_NAMES
                 path == EXPORT -> EXPORT_NAMES
@@ -281,6 +310,7 @@ internal object GccBundledInferredInterfaceCapture {
             val pin = pinFile(directory, name)
             val size = size(pin)
             val maximum = when {
+                path.startsWith("control-") -> MAXIMUM_STREAM_BYTES.toLong()
                 path in setOf(LISTING_MANIFEST, INFERRED_MANIFEST) -> limits.maximumManifestBytes.toLong()
                 path == MODEL_FILE -> limits.maximumModelBytes.toLong()
                 path.startsWith("$EXPORT/functions/") -> GccBundledFullExportCapture.MAXIMUM_FULL_FUNCTION_RECORD_BYTES.toLong()
@@ -316,9 +346,10 @@ internal object GccBundledInferredInterfaceCapture {
         }
     }
 
-    private fun readPinned(tree: Tree, path: String, pin: GccInterfaceCapturedFileV1, maximumBytes: Int, checkpoint: () -> Unit): ByteArray {
+    private fun readPinned(tree: Tree, path: String, pin: GccInterfaceCapturedFileV1, maximumBytes: Int,
+        checkpoint: () -> Unit, allowEmpty: Boolean = false): ByteArray {
         val (directory, name) = tree.file(path)
-        require(size(pin) in 1..maximumBytes.toLong())
+        require(size(pin) in (if (allowEmpty) 0L else 1L)..maximumBytes.toLong())
         return openPinnedFile(directory, name, pin).use { file ->
             LinuxFilesystemSyscalls.openReadableWithoutAtimeFrom(file).use { readable ->
                 FileChannel.open(LinuxFilesystemSyscalls.stableDescriptorPath(readable.fd), StandardOpenOption.READ).use { channel ->
@@ -404,7 +435,8 @@ internal object GccBundledInferredInterfaceCapture {
 
     private fun assessment(model: GccBundledFullExportSnapshot, summary: NativeInferredInterfaceSummaryV1,
         target: GccBundledInterfaceTargetEvidenceV1, runtime: GccBundledInterfaceCaptureBindingsV1, controlName: String,
-        runIdentity: LinuxFileIdentity, pinned: PinnedTree, listingManifest: ByteArray, inferredManifest: ByteArray, checkpoint: () -> Unit): ByteArray {
+        runIdentity: LinuxFileIdentity, pinned: PinnedTree, listingManifest: ByteArray, inferredManifest: ByteArray,
+        stdout: ByteArray, stderr: ByteArray, checkpoint: () -> Unit): ByteArray {
         val pinsDigest = MessageDigest.getInstance("SHA-256")
         for ((path, pin) in pinned.files) {
             checkpoint()
@@ -431,6 +463,8 @@ internal object GccBundledInferredInterfaceCapture {
             "programModelSha256" to JsonPrimitive(model.programModelSha256), "programModelBytes" to JsonPrimitive(model.programModelBytes),
             "fullOutputTreeSha256" to JsonPrimitive(model.outputTreeSha256), "fullOutputFileCount" to JsonPrimitive(model.outputFileCount),
             "fullCapturedBytes" to JsonPrimitive(model.capturedBytes), "capturedBytes" to JsonPrimitive(pinned.bytes),
+            "stdoutBytes" to JsonPrimitive(stdout.size), "stdoutSha256" to JsonPrimitive(OracleArtifacts.sha256(stdout)),
+            "stderrBytes" to JsonPrimitive(stderr.size), "stderrSha256" to JsonPrimitive(OracleArtifacts.sha256(stderr)),
             "modelAssessmentSha256" to JsonPrimitive(OracleArtifacts.sha256(model.assessmentBytes)),
             "listingCollectorSha256" to JsonPrimitive(runtime.listingCollectorSha256), "inferredCollectorSha256" to JsonPrimitive(runtime.inferredCollectorSha256),
             "typeGraphSha256" to JsonPrimitive(runtime.typeGraphSha256), "wrapperSha256" to JsonPrimitive(runtime.wrapperSha256),
