@@ -1,0 +1,10 @@
+{
+  "apiVersion": 1,
+  "kind": "gitRepositoryCloneRequest",
+  "data": {
+    "action": "git.clone",
+    "url": "https://git.example.org/team/project.git",
+    "remoteName": "origin",
+    "branch": null
+  }
+}

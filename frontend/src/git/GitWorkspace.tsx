@@ -4,12 +4,15 @@ import { textMessage } from '../shared/messages';
 import { usePrivateTransport } from '../session/PrivateTransport';
 import { ApiClientError, withApiFailureReference } from '../api/client';
 import type {
-  Capability, GitDiff, GitHistory, GitProvenance, GitRefs, GitRepositories, GitStatus, GitStatusEntry, GitWorktrees,
-  Operation, RequestData,
+  Capability, GitAudit, GitDiff, GitHistory, GitProvenance, GitRefs, GitRemotes, GitRepositories, GitStatus, GitStatusEntry, GitWorktrees,
+  Operation, RequestData, RequestKind,
 } from '../api/generated';
 import type { BrowserSession } from '../session/session';
 import { apiPath, runPath, sourceDirectoryPath } from '../app/paths';
 import { StateMark, capabilityTone } from '../shared/StateMark';
+import { GitRemotesPanel } from './GitRemotesPanel';
+import type { RemoteAction } from './GitRemotesPanel';
+import { gitRemotesCopy } from '../copy/git';
 
 function sleep(milliseconds: number, signal: AbortSignal) {
   return new Promise<void>((resolve, reject) => {
@@ -28,10 +31,13 @@ interface Loaded {
   worktrees: GitWorktrees | null;
   refs: GitRefs | null;
   history: GitHistory | null;
+  remotes: GitRemotes | null;
+  audit: GitAudit | null;
 }
 
 type Mutation = 'gitStageRequest' | 'gitCommitRequest' | 'gitBranchCreateRequest' | 'gitSwitchRequest' | 'gitBranchDeleteRequest'
-  | 'gitTagRequest' | 'gitWorktreeAddRequest' | 'gitWorktreeRemoveRequest';
+  | 'gitTagRequest' | 'gitWorktreeAddRequest' | 'gitWorktreeRemoveRequest' | 'gitRemoteAddRequest' | 'gitRemoteRemoveRequest'
+  | 'gitFetchRequest';
 
 function short(objectId: string | null): string { return objectId ? objectId.slice(0, 12) : ''; }
 const HEADS = 'refs/heads/';
@@ -54,6 +60,8 @@ export function GitWorkspace({ jobId, basePath, session, capabilities, pollInter
   const { client } = usePrivateTransport(basePath);
   const git = capabilities.find(item => item.id === 'git');
   const importing = capabilities.find(item => item.id === 'git-import');
+  const remoting = capabilities.find(item => item.id === 'git-remotes');
+  const [running, setRunning] = useState<Operation | null>(null);
   const supported = git?.state === 'supported';
   const [loaded, setLoaded] = useState<Loaded | null>(null);
   const [error, setError] = useState('');
@@ -78,17 +86,19 @@ export function GitWorkspace({ jobId, basePath, session, capabilities, pollInter
         const listing = (await client.get('gitRepositories', `/jobs/${jobId}/repositories`, { signal: controller.signal })).data;
         if (listing.jobId !== jobId) throw new ApiClientError('invalid_response');
         const found = listing.repositories[0];
-        if (!found) { setLoaded({ listing, status: null, worktrees: null, refs: null, history: null }); return; }
+        if (!found) { setLoaded({ listing, status: null, worktrees: null, refs: null, history: null, remotes: null, audit: null }); return; }
         const prefix = `/jobs/${jobId}/repositories/${found.repositoryId}`;
         const suffix = worktree ? `?worktree=${worktree}` : '';
-        const [status, worktrees, refs, history] = await Promise.all([
+        const [status, worktrees, refs, history, remotes, audit] = await Promise.all([
           readStatus(prefix, controller.signal),
           client.get('gitWorktrees', `${prefix}/worktrees`, { signal: controller.signal }),
           client.get('gitRefs', `${prefix}/refs?limit=200`, { signal: controller.signal }),
           client.get('gitHistory', `${prefix}/history${suffix ? `${suffix}&limit=20` : '?limit=20'}`, { signal: controller.signal }),
+          client.get('gitRemotes', `${prefix}/remotes`, { signal: controller.signal }),
+          client.get('gitAudit', `${prefix}/audit?limit=50`, { signal: controller.signal }),
         ]);
         if (controller.signal.aborted) return;
-        setLoaded({ listing, status, worktrees: worktrees.data, refs: refs.data, history: history.data });
+        setLoaded({ listing, status, worktrees: worktrees.data, refs: refs.data, history: history.data, remotes: remotes.data, audit: audit.data });
         // A selection survives a refresh only while the same file identity is still listed.
         setSelected(previous => new Set([...previous].filter(key => status.entries.some(entry => key.endsWith(`:${entry.fileId}`)))));
       } catch (failure: unknown) {
@@ -146,10 +156,12 @@ export function GitWorkspace({ jobId, basePath, session, capabilities, pollInter
     try {
       let operation = (await client.post('operation', `${base}/operations`, kind, body(guarded), {
         csrfToken, ifMatch: `"${statusData.worktreeVersion}"`, idempotencyKey: crypto.randomUUID(), signal: controller.signal })).data;
-      for (let poll = 0; !terminal.has(operation.state) && poll < 600; poll++) {
+      for (let poll = 0; !terminal.has(operation.state) && poll < 1200; poll++) {
+        setRunning(operation);
         await sleep(pollIntervalMs, controller.signal);
         operation = (await client.get('operation', `${base}/operations/${operation.operationId}`, { signal: controller.signal })).data;
       }
+      setRunning(null);
       setStatus(textMessage(operation.state === 'completed' ? copy.completed : copy.failed, { action: label, message: operation.message ?? operation.state }));
       if (operation.state === 'completed') { setSelected(new Set()); setDiff(null); return true; }
       return false;
@@ -157,8 +169,54 @@ export function GitWorkspace({ jobId, basePath, session, capabilities, pollInter
       if (!controller.signal.aborted) setStatus(withApiFailureReference(textMessage(copy.refused, { action: label }), failure));
       return false;
     } finally {
+      setRunning(null);
       if (active.current === controller) { active.current = null; setBusy(false); setRefresh(value => value + 1); }
     }
+  }
+
+  /** Ask the server to stop a running transfer; the polling loop reports its final state. */
+  async function cancelTransfer(operation: Operation) {
+    const csrfToken = session.csrf();
+    if (!base || !csrfToken) { setStatus(copy.reconnect); return; }
+    try {
+      const cancelled = (await client.post('operation', `${base}/operations/${operation.operationId}/cancel`, 'gitOperationCancelRequest',
+        { action: 'git.cancel' }, { csrfToken, ifMatch: `"${operation.version}"`, idempotencyKey: crypto.randomUUID() })).data;
+      setRunning(cancelled);
+    } catch (failure: unknown) {
+      setStatus(withApiFailureReference(textMessage(copy.refused, { action: gitRemotesCopy.cancel }), failure));
+    }
+  }
+
+  function remoteAction(action: RemoteAction): Promise<boolean> {
+    const worktreeId = statusData?.worktreeId ?? '';
+    switch (action.kind) {
+      case 'gitRemoteAddRequest': return act('gitRemoteAddRequest', gitRemotesCopy.add, guarded =>
+        ({ action: 'git.remote.add', worktreeId, guards: guarded, name: action.name, url: action.url }));
+      case 'gitRemoteRemoveRequest': return act('gitRemoteRemoveRequest', textMessage(gitRemotesCopy.remove, { name: action.name }), guarded =>
+        ({ action: 'git.remote.remove', worktreeId, guards: guarded, remoteId: action.remoteId }));
+      case 'gitFetchRequest': return act('gitFetchRequest', textMessage(gitRemotesCopy.fetch, { name: action.name }), guarded =>
+        ({ action: 'git.fetch', worktreeId, guards: guarded, remoteId: action.remoteId }));
+    }
+  }
+
+  /** Create the job's repository by import or clone and wait for its durable outcome. */
+  async function create<K extends 'gitRepositoryAttachRequest' | 'gitRepositoryCloneRequest'>(kind: K & RequestKind, label: string, body: RequestData<K>) {
+    const csrfToken = session.csrf();
+    if (!csrfToken) { setStatus(copy.reconnect); return; }
+    setBusy(true);
+    try {
+      const job = (await client.get('job', `/jobs/${jobId}`)).data;
+      let operation = (await client.post('operation', `/jobs/${jobId}/repositories`, kind, body,
+        { csrfToken, ifMatch: `"${job.version}"`, idempotencyKey: crypto.randomUUID() })).data;
+      for (let poll = 0; !terminal.has(operation.state) && poll < 1200; poll++) {
+        setRunning(operation);
+        await sleep(pollIntervalMs, new AbortController().signal);
+        operation = (await client.get('operation', `/jobs/${jobId}/repositories/${operation.repositoryId}/operations/${operation.operationId}`)).data;
+      }
+      setStatus(textMessage(operation.state === 'completed' ? copy.completed : copy.failed, { action: label, message: operation.message ?? operation.state }));
+    } catch (failure: unknown) {
+      setStatus(withApiFailureReference(textMessage(copy.refused, { action: label }), failure));
+    } finally { setRunning(null); setBusy(false); setRefresh(value => value + 1); }
   }
 
   async function showDiff(entry: GitStatusEntry, scope: 'staged' | 'unstaged') {
@@ -219,24 +277,18 @@ export function GitWorkspace({ jobId, basePath, session, capabilities, pollInter
     {loaded && !repository && <section aria-labelledby="git-import-title">
       <p>{copy.noRepository} {copy.initHelp}</p>
       <h3 id="git-import-title">{copy.importTitle}</h3>
-      {importing?.state === 'supported' ? <ImportForm disabled={busy} onImport={async name => {
-        const csrfToken = session.csrf();
-        const job = (await client.get('job', `/jobs/${jobId}`)).data;
-        if (!csrfToken) { setStatus(copy.reconnect); return; }
-        setBusy(true);
-        try {
-          let operation = (await client.post('operation', `/jobs/${jobId}/repositories`, 'gitRepositoryAttachRequest',
-            { action: 'git.attach', sourceName: name }, { csrfToken, ifMatch: `"${job.version}"`, idempotencyKey: crypto.randomUUID() })).data;
-          for (let poll = 0; !terminal.has(operation.state) && poll < 600; poll++) {
-            await sleep(pollIntervalMs, new AbortController().signal);
-            operation = (await client.get('operation', `/jobs/${jobId}/repositories/${operation.repositoryId}/operations/${operation.operationId}`)).data;
-          }
-          setStatus(textMessage(operation.state === 'completed' ? copy.completed : copy.failed, { action: copy.importAction, message: operation.message ?? operation.state }));
-        } catch (failure: unknown) {
-          setStatus(withApiFailureReference(textMessage(copy.refused, { action: copy.importAction }), failure));
-        } finally { setBusy(false); setRefresh(value => value + 1); }
-      }} /> : <p>{importing?.message ?? copy.importUnavailable}</p>}
+      {importing?.state === 'supported' ? <ImportForm disabled={busy} onImport={name =>
+        create('gitRepositoryAttachRequest', copy.importAction, { action: 'git.attach', sourceName: name })} />
+        : <p>{importing?.message ?? copy.importUnavailable}</p>}
       <p>{copy.importHelp}</p>
+      <h3>{gitRemotesCopy.cloneTitle}</h3>
+      {remoting?.state === 'supported' ? <CloneForm disabled={busy} onClone={(url, remoteName) =>
+        create('gitRepositoryCloneRequest', gitRemotesCopy.cloneAction, { action: 'git.clone', url, remoteName, branch: null })} />
+        : <p><StateMark tone={remoting ? capabilityTone(remoting.state) : 'unknown'}>{gitRemotesCopy.unavailable}</StateMark> {remoting?.message ?? gitRemotesCopy.notReported}</p>}
+      {running && running.action === 'git.clone' && <p role="status">{running.progress
+        ? textMessage(gitRemotesCopy.progress, { phase: running.progress.phase, percent: running.progress.percent === null ? '' : ` ${running.progress.percent}%` })
+        : gitRemotesCopy.transferring}</p>}
+      <p>{gitRemotesCopy.cloneHelp}</p>
     </section>}
     {loaded && repository && statusData && <>
       <section aria-labelledby="git-identity-title">
@@ -323,6 +375,8 @@ export function GitWorkspace({ jobId, basePath, session, capabilities, pollInter
             ({ action: 'git.tag', worktreeId, guards: guarded, name, targetObjectId: commit.provenance.objectId }))} />
         </section>}
       </section>
+      <GitRemotesPanel capability={remoting} remotes={loaded.remotes} audit={loaded.audit} writable={writable} running={running}
+        onAction={remoteAction} onCancel={operation => { void cancelTransfer(operation); }} />
       <section aria-labelledby="git-branches-title">
         <h3 id="git-branches-title">{copy.branches}</h3>
         {dirty && <p>{copy.dirtySwitch}</p>}
@@ -347,6 +401,17 @@ export function GitWorkspace({ jobId, basePath, session, capabilities, pollInter
       </section>
     </>}
   </section>;
+}
+
+function CloneForm({ disabled, onClone }: { disabled: boolean; onClone: (url: string, remoteName: string) => Promise<void> }) {
+  const [url, setUrl] = useState('');
+  const [remoteName, setRemoteName] = useState('origin');
+  return <form onSubmit={event => { event.preventDefault(); if (url && remoteName) void onClone(url, remoteName); }}>
+    <label>{gitRemotesCopy.url} <input value={url} maxLength={2048} required autoComplete="off" spellcheck={false} onInput={event => { setUrl(event.currentTarget.value); }} /></label>
+    <label>{gitRemotesCopy.cloneRemoteName} <input value={remoteName} pattern="[A-Za-z0-9][A-Za-z0-9._\-]{0,63}" required onInput={event => { setRemoteName(event.currentTarget.value); }} /></label>
+    <button type="submit" disabled={disabled}>{gitRemotesCopy.cloneAction}</button>
+    <p>{gitRemotesCopy.urlHelp}</p>
+  </form>;
 }
 
 function ImportForm({ disabled, onImport }: { disabled: boolean; onImport: (name: string) => Promise<void> }) {

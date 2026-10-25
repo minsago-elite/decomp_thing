@@ -2058,6 +2058,8 @@
             "git.tag",
             "git.worktree.add",
             "git.worktree.remove",
+            "git.remote.add",
+            "git.remote.remove",
             "git.fetch",
             "git.push",
             "git.merge",
@@ -2121,6 +2123,39 @@
               "type": "null"
             }
           ]
+        },
+        "progress": {
+          "anyOf": [
+            {
+              "type": "object",
+              "properties": {
+                "phase": {
+                  "type": "string",
+                  "pattern": "^[A-Za-z][A-Za-z ]{0,62}[A-Za-z]$"
+                },
+                "percent": {
+                  "anyOf": [
+                    {
+                      "type": "integer",
+                      "minimum": 0,
+                      "maximum": 100
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                }
+              },
+              "required": [
+                "phase",
+                "percent"
+              ],
+              "additionalProperties": false
+            },
+            {
+              "type": "null"
+            }
+          ]
         }
       },
       "required": [
@@ -2135,7 +2170,8 @@
         "endedAt",
         "resultObjectId",
         "recoveryRequired",
-        "message"
+        "message",
+        "progress"
       ],
       "additionalProperties": false
     },
@@ -4850,7 +4886,8 @@
       "type": "string",
       "enum": [
         "initialized",
-        "imported"
+        "imported",
+        "cloned"
       ]
     },
     "gitObjectFormat": {
@@ -5910,6 +5947,362 @@
         "mapping",
         "worktreeDirtyAtCommit",
         "export"
+      ],
+      "additionalProperties": false
+    },
+    "gitRepositoryClone": {
+      "type": "object",
+      "properties": {
+        "action": {
+          "const": "git.clone"
+        },
+        "url": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 2048
+        },
+        "remoteName": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$"
+        },
+        "branch": {
+          "anyOf": [
+            {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 200
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "action",
+        "url",
+        "remoteName",
+        "branch"
+      ],
+      "additionalProperties": false
+    },
+    "gitRemoteAdd": {
+      "type": "object",
+      "properties": {
+        "action": {
+          "const": "git.remote.add"
+        },
+        "worktreeId": {
+          "$ref": "#/definitions/id"
+        },
+        "guards": {
+          "$ref": "#/definitions/gitGuards"
+        },
+        "name": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$"
+        },
+        "url": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 2048
+        }
+      },
+      "required": [
+        "action",
+        "worktreeId",
+        "guards",
+        "name",
+        "url"
+      ],
+      "additionalProperties": false
+    },
+    "gitRemoteRemove": {
+      "type": "object",
+      "properties": {
+        "action": {
+          "const": "git.remote.remove"
+        },
+        "worktreeId": {
+          "$ref": "#/definitions/id"
+        },
+        "guards": {
+          "$ref": "#/definitions/gitGuards"
+        },
+        "remoteId": {
+          "$ref": "#/definitions/id"
+        }
+      },
+      "required": [
+        "action",
+        "worktreeId",
+        "guards",
+        "remoteId"
+      ],
+      "additionalProperties": false
+    },
+    "gitFetch": {
+      "type": "object",
+      "properties": {
+        "action": {
+          "const": "git.fetch"
+        },
+        "worktreeId": {
+          "$ref": "#/definitions/id"
+        },
+        "guards": {
+          "$ref": "#/definitions/gitGuards"
+        },
+        "remoteId": {
+          "$ref": "#/definitions/id"
+        }
+      },
+      "required": [
+        "action",
+        "worktreeId",
+        "guards",
+        "remoteId"
+      ],
+      "additionalProperties": false
+    },
+    "gitOperationCancel": {
+      "type": "object",
+      "properties": {
+        "action": {
+          "const": "git.cancel"
+        }
+      },
+      "required": [
+        "action"
+      ],
+      "additionalProperties": false
+    },
+    "gitRemotes": {
+      "type": "object",
+      "properties": {
+        "repositoryId": {
+          "$ref": "#/definitions/id"
+        },
+        "configured": {
+          "type": "boolean"
+        },
+        "remotes": {
+          "type": "array",
+          "maxItems": 8,
+          "items": {
+            "type": "object",
+            "properties": {
+              "remoteId": {
+                "$ref": "#/definitions/id"
+              },
+              "name": {
+                "type": "string",
+                "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$"
+              },
+              "transport": {
+                "type": "string",
+                "enum": [
+                  "https",
+                  "ssh",
+                  "admitted"
+                ]
+              },
+              "display": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 2048
+              },
+              "credential": {
+                "type": "string",
+                "enum": [
+                  "configured",
+                  "none",
+                  "not-required"
+                ]
+              },
+              "allowed": {
+                "type": "boolean"
+              },
+              "fetchedAt": {
+                "anyOf": [
+                  {
+                    "$ref": "#/definitions/instant"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "fetchOperationId": {
+                "anyOf": [
+                  {
+                    "$ref": "#/definitions/id"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "trackingRefs": {
+                "type": "array",
+                "maxItems": 200,
+                "items": {
+                  "type": "object",
+                  "properties": {
+                    "refId": {
+                      "$ref": "#/definitions/id"
+                    },
+                    "name": {
+                      "type": "string",
+                      "minLength": 1,
+                      "maxLength": 1024
+                    },
+                    "objectId": {
+                      "$ref": "#/definitions/objectId"
+                    }
+                  },
+                  "required": [
+                    "refId",
+                    "name",
+                    "objectId"
+                  ],
+                  "additionalProperties": false
+                }
+              }
+            },
+            "required": [
+              "remoteId",
+              "name",
+              "transport",
+              "display",
+              "credential",
+              "allowed",
+              "fetchedAt",
+              "fetchOperationId",
+              "trackingRefs"
+            ],
+            "additionalProperties": false
+          }
+        }
+      },
+      "required": [
+        "repositoryId",
+        "configured",
+        "remotes"
+      ],
+      "additionalProperties": false
+    },
+    "gitAudit": {
+      "type": "object",
+      "properties": {
+        "repositoryId": {
+          "$ref": "#/definitions/id"
+        },
+        "entries": {
+          "type": "array",
+          "maxItems": 200,
+          "items": {
+            "type": "object",
+            "properties": {
+              "at": {
+                "$ref": "#/definitions/instant"
+              },
+              "action": {
+                "type": "string",
+                "pattern": "^[a-z][a-z.]{0,31}$"
+              },
+              "operationId": {
+                "$ref": "#/definitions/id"
+              },
+              "outcome": {
+                "type": "string",
+                "pattern": "^[a-z][a-z_-]{0,63}$"
+              },
+              "remoteId": {
+                "anyOf": [
+                  {
+                    "$ref": "#/definitions/id"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "destination": {
+                "anyOf": [
+                  {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 2048
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "ref": {
+                "anyOf": [
+                  {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 1024
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "oldObjectId": {
+                "anyOf": [
+                  {
+                    "$ref": "#/definitions/objectId"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "newObjectId": {
+                "anyOf": [
+                  {
+                    "$ref": "#/definitions/objectId"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "detail": {
+                "anyOf": [
+                  {
+                    "type": "string",
+                    "maxLength": 200
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              }
+            },
+            "required": [
+              "at",
+              "action",
+              "operationId",
+              "outcome",
+              "remoteId",
+              "destination",
+              "ref",
+              "oldObjectId",
+              "newObjectId",
+              "detail"
+            ],
+            "additionalProperties": false
+          }
+        }
+      },
+      "required": [
+        "repositoryId",
+        "entries"
       ],
       "additionalProperties": false
     }
@@ -6993,6 +7386,154 @@
         },
         "data": {
           "$ref": "#/definitions/gitWorktreeRemove"
+        }
+      },
+      "required": [
+        "apiVersion",
+        "kind",
+        "data"
+      ],
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "properties": {
+        "apiVersion": {
+          "const": 1
+        },
+        "kind": {
+          "const": "gitRemotes"
+        },
+        "requestId": {
+          "$ref": "#/definitions/requestId"
+        },
+        "data": {
+          "$ref": "#/definitions/gitRemotes"
+        }
+      },
+      "required": [
+        "apiVersion",
+        "kind",
+        "requestId",
+        "data"
+      ],
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "properties": {
+        "apiVersion": {
+          "const": 1
+        },
+        "kind": {
+          "const": "gitAudit"
+        },
+        "requestId": {
+          "$ref": "#/definitions/requestId"
+        },
+        "data": {
+          "$ref": "#/definitions/gitAudit"
+        }
+      },
+      "required": [
+        "apiVersion",
+        "kind",
+        "requestId",
+        "data"
+      ],
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "properties": {
+        "apiVersion": {
+          "const": 1
+        },
+        "kind": {
+          "const": "gitRepositoryCloneRequest"
+        },
+        "data": {
+          "$ref": "#/definitions/gitRepositoryClone"
+        }
+      },
+      "required": [
+        "apiVersion",
+        "kind",
+        "data"
+      ],
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "properties": {
+        "apiVersion": {
+          "const": 1
+        },
+        "kind": {
+          "const": "gitRemoteAddRequest"
+        },
+        "data": {
+          "$ref": "#/definitions/gitRemoteAdd"
+        }
+      },
+      "required": [
+        "apiVersion",
+        "kind",
+        "data"
+      ],
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "properties": {
+        "apiVersion": {
+          "const": 1
+        },
+        "kind": {
+          "const": "gitRemoteRemoveRequest"
+        },
+        "data": {
+          "$ref": "#/definitions/gitRemoteRemove"
+        }
+      },
+      "required": [
+        "apiVersion",
+        "kind",
+        "data"
+      ],
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "properties": {
+        "apiVersion": {
+          "const": 1
+        },
+        "kind": {
+          "const": "gitFetchRequest"
+        },
+        "data": {
+          "$ref": "#/definitions/gitFetch"
+        }
+      },
+      "required": [
+        "apiVersion",
+        "kind",
+        "data"
+      ],
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "properties": {
+        "apiVersion": {
+          "const": 1
+        },
+        "kind": {
+          "const": "gitOperationCancelRequest"
+        },
+        "data": {
+          "$ref": "#/definitions/gitOperationCancel"
         }
       },
       "required": [

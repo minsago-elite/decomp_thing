@@ -215,6 +215,8 @@ class UploadServer(
     private val startupCancellation: () -> Boolean = { false },
     // Operator-admitted directory whose immediate children may be imported by name; never browser-selected.
     gitImportRoot: Path? = null,
+    // Operator-allowed remote destinations and server-side credentials (#585, #586); closed by default.
+    gitRemotePolicy: decompengine.git.GitRemotePolicy = decompengine.git.GitRemotePolicy(),
 ) {
     init {
         require(listenBacklog in 1..4096) { "HTTP listen backlog must be between 1 and 4096" }
@@ -297,7 +299,7 @@ class UploadServer(
     private val gitAvailability = decompengine.git.GitRuntime.detect()
     private val gitRepositories = decompengine.git.ManagedGitRepositories(store.storageRoot, gitAvailability,
         jobs::gitSourceSnapshot, gitImportRoot, acceptance = decompengine.git.GitAcceptanceResolver(jobs::gitAcceptance),
-        activity = decompengine.git.GitJobActivity(jobs::gitRunActivity))
+        activity = decompengine.git.GitJobActivity(jobs::gitRunActivity), remotePolicy = gitRemotePolicy)
     private val api = spaAssets?.let { WebApiController(access, it, jobs, jobMutations, streamResources,
         harnessReadiness = harnessReadiness, agentPreflight = agentPreflight,
         git = WebGitCapability(gitAvailability, gitRepositories)) }

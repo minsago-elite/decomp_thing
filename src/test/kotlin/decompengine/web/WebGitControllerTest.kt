@@ -57,7 +57,9 @@ class WebGitControllerTest {
         lateinit var owner: WorkflowAttemptStore
         val service = WebJobService(store, JobAnalyzer { _, _ -> error("Unexpected analysis") }, JobReconstructor { _, _ -> error("Unexpected reconstruction") },
             attemptStoreFactory = { WorkflowAttemptStore.open(it).also { opened -> owner = opened } })
-        val repositories = ManagedGitRepositories(root, availability, service::gitSourceSnapshot)
+        val admitted: Path = Files.createDirectories(root.resolve("admitted")).toRealPath()
+        val repositories = ManagedGitRepositories(root, availability, service::gitSourceSnapshot,
+            remotePolicy = decompengine.git.GitRemotePolicy(admittedRoot = admitted))
         val server: HttpServer = HttpServer.create(InetSocketAddress("127.0.0.1", 0), 0)
         val origin = "http://127.0.0.1:${server.address.port}"
         val access = LocalWebAccess(LocalWebAccessConfiguration(origin))
@@ -347,6 +349,66 @@ class WebGitControllerTest {
         error(f.read("$base/provenance/${head.take(10)}"), 422, "VALIDATION_FAILED")
     }
 
+    @Test fun `remotes, fetch, audit, clone and cancel over HTTP never expose paths or credentials`(): Unit = Fixture().use { f ->
+        decompengine.git.GitTestRepositories().use { g ->
+            val bare = f.admitted.resolve("upstream.git")
+            g.git("init", "-q", "--bare", "--initial-branch=main", bare.toString())
+            val seed = Files.createDirectories(g.root.resolve("seed"))
+            g.git("init", "-q", "--initial-branch=main", seed.toString())
+            Files.writeString(seed.resolve("README.md"), "remote\n")
+            g.git("-C", seed.toString(), "add", "-A"); g.git("-C", seed.toString(), "commit", "-q", "-m", "one")
+            g.git("-C", seed.toString(), "push", "-q", bare.toString(), "main")
+            // Clone is refused for an unsupported transport before any repository exists.
+            val cloneBody = { url: String -> buildJsonObject { put("action", "git.clone"); put("url", url); put("remoteName", "origin"); put("branch", JsonNull) }.toString() }
+            error(f.send("POST", cloneBody("file:///etc"), f.headers(key = "http_clone_intent_01")), 422, "TRANSPORT_UNSUPPORTED")
+            error(f.send("POST", cloneBody("https://user:pw@git.example.org/a.git"), f.headers(key = "http_clone_intent_02")), 422, "CREDENTIAL_IN_URL")
+            val (base, _) = f.initialized()
+            fun guards(): Pair<JsonObject, JsonObject> {
+                val status = data(f.read("$base/status"), 200, "gitStatus")
+                return status to buildJsonObject {
+                    put("repositoryVersion", status.getValue("repositoryVersion")); put("worktreeVersion", status.getValue("worktreeVersion"))
+                    put("expectedHeadObjectId", status.getValue("headObjectId")); put("expectedRefId", JsonNull); put("expectedRefObjectId", JsonNull)
+                }
+            }
+            fun change(fields: Map<String, JsonElement>, key: String): HttpResponse<String> {
+                val (status, guards) = guards()
+                val body = JsonObject(mapOf("worktreeId" to status.getValue("worktreeId"), "guards" to guards) + fields)
+                return f.send("POST", body.toString(), f.headers(key = key) + ("If-Match" to "\"${guards.getValue("worktreeVersion").jsonPrimitive.content}\""), "$base/operations")
+            }
+            val empty = data(f.read("$base/remotes"), 200, "gitRemotes")
+            assertTrue(empty.getValue("configured").jsonPrimitive.boolean)
+            error(change(mapOf("action" to JsonPrimitive("git.remote.add"), "name" to JsonPrimitive("upstream"), "url" to JsonPrimitive("ext::sh")), "http_remote_intent_01"), 422, "TRANSPORT_UNSUPPORTED")
+            error(change(mapOf("action" to JsonPrimitive("git.fetch"), "remoteId" to JsonPrimitive("remote_x"), "refspec" to JsonPrimitive("+refs/heads/*:refs/heads/*")), "http_fetch_intent_00"), 422, "VALIDATION_FAILED")
+            val added = f.awaitOperation(change(mapOf("action" to JsonPrimitive("git.remote.add"), "name" to JsonPrimitive("upstream"),
+                "url" to JsonPrimitive("admitted:upstream.git")), "http_remote_intent_02").headers().firstValue("Location").orElseThrow())
+            assertEquals("completed", added.getValue("state").jsonPrimitive.content, added.toString())
+            val remote = data(f.read("$base/remotes"), 200, "gitRemotes").getValue("remotes").jsonArray.single().jsonObject
+            assertEquals("admitted:upstream.git", remote.getValue("display").jsonPrimitive.content)
+            assertEquals(schema.getValue("gitRemotes").jsonObject.getValue("properties").jsonObject.getValue("remotes").jsonObject
+                .getValue("items").jsonObject.getValue("properties").jsonObject.keys, remote.keys)
+            val fetched = f.awaitOperation(change(mapOf("action" to JsonPrimitive("git.fetch"), "remoteId" to remote.getValue("remoteId")),
+                "http_fetch_intent_01").headers().firstValue("Location").orElseThrow())
+            assertEquals("completed", fetched.getValue("state").jsonPrimitive.content, fetched.toString())
+            assertEquals(JsonNull, fetched["progress"])
+            val tracking = data(f.read("$base/remotes"), 200, "gitRemotes").getValue("remotes").jsonArray.single().jsonObject
+            assertEquals(listOf("refs/remotes/upstream/main"), tracking.getValue("trackingRefs").jsonArray.map { it.jsonObject.getValue("name").jsonPrimitive.content })
+            val audit = data(f.read("$base/audit?limit=10"), 200, "gitAudit").getValue("entries").jsonArray
+            assertEquals(listOf("fetch", "remote.add"), audit.map { it.jsonObject.getValue("action").jsonPrimitive.content })
+            for (body in listOf(tracking, audit)) assertFalse(body.toString().contains(f.root.toString()))
+            // Cancelling a finished transfer returns it unchanged; a stale version is refused.
+            val location = "$base/operations/${fetched.getValue("operationId").jsonPrimitive.content}"
+            val cancelHeaders = f.headers(key = "http_cancel_intent_1") + ("If-Match" to "\"${fetched.getValue("version").jsonPrimitive.content}\"")
+            error(f.send("POST", "{\"action\":\"git.cancel\"}", cancelHeaders + ("If-Match" to "\"operation_v0\""), "$location/cancel"), 412, "VERSION_CONFLICT")
+            error(f.send("POST", "{\"action\":\"stop\"}", cancelHeaders, "$location/cancel"), 422, "VALIDATION_FAILED")
+            assertEquals("completed", data(f.send("POST", "{\"action\":\"git.cancel\"}", cancelHeaders, "$location/cancel"), 202, "operation")
+                .getValue("state").jsonPrimitive.content)
+            error(f.send("POST", "{\"action\":\"git.cancel\"}", cancelHeaders - "X-CSRF-Token", "$location/cancel"), 403)
+            val capabilities = data(f.read("/workbench/api/v1/bootstrap"), 200, "bootstrap").getValue("capabilities").jsonArray
+                .map { it.jsonObject }.associateBy { it.getValue("id").jsonPrimitive.content }
+            assertEquals("supported", capabilities.getValue("git-remotes").getValue("state").jsonPrimitive.content)
+        }
+    }
+
     @Test fun `authorization guards and strict bodies precede any repository operation`(): Unit = Fixture().use { f ->
         val body = f.init()
         error(f.send(), 401)
@@ -360,7 +422,7 @@ class WebGitControllerTest {
         error(f.send("POST", body, f.headers() - "Idempotency-Key"), 400, "INVALID_IDEMPOTENCY_KEY")
         error(f.send("POST", body, f.headers(), "${f.collection}?path=/etc"), 400)
         error(f.send("POST", "{", f.headers()), 400, "MALFORMED_JSON")
-        error(f.send("POST", " ".repeat(2049), f.headers()), 413)
+        error(f.send("POST", " ".repeat(4097), f.headers()), 413)
         for (invalid in listOf("{}", "{\"action\":\"git.clone\"}", body.replace("}", ",\"path\":\"/etc\"}"),
             "{\"action\":\"git.init\",\"runId\":\"../x\",\"revisionId\":\"revision_one\",\"initialBranch\":null}",
             "{\"action\":\"git.attach\",\"sourceName\":\"../escape\"}", "{\"action\":\"git.attach\",\"sourceName\":\"/etc\"}")) {

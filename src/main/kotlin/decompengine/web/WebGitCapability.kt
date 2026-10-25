@@ -37,7 +37,14 @@ internal class WebGitCapability(
         // Commits are always unsigned: no signing key handle exists, and hooks never run.
         val signing = Triple("unsupported", "GIT_SIGNING_UNSUPPORTED",
             "Commits are created unsigned with the server identity; no signing key handle is configured.")
-        return listOf(entry("git", git), entry("git-import", import), entry("git-signing", signing))
+        // Remote operations need operator-configured destinations (#585, #587); credentials never appear here.
+        val remotes = when {
+            git.first != "supported" -> Triple("unavailable", git.second, git.third)
+            managed?.remotePolicy?.configured != true -> Triple("unavailable", "GIT_REMOTES_UNCONFIGURED",
+                "Remote clone, fetch and push need operator-allowed destinations on the server. Local Git work is unaffected.")
+            else -> Triple("supported", null, "Remotes on operator-allowed destinations can be cloned and fetched over HTTPS, SSH or admitted local paths.")
+        }
+        return listOf(entry("git", git), entry("git-import", import), entry("git-signing", signing), entry("git-remotes", remotes))
     }
 
     /** The managed registry, or an explicit unavailable refusal for every Git route. */

@@ -14,6 +14,7 @@
     "endedAt": "2026-10-25T00:00:02Z",
     "resultObjectId": null,
     "recoveryRequired": false,
-    "message": "Initialized without a commit. Every copied source file is untracked until an explicit commit."
+    "message": "Initialized without a commit. Every copied source file is untracked until an explicit commit.",
+    "progress": null
   }
 }

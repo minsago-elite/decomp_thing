@@ -1,0 +1,39 @@
+{
+  "apiVersion": 1,
+  "kind": "gitRemotes",
+  "requestId": "request_example_1",
+  "data": {
+    "repositoryId": "repository_example_2",
+    "configured": true,
+    "remotes": [
+      {
+        "remoteId": "remote_example_1",
+        "name": "upstream",
+        "transport": "https",
+        "display": "https://git.example.org/team/project.git",
+        "credential": "configured",
+        "allowed": true,
+        "fetchedAt": "2026-10-25T00:00:00Z",
+        "fetchOperationId": "operation_example_9",
+        "trackingRefs": [
+          {
+            "refId": "ref_upstream_main",
+            "name": "refs/remotes/upstream/main",
+            "objectId": "0123456789abcdef0123456789abcdef01234567"
+          }
+        ]
+      },
+      {
+        "remoteId": "remote_example_2",
+        "name": "local",
+        "transport": "admitted",
+        "display": "admitted:upstream.git",
+        "credential": "not-required",
+        "allowed": true,
+        "fetchedAt": null,
+        "fetchOperationId": null,
+        "trackingRefs": []
+      }
+    ]
+  }
+}

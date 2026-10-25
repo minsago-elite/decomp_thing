@@ -27,6 +27,8 @@ internal class WebGitReads(private val repositories: () -> ManagedGitRepositorie
         val query = parseQuery(exchange.requestURI.rawQuery, when (resource) {
             "status" -> setOf("worktree", "cursor", "limit")
             "refs" -> setOf("cursor", "limit")
+            "remotes" -> emptySet()
+            "audit" -> setOf("limit")
             "history" -> setOf("worktree", "start", "cursor", "limit")
             else -> setOf("worktree", "scope", "commit", "file", "cursor", "limit")
         })
@@ -42,10 +44,36 @@ internal class WebGitReads(private val repositories: () -> ManagedGitRepositorie
                 "status" -> sendWebApiResponse(exchange, 200, "gitStatus", status(jobId, repositoryId, query["cursor"], limit, worktree))
                 "history" -> sendWebApiResponse(exchange, 200, "gitHistory", history(jobId, repositoryId, query, limit, worktree))
                 "diff" -> sendWebApiResponse(exchange, 200, "gitDiff", diff(jobId, repositoryId, query, limit, worktree))
+                "remotes" -> sendWebApiResponse(exchange, 200, "gitRemotes", remotes(jobId, repositoryId))
+                "audit" -> sendWebApiResponse(exchange, 200, "gitAudit", buildJsonObject {
+                    put("repositoryId", repositoryId)
+                    put("entries", JsonArray(repositories().auditLog(jobId, repositoryId, limit)))
+                })
                 else -> sendWebApiResponse(exchange, 200, "gitRefs", refs(jobId, repositoryId, query["cursor"], limit))
             }
         } catch (failure: ManagedGitException) {
             throw webGitDenied(failure)
+        }
+    }
+
+    /** `G/remotes` (#585): registered remotes, credential state (never the credential) and tracking refs. */
+    private fun remotes(jobId: String, repositoryId: String): JsonObject {
+        val service = repositories()
+        return buildJsonObject {
+            put("repositoryId", repositoryId)
+            put("configured", service.remotePolicy.configured)
+            put("remotes", JsonArray(service.remotes(jobId, repositoryId).map { remote ->
+                buildJsonObject {
+                    put("remoteId", remote.record.remoteId); put("name", remote.record.name)
+                    put("transport", remote.record.location.transport.wireName); put("display", remote.record.location.display)
+                    put("credential", remote.credential); put("allowed", remote.allowed)
+                    put("fetchedAt", remote.fetchedAt?.toString()?.let(::JsonPrimitive) ?: JsonNull)
+                    put("fetchOperationId", remote.fetchOperationId?.let(::JsonPrimitive) ?: JsonNull)
+                    put("trackingRefs", JsonArray(remote.tracking.map { ref ->
+                        buildJsonObject { put("refId", webGitRefId(repositoryId, ref.name)); put("name", ref.name); put("objectId", ref.objectId) }
+                    }))
+                }
+            }))
         }
     }
 
