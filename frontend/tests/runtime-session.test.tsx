@@ -79,3 +79,31 @@ it('explains unavailable borrowed-executor telemetry without zero metrics', asyn
   expect(screen.getByText(/unavailable for the externally supplied executor/)).toBeTruthy();
   expect(screen.queryByText('Active workers (count)')).toBeNull();
 });
+
+
+it('uses accepted bootstrap time across late runtime mounts without another session read', async () => {
+  const epoch = Date.parse('2026-09-05T00:00:00Z'); let elapsed = 0;
+  vi.spyOn(Date, 'now').mockImplementation(() => epoch + elapsed);
+  vi.spyOn(performance, 'now').mockImplementation(() => elapsed);
+  const fixture = JSON.parse(readFileSync(resolve(process.cwd(), '../contracts/web/v1/fixtures/bootstrap.json'), 'utf8')) as { data: Bootstrap };
+  const data = { ...fixture.data, sessionExpiresAt: new Date(epoch + 120_000).toISOString() };
+  const gateway = { bootstrap: vi.fn().mockResolvedValue(data), exchange: vi.fn(), logout: vi.fn() };
+  const session = createBrowserSession(gateway, '/');
+  try {
+    await session.initialize({ kind: 'absent' });
+    elapsed = 40_000;
+    const view = render(<Runtime identity={{ applicationVersion: '0.1.0', uiBuildId: data.uiBuildId }} session={session} />);
+    const at = screen.getByLabelText('Runtime report').querySelector<HTMLElement>('[data-received-at]')?.getAttribute('data-received-at');
+    expect(at).toBe(new Date(epoch).toISOString());
+    expect(screen.getByLabelText('Runtime report').textContent).toContain('about 40 seconds ago');
+    view.unmount(); elapsed = 60_000;
+    const later = render(<Runtime identity={{ applicationVersion: '0.1.0', uiBuildId: data.uiBuildId }} session={session} />);
+    expect(screen.getByLabelText('Runtime report').querySelector<HTMLElement>('[data-received-at]')?.getAttribute('data-received-at')).toBe(at);
+    expect(screen.getByLabelText('Runtime report').textContent).toContain('about 1 minute ago');
+    expect(gateway.bootstrap).toHaveBeenCalledOnce();
+    expect(gateway.exchange).not.toHaveBeenCalled(); expect(gateway.logout).not.toHaveBeenCalled();
+    expect(document.body.textContent).not.toContain(data.csrfToken);
+    expect(JSON.stringify(session.snapshot())).not.toContain(data.csrfToken);
+    later.unmount();
+  } finally { session.dispose(); vi.restoreAllMocks(); }
+});
