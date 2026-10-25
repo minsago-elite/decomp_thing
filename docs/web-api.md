@@ -176,11 +176,12 @@ internal storage optimization and must not merge identity, permissions or histor
 | `GET G/{status,history,diff,refs}` | `200 gitStatus`, `gitHistory`, `gitDiff`, `gitRefs` | Bounded, anchored pages; full object IDs; opaque file IDs; implemented by #202 |
 | `GET G/worktrees` | `200 gitWorktrees` | Primary and linked work trees with owner and HEAD; implemented by #204 |
 | `GET G/provenance/{objectId}`, `GET G/exports/{objectId}` | `200 gitProvenance`, `200 application/zip` | Exact-object provenance envelope and deterministic tree export; implemented by #205 |
-| `GET G/{remotes,conflicts}` | Bounded typed Git read | Scoped worktree/ref/object IDs; #207/#210/#211 |
-| `POST J/repositories` | `202 operation` | Strict `gitRepositoryInit`/`gitRepositoryAttach`, session/Origin/CSRF, job If-Match and idempotency; init/attach implemented by #201, clone #209 |
+| `GET G/remotes`, `GET G/audit` | `200 gitRemotes`, `200 gitAudit` | Registered remotes with credential state (never the credential) and tracking refs; audit history; implemented by #207/#209 |
+| `GET G/conflicts` | Bounded typed Git read | Scoped worktree/ref/object IDs; #210/#211 |
+| `POST J/repositories` | `202 operation` | Strict `gitRepositoryInit`/`gitRepositoryAttach`, session/Origin/CSRF, job If-Match and idempotency; init/attach implemented by #201, clone (`gitRepositoryClone`) by #209 |
 | `POST G/operations` | `202 operation` | Named action, selected file IDs, full guards, work-tree If-Match, idempotency; stage/unstage/commit by #203, branch/switch/worktree by #204, tag by #205, others #207–#212 |
 | `GET G/operations/{operationId}` | `200 operation` | Durable outcome/recovery state; init/attach operations implemented by #201, others #209 |
-| `POST G/operations/{operationId}/cancel` | `202 operation` or terminal `200` | Explicit cancellation, optimistic guard; #209 |
+| `POST G/operations/{operationId}/cancel` | `202 operation` | `gitOperationCancel`, operation-version If-Match and idempotency; a finished operation is returned unchanged; implemented by #209 |
 
 Schemas cover representative `session`, `bootstrap`, `job(s)`, `run`, `snapshot`, `events`,
 `report`, `revision`, `artifact`, `gitWorkspace`, `operation`, errors and mutation requests.
@@ -917,6 +918,102 @@ repository is never an input to it.
   timestamps, tamper detection, and identity unchanged by moved refs.
 
 `WebGitControllerTest` covers the HTTP endpoints and the downloaded export digest.
+
+### Remotes, clone, fetch and cancellation
+
+Remote operations are closed unless the operator configures them (#585, #586). Three web flags
+control them:
+
+- `--git-remote-host <host>`, repeatable, allows HTTPS and SSH remotes on that exact host.
+- `--git-remote-root <directory>` admits its immediate children as local remotes, named
+  `admitted:<name>`.
+- `--git-credentials <file>` names server-side credentials. HTTPS entries have a username, a
+  password or token file and an optional CA bundle. SSH entries have an identity file and a
+  required known-hosts file.
+
+Bootstrap reports `git-remotes` as `supported` only when destinations are configured. Otherwise it
+is `unavailable` with `GIT_REMOTES_UNCONFIGURED`, and local Git work is unaffected (#587).
+
+A remote URL is checked before Git runs. The server refuses:
+
+- remote-helper syntax such as `ext::` or `fd::`, other schemes, plain host paths and `file://`,
+  with `TRANSPORT_UNSUPPORTED`;
+- any user name, password or token embedded in an HTTPS URL, or a password in an SSH URL, with
+  `CREDENTIAL_IN_URL`;
+- hosts that are not allowlisted and admitted names that do not exist, with
+  `DESTINATION_NOT_ALLOWED`;
+- SSH hosts or paths that could be read as options, with `VALIDATION_FAILED`.
+
+An admitted remote is displayed by its name, never by its host path.
+
+Credentials never leave the server. For HTTPS, Git receives an `Authorization` header for that
+remote's origin only, through `GIT_CONFIG_*` environment variables. It never appears in argv,
+configuration files, records or responses. `http.sslVerify` stays on, `http.followRedirects` is
+off, and an operator CA bundle is the only trust extension. SSH runs with `-F /dev/null`,
+`BatchMode=yes` and `StrictHostKeyChecking=yes`, and uses the operator's known-hosts file; a host
+without one is refused with `HOST_KEY_UNVERIFIED`. Prompts are impossible because the terminal,
+askpass and credential helpers are disabled. Failures map to fixed messages and never echo Git
+output: `CERTIFICATE_INVALID`, `AUTHENTICATION_REQUIRED`, `HOST_KEY_UNVERIFIED`,
+`NETWORK_UNAVAILABLE`, `REMOTE_NOT_FOUND`, `TRANSFER_TIMEOUT`, `TRANSFER_LIMIT` and `CANCELLED`.
+
+`POST G/operations` accepts these remote actions, each with the full guards:
+
+| Action | Body fields | Effect |
+| --- | --- | --- |
+| `git.remote.add` | `name`, `url` | Registers a policy-checked remote (at most eight) in a server record; repository configuration is never written |
+| `git.remote.remove` | `remoteId` | Deletes the remote and its remote-tracking refs; local branches and commits are unchanged |
+| `git.fetch` | `remoteId` | Fetches branches into `refs/remotes/<name>/` only: no tags, no `FETCH_HEAD`, no submodules, no work tree, and nothing is merged or checked out |
+
+`POST J/repositories` with `git.clone` (`url`, `remoteName`, `branch`) fetches into a fresh managed
+repository in private staging (#592). The repository receives the remote's branches as
+remote-tracking refs plus its tags. Then the server creates the default or named branch, checks it
+out within the checkout bound and registers the remote. The repository is published only when it
+is complete; a failure or cancellation removes the staging tree. Hooks, filters, submodules and
+LFS stay inert, and objects are verified with `fsck`.
+
+Every transfer is bounded:
+
+- by elapsed time, at most ten minutes;
+- by repository bytes, which are checked while Git runs, so an overrun stops with `TRANSFER_LIMIT`;
+- by output.
+
+The operation's `progress` reports Git's own phase and percent while it runs (#594).
+`POST G/operations/{id}/cancel` with `{"action": "git.cancel"}` and the operation version in
+`If-Match` stops a queued or running fetch or clone. The operation shows `cancelling` and then ends
+`cancelled`. Partial packs are removed, and local branches, the work tree and accepted snapshots are
+never touched. Git updates each remote-tracking ref only after its pack is complete, so a fetch
+interrupted by a restart leaves refs unchanged or fully updated. It becomes `interrupted` and is
+never repeated. Progress is exposed through the durable operation resource. It is not yet published
+on the shared job event stream, which is still run-scoped.
+
+`GET G/remotes` lists each remote with:
+
+- its transport and display URL;
+- its credential state: `configured`, `none` or `not-required`;
+- whether today's policy still allows it;
+- its last fetch time, or none, so the remote state is shown as unknown;
+- its remote-tracking refs.
+
+`GET G/audit?limit=` returns the repository's newest audit entries first: remote additions and
+removals, fetches and clones, with destination, refs, objects and outcome. Audit entries are
+separate from reconstruction evidence and never accept a revision.
+
+The workspace shows a **Remotes** panel. It lists the remotes and their states, adds and removes
+remotes, fetches with live progress and a **Cancel transfer** control, and shows the audit history.
+A job without a repository offers **Clone from a remote** next to import. Neither form accepts a
+credential.
+
+`GitRemotesTest` covers:
+
+- URL policy and credential isolation in argv and the environment;
+- admitted fetch that leaves local work untouched, and clone;
+- HTTPS through `git http-backend` behind a loopback TLS server with a throwaway certificate:
+  certificate rejection without the CA, refused credentials, the size bound, cancellation of a
+  stalled transfer, and a successful credentialed clone and fetch whose secret appears in no stored
+  file;
+- restart reconciliation of an interrupted fetch.
+
+`WebGitControllerTest` covers the HTTP routes.
 
 ### Git workspace view and packaged journey
 

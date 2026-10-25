@@ -107,7 +107,7 @@ export const gitRemotesCopy = {
   name: 'Remote name',
   url: 'Remote URL',
   add: 'Add remote',
-  urlHelp: 'Use https://, ssh:// or admitted:<name> for an operator-admitted local remote. Never include a password or token: credentials are configured on the server and never shown here.',
+  urlHelp: 'Use an HTTPS or SSH URL on an operator-allowed host, or admitted:<name> for an operator-admitted local remote. Never include a password or token: credentials are configured on the server and never shown here.',
   transferring: 'Transfer running…',
   progress: '{phase}{percent}',
   cancel: 'Cancel transfer',
