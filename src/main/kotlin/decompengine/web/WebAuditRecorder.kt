@@ -96,6 +96,11 @@ internal class WebAuditRecorder(
 
         /** Legacy presentation mutations, by path segment. */
         fun legacyAction(method: String, segments: List<String>): Pair<WebAuditAction, WebAuditTarget>? {
+            if (segments == listOf("api", "v1", "session")) return when (method) {
+                "POST" -> WebAuditAction.SESSION_START to WebAuditTarget()
+                "DELETE" -> WebAuditAction.SESSION_END to WebAuditTarget()
+                else -> null
+            }
             if (method != "POST") return null
             return when {
                 segments == listOf("jobs") -> WebAuditAction.JOB_UPLOAD to WebAuditTarget()

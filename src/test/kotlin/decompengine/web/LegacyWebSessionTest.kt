@@ -105,10 +105,14 @@ class LegacyWebSessionTest {
             // Each refusal is audited, without any job state change.
             // An entry is written as its handler exits, after the response bytes.
             val auditDeadline = System.nanoTime() + 10_000_000_000L
-            while (WebAuditLog(root).read().entries.size < 9 && System.nanoTime() < auditDeadline) Thread.sleep(10)
-            val audited = WebAuditLog(root).read().entries
+            fun mutations() = WebAuditLog(root).read().entries.filter { it.action != WebAuditAction.SESSION_START }
+            while (mutations().size < 9 && System.nanoTime() < auditDeadline) Thread.sleep(10)
+            val audited = mutations()
             assertEquals(9, audited.size)
             assertTrue(audited.all { it.outcome == WebAuditOutcome.REJECTED })
+            // Legacy session establishment is audited like the versioned route, attributed to the issued session.
+            val logins = WebAuditLog(root).read().entries.filter { it.action == WebAuditAction.SESSION_START }
+            assertTrue(logins.isNotEmpty() && logins.all { it.outcome == WebAuditOutcome.ACCEPTED && it.actor.kind == "browser_session" })
             assertEquals(0, executions)
             val logout = request("/api/v1/session", "DELETE", session + mapOf("Origin" to origin, "Content-Type" to "application/json"))
             assertEquals(204, logout.statusCode())

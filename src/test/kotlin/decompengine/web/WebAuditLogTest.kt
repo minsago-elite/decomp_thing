@@ -103,6 +103,30 @@ class WebAuditLogTest {
         } finally { blocked.toFile().deleteRecursively() }
     }
 
+    @Test fun `a failed partial append is rolled back so later records and earlier entries stay readable`() {
+        val root = root("partial")
+        try {
+            var failNext = false
+            val log = WebAuditLog(root, clock, append = { channel, buffer ->
+                if (failNext) {
+                    failNext = false
+                    buffer.limit(buffer.limit() / 2)
+                    while (buffer.hasRemaining()) channel.write(buffer)
+                    throw java.io.IOException("No space left on device")
+                }
+                while (buffer.hasRemaining()) channel.write(buffer)
+            })
+            assertEquals(1, log.cancel()?.sequence)
+            failNext = true
+            assertNull(log.cancel())
+            assertEquals(2, log.cancel()?.sequence)
+            val page = log.read()
+            assertEquals(listOf(1L, 2L), page.entries.map { it.sequence })
+            assertEquals(1, page.unrecordedEntries)
+            assertEquals(listOf(1L, 2L), WebAuditLog(root, clock).read().entries.map { it.sequence }, "reopen reads every entry")
+        } finally { root.toFile().deleteRecursively() }
+    }
+
     @Test fun `versioned and legacy routes map to the closed action vocabulary`() {
         val run = WebAuditRecorder.versionedAction("POST", "jobs/$job/runs/run_1/cancel")
         assertEquals(WebAuditAction.RUN_CANCEL to WebAuditTarget(job, "run_1"), run)
@@ -115,5 +139,8 @@ class WebAuditLogTest {
         assertNull(WebAuditRecorder.versionedAction("GET", "jobs/$job/runs/r/events"))
         assertEquals(WebAuditAction.RUN_START, WebAuditRecorder.legacyAction("POST", listOf("jobs", job, "explore"))?.first)
         assertNull(WebAuditRecorder.legacyAction("GET", listOf("jobs")))
+        assertEquals(WebAuditAction.SESSION_START, WebAuditRecorder.legacyAction("POST", listOf("api", "v1", "session"))?.first)
+        assertEquals(WebAuditAction.SESSION_END, WebAuditRecorder.legacyAction("DELETE", listOf("api", "v1", "session"))?.first)
+        assertNull(WebAuditRecorder.legacyAction("GET", listOf("api", "v1", "session")))
     }
 }
