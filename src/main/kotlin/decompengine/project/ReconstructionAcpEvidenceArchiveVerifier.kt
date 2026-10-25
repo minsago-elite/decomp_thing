@@ -726,7 +726,12 @@ internal object ReconstructionAcpEvidenceArchiveVerifier {
         require(request.requiredSha256("promptSha256", "ACP receipt request") == checkpoint.promptSha256) {
             "ACP receipt prompt digest differs from the reconstruction checkpoint"
         }
-        request.requiredSha256("wirePromptSha256", "ACP receipt request")
+        val wirePromptSha256 = request.requiredSha256("wirePromptSha256", "ACP receipt request")
+        // v4 budgets and commits the exact shared ACP wire rendering. The v3 workflow
+        // digest included separate header snapshots, so historical receipts keep that scope.
+        require(!checkpoint.reconstructorIdentity.endsWith(":v4") || wirePromptSha256 == checkpoint.promptSha256) {
+            "module-minimal ACP wire prompt digest differs from its complete prompt commitment"
+        }
         verifyTextCommitmentList(
             request.requiredObject("workspaceRootIds", "ACP receipt request"),
             listOf("project"),

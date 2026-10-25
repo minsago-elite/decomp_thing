@@ -247,6 +247,9 @@ class BoundedLlmModuleReconstructor(
             invocationEvidence?.let { evidence ->
                 request.persistAgentExecutionEvidence?.invoke(evidence)
             }
+            invocationEvidence?.wirePromptSha256?.let { wireDigest ->
+                require(wireDigest == promptSha256) { "dispatched wire prompt differs from bounded module context" }
+            }
             val execution = receipt.requireResult()
             if (execution.stopReason in setOf(AgentStopReason.CANCELLED, AgentStopReason.LIMIT_EXHAUSTED)) {
                 throw ModuleReconstructionInterruptedException(

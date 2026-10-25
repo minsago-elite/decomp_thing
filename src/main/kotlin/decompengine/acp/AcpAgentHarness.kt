@@ -1983,6 +1983,8 @@ private class ProductionAcpSandboxExecution(
                 configuration.executable,
                 configuration.expectedExecutableManifestSha256,
             )
+            requireAgentRuntimeMountsExcludeWorkspace(request.workspaceRoots,
+                listOf(executableMount) + sandboxConfiguration.agentRuntimeMounts)
             val sandboxed = observePrefix(RuntimeCopyStatistics.Prefix.Phase.LAUNCH) { boundary.launch(
                 AcpSandboxLaunch(
                     command = configuration.command(),

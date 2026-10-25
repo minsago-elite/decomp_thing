@@ -93,7 +93,13 @@ Complete project headers remain compiler inputs. The provider must replace the
 owned implementation from recovered evidence, while the workflow retains prior
 source for rollback and acceptance. Durable session inventory captures hashes of
 authorized writable paths without granting the provider permission to read them. The archive verifier independently rejects
-v4 receipt policies granting header or prior-source reads.
+v4 receipt policies granting header or prior-source reads, or whose wire prompt
+digest differs from the budgeted text. Fresh reconstruction also rejects a
+mismatched wire digest after retaining its invocation receipt. ACP terminal
+execution is disabled for these requests. The outer provider receives empty
+workspace directories and mediated writes; configured runtime mount sources must
+be disjoint from every workspace so alternate mount paths cannot expose headers
+or prior source.
 
 Historical `v3` requests retain their original prompt rendering and structured
 `module-reconstruction-input-v2` plus transitive-interface fingerprint replay.

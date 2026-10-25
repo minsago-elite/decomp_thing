@@ -34,6 +34,7 @@ import decompengine.agent.AgentSessionReference
 import decompengine.agent.AgentStopReason
 import decompengine.agent.AgentUsage
 import decompengine.agent.AgentWorkspacePath
+import decompengine.agent.renderAgentPrompt
 import java.nio.file.Files
 import java.nio.file.Path
 import java.nio.file.StandardCopyOption
@@ -231,6 +232,97 @@ class ReconstructionAcpEvidenceArchiveVerifierTest {
                 ArchivalPackager.create(project, temp.resolve("$name.zip"))
             }
             assertTrue(failure.message.orEmpty().isNotBlank(), name)
+        }
+    }
+
+    @Test
+    fun `fresh mismatched wire prompt retains receipt and rolls back candidate to unresolved source`() {
+        val scratch = Path.of("build/test-tmp").toAbsolutePath().normalize()
+        Files.createDirectories(scratch)
+        val temp = Files.createTempDirectory(scratch, "v4-fresh-wire-mismatch-")
+        try {
+            for (profile in ReconstructionProfiles.builtIn) {
+                val project = temp.resolve(profile.id)
+                val mismatchedWire = "0".repeat(64)
+                val harness = ArchiveEvidenceHarness(accepted = true, wirePromptOverride = mismatchedWire)
+                val model = RecoveredProgramModel(inputSha256 = "a".repeat(64), functions = listOf(
+                    RecoveredFunction("fn_0000000000401000", "parse_input", 0x401000UL, "int parse_input(void)")))
+                val manifest = SourceTreeGenerator.generate(model, project, profile = profile,
+                    reconstructor = BoundedLlmModuleReconstructor(harness,
+                        harnessProvenanceDescriptor = harness.factoryProvenance.stableDescriptor))
+                assertEquals(listOf("fn_0000000000401000"), manifest.unresolvedImplementationIds)
+                val source = manifest.files.single { it.path == SOURCE_PATH }
+                assertEquals(false, source.acceptedImplementation)
+                assertTrue(source.generator.startsWith("unresolved:agent:"))
+                val plan = DeterministicModulePlanner(layout = profile.layout).plan(model)
+                val fallbackRequest = ProfileModulePromptInputs(model, plan, profile).request("parse", project, null)
+                val fallbackSource = ReconstructionAdapters.resolve(profile).defaultReconstructor()
+                    .reconstruct(fallbackRequest).source.trimEnd() + "\n"
+                assertEquals(fallbackSource, project.resolve(SOURCE_PATH).readText())
+                assertFalse("return 17;" in project.resolve(SOURCE_PATH).readText())
+                val checkpoint = Json.parseToJsonElement(project.resolve(CHECKPOINT_PATH).readText()).jsonObject
+                assertEquals(JsonPrimitive(false), checkpoint.getValue("accepted"))
+                assertEquals(JsonPrimitive("exception-fallback"), checkpoint.getValue("workflowOrigin"))
+                assertEquals(JsonNull, checkpoint.getValue("compilation"))
+                assertEquals(JsonPrimitive("returned-completed"), checkpoint.getValue("executionTerminalOutcome"))
+                assertTrue(project.resolve(EVIDENCE_PATH).exists())
+                val receipt = Json.parseToJsonElement(project.resolve(EVIDENCE_PATH).readText()).jsonObject
+                val request = receipt.getValue("request").jsonObject
+                assertEquals(JsonPrimitive(mismatchedWire), request.getValue("wirePromptSha256"))
+                assertEquals(checkpoint.getValue("promptSha256"), request.getValue("promptSha256"))
+                assertTrue(request.getValue("promptSha256") != request.getValue("wirePromptSha256"))
+                assertEquals(JsonPrimitive(sha256(project.resolve(EVIDENCE_PATH).readBytes())),
+                    checkpoint.getValue("executionEvidenceSha256"))
+                val failure = assertFailsWith<IllegalArgumentException> {
+                    ReconstructionAcpEvidenceArchiveVerifier.verify(project,
+                        manifest.files.associate { it.path to sha256(project.resolve(it.path).readBytes()) },
+                        manifest.files.associate { it.path to Files.size(project.resolve(it.path)) }, manifest, profile)
+                }
+                assertTrue(failure.message.orEmpty().contains("not accepted"), failure.message)
+            }
+        } finally {
+            Files.walk(temp).use { paths ->
+                paths.sorted(java.util.Comparator.reverseOrder()).forEach { Files.deleteIfExists(it) }
+            }
+        }
+    }
+
+    @Test
+    fun `v4 archive rejects a different wire prompt after every receipt commitment is rebound`() {
+        val scratch = Path.of("build/test-tmp").toAbsolutePath().normalize()
+        Files.createDirectories(scratch)
+        val temp = Files.createTempDirectory(scratch, "v4-wire-prompt-replay-")
+        try {
+            for (profile in ReconstructionProfiles.builtIn) {
+                val project = temp.resolve(profile.id)
+                val harness = ArchiveEvidenceHarness(accepted = true)
+                createAgentProject(project, accepted = true, profile = profile, harness = harness)
+                val receipt = Json.parseToJsonElement(project.resolve(EVIDENCE_PATH).readText()).jsonObject
+                val originalRequest = receipt.getValue("request").jsonObject
+                val actualWireSha256 = sha256(renderAgentPrompt(
+                    harness.executedRequest.objective, harness.executedRequest.contextInputs).toByteArray())
+                assertEquals(JsonPrimitive(actualWireSha256), originalRequest.getValue("wirePromptSha256"))
+                assertEquals(originalRequest.getValue("promptSha256"), originalRequest.getValue("wirePromptSha256"))
+                val originalSource = project.resolve(SOURCE_PATH).readBytes()
+                rewriteEvidenceAndBindings(project) { text ->
+                    val root = Json.parseToJsonElement(text).jsonObject
+                    val request = root.getValue("request").jsonObject
+                    JsonObject(root + ("request" to JsonObject(request +
+                        ("wirePromptSha256" to JsonPrimitive("0".repeat(64)))))).toString() + "\n"
+                }
+                assertTrue(originalSource.contentEquals(project.resolve(SOURCE_PATH).readBytes()))
+                val manifest = SourceTreeManifestReader.read(project, profile)
+                val failure = assertFailsWith<IllegalArgumentException>(profile.id) {
+                    ReconstructionAcpEvidenceArchiveVerifier.verify(project,
+                        manifest.files.associate { it.path to sha256(project.resolve(it.path).readBytes()) },
+                        manifest.files.associate { it.path to Files.size(project.resolve(it.path)) }, manifest, profile)
+                }
+                assertEquals("module-minimal ACP wire prompt digest differs from its complete prompt commitment", failure.message)
+            }
+        } finally {
+            Files.walk(temp).use { paths ->
+                paths.sorted(java.util.Comparator.reverseOrder()).forEach { Files.deleteIfExists(it) }
+            }
         }
     }
 
@@ -866,7 +958,10 @@ class ReconstructionAcpEvidenceArchiveVerifierTest {
         }
     }
 
-    private class ArchiveEvidenceHarness(private val accepted: Boolean) : AgentHarness {
+    private class ArchiveEvidenceHarness(
+        private val accepted: Boolean,
+        private val wirePromptOverride: String? = null,
+    ) : AgentHarness {
         private var evidence: AcpExecutionEvidenceSnapshot? = null
         private lateinit var requestBinding: AgentExecutionRequestBinding
         lateinit var executedRequest: AgentExecutionRequest
@@ -957,7 +1052,8 @@ class ReconstructionAcpEvidenceArchiveVerifierTest {
                 null,
                 AcpNegotiatedCapabilitiesEvidence(false, false, false, false, false, false, false),
             ),
-            wirePromptSha256 = "c".repeat(64),
+            wirePromptSha256 = wirePromptOverride ?:
+                sha256(renderAgentPrompt(executedRequest.objective, executedRequest.contextInputs).toByteArray()),
             diagnostics = AcpProcessDiagnostics(
                 pid = 123,
                 exitCode = 0,

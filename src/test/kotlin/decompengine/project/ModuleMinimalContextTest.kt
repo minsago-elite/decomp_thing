@@ -91,6 +91,24 @@ class ModuleMinimalContextTest {
     }
 
     @Test
+    fun `incoming caller context alone can exceed the budget before dispatch`() {
+        val original = request()
+        val baselineCharacters = modulePromptEvidence(original).text.length
+        val enlarged = original.copy(model = original.model.copy(functions = original.model.functions.map {
+            if (it.id == "caller") it.copy(prototype = it.prototype + " /*" + "caller evidence ".repeat(1000) + "*/") else it
+        }))
+        var dispatched = false
+        val reconstructor = BoundedLlmModuleReconstructor(AgentHarness { _, _ ->
+            dispatched = true
+            error("over-budget incoming caller must not dispatch")
+        }, maximumContextCharacters = maxOf(4096, baselineCharacters))
+        val failure = assertFailsWith<ModuleContextBudgetExceededException> { reconstructor.reconstruct(enlarged) }
+        assertEquals(modulePromptEvidence(enlarged).text.length, failure.promptCharacters)
+        assertTrue(failure.promptCharacters > failure.promptBudgetCharacters)
+        assertFalse(dispatched)
+    }
+
+    @Test
     fun `cross module declarations require explicit recovered ownership`() {
         assertFailsWith<IllegalArgumentException> { modulePromptEvidence(request().copy(modulePlan = null)) }
     }
