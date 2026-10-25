@@ -94,7 +94,7 @@ export function GitWorkspace({ jobId, basePath, session, capabilities, pollInter
         ]);
         if (controller.signal.aborted) return;
         diffGeneration.current++;
-        setDiff(null);
+        setDiff(null); setCommit(null);
         setLoaded({ listing, status, worktrees: worktrees.data, refs, history: history.data });
         // A selection survives a refresh only while the same file identity is still listed.
         setSelected(previous => new Set([...previous].filter(key => status.entries.some(entry => key.endsWith(`:${entry.fileId}`)))));
@@ -188,21 +188,31 @@ export function GitWorkspace({ jobId, basePath, session, capabilities, pollInter
     } catch (failure: unknown) { setStatus(withApiFailureReference(copy.readFailed, failure)); }
   }
 
+  /** Every changed file of a commit across its anchored pages; a listing past the page budget is marked incomplete. */
   async function showCommit(objectId: string) {
     if (!base) return;
+    const generation = diffGeneration.current;
     try {
-      const [changes, provenance] = await Promise.all([
-        client.get('gitDiff', `${base}/diff?scope=commit&commit=${objectId}`),
-        client.get('gitProvenance', `${base}/provenance/${objectId}`),
-      ]);
-      setCommit({ diff: changes.data, provenance: provenance.data });
+      const path = `${base}/diff?scope=commit&commit=${objectId}&limit=200`;
+      const [first, provenance] = await Promise.all([client.get('gitDiff', path), client.get('gitProvenance', `${base}/provenance/${objectId}`)]);
+      let page = first.data;
+      const files = [...page.files];
+      for (let pages = 1; page.nextCursor && pages < MAX_STATUS_PAGES; pages++) {
+        page = (await client.get('gitDiff', `${path}&cursor=${page.nextCursor}`)).data;
+        files.push(...page.files);
+      }
+      if (generation !== diffGeneration.current) return;
+      setCommit({ diff: { ...page, files, complete: page.complete && page.nextCursor === null }, provenance: provenance.data });
     } catch (failure: unknown) { setStatus(withApiFailureReference(copy.readFailed, failure)); }
   }
 
+  /** Older history pages belong to the history they continue; a response for an earlier read is dropped. */
   async function older(cursor: string) {
     if (!base || !loaded?.history) return;
+    const generation = diffGeneration.current;
     try {
       const page = (await client.get('gitHistory', `${base}/history?cursor=${cursor}&limit=20${query ? `&${query}` : ''}`)).data;
+      if (generation !== diffGeneration.current) return;
       setLoaded(previous => previous?.history ? { ...previous, history: { ...page, entries: [...previous.history.entries, ...page.entries] } } : previous);
     } catch (failure: unknown) { setStatus(withApiFailureReference(copy.historyChanged, failure)); }
   }
@@ -338,6 +348,7 @@ export function GitWorkspace({ jobId, basePath, session, capabilities, pollInter
         {commit && <section aria-labelledby="git-commit-title">
           <h4 id="git-commit-title">{textMessage(copy.commitDetail, { object: short(commit.provenance.objectId) })}</h4>
           <ul>{commit.diff.files.map(file => <li key={file.fileId}><code>{file.path}</code> {file.change}{file.binary ? ' (binary)' : ''}</li>)}</ul>
+          {!commit.diff.complete && <p role="alert">{copy.commitIncomplete}</p>}
           <h5>{copy.provenance}</h5>
           <p>{textMessage(copy.exportDigest, { sha: commit.provenance.export.sha256 })}</p>
           <p>{commit.provenance.export.verification === 'tree-blob-ids-match' ? copy.exportVerified : copy.exportMismatch}</p>

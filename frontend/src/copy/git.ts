@@ -65,6 +65,7 @@ export const gitCopy = {
   historyChanged: 'History changed since the first page. Refresh the repository to read it again.',
   inspect: 'Inspect {object}',
   commitDetail: 'Commit {object}',
+  commitIncomplete: 'This commit changes more files than the workbench lists; the list above is incomplete.',
   provenance: 'Provenance',
   exportDigest: 'Source export SHA-256: {sha}',
   exportVerified: 'Export verified against the commit tree’s blob IDs.',

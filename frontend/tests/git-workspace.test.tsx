@@ -47,7 +47,10 @@ function status(dirty: boolean) {
     notices: [{ code: dirty ? 'dirty' : 'clean', message: dirty ? 'The work tree has changes.' : 'The work tree is clean.' }], entries, nextCursor: null };
 }
 
+let historyGate: Promise<void> | null = null;
+
 function serve(kind: string, path: string): Promise<unknown> {
+  if (historyGate && path.includes('/history?cursor=')) { const gate = historyGate; historyGate = null; return gate.then(() => serve(kind, path)); }
   const [route = '', query = ''] = path.split('?');
   const data = (() => {
     if (route === `/jobs/${jobId}/repositories`) return { jobId, repositories: listing, operations: [] };
@@ -76,9 +79,13 @@ function serve(kind: string, path: string): Promise<unknown> {
     }
     if (route === `${base}/diff`) {
       const params = new URLSearchParams(query);
-      if (params.get('scope') === 'commit') return { repositoryId, worktreeId, scope: 'commit', commitObjectId: params.get('commit'), parentObjectId: null,
-        complete: true, nextCursor: null, patch: null, files: [{ fileId: 'file_c', path: 'src/main.c', pathEscaped: false, originalPath: null,
-          change: 'added', oldObjectId: null, newObjectId: other, oldMode: '000000', newMode: '100644', binary: false, additions: 3, deletions: 0, newSizeBytes: 40 }] };
+      if (params.get('scope') === 'commit') {
+        const file = (fileId: string, path: string) => ({ fileId, path, pathEscaped: false, originalPath: null,
+          change: 'added', oldObjectId: null, newObjectId: other, oldMode: '000000', newMode: '100644', binary: false, additions: 3, deletions: 0, newSizeBytes: 40 });
+        const second = params.get('cursor') === 'diff_page_2';
+        return { repositoryId, worktreeId, scope: 'commit', commitObjectId: params.get('commit'), parentObjectId: null, complete: true, patch: null,
+          nextCursor: paged && !second ? 'diff_page_2' : null, files: second ? [file('file_d', 'src/second.c')] : [file('file_c', 'src/main.c')] };
+      }
       return { repositoryId, worktreeId, scope: params.get('scope'), commitObjectId: null, parentObjectId: head, complete: true, nextCursor: null,
         files: [{ fileId: params.get('file'), path: 'src/util.c', pathEscaped: false, originalPath: null, change: 'modified', oldObjectId: older,
           newObjectId: other, oldMode: '100644', newMode: '100644', binary: false, additions: 1, deletions: 1, newSizeBytes: 12 }],
@@ -251,3 +258,26 @@ it('explains and disables a commit or selection beyond the 200-file request boun
   expect(screen.getByText(/At most 200 files can be staged or unstaged in one action/)).toBeTruthy();
   expect(screen.getByRole('button', { name: 'Unstage selected' })).toHaveProperty('disabled', true);
 }, 20_000);
+
+it('lists every file of an inspected commit and drops an older-history page that arrives after a refresh', async () => {
+  paged = true;
+  entries = [];
+  mount();
+  fireEvent.click(await screen.findByRole('button', { name: 'Older commits' }));
+  expect(await screen.findByText('Record candidate')).toBeTruthy();
+  fireEvent.click(screen.getByRole('button', { name: `Inspect ${older.slice(0, 12)}` }));
+  expect(await screen.findByText('src/second.c')).toBeTruthy();
+  expect(screen.getByText('src/main.c')).toBeTruthy();
+  expect(transport.get).toHaveBeenCalledWith('gitDiff', `${base}/diff?scope=commit&commit=${older}&limit=200&cursor=diff_page_2`);
+  // A pending older page must not be appended to history that was read again meanwhile.
+  let open = () => {};
+  historyGate = new Promise<void>(resolve => { open = resolve; });
+  fireEvent.click(screen.getByRole('button', { name: 'Refresh repository' }));
+  await waitFor(() => expect(screen.queryByText('Record candidate')).toBeNull());
+  fireEvent.click(await screen.findByRole('button', { name: 'Older commits' }));
+  fireEvent.click(screen.getByRole('button', { name: 'Refresh repository' }));
+  await waitFor(() => expect(transport.get.mock.calls.filter(call => String(call[1]).includes('/history?limit=20')).length).toBeGreaterThanOrEqual(3));
+  open();
+  await new Promise(resolve => setTimeout(resolve, 50));
+  expect(screen.queryByText('Record candidate')).toBeNull();
+});
