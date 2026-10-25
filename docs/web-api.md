@@ -429,7 +429,10 @@ persisted candidate, versions and that the attempt is still the latest.
 
 Production options declare no checkpoint policy yet, so `POST R/recover` and
 `GET R/controls` report resume as `RESUME_UNSUPPORTED`; an explicit retry starts a
-fresh linked attempt with the predecessor's own option and limits. A repair retry
+fresh linked attempt with the predecessor's own option and recorded (possibly
+lowered) limits; recovery never raises them. A new recovery command passes the same
+runtime-prerequisite admission as a fresh start, including the bounded sandbox check
+at submission, while a keyed replay stays read-only. A repair retry
 re-resolves the predecessor's recorded input revision (accepted or completed
 candidate) and copies its retained source afresh; if that revision is no longer
 retained, retry is refused with `INPUT_UNVERIFIED`.

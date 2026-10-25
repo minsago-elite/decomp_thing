@@ -34,7 +34,9 @@ internal class WebApiController(
         webAdmissionPrerequisites(jobs.durableRegistrations(), request, readiness().prerequisites, harnessReadiness::inspectSandbox)
     }
     private val cancellations = WebCancellationController(jobMutations, assets.basePath)
-    private val recoveries = WebRecoveryController(jobs, jobMutations, assets.basePath)
+    private val recoveries = WebRecoveryController(jobs, jobMutations, assets.basePath) { workflow, harness ->
+        webAdmissionPrerequisites(jobs.durableRegistrations(), workflow, harness, readiness().prerequisites, harnessReadiness::inspectSandbox)
+    }
     private val agentPreflights = WebAgentPreflightController(access, agentPreflight, assets.basePath)
     private val runPages = WebRunPages { jobId ->
         when (val inspection = jobs.inspectDurableJob(jobId)) {

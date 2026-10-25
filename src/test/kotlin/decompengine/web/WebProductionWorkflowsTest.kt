@@ -420,6 +420,34 @@ class WebProductionWorkflowsTest {
     }
 
     @Test
+    fun `retry keeps recorded limits and rechecks prerequisites while replay stays read-only`() = withRoot { root ->
+        val store = JobStore(root); val job = store.createFromUpload("retry-limits.elf", elfFixture())
+        val engines = FakeEngines()
+        service(store, adapters(engines)).use { service ->
+            service.initializeExistingStorage()
+            val lowered = WebWorkflowDefaults.RECONSTRUCT_AGENT.copy(maxToolCalls = 10uL, wallClockMs = 600_000uL, idleMs = 60_000uL)
+            engines.reconstructBody = { _, _, _ -> error("inert agent failure") }
+            val failed = service.requestDurableStart(job.id, version(service, job.id),
+                NewWorkflowAttempt(WorkflowKind.RECONSTRUCT, lowered, harnessCapabilityId = "agent-acp"), "retry_limits_first_01").attempt
+            assertEquals(WorkflowRunState.FAILED, failed.state); assertEquals(lowered, failed.limits)
+            val calls = engines.calls.get()
+            val agentMissing = WebWorkflowPrerequisites(WebPrerequisite(false, "AGENT_PREFLIGHT_FAILED", "The last operator inspection could not start the configured agent."),
+                WebPrerequisite.AVAILABLE, WebPrerequisite.AVAILABLE)
+            val refused = assertFailsWith<WebJobServiceException> {
+                service.requestDurableRecovery(job.id, failed.runId, failed.version, WorkflowRecoveryMode.RETRY, null, "retry_without_agent_1", agentMissing)
+            }
+            assertEquals("WORKFLOW_PREREQUISITE_UNAVAILABLE", refused.code); assertEquals(calls, engines.calls.get())
+            engines.reconstructBody = { reports, _, _ -> writeSourceTree(reports.resolve("source-tree"), "base") }
+            val retried = service.requestDurableRecovery(job.id, failed.runId, failed.version, WorkflowRecoveryMode.RETRY, null, "retry_with_agent_01").attempt
+            assertEquals(lowered, retried.limits, "retry raised the predecessor's recorded limits")
+            assertEquals(WorkflowRunState.COMPLETED, retried.state)
+            // Replaying the admitted command never rechecks readiness or executes again.
+            val replay = service.requestDurableRecovery(job.id, failed.runId, failed.version, WorkflowRecoveryMode.RETRY, null, "retry_with_agent_01", agentMissing)
+            assertTrue(replay.replayed); assertEquals(retried.runId, replay.attempt.runId); assertEquals(calls + 1, engines.calls.get())
+        }
+    }
+
+    @Test
     fun `an input that already validates publishes its accepted root baseline`() = withRoot { root ->
         for (acceptTestOnly in listOf(true, false)) {
             val store = JobStore(root.resolve("jobs-$acceptTestOnly")); val job = store.createFromUpload("baseline.elf", elfFixture())

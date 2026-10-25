@@ -982,11 +982,7 @@ class WebJobService(
         val registration = registrations[request.workflow to request.harnessCapabilityId]
             ?: throw WebJobServiceException("HARNESS_UNAVAILABLE", "The requested harness capability is unavailable.")
         if (!registration.admits(request.limits)) throw WebJobServiceException("WORKFLOW_LIMITS_UNAVAILABLE", "The requested workflow limits are unavailable.")
-        val requirements = registration.adapter.requirements
-        val unmet = if (requirements.isEmpty()) null
-            else prerequisites?.unmet(requirements) ?: if (prerequisites == null)
-                WebPrerequisite(false, "PREREQUISITES_UNKNOWN", "Runtime prerequisites could not be determined. Refresh runtime readiness before retrying.") else null
-        if (unmet != null) throw WebJobServiceException("WORKFLOW_PREREQUISITE_UNAVAILABLE", unmet.message)
+        requirePrerequisites(registration.adapter, prerequisites)
         if (owner == null) throw WebJobServiceException("JOB_NOT_FOUND", "The requested job is unavailable.")
         val view = inspectStoredJob(owner, jobId) as? WorkflowJobInspection.Available
             ?: throw WebJobServiceException("JOB_RECORD_UNAVAILABLE", "The job record is unavailable; inspect its storage diagnostic.")
@@ -1209,7 +1205,8 @@ class WebJobService(
      */
     @Synchronized
     internal fun requestDurableRecovery(jobId: String, runId: String, expectedRunVersion: String, mode: WorkflowRecoveryMode,
-        expectedInputRevisionId: String?, requestKey: String): DurableWebWorkflowStartResult {
+        expectedInputRevisionId: String?, requestKey: String,
+        prerequisites: WebWorkflowPrerequisites? = WebWorkflowPrerequisites.UNCHECKED): DurableWebWorkflowStartResult {
         requireInitializedRead()
         requirePublicationAvailable()
         val id = Regex("[A-Za-z0-9][A-Za-z0-9_-]{0,127}")
@@ -1237,7 +1234,13 @@ class WebJobService(
             is RecoveryDecision.Refused -> throw WebJobServiceException(selected.code, "This attempt cannot be recovered in the requested mode.")
             is RecoveryDecision.Admissible -> selected
         }
-        val request = NewWorkflowAttempt(predecessor.workflow, decision.registration.limits, predecessor.inputRevisionId,
+        // A new execution needs the same runtime prerequisites as a fresh start; replay above stays read-only.
+        requirePrerequisites(decision.registration.adapter, prerequisites)
+        // The successor keeps the predecessor's recorded (possibly lowered) limits; recovery never raises them.
+        if (!decision.registration.admits(predecessor.limits)) {
+            throw WebJobServiceException("WORKFLOW_LIMITS_UNAVAILABLE", "The attempt's recorded limits are no longer server-approved.")
+        }
+        val request = NewWorkflowAttempt(predecessor.workflow, predecessor.limits, predecessor.inputRevisionId,
             decision.registration.harnessCapabilityId, predecessor.runId, decision.recovery)
         val job = store.get(jobId)
         val admitted = publishStart(jobId) {
@@ -1246,6 +1249,15 @@ class WebJobService(
         if (admitted.replayed) return DurableWebWorkflowStartResult(admitted.attempt, replayed = true)
         return dispatchAdmitted(DurableTask(job, admitted.attempt, decision.registration.adapter, decision.predecessorReports,
             decision.inputSourceTree))
+    }
+
+    /** Shared by starts and recovery commands: a declared prerequisite must hold in the supplied snapshot. */
+    private fun requirePrerequisites(adapter: DurableWebWorkflowAdapter, prerequisites: WebWorkflowPrerequisites?) {
+        val requirements = adapter.requirements
+        val unmet = if (requirements.isEmpty()) null
+            else prerequisites?.unmet(requirements) ?: if (prerequisites == null)
+                WebPrerequisite(false, "PREREQUISITES_UNKNOWN", "Runtime prerequisites could not be determined. Refresh runtime readiness before retrying.") else null
+        if (unmet != null) throw WebJobServiceException("WORKFLOW_PREREQUISITE_UNAVAILABLE", unmet.message)
     }
 
     private fun <T> publishStart(jobId: String, command: () -> T): T = try { command() }
