@@ -105,6 +105,8 @@ main ul:not([class]) > li + li, main ol:not([class]) > li + li { margin-top: 0.5
 main dl:not([class]) { display: grid; grid-template-columns: minmax(8rem, 14rem) minmax(0, 1fr); gap: 0.4rem 1.25rem; margin: 0.75rem 0; overflow-wrap: anywhere; }
 main dl:not([class]) dt { color: var(--muted); font-weight: 600; }
 main dl:not([class]) dd { margin: 0; }
+/* Grouping wrappers must not become grid cells; their labels and values join the columns. */
+main dl:not([class]) > div, .job-facts > div { display: contents; }
 
 table { border-collapse: collapse; width: 100%; font-variant-numeric: tabular-nums; }
 caption { text-align: start; font-weight: 650; padding-bottom: 0.5rem; }
@@ -112,7 +114,8 @@ th, td { padding: 0.5rem 0.75rem; text-align: start; vertical-align: top; border
 th { color: var(--muted); font-size: 0.8125rem; font-weight: 650; background: var(--surface-sunken); }
 
 details { margin: 0.75rem 0; }
-summary { cursor: pointer; font-weight: 600; min-height: 2.75rem; display: flex; align-items: center; gap: 0.5rem; }
+/* Keep list-item display so the native disclosure marker still shows open/closed state. */
+summary { display: list-item; cursor: pointer; font-weight: 600; padding-block: 0.6rem; }
 summary::marker { color: var(--accent); }
 fieldset { margin: 1rem 0; padding: 1rem; border: 1px solid var(--line); border-radius: var(--radius-panel); min-width: 0; }
 legend { padding: 0 0.35rem; font-weight: 650; }
