@@ -110,6 +110,17 @@ internal object GitTransfers {
         }
     }
 
+    /** Every remote-tracking ref of one remote, for deletion; a listing past its bound is refused, never truncated. */
+    fun allTrackingRefs(runner: GitCommandRunner, gitDir: Path, format: GitObjectFormat, name: String): List<GitRefEntry> {
+        val result = runner.run(GitInvocation("for-each-ref", listOf("--format=%(objectname)%00%(refname)", "refs/remotes/$name/"),
+            gitDir = gitDir, truncateStdout = true, limits = GitExecutionLimits(Duration.ofSeconds(60), 8 * 1024 * 1024, 64 * 1024)))
+        if (result.stdoutTruncated) throw GitRepositoryException("REPOSITORY_UNSUPPORTED", "The remote has more tracking refs than the workbench can enumerate.")
+        return result.text.lineSequence().filter { it.isNotEmpty() }.map { line ->
+            val parts = line.split('\u0000')
+            GitRefEntry(parts[1], format.objectIdOrNull(parts[0]) ?: throw GitRepositoryException("REPOSITORY_CORRUPT", "A tracking ref is invalid."), null)
+        }.toList()
+    }
+
     /** Remote-tracking refs of one remote, for display and divergence. */
     fun trackingRefs(runner: GitCommandRunner, gitDir: Path, format: GitObjectFormat, name: String): List<GitRefEntry> {
         val result = runner.run(GitInvocation("for-each-ref", listOf("--format=%(objectname)%00%(refname)", "--count=201", "refs/remotes/$name/"),

@@ -311,7 +311,15 @@ internal object GitRemoteStore {
     const val MAX_AUDIT_BYTES = 4L * 1024 * 1024
     val NAME = Regex("[A-Za-z0-9][A-Za-z0-9._-]{0,63}")
 
-    fun remoteId(repositoryId: String, name: String) = "remote_" + GitStorage.sha256("git-remote-v1\n$repositoryId\n$name").take(32)
+    /**
+     * Each registration has its own identity: a remote removed and re-created under the same name
+     * is a different remote, so a request reviewed against the old one cannot reach the new one.
+     */
+    fun remoteId(repositoryId: String, name: String, operationId: String) =
+        "remote_" + GitStorage.sha256("git-remote-v2\n$repositoryId\n$name\n$operationId").take(32)
+
+    /** A name that forms valid `refs/remotes/<name>/<branch>` refs (no `..`, `.lock`, leading dot or `HEAD`). */
+    fun validName(name: String) = NAME.matches(name) && name != "HEAD" && GitRefNames.isPlausibleBranchName(name)
 
     fun write(directory: Path, record: GitRemoteRecord) {
         val remotes = GitStorage.directories(directory, REMOTES)
@@ -333,7 +341,7 @@ internal object GitRemoteStore {
                     fun text(name: String) = value.getValue(name).jsonPrimitive.content
                     require(value.getValue("schemaVersion").jsonPrimitive.content == "1" && text("repositoryId") == repositoryId)
                     val name = text("name").also { require(NAME.matches(it)) }
-                    require(text("remoteId") == remoteId(repositoryId, name) && file.fileName.toString() == "${text("remoteId")}.json")
+                    require(text("remoteId") == remoteId(repositoryId, name, text("operationId")) && file.fileName.toString() == "${text("remoteId")}.json")
                     GitRemoteRecord(text("remoteId"), repositoryId, name, GitRemoteLocation(GitTransport.entries.single { it.wireName == text("transport") },
                         text("url"), value["host"]?.takeIf { it != JsonNull }?.jsonPrimitive?.content, text("display")),
                         Instant.parse(text("createdAt")), text("operationId"))
@@ -390,6 +398,13 @@ internal class GitDiskWatch(private val directory: Path, private val maxBytes: L
         val now = System.nanoTime()
         if (now - checkedAt < 500_000_000L) return null
         checkedAt = now
+        return measure()
+    }
+
+    /** Unthrottled check after the transfer ends: a bound crossed in the last interval is still enforced. */
+    fun exceeded(): Boolean = measure() == "DISK_LIMIT"
+
+    private fun measure(): String? {
         var total = 0L
         try {
             Files.walk(directory).use { paths ->

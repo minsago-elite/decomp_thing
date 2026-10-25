@@ -277,4 +277,49 @@ class GitRemotesTest {
         // The explicit retry is a new operation; nothing was repeated automatically.
         assertEquals(GitOperationState.COMPLETED, sync(GitOperationAction.FETCH, "remoteId" to remoteId).state)
     }
+
+    @Test fun `remote names form valid refs, registrations have their own identity and removal deletes every tracking ref`(): Unit = Fixture().use { f ->
+        val bare = f.remote()
+        // Many branches on the remote: removal must not stop at a display bound.
+        val seed = f.repositories.root.resolve("upstream seed")
+        (1..210).forEach { f.repositories.git("-C", seed.toString(), "branch", "b%03d".format(it)) }
+        f.repositories.git("-C", seed.toString(), "push", "-q", bare.toString(), "--all")
+        service = f.open()
+        val invalid = listOf("release..mirror", "mirror.lock", ".hidden", "HEAD")
+        for (name in invalid) assertEquals("VALIDATION_FAILED", assertFailsWith<ManagedGitException>(name) {
+            service.request(jobId, GitCloneRequest("admitted:upstream.git", name, null), "clone_key_${name.hashCode().toUInt()}_0000")
+        }.code)
+        f.initialized()
+        for (name in invalid) refused("VALIDATION_FAILED", GitOperationAction.REMOTE_ADD, "name" to name, "url" to "admitted:upstream.git")
+        sync(GitOperationAction.REMOTE_ADD, "name" to "upstream", "url" to "admitted:upstream.git")
+        val first = service.remotes(jobId, repositoryId).single().record.remoteId
+        assertEquals(GitOperationState.COMPLETED, sync(GitOperationAction.FETCH, "remoteId" to first).state)
+        val gitDir = f.store.resolve("$jobId/git/repositories/$repositoryId/repository.git")
+        assertEquals(212, f.repositories.git("--git-dir=$gitDir", "for-each-ref", "refs/remotes/upstream/").lines().count { it.isNotBlank() })
+        assertEquals(GitOperationState.COMPLETED, sync(GitOperationAction.REMOTE_REMOVE, "remoteId" to first).state)
+        assertEquals("", f.repositories.git("--git-dir=$gitDir", "for-each-ref", "refs/remotes/").trim())
+        // A re-created remote with the same name is a different registration: a stale request cannot reach it.
+        sync(GitOperationAction.REMOTE_ADD, "name" to "upstream", "url" to "admitted:upstream.git")
+        val second = service.remotes(jobId, repositoryId).single().record.remoteId
+        assertTrue(first != second)
+        refused("NOT_FOUND", GitOperationAction.FETCH, "remoteId" to first)
+        refused("NOT_FOUND", GitOperationAction.REMOTE_REMOVE, "remoteId" to first)
+    }
+
+    @Test fun `the size bound is enforced after a transfer that finishes between checks`(): Unit = Fixture().use { f ->
+        f.remote()
+        service = f.open(GitRemotePolicy(admittedRoot = f.admitted, limits = GitTransferLimits(maxRepositoryBytes = 2048)))
+        val clone = service.request(jobId, GitCloneRequest("admitted:upstream.git", "origin", null), "clone_key_limit_0001")
+        assertTrue(service.awaitIdle(60_000))
+        assertEquals("TRANSFER_LIMIT", service.operation(jobId, clone.operation.repositoryId, clone.operation.operationId).failureCode)
+        assertTrue(service.listing(jobId).repositories.isEmpty())
+        service.close()
+        f.initialized()
+        sync(GitOperationAction.REMOTE_ADD, "name" to "upstream", "url" to "admitted:upstream.git")
+        service.close()
+        service = f.open(GitRemotePolicy(admittedRoot = f.admitted, limits = GitTransferLimits(maxRepositoryBytes = 2048)))
+        val fetched = sync(GitOperationAction.FETCH, "remoteId" to service.remotes(jobId, repositoryId).single().record.remoteId)
+        assertEquals("TRANSFER_LIMIT", fetched.failureCode, fetched.message)
+        assertTrue(service.remotes(jobId, repositoryId).single().tracking.isEmpty())
+    }
 }

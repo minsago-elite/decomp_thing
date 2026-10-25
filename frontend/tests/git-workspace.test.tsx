@@ -41,6 +41,7 @@ let listing: unknown[];
 let paged: boolean;
 let remoteList: unknown[];
 let operationReads: unknown[];
+let operationOverride: (() => unknown) | null = null;
 
 function status(dirty: boolean) {
   return { repositoryId, worktreeId, repositoryVersion: 'repo_v1', worktreeVersion: 'tree_v1', headState: 'attached', headObjectId: head,
@@ -93,7 +94,7 @@ function serve(kind: string, path: string): Promise<unknown> {
     if (route === `${base}/audit`) return { repositoryId, entries: [{ at: '2026-10-25T00:00:00Z', action: 'remote.add', operationId: 'operation_0',
       outcome: 'completed', remoteId: 'remote_1', destination: 'https://git.example.org/team/project.git', ref: null, oldObjectId: null,
       newObjectId: null, detail: null }] };
-    if (route.startsWith(`${base}/operations/`)) return operationReads.shift() ?? operation('completed').data;
+    if (route.startsWith(`${base}/operations/`)) return operationOverride?.() ?? operationReads.shift() ?? operation('completed').data;
     if (route === `/jobs/${jobId}`) return { jobId, version: 'job_v3' };
     if (route.startsWith(`/jobs/${jobId}/repositories/`) && route.includes('/operations/')) return operation('completed', 'git.attach').data;
     throw new Error(`unexpected ${kind} ${path}`);
@@ -107,6 +108,7 @@ beforeEach(() => {
   listing = [repository];
   paged = false;
   operationReads = [];
+  operationOverride = null;
   remoteList = [{ remoteId: 'remote_1', name: 'origin', transport: 'https', display: 'https://git.example.org/team/project.git',
     credential: 'configured', allowed: true, fetchedAt: null, fetchOperationId: null,
     trackingRefs: [{ refId: 'ref_origin_main', name: 'refs/remotes/origin/main', objectId: other }] }];
@@ -310,3 +312,25 @@ it('explains and disables a commit or selection beyond the 200-file request boun
   expect(screen.getByText(/At most 200 files can be staged or unstaged in one action/)).toBeTruthy();
   expect(screen.getByRole('button', { name: 'Unstage selected' })).toHaveProperty('disabled', true);
 }, 20_000);
+
+it('offers cancellation while the first repository is being cloned', async () => {
+  listing = [];
+  transport.post.mockResolvedValueOnce({ data: { ...operation('running', 'git.clone').data, progress: { phase: 'Receiving objects', percent: 10 } } });
+  let cancelled = false;
+  operationOverride = () => cancelled ? { ...operation('cancelled', 'git.clone').data, message: 'The clone was cancelled.' }
+    : { ...operation('running', 'git.clone').data, progress: { phase: 'Receiving objects', percent: 20 } };
+  mount();
+  fireEvent.input(await screen.findByLabelText('Remote URL'), { target: { value: 'https://git.example.org/team/project.git' } });
+  fireEvent.click(screen.getByRole('button', { name: 'Clone repository' }));
+  transport.post.mockImplementationOnce(() => {
+    cancelled = true;
+    return Promise.resolve({ data: { ...operation('cancelling', 'git.clone').data } });
+  });
+  await waitFor(() => expect(transport.post).toHaveBeenCalledOnce());
+  expect(await screen.findByText(/Receiving objects 20%/)).toBeTruthy();
+  fireEvent.click(screen.getByRole('button', { name: 'Cancel transfer' }));
+  await waitFor(() => expect(transport.post).toHaveBeenCalledTimes(2));
+  expect(transport.post.mock.calls[1]?.slice(1, 4)).toEqual([`/jobs/${jobId}/repositories/${repositoryId}/operations/operation_1/cancel`,
+    'gitOperationCancelRequest', { action: 'git.cancel' }]);
+  expect(await screen.findByText(/Clone repository did not complete: The clone was cancelled/)).toBeTruthy();
+});

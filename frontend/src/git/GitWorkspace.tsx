@@ -195,9 +195,11 @@ export function GitWorkspace({ jobId, basePath, session, capabilities, pollInter
   /** Ask the server to stop a running transfer; the polling loop reports its final state. */
   async function cancelTransfer(operation: Operation) {
     const csrfToken = session.csrf();
-    if (!base || !csrfToken) { setStatus(copy.reconnect); return; }
+    // A clone has no loaded repository yet; its operation names the repository being created.
+    if (!csrfToken || !operation.repositoryId) { setStatus(copy.reconnect); return; }
     try {
-      const cancelled = (await client.post('operation', `${base}/operations/${operation.operationId}/cancel`, 'gitOperationCancelRequest',
+      const cancelled = (await client.post('operation', `/jobs/${jobId}/repositories/${operation.repositoryId}/operations/${operation.operationId}/cancel`,
+        'gitOperationCancelRequest',
         { action: 'git.cancel' }, { csrfToken, ifMatch: `"${operation.version}"`, idempotencyKey: crypto.randomUUID() })).data;
       setRunning(cancelled);
     } catch (failure: unknown) {
@@ -306,7 +308,9 @@ export function GitWorkspace({ jobId, basePath, session, capabilities, pollInter
         : <p><StateMark tone={remoting ? capabilityTone(remoting.state) : 'unknown'}>{gitRemotesCopy.unavailable}</StateMark> {remoting?.message ?? gitRemotesCopy.notReported}</p>}
       {running && running.action === 'git.clone' && <p role="status">{running.progress
         ? textMessage(gitRemotesCopy.progress, { phase: running.progress.phase, percent: running.progress.percent === null ? '' : ` ${running.progress.percent}%` })
-        : gitRemotesCopy.transferring}</p>}
+        : gitRemotesCopy.transferring}
+        {' '}{running.state === 'cancelling' ? gitRemotesCopy.cancelling
+          : <button type="button" onClick={() => { void cancelTransfer(running); }}>{gitRemotesCopy.cancel}</button>}</p>}
       <p>{gitRemotesCopy.cloneHelp}</p>
     </section>}
     {loaded && repository && statusData && <>

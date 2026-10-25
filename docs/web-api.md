@@ -960,8 +960,8 @@ output: `CERTIFICATE_INVALID`, `AUTHENTICATION_REQUIRED`, `HOST_KEY_UNVERIFIED`,
 
 | Action | Body fields | Effect |
 | --- | --- | --- |
-| `git.remote.add` | `name`, `url` | Registers a policy-checked remote (at most eight) in a server record; repository configuration is never written |
-| `git.remote.remove` | `remoteId` | Deletes the remote and its remote-tracking refs; local branches and commits are unchanged |
+| `git.remote.add` | `name`, `url` | Registers a policy-checked remote (at most eight) in a server record; repository configuration is never written. The name must form valid `refs/remotes/<name>/` refs. Each registration has its own `remoteId`, so a remote removed and re-created under the same name is a different remote that stale requests cannot reach |
+| `git.remote.remove` | `remoteId` | Deletes the remote and every one of its remote-tracking refs; local branches and commits are unchanged |
 | `git.fetch` | `remoteId` | Fetches branches into `refs/remotes/<name>/` only: no tags, no `FETCH_HEAD`, no submodules, no work tree, and nothing is merged or checked out |
 
 `POST J/repositories` with `git.clone` (`url`, `remoteName`, `branch`) fetches into a fresh managed
@@ -974,7 +974,7 @@ LFS stay inert, and objects are verified with `fsck`.
 Every transfer is bounded:
 
 - by elapsed time, at most ten minutes;
-- by repository bytes, which are checked while Git runs, so an overrun stops with `TRANSFER_LIMIT`;
+- by repository bytes, which are checked while Git runs and once more after it exits, so an overrun stops with `TRANSFER_LIMIT`. A fetch restores its remote-tracking refs, and a clone publishes nothing;
 - by output.
 
 The operation's `progress` reports Git's own phase and percent while it runs (#594).

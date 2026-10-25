@@ -253,8 +253,8 @@ class ManagedGitRepositories(
                     throw IllegalArgumentException("workspace requests use requestWorkspace")
                 is GitCloneRequest -> {
                     refusing { GitRemoteUrls.parse(request.url, remotePolicy) }
-                    if (!GitRemoteStore.NAME.matches(request.remoteName)) {
-                        throw ManagedGitException("VALIDATION_FAILED", "A remote name is 1 to 64 letters, digits, '.', '_' or '-'.")
+                    if (!GitRemoteStore.validName(request.remoteName)) {
+                        throw ManagedGitException("VALIDATION_FAILED", "A remote name is 1 to 64 letters, digits, '.', '_' or '-' that form valid Git ref names.")
                     }
                     request.branch?.let { branch ->
                         try { GitRefNames.requireBranchName(runner, branch) } catch (_: IllegalArgumentException) {
@@ -624,9 +624,11 @@ class ManagedGitRepositories(
         runner.run(GitInvocation("init", listOf("--quiet", "--bare", "--initial-branch=${policy.defaultBranch}",
             "--object-format=${policy.objectFormat.wireName}", gitDir.toString())))
         configureManaged(runner, gitDir)
+        val watch = GitDiskWatch(staging, remotePolicy.limits.maxRepositoryBytes) { false }
         val control = transferControl(operation.operationId, staging)
         val remoteHead = GitTransfers.remoteHead(runner, location, remotePolicy, control)
         GitTransfers.fetch(runner, gitDir, location, request.remoteName, remotePolicy, control, tags = true)
+        if (watch.exceeded()) throw GitOperationFailure("TRANSFER_LIMIT", "The clone exceeded the repository size bound. Nothing was published.")
         GitConfigurationAudit.requireManaged(runner, gitDir)
         GitRepositoryImport.verify(runner, gitDir)
         val format = GitRepositoryInspector.objectFormat(runner, gitDir)
@@ -645,7 +647,7 @@ class ManagedGitRepositories(
                 limits = GitExecutionLimits(java.time.Duration.ofMinutes(2), 1024 * 1024, 64 * 1024)))
         }
         val observation = GitRepositoryInspector.inspect(runner, gitDir, workTree)
-        val remote = GitRemoteRecord(GitRemoteStore.remoteId(operation.repositoryId, request.remoteName), operation.repositoryId,
+        val remote = GitRemoteRecord(GitRemoteStore.remoteId(operation.repositoryId, request.remoteName, operation.operationId), operation.repositoryId,
             request.remoteName, location, clock.instant(), operation.operationId)
         GitRemoteStore.write(staging, remote)
         writeFetchState(staging, remote.remoteId, operation.operationId)
@@ -719,7 +721,7 @@ class ManagedGitRepositories(
             GitOperationAction.REMOTE_ADD -> {
                 requireRepositoryGuard(located, observation, request.guards)
                 val name = request.text("name")
-                if (!GitRemoteStore.NAME.matches(name) || name == "HEAD") {
+                if (!GitRemoteStore.validName(name)) {
                     GitWorkspaceMutations.refuse("VALIDATION_FAILED", "A remote name is 1 to 64 letters, digits, '.', '_' or '-'.")
                 }
                 val existing = GitRemoteStore.list(directory, located.record.repositoryId)
@@ -743,7 +745,7 @@ class ManagedGitRepositories(
             GitOperationAction.REMOTE_ADD -> {
                 val location = GitRemoteUrls.parse(request.text("url"), remotePolicy)
                 val name = request.text("name")
-                val remote = GitRemoteRecord(GitRemoteStore.remoteId(operation.repositoryId, name), operation.repositoryId, name, location,
+                val remote = GitRemoteRecord(GitRemoteStore.remoteId(operation.repositoryId, name, operation.operationId), operation.repositoryId, name, location,
                     clock.instant(), operation.operationId)
                 GitRemoteStore.write(directory, remote)
                 GitRemoteStore.audit(directory, GitRemoteStore.auditEntry("remote.add", operation.operationId, "completed", remote, clock.instant()))
@@ -751,7 +753,7 @@ class ManagedGitRepositories(
             }
             GitOperationAction.REMOTE_REMOVE -> {
                 val remote = remoteFor(located, request.parameters["remoteId"])
-                GitTransfers.trackingRefs(runner, located.commonDir, located.record.objectFormat, remote.name).forEach { ref ->
+                GitTransfers.allTrackingRefs(runner, located.commonDir, located.record.objectFormat, remote.name).forEach { ref ->
                     GitRefOperations.deleteRef(runner, located.commonDir, ref.name, ref.objectId)
                 }
                 GitRemoteStore.delete(directory, remote.remoteId)
@@ -762,7 +764,7 @@ class ManagedGitRepositories(
             GitOperationAction.FETCH -> {
                 val remote = remoteFor(located, request.parameters["remoteId"])
                 val location = allowedLocation(remote)
-                val before = GitTransfers.trackingRefs(runner, located.commonDir, located.record.objectFormat, remote.name).associate { it.name to it.objectId }
+                val before = GitTransfers.allTrackingRefs(runner, located.commonDir, located.record.objectFormat, remote.name).associate { it.name to it.objectId }
                 try {
                     GitTransfers.fetch(runner, located.commonDir, location, remote.name, remotePolicy, transferControl(operation.operationId, located.commonDir))
                 } catch (failure: GitCommandException) {
@@ -771,7 +773,17 @@ class ManagedGitRepositories(
                     GitRemoteStore.audit(directory, GitRemoteStore.auditEntry("fetch", operation.operationId, code.lowercase(), remote, clock.instant()))
                     throw failure
                 }
-                val after = GitTransfers.trackingRefs(runner, located.commonDir, located.record.objectFormat, remote.name).associate { it.name to it.objectId }
+                var after = GitTransfers.allTrackingRefs(runner, located.commonDir, located.record.objectFormat, remote.name).associate { it.name to it.objectId }
+                // The bound is enforced once more after Git exits: an overrun in the last interval is not accepted.
+                if (GitDiskWatch(located.commonDir, remotePolicy.limits.maxRepositoryBytes) { false }.exceeded()) {
+                    for (name in before.keys + after.keys) {
+                        val old = before[name]
+                        if (old == after[name]) continue
+                        runner.run(GitInvocation("update-ref", if (old == null) listOf("-d", name) else listOf(name, old), gitDir = located.commonDir))
+                    }
+                    GitRemoteStore.audit(directory, GitRemoteStore.auditEntry("fetch", operation.operationId, "transfer_limit", remote, clock.instant()))
+                    throw GitOperationRefusal("TRANSFER_LIMIT", "The fetch exceeded the repository size bound; its remote-tracking refs were restored and nothing was accepted.")
+                }
                 writeFetchState(directory, remote.remoteId, operation.operationId)
                 val changed = (before.keys + after.keys).count { before[it] != after[it] }
                 GitRemoteStore.audit(directory, GitRemoteStore.auditEntry("fetch", operation.operationId, "completed", remote, clock.instant(),
