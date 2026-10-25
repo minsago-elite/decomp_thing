@@ -305,7 +305,7 @@ internal class WebApiController(
                 }
             }
         } catch (failure: WebAccessDenied) {
-            access.sendDenied(exchange, failure)
+            access.sendDenied(exchange, withResourceMethods(failure, resource))
         } catch (_: decompengine.jobs.UploadIdempotencyConflict) {
             access.sendDenied(exchange, WebAccessDenied(409, "IDEMPOTENCY_CONFLICT", "The upload key was already used for different content or filename."))
         } catch (_: decompengine.jobs.UploadReceiptUnavailable) {
@@ -332,6 +332,21 @@ internal class WebApiController(
             else access.sendDenied(exchange, WebAccessDenied(500, "INTERNAL_ERROR", "The request could not be completed."))
         }
         return true
+    }
+
+    /**
+     * A handler authorizes only the method it serves, so its 405 names one method. Allow must list every
+     * method of the resource; a workflow start that is unavailable is not added.
+     */
+    private fun withResourceMethods(failure: WebAccessDenied, resource: String): WebAccessDenied {
+        if (failure.status != 405) return failure
+        val methods = when {
+            resource == "jobs" || resource == "agent/preflight" -> setOf("GET", "POST")
+            resource.matches(Regex("jobs/[^/]+/runs/[^/]+/progress-pin")) -> setOf("GET", "PUT")
+            else -> return failure
+        }
+        return WebAccessDenied(405, failure.code, failure.message ?: "The endpoint does not support this method.",
+            failure.allowedMethods + methods)
     }
 
     private fun bootstrap(credentials: WebSessionCredentials): JsonObject = buildJsonObject {
