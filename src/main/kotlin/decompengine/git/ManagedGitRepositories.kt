@@ -348,12 +348,12 @@ class ManagedGitRepositories(
         }
     }
 
-    fun refs(jobId: String, repositoryId: String, skip: Int, limit: Int): Pair<GitRepositoryRecord, Pair<List<GitRefEntry>, Boolean>> {
+    fun refs(jobId: String, repositoryId: String, skip: Int, limit: Int): Pair<GitRepositoryRecord, GitRefsPage> {
         val runner = requireRunner()
         val located = locate(jobId, repositoryId)
         return reading {
             GitConfigurationAudit.requireManaged(runner, located.gitDir)
-            located.record to GitReads.refs(runner, located.gitDir, located.record.objectFormat, skip, limit)
+            located.record to GitReads.refsPage(runner, located.gitDir, located.record.objectFormat, skip, limit)
         }
     }
 
