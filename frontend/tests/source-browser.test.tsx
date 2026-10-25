@@ -126,7 +126,9 @@ it.each([
     expect(route).toContain(`metadataVersion=${file.metadataVersion}`);
     expect(Number(new URLSearchParams(route.split('?')[1]).get('maxBytes'))).toBeLessThanOrEqual(65536);
     const line = screen.getByRole('link', { name: 'Open revision line 1 at byte 0' });
-    expect(line.getAttribute('href')).toBe(`${revision}/source-files/${file.item.fileId}?byte=0&line=1`);
+    // Line links pin the observed source and metadata commitments as well as the exact revision.
+    const pinned = `?sourceSha256=${file.sourceSha256}&metadataVersion=${file.metadataVersion}&byte=0&line=1`;
+    expect(line.getAttribute('href')).toBe(`${revision}/source-files/${file.item.fileId}${pinned}`);
     const colors = screen.getByRole('button', { name: sourceCopy.highlightRows });
     expect(colors.hasAttribute('disabled')).toBe(language === 'plain');
     if (language === 'plain') expect(screen.getByText(sourceCopy.highlightUnsupported)).toBeTruthy();
@@ -134,7 +136,7 @@ it.each([
       .toBe(`/nested/api/v1/jobs/${selected.jobId}/runs/run_1/revisions/revision_1/source-files/${file.item.fileId}/content?metadataVersion=${file.metadataVersion}`);
     // Keyboard activation of a line link is an ordinary navigation that keeps the exact revision and returns focus to the preview.
     fireEvent.click(line);
-    await waitFor(() => { expect(location.search).toBe('?byte=0&line=1'); });
+    await waitFor(() => { expect(location.search).toBe(pinned); });
     await waitFor(() => { expect(document.activeElement).toBe(screen.getByRole('heading', { name: sourceCopy.previewTitle })); });
     expect(location.pathname).toBe(`${revision}/source-files/${file.item.fileId}`);
   } finally { auth.dispose(); }
