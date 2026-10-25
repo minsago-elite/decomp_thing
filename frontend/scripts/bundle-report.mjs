@@ -127,6 +127,16 @@ export function bundleBudgets(manifest, files, html) {
   return { initial, total, entryJs, entryCss, chunks };
 }
 
+/** Graph and source feature modules may load only after their view opens, never with the initial shell. */
+export function assertLazyFeatures(composition, entryJs) {
+  const initial = new Set(entryJs);
+  for (const module of composition) {
+    assert.ok(module.lazyFeature === undefined || ['graph', 'sources'].includes(module.lazyFeature), 'Unknown lazy feature');
+    assert.ok(module.lazyFeature === undefined || !initial.has(module.chunk),
+      `Initial chunk includes a lazily loaded ${module.lazyFeature} module: ${module.chunk}`);
+  }
+}
+
 /** Import-safe producer so fixtures exercise the actual byte/gzip/manifest path. */
 export async function buildBundleReport(output = new URL('../../build/frontend/', import.meta.url)) {
   const dist = new URL('dist/', output);
@@ -161,6 +171,7 @@ export async function buildBundleReport(output = new URL('../../build/frontend/'
   assert.ok(typeof html === 'string', 'Missing index.html');
   files.sort((left, right) => left.file.localeCompare(right.file));
   const budgets = bundleBudgets(manifest, files, html);
+  assertLazyFeatures(composition, budgets.entryJs);
   const owners = {};
   for (const module of composition) {
     assert.ok(['application', 'preact', 'preact-iso'].includes(module.owner), `Unreviewed production dependency: ${module.owner}`);

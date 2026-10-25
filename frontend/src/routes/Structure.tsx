@@ -1,11 +1,13 @@
 import { useEffect, useRef, useState } from 'preact/hooks';
-import type { ComponentChildren } from 'preact';
 import { useLocation } from 'preact-iso/router';
+import lazy from 'preact-iso/lazy';
 import { structureCopy as copy } from '../copy/structure';
 import { ApiClientError } from '../api/errors';
 import { message } from '../shared/messages';
 import type { EntityDetail, FunctionInventory, ModuleDetail, ModuleInventory, StructureEntity, StructureReference,
   StructureReferences, StructureText, StructureUnrecordedEntity } from '../api/generated';
+import { structureView } from '../copy/structureTitles';
+import type { StructureView } from '../copy/structureTitles';
 import { appPath, runPath, sourceFilePath } from '../app/paths';
 import type { SourceSelection } from '../app/paths';
 import { structureItemPath, structureListPath } from '../structure/paths';
@@ -13,73 +15,17 @@ import type { StructureItem } from '../structure/paths';
 import { usePrivateTransport } from '../session/PrivateTransport';
 import { useSession } from '../session/useSession';
 import type { BrowserSession } from '../session/session';
-import { beginSourceRead, currentSourceRead } from '../sources/navigation';
-import type { SourceReadState } from '../sources/navigation';
 import { DEFAULT_FUNCTION_QUERY, EVIDENCE_CLASSES, EXTRACTION_LABELS, MODULE_PAGE_LIMIT, OWNED_KINDS, OWNED_PAGE_LIMIT,
   OWNERSHIP_STATES, bindStructure, withField, functionLocation, functionReadRoute, functionSearch, listLocation,
-  structureReadMessage, structureReadRoute } from '../structure/navigation';
+  structureReadRoute } from '../structure/navigation';
 import type { FunctionQuery } from '../structure/navigation';
+import { Frame, useStructureRead } from '../structure/Frame';
+import { graphLocation, graphPath } from '../graph/query';
 
-export type StructureView = 'functions' | 'modules' | 'module' | 'function' | 'global' | 'type';
-type Header = FunctionInventory | ModuleInventory | ModuleDetail | EntityDetail;
+// Relationship drawing and scorecards load only when opened, after the structure route itself.
+const Graph = lazy(() => import('../graph/GraphRoute'));
+const Scorecard = lazy(() => import('../structure/Scorecard'));
 const ITEM: Record<'function' | 'global' | 'type', StructureItem> = { function: 'functions', global: 'globals', type: 'types' };
-
-/** One latest-only read keyed by the complete URL selection. */
-function useStructureRead<T>(key: string, read: (signal: AbortSignal) => Promise<T>): [SourceReadState<T>, () => void] {
-  const [refresh, setRefresh] = useState(0);
-  const fullKey = `${key}/${refresh}`;
-  const [state, setState] = useState<SourceReadState<T>>({ key: fullKey, state: 'loading' });
-  useEffect(() => beginSourceRead(fullKey, read, setState), [fullKey]);
-  return [currentSourceRead(state, fullKey), () => setRefresh(value => value + 1)];
-}
-
-function Context({ selected, data }: { selected: SourceSelection; data: Header | null }) {
-  const record = (value: Header['model']) => value.path && value.sha256
-    ? message(copy.recordDigest, { path: <bdi>{value.path}</bdi>, sha256: <code>{value.sha256}</code>, schema: value.schemaVersion ?? copy.notRecorded })
-    : message(copy.recordState, { state: value.state, reason: value.stateReason ?? copy.notRecorded });
-  return <dl class="job-facts" aria-label={copy.context}>
-    <dt>{copy.job}</dt><dd><code>{selected.jobId}</code></dd>
-    <dt>{copy.attempt}</dt><dd><code>{selected.runId}</code></dd>
-    <dt>{copy.revision}</dt><dd><code>{selected.revisionId}</code></dd>
-    {data && <>
-      <dt>{copy.sourceDigest}</dt><dd><code>{data.sourceSha256}</code></dd>
-      <dt>{copy.structureVersion}</dt><dd><code>{data.structureVersion}</code></dd>
-      <dt>{copy.modelRecord}</dt><dd>{record(data.model)}</dd>
-      <dt>{copy.planRecord}</dt><dd>{record(data.plan)}</dd>
-    </>}
-  </dl>;
-}
-
-/** Model and plan states are always stated; an unavailable record is never presented as an empty result. */
-function States({ data }: { data: Header }) {
-  return <>
-    <p role={data.state === 'available' ? undefined : 'alert'}>{copy.states[data.state]}
-      {data.stateReason && <> {message(copy.reason, { code: <code>{data.stateReason}</code> })}</>}</p>
-    {data.state === 'available' && <p>{copy.planStates[data.plan.state]}
-      {data.plan.stateReason && <> {message(copy.reason, { code: <code>{data.plan.stateReason}</code> })}</>}</p>}
-    <p>{copy.assessment[data.recoveryAssessment]}</p>
-    <details>
-      <summary>{copy.capabilitiesTitle}</summary>
-      <ul>{data.capabilities.map(item => <li key={item.id}>{copy.capabilityNames[item.id]}: {copy.capabilityStates[item.state]}
-        {item.reason && <> ({message(copy.reason, { code: <code>{item.reason}</code> })})</>}</li>)}</ul>
-    </details>
-  </>;
-}
-
-function Frame({ selected, data, read, onRefresh, pinned, children }: {
-  selected: SourceSelection; data: Header | null; read: SourceReadState<unknown>; onRefresh: () => void; pinned?: boolean; children?: ComponentChildren;
-}) {
-  return <>
-    <Context selected={selected} data={data} />
-    <p>{copy.boundary}</p>
-    {pinned && <p>{copy.pinnedNotice}</p>}
-    <button type="button" disabled={read.state === 'loading'} onClick={onRefresh}>{copy.refresh}</button>
-    {read.state === 'loading' && <p role="status">{copy.loading}</p>}
-    {read.state === 'failed' && <p role="alert">{structureReadMessage(read.failure)}</p>}
-    {data && <States data={data} />}
-    {data && children}
-  </>;
-}
 
 function EntityName({ basePath, selected, entity, version }: {
   basePath: string; selected: SourceSelection; entity: { kind: 'function' | 'global' | 'type'; selector: string | null; name: string | null; entityId: string };
@@ -310,7 +256,8 @@ function Module({ selected, basePath, selector, search }: { selected: SourceSele
           <li key={index}><code>{item.text}</code></li>)}</ul>
           {module.boundaryEvidence.total > module.boundaryEvidence.items.length && message(copy.boundedList, { shown: module.boundaryEvidence.items.length, total: module.boundaryEvidence.total })}</dd></>}
       </dl>
-      {module.selector && <p><a href={structureListPath(basePath, selected, 'functions', functionSearch({ ...DEFAULT_FUNCTION_QUERY, module: module.selector }))}>{copy.showInInventory}</a></p>}
+      {module.selector && <p><a href={structureListPath(basePath, selected, 'functions', functionSearch({ ...DEFAULT_FUNCTION_QUERY, module: module.selector }))}>{copy.showInInventory}</a>
+        {' '}<a href={graphPath(basePath, selected, { view: 'modules', focus: module.selector }, data.structureVersion)}>{copy.exploreModules}</a></p>}
       <nav class="job-actions" aria-label={copy.ownedTitle}>
         {OWNED_KINDS.map(value => <a key={value} href={`${base}?${new URLSearchParams({ ...(version ? { structureVersion: version } : {}), kind: value })}`}
           aria-current={value === kind ? 'page' : undefined}>{copy.ownedKinds[value]}</a>)}
@@ -375,6 +322,8 @@ function Entity({ selected, basePath, kind, selector, search }: {
     <p><a href={structureListPath(basePath, selected, 'functions')}>{copy.returnFunctions}</a></p>
     {entity && data && <>
       <h2><bdi>{entity.name ?? entity.entityId}</bdi></h2>
+      {entity.kind === 'function' && entity.selector && <p>
+        <a href={graphPath(basePath, selected, { view: 'calls', focus: entity.selector }, data.structureVersion)}>{copy.exploreCalls}</a></p>}
       <dl class="job-facts" aria-label={copy.entityFacts}>
         <dt>{copy.kind}</dt><dd>{entity.kind}</dd>
         <dt>{copy.identity}</dt><dd><code>{entity.entityId}</code></dd>
@@ -419,35 +368,41 @@ function Entity({ selected, basePath, kind, selector, search }: {
 const TITLES: Record<StructureView, string> = {
   functions: copy.functionsTitle, modules: copy.modulesTitle, module: copy.moduleTitle,
   function: copy.entityTitles.function, global: copy.entityTitles.global, type: copy.entityTitles.type,
+  graph: copy.graphTitle, scorecard: copy.scorecardTitle,
 };
 
 export function structureTitle(view: StructureView): string { return TITLES[view]; }
 
-export default function Structure({ jobId, runId, revisionId, selector, view, basePath, session }: {
-  jobId: string; runId: string; revisionId: string; selector?: string; view: StructureView; basePath: string; session: BrowserSession | null;
+export default function Structure({ jobId, runId, revisionId, section, selector, basePath, session }: {
+  jobId: string; runId: string; revisionId: string; section: string; selector?: string; basePath: string; session: BrowserSession | null;
 }) {
   const state = useSession(session);
   const location = useLocation();
   const selected = { jobId, runId, revisionId };
   const search = new URL(location.url, 'https://structure.invalid').search;
-  let valid = /^[0-9a-f]{32}$/.test(jobId) && [runId, revisionId, ...(selector === undefined ? [] : [selector])]
+  const view = structureView(section, selector !== undefined);
+  let valid = view !== null && /^[0-9a-f]{32}$/.test(jobId) && [runId, revisionId, ...(selector === undefined ? [] : [selector])]
     .every(value => /^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/.test(value));
   try {
     if (view === 'functions') functionLocation(search);
-    else listLocation(search, view === 'module' ? ['kind'] : []);
-    if (view !== 'functions' && view !== 'modules' && view !== 'module' && search.includes('cursor=')) valid = false;
+    else if (view === 'graph') graphLocation(search);
+    else if (view !== 'scorecard') listLocation(search, view === 'module' ? ['kind'] : []);
+    if (view !== 'functions' && view !== 'modules' && view !== 'module' && view !== 'graph' && view !== 'scorecard'
+      && search.includes('cursor=')) valid = false;
   } catch { valid = false; }
   const generation = state?.status === 'authenticated' ? state.generation : 0;
-  const keyed = `${generation}/${jobId}/${runId}/${revisionId}/${view}/${selector ?? ''}`;
+  const keyed = `${generation}/${jobId}/${runId}/${revisionId}/${view ?? ''}/${selector ?? ''}`;
   return <section class="source-navigation structure-view" aria-labelledby="structure-title">
-    <h1 id="structure-title">{TITLES[view]}</h1>
-    {valid ? <>
+    <h1 id="structure-title">{view ? TITLES[view] : copy.invalidTitle}</h1>
+    {valid && view ? <>
       <p><a href={runPath(basePath, jobId, runId)}>{copy.returnAttempt}</a></p>
       {session && state?.status === 'authenticated'
         ? view === 'functions' ? <Functions key={keyed} selected={selected} basePath={basePath} search={search} />
           : view === 'modules' ? <Modules key={keyed} selected={selected} basePath={basePath} search={search} />
             : view === 'module' ? <Module key={keyed} selected={selected} basePath={basePath} selector={selector ?? ''} search={search} />
-              : <Entity key={keyed} selected={selected} basePath={basePath} kind={view} selector={selector ?? ''} search={search} />
+              : view === 'graph' ? <Graph key={keyed} selected={selected} basePath={basePath} search={search} />
+                : view === 'scorecard' ? <Scorecard key={keyed} selected={selected} basePath={basePath} search={search} />
+                  : <Entity key={keyed} selected={selected} basePath={basePath} kind={view} selector={selector ?? ''} search={search} />
         : <p>{copy.connect}</p>}
     </> : <><p role="alert">{copy.invalid}</p><a href={appPath(basePath, '/')}>{copy.returnJobs}</a></>}
   </section>;

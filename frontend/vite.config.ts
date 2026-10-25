@@ -7,7 +7,12 @@ import type { Plugin, UserConfig } from 'vite';
 const outputRoot = fileURLToPath(new URL('../build/frontend/', import.meta.url));
 const displayBootstrapSource = fileURLToPath(new URL('./src/app/display-preferences-bootstrap.js', import.meta.url));
 const displayBootstrapName = 'display-preferences-bootstrap';
-interface ModuleOwner { chunk: string; owner: string }
+interface ModuleOwner { chunk: string; owner: string; lazyFeature?: string }
+
+/** Feature modules that must load only when opened (docs/web-architecture.md); the bundle report keeps them out of the shell. */
+function lazyFeature(id: string): string | undefined {
+  return id.replaceAll('\\', '/').match(/\/frontend\/src\/(graph|sources)\//)?.[1];
+}
 
 function productionModuleOwner(id: string, renderedLength: number): string {
   const normalized = id.replaceAll('\\', '/');
@@ -70,14 +75,16 @@ function bundleComposition(workerModules: ModuleOwner[]): Plugin {
       const modules = Object.values(bundle)
         .filter((entry) => entry.type === 'chunk')
         .flatMap((entry) => Object.entries(entry.modules).map(([id, module]) => {
+          const feature = lazyFeature(id);
           return {
             chunk: entry.fileName,
             owner: productionModuleOwner(id, module.renderedLength),
             renderedBytes: module.renderedLength,
+            ...(feature ? { lazyFeature: feature } : {}),
           };
         }))
         .filter((entry) => entry.renderedBytes > 0)
-        .map(({ chunk, owner }) => ({ chunk, owner }))
+        .map(({ chunk, owner, lazyFeature: feature }) => ({ chunk, owner, ...(feature ? { lazyFeature: feature } : {}) }))
         .concat(workerModules)
         .sort((left, right) => `${left.chunk}/${left.owner}`.localeCompare(`${right.chunk}/${right.owner}`));
       await mkdir(outputRoot, { recursive: true });

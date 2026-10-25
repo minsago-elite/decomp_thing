@@ -5,7 +5,7 @@ import { join } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { gzipSync } from 'node:zlib';
 import { createHash } from 'node:crypto';
-import { bundleBudgets, buildBundleReport } from '../frontend/scripts/bundle-report.mjs';
+import { assertLazyFeatures, bundleBudgets, buildBundleReport } from '../frontend/scripts/bundle-report.mjs';
 import test from 'node:test';
 
 const script = fileURLToPath(new URL('./web-asset-manifest.mjs', import.meta.url));
@@ -98,6 +98,15 @@ function budgetFixture(htmlBytes = 1, jsBytes = 1, cssBytes = 1, otherBytes = 1)
       measured('.vite/manifest.json'), measured('assets/lazy.js', otherBytes)],
   };
 }
+
+test('graph and source feature modules are refused in the initial chunk but admitted in lazy chunks', () => {
+  const lazy = [{ chunk: 'assets/lazy.js', owner: 'application', lazyFeature: 'graph' }, { chunk: 'assets/entry.js', owner: 'application' }];
+  assert.doesNotThrow(() => assertLazyFeatures(lazy, ['assets/entry.js']));
+  for (const lazyFeature of ['graph', 'sources']) {
+    assert.throws(() => assertLazyFeatures([{ chunk: 'assets/entry.js', owner: 'application', lazyFeature }], ['assets/entry.js']),
+      /Initial chunk includes a lazily loaded/);
+  }
+});
 
 test('combined and conservative all-dist budgets accept their exact inclusive boundaries', () => {
   const fixture = budgetFixture(150 * 1024 - 2, 1, 1, 350 * 1024 - 1);

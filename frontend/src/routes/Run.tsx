@@ -9,7 +9,7 @@ import type { Run as RunData } from '../api/generated';
 import { withApiFailureReference } from '../api/client';
 import { jobPath, runPath, runViewPath, sourceDirectoryPath, type RunView } from '../app/paths';
 import { structureListPath } from '../structure/paths';
-import { structureTitles as structureCopy } from '../copy/structureTitles';
+import { structureLinks as structureCopy } from '../copy/structureLinks';
 import type { BrowserSession } from '../session/session';
 import { Activity } from '../jobs/Activity';
 import { ProgressPin } from '../jobs/ProgressPin';
@@ -107,6 +107,7 @@ function Details({ jobId, runId, basePath, session, view, navigation }: {
         <li><a href={sourceDirectoryPath(basePath, { jobId, runId, revisionId: run.resultRevisionId })}>{sourceCopy.browse}</a></li>
         <li><a href={structureListPath(basePath, { jobId, runId, revisionId: run.resultRevisionId }, 'functions')}>{structureCopy.browseFunctions}</a></li>
         <li><a href={structureListPath(basePath, { jobId, runId, revisionId: run.resultRevisionId }, 'modules')}>{structureCopy.browseModules}</a></li>
+        <li><a href={structureListPath(basePath, { jobId, runId, revisionId: run.resultRevisionId }, 'scorecard')}>{structureCopy.scorecard}</a></li>
       </ul> : <p>{sourceCopy.noRevision}</p>}
     </>}
   </>;
