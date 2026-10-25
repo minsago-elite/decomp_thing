@@ -121,7 +121,8 @@ class ReferenceCorpusOperationJournalTest {
         isRegularFile = false, isDirectory = true, isSymbolicLink = false)
 
     private fun withRoot(action: (Path) -> Unit) {
-        val parent = Files.createTempDirectory("reference-journal-").toAbsolutePath().normalize()
+        val testRoot = Files.createDirectories(Path.of("build/reference-journal-tests").toAbsolutePath().normalize())
+        val parent = Files.createTempDirectory(testRoot, "journal-")
         Files.setPosixFilePermissions(parent, PosixFilePermissions.fromString("rwx------"))
         val root = Files.createDirectory(parent.resolve("journal"))
         Files.setPosixFilePermissions(root, PosixFilePermissions.fromString("rwx------"))
