@@ -458,13 +458,33 @@ class WebJobService(
     @Synchronized
     fun inspect(jobId: String): WebJobInspection = inspectJob(jobId)
 
-    private fun inspectJob(jobId: String, read: ((String, Int) -> ByteArray)? = null): WebJobInspection {
+    private fun inspectJob(jobId: String): WebJobInspection {
         requireInitializedRead()
-        publicationFailures[jobId]?.let { return WebJobInspection.Unavailable(it) }
-        if (!jobId.matches(Regex("[0-9a-f]{32}")) || attempts == null) return WebJobInspection.Unavailable(
+        return inspectRecord(jobId, publicationFailures[jobId], attempts, { active[jobId] is LegacyTask }, null)
+    }
+
+    /**
+     * One listing row (#162). Only monitor-guarded service state is captured under the service
+     * monitor; the bounded metadata reads then run under the stores' own per-job locks, so a slow
+     * or stalled record read cannot hold unrelated status reads, uploads or commands behind it.
+     */
+    private fun inspectListedJob(jobId: String, read: (String, Int) -> ByteArray): WebJobInspection {
+        val (failure, owner, legacyActive) = synchronized(this) {
+            requireInitializedRead()
+            Triple(publicationFailures[jobId], attempts, active[jobId] is LegacyTask)
+        }
+        val inspection = inspectRecord(jobId, failure, owner, { legacyActive }, read)
+        synchronized(this) { requireInitializedRead() } // A row read across shutdown is never published.
+        return inspection
+    }
+
+    private fun inspectRecord(jobId: String, failure: WebJobDiagnostic?, owner: WorkflowAttemptStore?,
+        legacyActive: () -> Boolean, read: ((String, Int) -> ByteArray)?): WebJobInspection {
+        failure?.let { return WebJobInspection.Unavailable(it) }
+        if (!jobId.matches(Regex("[0-9a-f]{32}")) || owner == null) return WebJobInspection.Unavailable(
             WebJobDiagnostic(jobId, "JOB_NOT_FOUND", "The requested job is unavailable."))
         return try {
-            val inspected = if (read == null) attempts?.inspect(jobId) else attempts?.inspectForListing(jobId, read)
+            val inspected = if (read == null) owner.inspect(jobId) else owner.inspectForListing(jobId, read)
             if (inspected is WorkflowJobInspection.Unavailable) return WebJobInspection.Unavailable(
                 publicWebDiagnostic(jobId, inspected.diagnostic.code))
             val snapshot = (inspected as? WorkflowJobInspection.Available)?.snapshot
@@ -475,7 +495,7 @@ class WebJobService(
             }
             val latest = snapshot?.latestRun
             val legacyInterrupted = latest == null && snapshot?.legacy?.recoveredInterrupted == true &&
-                raw.status in setOf("queued", "analyzing") && active[jobId] !is LegacyTask
+                raw.status in setOf("queued", "analyzing") && !legacyActive()
             val job = when {
                 latest != null -> raw.copy(status = legacyStatus(latest.state),
                     updatedAt = (latest.endedAt ?: latest.startedAt ?: latest.createdAt).toString(),
@@ -500,14 +520,20 @@ class WebJobService(
         { relative, maximum ->
             val perFile = if (relative.endsWith("/job.json")) minOf(maximum, 256 * 1024) else maximum
             readWebJobCollectionMetadata(budget, perFile, progress) { allowance, check ->
+                listingReadObserver(relative)
                 decompengine.repair.readStableRegularFile(store.storageRoot, relative, allowance, cancellationCheck = check).bytes
             }
         }
 
-    /** Complete bounded HTML collection. Reads never acquire ownership or retain workflow histories. */
-    @Synchronized
+    /** Test seam: runs inside each physical listing read, where no service monitor may be held. */
+    @Volatile internal var listingReadObserver: (String) -> Unit = {}
+
+    /**
+     * Complete bounded HTML collection. Reads never acquire ownership or retain workflow histories.
+     * Enumeration and each record take only short service-monitor sections (#162).
+     */
     internal fun dashboardRows(): WebDashboardRows {
-        requireInitializedRead()
+        synchronized(this) { requireInitializedRead() }
         val budget = WebDashboardReadBudget(cancellation = { stopping })
         val read = listingReader(budget)
         try {
@@ -518,7 +544,7 @@ class WebJobService(
             }
             check(Files.isDirectory(store.storageRoot, NOFOLLOW_LINKS)) { "Dashboard storage root is unavailable" }
             val rows = Files.newDirectoryStream(store.storageRoot).use { entries ->
-                collectWebDashboardRows(entries.asSequence().map { it.fileName.toString() }, budget) { id -> inspectJob(id, read) }
+                collectWebDashboardRows(entries.asSequence().map { it.fileName.toString() }, budget) { id -> inspectListedJob(id, read) }
             }
             budget.checkpoint()
             return rows
@@ -537,7 +563,7 @@ class WebJobService(
         )
     }
 
-    /** Short per-record locks allow status reads between bounded snapshot collection steps. */
+    /** Status reads interleave with collection; record metadata reads hold no service monitor. */
     internal fun collectionRecords(): Sequence<kotlinx.serialization.json.JsonObject> = collectionRecordsWithProgress {}
 
     internal fun collectionRecordsWithProgress(progress: () -> Unit): Sequence<kotlinx.serialization.json.JsonObject> {
@@ -563,14 +589,11 @@ class WebJobService(
         return sequence {
             for (id in ids) {
                 checkpoint()
-                val record = synchronized(this@WebJobService) {
-                    requireInitializedRead()
-                    val inspection = inspectJob(id, read)
-                    checkpoint()
-                    when (inspection) {
-                        is WebJobInspection.Available -> webJob(inspection.presentation)
-                        is WebJobInspection.Unavailable -> throw WebJobServiceException(inspection.diagnostic.code, inspection.diagnostic.message)
-                    }
+                val inspection = inspectListedJob(id, read)
+                checkpoint()
+                val record = when (inspection) {
+                    is WebJobInspection.Available -> webJob(inspection.presentation)
+                    is WebJobInspection.Unavailable -> throw WebJobServiceException(inspection.diagnostic.code, inspection.diagnostic.message)
                 }
                 checkpoint()
                 yield(record)

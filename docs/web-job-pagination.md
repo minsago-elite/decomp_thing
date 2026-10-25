@@ -50,8 +50,17 @@ at most one physical overflow byte before refusal.
 The same five-second deadline reaches root enumeration and bounded metadata-read
 units. It is checked after collection, including empty or fully filtered results,
 after sorting, and before snapshot publication. These cooperative checks cannot
-preempt blocked kernel I/O. Per-record service locks still cover each inspection;
-full upload/listing responsiveness under blocked I/O is not established here.
+preempt blocked kernel I/O. They do not hold the service monitor across it either:
+the v1 collection and the legacy HTML dashboard capture the monitor-guarded service
+state for one record (publication failure, store owner, legacy task) in a short
+section, then read that record's metadata under the attempt store's per-job stripe
+lock only; the job store's listing read takes no store monitor, and its descriptor
+checks refuse a record replaced during the read. A stalled or slow record read therefore
+blocks other reads of that same record, not unrelated job status reads, scheduler
+status, uploads or workflow commands. Each row is rechecked against service shutdown
+before it is published. `WebJobServiceTest` parks both listings inside the first
+(workflow) and last (legacy presentation) physical read of one record and requires another job's status read, a scheduler read and an upload
+to complete while the listing remains in progress (#162).
 Each snapshot retains at most 16 MiB of
 serialized row data, with at most 4 KiB per row so a 200-row response fits the
 1 MiB transport ceiling; the cache retains at most eight snapshots and 32 MiB of row
@@ -66,6 +75,7 @@ and 64 MiB encoded recovery-plan limits. The legacy startup profile remains 4096
 root entries. This preserves libraries seeded before SPA startup as well as those
 uploaded after initialization; the profile is retained for lazy storage creation.
 
-This is the collection portion of #162. Streaming upload, upload/storage quotas,
-a persistent query index beyond the bounded scan profile, and full dashboard
-integration remain separate unfinished work within the original D-series scope.
+Streaming upload admission and the retained-storage quota are described in the
+upload documents; uploads refuse before consuming a body when the quota cannot hold
+a reservation, while listings stay readable. A persistent query index beyond the
+bounded scan profile is not provided.

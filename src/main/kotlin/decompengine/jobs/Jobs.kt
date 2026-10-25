@@ -154,8 +154,11 @@ class JobStore internal constructor(
         return decodeJobRecord(jobId, payload)
     }
 
-    /** Display-only collection read; the caller supplies one namespace-bound accounting reader. */
-    @Synchronized
+    /**
+     * Display-only collection read; the caller supplies one namespace-bound accounting reader.
+     * It takes no store monitor: the descriptor-stable reader refuses a replaced record, and a
+     * stalled listing read must not block other jobs' status reads or updates (#162).
+     */
     internal fun getForListing(jobId: String, read: (String, Int) -> ByteArray): Job {
         jobDirectory(jobId)
         return decodeJobRecord(jobId, OracleJson.parse(read("$jobId/job.json", MAX_METADATA_BYTES)).jsonObject)

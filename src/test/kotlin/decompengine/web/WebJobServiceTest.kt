@@ -659,6 +659,61 @@ class WebJobServiceTest {
         }
     }
 
+    @Test fun `stalled dashboard and API record reads leave unrelated status reads and uploads responsive`() = withStore { store, _ ->
+        // Distinct attempt-store stripes: only the stalled record's own lock may be held.
+        fun stripe(id: String) = (id.hashCode() and Int.MAX_VALUE) % 64
+        val stalled = store.createFromUpload("stalled.elf", elfFixture())
+        var other = store.createFromUpload("other.elf", elfFixture())
+        while (stripe(other.id) == stripe(stalled.id)) other = store.createFromUpload("other.elf", elfFixture())
+        WebJobService(store, JobAnalyzer { _, _ -> error("Unexpected execution") }, inertReconstructor).use { service ->
+            service.initializeExistingStorage()
+            val listings = listOf<(WebJobService) -> List<String>>(
+                { value -> value.dashboardRows().jobs.map { it.id } },
+                { value -> value.collectionRecords().map { (it.getValue("jobId") as kotlinx.serialization.json.JsonPrimitive).content }.toList() },
+            )
+            // Count the stalled record's physical reads: workflow inspection, then legacy presentation.
+            val recordReads = mutableListOf<String>()
+            service.listingReadObserver = { relative -> if (relative.startsWith("${stalled.id}/")) recordReads += relative }
+            service.dashboardRows()
+            assertTrue(recordReads.size >= 2, "Expected separate workflow and presentation reads: $recordReads")
+            val scenarios = listings.flatMap { listing -> listOf(1, recordReads.size).map { listing to it } }
+            for ((listing, stalledRead) in scenarios) {
+                val expected = store.jobIds().sorted()
+                val entered = CountDownLatch(1)
+                val release = CountDownLatch(1)
+                val reads = AtomicInteger()
+                service.listingReadObserver = { relative ->
+                    if (relative.startsWith("${stalled.id}/") && reads.incrementAndGet() == stalledRead) {
+                        entered.countDown()
+                        check(release.await(20, TimeUnit.SECONDS))
+                    }
+                }
+                val callers = Executors.newFixedThreadPool(2)
+                try {
+                    val pending = callers.submit<List<String>> { listing(service) }
+                    assertTrue(entered.await(5, TimeUnit.SECONDS), "The listing did not reach its stalled record read")
+                    // The listing is parked inside a physical record read; unrelated work must not wait for it.
+                    val status = callers.submit<Pair<String, String>> {
+                        service.get(other.id).id to (service.inspect(other.id) as WebJobInspection.Available).presentation.job.id
+                    }.get(5, TimeUnit.SECONDS)
+                    assertEquals(other.id to other.id, status)
+                    callers.submit<WebSchedulerSnapshot> { service.schedulerSnapshot() }.get(5, TimeUnit.SECONDS)
+                    val uploaded = callers.submit<String> { service.upload("concurrent.elf", elfFixture()).id }.get(5, TimeUnit.SECONDS)
+                    assertEquals(uploaded, service.get(uploaded).id)
+                    assertFalse(pending.isDone, "The stalled listing must still be in progress")
+                    release.countDown()
+                    // The listing enumerated its library before the upload; it neither fails nor invents rows.
+                    assertEquals(expected, pending.get(5, TimeUnit.SECONDS).sorted())
+                } finally {
+                    release.countDown()
+                    service.listingReadObserver = {}
+                    callers.shutdownNow()
+                    assertTrue(callers.awaitTermination(5, TimeUnit.SECONDS))
+                }
+            }
+        }
+    }
+
     @Test
     fun `startup reconciles orphan staging under ownership and releases lease when cleanup refuses storage`() = withStore { store, root ->
         val orphan = Files.createDirectory(root.resolve(".upload-stream-v1-123"), java.nio.file.attribute.PosixFilePermissions.asFileAttribute(
