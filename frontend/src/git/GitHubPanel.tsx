@@ -4,7 +4,9 @@ import { textMessage } from '../shared/messages';
 import { StateMark, capabilityTone } from '../shared/StateMark';
 import type { Capability, GitHubStatus, GitRemotes } from '../api/generated';
 
-export interface PullRequestDraft { remoteId: string; headBranch: string; baseBranch: string; title: string; body: string }
+export interface PullRequestDraft {
+  remoteId: string; headBranch: string; headObjectId: string; baseBranch: string; baseObjectId: string; title: string; body: string;
+}
 
 const matches = { matches: copy.headMatches, differs: copy.headDiffers, unknown: copy.headUnknown } as const;
 
@@ -28,8 +30,11 @@ export function GitHubPanel({ capability, remotes, branch, writable, readStatus,
   const reads = useRef(0);
   const remote = remotes?.remotes.find(item => item.remoteId === remoteId) ?? remotes?.remotes[0];
   const head = branch?.startsWith('refs/heads/') ? branch.slice('refs/heads/'.length) : branch;
-  // A status belongs to one remote and head; once either changes it is no longer shown or usable.
-  const status = loaded && remote && loaded.remoteId === remote.remoteId && loaded.headBranch === head ? loaded : null;
+  const tracked = (name: string | null | undefined) => remote?.trackingRefs.find(ref => ref.name === `refs/remotes/${remote.name}/${name ?? ''}`)?.objectId ?? null;
+  // A status belongs to one remote, head and pushed commit; once any changes (a push or fetch moved
+  // the tracked head) it is no longer shown or usable.
+  const status = loaded && remote && loaded.remoteId === remote.remoteId && loaded.headBranch === head
+    && loaded.pushedObjectId === tracked(head) ? loaded : null;
   if (capability?.state !== 'supported') {
     return <section aria-labelledby="git-github-title">
       <h3 id="git-github-title">{copy.title}</h3>
@@ -43,7 +48,9 @@ export function GitHubPanel({ capability, remotes, branch, writable, readStatus,
     const read = ++reads.current;
     return readStatus(remote.remoteId, head, chosenBase || null).then(result => { if (read === reads.current) setStatus(result); });
   };
-  const reviewed = status !== null && status.remoteId === remote.remoteId && status.headBranch === head && status.baseBranch === chosenBase;
+  // The reviewed range is exact: the base branch and its tracked commit must also be unchanged.
+  const reviewed = status !== null && status.baseBranch === chosenBase && status.pushedObjectId !== null
+    && status.baseObjectId !== null && status.baseObjectId === tracked(chosenBase);
   return <section aria-labelledby="git-github-title">
     <h3 id="git-github-title">{copy.title}</h3>
     <p>{copy.note}</p>
@@ -68,7 +75,9 @@ export function GitHubPanel({ capability, remotes, branch, writable, readStatus,
       {status.access === 'write' && bases.length > 0 && <form onSubmit={event => {
         event.preventDefault();
         // Submit exactly what was reviewed: the status's own remote, head and base.
-        if (title.trim() && reviewed) void onCreate({ remoteId: status.remoteId, headBranch: status.headBranch, baseBranch: chosenBase, title: title.trim(), body })
+        if (title.trim() && reviewed && status.pushedObjectId && status.baseObjectId) void onCreate({ remoteId: status.remoteId,
+          headBranch: status.headBranch, headObjectId: status.pushedObjectId, baseBranch: chosenBase, baseObjectId: status.baseObjectId,
+          title: title.trim(), body })
           .then(done => { if (done) { setTitle(''); setBody(''); void refresh(); } });
       }}>
         <h4>{copy.createTitle}</h4>

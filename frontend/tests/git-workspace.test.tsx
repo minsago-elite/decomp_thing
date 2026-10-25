@@ -421,7 +421,7 @@ it('lists pull requests tied to the pushed commit and creates one only after rev
   fireEvent.click(screen.getByRole('button', { name: 'Create pull request' }));
   await waitFor(() => expect(transport.post).toHaveBeenCalledOnce());
   expect(transport.post.mock.calls[0]?.slice(2, 4)).toEqual(['gitHubPullCreateRequest', expect.objectContaining({ action: 'github.pr.create',
-    remoteId: 'remote_1', headBranch: 'main', baseBranch: 'release', title: 'Review the parser', body: '' })]);
+    remoteId: 'remote_1', headBranch: 'main', headObjectId: head, baseBranch: 'release', baseObjectId: other, title: 'Review the parser', body: '' })]);
 });
 
 it('reviews pull requests for the chosen remote and drops a review when the remote changes', async () => {
@@ -443,6 +443,22 @@ it('reviews pull requests for the chosen remote and drops a review when the remo
   fireEvent.click(panel.getByRole('button', { name: 'Create pull request' }));
   await waitFor(() => expect(transport.post).toHaveBeenCalledOnce());
   expect(transport.post.mock.calls[0]?.[3]).toMatchObject({ action: 'github.pr.create', remoteId: 'remote_2', headBranch: 'main', baseBranch: 'release' });
+});
+
+it('drops a pull request review when a fetch moves the reviewed head', async () => {
+  remoteList = [{ ...(remoteList[0] as object), trackingRefs: [{ refId: 'ref_origin_main', name: 'refs/remotes/origin/main', objectId: head },
+    { refId: 'ref_origin_release', name: 'refs/remotes/origin/release', objectId: other }] }];
+  transport.post.mockResolvedValueOnce(operation('completed', 'git.fetch'));
+  mount([...supported, capability('github', 'supported')]);
+  const panel = within(await screen.findByRole('region', { name: 'GitHub pull requests' }));
+  fireEvent.click(panel.getByRole('button', { name: 'Check pull requests' }));
+  expect(await panel.findByRole('button', { name: 'Create pull request' })).toBeTruthy();
+  // The remote branch moved on the server; the workspace reloads the tracking refs after the fetch.
+  remoteList = [{ ...(remoteList[0] as object), trackingRefs: [{ refId: 'ref_origin_main', name: 'refs/remotes/origin/main', objectId: older },
+    { refId: 'ref_origin_release', name: 'refs/remotes/origin/release', objectId: other }] }];
+  fireEvent.click(screen.getByRole('button', { name: 'Fetch origin' }));
+  await waitFor(() => expect(transport.post).toHaveBeenCalledOnce());
+  await waitFor(() => expect(panel.queryByRole('button', { name: 'Create pull request' })).toBeNull());
 });
 
 it('explains an absent GitHub integration without affecting local Git', async () => {

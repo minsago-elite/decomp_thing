@@ -40,6 +40,10 @@ class GitHubIntegrationTest {
         @Volatile var failCreate = false
         /** Send listing headers and part of a body, then stall. */
         @Volatile var stallBody = false
+        /** Report a duplicate the way GitHub often does: a `custom` error with a message. */
+        @Volatile var customDuplicate = false
+        /** Appended to every created pull request's link. */
+        @Volatile var urlSuffix = ""
         private val server = HttpServer.create(InetSocketAddress("127.0.0.1", 0), 8)
         init {
             server.createContext("/repos/fixture-owner/fixture-repo/pulls") { exchange ->
@@ -69,6 +73,11 @@ class GitHubIntegrationTest {
                         val input = Json.parseToJsonElement(exchange.requestBody.readBytes().toString(Charsets.UTF_8)).jsonObject
                         val head = input.getValue("head").jsonPrimitive.content; val base = input.getValue("base").jsonPrimitive.content
                         if (failCreate) { reply(502, "{\"message\":\"bad gateway\"}"); exchange.close(); return@createContext }
+                        if (customDuplicate) {
+                            reply(422, "{\"message\":\"Validation Failed\",\"errors\":[{\"resource\":\"PullRequest\",\"code\":\"custom\"," +
+                                "\"message\":\"A pull request already exists for fixture-owner:$head.\"}]}")
+                            exchange.close(); return@createContext
+                        }
                         if (pulls.any { it.getValue("state").jsonPrimitive.content == "open" && it.getValue("head").jsonObject.getValue("ref").jsonPrimitive.content == head &&
                                 it.getValue("base").jsonObject.getValue("ref").jsonPrimitive.content == base }) {
                             reply(422, "{\"message\":\"exists\",\"errors\":[{\"code\":\"already_exists\"}]}")
@@ -76,7 +85,8 @@ class GitHubIntegrationTest {
                             val number = pulls.size + 1
                             val pull = buildJsonObject {
                                 put("number", number); put("state", "open"); put("title", input.getValue("title").jsonPrimitive.content)
-                                put("html_url", "https://fixture.invalid/fixture-owner/fixture-repo/pull/$number")
+                                put("html_url", "https://fixture.invalid/fixture-owner/fixture-repo/pull/$number$urlSuffix")
+                                put("body", input.getValue("body").jsonPrimitive.content)
                                 put("head", buildJsonObject { put("ref", head); shas[head]?.let { put("sha", it) } })
                                 put("base", buildJsonObject { put("ref", base) })
                             }
@@ -137,8 +147,10 @@ class GitHubIntegrationTest {
         val view = service.workspace(jobId, repositoryId)
         val guards = GitGuards(GitWorkspaceVersions.repositoryVersion(view.record, view.observation), GitWorkspaceVersions.worktreeVersion(view.observation),
             view.observation.head.objectId, null, null)
+        val tracking = service.remotes(jobId, repositoryId).single().tracking.associate { it.name to it.objectId }
         return GitSyncRequest(GitOperationAction.GITHUB_PR_CREATE, view.worktreeId, guards, mapOf("remoteId" to remoteId(), "headBranch" to "feature",
-            "baseBranch" to "main", "title" to title), "Synthetic review body.")
+            "headObjectId" to tracking["refs/remotes/origin/feature"], "baseBranch" to "main", "baseObjectId" to tracking["refs/remotes/origin/main"],
+            "title" to title), "Synthetic review body.")
     }
 
     private fun run(request: GitRepositoryRequest): GitOperationRecord {
@@ -293,6 +305,83 @@ class GitHubIntegrationTest {
             assertEquals(GitOperationState.COMPLETED, reconciled.state, reconciled.message)
             assertEquals(GitOperationState.COMPLETED, service.operation(jobId, repositoryId, uncertain.operationId).state)
             assertTrue(fake.requests.none { it.contains("other-owner") })
+        }
+    }
+
+    private fun openPull(number: Int, title: String) = buildJsonObject {
+        put("number", number); put("state", "open"); put("title", title)
+        put("html_url", "https://fixture.invalid/fixture-owner/fixture-repo/pull/$number")
+        put("head", buildJsonObject { put("ref", "feature") }); put("base", buildJsonObject { put("ref", "main") })
+    }
+
+    @Test fun `a created pull request is confirmed by its correlation even after its title changes`(): Unit = Fixture().use { f ->
+        FakeGitHub(token).use { fake ->
+            f.cloned(configuration(fake, f.repositories.root, writable = true))
+            fake.dropAfterCreate = true
+            val uncertain = run(create())
+            assertEquals("PR_UNCONFIRMED", uncertain.failureCode, uncertain.message)
+            fake.dropAfterCreate = false
+            // A collaborator retitles the pull request before reconciliation.
+            val created = fake.pulls.single()
+            assertTrue(created.getValue("body").jsonPrimitive.content.startsWith("Synthetic review body."))
+            fake.pulls[0] = kotlinx.serialization.json.JsonObject(created + ("title" to kotlinx.serialization.json.JsonPrimitive("Renamed by a reviewer")))
+            assertEquals(GitOperationState.COMPLETED, reconcile(uncertain.operationId).state)
+            assertEquals(GitOperationState.COMPLETED, service.operation(jobId, repositoryId, uncertain.operationId).state)
+        }
+    }
+
+    @Test fun `an unidentifiable new pull request keeps the creation unconfirmed`(): Unit = Fixture().use { f ->
+        FakeGitHub(token).use { fake ->
+            f.cloned(configuration(fake, f.repositories.root, writable = true))
+            fake.failCreate = true
+            val uncertain = run(create())
+            assertEquals("PR_UNCONFIRMED", uncertain.failureCode, uncertain.message)
+            fake.failCreate = false
+            // Someone else opened a pull request for the same branches with another title and no correlation.
+            fake.pulls += openPull(1, "Someone else's review")
+            val attempt = reconcile(uncertain.operationId)
+            assertEquals(GitOperationState.FAILED, attempt.state, attempt.message)
+            assertEquals("PR_AMBIGUOUS", attempt.failureCode)
+            assertEquals(GitOperationState.RECOVERY_REQUIRED, service.operation(jobId, repositoryId, uncertain.operationId).state)
+            assertEquals(listOf(uncertain.operationId), service.githubStatus(jobId, repositoryId, null, remoteId(), "feature").unconfirmed.map { it.operationId })
+        }
+    }
+
+    @Test fun `an existing open pull request is reported without writing, and GitHub's custom duplicate error is recognized`(): Unit = Fixture().use { f ->
+        FakeGitHub(token).use { fake ->
+            fake.pulls += openPull(1, "Already under review")
+            f.cloned(configuration(fake, f.repositories.root, writable = true))
+            val existed = run(create())
+            assertEquals(GitOperationState.COMPLETED, existed.state, existed.message)
+            assertTrue(existed.message.contains("already existed") && existed.message.contains("#1"), existed.message)
+            assertTrue(fake.requests.none { it.startsWith("POST") })
+            fake.customDuplicate = true
+            val client = GitHubClient(configuration(fake, f.repositories.root, writable = true))
+            assertEquals("GITHUB_PR_EXISTS", assertFailsWith<GitHubException> {
+                client.create(GitHubBinding("admitted:upstream.git", "fixture-owner", "fixture-repo"), "feature", "main", "Title", "")
+            }.code)
+        }
+    }
+
+    @Test fun `a long provider link never makes the operation record unreadable`(): Unit = Fixture().use { f ->
+        FakeGitHub(token).use { fake ->
+            fake.urlSuffix = "/" + "x".repeat(1900)
+            f.cloned(configuration(fake, f.repositories.root, writable = true))
+            val created = run(create())
+            assertEquals(GitOperationState.COMPLETED, created.state, created.message)
+            assertTrue(created.message.length <= 500)
+            service.close(); service = f.open(configuration(fake, f.repositories.root, writable = true))
+            assertEquals(GitOperationState.COMPLETED, service.operation(jobId, repositoryId, created.operationId).state)
+            assertNotNull(service.workspace(jobId, repositoryId))
+        }
+    }
+
+    @Test fun `creation is refused when a reviewed commit moved`(): Unit = Fixture().use { f ->
+        FakeGitHub(token).use { fake ->
+            f.cloned(configuration(fake, f.repositories.root, writable = true))
+            val stale = create().let { it.copy(parameters = it.parameters + ("headObjectId" to "1".repeat(40))) }
+            assertEquals("REF_CHANGED", assertFailsWith<ManagedGitException> { service.requestWorkspace(jobId, repositoryId, stale, key()) }.code)
+            assertTrue(fake.requests.none { it.startsWith("POST") })
         }
     }
 }

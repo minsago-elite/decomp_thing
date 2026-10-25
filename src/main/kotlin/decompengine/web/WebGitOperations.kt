@@ -91,7 +91,8 @@ internal class WebGitOperations(private val repositories: () -> ManagedGitReposi
             "git.conflict.complete" -> setOf("action", "worktreeId", "guards", "files")
             "git.push" -> setOf("action", "worktreeId", "guards", "remoteId", "localRefId", "remoteBranch", "localObjectId", "expectedRemoteObjectId")
             "git.push.reconcile" -> setOf("action", "worktreeId", "guards", "pushOperationId")
-            "github.pr.create" -> setOf("action", "worktreeId", "guards", "remoteId", "headBranch", "baseBranch", "title", "body")
+            "github.pr.create" -> setOf("action", "worktreeId", "guards", "remoteId", "headBranch", "headObjectId", "baseBranch",
+                "baseObjectId", "title", "body")
             "github.pr.reconcile" -> setOf("action", "worktreeId", "guards", "prOperationId")
             else -> invalid()
         }
@@ -131,6 +132,7 @@ internal class WebGitOperations(private val repositories: () -> ManagedGitReposi
                     content = text(body["body"]).takeIf { it.length <= 65536 } ?: invalid()
                     mapOf("remoteId" to id(body["remoteId"]), "headBranch" to (text(body["headBranch"]).takeIf { it.length in 1..200 } ?: invalid()),
                         "baseBranch" to (text(body["baseBranch"]).takeIf { it.length in 1..200 } ?: invalid()),
+                        "headObjectId" to (objectId(body["headObjectId"]) ?: invalid()), "baseObjectId" to (objectId(body["baseObjectId"]) ?: invalid()),
                         "title" to (text(body["title"]).takeIf { it.length in 1..256 } ?: invalid()))
                 }
                 GitOperationAction.GITHUB_PR_RECONCILE -> mapOf("prOperationId" to id(body["prOperationId"]))

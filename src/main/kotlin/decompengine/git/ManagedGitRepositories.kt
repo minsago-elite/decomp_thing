@@ -956,12 +956,17 @@ class ManagedGitRepositories(
                     try { GitRefNames.requireBranchName(runner, branch) } catch (_: IllegalArgumentException) {
                         GitWorkspaceMutations.refuse("VALIDATION_FAILED", "The $name is not a valid Git branch name.")
                     }
-                    GitRefOperations.refObject(runner, located.commonDir, located.record.objectFormat, "${remote.trackingPrefix}$branch")
+                    val tracked = GitRefOperations.refObject(runner, located.commonDir, located.record.objectFormat, "${remote.trackingPrefix}$branch")
                         ?: GitWorkspaceMutations.refuse("BRANCH_NOT_PUBLISHED", "The branch $branch is not on the remote as last fetched. Push or fetch it first.")
+                    // The request names the commits that were reviewed; a push or fetch since then needs a new review.
+                    val reviewed = request.parameters[if (name == "headBranch") "headObjectId" else "baseObjectId"]
+                    if (tracked != reviewed) GitWorkspaceMutations.refuse("REF_CHANGED",
+                        "The $name moved since the pull request was reviewed. Check the pull requests again and review the new range.")
                 }
                 if (request.text("headBranch") == request.text("baseBranch")) GitWorkspaceMutations.refuse("VALIDATION_FAILED", "The head and base branches must differ.")
                 if (request.text("title").length !in 1..256) GitWorkspaceMutations.refuse("VALIDATION_FAILED", "A pull request title is 1 to 256 characters.")
-                if ((request.content?.toByteArray()?.size ?: 0) > 64 * 1024) GitWorkspaceMutations.refuse("SIZE_EXCEEDED", "A pull request body is at most 64 KiB.")
+                if ((request.content?.toByteArray()?.size ?: 0) > 64 * 1024 - GitHubCorrelation.RESERVED_BYTES) GitWorkspaceMutations.refuse("SIZE_EXCEEDED",
+                    "A pull request body is at most ${64 * 1024 - GitHubCorrelation.RESERVED_BYTES} bytes.")
                 if (pullIntents(directory).any { it.remoteId == remote.remoteId && it.head == request.text("headBranch") && it.base == request.text("baseBranch") }) {
                     GitWorkspaceMutations.refuse("PR_UNCONFIRMED", "An earlier pull request creation for these branches is unconfirmed. Reconcile it first.")
                 }
@@ -985,16 +990,23 @@ class ManagedGitRepositories(
                 val head = request.text("headBranch"); val base = request.text("baseBranch"); val title = request.text("title")
                 val intents = GitStorage.directories(directory, PULL_INTENTS)
                 // Pull requests that already exist for these branches can never be this creation's result.
-                val existing = client.pulls(binding, head, base).map { it.number }
+                val listed = client.pulls(binding, head, base)
+                fun audit(outcome: String, detail: String?) = GitRemoteStore.audit(directory, GitRemoteStore.auditEntry("github.pr.create",
+                    operation.operationId, outcome, remote, clock.instant(), ref = "refs/heads/$head", detail = detail))
+                // An open pull request for these branches already exists: report it and never write.
+                listed.firstOrNull { it.state == "open" && it.baseRef == base }?.let {
+                    audit("existed", "#${it.number}")
+                    return null to "A pull request already existed for these branches: #${it.number} ${it.url}"
+                }
+                val existing = listed.map { it.number }
                 GitStorage.replaceAtomically(intents.resolve("${operation.operationId}.json"), buildJsonObject {
                     put("operationId", operation.operationId); put("remoteId", remote.remoteId); put("head", head); put("base", base)
                     put("titleSha256", GitStorage.sha256(title)); put("owner", binding.owner); put("repository", binding.repository)
                     put("existing", kotlinx.serialization.json.JsonArray(existing.map(::JsonPrimitive)))
                 }.toString().toByteArray())
-                fun audit(outcome: String, detail: String?) = GitRemoteStore.audit(directory, GitRemoteStore.auditEntry("github.pr.create",
-                    operation.operationId, outcome, remote, clock.instant(), ref = "refs/heads/$head", detail = detail))
                 crash(GitOperationCrashPoint.AFTER_STAGING)
-                val pull = try { client.create(binding, head, base, title, request.content ?: "") } catch (failure: GitHubException) {
+                val body = (request.content ?: "") + GitHubCorrelation.comment(operation.operationId)
+                val pull = try { client.create(binding, head, base, title, body) } catch (failure: GitHubException) {
                     when {
                         !client.definiteRefusal(failure.code) && failure.code != "GITHUB_PR_EXISTS" -> {
                             audit("unconfirmed", null)
@@ -1016,8 +1028,13 @@ class ManagedGitRepositories(
                 val remote = remoteFor(located, intent.remoteId)
                 // Look in the repository that was actually contacted, whatever the remote is bound to now.
                 val binding = GitHubBinding(remote.location.display, intent.owner, intent.repository)
-                val found = client.pulls(binding, intent.head, intent.base)
-                    .firstOrNull { GitStorage.sha256(it.title) == intent.titleSha256 && it.number !in intent.existing }
+                val candidates = client.pulls(binding, intent.head, intent.base).filter { it.number !in intent.existing }
+                // The correlation comment identifies the result even after a title edit; the title digest is the fallback.
+                val found = candidates.firstOrNull { it.correlation == intent.operationId }
+                    ?: candidates.firstOrNull { it.correlation == null && GitStorage.sha256(it.title) == intent.titleSha256 }
+                if (found == null && candidates.isNotEmpty()) throw GitOperationRefusal("PR_AMBIGUOUS",
+                    "Pull request(s) ${candidates.joinToString { "#${it.number}" }} were created for these branches since, but none carries " +
+                        "this creation's identity or title. The creation stays unconfirmed; check them on GitHub.")
                 val (state, code, message) = if (found != null) Triple(GitOperationState.COMPLETED, null,
                     "Reconciliation found pull request #${found.number}: ${found.url}")
                     else Triple(GitOperationState.FAILED, "PR_NOT_CREATED", "Reconciliation found no such pull request; it was not created.")
@@ -2083,7 +2100,10 @@ class ManagedGitRepositories(
 
     private fun finish(operation: GitOperationRecord, state: GitOperationState, code: String?, message: String,
         resultObjectId: String? = null) = operation.copy(state = state, revision = operation.revision + 1,
-        endedAt = clock.instant(), failureCode = code, message = message, resultObjectId = resultObjectId)
+        endedAt = clock.instant(), failureCode = code, message = boundedMessage(message), resultObjectId = resultObjectId)
+
+    /** Every persisted message fits the record decoder's bound, whatever a provider returned. */
+    private fun boundedMessage(message: String) = if (message.length <= 500) message else message.take(497) + "..."
 
     private fun persist(directory: Path, operation: GitOperationRecord) {
         val operations = GitStorage.directories(directory, "operations")

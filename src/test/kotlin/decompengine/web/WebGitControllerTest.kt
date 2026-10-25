@@ -428,6 +428,7 @@ class WebGitControllerTest {
             assertEquals(0, hosting.getValue("pulls").jsonArray.size)
             error(change(mapOf("action" to JsonPrimitive("github.pr.create"), "remoteId" to remote.getValue("remoteId"),
                 "headBranch" to JsonPrimitive("main"), "baseBranch" to JsonPrimitive("release"), "title" to JsonPrimitive("Review"),
+                "headObjectId" to JsonPrimitive("1".repeat(40)), "baseObjectId" to JsonPrimitive("2".repeat(40)),
                 "body" to JsonPrimitive("")), "http_github_intent_1"), 503, "GITHUB_UNAVAILABLE")
             // Publication: an unborn branch has nothing to push, and no force or deletion field exists.
             val remoteId = remote.getValue("remoteId").jsonPrimitive.content

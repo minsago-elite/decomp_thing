@@ -13,7 +13,9 @@
     },
     "remoteId": "remote_example_1",
     "headBranch": "feature",
+    "headObjectId": "1123456789abcdef0123456789abcdef01234567",
     "baseBranch": "main",
+    "baseObjectId": "0123456789abcdef0123456789abcdef01234567",
     "title": "Review the reconstructed module",
     "body": "Built from a recorded candidate; validation is separate."
   }

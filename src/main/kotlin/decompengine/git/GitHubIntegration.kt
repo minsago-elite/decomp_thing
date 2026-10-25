@@ -71,7 +71,18 @@ data class GitHubConfiguration(val apiUrl: URI, val tokenFile: Path?, val bindin
 
 /** A pull request as the provider reports it; nothing here implies build or reconstruction acceptance. */
 data class GitHubPull(val number: Int, val state: String, val title: String, val url: String, val headRef: String, val baseRef: String,
-    val headSha: String?)
+    val headSha: String?,
+    /** The creating operation named by the hidden correlation comment in the body, if any. */
+    val correlation: String? = null)
+
+/** Hidden body comment that ties a created pull request to its creating operation, whatever its title becomes. */
+object GitHubCorrelation {
+    private val PATTERN = Regex("<!-- decomp-workbench-operation: ([A-Za-z0-9_-]{1,80}) -->")
+    /** Bytes reserved in a body for the comment. */
+    const val RESERVED_BYTES = 128
+    fun comment(operationId: String) = "\n\n<!-- decomp-workbench-operation: $operationId -->"
+    fun find(body: String?): String? = body?.let { PATTERN.find(it)?.groupValues?.get(1) }
+}
 
 class GitHubException(val code: String, message: String, val retryAfterSeconds: Long? = null) : Exception(message)
 
@@ -145,7 +156,8 @@ class GitHubClient(private val configuration: GitHubConfiguration,
         return GitHubPull(item.getValue("number").jsonPrimitive.intOrNull ?: throw GitHubException("GITHUB_RESPONSE_INVALID", "Invalid pull request."),
             text("state"), text("title").take(256), url, head.getValue("ref").jsonPrimitive.content,
             item.getValue("base").jsonObject.getValue("ref").jsonPrimitive.content,
-            head["sha"]?.jsonPrimitive?.contentOrNull?.takeIf { it.matches(Regex("[0-9a-f]{40}|[0-9a-f]{64}")) })
+            head["sha"]?.jsonPrimitive?.contentOrNull?.takeIf { it.matches(Regex("[0-9a-f]{40}|[0-9a-f]{64}")) },
+            GitHubCorrelation.find((item["body"] as? kotlinx.serialization.json.JsonPrimitive)?.contentOrNull))
     }
 
     /** Whether a creation failure is a definite refusal; anything else may have created the pull request. */
@@ -167,8 +179,13 @@ class GitHubClient(private val configuration: GitHubConfiguration,
             put("head", head); put("base", base); put("title", title); put("body", body)
         }, write = true)
         if (status == 422) {
-            val exists = ((response as? JsonObject)?.get("errors") as? JsonArray)
-                ?.any { ((it as? JsonObject)?.get("code") as? kotlinx.serialization.json.JsonPrimitive)?.contentOrNull == "already_exists" } == true
+            // GitHub reports a duplicate either as `already_exists` or as a `custom` error whose message
+            // says a pull request already exists.
+            fun field(value: kotlinx.serialization.json.JsonElement?, name: String) =
+                ((value as? JsonObject)?.get(name) as? kotlinx.serialization.json.JsonPrimitive)?.contentOrNull
+            val errors = ((response as? JsonObject)?.get("errors") as? JsonArray).orEmpty()
+            val exists = errors.any { field(it, "code") == "already_exists" || field(it, "message")?.startsWith("A pull request already exists") == true } ||
+                field(response, "message")?.startsWith("A pull request already exists") == true
             throw GitHubException(if (exists) "GITHUB_PR_EXISTS" else "GITHUB_VALIDATION_FAILED",
                 if (exists) "A pull request for this head and base already exists." else "GitHub rejected the pull request; check that both branches exist.")
         }

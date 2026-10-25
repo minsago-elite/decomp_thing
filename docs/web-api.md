@@ -1186,36 +1186,53 @@ Provider failures do not fail the read; they are reported in `problem` with acti
 forks are not supported. A pull request's review or checks are never build validation or
 reconstruction acceptance. Auto-merge, comments and reviews are outside this capability.
 
-`github.pr.create` names `remoteId`, `headBranch`, `baseBranch`, `title` and `body`. It is an
+`github.pr.create` names `remoteId`, `headBranch`, `baseBranch`, `title` and `body`. It also
+names `headObjectId` and `baseObjectId`, the tracked commits whose range was reviewed. It is an
 explicit write, refused when:
 
 - the integration is absent, with `GITHUB_UNAVAILABLE`;
 - the remote is unbound, with `GITHUB_NOT_BOUND`;
 - there is no token, with `GITHUB_READ_ONLY`;
 - a branch is not on the remote as last fetched, with `BRANCH_NOT_PUBLISHED`;
+- a reviewed commit no longer matches its remote-tracking ref after a push or fetch, with
+  `REF_CHANGED`;
+- the body exceeds 65,408 bytes, with `SIZE_EXCEEDED` (128 bytes are reserved for the correlation
+  comment);
 - an earlier creation for the same branches is unconfirmed, with `PR_UNCONFIRMED`.
 
 The creation intent is recorded before GitHub is contacted, and every outcome is audited. The
 intent records the GitHub repository contacted and the numbers of pull requests that already
 existed for those branches.
 
-- A duplicate (`already_exists`) is resolved by finding the existing open pull request.
+- An open pull request that already exists for the branches is reported as the result, and
+  nothing is written. A duplicate refusal from GitHub during creation is resolved the same way.
+  GitHub reports a duplicate either as `already_exists` or as a `custom` error whose message says
+  a pull request already exists.
+- The body sent to GitHub ends with a hidden comment,
+  `<!-- decomp-workbench-operation: <operationId> -->`, that ties the pull request to its
+  creating operation.
 - Only definite refusals fail the operation: unauthorized, forbidden, not found, validation,
   read-only, missing credential and rate limited.
 - Any other outcome becomes `recovery-required` with `PR_UNCONFIRMED`. Examples are a dropped
   connection, a stalled or unreadable response, or a server error.
 - `github.pr.reconcile` with `prOperationId` looks in the recorded repository, even if the
-  remote's binding has since changed. It matches by branches and title digest and ignores pull
-  requests that already existed. It settles the original operation as `completed`, or as
-  `failed` with `PR_NOT_CREATED`, and never repeats the write.
+  remote's binding has since changed. It ignores pull requests that already existed. It matches
+  by the correlation comment, which survives a title edit, and otherwise by the title digest. It
+  settles the original operation as `completed`, or as `failed` with `PR_NOT_CREATED` when no new
+  pull request exists, and it never repeats the write. When new pull requests exist but none can
+  be identified, the reconciliation fails with `PR_AMBIGUOUS`, and the creation stays
+  unconfirmed.
+- Completion messages are bounded to the record's 500 characters, so a long provider link never
+  makes the operation record unreadable.
 - A remote with an unconfirmed creation cannot be removed (`PR_UNCONFIRMED`).
 
 The workspace's **GitHub pull requests** panel lists the pull requests and their commit binding.
 It shows the access state and provider problems, and it reviews the repository, branches, commit
 range, title and description before **Create pull request**. It also offers reconciliation of
-uncertain creations. With several remotes, a selector chooses the remote. Changing the remote or
-the head branch hides the reviewed status, a late answer to an older read is discarded, and
-creation sends exactly the reviewed remote and branches.
+uncertain creations. With several remotes, a selector chooses the remote. The reviewed status is
+hidden when the remote, the head branch or either tracked commit changes, for example after a
+push or fetch. A late answer to an older read is discarded. Creation sends exactly the reviewed
+remote, branches and commits.
 
 `GitHubIntegrationTest` runs against a loopback fake with the shape of
 `scripts/web-github-fixture.mjs`. It covers:
@@ -1227,7 +1244,11 @@ creation sends exactly the reviewed remote and branches.
 - a stalled response body bounded by the deadline;
 - an older pull request with the same title that is never taken as the result;
 - reconciliation in the recorded repository after the binding changes;
-- refusal to remove a remote with an unconfirmed creation.
+- refusal to remove a remote with an unconfirmed creation;
+- confirmation by correlation after a title edit, and `PR_AMBIGUOUS` for an unidentifiable pull
+  request;
+- an existing open pull request reported without writing, and GitHub's `custom` duplicate error;
+- a long provider link bounded in the record, and a moved reviewed commit refused.
 
 The separate `github-optional` CI lane runs these tests and the fixture's own test with no
 secrets or network credentials (#612).
