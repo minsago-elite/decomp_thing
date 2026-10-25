@@ -307,9 +307,23 @@
     {
       "path": "scripts/ci-prepare-generated-c-validation.py",
       "rule": "benchmark-target",
-      "fragment": "gcc_runtime / 'cc1'",
+      "fragment": "COMPILER_SUBPROGRAMS = ('cc1', 'collect2')",
       "count": 1,
       "reason": "Inventories the installed compiler runtime for generated-C provisioning; this expression does not select a benchmark artifact. Version and digest checks remain active."
+    },
+    {
+      "path": "scripts/test-ci-prepare-generated-c-validation.py",
+      "rule": "benchmark-target",
+      "fragment": "'cc1'",
+      "count": 14,
+      "reason": "Mocked provider-role fixtures verify exact compiler subprocess discovery, copying and refusal. Their authored bytes are never executed and do not select a benchmark corpus."
+    },
+    {
+      "path": "scripts/test-ci-prepare-generated-c-validation.py",
+      "rule": "benchmark-target",
+      "fragment": "'cc1plus'",
+      "count": 1,
+      "reason": "The mocked provider-role fixture verifies that an unreviewed compiler subprocess is refused before any command runs; it does not select a benchmark corpus."
     },
     {
       "path": "src/main/kotlin/decompengine/mvp/MvpPatchWorkflow.kt",
