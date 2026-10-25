@@ -141,6 +141,11 @@ attempt; failure is still reported even if cleanup succeeds. Journal and scratch
 residue remain for trusted reset. Do not treat an incomplete journal as a
 completed capture or implicitly resume it.
 
+The retained launcher receipt's cgroup counters are its existing frozen sample
+before teardown, while unit/cgroup/process absence is proved afterward. This
+route preserves those meanings; it does not relabel the sample as terminal
+memory/PID event evidence or supply another consumer's terminal lifecycle proof.
+
 This interface supplies a reference execution route. Required hosted
 qualification, exact observation comparison and independent replay must still
 be retained before claiming the reference outcome is qualified. Candidate
