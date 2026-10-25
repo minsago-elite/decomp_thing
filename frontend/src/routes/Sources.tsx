@@ -16,6 +16,9 @@ import { SourcePreview } from '../sources/SourcePreview';
 import { SourceDigestCheck } from '../sources/SourceDigestCheck';
 import { sourcePosition } from '../sources/viewer';
 
+import { acceptReceipt, receiptOf } from '../shared/receiptTime';
+import { MetadataReceipt } from '../shared/MetadataReceipt';
+
 function Context({ selected, sourceSha256 }: { selected: SourceSelection; sourceSha256?: string }) {
   return <dl class="job-facts" aria-label={copy.context}>
     <dt>{copy.job}</dt><dd><code>{selected.jobId}</code></dd>
@@ -50,7 +53,7 @@ function Directory({ selected, basePath, pin, search, historyEntry }: { selected
       throw new ApiClientError('aborted');
     }
     expected.current = { metadataVersion: page.metadataVersion, sourceSha256: page.sourceSha256 };
-    return page;
+    return acceptReceipt(page);
   }, value => { if (isCurrent()) setRead({ binding, value }); }), [binding, selected.jobId, selected.runId, selected.revisionId, selected.directoryId, cursor, invalid]);
   const current: SourceReadState<RevisionDirectory> = read.binding === binding ? currentSourceRead(read.value, key) : { key, state: 'loading' };
   const effectivePin = historyEntry.snapshot.pin;
@@ -74,6 +77,7 @@ function Directory({ selected, basePath, pin, search, historyEntry }: { selected
     {loading && <p role="status">{copy.loading}</p>}
     {current.state === 'failed' && <p role="alert">{sourceReadMessage(current.failure)}</p>}
     {data && <>
+      <MetadataReceipt kind="directory" receipt={receiptOf(data)} />
       <nav aria-label={copy.breadcrumbs}><ol class="breadcrumbs">
         {data.breadcrumbs.map((crumb, index) => <li key={crumb.directoryId}>
           {index === 1 && data.omittedAncestors > 0 && <span>{message(copy.omitted, { count: data.omittedAncestors })} </span>}
@@ -138,7 +142,7 @@ function File({ selected, basePath, runtime, search, pin, historyEntry }: { sele
       if (!pinSourceEntry(entry.current, file, () => window.location, url => history.replaceState(null, '', url))) {
         throw new ApiClientError('aborted');
       }
-      return file;
+      return acceptReceipt(file);
     }, value => { if (isCurrent()) setRead({ binding, value }); });
   }, [binding, selected.jobId, selected.runId, selected.revisionId, selected.fileId]);
   const current: SourceReadState<RevisionFile> = read.binding === binding ? currentSourceRead(read.value, key)
@@ -157,6 +161,7 @@ function File({ selected, basePath, runtime, search, pin, historyEntry }: { sele
     {loading && <p role="status">{copy.readingFile}</p>}
     {current.state === 'failed' && <p role="alert">{sourceReadMessage(current.failure)}</p>}
     {data && policy && <>
+      <MetadataReceipt kind="file" receipt={receiptOf(data)} />
       <p><a href={sourceDirectoryPath(basePath, selected, data.parentDirectoryId, undefined, effectivePin ?? undefined)}>{copy.returnDirectory}</a></p>
       <h2><bdi>{data.item.displayName}</bdi></h2>
       <dl class="job-facts"><dt>{copy.size}</dt><dd>{formatExactBytes(data.item.sizeBytes)}</dd>

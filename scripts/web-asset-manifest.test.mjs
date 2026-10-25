@@ -5,7 +5,7 @@ import { join } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { gzipSync } from 'node:zlib';
 import { createHash } from 'node:crypto';
-import { bundleBudgets, buildBundleReport } from '../frontend/scripts/bundle-report.mjs';
+import { assertDeferredFeatures, assertNoRemoteLoads, bundleBudgets, buildBundleReport } from '../frontend/scripts/bundle-report.mjs';
 import test from 'node:test';
 
 const script = fileURLToPath(new URL('./web-asset-manifest.mjs', import.meta.url));
@@ -249,3 +249,25 @@ for (const attributes of ['rel="stylesheet"', 'rel="preload" as="style"']) {
     assert.throws(() => bundleBudgets(fixture.manifest, fixture.files, html), /Initial HTML \+ JS \+ CSS exceeds/);
   });
 }
+
+test('source and graph modules must stay outside the initial closure', () => {
+  const lazy = [{ chunk: 'assets/Sources-a.js', owner: 'application', feature: 'sources' },
+    { chunk: 'assets/graph-b.js', owner: 'application', feature: 'graph' }, { chunk: 'assets/index-c.js', owner: 'preact' }];
+  assert.doesNotThrow(() => assertDeferredFeatures(lazy, ['assets/index-c.js']));
+  assert.throws(() => assertDeferredFeatures(lazy, ['assets/index-c.js', 'assets/Sources-a.js']), /Deferred sources code is in the initial chunk/);
+  assert.throws(() => assertDeferredFeatures(lazy, ['assets/graph-b.js']), /Deferred graph code/);
+  assert.throws(() => assertDeferredFeatures([{ chunk: 'x.js', owner: 'application', feature: 'other' }], []), /Unknown deferred feature/);
+});
+
+test('shipped assets reject remote resource loads but keep inert namespace strings', () => {
+  for (const safe of ['const ns = "http://www.w3.org/2000/svg";', 'body { background: url("./mark-abc.svg"); }',
+    'import("./Run-abc.js")', 'new Worker(new URL("./highlight.worker-abc.js", import.meta.url))', 'new URL(path, "https://source.invalid")',
+    'throw new Error("see https://github.com/preactjs/preact-iso#locationprovider")', 'const xlink = "http://www.w3.org/1999/xlink";']) {
+    assert.doesNotThrow(() => assertNoRemoteLoads(safe, 'fixture'), safe);
+  }
+  for (const remote of ['@import url("https://fonts.example.test/a.css");', 'main { background: url(//cdn.example.test/a.png) }',
+    'import("https://cdn.example.test/lib.js")', 'import x from "https://cdn.example.test/x.js"', 'import "https://cdn.example.test/side-effect.js";', "import'//cdn.example.test/a.js'", 'new Worker("https://cdn.example.test/w.js")',
+    'importScripts("//cdn.example.test/w.js")', 'const s=document.createElement("script");s.src="https://cdn.example.test/h.js";', 'h("img",{src:"//images.example.test/a.png"})', 'fetch(`https://api.example.test/x`)', 'fetch("https://www.w3.org@cdn.example.test/h.js")', 'fetch("//source.invalid@cdn.example.test/h.js")', 'fetch("https://www.w3.org:8443/x")', 'fetch("https://WWW.W3.ORG.cdn.example.test/x")', '<script src="https://cdn.example.test/a.js"></script>', '<link rel="stylesheet" href="//cdn.example.test/a.css">']) {
+    assert.throws(() => assertNoRemoteLoads(remote, 'fixture'), /loads a remote resource/, remote);
+  }
+});
