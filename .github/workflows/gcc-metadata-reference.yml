@@ -1,0 +1,154 @@
+name: GCC metadata reference qualification
+
+on:
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: Exact 40-character commit SHA to qualify (must equal this workflow's selected ref)
+        required: true
+        type: string
+  # A newly added dispatch workflow is not registered until it reaches the default branch.
+  # This closed, maintainer-applied label permits qualification of that exact introducing PR head.
+  pull_request:
+    types: [opened, synchronize, reopened, labeled]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: gcc-metadata-reference-${{ github.event.pull_request.number || inputs.ref }}${{ github.event.action == 'labeled' && github.event.label.name != 'qualify:gcc-metadata-reference' && '-ignored-label' || '' }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  qualify:
+    if: github.event_name == 'workflow_dispatch' || ((github.event.action != 'labeled' || github.event.label.name == 'qualify:gcc-metadata-reference') && contains(github.event.pull_request.labels.*.name, 'qualify:gcc-metadata-reference'))
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    env:
+      QUALIFICATION_REF: ${{ github.event_name == 'workflow_dispatch' && inputs.ref || github.event.pull_request.head.sha }}
+      QUALIFICATION_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+      QUALIFICATION_EVENT_SHA: ${{ github.sha }}
+      QUALIFICATION_WORKFLOW_SHA: ${{ github.workflow_sha }}
+      DECOMP_GCC_METADATA_EVIDENCE_ROOT: ${{ github.workspace }}/build/gcc-metadata-reference/evidence
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: Require an exact source identity
+        run: |
+          set -euo pipefail
+          [[ "$QUALIFICATION_REF" =~ ^[0-9a-f]{40}$ ]]
+          if [[ "$GITHUB_EVENT_NAME" == workflow_dispatch ]]; then
+            test "$QUALIFICATION_REF" = "$QUALIFICATION_EVENT_SHA"
+            test "$QUALIFICATION_REF" = "$QUALIFICATION_WORKFLOW_SHA"
+          fi
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ env.QUALIFICATION_REF }}
+          fetch-depth: 0
+          submodules: recursive
+          persist-credentials: false
+      - name: Verify immutable source ancestry and retain the observed master tip
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$QUALIFICATION_REF"
+          git fetch --no-tags origin master
+          master_sha="$(git rev-parse FETCH_HEAD)"
+          # This is the reviewed reference/master integration already required by this lane.
+          required_ancestor=a5efeeb9acf1bbf095fa7a3d2c483fbe2f3d118c
+          git merge-base --is-ancestor "$required_ancestor" HEAD
+          current_master_is_ancestor=false
+          if git merge-base --is-ancestor "$master_sha" HEAD; then current_master_is_ancestor=true; fi
+          if [[ "$GITHUB_EVENT_NAME" == pull_request ]]; then
+            [[ "$QUALIFICATION_EVENT_SHA" =~ ^[0-9a-f]{40}$ && "$QUALIFICATION_BASE_SHA" =~ ^[0-9a-f]{40}$ ]]
+            git merge-base --is-ancestor "$QUALIFICATION_BASE_SHA" HEAD
+            pinned_base="$QUALIFICATION_BASE_SHA"
+            git fetch --no-tags origin "$QUALIFICATION_EVENT_SHA"
+            read -r -a parents <<< "$(git show -s --format=%P "$QUALIFICATION_EVENT_SHA")"
+            [[ " ${parents[*]} " == *" $QUALIFICATION_REF "* ]]
+          else
+            pinned_base="$(git merge-base HEAD "$master_sha")"
+          fi
+          mkdir -p build/gcc-metadata-reference/{evidence,tmp}
+          jq -n --arg head "$QUALIFICATION_REF" --arg master "$master_sha" \
+            --arg base "$pinned_base" --arg required "$required_ancestor" --argjson masterAncestor "$current_master_is_ancestor" \
+            --arg event "$QUALIFICATION_EVENT_SHA" --arg workflow "$QUALIFICATION_WORKFLOW_SHA" \
+            --arg run "$GITHUB_RUN_ID" --arg attempt "$GITHUB_RUN_ATTEMPT" \
+            '{schemaVersion:1,headSha:$head,pinnedBaseSha:$base,requiredAncestorSha:$required,observedMasterSha:$master,currentMasterIsAncestor:$masterAncestor,eventSha:$event,workflowSha:$workflow,runId:$run,runAttempt:$attempt}' \
+            > "$DECOMP_GCC_METADATA_EVIDENCE_ROOT/source.json"
+      - uses: actions/setup-java@v6
+        with:
+          distribution: temurin
+          java-version: '21'
+      - uses: ./.github/actions/setup-gradle-compiler-cache
+      - name: Install the pinned build frontend toolchain
+        run: |
+          bash scripts/install-frontend-node.sh "$GITHUB_WORKSPACE/build/gcc-metadata-reference/node"
+          echo "$GITHUB_WORKSPACE/build/gcc-metadata-reference/node/bin" >> "$GITHUB_PATH"
+      - name: Install contained-execution and transport prerequisites
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            bubblewrap build-essential ca-certificates curl dbus-user-session e2fsprogs jq \
+            skopeo systemd util-linux xz-utils
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+          bwrap --unshare-user --disable-userns --ro-bind /usr /usr --ro-bind /lib /lib \
+            --ro-bind /lib64 /lib64 /usr/bin/true
+      - name: Check the bounded scratch selections
+        run: bash scripts/test-oracle-ext4-scratch-profile.sh
+      - name: Provision the existing trusted application JVM and native libraries
+        run: bash scripts/ci-prepare-oracle-runtime.sh
+      - name: Build once and install the application through the existing provisioner
+        run: bash scripts/ci-prepare-bundled-ghidra-runtime.sh --application
+      - name: Provision the existing authenticated root session controller
+        run: |
+          touch "$DECOMP_GCC_METADATA_EVIDENCE_ROOT/root-session.env"
+          sudo -n env GITHUB_ENV="$DECOMP_GCC_METADATA_EVIDENCE_ROOT/root-session.env" \
+            bash scripts/ci-prepare-acp-sandbox.sh
+      - name: Provision the first dedicated bounded ext4 lease
+        run: |
+          sudo -n env GITHUB_ENV="$GITHUB_ENV" RUNNER_TEMP="$GITHUB_WORKSPACE/build/gcc-metadata-reference/tmp" \
+            bash scripts/ci-prepare-oracle-ext4-scratch.sh --gcc-metadata-reference-first
+      - name: Provision the independent replay ext4 lease
+        run: |
+          sudo -n env GITHUB_ENV="$GITHUB_ENV" RUNNER_TEMP="$GITHUB_WORKSPACE/build/gcc-metadata-reference/tmp" \
+            bash scripts/ci-prepare-oracle-ext4-scratch.sh --gcc-metadata-reference-replay
+      - name: Run the installed Kotlin owner and independent frozen-reference replay
+        id: capture
+        run: bash scripts/ci-qualify-gcc-metadata-reference.sh capture
+      - name: Retain journals, scratch records and available failure evidence
+        id: collect
+        if: always()
+        run: bash scripts/ci-qualify-gcc-metadata-reference.sh collect
+      - name: Upload qualification evidence
+        id: upload
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: gcc-metadata-reference-${{ env.QUALIFICATION_REF }}-${{ github.run_id }}-${{ github.run_attempt }}
+          retention-days: 30
+          if-no-files-found: error
+          include-hidden-files: true
+          path: ${{ env.DECOMP_GCC_METADATA_EVIDENCE_ROOT }}
+      - name: Release the first dedicated ext4 lease through the existing helper
+        id: release-first
+        if: always() && steps.capture.outcome == 'success' && steps.collect.outcome == 'success' && steps.upload.outcome == 'success'
+        env:
+          RUNNER_TEMP: ${{ github.workspace }}/build/gcc-metadata-reference/tmp
+        run: bash scripts/ci-release-oracle-ext4-scratch.sh --gcc-metadata-reference-first
+      - name: Release the independent replay ext4 lease through the existing helper
+        id: release-replay
+        if: always() && steps.capture.outcome == 'success' && steps.collect.outcome == 'success' && steps.upload.outcome == 'success'
+        env:
+          RUNNER_TEMP: ${{ github.workspace }}/build/gcc-metadata-reference/tmp
+        run: bash scripts/ci-release-oracle-ext4-scratch.sh --gcc-metadata-reference-replay
+      - name: Release the admitted metadata extension after successful absence proofs
+        id: release-runtime
+        if: always() && steps.capture.outcome == 'success' && steps.collect.outcome == 'success' && steps.upload.outcome == 'success' && steps.release-first.outcome == 'success' && steps.release-replay.outcome == 'success'
+        run: bash scripts/ci-qualify-gcc-metadata-reference.sh cleanup
+      - name: Release the existing application installation after successful qualification
+        if: always() && steps.release-runtime.outcome == 'success'
+        run: bash scripts/ci-release-bundled-ghidra-runtime.sh --application
+      - name: Preserve incomplete qualification state until runner teardown
+        if: always() && (steps.capture.outcome != 'success' || steps.collect.outcome != 'success' || steps.upload.outcome != 'success')
+        run: echo 'Any provisioned scratch mounts, images and installed metadata runtime remain retained until ephemeral runner teardown; no successful qualification reset was authorized.'

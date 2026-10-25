@@ -2,7 +2,7 @@
 set -euo pipefail
 
 if (($# > 1)); then
-  echo "usage: $0 [--bundled-ghidra|--bundled-ghidra-resume|--bundled-ghidra-resume-control|--gcc-engine-{cc1,lto1}-{fresh,resume}]" >&2
+  echo "usage: $0 [--bundled-ghidra|--bundled-ghidra-resume|--bundled-ghidra-resume-control|--gcc-engine-{cc1,lto1}-{fresh,resume}|--gcc-metadata-reference-{first,replay}]" >&2
   exit 64
 fi
 source "$(cd "$(dirname "$0")" && pwd -P)/oracle-ext4-scratch-profile.sh"

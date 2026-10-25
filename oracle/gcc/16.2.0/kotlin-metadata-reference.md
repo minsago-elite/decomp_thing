@@ -146,8 +146,54 @@ before teardown, while unit/cgroup/process absence is proved afterward. This
 route preserves those meanings; it does not relabel the sample as terminal
 memory/PID event evidence or supply another consumer's terminal lifecycle proof.
 
-This interface supplies a reference execution route. Required hosted
-qualification, exact observation comparison and independent replay must still
-be retained before claiming the reference outcome is qualified. Candidate
-comparison and release authority remain false. It does not replace the existing
-Python diagnostic capture with a synthetic success or change its observations.
+## Installed qualification and independent replay
+
+`decompengine.oracle.gcc.GccMetadataReferenceQualificationCli` is the separate
+installed qualification entrypoint. It requires the root controller, the exact
+ordered installed classpath, and its adjacent root-owned, single-link classpath
+authority. Development classpath overrides are rejected. Its closed forms are:
+
+```text
+provision <profileRoot> <ociLayout> <freshRuntimeRoot> <jdkRoot> <deploymentJson>
+qualify <profileRoot> <ociLayout> <runtimeRoot> <deploymentJson> <firstJournalRoot> <firstScratchMount> <replayJournalRoot> <replayScratchMount> <reportPath>
+```
+
+Provisioning consumes the Kotlin materializer's typed entries, restores their
+exact metadata, and independently admits the result before publishing the
+trusted deployment. It does not consume a caller-written staging receipt as
+authority. The installed controller and worker use the same authenticated
+classpath closure and JVM.
+
+Qualification performs two fresh coordinator captures on distinct dedicated
+filesystems. Both successful captures retain their journal, scratch lease and
+absence-proof ownership while the qualifier independently checks all 19 cases,
+the complete journal chain, worker reports and operation bindings. It compares
+exact raw observations with the separately fixed metadata reference and checks
+that both operations have identical stable case bytes. The frozen expected
+observations are never mounted into the worker. Only these retained captures
+can publish a report with `referenceQualified: true`; a supplied JSON report or
+fixture comparison result cannot authorize publication.
+
+The `GCC metadata reference qualification` Actions workflow selects an exact
+source SHA. A maintainer can select an introducing PR with the closed
+`qualify:gcc-metadata-reference` label; after the workflow is registered on the
+default branch, manual dispatch requires the input SHA to equal the selected
+workflow SHA. The lane records immutable source ancestry and the observed
+master tip. It reuses the existing trusted application/JVM/controller
+provisioners and the existing ext4 helper with two 512 MiB, 16,384-inode profiles.
+New reports, transport data, logs and journals are under checkout `build/`;
+installed runtime and scratch paths use the existing host infrastructure.
+
+The lane retains both operations' journals and scratch records, the installed
+classpath authority, deployment, source identity, exact qualification report
+and artifact digests. Scratch release requires capture, evidence collection and
+upload to succeed; runtime cleanup additionally requires both scratch releases.
+Incomplete operations remain retained until the ephemeral runner is torn down.
+The report keeps the distinction between the pre-teardown counter sample and
+the later unit/cgroup/process absence proof.
+
+A successful exact-source hosted run and its retained evidence are still
+required before claiming qualification. Local staging, unit tests and the
+optional pinned-image worker replay establish their narrower checks only.
+Candidate comparison and release authority remain false. This route does not
+change the existing Python diagnostic reference observations.
