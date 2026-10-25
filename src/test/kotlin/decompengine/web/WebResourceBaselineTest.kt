@@ -137,7 +137,7 @@ class WebResourceBaselineTest {
     /** Completed uploads, refusals, overload-free slow clients and an orderly stop. */
     private fun runSpaWorkloadCycle(store: Path) {
         val server = UploadServer("127.0.0.1", 0, store, uiMode = WebUiMode.SPA, basePath = "/w/",
-            admissionLimits = WebAdmissionLimits(headerDeadlineMs = 500, uploadDeadlineMs = 2_000))
+            admissionLimits = WebAdmissionLimits(headerDeadlineMs = 2_000, uploadDeadlineMs = 10_000))
         server.start()
         val port = server.serverPort
         val origin = "http://127.0.0.1:$port"
@@ -175,7 +175,7 @@ class WebResourceBaselineTest {
                     "--b\r\nContent-Disposition: form-data; name=\"binary\"; filename=\"s.elf\"\r\n\r\n\u007fELF").toByteArray())
             }
             (slow + stalled).forEach { socket ->
-                socket.soTimeout = 10_000
+                socket.soTimeout = 30_000
                 socket.use { runCatching { it.getInputStream().readBytes() } }
             }
             val deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(10)

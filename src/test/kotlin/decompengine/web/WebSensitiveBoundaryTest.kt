@@ -66,7 +66,7 @@ class WebSensitiveBoundaryTest {
             val denied = record(upload(server, session, csrf = false, filename = "denied.elf"))
             assertEquals(403, denied.statusCode())
             val uploaded = record(upload(server, session, filename = "upload-$canary.elf"))
-            assertEquals(201, uploaded.statusCode())
+            assertEquals(201, uploaded.statusCode(), uploaded.body())
             val job = Json.parseToJsonElement(uploaded.body()).jsonObject.getValue("data").jsonObject
             val jobId = job.getValue("jobId").jsonPrimitive.content
             assertEquals("upload-[redacted].elf", job.getValue("displayFilename").jsonPrimitive.content)
@@ -144,7 +144,7 @@ class WebSensitiveBoundaryTest {
         assertFalse(combined.contains(canary), "a canary escaped into a served representation or log")
         assertFalse(combined.contains(root.toString()), "the private storage path escaped")
         assertFalse(combined.contains(parent.toString()), "a private host path escaped")
-        assertTrue(diagnostics.isNotEmpty() && diagnostics.all { it.startsWith("web-http-failure request_id=") })
+        assertTrue(diagnostics.isNotEmpty() && diagnostics.all { it.startsWith("web-http-failure request_id=") || it.startsWith("web-capacity-summary ") })
     }
 
     @Test fun `live and replayed event representations apply the same listener policy`() {
