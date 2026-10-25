@@ -22,6 +22,7 @@ internal class KotlinContainedCommandRequest(
     val maximumStdoutBytes: Long,
     val maximumStderrBytes: Long,
     val allowInterruption: Boolean = false,
+    val terminalResourcePolicySha256: String? = null,
 ) {
     val command: List<String>
     val environment: Map<String, String>
@@ -64,9 +65,14 @@ internal class KotlinContainedCommandRequest(
         require(maximumStdoutBytes in 1L..MAXIMUM_LOG_BYTES && maximumStderrBytes in 1L..MAXIMUM_LOG_BYTES) {
             "contained command log budget is outside its bound"
         }
+        require(terminalResourcePolicySha256 == null ||
+            terminalResourcePolicySha256 == ContainedCommandTerminalResourceEvidence.policySha256) {
+            "contained command terminal resource policy is unsupported"
+        }
+        val version = if (terminalResourcePolicySha256 != null) 3 else if (allowInterruption) 2 else 1
         val fields = mapOf(
-            "schemaVersion" to JsonPrimitive(if (allowInterruption) 2 else 1),
-            "provider" to JsonPrimitive(if (allowInterruption) "kotlin-contained-command-request-v2" else "kotlin-contained-command-request-v1"),
+            "schemaVersion" to JsonPrimitive(version),
+            "provider" to JsonPrimitive("kotlin-contained-command-request-v$version"),
             "runDirectory" to JsonPrimitive(runDirectory.toString()),
             "nonce" to JsonPrimitive(nonce),
             "command" to JsonArray(this.command.map(::JsonPrimitive)),
@@ -77,7 +83,9 @@ internal class KotlinContainedCommandRequest(
             "maximumStderrBytes" to JsonPrimitive(maximumStderrBytes),
         )
         encoded = OracleJson.canonicalBytes(JsonObject(fields +
-            if (allowInterruption) mapOf("allowInterruption" to JsonPrimitive(true)) else emptyMap()), CONTAINED_REQUEST_LIMITS)
+            (if (allowInterruption) mapOf("allowInterruption" to JsonPrimitive(true)) else emptyMap()) +
+            (terminalResourcePolicySha256?.let { mapOf("terminalResourcePolicySha256" to JsonPrimitive(it)) } ?: emptyMap())),
+            CONTAINED_REQUEST_LIMITS)
         sha256 = OracleArtifacts.sha256(encoded)
     }
 
@@ -91,14 +99,19 @@ internal class KotlinContainedCommandRequest(
             val document = OracleJson.parseCanonical(bytes, CONTAINED_REQUEST_LIMITS) as? JsonObject
                 ?: throw IllegalArgumentException("contained command request must be an object")
             val version = document.number("schemaVersion")
-            require(version in 1L..2L) { "contained command request version is unsupported" }
-            val allowInterruption = version == 2L
+            require(version in 1L..3L) { "contained command request version is unsupported" }
+            val allowInterruption = version == 2L || (version == 3L && "allowInterruption" in document)
             require(!allowInterruption || document["allowInterruption"] == JsonPrimitive(true)) {
-                "contained command v2 requires explicit interruption admission"
+                "contained command requires explicit interruption admission"
             }
+            require(version != 3L || "terminalResourcePolicySha256" in document) {
+                "contained command v3 requires its terminal resource policy"
+            }
+            val terminalResourcePolicySha256 = if (version == 3L) document.string("terminalResourcePolicySha256") else null
             require(document.keys == setOf("schemaVersion", "provider", "runDirectory", "nonce", "command",
                 "environment", "maximumStartWaitSeconds", "maximumWallSeconds", "maximumStdoutBytes", "maximumStderrBytes") +
-                if (allowInterruption) setOf("allowInterruption") else emptySet()) {
+                (if (allowInterruption) setOf("allowInterruption") else emptySet()) +
+                (if (version == 3L) setOf("terminalResourcePolicySha256") else emptySet())) {
                 "contained command request fields differ from its closed contract"
             }
             require(document.string("provider") == "kotlin-contained-command-request-v$version") {
@@ -113,6 +126,7 @@ internal class KotlinContainedCommandRequest(
                 command.map { it.requireString() }, environment.mapValues { it.value.requireString() },
                 document.number("maximumStartWaitSeconds"), document.number("maximumWallSeconds"),
                 document.number("maximumStdoutBytes"), document.number("maximumStderrBytes"), allowInterruption,
+                terminalResourcePolicySha256,
             ).also { require(it.canonicalBytes.contentEquals(bytes)) { "contained command request changed during parsing" } }
         }
     }
