@@ -102,6 +102,38 @@ class MetadataDiagnosticReferenceTest(unittest.TestCase):
             for pattern in rule["patterns"]:
                 self.assertRegex(text, re.compile(pattern, re.MULTILINE), rule["id"])
 
+    def test_configured_prefix_substitution_covers_retained_verbose_output(self) -> None:
+        case = next(case for case in RECORD["cases"] if case["id"] == "verbose-configuration")
+        original = base64.b64decode(case["observed"]["stderr"]["base64"])
+        expected = original.replace(b"--prefix=/oracle/install ", b"--prefix=/candidate/install ")
+        self.assertNotEqual(original, expected)
+        # argv[0] is an independent identity and does not need to share the install prefix.
+        actual = substitute(original, {
+            "driver-argv0": "/retained/path/gcc",
+            "install-prefix": "/candidate/install",
+        })
+        self.assertEqual(
+            actual,
+            expected.replace(b"COLLECT_GCC=/oracle/install/bin/gcc", b"COLLECT_GCC=/retained/path/gcc"),
+        )
+
+    def test_configured_prefix_substitution_has_bounded_argument_and_line(self) -> None:
+        allowed = (
+            b"Configured with: /source/configure --prefix=/oracle/install --enable-languages=c\n"
+            b"Configured with: /source/configure --prefix=/oracle/install\n"
+        )
+        self.assertEqual(
+            substitute(allowed, {"install-prefix": "/candidate"}),
+            allowed.replace(b"--prefix=/oracle/install", b"--prefix=/candidate"),
+        )
+        unchanged = (
+            b"Configured with: /source/configure --prefix=/oracle/install-extra --enable-languages=c\n"
+            b"Configured with: /source/configure --exec-prefix=/oracle/install --enable-languages=c\n"
+            b"Configured with: /source/configure --prefix=/unrelated/oracle/install\n"
+            b"gcc: error: unexpected --prefix=/oracle/install argument\n"
+        )
+        self.assertEqual(substitute(unchanged, {"install-prefix": "/candidate"}), unchanged)
+
     def test_substitute_replaces_only_the_captured_span(self) -> None:
         data = (
             b"gcc (GCC) 16.2.0\n"

@@ -521,7 +521,10 @@ IDENTITY_SUBSTITUTIONS = [
         "token": ORACLE_PREFIX,
         "where": "install-prefix components of search-directory and `-v` configuration output",
         "permitted": "the candidate's configured install prefix, applied to the whole prefix only",
-        "patterns": [rf"(?<![\w/.])({re.escape(ORACLE_PREFIX)})(?=/)"],
+        "patterns": [
+            rf"(?<![\w/.])({re.escape(ORACLE_PREFIX)})(?=/)",
+            rf"^Configured with: .* --prefix=({re.escape(ORACLE_PREFIX)})(?= |$)",
+        ],
     },
 ]
 

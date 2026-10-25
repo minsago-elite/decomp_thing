@@ -842,7 +842,8 @@
       "where": "install-prefix components of search-directory and `-v` configuration output",
       "permitted": "the candidate's configured install prefix, applied to the whole prefix only",
       "patterns": [
-        "(?<![\\w/.])(/oracle/install)(?=/)"
+        "(?<![\\w/.])(/oracle/install)(?=/)",
+        "^Configured with: .* --prefix=(/oracle/install)(?= |$)"
       ]
     }
   ],

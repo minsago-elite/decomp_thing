@@ -7,7 +7,9 @@ captured from real GCC 16.2.0 by `scripts/capture-gcc-preprocessing-reference.py
 
 ## Execution environment
 
-Every case runs the installed `/usr/local/bin/gcc` and its `cc1` inside the pinned
+Preprocessing, dependency-generation and `image`-driver metadata cases run the
+installed `/usr/local/bin/gcc` and its `cc1`; `oracle`-driver metadata cases run
+the oracle driver described below instead. Every case runs inside the pinned
 official image `docker.io/library/gcc@sha256:2e6f4ae27ab8ad6f9617b46f0468889d368fdd91f2ea29aff98e4d5d1a3637f0`
 (config `sha256:103614947d5e…`), which is the base image of
 `oracle/gcc/16.2.0/build-toolchain.Dockerfile`. The container has no network, a
@@ -54,8 +56,8 @@ The record's `identitySubstitutions` lists the only differences a candidate may
 show, each with patterns that bound the replaceable span: the driver basename in
 diagnostic prefixes, the `--version` banner and the `--help` usage text; the
 invocation `argv[0]` in the `-v` `COLLECT_GCC=` line; and the install prefix in
-path output. The capture re-runs every metadata case through a symlinked driver
-named `candidate-cc` and fails unless the driver-name substitutions account for
+path output and the complete `--prefix=` configure argument in `-v`. The capture
+re-runs every metadata case through a symlinked driver named `candidate-cc` and fails unless the driver-name substitutions account for
 every difference. Everything else must match byte-for-byte.
 
 Phase orchestration (`oracle/gcc/16.2.0/orchestration-phase-reference.json`,
@@ -90,9 +92,12 @@ pull requests labeled `qualify:preprocessing-reference`.
 
 ## Boundary
 
-The frontend is the official image's GCC 16.2.0, not the byte-identical
-`artifacts/gcc-driver.stripped` oracle driver, so these records establish real
-GCC frontend semantics rather than oracle-artifact identity. Comparing a
+The preprocessing and dependency-generation records, and the four `image`-driver
+metadata cases, use the official image's GCC 16.2.0 frontend rather than the
+byte-identical `artifacts/gcc-driver.stripped` oracle driver, so they establish
+real GCC frontend semantics rather than oracle-artifact identity. The 15
+`oracle`-driver metadata cases execute the manifest-verified oracle driver itself
+and so describe oracle-artifact behavior. Comparing a
 reconstructed candidate driver against them remains downstream work. No Ghidra
 analysis, `GHIDRA_HOME` fallback or `analyzeHeadless` invocation is introduced,
 and no authority crosses the oracle/candidate boundary.
