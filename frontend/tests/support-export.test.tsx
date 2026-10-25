@@ -1,6 +1,7 @@
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { act, cleanup, fireEvent, render, screen } from '@testing-library/preact';
+import axe from 'axe-core';
 import { afterEach, expect, it, vi } from 'vitest';
 import { createApiClient } from '../src/api/client';
 import { ApiClientError } from '../src/api/errors';
@@ -84,4 +85,20 @@ it('decodes both contract fixtures through the real typed client', async () => {
     const response = await client.get('supportExport', '/support-export?scope=server');
     expect(response.data).toEqual(document.data);
   }
+});
+
+it('has no automated WCAG A/AA violations in the invalid and previewed states', async () => {
+  const { client } = fakeClient(() => Promise.resolve({ data: job.data }));
+  render(<main><SupportExport client={client} /></main>);
+  const check = async () => (await axe.run(document.body, {
+    runOnly: { type: 'tag', values: ['wcag2a', 'wcag2aa', 'wcag21a', 'wcag21aa', 'wcag22aa'] },
+    rules: { 'color-contrast': { enabled: false } }, resultTypes: ['violations'],
+  })).violations.map(violation => violation.id);
+  fireEvent.click(screen.getByRole('radio', { name: /One job/ }));
+  await click('Preview export');
+  expect(await check()).toEqual([]);
+  fireEvent.input(screen.getByLabelText(/Job ID/), { target: { value: job.data.scope.jobId } });
+  await click('Preview export');
+  await screen.findByRole('link', { name: /Download previewed export/ });
+  expect(await check()).toEqual([]);
 });
