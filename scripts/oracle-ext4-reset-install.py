@@ -61,6 +61,7 @@ INSTALL_FILES = {
     'scripts/ci-oracle-ext4-reset.py': 'ci-oracle-ext4-reset.py',
     'scripts/oracle-ext4-reset-install.py': 'oracle-ext4-reset-install.py',
     'scripts/oracle-ext4-reset-fixture-mutations.py': 'oracle-ext4-reset-fixture-mutations.py',
+    'scripts/verify-oracle-ext4-reset.py': 'verify-oracle-ext4-reset.py',
     'scripts/oracle-ext4-reset-mke2fs.conf': 'mke2fs.conf',
 }
 APT_BOUNDARY = 'requires-successful-signature-enforced-workflow-apt-install'
