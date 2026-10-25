@@ -320,11 +320,38 @@ jobs:
             util-linux
           sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
           bwrap --ro-bind /usr /usr --ro-bind /lib /lib --ro-bind /lib64 /lib64 /usr/bin/true
+      - name: Install authenticated ext4 reset qualification prerequisites
+        if: matrix.shard == 'live-fulltree'
+        timeout-minutes: 10
+        shell: bash
+        run: |
+          mkdir -p build/issue933-evidence
+          apt_auth_options=(
+            -o APT::Get::AllowUnauthenticated=false
+            -o Acquire::AllowInsecureRepositories=false
+            -o Acquire::AllowDowngradeToInsecureRepositories=false
+            -o Acquire::Retries=2
+            -o Acquire::http::Timeout=30
+            -o Acquire::https::Timeout=30
+          )
+          sudo apt-get "${apt_auth_options[@]}" --error-on=any update 2>&1 \
+            | tee build/issue933-evidence/apt-update.log
+          sudo apt-get "${apt_auth_options[@]}" install -y --no-install-recommends \
+            e2fsprogs strace util-linux 2>&1 | tee build/issue933-evidence/apt-install.log
       - name: Check runtime provisioning with isolated inert fixtures
         run: python3 scripts/test-ci-bundled-runtime.py
       - name: Check CI partition routing and report ownership controls
         if: matrix.shard == 'core'
         run: python3 scripts/test-ci-partitions.py
+      - name: Check trusted ext4 reset provisioner and report controls
+        if: matrix.shard == 'core'
+        timeout-minutes: 2
+        run: |
+          python3 -B scripts/test-oracle-ext4-reset.py --verbose
+          python3 -B scripts/test-oracle-ext4-reset-install.py --verbose
+          python3 -B scripts/test-oracle-ext4-reset-fixture-mutations.py --verbose
+          python3 -B scripts/test-oracle-ext4-reset-report.py --verbose
+          python3 -B scripts/test-ci-oracle-ext4-reset.py --verbose
       - name: Check pinned Goose archive acquisition controls
         if: matrix.shard == 'core'
         run: python3 scripts/test-goose-archive-download.py
@@ -358,6 +385,13 @@ jobs:
           sudo -n python3 -I -S scripts/ci-oracle-ext4-admission.py prepare > build/issue930-evidence/prepare.json
           echo "DECOMP_TEST_ORACLE_EXT4_ADMISSION_HELPER=$GITHUB_WORKSPACE/scripts/ci-oracle-ext4-admission.py" >> "$GITHUB_ENV"
           echo "DECOMP_TEST_ORACLE_EXT4_ADMISSION_SCRATCH=/var/lib/decomp-oracle-ext4-admission-ci/scratch" >> "$GITHUB_ENV"
+      - name: Prepare separate trusted ext4 reset qualification slot
+        if: matrix.shard == 'live-fulltree'
+        run: |
+          mkdir -p build/issue933-evidence
+          sudo -n /usr/bin/python3 -I -S scripts/ci-oracle-ext4-reset.py prepare \
+            > build/issue933-evidence/prepare.json
+          echo "DECOMP_TEST_ORACLE_EXT4_RESET_HELPER=$GITHUB_WORKSPACE/scripts/ci-oracle-ext4-reset.py" >> "$GITHUB_ENV"
       - name: Prepare separate bounded ext4 bundled-analysis scratch
         run: bash scripts/ci-prepare-oracle-ext4-scratch.sh --bundled-ghidra
       - name: Prepare separate bundled interruption-resume scratch
@@ -414,6 +448,7 @@ jobs:
         env:
           DECOMP_REQUIRE_ORACLE_EXT4_SCRATCH: "true"
           DECOMP_REQUIRE_ORACLE_EXT4_ADMISSION: ${{ matrix.shard == 'live-fulltree' && 'true' || 'false' }}
+          DECOMP_REQUIRE_ORACLE_EXT4_RESET: ${{ matrix.shard == 'live-fulltree' && 'true' || 'false' }}
           DECOMP_REQUIRE_BUNDLED_GHIDRA_EXECUTION: "true"
           DECOMP_CI_TEST_SHARD: ${{ matrix.test-shard }}
         run: scripts/ci.sh
@@ -423,6 +458,21 @@ jobs:
           python3 scripts/verify-oracle-ext4-admission.py
           --reports build/test-results/test
           --output build/issue930-evidence/qualification.json
+      - name: Require all 32 actual trusted ext4 reset controls
+        if: always() && matrix.shard == 'live-fulltree'
+        run: >-
+          python3 scripts/verify-oracle-ext4-reset.py
+          --reports build/test-results/test
+          --evidence build/issue933-evidence
+          --source-root .
+          --source-commit "$(git rev-parse HEAD)"
+          --output build/issue933-evidence/qualification.json
+      - name: Inspect retained ext4 reset reservation without releasing it
+        if: always() && matrix.shard == 'live-fulltree'
+        run: |
+          mkdir -p build/issue933-evidence
+          sudo -n /usr/bin/python3 -I -S scripts/ci-oracle-ext4-reset.py inspect \
+            > build/issue933-evidence/retained.json 2> build/issue933-evidence/retained.stderr.log
       - name: Require every source-declared recovery scenario in core reports
         if: always() && matrix.shard == 'core'
         run: >-
@@ -472,6 +522,7 @@ jobs:
             build/reports/tests/test
             build/test-results/test
             build/issue930-evidence
+            build/issue933-evidence
             build/web-job-recovery-inventory.json
             build/reports/tests/v3BoundaryFinalStagingIsolated
             build/test-results/v3BoundaryFinalStagingIsolated
