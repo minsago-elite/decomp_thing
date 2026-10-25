@@ -3,8 +3,9 @@
 
 Every case runs in the pinned official base image that `build-toolchain.Dockerfile`
 builds on. Every metadata case runs the authenticated oracle driver mounted at
-its configured bindir; frontend cases mount its manifest-pinned cc1. Preprocessing,
-dependency and orchestration cases run the image's installed `gcc`. Runs have
+its configured bindir; frontend cases mount its manifest-pinned cc1. Orchestration
+also uses that driver and frontend, with explicitly selected image helpers.
+Preprocessing and dependency cases run the image's installed `gcc`. Runs have
 no network, a read-only root filesystem and no capabilities. Preprocessing and
 dependency cases add `-nostdinc` and use staged include roots; metadata and
 orchestration cases use the driver's default include search. Each
@@ -404,12 +405,15 @@ def run_gcc(runtime: str, scratch: Path, spec: dict, label: str, extra: list[str
     workspace = scratch / f"{spec['id']}-{label}"
     workspace.mkdir()
     stage(workspace, spec["inputs"])
-    return workspace, run_container(runtime, workspace, ["gcc", *extra, *spec["arguments"]], b"")
+    environment = {**ENVIRONMENT, **ORCHESTRATION_ENVIRONMENT}
+    command = ["env", "-i", *(f"{key}={value}" for key, value in sorted(environment.items())),
+               ORACLE_DRIVER_PATH, *extra, *spec["arguments"]]
+    return workspace, run_container(runtime, workspace, command, b"", orchestration_mounts(scratch))
 
 
-def inspect_runtime(runtime: str, workspace: Path, paths: list[str]) -> dict:
+def inspect_runtime(runtime: str, workspace: Path, paths: list[str], mounts: tuple = ()) -> dict:
     result = run_container(runtime, workspace,
-                           ["python3", "-B", "-c", RUNTIME_PROBE_BYTES.decode(), *paths], b"",
+                           ["python3", "-B", "-c", RUNTIME_PROBE_BYTES.decode(), *paths], b"", mounts,
                            workspace_read_only=True)
     if result.returncode or result.stderr:
         raise SystemExit(f"reference runtime inspection failed: {result.stderr.decode(errors='replace')}")
@@ -510,7 +514,7 @@ def capture_orchestration_case(runtime: str, scratch: Path, spec: dict, phase_to
         "id": spec["id"],
         "categories": spec["categories"],
         "arguments": spec["arguments"],
-        "environment": ENVIRONMENT,
+        "environment": {**ENVIRONMENT, **ORCHESTRATION_ENVIRONMENT},
         "inputs": [
             {"path": path, "bytes": len(data), "sha256": digest(data)}
             for path, data in sorted(spec["inputs"].items())
@@ -521,13 +525,13 @@ def capture_orchestration_case(runtime: str, scratch: Path, spec: dict, phase_to
     }
 
 
-def phase_tool_identities(runtime: str, scratch: Path) -> dict:
+def phase_tool_identities(runtime: str, scratch: Path, oracle_frontend: dict) -> dict:
     workspace = scratch / "phase-identity"
     workspace.mkdir()
     stage(workspace, {})
     script = (
         "set -eu; "
-        "for tool in cc1 collect2 lto-wrapper liblto_plugin.so; do "
+        "for tool in collect2 lto-wrapper liblto_plugin.so; do "
         "path=$(gcc -print-prog-name=$tool); "
         "printf '%s\\t%s\\t%s\\t%s\\n' \"$tool\" \"$path\" \"$(readlink -f \"$path\")\" \"$(sha256sum < \"$path\" | cut -d' ' -f1)\"; "
         "done; "
@@ -548,7 +552,8 @@ def phase_tool_identities(runtime: str, scratch: Path) -> dict:
             entry["version"] = fields[4]
         identities[fields[0]] = entry
     return {
-        "compile": {"role": "cc1", **identities["cc1"]},
+        "compile": {"role": "cc1", "path": ORACLE_FRONTEND_PATH, "resolvedPath": ORACLE_FRONTEND_PATH,
+                    "bytes": oracle_frontend["bytes"], "sha256": oracle_frontend["sha256"], "source": "oracleFrontend"},
         "assemble": {"role": "as", "invokedAs": "as", "lookup": "PATH", **identities["as"]},
         "link": {"role": "collect2", **identities["collect2"]},
         "linkEditor": {"role": "ld", "invokedBy": "collect2", "lookup": "PATH", **identities["ld"]},
@@ -569,6 +574,16 @@ def oracle_install_prefix() -> str:
 ORACLE_PREFIX = oracle_install_prefix()
 ORACLE_DRIVER_PATH = f"{ORACLE_PREFIX}/bin/gcc"
 ORACLE_FRONTEND_PATH = f"{ORACLE_PREFIX}/libexec/gcc/x86_64-pc-linux-gnu/16.2.0/cc1"
+ORCHESTRATION_ENVIRONMENT = {
+    "PATH": PROGRAM_ENVIRONMENT["PATH"],
+    "COMPILER_PATH": f"{PurePosixPath(ORACLE_FRONTEND_PATH).parent}:/usr/local/libexec/gcc/x86_64-linux-gnu/16.2.0",
+    "LIBRARY_PATH": "/usr/local/lib/gcc/x86_64-linux-gnu/16.2.0:/usr/lib/x86_64-linux-gnu",
+    "C_INCLUDE_PATH": "/usr/local/lib/gcc/x86_64-linux-gnu/16.2.0/include",
+}
+
+
+def orchestration_mounts(scratch: Path) -> tuple:
+    return ((ORACLE_DRIVER, ORACLE_DRIVER_PATH), (scratch / "oracle-cc1", ORACLE_FRONTEND_PATH))
 
 IDENTITY_SUBSTITUTIONS = [
     {
@@ -898,9 +913,11 @@ def records(runtime: str, scratch: Path) -> tuple[dict, dict, dict, dict]:
         check_driver_name_substitution(runtime, scratch, spec, captured["observed"])
     preprocessing = [capture_case(runtime, scratch, spec) for spec in PREPROCESSING_CASES]
     dependency = [capture_case(runtime, scratch, spec) for spec in DEPENDENCY_CASES]
-    phase_tools = phase_tool_identities(runtime, scratch)
+    phase_tools = phase_tool_identities(runtime, scratch, oracle_frontend)
+    original_driver = {"path": ORACLE_DRIVER_PATH, "bytes": oracle_driver["bytes"], "sha256": oracle_driver["sha256"]}
     phase_runtime = inspect_runtime(runtime, scratch / "phase-identity",
-                                    [identity["driver"]["path"], *[item["path"] for item in phase_tools.values()]])
+                                    [ORACLE_DRIVER_PATH, *[item["path"] for item in phase_tools.values()]],
+                                    orchestration_mounts(scratch))
     orchestration_cases = [capture_orchestration_case(runtime, scratch, spec, phase_tools) for spec in ORCHESTRATION_CASES]
     capture = {
         "tool": "scripts/capture-gcc-preprocessing-reference.py",
@@ -975,11 +992,16 @@ def records(runtime: str, scratch: Path) -> tuple[dict, dict, dict, dict]:
             "id": "gcc-16-2-0-orchestration-phase-reference",
             "status": "captured",
             "scope": "real-driver-phase-orchestration",
-            "toolchain": {**identity, "includeSearch": "default system include search", "phaseTools": phase_tools,
-                          "runtimeClosure": phase_runtime},
+            "toolchain": {**identity, "driver": original_driver,
+                          "frontend": {"role": "cc1", "path": ORACLE_FRONTEND_PATH, "sha256": oracle_frontend["sha256"]},
+                          "target": next(case["observed"]["stdout"]["text"].strip() for case in metadata if case["id"] == "dumpmachine"),
+                          "includeSearch": "default system include search plus the explicitly selected pinned-image builtin headers",
+                          "phaseTools": phase_tools, "runtimeClosure": phase_runtime},
+            "oracleDriver": {**oracle_driver, "installTree": "not retained; the original driver and frontend are mounted read-only; image phase helpers are selected by the declared environment"},
+            "oracleFrontend": {**oracle_frontend, "scope": "read-only mount for every orchestration case"},
             "referenceInvocationPolicy": {
                 "imageAuthentication": "the exact pinned image config is verified before every container invocation",
-                "driver": identity["driver"],
+                "driver": original_driver,
                 "cases": "only the exact versioned arguments and staged input bytes listed in cases are admitted",
                 "modes": [["-###"], ["-v"], []],
                 "phaseTools": "unknown or malformed planned commands are rejected; each parsed planned or verbose phase path must match a declared phaseTools path or its explicit invokedAs name",
