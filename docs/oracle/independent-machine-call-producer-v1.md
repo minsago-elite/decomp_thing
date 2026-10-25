@@ -205,3 +205,9 @@ PYTHONDONTWRITEBYTECODE=1 python3 -m unittest tests.oracle.test_byte_instruction
 `DECOMP_BYTE_DECODER_GHIDRA_RELEASE` can select an existing bundled release for
 the authored API controls. These tests verify decoder behavior; they do not
 authenticate a retained compiler run or establish production oracle authority.
+
+The [retained GCC driver component evidence](../../oracle/gcc/16.2.0/machine-call-component-v1/README.md)
+contains the exact compressed report, original request, source/input commitments,
+and a bounded offline verifier with create-new extraction. Its producer JAR hash
+remains a recorded build observation; the retained material grants no production
+or source-to-binary attestation authority.
