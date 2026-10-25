@@ -146,6 +146,22 @@ class WebArtifactCatalogTest {
         assertFailsWith<java.util.concurrent.CancellationException> { catalog.detail(jobId, id, "/", cancelled) }
     }
 
+    @Test fun `range forwarding reports progress for every verification chunk and withholds the final slice`() {
+        val data = ByteArray(10 * 4096) { it.toByte() }
+        for (range in listOf(WebByteRange(0, 9), WebByteRange(5000, 20000), WebByteRange(0, data.size - 1L), WebByteRange(data.size - 3L, data.size - 1L))) {
+            val written = java.io.ByteArrayOutputStream(); var progress = 0
+            val forwarder = WebRangeForwarder(range, { written.write(it) }, { progress++ })
+            data.toList().chunked(4096).forEachIndexed { index, chunk ->
+                forwarder.accept(chunk.toByteArray(), chunk.size)
+                assertEquals(index + 1, progress, "progress for every chunk of $range")
+            }
+            // Nothing past the range is written, and its last slice waits for verification.
+            assertTrue(written.size() < range.length)
+            assertEquals(range.length, forwarder.finish())
+            assertContentEquals(data.copyOfRange(range.start.toInt(), range.endInclusive.toInt() + 1), written.toByteArray())
+        }
+    }
+
     @Test fun `request deadlines are keyed by exchange identity rather than shared attributes`() {
         val scheduler = java.util.concurrent.ScheduledThreadPoolExecutor(1)
         try {

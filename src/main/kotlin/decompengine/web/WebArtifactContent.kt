@@ -144,24 +144,13 @@ internal class WebArtifactContent(private val store: WebArtifactStore,
     private fun stream(exchange: HttpExchange, selection: WebArtifactSelection, size: Long, range: WebByteRange, cancellation: () -> Unit) {
         val output = exchange.responseBody
         val deadline = WebRequestDeadline.of(exchange)
-        var pending: ByteArray? = null
-        var position = 0L
-        var written = 0L
+        val forwarder = WebRangeForwarder(range, { output.write(it) }, { deadline?.renew() })
         val digest = store.stream(selection.jobId, selection.attempt.runId, selection.family.path, {
             if (it != size) webArtifactChanged()
-        }, { buffer, count ->
-            val chunkStart = position; val chunkEnd = position + count - 1
-            position += count
-            val from = maxOf(chunkStart, range.start); val to = minOf(chunkEnd, range.endInclusive)
-            if (from <= to) {
-                pending?.let { output.write(it); written += it.size; deadline?.renew() }
-                pending = buffer.copyOfRange((from - chunkStart).toInt(), (to - chunkStart + 1).toInt())
-            }
-        }, cancellation)
+        }, forwarder::accept, cancellation)
         // The final bytes are released only after the complete pass reproduced the listed digest and identity.
         if (digest.sha256 != selection.sha256 || digest.size != size) throw IllegalStateException("artifact changed while streaming")
-        pending?.let { output.write(it); written += it.size }
-        check(written == range.length)
+        check(forwarder.finish() == range.length)
         output.flush()
     }
 
@@ -173,5 +162,33 @@ internal fun webExchangeCancellation(exchange: Any): () -> Unit {
     return {
         if (Thread.currentThread().isInterrupted) throw CancellationException("artifact read interrupted")
         if (deadline?.expired == true) throw CancellationException("artifact read deadline expired")
+    }
+}
+
+/**
+ * Forwards the selected byte range of a verification pass, holding back its final slice until [finish]. Every
+ * consumed chunk, including chunks outside the range, reports progress so a long verification keeps its deadline.
+ */
+internal class WebRangeForwarder(private val range: WebByteRange, private val write: (ByteArray) -> Unit, private val progress: () -> Unit) {
+    private var pending: ByteArray? = null
+    private var position = 0L
+    private var written = 0L
+
+    fun accept(buffer: ByteArray, count: Int) {
+        val chunkStart = position; val chunkEnd = position + count - 1
+        position += count
+        val from = maxOf(chunkStart, range.start); val to = minOf(chunkEnd, range.endInclusive)
+        if (from <= to) {
+            pending?.let { write(it); written += it.size }
+            pending = buffer.copyOfRange((from - chunkStart).toInt(), (to - chunkStart + 1).toInt())
+        }
+        progress()
+    }
+
+    /** Releases the held-back slice; call only after the pass has been verified. Returns the bytes written. */
+    fun finish(): Long {
+        pending?.let { write(it); written += it.size }
+        pending = null
+        return written
     }
 }
