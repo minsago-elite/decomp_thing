@@ -24,6 +24,7 @@ internal object ContainedCommandTerminalResourceEvidence {
         "terminal" to JsonPrimitive("same-scope-frozen-with-only-retained-BOOT-keepers-before-kill"),
         "counters" to JsonPrimitive("pids.events:all;memory.events:all;required:low,high,max,oom,oom_kill,oom_group_kill"),
         "acceptance" to JsonPrimitive("unchanged-keysets;monotonic;all-except-memory.low-zero-at-both-samples"),
+        "output" to JsonPrimitive("HMAC-protocol-v2;sha256-of-owned-pipe-bytes;captured-files-must-match-counts-and-hashes"),
         "cleanup" to JsonPrimitive("exact-unit-cgroup-and-retained-pidfds-absent"),
     ))))
 
@@ -130,11 +131,10 @@ internal object ContainedCommandTerminalResourceEvidence {
             "contained command execution differs from its resource attachment"
         }
         val outcome = execution.objectField("outcome")
+        requireStrictOutcomeHashes(outcome)
         require(outcome["status"] == JsonPrimitive("EXITED") && outcome["exitCode"] == JsonPrimitive(0) &&
             execution["childExitCode"] == JsonPrimitive(0)) { "contained command strict execution was not successful" }
-        require(outcome["schemaVersion"] == JsonPrimitive(1) &&
-            outcome["provider"] == JsonPrimitive("kotlin-contained-command-protocol-v1") &&
-            outcome["event"] == JsonPrimitive("OUTCOME") && outcome["requestSha256"] == attachment["requestSha256"] &&
+        require(outcome["requestSha256"] == attachment["requestSha256"] &&
             outcome["nonce"] == attachment["nonce"]) { "contained command strict outcome belongs to another request" }
         val keeperNamespacePid = requireScopeAndKeeper(attachment)
         require(outcome.number("keeperPid") == keeperNamespacePid && outcome.number("childPid") != keeperNamespacePid &&
@@ -152,6 +152,36 @@ internal object ContainedCommandTerminalResourceEvidence {
         val expected = create(attachmentBytes, Counters.parse(proof.objectField("final")))
         require(proof == expected) { "contained command terminal resource evidence differs from its frozen scope proof" }
         return proof
+    }
+
+    /** Compare retained captures only after authenticating the live outcome or reopening its execution proof. */
+    fun requireCapturedOutput(outcome: JsonObject, stdout: ByteArray, stderr: ByteArray) {
+        requireStrictOutcomeHashes(outcome)
+        for ((stream, bytes) in listOf("stdout" to stdout, "stderr" to stderr)) {
+            require(outcome.number("${stream}Bytes") == bytes.size.toLong() &&
+                outcome["${stream}Sha256"] == JsonPrimitive(OracleArtifacts.sha256(bytes))) {
+                "contained command captured $stream differs from its authenticated pipe bytes"
+            }
+        }
+    }
+
+    private fun requireStrictOutcomeHashes(outcome: JsonObject) {
+        require(outcome.keys == setOf("schemaVersion", "provider", "event", "nonce", "requestSha256", "keeperPid",
+            "childPid", "exitCode", "elapsedMillis", "stdoutBytes", "stderrBytes", "status", "hmacSha256",
+            "stdoutSha256", "stderrSha256") && outcome["schemaVersion"] == JsonPrimitive(2) &&
+            outcome["provider"] == JsonPrimitive("kotlin-contained-command-protocol-v2") &&
+            outcome["event"] == JsonPrimitive("OUTCOME")) { "contained command strict outcome lacks authenticated pipe hashes" }
+        for (stream in listOf("stdout", "stderr")) {
+            val bytes = outcome.number("${stream}Bytes")
+            val hash = outcome.string("${stream}Sha256")
+            require(bytes in 0L..KotlinContainedCommandRequest.MAXIMUM_LOG_BYTES && hash.matches(Regex("[0-9a-f]{64}")) &&
+                (bytes != 0L || hash == OracleArtifacts.sha256(ByteArray(0)))) {
+                "contained command strict $stream pipe identity is malformed"
+            }
+        }
+        require(outcome.string("hmacSha256").matches(Regex("[0-9a-f]{64}"))) {
+            "contained command strict outcome authentication is malformed"
+        }
     }
 
     private fun requireScopeAndKeeper(attachment: JsonObject): Long {

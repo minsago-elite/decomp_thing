@@ -141,6 +141,44 @@ class ContainedCommandTerminalResourceEvidenceTest {
         }
     }
 
+    @Test
+    fun `strict outcome pipe hashes bind exact captured bytes and cannot be downgraded`() {
+        val stdout = "real-result".toByteArray()
+        val stderr = "real-error".toByteArray()
+        val strict = request()
+        val signed = KotlinContainedCommandOutcome(123, 124, 0, 1, stdout.size.toLong(), stderr.size.toLong(), "EXITED",
+            OracleArtifacts.sha256(stdout), OracleArtifacts.sha256(stderr))
+        val bytes = KotlinContainedCommandProtocol.outcome(ByteArray(32), strict, signed)
+        val outcome = document(bytes)
+        assertEquals(JsonPrimitive(2), outcome["schemaVersion"])
+        assertEquals(signed, KotlinContainedCommandProtocol.requireOutcome(bytes, ByteArray(32), strict, 123))
+        ContainedCommandTerminalResourceEvidence.requireCapturedOutput(outcome, stdout, stderr)
+        assertFailsWith<IllegalArgumentException> {
+            ContainedCommandTerminalResourceEvidence.requireCapturedOutput(outcome, "fake-result".toByteArray(), stderr)
+        }
+        assertFailsWith<IllegalArgumentException> {
+            ContainedCommandTerminalResourceEvidence.requireCapturedOutput(outcome, stdout, "fake-error".toByteArray())
+        }
+        for (field in listOf("stdoutSha256", "stderrSha256")) {
+            val corrupt = JsonObject(outcome + (field to JsonPrimitive("0".repeat(64))))
+            assertFailsWith<IllegalArgumentException> {
+                KotlinContainedCommandProtocol.requireOutcome(OracleJson.canonicalBytes(corrupt), ByteArray(32), strict, 123)
+            }
+            assertFailsWith<IllegalArgumentException> {
+                ContainedCommandTerminalResourceEvidence.requireCapturedOutput(JsonObject(outcome - field), stdout, stderr)
+            }
+        }
+        assertFailsWith<IllegalArgumentException> {
+            KotlinContainedCommandProtocol.outcome(ByteArray(32), strict, signed.copy(stdoutSha256 = null))
+        }
+        assertFailsWith<IllegalArgumentException> { KotlinContainedCommandProtocol.outcome(ByteArray(32), request(strict = false), signed) }
+        val legacy = document(KotlinContainedCommandProtocol.outcome(ByteArray(32), request(strict = false),
+            signed.copy(stdoutSha256 = null, stderrSha256 = null)))
+        assertEquals(JsonPrimitive(1), legacy["schemaVersion"])
+        assertEquals(outcome.keys - setOf("stdoutSha256", "stderrSha256"), legacy.keys)
+        assertFailsWith<IllegalArgumentException> { ContainedCommandTerminalResourceEvidence.requireCapturedOutput(legacy, stdout, stderr) }
+    }
+
     private fun request(strict: Boolean = true, interruption: Boolean = false) = KotlinContainedCommandRequest(
         Path.of("/srv/contained-run"), "a".repeat(64), listOf("/usr/bin/java", "-version"),
         mapOf("LANG" to "C.UTF-8", "LC_ALL" to "C.UTF-8", "TZ" to "UTC"), 30, 30, 1024, 1024,
@@ -177,7 +215,8 @@ class ContainedCommandTerminalResourceEvidenceTest {
 
     private fun execution(attachment: ByteArray, status: String = "EXITED", code: Int = 0): ByteArray {
         val outcome = KotlinContainedCommandProtocol.outcome(ByteArray(32), request(),
-            KotlinContainedCommandOutcome(123, 124, code, 1, 0, 0, status))
+            KotlinContainedCommandOutcome(123, 124, code, 1, 0, 0, status,
+                OracleArtifacts.sha256(ByteArray(0)), OracleArtifacts.sha256(ByteArray(0))))
         return record(JsonObject(mapOf(
             "schemaVersion" to JsonPrimitive(3), "provider" to JsonPrimitive("kotlin-lease-contained-command-execution-v3"),
             "attachmentSha256" to JsonPrimitive(OracleArtifacts.sha256(attachment)),
