@@ -214,6 +214,61 @@ class GitBranchesWorktreesTest {
         }
     }
 
+    @Test fun `linked work trees cannot share a branch, resolve every ref page and recover their own commits`(): Unit = Fixture().use { f ->
+        val base = f.prepare()
+        val primary = service.workspace(jobId, repositoryId).worktreeId
+        val linked = run(GitRefRequest(GitOperationAction.WORKTREE_ADD, primary, guards().second, objectId = base)).worktreeId
+        // The primary checkout is invisible to Git's own check in the bare layout; the workbench refuses.
+        refused("BRANCH_CURRENT", GitRefRequest(GitOperationAction.SWITCH, linked, guards(linked).second, refId = refId("refs/heads/trunk")))
+        // Branch identities beyond the first 200 refs still resolve.
+        (1..210).forEach { f.repositories.git("--git-dir=${f.gitDir()}", "branch", "b%03d".format(it), base) }
+        val switched = run(GitRefRequest(GitOperationAction.SWITCH, linked, guards(linked).second, refId = refId("refs/heads/b205")))
+        assertEquals(GitOperationState.COMPLETED, switched.state, switched.message)
+        assertEquals("refs/heads/b205", service.workspace(jobId, repositoryId, linked).observation.head.refName)
+        // A commit in the linked work tree that crashes after Git ran is classified by that work tree's HEAD.
+        val path = f.store.resolve("$jobId/git/repositories/$repositoryId/worktrees/$linked")
+        Files.writeString(path.resolve("src/new.c"), "int fresh;\n")
+        val (view, g) = guards(linked)
+        run(GitStageRequest(linked, g, view.observation.status.entries.filter { it.untracked }.map { it.path.fileId(linked) }, true))
+        val (staged, stagedGuards) = guards(linked)
+        f.hook = { if (it == GitOperationCrashPoint.AFTER_PUBLISH) throw SimulatedGitCrash() }
+        val admission = service.requestWorkspace(jobId, repositoryId, GitCommitRequest(linked, stagedGuards,
+            staged.observation.status.entries.filter { it.staged != GitIndexChange.NONE }.map { it.path.fileId(linked) }, "linked crash"), "linked_crash_key_01")
+        assertTrue(service.awaitIdle(60_000)); service.close()
+        f.hook = {}
+        service = f.open()
+        val recovered = service.operation(jobId, repositoryId, admission.operation.operationId)
+        assertEquals(GitOperationState.RECOVERY_REQUIRED, recovered.state)
+        assertEquals(service.workspace(jobId, repositoryId, linked).observation.head.objectId, recovered.resultObjectId)
+        assertEquals(base, service.workspace(jobId, repositoryId).observation.head.objectId)
+    }
+
+    @Test fun `an interrupted named work-tree addition rolls back its new branch`(): Unit = Fixture().use { f ->
+        val base = f.prepare()
+        val primary = service.workspace(jobId, repositoryId).worktreeId
+        f.hook = { if (it == GitOperationCrashPoint.AFTER_STAGING) throw SimulatedGitCrash() }
+        service.requestWorkspace(jobId, repositoryId, GitRefRequest(GitOperationAction.WORKTREE_ADD, primary, guards().second,
+            name = "experiment", objectId = base), "named_crash_key_001")
+        assertTrue(service.awaitIdle(60_000)); service.close()
+        assertNotNull(GitRefOperations.refObject(f.repositories.runner, f.gitDir(), GitObjectFormat.SHA1, "refs/heads/experiment"))
+        f.hook = {}
+        service = f.open()
+        service.listing(jobId)
+        assertNull(GitRefOperations.refObject(f.repositories.runner, f.gitDir(), GitObjectFormat.SHA1, "refs/heads/experiment"))
+        val retried = run(GitRefRequest(GitOperationAction.WORKTREE_ADD, primary, guards().second, name = "experiment", objectId = base))
+        assertEquals(GitOperationState.COMPLETED, retried.state, retried.message)
+    }
+
+    @Test fun `a large file exports within the capture bounds`(): Unit = Fixture().use { f ->
+        f.prepare()
+        Files.write(f.workTree().resolve("table.dat"), ByteArray(40 * 1024 * 1024) { (it % 251).toByte() })
+        f.raw("add", "--", "table.dat"); f.raw("commit", "-q", "-m", "large")
+        val head = f.repositories.git("--git-dir=${f.gitDir()}", "rev-parse", "HEAD").trim()
+        val export = service.export(jobId, repositoryId, head)
+        assertTrue(export.bytes.size > 40 * 1024 * 1024)
+        assertTrue(GitSourceExports.verify(export.bytes, GitObjectFormat.SHA1, export.blobs))
+    }
+
     @Test fun `exports are deterministic, exclude Git metadata and verify independently of ref names`(): Unit = Fixture().use { f ->
         val base = f.prepare()
         val first = service.export(jobId, repositoryId, base)

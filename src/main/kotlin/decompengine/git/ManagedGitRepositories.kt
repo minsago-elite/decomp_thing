@@ -739,7 +739,7 @@ class ManagedGitRepositories(
 
     private fun branchFor(runner: GitCommandRunner, located: Located, refId: String?): Pair<String, String> {
         val id = refId ?: GitRefOperations.refuse("VALIDATION_FAILED", "A branch ref identity is required.")
-        val (refs, _) = GitReads.refs(runner, located.commonDir, located.record.objectFormat, 0, 200)
+        val refs = GitReads.allRefs(runner, located.commonDir, located.record.objectFormat)
         val ref = refs.singleOrNull { it.name.startsWith("refs/heads/") && GitWorkspaceVersions.refId(located.record.repositoryId, it.name) == id }
             ?: GitRefOperations.refuse("NOT_FOUND", "The branch is not registered in this repository.")
         return ref.name to ref.objectId
@@ -769,8 +769,14 @@ class ManagedGitRepositories(
                 if ((request.refId == null) == (request.objectId == null)) {
                     GitRefOperations.refuse("VALIDATION_FAILED", "A switch names exactly one branch or one commit.")
                 }
-                val target = request.refId?.let { branchFor(runner, located, it).second }
-                    ?: GitRefOperations.requireCommit(runner, located.commonDir, format, request.objectId)
+                val target = request.refId?.let { refId ->
+                    val (name, tip) = branchFor(runner, located, refId)
+                    // The bare common layout hides the primary checkout from Git's own check; use ours.
+                    if (name != observation.head.refName && name in checkedOutBranches(runner, located)) {
+                        GitRefOperations.refuse("BRANCH_CURRENT", "That branch is checked out in another work tree. Use a new branch or switch that work tree first.")
+                    }
+                    tip
+                } ?: GitRefOperations.requireCommit(runner, located.commonDir, format, request.objectId)
                 GitRepositoryImport.requireCheckoutBounds(runner, located.commonDir, target, importLimits)
             }
             GitOperationAction.BRANCH_DELETE -> {
@@ -989,7 +995,9 @@ class ManagedGitRepositories(
             val runner = requireRunner()
             // Reconciliation runs inside reconcile(); read the registration directly, never through locate().
             val record = repositories(jobId).single { it.repositoryId == operation.repositoryId }
-            val gitDir = root.resolve(jobId).resolve("git/repositories").resolve(record.repositoryId).resolve(GIT_DIR)
+            val commonDir = root.resolve(jobId).resolve("git/repositories").resolve(record.repositoryId).resolve(GIT_DIR)
+            // A commit may target a linked work tree; classify it by that work tree's own HEAD.
+            val gitDir = if (operation.worktreeId == record.worktreeId) commonDir else commonDir.resolve("worktrees").resolve(operation.worktreeId)
             GitRepositoryInspector.head(runner, gitDir, record.objectFormat).objectId
         } catch (_: Exception) { return finish(operation, GitOperationState.RECOVERY_REQUIRED, "HEAD_UNKNOWN",
             "Interrupted by a server restart and HEAD could not be read. Inspect the repository before a new request.") }
@@ -1026,7 +1034,7 @@ class ManagedGitRepositories(
                     }
                 }
                 GitOperationAction.BRANCH_DELETE -> {
-                    val refs = GitReads.refs(runner, commonDir, format, 0, 200).first
+                    val refs = GitReads.allRefs(runner, commonDir, format)
                     val present = refs.any { it.name.startsWith("refs/heads/") && GitWorkspaceVersions.refId(record.repositoryId, it.name) == request.refId }
                     if (present) interrupted("Interrupted by a server restart before the branch was deleted; it is unchanged.")
                     else completed("The branch was deleted before the server restarted.")
@@ -1035,7 +1043,7 @@ class ManagedGitRepositories(
                     val gitDir = if (operation.worktreeId == record.worktreeId) commonDir else commonDir.resolve("worktrees").resolve(operation.worktreeId)
                     val head = GitRepositoryInspector.head(runner, gitDir, format)
                     val target = request.refId?.let { refId ->
-                        GitReads.refs(runner, commonDir, format, 0, 200).first.singleOrNull { GitWorkspaceVersions.refId(record.repositoryId, it.name) == refId }?.name
+                        GitReads.allRefs(runner, commonDir, format).singleOrNull { GitWorkspaceVersions.refId(record.repositoryId, it.name) == refId }?.name
                     }
                     when {
                         head.state == GitHeadState.UNBORN && head.refName != null && target == null && request.refId != null ->
@@ -1061,7 +1069,17 @@ class ManagedGitRepositories(
                             GitStorage.deleteTree(path)
                         }
                         runner.run(GitInvocation("worktree", listOf("prune"), gitDir = commonDir))
-                        interrupted("Interrupted by a server restart before the work tree was registered; nothing was created.")
+                        // `worktree add -b` also created the branch; roll it back only at the exact start object.
+                        val branch = request.name?.let { "refs/heads/$it" }
+                        val tip = branch?.let { GitRefOperations.refObject(runner, commonDir, format, it) }
+                        when {
+                            tip == null -> interrupted("Interrupted by a server restart before the work tree was registered; nothing was created.")
+                            tip == request.objectId -> {
+                                GitRefOperations.deleteRef(runner, commonDir, checkNotNull(branch), tip)
+                                interrupted("Interrupted by a server restart before the work tree was registered; its new branch was rolled back and nothing remains.")
+                            }
+                            else -> recovery("REF_CONFLICT", "The work tree's new branch now names a different commit. Inspect it before any new request.")
+                        }
                     }
                 }
                 GitOperationAction.WORKTREE_REMOVE -> {

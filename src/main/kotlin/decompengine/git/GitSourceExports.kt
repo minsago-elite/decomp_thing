@@ -38,7 +38,9 @@ data class GitProvenanceView(
 )
 
 object GitSourceExports {
-    const val MAX_BYTES = 64 * 1024 * 1024
+    /** Total payload bound; blob reads are batched so every capture stays within the runner's 64 MiB limit. */
+    const val MAX_BYTES = 48 * 1024 * 1024
+    private const val BATCH_BYTES = 32L * 1024 * 1024
     const val MAX_FILES = 20_000
     private val FIXED_TIME: LocalDateTime = LocalDateTime.of(1980, 1, 1, 0, 0)
 
@@ -64,7 +66,16 @@ object GitSourceExports {
             entries += Entry(path, text, format.requireObjectId(fields[2]), size)
         }
         entries.sortWith { left, right -> java.util.Arrays.compareUnsigned(left.path, right.path) }
-        val contents = readBlobs(runner, gitDir, entries.map { it.objectId }.distinct(), total)
+        val sizes = entries.associate { it.objectId to it.size }
+        val batches = mutableListOf<Pair<List<String>, Long>>()
+        var batch = mutableListOf<String>(); var batchBytes = 0L
+        for (objectId in sizes.keys) {
+            val size = sizes.getValue(objectId)
+            if (batch.isNotEmpty() && batchBytes + size > BATCH_BYTES) { batches += batch to batchBytes; batch = mutableListOf(); batchBytes = 0 }
+            batch += objectId; batchBytes += size
+        }
+        if (batch.isNotEmpty()) batches += batch to batchBytes
+        val contents = readBlobs(runner, gitDir, sizes.keys.toList(), total, batches)
         val output = ByteArrayOutputStream()
         ZipOutputStream(output).use { zip ->
             zip.setMethod(ZipOutputStream.STORED)
@@ -84,13 +95,22 @@ object GitSourceExports {
     }
 
     /** Blob contents through `cat-file --batch`, parsed length-first so any byte content is exact. */
-    private fun readBlobs(runner: GitCommandRunner, gitDir: Path, objectIds: List<String>, total: Long): Map<String, ByteArray> {
+    private fun readBlobs(runner: GitCommandRunner, gitDir: Path, objectIds: List<String>, total: Long,
+        batches: List<Pair<List<String>, Long>>): Map<String, ByteArray> {
         if (objectIds.isEmpty()) return emptyMap()
-        val bound = (total + objectIds.size * 200L + 4096).coerceAtMost(MAX_BYTES + 8L * 1024 * 1024).toInt()
+        check(total <= MAX_BYTES)
+        val blobs = HashMap<String, ByteArray>()
+        for ((batch, bytes) in batches) readBatch(runner, gitDir, batch, bytes, blobs)
+        if (!objectIds.all { it in blobs }) throw GitRepositoryException("REPOSITORY_CORRUPT", "A tree blob is missing.")
+        return blobs
+    }
+
+    private fun readBatch(runner: GitCommandRunner, gitDir: Path, objectIds: List<String>, contentBytes: Long, blobs: MutableMap<String, ByteArray>) {
+        // Content plus one header line (at most ~100 bytes) and newline per blob, well under 64 MiB.
+        val bound = (contentBytes + objectIds.size * 200L + 4096).toInt()
         val result = runner.run(GitInvocation("cat-file", listOf("--batch"), gitDir = gitDir,
             input = objectIds.joinToString("") { "$it\n" }.toByteArray(), limits = GitExecutionLimits(Duration.ofMinutes(2), bound, 16 * 1024)))
         val output = result.stdout
-        val blobs = HashMap<String, ByteArray>()
         var offset = 0
         while (offset < output.size) {
             val newline = (offset until output.size).firstOrNull { output[it] == '\n'.code.toByte() }
@@ -103,8 +123,6 @@ object GitSourceExports {
             blobs[header[0]] = output.copyOfRange(start, start + size)
             offset = start + size + 1
         }
-        if (!objectIds.all { it in blobs }) throw GitRepositoryException("REPOSITORY_CORRUPT", "A tree blob is missing.")
-        return blobs
     }
 
     /**

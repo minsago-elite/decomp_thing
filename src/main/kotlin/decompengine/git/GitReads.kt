@@ -351,6 +351,17 @@ object GitReads {
             cut, binary = false)
     }
 
+    /** Every branch and tag, page by page, up to [maximum]; identity lookups must not stop at one page. */
+    fun allRefs(runner: GitCommandRunner, gitDir: Path, format: GitObjectFormat, maximum: Int = 10_000): List<GitRefEntry> {
+        val refs = mutableListOf<GitRefEntry>()
+        while (refs.size < maximum) {
+            val (page, more) = refs(runner, gitDir, format, refs.size, 200)
+            refs += page
+            if (!more) return refs
+        }
+        throw GitRepositoryException("REPOSITORY_UNSUPPORTED", "The repository has more refs than the workbench resolves.")
+    }
+
     /** Branches and tags with peeled tag targets, at most [limit] after [skip]. */
     fun refs(runner: GitCommandRunner, gitDir: Path, format: GitObjectFormat, skip: Int, limit: Int): Pair<List<GitRefEntry>, Boolean> {
         require(skip in 0..100_000 && limit in 1..200)
