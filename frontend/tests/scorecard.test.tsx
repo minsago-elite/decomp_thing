@@ -106,6 +106,25 @@ it('compares only compatible attempts with exact deltas and withholds deltas for
   } finally { auth.dispose(); }
 });
 
+it('lists older attempts on request instead of treating the newest page as every baseline', async () => {
+  const auth = await session();
+  const cursor = `${'a'.repeat(64)}_50_${'b'.repeat(32)}`;
+  const newest: Runs = { ...runs, page: { ...runs.page, nextCursor: cursor }, items: [run, { ...run, runId: 'run_6', resultRevisionId: null }] };
+  const older: Runs = { ...runs, items: [{ ...run, runId: 'run_1', resultRevisionId: 'revision_1' }] };
+  transport.get.mockImplementation((kind, path) => Promise.resolve({ data: kind === 'structureScorecard' ? card : kind === 'run' ? run
+    : kind === 'runs' ? (path.includes('cursor=') ? older : newest) : comparison }));
+  history.replaceState(null, '', `${revision}/scorecard`);
+  try {
+    render(<App basePath="/nested" session={auth} />);
+    fireEvent.click(await screen.findByRole('button', { name: copy.showOlderAttempts }));
+    expect(screen.queryByText(copy.noBaselines)).toBeNull();
+    const select = await screen.findByRole('combobox', { name: copy.baseline });
+    expect(transport.get).toHaveBeenCalledWith('runs', `/jobs/${selected.jobId}/runs?limit=50&cursor=${cursor}`, expect.anything());
+    expect(within(select).getAllByRole('option').map(option => option.getAttribute('value'))).toEqual(['', 'run_1/revision_1']);
+    expect(screen.queryByRole('button', { name: copy.showOlderAttempts })).toBeNull();
+  } finally { auth.dispose(); }
+});
+
 it('keeps scorecard state in a strict URL', () => {
   const query = scorecardLocation('?sort=score&order=desc&baselineRunId=run_1&baselineRevisionId=revision_1');
   expect(query).toEqual({ sort: 'score', order: 'desc', baseline: { runId: 'run_1', revisionId: 'revision_1' } });

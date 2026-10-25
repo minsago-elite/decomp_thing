@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from 'preact/hooks';
 import { useLocation } from 'preact-iso/router';
-import type { Acceptance, Run, Runs, ScorecardComparison, ScorecardMetric, ScorecardReconciliation, StructureScorecard } from '../api/generated';
+import type { Acceptance, Run, ScorecardComparison, ScorecardMetric, ScorecardReconciliation, StructureScorecard } from '../api/generated';
 import { ApiClientError } from '../api/errors';
 import { scorecardCopy as copy } from '../copy/scorecard';
 import { structureCopy } from '../copy/structure';
@@ -13,6 +13,7 @@ import { bindStructure, revisionReadRoute, structureReadMessage, structureRecord
 import { Frame, useStructureRead } from './Frame';
 
 export const SCORECARD_PAGE_LIMIT = 50;
+const RUN_PAGE_LIMIT = 50;
 const ID = /^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/;
 const CURSOR = /^[a-f0-9]{64}_(0|[1-9][0-9]{0,6})_[a-f0-9]{32}$/;
 const VERSION = /^[a-f0-9]{64}$/;
@@ -148,15 +149,25 @@ function Comparison({ selected, basePath, query, onRoute }: {
   selected: SourceSelection; basePath: string; query: ScorecardQuery; onRoute: (query: ScorecardQuery) => void;
 }) {
   const { client } = usePrivateTransport(basePath);
-  const [runs, setRuns] = useState<Runs | 'failed' | null>(null);
+  // Attempts are listed newest first, one bounded page at a time; older pages load on request, so an older
+  // baseline stays selectable and "no baselines" is said only once every page has been listed.
+  const [runs, setRuns] = useState<{ items: Run[]; nextCursor: string | null } | 'failed' | null>(null);
+  const [cursor, setCursor] = useState<string | undefined>(undefined);
   const [choice, setChoice] = useState(query.baseline ? `${query.baseline.runId}/${query.baseline.revisionId}` : '');
   useEffect(() => {
     const controller = new AbortController();
-    void client.get('runs', `/jobs/${selected.jobId}/runs?limit=50`, { signal: controller.signal })
-      .then(response => { if (!controller.signal.aborted) setRuns(response.data); })
+    const values = new URLSearchParams({ limit: String(RUN_PAGE_LIMIT) });
+    if (cursor) values.set('cursor', cursor);
+    void client.get('runs', `/jobs/${selected.jobId}/runs?${values}`, { signal: controller.signal })
+      .then(response => {
+        if (controller.signal.aborted) return;
+        if (response.data.jobId !== selected.jobId || response.data.items.some(run => run.jobId !== selected.jobId)) throw new ApiClientError('invalid_response');
+        setRuns(previous => ({ items: [...(cursor && previous && previous !== 'failed' ? previous.items : []), ...response.data.items],
+          nextCursor: response.data.page.nextCursor }));
+      })
       .catch(() => { if (!controller.signal.aborted) setRuns('failed'); });
     return () => controller.abort();
-  }, [selected.jobId]);
+  }, [selected.jobId, cursor]);
   const key = query.baseline ? [selected.jobId, selected.runId, selected.revisionId, query.baseline.runId, query.baseline.revisionId,
     query.compareCursor ?? '', query.version ?? ''].join('/') : '';
   const [read] = useStructureRead<ScorecardComparison | null>(key, async signal => {
@@ -173,8 +184,9 @@ function Comparison({ selected, basePath, query, onRoute }: {
     }
     return data;
   });
-  const candidates = runs && runs !== 'failed' ? runs.items.filter((run: Run) => run.resultRevisionId !== null
-    && !(run.runId === selected.runId && run.resultRevisionId === selected.revisionId)) : [];
+  const candidates = runs && runs !== 'failed' ? runs.items.filter((run: Run, position, all) => run.resultRevisionId !== null
+    && !(run.runId === selected.runId && run.resultRevisionId === selected.revisionId)
+    && all.findIndex(other => other.runId === run.runId) === position) : [];
   const data = read.state === 'ready' ? read.value : null;
   const offset = query.compareCursor ? Number(query.compareCursor.split('_')[1]) : 0;
   const side = (value: Measure | null) => value === null ? copy.notRecorded
@@ -187,7 +199,10 @@ function Comparison({ selected, basePath, query, onRoute }: {
     <h2 id="scorecard-compare-title">{copy.compareTitle}</h2>
     <p>{copy.compareHint}</p>
     {runs === 'failed' && <p role="alert">{copy.baselinesUnavailable}</p>}
-    {runs !== null && runs !== 'failed' && (candidates.length === 0 && !query.baseline ? <p>{copy.noBaselines}</p>
+    {runs !== null && runs !== 'failed' && runs.nextCursor !== null && <p>
+      {textMessage(copy.olderAttempts, { count: runs.items.length })}{' '}
+      <button type="button" onClick={() => setCursor(runs.nextCursor ?? undefined)}>{copy.showOlderAttempts}</button></p>}
+    {runs !== null && runs !== 'failed' && (candidates.length === 0 && !query.baseline ? runs.nextCursor === null && <p>{copy.noBaselines}</p>
       : <form class="job-filters" aria-label={copy.compareTitle} onSubmit={event => {
         event.preventDefault();
         const [runId, revisionId] = choice.split('/');
