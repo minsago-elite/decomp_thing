@@ -1,7 +1,5 @@
 # angr 9.2.213 uses ConstBitStream, removed in bitstring 5.
 # Shared by Docker and the actual discovery qualification.
 bitstring==4.4.0
-
-# angr 9.2.213 passes a lexer to pycparser._TokenStream; 3.12 requires a callable.
-# Keep the parser version used by the passing actual-discovery qualification.
-pycparser==3.11
+# angr 9.2.213 needs pycparser~=3.0; 3.12 breaks its CParser subclass (CLexer not callable).
+pycparser==3.1

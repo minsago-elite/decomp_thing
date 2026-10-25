@@ -1,53 +1,624 @@
 {
-  "schemaVersion": 1,
+  "schemaVersion": 2,
   "issue": 709,
-  "status": "incomplete",
-  "scope": "driver-orchestration-evidence",
-  "provenance": {
-    "corpus": "oracle/gcc/16.2.0/behavior-corpus.json",
-    "corpusSha256": "bcc1a14ca8c54f94106c943f0bc5698cb9af3151b7bf20a49ae3c8828baaad0e",
-    "evidence": "oracle/gcc/16.2.0/behavior-corpus-evidence.json",
-    "oracleBoundary": "checked corpus and evidence only; no host GCC or candidate output"
-  },
-  "case": {
-    "id": "preprocess-file",
-    "arguments": ["-B/workspace/tools/", "-E", "source.c"],
-    "source": {
-      "path": "source.c",
-      "bytes": 29,
-      "sha256": "2ad75d95660563887d8d3f1d0ae1dcf18c2379cbd83a5c72f5ab276351ee6949"
+  "id": "gcc-16-2-0-preprocessing-reference",
+  "status": "captured",
+  "scope": "real-frontend-preprocessing",
+  "toolchain": {
+    "image": "docker.io/library/gcc@sha256:2e6f4ae27ab8ad6f9617b46f0468889d368fdd91f2ea29aff98e4d5d1a3637f0",
+    "imageConfig": "sha256:103614947d5ebe34fc48305dcee29625bcf37fbe12d5d4bbca60e00fa601a22f",
+    "baseOf": "oracle/gcc/16.2.0/build-toolchain.Dockerfile",
+    "platform": "linux/amd64",
+    "version": "16.2.0",
+    "target": "x86_64-linux-gnu",
+    "driver": {
+      "path": "/usr/local/bin/gcc",
+      "sha256": "c1ff0a4fe7916ae6f4e18645a0e854077148b3ebb9d30b1e50e9672e8c5a1236"
     },
     "frontend": {
-      "path": "tools/cc1",
-      "bytes": 1023,
-      "sha256": "847484f59a66b70de4cac77751e4f712672cf52ee0b037b07a2413a7547ae2cb",
-      "kind": "deterministic-companion-program"
+      "role": "cc1",
+      "path": "/usr/local/libexec/gcc/x86_64-linux-gnu/16.2.0/cc1",
+      "sha256": "bc1bcbeccfaaf269c1a8c1bb74a0bc4d73bff56a0c6c6dbd4bb248d11f6232a0"
     },
-    "observed": {
-      "exitCode": 0,
-      "stdout": {
-        "bytes": 18,
-        "sha256": "b8a1f8e4208ed2055f683bd08a081ad8b794b7f88145b0a35d0693f18b04d178",
-        "base64": "TU9DSy1QUkVQUk9DRVNTRUQK"
+    "resourceIncludeDirectory": "/usr/local/lib/gcc/x86_64-linux-gnu/16.2.0/include",
+    "includeSearch": "-nostdinc; only staged workspace include roots are searched",
+    "sandbox": "--network none --read-only --cap-drop ALL --security-opt no-new-privileges"
+  },
+  "capture": {
+    "tool": "scripts/capture-gcc-preprocessing-reference.py",
+    "independentRepetition": "each case ran twice in fresh workspaces with byte-identical results"
+  },
+  "cases": [
+    {
+      "id": "preprocess-file",
+      "categories": [
+        "file"
+      ],
+      "arguments": [
+        "-nostdinc",
+        "-E",
+        "source.c"
+      ],
+      "environment": {
+        "LC_ALL": "C",
+        "SOURCE_DATE_EPOCH": "1786060800",
+        "TZ": "UTC"
       },
-      "stderr": {
+      "inputs": [
+        {
+          "path": "source.c",
+          "bytes": 29,
+          "sha256": "2ad75d95660563887d8d3f1d0ae1dcf18c2379cbd83a5c72f5ab276351ee6949"
+        }
+      ],
+      "stdin": {
         "bytes": 0,
-        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
-        "base64": ""
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
       },
-      "artifacts": []
+      "observed": {
+        "exitCode": 0,
+        "stdout": {
+          "bytes": 97,
+          "sha256": "1104a429a16920b105d9bce9399b3dcf26031b8e17c8ef657fd7947fc1778b82",
+          "base64": "IyAwICJzb3VyY2UuYyIKIyAwICI8YnVpbHQtaW4+IgojIDAgIjxjb21tYW5kLWxpbmU+IgojIDEgInNvdXJjZS5jIgppbnQgbWFpbih2b2lkKSB7IHJldHVybiAwOyB9Cg==",
+          "text": "# 0 \"source.c\"\n# 0 \"<built-in>\"\n# 0 \"<command-line>\"\n# 1 \"source.c\"\nint main(void) { return 0; }\n"
+        },
+        "stderr": {
+          "bytes": 0,
+          "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+          "base64": "",
+          "text": ""
+        },
+        "artifacts": []
+      },
+      "repetitions": 2,
+      "normalizations": []
+    },
+    {
+      "id": "preprocess-stdin",
+      "categories": [
+        "stdin"
+      ],
+      "arguments": [
+        "-nostdinc",
+        "-E",
+        "-"
+      ],
+      "environment": {
+        "LC_ALL": "C",
+        "SOURCE_DATE_EPOCH": "1786060800",
+        "TZ": "UTC"
+      },
+      "inputs": [],
+      "stdin": {
+        "bytes": 29,
+        "sha256": "2ad75d95660563887d8d3f1d0ae1dcf18c2379cbd83a5c72f5ab276351ee6949"
+      },
+      "observed": {
+        "exitCode": 0,
+        "stdout": {
+          "bytes": 95,
+          "sha256": "06c7352ebf11e738b2d508ac37544d70f756a7725d7f7aea438acf72c43d9db3",
+          "base64": "IyAwICI8c3RkaW4+IgojIDAgIjxidWlsdC1pbj4iCiMgMCAiPGNvbW1hbmQtbGluZT4iCiMgMSAiPHN0ZGluPiIKaW50IG1haW4odm9pZCkgeyByZXR1cm4gMDsgfQo=",
+          "text": "# 0 \"<stdin>\"\n# 0 \"<built-in>\"\n# 0 \"<command-line>\"\n# 1 \"<stdin>\"\nint main(void) { return 0; }\n"
+        },
+        "stderr": {
+          "bytes": 0,
+          "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+          "base64": "",
+          "text": ""
+        },
+        "artifacts": []
+      },
+      "repetitions": 2,
+      "normalizations": []
+    },
+    {
+      "id": "preprocess-stdin-explicit-language",
+      "categories": [
+        "stdin",
+        "language-selection"
+      ],
+      "arguments": [
+        "-nostdinc",
+        "-x",
+        "c",
+        "-E",
+        "-"
+      ],
+      "environment": {
+        "LC_ALL": "C",
+        "SOURCE_DATE_EPOCH": "1786060800",
+        "TZ": "UTC"
+      },
+      "inputs": [],
+      "stdin": {
+        "bytes": 29,
+        "sha256": "2ad75d95660563887d8d3f1d0ae1dcf18c2379cbd83a5c72f5ab276351ee6949"
+      },
+      "observed": {
+        "exitCode": 0,
+        "stdout": {
+          "bytes": 95,
+          "sha256": "06c7352ebf11e738b2d508ac37544d70f756a7725d7f7aea438acf72c43d9db3",
+          "base64": "IyAwICI8c3RkaW4+IgojIDAgIjxidWlsdC1pbj4iCiMgMCAiPGNvbW1hbmQtbGluZT4iCiMgMSAiPHN0ZGluPiIKaW50IG1haW4odm9pZCkgeyByZXR1cm4gMDsgfQo=",
+          "text": "# 0 \"<stdin>\"\n# 0 \"<built-in>\"\n# 0 \"<command-line>\"\n# 1 \"<stdin>\"\nint main(void) { return 0; }\n"
+        },
+        "stderr": {
+          "bytes": 0,
+          "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+          "base64": "",
+          "text": ""
+        },
+        "artifacts": []
+      },
+      "repetitions": 2,
+      "normalizations": []
+    },
+    {
+      "id": "include-search",
+      "categories": [
+        "include-search",
+        "include-next"
+      ],
+      "arguments": [
+        "-nostdinc",
+        "-iquote",
+        "quote",
+        "-Iinc/a",
+        "-Iinc/b",
+        "-isystem",
+        "sys",
+        "-E",
+        "include.c"
+      ],
+      "environment": {
+        "LC_ALL": "C",
+        "SOURCE_DATE_EPOCH": "1786060800",
+        "TZ": "UTC"
+      },
+      "inputs": [
+        {
+          "path": "inc/a/common.h",
+          "bytes": 56,
+          "sha256": "71176a7b7beb7c04d86396d80258b94931532bd9c7418a33659ae48fb8417c48"
+        },
+        {
+          "path": "inc/b/common.h",
+          "bytes": 20,
+          "sha256": "199c159e90e99a631477fa2ce02afa2b3db78b400e07985d5ae8dd8badda129c"
+        },
+        {
+          "path": "include.c",
+          "bytes": 90,
+          "sha256": "6fa2e129ce4e325ee9e20d676d874c26dd05ae302dbc3d491bad0538d14f34df"
+        },
+        {
+          "path": "quote/local.h",
+          "bytes": 16,
+          "sha256": "7977328a8956821e697e0aa4644d4a0324205d786dc6d303f4eeb092fd5a4e9b"
+        },
+        {
+          "path": "sys/sys.h",
+          "bytes": 16,
+          "sha256": "d73510a1a67aa07f235163e32ab16121443f0b76c3975aaa25e10d3144d7007c"
+        }
+      ],
+      "stdin": {
+        "bytes": 0,
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      },
+      "observed": {
+        "exitCode": 0,
+        "stdout": {
+          "bytes": 363,
+          "sha256": "343bc4050e3a5aa83b1a7073d8bd050e1da621e46bafba29871d8b0906a49da2",
+          "base64": "IyAwICJpbmNsdWRlLmMiCiMgMCAiPGJ1aWx0LWluPiIKIyAwICI8Y29tbWFuZC1saW5lPiIKIyAxICJpbmNsdWRlLmMiCiMgMSAicXVvdGUvbG9jYWwuaCIgMQojIDIgImluY2x1ZGUuYyIgMgojIDEgImluYy9hL2NvbW1vbi5oIiAxCiMgMSAiaW5jL2IvY29tbW9uLmgiIDEKIyAyICJpbmMvYS9jb21tb24uaCIgMgojIDMgImluY2x1ZGUuYyIgMgojIDEgInN5cy9zeXMuaCIgMSAzCiMgNCAiaW5jbHVkZS5jIiAyCmludCB2YWx1ZSA9IDEgKyAoMjAgKyAxMCkgKyAKIyA0ICJpbmNsdWRlLmMiIDMKICAgICAgICAgICAgICAgICAgICAgICAgICAgIDMwMAojIDQgImluY2x1ZGUuYyIKICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgIDsK",
+          "text": "# 0 \"include.c\"\n# 0 \"<built-in>\"\n# 0 \"<command-line>\"\n# 1 \"include.c\"\n# 1 \"quote/local.h\" 1\n# 2 \"include.c\" 2\n# 1 \"inc/a/common.h\" 1\n# 1 \"inc/b/common.h\" 1\n# 2 \"inc/a/common.h\" 2\n# 3 \"include.c\" 2\n# 1 \"sys/sys.h\" 1 3\n# 4 \"include.c\" 2\nint value = 1 + (20 + 10) + \n# 4 \"include.c\" 3\n                            300\n# 4 \"include.c\"\n                               ;\n"
+        },
+        "stderr": {
+          "bytes": 0,
+          "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+          "base64": "",
+          "text": ""
+        },
+        "artifacts": []
+      },
+      "repetitions": 2,
+      "normalizations": []
+    },
+    {
+      "id": "include-search-missing-header",
+      "categories": [
+        "include-search",
+        "diagnostic"
+      ],
+      "arguments": [
+        "-nostdinc",
+        "-E",
+        "missing.c"
+      ],
+      "environment": {
+        "LC_ALL": "C",
+        "SOURCE_DATE_EPOCH": "1786060800",
+        "TZ": "UTC"
+      },
+      "inputs": [
+        {
+          "path": "missing.c",
+          "bytes": 31,
+          "sha256": "0e5b8e73efe3c7c1d4a17e94239866f78fa5cd64d5cd1aa721bfea7ba8b25800"
+        }
+      ],
+      "stdin": {
+        "bytes": 0,
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      },
+      "observed": {
+        "exitCode": 1,
+        "stdout": {
+          "bytes": 70,
+          "sha256": "bc245f7673f71294555ee3df7f62a69403ba0990b33123068fc5171a43ba5296",
+          "base64": "IyAwICJtaXNzaW5nLmMiCiMgMCAiPGJ1aWx0LWluPiIKIyAwICI8Y29tbWFuZC1saW5lPiIKIyAxICJtaXNzaW5nLmMiCg==",
+          "text": "# 0 \"missing.c\"\n# 0 \"<built-in>\"\n# 0 \"<command-line>\"\n# 1 \"missing.c\"\n"
+        },
+        "stderr": {
+          "bytes": 145,
+          "sha256": "aa68f4f955f1f77f42c8fd3b9660fadeac140fdfb14ab1ed2455f56910d9a593",
+          "base64": "bWlzc2luZy5jOjE6MTA6IGZhdGFsIGVycm9yOiBhYnNlbnQuaDogTm8gc3VjaCBmaWxlIG9yIGRpcmVjdG9yeQogICAgMSB8ICNpbmNsdWRlICJhYnNlbnQuaCIKICAgICAgfCAgICAgICAgICBefn5+fn5+fn5+CmNvbXBpbGF0aW9uIHRlcm1pbmF0ZWQuCg==",
+          "text": "missing.c:1:10: fatal error: absent.h: No such file or directory\n    1 | #include \"absent.h\"\n      |          ^~~~~~~~~~\ncompilation terminated.\n"
+        },
+        "artifacts": []
+      },
+      "repetitions": 2,
+      "normalizations": []
+    },
+    {
+      "id": "macro-definition-undefinition",
+      "categories": [
+        "macro-definition",
+        "macro-undefinition"
+      ],
+      "arguments": [
+        "-nostdinc",
+        "-DDEFINED=42",
+        "-DUNDEFINED",
+        "-UUNDEFINED",
+        "-DEMPTY=",
+        "-DFLAG=\"on\"",
+        "-E",
+        "macros.c"
+      ],
+      "environment": {
+        "LC_ALL": "C",
+        "SOURCE_DATE_EPOCH": "1786060800",
+        "TZ": "UTC"
+      },
+      "inputs": [
+        {
+          "path": "macros.c",
+          "bytes": 251,
+          "sha256": "6e3c7aaefbd4d49f2426765af90a5102439904a59e11b176e25ff519d5056172"
+        }
+      ],
+      "stdin": {
+        "bytes": 0,
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      },
+      "observed": {
+        "exitCode": 0,
+        "stdout": {
+          "bytes": 167,
+          "sha256": "0aba4d643a76d4e40a7b89c454db1ecd0441ae6498551e1abdc9dccbf76a6965",
+          "base64": "IyAwICJtYWNyb3MuYyIKIyAwICI8YnVpbHQtaW4+IgojIDAgIjxjb21tYW5kLWxpbmU+IgojIDEgIm1hY3Jvcy5jIgoKaW50IGRlZmluZWRfdmFsdWUgPSA0MjsKCgoKCgppbnQgbG9jYWwgPSAoKCAzKSAqIDIpOwoKCmludCByZW1vdmVkID0gMTsKCmNvbnN0IGNoYXIgKmZsYWcgPSAib24iOwo=",
+          "text": "# 0 \"macros.c\"\n# 0 \"<built-in>\"\n# 0 \"<command-line>\"\n# 1 \"macros.c\"\n\nint defined_value = 42;\n\n\n\n\n\nint local = (( 3) * 2);\n\n\nint removed = 1;\n\nconst char *flag = \"on\";\n"
+        },
+        "stderr": {
+          "bytes": 0,
+          "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+          "base64": "",
+          "text": ""
+        },
+        "artifacts": []
+      },
+      "repetitions": 2,
+      "normalizations": []
+    },
+    {
+      "id": "macro-dump-definitions",
+      "categories": [
+        "macro-definition",
+        "macro-undefinition"
+      ],
+      "arguments": [
+        "-nostdinc",
+        "-DDEFINED=42",
+        "-UDEFINED",
+        "-DKEPT=1",
+        "-E",
+        "-dD",
+        "-P",
+        "source.c"
+      ],
+      "environment": {
+        "LC_ALL": "C",
+        "SOURCE_DATE_EPOCH": "1786060800",
+        "TZ": "UTC"
+      },
+      "inputs": [
+        {
+          "path": "source.c",
+          "bytes": 29,
+          "sha256": "2ad75d95660563887d8d3f1d0ae1dcf18c2379cbd83a5c72f5ab276351ee6949"
+        }
+      ],
+      "stdin": {
+        "bytes": 0,
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      },
+      "observed": {
+        "exitCode": 0,
+        "stdout": {
+          "bytes": 15299,
+          "sha256": "51671b553603fb86d09e860b8a12561ec5f3432fd864b73fe4d25e57904f9700",
+          "base64": "I2RlZmluZSBfX1NURENfXyAxCiNkZWZpbmUgX19TVERDX1ZFUlNJT05fXyAyMDIzMTFMCiNkZWZpbmUgX19TVERDX1VURl8xNl9fIDEKI2RlZmluZSBfX1NURENfVVRGXzMyX18gMQojZGVmaW5lIF9fU1REQ19IT1NURURfXyAxCiNkZWZpbmUgX19TVERDX0VNQkVEX05PVF9GT1VORF9fIDAKI2RlZmluZSBfX1NURENfRU1CRURfRk9VTkRfXyAxCiNkZWZpbmUgX19TVERDX0VNQkVEX0VNUFRZX18gMgojZGVmaW5lIF9fR05VQ19fIDE2CiNkZWZpbmUgX19HTlVDX01JTk9SX18gMgojZGVmaW5lIF9fR05VQ19QQVRDSExFVkVMX18gMAojZGVmaW5lIF9fVkVSU0lPTl9fICIxNi4yLjAiCiNkZWZpbmUgX19BVE9NSUNfUkVMQVhFRCAwCiNkZWZpbmUgX19BVE9NSUNfU0VRX0NTVCA1CiNkZWZpbmUgX19BVE9NSUNfQUNRVUlSRSAyCiNkZWZpbmUgX19BVE9NSUNfUkVMRUFTRSAzCiNkZWZpbmUgX19BVE9NSUNfQUNRX1JFTCA0CiNkZWZpbmUgX19BVE9NSUNfQ09OU1VNRSAxCiNkZWZpbmUgX19GSU5JVEVfTUFUSF9PTkxZX18gMAojZGVmaW5lIF9MUDY0IDEKI2RlZmluZSBfX0xQNjRfXyAxCiNkZWZpbmUgX19TSVpFT0ZfSU5UX18gNAojZGVmaW5lIF9fU0laRU9GX0xPTkdfXyA4CiNkZWZpbmUgX19TSVpFT0ZfTE9OR19MT05HX18gOAojZGVmaW5lIF9fU0laRU9GX1NIT1JUX18gMgojZGVmaW5lIF9fU0laRU9GX0ZMT0FUX18gNAojZGVmaW5lIF9fU0laRU9GX0RPVUJMRV9fIDgKI2RlZmluZSBfX1NJWkVPRl9MT05HX0RPVUJMRV9fIDE2CiNkZWZpbmUgX19TSVpFT0ZfU0laRV9UX18gOAojZGVmaW5lIF9fQ0hBUl9CSVRfXyA4CiNkZWZpbmUgX19CSUdHRVNUX0FMSUdOTUVOVF9fIDE2CiNkZWZpbmUgX19PUkRFUl9MSVRUTEVfRU5ESUFOX18gMTIzNAojZGVmaW5lIF9fT1JERVJfQklHX0VORElBTl9fIDQzMjEKI2RlZmluZSBfX09SREVSX1BEUF9FTkRJQU5fXyAzNDEyCiNkZWZpbmUgX19CWVRFX09SREVSX18gX19PUkRFUl9MSVRUTEVfRU5ESUFOX18KI2RlZmluZSBfX0ZMT0FUX1dPUkRfT1JERVJfXyBfX09SREVSX0xJVFRMRV9FTkRJQU5fXwojZGVmaW5lIF9fU0laRU9GX1BPSU5URVJfXyA4CiNkZWZpbmUgX19HTlVDX0VYRUNVVElPTl9DSEFSU0VUX05BTUUgIlVURi04IgojZGVmaW5lIF9fR05VQ19XSURFX0VYRUNVVElPTl9DSEFSU0VUX05BTUUgIlVURi0zMkxFIgojZGVmaW5lIF9fU0laRV9UWVBFX18gbG9uZyB1bnNpZ25lZCBpbnQKI2RlZmluZSBfX1BUUkRJRkZfVFlQRV9fIGxvbmcgaW50CiNkZWZpbmUgX19XQ0hBUl9UWVBFX18gaW50CiNkZWZpbmUgX19XSU5UX1RZUEVfXyB1bnNpZ25lZCBpbnQKI2RlZmluZSBfX0lOVE1BWF9UWVBFX18gbG9uZyBpbnQKI2RlZmluZSBfX1VJTlRNQVhfVFlQRV9fIGxvbmcgdW5zaWduZWQgaW50CiNkZWZpbmUgX19DSEFSOF9UWVBFX18gdW5zaWduZWQgY2hhcgojZGVmaW5lIF9fQ0hBUjE2X1RZUEVfXyBzaG9ydCB1bnNpZ25lZCBpbnQKI2RlZmluZSBfX0NIQVIzMl9UWVBFX18gdW5zaWduZWQgaW50CiNkZWZpbmUgX19TSUdfQVRPTUlDX1RZUEVfXyBpbnQKI2RlZmluZSBfX0lOVDhfVFlQRV9fIHNpZ25lZCBjaGFyCiNkZWZpbmUgX19JTlQxNl9UWVBFX18gc2hvcnQgaW50CiNkZWZpbmUgX19JTlQzMl9UWVBFX18gaW50CiNkZWZpbmUgX19JTlQ2NF9UWVBFX18gbG9uZyBpbnQKI2RlZmluZSBfX1VJTlQ4X1RZUEVfXyB1bnNpZ25lZCBjaGFyCiNkZWZpbmUgX19VSU5UMTZfVFlQRV9fIHNob3J0IHVuc2lnbmVkIGludAojZGVmaW5lIF9fVUlOVDMyX1RZUEVfXyB1bnNpZ25lZCBpbnQKI2RlZmluZSBfX1VJTlQ2NF9UWVBFX18gbG9uZyB1bnNpZ25lZCBpbnQKI2RlZmluZSBfX0lOVF9MRUFTVDhfVFlQRV9fIHNpZ25lZCBjaGFyCiNkZWZpbmUgX19JTlRfTEVBU1QxNl9UWVBFX18gc2hvcnQgaW50CiNkZWZpbmUgX19JTlRfTEVBU1QzMl9UWVBFX18gaW50CiNkZWZpbmUgX19JTlRfTEVBU1Q2NF9UWVBFX18gbG9uZyBpbnQKI2RlZmluZSBfX1VJTlRfTEVBU1Q4X1RZUEVfXyB1bnNpZ25lZCBjaGFyCiNkZWZpbmUgX19VSU5UX0xFQVNUMTZfVFlQRV9fIHNob3J0IHVuc2lnbmVkIGludAojZGVmaW5lIF9fVUlOVF9MRUFTVDMyX1RZUEVfXyB1bnNpZ25lZCBpbnQKI2RlZmluZSBfX1VJTlRfTEVBU1Q2NF9UWVBFX18gbG9uZyB1bnNpZ25lZCBpbnQKI2RlZmluZSBfX0lOVF9GQVNUOF9UWVBFX18gc2lnbmVkIGNoYXIKI2RlZmluZSBfX0lOVF9GQVNUMTZfVFlQRV9fIGxvbmcgaW50CiNkZWZpbmUgX19JTlRfRkFTVDMyX1RZUEVfXyBsb25nIGludAojZGVmaW5lIF9fSU5UX0ZBU1Q2NF9UWVBFX18gbG9uZyBpbnQKI2RlZmluZSBfX1VJTlRfRkFTVDhfVFlQRV9fIHVuc2lnbmVkIGNoYXIKI2RlZmluZSBfX1VJTlRfRkFTVDE2X1RZUEVfXyBsb25nIHVuc2lnbmVkIGludAojZGVmaW5lIF9fVUlOVF9GQVNUMzJfVFlQRV9fIGxvbmcgdW5zaWduZWQgaW50CiNkZWZpbmUgX19VSU5UX0ZBU1Q2NF9UWVBFX18gbG9uZyB1bnNpZ25lZCBpbnQKI2RlZmluZSBfX0lOVFBUUl9UWVBFX18gbG9uZyBpbnQKI2RlZmluZSBfX1VJTlRQVFJfVFlQRV9fIGxvbmcgdW5zaWduZWQgaW50CiNkZWZpbmUgX19HWFhfQUJJX1ZFUlNJT04gMTAyMQojZGVmaW5lIF9fU0NIQVJfTUFYX18gMHg3ZgojZGVmaW5lIF9fU0hSVF9NQVhfXyAweDdmZmYKI2RlZmluZSBfX0lOVF9NQVhfXyAweDdmZmZmZmZmCiNkZWZpbmUgX19MT05HX01BWF9fIDB4N2ZmZmZmZmZmZmZmZmZmZkwKI2RlZmluZSBfX0xPTkdfTE9OR19NQVhfXyAweDdmZmZmZmZmZmZmZmZmZmZMTAojZGVmaW5lIF9fV0NIQVJfTUFYX18gMHg3ZmZmZmZmZgojZGVmaW5lIF9fV0NIQVJfTUlOX18gKC1fX1dDSEFSX01BWF9fIC0gMSkKI2RlZmluZSBfX1dJTlRfTUFYX18gMHhmZmZmZmZmZlUKI2RlZmluZSBfX1dJTlRfTUlOX18gMFUKI2RlZmluZSBfX1BUUkRJRkZfTUFYX18gMHg3ZmZmZmZmZmZmZmZmZmZmTAojZGVmaW5lIF9fU0laRV9NQVhfXyAweGZmZmZmZmZmZmZmZmZmZmZVTAojZGVmaW5lIF9fU0NIQVJfV0lEVEhfXyA4CiNkZWZpbmUgX19TSFJUX1dJRFRIX18gMTYKI2RlZmluZSBfX0lOVF9XSURUSF9fIDMyCiNkZWZpbmUgX19MT05HX1dJRFRIX18gNjQKI2RlZmluZSBfX0xPTkdfTE9OR19XSURUSF9fIDY0CiNkZWZpbmUgX19XQ0hBUl9XSURUSF9fIDMyCiNkZWZpbmUgX19XSU5UX1dJRFRIX18gMzIKI2RlZmluZSBfX1BUUkRJRkZfV0lEVEhfXyA2NAojZGVmaW5lIF9fU0laRV9XSURUSF9fIDY0CiNkZWZpbmUgX19CSVRJTlRfTUFYV0lEVEhfXyA2NTUzNQojZGVmaW5lIF9fSU5UTUFYX01BWF9fIDB4N2ZmZmZmZmZmZmZmZmZmZkwKI2RlZmluZSBfX0lOVE1BWF9DKGMpIGMgIyMgTAojZGVmaW5lIF9fVUlOVE1BWF9NQVhfXyAweGZmZmZmZmZmZmZmZmZmZmZVTAojZGVmaW5lIF9fVUlOVE1BWF9DKGMpIGMgIyMgVUwKI2RlZmluZSBfX0lOVE1BWF9XSURUSF9fIDY0CiNkZWZpbmUgX19TSUdfQVRPTUlDX01BWF9fIDB4N2ZmZmZmZmYKI2RlZmluZSBfX1NJR19BVE9NSUNfTUlOX18gKC1fX1NJR19BVE9NSUNfTUFYX18gLSAxKQojZGVmaW5lIF9fU0lHX0FUT01JQ19XSURUSF9fIDMyCiNkZWZpbmUgX19JTlQ4X01BWF9fIDB4N2YKI2RlZmluZSBfX0lOVDE2X01BWF9fIDB4N2ZmZgojZGVmaW5lIF9fSU5UMzJfTUFYX18gMHg3ZmZmZmZmZgojZGVmaW5lIF9fSU5UNjRfTUFYX18gMHg3ZmZmZmZmZmZmZmZmZmZmTAojZGVmaW5lIF9fVUlOVDhfTUFYX18gMHhmZgojZGVmaW5lIF9fVUlOVDE2X01BWF9fIDB4ZmZmZgojZGVmaW5lIF9fVUlOVDMyX01BWF9fIDB4ZmZmZmZmZmZVCiNkZWZpbmUgX19VSU5UNjRfTUFYX18gMHhmZmZmZmZmZmZmZmZmZmZmVUwKI2RlZmluZSBfX0lOVF9MRUFTVDhfTUFYX18gMHg3ZgojZGVmaW5lIF9fSU5UOF9DKGMpIGMKI2RlZmluZSBfX0lOVF9MRUFTVDhfV0lEVEhfXyA4CiNkZWZpbmUgX19JTlRfTEVBU1QxNl9NQVhfXyAweDdmZmYKI2RlZmluZSBfX0lOVDE2X0MoYykgYwojZGVmaW5lIF9fSU5UX0xFQVNUMTZfV0lEVEhfXyAxNgojZGVmaW5lIF9fSU5UX0xFQVNUMzJfTUFYX18gMHg3ZmZmZmZmZgojZGVmaW5lIF9fSU5UMzJfQyhjKSBjCiNkZWZpbmUgX19JTlRfTEVBU1QzMl9XSURUSF9fIDMyCiNkZWZpbmUgX19JTlRfTEVBU1Q2NF9NQVhfXyAweDdmZmZmZmZmZmZmZmZmZmZMCiNkZWZpbmUgX19JTlQ2NF9DKGMpIGMgIyMgTAojZGVmaW5lIF9fSU5UX0xFQVNUNjRfV0lEVEhfXyA2NAojZGVmaW5lIF9fVUlOVF9MRUFTVDhfTUFYX18gMHhmZgojZGVmaW5lIF9fVUlOVDhfQyhjKSBjCiNkZWZpbmUgX19VSU5UX0xFQVNUMTZfTUFYX18gMHhmZmZmCiNkZWZpbmUgX19VSU5UMTZfQyhjKSBjCiNkZWZpbmUgX19VSU5UX0xFQVNUMzJfTUFYX18gMHhmZmZmZmZmZlUKI2RlZmluZSBfX1VJTlQzMl9DKGMpIGMgIyMgVQojZGVmaW5lIF9fVUlOVF9MRUFTVDY0X01BWF9fIDB4ZmZmZmZmZmZmZmZmZmZmZlVMCiNkZWZpbmUgX19VSU5UNjRfQyhjKSBjICMjIFVMCiNkZWZpbmUgX19JTlRfRkFTVDhfTUFYX18gMHg3ZgojZGVmaW5lIF9fSU5UX0ZBU1Q4X1dJRFRIX18gOAojZGVmaW5lIF9fSU5UX0ZBU1QxNl9NQVhfXyAweDdmZmZmZmZmZmZmZmZmZmZMCiNkZWZpbmUgX19JTlRfRkFTVDE2X1dJRFRIX18gNjQKI2RlZmluZSBfX0lOVF9GQVNUMzJfTUFYX18gMHg3ZmZmZmZmZmZmZmZmZmZmTAojZGVmaW5lIF9fSU5UX0ZBU1QzMl9XSURUSF9fIDY0CiNkZWZpbmUgX19JTlRfRkFTVDY0X01BWF9fIDB4N2ZmZmZmZmZmZmZmZmZmZkwKI2RlZmluZSBfX0lOVF9GQVNUNjRfV0lEVEhfXyA2NAojZGVmaW5lIF9fVUlOVF9GQVNUOF9NQVhfXyAweGZmCiNkZWZpbmUgX19VSU5UX0ZBU1QxNl9NQVhfXyAweGZmZmZmZmZmZmZmZmZmZmZVTAojZGVmaW5lIF9fVUlOVF9GQVNUMzJfTUFYX18gMHhmZmZmZmZmZmZmZmZmZmZmVUwKI2RlZmluZSBfX1VJTlRfRkFTVDY0X01BWF9fIDB4ZmZmZmZmZmZmZmZmZmZmZlVMCiNkZWZpbmUgX19JTlRQVFJfTUFYX18gMHg3ZmZmZmZmZmZmZmZmZmZmTAojZGVmaW5lIF9fSU5UUFRSX1dJRFRIX18gNjQKI2RlZmluZSBfX1VJTlRQVFJfTUFYX18gMHhmZmZmZmZmZmZmZmZmZmZmVUwKI2RlZmluZSBfX0dDQ19JRUNfNTU5IDIKI2RlZmluZSBfX0dDQ19JRUNfNTU5X0NPTVBMRVggMgojZGVmaW5lIF9fRkxUX0VWQUxfTUVUSE9EX18gMAojZGVmaW5lIF9fRkxUX0VWQUxfTUVUSE9EX1RTXzE4NjYxXzNfXyAwCiNkZWZpbmUgX19ERUNfRVZBTF9NRVRIT0RfXyAyCiNkZWZpbmUgX19GTFRfUkFESVhfXyAyCiNkZWZpbmUgX19GTFRfTUFOVF9ESUdfXyAyNAojZGVmaW5lIF9fRkxUX0RJR19fIDYKI2RlZmluZSBfX0ZMVF9NSU5fRVhQX18gKC0xMjUpCiNkZWZpbmUgX19GTFRfTUlOXzEwX0VYUF9fICgtMzcpCiNkZWZpbmUgX19GTFRfTUFYX0VYUF9fIDEyOAojZGVmaW5lIF9fRkxUX01BWF8xMF9FWFBfXyAzOAojZGVmaW5lIF9fRkxUX0RFQ0lNQUxfRElHX18gOQojZGVmaW5lIF9fRkxUX01BWF9fIDMuNDAyODIzNDY2Mzg1Mjg4NTk4MTE3MDQxODM0ODQ1MTY5MjVlKzM4RgojZGVmaW5lIF9fRkxUX05PUk1fTUFYX18gMy40MDI4MjM0NjYzODUyODg1OTgxMTcwNDE4MzQ4NDUxNjkyNWUrMzhGCiNkZWZpbmUgX19GTFRfTUlOX18gMS4xNzU0OTQzNTA4MjIyODc1MDc5Njg3MzY1MzcyMjIyNDU2OGUtMzhGCiNkZWZpbmUgX19GTFRfRVBTSUxPTl9fIDEuMTkyMDkyODk1NTA3ODEyNTAwMDAwMDAwMDAwMDAwMDAwMDBlLTdGCiNkZWZpbmUgX19GTFRfREVOT1JNX01JTl9fIDEuNDAxMjk4NDY0MzI0ODE3MDcwOTIzNzI5NTgzMjg5OTE2MTNlLTQ1RgojZGVmaW5lIF9fRkxUX0hBU19ERU5PUk1fXyAxCiNkZWZpbmUgX19GTFRfSEFTX0lORklOSVRZX18gMQojZGVmaW5lIF9fRkxUX0hBU19RVUlFVF9OQU5fXyAxCiNkZWZpbmUgX19GTFRfSVNfSUVDXzYwNTU5X18gMQojZGVmaW5lIF9fREJMX01BTlRfRElHX18gNTMKI2RlZmluZSBfX0RCTF9ESUdfXyAxNQojZGVmaW5lIF9fREJMX01JTl9FWFBfXyAoLTEwMjEpCiNkZWZpbmUgX19EQkxfTUlOXzEwX0VYUF9fICgtMzA3KQojZGVmaW5lIF9fREJMX01BWF9FWFBfXyAxMDI0CiNkZWZpbmUgX19EQkxfTUFYXzEwX0VYUF9fIDMwOAojZGVmaW5lIF9fREJMX0RFQ0lNQUxfRElHX18gMTcKI2RlZmluZSBfX0RCTF9NQVhfXyAoKGRvdWJsZSkxLjc5NzY5MzEzNDg2MjMxNTcwODE0NTI3NDIzNzMxNzA0MzU3ZSszMDhMKQojZGVmaW5lIF9fREJMX05PUk1fTUFYX18gKChkb3VibGUpMS43OTc2OTMxMzQ4NjIzMTU3MDgxNDUyNzQyMzczMTcwNDM1N2UrMzA4TCkKI2RlZmluZSBfX0RCTF9NSU5fXyAoKGRvdWJsZSkyLjIyNTA3Mzg1ODUwNzIwMTM4MzA5MDIzMjcxNzMzMjQwNDA2ZS0zMDhMKQojZGVmaW5lIF9fREJMX0VQU0lMT05fXyAoKGRvdWJsZSkyLjIyMDQ0NjA0OTI1MDMxMzA4MDg0NzI2MzMzNjE4MTY0MDYyZS0xNkwpCiNkZWZpbmUgX19EQkxfREVOT1JNX01JTl9fICgoZG91YmxlKTQuOTQwNjU2NDU4NDEyNDY1NDQxNzY1Njg3OTI4NjgyMjEzNzJlLTMyNEwpCiNkZWZpbmUgX19EQkxfSEFTX0RFTk9STV9fIDEKI2RlZmluZSBfX0RCTF9IQVNfSU5GSU5JVFlfXyAxCiNkZWZpbmUgX19EQkxfSEFTX1FVSUVUX05BTl9fIDEKI2RlZmluZSBfX0RCTF9JU19JRUNfNjA1NTlfXyAxCiNkZWZpbmUgX19MREJMX01BTlRfRElHX18gNjQKI2RlZmluZSBfX0xEQkxfRElHX18gMTgKI2RlZmluZSBfX0xEQkxfTUlOX0VYUF9fICgtMTYzODEpCiNkZWZpbmUgX19MREJMX01JTl8xMF9FWFBfXyAoLTQ5MzEpCiNkZWZpbmUgX19MREJMX01BWF9FWFBfXyAxNjM4NAojZGVmaW5lIF9fTERCTF9NQVhfMTBfRVhQX18gNDkzMgojZGVmaW5lIF9fREVDSU1BTF9ESUdfXyAyMQojZGVmaW5lIF9fTERCTF9ERUNJTUFMX0RJR19fIDIxCiNkZWZpbmUgX19MREJMX01BWF9fIDEuMTg5NzMxNDk1MzU3MjMxNzY1MDIxMjYzODUzMDMwOTcwMjFlKzQ5MzJMCiNkZWZpbmUgX19MREJMX05PUk1fTUFYX18gMS4xODk3MzE0OTUzNTcyMzE3NjUwMjEyNjM4NTMwMzA5NzAyMWUrNDkzMkwKI2RlZmluZSBfX0xEQkxfTUlOX18gMy4zNjIxMDMxNDMxMTIwOTM1MDYyNjI2Nzc4MTczMjE3NTI2MGUtNDkzMkwKI2RlZmluZSBfX0xEQkxfRVBTSUxPTl9fIDEuMDg0MjAyMTcyNDg1NTA0NDM0MDA3NDUyODAwODY5OTQxNzFlLTE5TAojZGVmaW5lIF9fTERCTF9ERU5PUk1fTUlOX18gMy42NDUxOTk1MzE4ODI0NzQ2MDI1Mjg0MDU5MzM2MTk0MTk4MmUtNDk1MUwKI2RlZmluZSBfX0xEQkxfSEFTX0RFTk9STV9fIDEKI2RlZmluZSBfX0xEQkxfSEFTX0lORklOSVRZX18gMQojZGVmaW5lIF9fTERCTF9IQVNfUVVJRVRfTkFOX18gMQojZGVmaW5lIF9fTERCTF9JU19JRUNfNjA1NTlfXyAxCiNkZWZpbmUgX19GTFQxNl9NQU5UX0RJR19fIDExCiNkZWZpbmUgX19GTFQxNl9ESUdfXyAzCiNkZWZpbmUgX19GTFQxNl9NSU5fRVhQX18gKC0xMykKI2RlZmluZSBfX0ZMVDE2X01JTl8xMF9FWFBfXyAoLTQpCiNkZWZpbmUgX19GTFQxNl9NQVhfRVhQX18gMTYKI2RlZmluZSBfX0ZMVDE2X01BWF8xMF9FWFBfXyA0CiNkZWZpbmUgX19GTFQxNl9ERUNJTUFMX0RJR19fIDUKI2RlZmluZSBfX0ZMVDE2X01BWF9fIDYuNTUwNDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDBlKzRGMTYKI2RlZmluZSBfX0ZMVDE2X05PUk1fTUFYX18gNi41NTA0MDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMGUrNEYxNgojZGVmaW5lIF9fRkxUMTZfTUlOX18gNi4xMDM1MTU2MjUwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMGUtNUYxNgojZGVmaW5lIF9fRkxUMTZfRVBTSUxPTl9fIDkuNzY1NjI1MDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDBlLTRGMTYKI2RlZmluZSBfX0ZMVDE2X0RFTk9STV9NSU5fXyA1Ljk2MDQ2NDQ3NzUzOTA2MjUwMDAwMDAwMDAwMDAwMDAwMDAwZS04RjE2CiNkZWZpbmUgX19GTFQxNl9IQVNfREVOT1JNX18gMQojZGVmaW5lIF9fRkxUMTZfSEFTX0lORklOSVRZX18gMQojZGVmaW5lIF9fRkxUMTZfSEFTX1FVSUVUX05BTl9fIDEKI2RlZmluZSBfX0ZMVDE2X0lTX0lFQ182MDU1OV9fIDEKI2RlZmluZSBfX0ZMVDMyX01BTlRfRElHX18gMjQKI2RlZmluZSBfX0ZMVDMyX0RJR19fIDYKI2RlZmluZSBfX0ZMVDMyX01JTl9FWFBfXyAoLTEyNSkKI2RlZmluZSBfX0ZMVDMyX01JTl8xMF9FWFBfXyAoLTM3KQojZGVmaW5lIF9fRkxUMzJfTUFYX0VYUF9fIDEyOAojZGVmaW5lIF9fRkxUMzJfTUFYXzEwX0VYUF9fIDM4CiNkZWZpbmUgX19GTFQzMl9ERUNJTUFMX0RJR19fIDkKI2RlZmluZSBfX0ZMVDMyX01BWF9fIDMuNDAyODIzNDY2Mzg1Mjg4NTk4MTE3MDQxODM0ODQ1MTY5MjVlKzM4RjMyCiNkZWZpbmUgX19GTFQzMl9OT1JNX01BWF9fIDMuNDAyODIzNDY2Mzg1Mjg4NTk4MTE3MDQxODM0ODQ1MTY5MjVlKzM4RjMyCiNkZWZpbmUgX19GTFQzMl9NSU5fXyAxLjE3NTQ5NDM1MDgyMjI4NzUwNzk2ODczNjUzNzIyMjI0NTY4ZS0zOEYzMgojZGVmaW5lIF9fRkxUMzJfRVBTSUxPTl9fIDEuMTkyMDkyODk1NTA3ODEyNTAwMDAwMDAwMDAwMDAwMDAwMDBlLTdGMzIKI2RlZmluZSBfX0ZMVDMyX0RFTk9STV9NSU5fXyAxLjQwMTI5ODQ2NDMyNDgxNzA3MDkyMzcyOTU4MzI4OTkxNjEzZS00NUYzMgojZGVmaW5lIF9fRkxUMzJfSEFTX0RFTk9STV9fIDEKI2RlZmluZSBfX0ZMVDMyX0hBU19JTkZJTklUWV9fIDEKI2RlZmluZSBfX0ZMVDMyX0hBU19RVUlFVF9OQU5fXyAxCiNkZWZpbmUgX19GTFQzMl9JU19JRUNfNjA1NTlfXyAxCiNkZWZpbmUgX19GTFQ2NF9NQU5UX0RJR19fIDUzCiNkZWZpbmUgX19GTFQ2NF9ESUdfXyAxNQojZGVmaW5lIF9fRkxUNjRfTUlOX0VYUF9fICgtMTAyMSkKI2RlZmluZSBfX0ZMVDY0X01JTl8xMF9FWFBfXyAoLTMwNykKI2RlZmluZSBfX0ZMVDY0X01BWF9FWFBfXyAxMDI0CiNkZWZpbmUgX19GTFQ2NF9NQVhfMTBfRVhQX18gMzA4CiNkZWZpbmUgX19GTFQ2NF9ERUNJTUFMX0RJR19fIDE3CiNkZWZpbmUgX19GTFQ2NF9NQVhfXyAxLjc5NzY5MzEzNDg2MjMxNTcwODE0NTI3NDIzNzMxNzA0MzU3ZSszMDhGNjQKI2RlZmluZSBfX0ZMVDY0X05PUk1fTUFYX18gMS43OTc2OTMxMzQ4NjIzMTU3MDgxNDUyNzQyMzczMTcwNDM1N2UrMzA4RjY0CiNkZWZpbmUgX19GTFQ2NF9NSU5fXyAyLjIyNTA3Mzg1ODUwNzIwMTM4MzA5MDIzMjcxNzMzMjQwNDA2ZS0zMDhGNjQKI2RlZmluZSBfX0ZMVDY0X0VQU0lMT05fXyAyLjIyMDQ0NjA0OTI1MDMxMzA4MDg0NzI2MzMzNjE4MTY0MDYyZS0xNkY2NAojZGVmaW5lIF9fRkxUNjRfREVOT1JNX01JTl9fIDQuOTQwNjU2NDU4NDEyNDY1NDQxNzY1Njg3OTI4NjgyMjEzNzJlLTMyNEY2NAojZGVmaW5lIF9fRkxUNjRfSEFTX0RFTk9STV9fIDEKI2RlZmluZSBfX0ZMVDY0X0hBU19JTkZJTklUWV9fIDEKI2RlZmluZSBfX0ZMVDY0X0hBU19RVUlFVF9OQU5fXyAxCiNkZWZpbmUgX19GTFQ2NF9JU19JRUNfNjA1NTlfXyAxCiNkZWZpbmUgX19GTFQxMjhfTUFOVF9ESUdfXyAxMTMKI2RlZmluZSBfX0ZMVDEyOF9ESUdfXyAzMwojZGVmaW5lIF9fRkxUMTI4X01JTl9FWFBfXyAoLTE2MzgxKQojZGVmaW5lIF9fRkxUMTI4X01JTl8xMF9FWFBfXyAoLTQ5MzEpCiNkZWZpbmUgX19GTFQxMjhfTUFYX0VYUF9fIDE2Mzg0CiNkZWZpbmUgX19GTFQxMjhfTUFYXzEwX0VYUF9fIDQ5MzIKI2RlZmluZSBfX0ZMVDEyOF9ERUNJTUFMX0RJR19fIDM2CiNkZWZpbmUgX19GTFQxMjhfTUFYX18gMS4xODk3MzE0OTUzNTcyMzE3NjUwODU3NTkzMjY2MjgwMDcwMmUrNDkzMkYxMjgKI2RlZmluZSBfX0ZMVDEyOF9OT1JNX01BWF9fIDEuMTg5NzMxNDk1MzU3MjMxNzY1MDg1NzU5MzI2NjI4MDA3MDJlKzQ5MzJGMTI4CiNkZWZpbmUgX19GTFQxMjhfTUlOX18gMy4zNjIxMDMxNDMxMTIwOTM1MDYyNjI2Nzc4MTczMjE3NTI2MGUtNDkzMkYxMjgKI2RlZmluZSBfX0ZMVDEyOF9FUFNJTE9OX18gMS45MjU5Mjk5NDQzODcyMzU4NTMwNTU5Nzc5NDI1ODQ5MjczMmUtMzRGMTI4CiNkZWZpbmUgX19GTFQxMjhfREVOT1JNX01JTl9fIDYuNDc1MTc1MTE5NDM4MDI1MTEwOTI0NDM4OTU4MjI3NjQ2NTVlLTQ5NjZGMTI4CiNkZWZpbmUgX19GTFQxMjhfSEFTX0RFTk9STV9fIDEKI2RlZmluZSBfX0ZMVDEyOF9IQVNfSU5GSU5JVFlfXyAxCiNkZWZpbmUgX19GTFQxMjhfSEFTX1FVSUVUX05BTl9fIDEKI2RlZmluZSBfX0ZMVDEyOF9JU19JRUNfNjA1NTlfXyAxCiNkZWZpbmUgX19GTFQzMlhfTUFOVF9ESUdfXyA1MwojZGVmaW5lIF9fRkxUMzJYX0RJR19fIDE1CiNkZWZpbmUgX19GTFQzMlhfTUlOX0VYUF9fICgtMTAyMSkKI2RlZmluZSBfX0ZMVDMyWF9NSU5fMTBfRVhQX18gKC0zMDcpCiNkZWZpbmUgX19GTFQzMlhfTUFYX0VYUF9fIDEwMjQKI2RlZmluZSBfX0ZMVDMyWF9NQVhfMTBfRVhQX18gMzA4CiNkZWZpbmUgX19GTFQzMlhfREVDSU1BTF9ESUdfXyAxNwojZGVmaW5lIF9fRkxUMzJYX01BWF9fIDEuNzk3NjkzMTM0ODYyMzE1NzA4MTQ1Mjc0MjM3MzE3MDQzNTdlKzMwOEYzMngKI2RlZmluZSBfX0ZMVDMyWF9OT1JNX01BWF9fIDEuNzk3NjkzMTM0ODYyMzE1NzA4MTQ1Mjc0MjM3MzE3MDQzNTdlKzMwOEYzMngKI2RlZmluZSBfX0ZMVDMyWF9NSU5fXyAyLjIyNTA3Mzg1ODUwNzIwMTM4MzA5MDIzMjcxNzMzMjQwNDA2ZS0zMDhGMzJ4CiNkZWZpbmUgX19GTFQzMlhfRVBTSUxPTl9fIDIuMjIwNDQ2MDQ5MjUwMzEzMDgwODQ3MjYzMzM2MTgxNjQwNjJlLTE2RjMyeAojZGVmaW5lIF9fRkxUMzJYX0RFTk9STV9NSU5fXyA0Ljk0MDY1NjQ1ODQxMjQ2NTQ0MTc2NTY4NzkyODY4MjIxMzcyZS0zMjRGMzJ4CiNkZWZpbmUgX19GTFQzMlhfSEFTX0RFTk9STV9fIDEKI2RlZmluZSBfX0ZMVDMyWF9IQVNfSU5GSU5JVFlfXyAxCiNkZWZpbmUgX19GTFQzMlhfSEFTX1FVSUVUX05BTl9fIDEKI2RlZmluZSBfX0ZMVDMyWF9JU19JRUNfNjA1NTlfXyAxCiNkZWZpbmUgX19GTFQ2NFhfTUFOVF9ESUdfXyA2NAojZGVmaW5lIF9fRkxUNjRYX0RJR19fIDE4CiNkZWZpbmUgX19GTFQ2NFhfTUlOX0VYUF9fICgtMTYzODEpCiNkZWZpbmUgX19GTFQ2NFhfTUlOXzEwX0VYUF9fICgtNDkzMSkKI2RlZmluZSBfX0ZMVDY0WF9NQVhfRVhQX18gMTYzODQKI2RlZmluZSBfX0ZMVDY0WF9NQVhfMTBfRVhQX18gNDkzMgojZGVmaW5lIF9fRkxUNjRYX0RFQ0lNQUxfRElHX18gMjEKI2RlZmluZSBfX0ZMVDY0WF9NQVhfXyAxLjE4OTczMTQ5NTM1NzIzMTc2NTAyMTI2Mzg1MzAzMDk3MDIxZSs0OTMyRjY0eAojZGVmaW5lIF9fRkxUNjRYX05PUk1fTUFYX18gMS4xODk3MzE0OTUzNTcyMzE3NjUwMjEyNjM4NTMwMzA5NzAyMWUrNDkzMkY2NHgKI2RlZmluZSBfX0ZMVDY0WF9NSU5fXyAzLjM2MjEwMzE0MzExMjA5MzUwNjI2MjY3NzgxNzMyMTc1MjYwZS00OTMyRjY0eAojZGVmaW5lIF9fRkxUNjRYX0VQU0lMT05fXyAxLjA4NDIwMjE3MjQ4NTUwNDQzNDAwNzQ1MjgwMDg2OTk0MTcxZS0xOUY2NHgKI2RlZmluZSBfX0ZMVDY0WF9ERU5PUk1fTUlOX18gMy42NDUxOTk1MzE4ODI0NzQ2MDI1Mjg0MDU5MzM2MTk0MTk4MmUtNDk1MUY2NHgKI2RlZmluZSBfX0ZMVDY0WF9IQVNfREVOT1JNX18gMQojZGVmaW5lIF9fRkxUNjRYX0hBU19JTkZJTklUWV9fIDEKI2RlZmluZSBfX0ZMVDY0WF9IQVNfUVVJRVRfTkFOX18gMQojZGVmaW5lIF9fRkxUNjRYX0lTX0lFQ182MDU1OV9fIDEKI2RlZmluZSBfX0JGTFQxNl9NQU5UX0RJR19fIDgKI2RlZmluZSBfX0JGTFQxNl9ESUdfXyAyCiNkZWZpbmUgX19CRkxUMTZfTUlOX0VYUF9fICgtMTI1KQojZGVmaW5lIF9fQkZMVDE2X01JTl8xMF9FWFBfXyAoLTM3KQojZGVmaW5lIF9fQkZMVDE2X01BWF9FWFBfXyAxMjgKI2RlZmluZSBfX0JGTFQxNl9NQVhfMTBfRVhQX18gMzgKI2RlZmluZSBfX0JGTFQxNl9ERUNJTUFMX0RJR19fIDQKI2RlZmluZSBfX0JGTFQxNl9NQVhfXyAzLjM4OTUzMTM4OTI1MTUzNTQ3NTkwNDcwODAwMzcxNDg3ODY3ZSszOEJGMTYKI2RlZmluZSBfX0JGTFQxNl9OT1JNX01BWF9fIDMuMzg5NTMxMzg5MjUxNTM1NDc1OTA0NzA4MDAzNzE0ODc4NjdlKzM4QkYxNgojZGVmaW5lIF9fQkZMVDE2X01JTl9fIDEuMTc1NDk0MzUwODIyMjg3NTA3OTY4NzM2NTM3MjIyMjQ1NjhlLTM4QkYxNgojZGVmaW5lIF9fQkZMVDE2X0VQU0lMT05fXyA3LjgxMjUwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwZS0zQkYxNgojZGVmaW5lIF9fQkZMVDE2X0RFTk9STV9NSU5fXyA5LjE4MzU0OTYxNTc5OTEyMTE1NjAwNTc1NDE5NzA0ODc5NDM2ZS00MUJGMTYKI2RlZmluZSBfX0JGTFQxNl9IQVNfREVOT1JNX18gMQojZGVmaW5lIF9fQkZMVDE2X0hBU19JTkZJTklUWV9fIDEKI2RlZmluZSBfX0JGTFQxNl9IQVNfUVVJRVRfTkFOX18gMQojZGVmaW5lIF9fQkZMVDE2X0lTX0lFQ182MDU1OV9fIDAKI2RlZmluZSBfX0RFQzMyX01BTlRfRElHX18gNwojZGVmaW5lIF9fREVDMzJfTUlOX0VYUF9fICgtOTQpCiNkZWZpbmUgX19ERUMzMl9NQVhfRVhQX18gOTcKI2RlZmluZSBfX0RFQzMyX01JTl9fIDFFLTk1REYKI2RlZmluZSBfX0RFQzMyX01BWF9fIDkuOTk5OTk5RTk2REYKI2RlZmluZSBfX0RFQzMyX0VQU0lMT05fXyAxRS02REYKI2RlZmluZSBfX0RFQzMyX1NVQk5PUk1BTF9NSU5fXyAwLjAwMDAwMUUtOTVERgojZGVmaW5lIF9fREVDNjRfTUFOVF9ESUdfXyAxNgojZGVmaW5lIF9fREVDNjRfTUlOX0VYUF9fICgtMzgyKQojZGVmaW5lIF9fREVDNjRfTUFYX0VYUF9fIDM4NQojZGVmaW5lIF9fREVDNjRfTUlOX18gMUUtMzgzREQKI2RlZmluZSBfX0RFQzY0X01BWF9fIDkuOTk5OTk5OTk5OTk5OTk5RTM4NERECiNkZWZpbmUgX19ERUM2NF9FUFNJTE9OX18gMUUtMTVERAojZGVmaW5lIF9fREVDNjRfU1VCTk9STUFMX01JTl9fIDAuMDAwMDAwMDAwMDAwMDAxRS0zODNERAojZGVmaW5lIF9fREVDMTI4X01BTlRfRElHX18gMzQKI2RlZmluZSBfX0RFQzEyOF9NSU5fRVhQX18gKC02MTQyKQojZGVmaW5lIF9fREVDMTI4X01BWF9FWFBfXyA2MTQ1CiNkZWZpbmUgX19ERUMxMjhfTUlOX18gMUUtNjE0M0RMCiNkZWZpbmUgX19ERUMxMjhfTUFYX18gOS45OTk5OTk5OTk5OTk5OTk5OTk5OTk5OTk5OTk5OTk5OTlFNjE0NERMCiNkZWZpbmUgX19ERUMxMjhfRVBTSUxPTl9fIDFFLTMzREwKI2RlZmluZSBfX0RFQzEyOF9TVUJOT1JNQUxfTUlOX18gMC4wMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDFFLTYxNDNETAojZGVmaW5lIF9fREVDNjRYX01BTlRfRElHX18gMzQKI2RlZmluZSBfX0RFQzY0WF9NSU5fRVhQX18gKC02MTQyKQojZGVmaW5lIF9fREVDNjRYX01BWF9FWFBfXyA2MTQ1CiNkZWZpbmUgX19ERUM2NFhfTUlOX18gMUUtNjE0M0Q2NHgKI2RlZmluZSBfX0RFQzY0WF9NQVhfXyA5Ljk5OTk5OTk5OTk5OTk5OTk5OTk5OTk5OTk5OTk5OTk5OUU2MTQ0RDY0eAojZGVmaW5lIF9fREVDNjRYX0VQU0lMT05fXyAxRS0zM0Q2NHgKI2RlZmluZSBfX0RFQzY0WF9TVUJOT1JNQUxfTUlOX18gMC4wMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDFFLTYxNDNENjR4CiNkZWZpbmUgX19SRUdJU1RFUl9QUkVGSVhfXyAKI2RlZmluZSBfX1VTRVJfTEFCRUxfUFJFRklYX18gCiNkZWZpbmUgX19HTlVDX1NURENfSU5MSU5FX18gMQojZGVmaW5lIF9fTk9fSU5MSU5FX18gMQojZGVmaW5lIF9fR0NDX0hBVkVfU1lOQ19DT01QQVJFX0FORF9TV0FQXzEgMQojZGVmaW5lIF9fR0NDX0hBVkVfU1lOQ19DT01QQVJFX0FORF9TV0FQXzIgMQojZGVmaW5lIF9fR0NDX0hBVkVfU1lOQ19DT01QQVJFX0FORF9TV0FQXzQgMQojZGVmaW5lIF9fR0NDX0hBVkVfU1lOQ19DT01QQVJFX0FORF9TV0FQXzggMQojZGVmaW5lIF9fR0NDX0FUT01JQ19CT09MX0xPQ0tfRlJFRSAyCiNkZWZpbmUgX19HQ0NfQVRPTUlDX0NIQVJfTE9DS19GUkVFIDIKI2RlZmluZSBfX0dDQ19BVE9NSUNfQ0hBUjhfVF9MT0NLX0ZSRUUgMgojZGVmaW5lIF9fR0NDX0FUT01JQ19DSEFSMTZfVF9MT0NLX0ZSRUUgMgojZGVmaW5lIF9fR0NDX0FUT01JQ19DSEFSMzJfVF9MT0NLX0ZSRUUgMgojZGVmaW5lIF9fR0NDX0FUT01JQ19XQ0hBUl9UX0xPQ0tfRlJFRSAyCiNkZWZpbmUgX19HQ0NfQVRPTUlDX1NIT1JUX0xPQ0tfRlJFRSAyCiNkZWZpbmUgX19HQ0NfQVRPTUlDX0lOVF9MT0NLX0ZSRUUgMgojZGVmaW5lIF9fR0NDX0FUT01JQ19MT05HX0xPQ0tfRlJFRSAyCiNkZWZpbmUgX19HQ0NfQVRPTUlDX0xMT05HX0xPQ0tfRlJFRSAyCiNkZWZpbmUgX19HQ0NfQVRPTUlDX1RFU1RfQU5EX1NFVF9UUlVFVkFMIDEKI2RlZmluZSBfX0dDQ19ERVNUUlVDVElWRV9TSVpFIDY0CiNkZWZpbmUgX19HQ0NfQ09OU1RSVUNUSVZFX1NJWkUgNjQKI2RlZmluZSBfX0dDQ19BVE9NSUNfUE9JTlRFUl9MT0NLX0ZSRUUgMgojZGVmaW5lIF9fSEFWRV9TUEVDVUxBVElPTl9TQUZFX1ZBTFVFIDEKI2RlZmluZSBfX0dDQ19IQVZFX0RXQVJGMl9DRklfQVNNIDEKI2RlZmluZSBfX1BSQUdNQV9SRURFRklORV9FWFROQU1FIDEKI2RlZmluZSBfX1NJWkVPRl9JTlQxMjhfXyAxNgojZGVmaW5lIF9fU0laRU9GX1dDSEFSX1RfXyA0CiNkZWZpbmUgX19TSVpFT0ZfV0lOVF9UX18gNAojZGVmaW5lIF9fU0laRU9GX1BUUkRJRkZfVF9fIDgKI2RlZmluZSBfX2FtZDY0IDEKI2RlZmluZSBfX2FtZDY0X18gMQojZGVmaW5lIF9feDg2XzY0IDEKI2RlZmluZSBfX3g4Nl82NF9fIDEKI2RlZmluZSBfX1NJWkVPRl9GTE9BVDgwX18gMTYKI2RlZmluZSBfX1NJWkVPRl9GTE9BVDEyOF9fIDE2CiNkZWZpbmUgX19BVE9NSUNfSExFX0FDUVVJUkUgNjU1MzYKI2RlZmluZSBfX0FUT01JQ19ITEVfUkVMRUFTRSAxMzEwNzIKI2RlZmluZSBfX0dDQ19BU01fRkxBR19PVVRQVVRTX18gMQojZGVmaW5lIF9fazggMQojZGVmaW5lIF9fazhfXyAxCiNkZWZpbmUgX19jb2RlX21vZGVsX3NtYWxsX18gMQojZGVmaW5lIF9fTU1YX18gMQojZGVmaW5lIF9fU1NFX18gMQojZGVmaW5lIF9fU1NFMl9fIDEKI2RlZmluZSBfX0ZYU1JfXyAxCiNkZWZpbmUgX19TU0VfTUFUSF9fIDEKI2RlZmluZSBfX1NTRTJfTUFUSF9fIDEKI2RlZmluZSBfX01NWF9XSVRIX1NTRV9fIDEKI2RlZmluZSBfX1NFR19GUyAxCiNkZWZpbmUgX19TRUdfR1MgMQojZGVmaW5lIF9fZ251X2xpbnV4X18gMQojZGVmaW5lIF9fbGludXggMQojZGVmaW5lIF9fbGludXhfXyAxCiNkZWZpbmUgbGludXggMQojZGVmaW5lIF9fdW5peCAxCiNkZWZpbmUgX191bml4X18gMQojZGVmaW5lIHVuaXggMQojZGVmaW5lIF9fRUxGX18gMQojZGVmaW5lIF9fREVDSU1BTF9CSURfRk9STUFUX18gMQojZGVmaW5lIERFRklORUQgNDIKI3VuZGVmIERFRklORUQKI2RlZmluZSBLRVBUIDEKaW50IG1haW4odm9pZCkgeyByZXR1cm4gMDsgfQo=",
+          "text": "#define __STDC__ 1\n#define __STDC_VERSION__ 202311L\n#define __STDC_UTF_16__ 1\n#define __STDC_UTF_32__ 1\n#define __STDC_HOSTED__ 1\n#define __STDC_EMBED_NOT_FOUND__ 0\n#define __STDC_EMBED_FOUND__ 1\n#define __STDC_EMBED_EMPTY__ 2\n#define __GNUC__ 16\n#define __GNUC_MINOR__ 2\n#define __GNUC_PATCHLEVEL__ 0\n#define __VERSION__ \"16.2.0\"\n#define __ATOMIC_RELAXED 0\n#define __ATOMIC_SEQ_CST 5\n#define __ATOMIC_ACQUIRE 2\n#define __ATOMIC_RELEASE 3\n#define __ATOMIC_ACQ_REL 4\n#define __ATOMIC_CONSUME 1\n#define __FINITE_MATH_ONLY__ 0\n#define _LP64 1\n#define __LP64__ 1\n#define __SIZEOF_INT__ 4\n#define __SIZEOF_LONG__ 8\n#define __SIZEOF_LONG_LONG__ 8\n#define __SIZEOF_SHORT__ 2\n#define __SIZEOF_FLOAT__ 4\n#define __SIZEOF_DOUBLE__ 8\n#define __SIZEOF_LONG_DOUBLE__ 16\n#define __SIZEOF_SIZE_T__ 8\n#define __CHAR_BIT__ 8\n#define __BIGGEST_ALIGNMENT__ 16\n#define __ORDER_LITTLE_ENDIAN__ 1234\n#define __ORDER_BIG_ENDIAN__ 4321\n#define __ORDER_PDP_ENDIAN__ 3412\n#define __BYTE_ORDER__ __ORDER_LITTLE_ENDIAN__\n#define __FLOAT_WORD_ORDER__ __ORDER_LITTLE_ENDIAN__\n#define __SIZEOF_POINTER__ 8\n#define __GNUC_EXECUTION_CHARSET_NAME \"UTF-8\"\n#define __GNUC_WIDE_EXECUTION_CHARSET_NAME \"UTF-32LE\"\n#define __SIZE_TYPE__ long unsigned int\n#define __PTRDIFF_TYPE__ long int\n#define __WCHAR_TYPE__ int\n#define __WINT_TYPE__ unsigned int\n#define __INTMAX_TYPE__ long int\n#define __UINTMAX_TYPE__ long unsigned int\n#define __CHAR8_TYPE__ unsigned char\n#define __CHAR16_TYPE__ short unsigned int\n#define __CHAR32_TYPE__ unsigned int\n#define __SIG_ATOMIC_TYPE__ int\n#define __INT8_TYPE__ signed char\n#define __INT16_TYPE__ short int\n#define __INT32_TYPE__ int\n#define __INT64_TYPE__ long int\n#define __UINT8_TYPE__ unsigned char\n#define __UINT16_TYPE__ short unsigned int\n#define __UINT32_TYPE__ unsigned int\n#define __UINT64_TYPE__ long unsigned int\n#define __INT_LEAST8_TYPE__ signed char\n#define __INT_LEAST16_TYPE__ short int\n#define __INT_LEAST32_TYPE__ int\n#define __INT_LEAST64_TYPE__ long int\n#define __UINT_LEAST8_TYPE__ unsigned char\n#define __UINT_LEAST16_TYPE__ short unsigned int\n#define __UINT_LEAST32_TYPE__ unsigned int\n#define __UINT_LEAST64_TYPE__ long unsigned int\n#define __INT_FAST8_TYPE__ signed char\n#define __INT_FAST16_TYPE__ long int\n#define __INT_FAST32_TYPE__ long int\n#define __INT_FAST64_TYPE__ long int\n#define __UINT_FAST8_TYPE__ unsigned char\n#define __UINT_FAST16_TYPE__ long unsigned int\n#define __UINT_FAST32_TYPE__ long unsigned int\n#define __UINT_FAST64_TYPE__ long unsigned int\n#define __INTPTR_TYPE__ long int\n#define __UINTPTR_TYPE__ long unsigned int\n#define __GXX_ABI_VERSION 1021\n#define __SCHAR_MAX__ 0x7f\n#define __SHRT_MAX__ 0x7fff\n#define __INT_MAX__ 0x7fffffff\n#define __LONG_MAX__ 0x7fffffffffffffffL\n#define __LONG_LONG_MAX__ 0x7fffffffffffffffLL\n#define __WCHAR_MAX__ 0x7fffffff\n#define __WCHAR_MIN__ (-__WCHAR_MAX__ - 1)\n#define __WINT_MAX__ 0xffffffffU\n#define __WINT_MIN__ 0U\n#define __PTRDIFF_MAX__ 0x7fffffffffffffffL\n#define __SIZE_MAX__ 0xffffffffffffffffUL\n#define __SCHAR_WIDTH__ 8\n#define __SHRT_WIDTH__ 16\n#define __INT_WIDTH__ 32\n#define __LONG_WIDTH__ 64\n#define __LONG_LONG_WIDTH__ 64\n#define __WCHAR_WIDTH__ 32\n#define __WINT_WIDTH__ 32\n#define __PTRDIFF_WIDTH__ 64\n#define __SIZE_WIDTH__ 64\n#define __BITINT_MAXWIDTH__ 65535\n#define __INTMAX_MAX__ 0x7fffffffffffffffL\n#define __INTMAX_C(c) c ## L\n#define __UINTMAX_MAX__ 0xffffffffffffffffUL\n#define __UINTMAX_C(c) c ## UL\n#define __INTMAX_WIDTH__ 64\n#define __SIG_ATOMIC_MAX__ 0x7fffffff\n#define __SIG_ATOMIC_MIN__ (-__SIG_ATOMIC_MAX__ - 1)\n#define __SIG_ATOMIC_WIDTH__ 32\n#define __INT8_MAX__ 0x7f\n#define __INT16_MAX__ 0x7fff\n#define __INT32_MAX__ 0x7fffffff\n#define __INT64_MAX__ 0x7fffffffffffffffL\n#define __UINT8_MAX__ 0xff\n#define __UINT16_MAX__ 0xffff\n#define __UINT32_MAX__ 0xffffffffU\n#define __UINT64_MAX__ 0xffffffffffffffffUL\n#define __INT_LEAST8_MAX__ 0x7f\n#define __INT8_C(c) c\n#define __INT_LEAST8_WIDTH__ 8\n#define __INT_LEAST16_MAX__ 0x7fff\n#define __INT16_C(c) c\n#define __INT_LEAST16_WIDTH__ 16\n#define __INT_LEAST32_MAX__ 0x7fffffff\n#define __INT32_C(c) c\n#define __INT_LEAST32_WIDTH__ 32\n#define __INT_LEAST64_MAX__ 0x7fffffffffffffffL\n#define __INT64_C(c) c ## L\n#define __INT_LEAST64_WIDTH__ 64\n#define __UINT_LEAST8_MAX__ 0xff\n#define __UINT8_C(c) c\n#define __UINT_LEAST16_MAX__ 0xffff\n#define __UINT16_C(c) c\n#define __UINT_LEAST32_MAX__ 0xffffffffU\n#define __UINT32_C(c) c ## U\n#define __UINT_LEAST64_MAX__ 0xffffffffffffffffUL\n#define __UINT64_C(c) c ## UL\n#define __INT_FAST8_MAX__ 0x7f\n#define __INT_FAST8_WIDTH__ 8\n#define __INT_FAST16_MAX__ 0x7fffffffffffffffL\n#define __INT_FAST16_WIDTH__ 64\n#define __INT_FAST32_MAX__ 0x7fffffffffffffffL\n#define __INT_FAST32_WIDTH__ 64\n#define __INT_FAST64_MAX__ 0x7fffffffffffffffL\n#define __INT_FAST64_WIDTH__ 64\n#define __UINT_FAST8_MAX__ 0xff\n#define __UINT_FAST16_MAX__ 0xffffffffffffffffUL\n#define __UINT_FAST32_MAX__ 0xffffffffffffffffUL\n#define __UINT_FAST64_MAX__ 0xffffffffffffffffUL\n#define __INTPTR_MAX__ 0x7fffffffffffffffL\n#define __INTPTR_WIDTH__ 64\n#define __UINTPTR_MAX__ 0xffffffffffffffffUL\n#define __GCC_IEC_559 2\n#define __GCC_IEC_559_COMPLEX 2\n#define __FLT_EVAL_METHOD__ 0\n#define __FLT_EVAL_METHOD_TS_18661_3__ 0\n#define __DEC_EVAL_METHOD__ 2\n#define __FLT_RADIX__ 2\n#define __FLT_MANT_DIG__ 24\n#define __FLT_DIG__ 6\n#define __FLT_MIN_EXP__ (-125)\n#define __FLT_MIN_10_EXP__ (-37)\n#define __FLT_MAX_EXP__ 128\n#define __FLT_MAX_10_EXP__ 38\n#define __FLT_DECIMAL_DIG__ 9\n#define __FLT_MAX__ 3.40282346638528859811704183484516925e+38F\n#define __FLT_NORM_MAX__ 3.40282346638528859811704183484516925e+38F\n#define __FLT_MIN__ 1.17549435082228750796873653722224568e-38F\n#define __FLT_EPSILON__ 1.19209289550781250000000000000000000e-7F\n#define __FLT_DENORM_MIN__ 1.40129846432481707092372958328991613e-45F\n#define __FLT_HAS_DENORM__ 1\n#define __FLT_HAS_INFINITY__ 1\n#define __FLT_HAS_QUIET_NAN__ 1\n#define __FLT_IS_IEC_60559__ 1\n#define __DBL_MANT_DIG__ 53\n#define __DBL_DIG__ 15\n#define __DBL_MIN_EXP__ (-1021)\n#define __DBL_MIN_10_EXP__ (-307)\n#define __DBL_MAX_EXP__ 1024\n#define __DBL_MAX_10_EXP__ 308\n#define __DBL_DECIMAL_DIG__ 17\n#define __DBL_MAX__ ((double)1.79769313486231570814527423731704357e+308L)\n#define __DBL_NORM_MAX__ ((double)1.79769313486231570814527423731704357e+308L)\n#define __DBL_MIN__ ((double)2.22507385850720138309023271733240406e-308L)\n#define __DBL_EPSILON__ ((double)2.22044604925031308084726333618164062e-16L)\n#define __DBL_DENORM_MIN__ ((double)4.94065645841246544176568792868221372e-324L)\n#define __DBL_HAS_DENORM__ 1\n#define __DBL_HAS_INFINITY__ 1\n#define __DBL_HAS_QUIET_NAN__ 1\n#define __DBL_IS_IEC_60559__ 1\n#define __LDBL_MANT_DIG__ 64\n#define __LDBL_DIG__ 18\n#define __LDBL_MIN_EXP__ (-16381)\n#define __LDBL_MIN_10_EXP__ (-4931)\n#define __LDBL_MAX_EXP__ 16384\n#define __LDBL_MAX_10_EXP__ 4932\n#define __DECIMAL_DIG__ 21\n#define __LDBL_DECIMAL_DIG__ 21\n#define __LDBL_MAX__ 1.18973149535723176502126385303097021e+4932L\n#define __LDBL_NORM_MAX__ 1.18973149535723176502126385303097021e+4932L\n#define __LDBL_MIN__ 3.36210314311209350626267781732175260e-4932L\n#define __LDBL_EPSILON__ 1.08420217248550443400745280086994171e-19L\n#define __LDBL_DENORM_MIN__ 3.64519953188247460252840593361941982e-4951L\n#define __LDBL_HAS_DENORM__ 1\n#define __LDBL_HAS_INFINITY__ 1\n#define __LDBL_HAS_QUIET_NAN__ 1\n#define __LDBL_IS_IEC_60559__ 1\n#define __FLT16_MANT_DIG__ 11\n#define __FLT16_DIG__ 3\n#define __FLT16_MIN_EXP__ (-13)\n#define __FLT16_MIN_10_EXP__ (-4)\n#define __FLT16_MAX_EXP__ 16\n#define __FLT16_MAX_10_EXP__ 4\n#define __FLT16_DECIMAL_DIG__ 5\n#define __FLT16_MAX__ 6.55040000000000000000000000000000000e+4F16\n#define __FLT16_NORM_MAX__ 6.55040000000000000000000000000000000e+4F16\n#define __FLT16_MIN__ 6.10351562500000000000000000000000000e-5F16\n#define __FLT16_EPSILON__ 9.76562500000000000000000000000000000e-4F16\n#define __FLT16_DENORM_MIN__ 5.96046447753906250000000000000000000e-8F16\n#define __FLT16_HAS_DENORM__ 1\n#define __FLT16_HAS_INFINITY__ 1\n#define __FLT16_HAS_QUIET_NAN__ 1\n#define __FLT16_IS_IEC_60559__ 1\n#define __FLT32_MANT_DIG__ 24\n#define __FLT32_DIG__ 6\n#define __FLT32_MIN_EXP__ (-125)\n#define __FLT32_MIN_10_EXP__ (-37)\n#define __FLT32_MAX_EXP__ 128\n#define __FLT32_MAX_10_EXP__ 38\n#define __FLT32_DECIMAL_DIG__ 9\n#define __FLT32_MAX__ 3.40282346638528859811704183484516925e+38F32\n#define __FLT32_NORM_MAX__ 3.40282346638528859811704183484516925e+38F32\n#define __FLT32_MIN__ 1.17549435082228750796873653722224568e-38F32\n#define __FLT32_EPSILON__ 1.19209289550781250000000000000000000e-7F32\n#define __FLT32_DENORM_MIN__ 1.40129846432481707092372958328991613e-45F32\n#define __FLT32_HAS_DENORM__ 1\n#define __FLT32_HAS_INFINITY__ 1\n#define __FLT32_HAS_QUIET_NAN__ 1\n#define __FLT32_IS_IEC_60559__ 1\n#define __FLT64_MANT_DIG__ 53\n#define __FLT64_DIG__ 15\n#define __FLT64_MIN_EXP__ (-1021)\n#define __FLT64_MIN_10_EXP__ (-307)\n#define __FLT64_MAX_EXP__ 1024\n#define __FLT64_MAX_10_EXP__ 308\n#define __FLT64_DECIMAL_DIG__ 17\n#define __FLT64_MAX__ 1.79769313486231570814527423731704357e+308F64\n#define __FLT64_NORM_MAX__ 1.79769313486231570814527423731704357e+308F64\n#define __FLT64_MIN__ 2.22507385850720138309023271733240406e-308F64\n#define __FLT64_EPSILON__ 2.22044604925031308084726333618164062e-16F64\n#define __FLT64_DENORM_MIN__ 4.94065645841246544176568792868221372e-324F64\n#define __FLT64_HAS_DENORM__ 1\n#define __FLT64_HAS_INFINITY__ 1\n#define __FLT64_HAS_QUIET_NAN__ 1\n#define __FLT64_IS_IEC_60559__ 1\n#define __FLT128_MANT_DIG__ 113\n#define __FLT128_DIG__ 33\n#define __FLT128_MIN_EXP__ (-16381)\n#define __FLT128_MIN_10_EXP__ (-4931)\n#define __FLT128_MAX_EXP__ 16384\n#define __FLT128_MAX_10_EXP__ 4932\n#define __FLT128_DECIMAL_DIG__ 36\n#define __FLT128_MAX__ 1.18973149535723176508575932662800702e+4932F128\n#define __FLT128_NORM_MAX__ 1.18973149535723176508575932662800702e+4932F128\n#define __FLT128_MIN__ 3.36210314311209350626267781732175260e-4932F128\n#define __FLT128_EPSILON__ 1.92592994438723585305597794258492732e-34F128\n#define __FLT128_DENORM_MIN__ 6.47517511943802511092443895822764655e-4966F128\n#define __FLT128_HAS_DENORM__ 1\n#define __FLT128_HAS_INFINITY__ 1\n#define __FLT128_HAS_QUIET_NAN__ 1\n#define __FLT128_IS_IEC_60559__ 1\n#define __FLT32X_MANT_DIG__ 53\n#define __FLT32X_DIG__ 15\n#define __FLT32X_MIN_EXP__ (-1021)\n#define __FLT32X_MIN_10_EXP__ (-307)\n#define __FLT32X_MAX_EXP__ 1024\n#define __FLT32X_MAX_10_EXP__ 308\n#define __FLT32X_DECIMAL_DIG__ 17\n#define __FLT32X_MAX__ 1.79769313486231570814527423731704357e+308F32x\n#define __FLT32X_NORM_MAX__ 1.79769313486231570814527423731704357e+308F32x\n#define __FLT32X_MIN__ 2.22507385850720138309023271733240406e-308F32x\n#define __FLT32X_EPSILON__ 2.22044604925031308084726333618164062e-16F32x\n#define __FLT32X_DENORM_MIN__ 4.94065645841246544176568792868221372e-324F32x\n#define __FLT32X_HAS_DENORM__ 1\n#define __FLT32X_HAS_INFINITY__ 1\n#define __FLT32X_HAS_QUIET_NAN__ 1\n#define __FLT32X_IS_IEC_60559__ 1\n#define __FLT64X_MANT_DIG__ 64\n#define __FLT64X_DIG__ 18\n#define __FLT64X_MIN_EXP__ (-16381)\n#define __FLT64X_MIN_10_EXP__ (-4931)\n#define __FLT64X_MAX_EXP__ 16384\n#define __FLT64X_MAX_10_EXP__ 4932\n#define __FLT64X_DECIMAL_DIG__ 21\n#define __FLT64X_MAX__ 1.18973149535723176502126385303097021e+4932F64x\n#define __FLT64X_NORM_MAX__ 1.18973149535723176502126385303097021e+4932F64x\n#define __FLT64X_MIN__ 3.36210314311209350626267781732175260e-4932F64x\n#define __FLT64X_EPSILON__ 1.08420217248550443400745280086994171e-19F64x\n#define __FLT64X_DENORM_MIN__ 3.64519953188247460252840593361941982e-4951F64x\n#define __FLT64X_HAS_DENORM__ 1\n#define __FLT64X_HAS_INFINITY__ 1\n#define __FLT64X_HAS_QUIET_NAN__ 1\n#define __FLT64X_IS_IEC_60559__ 1\n#define __BFLT16_MANT_DIG__ 8\n#define __BFLT16_DIG__ 2\n#define __BFLT16_MIN_EXP__ (-125)\n#define __BFLT16_MIN_10_EXP__ (-37)\n#define __BFLT16_MAX_EXP__ 128\n#define __BFLT16_MAX_10_EXP__ 38\n#define __BFLT16_DECIMAL_DIG__ 4\n#define __BFLT16_MAX__ 3.38953138925153547590470800371487867e+38BF16\n#define __BFLT16_NORM_MAX__ 3.38953138925153547590470800371487867e+38BF16\n#define __BFLT16_MIN__ 1.17549435082228750796873653722224568e-38BF16\n#define __BFLT16_EPSILON__ 7.81250000000000000000000000000000000e-3BF16\n#define __BFLT16_DENORM_MIN__ 9.18354961579912115600575419704879436e-41BF16\n#define __BFLT16_HAS_DENORM__ 1\n#define __BFLT16_HAS_INFINITY__ 1\n#define __BFLT16_HAS_QUIET_NAN__ 1\n#define __BFLT16_IS_IEC_60559__ 0\n#define __DEC32_MANT_DIG__ 7\n#define __DEC32_MIN_EXP__ (-94)\n#define __DEC32_MAX_EXP__ 97\n#define __DEC32_MIN__ 1E-95DF\n#define __DEC32_MAX__ 9.999999E96DF\n#define __DEC32_EPSILON__ 1E-6DF\n#define __DEC32_SUBNORMAL_MIN__ 0.000001E-95DF\n#define __DEC64_MANT_DIG__ 16\n#define __DEC64_MIN_EXP__ (-382)\n#define __DEC64_MAX_EXP__ 385\n#define __DEC64_MIN__ 1E-383DD\n#define __DEC64_MAX__ 9.999999999999999E384DD\n#define __DEC64_EPSILON__ 1E-15DD\n#define __DEC64_SUBNORMAL_MIN__ 0.000000000000001E-383DD\n#define __DEC128_MANT_DIG__ 34\n#define __DEC128_MIN_EXP__ (-6142)\n#define __DEC128_MAX_EXP__ 6145\n#define __DEC128_MIN__ 1E-6143DL\n#define __DEC128_MAX__ 9.999999999999999999999999999999999E6144DL\n#define __DEC128_EPSILON__ 1E-33DL\n#define __DEC128_SUBNORMAL_MIN__ 0.000000000000000000000000000000001E-6143DL\n#define __DEC64X_MANT_DIG__ 34\n#define __DEC64X_MIN_EXP__ (-6142)\n#define __DEC64X_MAX_EXP__ 6145\n#define __DEC64X_MIN__ 1E-6143D64x\n#define __DEC64X_MAX__ 9.999999999999999999999999999999999E6144D64x\n#define __DEC64X_EPSILON__ 1E-33D64x\n#define __DEC64X_SUBNORMAL_MIN__ 0.000000000000000000000000000000001E-6143D64x\n#define __REGISTER_PREFIX__ \n#define __USER_LABEL_PREFIX__ \n#define __GNUC_STDC_INLINE__ 1\n#define __NO_INLINE__ 1\n#define __GCC_HAVE_SYNC_COMPARE_AND_SWAP_1 1\n#define __GCC_HAVE_SYNC_COMPARE_AND_SWAP_2 1\n#define __GCC_HAVE_SYNC_COMPARE_AND_SWAP_4 1\n#define __GCC_HAVE_SYNC_COMPARE_AND_SWAP_8 1\n#define __GCC_ATOMIC_BOOL_LOCK_FREE 2\n#define __GCC_ATOMIC_CHAR_LOCK_FREE 2\n#define __GCC_ATOMIC_CHAR8_T_LOCK_FREE 2\n#define __GCC_ATOMIC_CHAR16_T_LOCK_FREE 2\n#define __GCC_ATOMIC_CHAR32_T_LOCK_FREE 2\n#define __GCC_ATOMIC_WCHAR_T_LOCK_FREE 2\n#define __GCC_ATOMIC_SHORT_LOCK_FREE 2\n#define __GCC_ATOMIC_INT_LOCK_FREE 2\n#define __GCC_ATOMIC_LONG_LOCK_FREE 2\n#define __GCC_ATOMIC_LLONG_LOCK_FREE 2\n#define __GCC_ATOMIC_TEST_AND_SET_TRUEVAL 1\n#define __GCC_DESTRUCTIVE_SIZE 64\n#define __GCC_CONSTRUCTIVE_SIZE 64\n#define __GCC_ATOMIC_POINTER_LOCK_FREE 2\n#define __HAVE_SPECULATION_SAFE_VALUE 1\n#define __GCC_HAVE_DWARF2_CFI_ASM 1\n#define __PRAGMA_REDEFINE_EXTNAME 1\n#define __SIZEOF_INT128__ 16\n#define __SIZEOF_WCHAR_T__ 4\n#define __SIZEOF_WINT_T__ 4\n#define __SIZEOF_PTRDIFF_T__ 8\n#define __amd64 1\n#define __amd64__ 1\n#define __x86_64 1\n#define __x86_64__ 1\n#define __SIZEOF_FLOAT80__ 16\n#define __SIZEOF_FLOAT128__ 16\n#define __ATOMIC_HLE_ACQUIRE 65536\n#define __ATOMIC_HLE_RELEASE 131072\n#define __GCC_ASM_FLAG_OUTPUTS__ 1\n#define __k8 1\n#define __k8__ 1\n#define __code_model_small__ 1\n#define __MMX__ 1\n#define __SSE__ 1\n#define __SSE2__ 1\n#define __FXSR__ 1\n#define __SSE_MATH__ 1\n#define __SSE2_MATH__ 1\n#define __MMX_WITH_SSE__ 1\n#define __SEG_FS 1\n#define __SEG_GS 1\n#define __gnu_linux__ 1\n#define __linux 1\n#define __linux__ 1\n#define linux 1\n#define __unix 1\n#define __unix__ 1\n#define unix 1\n#define __ELF__ 1\n#define __DECIMAL_BID_FORMAT__ 1\n#define DEFINED 42\n#undef DEFINED\n#define KEPT 1\nint main(void) { return 0; }\n"
+        },
+        "stderr": {
+          "bytes": 0,
+          "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+          "base64": "",
+          "text": ""
+        },
+        "artifacts": []
+      },
+      "repetitions": 2,
+      "normalizations": []
+    },
+    {
+      "id": "error-directive",
+      "categories": [
+        "diagnostic"
+      ],
+      "arguments": [
+        "-nostdinc",
+        "-E",
+        "error.c"
+      ],
+      "environment": {
+        "LC_ALL": "C",
+        "SOURCE_DATE_EPOCH": "1786060800",
+        "TZ": "UTC"
+      },
+      "inputs": [
+        {
+          "path": "error.c",
+          "bytes": 40,
+          "sha256": "e1f6ccb9004845648ce57986908c88876f75946ab1e66c6e2e9729197e50f55a"
+        }
+      ],
+      "stdin": {
+        "bytes": 0,
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      },
+      "observed": {
+        "exitCode": 1,
+        "stdout": {
+          "bytes": 90,
+          "sha256": "cd08d6aa53ed818a830fac0fedfbe0ffb768130c327f52b7a2d77f34ebb72f9b",
+          "base64": "IyAwICJlcnJvci5jIgojIDAgIjxidWlsdC1pbj4iCiMgMCAiPGNvbW1hbmQtbGluZT4iCiMgMSAiZXJyb3IuYyIKaW50IGJlZm9yZTsKCmludCBhZnRlcjsK",
+          "text": "# 0 \"error.c\"\n# 0 \"<built-in>\"\n# 0 \"<command-line>\"\n# 1 \"error.c\"\nint before;\n\nint after;\n"
+        },
+        "stderr": {
+          "bytes": 77,
+          "sha256": "f53a1486730641f7ddd88eaf1af06d94a4aab796fc4aff2296b2c50bd44aa57e",
+          "base64": "ZXJyb3IuYzoyOjI6IGVycm9yOiAjZXJyb3Igc3RvcCBoZXJlCiAgICAyIHwgI2Vycm9yIHN0b3AgaGVyZQogICAgICB8ICBefn5+fgo=",
+          "text": "error.c:2:2: error: #error stop here\n    2 | #error stop here\n      |  ^~~~~\n"
+        },
+        "artifacts": []
+      },
+      "repetitions": 2,
+      "normalizations": []
+    },
+    {
+      "id": "language-assembler-with-cpp-explicit",
+      "categories": [
+        "language-selection"
+      ],
+      "arguments": [
+        "-nostdinc",
+        "-x",
+        "assembler-with-cpp",
+        "-E",
+        "code.txt"
+      ],
+      "environment": {
+        "LC_ALL": "C",
+        "SOURCE_DATE_EPOCH": "1786060800",
+        "TZ": "UTC"
+      },
+      "inputs": [
+        {
+          "path": "code.txt",
+          "bytes": 36,
+          "sha256": "d853af155f1b008368806678a4e803d2311df88f36cfaa4a867f670e178aa017"
+        }
+      ],
+      "stdin": {
+        "bytes": 0,
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      },
+      "observed": {
+        "exitCode": 0,
+        "stdout": {
+          "bytes": 89,
+          "sha256": "c61829d8e574163a8d4548a37b56025166b785b69157f73808cd02c44f6fd822",
+          "base64": "IyAwICJjb2RlLnR4dCIKIyAwICI8YnVpbHQtaW4+IgojIDAgIjxjb21tYW5kLWxpbmU+IgojIDEgImNvZGUudHh0IgoKIG1vdmwgJDAsICVlYXgKIHJldAo=",
+          "text": "# 0 \"code.txt\"\n# 0 \"<built-in>\"\n# 0 \"<command-line>\"\n# 1 \"code.txt\"\n\n movl $0, %eax\n ret\n"
+        },
+        "stderr": {
+          "bytes": 0,
+          "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+          "base64": "",
+          "text": ""
+        },
+        "artifacts": []
+      },
+      "repetitions": 2,
+      "normalizations": []
+    },
+    {
+      "id": "language-assembler-with-cpp-suffix",
+      "categories": [
+        "language-selection"
+      ],
+      "arguments": [
+        "-nostdinc",
+        "-E",
+        "code.S"
+      ],
+      "environment": {
+        "LC_ALL": "C",
+        "SOURCE_DATE_EPOCH": "1786060800",
+        "TZ": "UTC"
+      },
+      "inputs": [
+        {
+          "path": "code.S",
+          "bytes": 36,
+          "sha256": "d853af155f1b008368806678a4e803d2311df88f36cfaa4a867f670e178aa017"
+        }
+      ],
+      "stdin": {
+        "bytes": 0,
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      },
+      "observed": {
+        "exitCode": 0,
+        "stdout": {
+          "bytes": 85,
+          "sha256": "3413f6d393316aa3cd54bd08aee77874f7cca71e9cec9747a3b58284925e6cca",
+          "base64": "IyAwICJjb2RlLlMiCiMgMCAiPGJ1aWx0LWluPiIKIyAwICI8Y29tbWFuZC1saW5lPiIKIyAxICJjb2RlLlMiCgogbW92bCAkMCwgJWVheAogcmV0Cg==",
+          "text": "# 0 \"code.S\"\n# 0 \"<built-in>\"\n# 0 \"<command-line>\"\n# 1 \"code.S\"\n\n movl $0, %eax\n ret\n"
+        },
+        "stderr": {
+          "bytes": 0,
+          "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+          "base64": "",
+          "text": ""
+        },
+        "artifacts": []
+      },
+      "repetitions": 2,
+      "normalizations": []
+    },
+    {
+      "id": "language-preprocessed-c-suffix",
+      "categories": [
+        "language-selection"
+      ],
+      "arguments": [
+        "-nostdinc",
+        "-E",
+        "already.i"
+      ],
+      "environment": {
+        "LC_ALL": "C",
+        "SOURCE_DATE_EPOCH": "1786060800",
+        "TZ": "UTC"
+      },
+      "inputs": [
+        {
+          "path": "already.i",
+          "bytes": 33,
+          "sha256": "b8d8aceb250ab4ba83fb501ca44855826587856fe815700fcd623fecdb4c7892"
+        }
+      ],
+      "stdin": {
+        "bytes": 0,
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      },
+      "observed": {
+        "exitCode": 0,
+        "stdout": {
+          "bytes": 0,
+          "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+          "base64": "",
+          "text": ""
+        },
+        "stderr": {
+          "bytes": 0,
+          "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+          "base64": "",
+          "text": ""
+        },
+        "artifacts": []
+      },
+      "repetitions": 2,
+      "normalizations": []
+    },
+    {
+      "id": "language-c-explicit-with-output",
+      "categories": [
+        "language-selection",
+        "artifacts"
+      ],
+      "arguments": [
+        "-nostdinc",
+        "-x",
+        "c",
+        "-E",
+        "code.txt",
+        "-o",
+        "code.i"
+      ],
+      "environment": {
+        "LC_ALL": "C",
+        "SOURCE_DATE_EPOCH": "1786060800",
+        "TZ": "UTC"
+      },
+      "inputs": [
+        {
+          "path": "code.txt",
+          "bytes": 23,
+          "sha256": "22ec4ee952e46f25d83bf513ee7d3031e774f7726f8aee0db5c44b513a973775"
+        }
+      ],
+      "stdin": {
+        "bytes": 0,
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      },
+      "observed": {
+        "exitCode": 0,
+        "stdout": {
+          "bytes": 0,
+          "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+          "base64": "",
+          "text": ""
+        },
+        "stderr": {
+          "bytes": 0,
+          "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+          "base64": "",
+          "text": ""
+        },
+        "artifacts": [
+          {
+            "path": "code.i",
+            "bytes": 80,
+            "sha256": "6572aadc749ef81714ddb1d6c1dff1d057334537d134c9ea2e62af534da8b169",
+            "base64": "IyAwICJjb2RlLnR4dCIKIyAwICI8YnVpbHQtaW4+IgojIDAgIjxjb21tYW5kLWxpbmU+IgojIDEgImNvZGUudHh0IgoKaW50IHYgPSA1Owo=",
+            "text": "# 0 \"code.txt\"\n# 0 \"<built-in>\"\n# 0 \"<command-line>\"\n# 1 \"code.txt\"\n\nint v = 5;\n"
+          }
+        ]
+      },
+      "repetitions": 2,
+      "normalizations": []
     }
+  ],
+  "productionGates": {
+    "reconstructedCandidateComparison": "unavailable",
+    "reason": "These records are the real GCC 16.2.0 frontend reference. Comparing a reconstructed candidate driver against them is downstream work."
   },
-  "productionGap": {
-    "realFrontendReference": "unavailable",
-    "authenticatedCandidateComparison": "unavailable",
-    "requiredNextCases": [
-      "include-search",
-      "macro-definition-undefinition",
-      "language-selection",
-      "preprocess-stdin"
-    ],
-    "reason": "The checked case uses the staged deterministic companion tools/cc1 and therefore cannot establish GCC frontend semantics, independently captured diagnostics, or produced artifacts."
-  },
-  "analysisBoundary": "No Ghidra analysis is part of this record; bundled Ghidra isolation and the authenticated oracle boundary remain unchanged, and no GHIDRA_HOME fallback is introduced."
+  "analysisBoundary": "No Ghidra analysis is part of this record; bundled Ghidra isolation and the authenticated oracle boundary remain unchanged, and no GHIDRA_HOME fallback or analyzeHeadless invocation is introduced."
 }
