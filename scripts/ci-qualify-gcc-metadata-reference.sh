@@ -154,12 +154,13 @@ umask 077
 # Two transport-only copies make decompression explicit. The second preserves the exact config
 # and uncompressed diffIDs; Kotlin independently authenticates every OCI input before extraction.
 # No container, image executable, reconstructed candidate or Python oracle is run here.
+# Skopeo otherwise defaults its temporary storage to /var/tmp; keep transport scratch in the repo.
 image='docker://docker.io/library/gcc@sha256:2e6f4ae27ab8ad6f9617b46f0468889d368fdd91f2ea29aff98e4d5d1a3637f0'
 [[ ! -e "$work/transport-dir" && ! -e "$work/oci" ]]
-timeout --kill-after=10s 15m skopeo --override-os linux --override-arch amd64 copy \
+TMPDIR="$work/tmp" timeout --kill-after=10s 15m skopeo --tmpdir "$work/tmp" --override-os linux --override-arch amd64 copy \
   --retry-times 2 --src-no-creds --dest-decompress "$image" "dir:$work/transport-dir" \
   2>&1 | tee "$evidence/image-transport.log"
-timeout --kill-after=10s 10m skopeo copy --dest-oci-accept-uncompressed-layers \
+TMPDIR="$work/tmp" timeout --kill-after=10s 10m skopeo --tmpdir "$work/tmp" copy --dest-oci-accept-uncompressed-layers \
   "dir:$work/transport-dir" "oci:$work/oci:gcc" \
   2>&1 | tee -a "$evidence/image-transport.log"
 
