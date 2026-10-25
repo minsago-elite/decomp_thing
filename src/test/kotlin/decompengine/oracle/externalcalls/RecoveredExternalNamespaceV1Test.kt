@@ -1,6 +1,7 @@
 package decompengine.oracle.externalcalls
 
 import decompengine.oracle.machinecalls.MachineInstructionDecoderV1
+import decompengine.oracle.machinecalls.MachineInstructionRefusalV1
 import decompengine.oracle.machinecalls.MachineInstructionV1
 import kotlin.test.*
 import org.junit.jupiter.api.Test
@@ -8,7 +9,7 @@ import kotlinx.serialization.json.*
 
 class RecoveredExternalNamespaceV1Test {
     @Test fun `existing direct thunk and indirect slot claims project once while raw unknown remains`() {
-        fixture { files, native -> files.withPair { pair ->
+        withRecoveredExternalFixtureV1 { files, native -> files.withPair { pair ->
             val frozen = freeze(native)
             val result = compose(frozen, pair)
             val sites = result.sites()
@@ -19,6 +20,10 @@ class RecoveredExternalNamespaceV1Test {
             assertEquals(JsonPrimitive(false), result["negativeCompleteness"])
             assertEquals(JsonPrimitive(3L), (result.getValue("counts") as JsonObject)["rawSites"])
             assertEquals(frozen.evidenceSha256, result.text("frozenClaimsSha256"))
+            val binding = result.getValue("frozenClaimsBinding") as JsonObject
+            assertEquals(JsonPrimitive(true), binding["rawSourcesRequired"])
+            assertEquals(JsonPrimitive(frozen.observationBytes), binding["observationsBytes"])
+            assertEquals(JsonPrimitive(frozen.rawRecordCount), binding["rawRecordCount"])
             // Deliberately mismatched recovered label/version is raw data, never a namespace selector.
             assertTrue(String(frozen.rawObservationBytes).contains("fixture_external"))
             assertTrue(result.getValue("externalNamespace").toString().contains("puts"))
@@ -27,7 +32,7 @@ class RecoveredExternalNamespaceV1Test {
     }
 
     @Test fun `known PLT bytes never supply a missing recovered external claim`() {
-        fixture { files, original ->
+        withRecoveredExternalFixtureV1 { files, original ->
             val native = original.withFunction(2) { it + mapOf("isThunk" to JsonPrimitive(false), "immediateThunkTarget" to JsonNull) }
                 .withSite(1) { it + ("referenceNeighborhoods" to JsonArray((it.getValue("referenceNeighborhoods") as JsonArray).map { raw ->
                     JsonObject((raw as JsonObject) + ("references" to JsonArray(emptyList())))
@@ -43,7 +48,7 @@ class RecoveredExternalNamespaceV1Test {
     }
 
     @Test fun `native slot must agree with byte transfer and no substitute is selected`() {
-        fixture { files, original ->
+        withRecoveredExternalFixtureV1 { files, original ->
             val native = original.copy(document = replaceAddresses(original.document, mapOf(0x1800L to 0x1818L)) as JsonObject).recount()
             files.withPair { pair ->
                 val result = compose(freeze(native), pair)
@@ -55,7 +60,7 @@ class RecoveredExternalNamespaceV1Test {
     }
 
     @Test fun `conflated external node keeps distinct physical candidates unresolved`() {
-        fixture { files, original ->
+        withRecoveredExternalFixtureV1 { files, original ->
             // A second independently encoded request, with the same recovered synthetic E.
             for (elf in listOf(files.richElf, files.strippedElf)) {
                 elf.bytes[0x400 + 2 * 24 + 4] = 0x12
@@ -77,7 +82,7 @@ class RecoveredExternalNamespaceV1Test {
     }
 
     @Test fun `weak request stays unresolved without manufacturing runtime implementation`() {
-        fixture { files, original ->
+        withRecoveredExternalFixtureV1 { files, original ->
             for (elf in listOf(files.richElf, files.strippedElf)) elf.bytes[0x400 + 24 + 4] = 0x22
             files.write()
             files.withPair { pair ->
@@ -89,7 +94,7 @@ class RecoveredExternalNamespaceV1Test {
     }
 
     @Test fun `native byte or input identity mismatch cannot use paired truth`() {
-        fixture { files, original -> files.withPair { pair ->
+        withRecoveredExternalFixtureV1 { files, original -> files.withPair { pair ->
             val changed = original.withSite(0) { it + ("instructionBytes" to JsonPrimitive("e800000000")) }
             assertEquals("unresolved-native-instruction-correspondence", compose(freeze(changed), pair).sites()[0].text("disposition"))
             assertFails { compose(freeze(rebound(original, "f".repeat(64))), pair) }
@@ -97,7 +102,7 @@ class RecoveredExternalNamespaceV1Test {
     }
 
     @Test fun `closed validator rejects forged path fields nested authority and census edits`() {
-        fixture { files, native -> files.withPair { pair ->
+        withRecoveredExternalFixtureV1 { files, native -> files.withPair { pair ->
             val frozen = freeze(native)
             val result = compose(frozen, pair)
             fun changedSite(change: (JsonObject) -> Map<String, JsonElement>): JsonObject = JsonObject(result + ("sites" to JsonArray(result.sites().mapIndexed { index, row ->
@@ -106,6 +111,9 @@ class RecoveredExternalNamespaceV1Test {
             val mutations = listOf(
                 JsonObject(result + ("productionVerified" to JsonPrimitive(true))),
                 JsonObject(result + ("sites" to JsonArray(result.sites().dropLast(1)))),
+                JsonObject(result + ("sites" to JsonArray(listOf(result.sites()[0], result.sites()[0], result.sites()[2])))),
+                JsonObject(result + ("frozenClaimsBinding" to JsonObject((result.getValue("frozenClaimsBinding") as JsonObject) - "observationsSha256"))),
+                JsonObject(result + ("frozenClaimsBinding" to JsonObject((result.getValue("frozenClaimsBinding") as JsonObject) + ("rawSourcesRequired" to JsonPrimitive(false))))),
                 changedSite { it + ("sourceRecordOrdinal" to JsonPrimitive(99)) },
                 changedSite { it + ("physicalInstruction" to JsonObject((it.getValue("physicalInstruction") as JsonObject) + ("authority" to JsonPrimitive(true)))) },
                 changedSite { it + ("physicalInstruction" to JsonObject((it.getValue("physicalInstruction") as JsonObject) + ("directCallTarget" to JsonPrimitive("0x400280")))) },
@@ -113,12 +121,13 @@ class RecoveredExternalNamespaceV1Test {
                 changedSite { it + ("memoryTransfer" to JsonObject((it.getValue("memoryTransfer") as JsonObject) + ("rawTransferOpIndex" to JsonPrimitive(4096)))) },
             )
             mutations.forEach { assertFails { RecoveredExternalNamespaceV1.validate(it, frozen, pair) } }
+            assertFails { RecoveredExternalNamespaceV1.validate(result, frozen, pair, RecoveredExternalNamespaceLimitsV1(maximumOutputBytes = 100)) }
             assertFails { RecoveredExternalNamespaceV1.validate(result, freeze(rebound(native, "f".repeat(64))), pair) }
         } }
     }
 
     @Test fun `bounds cancellation and malformed decoder receipt fail closed`() {
-        fixture { files, native -> files.withPair { pair ->
+        withRecoveredExternalFixtureV1 { files, native -> files.withPair { pair ->
             val frozen = freeze(native)
             assertFails { RecoveredExternalNamespaceV1.compose(frozen, pair, BASIC, MEMORY, RecoveredExternalNamespaceLimitsV1(maximumSites = 2)) }
             assertFails { RecoveredExternalNamespaceV1.compose(frozen, pair, BASIC, MEMORY, checkpoint = { error("cancel") }) }
@@ -126,9 +135,55 @@ class RecoveredExternalNamespaceV1Test {
             assertFails { RecoveredExternalNamespaceV1.compose(frozen, pair, BASIC, StaticMemoryTransferDecoderV1 { address, bytes -> MEMORY.decode(address, bytes).copy(rawTransferOpcode = "CALL") }) }
         } }
     }
+
+    @Test fun `coordinated disposition target and count edits cannot hide eligible proof or invent refusal`() {
+        withRecoveredExternalFixtureV1 { files, native -> files.withPair { pair ->
+            val frozen = freeze(native)
+            val report = compose(frozen, pair)
+            fun mutate(change: (JsonObject) -> Map<String, JsonElement>): JsonObject {
+                val sites = report.sites().mapIndexed { index, row -> if (index == 0) JsonObject(change(row)) else row }
+                val counts = JsonObject(mapOf("rawSites" to JsonPrimitive(frozen.rawSiteCount), "projectedSites" to JsonPrimitive(sites.size),
+                    "dispositions" to JsonObject(sites.groupingBy { it.text("disposition") }.eachCount().mapValues { JsonPrimitive(it.value) })))
+                return JsonObject(report + mapOf("sites" to JsonArray(sites), "counts" to counts))
+            }
+            for (status in listOf("unresolved-native-instruction-correspondence", "unresolved-frozen-native-claim",
+                "unresolved-memory-transfer", "unresolved-static-import-eligibility", "unresolved-byte-decoder-refusal")) {
+                val changed = mutate { it + mapOf("disposition" to JsonPrimitive(status), "externalTargetId" to JsonNull) }
+                assertFails(status) { RecoveredExternalNamespaceV1.validate(changed, frozen, pair) }
+            }
+            val extraRefusal = mutate { it + ("decoderRefusal" to JsonPrimitive("unsupported-flow")) }
+            assertFails { RecoveredExternalNamespaceV1.validate(extraRefusal, frozen, pair) }
+            val removedProofs = mutate { it + mapOf("disposition" to JsonPrimitive("unresolved-native-instruction-correspondence"),
+                "externalTargetId" to JsonNull, "candidateImportRequestId" to JsonNull, "physicalInstruction" to JsonNull,
+                "memoryTransfer" to JsonNull, "slotPair" to JsonNull) }
+            assertFails { RecoveredExternalNamespaceV1.validate(removedProofs, frozen, pair) }
+        } }
+    }
+
+    @Test fun `typed decode refusals flow disagreement and unresolved memory remain valid explicit outcomes`() {
+        withRecoveredExternalFixtureV1 { files, native -> files.withPair { pair ->
+            val frozen = freeze(native)
+            val firstRefusal = RecoveredExternalNamespaceV1.compose(frozen, pair,
+                MachineInstructionDecoderV1 { _, _ -> throw MachineInstructionRefusalV1("unsupported-flow") }, MEMORY)
+            assertTrue(firstRefusal.sites().take(2).all { it.text("disposition") == "unresolved-byte-decoder-refusal" && it["physicalInstruction"] == JsonNull })
+            val memoryRefusal = RecoveredExternalNamespaceV1.compose(frozen, pair, BASIC,
+                StaticMemoryTransferDecoderV1 { _, _ -> throw MachineInstructionRefusalV1("unsupported-flow") })
+            assertTrue(memoryRefusal.sites().take(2).all { it.text("disposition") == "unresolved-byte-decoder-refusal" && it["physicalInstruction"] != JsonNull })
+            val flow = RecoveredExternalNamespaceV1.compose(frozen, pair, MachineInstructionDecoderV1 { address, bytes ->
+                val receipt = BASIC.decode(address, bytes)
+                if (address == 0x400200UL) receipt.copy(directCallTarget = 0x400250UL, directTargets = listOf(0x400250UL)) else receipt
+            }, MEMORY)
+            assertEquals("unresolved-native-flow-or-target", flow.sites()[0].text("disposition"))
+            val unresolved = RecoveredExternalNamespaceV1.compose(frozen, pair, BASIC, StaticMemoryTransferDecoderV1 { address, bytes ->
+                MEMORY.decode(address, bytes).copy(pointerSlotAddress = null, pointerWidthBytes = null, relationship = "unresolved",
+                    rawReadOpcode = null, rawReadOpIndex = null, unresolvedReason = "register-transfer")
+            })
+            assertTrue(unresolved.sites().take(2).all { it.text("disposition") == "unresolved-memory-transfer" && it["externalTargetId"] == JsonNull })
+        } }
+    }
 }
 
-private fun fixture(action: (ElfExternalNamespacePairFixtureV1, NativeExternalFixtureV1) -> Unit) {
+internal fun withRecoveredExternalFixtureV1(action: (ElfExternalNamespacePairFixtureV1, NativeExternalFixtureV1) -> Unit) {
     withElfExternalNamespacePairFixtureV1 { files ->
         for (elf in listOf(files.richElf, files.strippedElf)) {
             hexBytes("e83b000000").copyInto(elf.bytes, 0x200)

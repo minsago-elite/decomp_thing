@@ -11,6 +11,14 @@ record ordinal survives, including unowned, nonphysical, analysis-only and tail
 candidates. No oracle call report, canonical function population or selected
 boundary mapping is an input. Names never select or supply a target.
 
+The projection report carries a closed `frozenClaimsBinding` with the exact raw
+manifest/observation hashes and byte counts, frozen-census hash and byte count,
+policy and native bindings, and original record/site counts. The complete raw
+sources must be retained alongside the worker request and report and supplied for
+independent re-freeze and validation. This commitment cannot replace missing
+source bytes. There remains exactly one projection row per original native site,
+in original order, with its original record ordinal.
+
 Two native claims can be checked:
 
 * A physical computed call already has an INDIRECTION reference to slot S and an

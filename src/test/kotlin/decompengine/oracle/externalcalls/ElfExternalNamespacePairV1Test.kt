@@ -52,6 +52,11 @@ class ElfExternalNamespacePairV1Test {
                     assertEquals(JsonPrimitive(false), pair.receipt[flag])
                 assertEquals(OracleArtifacts.sha256(OracleJson.canonicalBytes(pair.receipt)), pair.receiptSha256)
                 assertFailsWith<UnsupportedOperationException> { (pair.slots as MutableList<*>).clear() }
+                val row = (pair.receipt.getValue("slots") as JsonArray).first() as JsonObject
+                val coverage = row.getValue("richWriteCoverage") as JsonObject
+                val entry = coverage.entries.first { it.key == "candidateActive" } as MutableMap.MutableEntry<String, JsonElement>
+                assertFailsWith<UnsupportedOperationException> { entry.setValue(JsonPrimitive(false)) }
+                assertEquals(OracleArtifacts.sha256(OracleJson.canonicalBytes(pair.receipt)), pair.receiptSha256)
                 pair.requireCurrent()
             }
         }
@@ -130,6 +135,22 @@ class ElfExternalNamespacePairV1Test {
     }
 
     @Test
+    fun `a dependency string unused by symbols or versions is still part of the logical pairing proof`(): Unit =
+        withElfExternalNamespacePairFixtureV1 { fixture ->
+            pairFixtureAddNeededOnly(fixture.richElf)
+            val offset = pairFixtureAddNeededOnly(fixture.strippedElf)
+            fixture.write()
+            fixture.withPair { pair ->
+                assertEquals(listOf("libc.so.6", "unused-dependency.so"), pair.richInventory.neededLibraries)
+                assertTrue(pair.slotAtRva(0x800UL)!!.eligible)
+            }
+            fixture.strippedElf.bytes[offset] = 'x'.code.toByte()
+            fixture.write()
+            val error = assertFailsWith<IllegalArgumentException> { fixture.withPair {} }
+            assertTrue(error.message!!.contains("logical dynamic metadata differs"))
+        }
+
+    @Test
     fun `code proof is bounded byte correspondence and never invents ownership or hidden instruction boundaries`(): Unit =
         withElfExternalNamespacePairFixtureV1 { fixture ->
             fixture.strippedElf.bytes[0x206] = 1
@@ -176,10 +197,23 @@ class ElfExternalNamespacePairV1Test {
         val cancellation = IllegalStateException("authored pair cancellation")
         val observed = assertFailsWith<IllegalStateException> { fixture.withPair(checkpoint = { throw cancellation }) {} }
         assertSame(cancellation, observed)
+        assertFailsWith<IllegalArgumentException> {
+            fixture.withPair(ElfExternalNamespacePairLimitsV1(maximumWallMillis = 1), checkpoint = { Thread.sleep(3) }) {}
+        }
         fixture.withPair(ElfExternalNamespacePairLimitsV1(maximumCodeProofs = 1)) { pair ->
             assertNotNull(pair.codeWindowAtRva(0x200UL))
             assertFailsWith<IllegalArgumentException> { pair.codeWindowAtRva(0x200UL) }
         }
+        // Reserve both parser-owned terminal authentication passes before scanning. With this
+        // quota, the metadata reservations plus manifest fit, but the terminal byte reads do not.
+        val quota = Files.size(fixture.manifest) * 2 + fixture.richElf.bytes.size * 4 - 1
+        var beganScan = false
+        assertFailsWith<IllegalArgumentException> {
+            fixture.withPair(ElfExternalNamespacePairLimitsV1(maximumReadBytes = quota), checkpoint = {
+                if (it == "while parsing dynamic ELF metadata") beganScan = true
+            }) {}
+        }
+        assertFalse(beganScan, "unfunded scanner authentication reads must be rejected before either scan")
     }
 
     @Test
@@ -224,9 +258,10 @@ internal class ElfExternalNamespacePairFixtureV1(val root: Path) {
         Files.write(stripped, strippedTransform(strippedElf.bytes.copyOf()))
         richSha = OracleArtifacts.sha256(Files.readAllBytes(rich))
         strippedSha = OracleArtifacts.sha256(Files.readAllBytes(stripped))
-        // Reuse the checked closed v1 shape only. Its asserted equivalence/source summaries are
-        // deliberately not authority for these authored bytes; the pair independently scans them.
-        val template = OracleJson.parseCanonical(Files.readAllBytes(Path.of("oracle/gcc/16.2.0/oracle-manifest.json"))) as JsonObject
+        // This authored closed-schema shell has no source/build authority. Only the exact byte
+        // pins below are premises; the pair independently scans all ELF facts instead of relying
+        // on the shell's deliberately inert source/equivalence summaries or original paths.
+        val template = pairFixtureManifestShell()
         val originals = template.getValue("artifacts") as JsonObject
         fun artifact(name: String, file: Path, sha: String): JsonObject = JsonObject((originals.getValue(name) as JsonObject) + mapOf(
             "path" to JsonPrimitive("not-dereferenced-$name.elf"), "bytes" to JsonPrimitive(Files.size(file)), "sha256" to JsonPrimitive(sha)))
@@ -291,6 +326,19 @@ private fun pairFixtureMoveFileStorage(original: ByteArray): ByteArray {
     return bytes
 }
 private fun pairFixtureRead32(bytes: ByteArray, offset: Int): Int = (0..3).fold(0) { acc, i -> acc or ((bytes[offset + i].toInt() and 255) shl (8 * i)) }
+private fun pairFixtureAddNeededOnly(elf: DynamicBindingElfFixtureV1): Int {
+    val size = pairFixtureRead32(elf.bytes, elf.section(2) + 32)
+    val value = "unused-dependency.so".toByteArray()
+    value.copyInto(elf.bytes, 0x300 + size)
+    elf.bytes[0x300 + size + value.size] = 0
+    val total = (size + value.size + 1).toULong()
+    elf.word64(elf.section(2) + 32, total); elf.tag(10UL, total)
+    elf.word64(0xa00, 1UL); elf.word64(0xa08, size.toULong())
+    elf.word64(0xa10, 0UL); elf.word64(0xa18, 0UL)
+    elf.word64(elf.section(10) + 32, 288UL)
+    elf.word64(0x98, 288UL); elf.word64(0xa0, 288UL)
+    return 0x300 + size
+}
 private fun pairFixtureReindexSymbols(elf: DynamicBindingElfFixtureV1) {
     val first = elf.bytes.copyOfRange(0x418, 0x430)
     val second = elf.bytes.copyOfRange(0x430, 0x448)
@@ -304,4 +352,45 @@ private fun pairFixtureReindexSymbols(elf: DynamicBindingElfFixtureV1) {
         val swapped = when (symbol) { 1 -> 2; 2 -> 1; else -> symbol }
         elf.word64(at, (swapped.toULong() shl 32) or type)
     }
+}
+
+/** Generic schema shape, intentionally independent of every retained benchmark/profile. */
+private fun pairFixtureManifestShell(): JsonObject {
+    fun number(value: Long) = JsonPrimitive(value)
+    fun text(value: String) = JsonPrimitive(value)
+    fun flag(value: Boolean) = JsonPrimitive(value)
+    fun array(vararg values: JsonElement) = JsonArray(values.toList())
+    val sha = "0".repeat(64)
+    val identity = pairFixtureObject("class" to text("ELF64"), "dataEncoding" to text("little-endian"),
+        "identVersion" to number(1), "osAbi" to number(0), "abiVersion" to number(0), "type" to number(3),
+        "machine" to number(62), "version" to number(1), "entryPoint" to number(0), "flags" to number(0))
+    val header = JsonObject(identity + mapOf("osAbiName" to text("ELFOSABI_SYSV"), "typeName" to text("ET_DYN"),
+        "machineName" to text("EM_X86_64"), "programHeaderOffset" to number(64), "sectionHeaderOffset" to number(3072),
+        "headerSize" to number(64), "programHeaderEntrySize" to number(56), "programHeaderCount" to number(2),
+        "sectionHeaderEntrySize" to number(64), "sectionHeaderCount" to number(12), "sectionNameTableIndex" to number(11)))
+    val program = pairFixtureObject("index" to number(0), "type" to number(1), "typeName" to text("PT_LOAD"),
+        "flags" to number(7), "flagNames" to text("RWE"), "offset" to number(0), "virtualAddress" to number(0x400000),
+        "physicalAddress" to number(0), "fileSize" to number(0xf00), "memorySize" to number(0xf00),
+        "alignment" to number(0x1000), "contentSha256" to text(sha))
+    val section = pairFixtureObject("index" to number(1), "name" to text(".text"), "type" to number(1),
+        "typeName" to text("SHT_PROGBITS"), "flags" to number(6), "address" to number(0x400200), "offset" to number(0x200),
+        "size" to number(0x100), "link" to number(0), "info" to number(0), "alignment" to number(16), "entrySize" to number(0),
+        "allocated" to flag(true), "executable" to flag(true), "fileBacked" to flag(true), "contentSha256" to text(sha))
+    val metadata = pairFixtureObject("hasDwarf" to flag(false), "dwarfSections" to array(), "hasStaticSymbols" to flag(false),
+        "staticSymbolTables" to array(), "hasDynamicSymbols" to flag(true),
+        "dynamicSymbolTables" to array(pairFixtureObject("section" to text(".dynsym"), "entries" to number(8))))
+    val load = pairFixtureObject("selector" to text("PT_LOAD with PF_X and nonzero p_filesz"),
+        "segmentIndexes" to array(number(0)), "bytes" to number(0xf00), "sha256" to text(sha))
+    val elf = pairFixtureObject("header" to header, "identity" to identity, "buildIds" to array(text("01020304")),
+        "programHeaders" to array(program), "sections" to array(section), "metadata" to metadata, "executableLoad" to load)
+    val artifact = pairFixtureObject("path" to text("unused.elf"), "bytes" to number(1), "sha256" to text(sha), "elf" to elf)
+    fun input(path: String) = pairFixtureObject("path" to text(path), "bytes" to number(1), "sha256" to text(sha))
+    val delta = pairFixtureObject("fullOnlySections" to array(), "strippedOnlySections" to array(), "changedCommonSections" to array(),
+        "removedDwarfSections" to array(), "removedStaticSymbolTables" to array(pairFixtureObject("section" to text("unused-summary"), "entries" to number(0))))
+    return pairFixtureObject("schemaVersion" to number(1),
+        "oracle" to pairFixtureObject("id" to text("authored-pair"), "version" to text("1.0.0"), "sourceRevision" to text("0".repeat(40))),
+        "inputs" to pairFixtureObject("sourceLock" to input("unused-source.json"), "buildRecord" to input("unused-build.json")),
+        "artifacts" to pairFixtureObject("full" to artifact, "stripped" to artifact),
+        "equivalence" to pairFixtureObject("buildId" to text("01020304"), "elfIdentity" to identity,
+            "programHeadersSha256" to text(sha), "allocatedSectionsSha256" to text(sha), "executableLoad" to load, "metadataDelta" to delta))
 }

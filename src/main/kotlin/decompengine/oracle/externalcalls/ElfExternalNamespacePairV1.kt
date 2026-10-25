@@ -55,7 +55,7 @@ internal data class ElfExternalSlotPairV1(
         "richImportId" to pairNullable(richImportId), "strippedImportId" to pairNullable(strippedImportId),
         "richRelocation" to pairRelocationReceipt(richRelocation), "strippedRelocation" to pairRelocationReceipt(strippedRelocation),
         "richSymbolLocator" to pairString(richSymbol.raw.locator), "strippedSymbolLocator" to pairString(strippedSymbol.raw.locator),
-        "richWriteCoverage" to richWriteCoverage.toJson(), "strippedWriteCoverage" to strippedWriteCoverage.toJson(),
+        "richWriteCoverage" to pairFlatSnapshot(richWriteCoverage.toJson()), "strippedWriteCoverage" to pairFlatSnapshot(strippedWriteCoverage.toJson()),
         "runtimeProviderAvailable" to pairBool(false), "runtimeImplementationAvailable" to pairBool(false),
         "negativeCompleteness" to pairBool(false))
 }
@@ -149,9 +149,12 @@ internal class ElfExternalNamespacePairV1 private constructor(
                 return pairObject("sha256" to pairString(file.authenticatedSha256), "bytes" to pairNumber(file.size))
             }
             val richPin = pin("full", rich); val strippedPin = pin("stripped", stripped)
+            budget.reserveScannerAuthentications(rich.size, stripped.size)
             val metadataLimits = budget.reserveParsers()
             val a = BoundedElfDynamicBindingsV1.scan(rich, rich.authenticatedSha256, metadataLimits, budget::step)
+            budget.step("after rich dynamic scan and mandatory authentication")
             val b = BoundedElfDynamicBindingsV1.scan(stripped, stripped.authenticatedSha256, metadataLimits, budget::step)
+            budget.step("after stripped dynamic scan and mandatory authentication")
             require(a.structure.core == b.structure.core) { "twin ELF core layouts differ" }
             val left = LogicalInventory(a, budget); val right = LogicalInventory(b, budget)
             val logicalA = left.document(); val logicalB = right.document()
@@ -310,6 +313,9 @@ private class LogicalInventory(val inventory: ElfDynamicBindingInventoryV1, val 
         return pairObject("activeSymbolTable" to sectionIdentity(inventory.activeSymbolTableSectionIndex),
             "loads" to pairArray(loads), "dynamicEntries" to pairArray(inventory.dynamicEntries.map {
                 budget.step("logical dynamic entry"); pairObject("tag" to pairHex(it.tag), "value" to pairHex(it.value)) }),
+            "neededLibraries" to pairArray(inventory.neededLibraries.map {
+                budget.step("logical needed library"); budget.retainString(it); pairString(it)
+            }),
             "symbols" to pairArray(symbolRows), "relocations" to pairArray(relocationRows),
             "versionRequirements" to pairArray(inventory.versionRequirements.map { budget.step("logical version need"); requirement(it) }
                 .sortedWith { a, b -> budget.step("sort version needs"); (a.getValue("auxiliaryAddress") as JsonPrimitive).content
@@ -378,6 +384,7 @@ private class PairBudget(val limits: ElfExternalNamespacePairLimitsV1, val check
     private var work = 0L; private var reads = 0L; private var retained = 4096L; private var codeProofs = 0
     fun step(stage: String) {
         require(++work <= limits.maximumWorkUnits) { "external namespace pair work limit exceeded" }
+        require(!Thread.currentThread().isInterrupted) { "external namespace pair interrupted" }
         require((System.nanoTime() - started) / 1_000_000 < limits.maximumWallMillis) { "external namespace pair deadline exceeded" }
         checkpoint(stage)
     }
@@ -389,6 +396,15 @@ private class PairBudget(val limits: ElfExternalNamespacePairLimitsV1, val check
         work = Math.addExact(work, parserWork * 2); readReservation(parserReads * 2); step("reserve two bounded ELF scans")
         return ElfDynamicBindingLimitsV1(maximumWorkUnits = parserWork, maximumReadBytes = parserReads,
             maximumOutputBytes = limits.maximumOutputBytes)
+    }
+    fun reserveScannerAuthentications(richBytes: Long, strippedBytes: Long) {
+        // Both reused scanners terminally hash the file. These reads are outside their metadata
+        // read caps; reserve them here. Per-chunk cancellation uses each caller-opened descriptor's
+        // authentication checkpoint; this pair additionally checks its deadline after each scan.
+        readReservation(Math.multiplyExact(Math.addExact(richBytes, strippedBytes), 2))
+        val chunks = (richBytes + 1024 * 1024 - 1) / (1024 * 1024) + (strippedBytes + 1024 * 1024 - 1) / (1024 * 1024)
+        work = Math.addExact(work, Math.multiplyExact(chunks + 4, 2))
+        step("reserve scanner terminal authentication reads")
     }
     private fun readReservation(bytes: Long) { reads = Math.addExact(reads, bytes); require(reads <= limits.maximumReadBytes) { "external namespace pair read limit exceeded" } }
     fun read(file: StableControlFile, offset: Long, length: Int, label: String): ByteArray {
@@ -406,6 +422,10 @@ private val PAIR_UNSUPPORTED_WRITES = setOf("packed-relr-relocations-not-expande
 private fun pairJsonLimits(bytes: Int) = StrictJsonLimits(maximumInputBytes = bytes, maximumCanonicalBytes = bytes,
     maximumNodes = 1_000_000, maximumStringBytes = bytes, maximumTotalStringBytes = bytes)
 private fun pairObject(vararg fields: Pair<String, JsonElement>): JsonObject = JsonObject(Collections.unmodifiableMap(linkedMapOf(*fields)))
+private fun pairFlatSnapshot(value: JsonObject): JsonObject {
+    require(value.values.all { it is JsonPrimitive }) { "write coverage must remain a flat closed record" }
+    return JsonObject(Collections.unmodifiableMap(LinkedHashMap(value)))
+}
 private fun pairArray(values: List<JsonElement>): JsonArray = JsonArray(Collections.unmodifiableList(ArrayList(values)))
 private fun pairNumber(value: Number): JsonPrimitive = JsonPrimitive(value)
 private fun pairString(value: String): JsonPrimitive = JsonPrimitive(value)

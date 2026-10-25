@@ -7,6 +7,7 @@ import decompengine.oracle.machinecalls.MachineInstructionDecoderV1
 import decompengine.oracle.machinecalls.MachineInstructionRefusalV1
 import decompengine.oracle.machinecalls.MachineInstructionV1
 import decompengine.project.NativeCallAddressV1
+import decompengine.project.NativeCallBindingsV1
 import kotlinx.serialization.json.*
 
 internal data class RecoveredExternalNamespaceLimitsV1(
@@ -137,7 +138,6 @@ internal object RecoveredExternalNamespaceV1 {
                 JsonObject(row + mapOf("disposition" to JsonPrimitive("unresolved-external-node-conflict"), "externalTargetId" to JsonNull))
             else row
         }
-        val census = OracleJson.parseCanonical(frozen.canonicalEvidenceBytes, recoveryNamespaceJsonLimits(limits))
         val result = JsonObject(linkedMapOf(
             "schemaVersion" to JsonPrimitive(1), "kind" to JsonPrimitive("recovered-external-namespace-component-v1"),
             "scope" to JsonPrimitive("component"), "policy" to JsonPrimitive("native-claim-before-pair-v1"),
@@ -145,7 +145,7 @@ internal object RecoveredExternalNamespaceV1 {
             "complete" to JsonPrimitive(false), "releaseEligible" to JsonPrimitive(false), "negativeCompleteness" to JsonPrimitive(false),
             "productionVerified" to JsonPrimitive(false), "runtimeProviderAvailable" to JsonPrimitive(false),
             "runtimeImplementationAvailable" to JsonPrimitive(false), "rawSitesEnumerated" to JsonPrimitive(true),
-            "frozenClaimsSha256" to JsonPrimitive(frozen.evidenceSha256), "frozenClaims" to census,
+            "frozenClaimsSha256" to JsonPrimitive(frozen.evidenceSha256), "frozenClaimsBinding" to frozenBinding(frozen),
             "pairProofSha256" to JsonPrimitive(pair.receiptSha256), "pairProof" to pair.receipt,
             "externalNamespaceSha256" to JsonPrimitive(pair.richNamespaceSha256), "externalNamespace" to pair.richNamespace,
             "sites" to JsonArray(records), "counts" to JsonObject(mapOf("rawSites" to JsonPrimitive(frozen.rawSiteCount),
@@ -153,7 +153,7 @@ internal object RecoveredExternalNamespaceV1 {
                     (it.getValue("disposition") as JsonPrimitive).content
                 }.eachCount().toSortedMap().mapValues { JsonPrimitive(it.value) }))), "limits" to limits.toJson(),
         ))
-        validate(result, frozen, pair, limits)
+        validate(result, frozen, pair, limits, budget::step)
         OracleJson.canonicalBytes(result, recoveryNamespaceJsonLimits(limits), budget::step)
         pair.requireCurrent()
         return result
@@ -161,7 +161,8 @@ internal object RecoveredExternalNamespaceV1 {
 
     /** Closed component consistency against held capabilities; parsing grants no execution authority. */
     fun validate(document: JsonObject, frozen: FrozenNativeExternalClaimsSnapshotV1, pair: ElfExternalNamespacePairV1,
-                 limits: RecoveredExternalNamespaceLimitsV1 = RecoveredExternalNamespaceLimitsV1()) {
+                 limits: RecoveredExternalNamespaceLimitsV1 = RecoveredExternalNamespaceLimitsV1(), checkpoint: (String) -> Unit = {}) {
+        OracleJson.canonicalBytes(document, recoveryNamespaceJsonLimits(limits), checkpoint)
         require(frozen.inputSha256 == pair.strippedInventory.inputSha256) { "native input is not the authenticated stripped twin" }
         require(document.keys == ROOT_KEYS)
         require(document["schemaVersion"] == JsonPrimitive(1) && document["kind"] == JsonPrimitive("recovered-external-namespace-component-v1") &&
@@ -174,10 +175,13 @@ internal object RecoveredExternalNamespaceV1 {
             document["pairProofSha256"] == JsonPrimitive(pair.receiptSha256) && document["externalNamespace"] == pair.richNamespace &&
             document["externalNamespaceSha256"] == JsonPrimitive(pair.richNamespaceSha256) &&
             document["frozenClaimsSha256"] == JsonPrimitive(frozen.evidenceSha256))
-        require(OracleArtifacts.sha256(OracleJson.canonicalBytes(document.getValue("frozenClaims"), recoveryNamespaceJsonLimits(limits))) == frozen.evidenceSha256)
+        require(OracleArtifacts.sha256(OracleJson.canonicalBytes(document.getValue("pairProof"), recoveryNamespaceJsonLimits(limits), checkpoint)) == pair.receiptSha256 &&
+            OracleArtifacts.sha256(OracleJson.canonicalBytes(document.getValue("externalNamespace"), recoveryNamespaceJsonLimits(limits), checkpoint)) == pair.richNamespaceSha256)
+        require(document["frozenClaimsBinding"] == frozenBinding(frozen)) { "required raw sources or frozen census binding differs" }
         val sites = document["sites"] as? JsonArray ?: error("projected sites must be an array")
         require(sites.size == frozen.sites.size && sites.size <= limits.maximumSites)
         val statuses = sortedMapOf<String, Int>()
+        val expectedStatuses = ArrayList<String>(sites.size)
         val nodeIdentities = HashMap<NativeCallAddressV1, MutableSet<String>>()
         val nativeBase = requireNotNull(frozen.bindings.imageBase.offsetBits).toULong(16)
         val base = pair.strippedInventory.imageBase
@@ -186,10 +190,14 @@ internal object RecoveredExternalNamespaceV1 {
             val address = value.offsetBits.toULong(16)
             return if (address < nativeBase || address - nativeBase > ULong.MAX_VALUE - base) null else base + address - nativeBase
         }
+        var previousRecordOrdinal = -1L
         sites.forEachIndexed { index, raw ->
+            checkpoint("validate complete projected site population")
             val site = raw as? JsonObject ?: error("projected site must be an object")
             require(site.keys == SITE_KEYS && site["negativeCompleteness"] == JsonPrimitive(false))
             val original = frozen.sites[index]
+            require(original.siteOrdinal == index.toLong() && original.recordOrdinal > previousRecordOrdinal && original.recordOrdinal < frozen.rawRecordCount)
+            previousRecordOrdinal = original.recordOrdinal
             require(site["siteId"] == JsonPrimitive("native-site-${original.siteOrdinal}") && site["sourceRecordOrdinal"] == JsonPrimitive(original.recordOrdinal) &&
                 site["sourceSiteOrdinal"] == JsonPrimitive(original.siteOrdinal) && site["frozenDisposition"] == JsonPrimitive(original.disposition))
             val status = (site["disposition"] as? JsonPrimitive)?.takeIf { it.isString }?.content
@@ -221,6 +229,14 @@ internal object RecoveredExternalNamespaceV1 {
             }
             val slot = memory?.pointerSlotAddress
             val paired = if (slot != null && slot >= base) pair.slotAtRva(slot - base) else null
+            val direct = candidate is NativeExternalCandidateV1.Thunk
+            val expectedTarget = if (candidate is NativeExternalCandidateV1.Thunk) linked(candidate.target) else null
+            val flowMatches = physical != null && physical.contextStatus == "language-default-no-commits-v1" &&
+                physical.classification == (if (direct) "direct-call" else "indirect-call") &&
+                physical.directCallTarget == expectedTarget && physical.directTargets == listOfNotNull(expectedTarget) &&
+                physical.fallthrough != null && physical.fallthrough == linked(original.prototypeFallThrough) &&
+                physical.address <= ULong.MAX_VALUE - physical.length.toULong() && physical.fallthrough == physical.address + physical.length.toULong()
+            val desiredMemoryClass = if (direct) "indirect-jump" else "indirect-call"
             if (site["slotPair"] != JsonNull) {
                 require(paired != null && site["slotPair"] == paired.toJson() && candidateId == paired.richImportId)
                 require(candidate !is NativeExternalCandidateV1.Slot || linked(candidate.slot) == slot)
@@ -228,28 +244,94 @@ internal object RecoveredExternalNamespaceV1 {
             if (candidate != null && candidateId != null) nodeIdentities.getOrPut(candidate.externalTarget.address) { HashSet() }.add(candidateId)
             if (site["slotPair"] != JsonNull) {
                 require(candidate != null && physical != null && memory != null && refusal == null)
-                val direct = candidate is NativeExternalCandidateV1.Thunk
-                val expectedTarget = if (candidate is NativeExternalCandidateV1.Thunk) linked(candidate.target) else null
-                require(physical.contextStatus == "language-default-no-commits-v1" &&
-                    physical.classification == (if (direct) "direct-call" else "indirect-call") &&
-                    physical.directCallTarget == expectedTarget && physical.directTargets == listOfNotNull(expectedTarget) &&
-                    physical.fallthrough != null && physical.fallthrough == linked(original.prototypeFallThrough) &&
-                    physical.address <= ULong.MAX_VALUE - physical.length.toULong() && physical.fallthrough == physical.address + physical.length.toULong() &&
-                    memory.classification == (if (direct) "indirect-jump" else "indirect-call"))
+                require(flowMatches && memory.classification == desiredMemoryClass)
             }
             if (target != JsonNull) require(candidate != null && target == site["candidateImportRequestId"] && paired?.eligible == true)
             if (original.candidate == null) require(status == "unresolved-frozen-native-claim" &&
                 listOf("physicalInstruction", "memoryTransfer", "slotPair", "candidateImportRequestId", "externalTargetId", "decoderRefusal").all { site[it] == JsonNull })
+            val expectedStatus = when {
+                candidate == null -> "unresolved-frozen-native-claim"
+                physical == null -> {
+                    require(memory == null && site["slotPair"] == JsonNull)
+                    val address = linked(original.address)
+                    val bytes = requireNotNull(original.instructionBytes).chunked(2).map { it.toInt(16).toByte() }.toByteArray()
+                    val owned = address?.let { pair.proveCodeBytes(it - base, bytes) }
+                    if (refusal != null) {
+                        require(owned != null)
+                        "unresolved-byte-decoder-refusal"
+                    } else {
+                        require(owned == null) { "owned native bytes have neither a decoder receipt nor a refusal" }
+                        "unresolved-native-instruction-correspondence"
+                    }
+                }
+                !flowMatches -> {
+                    require(memory == null && site["slotPair"] == JsonNull && refusal == null)
+                    "unresolved-native-flow-or-target"
+                }
+                memory == null -> {
+                    require(site["slotPair"] == JsonNull)
+                    val probe = if (candidate is NativeExternalCandidateV1.Thunk) linked(candidate.target) else linked(original.address)
+                    val owned = probe?.let { pair.codeWindowAtRva(it - base) }
+                    if (refusal != null) {
+                        require(owned != null)
+                        "unresolved-byte-decoder-refusal"
+                    } else {
+                        require(owned == null) { "owned probe bytes have neither a memory receipt nor a refusal" }
+                        "unresolved-memory-transfer"
+                    }
+                }
+                else -> {
+                    require(refusal == null)
+                    when {
+                        memory.classification != desiredMemoryClass || slot == null || memory.contextStatus != "language-default-no-commits-v1" -> {
+                            require(site["slotPair"] == JsonNull); "unresolved-memory-transfer"
+                        }
+                        candidate is NativeExternalCandidateV1.Slot && linked(candidate.slot) != slot -> {
+                            require(site["slotPair"] == JsonNull); "unresolved-native-slot-disagreement"
+                        }
+                        paired == null -> { require(site["slotPair"] == JsonNull); "unresolved-paired-slot" }
+                        else -> {
+                            require(site["slotPair"] == paired.toJson()) { "paired slot receipt is missing" }
+                            if (paired.eligible) "verified-object-local-import-request" else "unresolved-static-import-eligibility"
+                        }
+                    }
+                }
+            }
+            expectedStatuses += expectedStatus
         }
         sites.forEachIndexed { index, raw ->
+            checkpoint("validate recovered external node conflicts")
             val candidate = frozen.sites[index].candidate
             val conflict = candidate != null && nodeIdentities[candidate.externalTarget.address].orEmpty().size > 1
-            require(((raw as JsonObject)["disposition"] == JsonPrimitive("unresolved-external-node-conflict")) == conflict)
+            val expected = if (conflict) "unresolved-external-node-conflict" else expectedStatuses[index]
+            require((raw as JsonObject)["disposition"] == JsonPrimitive(expected)) { "disposition differs from retained claim and proof progression" }
         }
         require(document["counts"] == JsonObject(mapOf("rawSites" to JsonPrimitive(frozen.rawSiteCount),
             "projectedSites" to JsonPrimitive(sites.size), "dispositions" to JsonObject(statuses.mapValues { JsonPrimitive(it.value) }))))
     }
 }
+
+/** These raw sources are required for independent re-freeze; this commitment cannot replace them. */
+private fun frozenBinding(frozen: FrozenNativeExternalClaimsSnapshotV1): JsonObject = JsonObject(mapOf(
+    "schemaVersion" to JsonPrimitive(1), "kind" to JsonPrimitive("required-frozen-native-external-source-binding-v1"),
+    "rawSourcesRequired" to JsonPrimitive(true), "manifestSha256" to JsonPrimitive(frozen.manifestSha256),
+    "manifestBytes" to JsonPrimitive(frozen.manifestBytes), "observationsSha256" to JsonPrimitive(frozen.observationsSha256),
+    "observationsBytes" to JsonPrimitive(frozen.observationBytes), "frozenClaimsSha256" to JsonPrimitive(frozen.evidenceSha256),
+    "frozenClaimsBytes" to JsonPrimitive(frozen.evidenceBytes), "policySha256" to JsonPrimitive(frozen.policySha256),
+    "inputSha256" to JsonPrimitive(frozen.inputSha256), "programModelSha256" to JsonPrimitive(frozen.bindings.programModelSha256),
+    "programModelBytes" to JsonPrimitive(frozen.bindings.programModelBytes), "rawRecordCount" to JsonPrimitive(frozen.rawRecordCount),
+    "rawSiteCount" to JsonPrimitive(frozen.rawSiteCount), "bindings" to nativeExternalBindingsJsonV1(frozen.bindings),
+    "negativeCompleteness" to JsonPrimitive(false),
+))
+
+internal fun nativeExternalBindingsJsonV1(bindings: NativeCallBindingsV1): JsonObject = JsonObject(mapOf(
+    "collectorSha256" to JsonPrimitive(bindings.collectorSha256), "compilerSpecId" to JsonPrimitive(bindings.compilerSpecId),
+    "ghidraArchiveSha256" to JsonPrimitive(bindings.ghidraArchiveSha256), "inputSha256" to JsonPrimitive(bindings.inputSha256),
+    "languageId" to JsonPrimitive(bindings.languageId), "programModelBytes" to JsonPrimitive(bindings.programModelBytes),
+    "programModelExporterSha256" to JsonPrimitive(bindings.programModelExporterSha256), "programModelSha256" to JsonPrimitive(bindings.programModelSha256),
+    "imageBase" to JsonObject(mapOf("kind" to JsonPrimitive("address"), "spaceIndex" to JsonPrimitive(requireNotNull(bindings.imageBase.spaceIndex)),
+        "offsetBits" to JsonPrimitive(requireNotNull(bindings.imageBase.offsetBits)))),
+))
 
 private fun requireReceipt(decoded: MachineInstructionV1, address: ULong, bytes: ByteArray, exact: Boolean = true) {
     require(decoded.address == address && decoded.length in 1..15 && decoded.length <= bytes.size &&
@@ -351,7 +433,7 @@ private class RecoveryNamespaceBudget(val limits: RecoveredExternalNamespaceLimi
 }
 private val ROOT_KEYS = setOf("schemaVersion", "kind", "scope", "policy", "decoderAuthentication", "complete", "releaseEligible",
     "negativeCompleteness", "productionVerified", "runtimeProviderAvailable", "runtimeImplementationAvailable", "rawSitesEnumerated",
-    "frozenClaimsSha256", "frozenClaims", "pairProofSha256", "pairProof", "externalNamespaceSha256", "externalNamespace", "sites", "counts", "limits")
+    "frozenClaimsSha256", "frozenClaimsBinding", "pairProofSha256", "pairProof", "externalNamespaceSha256", "externalNamespace", "sites", "counts", "limits")
 private val SITE_KEYS = setOf("siteId", "sourceRecordOrdinal", "sourceSiteOrdinal", "frozenDisposition", "disposition", "physicalInstruction",
     "memoryTransfer", "slotPair", "candidateImportRequestId", "externalTargetId", "decoderRefusal", "negativeCompleteness")
 private val STATUSES = setOf("unresolved-frozen-native-claim", "unresolved-native-instruction-correspondence", "unresolved-native-flow-or-target",
