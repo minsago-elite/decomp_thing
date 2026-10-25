@@ -73,6 +73,11 @@ class GitReadsTest {
         f.raw(gitDir, workTree, "merge", "-q", "other", expect = 1)
         val entry = GitRepositoryInspector.inspect(f.runner, gitDir, workTree).status.entries.single { it.path.exact == "shared.c" }
         assertEquals(GitConflict.BOTH_MODIFIED, entry.conflict)
+        // The unmerged path appears once in an unstaged diff, with the record that names real blobs.
+        val unstaged = GitReads.diff(f.runner, gitDir, workTree, GitObjectFormat.SHA1, GitDiffScope.UNSTAGED, null, null)
+        val shared = unstaged.files.filter { it.path.exact == "shared.c" }
+        assertEquals(1, shared.size)
+        assertEquals(unstaged.files.size, unstaged.files.map { it.path.fileId("w") }.toSet().size)
     }
 
     @Test fun `invalid UTF-8 names are escaped and keep a distinct identity`() {
@@ -103,6 +108,13 @@ class GitReadsTest {
         assertEquals(all.drop(3).take(3), second.entries)
         assertEquals(7, all.size); assertTrue(all.any { it.objectId == side })
         assertTrue(all.all { it.objectId.length == 40 })
+        // Separator-like and control characters in names and subjects cannot shift a field.
+        f.write(workTree, "odd.c", "int odd;\n"); f.raw(gitDir, workTree, "add", "--", "odd.c")
+        f.raw(gitDir, workTree, "commit", "-q", "--author=Na\u001fme <odd@example.invalid>", "-m", "sub\u001fject\u001fwith separators")
+        val odd = GitReads.history(f.runner, gitDir, GitObjectFormat.SHA1, f.git("--git-dir=$gitDir", "rev-parse", "HEAD").trim(), 0, 2)
+        assertEquals("sub\u001fject\u001fwith separators", odd.entries.first().subject)
+        assertEquals("Na\u001fme", odd.entries.first().authorName)
+        assertEquals(2, odd.entries.size)
         val long = "x".repeat(300); f.write(workTree, "long.c", "int long;\n"); f.commitAll(gitDir, workTree, long)
         val latest = GitReads.history(f.runner, gitDir, GitObjectFormat.SHA1, f.git("--git-dir=$gitDir", "rev-parse", "HEAD").trim(), 0, 1)
         assertEquals(200, latest.entries.single().subject.length); assertTrue(latest.entries.single().subjectTruncated)
@@ -141,6 +153,23 @@ class GitReadsTest {
         val root = GitReads.diff(f.runner, gitDir, workTree, GitObjectFormat.SHA1, GitDiffScope.COMMIT, base, null)
         assertTrue(root.files.all { it.change == GitIndexChange.ADDED && it.oldObjectId == null })
         assertFalse(marker.exists())
+    }
+
+    @Test fun `an output bound that cuts an entry yields an incomplete listing, and unreadable names refuse patches`(): Unit = GitTestRepositories().use { f ->
+        val (gitDir, workTree) = f.managed("bounded")
+        (1..60).forEach { f.write(workTree, "directory-with-a-long-name-$it/file-with-a-long-name-$it.c", "int v$it;\n") }
+        f.raw(gitDir, workTree, "add", "-A")
+        val complete = GitReads.diff(f.runner, gitDir, workTree, GitObjectFormat.SHA1, GitDiffScope.STAGED, null, null)
+        assertTrue(complete.complete); assertEquals(60, complete.files.size)
+        for (bound in listOf(1500, 1537, 2000, 4097)) {
+            val cut = GitReads.diff(f.runner, gitDir, workTree, GitObjectFormat.SHA1, GitDiffScope.STAGED, null, null, maxOutputBytes = bound)
+            assertFalse(cut.complete, "bound $bound"); assertTrue(cut.files.size in 1..59, "bound $bound")
+            assertEquals(complete.files.take(cut.files.size).map { it.path }, cut.files.map { it.path })
+        }
+        val unreadable = complete.files.first().copy(path = GitPath.of(byteArrayOf('a'.code.toByte(), 0xff.toByte())))
+        assertEquals("PATCH_UNAVAILABLE", kotlin.test.assertFailsWith<ManagedGitException> {
+            GitReads.patch(f.runner, gitDir, workTree, GitDiffScope.STAGED, null, null, unreadable)
+        }.code)
     }
 
     @Test fun `staged diff works on an unborn branch`(): Unit = GitTestRepositories().use { f ->

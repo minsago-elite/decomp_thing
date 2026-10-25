@@ -199,11 +199,11 @@ class WebGitControllerTest {
             assertEquals("unborn", unborn.getValue("headState").jsonPrimitive.content)
             assertTrue(unborn.getValue("notices").jsonArray.any { it.jsonObject.getValue("code").jsonPrimitive.content == "unborn" })
             val untracked = unborn.getValue("entries").jsonArray.map { it.jsonObject }
-            assertTrue(untracked.single { it.getValue("path").jsonPrimitive.content == "src/main.c" }.getValue("untracked").jsonPrimitive.content.toBoolean())
+            assertTrue(untracked.single { it.getValue("path").jsonPrimitive.content == "src/modules/unit.c" }.getValue("untracked").jsonPrimitive.content.toBoolean())
             assertEquals(schema.getValue("gitStatusEntry").jsonObject.getValue("properties").jsonObject.keys, untracked.first().keys)
             raw("add", "-A"); raw("commit", "-q", "-m", "first")
             repeat(3) { index -> Files.writeString(workTree.resolve("src/n$index.c"), "int n$index;\n"); raw("add", "-A"); raw("commit", "-q", "-m", "c$index") }
-            Files.writeString(workTree.resolve("src/main.c"), "int main(void) { return 2; }\n")
+            Files.writeString(workTree.resolve("src/modules/unit.c"), "int main(void) { return 2; }\n")
             Files.writeString(workTree.resolve("src/untracked.c"), "int untracked;\n")
             val status = data(f.read("$base/status?limit=1"), 200, "gitStatus")
             assertEquals("attached", status.getValue("headState").jsonPrimitive.content)

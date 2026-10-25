@@ -123,8 +123,19 @@ internal class WebGitReads(private val repositories: () -> ManagedGitRepositorie
             if (!it.matches(Regex("file_[0-9a-f]{32}"))) throw WebAccessDenied(422, "VALIDATION_FAILED", "file must be a file identity from this repository.")
         }
         val service = repositories()
-        val view = service.diff(jobId, repositoryId, scope, commit, file)
-        val anchor = commit ?: (webGitWorkspace(service.workspace(jobId, repositoryId)).getValue("worktreeVersion") as JsonPrimitive).content
+        fun version() = (webGitWorkspace(service.workspace(jobId, repositoryId)).getValue("worktreeVersion") as JsonPrimitive).content
+        // A staged or unstaged listing must belong to the version its cursor names: observe the
+        // version on both sides of the comparison and retry once if the work tree moved meanwhile.
+        fun consistent(): Pair<decompengine.git.GitDiffView, String> {
+            if (commit != null) return service.diff(jobId, repositoryId, scope, commit, file) to commit
+            repeat(2) {
+                val before = version()
+                val listing = service.diff(jobId, repositoryId, scope, null, file)
+                if (version() == before) return listing to before
+            }
+            throw WebAccessDenied(409, "REF_CHANGED", "The work tree kept changing during the diff read. Read it again.")
+        }
+        val (view, anchor) = consistent()
         val offset = anchoredOffset(query["cursor"], anchor)
         val worktreeId = view.record.worktreeId
         // A selected file is read alone: its listing entry and its bounded patch.

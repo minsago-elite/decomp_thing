@@ -164,7 +164,7 @@ internal fun webGitDenied(failure: ManagedGitException): WebAccessDenied {
         "NOT_FOUND" -> WebAccessDenied(404, "NOT_FOUND", message)
         "REPOSITORY_EXISTS", "WORKTREE_BUSY", "IDEMPOTENCY_CONFLICT" -> WebAccessDenied(409, failure.code, message)
         "QUOTA_EXCEEDED" -> WebAccessDenied(429, "QUOTA_EXCEEDED", message)
-        "VALIDATION_FAILED", "SOURCE_REVISION_UNAVAILABLE", "IMPORT_SOURCE_UNAVAILABLE" -> WebAccessDenied(422, failure.code, message)
+        "VALIDATION_FAILED", "SOURCE_REVISION_UNAVAILABLE", "IMPORT_SOURCE_UNAVAILABLE", "PATCH_UNAVAILABLE" -> WebAccessDenied(422, failure.code, message)
         "REPOSITORY_UNSUPPORTED", "REPOSITORY_CORRUPT", "REPOSITORY_CONFIG_UNTRUSTED", "REPOSITORY_UNAVAILABLE" ->
             WebAccessDenied(503, failure.code, message)
         else -> WebAccessDenied(503, "STORAGE_UNAVAILABLE", "Repository storage is unavailable. Preserve it and inspect the server.")
