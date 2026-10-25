@@ -1,6 +1,8 @@
 package decompengine.oracle.gcc
 
 import decompengine.oracle.core.OracleArtifacts
+import java.lang.reflect.InvocationTargetException
+import java.lang.reflect.Modifier
 import java.nio.file.Files
 import java.nio.file.Path
 import java.nio.file.attribute.PosixFilePermissions
@@ -14,6 +16,32 @@ import kotlin.test.assertSame
 import kotlin.test.assertTrue
 
 class GccSignedSourceTest {
+    @Test
+    fun `compiled API has no public result constructor or unchecked issuer accessors`() {
+        val result = GccSignedSource::class.java
+        assertTrue(result.constructors.isEmpty(), "public synthetic constructors must not mint a held source")
+        assertTrue(result.declaredConstructors.all { Modifier.isPrivate(it.modifiers) && !it.isSynthetic })
+        val surfaces = mapOf(
+            result to setOf("canonicalEvidence", "requireCurrent", "close"),
+            GccSignedSource.Companion::class.java to setOf("open", "open\$default"),
+            Class.forName("decompengine.oracle.gcc.GccSignedSourceIssuer") to setOf("open", "requireIssued", "revoke"),
+        )
+        surfaces.forEach { (type, expected) ->
+            assertEquals(expected, type.declaredMethods.filter { Modifier.isPublic(it.modifiers) }.map { it.name }.toSet(), type.name)
+            assertTrue(type.declaredFields.filter { Modifier.isPublic(it.modifiers) }.all {
+                Modifier.isFinal(it.modifiers) && (it.type == String::class.java || it.type.isPrimitive ||
+                    it.name == "Companion" || it.name == "INSTANCE")
+            }, "no registry or constructor handle may escape ${type.name}")
+        }
+    }
+
+    @Test
+    fun `empty guard constructor clones refuse fabricated evidence before caller checkpoint`() {
+        listOf(byteArrayOf(), "{\"sourceAuthenticated\":true}".toByteArray()).forEach { report ->
+            GccSignedSourceConstructionControls.assertCloneRefused(report)
+        }
+    }
+
     @Test
     fun `exact vendored metadata verifies before any source archive is selected`() {
         GccSignedSourceFixture.create().use { fixture ->
@@ -204,6 +232,41 @@ class GccSignedSourceTest {
             GccSignedSource.open(fixture.lock, fixture.archive, fixture.signature) { phases += it }.close()
         }
         assertEquals(expected, phases)
+    }
+}
+
+/** Reflection deliberately bypasses constructor privacy to test the independent issuance boundary. */
+internal object GccSignedSourceConstructionControls {
+    fun assertCloneRefused(report: ByteArray) {
+        var checkpointCalled = false
+        val constructor = GccSignedSource::class.java.getDeclaredConstructor(
+            List::class.java, ByteArray::class.java, kotlin.jvm.functions.Function0::class.java,
+        ).apply { check(trySetAccessible()) }
+        val clone = constructor.newInstance(emptyList<Any>(), report.copyOf(), { checkpointCalled = true })
+        clone.use {
+            assertUnissued { clone.requireCurrent() }
+            assertUnissued { clone.canonicalEvidence() }
+            assertFalse(checkpointCalled, "unissued access must refuse before invoking caller-controlled code")
+        }
+        clone.close()
+        assertUnissued { clone.requireCurrent() }
+        assertUnissued { clone.canonicalEvidence() }
+    }
+
+    fun assertIssuance(source: GccSignedSource, issued: Boolean) {
+        val owner = Class.forName("decompengine.oracle.gcc.GccSignedSourceIssuer")
+        val query = owner.getDeclaredMethod("requireIssued", GccSignedSource::class.java).apply { check(trySetAccessible()) }
+        val instance = owner.getDeclaredField("INSTANCE").apply { check(trySetAccessible()) }.get(null)
+        if (issued) query.invoke(instance, source) else {
+            val failure = assertFailsWith<InvocationTargetException> { query.invoke(instance, source) }
+            assertTrue(failure.cause is IllegalStateException)
+            assertTrue(failure.cause?.message.orEmpty().contains("not issued"))
+        }
+    }
+
+    private fun assertUnissued(action: () -> Unit) {
+        val failure = assertFailsWith<IllegalStateException>(block = action)
+        assertTrue(failure.message.orEmpty().contains("not issued"), failure.stackTraceToString())
     }
 }
 

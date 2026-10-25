@@ -16,7 +16,7 @@ RESULTS = ROOT / "build/test-results/gccSignedSourceQualification"
 EXPECTED = {
     "decompengine.oracle.gcc.GccSourceOpenPgpTest": 10,
     "decompengine.oracle.gcc.GccSourceArchiveTest": 13,
-    "decompengine.oracle.gcc.GccSignedSourceTest": 10,
+    "decompengine.oracle.gcc.GccSignedSourceTest": 12,
     "decompengine.oracle.gcc.GccSignedSourceQualificationTest": 1,
 }
 EXPECTED_METHODS = json.loads((ROOT / "scripts/gcc-signed-source-test-inventory.json").read_text())
@@ -106,7 +106,8 @@ def main():
         if (qualification.get("status") != "passed" or qualification.get("deterministic") is not True
                 or qualification.get("phaseSubstitutionRefusals") != phases
                 or any(qualification.get(key) is not True for key in ("afterHandoffSubstitutionRefused",
-                    "copyIsolationVerified", "closeSemanticsVerified"))
+                    "copyIsolationVerified", "closeSemanticsVerified", "factoryIssuanceAndRevocationVerified",
+                    "retainedReportConstructorCloneRefused"))
                 or qualification.get("evidenceFirstSha256") != hashlib.sha256(first).hexdigest()
                 or qualification.get("evidenceSecondSha256") != hashlib.sha256(second).hexdigest()):
             raise ValueError("actual source lifecycle qualification is incomplete")

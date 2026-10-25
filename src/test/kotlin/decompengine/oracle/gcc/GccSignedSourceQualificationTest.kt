@@ -56,6 +56,8 @@ class GccSignedSourceQualificationTest {
         var afterHandoff = false
         var copyIsolation = false
         var closeSemantics = false
+        var issuanceLifecycle = false
+        var retainedReportCloneRefused = false
         var succeeded = false
         try {
             observed("first-complete-verification", verifications) {
@@ -65,9 +67,11 @@ class GccSignedSourceQualificationTest {
                     try {
                         assertEquals(GccSignedSourcePhase.entries.toList(), phases)
                         held.requireCurrent()
+                        GccSignedSourceConstructionControls.assertIssuance(held, issued = true)
                         val evidence = held.canonicalEvidence()
                         assertActualEvidence(evidence)
                         first = evidence.copyOf()
+                        GccSignedSourceConstructionControls.assertCloneRefused(evidence)
                         evidence.fill(0)
                         assertContentEquals(requireNotNull(first), held.canonicalEvidence())
                         copyIsolation = true
@@ -76,6 +80,10 @@ class GccSignedSourceQualificationTest {
                         held.close()
                     }
                     held.close()
+                    GccSignedSourceConstructionControls.assertIssuance(held, issued = false)
+                    GccSignedSourceConstructionControls.assertCloneRefused(requireNotNull(first))
+                    issuanceLifecycle = true
+                    retainedReportCloneRefused = true
                     assertFailsWith<IllegalStateException> { held.requireCurrent() }
                     assertFailsWith<IllegalStateException> { held.canonicalEvidence() }
                     closeSemantics = true
@@ -132,7 +140,7 @@ class GccSignedSourceQualificationTest {
             }
             assertEquals(inputIdentities, listOf(archive, signature).map { inputIdentity(it) })
             assertEquals(GccSignedSourcePhase.entries.map { it.name }, phaseRefusals)
-            assertTrue(afterHandoff && copyIsolation && closeSemantics)
+            assertTrue(afterHandoff && copyIsolation && closeSemantics && issuanceLifecycle && retainedReportCloneRefused)
             succeeded = true
         } finally {
             val report = JsonObject(mapOf(
@@ -148,6 +156,8 @@ class GccSignedSourceQualificationTest {
                 "afterHandoffSubstitutionTarget" to JsonPrimitive("archive"),
                 "copyIsolationVerified" to JsonPrimitive(copyIsolation),
                 "closeSemanticsVerified" to JsonPrimitive(closeSemantics),
+                "factoryIssuanceAndRevocationVerified" to JsonPrimitive(issuanceLifecycle),
+                "retainedReportConstructorCloneRefused" to JsonPrimitive(retainedReportCloneRefused),
                 "verifications" to JsonArray(verifications),
                 "observations" to observation(System.nanoTime() - started),
                 "tool" to JsonObject(mapOf(

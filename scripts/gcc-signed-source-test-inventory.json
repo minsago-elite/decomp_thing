@@ -4,7 +4,9 @@
   ],
   "decompengine.oracle.gcc.GccSignedSourceTest": [
     "archive selection rejects short empty missing aliased and nonregular inputs()",
+    "compiled API has no public result constructor or unchecked issuer accessors()",
     "detached archive signature requires its exact bytes and safe descriptor()",
+    "empty guard constructor clones refuse fabricated evidence before caller checkpoint()",
     "exact vendored metadata verifies before any source archive is selected()",
     "key payload and armored tag signature mutations refuse before metadata admission()",
     "lock digest refuses altered revision signer paths unknown fields and trailing bytes()",
