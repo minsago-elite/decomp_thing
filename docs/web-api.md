@@ -372,7 +372,10 @@ one identifier can never name different sources. A candidate is never
 acceptance. After a repair attempt completes, and while the service still owns
 it, a read-only attestation reads the canonical repair graph: only a fully
 accepted head bound to a fully accepted run that began within this attempt, and
-published for release (test-only publication is refused), yields an acceptance
+published for release (test-only publication is refused), yields an acceptance. An
+input that already validates is accepted as the graph root without a repair
+iteration; its source digest and proof assurance come from the graph's recorded
+acceptance proof, and only a strictly contained proof is release-eligible. The result is an acceptance
 reference (`graphNodeId` = head, `artifactId` = `repair-graph`,
 `artifactSha256` = graph digest). The service records it once, rechecking the
 persisted candidate, versions and that the attempt is still the latest.
