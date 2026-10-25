@@ -8,6 +8,9 @@ from __future__ import annotations
 
 from pathlib import Path
 from types import SimpleNamespace
+import os
+import subprocess
+import tempfile
 import unittest
 from unittest import mock
 
@@ -117,6 +120,57 @@ def pairs(records):
     return {(int(record["callerRva"], 16), int(record["calleeRva"], 16)) for record in records}
 
 
+class GccEmittedCallSitesTest(unittest.TestCase):
+    def test_dwarf4_and_dwarf5_preserve_direct_tail_and_unknown_calls(self):
+        root = Path(__file__).resolve().parents[2]
+        scratch = root / "build/python-test-tmp"
+        scratch.mkdir(parents=True, exist_ok=True)
+        with tempfile.TemporaryDirectory(prefix="gcc-emitted-call-sites-", dir=scratch) as directory:
+            source = Path(directory) / "calls.c"
+            source.write_text("""
+#define NOINLINE __attribute__((noinline, noclone))
+NOINLINE int callee(int x) { __asm__ volatile("" : "+r"(x)); return x + 1; }
+NOINLINE int direct(int x) { int y = callee(x); __asm__ volatile("" : "+r"(y)); return y + 2; }
+NOINLINE int tail(int x) { return callee(x); }
+NOINLINE int indirect(int (*f)(int), int x) { return f(x) + 3; }
+int main(int argc, char **argv) { return direct(argc) + tail(argc) + indirect(callee, argc); }
+""", encoding="utf-8")
+            for version, tag, origin in ((4, "DW_TAG_GNU_call_site", "DW_AT_abstract_origin"),
+                                         (5, "DW_TAG_call_site", "DW_AT_call_origin")):
+                with self.subTest(dwarf=version):
+                    binary = Path(directory) / f"calls-dwarf{version}"
+                    subprocess.run(["gcc", "-O2", f"-gdwarf-{version}", "-fno-pie", "-no-pie",
+                                    str(source), "-o", str(binary)], check=True, capture_output=True,
+                                   env={**os.environ, "TMPDIR": directory}, timeout=30)
+                    with binary.open("rb") as stream:
+                        elf = calls.ELFFile(stream)
+                        base = min(int(segment["p_vaddr"]) for segment in elf.iter_segments()
+                                   if segment["p_type"] == "PT_LOAD" and int(segment["p_memsz"]) > 0)
+                        names = {symbol.name: int(symbol["st_value"]) - base
+                                 for symbol in elf.get_section_by_name(".symtab").iter_symbols()
+                                 if symbol.name in {"main", "direct", "tail", "indirect", "callee"}}
+                        sites = [die for cu in elf.get_dwarf_info().iter_CUs()
+                                 for die in cu.iter_DIEs() if die.tag == tag]
+                        self.assertTrue(sites, "fixture must exercise real emitted call sites")
+                        self.assertTrue(any(origin in die.attributes for die in sites))
+                    self.assertEqual(set(names), {"main", "direct", "tail", "indirect", "callee"})
+                    oracle = SimpleNamespace(functions=tuple(
+                        SimpleNamespace(rva=rva, aliases=(SimpleNamespace(name=name),))
+                        for name, rva in names.items()))
+                    population = calls._oracle_edges(binary.read_bytes(), oracle, set(names.values()), set())
+                    self.assertEqual(set(population.edges), {
+                        (names["main"], names["direct"]), (names["main"], names["tail"]),
+                        (names["main"], names["indirect"]), (names["direct"], names["callee"]),
+                        (names["tail"], names["callee"]),
+                    })
+                    self.assertEqual(population.edges[(names["direct"], names["callee"])], {False})
+                    self.assertEqual(population.edges[(names["tail"], names["callee"])], {True})
+                    self.assertTrue(population.caller_coverage[names["direct"]]["negativeEvidenceComplete"])
+                    unknown = population.caller_coverage[names["indirect"]]
+                    self.assertEqual(unknown["unresolvedSiteKinds"], {"indirect-unresolved": 1})
+                    self.assertFalse(unknown["negativeEvidenceComplete"])
+
+
 class CallEdgeNegativeAuthorityTest(unittest.TestCase):
     def fixture(self, flags=None, *, reference=None):
         caller = function(0x100, "caller", flags=flags, references=reference)
@@ -124,6 +178,23 @@ class CallEdgeNegativeAuthorityTest(unittest.TestCase):
         other = function(0x300, "other_target")
         site = call_site(caller, callee, pc=0x110)
         return caller, callee, other, site
+
+    def test_gnu_origin_is_used_only_for_gnu_call_sites(self):
+        for tag, expected in (("DW_TAG_GNU_call_site", {(0x100, 0x200)}),
+                              ("DW_TAG_call_site", set())):
+            with self.subTest(tag=tag):
+                caller = function(0x100, "caller", flags={"DW_AT_GNU_all_call_sites": True})
+                callee = function(0x200, "callee")
+                site = Die(tag, parent=caller, rva=0x110,
+                           references={"DW_AT_abstract_origin": callee},
+                           flags={"DW_AT_GNU_tail_call": True})
+                population = CallFixture([caller, site, callee]).population()
+                self.assertEqual(set(population.edges), expected)
+                if expected:
+                    self.assertEqual(population.edges[(0x100, 0x200)], {True})
+                    self.assertTrue(population.caller_coverage[0x100]["negativeEvidenceComplete"])
+                else:
+                    self.assertFalse(population.caller_coverage[0x100]["negativeEvidenceComplete"])
 
     def test_complete_emitted_calls_and_resolved_targets_authorize_false_positive(self):
         for name in ("DW_AT_call_all_calls", "DW_AT_call_all_source_calls",

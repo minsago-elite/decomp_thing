@@ -234,7 +234,8 @@ def _oracle_edges(
                 if callee not in scoreable:
                     kinds["callee-excluded" if callee in excluded else "callee-not-oracle"] += 1
                     continue
-                tail = attributes.get("DW_AT_call_tail_call")
+                tail = attributes.get("DW_AT_GNU_tail_call" if die.tag == "DW_TAG_GNU_call_site"
+                                      else "DW_AT_call_tail_call")
                 edges.setdefault((caller, callee), set()).add(
                     bool(tail is not None and tail.value)
                 )
