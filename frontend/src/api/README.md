@@ -130,6 +130,15 @@ bounded key/filename/size ticket in tab sessionStorage for explicit retries afte
 for actual request bytes received, independently of its durable retry key. Unknown
 Content-Length leaves the percentage indeterminate while preserving the byte count.
 
+Attempt controls read `attemptControls` from `GET R/controls` only on an explicit click. Cancel
+(`workflowCancelRequest`) and recovery (`recoverRequest`) send that read's run version as If-Match
+and a fresh request key. One bounded command (identities, version, key, expected input; no
+credentials) is retained in tab sessionStorage before sending and cleared only after a definite
+answer. Lost acknowledgements, uncertain publication and denied access keep it; reload offers an
+explicit replay with the same key and body and never sends anything automatically. A cancel
+response is reported by its current state, so a completion that won the race is not shown as
+cancelled; retry and resume require a new attempt linked to the predecessor.
+
 `createSseDecoder(basePath)` incrementally decodes the application's SSE frames. It yields
 one validated WebEvent at a time and retains at most one bounded unfinished frame. It checks
 UTF-8, line endings, event/cursor agreement and the shared contract, including deployment
