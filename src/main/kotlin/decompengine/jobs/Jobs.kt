@@ -371,9 +371,16 @@ class JobStore internal constructor(
             if (total > maximumTotalBytes) throw decompengine.repair.RepairBudgetExceededException("source tree exceeds its receipt budget")
             receipt
         }
-        if (sourceArchiveInventory(jobId, layout, reportPrefix) != inventory) {
+        // The tree was admitted by the first pass: if it can no longer be inventoried (deleted, replaced by a link,
+        // or grown past a bound), that is a concurrent change to this snapshot, not a missing artifact.
+        val after = try { sourceArchiveInventory(jobId, layout, reportPrefix) } catch (failure: ArtifactChangedException) {
+            throw failure
+        } catch (_: JobStoreException) {
+            throw ArtifactChangedException("source tree changed while it was inventoried")
+        } catch (_: IllegalArgumentException) {
             throw ArtifactChangedException("source tree changed while it was inventoried")
         }
+        if (after != inventory) throw ArtifactChangedException("source tree changed while it was inventoried")
         return SourceArchiveReceipts(inventory, files, total)
     }
 

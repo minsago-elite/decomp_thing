@@ -154,6 +154,30 @@ class WebArtifactContainmentTest {
                 store.sourceArchiveReceipts(job.id, layout) { if (++calls == 1) Files.delete(tree.resolve("a.c")) }
             }
             Files.writeString(tree.resolve("a.c"), "int a;\n")
+            // Replacement of the whole admitted tree after every receipt, before the final inventory pass:
+            // the last callback runs after the last file was revalidated.
+            var total = 0
+            store.sourceArchiveReceipts(job.id, layout) { total++ }
+            val sourceTree = tree.parent
+            val moved = sourceTree.resolveSibling("source-tree.moved")
+            calls = 0
+            assertFailsWith<ArtifactChangedException> {
+                store.sourceArchiveReceipts(job.id, layout) {
+                    if (++calls == total) {
+                        Files.move(sourceTree, moved)
+                        Files.createSymbolicLink(sourceTree, moved)
+                    }
+                }
+            }
+            Files.delete(sourceTree)
+            Files.move(moved, sourceTree)
+            calls = 0
+            assertFailsWith<ArtifactChangedException> {
+                store.sourceArchiveReceipts(job.id, layout) { if (++calls == total) sourceTree.toFile().deleteRecursively() }
+            }
+            Files.createDirectories(tree)
+            Files.writeString(tree.resolve("a.c"), "int a;\n")
+            Files.writeString(tree.parent.resolve("README"), "readme\n")
             assertFailsWith<RepairBudgetExceededException> {
                 store.sourceArchiveReceipts(job.id, layout, maximumFileBytes = 4, maximumTotalBytes = 4)
             }
