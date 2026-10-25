@@ -1096,8 +1096,13 @@ Route-level component tests cover these bindings, page bounds, opaque URLs, obso
 role/size/runtime explanations, every generated family (C, headers, Makefile, JSON reports,
 Markdown, plain logs and binary hex), keyboard line-link navigation with focus return, and
 worker termination when the viewer is left. HTTP tests over real generated trees cover
-diffs, historical stability after a later acceptance and manifest-only entries. Physical
-D0 timing/memory/workload budgets remain open.
+diffs, historical stability after a later acceptance and manifest-only entries. The
+packaged-browser `--mode sources` journey drives the installed application by keyboard
+through directories, previews, line links with reload, inert markup, the invalid-UTF-8 hex
+fallback, JSON and Markdown manifest entries, the bundled highlight worker (its URL must be
+the packaged `assets/highlight.worker-*.js`; it exits after one answer and is terminated
+when the viewer is left while it is pending) and the parent comparison with its patch at
+320 px. Physical D0 timing/memory/workload budgets remain open.
 
 ### Bounded source preview consumer
 
