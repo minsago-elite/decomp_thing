@@ -26,8 +26,39 @@ REPORT_SHARDS = {"core": "core", "oracle": "oracle", "live": "live", "live-fullt
 FULLTREE_PACKAGE = "decompengine.oracle.fulltree."
 
 
-def check_partition_reports(root):
+REQUIRED_REGRESSIONS = REPOSITORY / "scripts/ci-required-regressions.json"
+
+
+def load_required_regressions(path=REQUIRED_REGRESSIONS):
+    document = json.loads(path.read_text(encoding="utf-8"))
+    classes = document.get("classes")
+    if document.get("schemaVersion") != 1 or document.get("partition") not in REPORT_SHARDS or \
+            not isinstance(classes, dict) or not classes or \
+            any(not isinstance(name, str) or not isinstance(count, int) or isinstance(count, bool) or count < 1
+                for name, count in classes.items()):
+        raise ValueError("required regression inventory is malformed")
+    return document["partition"], classes
+
+
+def check_required_regressions(passed, partition, classes):
+    """Each named class must pass at least its authored case count, with no skip, in its owning shard."""
+    observed = {}
+    for name, minimum in sorted(classes.items()):
+        outcomes = passed[partition].get(name, Counter())
+        if outcomes["SKIP"]:
+            raise ValueError(f"required regression class skipped a case: {name}")
+        if outcomes["PASS"] < minimum:
+            raise ValueError(f"required regression class ran {outcomes['PASS']} of {minimum} cases in {partition}: {name}")
+        elsewhere = [role for role in passed if role != partition and name in passed[role]]
+        if elsewhere:
+            raise ValueError(f"required regression class ran outside {partition}: {name}")
+        observed[name] = outcomes["PASS"]
+    return {"partition": partition, "classes": observed}
+
+
+def check_partition_reports(root, required=None):
     owners = {}
+    by_class = {role: {} for role in REPORT_SHARDS}
     partitions = {}
     shards = {}
     logical_outcomes = {role: Counter() for role in REPORT_SHARDS.values()}
@@ -75,7 +106,9 @@ def check_partition_reports(root):
                 identities.add(identity)
                 if case.find("failure") is not None or case.find("error") is not None:
                     raise ValueError(f"failed JUnit test in {role}: {classname}.{name}")
-                outcomes["SKIP" if case.find("skipped") is not None else "PASS"] += 1
+                outcome = "SKIP" if case.find("skipped") is not None else "PASS"
+                outcomes[outcome] += 1
+                by_class[role].setdefault(classname, Counter())[outcome] += 1
         if not sum(outcomes.values()):
             raise ValueError(f"no JUnit test cases in {role}")
         shards[role] = {"executions": sum(outcomes.values()), "PASS": outcomes["PASS"],
@@ -85,7 +118,9 @@ def check_partition_reports(root):
     for logical, outcomes in logical_outcomes.items():
         partitions[logical] = {"executions": sum(outcomes.values()), "PASS": outcomes["PASS"],
                                "SKIP": outcomes["SKIP"], "uniqueClassMethodPairs": len(logical_identities[logical])}
+    regressions = check_required_regressions(by_class, *required) if required is not None else None
     return {"schemaVersion": 2, "status": "passed", "partitions": partitions, "reportShards": shards,
+            "requiredRegressions": regressions,
             "executions": sum(p["executions"] for p in partitions.values()),
             "uniqueClassMethodPairs": len(owners), "crossPartitionDuplicates": 0,
             "crossShardDuplicates": 0, "inputs": inputs,
@@ -98,7 +133,7 @@ def report_command(arguments):
     parser.add_argument("--output", type=Path, required=True)
     options = parser.parse_args(arguments)
     try:
-        report = check_partition_reports(options.check_reports)
+        report = check_partition_reports(options.check_reports, load_required_regressions())
     except (ValueError, OSError) as failure:
         report = {"schemaVersion": 2, "status": "failed", "reason": str(failure)}
     options.output.parent.mkdir(parents=True, exist_ok=True)
@@ -367,6 +402,41 @@ class CiPartitionReportTest(unittest.TestCase):
         self.assertEqual(1, report["reportShards"]["live-fulltree"]["executions"])
         self.assertEqual(0, report["crossShardDuplicates"])
         self.assertEqual(2, report["schemaVersion"])
+
+    def test_required_regressions_must_pass_their_authored_count_in_their_partition(self):
+        required = ("core", {"decompengine.web.ExampleWebTest": 2})
+        self.write("core", "decompengine.web.ExampleWebTest", "first")
+        with self.assertRaisesRegex(ValueError, "ran 1 of 2"):
+            check_partition_reports(self.root, required)
+        self.write("core", "decompengine.web.ExampleWebTest", "second")
+        report = check_partition_reports(self.root, required)
+        self.assertEqual({"decompengine.web.ExampleWebTest": 2}, report["requiredRegressions"]["classes"])
+        self.write("core", "decompengine.web.ExampleWebTest", "third", "SKIP")
+        with self.assertRaisesRegex(ValueError, "skipped"):
+            check_partition_reports(self.root, required)
+
+    def test_required_regressions_cannot_be_missing_or_moved_to_another_partition(self):
+        with self.assertRaisesRegex(ValueError, "ran 0 of 1"):
+            check_partition_reports(self.root, ("core", {"decompengine.web.MissingTest": 1}))
+        self.write("core", "decompengine.web.MovedTest", "first")
+        self.write("live", "decompengine.web.MovedTest", "second")
+        with self.assertRaisesRegex(ValueError, "outside core"):
+            check_partition_reports(self.root, ("core", {"decompengine.web.MovedTest": 1}))
+
+    def test_checked_in_required_regression_inventory_names_existing_test_classes(self):
+        partition, classes = load_required_regressions()
+        self.assertEqual("core", partition)
+        for name in classes:
+            source = REPOSITORY / "src/test/kotlin" / (name.replace(".", "/") + ".kt")
+            self.assertTrue(source.is_file(), name)
+            self.assertGreaterEqual(source.read_text(encoding="utf-8").count("@Test"), classes[name], name)
+        for document in ({"schemaVersion": 1, "partition": "core", "classes": {}},
+                         {"schemaVersion": 1, "partition": "core", "classes": {"a.B": 0}},
+                         {"schemaVersion": 2, "partition": "core", "classes": {"a.B": 1}}):
+            path = self.root / "inventory.json"
+            path.write_text(json.dumps(document), encoding="utf-8")
+            with self.assertRaises(ValueError):
+                load_required_regressions(path)
 
     def test_fulltree_cases_cannot_hide_in_the_other_live_report(self):
         self.write("live", "decompengine.oracle.fulltree.ExampleLiveTest", "misplaced")

@@ -1,0 +1,26 @@
+{
+  "schemaVersion": 1,
+  "description": "Web-integration regression classes that every pull request must execute and pass in the kotlin-core partition (#224, #643). Each minimum is the authored passing case count; lowering one, removing a class or making a case skip requires an explicit change here.",
+  "partition": "core",
+  "classes": {
+    "decompengine.acp.AcpHarnessFactoryTest": 16,
+    "decompengine.web.DurableWebWorkflowTest": 20,
+    "decompengine.web.SourceTreeJobReconstructorTest": 7,
+    "decompengine.web.UploadServerTest": 72,
+    "decompengine.web.WebAdmissionBoundsTest": 2,
+    "decompengine.web.WebAgentPreflightLifecycleTest": 3,
+    "decompengine.web.WebAgentPreflightTest": 8,
+    "decompengine.web.WebArchiveEvidenceTest": 3,
+    "decompengine.web.WebBoundedReadsHttpTest": 2,
+    "decompengine.web.WebCancellationControllerTest": 11,
+    "decompengine.web.WebContainmentHttpTest": 1,
+    "decompengine.web.WebEventStreamTest": 8,
+    "decompengine.web.WebHarnessProbeAdmissionTest": 4,
+    "decompengine.web.WebHarnessReadinessTest": 8,
+    "decompengine.web.WebNegotiationMatrixTest": 5,
+    "decompengine.web.WebRestartReconciliationHttpTest": 2,
+    "decompengine.web.WebRouteMatrixTest": 3,
+    "decompengine.web.WebSessionRealRoutesTest": 2,
+    "decompengine.web.WebStreamLifecycleHttpTest": 2
+  }
+}
