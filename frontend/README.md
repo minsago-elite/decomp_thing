@@ -283,6 +283,15 @@ tests and build configuration with strict options; lint checks typed promises an
 prevents React compatibility imports. No `skipLibCheck` or ambient untyped shim
 is used to hide dependency declaration problems.
 
+`tests/accessibility.test.tsx` runs axe-core (pinned dev dependency, never bundled)
+against every routed view with contract fixtures: the public shell, workspace with jobs,
+upload, runtime, job overview, attempt history/overview/activity/evidence, source
+directory and file, the not-found page, the open display-preference panel and a failed
+job read. Any WCAG 2.0/2.1/2.2 A or AA rule violation fails `npm test`. jsdom has no
+layout or colour, so contrast and reflow stay in the packaged Chrome checks
+(`scripts/packaged-browser-contrast.mjs`); manual screen-reader audit evidence is
+recorded separately (#617). Add a new route or state to that suite when you add a view.
+
 A production build empties the output directory, builds split assets and writes
 `build/frontend/bundle-report.json`. The report includes every output's SHA-256,
 raw/gzip bytes, the initial static JS/CSS closure and bundler module ownership.
@@ -291,6 +300,18 @@ Builds enforce the D1 initial limits of 50 KiB gzip JavaScript and 10 KiB gzip C
 reject production source maps/test/dev sentinels, and reject unexpected production
 module owners. `BUNDLE.md` records the initial measured result. These measurements
 do not establish packaged serving, browser performance or the full D-series gate.
+
+The report also enforces two #622 loading rules on the shipped bytes. Modules under
+`src/sources/` (browsing, preview, highlighting worker) and `src/graph/` are tagged in
+`bundle-composition.json` and must not land in any initial chunk; each `chunks[]` entry
+records whether it loads `initial` or `deferred`. Every shipped HTML, JS and CSS file is
+also scanned for remote resource loads (CSS `url()`/`@import`, `import()`/`from`,
+`Worker`/`importScripts`, and `src`/`href` on loading elements). Because scripts can
+also build element URLs, `fetch` targets or JSX props, every absolute or protocol-relative
+URL literal must name a reviewed inert host (XML namespaces, the non-resolvable `.invalid`
+parsing base and one router error-message documentation link); any other host fails the
+build, so no CDN asset can ship. Interface copy therefore links to repository docs, not
+external sites.
 
 ## Dependency updates
 

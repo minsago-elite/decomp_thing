@@ -285,7 +285,7 @@ internal fun calculateFullTreeObservationRuntimeManifestSha256(source: Path): St
         stream.limit(MAXIMUM_RUNTIME_TREE_ENTRIES.toLong() + 1L).toList()
     }
     if (entries.size > MAXIMUM_RUNTIME_TREE_ENTRIES) {
-        isolationFail("isolated runtime root exceeds its entry bound")
+        isolationFail("isolated runtime root exceeds its entry bound of $MAXIMUM_RUNTIME_TREE_ENTRIES: $normalized")
     }
     entries.filter { path ->
         normalized.relativize(path).nameCount == MAXIMUM_RUNTIME_TREE_DEPTH &&
@@ -954,11 +954,19 @@ internal data class KotlinSystemdCgroupCommandResources(
     val maximumResidentBytes: Long,
     val pidsMax: Long,
     val maximumFileBytes: Long,
+    val processorCount: Int = 1,
 ) {
+    // Throughput changes concurrency, never the admitted total compute budget.
+    internal val aggregateCpuSeconds: Long
+        get() = isolatedObservationServiceRuntimeSeconds(wallClockMillis / 1_000L)
+
     init {
         require(wallClockMillis in 1_000L..86_400_000L && wallClockMillis % 1_000L == 0L)
         require(maximumResidentBytes in 256L * 1024 * 1024..64L * 1024 * 1024 * 1024)
         require(pidsMax in 4L..4096L && maximumFileBytes in 1L..1024L * 1024 * 1024)
+        require(processorCount in 1..MAXIMUM_CONTAINED_COMMAND_PROCESSORS) {
+            "contained command processor count exceeds the independent host ceiling"
+        }
     }
 
     internal fun json(): JsonObject = JsonObject(mapOf(
@@ -966,7 +974,7 @@ internal data class KotlinSystemdCgroupCommandResources(
         "maximumResidentBytes" to JsonPrimitive(maximumResidentBytes),
         "pidsMax" to JsonPrimitive(pidsMax),
         "maximumFileBytes" to JsonPrimitive(maximumFileBytes),
-    ))
+    ) + if (processorCount == 1) emptyMap() else mapOf("processorCount" to JsonPrimitive(processorCount)))
 }
 
 internal class KotlinSystemdCgroupCommandAttachment(bytes: ByteArray) {
@@ -1057,7 +1065,7 @@ internal object KotlinSystemdCgroupCommandLauncher {
             val additionalMounts = java.util.List.copyOf(runtimeMounts)
             val additionalInputs = java.util.List.copyOf(readOnlyInputs)
             val runtimeClosureSha256 = OracleArtifacts.sha256(OracleJson.canonicalBytes(JsonObject(mapOf(
-                "provider" to JsonPrimitive("kotlin-lease-contained-command-runtime-v1"),
+                "provider" to JsonPrimitive("kotlin-lease-contained-command-runtime-v${if (resources.processorCount == 1) 1 else 2}"),
                 "configurationSha256" to JsonPrimitive(configuration.canonicalSha256),
                 "deploymentClosureSha256" to JsonPrimitive(deploymentClosureSha256),
                 "runtimeMounts" to JsonArray(additionalMounts.map { it.canonicalIdentity() }),
@@ -1077,7 +1085,8 @@ internal object KotlinSystemdCgroupCommandLauncher {
                 "readOnlyControlDirectories" to retainedDirectories.controlsToJson(),
             )) + (retainedDirectories.stateToJson()?.let { mapOf("readOnlyStateDirectory" to it) } ?: emptyMap()) +
                 (retainedDirectories.reportsToJson()?.let { mapOf("readOnlyReportsDirectory" to it) } ?: emptyMap()) +
-                (operationDeadline?.let { mapOf("operationWallDeadline" to it.policy) } ?: emptyMap()))))
+                (operationDeadline?.let { mapOf("operationWallDeadline" to it.policy) } ?: emptyMap()) +
+                (if (resources.processorCount == 1) emptyMap() else mapOf("resources" to resources.json())))))
             val runtime = AuthenticatedObservationRuntime.open(configuration)
             cleanup.runtime = runtime
             for (input in additionalInputs) {
@@ -1226,7 +1235,10 @@ internal object KotlinSystemdCgroupCommandLauncher {
                 operationDeadline?.requireCurrent()
                 val outcome = KotlinContainedCommandProtocol.requireOutcome(outcomeBytes, secret, request, keeperPid)
                 val interruptionAuthorization = if (interruption == null) {
-                    outcome.requireSuccessful()
+                    val diagnostics = if (outcome.status == "EXITED" && outcome.exitCode == 0) {
+                        null
+                    } else containedCommandFailureDiagnostics(runTree)
+                    outcome.requireSuccessful(diagnostics)
                     null
                 } else interruption.requireInterruptedOutcome(outcome)
                 val elapsed = monotonicElapsed(started, System.nanoTime(), "contained command execution")
@@ -1239,9 +1251,9 @@ internal object KotlinSystemdCgroupCommandLauncher {
                 borrowed.withPinnedDescriptor(retainedDirectories::verify)
                 val controlIdentity = if (controlDirectoryName == null) null else runTree.withPinnedDescriptor { LinuxFilesystemSyscalls.identity(it.fd) }
                 val result = JsonObject(mapOf(
-                    "schemaVersion" to JsonPrimitive(1),
-                    "provider" to JsonPrimitive(if (interruption == null) "kotlin-lease-contained-command-execution-v1"
-                        else "kotlin-lease-contained-command-interrupted-v1"),
+                    "schemaVersion" to JsonPrimitive(if (resources.processorCount == 1) 1 else 2),
+                    "provider" to JsonPrimitive(if (interruption == null) "kotlin-lease-contained-command-execution-v${if (resources.processorCount == 1) 1 else 2}"
+                        else "kotlin-lease-contained-command-interrupted-v${if (resources.processorCount == 1) 1 else 2}"),
                     "attachmentSha256" to JsonPrimitive(OracleArtifacts.sha256(attachment.canonicalBytes)),
                     "requestSha256" to JsonPrimitive(request.sha256),
                     "deploymentClosureSha256" to JsonPrimitive(deploymentClosureSha256),
@@ -1284,6 +1296,60 @@ private fun readContainedCommandProtocol(runTree: ObservationRunTreeAccess, name
     runTree.withPinnedDescriptor { root ->
         DescriptorBoundAtomicStateFile.readOrNull(root, name, KotlinContainedCommandProtocol.MAXIMUM_PROTOCOL_BYTES)?.bytes
     }
+
+private fun containedCommandFailureDiagnostics(runTree: ObservationRunTreeAccess): String = buildString {
+    for ((label, name) in listOf(
+        "stdout" to KotlinContainedCommandProtocol.STDOUT_FILE,
+        "stderr" to KotlinContainedCommandProtocol.STDERR_FILE,
+    )) {
+        if (isNotEmpty()) append('\n')
+        append("contained command ").append(label).append(" tail: ")
+        val tail = runCatching {
+            runTree.withPinnedDescriptor { root ->
+                LinuxFilesystemSyscalls.openDirectoryAt(root.fd, "reports").use { reports ->
+                    val selected = LinuxFilesystemSyscalls.openRegularFileAtOrNull(reports.fd, name)
+                        ?: return@withPinnedDescriptor "not captured"
+                    selected.use { file ->
+                        val before = file.identity
+                        require(before.isRegularFile && !before.isSymbolicLink && before.linkCount == 1) {
+                            "contained command diagnostic is not a private regular file"
+                        }
+                        val size = Files.size(LinuxFilesystemSyscalls.stableDescriptorPath(file.fd))
+                        require(size in 0L..KotlinContainedCommandRequest.MAXIMUM_LOG_BYTES) {
+                            "contained command diagnostic exceeds its fixed limit"
+                        }
+                        val tailBytes = minOf(size, MAXIMUM_CONTAINED_COMMAND_DIAGNOSTIC_TAIL_BYTES.toLong()).toInt()
+                        val bytes = ByteArray(tailBytes)
+                        if (tailBytes > 0) {
+                            FileChannel.open(
+                                LinuxFilesystemSyscalls.stableDescriptorPath(file.fd), StandardOpenOption.READ,
+                            ).use { channel ->
+                                channel.position(size - tailBytes)
+                                val buffer = ByteBuffer.wrap(bytes)
+                                while (buffer.hasRemaining()) {
+                                    require(channel.read(buffer) >= 0) { "contained command diagnostic ended during tail capture" }
+                                }
+                            }
+                        }
+                        require(sameRegularFile(before, LinuxFilesystemSyscalls.identity(file.fd))) {
+                            "contained command diagnostic changed during capture"
+                        }
+                        val text = bytes.toString(Charsets.UTF_8)
+                            .map { character ->
+                                if (character == '\n' || character == '\r' || character == '\t' || !Character.isISOControl(character)) {
+                                    character
+                                } else '?'
+                            }.joinToString("")
+                        "last $tailBytes of $size bytes${if (tailBytes.toLong() == size) "" else " (truncated)"}:\n$text"
+                    }
+                }
+            }
+        }.getOrElse { failure -> "unavailable (${failure::class.simpleName ?: "read failure"})" }
+        append(tail)
+    }
+}
+
+private const val MAXIMUM_CONTAINED_COMMAND_DIAGNOSTIC_TAIL_BYTES = 4 * 1024
 
 /**
  * Shared production BOOT primitive extracted from the full-tree controller's proven boundary.
@@ -3184,6 +3250,7 @@ private data class IsolatedObservationResources(
     val tasksMax: Long,
     val timeoutStopMillis: Long,
     val cleanupLimits: AcpRuntimeClosureLimits,
+    val processorCount: Int = 1,
 ) {
     companion object {
         fun derive(
@@ -3259,7 +3326,7 @@ private data class IsolatedObservationResources(
                 maximumDatabaseBytes = requested.maximumFileBytes,
                 maximumFileBytes = requested.maximumFileBytes,
                 maximumEntities = 1L,
-                cpuSeconds = isolatedObservationServiceRuntimeSeconds(wallSeconds),
+                cpuSeconds = requested.aggregateCpuSeconds,
                 wallSeconds = wallSeconds,
                 serviceRuntimeSeconds = isolatedObservationServiceRuntimeSeconds(wallSeconds),
                 tasksMax = requested.pidsMax,
@@ -3269,6 +3336,7 @@ private data class IsolatedObservationResources(
                     maximumUserOwnedFileBytes = requested.maximumFileBytes,
                     maximumDepth = MAXIMUM_PRIVATE_DEPTH,
                 ),
+                processorCount = requested.processorCount,
             )
         }
 
@@ -4557,7 +4625,7 @@ private class TrustedObservationBoundary(
         add("--property=MemoryMax=${resources.maximumResidentBytes}")
         add("--property=MemorySwapMax=0")
         add("--property=OOMPolicy=kill")
-        add("--property=CPUQuota=100%")
+        add("--property=CPUQuota=${resources.processorCount * 100}%")
         add("--property=KillMode=control-group")
         add("--property=SendSIGKILL=yes")
         add("--property=RuntimeMaxSec=${resources.serviceRuntimeSeconds}s")
@@ -5510,11 +5578,35 @@ internal fun describeObservationCgroupSelectionFailure(failure: Throwable): Stri
         "cgroupSelectionMissingErrno=${captured?.errno == LinuxFilesystemSyscalls.ENOENT}"
 }
 
-private enum class ObservationUnitMutationTargetState {
+internal enum class ObservationUnitMutationTargetState {
     SAME,
     ABSENT,
+    UNRESOLVED,
     REPLACED,
 }
+
+/**
+ * A missing path during an otherwise authenticated reselection proves neither absence nor
+ * replacement. This state grants no name mutation; cleanup must still prove absence separately
+ * within its original deadline. Other failures retain the replacement refusal.
+ */
+internal fun observationCgroupSelectionFailureState(failure: Throwable): ObservationUnitMutationTargetState {
+    val missingReselection = failure is FullTreeFunctionObservationIsolationException &&
+        failure.message == "cannot reselect the descriptor-pinned isolated cgroup" &&
+        (failure.cause as? decompengine.acp.LinuxSyscallException)?.errno == LinuxFilesystemSyscalls.ENOENT
+    return if (missingReselection) ObservationUnitMutationTargetState.UNRESOLVED
+    else ObservationUnitMutationTargetState.REPLACED
+}
+
+/** A command decision only: neither false state establishes the caller's final absence proof. */
+internal fun observationSystemdCleanupMutationPermitted(state: ObservationUnitMutationTargetState): Boolean =
+    when (state) {
+        ObservationUnitMutationTargetState.SAME -> true
+        ObservationUnitMutationTargetState.ABSENT,
+        ObservationUnitMutationTargetState.UNRESOLVED -> false
+        ObservationUnitMutationTargetState.REPLACED ->
+            isolationFail("isolated cleanup refused a replacement systemd invocation")
+    }
 
 private class ObservationSystemdController(
     private val inspector: PinnedSecurityExecutable,
@@ -5615,12 +5707,7 @@ private class ObservationSystemdController(
                 runGuardedObservationSystemdCleanupFallback(
                     unitName = unitName,
                     beforeCommand = {
-                        when (observeTarget()) {
-                            ObservationUnitMutationTargetState.SAME -> true
-                            ObservationUnitMutationTargetState.ABSENT -> false
-                            ObservationUnitMutationTargetState.REPLACED ->
-                                isolationFail("isolated cleanup refused a replacement systemd invocation")
-                        }
+                        observationSystemdCleanupMutationPermitted(observeTarget())
                     },
                     command = { arguments, allowedExitCodes ->
                         systemctl(arguments, allowedExitCodes)
@@ -5676,6 +5763,7 @@ private class ObservationSystemdController(
             ObservationUnitMutationTargetState.ABSENT ->
                 isolationFail("isolated systemd target disappeared before $action")
 
+            ObservationUnitMutationTargetState.UNRESOLVED,
             ObservationUnitMutationTargetState.REPLACED ->
                 isolationFail("isolated systemd target was replaced before $action")
         }
@@ -6136,8 +6224,13 @@ private class ManagedObservationUnit(
         commandBootPopulation?.let { require(it == snapshot.population) { "contained command keeper identities changed" } }
         commandBootPopulation = snapshot.population
         commandKeeperNamespacePid = keeperNamespacePid
+        val hostCpuCapacity = if (requested.processorCount == 1) null else captureContainedCommandCpuCapacity(mainPid).also {
+            require(it.controlGroup == expectedControlGroup) { "CPU capacity observation differs from the attached cgroup" }
+            it.requireCapacity(requested.processorCount)
+        }
         val unsigned = JsonObject(mapOf(
-            "schemaVersion" to JsonPrimitive(1), "provider" to JsonPrimitive("kotlin-lease-contained-command-attachment-v1"),
+            "schemaVersion" to JsonPrimitive(if (requested.processorCount == 1) 1 else 2),
+            "provider" to JsonPrimitive("kotlin-lease-contained-command-attachment-v${if (requested.processorCount == 1) 1 else 2}"),
             "unitName" to JsonPrimitive(unitName), "nonce" to JsonPrimitive(nonce),
             "bootId" to JsonPrimitive(systemdBootIdToKernelUuid(snapshot.bootId)),
             "invocationId" to JsonPrimitive(snapshot.invocationId), "controlGroup" to JsonPrimitive(snapshot.controlGroup),
@@ -6158,7 +6251,7 @@ private class ManagedObservationUnit(
                 "executableDevice" to JsonPrimitive(process.executableDevice), "executableInode" to JsonPrimitive(process.executableInode),
                 "executableMountId" to JsonPrimitive(process.executableMountId),
             )) }),
-        ))
+        ) + (hostCpuCapacity?.let { mapOf("hostCpuCapacity" to it.json()) } ?: emptyMap()))
         return KotlinSystemdCgroupCommandAttachment(containedCommandRecord(unsigned, "attachmentSha256"))
     }
 
@@ -6166,11 +6259,27 @@ private class ManagedObservationUnit(
         require(bootTopology == ObservationBootProcessTopology.SINGLE_KOTLIN_COMMAND_KEEPER)
         val deadline = deadlineAfter(Duration.ofMillis(wallClockMillis), "contained command completion")
         var nextStatus = 0L
+        val cpuMonitor = if (resources.processorCount == 1) null else ContainedCommandCpuBudgetMonitor(
+            resources.cpuSeconds, resources.processorCount,
+            STATUS_POLL_INTERVAL.toMillis() + SERVICE_CLEANUP_TIMEOUT.toMillis() + 1_000L,
+        )
         while (System.nanoTime() < deadline) {
             readContainedCommandProtocol(runTree, KotlinContainedCommandProtocol.OUTCOME_FILE)?.let { return it }
             pollControl()
             val now = System.nanoTime()
             if (now >= nextStatus) {
+                if (cpuMonitor != null) {
+                    val cgroup = cgroupPath ?: isolationFail("contained CPU monitor lacks its retained cgroup")
+                    val before = requirePinnedCgroupSelection(cgroup)
+                    requireActualControllers(cgroup, resources)
+                    val usage = parseFlatCounters(
+                        readBoundedText(cgroup.resolve("cpu.stat"), CGROUP_TEXT_BYTES), "cpu.stat",
+                    )["usage_usec"] ?: isolationFail("contained CPU monitor lacks aggregate usage")
+                    require(requirePinnedCgroupSelection(cgroup) == before) {
+                        "contained aggregate CPU accounting changed identity"
+                    }
+                    cpuMonitor.observe(usage, ::killRetainedProcessHandles, ::stopAndProveRemoved)
+                }
                 requireUnitStillRunning(controller.show(), "during contained command execution")
                 nextStatus = addNanos(now, STATUS_POLL_INTERVAL.toNanos(), "contained command status poll")
             }
@@ -6544,13 +6653,9 @@ private class ManagedObservationUnit(
         val swapMax = readRequiredLong(cgroup.resolve("memory.swap.max"), "isolated memory.swap.max")
         val oomGroup = readBoundedText(cgroup.resolve("memory.oom.group"), CGROUP_TEXT_BYTES).trim()
         val cpu = readBoundedText(cgroup.resolve("cpu.max"), CGROUP_TEXT_BYTES)
-            .trim().split(Regex("\\s+"))
-        val quota = cpu.getOrNull(0)?.toLongOrNull()
-        val period = cpu.getOrNull(1)?.toLongOrNull()
         if (
             pidsMax != expected.tasksMax || memoryMax != expected.maximumResidentBytes ||
-            swapMax != 0L || oomGroup != "1" || cpu.size != 2 || quota == null || period == null ||
-            quota <= 0L || quota != period
+            swapMax != 0L || oomGroup != "1" || !containedCommandCpuQuotaMatches(cpu, expected.processorCount)
         ) isolationFail("isolated cgroup controllers differ from the authenticated runtime policy")
         val procs = readCgroupProcesses(cgroup)
         if (mainPid !in procs) isolationFail("isolated bubblewrap leader is absent from its cgroup")
@@ -6972,8 +7077,9 @@ private class ManagedObservationUnit(
 
     /**
      * Authenticates the retained invocation and descriptor-selected cgroup immediately before a
-     * unit-name mutation. ABSENT permits only pidfd backstops; REPLACED must fail without touching
-     * the deterministic name. The check/command interval assumes cooperative same-UID peers.
+     * unit-name mutation. ABSENT and UNRESOLVED permit only pidfd backstops while cleanup waits
+     * for its independent absence proof; REPLACED must fail without touching the deterministic
+     * name. The check/command interval assumes cooperative same-UID peers.
      */
     private fun observeUnitMutationTarget(): ObservationUnitMutationTargetState {
         lastCleanupTargetDiagnostic = null
@@ -7020,7 +7126,7 @@ private class ManagedObservationUnit(
                         "$it; ${describeObservationCgroupSelectionFailure(failure)}"
                     }
                 }
-                ObservationUnitMutationTargetState.REPLACED
+                observationCgroupSelectionFailureState(failure)
             },
         )
     }
@@ -7081,7 +7187,7 @@ private class ManagedObservationUnit(
         if (properties["MemoryMax"] != expected.maximumResidentBytes.toString()) add("MemoryMax")
         if (properties["MemorySwapMax"] != "0") add("MemorySwapMax")
         if (properties["OOMPolicy"] != "kill") add("OOMPolicy")
-        if (properties["CPUQuotaPerSecUSec"] !in setOf("1s", "1000000us")) add("CPUQuota")
+        if (parseSystemdMicros(properties["CPUQuotaPerSecUSec"]) != expected.processorCount * 1_000_000L) add("CPUQuota")
         if (properties["KillMode"] != "control-group") add("KillMode")
         if (properties["SendSIGKILL"] != "yes") add("SendSIGKILL")
         if (properties["Delegate"] != "no") add("Delegate")

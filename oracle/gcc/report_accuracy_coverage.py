@@ -40,7 +40,7 @@ class CoverageError(RuntimeError):
     """Raised when the checked oracle inputs cannot be authenticated."""
 
 
-def _read_regular(path: Path, label: str) -> bytes:
+def _read_regular(path: Path, label: str, limit: int | None = None) -> bytes:
     try:
         if path.is_symlink():
             raise CoverageError(f"{label} is a symlink: {path}")
@@ -49,12 +49,21 @@ def _read_regular(path: Path, label: str) -> bytes:
             metadata = os.fstat(descriptor)
             if not stat.S_ISREG(metadata.st_mode):
                 raise CoverageError(f"{label} is not a regular file: {path}")
+            if limit is not None and metadata.st_size > limit:
+                raise CoverageError(f"{label} exceeds {limit} bytes: {path}")
             chunks: list[bytes] = []
+            size = 0
             while True:
-                chunk = os.read(descriptor, 1024 * 1024)
+                request = 1024 * 1024
+                if limit is not None:
+                    request = min(request, limit + 1 - size)
+                chunk = os.read(descriptor, request)
                 if not chunk:
                     break
                 chunks.append(chunk)
+                size += len(chunk)
+                if limit is not None and size > limit:
+                    raise CoverageError(f"{label} exceeds {limit} bytes: {path}")
             return b"".join(chunks)
         finally:
             os.close(descriptor)
@@ -64,14 +73,28 @@ def _read_regular(path: Path, label: str) -> bytes:
         raise CoverageError(f"cannot read {label} {path}: {error}") from error
 
 
-def _json(path: Path, label: str) -> dict[str, Any]:
+def _json_snapshot(
+    path: Path, label: str, limit: int | None = None
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    """Decode one read of ``path`` and return it with that read's record."""
+
+    payload = _read_regular(path, label, limit)
     try:
-        value = json.loads(_read_regular(path, label))
+        value = json.loads(payload)
     except json.JSONDecodeError as error:
         raise CoverageError(f"{label} is not valid JSON: {error}") from error
     if not isinstance(value, dict):
         raise CoverageError(f"{label} must contain a JSON object")
-    return value
+    record = {
+        "path": path.name,
+        "bytes": len(payload),
+        "sha256": hashlib.sha256(payload).hexdigest(),
+    }
+    return value, record
+
+
+def _json(path: Path, label: str, limit: int | None = None) -> dict[str, Any]:
+    return _json_snapshot(path, label, limit)[0]
 
 
 def _sha256(path: Path, label: str) -> str:
@@ -134,6 +157,125 @@ def _historical_unattested_score() -> dict[str, Any]:
         "stripped": {
             "precision": {"numerator": 3268, "denominator": 3272},
             "recall": {"numerator": 3268, "denominator": 3284},
+        },
+    }
+
+
+
+SYMBOL_IDENTITY_REPORT = "surviving-symbol-identity.json"
+SYMBOL_IDENTITY_BINDING = "surviving-symbol-identity-binding.json"
+SYMBOL_IDENTITY_QUALIFICATION = "surviving-symbol-identity-qualification.json"
+SYMBOL_IDENTITY_REPORT_ID = "gcc-driver-surviving-symbol-identity-v1"
+
+
+def _symbol_identity_score(
+    profile_directory: Path,
+    loaded_oracle: Any,
+    manifest_sha256: str,
+) -> dict[str, Any]:
+    """Return the current score from a retained, oracle-bound identity report."""
+
+    report_path = profile_directory / SYMBOL_IDENTITY_REPORT
+    if not report_path.exists():
+        return {
+            "status": "unavailable",
+            "reasonCode": "no-retained-production-symbol-identity-report",
+            "productionVerified": False,
+        }
+    # Imported here because the bound-model loader reuses this module's
+    # bounded readers.
+    from oracle.gcc.bound_recovered_model import load_bound_provenance
+
+    # Score and record the same snapshot so the evidence digest names the
+    # bytes that produced the ratio.
+    report, report_record = _json_snapshot(report_path, "surviving symbol identity report")
+    if report.get("reportId") != SYMBOL_IDENTITY_REPORT_ID or report.get("twin") != "stripped":
+        raise CoverageError("surviving symbol identity report has an unexpected identity")
+    provenance = _required_mapping(report.get("provenance"), "symbol identity provenance")
+    if provenance.get("artifactManifestSha256") != manifest_sha256:
+        raise CoverageError("surviving symbol identity report is bound to another manifest")
+    if provenance.get("strippedInputSha256") != loaded_oracle.artifacts["stripped"].input_sha256:
+        raise CoverageError("surviving symbol identity report is bound to another input")
+    expected = sorted(
+        (function.rva, alias.name)
+        for function in loaded_oracle.functions
+        for alias in function.aliases
+        if alias.availability["stripped"] == "surviving"
+    )
+    symbols = report.get("symbols")
+    if not isinstance(symbols, list):
+        raise CoverageError("surviving symbol identity report symbols must be an array")
+    counts = {"exact": 0, "name-mismatch": 0, "missing": 0}
+    try:
+        observed = sorted((int(item["rva"], 16), item["name"]) for item in symbols)
+        for item in symbols:
+            # Recompute each outcome from the recorded names rather than
+            # trusting the self-reported label.
+            recovered_name = item["recoveredName"]
+            if recovered_name is None:
+                derived = "missing"
+                if item["recoveredStatus"] is not None:
+                    raise ValueError("missing symbol carries a recovered status")
+            elif not isinstance(recovered_name, str):
+                raise TypeError("recovered name must be a string or null")
+            elif recovered_name == item["name"]:
+                derived = "exact"
+            else:
+                derived = "name-mismatch"
+            if item["outcome"] != derived:
+                raise ValueError("symbol outcome disagrees with its recorded names")
+            counts[derived] += 1
+    except (KeyError, TypeError, ValueError) as error:
+        raise CoverageError("surviving symbol identity report symbol is malformed") from error
+    if observed != expected:
+        raise CoverageError(
+            "surviving symbol identity report population differs from the oracle"
+        )
+    exact = counts["exact"]
+    summary = _required_mapping(report.get("summary"), "symbol identity summary")
+    if summary.get("population") != len(symbols) or any(
+        summary.get(kind) != count for kind, count in counts.items()
+    ):
+        raise CoverageError("surviving symbol identity report summary disagrees with symbols")
+    qualification = _required_mapping(
+        provenance.get("qualification"), "symbol identity qualification"
+    )
+    if qualification.get("releaseEligible") is not False:
+        # No release-admission authority exists for recovered models yet, so a
+        # retained report may never promote itself to release eligibility.
+        raise CoverageError(
+            "surviving symbol identity report claims release eligibility without "
+            "an authenticated admission record"
+        )
+    # The model digest and the rest of the provenance are republished only
+    # when they match the retained binding and qualification, which are
+    # themselves verified against this manifest and stripped input.
+    bound = load_bound_provenance(
+        manifest_sha256,
+        loaded_oracle.artifacts["stripped"],
+        profile_directory / SYMBOL_IDENTITY_BINDING,
+        profile_directory / SYMBOL_IDENTITY_QUALIFICATION,
+    )
+    if provenance != bound.provenance:
+        raise CoverageError(
+            "surviving symbol identity report provenance disagrees with its "
+            "retained binding and qualification"
+        )
+    return {
+        "status": "measured",
+        "identityRecovery": {
+            "numerator": exact,
+            "denominator": len(symbols),
+            "value": None if not symbols else round(exact / len(symbols), 6),
+        },
+        "productionVerified": False,
+        "reasonCode": "recovered-model-not-release-eligible",
+        "releaseEligible": False,
+        "evidence": {
+            **report_record,
+            "binding": bound.binding_record,
+            "qualification": bound.qualification_record,
+            "programModelSha256": bound.provenance["programModel"]["sha256"],
         },
     }
 
@@ -224,6 +366,15 @@ def build_report(profile_directory: Path) -> dict[str, Any]:
         )
         == "surviving"
     )
+    identity_score = _symbol_identity_score(
+        profile_directory, loaded_oracle, manifest_sha256
+    )
+    if identity_score["status"] != "measured":
+        identity_status = "oracle-population-known-recovery-unavailable"
+    elif identity_score["releaseEligible"]:
+        identity_status = "measured"
+    else:
+        identity_status = "measured-not-release-eligible"
     registry_path = REPOSITORY_ROOT / REGISTRY_PATH
     registry_text = _read_regular(registry_path, "structural replay registry").decode(
         "utf-8"
@@ -289,7 +440,7 @@ def build_report(profile_directory: Path) -> dict[str, Any]:
                 "historicalReference": _historical_unattested_score(),
             },
             "survivingSymbolIdentity": {
-                "status": "oracle-population-known-recovery-unavailable",
+                "status": identity_status,
                 "threshold": {"identityRecovery": 1.0},
                 "oracle": {
                     "status": "available",
@@ -299,11 +450,7 @@ def build_report(profile_directory: Path) -> dict[str, Any]:
                         "authenticated function oracle"
                     ),
                 },
-                "currentScore": {
-                    "status": "unavailable",
-                    "reasonCode": "no-retained-production-symbol-identity-report",
-                    "productionVerified": False,
-                },
+                "currentScore": identity_score,
             },
             "callEdges": {
                 "status": "unavailable",
@@ -347,7 +494,12 @@ def build_report(profile_directory: Path) -> dict[str, Any]:
 
 
 def _write_json(path: Path, report: dict[str, Any]) -> None:
-    payload = (json.dumps(report, indent=2, sort_keys=True) + "\n").encode("utf-8")
+    _write_payload(
+        path, (json.dumps(report, indent=2, sort_keys=True) + "\n").encode("utf-8")
+    )
+
+
+def _write_payload(path: Path, payload: bytes) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     with tempfile.NamedTemporaryFile(
         mode="wb", dir=path.parent, prefix=f".{path.name}.", delete=False
@@ -359,6 +511,13 @@ def _write_json(path: Path, report: dict[str, Any]) -> None:
     os.replace(temporary_path, path)
 
 
+def _identity_suffix(score: dict[str, Any]) -> str:
+    if score["status"] != "measured":
+        return ""
+    ratio = score["identityRecovery"]
+    return f", {ratio['numerator']}/{ratio['denominator']} exact"
+
+
 def render_human(report: dict[str, Any]) -> str:
     dimensions = report["dimensions"]
     return "\n".join(
@@ -367,7 +526,8 @@ def render_human(report: dict[str, Any]) -> str:
             f"function starts: {dimensions['functionStarts']['status']} "
             f"({dimensions['functionStarts']['oracle']['scoreableFunctionCount']} scoreable oracle functions)",
             f"surviving symbol identity: {dimensions['survivingSymbolIdentity']['status']} "
-            f"({dimensions['survivingSymbolIdentity']['oracle']['strippedSurvivingAliasCount']} oracle aliases)",
+            f"({dimensions['survivingSymbolIdentity']['oracle']['strippedSurvivingAliasCount']} oracle aliases"
+            f"{_identity_suffix(dimensions['survivingSymbolIdentity']['currentScore'])})",
             f"call edges: {dimensions['callEdges']['status']}",
             f"next boundary: {report['nextBoundary']['id']} ({report['nextBoundary']['status']})",
         ]

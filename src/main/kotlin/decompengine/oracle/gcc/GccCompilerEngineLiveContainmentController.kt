@@ -1426,6 +1426,9 @@ internal fun deriveRuntimeConfiguration(
 private fun requireSupportedCheckpoint(
     definition: GccCompilerEngineValidatedContainmentDefinition,
 ): KotlinSystemdCgroupBootResources {
+    if ((definition.bundledRuntime?.processorCount ?: 1) != 1) {
+        liveContainmentFail("parallel runtime requires the contained command launcher; the BOOT-only controller admits one CPU")
+    }
     if (
         definition.runKind == GccCompilerEngineContainmentRunKind.RESUMED ||
         definition.analysisState.mode != GccCompilerEngineAnalysisStateMode.FRESH_EMPTY

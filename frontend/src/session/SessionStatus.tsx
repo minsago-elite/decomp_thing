@@ -27,7 +27,8 @@ function explanation(state: SessionState): string {
   return '';
 }
 
-export function SessionStatus({ session }: { session: BrowserSession }) {
+/** The connected state is quiet header chrome; every other state is a page notice. */
+export function SessionStatus({ session, placement = 'any' }: { session: BrowserSession; placement?: 'header' | 'page' | 'any' }) {
   const [state, setState] = useState(session.snapshot);
   useLayoutEffect(() => {
     const unsubscribe = session.subscribe(setState);
@@ -35,13 +36,14 @@ export function SessionStatus({ session }: { session: BrowserSession }) {
     return unsubscribe;
   }, [session]);
   if (state.status === 'public') return null;
+  if (placement !== 'any' && (placement === 'header') !== (state.status === 'authenticated')) return null;
   if (state.status === 'checking' || state.status === 'signing-out') {
     return <aside class="session-notice notice" role="status">
       <p>{state.status === 'checking' ? copy.checkingLocalSession : copy.signingOut}</p>
     </aside>;
   }
   if (state.status === 'authenticated') {
-    return <aside class="session-notice notice" aria-label={copy.localSession}>
+    return <aside class="session-notice is-connected" aria-label={copy.localSession}>
       <p>{copy.localSessionConnected}</p>
       {state.serverChanged && <p role="status">{copy.applicationInstanceChanged}</p>}
       <button type="button" onClick={() => { void session.logout(); }}>{copy.signOut}</button>
