@@ -153,6 +153,29 @@ class WebSensitiveBoundaryTest {
         assertTrue(diagnostics.isNotEmpty() && diagnostics.all { it.startsWith("web-http-failure request_id=") })
     }
 
+    @Test fun `legacy operator inspection refusals and cancellations are audited with their public reason`() {
+        val root = Files.createTempDirectory(Files.createDirectories(Path.of("build/test-tmp/web-sensitive").toAbsolutePath()), "operator-")
+        val server = UploadServer("127.0.0.1", 0, root, JobAnalyzer { _, _ -> error("unexpected") },
+            JobReconstructor { _, _ -> error("unexpected") })
+        try {
+            server.start()
+            val origin = "http://127.0.0.1:${server.serverPort}"
+            val headers = legacySessionHeaders(server)
+            for (path in listOf("/api/operator/auth-methods", "/api/operator/auth-methods/cancel")) {
+                val response = client.send(HttpRequest.newBuilder(URI("$origin$path")).header("Origin", origin)
+                    .header("Content-Type", "application/json").header("Accept", "application/json")
+                    .apply { headers.forEach { (k, v) -> header(k, v) } }
+                    .POST(HttpRequest.BodyPublishers.ofString("{}")).build(), HttpResponse.BodyHandlers.ofString())
+                assertEquals(400, response.statusCode(), path)
+            }
+            val deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(10)
+            fun operator() = server.audit.read().entries.filter { it.action.wireName.startsWith("operator.") }
+            while (operator().size < 2 && System.nanoTime() < deadline) Thread.sleep(10)
+            assertEquals(setOf("operator.auth-inspection", "operator.auth-inspection-cancel"), operator().map { it.action.wireName }.toSet())
+            assertTrue(operator().all { it.outcome == WebAuditOutcome.REJECTED && it.reasonCode == "OPERATOR_INSPECTION_REJECTED" })
+        } finally { server.stop(); root.toFile().deleteRecursively() }
+    }
+
     @Test fun `a base path that looks like a host directory survives bootstrap redaction`() {
         val root = Files.createTempDirectory(Files.createDirectories(Path.of("build/test-tmp/web-sensitive").toAbsolutePath()), "base-")
         val server = UploadServer("127.0.0.1", 0, root, JobAnalyzer { _, _ -> error("unexpected") },

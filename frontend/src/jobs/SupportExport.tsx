@@ -26,8 +26,9 @@ const reasonCopy: Record<Omission['reason'], string> = {
 };
 
 /** The download is the previewed document byte for byte; no second request can change it. */
-export function supportExportDownload(data: SupportExportData): { href: string; filename: string; bytes: number } | null {
-  const text = JSON.stringify({ apiVersion: 1, kind: 'supportExport', data }, null, 2) + '\n';
+export function supportExportDownload(data: SupportExportData, requestId: string): { href: string; filename: string; bytes: number } | null {
+  // The complete response envelope, so the saved file decodes with the shared contract tooling.
+  const text = JSON.stringify({ apiVersion: 1, kind: 'supportExport', requestId, data }, null, 2) + '\n';
   const bytes = new TextEncoder().encode(text).byteLength;
   if (bytes > MAX_SUPPORT_EXPORT_BYTES) return null;
   const scope = data.scope.kind === 'job' && data.scope.jobId ? `job-${data.scope.jobId}` : 'server';
@@ -38,8 +39,8 @@ export function supportExportDownload(data: SupportExportData): { href: string; 
 export function SupportExport({ client }: { client: ExportClient }) {
   const [scope, setScope] = useState<'server' | 'job'>('server');
   const [jobId, setJobId] = useState('');
-  const [state, setState] = useState<{ status: 'idle' | 'loading' | 'ready' | 'error'; data: SupportExportData | null; error: string }>({
-    status: 'idle', data: null, error: '',
+  const [state, setState] = useState<{ status: 'idle' | 'loading' | 'ready' | 'error'; data: SupportExportData | null; requestId: string; error: string }>({
+    status: 'idle', data: null, requestId: '', error: '',
   });
   const [invalid, setInvalid] = useState(false);
   const controller = useRef<AbortController | null>(null);
@@ -55,18 +56,18 @@ export function SupportExport({ client }: { client: ExportClient }) {
     controller.current?.abort();
     const current = new AbortController();
     controller.current = current;
-    setState({ status: 'loading', data: null, error: '' });
+    setState({ status: 'loading', data: null, requestId: '', error: '' });
     const query = scope === 'job' ? `scope=job&jobId=${trimmed}` : 'scope=server';
     try {
       const response = await client.get('supportExport', `/support-export?${query}`, { signal: current.signal });
-      if (!current.signal.aborted) setState({ status: 'ready', data: response.data, error: '' });
+      if (!current.signal.aborted) setState({ status: 'ready', data: response.data, requestId: response.requestId, error: '' });
     } catch (failure) {
-      if (!current.signal.aborted) setState({ status: 'error', data: null, error: withApiFailureReference(copy.previewFailed, failure) });
+      if (!current.signal.aborted) setState({ status: 'error', data: null, requestId: '', error: withApiFailureReference(copy.previewFailed, failure) });
     }
   }
 
   const data = state.status === 'ready' ? state.data : null;
-  const download = data ? supportExportDownload(data) : null;
+  const download = data ? supportExportDownload(data, state.requestId) : null;
   return <section aria-labelledby="support-export-title" class="upload-panel">
     <h2 id="support-export-title">{copy.supportExport}</h2>
     <p>{copy.intro}</p>

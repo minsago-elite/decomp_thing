@@ -1004,7 +1004,7 @@ paths (the storage root, home, temporary, working and Java directories plus the 
 directory families) with `[private-path]`. Closed-syntax protocol fields (`*Id`, `*Cursor`, `*Token`, `*Sha256`,
 `version` and similar) keep their exact bytes unless they contain a configured literal, so cursors and ETags stay
 valid. A download is byte-identical when nothing needs redaction, and the exploration artifact digest is computed
-over the same projection the download serves. Committed job content (`sourceChunk`, source-file downloads and the exact-byte
+over the same projection the download serves. Committed job content (`sourceChunk`, the committed source-tree names in `revisionDirectory`, `revisionSources`, `revisionFile` and `sourceCatalog`, source-file downloads and the exact-byte
 validation output previews in reports) is digest-bound user data, not server configuration, and is served verbatim under job authorization. Progress events
 remain allowlisted projections: journal prose, paths, usage that was not reported and any agent reasoning are never
 requested or displayed (the activity view shows "Not reported").
@@ -1012,7 +1012,7 @@ requested or displayed (the activity view shows "Not reported").
 **Audit.** Every sensitive action is recorded durably in `<store>/.web-audit/` before the request thread
 finishes, including refused and failed requests: `session.start`, `session.end`, `job.upload`, `job.update`,
 `job.delete`, `run.start`, `run.cancel`, `run.recover`, `run.progress-pin`, `agent.preflight`,
-`operator.auth-inspection` (legacy) and `support.export`. An entry records a sequence, time, the response request
+`operator.auth-inspection` and `operator.auth-inspection-cancel` (legacy) and `support.export`. An entry records a sequence, time, the response request
 ID, the actor (`browser_session` with a domain-separated SHA-256 digest of the authorization-owned session
 identity, or `unauthenticated`), the action, the target job/run, the client's strong `If-Match` version and the
 version the response reported, the outcome (`accepted`, `replayed`, `rejected` for 4xx, `failed` for 5xx) with its

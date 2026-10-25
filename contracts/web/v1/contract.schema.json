@@ -4763,6 +4763,7 @@
             "run.progress-pin",
             "agent.preflight",
             "operator.auth-inspection",
+            "operator.auth-inspection-cancel",
             "support.export"
           ]
         },

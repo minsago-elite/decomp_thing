@@ -51,6 +51,7 @@ internal fun sendCorrelatedLegacyJsonProblem(
     requestDiagnosticOutput: (String) -> Unit = System.err::println,
 ) {
     require(status in 400..599)
+    WebDeniedResponseTrace.note(code)
     val fields = Json.parseToJsonElement(payload) as? JsonObject
         ?: error("Legacy JSON error payload must be an object")
     val requestId = java.util.UUID.randomUUID().toString()

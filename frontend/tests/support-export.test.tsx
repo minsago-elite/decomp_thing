@@ -5,6 +5,7 @@ import axe from 'axe-core';
 import { afterEach, expect, it, vi } from 'vitest';
 import { createApiClient } from '../src/api/client';
 import { ApiClientError } from '../src/api/errors';
+import { decodeResponse } from '../src/api/decode';
 import type { SupportExport as SupportExportData } from '../src/api/generated';
 import { SupportExport, supportExportDownload } from '../src/jobs/SupportExport';
 
@@ -25,7 +26,7 @@ async function click(name: string) {
 }
 
 it('previews an explicitly scoped export only on request and downloads exactly the previewed document', async () => {
-  const { get, client } = fakeClient(() => Promise.resolve({ data: server.data }));
+  const { get, client } = fakeClient(() => Promise.resolve({ requestId: server.requestId, data: server.data }));
   render(<SupportExport client={client} />);
   expect(get).not.toHaveBeenCalled();
   await click('Preview export');
@@ -38,16 +39,19 @@ it('previews an explicitly scoped export only on request and downloads exactly t
   expect(screen.getByText('job').parentElement?.textContent).toBe('job: outside the selected scope');
   expect(document.activeElement?.id).toBe('support-export-preview');
   const link = screen.getByRole('link', { name: /Download previewed export/ });
-  const expected = supportExportDownload(server.data);
+  const expected = supportExportDownload(server.data, server.requestId);
   expect(link.getAttribute('download')).toBe('support-export-server.json');
   const text = decodeURIComponent((link.getAttribute('href') ?? '').replace('data:application/json;charset=utf-8,', ''));
   expect((JSON.parse(text) as { data: unknown }).data).toEqual(server.data);
+  // The saved file is a complete contract envelope that the shared decoder accepts.
+  expect(decodeResponse(text, 'supportExport').data).toEqual(server.data);
+  expect(decodeResponse(text, 'supportExport').requestId).toBe(server.requestId);
   expect(link.getAttribute('href')).toBe(expected?.href);
   expect(get).toHaveBeenCalledOnce();
 });
 
 it('validates the job scope before any request and reports omitted unreadable sections as unknown', async () => {
-  const { get, client } = fakeClient(() => Promise.resolve({ data: job.data }));
+  const { get, client } = fakeClient(() => Promise.resolve({ requestId: job.requestId, data: job.data }));
   render(<SupportExport client={client} />);
   fireEvent.click(screen.getByRole('radio', { name: /One job/ }));
   fireEvent.input(screen.getByLabelText(/Job ID/), { target: { value: '../etc/passwd' } });
@@ -66,7 +70,7 @@ it('validates the job scope before any request and reports omitted unreadable se
 it('keeps a failed preview explicit and never offers a stale download', async () => {
   let fail = false;
   const { client } = fakeClient(() => fail ? Promise.reject(new ApiClientError('http_error', { status: 503, requestId: 'request_example_9' }))
-    : Promise.resolve({ data: server.data }));
+    : Promise.resolve({ requestId: server.requestId, data: server.data }));
   render(<SupportExport client={client} />);
   await click('Preview export');
   expect(await screen.findByRole('link', { name: /Download previewed export/ })).toBeTruthy();
@@ -88,7 +92,7 @@ it('decodes both contract fixtures through the real typed client', async () => {
 });
 
 it('has no automated WCAG A/AA violations in the invalid and previewed states', async () => {
-  const { client } = fakeClient(() => Promise.resolve({ data: job.data }));
+  const { client } = fakeClient(() => Promise.resolve({ requestId: job.requestId, data: job.data }));
   render(<main><SupportExport client={client} /></main>);
   const check = async () => (await axe.run(document.body, {
     runOnly: { type: 'tag', values: ['wcag2a', 'wcag2aa', 'wcag21a', 'wcag21aa', 'wcag22aa'] },

@@ -139,6 +139,20 @@ class WebRedactionPolicyTest {
         assertEquals("see [private-path]", safe.getValue("message").jsonPrimitive.content)
     }
 
+    @Test fun `committed source tree names keep their exact unique ordered spellings`() {
+        val directory = buildJsonObject {
+            put("entries", buildJsonArray {
+                add(buildJsonObject { put("displayName", "token=one.c") })
+                add(buildJsonObject { put("displayName", "token=two.c") })
+            })
+        }
+        assertEquals(directory, publicWebApiData("revisionDirectory", directory, policy))
+        assertEquals(directory, publicWebApiData("revisionSources", directory, policy))
+        // Server-produced documents still pass through the policy.
+        assertEquals("token=[redacted]", publicWebApiData("report", directory, policy).jsonObject.getValue("entries")
+            .let { (it as kotlinx.serialization.json.JsonArray)[0].jsonObject.getValue("displayName").jsonPrimitive.content })
+    }
+
     @Test fun `persisted diagnostics also redact short configured values before storage`() {
         val diagnostic = WebRedactionPolicy.create(emptyMap(), listOf("s3cr"), emptyList())
         assertEquals("value [redacted] at [private-path]", diagnostic.diagnostic("value s3cr at /home/x/y"))

@@ -146,6 +146,20 @@ class WebAuditLogTest {
         } finally { parent.toFile().deleteRecursively() }
     }
 
+    @Test fun `new audit directories and segments are made durable before a record is reported`() {
+        val root = root("dirsync")
+        try {
+            val synced = mutableListOf<String>()
+            val log = WebAuditLog(root, clock, segmentEntries = 2, syncDirectory = { synced += root.relativize(it).toString() })
+            log.cancel()
+            assertEquals(listOf("", WebAuditLog.DIRECTORY), synced, "store root after creating .web-audit, then the new segment")
+            synced.clear(); log.cancel()
+            assertEquals(emptyList(), synced, "appending to an existing segment needs no directory sync")
+            log.cancel()
+            assertEquals(listOf(WebAuditLog.DIRECTORY, WebAuditLog.DIRECTORY), synced, "rotation, then the recreated segment")
+        } finally { root.toFile().deleteRecursively() }
+    }
+
     @Test fun `versioned and legacy routes map to the closed action vocabulary`() {
         val run = WebAuditRecorder.versionedAction("POST", "jobs/$job/runs/run_1/cancel")
         assertEquals(WebAuditAction.RUN_CANCEL to WebAuditTarget(job, "run_1"), run)
@@ -161,5 +175,7 @@ class WebAuditLogTest {
         assertEquals(WebAuditAction.SESSION_START, WebAuditRecorder.legacyAction("POST", listOf("api", "v1", "session"))?.first)
         assertEquals(WebAuditAction.SESSION_END, WebAuditRecorder.legacyAction("DELETE", listOf("api", "v1", "session"))?.first)
         assertNull(WebAuditRecorder.legacyAction("GET", listOf("api", "v1", "session")))
+        assertEquals(WebAuditAction.OPERATOR_INSPECTION_CANCEL,
+            WebAuditRecorder.legacyAction("POST", listOf("api", "operator", "auth-methods", "cancel"))?.first)
     }
 }

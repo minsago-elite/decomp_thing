@@ -35,6 +35,7 @@ internal enum class WebAuditAction(val wireName: String) {
     PROGRESS_PIN("run.progress-pin"),
     AGENT_PREFLIGHT("agent.preflight"),
     OPERATOR_INSPECTION("operator.auth-inspection"),
+    OPERATOR_INSPECTION_CANCEL("operator.auth-inspection-cancel"),
     SUPPORT_EXPORT("support.export"),
     ;
 
@@ -192,6 +193,8 @@ internal class WebAuditLog(
     private val prepareStorage: () -> Unit = {},
     // Test seam for append faults; production writes the whole buffer.
     private val append: (FileChannel, ByteBuffer) -> Unit = { channel, buffer -> while (buffer.hasRemaining()) channel.write(buffer) },
+    // Test seam observing directory syncs; production forces the directory to stable storage.
+    private val syncDirectory: (Path) -> Unit = { path -> FileChannel.open(path, READ).use { it.force(true) } },
 ) {
     init { require(segmentEntries in 1..65_536) }
     private val storeRoot = root.toAbsolutePath().normalize()
@@ -240,6 +243,7 @@ internal class WebAuditLog(
         val line = (buildJsonObject { put("schemaVersion", 1); put("entry", entry.toJson()) }.toString() + "\n")
             .toByteArray(Charsets.UTF_8)
         check(line.size <= MAXIMUM_LINE_BYTES)
+        val created = Files.notExists(current, NOFOLLOW_LINKS)
         FileChannel.open(current, CREATE, WRITE, NOFOLLOW_LINKS).use { channel ->
             val boundary = channel.size()
             try {
@@ -252,6 +256,8 @@ internal class WebAuditLog(
                 throw failure
             }
         }
+        // A newly created segment (first append, or after rotation) is durable only once its directory entry is.
+        if (created) syncDirectory(directory)
         nextSequence++
         currentEntries++
     }
@@ -285,7 +291,11 @@ internal class WebAuditLog(
     private fun open() {
         if (opened) return
         prepareStorage()
-        Files.createDirectories(directory)
+        if (Files.notExists(directory, NOFOLLOW_LINKS)) {
+            Files.createDirectories(directory)
+            // The new audit directory entry must itself be durable before any record is reported recorded.
+            syncDirectory(storeRoot)
+        }
         require(Files.isDirectory(directory, NOFOLLOW_LINKS)) { "audit storage is not a directory" }
         discardTornTail()
         val existing = readSegment(current)
@@ -313,7 +323,7 @@ internal class WebAuditLog(
 
     private fun rotate() {
         Files.move(current, previous, StandardCopyOption.REPLACE_EXISTING, StandardCopyOption.ATOMIC_MOVE)
-        FileChannel.open(directory, READ).use { it.force(true) }
+        syncDirectory(directory)
         currentEntries = 0
     }
 
