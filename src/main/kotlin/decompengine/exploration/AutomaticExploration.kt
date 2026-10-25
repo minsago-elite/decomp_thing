@@ -454,26 +454,34 @@ class AutomaticExplorer(
 
 /**
  * Waits for an owned helper. Interruption (cancellation or an exhausted workflow limit) kills its
- * whole process tree and waits for every member to exit before rethrowing, so no helper outlives
- * the workflow that started it.
+ * descendants first, while their parent can still reap them, then the helper itself, and returns
+ * only after each has exited. A killed descendant left as an unreaped zombie holds no resources and
+ * counts as exited, so a container without a reaping init cannot hang cancellation.
  */
 internal fun awaitOwnedProcess(process: Process): Int = try {
     process.waitFor()
 } catch (interrupted: InterruptedException) {
-    val members = process.descendants().toList() + process.toHandle()
-    members.forEach { it.destroyForcibly() }
     var reinterrupt = false
-    for (member in members) {
-        while (member.isAlive) {
-            try { member.onExit().get(1, java.util.concurrent.TimeUnit.SECONDS) }
+    fun await(member: ProcessHandle, exited: () -> Boolean) {
+        member.destroyForcibly()
+        while (!exited()) {
+            try { member.onExit().get(100, java.util.concurrent.TimeUnit.MILLISECONDS) }
             catch (_: InterruptedException) { reinterrupt = true }
             catch (_: java.util.concurrent.TimeoutException) { member.destroyForcibly() }
             catch (_: java.util.concurrent.ExecutionException) { }
         }
     }
+    // Deepest first: each parent outlives its children and can reap them.
+    process.descendants().toList().reversed().forEach { member -> await(member) { !member.isAlive || isZombie(member.pid()) } }
+    await(process.toHandle()) { !process.isAlive } // The JVM reaps its own direct child.
     if (reinterrupt) Thread.currentThread().interrupt()
     throw interrupted
 }
+
+/** Linux process state Z: exited and awaiting its parent's wait; no other platform reports one. */
+internal fun isZombie(pid: Long): Boolean = try {
+    java.nio.file.Files.readString(java.nio.file.Path.of("/proc/$pid/stat")).substringAfterLast(") ").firstOrNull() == 'Z'
+} catch (_: Exception) { false }
 
 private fun ExplorationReport.toJson(): String = """
 {

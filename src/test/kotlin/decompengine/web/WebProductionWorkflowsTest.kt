@@ -357,6 +357,30 @@ class WebProductionWorkflowsTest {
     }
 
     @Test
+    fun `an input that already validates publishes its accepted root baseline`() = withRoot { root ->
+        for (acceptTestOnly in listOf(true, false)) {
+            val store = JobStore(root.resolve("jobs-$acceptTestOnly")); val job = store.createFromUpload("baseline.elf", elfFixture())
+            val engines = FakeEngines().apply { repairBody = { project -> acceptRepairBaseline(project) } }
+            service(store, adapters(engines, acceptTestOnly)).use { service ->
+                service.initializeExistingStorage()
+                fun start(request: NewWorkflowAttempt, key: String) = service.requestDurableStart(job.id, version(service, job.id), request, key)
+                val reconstructed = start(NewWorkflowAttempt(WorkflowKind.RECONSTRUCT, WebWorkflowDefaults.RECONSTRUCT_EVIDENCE,
+                    harnessCapabilityId = EVIDENCE_ONLY_CAPABILITY), "baseline_reconstruct_01").attempt
+                val repaired = start(NewWorkflowAttempt(WorkflowKind.REPAIR, WebWorkflowDefaults.REPAIR, reconstructed.candidate!!.revisionId,
+                    "agent-acp"), "baseline_repair_start_01").attempt
+                assertEquals(WorkflowRunState.COMPLETED, repaired.state)
+                val history = readProjectRecordedRepairHistory(store.runReportsDirectory(job.id, repaired.runId).resolve("source-tree"))
+                val baseline = assertNotNull(history.snapshot?.acceptedBaseline, "the accepted root was not projected")
+                assertEquals(WorkflowCandidate(webSourceRevisionId(baseline.sourceRevisionSha256), baseline.sourceRevisionSha256), repaired.candidate)
+                if (acceptTestOnly) {
+                    val accepted = assertNotNull(repaired.acceptedRevision)
+                    assertEquals(baseline.identity.value, accepted.graphNodeId)
+                } else assertNull(repaired.acceptedRevision, "a test-only baseline proof became release acceptance")
+            }
+        }
+    }
+
+    @Test
     fun `restart distinguishes queued, interrupted, unpublished and accepted attempts without executing work`() = withRoot { root ->
         val store = JobStore(root)
         val queued = store.createFromUpload("queued.elf", elfFixture())
@@ -431,12 +455,13 @@ class WebProductionWorkflowsTest {
         var reconstructBody: (Path, WebReconstructionMode, AgentWorkflowProgress) -> Unit = { reports, mode, _ ->
             modes += mode; writeSourceTree(reports.resolve("source-tree"), "base")
         }
+        var repairBody: (Path) -> Unit = { project -> acceptRepairGraph(project) }
         override fun explore(binary: Path, reportsDirectory: Path) { calls.incrementAndGet(); exploreBody(reportsDirectory) }
         override fun reconstruct(binary: Path, reportsDirectory: Path, mode: WebReconstructionMode, progress: AgentWorkflowProgress) {
             calls.incrementAndGet(); reconstructBody(reportsDirectory, mode, progress)
         }
         override fun repair(project: Path, binary: Path, reportsDirectory: Path, harness: String): RepairRunStatus {
-            calls.incrementAndGet(); check(harness == "acp"); acceptRepairGraph(project); return RepairRunStatus.FULLY_ACCEPTED
+            calls.incrementAndGet(); check(harness == "acp"); repairBody(project); return RepairRunStatus.FULLY_ACCEPTED
         }
     }
 
@@ -499,6 +524,19 @@ class WebProductionWorkflowsTest {
                     repairCandidateSourceSha256(graph.candidateSources(attempt)), state.profileSha256, state.indexSha256, corpus.sha256,
                     sha256("reference".toByteArray()), sha256("rebuilt".toByteArray()), sha256("runtime".toByteArray()),
                     sha256("evidence".toByteArray()), true, RepairValidationAssurance.TEST_ONLY_HOST_PROCESS))
+            }
+        }
+
+        /** Records a FULLY_ACCEPTED run whose accepted head is the unchanged root, as a validated baseline does. */
+        fun acceptRepairBaseline(project: Path) {
+            ModuleRevisionGraph.open(project, PROFILE).use { graph ->
+                graph.enableRunContract(); graph.retainRegressionInputs(INPUTS); graph.beginRun(2, 60_000)
+                graph.bindOriginalBinary(sha256("reference".toByteArray())); graph.bindExpectedObservations(sha256("expected".toByteArray()))
+                val state = graph.snapshot
+                graph.acceptAssessedBaseline(RepairValidationProof(repairCandidateSourceSha256(graph.candidateSources()), state.profileSha256,
+                    state.indexSha256, graph.retainedRegressionCorpus().sha256, sha256("reference".toByteArray()), sha256("rebuilt".toByteArray()),
+                    sha256("runtime".toByteArray()), sha256("evidence".toByteArray()), true, RepairValidationAssurance.TEST_ONLY_HOST_PROCESS),
+                    RepairEvidence("valid", "inert baseline"))
             }
         }
 
