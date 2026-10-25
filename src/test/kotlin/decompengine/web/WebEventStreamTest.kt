@@ -246,6 +246,31 @@ class WebEventStreamTest {
         }
     }
 
+    @Test fun `client disconnects release both session stream slots long before their leases end`() = Fixture(lifetimeMs = 30_000).use { f ->
+        val port = f.server.address.port
+        fun connect(): Socket = Socket("127.0.0.1", port).apply {
+            soTimeout = 5000
+            getOutputStream().write(("GET /events HTTP/1.1\r\nHost: 127.0.0.1:$port\r\nCookie: ${f.cookie}\r\n" +
+                "Accept: text/event-stream\r\nConnection: close\r\n\r\n").toByteArray())
+            val reader = getInputStream().bufferedReader()
+            assertEquals("HTTP/1.1 200 OK", reader.readLine())
+            // Admission has charged the slot once the stream announces itself.
+            while (reader.readLine() != ": connected") Unit
+        }
+        val sockets = listOf(connect(), connect())
+        assertEquals(2, f.resources.snapshot().active)
+        assertEquals(429, f.open().also { it.body().close() }.statusCode(), "the per-session cap is reached")
+        // The peer goes away without a logout; heartbeat writes observe the reset and end each stream.
+        sockets.forEach(Socket::close)
+        val deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(10)
+        while (f.resources.snapshot().active != 0 && System.nanoTime() < deadline) Thread.sleep(10)
+        assertEquals(Pair(0, 0), f.resources.snapshot().let { it.active to it.cleanupFailures },
+            "disconnected streams must release their slots within the 10s bound, not the 30s lease")
+        val reconnected = listOf(f.open(), f.open())
+        try { assertEquals(listOf(200, 200), reconnected.map { it.statusCode() }) }
+        finally { reconnected.forEach { it.body().close() } }
+    }
+
     companion object {
         private fun journal(sequences: List<Int>) = buildJsonObject {
             put("schemaVersion", 1); put("displayOnly", true); put("nextSequence", (sequences.lastOrNull() ?: -1) + 1)
