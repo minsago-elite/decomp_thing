@@ -2655,7 +2655,16 @@ class AcpAgentHarnessTest {
                 throw wrapped.cause ?: wrapped
             }
 
-            assertEquals(AgentFailureKind.RESOURCE_EXHAUSTED, failure.failure.kind)
+            assertEquals(
+                AgentFailureKind.RESOURCE_EXHAUSTED,
+                failure.failure.kind,
+                if (failure.failure.kind == AgentFailureKind.RESOURCE_EXHAUSTED) null else try {
+                    (safeCleanupFailureContext("protocol frame flood", failure) +
+                        " cause=${boundedPreparationCauseForTest(failure)}").take(4096)
+                } catch (_: Throwable) {
+                    "protocol-frame-flood recordedContext=UNAVAILABLE"
+                },
+            )
             assertTrue(failure.message.orEmpty().contains("8-frame protocol limit"), failure.message)
             assertEquals("original artifact\n", fixture.source.readText())
             assertCleanTermination(
