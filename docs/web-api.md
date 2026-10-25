@@ -197,7 +197,7 @@ offset shifting. Expired snapshots return `410 CURSOR_EXPIRED` with guidance to 
 job filters are bounded display-name search (256 characters), exact known status, inclusive
 `createdAfter` and exclusive `createdBefore` RFC3339 instants, `sort=newest`
 (default) or `sort=oldest` creation/identity ordering, and `archived=exclude` (default),
-`include` or `only`. The search also matches a job's display label. Cursors cannot be reused across
+`all` or `only`. The search also matches a job's display label. Cursors cannot be reused across
 resources, revisions or filters. Counts are optional and explicitly exact/estimated/unknown;
 absence of a total never prevents page navigation.
 

@@ -35,7 +35,7 @@ export function jobFilters(search: string): JobFilters {
     throw new JobFilterError('search', copy.search);
   if (!['50', '100', '200'].includes(values.limit)) throw new JobFilterError('limit', copy.limit);
   if (!['newest', 'oldest'].includes(values.sort)) throw new JobFilterError('sort', copy.sort);
-  if (!['', 'include', 'only'].includes(values.archived)) throw new JobFilterError('archived', copy.archived);
+  if (!['', 'all', 'only'].includes(values.archived)) throw new JobFilterError('archived', copy.archived);
   if (values.status !== '' && !(JOB_STATUSES as readonly string[]).includes(values.status)) throw new JobFilterError('status', copy.status);
   function date(field: 'createdAfter' | 'createdBefore') {
     try { return filterInstant(values[field]); }

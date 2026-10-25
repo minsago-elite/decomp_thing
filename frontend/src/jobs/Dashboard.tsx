@@ -336,7 +336,7 @@ export function Dashboard({ basePath }: { basePath: string }) {
         <option value="newest">{copy.newestFirst}</option><option value="oldest">{copy.oldestFirst}</option>
       </select></label>
       <label>{copy.archivedJobs}<select {...fieldA11y('archived')} value={draft.archived} onChange={event => field('archived', event.currentTarget.value)}>
-        <option value="">{copy.hideArchived}</option><option value="include">{copy.includeArchived}</option><option value="only">{copy.onlyArchived}</option>
+        <option value="">{copy.hideArchived}</option><option value="all">{copy.includeArchived}</option><option value="only">{copy.onlyArchived}</option>
       </select></label>
       <label>{copy.jobsPerPage}<select {...fieldA11y('limit')} value={draft.limit} onChange={event => field('limit', event.currentTarget.value)}>
         {[50, 100, 200].map(limit => <option key={limit}>{limit}</option>)}

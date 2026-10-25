@@ -135,7 +135,7 @@ class WebJobLifecycleTest {
         fun listed(query: String) = data(f.read("/jobs$query"), "jobs").getValue("items").jsonArray.map { it.jsonObject.getValue("jobId").jsonPrimitive.content }
         assertEquals(emptyList(), listed(""))
         assertEquals(listOf(job.id), listed("?archived=only"))
-        assertEquals(listOf(job.id), listed("?archived=include&search=firmware"))
+        assertEquals(listOf(job.id), listed("?archived=all&search=firmware"))
         error(f.read("/jobs?archived=everything"), 422)
 
         val cleared = data(f.send("PATCH", "/jobs/${job.id}", "{\"label\":null,\"archived\":false}",
@@ -263,7 +263,7 @@ class WebJobLifecycleTest {
             error(f.read("/jobs/${job.id}"), 410, "RESOURCE_GONE")
             error(f.read("/jobs/${job.id}/runs"), 410, "RESOURCE_GONE")
             error(f.read("/jobs/${job.id}/deletion-preview"), 410, "RESOURCE_GONE")
-            assertEquals(listOf(kept.id), data(f.read("/jobs?archived=include"), "jobs").getValue("items").jsonArray.map { it.jsonObject.getValue("jobId").jsonPrimitive.content })
+            assertEquals(listOf(kept.id), data(f.read("/jobs?archived=all"), "jobs").getValue("items").jsonArray.map { it.jsonObject.getValue("jobId").jsonPrimitive.content })
             assertEquals(operation, data(f.read("/jobs/${job.id}/operations/$operationId"), "operation"))
             val replay = f.delete(job.id, "delete_key_00001", version)
             assertEquals(operation, data(replay, "operation", 202)); assertEquals("true", replay.headers().firstValue("Idempotency-Replayed").orElseThrow())
