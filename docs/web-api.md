@@ -1253,6 +1253,32 @@ remote, branches and commits.
 The separate `github-optional` CI lane runs these tests and the fixture's own test with no
 secrets or network credentials (#612).
 
+### Supported Git capabilities
+
+This summary (#611) collects the supported Git surface. The sections above give each behavior and
+its refusal codes.
+
+| Area | Supported | Not supported |
+| --- | --- | --- |
+| Git runtime | The system `git` executable, 2.36.0 or newer, resolved once at startup. Bootstrap reports `runtime.gitVersion` and the `git` capability | Older Git (`GIT_VERSION_UNSUPPORTED`). Bundled or library Git implementations |
+| Transports | `https` and `ssh` (scp-like `host:path` is normalized to `ssh`) on hosts allowed by `--git-remote-host`. `admitted:<name>` local remotes under `--git-remote-root`. HTTPS always verifies certificates (optional CA bundle) and follows no redirects. SSH runs in batch mode with strict host-key checking against a required known-hosts file | `git://`, `file://`, plain paths, `ext::` and other helper syntax, embedded credentials, any host outside the allowlist. Remote operations stay `unavailable` (`GIT_REMOTES_UNCONFIGURED`) until configured |
+| Credentials | Server-side HTTPS username and token files, and SSH identity files, from `--git-credentials`. Passed only through the child environment, never through argv, records, audit, responses or exports | Browser-supplied credentials, credential helpers and interactive prompts |
+| Identity | Every commit and merge uses the server identity (`Decomp Workbench <workbench@localhost.invalid>` by default) as author and committer | Per-user or repository-configured identities |
+| Signing | Commits and merges are unsigned. Bootstrap reports `git-signing` as `unsupported`. A policy that requires signed commits refuses commits and merge commits (`SIGNING_UNAVAILABLE`) but keeps fast-forwards | Signing keys, GPG or SSH signing, and verification of existing signatures |
+| Repositories | Bare and non-bare imports, and full clones, in SHA-1 or SHA-256 object format. HEAD may be attached, detached or unborn. Server-managed linked work trees for attempts | Shallow repositories and shallow or partial clones, alternates, `commondir`, `.git` files, reftable, repository format above 1, and extensions other than `objectFormat`, `worktreeConfig`, `noop` and `preciousObjects` (`REPOSITORY_UNSUPPORTED`) |
+| Detached HEAD | Status, history, diffs, provenance, branch creation and switching | Integration (`DETACHED`): switch to a branch first |
+| Integration | Fetch-then-review divergence, fast-forward and merge with conflict review, explicit staging and commit, and abort | Rebase, cherry-pick, squash, history rewriting and force pushes |
+| Publication | Explicit, reviewed fast-forward pushes, leased to the reviewed remote state, with reconciliation after an uncertain outcome | Force pushes, deleting remote branches, pushing tags |
+| Repository content | Hooks, filter, diff and merge drivers, fsmonitor, aliases, includes and submodule recursion never run. Configuration written by the server is the only configuration admitted | Running repository-provided programs. Submodules, which stay empty gitlinks |
+| Hosting | Optional GitHub pull requests through `--github-config` for same-repository heads | Forks, other hosting providers, comments, reviews and auto-merge |
+
+`GitRecoveryBoundariesTest` interrupts one repository at each boundary (#609): a fetch is
+restarted and cancelled, a push is restarted after publication, a commit after Git committed, and
+a merge after Git stopped with conflicts. Each operation settles as `interrupted`, `cancelled` or
+`recovery-required` and is never repeated. The accepted evidence of the first commit is checked
+after every step. That evidence is the recorded snapshot digests, the revision mapping with its
+`accepted` state, and the verified export digest, and it stays identical.
+
 ### Git workspace view and packaged journey
 
 The SPA route `/jobs/{jobId}/git` (#583) is a lazily loaded view over the endpoints above. The job

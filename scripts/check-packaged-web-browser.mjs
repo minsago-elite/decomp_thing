@@ -12,7 +12,7 @@ import { seedLive, qualifyLive } from './packaged-browser-live.mjs';
 import { seedHistory, qualifyHistory } from './packaged-browser-history.mjs';
 import { seedLegacy, qualifyLegacy } from './packaged-browser-legacy.mjs';
 import { qualifyUpgrade, qualifyUpgradeCache } from './packaged-browser-upgrade.mjs';
-import { seedGit, qualifyGit, qualifyGitRestart } from './packaged-browser-git.mjs';
+import { seedGit, qualifyGit, qualifyGitRestart, qualifyGitSync } from './packaged-browser-git.mjs';
 
 // Test driver only: the application is launched with a separate Node-free PATH.
 const repo = resolve(dirname(fileURLToPath(import.meta.url)), '..');
@@ -436,7 +436,8 @@ async function launchApplication(installation, port = '0', frontendOrigin) {
   applicationError = '';
   application = startOwned(join(installation.app, 'bin/llm_bin_patch'), ['web', '--ui', values.mode === 'legacy' ? 'legacy' : 'spa', '--host', '127.0.0.1', '--port', port,
     '--base-path', values.mode === 'legacy' ? '/' : '/nested/', '--data-dir', installation.data, ...(frontendOrigin ? ['--dev-frontend-origin', frontendOrigin] : []),
-    ...(gitImportRoot ? ['--git-import-root', gitImportRoot] : [])], {
+    ...(gitImportRoot ? ['--git-import-root', gitImportRoot, '--git-remote-root', gitImportRoot, '--git-remote-host', 'canary.invalid',
+      '--git-credentials', gitFixture.credentials] : [])], {
     cwd: installation.working, env: installation.environment, stdio: ['ignore', 'pipe', 'pipe'],
   });
   application.stdout.on('data', (chunk) => { applicationOutput = (applicationOutput + chunk).slice(-1048576); });
@@ -1029,6 +1030,8 @@ try {
     sensitiveValues.push(new URL(bootstrapUrl).hash.slice('#bootstrap='.length));
     report.gitRestart = await qualifyGitRestart({ fixture: gitFixture, objectId: report.git.objectId, exportSha256: report.git.exportSha256,
       bootstrapUrl, makeTarget, cdp, evaluate, ready, browserOrigin });
+    report.gitSync = await qualifyGitSync({ fixture: gitFixture, objectId: report.git.objectId, exportSha256: report.git.exportSha256,
+      makeTarget, cdp, evaluate, ready, browserOrigin, data: installation.data });
   }
 
   // Let the final DevTools events drain before taking the evidence snapshot.
