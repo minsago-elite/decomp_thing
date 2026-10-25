@@ -1,0 +1,107 @@
+{
+  "apiVersion": 1,
+  "kind": "sourceSearch",
+  "requestId": "request_source_search_1",
+  "data": {
+    "binding": {
+      "jobId": "1234567890abcdef1234567890abcdef",
+      "runId": "run_1",
+      "revisionId": "revision_1"
+    },
+    "authority": "source-input-commitments",
+    "sourceSha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+    "metadataVersion": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+    "query": {
+      "text": "needle",
+      "match": "text",
+      "caseSensitive": true,
+      "directoryId": "root",
+      "path": null
+    },
+    "index": "none",
+    "status": "complete",
+    "stopReason": null,
+    "scope": {
+      "filesInScope": 2,
+      "searchableFiles": 2,
+      "notViewable": 0,
+      "declaredBinary": 0,
+      "tooLarge": 0
+    },
+    "progress": {
+      "scannedFiles": 2,
+      "scannedBytes": "120",
+      "unsearchableText": 0,
+      "unavailableFiles": 0,
+      "remainingFiles": 0
+    },
+    "limits": {
+      "maxResults": 50,
+      "maxScannedBytes": "33554432",
+      "deadlineMs": "2000"
+    },
+    "items": [
+      {
+        "fileId": "file_0_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "displayName": "Makefile",
+        "sha256": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+        "line": "1",
+        "column": "6",
+        "offsetBytes": "5",
+        "lineOffsetBytes": "0",
+        "before": "all: ",
+        "match": "Needle",
+        "after": "",
+        "truncatedBefore": false,
+        "truncatedAfter": false
+      },
+      {
+        "fileId": "file_1_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "displayName": "src/é space.c",
+        "sha256": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+        "line": "1",
+        "column": "4",
+        "offsetBytes": "7",
+        "lineOffsetBytes": "0",
+        "before": "α😀 ",
+        "match": "needle",
+        "after": "",
+        "truncatedBefore": false,
+        "truncatedAfter": false
+      },
+      {
+        "fileId": "file_1_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "displayName": "src/é space.c",
+        "sha256": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+        "line": "2",
+        "column": "9",
+        "offsetBytes": "23",
+        "lineOffsetBytes": "15",
+        "before": "<script>",
+        "match": "needle",
+        "after": "</script>",
+        "truncatedBefore": false,
+        "truncatedAfter": false
+      },
+      {
+        "fileId": "file_1_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "displayName": "src/é space.c",
+        "sha256": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+        "line": "3",
+        "column": "3",
+        "offsetBytes": "45",
+        "lineOffsetBytes": "39",
+        "before": "東京",
+        "match": "needle",
+        "after": " needle",
+        "truncatedBefore": false,
+        "truncatedAfter": false
+      }
+    ],
+    "page": {
+      "limit": 50,
+      "snapshotVersion": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+      "nextCursor": null
+    }
+  }
+}

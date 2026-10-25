@@ -1,0 +1,79 @@
+{
+  "apiVersion": 1,
+  "kind": "sourceSearch",
+  "requestId": "request_source_search_2",
+  "data": {
+    "binding": {
+      "jobId": "1234567890abcdef1234567890abcdef",
+      "runId": "run_1",
+      "revisionId": "revision_1"
+    },
+    "authority": "source-input-commitments",
+    "sourceSha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+    "metadataVersion": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+    "query": {
+      "text": "count",
+      "match": "symbol",
+      "caseSensitive": false,
+      "directoryId": "dir_1_1_dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+      "path": ".c"
+    },
+    "index": "none",
+    "status": "partial",
+    "stopReason": "deadline",
+    "scope": {
+      "filesInScope": 6,
+      "searchableFiles": 4,
+      "notViewable": 1,
+      "declaredBinary": 1,
+      "tooLarge": 0
+    },
+    "progress": {
+      "scannedFiles": 2,
+      "scannedBytes": "9000",
+      "unsearchableText": 0,
+      "unavailableFiles": 0,
+      "remainingFiles": 2
+    },
+    "limits": {
+      "maxResults": 20,
+      "maxScannedBytes": "33554432",
+      "deadlineMs": "2000"
+    },
+    "items": [
+      {
+        "fileId": "file_1_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "displayName": "src/a.c",
+        "sha256": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+        "line": "7",
+        "column": "5",
+        "offsetBytes": "204",
+        "lineOffsetBytes": "200",
+        "before": "int ",
+        "match": "Count",
+        "after": " = 0;",
+        "truncatedBefore": false,
+        "truncatedAfter": false
+      },
+      {
+        "fileId": "file_2_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "displayName": "src/b.c",
+        "sha256": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+        "line": "9",
+        "column": "301",
+        "offsetBytes": "5000",
+        "lineOffsetBytes": "4000",
+        "before": "yyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyy ",
+        "match": "COUNT",
+        "after": "();",
+        "truncatedBefore": true,
+        "truncatedAfter": false
+      }
+    ],
+    "page": {
+      "limit": 20,
+      "snapshotVersion": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+      "nextCursor": null
+    }
+  }
+}

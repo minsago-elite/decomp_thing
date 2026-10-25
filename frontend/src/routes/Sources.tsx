@@ -15,6 +15,8 @@ import type { DirectorySelection, FileSelection, SourceReadState, SourceSnapshot
 import { SourcePreview } from '../sources/SourcePreview';
 import { SourceDigestCheck } from '../sources/SourceDigestCheck';
 import { sourcePosition } from '../sources/viewer';
+import { SourceSearch } from '../sources/SourceSearch';
+import { sourceSearchPath } from '../sources/search';
 
 function Context({ selected, sourceSha256 }: { selected: SourceSelection; sourceSha256?: string }) {
   return <dl class="job-facts" aria-label={copy.context}>
@@ -61,6 +63,7 @@ function Directory({ selected, basePath, pin, search }: { selected: DirectorySel
     <Context selected={selected} {...(data ? { sourceSha256: data.sourceSha256 } : {})} />
     <p>{copy.metadataNotice}</p><p>{copy.browseLimitation}</p><p>{copy.emptyDirectories}</p>
     {pin && <p>{copy.pinnedSnapshot}</p>}
+    <p><a href={sourceSearchPath(basePath, selected, selected.directoryId)}>{copy.searchDirectory}</a></p>
     <button type="button" disabled={loading} onClick={first}>{copy.refresh}</button>
     {loading && <p role="status">{copy.loading}</p>}
     {current.state === 'failed' && <p role="alert">{sourceReadMessage(current.failure)}</p>}
@@ -154,7 +157,7 @@ function File({ selected, basePath, runtime, search, pin }: { selected: FileSele
 
 export default function Sources({ jobId, runId, revisionId, directoryId, fileId, resource, basePath, session }: {
   jobId: string; runId: string; revisionId: string; directoryId?: string; fileId?: string;
-  resource: 'directory' | 'file'; basePath: string; session: BrowserSession | null;
+  resource: 'directory' | 'file' | 'search'; basePath: string; session: BrowserSession | null;
 }) {
   const state = useSession(session);
   const location = useLocation();
@@ -163,17 +166,23 @@ export default function Sources({ jobId, runId, revisionId, directoryId, fileId,
   let search = ''; let pin: SourceSnapshotPin | null = null;
   let valid = true;
   try {
-    sourceReadRoute(selected, resource, (resource === 'directory' ? directoryId : fileId) ?? '');
-    const query = sourceSnapshotSelection(rawSearch); search = query.search; pin = query.pin;
-    if (resource === 'directory') sourceCursor(search);
-    if (resource === 'file') sourcePosition(search);
+    // The search view validates its own closed query and reports an invalid address in place.
+    if (resource === 'search') sourceSearchPath(basePath, selected);
+    else {
+      sourceReadRoute(selected, resource, (resource === 'directory' ? directoryId : fileId) ?? '');
+      const query = sourceSnapshotSelection(rawSearch); search = query.search; pin = query.pin;
+      if (resource === 'directory') sourceCursor(search);
+      if (resource === 'file') sourcePosition(search);
+    }
   } catch { valid = false; }
   return <section class="source-navigation" aria-labelledby="source-title">
-    <h1 id="source-title">{resource === 'directory' ? copy.title : copy.fileTitle}</h1>
+    <h1 id="source-title">{resource === 'directory' ? copy.title : resource === 'search' ? copy.searchTitle : copy.fileTitle}</h1>
     {valid ? <>
       <p><a href={runPath(basePath, jobId, runId)}>{copy.returnAttempt}</a></p>
       {session && state?.status === 'authenticated'
-        ? resource === 'directory'
+        ? resource === 'search'
+          ? <SourceSearch key={`${state.generation}/${jobId}/${runId}/${revisionId}/${rawSearch}`} selected={selected} basePath={basePath} search={rawSearch} />
+          : resource === 'directory'
           ? <Directory key={`${state.generation}/${jobId}/${runId}/${revisionId}/${directoryId ?? ''}/${pin?.sourceSha256}/${pin?.metadataVersion}`}
               selected={{ ...selected, directoryId: directoryId ?? '' }} basePath={basePath} pin={pin} search={search} />
           : <File key={`${state.generation}/${jobId}/${runId}/${revisionId}/${fileId ?? ''}/${pin?.sourceSha256}/${pin?.metadataVersion}`}
