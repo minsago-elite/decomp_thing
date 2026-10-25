@@ -208,6 +208,22 @@ class CallEdgeNegativeAuthorityTest(unittest.TestCase):
         self.assertFalse(coverage["negativeEvidenceComplete"])
         self.assertEqual(fixture.report({(0x100, 0x300)})["fabricatedEdges"], [])
 
+    def test_site_before_parent_start_blocks_negative_authority(self):
+        caller = function(0x100, "caller", flags={"DW_AT_call_all_calls": True})
+        callee = function(0x200, "callee")
+        fixture = CallFixture([caller, call_site(caller, callee, pc=0x50), callee])
+        population = fixture.population()
+        coverage = population.caller_coverage[0x100]
+        self.assertEqual(population.kinds["caller-no-emitted-range"], 1)
+        self.assertTrue(coverage["completeEmittedCallCoverage"])
+        self.assertEqual(coverage["unresolvedSiteKinds"], {"unassigned-call-site": 1})
+        self.assertFalse(coverage["negativeEvidenceComplete"])
+        report = fixture.report({(0x100, 0x200)})
+        self.assertEqual(report["fabricatedEdges"], [])
+        self.assertEqual(pairs(report["unknownRecoveredEdges"]), {(0x100, 0x200)})
+        self.assertIn("unresolved-unlocated-or-unassigned-call-targets",
+                      report["unknownRecoveredEdges"][0]["reasonCodes"])
+
     def test_partial_caller_positive_reference_remains_in_recall(self):
         fixture = CallFixture(self.fixture())
         report = fixture.report({(0x100, 0x300)})

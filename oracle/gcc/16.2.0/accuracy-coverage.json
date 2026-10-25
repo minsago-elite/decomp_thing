@@ -8,7 +8,7 @@
             "path": "surviving-symbol-identity-binding.json",
             "sha256": "3293afb3fd547fafb0f84c423b8a971a18bb0a7568f230db3383d7c84b7dd90d"
           },
-          "bytes": 3695875,
+          "bytes": 3714700,
           "path": "call-edge-score.json",
           "programModel": {
             "bytes": 7634939,
@@ -21,7 +21,7 @@
             "path": "surviving-symbol-identity-qualification.json",
             "sha256": "bead696e9755375578e8adbaa67cc432789954acee96b20cf9f621308227552b"
           },
-          "sha256": "e87d217b0d166c96a9a5fff2204143a18fd8e6348960989530823e3e05ce628e"
+          "sha256": "99fd8d463a72a0d207f380162b6883c00fe8edd93ff1d2a11f2ac054f58cecdf"
         },
         "precision": null,
         "precisionBounds": {
@@ -32,8 +32,8 @@
           },
           "upper": {
             "denominator": 6894,
-            "numerator": 6892,
-            "value": 0.99971
+            "numerator": 6894,
+            "value": 1.0
           }
         },
         "precisionStatus": "bounded-with-unknowns",
@@ -53,7 +53,7 @@
           "recallAtLeast": 0.9,
           "releaseEligible": false
         },
-        "unknownRecoveredCount": 1112
+        "unknownRecoveredCount": 1114
       },
       "oracle": {
         "callSiteKinds": {
@@ -67,7 +67,7 @@
           "virtual-unresolved": 141
         },
         "callersWithCallSites": 2032,
-        "callersWithCompleteNegativeEvidence": 1442,
+        "callersWithCompleteNegativeEvidence": 1424,
         "edgeCount": 5860,
         "negativeEvidencePolicy": "dwarf5-all-emitted-calls-and-resolved-targets-v1",
         "populationDefinition": "unique caller/callee function-start pairs from full-twin DWARF call sites whose callee is a definition or a uniquely named oracle alias, with both endpoints scoreable; every recovered edge with scoreable endpoints remains in the precision denominator; unmatched edges are fabricated only with complete emitted-call and target coverage, otherwise unknown",

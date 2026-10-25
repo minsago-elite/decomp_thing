@@ -38,7 +38,7 @@ class RetainedCallEdgeTest(unittest.TestCase):
             {(edge["callerRva"], edge["calleeRva"]) for edge in self.report[key]}
             for key in ("matchedEdges", "fabricatedEdges", "unknownRecoveredEdges", "excludedRecoveredEdges")
         ]
-        self.assertEqual([len(part) for part in partitions], [5780, 2, 1112, 2011])
+        self.assertEqual([len(part) for part in partitions], [5780, 0, 1114, 2011])
         self.assertEqual(len(set.union(*partitions)), summary["rawRecoveredCount"])
         self.assertEqual(summary["rawRecoveredCount"], 8905)
         self.assertEqual(sum(map(len, partitions[:3])), summary["scoredRecoveredCount"])
@@ -55,7 +55,7 @@ class RetainedCallEdgeTest(unittest.TestCase):
         self.assertEqual(score["precisionBounds"]["lower"],
                          {"numerator": 5780, "denominator": 6894, "value": 0.83841})
         self.assertEqual(score["precisionBounds"]["upper"],
-                         {"numerator": 6892, "denominator": 6894, "value": 0.99971})
+                         {"numerator": 6894, "denominator": 6894, "value": 1.0})
         self.assertEqual(score["thresholdAssessment"]["precision"], "unproven")
         self.assertEqual(
             score["recall"],
@@ -291,13 +291,15 @@ class TamperedCallEdgeTest(unittest.TestCase):
                 )
 
     def test_rejects_unscoreable_endpoint(self) -> None:
-        self.report["fabricatedEdges"][0]["calleeRva"] = "0x1"
+        edge = dict(self.report["unknownRecoveredEdges"][0])
+        edge["calleeRva"] = "0x1"
+        self.report["fabricatedEdges"].append(edge)
         self._rewrite()
         with self.assertRaisesRegex(CoverageError, "rescore of its retained recovered model"):
             build_coverage(self.profile)
 
     def test_rejects_missing_edge_outside_oracle(self) -> None:
-        fabricated = self.report["fabricatedEdges"][0]
+        fabricated = self.report["unknownRecoveredEdges"][0]
         self.report["missingEdges"][0].update(
             callerRva=fabricated["callerRva"], calleeRva=fabricated["calleeRva"]
         )
@@ -307,15 +309,21 @@ class TamperedCallEdgeTest(unittest.TestCase):
 
     def test_rejects_fabricated_oracle_edge(self) -> None:
         edge = self.report["oracleEdges"][0]
-        self.report["fabricatedEdges"][0].update(
-            callerRva=edge["callerRva"], calleeRva=edge["calleeRva"]
-        )
+        self.report["fabricatedEdges"].append(dict(edge))
         self._rewrite()
         with self.assertRaisesRegex(CoverageError, "rescore of its retained recovered model"):
             build_coverage(self.profile)
 
-    def test_rejects_dropped_fabricated_edge(self) -> None:
-        del self.report["fabricatedEdges"][-1]
+    def test_rejects_unknown_promoted_to_fabricated(self) -> None:
+        edge = self.report["unknownRecoveredEdges"].pop()
+        edge.pop("reasonCodes")
+        self.report["fabricatedEdges"].append(edge)
+        summary = self.report["summary"]
+        summary["falsePositives"] += 1
+        summary["unknownRecoveredCount"] -= 1
+        upper = summary["precisionBounds"]["upper"]
+        upper["numerator"] -= 1
+        upper["value"] = round(upper["numerator"] / upper["denominator"], 6)
         self._rewrite()
         with self.assertRaisesRegex(CoverageError, "rescore of its retained recovered model"):
             build_coverage(self.profile)

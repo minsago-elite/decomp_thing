@@ -91,13 +91,13 @@ turn an unmatched recovered edge into a proven fabrication.
 
 The v2 report retains all 8,905 recovered edges: 6,894 have scoreable oracle
 endpoints, and 2,011 are explicitly listed with endpoint exclusion reasons.
-The eligible population partitions into 5,780 known matches, two proven
-fabricated edges, and 1,112 unknown edges. All 5,860 known oracle edges stay in
+The eligible population partitions into 5,780 known matches, zero proven
+fabricated edges, and 1,114 unknown edges. All 5,860 known oracle edges stay in
 the recall population, including positive observations from partial callers;
 recall is 5,780/5,860 (0.986348), with 80 missing edges retained.
 
 Precision is **not established**. Its lower bound is 5,780/6,894 (0.838410)
-and its upper bound is 6,892/6,894 (0.999710). The exact `precision` field is
+and its upper bound is 6,894/6,894 (1.000000). The exact `precision` field is
 null while unknowns remain, and the unchanged 90% precision requirement is
 `unproven`. Unknown edges are neither confirmed false positives nor accepted
 matches. This corrects the historical v1 caller restriction, which reported
@@ -107,8 +107,8 @@ Negative authority requires concrete emitted-subprogram `DW_AT_call_all_calls`
 or stronger `DW_AT_call_all_source_calls` evidence (or the equivalent GNU
 attribute), together with resolved targets for every potentially relevant
 site. A tail-only flag, inherited abstract/specification-only flag, unresolved
-indirect/virtual/external target or unlocated site leaves negative coverage
-unproven. The report retains these facts and reasons for every scoreable caller.
+indirect/virtual/external target, unlocated site, or a site that cannot be
+assigned to its parent's emitted start leaves negative coverage unproven. The report retains these facts and reasons for every scoreable caller.
 See [DWARF 5 section 3.3.1.3](https://dwarfstd.org/doc/DWARF5.pdf).
 
 The coverage generator rescores the retained binding-verified recovered model

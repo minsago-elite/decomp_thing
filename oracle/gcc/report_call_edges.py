@@ -197,6 +197,12 @@ def _oracle_edges(
                 caller = max((start for start in starts if start <= rva), default=None)
                 if caller is None:
                     kinds["caller-no-emitted-range"] += 1
+                    # A located site can lie outside its parent's emitted start
+                    # (for example an unrepresented cold fragment). Its target
+                    # was not consumed, so no parent can claim complete negatives.
+                    for start in starts:
+                        if start in scoreable:
+                            unresolved_sites.setdefault(start, Counter())["unassigned-call-site"] += 1
                     continue
                 if caller in scoreable:
                     callers_with_sites.add(caller)
@@ -246,7 +252,7 @@ def _oracle_edges(
         if not complete:
             reasons.append("complete-emitted-call-coverage-unproven")
         if unresolved:
-            reasons.append("unresolved-or-unlocated-call-targets")
+            reasons.append("unresolved-unlocated-or-unassigned-call-targets")
         coverage[caller] = {
             "callerRva": hex(caller),
             "completenessAttributes": flags,
