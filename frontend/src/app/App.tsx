@@ -1,5 +1,5 @@
 import { appCopy as copy } from '../copy/shell';
-import { sourceCopy } from '../copy/sources';
+import { sourceTitleCopy } from '../copy/sourceTitles';
 import { message as displayMessage, textMessage } from '../shared/messages';
 import { useLayoutEffect, useMemo, useRef, useState } from 'preact/hooks';
 import { LocationProvider, Route, Router, useLocation } from 'preact-iso/router';
@@ -82,7 +82,7 @@ function Shell({ basePath, identity, recovery, reload, session }: ShellProps) {
     : location.path === runtimePath ? copy.runtimeStatus : isJob ? copy.jobOverview
       : isRunActivity ? copy.attemptActivity : isRunEvidence ? copy.attemptEvidence
         : isRun ? copy.workflowAttempt : isHistory ? copy.attemptHistory
-      : isSourceDirectory ? sourceCopy.title : isSourceFile ? sourceCopy.fileTitle : copy.pageUnavailable;
+      : isSourceDirectory ? sourceTitleCopy.title : isSourceFile ? sourceTitleCopy.fileTitle : copy.pageUnavailable;
 
   function focusRouteHeading(url: string) {
     const path = new URL(url, window.location.origin).pathname.replace(/\/+$/g, '') || '/';
