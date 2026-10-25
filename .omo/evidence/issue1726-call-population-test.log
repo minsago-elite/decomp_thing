@@ -2,8 +2,22 @@ Picked up JAVA_TOOL_OPTIONS: -Djava.io.tmpdir=/home/june/decomp_thing/.claude/wo
 To honour the JVM settings for this build a single-use Daemon process will be forked. For more on this, please refer to https://docs.gradle.org/9.6.1/userguide/gradle_daemon.html#sec:disabling_the_daemon in the Gradle documentation.
 Daemon will be stopped at the end of the build
 > Task :checkKotlinGradlePluginConfigurationErrors SKIPPED
+> Task :compileKotlin UP-TO-DATE
+> Task :compileJava UP-TO-DATE
 > Task :stageOracleNativeLibraries UP-TO-DATE
+
+> Task :buildAnalysisIoHelper
+4ed582bb29107836eb704bf0adb8fa8d79265dc3f0dc564f24ea39ecd30ede40  decomp-analysis-io-helper-v1.properties
+
 > Task :stageLlvmBehaviorHelperBootstrapResources UP-TO-DATE
+
+> Task :buildLlvmBehaviorHelper
+Picked up JAVA_TOOL_OPTIONS: -Djava.io.tmpdir=/home/june/decomp_thing/.claude/worktrees/a-series-20261026-call-population/build/tmp -Djna.tmpdir=/home/june/decomp_thing/.claude/worktrees/a-series-20261026-call-population/build/tmp -Duser.home=/home/june/decomp_thing/.claude/worktrees/a-series-20261026-call-population/.omo/call-population/home -XX:-UsePerfData
+c84c37c7e07d5ff03d8915aff72e622d0659b154933ebbb43b1ecb18a14778bc  llvm-behavior-native-helper-deployment-reference-v1.json
+
+> Task :processResources
+> Task :classes
+> Task :jar
 > Task :buildAcpGateHelper
 > Task :verifyAcpGateHelper
 > Task :generateAcpGateHelperChecksum UP-TO-DATE
@@ -14,27 +28,9 @@ Daemon will be stopped at the end of the build
 > Task :ghidra-bridge:classes UP-TO-DATE
 > Task :ghidra-bridge:jar UP-TO-DATE
 > Task :ghidra-bridge:stageBundle UP-TO-DATE
-> Task :processTestResources UP-TO-DATE
-> Task :ghidra-bridge:compileTestJava NO-SOURCE
-> Task :ghidra-bridge:processTestResources NO-SOURCE
-> Task :ghidra-bridge:testClasses UP-TO-DATE
-> Task :ghidra-bridge:test NO-SOURCE
-> Task :compileKotlin
-> Task :compileJava UP-TO-DATE
-
-> Task :buildAnalysisIoHelper
-894eb4ba4bba00398615a63d4d56123956adc5fc95895cd5bd3c56795b67f7e3  decomp-analysis-io-helper-v1.properties
-
-> Task :buildLlvmBehaviorHelper
-Picked up JAVA_TOOL_OPTIONS: -Djava.io.tmpdir=/home/june/decomp_thing/.claude/worktrees/a-series-20261026-call-population/build/tmp -Djna.tmpdir=/home/june/decomp_thing/.claude/worktrees/a-series-20261026-call-population/build/tmp -Duser.home=/home/june/decomp_thing/.claude/worktrees/a-series-20261026-call-population/.omo/call-population/home -XX:-UsePerfData
-b41dc247ae33f4b013ed0c458c6bbab7d1a99cd84d5679348f31968de2c0d196  llvm-behavior-native-helper-deployment-reference-v1.json
-
-> Task :processResources
-> Task :classes
-> Task :jar
-> Task :compileTestKotlin UP-TO-DATE
-> Task :compileTestJava NO-SOURCE
+> Task :compileTestKotlin
 > Task :generateGccBundledGhidraReference
+> Task :compileTestJava NO-SOURCE
 > Task :stageKotlinBootRuntime
 > Task :generateKotlinBootClasspathReference
 > Task :verifyLlvmBehaviorHelper
@@ -42,10 +38,16 @@ b41dc247ae33f4b013ed0c458c6bbab7d1a99cd84d5679348f31968de2c0d196  llvm-behavior-
 > Task :generateLlvmHostedWorkerClasspathReference
 > Task :startScripts
 > Task :installDist
+> Task :processTestResources UP-TO-DATE
 > Task :testClasses UP-TO-DATE
 
 > Task :test
 Picked up JAVA_TOOL_OPTIONS: -Djava.io.tmpdir=/home/june/decomp_thing/.claude/worktrees/a-series-20261026-call-population/build/tmp -Djna.tmpdir=/home/june/decomp_thing/.claude/worktrees/a-series-20261026-call-population/build/tmp -Duser.home=/home/june/decomp_thing/.claude/worktrees/a-series-20261026-call-population/.omo/call-population/home -XX:-UsePerfData
+
+> Task :ghidra-bridge:compileTestJava NO-SOURCE
+> Task :ghidra-bridge:processTestResources NO-SOURCE
+> Task :ghidra-bridge:testClasses UP-TO-DATE
+> Task :ghidra-bridge:test NO-SOURCE
 
 [Incubating] Problems report is available at: file:///home/june/decomp_thing/.claude/worktrees/a-series-20261026-call-population/build/reports/problems/problems-report.html
 
@@ -55,6 +57,6 @@ You can use '--warning-mode all' to show the individual deprecation warnings and
 
 For more on this, please refer to https://docs.gradle.org/9.6.1/userguide/command_line_interface.html#sec:command_line_warnings in the Gradle documentation.
 
-BUILD SUCCESSFUL in 1m 15s
+BUILD SUCCESSFUL in 4m 5s
 27 actionable tasks: 16 executed, 11 up-to-date
 Consider enabling configuration cache to speed up this build: https://docs.gradle.org/9.6.1/userguide/configuration_cache_enabling.html

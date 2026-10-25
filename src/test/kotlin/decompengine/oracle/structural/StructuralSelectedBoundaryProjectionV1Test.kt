@@ -262,7 +262,7 @@ private class ProjectionFixture(val oracle: ByteArray, val model: ByteArray, val
     }
 }
 
-private fun <T> withProjectionFixture(block: (ProjectionFixture) -> T): T {
+private fun withProjectionFixture(block: (ProjectionFixture) -> Unit) {
     fun resource(path: String): ByteArray = checkNotNull(StructuralSelectedBoundaryProjectionV1Test::class.java
         .getResourceAsStream(path)).use { it.readAllBytes() }
     val oracle = resource("/oracle/structural-v1/function-oracle.json")

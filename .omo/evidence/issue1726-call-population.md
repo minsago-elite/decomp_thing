@@ -7,20 +7,27 @@ external composer or historical fixture scorer is changed.
 
 ## JVM verification
 
-Final focused run: **39 tests passed, zero failures, errors or skips**.
+Final focused run: **40 tests passed, zero failures, errors or skips**.
 
 - `StructuralCallPopulationV1Test`: 17 semantic/conservation/negative-control tests.
-- `StructuralSelectedBoundaryProjectionV1Test`: 9 projection, substitution,
+- `StructuralSelectedBoundaryProjectionV1Test`: 10 projection, substitution,
   immutable snapshot and JVM constructor-bridge tests.
 - Existing `StructuralFunctionAccuracyV1Test`: 13 regression tests.
 
 The first run exposed the new component's requested JSON node ceiling exceeding
-the shared parser's hard ceiling. The component now uses the existing one-million
-node limit. The final run recompiled that change and the immutable input snapshot
-correction, then passed all 39 tests in 1m15s.
+that of the shared parser; the component now uses the existing one-million node
+limit. Independent test-inventory review then found one malformed-envelope test
+was silently undiscovered because the generic fixture helper inferred a non-void
+return type. The helper now explicitly accepts and returns `Unit`.
+
+The final run passed all **40 intended tests in 4m5s**. A separate source-to-XML
+inventory comparison required every `@Test` declaration's exact name to appear in
+JUnit output, with no missing or unexpected cases. This explicitly includes
+`unbound incomplete envelopes and noncanonical commitments fail`. The earlier
+39-test result is superseded; it did not execute that assertion group.
 
 Final log: `issue1726-call-population-test.log` alongside this file (trailing whitespace normalized).
-SHA-256: `034360e559ff134edd1c2ef0dc17ec8846d8e0ee381080631aba9308c5cb2e18`.
+SHA-256: `5d91c4efccafa0a87d7da97ce22e279e1ffb862047cc89663fc147492edbf445`.
 
 Invocation used Java 21, the repository-local Gradle 9.6.1 distribution/cache,
 `--offline --no-daemon`, and these arguments:
