@@ -86,3 +86,52 @@ it('resets the receipt age when a new verified page arrives', async () => {
   expect(screen.getByText(/less than 10 seconds ago/)).toBeTruthy();
   expect(document.querySelector('time')?.dateTime).toBe(updated.at);
 });
+
+it('resets a fresh receipt after suspension even when its monotonic value matches the previous receipt', async () => {
+  vi.setSystemTime(0);
+  const initial = { ...receipt, at: new Date(0).toISOString() };
+  const view = render(<ActivityReceiptAge receipt={initial} visible />);
+  view.rerender(<ActivityReceiptAge receipt={initial} visible={false} />);
+  await act(async () => { await Promise.resolve(); });
+  vi.setSystemTime(3_600_000); // The tab's monotonic clock remains paused at zero.
+  view.rerender(<ActivityReceiptAge receipt={initial} visible />);
+  await act(async () => { await Promise.resolve(); });
+  expect(screen.getByText(/about 1 hour ago/)).toBeTruthy();
+  const fresh = { at: new Date(Date.now()).toISOString(), monotonicMs: clock, wallClockMs: Date.now() };
+  expect(fresh.monotonicMs).toBe(initial.monotonicMs);
+  view.rerender(<ActivityReceiptAge receipt={fresh} visible />);
+  await act(async () => { await Promise.resolve(); });
+  expect(screen.getByText(/less than 10 seconds ago/)).toBeTruthy();
+  expect(document.querySelector('time')?.dateTime).toBe(fresh.at);
+  expect(vi.getTimerCount()).toBe(1);
+  await tick(10_000);
+  expect(screen.getByText(/about 10 seconds ago/)).toBeTruthy();
+  expect(document.querySelector('[role="status"], [aria-live]')).toBeNull();
+  view.unmount(); expect(vi.getTimerCount()).toBe(0);
+});
+
+it('ages only the newer hidden receipt after replacement at the same paused monotonic value', async () => {
+  vi.setSystemTime(0);
+  const initial = { ...receipt, at: new Date(0).toISOString() };
+  const view = render(<ActivityReceiptAge receipt={initial} visible />);
+  view.rerender(<ActivityReceiptAge receipt={initial} visible={false} />);
+  await act(async () => { await Promise.resolve(); });
+  vi.setSystemTime(3_600_000);
+  view.rerender(<ActivityReceiptAge receipt={initial} visible />);
+  await act(async () => { await Promise.resolve(); });
+  expect(screen.getByText(/about 1 hour ago/)).toBeTruthy();
+  view.rerender(<ActivityReceiptAge receipt={initial} visible={false} />);
+  await act(async () => { await Promise.resolve(); });
+  const fresh = { at: new Date(Date.now()).toISOString(), monotonicMs: clock, wallClockMs: Date.now() };
+  view.rerender(<ActivityReceiptAge receipt={fresh} visible={false} />);
+  await act(async () => { await Promise.resolve(); });
+  expect(screen.getByText(/less than 10 seconds ago/)).toBeTruthy(); expect(vi.getTimerCount()).toBe(0);
+  vi.setSystemTime(3_660_000);
+  view.rerender(<ActivityReceiptAge receipt={fresh} visible />);
+  await act(async () => { await Promise.resolve(); });
+  expect(screen.getByText(/about 1 minute ago/)).toBeTruthy();
+  expect(document.querySelector('time')?.dateTime).toBe(fresh.at);
+  expect(document.querySelector('time')?.title).toBe(fresh.at);
+  expect(vi.getTimerCount()).toBe(1);
+  view.unmount(); expect(vi.getTimerCount()).toBe(0);
+});

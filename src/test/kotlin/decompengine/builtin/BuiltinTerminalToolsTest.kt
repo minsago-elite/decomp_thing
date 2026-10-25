@@ -148,7 +148,7 @@ class BuiltinTerminalToolsTest {
     private fun terminalAuditContext(dispatcher: BuiltinTerminalDispatcher): String =
         dispatcher.audit().takeLast(8).joinToString(prefix = "terminal audit=[", postfix = "]") {
             "${it.outcome.name}/${it.reason.name}"
-        }
+        } + "; " + dispatcher.launchFailureContext()
 
     private class Fixture(val request: AgentExecutionRequest, val control: BuiltinExecutionControl,
         val configuration: AcpLinuxSandboxConfiguration, val policy: AcpTerminalExecutionPolicy,
