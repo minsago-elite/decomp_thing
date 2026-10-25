@@ -9,16 +9,21 @@ import type { BrowserSession, RuntimeSnapshot } from '../session/session';
 import { useSession } from '../session/useSession';
 import { JobSummary } from '../jobs/JobSummary';
 import { WorkflowAvailability } from '../jobs/WorkflowAvailability';
+import { receive } from '../shared/receiptTime';
+import type { ReceiptTime } from '../shared/receiptTime';
+import type { Received } from '../shared/receiptTime';
+import { MetadataReceipt } from '../shared/MetadataReceipt';
 import { canRetainMetadata, isDeletedJob, metadataFailureKind } from '../shared/retainMetadata';
 import { JobDeletion, JobOrganization } from '../jobs/JobLifecycle';
 import { onLibraryChange } from '../jobs/libraryChannel';
 
-function JobDetails({ jobId, basePath, runtime, session }: { jobId: string; basePath: string; runtime: RuntimeSnapshot; session: BrowserSession }) {
+function JobDetails({ jobId, basePath, runtime, runtimeReceipt, session }: { jobId: string; basePath: string; runtime: RuntimeSnapshot; runtimeReceipt: ReceiptTime | undefined; session: BrowserSession }) {
   const { client } = usePrivateTransport(basePath);
   const binding = useMemo(() => ({ client, basePath, jobId }), [client, basePath, jobId]);
-  const [stored, setStored] = useState<{ binding: typeof binding; data: JobData | null; error: string; loading: boolean }>(
+  const [stored, setStored] = useState<{ binding: typeof binding; data: Received<JobData> | null; error: string; loading: boolean }>(
     { binding, data: null, error: '', loading: true });
-  const { data: job, error, loading } = stored.binding === binding ? stored : { data: null, error: '', loading: true };
+  const { data: observation, error, loading } = stored.binding === binding ? stored : { data: null, error: '', loading: true };
+  const job = observation?.value;
   const [refresh, setRefresh] = useState(0);
   const [deleted, setDeleted] = useState(false);
   const [operation, setOperation] = useState<Operation | null>(null);
@@ -35,7 +40,7 @@ function JobDetails({ jobId, basePath, runtime, session }: { jobId: string; base
         if (response.data.jobId !== jobId) {
           setStored({ binding, data: null, error: copy.theServerReturnedADifferentJobIdentity, loading: false }); return;
         }
-        setStored({ binding, data: response.data, error: '', loading: false });
+        setStored({ binding, data: receive(response.data), error: '', loading: false });
       }
     }).catch((failure: unknown) => {
       if (!controller.signal.aborted && isDeletedJob(failure)) { setDeleted(true); setStored({ binding, data: null, error: '', loading: false }); return; }
@@ -60,6 +65,7 @@ function JobDetails({ jobId, basePath, runtime, session }: { jobId: string; base
     {error && job && <p>{copy.previousJobMetadataMayBeOutdated}</p>}
     <button type="button" disabled={loading} onClick={() => setRefresh(value => value + 1)}>{copy.refreshJob}</button>
     {job && <>
+      <MetadataReceipt kind="job" receipt={observation?.receipt} />
       <h2>{job.label ?? job.displayFilename}</h2>
       {job.label && <p>{displayMessage(copy.fileName, { name: job.displayFilename })}</p>}
       <p>{displayMessage(copy.identity, { identity: <code>{job.jobId}</code> })}</p>
@@ -76,10 +82,10 @@ function JobDetails({ jobId, basePath, runtime, session }: { jobId: string; base
       <p>{copy.completionIsAnAttemptOutcomeOnlyTheRecordedAcceptedRevision}</p>
       <p>{copy.theAttemptPageRetainsItsExactIdentityAsNewerWork}</p>
       <p>{copy.startingExplorationReconstructionBuildsValidationOrRepairIsUnavailableIn}</p>
-      <WorkflowAvailability runtime={runtime} />
+      <WorkflowAvailability runtime={runtime} {...(runtimeReceipt ? { receipt: runtimeReceipt } : {})} />
       <a href={appPath(basePath, '/runtime')}>{copy.viewReportedWorkflowAvailability}</a>
       <JobOrganization job={job} client={client} basePath={basePath} session={session}
-        onChanged={next => setStored({ binding, data: next, error: '', loading: false })} />
+        onChanged={next => setStored({ binding, data: receive(next), error: '', loading: false })} />
       <JobDeletion job={job} client={client} basePath={basePath} session={session}
         onDeleted={result => { setOperation(result); setDeleted(true); }} />
     </>}
@@ -91,7 +97,7 @@ export default function Job({ jobId, basePath, session }: { jobId: string; baseP
   return <section aria-labelledby="job-title">
     <h1 id="job-title">{copy.jobOverview}</h1>
     <a href={appPath(basePath, '/')}>{copy.returnToJobs}</a>
-    {state?.status === 'authenticated' ? <JobDetails key={`${state.generation}/${jobId}`} jobId={jobId} basePath={basePath} runtime={state.runtime} session={session!} />
+    {state?.status === 'authenticated' ? <JobDetails key={`${state.generation}/${jobId}`} jobId={jobId} basePath={basePath} runtime={state.runtime} runtimeReceipt={state.runtimeReceipt} session={session!} />
       : <p>{copy.connectALocalSessionToViewThisJob}</p>}
   </section>;
 }

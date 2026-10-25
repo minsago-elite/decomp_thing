@@ -9,6 +9,9 @@ import { jobPath } from '../app/paths';
 import { DEFAULT_FILTERS, JOB_STATUSES, JobFilterError, filterSearch, jobFilters, jobLocation, jobPageSearch } from './query';
 import type { JobFilters } from './query';
 import { JobSummary } from './JobSummary';
+import { receive } from '../shared/receiptTime';
+import type { Received } from '../shared/receiptTime';
+import { MetadataReceipt } from '../shared/MetadataReceipt';
 import { RecoverySummary } from './RecoverySummary';
 import { onLibraryChange } from './libraryChannel';
 
@@ -33,7 +36,8 @@ export function Dashboard({ basePath }: { basePath: string }) {
   const [pageIndex, setPageIndex] = useState(0);
   const [displayedPageIndex, setDisplayedPageIndex] = useState<number | null>(null);
   const [refresh, setRefresh] = useState(0);
-  const [data, setData] = useState<Jobs | null>(null);
+  const [observation, setData] = useState<Received<Jobs> | null>(null);
+  const data = observation?.value;
   const [phase, setPhase] = useState<'loading' | 'ready' | 'error'>('loading');
   const [error, setError] = useState('');
   const [validationError, setValidationError] = useState<JobFilterError | null>(null);
@@ -64,7 +68,7 @@ export function Dashboard({ basePath }: { basePath: string }) {
   }, [error]);
   const { client } = usePrivateTransport(basePath);
   // Only one extra bounded page is retained; continuation pages stay server-backed.
-  const firstPage = useRef<{ selection: typeof selection; refresh: number; client: typeof client; basePath: string; data: Jobs } | null>(null);
+  const firstPage = useRef<{ selection: typeof selection; refresh: number; client: typeof client; basePath: string; data: Received<Jobs> } | null>(null);
   const cursor = selection.cursor ?? cursors[pageIndex] ?? null;
   const dashboardPath = useRef(location.pathname);
   const binding = useMemo(() => ({ selection, refresh, client, basePath, pageIndex, cursor }), [selection, refresh, client, basePath, pageIndex, cursor]);
@@ -151,10 +155,10 @@ export function Dashboard({ basePath }: { basePath: string }) {
     if (retained && (retained.refresh !== refresh || retained.client !== client || retained.basePath !== basePath ||
       filterSearch(retained.selection.filters) !== filterSearch(selection.filters))) firstPage.current = null;
     const cached = firstPage.current;
-    const retainedSnapshot = cached !== null && cursor !== null && snapshotPagination(cached.data.page) &&
-      cached.data.page.pageNumber === 1 && cached.data.page.currentCursor === cursor;
+    const retainedSnapshot = cached !== null && cursor !== null && snapshotPagination(cached.data.value.page) &&
+      cached.data.value.page.pageNumber === 1 && cached.data.value.page.currentCursor === cursor;
     if (cached && ((!cursor && cached.selection === selection) || retainedSnapshot)) {
-      if (!pinReceivedPage(cached.data.page)) return;
+      if (!pinReceivedPage(cached.data.value.page)) return;
       if (retainedSnapshot) setPageNotice(copy.cachedFirstSnapshot);
       setData(cached.data); setDisplayedPageIndex(0); setPhase('ready'); setError('');
       return;
@@ -173,8 +177,9 @@ export function Dashboard({ basePath }: { basePath: string }) {
         throw new ApiClientError('invalid_response');
       }
       if (!pinReceivedPage(page)) return;
-      if (!cursor) firstPage.current = { selection, refresh, client, basePath, data: response.data };
-      setData(response.data); setDisplayedPageIndex(pageIndex); setPhase('ready');
+      const received = receive(response.data);
+      if (!cursor) firstPage.current = { selection, refresh, client, basePath, data: received };
+      setData(received); setDisplayedPageIndex(pageIndex); setPhase('ready');
     }).catch((failure: unknown) => {
       if (controller.signal.aborted) return;
       if (activeBinding.current !== binding || location.pathname !== dashboardPath.current) return;
@@ -226,8 +231,9 @@ export function Dashboard({ basePath }: { basePath: string }) {
         }
         if (snapshotPagination(response.data.page) && response.data.page.pageNumber !== 1) throw new ApiClientError('invalid_response');
         if (!pinReceivedPage(response.data.page)) { stopped = true; return; }
-        firstPage.current = { selection, refresh, client, basePath, data: response.data };
-        setLiveDeferred(false); setData(response.data);
+        const received = receive(response.data);
+        firstPage.current = { selection, refresh, client, basePath, data: received };
+        setLiveDeferred(false); setData(received);
       } catch (failure: unknown) {
         if (!disposed && !controller.signal.aborted && activeBinding.current === binding) { stopped = true; failRead(failure); }
       } finally {
@@ -362,6 +368,7 @@ export function Dashboard({ basePath }: { basePath: string }) {
     <p role="status">{phase === 'loading' && selection.valid
       ? loadingStatus
       : phase === 'ready' && data ? displayMessage(copy.pageCount, { count: data.items.length }) : ''}</p>
+    {data && <MetadataReceipt kind="library" receipt={observation?.receipt} />}
     {phase === 'ready' && retainedEmpty && <p>{filtered ? copy.noJobsMatchTheseFilters : copy.noUploadedJobsYet}</p>}
     {data && <ul ref={list} class="job-list" aria-label={copy.uploadedJobs}>
       {data.items.map(job => <li key={job.jobId}>
