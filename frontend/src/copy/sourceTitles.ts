@@ -1,5 +1,5 @@
 /** Source page titles used by the shell. The remaining source copy loads with the source routes. */
-export const sourceTitles = {
+export const sourceTitleCopy = {
   title: 'Recorded source inputs',
   fileTitle: 'Recorded source file',
   searchTitle: 'Search recorded source inputs',

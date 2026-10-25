@@ -1,8 +1,8 @@
-import { sourceTitles } from './sourceTitles';
+import { sourceTitleCopy } from './sourceTitles';
 
 /** Source navigation copy. IDs, labels and committed values remain separate display data. */
 export const sourceCopy = {
-  ...sourceTitles,
+  ...sourceTitleCopy,
   browse: 'Browse recorded source inputs',
   noRevision: 'No recorded result revision is available for source browsing.',
   returnAttempt: 'Return to this attempt',
