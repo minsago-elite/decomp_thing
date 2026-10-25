@@ -24,6 +24,7 @@ import java.nio.file.StandardOpenOption.WRITE
 import java.nio.file.attribute.PosixFilePermissions
 import java.security.MessageDigest
 import kotlin.test.Test
+import kotlin.test.assertContentEquals
 import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
 import kotlin.test.assertFalse
@@ -1381,7 +1382,7 @@ class GccProductionFullExportQualificationTest {
     }
 
     private fun qualifyNativeStructuralReplay(result: JsonObject, output: Path, captured: Path,
-        profile: GccDriverStructuralInputsV1, intent: JsonObject) {
+        profile: GccDriverStructuralInputsV1, intent: JsonObject, nativeBindings: NativeCallBindingsV1) {
         fun retain(name: String, maximum: Int = MAXIMUM_RECEIPT_BYTES): ByteArray =
             readStable(output.resolve(name), maximum).also { publish(captured.resolve(name), it) }
         assertEquals("unavailable-pending-population-and-external-composition", result.requiredText("callAuthority"))
@@ -1409,6 +1410,32 @@ class GccProductionFullExportQualificationTest {
         val modelBinding = retain(GccBundledNativeStructuralEvidenceV1.MODEL_BINDING_NAME)
         assertEquals(binding.requiredText("modelBindingSha256"), OracleArtifacts.sha256(modelBinding))
         assertEquals(score.requiredText("fullExportBindingSha256"), OracleArtifacts.sha256(modelBinding))
+        val freezeBytes = retain(GccBundledNativeStructuralEvidenceV1.FREEZE_NAME)
+        val claimsBytes = retain(GccBundledNativeStructuralEvidenceV1.CLAIMS_NAME, 64 * 1024 * 1024)
+        val populationBytes = retain(GccBundledNativeStructuralEvidenceV1.POPULATION_NAME, 64 * 1024 * 1024)
+        assertEquals(binding.requiredText("nativeClaimFreezeSha256"), OracleArtifacts.sha256(freezeBytes))
+        assertEquals(binding.requiredText("nativeClaimsSha256"), OracleArtifacts.sha256(claimsBytes))
+        assertEquals(binding.requiredText("nativePopulationSha256"), OracleArtifacts.sha256(populationBytes))
+        val freeze = OracleJson.parseCanonical(freezeBytes).jsonObject
+        assertEquals("after-native-absence-before-boundary-oracle", freeze.requiredText("phase"))
+        assertEquals(binding.requiredText("nativeClaimsSha256"), freeze.requiredText("claimsSha256"))
+        val frozen = decompengine.oracle.structural.NativeRecoveredCallPopulationV1.freeze(
+            readStable(Path.of(result.requiredText("nativeManifest")), MAXIMUM_RECEIPT_BYTES),
+            readStable(captured.resolve("native-calls.json"), 64 * 1024 * 1024),
+            readStable(captured.resolve("program_model.json"), Math.toIntExact(MAXIMUM_MODEL_BYTES)), nativeBindings)
+        assertContentEquals(frozen.canonicalEvidenceBytes, claimsBytes)
+        assertEquals(frozen.rawRecordCount, freeze.getValue("rawRecordCount").jsonPrimitive.long)
+        assertEquals(frozen.rawSiteCount.toLong(), freeze.getValue("rawSiteCount").jsonPrimitive.long)
+        val projection = decompengine.oracle.structural.StructuralSelectedBoundaryProjectionV1.fromReport(scoreBytes)
+        assertContentEquals(frozen.project(projection), populationBytes)
+        val population = OracleJson.parseCanonical(populationBytes, TREE_MANIFEST_LIMITS).jsonObject
+        for (field in listOf("productionVerified", "scored", "complete", "releaseEligible", "negativeCoverageAvailable")) {
+            assertFalse(population.getValue(field).jsonPrimitive.boolean)
+        }
+        for (prefix in listOf("structural-replay", "independent-machine-call")) {
+            val start = OracleJson.parseCanonical(readStable(output.resolve("$prefix-start-authorized.json"), MAXIMUM_RECEIPT_BYTES)).jsonObject
+            assertEquals(OracleArtifacts.sha256(freezeBytes), start.requiredText("nativeClaimFreezeSha256"))
+        }
         val observation = retain(GccDriverStructuralBoundaryEvidenceV1.OBSERVATION_NAME, 64 * 1024 * 1024)
         val boundary = retain(GccDriverStructuralBoundaryEvidenceV1.BINDING_NAME)
         assertEquals(binding.requiredText("boundaryObservationSha256"), OracleArtifacts.sha256(observation))
@@ -1605,6 +1632,7 @@ class GccProductionFullExportQualificationTest {
             copyStable(observationsPath, captured.resolve("native-calls.json"), NativeCallObservationLimitsV1().maximumCombinedBytes,
                 observationsBytes, result.requiredText("nativeObservationsSha256"))
             // Replay the entire frozen raw stream. No site is selected from independent oracle findings.
+            var selectedNativeBindings: NativeCallBindingsV1? = null
             fun replayPopulation(): JsonObject {
                 var sites = 0L
                 var unownedSites = 0L
@@ -1634,6 +1662,8 @@ class GccProductionFullExportQualificationTest {
                             kinds[record.observationKind] = (kinds[record.observationKind] ?: 0) + 1
                         }
                     })
+                selectedNativeBindings?.let { assertEquals(it, summary.bindings) }
+                selectedNativeBindings = summary.bindings
                 assertEquals(observationsBytes, summary.observationsBytes)
                 assertEquals(result.requiredText("nativeObservationsSha256"), summary.observationsSha256)
                 assertEquals(binding.getValue("nativeSiteCount").jsonPrimitive.long, sites)
@@ -1664,7 +1694,7 @@ class GccProductionFullExportQualificationTest {
             assertTrue(populationBytes.contentEquals(OracleJson.canonicalBytes(replayPopulation())),
                 "independent complete native stream replays differ")
             publish(captured.resolve("native-population-replay.json"), populationBytes)
-            if (engine == "driver") qualifyNativeStructuralReplay(result, output, captured, selectedProfile, retainedIntent)
+            if (engine == "driver") qualifyNativeStructuralReplay(result, output, captured, selectedProfile, retainedIntent, checkNotNull(selectedNativeBindings))
             val diagnosticStdout = captureCommandStdout(executionBytes, scratch, captured)
             publish(captured.resolve("result.json"), resultBytes)
             publish(captured.resolve("native-call-observation-binding.json"), bindingBytes)

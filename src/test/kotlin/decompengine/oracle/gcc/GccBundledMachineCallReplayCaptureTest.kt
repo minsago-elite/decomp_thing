@@ -68,7 +68,7 @@ class GccBundledMachineCallReplayCaptureTest {
         assertTrue(constructors.isNotEmpty())
         for (constructor in constructors) {
             val parameters = constructor.parameterTypes
-            assertTrue(GccBundledNativeCallOperation::class.java in parameters)
+            assertTrue(GccBundledNativeClaimFreezeOperation::class.java in parameters)
             assertTrue(VerifiedStructuralInputsV1::class.java in parameters)
             assertTrue(IndependentMachineCallRequestV1::class.java in parameters)
             assertFails { constructor.newInstance(*arrayOfNulls<Any>(parameters.size)) }
