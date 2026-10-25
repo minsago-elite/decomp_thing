@@ -2,7 +2,9 @@ package decompengine.project
 
 import decompengine.assessment.HeuristicScoreInterpretation
 import decompengine.acp.LinuxDescriptor
+import decompengine.acp.LinuxFileIdentity
 import decompengine.acp.LinuxFilesystemSyscalls
+import decompengine.repair.readStableRegularFile
 import decompengine.agent.AgentAccessPolicy
 import decompengine.agent.AgentContextInput
 import decompengine.agent.AgentExecutionRequest
@@ -30,6 +32,9 @@ import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 import java.nio.file.AtomicMoveNotSupportedException
+import java.io.IOException
+import java.io.InterruptedIOException
+import java.nio.channels.ClosedByInterruptException
 import java.nio.charset.StandardCharsets
 import java.nio.file.Files
 import java.nio.file.Path
@@ -598,6 +603,7 @@ object SourceTreeGenerator {
                 ))
             }
         }
+        val previousBuildDefinition = capturePreviousBuildDefinition(projectDir, profile)
         typesHeaderFile.parent.createDirectories()
         typesHeaderFile.writeText(typesHeader)
         headers.forEach { (id, content) ->
@@ -958,40 +964,9 @@ object SourceTreeGenerator {
         }.map { it.path }.sorted()
         val makefile = rendering.buildDefinition(sourcePaths, profile)
         val makefilePath = profile.layout.declaration("build-definition").materialize()
-        // A rerun with a different built-in profile must not leave the previous
-        // profile's generated build definition beside the new one. Both built-in
-        // generated-C profiles declare their definition under this id.
-        for (candidate in ReconstructionProfiles.builtIn.map {
-            it.layout.declaration("build-definition").materialize()
-        }.toSet()) {
-            if (candidate != makefilePath) projectDir.resolve(candidate).deleteIfExists()
-        }
         val makefileFile = projectDir.resolve(makefilePath)
         makefileFile.parent.createDirectories()
-        // Only remove an inactive built-in definition when the previous manifest
-        // proves that the generator owned it. An arbitrary file in a reused
-        // project directory (for example, a user's Makefile) is not ours to delete.
-        val previouslyGeneratedBuildDefinitions = runCatching {
-            val manifest = projectDir.resolve("source_tree_manifest.json")
-            if (!manifest.exists()) emptySet() else {
-                Json.parseToJsonElement(manifest.readText()).jsonObject
-                    .getValue("files").jsonArray
-                    .mapNotNull { file ->
-                        val item = file.jsonObject
-                        val roles = item.getValue("roles").jsonArray.map { it.jsonPrimitive.content }
-                        item.getValue("path").jsonPrimitive.content.takeIf {
-                            ProjectFileRole.BUILD_DEFINITION.wireName in roles
-                        }
-                    }.toSet()
-            }
-        }.getOrDefault(emptySet())
-        for (candidate in ReconstructionProfiles.builtIn) {
-            val stalePath = candidate.layout.declaration("build-definition").materialize()
-            if (stalePath != makefilePath && stalePath in previouslyGeneratedBuildDefinitions &&
-                !runCatching { profile.layout.declarationForPath(stalePath) }.isSuccess) {
-                projectDir.resolve(stalePath).deleteIfExists()
-            }
-        }
+        removeUnchangedPreviousBuildDefinition(projectDir, previousBuildDefinition)
         makefileFile.writeText(makefile)
         generated += evidence(profile, makefilePath, makefile, "planner", emptyList())
 
@@ -1035,6 +1010,74 @@ object SourceTreeGenerator {
         )
         projectDir.resolve("source_tree_manifest.json").writeText(manifest.toJson())
         return manifest
+    }
+
+    private data class PreviousBuildDefinition(
+        val path: String,
+        val sha256: String,
+        val identity: LinuxFileIdentity,
+        val maximumBytes: Long,
+    )
+
+    private fun capturePreviousBuildDefinition(
+        projectDir: Path,
+        currentProfile: ReconstructionProfile,
+    ): PreviousBuildDefinition? = optionalBuildDefinitionEvidence {
+        val builtInProfiles = ReconstructionProfiles.builtIn
+        val maximumBytes = minOf(currentProfile.budgets.archiveMaximumFileBytes,
+            builtInProfiles.minOf { it.budgets.archiveMaximumFileBytes }, Int.MAX_VALUE.toLong() - 1L)
+        val text = readStableRegularFile(projectDir, "source_tree_manifest.json", maximumBytes,
+            cancellationCheck = ::buildDefinitionCleanupCheckpoint).bytes.decodeToString(throwOnInvalidSequence = true)
+        val previous = builtInProfiles.firstNotNullOfOrNull { descriptor ->
+            optionalBuildDefinitionEvidence { descriptor to SourceTreeManifestReader.parse(text, descriptor) }
+        } ?: return@optionalBuildDefinitionEvidence null
+        val declaration = previous.first.layout.declaration("build-definition")
+        val path = declaration.materialize()
+        if (currentProfile.layout.declarations.any { it.matches(path) }) return@optionalBuildDefinitionEvidence null
+        require(ProjectFileRole.BUILD_DEFINITION in declaration.roles &&
+            ProjectFileRole.BUILD_INPUT in declaration.roles && declaration.contentKind == ProjectContentKind.UTF8_TEXT)
+        val record = previous.second.files.singleOrNull { it.path == path } ?: return@optionalBuildDefinitionEvidence null
+        require(record.generator == "planner" && record.promptSha256 == null &&
+            record.acceptedImplementation == null && record.entityIds.isEmpty())
+        val candidate = readStableRegularFile(projectDir, path, maximumBytes,
+            cancellationCheck = ::buildDefinitionCleanupCheckpoint)
+        require(candidate.sha256 == record.sha256) { "previous build definition no longer matches its manifest" }
+        PreviousBuildDefinition(path, candidate.sha256, candidate.identity, maximumBytes)
+    }
+
+    private fun removeUnchangedPreviousBuildDefinition(projectDir: Path, previous: PreviousBuildDefinition?) {
+        buildDefinitionCleanupCheckpoint()
+        if (previous == null) return
+        val current = optionalBuildDefinitionEvidence {
+            readStableRegularFile(projectDir, previous.path, previous.maximumBytes,
+                cancellationCheck = ::buildDefinitionCleanupCheckpoint)
+        } ?: return
+        if (current.identity != previous.identity || current.sha256 != previous.sha256) return
+        // This is local manifest consistency, not authenticated producer history or an
+        // atomic unlink against concurrent writers. Never infer ownership from a filename.
+        buildDefinitionCleanupCheckpoint()
+        projectDir.resolve(previous.path).deleteIfExists()
+    }
+
+    private inline fun <T> optionalBuildDefinitionEvidence(read: () -> T): T? {
+        buildDefinitionCleanupCheckpoint()
+        return try {
+            read()
+        } catch (failure: InterruptedIOException) {
+            throw failure
+        } catch (failure: ClosedByInterruptException) {
+            throw failure
+        } catch (_: IOException) {
+            buildDefinitionCleanupCheckpoint()
+            null
+        } catch (_: IllegalArgumentException) {
+            buildDefinitionCleanupCheckpoint()
+            null
+        }
+    }
+
+    private fun buildDefinitionCleanupCheckpoint() {
+        if (Thread.currentThread().isInterrupted) throw InterruptedException("build definition cleanup interrupted")
     }
 
     private fun requireWorkflowOwnedPathsAreReserved(profile: ReconstructionProfile) {
