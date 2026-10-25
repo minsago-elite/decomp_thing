@@ -773,7 +773,7 @@ and never contain a path or pathspec. `If-Match` must name the guarded `worktree
 
 Routine work-tree operations never use up the job's operation quota. When an admission would
 reach it, the oldest terminal work-tree records are retired, and the newest 63 stay replayable by
-their keys. Initialization and import records are never retired. If a retired key is sent again,
+their keys. Initialization, import and `recovery-required` records are never retired. If a retired key is sent again,
 it is admitted as a new request, and its guards refuse it unless the reviewed state still holds.
 
 A path can have two status records with one file identity: a staged deletion and an untracked
