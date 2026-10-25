@@ -292,6 +292,14 @@ reject production source maps/test/dev sentinels, and reject unexpected producti
 module owners. `BUNDLE.md` records the initial measured result. These measurements
 do not establish packaged serving, browser performance or the full D-series gate.
 
+The report also enforces two #622 loading rules on the shipped bytes. Modules under
+`src/sources/` (browsing, preview, highlighting worker) and `src/graph/` are tagged in
+`bundle-composition.json` and must not land in any initial chunk; each `chunks[]` entry
+records whether it loads `initial` or `deferred`. Every shipped HTML, JS and CSS file is
+also scanned for remote resource loads (CSS `url()`/`@import`, `import()`/`from`,
+`Worker`/`importScripts`, and `src`/`href` on loading elements); any absolute
+`http(s)://` or protocol-relative target fails the build, so no CDN asset can ship.
+
 ## Dependency updates
 
 Change exact direct versions and `package-lock.json` together. Under the pinned

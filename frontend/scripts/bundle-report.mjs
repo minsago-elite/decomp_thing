@@ -127,6 +127,31 @@ export function bundleBudgets(manifest, files, html) {
   return { initial, total, entryJs, entryCss, chunks };
 }
 
+/** Source browsing, highlighting and graph code must stay out of the initial closure (#622). */
+export function assertDeferredFeatures(composition, initialJs) {
+  const initial = new Set(initialJs);
+  for (const module of composition) {
+    assert.ok(module.feature === undefined || ['sources', 'graph'].includes(module.feature), `Unknown deferred feature: ${module.feature}`);
+    if (module.feature) assert.ok(!initial.has(module.chunk), `Deferred ${module.feature} code is in the initial chunk ${module.chunk}`);
+  }
+}
+
+// Resource loads only; namespace strings such as the SVG XML namespace are not fetches.
+const remoteLoads = [
+  /\burl\(\s*["']?(?:https?:)?\/\//i,
+  /@import\s+(?:url\()?\s*["']?(?:https?:)?\/\//i,
+  /\bimport\(\s*["'`](?:https?:)?\/\//i,
+  /\bfrom\s*["'`](?:https?:)?\/\//i,
+  /\bnew\s+(?:Shared)?Worker\(\s*["'`](?:https?:)?\/\//i,
+  /\bimportScripts\(\s*["'`](?:https?:)?\/\//i,
+  /<(?:script|link|img|iframe)\b[^>]*\b(?:src|href)\s*=\s*["']?(?:https?:)?\/\//i,
+];
+
+/** Shipped HTML, scripts and styles never fetch from a CDN or any other remote origin. */
+export function assertNoRemoteLoads(source, name) {
+  for (const pattern of remoteLoads) assert.ok(!pattern.test(source), `Production asset loads a remote resource: ${name}`);
+}
+
 /** Import-safe producer so fixtures exercise the actual byte/gzip/manifest path. */
 export async function buildBundleReport(output = new URL('../../build/frontend/', import.meta.url)) {
   const dist = new URL('dist/', output);
@@ -152,6 +177,7 @@ export async function buildBundleReport(output = new URL('../../build/frontend/'
           'DECOMP_DEV_BACKEND_ORIGIN', 'DECOMP_DEV_ONLY_ENDPOINT_SENTINEL', 'synthetic_non_secret_']) {
           assert.ok(!source.includes(marker), `Production asset contains ${marker}: ${name}`);
         }
+        assertNoRemoteLoads(source, name);
       }
       files.push({ file: name, rawBytes: bytes.length, gzipBytes: gzipSync(bytes, { level: 9 }).length,
         sha256: createHash('sha256').update(bytes).digest('hex') });
@@ -161,6 +187,7 @@ export async function buildBundleReport(output = new URL('../../build/frontend/'
   assert.ok(typeof html === 'string', 'Missing index.html');
   files.sort((left, right) => left.file.localeCompare(right.file));
   const budgets = bundleBudgets(manifest, files, html);
+  assertDeferredFeatures(composition, budgets.entryJs);
   const owners = {};
   for (const module of composition) {
     assert.ok(['application', 'preact', 'preact-iso'].includes(module.owner), `Unreviewed production dependency: ${module.owner}`);
