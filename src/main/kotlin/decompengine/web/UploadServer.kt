@@ -1122,7 +1122,10 @@ class UploadServer(
         val limit = if (isProgressJournalArtifact(relativePath)) AgentProgressJournal.MAXIMUM_READ_BYTES.toLong() else MAX_ARTIFACT_BYTES
         val artifact = jobs.readArtifact(jobId, relativePath, limit)
         val name = Path.of(relativePath).fileName
-        exchange.sendUntrustedAttachment(200, progressArtifactProjection(relativePath, artifact.bytes), contentType(name), name.toString())
+        val projected = progressArtifactProjection(relativePath, artifact.bytes)
+        // Server-produced reports pass through the shared policy; committed source-tree files are job content.
+        val public = if (relativePath.contains("/source-tree/")) projected else redaction.document(projected)
+        exchange.sendUntrustedAttachment(200, public, contentType(name), name.toString())
     }
 
     private fun decode(value: String): String = URLDecoder.decode(value, StandardCharsets.UTF_8)
@@ -1155,6 +1158,8 @@ internal fun handleAuthorizedUploadRequest(
         val contentType = exchange.requestHeaders.getFirst("Content-Type") ?: ""
         val job = mutation.uploadMultipartReceipt(exchange.requestBody, contentType).job
         if (exchange.requestsLegacyJson()) {
+            // The created job's identity, as for the HTML redirect and the versioned route (and its audit target).
+            exchange.responseHeaders.set("Location", "/jobs/${job.id}")
             exchange.sendJson(201, encodeJob(job))
         } else {
             exchange.redirect("/jobs/${job.id}")
