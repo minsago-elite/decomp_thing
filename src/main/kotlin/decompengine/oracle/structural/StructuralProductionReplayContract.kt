@@ -376,17 +376,52 @@ class AuthenticatedStructuralReplayReceiptsV1 internal constructor(
     val model: AuthenticatedStructuralModelReplayReceiptV1,
 )
 
+enum class StructuralReplayDomainV1 {
+    MODEL_PROVENANCE, FUNCTION_BOUNDARIES, INTERFACES, CALLS, GLOBALS, TYPES,
+}
+
 /**
- * Reserved opaque capability for production structural scoring. It intentionally has no creator in
- * this checkpoint: stored receipts and adapter-asserted hashes are insufficient. A later host-owned
- * output-snapshot orchestrator must become the sole constructor gate.
+ * Live host-owned authority, restricted to the independently replayed domains. Stored receipts,
+ * fixture transcripts and matching model hashes cannot construct this capability. A boundary
+ * admission is deliberately insufficient for the complete structural scorer or assessment join.
  */
-class VerifiedStructuralInputsV1 private constructor()
+class VerifiedStructuralInputsV1 private constructor(
+    admission: StructuralReplayAdapterRegistry.SelectedBoundaryAdmission,
+) {
+    val profileId: String = admission.profileId
+    val inputSha256: String = admission.inputSha256
+    val programModelSha256: String = admission.programModelSha256
+    val programModelBytes: Long = admission.programModelBytes
+    private val binding = admission.fullExportBindingBytes
+    private val report = admission.reportBytes
+    val admittedDomains: Set<StructuralReplayDomainV1> = java.util.Collections.unmodifiableSet(
+        setOf(StructuralReplayDomainV1.MODEL_PROVENANCE, StructuralReplayDomainV1.FUNCTION_BOUNDARIES),
+    )
+
+    fun requireDomain(domain: StructuralReplayDomainV1) {
+        if (domain !in admittedDomains) replayFail("production structural domain has not been independently admitted: $domain")
+    }
+
+    internal val fullExportBindingBytes: ByteArray get() = binding.copyOf()
+    internal val selectedBoundaryReportBytes: ByteArray get() = report.copyOf()
+
+    internal companion object {
+        fun fromOwnedAdmission(admission: StructuralReplayAdapterRegistry.SelectedBoundaryAdmission): VerifiedStructuralInputsV1 =
+            VerifiedStructuralInputsV1(admission)
+    }
+}
 
 object StructuralProductionReplayContract {
     const val IDENTITY_RECEIPT_KIND = "structural-identity-replay-receipt-v1"
     const val MODEL_RECEIPT_KIND = "structural-model-replay-receipt-v1"
     const val OUTPUT_TREE_KIND = "structural-replay-output-tree-v1"
+
+    /** A score can be published only from the exact live capability; no replacement model is accepted. */
+    fun scoreSelectedBoundary(inputs: VerifiedStructuralInputsV1): ByteArray {
+        inputs.requireDomain(StructuralReplayDomainV1.MODEL_PROVENANCE)
+        inputs.requireDomain(StructuralReplayDomainV1.FUNCTION_BOUNDARIES)
+        return inputs.selectedBoundaryReportBytes
+    }
 
     fun requestSha256(
         request: StructuralReplayRequestV1,
