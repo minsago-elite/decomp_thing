@@ -24,6 +24,8 @@ PRIVATE = ROOT / 'private'
 PUBLIC = ROOT / 'public'
 UNIT_NAME = 'decomp-oracle-ext4-reset-ci.service'
 UNIT_FILE = Path('/etc/systemd/system') / UNIT_NAME
+RETENTION_NAME = 'decomp-oracle-ext4-reset-retain.target'
+RETENTION_FILE = UNIT_FILE.parent / RETENTION_NAME
 IMAGE_BYTES = 67108864
 MAX_SOURCE = 2 * 1024 * 1024
 MAX_CAPTURE = 65536
@@ -45,8 +47,10 @@ SOURCE_PATHS = (
     'scripts/oracle-ext4-reset-profile.json',
     'scripts/oracle-ext4-reset-mke2fs.conf',
     'scripts/systemd/decomp-oracle-ext4-reset-ci.service',
+    'scripts/systemd/decomp-oracle-ext4-reset-retain.target',
     'scripts/ci-oracle-ext4-reset.py',
     'scripts/oracle-ext4-reset-install.py',
+    'scripts/oracle-ext4-reset-fixture-mutations.py',
     'scripts/verify-oracle-ext4-reset.py',
     'src/main/kotlin/decompengine/oracle/fulltree/FullTreeDiskScratchAuthority.kt',
     'src/test/kotlin/decompengine/oracle/fulltree/FullTreeDiskScratchResetMountedTest.kt',
@@ -56,6 +60,7 @@ INSTALL_FILES = {
     'scripts/oracle-ext4-reset.py': 'oracle-ext4-reset.py',
     'scripts/ci-oracle-ext4-reset.py': 'ci-oracle-ext4-reset.py',
     'scripts/oracle-ext4-reset-install.py': 'oracle-ext4-reset-install.py',
+    'scripts/oracle-ext4-reset-fixture-mutations.py': 'oracle-ext4-reset-fixture-mutations.py',
     'scripts/oracle-ext4-reset-mke2fs.conf': 'mke2fs.conf',
 }
 APT_BOUNDARY = 'requires-successful-signature-enforced-workflow-apt-install'
@@ -341,6 +346,7 @@ def install():
         fail('trusted bootstrap requires root')
     absent(ROOT)
     absent(UNIT_FILE)
+    absent(RETENTION_FILE)
     require_root_ancestry(ROOT.parent)
     require_root_ancestry(UNIT_FILE.parent)
     owner = validate_owner()
@@ -384,6 +390,7 @@ def install():
         unit_parent = os.open(UNIT_FILE.parent, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC)
         try:
             create_file(unit_parent, UNIT_NAME, source_files['scripts/systemd/' + UNIT_NAME], 0o644)
+            create_file(unit_parent, RETENTION_NAME, source_files['scripts/systemd/' + RETENTION_NAME], 0o644)
         finally:
             os.close(unit_parent)
         image_fd = os.open('image', os.O_RDWR | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600, dir_fd=private_fd)
@@ -428,13 +435,15 @@ def install():
                     os.fsync(root_fd)
                 finally:
                     os.close(root_fd)
-                installed_extra = [PRIVATE / name for name in INSTALL_FILES.values()]
+                installed_extra = [PRIVATE / name for name in INSTALL_FILES.values()] + [RETENTION_FILE]
                 manifest = core.capture_manifest(owner, tools, [*closure, *installed_extra], provenance)
                 manifest_bytes = core.canonical(manifest)
                 if len(manifest_bytes) > MAX_MANIFEST:
                     fail('installed manifest exceeds qualification artifact bound')
                 create_file(private_fd, 'manifest.json', manifest_bytes)
                 _run(core, [tools['systemctl'], 'daemon-reload'], deadline=deadline)
+                _run(core, [tools['systemctl'], 'start', RETENTION_NAME], deadline=deadline)
+                # Keep this ordering-only target active through VM disposal.
                 # register_initial persists the closed gate before opening it.
                 state = core.register_initial(owner, loop, underlying_root, underlying_scratch)
             finally:

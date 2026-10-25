@@ -136,6 +136,19 @@ class FilesystemRefusalTests(unittest.TestCase):
             install.install()
         load.assert_not_called()
 
+    def test_existing_retention_target_refuses_before_source_loading(self):
+        target = self.root / 'existing.target'
+        target.write_bytes(b'alien target')
+        with patch.object(install.os, 'geteuid', return_value=0), \
+                patch.object(install, 'ROOT', self.root / 'absent-root'), \
+                patch.object(install, 'UNIT_FILE', self.root / 'absent.service'), \
+                patch.object(install, 'RETENTION_FILE', target), \
+                patch.object(install, '_load_core') as load, \
+                self.assertRaises(install.InstallError):
+            install.install()
+        load.assert_not_called()
+        self.assertEqual(b'alien target', target.read_bytes())
+
     def test_closed_file_names_reject_path_injection_before_open(self):
         for name in ('../state', 'nested/state', '', '.', '..'):
             with self.subTest(name=name), patch.object(install.os, 'open') as opened, \
