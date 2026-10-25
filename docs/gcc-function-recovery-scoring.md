@@ -281,7 +281,7 @@ full structural assessment and calibrated confidence remain unavailable until
 their independent truth and identity relations are admitted. Fixture transcripts,
 stored JSON receipts and recomputed hash strings cannot create this capability.
 
-Driver result schema v3 binds `structural-boundary-production-score.json` by path,
+Driver result schema v4 binds `structural-boundary-production-score.json` by path,
 size and digest, and is committed only after the evidence files. The score keeps
 the complete observation and exporter/replay provenance. Its `productionVerified`
 and `scored` fields apply only to the explicit admitted domains; full-result
@@ -300,7 +300,7 @@ separate population members. A missing or renamed excluded survivor remains a
 failure, and an empty population cannot satisfy the benchmark.
 
 The GCC consumer applies the 95% exact-start precision and recall thresholds and
-100% surviving-symbol identity threshold using integer comparisons. Result v3
+100% surviving-symbol identity threshold using integer comparisons. Result v4
 binds `gcc-driver-production-function-accuracy.json` by path, length and digest.
 That sidecar retains complete denominators and per-alias outcomes, references the
 complete source partitions and exclusions in the bound boundary observation, and
@@ -315,3 +315,19 @@ original export lineage, second-worker request, attachment, execution, capture
 and metadata, verifies the measured bounds and all digest joins, and independently
 replays the boundary observation. Ordinary component tests use explicit authored
 operation fixtures and do not establish that live qualification.
+
+
+Driver result schema v4 also binds
+`structural-selected-function-assessment.json` by path, exact byte count and
+SHA-256. The coordinator publishes this sidecar before `result.json` from the
+same live selected-function capability; it is outside the immutable original
+exported report tree and does not change that tree's membership or digest.
+The sidecar preserves the complete function/global/type census while exposing
+only scoped start/name measurements. It grants no overall recovery, calibration
+or release authority. No-capability and cc1 results retain their exact v2 shape.
+
+The existing installed-driver qualification now retains this overlay, rederives
+its exact bytes from the captured canonical model and boundary score, and checks
+all typed entity identities, extraction statuses, bindings, and unassessed
+states. This extends the qualification contract; source and component tests
+alone do not establish a fresh hosted execution.
