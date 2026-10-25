@@ -282,6 +282,51 @@ def check_directory(data: dict) -> None:
         raise ValueError("directory parent identity is inconsistent")
 
 
+def check_source_diff(data: dict) -> None:
+    counts, items, page = data["counts"], data["items"], data["page"]
+    if counts["added"] + counts["removed"] + counts["modified"] + counts["renamed"] != data["totalChanged"]:
+        raise ValueError("source diff change counts disagree with the changed total")
+    if len(items) > page["limit"] or len(items) > data["totalChanged"]:
+        raise ValueError("source diff page exceeds its limit or changed total")
+    for item in items:
+        for side, revision in (("baseFile", "base"), ("headFile", "head")):
+            entry = item[side]
+            if entry is not None and entry["commitment"] == "source-input" and entry["sizeBytes"] is None:
+                raise ValueError("source diff input entry lacks its committed size")
+        if item["status"] == "renamed" and item["baseFile"]["sha256"] != item["headFile"]["sha256"]:
+            raise ValueError("source diff renames require identical recorded digests")
+        if item["status"] == "modified" and (item["baseFile"]["displayName"] != item["headFile"]["displayName"]
+                                             or item["baseFile"]["sha256"] == item["headFile"]["sha256"]):
+            raise ValueError("source diff modification must keep its path and change its digest")
+
+
+def check_source_file_diff(data: dict) -> None:
+    hunks = data["hunks"]
+    end = data["hunkOffset"] + len(hunks)
+    if data["nextHunk"] is not None and data["nextHunk"] != end:
+        raise ValueError("source diff continuation does not follow this page")
+    if (data["nextHunk"] is None) != (end == data["totalHunks"] or data["totalHunks"] == 0):
+        raise ValueError("source diff hunk pages disagree with the total")
+    if data["representation"] == "text" and data["totalHunks"] > 0 and not hunks:
+        raise ValueError("source diff text page has no hunks")
+    for hunk in hunks:
+        base, head = hunk["baseStart"], hunk["headStart"]
+        for line in hunk["lines"]:
+            if line["baseLine"] is not None:
+                if line["baseLine"] != base or base > data["baseLines"]:
+                    raise ValueError("source diff base line numbers are not sequential within the file")
+                base += 1
+            if line["headLine"] is not None:
+                if line["headLine"] != head or head > data["headLines"]:
+                    raise ValueError("source diff head line numbers are not sequential within the file")
+                head += 1
+            shown = len(line["text"].encode("utf-16-le", "surrogatepass")) // 2
+            if line["characters"] < shown or line["truncated"] != (line["characters"] > shown):
+                raise ValueError("source diff truncation marker disagrees with the line length")
+        if base - hunk["baseStart"] != hunk["baseCount"] or head - hunk["headStart"] != hunk["headCount"]:
+            raise ValueError("source diff hunk counts disagree with its lines")
+
+
 def check_source_chunk(data: dict) -> None:
     size, offset, length = int(data["sizeBytes"]), int(data["offsetBytes"]), int(data["lengthBytes"])
     end = offset + length
@@ -437,6 +482,10 @@ def check_semantics(document: dict) -> None:
         check_source_chunk(data)
     elif kind == "sourceSearch":
         check_source_search(data)
+    elif kind == "sourceDiff":
+        check_source_diff(data)
+    elif kind == "sourceFileDiff":
+        check_source_file_diff(data)
     elif kind == "artifact":
         check_catalog_artifact(data)
     elif kind == "artifacts":

@@ -17,6 +17,8 @@ import { SourceDigestCheck } from '../sources/SourceDigestCheck';
 import { sourcePosition } from '../sources/viewer';
 import { SourceSearch } from '../sources/SourceSearch';
 import { sourceSearchPath } from '../sources/search';
+import { SourceDiff, SourceFileDiff } from '../sources/SourceDiff';
+import { sourceDiffPath, sourceDiffSelection, sourceFileDiffSelection } from '../sources/diff';
 
 function Context({ selected, sourceSha256 }: { selected: SourceSelection; sourceSha256?: string }) {
   return <dl class="job-facts" aria-label={copy.context}>
@@ -73,6 +75,7 @@ function Directory({ selected, basePath, pin, search, historyEntry }: { selected
     <p>{copy.metadataNotice}</p><p>{copy.browseLimitation}</p><p>{copy.emptyDirectories}</p>
     {effectivePin && <p>{copy.pinnedSnapshot}</p>}
     <p><a href={sourceSearchPath(basePath, selected, selected.directoryId)}>{copy.searchDirectory}</a></p>
+    <p><a href={sourceDiffPath(basePath, selected)}>{copy.compareRevisions}</a></p>
     <button type="button" disabled={loading} onClick={first}>{copy.refresh}</button>
     {loading && <p role="status">{copy.loading}</p>}
     {current.state === 'failed' && <p role="alert">{sourceReadMessage(current.failure)}</p>}
@@ -159,7 +162,9 @@ function File({ selected, basePath, runtime, search, pin, historyEntry }: { sele
     {effectivePin && <p>{copy.pinnedSnapshot}</p>}
     <button type="button" disabled={loading} onClick={() => setRefresh(value => value + 1)}>{copy.refreshFile}</button>
     {loading && <p role="status">{copy.readingFile}</p>}
-    {current.state === 'failed' && <p role="alert">{sourceReadMessage(current.failure)}</p>}
+    {current.state === 'failed' && <p role="alert">{removedFile(current.failure) ? copy.removedFile : sourceReadMessage(current.failure)}</p>}
+    {current.state === 'failed' && removedFile(current.failure) && <p>
+      <a href={sourceDirectoryPath(basePath, selected)}>{copy.returnDirectory}</a> <a href={sourceDiffPath(basePath, selected)}>{copy.compareRevisions}</a></p>}
     {data && policy && <>
       <p><a href={sourceDirectoryPath(basePath, selected, data.parentDirectoryId, undefined, effectivePin ?? undefined)}>{copy.returnDirectory}</a></p>
       <h2><bdi>{data.item.displayName}</bdi></h2>
@@ -193,9 +198,14 @@ function File({ selected, basePath, runtime, search, pin, historyEntry }: { sele
   </>;
 }
 
+/** A file identity from another revision (or a removed file) is not registered in this one. */
+function removedFile(failure: unknown): boolean {
+  return failure instanceof ApiClientError && failure.status === 404 && failure.serverCode === 'SOURCE_FILE_NOT_FOUND';
+}
+
 export default function Sources({ jobId, runId, revisionId, directoryId, fileId, resource, basePath, session }: {
   jobId: string; runId: string; revisionId: string; directoryId?: string; fileId?: string;
-  resource: 'directory' | 'file' | 'search'; basePath: string; session: BrowserSession | null;
+  resource: 'directory' | 'file' | 'search' | 'diff' | 'file-diff'; basePath: string; session: BrowserSession | null;
 }) {
   const state = useSession(session);
   const location = useLocation();
@@ -220,6 +230,8 @@ export default function Sources({ jobId, runId, revisionId, directoryId, fileId,
   try {
     // The search view validates its own closed query and reports an invalid address in place.
     if (resource === 'search') sourceSearchPath(basePath, selected);
+    else if (resource === 'diff') { sourceDiffPath(basePath, selected); sourceDiffSelection(rawSearch); }
+    else if (resource === 'file-diff') { sourceDiffPath(basePath, selected); sourceFileDiffSelection(rawSearch); }
     else {
       sourceReadRoute(selected, resource, (resource === 'directory' ? directoryId : fileId) ?? '');
       const query = sourceSnapshotSelection(rawSearch); search = query.search; pin = query.pin;
@@ -234,11 +246,16 @@ export default function Sources({ jobId, runId, revisionId, directoryId, fileId,
   const historyEntry = useMemo<SourceHistoryEntry>(() => ({ pathname: uri.pathname, search: rawSearch, hash, snapshot }),
     [snapshot, hash]);
   return <section class="source-navigation" aria-labelledby="source-title">
-    <h1 id="source-title">{resource === 'directory' ? copy.title : resource === 'search' ? copy.searchTitle : copy.fileTitle}</h1>
+    <h1 id="source-title">{resource === 'directory' ? copy.title : resource === 'search' ? copy.searchTitle
+      : resource === 'diff' ? copy.diffTitle : resource === 'file-diff' ? copy.fileDiffTitle : copy.fileTitle}</h1>
     {valid ? <>
       <p><a href={runPath(basePath, jobId, runId)}>{copy.returnAttempt}</a></p>
       {session && state?.status === 'authenticated'
-        ? resource === 'search'
+        ? resource === 'diff'
+          ? <SourceDiff key={`${state.generation}/${jobId}/${runId}/${revisionId}/${rawSearch}`} selected={selected} basePath={basePath} search={rawSearch} />
+          : resource === 'file-diff'
+          ? <SourceFileDiff key={`${state.generation}/${jobId}/${runId}/${revisionId}/${rawSearch}`} selected={selected} basePath={basePath} search={rawSearch} />
+          : resource === 'search'
           ? <SourceSearch key={`${state.generation}/${jobId}/${runId}/${revisionId}/${rawSearch}`} selected={selected} basePath={basePath} search={rawSearch} />
           : resource === 'directory'
           ? <Directory key={`${state.generation}/${jobId}/${runId}/${revisionId}/${directoryId ?? ''}/${pin?.sourceSha256}/${pin?.metadataVersion}`}

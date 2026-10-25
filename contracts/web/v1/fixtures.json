@@ -881,6 +881,90 @@
     {
       "file": "fixtures/invalid-artifacts-verified-without-revision.json",
       "valid": false
+    },
+    {
+      "file": "fixtures/source-diff-page.json",
+      "valid": true
+    },
+    {
+      "file": "fixtures/source-file-diff-text.json",
+      "valid": true
+    },
+    {
+      "file": "fixtures/source-file-diff-binary.json",
+      "valid": true
+    },
+    {
+      "file": "fixtures/source-file-diff-renamed.json",
+      "valid": true
+    },
+    {
+      "file": "fixtures/revision-directory-manifest-entry.json",
+      "valid": true
+    },
+    {
+      "file": "fixtures/invalid-source-diff-added-base.json",
+      "valid": false
+    },
+    {
+      "file": "fixtures/invalid-source-diff-removed-head.json",
+      "valid": false
+    },
+    {
+      "file": "fixtures/invalid-source-diff-unchanged-listed.json",
+      "valid": false
+    },
+    {
+      "file": "fixtures/invalid-source-diff-count-total.json",
+      "valid": false
+    },
+    {
+      "file": "fixtures/invalid-source-diff-over-limit.json",
+      "valid": false
+    },
+    {
+      "file": "fixtures/invalid-source-diff-foreign-authority.json",
+      "valid": false
+    },
+    {
+      "file": "fixtures/invalid-source-file-diff-binary-patch.json",
+      "valid": false
+    },
+    {
+      "file": "fixtures/invalid-source-file-diff-renamed-text.json",
+      "valid": false
+    },
+    {
+      "file": "fixtures/invalid-source-file-diff-context-side.json",
+      "valid": false
+    },
+    {
+      "file": "fixtures/invalid-source-file-diff-hunk-count.json",
+      "valid": false
+    },
+    {
+      "file": "fixtures/invalid-source-file-diff-line-sequence.json",
+      "valid": false
+    },
+    {
+      "file": "fixtures/invalid-source-file-diff-next-hunk.json",
+      "valid": false
+    },
+    {
+      "file": "fixtures/invalid-source-file-diff-truncation.json",
+      "valid": false
+    },
+    {
+      "file": "fixtures/invalid-source-file-diff-binary-reason.json",
+      "valid": false
+    },
+    {
+      "file": "fixtures/invalid-revision-directory-manifest-size.json",
+      "valid": false
+    },
+    {
+      "file": "fixtures/invalid-revision-directory-input-without-size.json",
+      "valid": false
     }
   ]
 }

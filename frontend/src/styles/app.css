@@ -189,6 +189,21 @@ button:disabled { opacity: 0.65; cursor: wait; }
 .source-search-results pre { margin: .25rem 0 0; white-space: pre-wrap; overflow-wrap: anywhere; tab-size: 4; unicode-bidi: isolate; }
 .source-search-results mark { background: var(--selected); color: inherit; outline: 1px solid var(--accent); }
 .source-search nav { display: flex; flex-wrap: wrap; gap: .5rem; margin-block: 1rem; }
+.source-diff { min-width: 0; overflow-wrap: anywhere; }
+.source-diff nav, .source-diff-links { display: flex; flex-wrap: wrap; gap: .5rem 1rem; margin-block: 1rem; }
+.source-diff-entries { padding: 0; list-style: none; }
+.source-diff-entries > li { padding: .75rem; margin-block: .75rem; border: 1px solid var(--line); border-inline-start-width: .4rem; border-radius: .3rem; background: var(--surface); }
+.source-diff-entries > li > p { margin-block: .25rem; }
+.source-diff-entries > li[data-diff-status="added"], .source-diff-added { border-inline-start-color: var(--accent); }
+.source-diff-entries > li[data-diff-status="removed"], .source-diff-removed { border-inline-start-color: var(--danger); }
+.source-diff-entries > li[data-diff-status="modified"], .source-diff-entries > li[data-diff-status="renamed"] { border-inline-start-color: var(--focus); }
+.source-diff-row { display: grid; grid-template-columns: 3.5rem 3.5rem 1.25rem minmax(0, 1fr); border-bottom: 1px solid var(--line); border-inline-start: .3rem solid transparent; }
+.source-diff-added { background: var(--selected); }
+.source-diff-removed { background: var(--canvas); }
+.source-diff-row pre { margin: 0; padding: .4rem; min-height: 1.5em; white-space: pre-wrap; overflow-wrap: anywhere; tab-size: 4; unicode-bidi: isolate; }
+.source-diff-marker { padding: .4rem 0; font-family: ui-monospace, monospace; font-weight: 650; }
+.source-diff-omitted, .source-diff-truncated { color: var(--muted); font-style: italic; }
+.source-diff-header { margin-block: .5rem 0; }
 .artifact-catalog { min-width: 0; overflow-wrap: anywhere; }
 .artifact-catalog nav { display: flex; flex-wrap: wrap; gap: .5rem; margin-block: 1rem; }
 .artifact-inventory-checked { border-inline-start: .3rem solid var(--accent); padding-inline-start: .5rem; }

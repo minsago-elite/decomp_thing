@@ -167,6 +167,9 @@ internal storage optimization and must not merge identity, permissions or histor
 | `GET`, `HEAD R/revisions/{revisionId}/source-files/{fileId}/content` | `200 application/octet-stream` | Complete authorized input download, at most 8 MiB; #491, #545 |
 | `GET J/revisions`, `GET V` | `200 revisions`, `200 revision` | Immutable source/acceptance bindings; #165/#199 |
 | `GET V/sources`, `GET V/sources/{fileId}` | `200 files`, `200 file` | Bounded tree/page/read; #165/#188/#189 |
+| `GET`, `HEAD R/revisions/{revisionId}/source-diff` | `200 sourceDiff` | Changed files against an explicit `baseRunId`/`baseRevisionId` of the same job, from recorded digests; #550 |
+| `GET`, `HEAD R/revisions/{revisionId}/source-diff/file` | `200 sourceFileDiff` | One classified pair (`baseFileId` and/or `headFileId`), bounded hunk pages and explicit binary/oversize/budget states; #550 |
+| `GET`, `HEAD R/revisions/{revisionId}/source-diff/patch` | `200 application/octet-stream` | Complete unified diff of one text comparison, no Range or conditional headers; #550 |
 | `GET`, `HEAD R/revisions/{revisionId}/source-search` | `200 sourceSearch` | Explicit revision and query/byte/result/deadline bounds over canonical inputs; replaces the reserved `V/search`; #547, #548 |
 | `GET`, `HEAD J/artifacts`, `J/artifacts/{artifactId}` | `200 artifacts`, `200 artifact` | Fixed attempt families; optional `runId`, with `revisionId` only together with `runId`; #551 |
 | `GET`/`HEAD J/artifacts/{artifactId}/content` | `200`, `206`, `304` bytes | Digest-bound pinned stream, single byte range, strong ETag preconditions; #552 |
@@ -713,10 +716,17 @@ acceptance or release relationship, including when the stored attempt has an acc
 reference. Missing registration returns 404; inconsistent capture returns 409; missing,
 malformed, unsupported or oversized metadata has a fixed unavailable response.
 
-This endpoint lists only the canonical build input set. The observed catalog above
-continues to describe other manifest entries. Reads outside that committed input set,
-UI/HTTP/performance qualification and accepted publication remain open;
-bootstrap advertises the chunk reader's range ceiling. In-memory controls cover canonical
+Every other manifest entry (for the generated-C profiles: JSON reports and the
+`UNRESOLVED.md` note) is listed too, so every recorded generated file is reachable. Each
+item names its `commitment`: `source-input` entries carry their committed decimal
+`sizeBytes` and belong to `sourceSha256`; `manifest-digest` entries are bound only by
+the manifest digest (and so by `metadataVersion`), have `sizeBytes: null` because the
+manifest records no size, and never change the source commitment. Their bodies use the
+same reader, digest check and 8 MiB ceiling; an oversized body returns
+`SOURCE_FILE_TOO_LARGE`. Build logs and progress journals are attempt artifacts in the
+artifact catalog, not source-tree entries. File IDs index the complete sorted recorded
+list, so IDs issued before manifest entries were listed differ for the same files.
+Accepted publication remains separate; bootstrap advertises the chunk reader's range ceiling. In-memory controls cover canonical
 identity, conflicts, exact large sizes/Unicode, 25,000 commitments, paging and capture
 admission. They do not establish the D0 physical source workload or delivery budgets.
 
@@ -727,7 +737,7 @@ admission. They do not establish the D0 physical source workload or delivery bud
 Only `limit` and `cursor` are accepted, with the same default 50, maximum 200 and
 sub-MiB response ceiling. Each page groups immediate children of the selected prefix;
 directories sort first, then files, each in UTF-16 label order. Selecting a directory
-does not recursively fetch its children. Counts include only canonical input files.
+does not recursively fetch its children. Counts include every recorded file below the prefix.
 `emptyDirectories: "not-recorded"` explicitly describes the file-only inventory;
 an unknown directory returns `SOURCE_DIRECTORY_NOT_FOUND`, without asserting physical
 absence. File/directory prefix collisions return a source revision conflict.
@@ -909,6 +919,52 @@ CRLF and markup text, multi-megabyte files and paged continuations, and exercise
 deadline, byte budget, cursor binding and digest refusal; they do not measure physical
 latency or memory on the D0 workload.
 
+### Bounded revision source diffs
+
+`GET`/`HEAD R/revisions/V/source-diff?baseRunId=B&baseRevisionId=W` compares the
+selected candidate (the head) with another exact persisted candidate of the same job.
+Both selections go through the same retained-candidate, metadata capture and conflict
+checks as the listings; a base outside the job or an unregistered revision is a 404.
+The closed query also admits `limit` (1–200, default 50) and a signed `cursor` bound to
+the session, both revisions and the page size; a changed metadata version of either side
+expires it (`410 CURSOR_EXPIRED`).
+
+Classification uses recorded paths and digests only and reads no body
+(`authority: "recorded-digests"`). A shared path with a different digest or content kind
+is `modified`; paths only in the base or head are `removed` or `added`. A removed and an
+added path with the same digest and content kind are paired, in path order, as `renamed`
+(`renameDetection: "identical-digest"`); a moved file whose bytes also changed stays one
+removal and one addition. `counts` covers all five states; only changed entries are
+listed, ordered by head path (base path for removals). Each side repeats the listing's
+opaque file ID, label, size or null, digest, declarations and commitment.
+
+`source-diff/file` takes the base query plus `baseFileId` and/or `headFileId` naming one
+classified entry (any other pair is `404 SOURCE_DIFF_ENTRY_NOT_FOUND`) and an optional
+`hunk` offset. Renamed or unchanged entries report `identical`. Undeclared viewability
+reports `not-viewable`; a declared binary side reports `binary` with `declared-binary`,
+all without reading bodies. Otherwise both bodies go through the digest-checked source
+reader under one comparison admission (`429 SOURCE_DIFF_BUSY`). Invalid UTF-8 or a line
+over 256 KiB reports `binary` with that fallback reason. Sides over 1 MiB or 50,000
+lines report `too-large`. A line diff with more than 2,000 edits, or longer than 2 s,
+reports `budget-exceeded`. None of these states has hunks.
+
+Text comparisons use a Myers line diff over LF-separated lines, where a missing final
+newline is part of the last line's identity. Hunks have three context lines, merge when
+at most six unchanged lines separate changes, and are split at 400 rows so every row stays
+reachable. A page holds at most 20 hunks, 2,000 rows and about 512 Ki characters, and
+always at least one hunk. `nextHunk` continues it; an offset past the end is
+`416 SOURCE_DIFF_RANGE_INVALID`. Each hunk reports exact 1-based starts and counts per
+side and `unchangedBefore`; the response reports `unchangedAfter`, so omitted unchanged
+ranges are counted. Line text is cut at 1,000 UTF-16 units without splitting a surrogate
+pair, with `truncated` and the full `characters`. The final line reports a missing newline.
+
+`source-diff/patch` (with the same pair, without `hunk`) returns the complete unified
+diff of a text comparison as an inert `application/octet-stream` attachment named
+`<file>.diff`, with `X-Decomp-Diff-Authority`, both source commitments and both metadata
+versions. Other representations are `409 SOURCE_DIFF_NOT_TEXT`; both complete files
+remain available through their own content routes. Comparisons are presentation
+evidence: they do not verify compilation, behavior or accepted reconstruction.
+
 ## Attempt artifact catalog and streamed downloads
 
 `GET`/`HEAD /api/v1/jobs/{jobId}/artifacts` lists the fixed artifact families retained for a
@@ -1022,11 +1078,26 @@ continuations also retain the observed source/metadata identity across loaded pa
 Failures use fixed recovery copy plus a canonical reference ID, never raw diagnostics.
 Authenticated state owns the views; expiry or logout removes their private metadata.
 
-Pure DTO/path/callback controls cover these bindings, page bounds, opaque URLs,
-obsolete reads and role/size/runtime explanations. They do not qualify actual source
-HTTP/browser navigation, keyboard/layout behavior, physical deep paths, all generated
-manifest/log/report families or D0 timing/memory/workload budgets. Those requirements
-and the original parent acceptance criteria remain open.
+Directory pages link to `jobs/J/runs/R/revisions/V/source-diff`, which first asks for a
+base revision. It reads the head attempt and the first 200 attempts of the job, offers
+every other attempt with a result revision, and preselects the recorded parent: the
+attempt whose revision is the head's `inputRevisionId`, otherwise its `previousRunId`.
+The comparison address always carries `baseRunId` and `baseRevisionId`. The changed-file
+list pages explicitly and pins both observed metadata versions across continuations.
+`source-diff/file` renders one bounded hunk page as escaped text in labelled, focusable
+regions, with per-side line numbers, text markers for added and removed rows, omitted
+and truncated counts, explicit paging and the complete patch download. Links to both
+sides open the exact historical file views pinned to the compared commitments, so a later
+accepted revision never replaces them. A file ID that is not recorded in the selected
+revision (for example, a file removed later) shows a fixed explanation with links to the
+revision directory and the comparison chooser.
+
+Route-level component tests cover these bindings, page bounds, opaque URLs, obsolete reads,
+role/size/runtime explanations, every generated family (C, headers, Makefile, JSON reports,
+Markdown, plain logs and binary hex), keyboard line-link navigation with focus return, and
+worker termination when the viewer is left. HTTP tests over real generated trees cover
+diffs, historical stability after a later acceptance and manifest-only entries. Physical
+D0 timing/memory/workload budgets remain open.
 
 ### Bounded source preview consumer
 

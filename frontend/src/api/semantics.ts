@@ -1,4 +1,4 @@
-import type { Artifact, ContractDocument, Page, RevisionDirectory, Run, SourceChunk, SourceSearch, ValidationBytePreview, ValidationCases, ValidationFailure, ValidationHistory, ValidationSummary } from './generated';
+import type { Artifact, ContractDocument, Page, RevisionDirectory, Run, SourceChunk, SourceDiff, SourceFileDiff, SourceSearch, ValidationBytePreview, ValidationCases, ValidationFailure, ValidationHistory, ValidationSummary } from './generated';
 import { ApiClientError } from './errors';
 import { normalizeBasePath, validateResourceHref } from '../app/paths';
 import type { ApiResource } from '../app/paths';
@@ -240,6 +240,35 @@ const codePoints = (value: string): number => Array.from(value).length;
 const ARTIFACT_CODES = { 'exploration-report': 'exploration', 'progress-journal': 'progress', 'source-manifest': 'manifest',
   'build-contract': 'contract', 'source-archive': 'archive' } as const;
 
+/** Mirrors verify.py: counts partition the changed total and modifications keep their path. */
+export function checkSourceDiff(data: SourceDiff): void {
+  const { counts, items, page } = data;
+  requireValue(counts.added + counts.removed + counts.modified + counts.renamed === data.totalChanged);
+  requireValue(items.length <= page.limit && items.length <= data.totalChanged);
+  for (const item of items) {
+    if (item.status === 'renamed') requireValue(item.baseFile!.sha256 === item.headFile!.sha256);
+    if (item.status === 'modified') requireValue(item.baseFile!.displayName === item.headFile!.displayName
+      && item.baseFile!.sha256 !== item.headFile!.sha256);
+  }
+}
+
+/** Hunk pages are contiguous, line numbers sequential per side and truncation explicit. */
+export function checkSourceFileDiff(data: SourceFileDiff): void {
+  const end = data.hunkOffset + data.hunks.length;
+  requireValue(data.nextHunk === null || data.nextHunk === end);
+  requireValue((data.nextHunk === null) === (end === data.totalHunks || data.totalHunks === 0));
+  requireValue(data.representation !== 'text' || data.totalHunks === 0 || data.hunks.length > 0);
+  for (const hunk of data.hunks) {
+    let base = hunk.baseStart, head = hunk.headStart;
+    for (const line of hunk.lines) {
+      if (line.baseLine !== null) { requireValue(line.baseLine === base && base <= (data.baseLines ?? 0)); base++; }
+      if (line.headLine !== null) { requireValue(line.headLine === head && head <= (data.headLines ?? 0)); head++; }
+      requireValue(line.characters >= line.text.length && line.truncated === line.characters > line.text.length);
+    }
+    requireValue(base - hunk.baseStart === hunk.baseCount && head - hunk.headStart === hunk.headCount);
+  }
+}
+
 export function checkSourceSearch(data: SourceSearch): void {
   const { page, limits, scope, progress, query, items } = data;
   requireValue(page.snapshotVersion === data.metadataVersion && page.limit === limits.maxResults && items.length <= page.limit);
@@ -340,6 +369,12 @@ export function checkSemantics(document: ContractDocument, basePath = '/'): void
       break;
     case 'sourceSearch':
       checkSourceSearch(document.data);
+      break;
+    case 'sourceDiff':
+      checkSourceDiff(document.data);
+      break;
+    case 'sourceFileDiff':
+      checkSourceFileDiff(document.data);
       break;
     case 'revisionFile': {
       const { item, parentDirectoryId } = document.data;

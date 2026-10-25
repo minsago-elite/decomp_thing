@@ -45,6 +45,9 @@ internal class WebApiController(
     private val revisionDirectoryPages = WebRevisionDirectoryPages(jobs::readRevisionSources)
     private val revisionFileMetadata = WebRevisionFileMetadata(jobs::readRevisionFileMetadata)
     private val revisionSourceSearch = WebRevisionSourceSearch(jobs::searchRevisionSources)
+    private val revisionSourceDiffs = WebRevisionSourceDiffs(jobs::readRevisionSources, content = { job, run, revision, file ->
+        jobs.readRevisionSourceFile(job, run, revision, file, WebSourceReadPurpose.PREVIEW)
+    })
     private val artifactStore = WebJobArtifactStore(jobs)
     private val artifactCatalog = WebArtifactCatalog(artifactStore)
     private val artifactContent = WebArtifactContent(artifactStore)
@@ -59,7 +62,7 @@ internal class WebApiController(
         val path = exchange.requestURI.rawPath
         if (!path.startsWith("${assets.basePath}api/")) return false
         val resource = path.removePrefix(prefix)
-        if (!path.startsWith(prefix) || !(resource in setOf("session", "bootstrap", "jobs", "recovery", "agent/preflight") || resource.matches(Regex("(?:jobs|uploads)/[^/]+|jobs/[^/]+/runs(?:/[^/]+(?:/reports/(?:exploration|revision-validation)|/validation-history|/source-catalog|/revisions/[^/]+/(?:sources|source-search|source-directories/[^/]+|source-files/[^/]+(?:/(?:chunk|content))?)|/snapshot|/events|/progress-pin|/cancel)?)?|jobs/[^/]+/artifacts(?:/[^/]+(?:/content)?)?")))) {
+        if (!path.startsWith(prefix) || !(resource in setOf("session", "bootstrap", "jobs", "recovery", "agent/preflight") || resource.matches(Regex("(?:jobs|uploads)/[^/]+|jobs/[^/]+/runs(?:/[^/]+(?:/reports/(?:exploration|revision-validation)|/validation-history|/source-catalog|/revisions/[^/]+/(?:sources|source-search|source-diff(?:/(?:file|patch))?|source-directories/[^/]+|source-files/[^/]+(?:/(?:chunk|content))?)|/snapshot|/events|/progress-pin|/cancel)?)?|jobs/[^/]+/artifacts(?:/[^/]+(?:/content)?)?")))) {
             try {
                 val policy = if (exchange.requestMethod in setOf("POST", "PUT", "PATCH", "DELETE")) {
                     WebEndpointPolicy.jsonMutation(exchange.requestMethod)
@@ -202,21 +205,7 @@ internal class WebApiController(
                             throw WebAccessDenied(406, "NOT_ACCEPTABLE", "This endpoint returns application/octet-stream.")
                         }
                         val content = jobs.readRevisionSourceFile(parts[1], parts[3], parts[5], parts[7], WebSourceReadPurpose.DOWNLOAD, metadataVersion)
-                        val bytes = content.download()
-                        val name = java.net.URLEncoder.encode(content.downloadName, Charsets.UTF_8).replace("+", "%20").replace("*", "%2A")
-                        webApiHeaders(exchange, UUID.randomUUID().toString())
-                        exchange.responseHeaders.set("Content-Type", "application/octet-stream")
-                        exchange.responseHeaders.set("Content-Disposition", "attachment; filename=\"source.bin\"; filename*=UTF-8''$name")
-                        exchange.responseHeaders.set("Content-Security-Policy", "sandbox; default-src 'none'; base-uri 'none'; form-action 'none'")
-                        exchange.responseHeaders.set("Content-Length", bytes.size.toString())
-                        content.verifiedDownloadHeaders().forEach { (name, value) -> exchange.responseHeaders.set(name, value) }
-                        try {
-                            if (exchange.requestMethod == "HEAD" || bytes.isEmpty()) exchange.sendResponseHeaders(200, -1)
-                            else {
-                                exchange.sendResponseHeaders(200, bytes.size.toLong())
-                                exchange.responseBody.use { it.write(bytes) }
-                            }
-                        } finally { exchange.close() }
+                        sendWebAttachment(exchange, content.download(), content.downloadName, content.verifiedDownloadHeaders())
                     }
                 }
                 resource.matches(Regex("jobs/[^/]+/runs/[^/]+/revisions/[^/]+/source-directories/[^/]+")) -> {
@@ -232,6 +221,27 @@ internal class WebApiController(
                     val parts = resource.split('/')
                     sendWebApiResponse(exchange, 200, "sourceSearch",
                         revisionSourceSearch.search(session.sessionId, parts[1], parts[3], parts[5], exchange.requestURI.rawQuery))
+                }
+                resource.matches(Regex("jobs/[^/]+/runs/[^/]+/revisions/[^/]+/source-diff(?:/file)?")) -> {
+                    val session = checkNotNull(access.authorize(exchange, WebEndpointPolicy.privateRead(allowHead = true)))
+                    requireJsonAccept(exchange)
+                    val parts = resource.split('/')
+                    val query = exchange.requestURI.rawQuery
+                    if (parts.size == 7) sendWebApiResponse(exchange, 200, "sourceDiff",
+                        revisionSourceDiffs.summary(session.sessionId, parts[1], parts[3], parts[5], query))
+                    else sendWebApiResponse(exchange, 200, "sourceFileDiff", revisionSourceDiffs.file(parts[1], parts[3], parts[5], query))
+                }
+                resource.matches(Regex("jobs/[^/]+/runs/[^/]+/revisions/[^/]+/source-diff/patch")) -> {
+                    access.authorize(exchange, WebEndpointPolicy.privateRead(allowHead = true))
+                    if (exchange.requestHeaders.keys.any { it.equals("Range", true) || it.startsWith("If-", true) }) {
+                        throw WebAccessDenied(400, "UNSUPPORTED_HEADER", "Source patches do not support Range or conditional headers.")
+                    }
+                    if (!acceptsWebMediaType(exchange, "application/octet-stream")) {
+                        throw WebAccessDenied(406, "NOT_ACCEPTABLE", "This endpoint returns application/octet-stream.")
+                    }
+                    val parts = resource.split('/')
+                    val patch = revisionSourceDiffs.patch(parts[1], parts[3], parts[5], exchange.requestURI.rawQuery)
+                    sendWebAttachment(exchange, patch.bytes, patch.fileName, patch.headers)
                 }
                 resource.matches(Regex("jobs/[^/]+/runs/[^/]+/revisions/[^/]+/sources")) -> {
                     val session = checkNotNull(access.authorize(exchange, WebEndpointPolicy.privateRead(allowHead = true)))
@@ -433,4 +443,22 @@ private fun applicationBuildId(): String {
         }
     }
     return digest.digest().joinToString("") { "%02x".format(it) }
+}
+
+/** Bounded in-memory attachment: inert octet stream, encoded filename, and bodyless HEAD. */
+private fun sendWebAttachment(exchange: HttpExchange, bytes: ByteArray, fileName: String, headers: Map<String, String>) {
+    val name = java.net.URLEncoder.encode(fileName, Charsets.UTF_8).replace("+", "%20").replace("*", "%2A")
+    webApiHeaders(exchange, UUID.randomUUID().toString())
+    exchange.responseHeaders.set("Content-Type", "application/octet-stream")
+    exchange.responseHeaders.set("Content-Disposition", "attachment; filename=\"source.bin\"; filename*=UTF-8''$name")
+    exchange.responseHeaders.set("Content-Security-Policy", "sandbox; default-src 'none'; base-uri 'none'; form-action 'none'")
+    exchange.responseHeaders.set("Content-Length", bytes.size.toString())
+    headers.forEach { (key, value) -> exchange.responseHeaders.set(key, value) }
+    try {
+        if (exchange.requestMethod == "HEAD" || bytes.isEmpty()) exchange.sendResponseHeaders(200, -1)
+        else {
+            exchange.sendResponseHeaders(200, bytes.size.toLong())
+            exchange.responseBody.use { it.write(bytes) }
+        }
+    } finally { exchange.close() }
 }

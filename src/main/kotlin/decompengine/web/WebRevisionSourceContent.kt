@@ -100,6 +100,15 @@ internal class WebRevisionSourceContent(snapshot: WebRevisionSourceSnapshot, val
         if (current.identity != identity || current.sha256 != sha256 || !bytes.contentEquals(current.bytes)) revisionSourceChanged()
     }
 
+    /** Digest-verified bytes for a bounded comparison; requires the same viewable declaration as previews. */
+    internal fun previewBytes(): ByteArray {
+        if (!previewAvailable) representationUnavailable()
+        return bytes.copyOf()
+    }
+
+    /** Null for displayable UTF-8; otherwise the same fallback reason a preview would report. */
+    internal val fallbackReason: String? get() = fallback
+
     fun download(): ByteArray {
         if (!downloadAvailable) representationUnavailable()
         return bytes.copyOf()
