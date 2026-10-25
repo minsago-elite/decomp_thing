@@ -16,7 +16,6 @@ import zlib
 
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
-DEFAULT_EVIDENCE = Path("oracle/gcc/16.2.0/machine-call-component-v1/evidence.json")
 MAX_BYTES = 64 * 1024 * 1024
 MAX_CONTROL_BYTES = 2 * 1024 * 1024
 LIMIT_CEILINGS = {"maximumRoots": 131072, "maximumInstructionsPerRoot": 1000000,
@@ -329,8 +328,8 @@ def verify_report_bindings(evidence: dict, request: dict, report: dict) -> None:
     require(instructions <= limits["maximumInstructions"] and len(locators) <= limits["maximumRoots"], "retained population exceeds request bounds")
 
 
-def verify_evidence(evidence_path: Path | None = None) -> tuple[bytes, dict]:
-    evidence_path = repository_path(evidence_path or DEFAULT_EVIDENCE, existing=True)
+def verify_evidence(evidence_path: Path) -> tuple[bytes, dict]:
+    evidence_path = repository_path(evidence_path, existing=True)
     evidence = parse_canonical(read_file(evidence_path, MAX_CONTROL_BYTES), MAX_CONTROL_BYTES)
     fields(evidence, {"schemaVersion", "kind", "authority", "complete", "releaseEligible", "negativeCompleteness", "containmentStatus",
         "counts", "inputs", "payloads", "producerJar", "runtime", "source"}, "evidence")
@@ -397,7 +396,7 @@ def extract_report(destination: Path, report_bytes: bytes) -> None:
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("evidence", nargs="?", type=Path)
+    parser.add_argument("evidence", type=Path, help="repository-local evidence manifest selected by the benchmark adapter")
     parser.add_argument("--extract-report", type=Path, help="create the exact verified report at a new repository-local path")
     arguments = parser.parse_args(argv)
     try:

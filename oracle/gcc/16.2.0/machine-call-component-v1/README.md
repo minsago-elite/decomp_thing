@@ -18,7 +18,8 @@ fetches missing history.
 Run the bounded offline verifier from the repository:
 
 ```sh
-python3 scripts/verify-machine-call-component-evidence.py
+python3 scripts/verify-machine-call-component-evidence.py \
+  oracle/gcc/16.2.0/machine-call-component-v1/evidence.json
 ```
 
 To recover the exact report into an existing repository-local directory, add
