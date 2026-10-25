@@ -1,4 +1,4 @@
-import { supportExportCopy as copy } from '../copy/runtime';
+import { supportExportCopy as copy } from '../copy/supportExport';
 import { message as displayMessage, textMessage } from '../shared/messages';
 import { formatExactBytes, formatExactTimestamp } from './metadataFormat';
 import { useEffect, useRef, useState } from 'preact/hooks';

@@ -81,7 +81,7 @@ function stripAnnotations(node) {
 stripAnnotations(runtimeSchema);
 // Kinds decoded only by lazily loaded routes. Definitions reachable from them alone are emitted to a
 // separate module those routes register at load, so the initial bundle carries only core contracts.
-const lazyKinds = new Set(['supportExport']);
+const lazyKinds = new Set(['supportExport', 'sourceChunk', 'revisionFile', 'revisionDirectory', 'validationHistory']);
 const isLazy = (variant) => lazyKinds.has(variant.properties?.kind?.const);
 function closure(nodes) {
   const result = new Set();

@@ -16,6 +16,11 @@ import { RecordedValidationEvidence } from '../jobs/RecordedValidationEvidence';
 import type { ValidationNavigation } from '../jobs/validationNavigation';
 import { useSession } from '../session/useSession';
 import { canRetainMetadata, metadataFailureKind } from '../shared/retainMetadata';
+import { registerContractExtension } from '../api/decode';
+import { lazyContractSchema } from '../api/generated-schema-lazy';
+
+// Contracts decoded only by lazily loaded routes stay out of the initial bundle.
+registerContractExtension(lazyContractSchema);
 
 function Details({ jobId, runId, basePath, session, view, navigation }: {
   jobId: string; runId: string; basePath: string; session: BrowserSession; view: RunView; navigation?: ValidationNavigation;
