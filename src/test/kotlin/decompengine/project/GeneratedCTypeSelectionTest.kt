@@ -70,6 +70,44 @@ class GeneratedCTypeSelectionTest {
     }
 
     @Test
+    fun `earlier tag introductions survive selection without widening namespaces or prototype scope`() {
+        for (tag in listOf("Foo", "decomp_context_tag")) {
+            for (introduction in listOf(
+                "struct $tag;",
+                "typedef struct $tag FooAlias;",
+                "const typedef struct $tag *FooPointer, **FooPointerPointer;",
+            )) {
+                val dependency = RecoveredType("a08_dependency", "typedef long ExtraDependency;")
+                val first = RecoveredType("a10_introduction", "$introduction\n typedef ExtraDependency ExtraAlias;")
+                val callback = RecoveredType("a20_callback", "typedef int (*Fn)(struct $tag *);")
+                val definition = RecoveredType("a30_definition", "struct $tag { int value; };")
+                val types = listOf(
+                    // These selector-only distractors are not an asserted compilable full header.
+                    RecoveredType("a00_prototype", "typedef int (*Other)(struct $tag *);"),
+                    RecoveredType("a02_wrong_kind", "union $tag;"),
+                    RecoveredType("a05_anonymous", "typedef struct { int value; } UnrelatedAnonymous;"),
+                    dependency,
+                    first,
+                    RecoveredType("a15_duplicate", "struct $tag;"),
+                    callback,
+                    definition,
+                    RecoveredType("a40_late", "struct $tag;"),
+                    RecoveredType("a50_ordinary", "typedef int $tag;"),
+                    RecoveredType("a60_unrelated", "struct Unrelated { int value; };"),
+                )
+                val expected = listOf(dependency, first, callback, definition)
+                assertEquals(expected, selectRequiredGeneratedCTypes(types, listOf("Fn choose(void)")), introduction)
+                assertEquals(expected, selectRequiredGeneratedCTypes(types.reversed(), listOf("Fn choose(void)")), introduction)
+                val conflict = RecoveredType("a35_conflict", "struct $tag { long value; };")
+                val failure = assertFailsWith<IllegalArgumentException>(introduction) {
+                    selectRequiredGeneratedCTypes(types + conflict, listOf("Fn choose(void)"))
+                }
+                assertTrue(failure.message.orEmpty().contains("ambiguous recovered type dependency tag:$tag"), failure.message)
+            }
+        }
+    }
+
+    @Test
     fun `needed conflicts fail without rejecting an unrelated ambiguity`() {
         val types = listOf(
             RecoveredType("first", "typedef int Value;"),

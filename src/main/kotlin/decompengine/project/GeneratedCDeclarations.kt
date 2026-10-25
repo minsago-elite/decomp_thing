@@ -328,8 +328,18 @@ internal fun selectRequiredGeneratedCTypes(types: List<RecoveredType>, evidence:
         for (statement in splitCTypeSource(type.declaration, ";")) {
             val statementTokens = cDeclarationTokens(statement)
             if (statementTokens.any { it.text == "typedef" }) {
-                val parts = splitCTypeSource(aliasParsingView(statement), ",")
+                val parsingView = aliasParsingView(statement)
+                val parts = splitCTypeSource(parsingView, ",")
                 val first = CDeclarationParser(parts.first()).parse()
+                // Only original outer specifiers introduce a file-scope tag here. Parameter
+                // types and the synthetic tag used to parse aggregate bodies are not exports.
+                if (parsingView == statement) {
+                    first.specifiers.zipWithNext().firstOrNull { (kind, tag) ->
+                        kind in aggregateKeywords && tag.matches(identifier)
+                    }?.let { (kind, tag) ->
+                        export("tag:$tag", type, listOf(kind, tag), definition = false)
+                    }
+                }
                 val prefix = first.source.substring(0, first.declaratorOffset)
                 for (declaration in listOf(first) + parts.drop(1).map { CDeclarationParser(prefix + it).parse() }) {
                     val name = requireNotNull(declaration.name) { "typedef has no alias name" }.text
@@ -379,8 +389,15 @@ internal fun selectRequiredGeneratedCTypes(types: List<RecoveredType>, evidence:
         require(definitions.map { it.signature }.distinct().size == 1) {
             "ambiguous recovered type dependency $name in ${definitions.map { it.type.id }.distinct().sorted()}"
         }
-        val type = definitions.minBy { it.type.id }.type
-        if (selected.putIfAbsent(type.id, type) == null) references.getValue(type.id).sorted().forEach(pending::addLast)
+        val chosen = definitions.minBy { it.type.id }
+        val preceding = candidates.asSequence()
+            .filter { !it.definition && it.type.id < chosen.type.id &&
+                it.signature == chosen.signature.take(2) }
+            .minByOrNull { it.type.id }
+        for (required in listOfNotNull(preceding, chosen)) {
+            val type = required.type
+            if (selected.putIfAbsent(type.id, type) == null) references.getValue(type.id).sorted().forEach(pending::addLast)
+        }
     }
     return selected.values.sortedBy { it.id }
 }

@@ -9,6 +9,8 @@ import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
 import kotlin.test.assertTrue
+import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.JsonPrimitive
 import org.junit.jupiter.api.Assumptions.assumeTrue
 
 class GeneratedCSyntheticDefinitionTest {
@@ -96,6 +98,72 @@ class GeneratedCSyntheticDefinitionTest {
             if (compiler == "clang") assertTrue(invalidAtomic.first != 0, invalidAtomic.second)
             val retained = syntax(compiler, "struct Pair { int value; }; _Atomic(struct Pair) item = (struct Pair){7};", root)
             assertEquals(0, retained.first, retained.second)
+        }
+    }
+
+    @Test
+    fun `selected callback interfaces preserve file scope tag identity for forward and typedef introductions`(): Unit {
+        fixture { root ->
+            fun compile(compiler: String, variant: String, case: String, source: String): Pair<Int, String> {
+                val result = syntax(compiler, source, root)
+                val sourceBytes = source.toByteArray()
+                val diagnosticBytes = result.second.toByteArray()
+                // JUnit retains these bounded records after the ordinary fixture cleanup.
+                println(JsonObject(mapOf(
+                    "kind" to JsonPrimitive("generated-c-tag-introduction-compiler-v1"),
+                    "compiler" to JsonPrimitive(compiler),
+                    "variant" to JsonPrimitive(variant),
+                    "case" to JsonPrimitive(case),
+                    "sourceBytes" to JsonPrimitive(sourceBytes.size),
+                    "sourceSha256" to JsonPrimitive(sha256(sourceBytes)),
+                    "sourceTruncated" to JsonPrimitive(source.length > 16_384),
+                    "source" to JsonPrimitive(source.take(16_384)),
+                    "exitCode" to JsonPrimitive(result.first),
+                    "diagnosticBytes" to JsonPrimitive(diagnosticBytes.size),
+                    "diagnosticSha256" to JsonPrimitive(sha256(diagnosticBytes)),
+                    "diagnosticTruncated" to JsonPrimitive(result.second.length > 16_384),
+                    "diagnostic" to JsonPrimitive(result.second.take(16_384)),
+                )))
+                return result
+            }
+            val compilers = listOf("gcc", "clang")
+            compilers.forEach(::requireCompiler)
+            val implementation = """
+                _Static_assert(_Generic((Fn)0, int (*)(struct Foo *): 1, default: 0),
+                               "callback lost file-scope tag identity");
+                static int callback(struct Foo *value) { return value->value; }
+                Fn choose(void) { return callback; }
+            """.trimIndent() + "\n"
+            for ((variant, introduction) in listOf(
+                "forward" to "struct Foo;",
+                "typedef" to "typedef struct Foo FooAlias;",
+            )) {
+                val types = listOf(
+                    RecoveredType("a00_intro", introduction),
+                    RecoveredType("a10_callback", "typedef int (*Fn)(struct Foo *);"),
+                    RecoveredType("a20_definition", "struct Foo { int value; };"),
+                )
+                val program = model(RecoveredFunction("fn_choose", "choose", 200UL, "Fn choose(void)"))
+                    .copy(types = types)
+                val contextRequest = request(program, root)
+                val plan = ModulePlan(modules = listOf(contextRequest.module))
+                val fullHeader = GeneratedCProjectRendering(program, plan).sharedInterface()
+                val selectedHeader = GeneratedCModuleContext.select(contextRequest).interfaces.getValue(
+                    contextRequest.profile.layout.declaration("shared-interface").materialize(),
+                )
+                val withoutIntroduction = GeneratedCProjectRendering(
+                    program.copy(types = types.filterNot { it.id == "a00_intro" }), plan,
+                ).sharedInterface()
+                for (compiler in compilers) {
+                    val full = compile(compiler, variant, "full", fullHeader + implementation)
+                    assertEquals(0, full.first, "$compiler $variant full header:\n${full.second}")
+                    val selected = compile(compiler, variant, "selected", selectedHeader + implementation)
+                    assertEquals(0, selected.first, "$compiler $variant selected interface:\n${selected.second}")
+                    val removed = compile(compiler, variant, "removed", withoutIntroduction + implementation)
+                    assertTrue(removed.first != 0, "$compiler $variant removed introduction must fail:\n${removed.second}")
+                    assertTrue(removed.second.contains("callback lost file-scope tag identity"), removed.second)
+                }
+            }
         }
     }
 
