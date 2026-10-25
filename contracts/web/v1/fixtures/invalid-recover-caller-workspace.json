@@ -1,0 +1,9 @@
+{
+  "apiVersion": 1,
+  "kind": "recoverRequest",
+  "data": {
+    "mode": "resume",
+    "expectedInputRevisionId": null,
+    "workspacePath": "workspace"
+  }
+}
