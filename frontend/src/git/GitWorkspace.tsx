@@ -71,6 +71,7 @@ export function GitWorkspace({ jobId, basePath, session, capabilities, pollInter
   const active = useRef<AbortController | null>(null);
   // Each status read or work-tree change starts a new diff generation; late diff responses are dropped.
   const diffGeneration = useRef(0);
+  const diffRequest = useRef(0);
   const repository = loaded?.listing.repositories[0] ?? null;
   const base = repository ? `/jobs/${jobId}/repositories/${repository.repositoryId}` : null;
   const query = worktree ? `worktree=${worktree}` : '';
@@ -183,9 +184,11 @@ export function GitWorkspace({ jobId, basePath, session, capabilities, pollInter
   async function showDiff(entry: GitStatusEntry, scope: 'staged' | 'unstaged') {
     if (!base) return;
     const generation = diffGeneration.current;
+    // Only the latest diff selection may update the shown patch, whatever order responses arrive in.
+    const request = ++diffRequest.current;
     try {
       const result = await client.get('gitDiff', `${base}/diff?scope=${scope}&file=${entry.fileId}${query ? `&${query}` : ''}`);
-      if (generation === diffGeneration.current) setDiff(result.data);
+      if (generation === diffGeneration.current && request === diffRequest.current) setDiff(result.data);
     } catch (failure: unknown) { setStatus(withApiFailureReference(copy.readFailed, failure)); }
   }
 
@@ -332,7 +335,7 @@ export function GitWorkspace({ jobId, basePath, session, capabilities, pollInter
           onClick={() => { void act('gitStageRequest', copy.unstageSelected, guarded => ({ action: 'git.unstage', worktreeId,
             guards: guarded, selectedFileIds: selectedIn('staged') })); }}>{copy.unstageSelected}</button>
         {diff?.patch && <section aria-labelledby="git-diff-title">
-          <h4 id="git-diff-title">{textMessage(copy.diffTitle, { path: diff.files[0]?.path ?? '' })}</h4>
+          <h4 id="git-diff-title">{textMessage(copy.diffTitle, { path: diff.files[0]?.path ?? '', scope: diff.scope === 'staged' ? copy.staged : copy.unstaged })}</h4>
           {diff.patch.binary ? <p>{copy.binary}</p> : <pre class="source-text">{diff.patch.text}</pre>}
           {diff.patch.truncated && <p>{copy.truncated}</p>}
         </section>}

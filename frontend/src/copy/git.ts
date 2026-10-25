@@ -45,7 +45,7 @@ export const gitCopy = {
   unstageSelected: 'Unstage selected',
   select: 'Select {path} ({group})',
   showDiff: 'Show diff for {path}',
-  diffTitle: 'Diff: {path}',
+  diffTitle: '{scope} diff: {path}',
   binary: 'Binary file; content is not shown.',
   truncated: 'The diff is truncated at its bound.',
   commitTitle: 'Commit staged files',

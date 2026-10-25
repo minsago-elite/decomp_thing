@@ -50,8 +50,10 @@ function status(dirty: boolean) {
 }
 
 let historyGate: Promise<void> | null = null;
+let unstagedDiffGate: Promise<void> | null = null;
 
 function serve(kind: string, path: string): Promise<unknown> {
+  if (unstagedDiffGate && path.includes('scope=unstaged')) { const gate = unstagedDiffGate; unstagedDiffGate = null; return gate.then(() => serve(kind, path)); }
   if (historyGate && path.includes('/history?cursor=')) { const gate = historyGate; historyGate = null; return gate.then(() => serve(kind, path)); }
   const [route = '', query = ''] = path.split('?');
   let data: unknown;
@@ -313,4 +315,18 @@ it('reports a failed job read during import instead of stopping silently', async
   expect(await screen.findByText(/The server refused Import repository/)).toBeTruthy();
   expect(transport.post).not.toHaveBeenCalled();
   expect(screen.getByRole('button', { name: 'Import repository' })).toHaveProperty('disabled', false);
+});
+
+it('shows only the latest requested diff even when an earlier one answers later', async () => {
+  mount();
+  await screen.findByRole('group', { name: 'Staged' });
+  let open = () => {};
+  unstagedDiffGate = new Promise<void>(resolve => { open = resolve; });
+  fireEvent.click(within(screen.getByRole('group', { name: 'Not staged' })).getByRole('button', { name: 'Show diff for src/util.c' }));
+  fireEvent.click(within(screen.getByRole('group', { name: 'Staged' })).getByRole('button', { name: 'Show diff for src/util.c' }));
+  expect(await screen.findByText('Staged diff: src/util.c')).toBeTruthy();
+  open();
+  await new Promise(resolve => setTimeout(resolve, 50));
+  expect(screen.getByText('Staged diff: src/util.c')).toBeTruthy();
+  expect(screen.queryByText('Not staged diff: src/util.c')).toBeNull();
 });
