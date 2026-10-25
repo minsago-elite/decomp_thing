@@ -22,6 +22,7 @@ internal class WebApiController(
     clock: Clock = Clock.systemUTC(),
     private val harnessReadiness: WebHarnessReadinessProjector = WebHarnessReadinessProjector(),
     private val agentPreflight: WebAgentPreflight = WebAgentPreflight { error("No agent preflight is configured.") },
+    private val git: WebGitCapability = WebGitCapability.detect(),
 ) {
     private val prefix = "${assets.basePath}api/v1/"
     private val applicationBuildId = applicationBuildId()
@@ -351,7 +352,7 @@ internal class WebApiController(
             put("workflows", JsonArray(emptyList()))
             put("agentContractVersion", JsonNull)
             put("limits", JsonNull)
-        }, harnessCapability())))
+        }, harnessCapability(), git.capability())))
         // Configured ceilings for the API profile; unavailable resources remain
         // unavailable until their adapters enforce these limits and are enabled.
         put("limits", buildJsonObject {
@@ -380,7 +381,7 @@ internal class WebApiController(
                 "aarch64", "arm64" -> "aarch64"
                 else -> "unknown"
             })
-            put("gitVersion", JsonNull)
+            put("gitVersion", git.versionJson())
             put("scheduler", webSchedulerSnapshot(jobs.schedulerSnapshot()))
             put("progressRetention", webProgressRetentionStatus(jobs.progressRetentionStatus()))
         })

@@ -511,6 +511,111 @@ operation records intent, guards, stage/outcome, safe diagnostics and recovery r
 restart never silently repeats a remote write; reconcile the exact refs and durable intent before
 offering an explicit recovery action. Credentials and raw transport diagnostics stay server-side.
 
+### Managed repository identity mapping
+
+Each identity below has one owner, and relationships are recorded, never inferred from equal
+bytes, names or timestamps (#568). The server stores Git records under the job's private
+storage. Paths never appear in a DTO.
+
+| Relationship | Recorded by | Meaning and limits |
+| --- | --- | --- |
+| job → repository | Repository registration (`jobId`, `repositoryId`) | One managed repository per job source workspace, created only by an explicit init or attach operation |
+| repository → worktree | Registration (`worktreeId`) | One registered work tree; neither branch name nor directory is its identity |
+| worktree → run attempt, source revision | Registration (`runId`, `candidateRevisionId`) | The candidate snapshot the work tree was materialized from; `null` for an imported history |
+| source revision → Git object ID | `gitMapping` | Created only by an explicit commit after the commit tree is checked against the revision's source bytes |
+| Git object ID → archive digest | `gitMapping.sourceSha256`, `archiveArtifactId` | The archive is verified against the same source bytes, never against the object ID |
+| revision → acceptance | `gitMapping.acceptance`, `acceptanceArtifactId` | Copied from canonical validation evidence only |
+
+Object IDs are opaque lowercase hexadecimal strings whose length comes from the repository's
+observed `objectFormat` (`git rev-parse --show-object-format`): 40 for SHA-1, 64 for SHA-256.
+Unknown formats are readable but cannot be used for writes. `GitObjectFormat` is the only parser;
+no code converts an ID to a number or accepts an abbreviation. HEAD is reported as
+`headState`: `attached` (names an existing branch, with `headRefId` and `headObjectId`), `unborn`
+(names a branch without a commit, so both IDs are `null`) or `detached` (an object without a
+branch). `headRefName` is display text. No code path assumes a `master` or `main` branch; the
+initial branch of a new repository is configured policy, and imported repositories keep their own.
+
+A commit records source state. A commit, branch, tag or clean work tree never means build or
+behavior validation, candidate selection or acceptance; `gitMapping.acceptance` comes from canonical
+evidence alone. Every `gitWorkspace` reports `trackingPolicy: "source-only-v1"` (below).
+
+### Source-only tracking policy
+
+Managed repositories track reconstructed source, not job state (#569). The server writes the rules
+below to the repository's private `info/exclude`. Nothing is added to the work tree, so source
+bytes and file names stay exactly as the snapshot recorded them. The top-level `build` output root
+of a snapshot is not copied into the work tree, which matches the archive transport layout.
+
+| Category | Excluded patterns |
+| --- | --- |
+| Original binaries | `/input.elf`, `*.elf`, `*.bin`, `*.exe`, `*.dll`, `*.so`, `*.so.*`, `*.dylib`, `*.a`, `*.lib`, `*.o`, `*.obj`, `*.out` |
+| Credentials | `.env`, `.env.*`, `*.pem`, `*.key`, `*.p12`, `*.pfx`, `id_rsa*`, `id_ecdsa*`, `id_ed25519*`, `.netrc`, `.git-credentials`, `.npmrc`, `.pypirc`, `*.token`, `credentials.json` |
+| Job databases and runtime state | `job.json`, `workflow-state.json`, `*.sqlite`, `*.sqlite3`, `*.db`, `*.db-journal`, `*.db-wal`, `.upload-*/`, `.job-metadata-*`, `.git-runtime/` |
+| Private transcripts | `/transcripts/`, `/sessions/`, `*.transcript`, `*.jsonl`, `*.ndjson` |
+| Native build output | `/build/`, `/out/`, `cmake-build-*/`, `CMakeFiles/`, `CMakeCache.txt`, `cmake_install.cmake`, `build.ninja`, `.ninja_deps`, `.ninja_log`, `compile_commands.json`, `*.d`, `*.gcda`, `*.gcno` |
+| Transient evidence | `/reports/`, `/evidence/`, `*.log`, `*.tmp`, `*.swp`, `/tmp/`, `/.tmp/` |
+
+The patterns never match C/C++ sources, headers, CMake or Make descriptions, README files or
+`source_tree_manifest.json`. `GitTrackingPolicy` holds the same list, and its tests check both
+directions against real `git check-ignore` results.
+
+### Server-owned Git adapter
+
+The `decompengine.git` adapter uses the system `git` executable, not a library (#570). Git is an
+optional runtime prerequisite. At startup the first absolute `git` on the server's `PATH`
+is resolved to its real path and probed with `git version`. Versions older than 2.36.0
+(needed for `GIT_CONFIG_GLOBAL` and repository ownership checks) are unsupported.
+Bootstrap reports `runtime.gitVersion` as the bare numeric version, or `null` when none is
+detected, and a `git` capability. The capability is `unavailable` with `GIT_NOT_FOUND`,
+`GIT_VERSION_UNSUPPORTED` or `GIT_PROBE_FAILED`, or `supported` once the managed repository routes
+are served. Every Git endpoint answers `503 CAPABILITY_UNAVAILABLE` with that reason's message when
+Git is unusable. The executable path never leaves the server.
+
+- **Argument safety.** `ProcessBuilder` receives a separate argv; no shell is involved. Callers
+  name one allowlisted subcommand and its arguments. Only the runner adds global options
+  (`--no-pager`, `--no-replace-objects`, `--literal-pathspecs` except for `check-ignore`, which
+  takes plain names, `-c` overrides, `--git-dir`, `--work-tree`). Arguments are bounded and contain no NUL. Branch names pass a local syntax check
+  and then `git check-ref-format refs/heads/<name>`, so a value can never be parsed as an option.
+- **Bounds.** Each call has its own wall-clock limit (30 s by default) and stdout/stderr byte
+  limits (1 MiB and 64 KiB). Exceeding either kills the process and its descendants. Stdin is
+  closed. Captured stderr stays server-side; public errors use fixed messages.
+- **Environment.** The child receives a fresh environment: `PATH` (the executable's directory,
+  `/usr/bin`, `/bin`), a server-owned `HOME` and `XDG_CONFIG_HOME`, `GIT_CONFIG_NOSYSTEM=1`,
+  `GIT_CONFIG_GLOBAL` pointing to an empty server-owned file, `GIT_ATTR_NOSYSTEM=1`,
+  `GIT_TERMINAL_PROMPT=0`, empty `GIT_ASKPASS`/`SSH_ASKPASS`, `GIT_NO_REPLACE_OBJECTS=1`,
+  `GIT_OPTIONAL_LOCKS=0`, `GIT_PROTOCOL_FROM_USER=0`, `GIT_CEILING_DIRECTORIES` and a C/UTC locale.
+  The runtime directories live in `<job store>/.git-runtime` and must be empty.
+- **Command-line configuration.** These values outrank any repository configuration:
+  `core.hooksPath` (an empty server-owned directory), `core.fsmonitor=false`,
+  `core.untrackedCache=false`, empty `core.askPass` and `credential.helper`,
+  `core.sshCommand=false`, `core.symlinks=false`, `core.autocrlf=false`, `core.protectNTFS`/`HFS`,
+  empty `core.attributesFile`/`core.excludesFile`, `protocol.allow=never`, no submodule recursion
+  (`submodule.recurse`, `fetch.recurseSubmodules`, `push.recurseSubmodules`), no automatic
+  gc/maintenance, no signing, an empty `init.templateDir`, `safe.bareRepository=explicit` and
+  `transfer.fsckObjects=true`. `safe.directory` is never set, so Git's ownership check stays strict.
+- **Inert repository content.** Only configuration can name an executable: filter, diff and merge
+  drivers, credential helpers, fsmonitor, pagers, aliases and includes. Before any command runs in
+  a managed repository, its `config` is read with `git config --file … --no-includes` and must
+  contain only server-written keys (`core.repositoryformatversion`, `core.filemode`,
+  `core.bare=true`, `core.ignorecase`, `core.precomposeunicode`, `core.logallrefupdates`,
+  `extensions.objectformat`, `user.*`). Otherwise the read fails with `REPOSITORY_CONFIG_UNTRUSTED`.
+  Alternates, `commondir` and shallow files are `REPOSITORY_UNSUPPORTED`. Hooks never run because
+  of the empty `core.hooksPath`. Attribute files can name a filter, but no driver exists, so
+  content is checked out byte for byte. Submodule paths stay empty gitlinks. No command fetches
+  or contacts a remote. No exceptions exist yet. Any future hook, filter, submodule or helper
+  support needs its own reviewed design and capability.
+- **States.** A read reports `unborn`, `attached`, `detached`, `dirty` and the object format,
+  without assuming a branch name. A missing or linked repository is `REPOSITORY_UNSUPPORTED`. A ref
+  that does not resolve, or a non-commit HEAD, is `REPOSITORY_CORRUPT`. Bounded failures are
+  `REPOSITORY_UNAVAILABLE`.
+
+`GitAdapterTest` uses real temporary repositories under the Gradle temporary directory, including
+paths with spaces and non-ASCII characters, SHA-1 and SHA-256 formats and a non-`main` branch. It
+also uses fake executables for missing, old, slow, noisy and failing Git. Tripwire hooks,
+fsmonitor and filter scripts show that nothing in repository content runs. This covers the
+adapter boundary only. Repository initialization, import and their HTTP routes are separate
+D8.2 work.
+
 ## Legacy compatibility
 
 `GET /api/jobs/{id}` and JSON-requested POST `/jobs` success responses use an explicit

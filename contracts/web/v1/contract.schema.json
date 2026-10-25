@@ -1926,6 +1926,16 @@
             "unknown"
           ]
         },
+        "origin": {
+          "type": "string",
+          "enum": [
+            "initialized",
+            "imported"
+          ]
+        },
+        "trackingPolicy": {
+          "const": "source-only-v1"
+        },
         "headObjectId": {
           "anyOf": [
             {
@@ -1945,6 +1955,28 @@
               "type": "null"
             }
           ]
+        },
+        "headState": {
+          "type": "string",
+          "enum": [
+            "attached",
+            "detached",
+            "unborn"
+          ],
+          "description": "attached: HEAD names an existing branch; detached: HEAD names an object; unborn: HEAD names a branch with no commit."
+        },
+        "headRefName": {
+          "anyOf": [
+            {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 1024
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Display text of the branch HEAD names; never filesystem, URL or mutation authority."
         },
         "candidateRevisionId": {
           "anyOf": [
@@ -1983,8 +2015,12 @@
         "repositoryVersion",
         "worktreeVersion",
         "objectFormat",
+        "origin",
+        "trackingPolicy",
         "headObjectId",
         "headRefId",
+        "headState",
+        "headRefName",
         "candidateRevisionId",
         "dirty",
         "refs",
