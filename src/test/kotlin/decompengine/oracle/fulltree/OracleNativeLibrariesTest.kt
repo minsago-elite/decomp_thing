@@ -1,5 +1,6 @@
 package decompengine.oracle.fulltree
 
+import decompengine.oracle.core.OracleArtifacts
 import java.nio.file.Files
 import java.nio.file.Path
 import java.nio.file.StandardCopyOption
@@ -62,6 +63,31 @@ class OracleNativeLibrariesTest {
         assertTrue("-Djna.boot.library.path=$staged" in arguments)
         assertTrue("-Dorg.sqlite.lib.path=$staged" in arguments)
         assertTrue("-Djava.io.tmpdir=/private/run/tmp" in arguments)
+    }
+
+    @Test
+    fun `fresh pinned native bootstrap authenticates descriptor input and disables fallback`() {
+        withRoot(createTempDirectory("oracle-native-descriptor-")) { root ->
+            val temporary = root.resolve("tmp").createDirectories()
+            val bytes = "pinned contained worker request".toByteArray()
+            val request = Files.write(root.resolve("request.json"), bytes)
+            val suffix = listOf("-classpath", System.getProperty("java.class.path"),
+                OracleNativeDescriptorProbe::class.java.name, request.toString(), bytes.size.toString())
+            val pinned = isolatedObservationJvmTemporaryArguments(root, staged)
+            val positive = runJava(root, pinned + suffix + OracleArtifacts.sha256(bytes))
+            assertEquals(0, positive.first, positive.second)
+            assertTrue(positive.second.contains("descriptor-bootstrap-ok"), positive.second)
+            val substituted = runJava(root, pinned + suffix + "0".repeat(64))
+            assertTrue(substituted.first != 0 && substituted.second.contains("descriptor request digest changed"), substituted.second)
+            // No ambient system library or JAR extraction may repair a missing admitted native path.
+            val missingNative = staged.resolveSibling("missing-native-${root.fileName}")
+            check(!Files.exists(missingNative))
+            val missing = runJava(root, isolatedObservationJvmTemporaryArguments(root, missingNative) +
+                suffix + OracleArtifacts.sha256(bytes))
+            assertTrue(missing.first != 0 && missing.second.contains("UnsatisfiedLinkError"), missing.second)
+            assertTrue(Files.newDirectoryStream(temporary).use { !it.iterator().hasNext() })
+            OracleNativeLibraries.requireCurrent(staged, artifactDigests)
+        }
     }
 
     @Test
@@ -141,5 +167,21 @@ object OracleNativeLibrariesProbe {
             }
         }
         println("native-bootstrap-ok")
+    }
+}
+
+object OracleNativeDescriptorProbe {
+    @JvmStatic
+    fun main(arguments: Array<String>) {
+        check(arguments.size == 3)
+        val bytes = arguments[1].toInt().also { check(it in 1..1024) }
+        StableControlFile.open(Path.of(arguments[0]), bytes.toLong(), "native bootstrap request").use { file ->
+            check(file.size == bytes.toLong() && file.authenticatedSha256 == arguments[2]) {
+                "descriptor request digest changed"
+            }
+            check(OracleArtifacts.sha256(file.readExactly(0, bytes, "native bootstrap request")) == arguments[2])
+            file.verifyUnchanged("native bootstrap request")
+        }
+        println("descriptor-bootstrap-ok")
     }
 }

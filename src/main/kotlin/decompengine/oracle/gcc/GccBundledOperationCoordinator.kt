@@ -41,6 +41,8 @@ import decompengine.oracle.fulltree.KotlinSystemdCgroupCommandInput
 import decompengine.oracle.fulltree.KotlinSystemdCgroupCommandLauncher
 import decompengine.oracle.fulltree.KotlinSystemdCgroupCommandResources
 import decompengine.oracle.fulltree.calculateFullTreeObservationRuntimeManifestSha256
+import decompengine.oracle.fulltree.OracleNativeLibraries
+import decompengine.oracle.fulltree.isolatedObservationJvmTemporaryArguments
 import java.nio.file.Path
 
 private object GCC_BUNDLED_PREPARED_OPERATION_PERMIT
@@ -1091,8 +1093,9 @@ internal class GccBundledPreparedOperation internal constructor(
         val unit = "decomp-machine-calls-${requestSha.take(32)}.scope"
         val command = listOf(configuration.javaExecutable.toString(),
             "-Xmx${minOf(intent.budgets.maximumResidentBytes / (1024 * 1024) * 3 / 4, 3072)}m",
-            "-XX:+DisableAttachMechanism", "-Duser.home=${controlPath.resolve("state")}",
-            "-Djava.io.tmpdir=${controlPath.resolve("tmp")}", "-cp",
+            "-XX:+DisableAttachMechanism", "-Duser.home=${controlPath.resolve("state")}") +
+            isolatedObservationJvmTemporaryArguments(controlPath,
+                configuration.javaRuntime.destination.resolve(OracleNativeLibraries.relativeDirectory)) + listOf("-cp",
             inputs.classPathEntries.indices.joinToString(java.io.File.pathSeparator) {
                 controlPath.resolve("runtime/classpath-$it.jar").toString()
             }, IndependentMachineCallWorkerV1::class.java.name, requestPath.toString(), requestSha)
@@ -1276,8 +1279,9 @@ internal class GccBundledPreparedOperation internal constructor(
                     val path = original.outputLease.path.resolve(controlName)
                     val command = listOf(configuration.javaExecutable.toString(),
                         "-Xmx${minOf(intent.budgets.maximumResidentBytes / (1024 * 1024) * 3 / 4, 3072)}m",
-                        "-XX:+DisableAttachMechanism", "-Duser.home=${path.resolve("state")}",
-                        "-Djava.io.tmpdir=${path.resolve("tmp")}", "-cp",
+                        "-XX:+DisableAttachMechanism", "-Duser.home=${path.resolve("state")}") +
+                        isolatedObservationJvmTemporaryArguments(path,
+                            configuration.javaRuntime.destination.resolve(OracleNativeLibraries.relativeDirectory)) + listOf("-cp",
                         inputs.classPathEntries.indices.joinToString(java.io.File.pathSeparator) {
                             path.resolve("runtime/classpath-$it.jar").toString()
                         }, worker, requestPath.toString(), requestSha)
