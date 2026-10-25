@@ -170,4 +170,41 @@ class GitPushTest {
         assertEquals(listOf("confirmed", "not_published"), service.auditLog(jobId, repositoryId, 50)
             .filter { it.getValue("action").toString().trim('"') == "push.reconcile" }.map { it.getValue("outcome").toString().trim('"') })
     }
+
+    @Test fun `only explicit rejections are definite, and remote failures or missing status stay unconfirmed`() {
+        val ok = GitPushes.classify(0, "To x\n \t${"a".repeat(40)}:refs/heads/main\t${"b".repeat(7)}..${"a".repeat(7)}\nDone\n", "main")
+        assertEquals(GitPushResult.PUBLISHED, ok)
+        assertEquals(GitPushResult.PUBLISHED, GitPushes.classify(0, "*\t${"a".repeat(40)}:refs/heads/new\t[new branch]\n", "new"))
+        assertEquals(GitPushResult.REJECTED_NON_FAST_FORWARD,
+            GitPushes.classify(1, "!\t${"a".repeat(40)}:refs/heads/main\t[rejected] (non-fast-forward)\n", "main"))
+        assertEquals(GitPushResult.REJECTED_REMOTE_CHANGED, GitPushes.classify(1, "!\t${"a".repeat(40)}:refs/heads/main\t[rejected] (fetch first)\n", "main"))
+        assertEquals(GitPushResult.REJECTED, GitPushes.classify(1, "!\t${"a".repeat(40)}:refs/heads/main\t[remote rejected] (hook declined)\n", "main"))
+        assertEquals(GitPushResult.UNCONFIRMED,
+            GitPushes.classify(1, "!\t${"a".repeat(40)}:refs/heads/main\t[remote failure] (remote failed to report status)\n", "main"))
+        assertEquals(GitPushResult.UNCONFIRMED, GitPushes.classify(1, "To x\n", "main"))
+        assertEquals(GitPushResult.UNCONFIRMED, GitPushes.classify(0, "", "main"))
+    }
+
+    @Test fun `the push intent survives until the completed operation is durable`(): Unit = Fixture().use { f ->
+        f.cloned()
+        f.localCommit("notes.txt", "local work\n")
+        // Process death after the completed record was written but before the intent was removed.
+        f.hook = { point -> if (point == GitOperationCrashPoint.BEFORE_PUBLISH) throw SimulatedGitCrash() }
+        val pushed = service.requestWorkspace(jobId, repositoryId, pushRequest(service.pushPreview(jobId, repositoryId, null, remoteId(), null)), key())
+        assertTrue(service.awaitIdle(60_000))
+        f.hook = {}
+        service.close(); service = f.open()
+        assertEquals(GitOperationState.COMPLETED, service.operation(jobId, repositoryId, pushed.operation.operationId).state)
+        assertEquals(1, service.unconfirmedPushes(jobId, repositoryId).size)
+        refused("PUSH_UNCONFIRMED", pushRequest(service.pushPreview(jobId, repositoryId, null, remoteId(), null)))
+        val reconcile = run(GitSyncRequest(GitOperationAction.PUSH_RECONCILE, guards().first.worktreeId, guards().second,
+            mapOf("pushOperationId" to pushed.operation.operationId)))
+        assertEquals(GitOperationState.COMPLETED, reconcile.state, reconcile.message)
+        assertEquals(GitOperationState.COMPLETED, service.operation(jobId, repositoryId, pushed.operation.operationId).state)
+        assertTrue(service.unconfirmedPushes(jobId, repositoryId).isEmpty())
+        // A normal push removes its intent once completed.
+        f.localCommit("more.txt", "more\n")
+        assertEquals(GitOperationState.COMPLETED, run(pushRequest(service.pushPreview(jobId, repositoryId, null, remoteId(), null))).state)
+        assertTrue(service.unconfirmedPushes(jobId, repositoryId).isEmpty())
+    }
 }

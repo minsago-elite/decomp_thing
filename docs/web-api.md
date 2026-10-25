@@ -1124,13 +1124,21 @@ rejection is reported as `NON_FAST_FORWARD` or `PUSH_REJECTED`. Ref deletion and
 unavailable; any future support needs its own scope and expected-object protection. Credentials,
 authentication failures and rejections surface only as the fixed transport codes.
 
-A push whose outcome is unknown never claims publication (#601). This happens when the transfer
-fails after starting or the server restarts while it runs. The operation becomes
-`recovery-required` with `PUSH_UNCONFIRMED`, and its intent blocks retries and removal of that
-remote. `git.push.reconcile` with `pushOperationId` reads the remote and settles the original
-operation:
+A push whose outcome is unknown never claims publication (#601). This happens when:
 
-- `completed` when the remote branch names the pushed commit;
+- the transfer fails after starting;
+- the server restarts while it runs;
+- Git reports a `[remote failure]` (the remote did not report the update), a missing status or an
+  unrecognized status.
+
+Only an explicit `[rejected]` or `[remote rejected]` is a definite refusal. An unknown outcome makes
+the operation `recovery-required` with `PUSH_UNCONFIRMED`, and its intent blocks retries and removal
+of that remote. The intent is removed only after the completed operation is durable, so a crash or
+storage failure in between still leaves a reconcilable record. `git.push.reconcile` with
+`pushOperationId` reads the remote and settles the original operation:
+
+- `completed` when the remote branch names the pushed commit (an operation already recorded as
+  completed keeps its record);
 - `failed` with `PUSH_NOT_PUBLISHED` when it still names the expected object;
 - `failed` with `PUSH_SUPERSEDED` when it names something else.
 

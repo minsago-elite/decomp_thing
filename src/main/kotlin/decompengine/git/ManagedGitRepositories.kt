@@ -840,9 +840,15 @@ class ManagedGitRepositories(
         return when (result) {
             GitPushResult.PUBLISHED, GitPushResult.UP_TO_DATE -> {
                 runner.run(GitInvocation("update-ref", listOf("${remote.trackingPrefix}$branch", local), gitDir = located.commonDir))
-                GitPushes.delete(directory, operation.operationId)
+                // The intent stays until the completed operation is durable (see executeWorkspace), so a
+                // crash or audit failure from here on still leaves a reconcilable record.
                 audit("published")
                 local to "Published ${local.take(12)} to ${remote.name}/$branch. Publication is not validation or acceptance."
+            }
+            GitPushResult.UNCONFIRMED -> {
+                audit("unconfirmed")
+                throw GitOperationRefusal("PUSH_UNCONFIRMED", "The remote did not confirm the update. Reconcile the push against the remote " +
+                    "before any retry; publication is not claimed.")
             }
             else -> {
                 GitPushes.delete(directory, operation.operationId)
@@ -866,6 +872,7 @@ class ManagedGitRepositories(
             else -> Triple(GitOperationState.FAILED, "PUSH_SUPERSEDED", "Reconciliation found the remote branch at another commit; the pushed commit is not published there.")
         }
         synchronized(lock) {
+            // A push already recorded as completed keeps its record; only its leftover intent is settled.
             val original = operations(operation.jobId).singleOrNull { it.operationId == intent.operationId }
             if (original != null && !(original.state == GitOperationState.COMPLETED)) {
                 persist(root.resolve(operation.jobId).resolve("git"), finish(original, state, code, message,
@@ -1505,6 +1512,11 @@ class ManagedGitRepositories(
                 else -> error("not a workspace request")
             }
             synchronized(lock) { current = finish(current, GitOperationState.COMPLETED, null, message, result); persist(directory, current) }
+            if (queued.action == GitOperationAction.PUSH) {
+                // Only now is publication durably recorded; the intent can go.
+                crash(GitOperationCrashPoint.BEFORE_PUBLISH)
+                GitPushes.delete(repositoryDirectory(queued.jobId, queued.repositoryId), queued.operationId)
+            }
         } catch (_: SimulatedGitCrash) {
             synchronized(lock) { active -= queued.operationId }
             return

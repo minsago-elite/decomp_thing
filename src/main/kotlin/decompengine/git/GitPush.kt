@@ -28,7 +28,7 @@ data class GitPushIntent(
 )
 
 /** Outcome Git reported for the one pushed ref. */
-enum class GitPushResult { PUBLISHED, UP_TO_DATE, REJECTED_NON_FAST_FORWARD, REJECTED_REMOTE_CHANGED, REJECTED }
+enum class GitPushResult { PUBLISHED, UP_TO_DATE, REJECTED_NON_FAST_FORWARD, REJECTED_REMOTE_CHANGED, REJECTED, UNCONFIRMED }
 
 internal object GitPushes {
     const val DIRECTORY = "push-intents"
@@ -83,14 +83,25 @@ internal object GitPushes {
         val result = runner.run(GitInvocation("push", listOf("--porcelain", "--no-verify", "--signed=false", "--no-recurse-submodules",
             "--no-follow-tags", "--no-atomic", "--", location.url, "$objectId:refs/heads/$branch"), gitDir = gitDir,
             limits = GitTransfers.limits(policy), transport = GitTransports.context(location, policy), allowedExitCodes = setOf(0, 1)))
-        val line = result.text.lineSequence().firstOrNull { it.contains("\t") && it.contains(":refs/heads/$branch") }
+        return classify(result.exitCode, result.text, branch)
+    }
+
+    /**
+     * The outcome of one pushed ref from porcelain output. Only an explicit `[rejected]` or
+     * `[remote rejected]` is a definite refusal; a `[remote failure]` (the remote did not report
+     * the update), a missing status line or anything unrecognized is unconfirmed, because the
+     * remote may have accepted the update.
+     */
+    fun classify(exitCode: Int, porcelain: String, branch: String): GitPushResult {
+        val line = porcelain.lineSequence().firstOrNull { it.contains("\t") && it.contains(":refs/heads/$branch") }
         return when {
-            line == null -> if (result.exitCode == 0) GitPushResult.PUBLISHED else GitPushResult.REJECTED
+            line == null -> GitPushResult.UNCONFIRMED
             line.startsWith("=") -> GitPushResult.UP_TO_DATE
-            line.startsWith(" ") || line.startsWith("*") -> GitPushResult.PUBLISHED
-            line.startsWith("!") && "non-fast-forward" in line -> GitPushResult.REJECTED_NON_FAST_FORWARD
-            line.startsWith("!") && ("fetch first" in line || "stale info" in line) -> GitPushResult.REJECTED_REMOTE_CHANGED
-            else -> GitPushResult.REJECTED
+            (line.startsWith(" ") || line.startsWith("*")) && exitCode == 0 -> GitPushResult.PUBLISHED
+            line.startsWith("!") && "[rejected]" in line && "non-fast-forward" in line -> GitPushResult.REJECTED_NON_FAST_FORWARD
+            line.startsWith("!") && "[rejected]" in line && ("fetch first" in line || "stale info" in line) -> GitPushResult.REJECTED_REMOTE_CHANGED
+            line.startsWith("!") && ("[rejected]" in line || "[remote rejected]" in line) -> GitPushResult.REJECTED
+            else -> GitPushResult.UNCONFIRMED
         }
     }
 
