@@ -7,6 +7,10 @@ oracle_ext4_scratch_profile() {
   environment_prefix=DECOMP_TEST_ORACLE_EXT4
   case "${1:-}" in
     "") ;;
+    --module-compile)
+      scratch_profile_name=module-compile
+      environment_prefix=DECOMP_TEST_MODULE_COMPILE_EXT4
+      image_size=512M; inode_count=16384 ;;
     --bundled-ghidra)
       scratch_profile_name=bundled-ghidra
       environment_prefix=DECOMP_TEST_BUNDLED_GHIDRA_EXT4
