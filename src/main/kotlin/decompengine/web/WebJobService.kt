@@ -984,6 +984,8 @@ class WebJobService(
             else prerequisites?.unmet(requirements, registration.adapter.launch?.harness) ?: if (prerequisites == null)
                 WebPrerequisite(false, "PREREQUISITES_UNKNOWN", "Runtime prerequisites could not be determined. Refresh runtime readiness before retrying.") else null
         if (unmet != null) throw WebJobServiceException("WORKFLOW_PREREQUISITE_UNAVAILABLE", unmet.message)
+        // Scope bounds are server-owned; the effective values are recorded with the attempt below.
+        val configuration = webAttemptConfiguration(registration.adapter, prerequisites, request.scope)
         if (owner == null) throw WebJobServiceException("JOB_NOT_FOUND", "The requested job is unavailable.")
         val view = inspectStoredJob(owner, jobId) as? WorkflowJobInspection.Available
             ?: throw WebJobServiceException("JOB_RECORD_UNAVAILABLE", "The job record is unavailable; inspect its storage diagnostic.")
@@ -998,7 +1000,7 @@ class WebJobService(
         val job = store.get(jobId)
         val admitted = publishStart(jobId) {
             owner.createIdempotent(jobId, view.snapshot.version,
-                request.copy(configuration = webAttemptConfiguration(registration.adapter, prerequisites)), requestKey, expectedJobVersion)
+                request.copy(configuration = configuration), requestKey, expectedJobVersion)
         }
         if (admitted.replayed) return DurableWebWorkflowStartResult(admitted.attempt, replayed = true)
         val task = DurableTask(job, admitted.attempt, registration.adapter, inputSourceTree)

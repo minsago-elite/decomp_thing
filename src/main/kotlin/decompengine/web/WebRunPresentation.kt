@@ -40,5 +40,8 @@ internal fun webRunConfiguration(value: decompengine.jobs.WorkflowAttemptConfigu
         put("configurationSha256", harness.configurationSha256?.let(::JsonPrimitive) ?: JsonNull)
         put("deprecated", harness.deprecated)
     } } ?: JsonNull)
-    put("profileId", value.profileId?.let(::JsonPrimitive) ?: JsonNull)
+    put("reconstruction", value.reconstruction?.let { reconstruction -> buildJsonObject {
+        put("profileId", reconstruction.profileId); put("profileSha256", reconstruction.profileSha256)
+        put("maxContextCharacters", reconstruction.maxContextCharacters?.let { JsonPrimitive(it.toString()) } ?: JsonNull)
+    } } ?: JsonNull)
 }

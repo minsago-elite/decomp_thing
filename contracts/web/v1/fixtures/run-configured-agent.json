@@ -51,7 +51,11 @@
         "configurationSha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
         "deprecated": false
       },
-      "profileId": null
+      "reconstruction": {
+        "profileId": "generated-c-make-v1",
+        "profileSha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+        "maxContextCharacters": "60000"
+      }
     }
   }
 }

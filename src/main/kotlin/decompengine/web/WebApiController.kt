@@ -54,7 +54,7 @@ internal class WebApiController(
         val path = exchange.requestURI.rawPath
         if (!path.startsWith("${assets.basePath}api/")) return false
         val resource = path.removePrefix(prefix)
-        if (!path.startsWith(prefix) || !(resource in setOf("session", "bootstrap", "jobs", "recovery", "agent/preflight") || resource.matches(Regex("(?:jobs|uploads)/[^/]+|jobs/[^/]+/runs(?:/[^/]+(?:/reports/(?:exploration|revision-validation)|/validation-history|/source-catalog|/revisions/[^/]+/(?:sources|source-directories/[^/]+|source-files/[^/]+(?:/(?:chunk|content))?)|/snapshot|/events|/progress-pin|/cancel)?)?|jobs/[^/]+/artifacts/[^/]+/content")))) {
+        if (!path.startsWith(prefix) || !(resource in setOf("session", "bootstrap", "jobs", "recovery", "agent/preflight") || resource.matches(Regex("(?:jobs|uploads)/[^/]+|jobs/[^/]+/runs(?:/[^/]+(?:/reports/(?:exploration|revision-validation|module-progress)|/validation-history|/source-catalog|/revisions/[^/]+/(?:sources|source-directories/[^/]+|source-files/[^/]+(?:/(?:chunk|content))?)|/snapshot|/events|/progress-pin|/cancel)?)?|jobs/[^/]+/artifacts/[^/]+/content")))) {
             try {
                 val policy = if (exchange.requestMethod in setOf("POST", "PUT", "PATCH", "DELETE")) {
                     WebEndpointPolicy.jsonMutation(exchange.requestMethod)
@@ -253,6 +253,14 @@ internal class WebApiController(
                         revisionValidationReports.failure(parts[1], parts[3], query, jobs::readRecordedValidationFailureReport)
                     else revisionValidationReports.read(parts[1], parts[3], query)
                     sendWebApiResponse(exchange, 200, "report", report)
+                }
+                resource.matches(Regex("jobs/[^/]+/runs/[^/]+/reports/module-progress")) -> {
+                    access.authorize(exchange, WebEndpointPolicy.privateRead())
+                    requireNoWebApiQuery(exchange); requireJsonAccept(exchange)
+                    val parts = resource.split('/')
+                    val capture = jobs.readModuleProgress(parts[1], parts[3])
+                    sendWebApiResponse(exchange, 200, "moduleProgress",
+                        webModuleProgress(parts[1], capture, jobs.durableRegistrations(), readiness().prerequisites))
                 }
                 resource.matches(Regex("jobs/[^/]+/runs/[^/]+/reports/exploration")) -> {
                     access.authorize(exchange, WebEndpointPolicy.privateRead())

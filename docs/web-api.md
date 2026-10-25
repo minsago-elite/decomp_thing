@@ -151,13 +151,14 @@ internal storage optimization and must not merge identity, permissions or histor
 | `PUT R/progress-pin` | `200 progressPin`, original result on keyed replay | Strict `progressPinRequest`, session/Origin/CSRF, run If-Match and idempotency; #172/#177 |
 | `GET /agent/preflight` | `200 agentPreflight` | Last explicit agent inspection result; never starts the agent; #493 |
 | `POST /agent/preflight` | `202 agentPreflight`, `409` while one runs | Strict `agentPreflightRequest` (`{"action":"inspect"}`), session/Origin/CSRF; starts one single-flight `preflight(WEB)`; #493 |
-| `POST J/runs` | `202 run`, `Location: R` | `workflowStart` request, explicit option, server-approved limits, input policy and fresh readiness checks, job If-Match; #163/#478 |
+| `POST J/runs` | `202 run`, `Location: R` | `workflowStart` request, explicit option, server-approved limits and reconstruction scope, input policy and fresh readiness checks, job If-Match; #163/#478/#559 |
 | `POST R/cancel` | `202 run` or `200 run` if already terminal | Closed `workflowCancel` request, idempotent recorded intent, run If-Match; #163 |
 | `POST R/recover` | `202 run`, `Location` of a new attempt | Explicit `retry` or capability-gated `resume`; If-Match; #163 |
 | `GET R/snapshot` | `200 snapshot`, ETag | Run state and consistent event watermark; #174 |
 | `GET R/events` | `200 text/event-stream` | Resume with `Last-Event-ID` or `after`, never both; #174 |
 | `GET R/events?transport=poll` | `200 events` | Same retention/cursor semantics, bounded page; #174 |
 | `GET R/reports/{reportId}` | `200 report` | State may be missing/partial/unsupported/unknown; #165 |
+| `GET R/reports/module-progress` | `200 moduleProgress` | Stage-separated reconstruction progress and retained-plan reuse explanation from the attempt's own reports; read-only, no query; #560 |
 | `GET R/source-catalog` | `200 sourceCatalog` | Bounded flat manifest metadata; selected durable job/run; #490 |
 | `GET`, `HEAD R/reports/revision-validation` | `200 report` | Explicit graph and evidence-owner selection; checked normal summary and bounded case pages; #489, #543 |
 | `GET`, `HEAD R/revisions/{revisionId}/sources` | `200 revisionSources` | Bounded canonical input commitments for the selected persisted candidate; #490 |
@@ -478,6 +479,57 @@ returns the original record. It is not part of the caller's start intent. When w
 begins, the adapter resolves the harness again and refuses the attempt (`failed`,
 `REFUSED`) before any agent work if the resolution differs from the record.
 Attempts recorded before this field existed report `configuration: null`.
+
+### Reconstruction scope
+
+Reconstruction options report `launch.reconstruction` (null for other workflows): the
+reconstruction `profileId`, `planner: "deterministic"`, `moduleSelection: "all-planned"`,
+the planner's scale bounds (`plannerMaximumEntities`, `plannerMaximumDependencyEdges`,
+`plannerMaximumWorkUnits`) and `maximumFunctionsPerModule`, and for the agent option the
+per-module `contextCharacters` range (`default`, `minimum`; null for evidence-only). The
+deterministic planner always plans the whole program and owns every module boundary; a
+start cannot select, exclude or reorder modules or supply a plan. Planner bounds are scale
+limits: a binary beyond them stops during planning rather than reconstructing partially.
+Large-binary support and harness availability remain separate feature-level dependencies.
+
+A start's `scope` is `null` or `{"maxContextCharacters": "<uint64>"}`; any other field,
+unquoted number or non-object is `422 VALIDATION_FAILED`. Admission refuses a scope outside
+the option's range, or on an option without a context range, as `422
+RECONSTRUCTION_SCOPE_UNAVAILABLE`. A scope is part of the start intent (absent for scope-less
+starts, so earlier receipts keep their digest). The attempt records the exact effective values
+in `configuration.reconstruction`: `profileId`, the profile's `profileSha256` and the
+`maxContextCharacters` the run used (the default when none was requested; null for
+evidence-only). The agent reconstructor runs with that recorded budget.
+
+### Module progress and retained plans
+
+`GET R/reports/module-progress` returns `moduleProgress` for one attempt, read from that
+attempt's own `reconstruction_progress.json`, `reconstruction.json` and source-tree
+`reports/module_plan.json` and `reports/confidence.json` (the last only after generation),
+captured between two reads of the same attempt version (`409 REPORT_CHANGED` otherwise). An
+absent or partially rewritten report is unrecorded, never an outcome. Non-reconstruction
+attempts report `state: "not-applicable"` with no stages.
+
+`stages` always lists `analysis`, `planning`, `generation` (completed/total modules),
+`validation` (the profile build, `build-passed` or `build-failed`) and `publication` (the
+recorded candidate revision or acceptance), each `pending`, `active`, `completed`, `stopped`
+(active when the attempt ended) or `not-reached`. A later stage never completes before an
+earlier one; a candidate retained after an unfinished build is `stopped` with
+`candidate-recorded`. `plan` carries the recorded plan digest and module count;
+`unresolved` lists up to 100 planned modules the generation record reports as unresolved,
+with the total and the archive's unresolved entity count.
+
+`recovery` explains, for a failed, cancelled or interrupted attempt with a recorded plan and
+configuration, how each current reconstruction option relates to it: `compatible` (same
+profile, harness resolution and context budget, so the core generator can verify and reuse
+its module checkpoints), `stale` (`HARNESS_DIFFERS`, `HARNESS_CONFIGURATION_CHANGED` or
+`CONTEXT_DIFFERS`: the plan applies but modules are regenerated), `incompatible`
+(`PROFILE_CHANGED`: a different plan) or `unknown`. `retainedModules` counts modules that
+finished generating before the attempt ended. Otherwise `eligible` is false with
+`ATTEMPT_ACTIVE`, `ATTEMPT_COMPLETED`, `CONFIGURATION_NOT_RECORDED` or `PLAN_NOT_RECORDED`
+and no options. This is an explanation only: it starts nothing, and the core generator
+remains the sole authority over checkpoint reuse. The recovery command itself is the
+separate `POST R/recover` operation.
 
 Runtime information uses allowlisted implementation/version/platform names and effective limit
 values. It excludes absolute installations/worktrees, environment values, credential-bearing
@@ -984,6 +1036,15 @@ actionable requirement for its reason code and links the runtime page; the built
 harness links its owning issues instead. Server message text, configuration values,
 paths and credentials are never interpreted or shown. The summary names the harness
 implementation that will be recorded.
+
+Reconstruction options also show their scope before submission: the profile, that the
+deterministic planner plans the whole program (modules cannot be selected here), the planner
+scale bounds and that large-binary support and harness availability are separate
+dependencies. The agent option offers one per-module context field, prefilled with the
+server default and validated against the reported range; the body carries it as `scope`.
+Every other option submits `scope: null`. Reconstruction attempts show an explicit "Read
+module progress" panel with the stages, recorded plan, unresolved modules and the retained-plan
+explanation; it offers no start or recovery action.
 
 ## SPA recorded source navigation
 

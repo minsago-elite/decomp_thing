@@ -26,6 +26,8 @@ interface DurableWebWorkflowAdapter {
     val launch: DurableWebWorkflowLaunch? get() = null
     /** Read-only acceptance attestation for a completed candidate; never executes work. */
     val publication: DurableWebWorkflowPublication? get() = null
+    /** Reconstruction scope facts, or null for workflows without a reconstruction plan. */
+    val reconstruction: DurableWebReconstructionScope? get() = null
     fun execute(context: DurableWebWorkflowContext): DurableWebWorkflowOutcome
 }
 
@@ -72,6 +74,37 @@ data class DurableWebWorkflowLaunch(
         }
     }
     companion object { val LAUNCH_TOOLS = setOf("sandbox", "ghidra", "agent-harness", "c-toolchain", "angr") }
+}
+
+/**
+ * The scope a reconstruction option runs with. The deterministic planner owns every module boundary and
+ * always plans the whole program; planner bounds are scale limits a binary must fit within, never a
+ * selection. Only an agent option has a per-module context budget, which a start may lower to [minimumContextCharacters].
+ */
+data class DurableWebReconstructionScope(
+    val profileId: String,
+    val profileSha256: String,
+    val maximumFunctionsPerModule: Int,
+    val plannerMaximumEntities: Int,
+    val plannerMaximumDependencyEdges: Long,
+    val plannerMaximumWorkUnits: Long,
+    val defaultContextCharacters: Int?,
+    val minimumContextCharacters: Int?,
+) {
+    init {
+        require((defaultContextCharacters == null) == (minimumContextCharacters == null))
+        require(minimumContextCharacters == null || minimumContextCharacters in 1..defaultContextCharacters!!)
+    }
+
+    /** The exact budget to run with: the default, or a requested lowering within the declared range. */
+    fun effectiveContext(requested: decompengine.jobs.WorkflowReconstructionScope?): Int? {
+        val maximum = defaultContextCharacters ?: return if (requested == null) null else throw WebJobServiceException(
+            "RECONSTRUCTION_SCOPE_UNAVAILABLE", "This option has no adjustable reconstruction scope.")
+        val value = requested?.maxContextCharacters ?: return maximum
+        if (value < checkNotNull(minimumContextCharacters).toULong() || value > maximum.toULong()) throw WebJobServiceException(
+            "RECONSTRUCTION_SCOPE_UNAVAILABLE", "The requested context budget is outside the server-approved range.")
+        return value.toInt()
+    }
 }
 
 /** Trusted, bounded and read-only: verify retained canonical evidence for a completed candidate. */

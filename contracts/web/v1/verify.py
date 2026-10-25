@@ -230,6 +230,29 @@ def check_run(run: dict) -> None:
         raise ValueError("recorded harness provenance and submitted harness disagree")
 
 
+def check_module_progress(data: dict) -> None:
+    """Stages keep their fixed order, never complete out of order and never count past their total."""
+    stages = data["stages"]
+    if stages and [item["stage"] for item in stages] != ["analysis", "planning", "generation", "validation", "publication"]:
+        raise ValueError("module progress stages are out of order")
+    for earlier, later in zip(stages, stages[1:]):
+        if later["state"] == "completed" and earlier["state"] != "completed":
+            raise ValueError("a module progress stage completed before its predecessor")
+    for item in stages:
+        if item["completedUnits"] is not None and item["totalUnits"] is not None and int(item["completedUnits"]) > int(item["totalUnits"]):
+            raise ValueError("module progress counted past its total")
+    if data["currentModuleId"] is not None and data["attemptState"] not in ("running", "cancelling"):
+        raise ValueError("a finished attempt reports a current module")
+    unresolved = data["unresolved"]
+    if unresolved is not None:
+        count = unresolved["moduleCount"]
+        if count is None and unresolved["moduleIds"] or count is not None and (len(unresolved["moduleIds"]) > int(count)
+                or unresolved["truncated"] != (int(count) > len(unresolved["moduleIds"]))):
+            raise ValueError("unresolved module listing disagrees with its count")
+    if data["recovery"] is not None and data["recovery"]["eligible"] and data["attemptState"] not in ("failed", "cancelled", "interrupted"):
+        raise ValueError("only an unsuccessful finished attempt offers a retained plan")
+
+
 def check_source_page(data: dict, version: str) -> None:
     items, page = data["items"], data["page"]
     if page["snapshotVersion"] != version or len(items) > min(page["limit"], data["totalFiles"]):
@@ -376,6 +399,8 @@ def check_semantics(document: dict) -> None:
             raise ValueError("recovery inventory exceeds its bounded inspection")
     elif kind == "run":
         check_run(data)
+    elif kind == "moduleProgress":
+        check_module_progress(data)
     elif kind == "runs":
         items = data["items"]
         if len(items) > data["page"]["limit"] or len({item["runId"] for item in items}) != len(items):

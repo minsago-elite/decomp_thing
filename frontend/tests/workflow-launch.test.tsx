@@ -85,7 +85,7 @@ it('starts from server defaults with one guarded keyed request and opens the rec
   const [kind, path, requestKind, body, settings] = transport.post.mock.calls[0]!;
   expect([kind, path, requestKind]).toEqual(['run', '/jobs/' + job.jobId + '/runs', 'workflowStartRequest']);
   expect(body).toEqual({ workflow: 'reconstruct', inputRevisionId: null, harnessCapabilityId: 'evidence-only',
-    limits: { wallClockMs: '7200000', idleMs: '1200000', maxOutputBytes: '4294967296', maxToolCalls: '0' } });
+    limits: { wallClockMs: '7200000', idleMs: '1200000', maxOutputBytes: '4294967296', maxToolCalls: '0' }, scope: null });
   expect(settings).toMatchObject({ csrfToken: session.csrf(), ifMatch: '"job_version_1"' });
   expect(settings.idempotencyKey).toMatch(/^[A-Za-z0-9_-]{16,128}$/);
   expect(start(/Start Reconstruction/)).toHaveProperty('disabled', true);
@@ -111,7 +111,7 @@ it('validates lowered bounds locally and never submits a raised or inconsistent 
   expect(start()).toHaveProperty('disabled', false);
   fireEvent.click(start());
   expect(transport.post.mock.calls[0]?.[3]).toEqual({ workflow: 'explore', inputRevisionId: null, harnessCapabilityId: null,
-    limits: { wallClockMs: '1000', idleMs: '1000', maxOutputBytes: '1024', maxToolCalls: '0' } });
+    limits: { wallClockMs: '1000', idleMs: '1000', maxOutputBytes: '1024', maxToolCalls: '0' }, scope: null });
 });
 
 it('requires a revision recorded by this job for repair and keeps its fixed limits read-only', async () => {
@@ -247,4 +247,32 @@ it('explains an unavailable configured agent without enabling another harness in
   expect(facts.textContent).toContain('configuration values are never shown here');
   expect(screen.getByLabelText<HTMLInputElement>('Reconstruction: legacy compatibility agent').checked).toBe(false);
   expect(start()).toHaveProperty('disabled', true);
+});
+
+it('shows the whole-plan reconstruction scope and submits only a server-bounded context budget', async () => {
+  transport.post.mockResolvedValue(run({ runId: 'run_scoped', harnessCapabilityId: 'agent-acp' }));
+  mount({ capabilities: harnessBootstrap.capabilities });
+  fireEvent.click(screen.getByLabelText('Reconstruction: configured agent'));
+  const settings = screen.getByRole('group', { name: 'Settings' });
+  expect(settings.textContent).toContain('Reconstruction profile: generated-c-make-v1');
+  expect(settings.textContent).toContain('Modules cannot be selected, excluded or reordered here.');
+  expect(settings.textContent).toContain('at most 250000 entities, 2000000 dependency edges and 50000000 work units, with at most 24 functions per module');
+  expect(settings.textContent).toContain('does not promise that every uploaded binary can be reconstructed');
+  const context = screen.getByLabelText<HTMLInputElement>('Per-module agent context (characters)');
+  expect(context.value).toBe('120000');
+  for (const value of ['4095', '120001', '6e4', '']) {
+    fireEvent.input(context, { target: { value } });
+    expect(context.getAttribute('aria-invalid')).toBe('true');
+    expect(start(/Start Reconstruction/)).toHaveProperty('disabled', true);
+  }
+  fireEvent.input(context, { target: { value: '60000' } });
+  const summary = within(screen.getByRole('region', { name: 'Configuration to submit' }));
+  expect(summary.getByText('Whole deterministic plan; 60000 characters of agent context per module')).toBeTruthy();
+  fireEvent.click(start(/Start Reconstruction/));
+  await waitFor(() => expect(transport.post).toHaveBeenCalledOnce());
+  expect(transport.post.mock.calls[0]?.[3]).toMatchObject({ harnessCapabilityId: 'agent-acp', scope: { maxContextCharacters: '60000' } });
+  // Evidence-only reconstruction plans the same way but has no agent context to narrow.
+  fireEvent.click(screen.getByLabelText('Reconstruction: evidence only'));
+  expect(screen.queryByLabelText('Per-module agent context (characters)')).toBeNull();
+  expect(screen.getByText('Evidence-only reconstruction uses no agent context budget.')).toBeTruthy();
 });

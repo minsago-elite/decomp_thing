@@ -376,6 +376,14 @@ class WebApiControllerTest {
             assertEquals("interrupted", body.getValue("status").jsonPrimitive.content)
             assertEquals("null", body.getValue("acceptedRevisionId").toString())
             assertError(request(server, "/workbench/api/v1/jobs/${otherJob.id}/runs/${run.runId}", headers = mapOf("Cookie" to cookie)), 404, "NOT_FOUND")
+            // An interrupted reconstruction without reports or a recorded configuration explains why nothing can be reused.
+            val modules = assertEnvelope(request(server, "/workbench/api/v1/jobs/${job.id}/runs/${run.runId}/reports/module-progress",
+                headers = mapOf("Cookie" to cookie)), 200, "moduleProgress")
+            assertEquals("not-recorded", modules.getValue("state").jsonPrimitive.content)
+            assertEquals(listOf("analysis", "planning", "generation", "validation", "publication"),
+                modules.getValue("stages").jsonArray.map { it.jsonObject.getValue("stage").jsonPrimitive.content })
+            assertEquals("not-reached", modules.getValue("stages").jsonArray[1].jsonObject.getValue("state").jsonPrimitive.content)
+            assertEquals("CONFIGURATION_NOT_RECORDED", modules.getValue("recovery").jsonObject.getValue("reasonCode").jsonPrimitive.content)
             val history = assertEnvelope(request(server, "/workbench/api/v1/jobs/${job.id}/runs?limit=1", headers = mapOf("Cookie" to cookie)), 200, "runs")
             assertEquals(job.id, history.getValue("jobId").jsonPrimitive.content)
             assertEquals(run.runId, history.getValue("items").jsonArray.single().jsonObject.getValue("runId").jsonPrimitive.content)

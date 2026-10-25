@@ -55,6 +55,7 @@ internal class WebWorkflowStartController(
                     "A runtime prerequisite for this workflow is unavailable. ${failure.message}")
                 "INPUT_REVISION_UNAVAILABLE" -> throw WebAccessDenied(422, failure.code, "The selected input revision is unavailable for this job.")
                 "INPUT_REVISION_REQUIRED" -> throw WebAccessDenied(422, failure.code, "This workflow starts from a revision recorded by this job. Select one before starting.")
+                "RECONSTRUCTION_SCOPE_UNAVAILABLE" -> throw WebAccessDenied(422, failure.code, "The requested reconstruction scope is outside the server-approved range for this option.")
                 "SCHEDULING_FAILED" -> throw WebAccessDenied(503, failure.code, "Scheduling did not finish. Inspect the retained run before retrying.")
                 else -> throw failure
             }
@@ -85,14 +86,21 @@ internal class WebWorkflowStartController(
         val value = try { OracleJson.parse(bytes, StrictJsonLimits(MAX_BODY, MAX_BODY, 4, 32, 128, 2048, 32)) }
         catch (_: Exception) { throw WebAccessDenied(400, "MALFORMED_JSON", "The workflow start must be bounded strict JSON.") }
         val body = value as? JsonObject ?: invalid()
-        if (body.keys != setOf("workflow", "inputRevisionId", "harnessCapabilityId", "limits")) invalid()
+        val declared = setOf("workflow", "inputRevisionId", "harnessCapabilityId", "limits")
+        if (body.keys != declared && body.keys != declared + "scope") invalid()
         val workflow = WorkflowKind.entries.singleOrNull { it.wireName == text(body["workflow"]) } ?: invalid()
         val limits = body["limits"] as? JsonObject ?: invalid()
         if (limits.keys != setOf("wallClockMs", "idleMs", "maxOutputBytes", "maxToolCalls")) invalid()
+        val scope = body["scope"]?.takeUnless { it == JsonNull }?.let { value ->
+            val fields = value as? JsonObject ?: invalid()
+            if (fields.keys != setOf("maxContextCharacters")) invalid()
+            fields["maxContextCharacters"]
+        }
         return try {
             NewWorkflowAttempt(workflow, WorkflowExecutionLimits(number(limits["wallClockMs"]), number(limits["idleMs"]),
                 number(limits["maxOutputBytes"]), number(limits["maxToolCalls"])),
-                nullableId(body["inputRevisionId"]), nullableId(body["harnessCapabilityId"]))
+                nullableId(body["inputRevisionId"]), nullableId(body["harnessCapabilityId"]),
+                scope = scope?.let { decompengine.jobs.WorkflowReconstructionScope(number(it)) })
         } catch (_: IllegalArgumentException) { invalid() }
     }
 

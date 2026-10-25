@@ -2,6 +2,8 @@ package decompengine.web
 
 import decompengine.jobs.WorkflowAttemptConfiguration
 import decompengine.jobs.WorkflowAttemptHarness
+import decompengine.jobs.WorkflowAttemptReconstruction
+import decompengine.jobs.WorkflowReconstructionScope
 import decompengine.jobs.WorkflowKind
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonNull
@@ -51,7 +53,7 @@ internal fun webWorkflowCapabilities(adapters: List<DurableWebWorkflowAdapter>, 
         capability(webWorkflowCapabilityId(adapter), state, reason, message, listOf(adapter.workflow),
             if (launch.contactsAgent) WEB_AGENT_CONTRACT_VERSION else null, adapter.limits,
             launchFacts(adapter.harnessCapabilityId, launch, adapter.input, adapter.limitsAdjustable,
-                launch.harness?.let { harnessFacts(it, prerequisites, operations[it].orEmpty()) }))
+                launch.harness?.let { harnessFacts(it, prerequisites, operations[it].orEmpty()) }, adapter.reconstruction))
     }
     // The built-in harness is shown, never selectable: the same launch shape, an unsupported state and no registration.
     val builtin = described.filter { it.launch?.harness == WebAgentHarness.ACP }.map { adapter ->
@@ -60,7 +62,7 @@ internal fun webWorkflowCapabilities(adapters: List<DurableWebWorkflowAdapter>, 
         capability("workflow-${adapter.workflow.wireName}-agent-${WebAgentHarness.BUILTIN.wireName}", "unsupported", facts.reasonCode,
             facts.message, listOf(adapter.workflow), WEB_AGENT_CONTRACT_VERSION, adapter.limits,
             launchFacts(WebAgentHarness.BUILTIN.capabilityId, launch, adapter.input, adapter.limitsAdjustable,
-                harnessFacts(WebAgentHarness.BUILTIN, prerequisites, emptyList())))
+                harnessFacts(WebAgentHarness.BUILTIN, prerequisites, emptyList()), adapter.reconstruction))
     }
     val missing = WorkflowKind.entries.filter { kind -> described.none { it.workflow == kind } }.map { kind ->
         capability("workflow-${kind.wireName}", "unsupported", "WORKFLOW_NOT_IMPLEMENTED",
@@ -71,7 +73,7 @@ internal fun webWorkflowCapabilities(adapters: List<DurableWebWorkflowAdapter>, 
 }
 
 private fun launchFacts(harnessCapabilityId: String?, launch: DurableWebWorkflowLaunch, input: DurableWebWorkflowInput,
-    limitsAdjustable: Boolean, harness: JsonObject?): JsonObject = buildJsonObject {
+    limitsAdjustable: Boolean, harness: JsonObject?, reconstruction: DurableWebReconstructionScope?): JsonObject = buildJsonObject {
     put("harnessCapabilityId", harnessCapabilityId?.let(::JsonPrimitive) ?: JsonNull)
     put("mode", launch.mode.wireName)
     put("executesBinary", launch.executesBinary)
@@ -80,6 +82,24 @@ private fun launchFacts(harnessCapabilityId: String?, launch: DurableWebWorkflow
     put("input", input.wireName())
     put("limitsAdjustable", limitsAdjustable)
     put("harness", harness ?: JsonNull)
+    put("reconstruction", reconstruction?.let(::reconstructionFacts) ?: JsonNull)
+}
+
+/**
+ * What a reconstruction plans and how far a start may narrow it. Module selection is always the whole
+ * deterministic plan; the planner bounds are the binary sizes it can plan, reported as scale limits.
+ */
+private fun reconstructionFacts(scope: DurableWebReconstructionScope): JsonObject = buildJsonObject {
+    put("profileId", scope.profileId)
+    put("planner", "deterministic")
+    put("moduleSelection", "all-planned")
+    put("maximumFunctionsPerModule", scope.maximumFunctionsPerModule)
+    put("plannerMaximumEntities", scope.plannerMaximumEntities.toString())
+    put("plannerMaximumDependencyEdges", scope.plannerMaximumDependencyEdges.toString())
+    put("plannerMaximumWorkUnits", scope.plannerMaximumWorkUnits.toString())
+    put("contextCharacters", scope.defaultContextCharacters?.let { default -> buildJsonObject {
+        put("default", default.toString()); put("minimum", checkNotNull(scope.minimumContextCharacters).toString())
+    } } ?: JsonNull)
 }
 
 /**
@@ -102,7 +122,11 @@ private fun harnessFacts(harness: WebAgentHarness, prerequisites: WebWorkflowPre
  * The server-validated configuration recorded with a newly admitted attempt. Harness provenance is the
  * admission-time resolution of the option's single harness; a caller can neither supply nor change it.
  */
-internal fun webAttemptConfiguration(adapter: DurableWebWorkflowAdapter, prerequisites: WebWorkflowPrerequisites?): WorkflowAttemptConfiguration? {
+internal fun webAttemptConfiguration(adapter: DurableWebWorkflowAdapter, prerequisites: WebWorkflowPrerequisites?,
+    scope: WorkflowReconstructionScope? = null): WorkflowAttemptConfiguration? {
+    // Validate the requested scope against the option even when it describes no launch facts.
+    val contextBudget = adapter.reconstruction?.effectiveContext(scope) ?: if (scope != null) throw WebJobServiceException(
+        "RECONSTRUCTION_SCOPE_UNAVAILABLE", "This option has no adjustable reconstruction scope.") else null
     val launch = adapter.launch ?: return null
     val harness = launch.harness?.let { selected ->
         val provenance = prerequisites?.harnesses?.get(selected)?.provenance
@@ -110,7 +134,8 @@ internal fun webAttemptConfiguration(adapter: DurableWebWorkflowAdapter, prerequ
             provenance?.protocolVersion, provenance?.sdkVersion, provenance?.configurationSha256, selected.deprecated)
     }
     return WorkflowAttemptConfiguration(webWorkflowCapabilityId(adapter), launch.mode.wireName, launch.executesBinary,
-        launch.contactsAgent, launch.requiredTools, adapter.input.wireName(), adapter.limitsAdjustable, harness)
+        launch.contactsAgent, launch.requiredTools, adapter.input.wireName(), adapter.limitsAdjustable, harness,
+        adapter.reconstruction?.let { WorkflowAttemptReconstruction(it.profileId, it.profileSha256, contextBudget?.toULong()) })
 }
 
 private fun capability(id: String, state: String, reason: String?, message: String, workflows: List<WorkflowKind>,

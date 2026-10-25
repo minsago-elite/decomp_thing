@@ -39,7 +39,8 @@
           ],
           "input": "none",
           "limitsAdjustable": true,
-          "harness": null
+          "harness": null,
+          "reconstruction": null
         }
       },
       {
@@ -78,6 +79,19 @@
               "reconstruct",
               "repair"
             ]
+          },
+          "reconstruction": {
+            "profileId": "generated-c-make-v1",
+            "planner": "deterministic",
+            "moduleSelection": "all-planned",
+            "maximumFunctionsPerModule": 24,
+            "plannerMaximumEntities": "250000",
+            "plannerMaximumDependencyEdges": "2000000",
+            "plannerMaximumWorkUnits": "50000000",
+            "contextCharacters": {
+              "default": "120000",
+              "minimum": "4096"
+            }
           }
         }
       },
@@ -117,6 +131,19 @@
               "reconstruct",
               "repair"
             ]
+          },
+          "reconstruction": {
+            "profileId": "generated-c-make-v1",
+            "planner": "deterministic",
+            "moduleSelection": "all-planned",
+            "maximumFunctionsPerModule": 24,
+            "plannerMaximumEntities": "250000",
+            "plannerMaximumDependencyEdges": "2000000",
+            "plannerMaximumWorkUnits": "50000000",
+            "contextCharacters": {
+              "default": "120000",
+              "minimum": "4096"
+            }
           }
         }
       },
@@ -153,6 +180,19 @@
             "protocolVersion": null,
             "deprecated": false,
             "operations": []
+          },
+          "reconstruction": {
+            "profileId": "generated-c-make-v1",
+            "planner": "deterministic",
+            "moduleSelection": "all-planned",
+            "maximumFunctionsPerModule": 24,
+            "plannerMaximumEntities": "250000",
+            "plannerMaximumDependencyEdges": "2000000",
+            "plannerMaximumWorkUnits": "50000000",
+            "contextCharacters": {
+              "default": "120000",
+              "minimum": "4096"
+            }
           }
         }
       },
@@ -182,7 +222,17 @@
           ],
           "input": "none",
           "limitsAdjustable": true,
-          "harness": null
+          "harness": null,
+          "reconstruction": {
+            "profileId": "generated-c-make-v1",
+            "planner": "deterministic",
+            "moduleSelection": "all-planned",
+            "maximumFunctionsPerModule": 24,
+            "plannerMaximumEntities": "250000",
+            "plannerMaximumDependencyEdges": "2000000",
+            "plannerMaximumWorkUnits": "50000000",
+            "contextCharacters": null
+          }
         }
       },
       {
@@ -221,7 +271,8 @@
               "reconstruct",
               "repair"
             ]
-          }
+          },
+          "reconstruction": null
         }
       },
       {
@@ -260,7 +311,8 @@
               "reconstruct",
               "repair"
             ]
-          }
+          },
+          "reconstruction": null
         }
       },
       {
@@ -296,7 +348,8 @@
             "protocolVersion": null,
             "deprecated": false,
             "operations": []
-          }
+          },
+          "reconstruction": null
         }
       },
       {

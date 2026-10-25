@@ -14,6 +14,7 @@ import { ProgressPin } from '../jobs/ProgressPin';
 import { ExplorationEvidence } from '../jobs/ExplorationEvidence';
 import { RecordedValidationEvidence } from '../jobs/RecordedValidationEvidence';
 import { RecordedConfiguration } from '../jobs/RecordedConfiguration';
+import { ModuleProgress } from '../jobs/ModuleProgress';
 import type { ValidationNavigation } from '../jobs/validationNavigation';
 import { useSession } from '../session/useSession';
 import { canRetainMetadata, metadataFailureKind } from '../shared/retainMetadata';
@@ -100,6 +101,7 @@ function Details({ jobId, runId, basePath, session, view, navigation }: {
         <Activity key={`activity/${jobId}/${runId}`} jobId={jobId} runId={runId} basePath={basePath} {...(view === 'activity' && navigation !== undefined ? { navigation } : {})} />
       </>}
       {view !== 'activity' && <>
+        {run.workflow === 'reconstruct' && <ModuleProgress key={`modules/${jobId}/${runId}`} jobId={jobId} runId={runId} basePath={basePath} />}
         <ExplorationEvidence key={`${jobId}/${runId}`} jobId={jobId} runId={runId} basePath={basePath} />
         <RecordedValidationEvidence key={`${jobId}/${runId}`} jobId={jobId} runId={runId} basePath={basePath} {...(navigation === undefined ? {} : { navigation })} />
       </>}
