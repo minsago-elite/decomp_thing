@@ -281,7 +281,8 @@ class WebReverseProxyProfileTest {
     }
 
     /**
-     * A minimal nginx-like hop. It overwrites Host and all client forwarding headers, connects from the
+     * A minimal authenticating nginx-like hop. It answers 401 itself unless the single operator's basic
+     * credential is present (and strips it), overwrites Host and all client forwarding headers, connects from the
      * trusted source address and, like nginx's default `proxy_buffering on`, holds a response until the
      * upstream finishes unless the upstream sends `X-Accel-Buffering: no` (or [alwaysBuffer] is set).
      */
@@ -289,6 +290,8 @@ class WebReverseProxyProfileTest {
         private val listener = ServerSocket(0, 16, InetAddress.getByName("127.0.0.1"))
         private val sockets = ConcurrentLinkedQueue<Socket>()
         val origin: String get() = "http://127.0.0.1:${listener.localPort}"
+        /** Requests that passed authentication and were forwarded to the JVM. */
+        val forwardedRequests = java.util.concurrent.atomic.AtomicInteger()
 
         init {
             Thread({
@@ -321,7 +324,13 @@ class WebReverseProxyProfileTest {
             val clientIn = BufferedInputStream(client.getInputStream())
             val lines = head(clientIn)?.decodeToString()?.split("\r\n")?.filter(String::isNotEmpty) ?: return
             val headers = lines.drop(1).map { it.substringBefore(':') to it.substringAfter(':').trim() }
-            val hopByHop = setOf("host", "connection", "keep-alive", "upgrade", "http2-settings", "te", "forwarded", "x-real-ip")
+            if (headers.none { it.first.equals("Authorization", true) && it.second == OPERATOR_CREDENTIAL }) {
+                client.getOutputStream().write(("HTTP/1.1 401 Unauthorized\r\nWWW-Authenticate: Basic realm=\"decomp\"\r\n" +
+                    "Content-Length: 0\r\nConnection: close\r\n\r\n").toByteArray())
+                return
+            }
+            forwardedRequests.incrementAndGet()
+            val hopByHop = setOf("authorization", "host", "connection", "keep-alive", "upgrade", "http2-settings", "te", "forwarded", "x-real-ip")
             val kept = headers.filterNot { (name, _) -> name.lowercase() in hopByHop || name.lowercase().startsWith("x-forwarded-") }
             val length = headers.firstOrNull { it.first.equals("Content-Length", true) }?.second?.toLong() ?: 0L
             upstream.bind(InetSocketAddress(TRUSTED_PEER, 0))
@@ -385,10 +394,17 @@ class WebReverseProxyProfileTest {
         val buffering = FakeReverseProxy(server.serverPort, "decomp.example", alwaysBuffer = true)
         try {
             val (session, csrf) = signIn(server)
+            // Denied access: without the operator credential the proxy answers 401 and nothing reaches the JVM.
+            for (path in listOf(BASE, "${BASE}api/v1/bootstrap", "${BASE}jobs/${run.jobId}")) {
+                val denied = http.send(HttpRequest.newBuilder(URI(proxy.origin + path)).header("Cookie", session).build(), HttpResponse.BodyHandlers.ofString())
+                assertEquals(401, denied.statusCode()); assertTrue(denied.headers().firstValue("WWW-Authenticate").isPresent)
+            }
+            assertEquals(0, proxy.forwardedRequests.get())
             fun call(path: String, accept: String = "application/json", via: FakeReverseProxy = proxy, method: String = "GET",
                      headers: Map<String, String> = emptyMap(), body: HttpRequest.BodyPublisher = HttpRequest.BodyPublishers.noBody(),
                      cookie: String = session): HttpResponse<String> {
                 val builder = HttpRequest.newBuilder(URI(via.origin + path)).timeout(Duration.ofSeconds(30)).header("Accept", accept).header("Cookie", cookie)
+                    .header("Authorization", OPERATOR_CREDENTIAL)
                 headers.forEach { (name, value) -> builder.header(name, value) }
                 return http.send(builder.method(method, body).build(), HttpResponse.BodyHandlers.ofString())
             }
@@ -412,7 +428,7 @@ class WebReverseProxyProfileTest {
             fun firstFrame(via: FakeReverseProxy, cookie: String, query: String, within: Long = 5): Pair<HttpResponse<InputStream>, String?> =
                 CompletableFuture.supplyAsync {
                     val response = http.send(HttpRequest.newBuilder(URI("${via.origin}$runPath/events$query")).header("Cookie", cookie)
-                        .header("Accept", "text/event-stream").build(), HttpResponse.BodyHandlers.ofInputStream())
+                        .header("Accept", "text/event-stream").header("Authorization", OPERATOR_CREDENTIAL).build(), HttpResponse.BodyHandlers.ofInputStream())
                     val reader = BufferedReader(InputStreamReader(response.body()))
                     var id: String? = null
                     var line = reader.readLine()
@@ -433,7 +449,7 @@ class WebReverseProxyProfileTest {
             val eventId = assertNotNull(eventIdOrNull, "the proxied stream delivered no event id")
             // Reconnect with Last-Event-ID under the same session through the same proxy.
             val resumed = http.send(HttpRequest.newBuilder(URI("${proxy.origin}$runPath/events")).header("Cookie", session)
-                .header("Accept", "text/event-stream").header("Last-Event-ID", eventId).build(), HttpResponse.BodyHandlers.ofInputStream())
+                .header("Accept", "text/event-stream").header("Last-Event-ID", eventId).header("Authorization", OPERATOR_CREDENTIAL).build(), HttpResponse.BodyHandlers.ofInputStream())
             assertEquals(200, resumed.statusCode())
             assertEquals(": connected", CompletableFuture.supplyAsync { BufferedReader(InputStreamReader(resumed.body())).readLine() }.get(5, TimeUnit.SECONDS))
             resumed.body().close()
@@ -511,5 +527,6 @@ class WebReverseProxyProfileTest {
     private companion object {
         const val TRUSTED_PEER = "127.0.0.2"
         const val BASE = "/decomp/"
+        const val OPERATOR_CREDENTIAL = "Basic b3BlcmF0b3I6c3ludGhldGljLWZpeHR1cmU=" // operator:synthetic-fixture
     }
 }

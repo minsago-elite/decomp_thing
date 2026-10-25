@@ -48,8 +48,10 @@ Origin, and the base path. Browsers send `Origin: https://…` and return `Secur
 HTTPS, so the exact-origin check and the cookie attributes are what bind the session to TLS; the
 forwarded protocol is a consistency check that catches a misconfigured hop.
 
-The reviewed reference fixture is the test-owned nginx-like hop in
-`src/test/kotlin/decompengine/web/WebReverseProxyProfileTest.kt`. The nginx (1.25.1 or later,
+The proposed reference fixture is the test-owned, basic-authenticating nginx-like hop in
+`src/test/kotlin/decompengine/web/WebReverseProxyProfileTest.kt`: it refuses unauthenticated
+requests itself, strips the credential, overwrites forwarding headers and buffers responses
+unless they carry `X-Accel-Buffering: no`. The nginx (1.25.1 or later,
 `auth_basic`) and Caddy (2.8 or later, `basic_auth`) configurations below are maintained examples
 of that topology; this repository has not qualified those products' binaries.
 
