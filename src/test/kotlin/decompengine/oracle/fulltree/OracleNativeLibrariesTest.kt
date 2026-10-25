@@ -132,7 +132,7 @@ class OracleNativeLibrariesTest {
 
     private fun runJava(root: Path, arguments: List<String>): Pair<Int, String> {
         val process = ProcessBuilder(listOf(Path.of(System.getProperty("java.home"), "bin", "java").toString(),
-            "-Duser.home=$root") + arguments).directory(root.toFile()).redirectErrorStream(true).apply {
+            "-XX:-UsePerfData", "-Duser.home=$root") + arguments).directory(root.toFile()).redirectErrorStream(true).apply {
             environment().clear()
             environment()["HOME"] = root.toString()
             environment()["TMPDIR"] = root.resolve("tmp").toString()
@@ -174,6 +174,12 @@ object OracleNativeDescriptorProbe {
     @JvmStatic
     fun main(arguments: Array<String>) {
         check(arguments.size == 3)
+        val root = Path.of(arguments[0]).parent
+        val temporary = root.resolve("tmp").toString()
+        check(System.getProperty("user.home") == root.toString())
+        check(System.getProperty("java.io.tmpdir") == temporary && System.getProperty("jna.tmpdir") == temporary)
+        check(System.getenv() == mapOf("HOME" to root.toString(), "TMPDIR" to temporary))
+        check("-XX:-UsePerfData" in java.lang.management.ManagementFactory.getRuntimeMXBean().inputArguments)
         val bytes = arguments[1].toInt().also { check(it in 1..1024) }
         StableControlFile.open(Path.of(arguments[0]), bytes.toLong(), "native bootstrap request").use { file ->
             check(file.size == bytes.toLong() && file.authenticatedSha256 == arguments[2]) {
