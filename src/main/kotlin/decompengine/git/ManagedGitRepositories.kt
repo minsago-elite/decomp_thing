@@ -32,6 +32,7 @@ enum class GitOperationAction(val wireName: String, val workspace: Boolean = fal
     CLONE("git.clone"), REMOTE_ADD("git.remote.add", true), REMOTE_REMOVE("git.remote.remove", true), FETCH("git.fetch", true),
     MERGE("git.merge", true), MERGE_ABORT("git.merge.abort", true), CONFLICT_SAVE("git.conflict.save", true),
     CONFLICT_COMPLETE("git.conflict.complete", true), PUSH("git.push", true), PUSH_RECONCILE("git.push.reconcile", true),
+    GITHUB_PR_CREATE("github.pr.create", true), GITHUB_PR_RECONCILE("github.pr.reconcile", true),
 }
 
 enum class GitOperationState(val wireName: String, val terminal: Boolean) {
@@ -190,6 +191,9 @@ class ManagedGitRepositories(
     private val activity: GitJobActivity = GitJobActivity { emptyMap() },
     /** Remote transports, destinations and credentials (#585, #586); closed unless configured. */
     val remotePolicy: GitRemotePolicy = GitRemotePolicy(),
+    /** Optional hosting integration (#602, #603); local Git and remotes never depend on it. */
+    val github: GitHubConfiguration? = null,
+    private val githubClient: GitHubClient? = github?.let(::GitHubClient),
 ) : AutoCloseable {
     private val root = storeRoot.toAbsolutePath().normalize()
     private val importRoot: Path? = importRoot?.let { configured ->
@@ -715,6 +719,7 @@ class ManagedGitRepositories(
     private fun allowedLocation(remote: GitRemoteRecord): GitRemoteLocation = GitRemoteUrls.parse(remote.location.display, remotePolicy)
 
     private fun validateSync(runner: GitCommandRunner, located: Located, observation: GitWorkspaceObservation, request: GitSyncRequest) {
+        if (request.action in GitSyncRequest.GITHUB) return validateGitHub(runner, located, observation, request)
         if (request.action !in GitSyncRequest.REMOTE) return validateIntegration(runner, located, observation, request)
         if (!remotePolicy.configured) GitWorkspaceMutations.refuse("REMOTES_UNAVAILABLE", "Remote operations are not configured on this server.")
         val directory = repositoryDirectory(located.record.jobId, located.record.repositoryId)
@@ -880,6 +885,140 @@ class ManagedGitRepositories(
             when (code) { null -> "confirmed"; "PUSH_NOT_PUBLISHED" -> "not_published"; else -> "superseded" }, remote, clock.instant(),
             ref = "refs/heads/${intent.branch}", oldObjectId = intent.expectedObjectId, newObjectId = current, detail = "push ${intent.operationId}"))
         return current to message
+    }
+
+    // ---- Optional GitHub integration (#602, #603) --------------------------------------------
+
+    data class GitHubStatusView(val remote: GitRemoteRecord, val binding: GitHubBinding?, val access: String, val head: String,
+        val pushedObjectId: String?, val pulls: List<GitHubPull>, val problem: GitHubException?, val unconfirmed: List<GitPullIntent>,
+        val base: String? = null, val baseObjectId: String? = null, val range: Pair<List<Pair<String, String>>, Long>? = null)
+
+    /** A pull-request creation intent; retained while its outcome is unconfirmed. */
+    data class GitPullIntent(val operationId: String, val remoteId: String, val head: String, val base: String, val titleSha256: String)
+
+    private fun pullIntents(directory: Path): List<GitPullIntent> {
+        val intents = directory.resolve(PULL_INTENTS)
+        if (!Files.isDirectory(intents, NOFOLLOW_LINKS)) return emptyList()
+        return Files.newDirectoryStream(intents).use { entries ->
+            entries.filter { it.fileName.toString().matches(Regex("operation_[0-9a-f]{32}\\.json")) }.take(64).map { file ->
+                val value = Json.parseToJsonElement(GitStorage.read(file, 4096).toString(Charsets.UTF_8)).jsonObject
+                GitPullIntent(value.text("operationId"), value.text("remoteId"), value.text("head"), value.text("base"), value.text("titleSha256"))
+            }
+        }
+    }
+
+    /**
+     * Pull requests for the work tree's branch on the remote's bound repository (#602). Provider
+     * failures are reported in the view so local work stays usable; nothing implies acceptance.
+     */
+    fun githubStatus(jobId: String, repositoryId: String, worktreeId: String?, remoteId: String, head: String?, base: String? = null): GitHubStatusView {
+        val runner = requireRunner()
+        val located = locate(jobId, repositoryId, worktreeId)
+        val directory = repositoryDirectory(jobId, repositoryId)
+        return refusing {
+            val remote = remoteFor(located, remoteId)
+            val observed = GitRepositoryInspector.head(runner, located.gitDir, located.record.objectFormat)
+            val branch = head ?: observed.refName?.removePrefix("refs/heads/") ?: GitWorkspaceMutations.refuse("DETACHED",
+                "The work tree is not on a branch; name the branch to look up.")
+            val binding = github?.binding(remote)
+            val access = when { github == null -> "unavailable"; binding == null -> "unbound"; github.writable -> "write"; else -> "read-only" }
+            val pushed = GitRefOperations.refObject(runner, located.commonDir, located.record.objectFormat, "${remote.trackingPrefix}$branch")
+            val unconfirmed = pullIntents(directory).filter { it.remoteId == remote.remoteId }
+            // The reviewable commit range of a proposed pull request, from fetched remote-tracking refs (#603).
+            val baseTip = base?.let { GitRefOperations.refObject(runner, located.commonDir, located.record.objectFormat, "${remote.trackingPrefix}$it") }
+            val range = if (pushed != null && baseTip != null) GitPushes.outgoing(runner, located.commonDir, pushed, baseTip, 50) else null
+            val view = GitHubStatusView(remote, binding, access, branch, pushed, emptyList(), null, unconfirmed, base, baseTip, range)
+            if (binding == null || githubClient == null) view
+            else try { view.copy(pulls = githubClient.pulls(binding, branch)) } catch (failure: GitHubException) { view.copy(problem = failure) }
+        }
+    }
+
+    private fun validateGitHub(runner: GitCommandRunner, located: Located, observation: GitWorkspaceObservation, request: GitSyncRequest) {
+        requireRepositoryGuard(located, observation, request.guards)
+        val configuration = github ?: GitWorkspaceMutations.refuse("GITHUB_UNAVAILABLE", "No GitHub integration is configured on this server.")
+        val directory = repositoryDirectory(located.record.jobId, located.record.repositoryId)
+        when (request.action) {
+            GitOperationAction.GITHUB_PR_CREATE -> {
+                val remote = remoteFor(located, request.parameters["remoteId"])
+                configuration.binding(remote) ?: GitWorkspaceMutations.refuse("GITHUB_NOT_BOUND", "This remote is not bound to a GitHub repository.")
+                if (!configuration.writable) GitWorkspaceMutations.refuse("GITHUB_READ_ONLY", "The GitHub integration is read-only: no token is configured on the server.")
+                for (name in listOf("headBranch", "baseBranch")) {
+                    val branch = request.text(name)
+                    try { GitRefNames.requireBranchName(runner, branch) } catch (_: IllegalArgumentException) {
+                        GitWorkspaceMutations.refuse("VALIDATION_FAILED", "The $name is not a valid Git branch name.")
+                    }
+                    GitRefOperations.refObject(runner, located.commonDir, located.record.objectFormat, "${remote.trackingPrefix}$branch")
+                        ?: GitWorkspaceMutations.refuse("BRANCH_NOT_PUBLISHED", "The branch $branch is not on the remote as last fetched. Push or fetch it first.")
+                }
+                if (request.text("headBranch") == request.text("baseBranch")) GitWorkspaceMutations.refuse("VALIDATION_FAILED", "The head and base branches must differ.")
+                if (request.text("title").length !in 1..256) GitWorkspaceMutations.refuse("VALIDATION_FAILED", "A pull request title is 1 to 256 characters.")
+                if ((request.content?.toByteArray()?.size ?: 0) > 64 * 1024) GitWorkspaceMutations.refuse("SIZE_EXCEEDED", "A pull request body is at most 64 KiB.")
+                if (pullIntents(directory).any { it.remoteId == remote.remoteId && it.head == request.text("headBranch") && it.base == request.text("baseBranch") }) {
+                    GitWorkspaceMutations.refuse("PR_UNCONFIRMED", "An earlier pull request creation for these branches is unconfirmed. Reconcile it first.")
+                }
+            }
+            GitOperationAction.GITHUB_PR_RECONCILE -> {
+                val intent = pullIntents(directory).singleOrNull { it.operationId == request.parameters["prOperationId"] }
+                    ?: GitWorkspaceMutations.refuse("NOT_FOUND", "No unconfirmed pull request creation has that operation identity.")
+                remoteFor(located, intent.remoteId)
+            }
+            else -> error("not a GitHub request")
+        }
+    }
+
+    private fun executeGitHub(located: Located, operation: GitOperationRecord, request: GitSyncRequest): Pair<String?, String?> {
+        val directory = repositoryDirectory(operation.jobId, operation.repositoryId)
+        val client = checkNotNull(githubClient)
+        return when (request.action) {
+            GitOperationAction.GITHUB_PR_CREATE -> {
+                val remote = remoteFor(located, request.parameters["remoteId"])
+                val binding = checkNotNull(checkNotNull(github).binding(remote))
+                val head = request.text("headBranch"); val base = request.text("baseBranch"); val title = request.text("title")
+                val intents = GitStorage.directories(directory, PULL_INTENTS)
+                GitStorage.replaceAtomically(intents.resolve("${operation.operationId}.json"), buildJsonObject {
+                    put("operationId", operation.operationId); put("remoteId", remote.remoteId); put("head", head); put("base", base)
+                    put("titleSha256", GitStorage.sha256(title))
+                }.toString().toByteArray())
+                fun audit(outcome: String, detail: String?) = GitRemoteStore.audit(directory, GitRemoteStore.auditEntry("github.pr.create",
+                    operation.operationId, outcome, remote, clock.instant(), ref = "refs/heads/$head", detail = detail))
+                crash(GitOperationCrashPoint.AFTER_STAGING)
+                val pull = try { client.create(binding, head, base, title, request.content ?: "") } catch (failure: GitHubException) {
+                    when (failure.code) {
+                        "GITHUB_UNREACHABLE" -> {
+                            audit("unconfirmed", null)
+                            throw GitOperationRefusal("PR_UNCONFIRMED", "GitHub did not report the outcome. Reconcile before creating it again; nothing is claimed.")
+                        }
+                        "GITHUB_PR_EXISTS" -> client.pulls(binding, head, base).firstOrNull { it.state == "open" && it.baseRef == base }
+                            ?.also { Files.deleteIfExists(intents.resolve("${operation.operationId}.json")); audit("existed", "#${it.number}") }
+                            ?.let { return null to "A pull request already existed for these branches: #${it.number} ${it.url}" }
+                            ?: run { Files.deleteIfExists(intents.resolve("${operation.operationId}.json")); audit("rejected", failure.code.lowercase()); throw failure }
+                        else -> { Files.deleteIfExists(intents.resolve("${operation.operationId}.json")); audit("rejected", failure.code.lowercase()); throw failure }
+                    }
+                }
+                Files.deleteIfExists(intents.resolve("${operation.operationId}.json"))
+                audit("created", "#${pull.number}")
+                null to "Created pull request #${pull.number}: ${pull.url}. Its review or checks are not build or reconstruction acceptance."
+            }
+            GitOperationAction.GITHUB_PR_RECONCILE -> {
+                val intent = pullIntents(directory).single { it.operationId == request.parameters["prOperationId"] }
+                val remote = remoteFor(located, intent.remoteId)
+                val binding = checkNotNull(checkNotNull(github).binding(remote))
+                val found = client.pulls(binding, intent.head, intent.base).firstOrNull { GitStorage.sha256(it.title) == intent.titleSha256 }
+                val (state, code, message) = if (found != null) Triple(GitOperationState.COMPLETED, null,
+                    "Reconciliation found pull request #${found.number}: ${found.url}")
+                    else Triple(GitOperationState.FAILED, "PR_NOT_CREATED", "Reconciliation found no such pull request; it was not created.")
+                synchronized(lock) {
+                    operations(operation.jobId).singleOrNull { it.operationId == intent.operationId && !it.state.equals(GitOperationState.COMPLETED) }
+                        ?.let { persist(root.resolve(operation.jobId).resolve("git"), finish(it, state, code, message)) }
+                }
+                Files.deleteIfExists(directory.resolve(PULL_INTENTS).resolve("${intent.operationId}.json"))
+                GitRemoteStore.audit(directory, GitRemoteStore.auditEntry("github.pr.reconcile", operation.operationId,
+                    if (found != null) "confirmed" else "not_created", remote, clock.instant(), ref = "refs/heads/${intent.head}",
+                    detail = found?.let { "#${it.number}" }))
+                null to message
+            }
+            else -> error("not a GitHub request")
+        }
     }
 
     // ---- Integration and conflicts (#595-#598) ----------------------------------------------
@@ -1113,6 +1252,9 @@ class ManagedGitRepositories(
 
     /** Apply one validated remote intent. Returns the result object and a completion message. */
     private fun executeSync(runner: GitCommandRunner, located: Located, operation: GitOperationRecord, request: GitSyncRequest): Pair<String?, String?> {
+        if (request.action in GitSyncRequest.GITHUB) return try { executeGitHub(located, operation, request) } catch (failure: GitHubException) {
+            throw GitOperationRefusal(failure.code, failure.message ?: "GitHub refused the request.")
+        }
         if (request.action !in GitSyncRequest.REMOTE) return executeIntegration(runner, located, operation, request)
         val directory = repositoryDirectory(operation.jobId, operation.repositoryId)
         return when (request.action) {
@@ -1525,7 +1667,7 @@ class ManagedGitRepositories(
                 val state = when (code) {
                     "INTERRUPTED" -> GitOperationState.INTERRUPTED
                     "CANCELLED" -> GitOperationState.CANCELLED
-                    "PUSH_UNCONFIRMED" -> GitOperationState.RECOVERY_REQUIRED
+                    "PUSH_UNCONFIRMED", "PR_UNCONFIRMED" -> GitOperationState.RECOVERY_REQUIRED
                     else -> GitOperationState.FAILED
                 }
                 current = finish(current, state, code, message.take(500))
@@ -1762,7 +1904,7 @@ class ManagedGitRepositories(
      */
     private fun reconcileSync(jobId: String, operation: GitOperationRecord, request: GitSyncRequest): GitOperationRecord {
         val directory = repositoryDirectory(jobId, operation.repositoryId)
-        if (request.action !in GitSyncRequest.REMOTE) return reconcileIntegration(jobId, operation, request)
+        if (request.action !in GitSyncRequest.REMOTE && request.action !in GitSyncRequest.GITHUB) return reconcileIntegration(jobId, operation, request)
         val remotes = try { GitRemoteStore.list(directory, operation.repositoryId) } catch (_: Exception) { emptyList() }
         return when (request.action) {
             GitOperationAction.FETCH -> {
@@ -1777,6 +1919,12 @@ class ManagedGitRepositories(
                 finish(operation, GitOperationState.RECOVERY_REQUIRED, "PUSH_UNCONFIRMED",
                     "The server restarted while pushing. Reconcile the push against the remote before any retry; publication is not claimed.")
                 else finish(operation, GitOperationState.INTERRUPTED, "INTERRUPTED", "Interrupted by a server restart before anything was pushed.")
+            GitOperationAction.GITHUB_PR_CREATE -> if (pullIntents(directory).any { it.operationId == operation.operationId })
+                finish(operation, GitOperationState.RECOVERY_REQUIRED, "PR_UNCONFIRMED",
+                    "The server restarted while creating the pull request. Reconcile it before creating it again.")
+                else finish(operation, GitOperationState.INTERRUPTED, "INTERRUPTED", "Interrupted by a server restart before GitHub was contacted.")
+            GitOperationAction.GITHUB_PR_RECONCILE -> finish(operation, GitOperationState.INTERRUPTED, "INTERRUPTED",
+                "Interrupted by a server restart; reconcile again.")
             GitOperationAction.PUSH_RECONCILE -> finish(operation, GitOperationState.INTERRUPTED, "INTERRUPTED",
                 "Interrupted by a server restart; the push is still unconfirmed. Reconcile it again.")
             GitOperationAction.REMOTE_REMOVE -> if (remotes.none { it.remoteId == request.parameters["remoteId"] })
@@ -2107,6 +2255,8 @@ class ManagedGitRepositories(
         GitOperationAction.CONFLICT_COMPLETE -> "Staged the reviewed resolutions. Commit explicitly to finish."
         GitOperationAction.PUSH -> "Published the reviewed commit. Publication is not validation or acceptance."
         GitOperationAction.PUSH_RECONCILE -> "Reconciled the unconfirmed push against the remote."
+        GitOperationAction.GITHUB_PR_CREATE -> "Created the pull request. Its review or checks are not acceptance."
+        GitOperationAction.GITHUB_PR_RECONCILE -> "Reconciled the pull request creation."
     }
 
     internal companion object {
@@ -2115,6 +2265,7 @@ class ManagedGitRepositories(
         const val LINKED_WORK_TREES = "worktrees"
         const val WORKTREE_RECORDS = "worktree-records"
         const val FETCH_STATE = "fetch-state"
+        const val PULL_INTENTS = "pull-intents"
         const val RECORD = "repository.json"
         const val MAX_OPERATIONS = 64
         const val MAX_LISTED_OPERATIONS = 20

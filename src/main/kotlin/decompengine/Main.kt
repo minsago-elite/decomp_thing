@@ -892,6 +892,7 @@ private fun runWeb(args: List<String>) {
     val gitRemoteHosts = mutableSetOf<String>()
     var gitRemoteRoot: Path? = null
     var gitCredentials: Path? = null
+    var githubConfig: Path? = null
     var index = 0
     while (index < args.size) {
         require(index + 1 < args.size) { "${args[index]} requires a value; see llm_bin_patch --help" }
@@ -948,6 +949,10 @@ private fun runWeb(args: List<String>) {
                 gitCredentials = Path.of(args[index + 1]).toAbsolutePath()
                 index += 2
             }
+            "--github-config" -> {
+                githubConfig = Path.of(args[index + 1]).toAbsolutePath()
+                index += 2
+            }
             else -> error("unknown web argument: ${args[index]}")
         }
     }
@@ -957,7 +962,8 @@ private fun runWeb(args: List<String>) {
             UploadServer(host, port, dataDir, uiMode = uiMode, basePath = basePath, devFrontendOrigin = devFrontendOrigin,
                 listenBacklog = listenBacklog, startupCancellation = cancellation, gitImportRoot = gitImportRoot,
                 gitRemotePolicy = decompengine.git.GitRemotePolicy(gitRemoteHosts, gitRemoteRoot,
-                    gitCredentials?.let(decompengine.git.GitCredentialStore::load) ?: decompengine.git.GitCredentialStore.EMPTY))
+                    gitCredentials?.let(decompengine.git.GitCredentialStore::load) ?: decompengine.git.GitCredentialStore.EMPTY),
+                github = githubConfig?.let(decompengine.git.GitHubConfiguration::load))
         }
     } catch (_: java.net.BindException) {
         System.err.println("Cannot bind web server to $host:$port. Check --host or choose an unused --port.")
@@ -988,7 +994,7 @@ private fun printHelp() {
           llm_bin_patch gcc-engine-full-export <cc1|driver> <stripped-binary> --profile <file> --ghidra-archive <file> --output <empty-private-directory> --scratch <provisioned-mount>
           llm_bin_patch gcc-engine-native-calls <cc1> <stripped-binary> --profile <file> --ghidra-archive <file> --output <empty-private-directory> --scratch <provisioned-mount>
           llm_bin_patch llvm-native-runtime-measurement [--listener-continuity] <oci-layout> <fixed-client> <empty-config> <private-socket> <fresh-output>
-          llm_bin_patch web [--host 127.0.0.1] [--port 8000] [--listen-backlog 64] [--data-dir .decomp_engine/jobs] [--ui legacy|spa] [--base-path /] [--dev-frontend-origin http://127.0.0.1:5173] [--git-import-root <directory>] [--git-remote-host <host>]... [--git-remote-root <directory>] [--git-credentials <file>]
+          llm_bin_patch web [--host 127.0.0.1] [--port 8000] [--listen-backlog 64] [--data-dir .decomp_engine/jobs] [--ui legacy|spa] [--base-path /] [--dev-frontend-origin http://127.0.0.1:5173] [--git-import-root <directory>] [--git-remote-host <host>]... [--git-remote-root <directory>] [--git-credentials <file>] [--github-config <file>]
 
         Agent harness selection for doctor, patch, reconstruction, and repair:
           --harness acp            use the ACP agent provisioned by ACP_CONFIG_FILE (default)

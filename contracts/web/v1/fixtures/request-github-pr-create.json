@@ -1,0 +1,20 @@
+{
+  "apiVersion": 1,
+  "kind": "gitHubPullCreateRequest",
+  "data": {
+    "action": "github.pr.create",
+    "worktreeId": "worktree_example_2",
+    "guards": {
+      "repositoryVersion": "repository_v_1",
+      "worktreeVersion": "worktree_v_1",
+      "expectedHeadObjectId": "0123456789abcdef0123456789abcdef01234567",
+      "expectedRefId": "ref_main",
+      "expectedRefObjectId": "0123456789abcdef0123456789abcdef01234567"
+    },
+    "remoteId": "remote_example_1",
+    "headBranch": "feature",
+    "baseBranch": "main",
+    "title": "Review the reconstructed module",
+    "body": "Built from a recorded candidate; validation is separate."
+  }
+}

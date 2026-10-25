@@ -218,7 +218,9 @@ internal fun webGitDenied(failure: ManagedGitException): WebAccessDenied {
         "BRANCH_UNMERGED", "BRANCH_CURRENT", "WORKTREE_UNMERGED", "WORKTREE_PRIMARY", "SWITCH_REFUSED", "REF_CONFLICT",
         "REMOTE_EXISTS", "NOT_CANCELLABLE", "MERGE_IN_PROGRESS", "NOTHING_TO_INTEGRATE", "FAST_FORWARD_UNAVAILABLE", "NO_MERGE",
         "CONTENT_CHANGED", "DETACHED", "NO_COMMITS", "MERGE_REFUSED", "ABORT_REFUSED", "PUSH_UNCONFIRMED", "REMOTE_CHANGED", "NON_FAST_FORWARD",
-        "NOTHING_TO_PUSH", "PUSH_REJECTED" -> WebAccessDenied(409, failure.code, message)
+        "NOTHING_TO_PUSH", "PUSH_REJECTED", "GITHUB_NOT_BOUND", "GITHUB_READ_ONLY", "BRANCH_NOT_PUBLISHED", "PR_UNCONFIRMED" ->
+            WebAccessDenied(409, failure.code, message)
+        "GITHUB_UNAVAILABLE" -> WebAccessDenied(503, failure.code, message)
         "STRATEGY_UNSUPPORTED", "UNSUPPORTED_CONFLICT", "UNRESOLVED_MARKERS" -> WebAccessDenied(422, failure.code, message)
         "TRANSPORT_UNSUPPORTED", "CREDENTIAL_IN_URL", "DESTINATION_NOT_ALLOWED" -> WebAccessDenied(422, failure.code, message)
         "REMOTES_UNAVAILABLE", "HOST_KEY_UNVERIFIED", "CREDENTIAL_UNAVAILABLE" -> WebAccessDenied(503, failure.code, message)

@@ -93,6 +93,11 @@ function serve(kind: string, path: string): Promise<unknown> {
       export: { sha256: 'e'.repeat(64), sizeBytes: 512, files: 1, skippedEntries: 0, verification: 'tree-blob-ids-match' } };
     if (route === `${base}/remotes`) return { repositoryId, configured: true, remotes: remoteList };
     if (route === `${base}/conflicts`) return conflictState;
+    if (route === `${base}/github`) return { repositoryId, remoteId: 'remote_1', access: 'write', repository: 'fixture-owner/fixture-repo',
+      headBranch: new URLSearchParams(query).get('branch'), pushedObjectId: head, baseBranch: new URLSearchParams(query).get('base'),
+      baseObjectId: other, commitCount: '1', commits: [{ objectId: head, subject: 'Work in progress' }],
+      pulls: [{ number: 3, state: 'open', title: 'Review the parser', url: 'https://fixture.invalid/fixture-owner/fixture-repo/pull/3',
+        headBranch: 'main', baseBranch: 'release', headObjectId: head, headMatchesPushed: 'matches' }], problem: null, unconfirmedOperationIds: [] };
     if (route === `${base}/push-preview`) return { repositoryId, worktreeId, remoteId: 'remote_1', destination: 'https://git.example.org/team/project.git',
       allowed: true, localRefId: 'ref_main', localRefName: 'refs/heads/main', localObjectId: head,
       remoteBranch: new URLSearchParams(query).get('branch'), expectedRemoteObjectId: older, fetchedAt: '2026-10-25T00:00:00Z', remoteState: 'current',
@@ -399,4 +404,29 @@ it('refuses to offer a non-fast-forward push and asks to reconcile an unconfirme
   await waitFor(() => expect(transport.post).toHaveBeenCalledOnce());
   expect(transport.post.mock.calls[0]?.[3]).toMatchObject({ action: 'git.push.reconcile', pushOperationId: 'operation_9' });
   expect(screen.queryByRole('button', { name: /^Push / })).toBeNull();
+});
+
+it('lists pull requests tied to the pushed commit and creates one only after reviewing its range', async () => {
+  remoteList = [{ ...(remoteList[0] as object), trackingRefs: [{ refId: 'ref_origin_main', name: 'refs/remotes/origin/main', objectId: head },
+    { refId: 'ref_origin_release', name: 'refs/remotes/origin/release', objectId: other }] }];
+  transport.post.mockResolvedValueOnce(operation('completed', 'github.pr.create'));
+  mount([...supported, capability('github', 'supported')]);
+  fireEvent.click(await screen.findByRole('button', { name: 'Check pull requests' }));
+  expect(await screen.findByRole('link', { name: '#3 Review the parser' })).toBeTruthy();
+  expect(screen.getByText(/head matches the last pushed commit/)).toBeTruthy();
+  expect(screen.getByText(/not build validation or reconstruction acceptance/)).toBeTruthy();
+  expect(transport.get).toHaveBeenCalledWith('gitHubStatus', `${base}/github?remote=remote_1&branch=main&base=release`);
+  expect(screen.getByText(/1 commit\(s\) in the range/)).toBeTruthy();
+  fireEvent.input(screen.getByLabelText('Title'), { target: { value: 'Review the parser' } });
+  fireEvent.click(screen.getByRole('button', { name: 'Create pull request' }));
+  await waitFor(() => expect(transport.post).toHaveBeenCalledOnce());
+  expect(transport.post.mock.calls[0]?.slice(2, 4)).toEqual(['gitHubPullCreateRequest', expect.objectContaining({ action: 'github.pr.create',
+    remoteId: 'remote_1', headBranch: 'main', baseBranch: 'release', title: 'Review the parser', body: '' })]);
+});
+
+it('explains an absent GitHub integration without affecting local Git', async () => {
+  mount([...supported, capability('github', 'unavailable', 'No GitHub integration is configured.', 'GITHUB_UNCONFIGURED')]);
+  expect(await screen.findByText(/No GitHub integration is configured/)).toBeTruthy();
+  expect(screen.queryByRole('button', { name: 'Check pull requests' })).toBeNull();
+  expect(screen.getByRole('button', { name: 'Fetch origin' })).toHaveProperty('disabled', false);
 });

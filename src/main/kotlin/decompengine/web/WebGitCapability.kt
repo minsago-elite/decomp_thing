@@ -44,7 +44,16 @@ internal class WebGitCapability(
                 "Remote clone, fetch and push need operator-allowed destinations on the server. Local Git work is unaffected.")
             else -> Triple("supported", null, "Remotes on operator-allowed destinations can be cloned and fetched over HTTPS, SSH or admitted local paths.")
         }
-        return listOf(entry("git", git), entry("git-import", import), entry("git-signing", signing), entry("git-remotes", remotes))
+        // Optional hosting integration (#602): never required by local Git or remotes, off unless configured.
+        val hosting = when {
+            git.first != "supported" -> Triple("unavailable", git.second, git.third)
+            managed?.github == null -> Triple("unavailable", "GITHUB_UNCONFIGURED",
+                "No GitHub integration is configured. Local Git and remotes work without it.")
+            managed.github.writable -> Triple("supported", null, "GitHub pull requests can be listed and created for bound remotes with the server's credential.")
+            else -> Triple("supported", "GITHUB_READ_ONLY", "GitHub pull requests can be listed; creating them needs a server credential.")
+        }
+        return listOf(entry("git", git), entry("git-import", import), entry("git-signing", signing), entry("git-remotes", remotes),
+            entry("github", hosting))
     }
 
     /** The managed registry, or an explicit unavailable refusal for every Git route. */

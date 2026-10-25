@@ -31,6 +31,7 @@ internal class WebGitReads(private val repositories: () -> ManagedGitRepositorie
             "divergence" -> setOf("worktree", "tracking")
             "conflicts" -> setOf("worktree")
             "push-preview" -> setOf("worktree", "remote", "branch")
+            "github" -> setOf("worktree", "remote", "branch", "base")
             "audit" -> setOf("limit")
             "history" -> setOf("worktree", "start", "cursor", "limit")
             else -> setOf("worktree", "scope", "commit", "file", "cursor", "limit")
@@ -52,6 +53,10 @@ internal class WebGitReads(private val repositories: () -> ManagedGitRepositorie
                     query["tracking"]?.takeIf { it.matches(Regex("[A-Za-z0-9][A-Za-z0-9_-]{0,127}")) }
                         ?: throw WebAccessDenied(422, "VALIDATION_FAILED", "tracking must name one remote-tracking ref identity.")))
                 "conflicts" -> sendWebApiResponse(exchange, 200, "gitConflicts", conflicts(jobId, repositoryId, worktree))
+                "github" -> sendWebApiResponse(exchange, 200, "gitHubStatus", github(jobId, repositoryId, worktree,
+                    query["remote"]?.takeIf { it.matches(Regex("remote_[0-9a-f]{32}")) }
+                        ?: throw WebAccessDenied(422, "VALIDATION_FAILED", "remote must name one registered remote identity."),
+                    query["branch"]?.takeIf { it.length in 1..200 }, query["base"]?.takeIf { it.length in 1..200 }))
                 "push-preview" -> sendWebApiResponse(exchange, 200, "gitPushPreview", pushPreview(jobId, repositoryId, worktree,
                     query["remote"]?.takeIf { it.matches(Regex("remote_[0-9a-f]{32}")) }
                         ?: throw WebAccessDenied(422, "VALIDATION_FAILED", "remote must name one registered remote identity."),
@@ -64,6 +69,33 @@ internal class WebGitReads(private val repositories: () -> ManagedGitRepositorie
             }
         } catch (failure: ManagedGitException) {
             throw webGitDenied(failure)
+        }
+    }
+
+    /** `G/github` (#602, #603): pull requests of a bound remote, and a proposed PR's commit range; never acceptance. */
+    private fun github(jobId: String, repositoryId: String, worktree: String?, remote: String, branch: String?, base: String?): JsonObject {
+        val view = repositories().githubStatus(jobId, repositoryId, worktree, remote, branch, base)
+        return buildJsonObject {
+            put("repositoryId", repositoryId); put("remoteId", view.remote.remoteId); put("access", view.access)
+            put("repository", view.binding?.let { JsonPrimitive("${it.owner}/${it.repository}") } ?: JsonNull)
+            put("headBranch", view.head); put("pushedObjectId", view.pushedObjectId?.let(::JsonPrimitive) ?: JsonNull)
+            put("baseBranch", view.base?.let(::JsonPrimitive) ?: JsonNull); put("baseObjectId", view.baseObjectId?.let(::JsonPrimitive) ?: JsonNull)
+            put("commitCount", view.range?.second?.toString()?.let(::JsonPrimitive) ?: JsonNull)
+            put("commits", JsonArray(view.range?.first.orEmpty().map { (objectId, subject) -> buildJsonObject { put("objectId", objectId); put("subject", subject) } }))
+            put("pulls", JsonArray(view.pulls.map { pull ->
+                buildJsonObject {
+                    put("number", pull.number); put("state", pull.state.take(32)); put("title", pull.title); put("url", pull.url)
+                    put("headBranch", pull.headRef); put("baseBranch", pull.baseRef)
+                    put("headObjectId", pull.headSha?.let(::JsonPrimitive) ?: JsonNull)
+                    put("headMatchesPushed", when { pull.headSha == null || view.pushedObjectId == null -> "unknown"
+                        pull.headSha == view.pushedObjectId -> "matches"; else -> "differs" })
+                }
+            }))
+            put("problem", view.problem?.let { problem ->
+                buildJsonObject { put("code", problem.code); put("message", (problem.message ?: "").take(300))
+                    put("retryAfterSeconds", problem.retryAfterSeconds?.let(::JsonPrimitive) ?: JsonNull) }
+            } ?: JsonNull)
+            put("unconfirmedOperationIds", JsonArray(view.unconfirmed.map { JsonPrimitive(it.operationId) }))
         }
     }
 

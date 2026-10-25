@@ -91,6 +91,8 @@ internal class WebGitOperations(private val repositories: () -> ManagedGitReposi
             "git.conflict.complete" -> setOf("action", "worktreeId", "guards", "files")
             "git.push" -> setOf("action", "worktreeId", "guards", "remoteId", "localRefId", "remoteBranch", "localObjectId", "expectedRemoteObjectId")
             "git.push.reconcile" -> setOf("action", "worktreeId", "guards", "pushOperationId")
+            "github.pr.create" -> setOf("action", "worktreeId", "guards", "remoteId", "headBranch", "baseBranch", "title", "body")
+            "github.pr.reconcile" -> setOf("action", "worktreeId", "guards", "prOperationId")
             else -> invalid()
         }
         if (body.keys != expected) invalid()
@@ -125,6 +127,13 @@ internal class WebGitOperations(private val repositories: () -> ManagedGitReposi
                     "remoteBranch" to (text(body["remoteBranch"]).takeIf { it.length in 1..200 } ?: invalid()),
                     "localObjectId" to (objectId(body["localObjectId"]) ?: invalid()), "expectedRemoteObjectId" to objectId(body["expectedRemoteObjectId"]))
                 GitOperationAction.PUSH_RECONCILE -> mapOf("pushOperationId" to id(body["pushOperationId"]))
+                GitOperationAction.GITHUB_PR_CREATE -> {
+                    content = text(body["body"]).takeIf { it.length <= 65536 } ?: invalid()
+                    mapOf("remoteId" to id(body["remoteId"]), "headBranch" to (text(body["headBranch"]).takeIf { it.length in 1..200 } ?: invalid()),
+                        "baseBranch" to (text(body["baseBranch"]).takeIf { it.length in 1..200 } ?: invalid()),
+                        "title" to (text(body["title"]).takeIf { it.length in 1..256 } ?: invalid()))
+                }
+                GitOperationAction.GITHUB_PR_RECONCILE -> mapOf("prOperationId" to id(body["prOperationId"]))
                 GitOperationAction.CONFLICT_SAVE -> {
                     val resolution = text(body["resolution"]).takeIf { it in setOf("ours", "theirs", "base", "text") } ?: invalid()
                     content = body["content"].let { if (it == JsonNull) null else text(it) }

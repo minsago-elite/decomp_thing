@@ -13,9 +13,11 @@ import { StateMark, capabilityTone } from '../shared/StateMark';
 import { GitRemotesPanel } from './GitRemotesPanel';
 import { GitIntegrationPanel } from './GitIntegrationPanel';
 import { GitPushPanel } from './GitPushPanel';
+import { GitHubPanel } from './GitHubPanel';
+import type { PullRequestDraft } from './GitHubPanel';
 import type { IntegrationAction } from './GitIntegrationPanel';
 import type { RemoteAction } from './GitRemotesPanel';
-import { gitIntegrationCopy, gitPushCopy, gitRemotesCopy } from '../copy/git';
+import { gitHubCopy, gitIntegrationCopy, gitPushCopy, gitRemotesCopy } from '../copy/git';
 
 function sleep(milliseconds: number, signal: AbortSignal) {
   return new Promise<void>((resolve, reject) => {
@@ -45,7 +47,7 @@ interface Loaded {
 type Mutation = 'gitStageRequest' | 'gitCommitRequest' | 'gitBranchCreateRequest' | 'gitSwitchRequest' | 'gitBranchDeleteRequest'
   | 'gitTagRequest' | 'gitWorktreeAddRequest' | 'gitWorktreeRemoveRequest' | 'gitRemoteAddRequest' | 'gitRemoteRemoveRequest'
   | 'gitFetchRequest' | 'gitMergeRequest' | 'gitMergeAbortRequest' | 'gitConflictSaveRequest' | 'gitConflictCompleteRequest'
-  | 'gitPushRequest' | 'gitPushReconcileRequest';
+  | 'gitPushRequest' | 'gitPushReconcileRequest' | 'gitHubPullCreateRequest' | 'gitHubPullReconcileRequest';
 
 function short(objectId: string | null): string { return objectId ? objectId.slice(0, 12) : ''; }
 const HEADS = 'refs/heads/';
@@ -69,6 +71,7 @@ export function GitWorkspace({ jobId, basePath, session, capabilities, pollInter
   const git = capabilities.find(item => item.id === 'git');
   const importing = capabilities.find(item => item.id === 'git-import');
   const remoting = capabilities.find(item => item.id === 'git-remotes');
+  const hosting = capabilities.find(item => item.id === 'github');
   const [running, setRunning] = useState<Operation | null>(null);
   const supported = git?.state === 'supported';
   const [loaded, setLoaded] = useState<Loaded | null>(null);
@@ -234,6 +237,24 @@ export function GitWorkspace({ jobId, basePath, session, capabilities, pollInter
     return act('gitPushRequest', textMessage(gitPushCopy.push, { count: preview.commitCount, branch: preview.remoteBranch }), guarded => ({
       action: 'git.push', worktreeId: preview.worktreeId, guards: guarded, remoteId: preview.remoteId, localRefId: preview.localRefId,
       remoteBranch: preview.remoteBranch, localObjectId: preview.localObjectId, expectedRemoteObjectId: preview.expectedRemoteObjectId }));
+  }
+
+  async function readGitHub(remoteId: string, head: string, baseBranch: string | null) {
+    if (!base) return null;
+    try {
+      return (await client.get('gitHubStatus', `${base}/github?remote=${remoteId}&branch=${encodeURIComponent(head)}` +
+        `${baseBranch ? `&base=${encodeURIComponent(baseBranch)}` : ''}${query ? `&${query}` : ''}`)).data;
+    } catch (failure: unknown) { setStatus(withApiFailureReference(copy.readFailed, failure)); return null; }
+  }
+
+  function createPull(draft: PullRequestDraft) {
+    return act('gitHubPullCreateRequest', gitHubCopy.create, guarded => ({ action: 'github.pr.create', worktreeId: statusData?.worktreeId ?? '',
+      guards: guarded, ...draft }));
+  }
+
+  function reconcilePull(prOperationId: string) {
+    return act('gitHubPullReconcileRequest', gitHubCopy.reconcile, guarded => ({ action: 'github.pr.reconcile',
+      worktreeId: statusData?.worktreeId ?? '', guards: guarded, prOperationId }));
   }
 
   function reconcilePush(pushOperationId: string) {
@@ -454,6 +475,8 @@ export function GitWorkspace({ jobId, basePath, session, capabilities, pollInter
         readDivergence={readDivergence} readConflict={readConflict} onAction={integrationAction} />
       <GitPushPanel remotes={loaded.remotes} branch={statusData.headState === 'attached' ? statusData.headRefName : null} writable={writable}
         readPreview={readPushPreview} onPush={push} onReconcile={reconcilePush} />
+      <GitHubPanel capability={hosting} remotes={loaded.remotes} branch={statusData.headState === 'attached' ? statusData.headRefName : null}
+        writable={writable} readStatus={readGitHub} onCreate={createPull} onReconcile={reconcilePull} />
       <GitRemotesPanel capability={remoting} remotes={loaded.remotes} audit={loaded.audit} writable={writable} running={running}
         onAction={remoteAction} onCancel={operation => { void cancelTransfer(operation); }} />
       <section aria-labelledby="git-branches-title">
