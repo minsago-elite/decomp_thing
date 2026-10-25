@@ -688,7 +688,9 @@ def _limit_setter(limits: Mapping[str, int], address_space: int, tasks: int, *, 
         resource.setrlimit(resource.RLIMIT_CPU, (limits["cpuSeconds"], limits["cpuSeconds"]))
         resource.setrlimit(resource.RLIMIT_AS, (address_space, address_space))
         resource.setrlimit(resource.RLIMIT_NOFILE, (limits["openFiles"], limits["openFiles"]))
-        size = limits["artifactBytes"] if artifacts else limits["streamBytes"]
+        # stdout/stderr are files too: the shared kernel ceiling must admit both
+        # declared kinds. Collection independently enforces each narrower limit.
+        size = max(limits["artifactBytes"], limits["streamBytes"]) if artifacts else limits["streamBytes"]
         resource.setrlimit(resource.RLIMIT_FSIZE, (size, size))
         resource.setrlimit(resource.RLIMIT_CORE, (0, 0))
         # bubblewrap's user namespace inherits this as its ceiling, and every ancestor namespace is

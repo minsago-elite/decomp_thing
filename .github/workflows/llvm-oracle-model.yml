@@ -224,7 +224,9 @@ jobs:
             tests.oracle.test_behavior_corpus_bwrap \
             tests.oracle.test_behavior_corpus_bwrap_loader \
             tests.oracle.test_behavior_storage_lease \
-            tests.oracle.test_behavior_corpus_bwrap_seccomp -v
+            tests.oracle.test_behavior_corpus_bwrap_seccomp \
+            tests.oracle.test_behavior_corpus_bwrap_limits \
+            tests.oracle.test_behavior_snapshot_collection -v
       - uses: actions/upload-artifact@v7
         if: always()
         with:
@@ -848,7 +850,9 @@ jobs:
             tests.oracle.test_behavior_corpus_bwrap \
             tests.oracle.test_behavior_corpus_bwrap_loader \
             tests.oracle.test_behavior_storage_lease \
-            tests.oracle.test_behavior_corpus_bwrap_seccomp -v
+            tests.oracle.test_behavior_corpus_bwrap_seccomp \
+            tests.oracle.test_behavior_corpus_bwrap_limits \
+            tests.oracle.test_behavior_snapshot_collection -v
       - name: Run the supplemental bubblewrap behavior corpus through the generic backend
         env:
           HOME: ${{ github.workspace }}/build/issue97-bwrap/home
