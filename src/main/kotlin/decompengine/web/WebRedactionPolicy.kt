@@ -137,7 +137,7 @@ internal class WebRedactionPolicy private constructor(
                 "github_pat_[A-Za-z0-9_]{20,}|xox[abprs]-[A-Za-z0-9-]{10,}|AKIA[0-9A-Z]{16}|AIza[0-9A-Za-z_-]{35})") to false,
         )
         // A path starts the value, follows a separator or follows a URL scheme ("file:///home/...");
-        // a relative path such as "src/home/main.c" is public. Path text ends at whitespace or punctuation.
+        // a relative path such as "pkg/home/notes.txt" is public. Path text ends at whitespace or punctuation.
         private const val PATH_START = "(?:(?<=:/{2})|(?<![A-Za-z0-9_.~/\\\\-]))"
         private const val PATH_END = "(?=[/\\\\]|$|[^A-Za-z0-9_.~-])"
         private const val PATH_TAIL = "[^\\s\"'<>;:,)\\]}]*"
