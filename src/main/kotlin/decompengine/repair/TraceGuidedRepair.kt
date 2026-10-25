@@ -177,14 +177,7 @@ class HttpOpenAiCompatibleRepairClient(
     private val reasoningEffort = reasoningEffort?.trim()?.takeIf { it.isNotEmpty() }
 
     init {
-        require(apiKey.isNotBlank()) { "API_KEY must not be blank" }
-        require(model.isNotBlank()) { "MODEL must not be blank" }
-        require(baseUrl.scheme in setOf("http", "https") && !baseUrl.host.isNullOrBlank()) {
-            "BASE_URL must be an absolute HTTP(S) URL"
-        }
-        require(this.reasoningEffort == null || this.reasoningEffort in SUPPORTED_REASONING_EFFORTS) {
-            "REASONING_EFFORT must be one of ${SUPPORTED_REASONING_EFFORTS.joinToString(", ")}"
-        }
+        validateConfiguration(apiKey, model, baseUrl, this.reasoningEffort)
     }
 
     override fun requestRepair(request: RepairRequest): RepairResponse = requestRepair(
@@ -482,6 +475,27 @@ class HttpOpenAiCompatibleRepairClient(
     }
 
     companion object {
+        /** The same argument validation as construction, without allocating an HTTP client. */
+        internal fun validateEnvironment(environment: Map<String, String>) {
+            validateConfiguration(
+                apiKey = environment["API_KEY"].orEmpty(),
+                model = environment["MODEL"].orEmpty(),
+                baseUrl = URI.create(environment["BASE_URL"].orEmpty()),
+                reasoningEffort = environment["REASONING_EFFORT"]?.trim()?.takeIf { it.isNotEmpty() },
+            )
+        }
+
+        private fun validateConfiguration(apiKey: String, model: String, baseUrl: URI, reasoningEffort: String?) {
+            require(apiKey.isNotBlank()) { "API_KEY must not be blank" }
+            require(model.isNotBlank()) { "MODEL must not be blank" }
+            require(baseUrl.scheme in setOf("http", "https") && !baseUrl.host.isNullOrBlank()) {
+                "BASE_URL must be an absolute HTTP(S) URL"
+            }
+            require(reasoningEffort == null || reasoningEffort in SUPPORTED_REASONING_EFFORTS) {
+                "REASONING_EFFORT must be one of ${SUPPORTED_REASONING_EFFORTS.joinToString(", ")}"
+            }
+        }
+
         fun fromEnvironment(environment: Map<String, String> = System.getenv()): HttpOpenAiCompatibleRepairClient =
             HttpOpenAiCompatibleRepairClient(
                 apiKey = environment["API_KEY"].orEmpty(),

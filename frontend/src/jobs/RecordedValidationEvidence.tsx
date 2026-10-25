@@ -9,7 +9,7 @@ import { compareValidationSnapshots, validationComparisonSnapshot } from './reco
 import type { ValidationComparisonSnapshot } from './recordedValidationComparison';
 import { validationLocation, validationLocationOwner, validationObservationLocation, validationRouteLocation, validationRouteSearch, validationSearch } from './validationNavigation';
 import type { ValidationLocation, ValidationNavigation } from './validationNavigation';
-import { captureReceiptTime } from '../shared/receiptTime';
+import { acceptReceipt, receiptOf } from '../shared/receiptTime';
 import type { ReceiptTime } from '../shared/receiptTime';
 import { MetadataReceipt } from '../shared/MetadataReceipt';
 
@@ -38,10 +38,6 @@ export function RecordedValidationEvidence({ jobId, runId, basePath, navigation 
   const [stored, setStored] = useState<View | null>(null);
   type Baseline = { binding: typeof binding; snapshot: ValidationComparisonSnapshot; history: ValidationHistory; owner: ValidationOwner; page: number;
     receipt: ReceiptTime | undefined };
-  // Local receipt coordinates follow the accepted response object, so reselecting retained
-  // history or a pinned baseline keeps its original receipt instead of minting a new one.
-  const receipts = useRef(new WeakMap<object, ReceiptTime>());
-  function accepted<T extends object>(data: T): T { receipts.current.set(data, captureReceiptTime()); return data; }
   const [savedBaseline, setSavedBaseline] = useState<Baseline | null>(null);
   const baseline = savedBaseline?.binding === binding ? savedBaseline : null;
   const view = stored?.binding === binding && (!navigation || stored.locationKey === requested.key) ? stored : null;
@@ -105,7 +101,7 @@ export function RecordedValidationEvidence({ jobId, runId, basePath, navigation 
       if (data.binding.jobId !== jobId || data.binding.runId !== runId || data.binding.revisionId !== null ||
         data.authority !== 'recorded-metadata' || (page !== undefined && (data.page !== page || data.graphSha256 !== graph)))
         throw new Error('validation history binding');
-    return accepted(data);
+    return acceptReceipt(data);
   }
   async function loadReport(controller: AbortController, history: ValidationHistory, owner: ValidationOwner, page: number, reportId?: string) {
     const failureOwner = owner.ownerKind === 'run-failure';
@@ -127,7 +123,7 @@ export function RecordedValidationEvidence({ jobId, runId, basePath, navigation 
         (cases && (cases.graphSha256 !== history.graphSha256 || cases.ownerKind !== owner.ownerKind || cases.ownerId !== owner.ownerId ||
           cases.sourceSha256 !== owner.sourceSha256 || cases.corpusSha256 !== owner.corpusSha256 ||
           cases.normalOutcome !== owner.normalOutcome || cases.page !== page))) throw new Error('validation receipt binding');
-    return accepted(data);
+    return acceptReceipt(data);
   }
   async function readHistory(page?: number, graph?: string) {
     if (!atRequestedLocation()) return;
@@ -195,7 +191,7 @@ export function RecordedValidationEvidence({ jobId, runId, basePath, navigation 
         const baselineReport = same && report ? report : await loadReport(controller, baselineHistory, baselineOwner, selected.casePage, selected.reportId);
         const snapshot = validationComparisonSnapshot(baselineReport, { jobId, runId, graphSha256: location.graphSha256, owner: baselineOwner });
         if (!snapshot) throw new Error('saved baseline unavailable');
-        saved = { binding, snapshot, history: baselineHistory, owner: baselineOwner, page: selected.casePage, receipt: receipts.current.get(baselineReport) };
+        saved = { binding, snapshot, history: baselineHistory, owner: baselineOwner, page: selected.casePage, receipt: receiptOf(baselineReport) };
       }
       if (location.comparisonPage > 1) {
         const snapshot = owner && report ? validationComparisonSnapshot(report, { jobId, runId, graphSha256: location.graphSha256, owner }) : null;
@@ -225,7 +221,7 @@ export function RecordedValidationEvidence({ jobId, runId, basePath, navigation 
     {loading && <p role="status">{copy.loading}</p>}
     {view?.error && <p role="alert">{view.error}</p>}
     {history && <>
-      <MetadataReceipt kind="validationHistory" receipt={receipts.current.get(history)} />
+      <MetadataReceipt kind="validationHistory" receipt={receiptOf(history)} />
       <p>{copy.historyState}: {history.state}</p>
       <ul aria-label={copy.limitations}>{history.limitations.map((text, index) => <li key={index}>{text}</li>)}</ul>
       {history.state === 'recorded' && <>
@@ -253,7 +249,7 @@ export function RecordedValidationEvidence({ jobId, runId, basePath, navigation 
       </>}
     </>}
     {report && <>
-      <MetadataReceipt kind="validationReport" receipt={receipts.current.get(report)} />
+      <MetadataReceipt kind="validationReport" receipt={receiptOf(report)} />
       <p>{copy.reportState}: {report.state}</p>
       <p>{copy.acceptance}</p>
       {report.state === 'available' && (cases || failure) && <>
@@ -282,7 +278,7 @@ export function RecordedValidationEvidence({ jobId, runId, basePath, navigation 
           <h3 id="validation-comparison-title">{copy.comparisonTitle}</h3><p>{copy.comparisonScope}</p>
           {comparisonSnapshot ? <button type="button" disabled={loading} onClick={() => {
             if (history && selected) {
-              const saved = { binding, snapshot: comparisonSnapshot, history, owner: selected, page: cases.page, receipt: receipts.current.get(report) };
+              const saved = { binding, snapshot: comparisonSnapshot, history, owner: selected, page: cases.page, receipt: receiptOf(report) };
               const locationKey = publish(history, selected, report, saved);
               if (locationKey === null) return;
               setSavedBaseline(saved); setComparisonPage(1);
@@ -314,7 +310,7 @@ export function RecordedValidationEvidence({ jobId, runId, basePath, navigation 
               }} onSwap={() => {
                 if (!atRequestedLocation()) return;
                 if (history && selected) {
-                  const saved = { binding, snapshot: comparisonSnapshot, history, owner: selected, page: cases.page, receipt: receipts.current.get(report) };
+                  const saved = { binding, snapshot: comparisonSnapshot, history, owner: selected, page: cases.page, receipt: receiptOf(report) };
                   setSavedBaseline(saved); setComparisonPage(1);
                   void readCases(baseline.history, baseline.owner, baseline.page, baseline.snapshot.reportId, saved);
                 }
