@@ -8,6 +8,7 @@ import { jobCopy } from '../copy/job';
 import { usePrivateTransport } from '../session/PrivateTransport';
 import type { BrowserSession, RuntimeSnapshot } from '../session/session';
 import { message, textMessage } from '../shared/messages';
+import { launchStartable } from './capabilityFacts';
 
 type LaunchOption = Capability & { launch: Launch; limits: ExecutionLimits };
 type LimitKey = keyof ExecutionLimits;
@@ -129,7 +130,7 @@ export function WorkflowLaunch({ job, runtime, basePath, session, onRefresh, onS
   const { client } = usePrivateTransport(basePath);
   const options = useMemo(() => launchOptions(runtime), [runtime]);
   const [selectedId, setSelectedId] = useState<string | null>(null);
-  const selected = options.find(option => option.id === selectedId && option.state === 'supported') ?? null;
+  const selected = options.find(option => option.id === selectedId && launchStartable(option)) ?? null;
   const [limits, setLimits] = useState<Record<LimitKey, string> | null>(null);
   const [inputRevisionId, setInputRevisionId] = useState<string>('');
   const [pending, setPending] = useState(false);
@@ -200,13 +201,14 @@ export function WorkflowLaunch({ job, runtime, basePath, session, onRefresh, onS
         <legend>{copy.workflowOption}</legend>
         {options.map(option => {
           const id = `launch-${option.id}`;
-          const ready = option.state === 'supported';
+          const ready = launchStartable(option);
           return <div class="launch-option" key={option.id}>
             <input type="radio" name="workflow-option" id={id} value={option.id} disabled={!ready}
               checked={selected?.id === option.id} aria-describedby={`${id}-facts`} onChange={() => { choose(option); }} />
             <label for={id}>{textMessage(copy.optionLabel, { workflow: workflowLabels[option.workflows[0]!], mode: modeLabels[option.launch.mode] })}</label>
             <div id={`${id}-facts`} class="launch-facts">
               <p>{message(copy.optionState, { state: <code>{option.state}</code> })}</p>
+              {ready && option.state !== 'supported' && <p>{copy.checkedAtStart}</p>}
               {!ready && <p>{option.message ? textMessage(copy.optionUnavailable, { reason: option.message }) : copy.optionUnavailableWithoutReason}
                 {option.reasonCode && <> <code>{option.reasonCode}</code></>}</p>}
               <OptionFacts option={option} />

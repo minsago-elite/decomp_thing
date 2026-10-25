@@ -934,8 +934,10 @@ introduced by those controls.
 The job overview renders a start form from the last authenticated bootstrap. It lists
 only capabilities with `launch` facts and exactly one workflow; every option shows its
 reported state and reason, whether it runs the uploaded binary or contacts the configured
-agent (with its contract version), and the tools it requires. Options that are not
-`supported` stay visible but cannot be selected, and nothing is preselected: a harness or
+agent (with its contract version), and the tools it requires. An `unknown` option whose
+reason is `SANDBOX_HELPER_UNCHECKED` can be chosen, with a note that the server checks the
+helpers when the start is submitted; no preflight is asked for. Every other option that is
+not `supported` stays visible but cannot be selected, and nothing is preselected: a harness or
 evidence-only reconstruction is always an explicit choice, and evidence-only shows its
 limitations. Settings start from the server-approved defaults. Adjustable limits accept
 whole decimal values no larger than each default (positive for time and output, and an

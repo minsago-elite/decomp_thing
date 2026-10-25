@@ -11,6 +11,7 @@ export const launchCopy = {
   "modeEvidenceOnly": "evidence only",
   "optionState": "Reported state: {state}",
   "optionUnavailable": "This option cannot be selected: {reason}",
+  "checkedAtStart": "The server checks the sandbox helpers when you start this option. If they are unavailable, nothing starts and the reason is shown here.",
   "optionUnavailableWithoutReason": "This option cannot be selected because the server did not report it as supported.",
   "executesBinary": "Runs the uploaded binary inside the sandbox.",
   "doesNotExecuteBinary": "Does not run the uploaded binary.",

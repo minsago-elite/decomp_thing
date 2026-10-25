@@ -213,6 +213,22 @@ it('refuses a response for another job instead of opening it', async () => {
   expect(onStarted).not.toHaveBeenCalled();
 });
 
+it('lets an option whose sandbox check runs at start be chosen, but no other unknown option', () => {
+  transport.post.mockResolvedValue(run({ runId: 'run_explore', workflow: 'explore' }));
+  const unchecked = launchBootstrap.capabilities.map(capability => capability.id === 'workflow-explore-tools'
+    ? { ...capability, state: 'unknown' as const, reasonCode: 'SANDBOX_HELPER_UNCHECKED', message: 'Sandbox helpers are checked when this workflow starts.' }
+    : capability.id === 'workflow-reconstruct-evidence-only'
+      ? { ...capability, state: 'unknown' as const, reasonCode: 'PROBE_TIMEOUT', message: 'Readiness timed out.' } : capability);
+  mount({ capabilities: unchecked });
+  const explore = screen.getByLabelText<HTMLInputElement>('Exploration: local tools');
+  expect(explore.disabled).toBe(false);
+  expect(document.getElementById(explore.getAttribute('aria-describedby')!)!.textContent).toContain('checks the sandbox helpers when you start');
+  expect(screen.getByLabelText<HTMLInputElement>('Reconstruction: evidence only').disabled).toBe(true);
+  expect(document.body.textContent).not.toMatch(/preflight|inspect the agent/i);
+  fireEvent.click(explore); fireEvent.click(start());
+  expect(transport.post).toHaveBeenCalledOnce();
+});
+
 it('offers no start controls when the server describes no launch option', () => {
   mount({ capabilities: launchBootstrap.capabilities.map(capability => ({ ...capability, launch: null })) });
   expect(screen.queryByRole('radio')).toBeNull();
