@@ -16,6 +16,7 @@
     "docs/evidence",
     "oracle",
     "src/main/kotlin/decompengine/oracle",
+    "src/main/resources/oracle-reference-profiles/gcc-metadata-v1.json",
     "src/test/kotlin/decompengine/oracle",
     "tests/oracle",
     ".github/workflows/gcc-oracle-model.yml",

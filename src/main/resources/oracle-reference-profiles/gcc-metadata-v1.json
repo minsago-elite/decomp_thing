@@ -1,0 +1,74 @@
+{
+  "artifacts": [
+    {
+      "binding": "driver",
+      "buildBinding": "driver-build",
+      "encoding": "raw",
+      "manifestBinding": "driver-manifest",
+      "role": "driver",
+      "variant": "stripped"
+    },
+    {
+      "binding": "frontend",
+      "buildBinding": "frontend-build",
+      "encoding": "xz",
+      "manifestBinding": "frontend-manifest",
+      "role": "frontend",
+      "variant": "stripped"
+    }
+  ],
+  "bindings": [
+    {
+      "bytes": 14773,
+      "id": "profile",
+      "path": "metadata-reference-profile-v1.json",
+      "sha256": "49c15a75ddcf88d57d5c2d0de103be91b8c95c5f701c9d4b3d18118113a78d7b"
+    },
+    {
+      "bytes": 3953,
+      "id": "source-lock",
+      "path": "source-lock.json",
+      "sha256": "e2930ecc9748b40e56d6fe09dbe88f21f735953d4e6da50403f2cc0aa5b650cc"
+    },
+    {
+      "bytes": 60269,
+      "id": "driver-manifest",
+      "path": "oracle-manifest.json",
+      "sha256": "c9e21c5a6422c65572ee4c4de5578107b82ae92b6730536c4fc76490fe2ecad9"
+    },
+    {
+      "bytes": 60519,
+      "id": "frontend-manifest",
+      "path": "cc1-oracle-manifest.json",
+      "sha256": "dbef520c025d268f5126229ace8ad5b08a15722573d45b5e1ab934611905abb4"
+    },
+    {
+      "bytes": 3910,
+      "id": "driver-build",
+      "path": "build-record.json",
+      "sha256": "f91a68ffde054b9598cba8506bbf6b3b373b35b8680fddb54f76bffa9db23637"
+    },
+    {
+      "bytes": 3972,
+      "id": "frontend-build",
+      "path": "cc1-build-record.json",
+      "sha256": "f6b2711d4f82562195acebe7250d7dc62eb9425af4f736736e0ea69b65103e8e"
+    },
+    {
+      "bytes": 2349296,
+      "id": "driver",
+      "path": "artifacts/gcc-driver.stripped",
+      "sha256": "3c0cfef73a02b06b40456e89d9d9e33727144c2f473b8b7256b361a7699d48a4"
+    },
+    {
+      "bytes": 10936732,
+      "id": "frontend",
+      "path": "artifacts/gcc-cc1.stripped.xz",
+      "sha256": "bb522fda64760e6be7890954f40cb032422c1dc02299aa212899a8810f39bcd1"
+    }
+  ],
+  "id": "gcc-metadata-v1",
+  "profileBinding": "profile",
+  "schemaVersion": 1,
+  "sourceLockBinding": "source-lock"
+}
