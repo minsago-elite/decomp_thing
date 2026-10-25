@@ -306,6 +306,11 @@ def check_source_chunk(data: dict) -> None:
             raise ValueError("UTF-8 source end line is inconsistent")
 
 
+def check_job_label(label) -> None:
+    if isinstance(label, str) and (label.strip() != label or any(ord(c) < 32 or ord(c) == 127 or ord(c) in (0x2028, 0x2029) for c in label)):
+        raise ValueError("a job label must be printable and unpadded")
+
+
 def check_semantics(document: dict) -> None:
     """Check relationships JSON Schema cannot express with portable draft-07."""
     kind = document["kind"]
@@ -365,6 +370,15 @@ def check_semantics(document: dict) -> None:
                 raise ValueError("invalid recorded source path component")
         if (data["parentDirectoryId"] == "root") != ("/" not in path):
             raise ValueError("recorded source parent is inconsistent")
+    elif kind == "jobDeletionPreview":
+        if data["deletable"] != (len(data["protections"]) == 0):
+            raise ValueError("a deletion preview is deletable exactly when no protection applies")
+        check_job_label(data["label"])
+    elif kind == "storageSummary":
+        if data["complete"] and data["uninspectedEntries"] != "0":
+            raise ValueError("a complete storage summary cannot have uninspected entries")
+    elif kind in ("job", "jobOrganizationRequest"):
+        check_job_label(data.get("label"))
     elif kind == "recovery":
         candidates = data["retainedUploadStages"] + data["retainedMetadataFiles"]
         if candidates > 128 or candidates > data["scannedEntries"] or int(data["observedBytes"]) > 67108864:
