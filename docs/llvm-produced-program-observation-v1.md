@@ -228,3 +228,37 @@ read-only with no `/dev`. Separate lease controls prove shared capacity, inode a
 namespace isolation. Nested-user-namespace and anonymous-storage controls reject attempts to bypass the mount quota. The
 hosted `produced-program-bwrap-observation` dispatch job runs these live controls, the corpus live and its offline
 replay. The authority limits of the standalone profile apply unchanged.
+
+### Checked generic report and source provenance
+
+The checked capture is [Actions run 40207148298](https://github.com/minsago-elite/decomp_thing/actions/runs/40207148298)
+at source `41b56dcbb4f1cd44eb0baddb8c5e78426f42ede3`. Its 99 generic backend controls passed with no skips,
+then the actual locked Clang corpus passed both compile/execute repetitions and offline replay. Artifact
+`12604064847` has archive SHA-256 `b9a59e9953df0816ffc5653134194251e7b460e808c6c5af00f6de81ad403e9c`;
+the unchanged 31,523-byte generic report has SHA-256
+`04a5af238dc0f2a89aac0b573e6786188c28d30ae3e5c9a494e884f076ff0a22`.
+
+The checked supplemental report is `oracle/llvm/22.1.6/behavior-corpus-bwrap-v1-evidence.json`.
+Its neighboring `behavior-corpus-bwrap-v1-provenance.json` identifies the successful workflow dispatch,
+source commit, downloaded artifact ID and archive SHA-256, exact report bytes, corpus bytes, and hashes of
+the runtime modules and direct inputs used by that capture. The downloaded report is retained unchanged;
+the provenance record does not synthesize observations or replace the report's runtime/profile bindings.
+
+The ordinary LLVM lane unconditionally verifies the corpus/report pair and runs
+`tests.oracle.test_behavior_corpus_bwrap_evidence` to compare the captured runtime-source hashes with the
+checked source. A runtime change therefore requires fresh capture evidence. Evidence, documentation, or
+test-only commits may retain the capture commit when all bound runtime bytes remain identical. The capture
+generation job runs the generic controls without this checked-source test, allowing it to produce replacement
+evidence after source changes; the ordinary lane then admits the replacement with its new source binding.
+
+```sh
+python3 -B -m oracle.llvm.behavior_corpus_bwrap --verify-pair \
+  oracle/llvm/22.1.6/behavior-corpus-bwrap-v1.json \
+  oracle/llvm/22.1.6/behavior-corpus-bwrap-v1-evidence.json
+python3 -B -m unittest tests.oracle.test_behavior_corpus_bwrap_evidence
+```
+
+These offline checks validate the relationships among checked bytes. They do not independently attest that
+execution occurred; the linked successful Actions run and digest-verified artifact provide the retained capture
+record. The supplemental report remains a Python compatibility reference observation, with no candidate,
+Kotlin runtime, effectiveness, or release authority.

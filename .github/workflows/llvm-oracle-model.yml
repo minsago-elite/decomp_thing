@@ -213,6 +213,11 @@ jobs:
           python3 scripts/check-behavior-corpus-evidence.py \
             --corpus oracle/llvm/22.1.6/behavior-corpus.json \
             --evidence oracle/llvm/22.1.6/behavior-corpus-evidence.json
+      - name: Verify checked supplemental produced-program corpus evidence
+        run: |
+          python3 -B -m oracle.llvm.behavior_corpus_bwrap --verify-pair \
+            oracle/llvm/22.1.6/behavior-corpus-bwrap-v1.json \
+            oracle/llvm/22.1.6/behavior-corpus-bwrap-v1-evidence.json
       - name: Run non-authoritative Python compatibility regressions
         run: |
           python3 -m unittest \
@@ -222,6 +227,7 @@ jobs:
             tests.oracle.test_function_recovery_oracle_generation \
             tests.oracle.test_behavior_corpus \
             tests.oracle.test_behavior_corpus_bwrap \
+            tests.oracle.test_behavior_corpus_bwrap_evidence \
             tests.oracle.test_behavior_corpus_bwrap_normalization \
             tests.oracle.test_behavior_corpus_bwrap_loader \
             tests.oracle.test_behavior_storage_lease \
