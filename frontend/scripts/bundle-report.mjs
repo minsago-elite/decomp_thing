@@ -151,19 +151,25 @@ const remoteLoads = [
 // protocol-relative URL literal must name a reviewed inert host: XML namespaces, the
 // non-resolvable .invalid parsing base (RFC 6761) and one documentation link inside a
 // bundled router error message. Anything else fails, whatever code would use it.
-const urlLiteral = /(?:https?:)?\/\/([A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)+)(\/[^\s"'`)<>]*)?/gi;
+const urlLiteral = /(?:https?:)?\/\/[^\s"'`)<>\\]+/gi;
 const inertUrls = [
-  host => host === 'www.w3.org',
-  host => host.endsWith('.invalid'),
-  (host, path) => host === 'github.com' && path === '/preactjs/preact-iso#locationprovider',
+  url => url.hostname === 'www.w3.org',
+  url => url.hostname.endsWith('.invalid'),
+  url => url.hostname === 'github.com' && `${url.pathname}${url.hash}` === '/preactjs/preact-iso#locationprovider',
 ];
+
+/** Parse the literal as the browser would, so userinfo or an allowed prefix cannot hide the real host. */
+function inertUrl(literal) {
+  let url;
+  try { url = new URL(literal.startsWith('//') ? `https:${literal}` : literal); } catch { return true; }
+  return url.username === '' && url.password === '' && url.port === '' && inertUrls.some(inert => inert(url));
+}
 
 /** Shipped HTML, scripts and styles never fetch from a CDN or any other remote origin. */
 export function assertNoRemoteLoads(source, name) {
   for (const pattern of remoteLoads) assert.ok(!pattern.test(source), `Production asset loads a remote resource: ${name}`);
-  for (const [, host, path = ''] of source.matchAll(urlLiteral)) {
-    assert.ok(inertUrls.some(inert => inert(host.toLowerCase(), path)),
-      `Production asset loads a remote resource: ${name} names unreviewed host ${host}`);
+  for (const [literal] of source.matchAll(urlLiteral)) {
+    assert.ok(inertUrl(literal), `Production asset loads a remote resource: ${name} names unreviewed URL ${literal.slice(0, 80)}`);
   }
 }
 

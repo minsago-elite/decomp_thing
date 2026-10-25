@@ -267,7 +267,7 @@ test('shipped assets reject remote resource loads but keep inert namespace strin
   }
   for (const remote of ['@import url("https://fonts.example.test/a.css");', 'main { background: url(//cdn.example.test/a.png) }',
     'import("https://cdn.example.test/lib.js")', 'import x from "https://cdn.example.test/x.js"', 'import "https://cdn.example.test/side-effect.js";', "import'//cdn.example.test/a.js'", 'new Worker("https://cdn.example.test/w.js")',
-    'importScripts("//cdn.example.test/w.js")', 'const s=document.createElement("script");s.src="https://cdn.example.test/h.js";', 'h("img",{src:"//images.example.test/a.png"})', 'fetch(`https://api.example.test/x`)', '<script src="https://cdn.example.test/a.js"></script>', '<link rel="stylesheet" href="//cdn.example.test/a.css">']) {
+    'importScripts("//cdn.example.test/w.js")', 'const s=document.createElement("script");s.src="https://cdn.example.test/h.js";', 'h("img",{src:"//images.example.test/a.png"})', 'fetch(`https://api.example.test/x`)', 'fetch("https://www.w3.org@cdn.example.test/h.js")', 'fetch("//source.invalid@cdn.example.test/h.js")', 'fetch("https://www.w3.org:8443/x")', 'fetch("https://WWW.W3.ORG.cdn.example.test/x")', '<script src="https://cdn.example.test/a.js"></script>', '<link rel="stylesheet" href="//cdn.example.test/a.css">']) {
     assert.throws(() => assertNoRemoteLoads(remote, 'fixture'), /loads a remote resource/, remote);
   }
 });
