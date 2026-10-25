@@ -6,6 +6,10 @@ import type { ProgressPin as Policy } from '../api/generated';
 import type { BrowserSession } from '../session/session';
 import { useBrowserAvailability } from '../session/useBrowserAvailability';
 
+import { receive } from '../shared/receiptTime';
+import type { Received } from '../shared/receiptTime';
+import { MetadataReceipt } from '../shared/MetadataReceipt';
+
 /** Pin policy is separate from workflow state and activity delivery. */
 export function ProgressPin({ jobId, runId, basePath, session }: {
   jobId: string; runId: string; basePath: string; session: Pick<BrowserSession, 'csrf'>;
@@ -13,7 +17,8 @@ export function ProgressPin({ jobId, runId, basePath, session }: {
   const { client } = usePrivateTransport(basePath);
   const availability = useBrowserAvailability();
   const active = useRef<AbortController | null>(null);
-  const [policy, setPolicy] = useState<Policy | null>(null);
+  const [observation, setPolicy] = useState<Received<Policy> | null>(null);
+  const policy = observation?.value;
   const [busy, setBusy] = useState(false);
   const [message, setMessage] = useState<string>(copy.readTheCurrentPolicyBeforeChangingIt);
   const available = availability.online && availability.visible;
@@ -43,7 +48,7 @@ export function ProgressPin({ jobId, runId, basePath, session }: {
       // A replay can carry an older result. Only a fresh GET becomes the next editable policy.
       const result = await client.get('progressPin', path, { signal: controller.signal });
       if (controller.signal.aborted) return;
-      setPolicy(verify(result.data)); setMessage(copy.currentPolicyVerifiedAnotherTabMayChangeItConflictingChanges);
+      setPolicy(receive(verify(result.data))); setMessage(copy.currentPolicyVerifiedAnotherTabMayChangeItConflictingChanges);
     } catch (failure: unknown) {
       if (controller.signal.aborted) return;
       setPolicy(null);
@@ -61,6 +66,7 @@ export function ProgressPin({ jobId, runId, basePath, session }: {
   }
   return <section aria-label={copy.progressRetention}>
     <h2>{copy.progressRetention}</h2>
+    {policy && <MetadataReceipt kind="pin" receipt={observation?.receipt} />}
     <p>{copy.aPinProtectsThisAttemptSStoredProgressHistoryIt}</p>
     <p role="status">{!available ? copy.pinControlsArePausedWhileThisTabIsHiddenOr : message}</p>
     {available && policy && <p>{policy.pinned ? copy.progressHistoryIsPinned : copy.progressHistoryIsNotPinned}</p>}
