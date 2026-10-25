@@ -235,3 +235,9 @@ it('offers no start controls when the server describes no launch option', () => 
   expect(screen.queryByRole('button')).toBeNull();
   expect(screen.getByText(/reported no workflow option that can be started/)).toBeTruthy();
 });
+
+it('treats an older producer that omits launch facts like one that reports none', () => {
+  mount({ capabilities: launchBootstrap.capabilities.map(capability => { const legacy: Capability = { ...capability }; delete legacy.launch; return legacy; }) });
+  expect(screen.queryByRole('radio')).toBeNull();
+  expect(screen.queryByRole('button')).toBeNull();
+});

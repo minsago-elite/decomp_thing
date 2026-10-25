@@ -29,7 +29,7 @@ const decimal = /^(?:0|[1-9][0-9]{0,19})$/;
 /** Only server-described options with exactly one workflow and explicit default limits can be offered. */
 export function launchOptions(runtime: RuntimeSnapshot): LaunchOption[] {
   return runtime.capabilities
-    .filter((capability): capability is LaunchOption => capability.launch !== null && capability.limits !== null
+    .filter((capability): capability is LaunchOption => capability.launch != null && capability.limits !== null
       && capability.workflows.length === 1)
     .sort((left, right) => order.indexOf(left.workflows[0]!) - order.indexOf(right.workflows[0]!));
 }

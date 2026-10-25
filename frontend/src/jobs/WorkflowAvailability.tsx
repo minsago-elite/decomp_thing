@@ -55,7 +55,7 @@ export function WorkflowAvailability({ runtime, receipt }: { runtime: RuntimeSna
     <ul class="availability-list" aria-label={copy.workflowAvailability}>
       {workflows.map(workflow => {
         const capabilities = runtime.capabilities.filter(capability => capability.workflows.includes(workflow));
-        const launchable = capabilities.filter(capability => capability.launch !== null);
+        const launchable = capabilities.filter(capability => capability.launch != null);
         return <li key={workflow}>
           <h4>{labels[workflow]}</h4>
           <div>
