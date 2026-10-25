@@ -203,7 +203,7 @@ data class GitInvocation(
     companion object {
         val SUBCOMMANDS = setOf(
             "version", "init", "config", "check-ref-format", "rev-parse", "symbolic-ref", "for-each-ref",
-            "status", "read-tree", "fsck", "cat-file", "ls-files", "check-ignore", "update-ref",
+            "status", "read-tree", "fsck", "cat-file", "ls-files", "ls-tree", "check-ignore", "update-ref",
         )
     }
 }

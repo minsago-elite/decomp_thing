@@ -101,6 +101,11 @@ internal object GitSourceCopy {
         "The selected source snapshot is unavailable or changed while it was copied.")
 }
 
+/** Bounds on the work tree an imported HEAD would expand to. */
+data class GitCheckoutLimits(val maxFiles: Int = 20_000, val maxBytes: Long = 512L * 1024 * 1024) {
+    init { require(maxFiles in 1..100_000 && maxBytes in 1..4L * 1024 * 1024 * 1024) }
+}
+
 /** Layout of a repository found under the operator-admitted import root. */
 internal data class ImportedRepositoryLayout(val gitDir: Path, val bare: Boolean, val objectFormat: GitObjectFormat)
 
@@ -238,7 +243,10 @@ internal object GitRepositoryImport {
                     val objectId = format.objectIdOrNull(line.substringBefore(' '))
                     val name = line.substringAfter(' ', "")
                     if (objectId == null || !GitRefNames.isObservedRefName(name)) corrupt("The packed references are malformed.")
-                    keepPeel = (name.startsWith("refs/heads/") || name.startsWith("refs/tags/")) && validRefName(name)
+                    // Other namespaces (remotes, notes, replace, stash) are intentionally not imported;
+                    // a branch or tag that cannot be imported fails instead of silently disappearing.
+                    keepPeel = name.startsWith("refs/heads/") || name.startsWith("refs/tags/")
+                    if (keepPeel && !validRefName(name)) unsupported("A repository reference has an unsupported name.")
                     if (keepPeel) output.append(line).append('\n')
                 }
             }
@@ -246,8 +254,14 @@ internal object GitRepositoryImport {
         return output.toString().toByteArray(Charsets.UTF_8)
     }
 
-    private fun validRefName(name: String): Boolean = GitRefNames.isObservedRefName(name) &&
-        name.split('/').drop(2).let { segments -> segments.isNotEmpty() && segments.all { GitRefNames.isPlausibleBranchName(it) } }
+    /**
+     * Local equivalent of `git check-ref-format <refname>` for a complete stored name, so a valid
+     * ref such as `refs/tags/HEAD` is kept. Branch-name rules apply to request input, not here.
+     */
+    internal fun validRefName(name: String): Boolean = GitRefNames.isObservedRefName(name) && name.count { it == '/' } >= 2 &&
+        name.none { it in "~^:?*[\\" } && !name.contains("@{") && !name.contains("//") &&
+        !name.endsWith("/") && !name.endsWith(".") &&
+        name.split('/').all { it.isNotEmpty() && !it.startsWith(".") && !it.endsWith(".lock") }
 
     private fun validRefContent(content: String, format: GitObjectFormat): Boolean {
         val value = content.removeSuffix("\n")
@@ -255,10 +269,13 @@ internal object GitRepositoryImport {
         return format.objectIdOrNull(value) != null || (value.startsWith("ref: refs/") && validRefName(value.removePrefix("ref: ")))
     }
 
-    /** Connectivity of everything reachable from the copied refs, without contacting anything. */
+    /**
+     * Full object verification: every object is re-hashed against its ID and everything reachable
+     * from the copied refs must be present. `--connectivity-only` would not detect altered blobs.
+     */
     fun verify(runner: GitCommandRunner, managedGitDir: Path) {
         try {
-            runner.run(GitInvocation("fsck", listOf("--connectivity-only", "--no-dangling", "--no-progress"), gitDir = managedGitDir,
+            runner.run(GitInvocation("fsck", listOf("--full", "--no-dangling", "--no-progress"), gitDir = managedGitDir,
                 limits = GitExecutionLimits(Duration.ofMinutes(2), 1024 * 1024, 64 * 1024)))
         } catch (failure: GitCommandException) {
             if (failure.kind == GitCommandException.Kind.FAILED) corrupt("The repository is missing objects or contains invalid objects.")
@@ -266,6 +283,34 @@ internal object GitRepositoryImport {
         }
     }
 
+    /** Sum the recursive tree's entries and declared blob sizes; refuse before any byte is checked out. */
+    fun requireCheckoutBounds(runner: GitCommandRunner, gitDir: Path, objectId: String, limits: GitCheckoutLimits) {
+        val listing = try {
+            runner.run(GitInvocation("ls-tree", listOf("-r", "-l", "-z", "--full-tree", objectId), gitDir = gitDir,
+                limits = GitExecutionLimits(Duration.ofMinutes(2), 32 * 1024 * 1024, 64 * 1024)))
+        } catch (failure: GitCommandException) {
+            when (failure.kind) {
+                GitCommandException.Kind.OUTPUT_LIMIT -> tooLarge()
+                GitCommandException.Kind.FAILED -> corrupt("The repository's HEAD tree could not be read.")
+                else -> throw GitOperationFailure("REPOSITORY_UNAVAILABLE", "The repository could not be checked within its bounds.")
+            }
+        }
+        var files = 0
+        var bytes = 0L
+        for (entry in listing.text.split('\u0000')) {
+            if (entry.isEmpty()) continue
+            val fields = entry.substringBefore('\t').split(' ').filter { it.isNotEmpty() }
+            if (fields.size != 4 || '\t' !in entry) corrupt("The repository's HEAD tree could not be read.")
+            if (++files > limits.maxFiles) tooLarge()
+            if (fields[1] == "blob") {
+                val size = fields[3].toLongOrNull()?.takeIf { it >= 0 } ?: corrupt("The repository's HEAD tree could not be read.")
+                if (size > limits.maxBytes - bytes) tooLarge()
+                bytes += size
+            }
+        }
+    }
+
+    private fun tooLarge(): Nothing = unsupported("The repository's checked-out tree exceeds the import size limits.")
     private fun unsupported(message: String): Nothing = throw GitOperationFailure("REPOSITORY_UNSUPPORTED", message)
     private fun corrupt(message: String): Nothing = throw GitOperationFailure("REPOSITORY_CORRUPT", message)
 }

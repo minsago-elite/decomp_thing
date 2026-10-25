@@ -118,7 +118,7 @@ internal class WebGitController(
         if (length != null && length.toLong() > MAX_BODY) tooLarge()
         val bytes = exchange.requestBody.use { it.readNBytes(MAX_BODY + 1) }
         if (bytes.size > MAX_BODY) tooLarge()
-        val value = try { OracleJson.parse(bytes, StrictJsonLimits(MAX_BODY, MAX_BODY, 2, 8, 64, 512, 16)) }
+        val value = try { OracleJson.parse(bytes, StrictJsonLimits(MAX_BODY, MAX_BODY, 2, 8, MAX_STRING_BYTES, MAX_BODY, 16)) }
             catch (_: Exception) { throw WebAccessDenied(400, "MALFORMED_JSON", "The repository request must be bounded strict JSON.") }
         val body = value as? JsonObject ?: invalid()
         return when (text(body["action"])) {
@@ -143,6 +143,8 @@ internal class WebGitController(
 
     private companion object {
         const val MAX_BODY = 2048
+        // Room for the largest declared field: a 200-character branch name of 4-byte UTF-8 characters.
+        const val MAX_STRING_BYTES = 800
         val JOB = Regex("[0-9a-f]{32}")
         val ID = Regex("[A-Za-z0-9][A-Za-z0-9_-]{0,127}")
         val SOURCE_NAME = Regex("[A-Za-z0-9][A-Za-z0-9._-]{0,127}")

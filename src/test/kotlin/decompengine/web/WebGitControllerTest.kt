@@ -173,6 +173,10 @@ class WebGitControllerTest {
             error(f.send("POST", invalid, f.headers()), 422, "VALIDATION_FAILED")
         }
         error(f.send("POST", f.init("a..b"), f.headers()), 422, "VALIDATION_FAILED")
+        // Strings up to their declared bounds reach field validation instead of failing JSON limits.
+        error(f.send("POST", f.init("功".repeat(201)), f.headers()), 422, "VALIDATION_FAILED")
+        error(f.send("POST", "{\"action\":\"git.attach\",\"sourceName\":\"${"a".repeat(129)}\"}", f.headers()), 422, "VALIDATION_FAILED")
+        error(f.send("POST", "{\"action\":\"git.attach\",\"sourceName\":\"${"a".repeat(128)}\"}", f.headers()), 503, "CAPABILITY_UNAVAILABLE")
         error(f.send("POST", body.replace("revision_one", "revision_other"), f.headers()), 422, "SOURCE_REVISION_UNAVAILABLE")
         error(f.send("POST", "{\"action\":\"git.attach\",\"sourceName\":\"anything\"}", f.headers()), 503, "CAPABILITY_UNAVAILABLE")
         error(f.send("PUT", body, f.headers()), 405)

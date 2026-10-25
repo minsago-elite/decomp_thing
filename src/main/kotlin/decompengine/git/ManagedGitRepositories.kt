@@ -136,6 +136,7 @@ class ManagedGitRepositories(
     private val policy: GitRepositoryPolicy = GitRepositoryPolicy(),
     private val clock: Clock = Clock.systemUTC(),
     private val crash: (GitOperationCrashPoint) -> Unit = {},
+    private val importLimits: GitCheckoutLimits = GitCheckoutLimits(),
 ) : AutoCloseable {
     private val root = storeRoot.toAbsolutePath().normalize()
     private val importRoot: Path? = importRoot?.let { configured ->
@@ -388,6 +389,9 @@ class ManagedGitRepositories(
             throw GitOperationFailure(failure.code, failure.message ?: "")
         }
         head.objectId?.let { objectId ->
+            // Object-store limits do not bound expansion (one compressed blob may be referenced by many
+            // paths), so the tree's declared sizes are checked before anything is written.
+            GitRepositoryImport.requireCheckoutBounds(runner, gitDir, objectId, importLimits)
             runner.run(GitInvocation("read-tree", listOf("--reset", "-u", objectId), gitDir = gitDir, workTree = workTree,
                 limits = GitExecutionLimits(java.time.Duration.ofMinutes(2), 1024 * 1024, 64 * 1024)))
         }

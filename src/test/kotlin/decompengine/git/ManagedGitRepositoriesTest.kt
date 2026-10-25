@@ -52,10 +52,10 @@ class ManagedGitRepositoriesTest {
         }
 
         fun open(policy: GitRepositoryPolicy = GitRepositoryPolicy(defaultBranch = "trunk"),
-            availability: GitAvailability = GitRuntime.detect()): ManagedGitRepositories =
+            availability: GitAvailability = GitRuntime.detect(), limits: GitCheckoutLimits = GitCheckoutLimits()): ManagedGitRepositories =
             ManagedGitRepositories(store, availability, resolver, importRoot, policy, crash = { point ->
                 if (point in crashes) throw SimulatedGitCrash()
-            }).also(opened::add)
+            }, importLimits = limits).also(opened::add)
 
         fun tree(root: Path): Map<String, List<Byte>> = Files.walk(root).use { paths ->
             paths.filter { Files.isRegularFile(it, NOFOLLOW_LINKS) }.toList()
@@ -279,6 +279,65 @@ class ManagedGitRepositoriesTest {
             assertFalse(gitDir.resolve("modules").exists())
             assertEquals(GitTrackingPolicy.excludeFile(), Files.readString(gitDir.resolve("info/exclude")))
             assertFalse(marker.exists())
+        }
+    }
+
+    @Test fun `import keeps every valid tag, refuses unimportable refs, altered objects and oversized checkouts`() {
+        val (f, importRoot) = importFixture()
+        f.use {
+            val g = f.repositories
+            fun repository(name: String, files: Map<String, ByteArray>): Path {
+                val source = Files.createDirectories(importRoot.resolve(name))
+                g.git("init", "-q", "--initial-branch=main", source.toString())
+                files.forEach { (path, bytes) -> Files.write(source.resolve(path), bytes) }
+                g.git("add", "-A", cwd = source); g.git("commit", "-q", "-m", name, cwd = source)
+                return source
+            }
+            fun attempt(name: String, limits: GitCheckoutLimits = GitCheckoutLimits()): Pair<GitOperationRecord, ManagedGitRepositories> {
+                val service = f.open(limits = limits)
+                return service.settle(service.request(jobId, GitRepositoryRequest.Attach(name), "import_${name}_key_00001")) to service
+            }
+            fun clear(service: ManagedGitRepositories) { service.close(); f.store.resolve(jobId).resolve("git").toFile().deleteRecursively() }
+
+            // A packed tag named HEAD is a valid full ref name and must survive import.
+            val tagged = repository("tagged", mapOf("a.c" to "int a;\n".toByteArray()))
+            g.git("update-ref", "refs/tags/HEAD", g.git("rev-parse", "HEAD", cwd = tagged).trim(), cwd = tagged)
+            g.git("tag", "v1.0", cwd = tagged)
+            g.git("pack-refs", "--all", cwd = tagged)
+            val (imported, service) = attempt("tagged")
+            assertEquals(GitOperationState.COMPLETED, imported.state, imported.message)
+            assertEquals(setOf("refs/heads/main", "refs/tags/HEAD", "refs/tags/v1.0"),
+                service.workspace(jobId, imported.repositoryId).observation.refs.map { it.name }.toSet())
+            clear(service)
+
+            // An unimportable branch or tag fails explicitly instead of silently disappearing.
+            val locked = repository("locked", mapOf("a.c" to "int a;\n".toByteArray()))
+            val head = g.git("rev-parse", "HEAD", cwd = locked).trim()
+            Files.writeString(locked.resolve(".git/packed-refs"), "# pack-refs with: peeled fully-peeled sorted \n$head refs/tags/x.lock\n")
+            val (refused, refusedService) = attempt("locked")
+            assertEquals(GitOperationState.FAILED, refused.state); assertEquals("REPOSITORY_UNSUPPORTED", refused.failureCode)
+            clear(refusedService)
+
+            // A loose blob replaced by validly compressed, same-length different content is corrupt.
+            val altered = repository("altered", mapOf("a.c" to "abcd\n".toByteArray()))
+            val blob = g.git("rev-parse", "HEAD:a.c", cwd = altered).trim()
+            val loose = altered.resolve(".git/objects/${blob.take(2)}/${blob.drop(2)}")
+            Files.delete(loose)
+            java.util.zip.DeflaterOutputStream(Files.newOutputStream(loose)).use { it.write("blob 5\u0000wxyz\n".toByteArray()) }
+            val (corrupt, corruptService) = attempt("altered")
+            assertEquals(GitOperationState.FAILED, corrupt.state); assertEquals("REPOSITORY_CORRUPT", corrupt.failureCode)
+            assertTrue(corruptService.listing(jobId).repositories.isEmpty())
+            clear(corruptService)
+
+            // Forty paths sharing one compressible blob expand far beyond the object store's size.
+            val zeros = ByteArray(64 * 1024)
+            repository("expanding", (1..40).associate { "copy$it.bin" to zeros })
+            val (expanded, expandedService) = attempt("expanding", GitCheckoutLimits(maxBytes = 1024 * 1024))
+            assertEquals(GitOperationState.FAILED, expanded.state); assertEquals("REPOSITORY_UNSUPPORTED", expanded.failureCode)
+            assertFalse(f.store.resolve(jobId).resolve("git/staging/${expanded.operationId}").exists())
+            val (fewer, fewerService) = attempt("expanding".also { clear(expandedService) }, GitCheckoutLimits(maxFiles = 10))
+            assertEquals("REPOSITORY_UNSUPPORTED", fewer.failureCode)
+            clear(fewerService)
         }
     }
 

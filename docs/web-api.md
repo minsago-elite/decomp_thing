@@ -668,10 +668,14 @@ and `HEAD`/`objects`/`refs` at the top level is a bare one. A `.git` file or lin
 `worktreeConfig`, `noop` and `preciousObjects` (for example reftable or partial clone) gives
 `REPOSITORY_UNSUPPORTED`. The repository configuration is read only with `git config --file …
 --no-includes`. A fresh managed repository then receives the object store (without
-`objects/info`), the branch and tag refs (loose and packed) and HEAD. Configuration, hooks, `info/`,
-the index, reflogs, remotes, worktrees, submodule repositories and uncommitted working-tree changes
-are not copied. `git fsck --connectivity-only` must succeed (otherwise `REPOSITORY_CORRUPT`). A
-HEAD commit is then checked out with `read-tree --reset -u` under the server configuration and
+`objects/info`), the branch and tag refs (loose and packed) and HEAD. Every branch or tag must be
+a valid full ref name, such as `refs/tags/HEAD`; one that cannot be imported fails the import
+instead of being dropped. Configuration, hooks, `info/`, the index, reflogs, remotes, notes,
+replace refs, worktrees, submodule repositories and uncommitted working-tree changes are not
+copied. A full `git fsck` must succeed, which re-hashes every object against its ID (otherwise
+`REPOSITORY_CORRUPT`). Before checkout, `ls-tree -r -l` of the HEAD tree must fit the work-tree
+quota (20,000 entries and 512 MiB of declared blob bytes), because a few compressed objects can
+expand without bound. The HEAD commit is then checked out with `read-tree --reset -u` under the server configuration and
 the neutral `info/attributes`. No hook, filter, fsmonitor or submodule recursion can run, and no
 attribute conversion can rewrite bytes. Attached, detached and unborn HEADs
 are preserved and reported as such, and SHA-256 repositories keep their format. Failed
