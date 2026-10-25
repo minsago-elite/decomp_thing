@@ -14,7 +14,8 @@
     "listingSha256",
     "programModelSha256",
     "schemaVersion",
-    "sha256"
+    "sha256",
+    "typeGraphSha256"
   ],
   "properties": {
     "bytes": {
@@ -52,6 +53,10 @@
       "const": 1
     },
     "sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "typeGraphSha256": {
       "type": "string",
       "pattern": "^[0-9a-f]{64}$"
     }

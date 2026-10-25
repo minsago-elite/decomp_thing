@@ -215,6 +215,20 @@
     {
       "archive": "Ghidra/Framework/SoftwareModeling/lib/SoftwareModeling-src.zip",
       "archiveSha256": "fed5e47f0578b04597ead75fef77e2316a0458b9dbeeb1eb2cfa3d01472411b3",
+      "bytes": 12936,
+      "entry": "ghidra/program/model/data/FunctionDefinitionDataType.java",
+      "entrySha256": "d0a89244f5e35c63ddafd7843116470b66f5e6f3f7f0ab92528f2126d8d0b718",
+      "note": "Native metadata traversal terminates at pointer/function-definition representation; referenced source type closure remains separate.",
+      "reviewedPublicDeclarations": [
+        {
+          "declaration": "public int getLength() {",
+          "line": 235
+        }
+      ]
+    },
+    {
+      "archive": "Ghidra/Framework/SoftwareModeling/lib/SoftwareModeling-src.zip",
+      "archiveSha256": "fed5e47f0578b04597ead75fef77e2316a0458b9dbeeb1eb2cfa3d01472411b3",
       "bytes": 2963,
       "entry": "ghidra/program/model/data/ParameterDefinition.java",
       "entrySha256": "92b00c6286263763dd98ca40c4f46adb7a3e674a73437fd6d5b8ef4f3b07fcfb",
@@ -231,6 +245,24 @@
       "bytes": 1786,
       "entry": "ghidra/program/model/data/Pointer.java",
       "entrySha256": "73354a86910d8fc16ae7bb6870a5d3600bd85f0f20f345f8738c1721f9120c88"
+    },
+    {
+      "archive": "Ghidra/Framework/SoftwareModeling/lib/SoftwareModeling-src.zip",
+      "archiveSha256": "fed5e47f0578b04597ead75fef77e2316a0458b9dbeeb1eb2cfa3d01472411b3",
+      "bytes": 26714,
+      "entry": "ghidra/program/model/data/PointerDataType.java",
+      "entrySha256": "56e6d7f4897bb4083237964323cf6d3750da353a12df8e66a3bbddb133383b1c",
+      "note": "Native metadata traversal terminates at pointer/function-definition representation; referenced source type closure remains separate.",
+      "reviewedPublicDeclarations": [
+        {
+          "declaration": "public int getLength() {",
+          "line": 172
+        },
+        {
+          "declaration": "public int getAlignedLength() {",
+          "line": 177
+        }
+      ]
     },
     {
       "archive": "Ghidra/Framework/SoftwareModeling/lib/SoftwareModeling-src.zip",
