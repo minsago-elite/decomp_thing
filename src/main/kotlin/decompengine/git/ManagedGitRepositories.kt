@@ -1208,7 +1208,9 @@ class ManagedGitRepositories(
         val excess = operations.size - (MAX_OPERATIONS - 1)
         if (excess <= 0) return operations
         val directory = root.resolve(jobId).resolve("git").resolve("operations")
-        val retired = operations.filter { it.action.workspace && it.state.terminal }.sortedBy { it.createdAt }.take(excess)
+        // A recovery-required record awaits an operator and keeps its staging tree; it is never retired.
+        val retired = operations.filter { it.action.workspace && it.state.terminal && it.state != GitOperationState.RECOVERY_REQUIRED }
+            .sortedBy { it.createdAt }.take(excess)
         retired.forEach { Files.deleteIfExists(directory.resolve("${it.operationId}.json")) }
         return operations - retired.toSet()
     }
