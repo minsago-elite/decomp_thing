@@ -237,7 +237,7 @@ function Module({ selected, basePath, selector, search }: { selected: SourceSele
   };
   const offset = cursor ? Number(cursor.split('_')[1]) : 0;
   const kindLabel = copy.ownedKinds[kind as typeof OWNED_KINDS[number]];
-  return <Frame selected={selected} data={data} read={read} pinned={version !== undefined} onRefresh={refresh}>
+  return <Frame selected={selected} data={data} read={read} pinned={version !== undefined} onRefresh={() => { if (cursor) route({ kind }); else refresh(); }}>
     <p><a href={structureListPath(basePath, selected, 'modules')}>{copy.returnModules}</a></p>
     {module && data && <>
       <h2><bdi>{module.moduleId}</bdi></h2>

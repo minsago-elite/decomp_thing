@@ -382,6 +382,20 @@ class WebProgramStructureTest {
         assertTrue(pages > 1, "a 200-row owned page must split by bytes")
     }
 
+    @Test fun `retained projections stay readable after an attempt version change with identical commitments`() {
+        val revision = standard()
+        assertEquals("available", revision.pages.functions("owner", jobId, runId, revisionId, null).text("state"))
+        // A progress-retention pin changes only the attempt version of the same candidate.
+        val pinned = WebProgramStructurePages { _, _, _, project ->
+            revision.evidence.readStructure(revision.reference.copy(attemptVersion = "version_2"), revision.cache, project)
+        }
+        repeat(2) {
+            val page = pinned.functions("owner", jobId, runId, revisionId, null)
+            assertEquals("available", page.text("state")); assertEquals(5, page.getValue("totalFunctions").jsonPrimitive.int)
+        }
+        assertEquals(1, revision.reads.count { it == "reports/runs/$runId/source-tree/reports/program_model.json" })
+    }
+
     @Test fun `historical schema one models remain extraction labels without an assessment`() {
         val revision = Revision(model(functions.take(1), schema = 1), plan(planned("core", listOf("fn_0000000000401000"))), listOf("core"))
         val page = revision.pages.functions("owner", jobId, runId, revisionId, null)

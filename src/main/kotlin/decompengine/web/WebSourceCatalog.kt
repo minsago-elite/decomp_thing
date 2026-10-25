@@ -161,7 +161,9 @@ internal class WebSourceCatalogEvidence(
                     model?.cancel(true); plan?.cancel(true)
                 }
             }
-            check(index.reference == reference && index.manifestSha256 == captured.sha256 && index.descriptorSha256 == descriptor.sha256)
+            // Retention pins change the attempt version without changing the candidate; the projection depends
+            // only on the keyed commitments, so it stays valid for the current reference.
+            check(index.reference.copy(attemptVersion = reference.attemptVersion) == reference && index.manifestSha256 == captured.sha256 && index.descriptorSha256 == descriptor.sha256)
             val result = project(index) { record, maximum ->
                 val read = readArtifact(reference.jobId, "$root/${record.path}", maximum.toLong())
                 if (read.bytes.size > maximum) throw RepairBudgetExceededException("Structure record exceeds its byte bound.")
