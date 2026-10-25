@@ -78,6 +78,13 @@ internal data class WebMaintenancePreview(
     val actions: List<WebMaintenanceAction>, val protectedJobs: List<Pair<String, List<WebRetentionProtection>>>,
 )
 
+/** Round-robin after the last resumed operation, so one persistently failing purge cannot starve the rest. */
+internal fun nextPendingDeletion(pending: List<String>, last: String?): String? {
+    if (pending.isEmpty()) return null
+    val ordered = pending.sorted()
+    return ordered.firstOrNull { last != null && it > last } ?: ordered.first()
+}
+
 internal fun lifecycleDigest(value: String): String = MessageDigest.getInstance("SHA-256")
     .digest(value.toByteArray(Charsets.UTF_8)).joinToString("") { "%02x".format(it) }
 

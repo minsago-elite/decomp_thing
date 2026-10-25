@@ -276,6 +276,37 @@ class WebJobLifecycleTest {
         } finally { outside.toFile().deleteRecursively() }
     }
 
+    @Test fun `one purge pass owns an operation while another caller tries to resume it`() {
+        val entered = java.util.concurrent.CountDownLatch(1)
+        val release = java.util.concurrent.CountDownLatch(1)
+        val hits = java.util.concurrent.atomic.AtomicInteger()
+        Fixture(configure = { service ->
+            service.deletionFaults = JobDeletionFaults { point ->
+                if (point == JobDeletionFaultPoint.PURGE_ENTRY && hits.incrementAndGet() == 1) {
+                    entered.countDown(); check(release.await(10, TimeUnit.SECONDS))
+                }
+            }
+        }).start().use { f ->
+            val job = f.store.createFromUpload("inert.elf", elfFixture())
+            Files.createDirectories(f.root.resolve("${job.id}/reports")).resolve("a.json").writeBytes(ByteArray(1000))
+            val expected = Files.walk(f.root.resolve(job.id)).use { paths -> paths.filter { Files.isRegularFile(it) }.mapToLong { Files.size(it) }.sum() }
+            val version = f.version(job.id)
+            val requests = Executors.newSingleThreadExecutor()
+            try {
+                val pending = requests.submit<HttpResponse<String>> { f.delete(job.id, "delete_key_concurrent_pass", version) }
+                assertTrue(entered.await(10, TimeUnit.SECONDS))
+                val running = checkNotNull(f.service.deletedJob(job.id))
+                val second = f.service.continueJobDeletion(running)
+                assertEquals(JobDeletionState.RUNNING, second.state)
+                assertEquals(1, hits.get(), "a second caller must not traverse the tree another pass owns")
+                release.countDown()
+                val operation = data(pending.get(10, TimeUnit.SECONDS), "operation", 202)
+                assertEquals("completed", operation.getValue("state").jsonPrimitive.content)
+                assertTrue(operation.getValue("message").jsonPrimitive.content.contains("($expected bytes"), "the audit count is charged once")
+            } finally { release.countDown(); requests.shutdownNow() }
+        }
+    }
+
     @Test fun `interrupted purge resumes after restart and a crash before removal retains the job`() {
         val root = Files.createTempDirectory("web-job-lifecycle-restart-")
         var hits = 0

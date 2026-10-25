@@ -280,6 +280,9 @@ class WebJobService(
     internal var deletionFaults: decompengine.jobs.JobDeletionFaults = decompengine.jobs.JobDeletionFaults {}
     private var deletions: decompengine.jobs.JobDeletionStore? = null
     private val deletionWorkers = mutableMapOf<Thread, CountDownLatch>()
+    /** One purger per operation: request and maintenance passes must never traverse the same tree. */
+    private val purgingOperations = mutableSetOf<String>()
+    private var lastResumedDeletion: String? = null
     private val downloadLeases = mutableMapOf<String, Int>()
     private val holds = java.util.concurrent.CopyOnWriteArrayList(retentionHolds)
     private var attempts: WorkflowAttemptStore? = null
@@ -1212,14 +1215,18 @@ class WebJobService(
             val current = journal.get(operation.operationId) ?: return operation
             // Concurrent purges touch disjoint detached directories; uploads measure the whole root.
             if (current.state != decompengine.jobs.JobDeletionState.RUNNING || closed || stopping ||
-                worker in deletionWorkers || uploads.isNotEmpty()) return current
+                worker in deletionWorkers || uploads.isNotEmpty() || current.operationId in purgingOperations) return current
+            purgingOperations += current.operationId
             CountDownLatch(1).also { deletionWorkers[worker] = it }
         }
         try {
             val result = journal.purge(operation, { !closed && !stopping }, maximumNanos)
             return synchronized(this) { journal.record(operation, result) }
         } finally {
-            synchronized(this) { deletionWorkers.remove(worker); finished.countDown(); releaseIfQuiescent() }
+            synchronized(this) {
+                purgingOperations -= operation.operationId
+                deletionWorkers.remove(worker); finished.countDown(); releaseIfQuiescent()
+            }
         }
     }
 
@@ -1227,7 +1234,10 @@ class WebJobService(
         val pending = synchronized(this) {
             if (!initialized || closed || stopping || uploads.isNotEmpty()) return
             val journal = deletions ?: return
-            journal.pending().firstOrNull()?.let(journal::reconcileBeforePurge)
+            val next = nextPendingDeletion(journal.pending().map { it.operationId }.filter { it !in purgingOperations }, lastResumedDeletion)
+                ?: return
+            lastResumedDeletion = next
+            journal.get(next)?.let(journal::reconcileBeforePurge)
         } ?: return
         if (pending.state == decompengine.jobs.JobDeletionState.RUNNING) continueJobDeletion(pending, 1_000_000_000L)
     }

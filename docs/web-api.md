@@ -1053,8 +1053,11 @@ a deleted row. The purge has a five-second budget per request; an unfinished pas
 `running` and resumes during periodic maintenance (SPA mode) or at the next startup, before any
 request is admitted. If a process stopped after the intent but before the rename, startup marks
 the operation `failed` (`INTERRUPTED_BEFORE_REMOVAL`) and the job is retained unchanged; nothing
-is deleted that was not detached. Cleanup that meets an entry outside owned storage stops with
-`recoveryRequired: true` and preserves the remaining bytes.
+is deleted that was not detached. Cleanup that meets an entry outside owned storage (a mount, or any descendant whose owner
+differs from the job root) stops with `recoveryRequired: true`, preserves the remaining bytes and
+keeps the tombstone, since the job was already detached. Only one purge pass runs per operation,
+and maintenance rotates through pending operations so one failing purge cannot starve the rest.
+A collection snapshot whose scan overlapped a deletion is discarded and collected again.
 
 The operation record keeps the job identity, a domain-separated session digest, request
 digests, times, outcome and the removed byte/entry counts; it never keeps the filename, label,

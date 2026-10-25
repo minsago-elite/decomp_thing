@@ -109,6 +109,9 @@ internal class JobDeletionStore(
     private val clock: Clock = Clock.systemUTC(),
     private val faults: JobDeletionFaults = JobDeletionFaults {},
     private val newOperationId: () -> String = { "jobdel_" + UUID.randomUUID().toString().replace("-", "") },
+    /** Fixture seam only; production compares every descendant's owner with the owned root. */
+    private val owned: (name: String, entry: decompengine.acp.LinuxFileIdentity, root: decompengine.acp.LinuxFileIdentity) -> Boolean =
+        { _, entry, root -> entry.uid == root.uid },
 ) {
     private val directory = root.resolve(DIRECTORY)
     private val records = linkedMapOf<String, JobDeletionOperation>()
@@ -144,7 +147,10 @@ internal class JobDeletionStore(
     fun get(operationId: String): JobDeletionOperation? { requireLoaded(); return records[operationId] }
     fun latestForJob(jobId: String): JobDeletionOperation? { requireLoaded(); return records.values.filter { it.jobId == jobId }.maxByOrNull { it.createdAt } }
     /** A completed record is the tombstone that lets readers distinguish "deleted" from "never existed". */
-    fun deleted(jobId: String): JobDeletionOperation? = latestForJob(jobId)?.takeIf { it.state == JobDeletionState.COMPLETED || it.state == JobDeletionState.RUNNING }
+    fun deleted(jobId: String): JobDeletionOperation? = latestForJob(jobId)?.takeIf {
+        // A containment stop happens after detachment: the job is gone even though bytes were preserved.
+        it.state == JobDeletionState.COMPLETED || it.state == JobDeletionState.RUNNING || it.failureCode == "CLEANUP_CONTAINMENT"
+    }
     fun pending(): List<JobDeletionOperation> = all().filter { !it.state.terminal }
 
     fun replay(keyDigest: String, requestDigest: String): JobDeletionOperation? {
@@ -233,6 +239,8 @@ internal class JobDeletionStore(
                                 val entry = Linux.openPathAtOrNull(directory.fd, child) ?: continue
                                 entry.use { selected ->
                                     val current = selected.identity
+                                    // A foreign-owned entry is never removed or traversed, even when permissions would allow it.
+                                    if (!owned(child, current, rootDirectory.identity)) throw JobDeletionContainmentException("job tree contains a foreign-owned entry")
                                     if (current.isDirectory && !current.isSymbolicLink) {
                                         if (current.mountId != rootDirectory.identity.mountId) throw JobDeletionContainmentException("job tree crosses a mount")
                                         Linux.openDirectoryAt(directory.fd, child).use { opened ->
