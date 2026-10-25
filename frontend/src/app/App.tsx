@@ -3,8 +3,6 @@ import { sourceCopy } from '../copy/sources';
 import { message as displayMessage, textMessage } from '../shared/messages';
 import { useLayoutEffect, useMemo, useRef, useState } from 'preact/hooks';
 import { LocationProvider, Route, Router, useLocation } from 'preact-iso/router';
-import Home from '../routes/Home';
-import UploadPage from '../routes/UploadPage';
 import { NotFound } from '../routes/NotFound';
 import { ViewBoundary } from '../shared/ViewBoundary';
 import { AssetRecoveryNotice } from '../shared/AssetRecoveryNotice';
@@ -43,6 +41,10 @@ function ConnectionNotice() {
 }
 
 function Shell({ basePath, identity, recovery, reload, session }: ShellProps) {
+  // Every route, including the workspace landing page, loads on demand so the initial
+  // closure stays the shell, session and transport (#622).
+  const Home = useMemo(() => lazyRoute(() => import('../routes/Home'), recovery), [recovery]);
+  const UploadPage = useMemo(() => lazyRoute(() => import('../routes/UploadPage'), recovery), [recovery]);
   const Job = useMemo(() => lazyRoute(() => import('../routes/Job'), recovery), [recovery]);
   const RunHistory = useMemo(() => lazyRoute(() => import('../routes/RunHistory'), recovery), [recovery]);
   const Run = useMemo(() => lazyRoute(() => import('../routes/Run'), recovery), [recovery]);
