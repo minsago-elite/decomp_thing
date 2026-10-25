@@ -338,6 +338,92 @@ class RecoveryAssessmentProjectionV1Test {
         })
     }
 
+    @Test
+    fun `bounded plan encoding admits exact historical canonical byte boundaries`() {
+        val text = "quotes\" slash\\ newline\nreturn\rtab\tbackspace\bformfeed\u000c nul\u0000 한글 é 😀"
+        val values = listOf(
+            ModulePlan(modules = emptyList()),
+            ModulePlan(modules = listOf(
+                PlannedModule("z-$text", "src/$text.c", "include/$text.h",
+                    listOf("", text, "last"), listOf(text), listOf("type", text), listOf(text, "")),
+                module("a", emptyList()),
+            ), dependencyCycles = listOf(listOf("a", "z-$text"), emptyList())),
+        )
+        for (value in values) {
+            val expected = value.toJson().toByteArray(Charsets.UTF_8)
+            assertContentEquals(expected, AnalysisCanonicalEncoding.encodePlan(value, expected.size))
+            var serialized = false
+            assertFailsWith<IllegalArgumentException> {
+                AnalysisCanonicalEncoding.encodePlan(value, expected.size - 1) { stage ->
+                    if (stage == "before bounded plan serialization") serialized = true
+                }
+            }
+            assertFalse(serialized)
+        }
+    }
+
+    @Test
+    fun `oversized plan evidence fails before serialization or walking remaining caller rows`() {
+        val oversized = "\u0000".repeat(16 * 1024)
+        var readRows = 0
+        val lazyEvidence = object : AbstractList<String>() {
+            override val size = 2
+            override fun get(index: Int): String {
+                readRows++
+                check(index == 0 && readRows == 1) { "preflight walked beyond already oversized plan evidence" }
+                return oversized
+            }
+        }
+        val value = ModulePlan(modules = listOf(module("alpha", emptyList()).copy(boundaryEvidence = lazyEvidence)))
+        var serialized = false
+        assertFailsWith<IllegalArgumentException> {
+            AnalysisCanonicalEncoding.encodePlan(value, maximumBytes = 1024, checkpoint = { stage ->
+                if (stage == "before bounded plan serialization") serialized = true
+            })
+        }
+        assertEquals(1, readRows)
+        assertFalse(serialized)
+    }
+
+    @Test
+    fun `bounded plan encoding freezes nested membership and cycles before serialization`() {
+        val functionIds = mutableListOf("function")
+        val globalIds = mutableListOf("global")
+        val typeIds = mutableListOf("type")
+        val evidence = mutableListOf("retained evidence")
+        val cycle = mutableListOf("alpha", "beta")
+        val cycles = mutableListOf<List<String>>(cycle)
+        val modules = mutableListOf(module("alpha", functionIds, globalIds, typeIds).copy(boundaryEvidence = evidence),
+            module("beta", emptyList()))
+        val value = ModulePlan(modules = modules, dependencyCycles = cycles)
+        val expected = value.toJson().toByteArray(Charsets.UTF_8)
+        var mutated = false
+        val result = AnalysisCanonicalEncoding.encodePlan(value, expected.size) { stage ->
+            if (stage == "before bounded plan serialization") {
+                functionIds.clear(); globalIds.clear(); typeIds.clear(); evidence.clear()
+                cycle.clear(); cycles.clear(); modules.clear()
+                mutated = true
+            }
+        }
+        assertTrue(mutated)
+        assertContentEquals(expected, result)
+    }
+
+    @Test
+    fun `bounded plan preflight propagates cancellation before serialization`() {
+        val cancelled = CancellationException("cancelled during bounded plan preflight")
+        var checkpoints = 0
+        var serialized = false
+        assertSame(cancelled, assertFailsWith<CancellationException> {
+            AnalysisCanonicalEncoding.encodePlan(plan()) { stage ->
+                if (stage == "before bounded plan serialization") serialized = true
+                if (++checkpoints == 3) throw cancelled
+            }
+        })
+        assertEquals(3, checkpoints)
+        assertFalse(serialized)
+    }
+
     private fun model() = RecoveredProgramModel(4, "a".repeat(64), functions = listOf(
         RecoveredFunction("private_shared", "private_function", 1u, "int secret(void)", status = RecoveryStatus.RECOVERED),
         RecoveredFunction("private_second", "private_second_function", 2u, "int secret_second(void)", status = RecoveryStatus.PARTIAL),

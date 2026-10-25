@@ -149,8 +149,7 @@ private val ALIAS_FIELDS = setOf("population", "exact", "nameMismatch", "missing
 private val UNASSIGNED_FIELDS = setOf("oracleFunctionCount", "oracleOnlyFunctionCount", "excludedOracleFunctionCount", "survivingAliasCount")
 
 private fun capturePlan(suppliedPlan: ModulePlan, checkpoint: (String) -> Unit): AssessmentPlanSnapshot {
-    assessmentCheckpoint(checkpoint, "before projection plan encoding")
-    val planBytes = suppliedPlan.toJson().toByteArray(Charsets.UTF_8)
+    val planBytes = AnalysisCanonicalEncoding.encodePlan(suppliedPlan, checkpoint = checkpoint)
     val plan = ModulePlanJson.readCanonical(planBytes, RecoveryAssessmentProjectionV1.MAXIMUM_BYTES) {
         assessmentCheckpoint(checkpoint, it)
     }

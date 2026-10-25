@@ -43,10 +43,12 @@ class ProgramAnalysisResult(
         const val MAXIMUM_MODEL_BYTES: Int = 512 * 1024 * 1024
 
         /** Ordinary analysis retains historical extraction labels, without structural authority. */
-        fun fromModel(model: RecoveredProgramModel, checkpoint: (String) -> Unit = {}): ProgramAnalysisResult {
-            assessmentCheckpoint(checkpoint, "before ordinary model encoding")
-            val bytes = model.toJson { assessmentCheckpoint(checkpoint, it) }.toByteArray(Charsets.UTF_8)
-            assessmentCheckpoint(checkpoint, "after ordinary model encoding")
+        fun fromModel(model: RecoveredProgramModel, checkpoint: (String) -> Unit = {}): ProgramAnalysisResult =
+            fromModel(model, MAXIMUM_MODEL_BYTES, checkpoint)
+
+        fun fromModel(model: RecoveredProgramModel, maximumBytes: Int,
+            checkpoint: (String) -> Unit = {}): ProgramAnalysisResult {
+            val bytes = AnalysisCanonicalEncoding.encodeModel(model, maximumBytes, checkpoint)
             return ProgramAnalysisResult(bytes, checkpoint = checkpoint)
         }
     }
