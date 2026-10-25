@@ -1370,7 +1370,7 @@ class GccProductionFullExportQualificationTest {
                 "benchmarkAccepted" to JsonPrimitive(false),
                 "releaseEligible" to JsonPrimitive(false),
                 "limitation" to JsonPrimitive(if (engine == "driver")
-                    "live contained driver export and selected function-boundary replay only; structural identity admission and production scoring remain open"
+                    "live contained driver export with admitted selected function-boundary and surviving-symbol scores; full structural scoring and release eligibility remain open"
                     else "live contained export only; independent identity replay and production scoring remain open"),
             ) + boundaryFields + throughputFields)
             publish(evidenceRoot.resolve("qualification.json"), OracleJson.canonicalBytes(summary))
