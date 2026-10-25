@@ -341,8 +341,9 @@ export function checkSemantics(document: ContractDocument, basePath = '/'): void
       const { limits, capabilities, apiVersions } = document.data;
       requireValue(limits.defaultPageLimit <= limits.maxPageLimit);
       requireValue(new Set(capabilities.map((item) => item.id)).size === capabilities.length);
-      // An agent contract version is reported exactly for launch options that contact an agent.
-      requireValue(capabilities.every((item) => item.launch === null
+      // An agent contract version is reported exactly for launch options that contact an agent;
+      // older v1 producers omit launch, which means no launch facts were reported.
+      requireValue(capabilities.every((item) => item.launch == null
         || item.launch.contactsAgent === (item.agentContractVersion !== null)));
       if (!apiVersions.includes(1)) throw new ApiClientError('unsupported_contract');
       try {

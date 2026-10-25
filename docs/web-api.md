@@ -450,7 +450,9 @@ runtime's validator qualification gate opens, repair reports
 is `unavailable` with its fixed reason code, and a probe that did not finish makes
 the option `unknown`. Workflows without a production adapter (`build`,
 `validate`) are reported `unsupported` with `WORKFLOW_NOT_IMPLEMENTED`. Every
-other capability has `launch: null`. Launch facts describe adapters; admission
+other capability has `launch: null`. `launch` is optional within v1: an older
+producer omits it, and clients treat absence like null (no launch facts, no start
+control). Launch facts describe adapters; admission
 rechecks registration, limits, input and readiness.
 
 These are report-level observations, separate from an individual attempt's
