@@ -156,6 +156,25 @@ class WebSourceArchiveRoutesTest {
             sha256(Files.readAllBytes(extracted.resolve(artifact.getValue("path").jsonPrimitive.content))))
     }
 
+    @Test fun `a metadata-only change of the same archive asks for a new check instead of claiming a replacement`() = withFixture { fixture ->
+        val bytes = Files.readAllBytes(fixture.archive)
+        assertEquals("completed", finish(fixture, data(verify(fixture, sha256(bytes)), "operation", 202)).getValue("state").jsonPrimitive.content)
+        // Change a manifest-only note and its recorded digest; the archive file itself is untouched.
+        val note = fixture.tree.resolve("UNRESOLVED.md")
+        Files.writeString(note, Files.readString(note) + "\nchanged note\n")
+        val manifestPath = fixture.tree.resolve("source_tree_manifest.json")
+        val manifest = Json.parseToJsonElement(Files.readString(manifestPath)).jsonObject
+        val files = manifest.getValue("files").jsonArray.map { item ->
+            val file = item.jsonObject
+            if (file.getValue("path").jsonPrimitive.content == "UNRESOLVED.md") JsonObject(file + ("sha256" to JsonPrimitive(sha256(Files.readAllBytes(note))))) else file
+        }
+        Files.writeString(manifestPath, JsonObject(manifest + ("files" to JsonArray(files))).toString())
+        val verification = status(fixture).getValue("verification").jsonObject
+        assertEquals("not-verified", verification.getValue("state").jsonPrimitive.content)
+        assertEquals(JsonNull, verification.getValue("previousVerifiedSha256"))
+        assertEquals(sha256(bytes), status(fixture).getValue("archive").jsonObject.getValue("sha256").jsonPrimitive.content)
+    }
+
     @Test fun `replaced incomplete or stale archives never keep or gain the verified label`() = withFixture { fixture ->
         val original = Files.readAllBytes(fixture.archive)
         assertEquals("completed", finish(fixture, data(verify(fixture, sha256(original)), "operation", 202)).getValue("state").jsonPrimitive.content)

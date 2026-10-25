@@ -61,7 +61,8 @@ internal class WebSourceArchives(
         val history = synchronized(this) { records.values.filter { it.jobId == jobId && it.runId == runId && it.revisionId == revisionId }.toList() }
         fun matches(record: WebArchiveVerification) = current != null && record.archiveSha256 == current.first && record.metadataVersion == snapshot.metadataVersion
         val latest = history.lastOrNull(::matches)
-        val previous = history.lastOrNull { it.verified && !matches(it) }
+        // "stale" names a replaced archive only; a metadata-only change of the same bytes just needs a new check.
+        val previous = history.lastOrNull { it.verified && current != null && it.archiveSha256 != current.first }
         val state = when {
             current == null -> if (tooLarge) "too-large" else "missing"
             latest == null -> if (previous != null) "stale" else "not-verified"
@@ -141,6 +142,7 @@ internal class WebSourceArchives(
         synchronized(this) {
             records.values.lastOrNull { !it.terminal && it.jobId == jobId && it.runId == runId && it.revisionId == revisionId &&
                 it.archiveSha256 == archiveSha256 && it.metadataVersion == snapshot.metadataVersion }?.let { running ->
+                keys[key] = running.operationId // A deduplicated request still binds its key to the returned operation.
                 return Started(running, false)
             }
             if (records.values.count { !it.terminal } >= MAXIMUM_ACTIVE) {
@@ -151,7 +153,7 @@ internal class WebSourceArchives(
             records[record.operationId] = record; keys[key] = record.operationId
             while (records.size > MAXIMUM_RECORDS) {
                 val oldest = records.values.firstOrNull { it.terminal } ?: break
-                records.remove(oldest.operationId); keys.remove(oldest.idempotencyKey)
+                records.remove(oldest.operationId); keys.values.removeAll { it == oldest.operationId }
             }
             try { executor.execute { run(record) } }
             catch (_: RejectedExecutionException) {

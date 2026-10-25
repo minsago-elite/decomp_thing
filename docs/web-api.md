@@ -1004,12 +1004,12 @@ compilation or behavioral fidelity.
 The other states are `not-verified`, `running`, `failed` (with `failureCode`), `missing`,
 `too-large` and `stale`. `stale` means a different archive file now replaces a verified one; its
 `previousVerifiedSha256` is reported, and the label is never transferred. The old digest-bound link
-then refuses the new bytes with `409 ARCHIVE_CHANGED`.
+then refuses the new bytes with `409 ARCHIVE_CHANGED`. If only the revision metadata changes while the archive bytes stay the same, the state returns to `not-verified` until the archive is checked again.
 
 `POST R/revisions/V/archive-verifications` takes `{"archiveSha256": "<displayed digest>"}` under the
 JSON mutation boundary (session, Origin, `X-CSRF-Token`) with a 16–128 character `Idempotency-Key`.
 A current archive with a different digest is `409 ARCHIVE_CHANGED`; no archive is
-`404 ARCHIVE_NOT_FOUND`. A replayed key returns the original operation with
+`404 ARCHIVE_NOT_FOUND`. Every admitted key, including one deduplicated onto an in-flight verification, is bound to the operation it returned. A replayed key returns the original operation with
 `Idempotency-Replayed: true`. The same key with another intent is `409 IDEMPOTENCY_CONFLICT`. A
 verification already queued or running for the same archive and metadata is returned instead of
 starting a second one. At most two run at once (`429 ARCHIVE_VERIFICATION_BUSY`), on one background
