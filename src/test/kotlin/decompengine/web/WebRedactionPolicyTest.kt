@@ -38,6 +38,10 @@ class WebRedactionPolicyTest {
         assertEquals("1 of 1 en_US.UTF-8", policy.text("1 of 1 en_US.UTF-8"))
         assertEquals("Authorization: [redacted]", policy.text("Authorization: Bearer abcdefghijkl"))
         assertEquals("password=[redacted]&next", policy.text("password=hunter2&next"))
+        assertEquals("password=[redacted] next", policy.text("password=\"hunter2 two\" next"))
+        assertEquals("token=[redacted]", policy.text("token='abcdefghijk'"))
+        assertEquals("{\"secret\": [redacted]}", policy.text("{\"secret\": \"s3cr3t value\"}"))
+        assertEquals("api_key: [redacted], ok", policy.text("api_key: 'k-123', ok"))
         assertEquals("use [redacted] now", policy.text("use sk-abcdefghijklmnopqrstuvwx now"))
         assertEquals("https://[redacted]@example.test/x", policy.text("https://user:pa55@example.test/x"))
         assertEquals("open [private-path] failed", policy.text("open /srv/decomp-private-store/abc/input.elf failed"))
@@ -137,6 +141,20 @@ class WebRedactionPolicyTest {
         val safe = policy.json(report).jsonObject
         assertEquals(preview, safe.getValue("expected"))
         assertEquals("see [private-path]", safe.getValue("message").jsonPrimitive.content)
+    }
+
+    @Test fun `committed source tree names keep their exact unique ordered spellings`() {
+        val directory = buildJsonObject {
+            put("entries", buildJsonArray {
+                add(buildJsonObject { put("displayName", "token=one.c") })
+                add(buildJsonObject { put("displayName", "token=two.c") })
+            })
+        }
+        assertEquals(directory, publicWebApiData("revisionDirectory", directory, policy))
+        assertEquals(directory, publicWebApiData("revisionSources", directory, policy))
+        // Server-produced documents still pass through the policy.
+        assertEquals("token=[redacted]", publicWebApiData("report", directory, policy).jsonObject.getValue("entries")
+            .let { (it as kotlinx.serialization.json.JsonArray)[0].jsonObject.getValue("displayName").jsonPrimitive.content })
     }
 
     @Test fun `persisted diagnostics also redact short configured values before storage`() {

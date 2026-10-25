@@ -143,12 +143,15 @@ internal class WebRedactionPolicy private constructor(
         private val BYTE_PREVIEW_KEYS = setOf("totalBytes", "prefixBytes", "hex", "text", "textBytes", "truncated")
         /** A same-origin URL path (optionally with a query): what basePath and *Href fields carry. */
         private val ROUTE_SYNTAX = Regex("/(?:[A-Za-z0-9._~!$&'()*+,;=:@%-]+/?)*(?:\\?[A-Za-z0-9._~!$&'()*+,;=:@%/?-]*)?")
-        private val URL_USER_INFO = Regex("(?i)\\b([a-z][a-z0-9+.-]{1,31}://)[^/\\s:@\"'<>]{1,256}:[^/\\s@\"'<>]{1,512}@")
+        private const val CREDENTIAL_KEYS = "api[_-]?key|access[_-]?key|secret[_-]?key|access[_-]?token|refresh[_-]?token|" +
+            "auth[_-]?token|client[_-]?secret|password|passwd|passphrase|secret|token"
+        private val URL_USER_INFO =Regex("(?i)\\b([a-z][a-z0-9+.-]{1,31}://)[^/\\s:@\"'<>]{1,256}:[^/\\s@\"'<>]{1,512}@")
         private val CREDENTIAL_PATTERNS = listOf(
             Regex("(?i)\\b((?:proxy-)?authorization\\s*[:=]\\s*)(?:basic|bearer|token|digest)\\s+[^\\s,;\"'<>]+") to true,
             Regex("(?i)\\b(bearer\\s+)[A-Za-z0-9._~+/=-]{8,}") to true,
-            Regex("(?i)\\b((?:api[_-]?key|access[_-]?key|secret[_-]?key|access[_-]?token|refresh[_-]?token|auth[_-]?token|" +
-                "client[_-]?secret|password|passwd|passphrase|secret|token)\\s*[:=]\\s*)(?!\\[redacted])[^\\s,;\"'&<>]+") to true,
+            // Quoted values first (password="x", token='x', "secret": "x"), then bare values.
+            Regex("(?i)\\b((?:$CREDENTIAL_KEYS)[\"']?\\s*[:=]\\s*)(?:\"[^\"\\n]{0,1024}\"|'[^'\\n]{0,1024}')") to true,
+            Regex("(?i)\\b((?:$CREDENTIAL_KEYS)[\"']?\\s*[:=]\\s*)(?!\\[redacted])[^\\s,;\"'&<>]+") to true,
             Regex("(?<![A-Za-z0-9_-])(?:sk-[A-Za-z0-9_-]{16,}|sk-ant-[A-Za-z0-9_-]{8,}|gh[pousr]_[A-Za-z0-9]{20,}|" +
                 "github_pat_[A-Za-z0-9_]{20,}|xox[abprs]-[A-Za-z0-9-]{10,}|AKIA[0-9A-Z]{16}|AIza[0-9A-Za-z_-]{35})") to false,
         )

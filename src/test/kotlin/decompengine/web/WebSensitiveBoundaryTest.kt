@@ -153,6 +153,66 @@ class WebSensitiveBoundaryTest {
         assertTrue(diagnostics.isNotEmpty() && diagnostics.all { it.startsWith("web-http-failure request_id=") || it.startsWith("web-capacity-summary ") })
     }
 
+    @Test fun `legacy JSON uploads are attributed to their job and legacy report downloads are redacted`() {
+        val root = Files.createTempDirectory(Files.createDirectories(Path.of("build/test-tmp/web-sensitive").toAbsolutePath()), "legacy-")
+        val server = UploadServer("127.0.0.1", 0, root, JobAnalyzer { _, _ -> error("unexpected") },
+            JobReconstructor { _, _ -> error("unexpected") }, sensitiveValues = listOf(canary),
+            redactionEnvironment = mapOf("DECOMP_TEST_API_TOKEN" to canary))
+        try {
+            server.start()
+            val origin = "http://127.0.0.1:${server.serverPort}"
+            val headers = legacySessionHeaders(server)
+            val boundary = "legacy_boundary"
+            val payload = "--$boundary\r\nContent-Disposition: form-data; name=\"binary\"; filename=\"l.elf\"\r\n\r\n".toByteArray() +
+                elfFixture() + "\r\n--$boundary--\r\n".toByteArray()
+            val uploaded = client.send(HttpRequest.newBuilder(URI("$origin/jobs")).header("Origin", origin)
+                .header("Accept", "application/json").header("Content-Type", "multipart/form-data; boundary=$boundary")
+                .apply { headers.forEach { (k, v) -> header(k, v) } }
+                .POST(HttpRequest.BodyPublishers.ofByteArray(payload)).build(), HttpResponse.BodyHandlers.ofString())
+            assertEquals(201, uploaded.statusCode(), uploaded.body())
+            val jobId = Json.parseToJsonElement(uploaded.body()).jsonObject.getValue("id").jsonPrimitive.content
+            assertEquals("/jobs/$jobId", uploaded.headers().firstValue("Location").orElse(null))
+            val deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(10)
+            while (server.audit.read(jobId).entries.none { it.action == WebAuditAction.JOB_UPLOAD } && System.nanoTime() < deadline) Thread.sleep(10)
+            assertEquals(WebAuditOutcome.ACCEPTED, server.audit.read(jobId).entries.single { it.action == WebAuditAction.JOB_UPLOAD }.outcome)
+
+            val reports = Files.createDirectories(root.resolve(jobId).resolve("reports"))
+            Files.writeString(reports.resolve("exploration.json"), "{\"note\": \"token $canary at /home/someone/x\"}")
+            Files.createDirectories(reports.resolve("source-tree/src"))
+            Files.writeString(reports.resolve("source-tree/src/main.c"), "/* built in /home/someone/x */\n")
+            fun download(path: String) = client.send(HttpRequest.newBuilder(URI("$origin/jobs/$jobId/artifacts/$path"))
+                .apply { headers.forEach { (k, v) -> header(k, v) } }.GET().build(), HttpResponse.BodyHandlers.ofString())
+            val report = download("reports/exploration.json")
+            assertEquals(200, report.statusCode())
+            assertFalse(report.body().contains(canary) || report.body().contains("/home/someone"), report.body())
+            assertEquals("token [redacted] at [private-path]", Json.parseToJsonElement(report.body()).jsonObject.getValue("note").jsonPrimitive.content)
+            assertEquals("/* built in /home/someone/x */\n", download("reports/source-tree/src/main.c").body(), "committed source is job content")
+        } finally { server.stop(); root.toFile().deleteRecursively() }
+    }
+
+    @Test fun `legacy operator inspection refusals and cancellations are audited with their public reason`() {
+        val root = Files.createTempDirectory(Files.createDirectories(Path.of("build/test-tmp/web-sensitive").toAbsolutePath()), "operator-")
+        val server = UploadServer("127.0.0.1", 0, root, JobAnalyzer { _, _ -> error("unexpected") },
+            JobReconstructor { _, _ -> error("unexpected") })
+        try {
+            server.start()
+            val origin = "http://127.0.0.1:${server.serverPort}"
+            val headers = legacySessionHeaders(server)
+            for (path in listOf("/api/operator/auth-methods", "/api/operator/auth-methods/cancel")) {
+                val response = client.send(HttpRequest.newBuilder(URI("$origin$path")).header("Origin", origin)
+                    .header("Content-Type", "application/json").header("Accept", "application/json")
+                    .apply { headers.forEach { (k, v) -> header(k, v) } }
+                    .POST(HttpRequest.BodyPublishers.ofString("{}")).build(), HttpResponse.BodyHandlers.ofString())
+                assertEquals(400, response.statusCode(), path)
+            }
+            val deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(10)
+            fun operator() = server.audit.read().entries.filter { it.action.wireName.startsWith("operator.") }
+            while (operator().size < 2 && System.nanoTime() < deadline) Thread.sleep(10)
+            assertEquals(setOf("operator.auth-inspection", "operator.auth-inspection-cancel"), operator().map { it.action.wireName }.toSet())
+            assertTrue(operator().all { it.outcome == WebAuditOutcome.REJECTED && it.reasonCode == "OPERATOR_INSPECTION_REJECTED" })
+        } finally { server.stop(); root.toFile().deleteRecursively() }
+    }
+
     @Test fun `a base path that looks like a host directory survives bootstrap redaction`() {
         val root = Files.createTempDirectory(Files.createDirectories(Path.of("build/test-tmp/web-sensitive").toAbsolutePath()), "base-")
         val server = UploadServer("127.0.0.1", 0, root, JobAnalyzer { _, _ -> error("unexpected") },

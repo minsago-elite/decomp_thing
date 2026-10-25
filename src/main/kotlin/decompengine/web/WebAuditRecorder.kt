@@ -109,6 +109,8 @@ internal class WebAuditRecorder(
                     WebAuditAction.RUN_START to WebAuditTarget(jobId = segments[1].takeIf(JOB::matches))
                 segments == listOf("api", "operator", "auth-methods") ->
                     WebAuditAction.OPERATOR_INSPECTION to WebAuditTarget()
+                segments == listOf("api", "operator", "auth-methods", "cancel") ->
+                    WebAuditAction.OPERATOR_INSPECTION_CANCEL to WebAuditTarget()
                 else -> null
             }
         }
