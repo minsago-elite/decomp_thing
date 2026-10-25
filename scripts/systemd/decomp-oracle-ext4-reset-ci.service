@@ -1,5 +1,8 @@
 [Unit]
 Description=Trusted finite ext4 scratch generation reset custodian
+StartLimitIntervalSec=10s
+StartLimitBurst=5
+StartLimitAction=none
 
 [Service]
 Type=exec

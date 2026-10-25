@@ -501,6 +501,32 @@ class RetentionProtocolTests(unittest.TestCase):
         store.command.assert_called_once()
         self.assertEqual(store.command.call_args.args[1][-1], reset.RETENTION_UNIT)
 
+    def test_start_rate_limit_drift_refuses_before_service_authority(self):
+        for key,replacement in (("StartLimitIntervalUSec","0"),("StartLimitIntervalUSec","1min"),
+                                ("StartLimitBurst","0"),("StartLimitBurst","64"),
+                                ("StartLimitAction","reboot"),("StartLimitAction","")):
+            values = dict(reset.UNIT_FIXED)
+            values.update({name:"" for name in reset.UNIT_OBSERVED})
+            values.update(LoadState="loaded",**{key:replacement})
+            raw = "".join(f"{name}={value}\n" for name,value in values.items()).encode()
+            store = Mock(platform_checked=True)
+            store.command.return_value = (raw,b"")
+            with self.subTest(property=key,value=replacement), \
+                 patch.object(reset,"retention_snapshot"), \
+                 self.assertRaisesRegex(reset.ResetError,"effective service settings"):
+                reset.manager_snapshot(store)
+            store.command.assert_called_once()
+
+    def test_profile_pins_supported_finite_default_start_window(self):
+        profile = reset.profile_document()
+        self.assertEqual(profile["startLimitIntervalSeconds"],10)
+        self.assertEqual(profile["startLimitBurst"],5)
+        self.assertEqual(profile["startLimitAction"],"none")
+        self.assertEqual(reset.UNIT_FIXED["StartLimitIntervalUSec"],"10s")
+        self.assertEqual(reset.UNIT_FIXED["StartLimitBurst"],"5")
+        self.assertEqual(reset.UNIT_FIXED["StartLimitAction"],"none")
+        self.assertEqual((ROOT / "scripts/oracle-ext4-reset-profile.json").read_bytes(),reset.canonical(profile))
+
 
 class FormatterAttemptProtocolTests(unittest.TestCase):
     @staticmethod

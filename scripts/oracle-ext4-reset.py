@@ -62,6 +62,7 @@ BASE_PRIVATE = frozenset(('image', 'lock', 'state.json', 'state.next', 'manifest
     'profile.json', 'mke2fs.conf', 'oracle-ext4-reset.py', 'quarantine', 'diagnostic.json', 'diagnostic.next'))
 QUAL_PRIVATE = frozenset(('fixture.json', 'fixture.lock', 'case-receipts', 'fault.json',
                          'barrier.json', 'formatter.trace', 'ci-oracle-ext4-reset.py',
+                         'verify-oracle-ext4-reset.py',
                          'oracle-ext4-reset-install.py','oracle-ext4-reset-fixture-mutations.py',
                          'fixture-companion-image',
                          'fixture-old-mount','fixture-alias','fixture-old-image','fixture-old-state','fixture-old-gate',
@@ -155,7 +156,8 @@ def profile_document(qualification=False):
         'mountFlags': FLAGS, 'systemdMajor': 255, 'machine': 'x86_64',
         'formatterPackages': ['1.47.0-2.4~exp1ubuntu4', '1.47.0-2.4~exp1ubuntu4.1'],
         'metadataBytes': 1048576, 'maximumEntries': 32, 'maximumGenerationDirectories': 2,
-        'recordBytes': MAX_RECORD, 'actionSeconds': 45, 'unit': UNIT,'retentionUnit':RETENTION_UNIT}
+        'recordBytes': MAX_RECORD, 'actionSeconds': 45, 'unit': UNIT,'retentionUnit':RETENTION_UNIT,
+        'startLimitIntervalSeconds':10,'startLimitBurst':5,'startLimitAction':'none'}
 
 
 def fd_identity(fd):
@@ -1080,6 +1082,7 @@ UNIT_FIXED = {'Type':'exec','ExitType':'cgroup','User':'root','Group':'root',
     'LimitCORE':'0','MemoryMax':'268435456','NoNewPrivileges':'yes','PrivateMounts':'no',
     'PrivateTmp':'no','RootDirectory':'','RootImage':'','Environment':'','EnvironmentFiles':'',
     'PassEnvironment':'','UnsetEnvironment':''}
+UNIT_FIXED.update({'StartLimitIntervalUSec':'10s','StartLimitBurst':'5','StartLimitAction':'none'})
 UNIT_OBSERVED = ('ActiveState','SubState','Job','InvocationID','ControlGroup','ExecMainPID',
                  'MainPID','ExecMainCode','ExecMainStatus','Result','ExecStart','LoadState')
 CGROUP = '/system.slice/' + UNIT
