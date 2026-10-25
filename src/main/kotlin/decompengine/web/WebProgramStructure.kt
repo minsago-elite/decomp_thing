@@ -60,18 +60,24 @@ internal class WebStructureTable(
     val size: Int get() = ids.size
     val index: Map<String, Int> = HashMap<String, Int>(ids.size * 2).also { map -> ids.forEachIndexed { i, id -> map[id] = i } }
     // Unsigned 64-bit order; entities without a recorded address (types only) follow all addresses.
-    val byAddress: IntArray = order(Comparator { a, b ->
+    private val addressOrder = Comparator<Int> { a, b ->
         val recorded = hasAddress[b].compareTo(hasAddress[a])
         if (recorded != 0) recorded else {
             val address = java.lang.Long.compareUnsigned(addresses[a], addresses[b])
             if (address != 0) address else ids[a].compareTo(ids[b])
         }
-    })
-    val byName: IntArray = order(Comparator { a, b ->
-        val name = (names[a] ?: ids[a]).compareTo(names[b] ?: ids[b])
-        if (name != 0) name else ids[a].compareTo(ids[b])
-    })
-    val byId: IntArray = order(Comparator { a, b -> ids[a].compareTo(ids[b]) })
+    }
+    // Total orders with an identity tie-break, built on first use; canonical models are already address-ordered.
+    val byAddress: IntArray by lazy {
+        if ((1 until ids.size).all { addressOrder.compare(it - 1, it) < 0 }) IntArray(ids.size) { it } else order(addressOrder)
+    }
+    val byName: IntArray by lazy {
+        order(Comparator { a, b ->
+            val name = (names[a] ?: ids[a]).compareTo(names[b] ?: ids[b])
+            if (name != 0) name else ids[a].compareTo(ids[b])
+        })
+    }
+    val byId: IntArray by lazy { order(Comparator { a, b -> ids[a].compareTo(ids[b]) }) }
 
     private fun order(comparator: Comparator<Int>): IntArray =
         (0 until ids.size).sortedWith(comparator).toIntArray()
@@ -140,7 +146,9 @@ internal class WebProgramStructureIndex(
     val modulesByName: List<Int> = modules.indices.sortedBy { modules[it].id }
 
     /** Exact name collisions among recorded functions and globals; types are keyed by declaration identity. */
-    val collisions: Map<String, List<Pair<WebStructureKind, Int>>> = HashMap<String, MutableList<Pair<WebStructureKind, Int>>>().also { groups ->
+    val collisions: Map<String, List<Pair<WebStructureKind, Int>>> by lazy { collisionGroups() }
+
+    private fun collisionGroups(): Map<String, List<Pair<WebStructureKind, Int>>> = HashMap<String, MutableList<Pair<WebStructureKind, Int>>>().also { groups ->
         for (table in tables) if (table.kind != WebStructureKind.TYPE) {
             for (row in 0 until table.size) table.names[row]?.let { groups.getOrPut(it) { ArrayList(1) } += table.kind to row }
         }

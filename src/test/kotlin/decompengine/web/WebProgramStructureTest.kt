@@ -415,6 +415,22 @@ class WebProgramStructureTest {
         assertTrue(retained < 256L * 1024 * 1024, "retained projection bytes $retained")
     }
 
+    /** The packaged-browser structure seed writes manifests directly; its pinned profile facts must stay current. */
+    @Test fun `packaged browser structure seed pins the current generated-C profile declarations`() {
+        val pinned = Json.parseToJsonElement(Files.readString(Path.of("scripts/packaged-browser-structure-profile.json"))).jsonObject
+        val expected = buildJsonObject {
+            put("profileId", profile.id); put("profileSha256", profile.sha256)
+            put("declarations", buildJsonObject {
+                for (template in pinned.getValue("declarations").jsonObject.keys) {
+                    val declaration = profile.layout.declarationForPath(template.replace("{module}", "module_0000"))
+                    assertEquals(ProjectContentKind.UTF8_TEXT, declaration.contentKind, template)
+                    put(template, JsonArray(declaration.roles.map { JsonPrimitive(it.wireName) }.sortedBy { it.content }))
+                }
+            })
+        }
+        assertEquals(expected, pinned, "Update scripts/packaged-browser-structure-profile.json to $expected")
+    }
+
     private companion object {
         val INPUT_IDENTITY = LinuxFileIdentity(LinuxFileKey(1, 1), 0x8180, 1000, 1000, 1, 1, true, false, false)
     }
