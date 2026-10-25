@@ -607,7 +607,14 @@ private fun stopLateExportProcess(process: Process, terminationGrace: Duration) 
         }
     }
     try {
-        cleanup { ExportProcessTree(process, terminationGrace).terminate() }
+        val tree = ExportProcessTree(process, terminationGrace)
+        cleanup { tree.terminate() }
+        cleanup {
+            if (process.isAlive) {
+                val remaining = tree.remainingCleanupNanosOrNull() ?: 0L
+                if (remaining > 0) process.waitFor(remaining, TimeUnit.NANOSECONDS)
+            }
+        }
         cleanup { process.outputStream.close() }
         cleanup { process.inputStream.close() }
         cleanup { process.errorStream.close() }
