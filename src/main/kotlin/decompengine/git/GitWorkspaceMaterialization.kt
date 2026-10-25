@@ -35,6 +35,7 @@ internal object GitSourceCopy {
         var bytes = 0L
         Files.walkFileTree(source, emptySet(), MAX_DEPTH + 1, object : SimpleFileVisitor<Path>() {
             override fun preVisitDirectory(directory: Path, attributes: BasicFileAttributes): FileVisitResult {
+                GitStorage.checkInterrupted()
                 val relative = source.relativize(directory)
                 if (relative.nameCount > MAX_DEPTH || attributes.isSymbolicLink) unsupported()
                 if (directory != source) {
@@ -58,6 +59,7 @@ internal object GitSourceCopy {
                         val buffer = ByteArray(64 * 1024)
                         var total = 0L
                         while (true) {
+                            GitStorage.checkInterrupted()
                             val count = input.read(buffer)
                             if (count < 0) break
                             total += count
@@ -77,6 +79,7 @@ internal object GitSourceCopy {
         })
         // The snapshot must be unchanged after the copy; the work tree must hold exactly those bytes.
         for ((relative, expected) in digests) {
+            GitStorage.checkInterrupted()
             if (digestOf(source.resolve(relative)) != expected || digestOf(target.resolve(relative)) != expected) unavailable()
         }
         return digests
@@ -90,7 +93,7 @@ internal object GitSourceCopy {
         val digest = MessageDigest.getInstance("SHA-256")
         Files.newInputStream(file, NOFOLLOW_LINKS).use { input ->
             val buffer = ByteArray(64 * 1024)
-            while (true) { val count = input.read(buffer); if (count < 0) break; digest.update(buffer, 0, count) }
+            while (true) { GitStorage.checkInterrupted(); val count = input.read(buffer); if (count < 0) break; digest.update(buffer, 0, count) }
         }
         return digest.digest().hex()
     }
@@ -180,6 +183,7 @@ internal object GitRepositoryImport {
                     return FileVisitResult.CONTINUE
                 }
                 override fun visitFile(file: Path, attributes: BasicFileAttributes): FileVisitResult {
+                    GitStorage.checkInterrupted()
                     if (!attributes.isRegularFile || attributes.isSymbolicLink || ++refs > MAX_REFS) unsupported("The repository references are not ordinary files.")
                     val name = "refs/$namespace/" + root.relativize(file).joinToString("/")
                     if (name.endsWith(".lock")) return FileVisitResult.CONTINUE
@@ -215,6 +219,7 @@ internal object GitRepositoryImport {
                 return FileVisitResult.CONTINUE
             }
             override fun visitFile(file: Path, attributes: BasicFileAttributes): FileVisitResult {
+                GitStorage.checkInterrupted()
                 if (!attributes.isRegularFile || attributes.isSymbolicLink) unsupported("The repository object store contains links or special files.")
                 if (++files > MAX_OBJECT_FILES || attributes.size() > MAX_OBJECT_BYTES - bytes) unsupported("The repository exceeds the import size limits.")
                 bytes += attributes.size()

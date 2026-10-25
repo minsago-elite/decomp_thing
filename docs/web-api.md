@@ -740,6 +740,11 @@ job, non-terminal records are reconciled. A published repository makes its opera
 for inspection. Reconciliation never repeats work. Replaying the original key reports the
 interrupted operation, and a new key starts a fresh, explicit initialization.
 
+Shutdown interrupts the Git worker. Copy and cleanup loops stop at their next step, and Git
+processes are killed. The listener releases store ownership only after the worker has actually
+stopped. A worker that outlives the bounded wait keeps the store owned, so a replacement listener
+cannot reconcile staging that is still being written.
+
 `GET J/repositories` returns `gitRepositories`: the job's repository summary (at most one) and
 its latest 20 operations. `GET G` returns `gitWorkspace` from a fresh bounded inspection. Its
 `worktreeVersion` doubles as its ETag and changes with any observed status or HEAD change.

@@ -431,4 +431,35 @@ class ManagedGitRepositoriesTest {
             assertTrue(service.listing(jobId).operations.isEmpty())
         }
     }
+
+    @Test fun `shutdown reports a Git worker that outlives its wait, and storage loops stop on interruption`() {
+        Fixture().use { f ->
+            // A worker stuck where interruption cannot reach it: close() must not claim it stopped.
+            val release = java.util.concurrent.CountDownLatch(1)
+            val entered = java.util.concurrent.CountDownLatch(1)
+            val service = ManagedGitRepositories(f.store, GitRuntime.detect(), f.resolver, policy = GitRepositoryPolicy(defaultBranch = "trunk"),
+                crash = { point ->
+                    if (point == GitOperationCrashPoint.AFTER_RUNNING) {
+                        entered.countDown()
+                        while (release.count > 0) try { release.await() } catch (_: InterruptedException) { /* ignores shutdown */ }
+                    }
+                }, shutdownTimeout = java.time.Duration.ofMillis(200))
+            service.request(jobId, GitRepositoryRequest.Init("run_1", "revision_1", null), "shutdown_key_00001")
+            assertTrue(entered.await(30, java.util.concurrent.TimeUnit.SECONDS))
+            service.close()
+            assertFalse(service.terminated, "a running worker must keep the store owned")
+            release.countDown()
+            val deadline = System.nanoTime() + java.time.Duration.ofSeconds(30).toNanos()
+            while (!service.terminated && System.nanoTime() < deadline) Thread.sleep(10)
+            assertTrue(service.terminated)
+            // Copy and cleanup loops stop at their next step once the worker is interrupted.
+            val target = Files.createDirectories(f.repositories.root.resolve("interrupted copy"))
+            Thread.currentThread().interrupt()
+            try {
+                assertFailsWith<java.io.InterruptedIOException> { GitSourceCopy.copy(f.snapshot, target) }
+                assertFailsWith<java.io.InterruptedIOException> { GitStorage.deleteTree(f.snapshot) }
+            } finally { Thread.interrupted() }
+            assertTrue(Files.exists(f.snapshot.resolve("CMakeLists.txt")))
+        }
+    }
 }

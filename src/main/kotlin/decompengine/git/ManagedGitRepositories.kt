@@ -154,6 +154,8 @@ class ManagedGitRepositories(
     private val clock: Clock = Clock.systemUTC(),
     private val crash: (GitOperationCrashPoint) -> Unit = {},
     private val importLimits: GitCheckoutLimits = GitCheckoutLimits(),
+    /** How long [close] waits for the Git worker to stop before reporting it still running. */
+    private val shutdownTimeout: java.time.Duration = java.time.Duration.ofSeconds(30),
 ) : AutoCloseable {
     private val root = storeRoot.toAbsolutePath().normalize()
     private val importRoot: Path? = importRoot?.let { configured ->
@@ -291,11 +293,21 @@ class ManagedGitRepositories(
         return false
     }
 
+    /**
+     * Stop admitting work, interrupt the Git worker and wait for it to stop. Long copy and cleanup
+     * loops check interruption, and Git processes are killed on interrupt. [terminated] reports
+     * whether the worker has stopped; storage ownership must not be released before it is true.
+     */
     override fun close() {
         synchronized(lock) { closed = true }
         executor.shutdownNow()
-        executor.awaitTermination(10, TimeUnit.SECONDS)
+        try { executor.awaitTermination(shutdownTimeout.toMillis(), TimeUnit.MILLISECONDS) } catch (_: InterruptedException) {
+            Thread.currentThread().interrupt()
+        }
     }
+
+    /** True once no Git worker can still touch repository storage. */
+    val terminated: Boolean get() = executor.isTerminated
 
     // ---- Execution ------------------------------------------------------------------------
 
@@ -342,7 +354,7 @@ class ManagedGitRepositories(
                 is ManagedGitException -> failure.code to (failure.message ?: "")
                 is GitCommandException -> if (failure.kind == GitCommandException.Kind.INTERRUPTED) "INTERRUPTED" to INTERRUPTED_MESSAGE
                     else "REPOSITORY_UNAVAILABLE" to "Git did not complete within its bounds. Nothing was published."
-                is InterruptedException -> "INTERRUPTED" to INTERRUPTED_MESSAGE
+                is InterruptedException, is java.io.InterruptedIOException -> "INTERRUPTED" to INTERRUPTED_MESSAGE
                 else -> "STORAGE_FAILED" to "Repository storage could not be prepared. Nothing was published."
             }
             synchronized(lock) {
