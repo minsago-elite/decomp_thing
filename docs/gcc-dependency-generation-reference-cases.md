@@ -7,9 +7,9 @@ captured from real GCC 16.2.0 by `scripts/capture-gcc-preprocessing-reference.py
 
 ## Execution environment
 
-Preprocessing, dependency-generation and `image`-driver metadata cases run the
-installed `/usr/local/bin/gcc` and its `cc1`; `oracle`-driver metadata cases run
-the oracle driver described below instead. Every case runs inside the pinned
+Preprocessing and dependency-generation cases run the installed
+`/usr/local/bin/gcc` and its `cc1`. All metadata cases run the oracle driver
+described below instead. Every case runs inside the pinned
 official image `docker.io/library/gcc@sha256:2e6f4ae27ab8ad6f9617b46f0468889d368fdd91f2ea29aff98e4d5d1a3637f0`
 (config `sha256:103614947d5e…`), which is the base image of
 `oracle/gcc/16.2.0/build-toolchain.Dockerfile`. The container has no network, a
@@ -41,16 +41,30 @@ issue #706): `--version`, `-dumpversion`, `-dumpfullversion`, `-dumpmachine`,
 `-std=` and `-march=` values, unrecognized long and `-f` options, a malformed C
 source and a malformed link input. These cases do not pass `-nostdinc`.
 
-Each metadata case records its `driver`. Driver-only cases (`oracle`) run
+Every metadata case records `driver: oracle` and runs
 `oracle/gcc/16.2.0/artifacts/gcc-driver.stripped`, checked against
-`oracle-manifest.json` and mounted read-only at its configured
-`/oracle/install/bin/gcc`. Their target triple (`x86_64-pc-linux-gnu`), `-v`
-configuration and search directories are therefore the oracle's own, and agree
-with `behavior-corpus.json`. The oracle install tree is not retained, so
-`-print-prog-name=cc1` and `-print-libgcc-file-name` report bare names, and `-v`
-has no `COLLECT_LTO_WRAPPER` line. The missing-file, `-march=`,
-malformed-source and malformed-link cases need `cc1`, `collect2` or `ld`. They
-run the image's GCC (`image`), and their output names no target or prefix.
+`oracle-manifest.json` and mounted read-only at `/oracle/install/bin/gcc`.
+Its target, configuration and driver-only query output agree with
+`behavior-corpus.json`.
+
+The missing-file, invalid `-march` and malformed-source cases also mount the
+original oracle's `cc1` read-only at its configured libexec path. The checked
+`artifacts/gcc-cc1.stripped.xz` is a lossless XZ encoding (`lzma`, preset 6) of
+`cc1-oracle-manifest.json`'s stripped artifact: 41,935,768 decoded bytes, SHA-256
+`e51bf6e3f3300d31ce9713e2160c6fe5895d1e4914fb25562c3542b161427905`.
+Extraction is bounded, rejects trailing bytes, and verifies the artifact,
+build record and source lock before exposing the executable. The frontend and
+driver must share the exact source revision and source-lock identity. This
+provides the real original frontend for local and hosted reproduction without
+an external artifact download.
+
+The malformed-link case uses the oracle driver with the pinned image's real
+`collect2` and `ld`. Its explicit `COMPILER_PATH` and `LIBRARY_PATH` are recorded,
+as are both helper paths, resolved paths, sizes and hashes under `linkSupport`.
+The original install tree and libgcc are not retained; driver-only queries have
+no helper environment or mounts, so `-print-prog-name=cc1` and
+`-print-libgcc-file-name` still report bare names and `-v` has no
+`COLLECT_LTO_WRAPPER` line.
 
 The record's `identitySubstitutions` lists the only differences a candidate may
 show, each with patterns that bound the replaceable span: the driver basename in
@@ -73,12 +87,13 @@ pull requests labeled `qualify:preprocessing-reference`.
 
 ## Boundary
 
-The preprocessing and dependency-generation records, and the four `image`-driver
-metadata cases, use the official image's GCC 16.2.0 frontend rather than the
-byte-identical `artifacts/gcc-driver.stripped` oracle driver, so they establish
-real GCC frontend semantics rather than oracle-artifact identity. The 15
-`oracle`-driver metadata cases execute the manifest-verified oracle driver itself
-and so describe oracle-artifact behavior. Comparing a
-reconstructed candidate driver against them remains downstream work. No Ghidra
-analysis, `GHIDRA_HOME` fallback or `analyzeHeadless` invocation is introduced,
-and no authority crosses the oracle/candidate boundary.
+The preprocessing and dependency-generation records use the official image's
+GCC 16.2.0 frontend. Every metadata case executes the manifest-verified oracle
+driver; frontend-dependent metadata cases execute its manifest-verified original
+`cc1`. The malformed-link case deliberately uses the pinned image's real linker
+helpers, identified separately. These captures remain reference evidence:
+authenticated Kotlin execution ownership, complete phase/runtime enforcement,
+and comparison against an immutable reconstructed candidate remain required by
+the parent workflow. No Ghidra analysis, `GHIDRA_HOME` fallback or
+`analyzeHeadless` invocation is introduced, and no authority crosses the
+oracle/candidate boundary.
