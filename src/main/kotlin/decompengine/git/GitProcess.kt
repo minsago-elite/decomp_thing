@@ -164,9 +164,41 @@ data class GitExecutionLimits(
     }
 }
 
-class GitCommandException(val kind: Kind, message: String, val exitCode: Int? = null) : IOException(message) {
-    enum class Kind { START_FAILED, TIMED_OUT, OUTPUT_LIMIT, FAILED, INTERRUPTED }
+class GitCommandException(val kind: Kind, message: String, val exitCode: Int? = null, val stopReason: String? = null,
+    /** Git's stderr, for server-side classification only; never sent to a client or logged. */
+    internal val diagnostic: String? = null) : IOException(message) {
+    enum class Kind { START_FAILED, TIMED_OUT, OUTPUT_LIMIT, FAILED, INTERRUPTED, STOPPED }
 }
+
+/**
+ * Remote transport settings for `fetch`, `push` and `ls-remote` only (#585, #586). [configuration]
+ * follows the base configuration on the command line, so it can enable exactly one protocol and
+ * name the server-owned SSH command and certificate bundle. [secretVariables] carry credentials
+ * through the child environment only: they never enter argv, logs or results.
+ */
+class GitTransportContext(
+    val configuration: List<Pair<String, String>>,
+    val variables: Map<String, String> = emptyMap(),
+    private val secretVariables: Map<String, String> = emptyMap(),
+) {
+    init {
+        require(configuration.size <= 32 && configuration.all { (key, value) -> key.matches(Regex("[A-Za-z0-9.-]{1,128}")) && value.length <= 4096 && '\u0000' !in value })
+        require(variables.keys.all { it in PUBLIC_VARIABLES })
+        require(secretVariables.keys.all { it.matches(Regex("GIT_CONFIG_(?:COUNT|KEY_[0-9]|VALUE_[0-9])")) } && secretVariables.values.all { '\u0000' !in it && it.length <= 8192 })
+    }
+    internal fun environment(): Map<String, String> = variables + secretVariables
+    override fun toString(): String = "GitTransportContext(configuration=${configuration.map { it.first }}, secrets=${secretVariables.size})"
+
+    companion object { val PUBLIC_VARIABLES = setOf("GIT_ALLOW_PROTOCOL", "GIT_SSH_VARIANT", "GIT_HTTP_LOW_SPEED_LIMIT", "GIT_HTTP_LOW_SPEED_TIME") }
+}
+
+/**
+ * Cooperative control of one long-running process. [stop] is polled while the process runs and
+ * returns a stop reason (for example `CANCELLED` or `DISK_LIMIT`) to terminate it. [progress]
+ * receives the latest progress line Git wrote to stderr; stderr then keeps only its tail, so
+ * progress output can never exceed the stderr bound.
+ */
+class GitProcessControl(val stop: () -> String? = { null }, val progress: ((String) -> Unit)? = null)
 
 /** Captured output stays server-side; stderr in particular may contain host paths. */
 class GitCommandResult internal constructor(
@@ -195,6 +227,9 @@ data class GitInvocation(
     val input: ByteArray? = null,
     /** Additional variables from a fixed allowlist (commit identity and dates only). */
     val variables: Map<String, String> = emptyMap(),
+    /** Required by, and only allowed for, the remote transport subcommands. */
+    val transport: GitTransportContext? = null,
+    val control: GitProcessControl? = null,
 ) {
     init {
         require(subcommand in SUBCOMMANDS) { "Git subcommand is not allowlisted" }
@@ -206,14 +241,19 @@ data class GitInvocation(
         require(variables.keys.all { it in VARIABLES } && variables.values.all { it.length <= 512 && it.none(Char::isISOControl) }) {
             "Git variables are not allowlisted"
         }
+        require((subcommand in TRANSPORT_SUBCOMMANDS) == (transport != null)) { "Remote transport needs its controlled context" }
     }
+
+    override fun toString(): String = "GitInvocation($subcommand)"
 
     companion object {
         val SUBCOMMANDS = setOf(
             "version", "init", "config", "check-ref-format", "rev-parse", "symbolic-ref", "for-each-ref",
             "status", "read-tree", "fsck", "cat-file", "ls-files", "ls-tree", "check-ignore", "update-ref",
             "log", "diff", "diff-tree", "add", "rm", "reset", "commit", "switch", "worktree", "rev-list",
+            "fetch", "push", "ls-remote", "merge", "merge-base", "checkout-index",
         )
+        val TRANSPORT_SUBCOMMANDS = setOf("fetch", "push", "ls-remote")
         val VARIABLES = setOf("GIT_AUTHOR_NAME", "GIT_AUTHOR_EMAIL", "GIT_AUTHOR_DATE",
             "GIT_COMMITTER_NAME", "GIT_COMMITTER_EMAIL", "GIT_COMMITTER_DATE")
     }
@@ -227,6 +267,7 @@ class GitCommandRunner internal constructor(val executable: Path, val environmen
         // check-ignore takes plain path names and refuses pathspec magic, including `literal`.
         if (invocation.subcommand != "check-ignore") add("--literal-pathspecs")
         environment.configuration().forEach { (key, value) -> add("-c"); add("$key=$value") }
+        invocation.transport?.configuration?.forEach { (key, value) -> add("-c"); add("$key=$value") }
         invocation.gitDir?.let { add("--git-dir=$it") }
         invocation.workTree?.let { add("--work-tree=$it") }
         add(invocation.subcommand)
@@ -240,6 +281,7 @@ class GitCommandRunner internal constructor(val executable: Path, val environmen
         builder.environment().clear()
         builder.environment().putAll(environment.variables(executable))
         builder.environment().putAll(invocation.variables)
+        invocation.transport?.let { builder.environment().putAll(it.environment()) }
         val process = try { builder.start() } catch (failure: IOException) {
             throw GitCommandException(GitCommandException.Kind.START_FAILED, "Git could not be started.")
         }
@@ -250,7 +292,7 @@ class GitCommandRunner internal constructor(val executable: Path, val environmen
                 try { process.outputStream.use { it.write(input) } } catch (_: IOException) { /* child exited early */ }
             }
             val stdout = BoundedCapture(process.inputStream, invocation.limits.maxStdoutBytes)
-            val stderr = BoundedCapture(process.errorStream, invocation.limits.maxStderrBytes)
+            val stderr = BoundedCapture(process.errorStream, invocation.limits.maxStderrBytes, invocation.control?.progress)
             val readers = listOf(Thread.ofVirtual().start(stdout), Thread.ofVirtual().start(stderr))
             val deadline = System.nanoTime() + invocation.limits.timeout.toNanos()
             while (process.isAlive) {
@@ -258,6 +300,10 @@ class GitCommandRunner internal constructor(val executable: Path, val environmen
                 if (stdout.overflowed || stderr.overflowed) {
                     terminate(process)
                     throw GitCommandException(GitCommandException.Kind.OUTPUT_LIMIT, "Git output exceeded its bound.")
+                }
+                invocation.control?.stop?.invoke()?.let { reason ->
+                    terminate(process)
+                    throw GitCommandException(GitCommandException.Kind.STOPPED, "Git was stopped: $reason.", stopReason = reason)
                 }
                 val remaining = deadline - System.nanoTime()
                 if (remaining <= 0) {
@@ -280,7 +326,8 @@ class GitCommandRunner internal constructor(val executable: Path, val environmen
             }
             val exit = if (truncated) -1 else process.exitValue()
             if (!truncated && exit !in invocation.allowedExitCodes) {
-                throw GitCommandException(GitCommandException.Kind.FAILED, "Git reported a failure.", exit)
+                throw GitCommandException(GitCommandException.Kind.FAILED, "Git reported a failure.", exit,
+                    diagnostic = stderr.bytes().toString(Charsets.UTF_8))
             }
             return GitCommandResult(exit, stdout.bytes(), stderr.bytes(), truncated)
         } catch (interrupted: InterruptedException) {
@@ -298,9 +345,14 @@ class GitCommandRunner internal constructor(val executable: Path, val environmen
         process.waitFor(5, TimeUnit.SECONDS)
     }
 
-    /** Keeps at most [limit] bytes and records overflow; it keeps draining so the child cannot block. */
-    private class BoundedCapture(private val input: InputStream, private val limit: Int) : Runnable {
+    /**
+     * Keeps at most [limit] bytes and records overflow; it keeps draining so the child cannot block.
+     * With a [progress] listener it keeps only the tail instead and reports each progress line.
+     */
+    private class BoundedCapture(private val input: InputStream, private val limit: Int,
+        private val progress: ((String) -> Unit)? = null) : Runnable {
         private val buffer = java.io.ByteArrayOutputStream()
+        private val line = StringBuilder()
         @Volatile var overflowed = false
             private set
 
@@ -312,14 +364,33 @@ class GitCommandRunner internal constructor(val executable: Path, val environmen
                         val count = stream.read(chunk)
                         if (count < 0) break
                         synchronized(buffer) {
-                            val room = limit - buffer.size()
-                            if (count > room) { buffer.write(chunk, 0, maxOf(room, 0)); overflowed = true }
-                            else buffer.write(chunk, 0, count)
+                            if (progress != null) {
+                                buffer.write(chunk, 0, count)
+                                if (buffer.size() > limit) {
+                                    val tail = buffer.toByteArray().let { it.copyOfRange(it.size - limit / 2, it.size) }
+                                    buffer.reset(); buffer.write(tail)
+                                }
+                            } else {
+                                val room = limit - buffer.size()
+                                if (count > room) { buffer.write(chunk, 0, maxOf(room, 0)); overflowed = true }
+                                else buffer.write(chunk, 0, count)
+                            }
                         }
+                        progress?.let { report -> lines(chunk, count, report) }
                     }
                 }
             } catch (_: IOException) {
                 // The process was terminated; the caller reports the bound that caused it.
+            }
+        }
+
+        private fun lines(chunk: ByteArray, count: Int, report: (String) -> Unit) {
+            for (index in 0 until count) {
+                val char = (chunk[index].toInt() and 0xff).toChar()
+                if (char == '\r' || char == '\n') {
+                    if (line.isNotEmpty()) try { report(line.toString()) } catch (_: Exception) { }
+                    line.setLength(0)
+                } else if (line.length < 256) line.append(char)
             }
         }
 
