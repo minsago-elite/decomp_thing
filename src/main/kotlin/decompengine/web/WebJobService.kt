@@ -808,6 +808,22 @@ class WebJobService(
         return store.resolveArtifact(jobId, relativePath)
     }
 
+    /** Host root used only to redact display text; it never enters a DTO. */
+    internal val redactionStorageRoot: Path get() = store.storageRoot
+
+    /** The attempt and its recorded build log, or null with an oversized flag; absence is not an error. */
+    internal fun readRunBuildLog(jobId: String, runId: String, maximumBytes: Long): Triple<WorkflowAttempt, decompengine.repair.StableRegularFile?, Boolean> {
+        val attempt = getAttempt(jobId, runId)
+        return try {
+            Triple(attempt, readArtifact(jobId, "reports/runs/$runId/source-tree/reports/build.log", maximumBytes), false)
+        } catch (_: decompengine.repair.RepairBudgetExceededException) {
+            Triple(attempt, null, true)
+        } catch (failure: Exception) {
+            if (failure is InterruptedException || failure is WebJobServiceException) throw failure
+            Triple(attempt, null, false)
+        }
+    }
+
     /** Validate the report namespace and attempt ownership before a bounded retained-descriptor read. */
     @Synchronized
     internal fun readArtifact(jobId: String, relativePath: String, maximumBytes: Long): decompengine.repair.StableRegularFile {

@@ -19,7 +19,7 @@ internal class WebApiController(
     private val jobs: WebJobService,
     private val jobMutations: WebJobMutationBoundary,
     streamResources: WebStreamResources,
-    clock: Clock = Clock.systemUTC(),
+    private val clock: Clock = Clock.systemUTC(),
     private val harnessReadiness: WebHarnessReadinessProjector = WebHarnessReadinessProjector(),
     private val agentPreflight: WebAgentPreflight = WebAgentPreflight { error("No agent preflight is configured.") },
 ) {
@@ -32,6 +32,7 @@ internal class WebApiController(
     private val progressPins = WebProgressPinController(access, jobs, jobMutations)
     private val workflowStarts = WebWorkflowStartController(jobs, jobMutations, assets.basePath)
     private val cancellations = WebCancellationController(jobMutations, assets.basePath)
+    private val runLogs = WebRunLogs(WebLogRedaction.forHost(jobs.redactionStorageRoot))
     private val agentPreflights = WebAgentPreflightController(access, agentPreflight, assets.basePath)
     private val runPages = WebRunPages { jobId ->
         when (val inspection = jobs.inspectDurableJob(jobId)) {
@@ -54,7 +55,7 @@ internal class WebApiController(
         val path = exchange.requestURI.rawPath
         if (!path.startsWith("${assets.basePath}api/")) return false
         val resource = path.removePrefix(prefix)
-        if (!path.startsWith(prefix) || !(resource in setOf("session", "bootstrap", "jobs", "recovery", "agent/preflight") || resource.matches(Regex("(?:jobs|uploads)/[^/]+|jobs/[^/]+/runs(?:/[^/]+(?:/reports/(?:exploration|revision-validation)|/validation-history|/source-catalog|/revisions/[^/]+/(?:sources|source-directories/[^/]+|source-files/[^/]+(?:/(?:chunk|content))?)|/snapshot|/events|/progress-pin|/cancel)?)?|jobs/[^/]+/artifacts/[^/]+/content")))) {
+        if (!path.startsWith(prefix) || !(resource in setOf("session", "bootstrap", "jobs", "recovery", "agent/preflight") || resource.matches(Regex("(?:jobs|uploads)/[^/]+|jobs/[^/]+/runs(?:/[^/]+(?:/reports/(?:exploration|revision-validation)|/validation-history|/source-catalog|/revisions/[^/]+/(?:sources|source-directories/[^/]+|source-files/[^/]+(?:/(?:chunk|content))?)|/snapshot|/events|/progress-pin|/cancel|/logs/build(?:/content)?)?)?|jobs/[^/]+/artifacts/[^/]+/content")))) {
             try {
                 val policy = if (exchange.requestMethod in setOf("POST", "PUT", "PATCH", "DELETE")) {
                     WebEndpointPolicy.jsonMutation(exchange.requestMethod)
@@ -271,6 +272,35 @@ internal class WebApiController(
                     val session = checkNotNull(access.authorize(exchange, WebEndpointPolicy.privateRead()))
                     requireJsonAccept(exchange)
                     sendWebApiResponse(exchange, 200, "runs", runPages.page(session.sessionId, resource.split('/')[1], exchange.requestURI.rawQuery))
+                }
+                resource.matches(Regex("jobs/[^/]+/runs/[^/]+/logs/build")) -> {
+                    access.authorize(exchange, WebEndpointPolicy.privateRead())
+                    requireJsonAccept(exchange)
+                    val parts = resource.split('/')
+                    val query = runLogs.parseQuery(exchange.requestURI.rawQuery)
+                    val (attempt, file, oversized) = jobs.readRunBuildLog(parts[1], parts[3], WebRunLogs.MAXIMUM_LOG_BYTES.toLong())
+                    val capture = file?.let { runLogs.capture(it.bytes, it.sha256) }
+                    sendWebApiResponse(exchange, 200, "logRange", runLogs.range(parts[1], attempt, capture, oversized, query, clock.instant()))
+                }
+                resource.matches(Regex("jobs/[^/]+/runs/[^/]+/logs/build/content")) -> {
+                    access.authorize(exchange, WebEndpointPolicy.privateRead())
+                    requireNoWebApiQuery(exchange)
+                    if (!acceptsWebMediaType(exchange, "text/plain")) throw WebAccessDenied(406, "NOT_ACCEPTABLE", "This endpoint returns text/plain.")
+                    if (exchange.requestHeaders.keys.any { it.equals("Range", true) || it.startsWith("If-", true) }) {
+                        throw WebAccessDenied(400, "UNSUPPORTED_HEADER", "This bounded log download does not support Range or conditional requests.")
+                    }
+                    val parts = resource.split('/')
+                    val (attempt, file, _) = jobs.readRunBuildLog(parts[1], parts[3], WebRunLogs.MAXIMUM_LOG_BYTES.toLong())
+                    if (file == null) throw WebAccessDenied(404, "NOT_FOUND", "This attempt has no downloadable build log.")
+                    val bytes = runLogs.download(parts[1], attempt, runLogs.capture(file.bytes, file.sha256), clock.instant())
+                    webApiHeaders(exchange, UUID.randomUUID().toString())
+                    exchange.responseHeaders.set("Content-Type", "text/plain; charset=utf-8")
+                    exchange.responseHeaders.set("Content-Disposition", "attachment; filename=\"build-${attempt.runId}.log\"")
+                    exchange.responseHeaders.set("Content-Length", bytes.size.toString())
+                    try {
+                        exchange.sendResponseHeaders(200, bytes.size.toLong())
+                        exchange.responseBody.use { it.write(bytes) }
+                    } finally { exchange.close() }
                 }
                 resource.matches(Regex("jobs/[^/]+/runs/[^/]+")) -> {
                     access.authorize(exchange, WebEndpointPolicy.privateRead())

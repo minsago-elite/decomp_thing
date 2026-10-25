@@ -155,6 +155,8 @@ internal storage optimization and must not merge identity, permissions or histor
 | `POST R/cancel` | `202 run` or `200 run` if already terminal | Closed `workflowCancel` request, idempotent recorded intent, run If-Match; #163 |
 | `POST R/recover` | `202 run`, `Location` of a new attempt | Explicit `retry` or capability-gated `resume`; If-Match; #163 |
 | `GET R/snapshot` | `200 snapshot`, ETag | Run state and consistent event watermark; #174 |
+| `GET R/logs/build` | `200 logRange` | Bounded redacted line range of the attempt's build log; `tail`/`fromLine`, `limit` ≤ 500, literal `search`; #523 |
+| `GET R/logs/build/content` | `200 text/plain` attachment | The same redacted lines with a provenance header; no Range/conditional headers; #523 |
 | `GET R/events` | `200 text/event-stream` | Resume with `Last-Event-ID` or `after`, never both; #174 |
 | `GET R/events?transport=poll` | `200 events` | Same retention/cursor semantics, bounded page; #174 |
 | `GET R/reports/{reportId}` | `200 report` | State may be missing/partial/unsupported/unknown; #165 |
@@ -633,6 +635,32 @@ configured limits, lifecycle, source and server sample time. Borrowed executors
 report unavailable metrics without zero values. Runtime uses the session-time
 snapshot; it neither polls these counts nor infers workflow availability from
 capacity. See [scheduler summary and verification](web-scheduler-summary.md).
+
+### Attempt build log ranges
+
+`GET jobs/J/runs/R/logs/build` reads `reports/runs/R/source-tree/reports/build.log` (at most
+8 MiB; larger logs report `oversized`, absent logs `missing`) and returns one contiguous range:
+`tail=true` for the newest lines or `fromLine=N` (a position just past the end returns an empty,
+current range for following), `limit` 1–500 lines (default 200) and at most 256 KiB of text. The
+range states `firstLine`, `lineCount`, `truncatedBefore`/`truncatedAfter` and `byteLimited`, with
+`totalLines`, `totalBytes`, the recording's `sourceSha256`, the attempt state with its start/end
+times and the server `readAt` time. Lines are decoded as UTF-8 with replacement (flagged), cut at
+4,096 characters (flagged) and have C0/C1 controls and bidirectional overrides rewritten as visible
+escapes (`\e`, `\uXXXX`), so terminal sequences and markup reach the browser only as text.
+
+Redaction policy `web-log-v1` replaces the job store, home, temporary and working directories with
+fixed labels and flags each changed line. The optional `search` is a literal substring of at most 128
+characters, never a pattern; it scans the bounded log and returns the match count and the first 200
+line numbers. `GET .../logs/build/content` returns every line exactly as the ranges present them,
+after a provenance header naming the job, attempt, attempt times, source digest, policy, redacted
+line count and export time.
+
+The attempt's Build log view keeps at most 2,000 lines, released from the far end as pages load,
+and renders only rows near its viewport. Following polls for new lines every 3 s only after an
+explicit Follow, stops as soon as the reader scrolls away or filters, and resumes only on request; it
+is suspended while the tab is hidden or offline and ends with the attempt. Client filtering states
+the loaded line range it covered. Leaving the view aborts reads, clears the follow timer and drops
+the buffer.
 
 ## Current source catalog metadata
 

@@ -745,6 +745,38 @@
     {
       "file": "fixtures/invalid-agent-preflight-failed-identity.json",
       "valid": false
+    },
+    {
+      "file": "fixtures/log-range-available.json",
+      "valid": true
+    },
+    {
+      "file": "fixtures/log-range-missing.json",
+      "valid": true
+    },
+    {
+      "file": "fixtures/invalid-log-range-gap.json",
+      "valid": false
+    },
+    {
+      "file": "fixtures/invalid-log-range-marker.json",
+      "valid": false
+    },
+    {
+      "file": "fixtures/invalid-log-range-search-scope.json",
+      "valid": false
+    },
+    {
+      "file": "fixtures/invalid-log-range-search-count.json",
+      "valid": false
+    },
+    {
+      "file": "fixtures/invalid-log-range-long-line.json",
+      "valid": false
+    },
+    {
+      "file": "fixtures/invalid-log-range-host-path.json",
+      "valid": false
     }
   ]
 }
