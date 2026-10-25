@@ -283,6 +283,15 @@ tests and build configuration with strict options; lint checks typed promises an
 prevents React compatibility imports. No `skipLibCheck` or ambient untyped shim
 is used to hide dependency declaration problems.
 
+`tests/accessibility.test.tsx` runs axe-core (pinned dev dependency, never bundled)
+against every routed view with contract fixtures: the public shell, workspace with jobs,
+upload, runtime, job overview, attempt history/overview/activity/evidence, source
+directory and file, the not-found page, the open display-preference panel and a failed
+job read. Any WCAG 2.0/2.1/2.2 A or AA rule violation fails `npm test`. jsdom has no
+layout or colour, so contrast and reflow stay in the packaged Chrome checks
+(`scripts/packaged-browser-contrast.mjs`); manual screen-reader audit evidence is
+recorded separately (#617). Add a new route or state to that suite when you add a view.
+
 A production build empties the output directory, builds split assets and writes
 `build/frontend/bundle-report.json`. The report includes every output's SHA-256,
 raw/gzip bytes, the initial static JS/CSS closure and bundler module ownership.
