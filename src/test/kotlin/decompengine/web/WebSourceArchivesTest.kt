@@ -100,6 +100,58 @@ class WebSourceArchivesTest {
     }
 }
 
+/** Concurrent polling must only ever observe one transition's complete set of fields. */
+class WebSourceArchivesConsistencyTest {
+    @Test fun `status and operation projections stay consistent while verifications finish concurrently`() {
+        val digest = "b".repeat(64)
+        val jobId = "a".repeat(32)
+        val identity = LinuxFileIdentity(LinuxFileKey(1, 1), 0x8180, 1000, 1000, 1, 1, true, false, false)
+        val snapshot = WebRevisionSourceSnapshot(WebRevisionSourceReference(jobId, "run_1", "revision_1", "c".repeat(64), "version_1"),
+            "d".repeat(64), "e".repeat(64), listOf(WebRevisionSourceFile(GeneratedFileEvidence("Makefile", "f".repeat(64), "fixture",
+                roles = setOf(ProjectFileRole.BUILD_INPUT), contentKind = ProjectContentKind.UTF8_TEXT), 1)))
+        val at = Instant.parse("2026-10-25T00:00:00Z")
+        val attempt = WorkflowAttempt("run_1", jobId, WorkflowKind.RECONSTRUCT, WorkflowRunState.COMPLETED, "version_1", at, at, at, null, null, null,
+            WorkflowExecutionLimits(1u, 1u, 1u, 0u), WorkflowTerminalReason.COMPLETED, null, WorkflowCandidate("revision_1", "c".repeat(64)), null)
+        val store = object : WebArtifactStore {
+            override fun attempts(jobId: String) = listOf(attempt)
+            override fun present(jobId: String, runId: String, path: String) = true
+            override fun stream(jobId: String, runId: String, path: String, declaredSize: (Long) -> Unit,
+                consume: (ByteArray, Int) -> Unit, cancellationCheck: () -> Unit) = StableFileDigest(digest, 10, identity)
+            override fun revisionCommitments(jobId: String, runId: String, revisionId: String) = null
+        }
+        var round = 0
+        val archives = WebSourceArchives({ _, _, _ -> snapshot }, { _, _ -> attempt }, store, { _, _ -> null }, { _, _, sha ->
+            // Alternate verified and failed outcomes so both terminal shapes are polled.
+            if (synchronized(this) { round++ } % 2 == 1) throw IllegalArgumentException("payload differs")
+            WebArchiveSnapshot(ByteArray(0), sha, SourceTreeView(emptyList(), null), kotlinx.serialization.json.JsonObject(emptyMap()), snapshot.descriptorSha256)
+        }, Executors.newSingleThreadExecutor())
+        archives.use {
+            val stop = java.util.concurrent.atomic.AtomicBoolean(false)
+            val problems = java.util.concurrent.ConcurrentLinkedQueue<String>()
+            val poller = Thread {
+                while (!stop.get()) {
+                    val verification = archives.status("/", jobId, "run_1", "revision_1").getValue("verification") as kotlinx.serialization.json.JsonObject
+                    val state = (verification.getValue("state") as kotlinx.serialization.json.JsonPrimitive).content
+                    val verifiedAt = verification.getValue("verifiedAt") != kotlinx.serialization.json.JsonNull
+                    val failure = verification.getValue("failureCode") != kotlinx.serialization.json.JsonNull
+                    if (verifiedAt != (state == "verified") || failure != (state == "failed")) problems += verification.toString()
+                }
+            }.apply { start() }
+            repeat(200) { index ->
+                val record = archives.start(jobId, "run_1", "revision_1", digest, "key-consistency-${index.toString().padStart(4, '0')}").record
+                while (!record.terminal) {
+                    val operation = webArchiveOperation(record)
+                    val ended = operation.getValue("endedAt") != kotlinx.serialization.json.JsonNull
+                    val state = (operation.getValue("state") as kotlinx.serialization.json.JsonPrimitive).content
+                    if (ended != (state in setOf("completed", "failed", "interrupted"))) problems += operation.toString()
+                }
+            }
+            stop.set(true); poller.join(10_000)
+            assertEquals(emptyList(), problems.toList())
+        }
+    }
+}
+
 private object WebSourceArchivesTestViews {
     val view: SourceTreeView = SourceTreeView(emptyList(), null)
 }

@@ -16,10 +16,14 @@ internal class WebArchiveVerification(
     val archiveSha256: String, val sourceSha256: String, val metadataVersion: String,
     val idempotencyKey: String, val createdAt: Instant,
 ) {
-    @Volatile var state: String = "queued"
-    @Volatile var endedAt: Instant? = null
-    @Volatile var failureCode: String? = null
-    @Volatile var version: Int = 1
+    /** Replaced as one immutable value, so a reader never combines fields from two transitions. */
+    @Volatile var progress: WebArchiveProgress = WebArchiveProgress("queued", null, null, 1)
+    val state: String get() = progress.state
+    val verified: Boolean get() = progress.verified
+    val terminal: Boolean get() = progress.terminal
+}
+
+internal data class WebArchiveProgress(val state: String, val endedAt: Instant?, val failureCode: String?, val version: Int) {
     val verified: Boolean get() = state == "completed"
     val terminal: Boolean get() = state == "completed" || state == "failed" || state == "interrupted"
 }
@@ -59,16 +63,20 @@ internal class WebSourceArchives(
         check(snapshot.reference.jobId == jobId && snapshot.reference.runId == runId && snapshot.reference.revisionId == revisionId)
         var tooLarge = false
         val current = try { observe(jobId, runId) } catch (_: WebArtifactTooLarge) { tooLarge = true; null }
-        val history = synchronized(this) { records.values.filter { it.jobId == jobId && it.runId == runId && it.revisionId == revisionId }.toList() }
+        // One consistent copy of every record's progress; the projection below never rereads mutable state.
+        val history = synchronized(this) {
+            records.values.filter { it.jobId == jobId && it.runId == runId && it.revisionId == revisionId }.map { it to it.progress }
+        }
         fun matches(record: WebArchiveVerification) = current != null && record.archiveSha256 == current.first && record.metadataVersion == snapshot.metadataVersion
-        val latest = history.lastOrNull(::matches)
+        val latest = history.lastOrNull { matches(it.first) }
+        val progress = latest?.second
         // "stale" names a replaced archive only; a metadata-only change of the same bytes just needs a new check.
-        val previous = history.lastOrNull { it.verified && current != null && it.archiveSha256 != current.first }
+        val previous = history.lastOrNull { it.second.verified && current != null && it.first.archiveSha256 != current.first }?.first
         val state = when {
             current == null -> if (tooLarge) "too-large" else "missing"
-            latest == null -> if (previous != null) "stale" else "not-verified"
-            latest.verified -> "verified"
-            latest.state == "failed" || latest.state == "interrupted" -> "failed"
+            progress == null -> if (previous != null) "stale" else "not-verified"
+            progress.verified -> "verified"
+            progress.state == "failed" || progress.state == "interrupted" -> "failed"
             else -> "running"
         }
         return buildJsonObject {
@@ -85,9 +93,9 @@ internal class WebSourceArchives(
             put("verification", buildJsonObject {
                 put("authority", "archive-verifier")
                 put("state", state)
-                put("operationId", latest?.operationId?.let(::JsonPrimitive) ?: JsonNull)
-                put("verifiedAt", latest?.takeIf { it.verified }?.endedAt?.toString()?.let(::JsonPrimitive) ?: JsonNull)
-                put("failureCode", latest?.takeIf { !it.verified }?.failureCode?.let(::JsonPrimitive) ?: JsonNull)
+                put("operationId", latest?.first?.operationId?.let(::JsonPrimitive) ?: JsonNull)
+                put("verifiedAt", progress?.takeIf { it.verified }?.endedAt?.toString()?.let(::JsonPrimitive) ?: JsonNull)
+                put("failureCode", progress?.takeIf { !it.verified }?.failureCode?.let(::JsonPrimitive) ?: JsonNull)
                 put("previousVerifiedSha256", previous?.archiveSha256?.takeIf { state == "stale" }?.let(::JsonPrimitive) ?: JsonNull)
             })
             put("build", build(jobId, runId))
@@ -169,7 +177,7 @@ internal class WebSourceArchives(
     }
 
     private fun run(record: WebArchiveVerification) {
-        synchronized(this) { if (record.terminal) return; record.state = "running"; record.version++ }
+        synchronized(this) { if (record.terminal) return; record.progress = record.progress.copy(state = "running", version = record.progress.version + 1) }
         val failure = try {
             val verified = verify(record.jobId, record.runId, record.archiveSha256)
             val now = recapture(record)
@@ -199,7 +207,7 @@ internal class WebSourceArchives(
 
     private fun finish(record: WebArchiveVerification, state: String, failure: String?) = synchronized(this) {
         if (record.terminal) return@synchronized
-        record.state = state; record.failureCode = failure; record.endedAt = clock.instant(); record.version++
+        record.progress = WebArchiveProgress(state, clock.instant(), failure, record.progress.version + 1)
     }
 
     fun operation(jobId: String, runId: String, revisionId: String, operationId: String): WebArchiveVerification {
@@ -236,14 +244,15 @@ internal class WebSourceArchives(
 
 /** Closed operation projection; archive verification has no repository, worktree or Git result object. */
 internal fun webArchiveOperation(record: WebArchiveVerification): JsonObject = buildJsonObject {
+    val progress = record.progress // Read once: every field below comes from one transition.
     put("operationId", record.operationId); put("jobId", record.jobId)
     put("repositoryId", JsonNull); put("worktreeId", JsonNull); put("action", "archive.verify")
-    put("state", record.state); put("version", "version_${record.version}")
-    put("createdAt", record.createdAt.toString()); put("endedAt", record.endedAt?.toString()?.let(::JsonPrimitive) ?: JsonNull)
+    put("state", progress.state); put("version", "version_${progress.version}")
+    put("createdAt", record.createdAt.toString()); put("endedAt", progress.endedAt?.toString()?.let(::JsonPrimitive) ?: JsonNull)
     put("resultObjectId", JsonNull); put("recoveryRequired", false)
     put("message", when {
-        record.state == "completed" -> JsonPrimitive("The archive digest, payload and recorded build contract match this revision.")
-        record.failureCode != null -> JsonPrimitive(ARCHIVE_FAILURE_MESSAGES[record.failureCode] ?: "The archive was not verified.")
+        progress.state == "completed" -> JsonPrimitive("The archive digest, payload and recorded build contract match this revision.")
+        progress.failureCode != null -> JsonPrimitive(ARCHIVE_FAILURE_MESSAGES[progress.failureCode] ?: "The archive was not verified.")
         else -> JsonNull
     })
 }
