@@ -19,6 +19,9 @@ function sleep(milliseconds: number, signal: AbortSignal) {
 }
 
 const MAX_STATUS_PAGES = 10;
+const MAX_REF_PAGES = 10;
+/** The mutation contract's `selectedFileIds` bound for stage, unstage and commit. */
+const MAX_SELECTION = 200;
 
 const terminal = new Set<Operation['state']>(['completed', 'failed', 'cancelled', 'interrupted', 'recovery-required']);
 
@@ -65,6 +68,8 @@ export function GitWorkspace({ jobId, basePath, session, capabilities, pollInter
   const [commit, setCommit] = useState<{ diff: GitDiff; provenance: GitProvenance } | null>(null);
   const [refresh, setRefresh] = useState(0);
   const active = useRef<AbortController | null>(null);
+  // Each status read or work-tree change starts a new diff generation; late diff responses are dropped.
+  const diffGeneration = useRef(0);
   const repository = loaded?.listing.repositories[0] ?? null;
   const base = repository ? `/jobs/${jobId}/repositories/${repository.repositoryId}` : null;
   const query = worktree ? `worktree=${worktree}` : '';
@@ -84,11 +89,13 @@ export function GitWorkspace({ jobId, basePath, session, capabilities, pollInter
         const [status, worktrees, refs, history] = await Promise.all([
           readStatus(prefix, controller.signal),
           client.get('gitWorktrees', `${prefix}/worktrees`, { signal: controller.signal }),
-          client.get('gitRefs', `${prefix}/refs?limit=200`, { signal: controller.signal }),
+          readRefs(prefix, controller.signal),
           client.get('gitHistory', `${prefix}/history${suffix ? `${suffix}&limit=20` : '?limit=20'}`, { signal: controller.signal }),
         ]);
         if (controller.signal.aborted) return;
-        setLoaded({ listing, status, worktrees: worktrees.data, refs: refs.data, history: history.data });
+        diffGeneration.current++;
+        setDiff(null);
+        setLoaded({ listing, status, worktrees: worktrees.data, refs, history: history.data });
         // A selection survives a refresh only while the same file identity is still listed.
         setSelected(previous => new Set([...previous].filter(key => status.entries.some(entry => key.endsWith(`:${entry.fileId}`)))));
       } catch (failure: unknown) {
@@ -105,6 +112,17 @@ export function GitWorkspace({ jobId, basePath, session, capabilities, pollInter
    * staged set. A status that needs more than the page budget is presented as incomplete, which
    * disables selection and committing instead of reviewing a partial set.
    */
+  /** Every ref page under its anchored cursor, so each branch stays reachable for switch and delete. */
+  async function readRefs(prefix: string, signal: AbortSignal): Promise<GitRefs> {
+    let page = (await client.get('gitRefs', `${prefix}/refs?limit=200`, { signal })).data;
+    const refs = [...page.refs];
+    for (let pages = 1; page.nextCursor && pages < MAX_REF_PAGES; pages++) {
+      page = (await client.get('gitRefs', `${prefix}/refs?limit=200&cursor=${page.nextCursor}`, { signal })).data;
+      refs.push(...page.refs);
+    }
+    return { ...page, refs };
+  }
+
   async function readStatus(prefix: string, signal: AbortSignal): Promise<GitStatus> {
     const scope = worktree ? `worktree=${worktree}&` : '';
     let page = (await client.get('gitStatus', `${prefix}/status?${scope}limit=200`, { signal })).data;
@@ -163,9 +181,10 @@ export function GitWorkspace({ jobId, basePath, session, capabilities, pollInter
 
   async function showDiff(entry: GitStatusEntry, scope: 'staged' | 'unstaged') {
     if (!base) return;
+    const generation = diffGeneration.current;
     try {
       const result = await client.get('gitDiff', `${base}/diff?scope=${scope}&file=${entry.fileId}${query ? `&${query}` : ''}`);
-      setDiff(result.data);
+      if (generation === diffGeneration.current) setDiff(result.data);
     } catch (failure: unknown) { setStatus(withApiFailureReference(copy.readFailed, failure)); }
   }
 
@@ -283,10 +302,13 @@ export function GitWorkspace({ jobId, basePath, session, capabilities, pollInter
         </fieldset>)}
         {groups.staged.length + groups.unstaged.length + groups.untracked.length + groups.conflicted.length === 0 && <p>{copy.noChanges}</p>}
         {statusData.counts.ignored > 0 && <p>{textMessage(copy.ignoredCount, { count: String(statusData.counts.ignored) })}</p>}
-        <button type="button" disabled={!writable || !statusData.complete || selectedIn('unstaged', 'untracked').length === 0}
+        {(selectedIn('unstaged', 'untracked').length > MAX_SELECTION || selectedIn('staged').length > MAX_SELECTION) &&
+          <p role="alert">{textMessage(copy.selectionTooLarge, { max: MAX_SELECTION })}</p>}
+        <button type="button" disabled={!writable || !statusData.complete || selectedIn('unstaged', 'untracked').length === 0 ||
+          selectedIn('unstaged', 'untracked').length > MAX_SELECTION}
           onClick={() => { void act('gitStageRequest', copy.stageSelected, guarded => ({ action: 'git.stage', worktreeId,
             guards: guarded, selectedFileIds: selectedIn('unstaged', 'untracked') })); }}>{copy.stageSelected}</button>
-        <button type="button" disabled={!writable || !statusData.complete || selectedIn('staged').length === 0}
+        <button type="button" disabled={!writable || !statusData.complete || selectedIn('staged').length === 0 || selectedIn('staged').length > MAX_SELECTION}
           onClick={() => { void act('gitStageRequest', copy.unstageSelected, guarded => ({ action: 'git.unstage', worktreeId,
             guards: guarded, selectedFileIds: selectedIn('staged') })); }}>{copy.unstageSelected}</button>
         {diff?.patch && <section aria-labelledby="git-diff-title">
@@ -295,7 +317,9 @@ export function GitWorkspace({ jobId, basePath, session, capabilities, pollInter
           {diff.patch.truncated && <p>{copy.truncated}</p>}
         </section>}
       </section>
-      <CommitForm staged={groups.staged} parent={statusData.headObjectId} disabled={!writable || !statusData.complete || groups.conflicted.length > 0}
+      {groups.staged.length > MAX_SELECTION && <p role="alert">{textMessage(copy.commitTooLarge, { max: MAX_SELECTION, count: groups.staged.length })}</p>}
+      <CommitForm staged={groups.staged} parent={statusData.headObjectId}
+        disabled={!writable || !statusData.complete || groups.conflicted.length > 0 || groups.staged.length > MAX_SELECTION}
         onCommit={message => act('gitCommitRequest', copy.commitAction, guarded => ({ action: 'git.commit', worktreeId, guards: guarded,
           selectedFileIds: groups.staged.map(entry => entry.fileId), message }))} />
       <section aria-labelledby="git-history-title">
@@ -330,7 +354,7 @@ export function GitWorkspace({ jobId, basePath, session, capabilities, pollInter
           <code>{ref.displayName}</code> <code title={ref.objectId}>{short(ref.objectId)}</code>{ref.current && <> <StateMark tone="settled">{copy.current}</StateMark></>}
           {ref.kind === 'branch' && !ref.current && <>
             {' '}<button type="button" disabled={!writable || dirty} onClick={() => { void act('gitSwitchRequest', textMessage(copy.switchAction, { name: branch(ref.displayName) }),
-              guarded => ({ action: 'git.switch', worktreeId, guards: guarded, refId: ref.refId, objectId: null })); }}>
+              guarded => ({ action: 'git.switch', worktreeId, guards: guarded, refId: ref.refId, objectId: ref.objectId })); }}>
               {textMessage(copy.switchAction, { name: branch(ref.displayName) })}</button>
             {' '}<button type="button" disabled={!writable} onClick={() => { void act('gitBranchDeleteRequest', textMessage(copy.deleteAction, { name: branch(ref.displayName) }),
               guarded => ({ action: 'git.branch.delete', worktreeId, guards: guarded, refId: ref.refId, expectedObjectId: ref.objectId })); }}>
