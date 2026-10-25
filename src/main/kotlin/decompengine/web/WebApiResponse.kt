@@ -13,13 +13,17 @@ internal fun requireNoWebApiQuery(exchange: HttpExchange) {
     }
 }
 
+/** Kinds whose payload is digest-bound committed job content rather than server-produced text. */
+private val committedContentKinds = setOf("sourceChunk")
+
 internal fun sendWebApiResponse(exchange: HttpExchange, status: Int, kind: String, data: JsonElement) {
     val requestId = UUID.randomUUID().toString()
+    val public = if (kind in committedContentKinds) data else WebRedactionPolicy.of(exchange).json(data)
     val body = buildJsonObject {
         put("apiVersion", 1)
         put("kind", kind)
         put("requestId", requestId)
-        put("data", data)
+        put("data", public)
     }.toString().toByteArray(Charsets.UTF_8)
     check(body.size <= 1024 * 1024) { "The API response exceeds its byte ceiling" }
     webApiHeaders(exchange, requestId)

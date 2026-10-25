@@ -21,6 +21,7 @@ internal fun legacyError(
     requestDiagnosticOutput: (String) -> Unit = System.err::println,
     html: () -> String,
 ) {
+    WebDeniedResponseTrace.note(code)
     val segments = exchange.requestURI.path.split('/').filter(String::isNotBlank)
     val json = segments.firstOrNull() == "api" ||
         (exchange.requestMethod == "POST" && segments == listOf("jobs") &&

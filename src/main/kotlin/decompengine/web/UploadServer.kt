@@ -18,7 +18,6 @@ import decompengine.jobs.JobStoreException
 import decompengine.jobs.WorkflowAttemptStore
 import decompengine.jobs.UploadPublicationUncertainException
 import decompengine.jobs.AgentProgressJournal
-import decompengine.jobs.ProgressRedactor
 import decompengine.jobs.BestEffortProgressJournal
 import decompengine.agent.AgentWorkflowProgress
 import decompengine.agent.AgentWorkflowPhase
@@ -206,6 +205,8 @@ class UploadServer(
     devFrontendOrigin: String? = null,
     sourceProfiles: List<ReconstructionProfile> = defaultWebSourceProfiles(),
     sensitiveValues: Collection<String> = System.getenv().values,
+    // Credential-named variables are redacted from every public representation (see WebRedactionPolicy).
+    redactionEnvironment: Map<String, String> = System.getenv(),
     private val listenBacklog: Int = 64,
     private val authenticationInspector: (decompengine.agent.AgentCancellation) -> decompengine.acp.AcpAuthenticationInventory = defaultWebAuthenticationInspector(),
     private val requestShutdownTimeoutMs: Long = 1000,
@@ -219,7 +220,8 @@ class UploadServer(
         require(requestShutdownTimeoutMs in 0..5000) { "HTTP request shutdown wait must be between zero and five seconds" }
         check(!Thread.currentThread().isInterrupted && !startupCancellation()) { "Web server startup cancelled" }
     }
-    private val diagnosticRedactor = ProgressRedactor(sensitiveValues)
+    internal val redaction = WebRedactionPolicy.create(redactionEnvironment, sensitiveValues,
+        WebRedactionPolicy.defaultPrivateRoots(dataDir))
     private val authenticationInspectionLock = Any()
     private var authenticationInspectionId: String? = null
     private val authenticationInspectionCancellation = java.util.concurrent.atomic.AtomicBoolean(false)
@@ -275,6 +277,8 @@ class UploadServer(
         setOfNotNull(devFrontendOrigin)), webAccessClock ?: SystemWebAccessClock,
         requestDiagnosticOutput = requestDiagnosticOutput)
     private val jobMutations = WebJobMutationBoundary(access, jobs)
+    internal val audit = WebAuditLog(dataDir, prepareStorage = ownership::ensureLockFile)
+    private val auditRecorder = WebAuditRecorder(access, audit)
     private val legacySessions = WebSessionController(access)
     internal val streamResources = WebStreamResources()
     private val harnessReadiness = WebHarnessReadinessProjector()
@@ -293,7 +297,7 @@ class UploadServer(
         }) { "Server is stopping" }
     }
     private val api = spaAssets?.let { WebApiController(access, it, jobs, jobMutations, streamResources,
-        harnessReadiness = harnessReadiness, agentPreflight = agentPreflight) }
+        harnessReadiness = harnessReadiness, agentPreflight = agentPreflight, audit = audit) }
     // A request that finds every worker and queue slot taken is answered by this tiny pool with a stable 429
     // instead of a reset connection. It has no queue, so overload still never buffers more than the main pool does;
     // when it too is busy the rejection propagates and the dispatcher closes the connection, as before.
@@ -359,7 +363,7 @@ class UploadServer(
             throw failure
         }
         server.executor = requestExecutor
-        server.createContext("/") { exchange ->
+        val context = server.createContext("/") { exchange ->
             if (Thread.currentThread().name == OVERLOAD_RESPONDER_THREAD) {
                 // Admitted only to be refused: no routing, no deadline, no session or storage access.
                 exchange.responseHeaders.set("Connection", "close")
@@ -371,6 +375,7 @@ class UploadServer(
             val deadline = requestDeadlines.schedule({ exchange.close() }, if (upload) 120 else 30, TimeUnit.SECONDS)
             try { route(exchange) } finally { deadline.cancel(false) }
         }
+        WebRedactionPolicy.install(context, redaction)
     }
 
     fun start() {
@@ -584,9 +589,9 @@ class UploadServer(
             put("loginSupported", false)
             put("methods", kotlinx.serialization.json.buildJsonArray {
                 inventory.methods.forEach { method -> add(buildJsonObject {
-                    put("idPreview", diagnosticRedactor.text(method.idPreview, 128))
-                    put("namePreview", diagnosticRedactor.text(method.namePreview, 128))
-                    put("descriptionPreview", diagnosticRedactor.text(method.descriptionPreview.orEmpty(), 256))
+                    put("idPreview", redaction.diagnostic(method.idPreview, 128))
+                    put("namePreview", redaction.diagnostic(method.namePreview, 128))
+                    put("descriptionPreview", redaction.diagnostic(method.descriptionPreview.orEmpty(), 256))
                     put("variant", method.variant)
                     put("loginSupported", false)
                 }) }
@@ -633,6 +638,11 @@ class UploadServer(
             return
         }
         val segments = exchange.requestURI.path.split('/').filter(String::isNotBlank)
+        val audited = WebAuditRecorder.legacyAction(exchange.requestMethod, segments)
+        auditRecorder.around(exchange, audited?.first, audited?.second ?: WebAuditTarget()) { routeLegacy(exchange, segments) }
+    }
+
+    private fun routeLegacy(exchange: HttpExchange, segments: List<String>) {
         try {
             access.authorize(exchange, WebEndpointPolicy.transport(setOf("GET", "HEAD", "POST", "PUT", "PATCH", "DELETE", "OPTIONS")))
             if (exchange.requestURI.rawPath == "/api/v1/session") {
@@ -840,7 +850,7 @@ class UploadServer(
     }
 
     private fun diagnostic(failure: Exception, fallback: String): String =
-        diagnosticRedactor.text(failure.message ?: fallback, maximumCharacters = 480)
+        redaction.diagnostic(failure.message ?: fallback, maximumCharacters = 480)
 
     /** A queued operation can be claimed once, either by a worker or by shutdown. */
     private fun readLegacyProgress(jobId: String, runId: String?): kotlinx.serialization.json.JsonObject {
@@ -1285,7 +1295,7 @@ internal fun HttpExchange.sendHtml(
     )
 
 internal fun HttpExchange.sendJson(status: Int, body: String) =
-    sendBytes(status, body.toByteArray(StandardCharsets.UTF_8), "application/json; charset=utf-8")
+    sendBytes(status, WebRedactionPolicy.of(this).document(body.toByteArray(StandardCharsets.UTF_8)), "application/json; charset=utf-8")
 
 private fun HttpExchange.sendBytes(
     status: Int,

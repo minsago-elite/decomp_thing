@@ -20,14 +20,15 @@ internal object WebExplorationArtifact {
         put("role", "raw-evidence"); put("derivedFromArtifactId", JsonNull)
     }
 
-    fun read(jobs: WebJobService, jobId: String, artifactId: String): ByteArray {
+    /** [project] is the public byte projection the descriptor digest was computed over. */
+    fun read(jobs: WebJobService, jobId: String, artifactId: String, project: (ByteArray) -> ByteArray = { it }): ByteArray {
         val match = idPattern.matchEntire(artifactId) ?: unavailable()
         val snapshot = when (val inspection = jobs.inspectDurableJob(jobId)) {
             is WorkflowJobInspection.Available -> inspection.snapshot
             is WorkflowJobInspection.Unavailable -> unavailable()
         }
         val run = snapshot.attempts.singleOrNull { binding(jobId, it.runId) == match.groupValues[1] } ?: unavailable()
-        val bytes = jobs.readArtifact(jobId, "reports/runs/${run.runId}/exploration.json", 1_048_576).bytes
+        val bytes = project(jobs.readArtifact(jobId, "reports/runs/${run.runId}/exploration.json", 1_048_576).bytes)
         if (sha256(bytes) != match.groupValues[2]) throw WebJobServiceException("ARTIFACT_CHANGED", "These report bytes differ from the displayed artifact. Refresh its evidence before downloading.")
         return bytes
     }
