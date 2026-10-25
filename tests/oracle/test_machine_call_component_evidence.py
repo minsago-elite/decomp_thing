@@ -11,6 +11,7 @@ import json
 import os
 from pathlib import Path
 import subprocess
+import sys
 import tempfile
 import unittest
 from unittest import mock
@@ -205,6 +206,42 @@ class MachineCallComponentEvidenceTest(unittest.TestCase):
         self.write_manifest()
         with self.assertRaises(VERIFY.VerificationError):
             self.verify()
+
+    def test_fifo_substitution_after_path_validation_refuses_without_blocking(self) -> None:
+        victim = self.root / "fifo-substitution.bin"
+        victim.write_bytes(b"authored regular file")
+        child = r"""
+import importlib.util
+import os
+from pathlib import Path
+import stat
+import sys
+spec = importlib.util.spec_from_file_location("evidence_fifo_control", sys.argv[1])
+verify = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(verify)
+verify.REPOSITORY_ROOT = Path(sys.argv[2])
+victim = verify.REPOSITORY_ROOT / "fifo-substitution.bin"
+original = verify.repository_path
+def substitute(path, *, existing):
+    selected = original(path, existing=existing)
+    assert selected == victim and existing
+    selected.unlink()
+    os.mkfifo(selected, 0o600)
+    return selected
+verify.repository_path = substitute
+try:
+    verify.read_file(victim, 64)
+except verify.VerificationError:
+    assert stat.S_ISFIFO(victim.lstat().st_mode)
+    print("real FIFO substitution refused")
+else:
+    raise AssertionError("substituted FIFO was accepted")
+"""
+        result = subprocess.run([sys.executable, "-c", child,
+            str(ROOT / "scripts/verify-machine-call-component-evidence.py"), str(self.root)],
+            env=os.environ | {"PYTHONDONTWRITEBYTECODE": "1"}, stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE, timeout=5, check=True)
+        self.assertIn(b"real FIFO substitution refused", result.stdout)
 
     def test_extraction_refuses_overwrite_symlinks_missing_parent_and_repository_escape(self) -> None:
         recovered, _ = self.verify()
