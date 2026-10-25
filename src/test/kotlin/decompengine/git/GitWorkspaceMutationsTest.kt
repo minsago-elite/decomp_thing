@@ -206,6 +206,62 @@ class GitWorkspaceMutationsTest {
         assertTrue(after.single { it.path.exact == "src/util.c/extra.c" }.untracked)
     }
 
+    @Test fun `routine work-tree operations retire old terminal records instead of exhausting the quota`(): Unit = Fixture().use { f ->
+        val service = f.open()
+        val repositoryId = service.initialized()
+        val operations = f.store.resolve(jobId).resolve("git").resolve("operations")
+        val first = mutableListOf<String>()
+        repeat(ManagedGitRepositories.MAX_OPERATIONS / 2 + 2) { cycle ->
+            for (stage in listOf(true, false)) {
+                val (view, guards) = service.guards(repositoryId)
+                val record = service.run(repositoryId, GitStageRequest(view.record.worktreeId, guards, view.ids { it.path.exact == "src/main.c" }, stage),
+                    "cycle_${if (stage) "s" else "u"}_${"%04d".format(cycle)}_000000")
+                assertEquals(GitOperationState.COMPLETED, record.state, record.message)
+                if (cycle == 0) first += record.operationId
+            }
+        }
+        val retained = Files.list(operations).use { files -> files.map { it.fileName.toString() }.toList() }
+        assertTrue(retained.size <= ManagedGitRepositories.MAX_OPERATIONS, "retained ${retained.size}")
+        assertTrue(first.none { "$it.json" in retained }, "the oldest work-tree records are retired first")
+        val (view, guards) = service.guards(repositoryId)
+        assertTrue("${view.record.operationId}.json" in retained, "initialization records are never retired")
+        // The newest key still replays its original record.
+        val request = GitStageRequest(view.record.worktreeId, guards, view.ids { it.path.exact == "src/main.c" }, true)
+        val latest = service.run(repositoryId, request, "cycle_latest_key_0000")
+        assertEquals(GitOperationState.COMPLETED, latest.state, latest.message)
+        assertTrue(service.requestWorkspace(jobId, repositoryId, request, "cycle_latest_key_0000").replayed)
+    }
+
+    @Test fun `a staged deletion with an untracked replacement unstages and stages by action`(): Unit = Fixture().use { f ->
+        val service = f.open()
+        val repositoryId = service.initialized()
+        val workTree = f.store.resolve("$jobId/git/repositories/$repositoryId/worktree")
+        val (all, allGuards) = service.guards(repositoryId)
+        service.run(repositoryId, GitStageRequest(all.record.worktreeId, allGuards, all.ids { it.untracked }, true), "stage_key_0000060")
+        val (staged, stagedGuards) = service.guards(repositoryId)
+        service.run(repositoryId, GitCommitRequest(staged.record.worktreeId, stagedGuards, staged.ids { it.staged != GitIndexChange.NONE }, "base"), "commit_key_000060")
+        val gitDir = f.store.resolve("$jobId/git/repositories/$repositoryId/repository.git")
+        fun raw(vararg args: String) = f.repositories.git("--git-dir=$gitDir", "--work-tree=$workTree", *args, cwd = workTree)
+        raw("rm", "-q", "--cached", "--", "src/util.c")
+        Files.writeString(workTree.resolve("src/util.c"), "int replacement;\n")
+        // Status now holds a staged deletion (D.) and an untracked record (?) with one identity.
+        val (view, guards) = service.guards(repositoryId)
+        val records = view.observation.status.entries.filter { it.path.exact == "src/util.c" }
+        assertEquals(setOf(GitIndexChange.DELETED to false, GitIndexChange.NONE to true), records.map { it.staged to it.untracked }.toSet())
+        val id = view.ids { it.path.exact == "src/util.c" }.distinct().single()
+        val unstaged = service.run(repositoryId, GitStageRequest(view.record.worktreeId, guards, listOf(id), false), "unstage_key_00061")
+        assertEquals(GitOperationState.COMPLETED, unstaged.state, unstaged.message)
+        val after = service.workspace(jobId, repositoryId).observation.status.entries.single { it.path.exact == "src/util.c" }
+        assertEquals(GitIndexChange.NONE, after.staged); assertEquals(GitIndexChange.MODIFIED, after.unstaged)
+        assertEquals("int replacement;\n", Files.readString(workTree.resolve("src/util.c")))
+        // The same pair staged by action adds the replacement instead of refusing the selection.
+        raw("rm", "-q", "--cached", "--", "src/util.c")
+        val (again, againGuards) = service.guards(repositoryId)
+        val restaged = service.run(repositoryId, GitStageRequest(again.record.worktreeId, againGuards, listOf(id), true), "stage_key_0000062")
+        assertEquals(GitOperationState.COMPLETED, restaged.state, restaged.message)
+        assertEquals(GitIndexChange.MODIFIED, service.workspace(jobId, repositoryId).observation.status.entries.single { it.path.exact == "src/util.c" }.staged)
+    }
+
     @Test fun `unstaging a rename never touches staged entries beneath its original path`(): Unit = Fixture().use { f ->
         val service = f.open()
         val repositoryId = service.initialized()

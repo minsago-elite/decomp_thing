@@ -567,7 +567,7 @@ class ManagedGitRepositories(
             if (operations.any { !it.state.terminal }) {
                 throw ManagedGitException("WORKTREE_BUSY", "Another repository operation is still running for this job.")
             }
-            if (operations.size >= MAX_OPERATIONS || executor.queue.remainingCapacity() == 0) {
+            if (retireTerminalWorkspace(jobId, operations).size >= MAX_OPERATIONS || executor.queue.remainingCapacity() == 0) {
                 throw ManagedGitException("QUOTA_EXCEEDED", "Repository operation capacity is exhausted. Review existing operations first.")
             }
             refusing { validate(runner, located, request) }
@@ -853,6 +853,23 @@ class ManagedGitRepositories(
     private fun persist(directory: Path, operation: GitOperationRecord) {
         val operations = GitStorage.directories(directory, "operations")
         GitStorage.replaceAtomically(operations.resolve("${operation.operationId}.json"), encode(operation).toByteArray())
+    }
+
+    /**
+     * Routine work-tree operations must not use up the job's record quota. When the next
+     * admission would reach it, the oldest terminal work-tree records are retired so that the
+     * newest `MAX_OPERATIONS - 1` stay replayable by their keys. Initialization and import
+     * records are never retired. A retired key that is sent again is admitted as a new request,
+     * and its reviewed guards then refuse it unless the state it was reviewed against still
+     * holds.
+     */
+    private fun retireTerminalWorkspace(jobId: String, operations: List<GitOperationRecord>): List<GitOperationRecord> {
+        val excess = operations.size - (MAX_OPERATIONS - 1)
+        if (excess <= 0) return operations
+        val directory = root.resolve(jobId).resolve("git").resolve("operations")
+        val retired = operations.filter { it.action.workspace && it.state.terminal }.sortedBy { it.createdAt }.take(excess)
+        retired.forEach { Files.deleteIfExists(directory.resolve("${it.operationId}.json")) }
+        return operations - retired.toSet()
     }
 
     private fun operations(jobId: String): List<GitOperationRecord> {

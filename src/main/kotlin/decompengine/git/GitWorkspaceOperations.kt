@@ -104,17 +104,20 @@ internal object GitWorkspaceMutations {
     /** Map reviewed file identities to the current status entries, refusing anything not selectable. */
     fun select(record: GitRepositoryRecord, observation: GitWorkspaceObservation, fileIds: List<String>, stage: Boolean): List<GitStatusEntry> {
         if (!observation.status.complete) refuse("STATUS_INCOMPLETE", "The status is too large to review completely; selection is unavailable.")
-        val byId = observation.status.entries.associateBy { it.path.fileId(record.worktreeId) }
+        // One path can have two records: a staged deletion and an untracked replacement share a
+        // file identity. Resolve each selection against the record the action applies to.
+        val byId = observation.status.entries.groupBy { it.path.fileId(record.worktreeId) }
+        fun applies(entry: GitStatusEntry) = if (stage) entry.untracked || entry.unstaged != GitIndexChange.NONE else entry.staged != GitIndexChange.NONE
         return fileIds.map { id ->
-            val entry = byId[id] ?: refuse("SELECTION_CHANGED", "A selected file is no longer in the current status.")
+            val records = byId[id] ?: refuse("SELECTION_CHANGED", "A selected file is no longer in the current status.")
+            val entry = records.firstOrNull { !it.ignored && applies(it) } ?: records.first()
             if (entry.ignored) refuse("EXCLUDED_PATH", "A selected file is excluded by the source-only tracking policy and cannot be staged.")
             if (entry.submodule) refuse("EXCLUDED_PATH", "Submodule entries are not staged by the workbench.")
             if (entry.path.exact == null || (entry.originalPath != null && entry.originalPath.exact == null)) {
                 refuse("EXCLUDED_PATH", "A selected file name is not valid UTF-8 and cannot be staged by the workbench.")
             }
             if (entry.conflict != null) refuse("CONFLICTED", "Resolve conflicted files in the work tree before staging them.")
-            val changed = if (stage) entry.untracked || entry.unstaged != GitIndexChange.NONE else entry.staged != GitIndexChange.NONE
-            if (!changed) refuse("NOTHING_SELECTED", if (stage) "A selected file has no unstaged change." else "A selected file has no staged change.")
+            if (!applies(entry)) refuse("NOTHING_SELECTED", if (stage) "A selected file has no unstaged change." else "A selected file has no staged change.")
             entry
         }.also { selected -> refuseOverlap(observation, selected) }
     }
