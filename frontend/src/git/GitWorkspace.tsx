@@ -32,7 +32,8 @@ type Mutation = 'gitStageRequest' | 'gitCommitRequest' | 'gitBranchCreateRequest
   | 'gitTagRequest' | 'gitWorktreeAddRequest' | 'gitWorktreeRemoveRequest';
 
 function short(objectId: string | null): string { return objectId ? objectId.slice(0, 12) : ''; }
-function branch(name: string | null): string { return name?.replace(/^refs\/heads\//, '') ?? ''; }
+const HEADS = 'refs/heads/';
+function branch(name: string | null): string { return name?.startsWith(HEADS) ? name.slice(HEADS.length) : name ?? ''; }
 
 function headLabel(state: GitStatus['headState'], refName: string | null, objectId: string | null): string {
   if (state === 'attached') return textMessage(copy.attached, { branch: branch(refName) });
