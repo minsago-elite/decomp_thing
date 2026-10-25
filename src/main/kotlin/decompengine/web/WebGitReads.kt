@@ -164,13 +164,18 @@ internal class WebGitReads(private val repositories: () -> ManagedGitRepositorie
     }
 
     private fun refs(jobId: String, repositoryId: String, cursor: String?, limit: Int): JsonObject {
-        val offset = cursor?.let { value ->
-            value.takeIf { it.matches(Regex("refs~(0|[1-9][0-9]{0,5})")) }?.substringAfter('~')?.toInt()
+        // A continuation names the listing it read through; any ref created, deleted or moved
+        // before its offset changes that anchor, so the page cannot repeat or skip an entry.
+        val (anchor, offset) = cursor?.let { value ->
+            Regex("refs~([0-9a-f]{32})~(0|[1-9][0-9]{0,5})").matchEntire(value)?.destructured?.let { (anchor, offset) -> anchor to offset.toInt() }
                 ?: throw WebAccessDenied(400, "INVALID_CURSOR", "The refs cursor is invalid.")
-        } ?: 0
+        } ?: (null to 0)
         val service = repositories()
         val head = service.workspace(jobId, repositoryId).observation.head
         val (record, page) = service.refs(jobId, repositoryId, offset, limit)
+        if (anchor != null && anchor != page.anchorBefore) {
+            throw WebAccessDenied(409, "REF_CHANGED", "Branches or tags changed since this page began. Read the first page again.")
+        }
         val (entries, more) = page
         return buildJsonObject {
             put("repositoryId", record.repositoryId)
@@ -184,7 +189,7 @@ internal class WebGitReads(private val repositories: () -> ManagedGitRepositorie
                     put("current", head.state == GitHeadState.ATTACHED && head.refName == ref.name)
                 }
             }))
-            put("nextCursor", if (more) JsonPrimitive("refs~${offset + entries.size}") else JsonNull)
+            put("nextCursor", if (more) JsonPrimitive("refs~${page.anchorThrough}~${offset + entries.size}") else JsonNull)
         }
     }
 

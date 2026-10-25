@@ -748,7 +748,9 @@ textconv, external diff tool or submodule command, and no read refreshes the ind
   with a unified patch of at most 128 KiB, flagged `truncated` when cut. Binary files never
   render content. Abbreviated object IDs are rejected with 422.
 - `refs` (`gitRefs`) pages through branches and tags with exact and peeled object IDs, stable
-  `refId`s and the branch HEAD currently names.
+  `refId`s and the branch HEAD currently names. Its cursor carries a digest of every ref listed
+  before it. If a branch or tag is created, deleted or moved ahead of the offset, the page answers
+  `409 REF_CHANGED` instead of repeating or skipping an entry.
 
 Paths are display strings. Backslashes, control characters (newline, tab, escape and the like)
 and invalid UTF-8 bytes are escaped, and `pathEscaped` marks any name whose display differs from

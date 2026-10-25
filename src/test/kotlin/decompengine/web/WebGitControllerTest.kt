@@ -226,6 +226,21 @@ class WebGitControllerTest {
             val refs = data(f.read("$base/refs"), 200, "gitRefs")
             assertTrue(refs.getValue("refs").jsonArray.single().jsonObject.getValue("current").jsonPrimitive.content.toBoolean())
             for (body in listOf(status, history, diff, refs)) assertFalse(body.toString().contains(f.root.toString()))
+            // A refs continuation is bound to the listing before it: a ref created or deleted
+            // ahead of the offset refuses the page instead of repeating or skipping an entry.
+            raw("branch", "b"); raw("branch", "c")
+            val firstRefs = data(f.read("$base/refs?limit=1"), 200, "gitRefs")
+            assertEquals(listOf("refs/heads/b"), firstRefs.getValue("refs").jsonArray.map { it.jsonObject.getValue("displayName").jsonPrimitive.content })
+            val refsCursor = firstRefs.getValue("nextCursor").jsonPrimitive.content
+            val nextRefs = data(f.read("$base/refs?limit=1&cursor=$refsCursor"), 200, "gitRefs")
+            assertEquals(listOf("refs/heads/c"), nextRefs.getValue("refs").jsonArray.map { it.jsonObject.getValue("displayName").jsonPrimitive.content })
+            raw("branch", "a")
+            error(f.read("$base/refs?limit=1&cursor=$refsCursor"), 409, "REF_CHANGED")
+            val restarted = data(f.read("$base/refs?limit=1"), 200, "gitRefs").getValue("nextCursor").jsonPrimitive.content
+            raw("branch", "-D", "a")
+            error(f.read("$base/refs?limit=1&cursor=$restarted"), 409, "REF_CHANGED")
+            error(f.read("$base/refs?cursor=refs~1"), 400, "INVALID_CURSOR")
+            raw("branch", "-D", "b"); raw("branch", "-D", "c")
             // A status page cursor is bound to the work-tree version it was taken from.
             val statusCursor = data(f.read("$base/status?limit=1"), 200, "gitStatus").getValue("nextCursor")
             Files.writeString(workTree.resolve("src/extra.c"), "int extra;\n")
