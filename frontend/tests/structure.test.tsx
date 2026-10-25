@@ -8,6 +8,9 @@ import { structureCopy as copy } from '../src/copy/structure';
 import { App } from '../src/app/App';
 import { createBrowserSession } from '../src/session/session';
 import { functionLocation, functionReadRoute, functionSearch, structureReadRoute } from '../src/structure/navigation';
+import { structureListPath } from '../src/structure/paths';
+import { apiPath } from '../src/app/paths';
+import { ApiClientError } from '../src/api/errors';
 
 const transport = vi.hoisted(() => ({ get: vi.fn<(kind: string, path: string, options: { signal: AbortSignal }) => Promise<unknown>>() }));
 vi.mock('../src/api/client', async load => ({ ...await load<typeof ClientModule>(), createApiClient: () => transport }));
@@ -191,6 +194,34 @@ it('rejects foreign bindings and invalid structure URLs before rendering facts',
   }
   expect(transport.get).not.toHaveBeenCalled();
   auth.dispose();
+});
+
+it('keeps the longest accepted Unicode search valid after URL serialization', () => {
+  for (const text of ['名'.repeat(256), '😀'.repeat(128)]) {
+    const query = { ...functionLocation(''), search: text, module: 'm'.repeat(128), cursor: `${'5'.repeat(64)}_9999999_${'a'.repeat(32)}` };
+    const search = functionSearch(query);
+    expect(search.length).toBeGreaterThan(text.startsWith('名') ? 2048 : 1536);
+    expect(functionLocation(search)).toEqual(query);
+    expect(structureListPath('/nested', selected, 'functions', search)).toBe(`${revision}/functions${search}`);
+    expect(() => apiPath('/nested', functionReadRoute(selected, query))).not.toThrow();
+  }
+});
+
+it('refreshes a module detail from its first owned page after its cursor becomes invalid', async () => {
+  const auth = await session();
+  const detail = fixture<ModuleDetail>('module-detail');
+  const cursor = `${'5'.repeat(64)}_50_${'a'.repeat(32)}`;
+  transport.get.mockImplementation((_kind, path) => path.includes('cursor=')
+    ? Promise.reject(new ApiClientError('http_error', { status: 400, serverCode: 'INVALID_CURSOR' })) : Promise.resolve({ data: detail }));
+  history.replaceState(null, '', `${revision}/modules/extra?kind=functions&cursor=${cursor}`);
+  try {
+    render(<App basePath="/nested" session={auth} />);
+    expect((await screen.findByRole('alert')).textContent).toContain(copy.expired);
+    fireEvent.click(screen.getByRole('button', { name: copy.refresh }));
+    await screen.findByRole('table', { name: copy.ownedKinds.functions });
+    expect(location.search).toBe('?kind=functions');
+    expect(transport.get).toHaveBeenLastCalledWith('moduleDetail', `${api}/modules/extra?kind=functions&limit=50`, expect.anything());
+  } finally { auth.dispose(); }
 });
 
 it('round-trips inventory selections and builds exact bounded API routes', () => {

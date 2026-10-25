@@ -42,7 +42,7 @@ const invalid = (): never => { throw new ApiClientError('invalid_request'); };
 
 function params(search: string, allowed: readonly string[]): Map<string, string> {
   if (search === '') return new Map();
-  if (search.length > 2048 || !search.startsWith('?')) invalid();
+  if (search.length > 4096 || !search.startsWith('?')) invalid();
   const result = new Map<string, string>();
   for (const [key, value] of new URLSearchParams(search)) {
     if (!allowed.includes(key) || result.has(key) || value === '' || value.length > 256

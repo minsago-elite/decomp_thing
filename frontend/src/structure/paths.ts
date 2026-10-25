@@ -14,7 +14,7 @@ function revisionPath(basePath: string, selected: SourceSelection): string {
 /** Revision-scoped structure views. Query values are validated by the structure navigation parser. */
 export function structureListPath(basePath: string, selected: SourceSelection, view: StructureList, search = ''): string {
   if (view !== 'functions' && view !== 'modules') return invalidUrl();
-  if (search !== '' && (!search.startsWith('?') || search.length > 2048)) return invalidUrl();
+  if (search !== '' && (!search.startsWith('?') || search.length > 4096)) return invalidUrl();
   return `${revisionPath(basePath, selected)}/${view}${search}`;
 }
 

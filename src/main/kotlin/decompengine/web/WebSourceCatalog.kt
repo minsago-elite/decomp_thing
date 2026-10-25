@@ -136,7 +136,9 @@ internal class WebSourceCatalogEvidence(
                 val snapshot = parseWebRevisionSourceInputs(reference, manifest, captured.sha256, descriptorDocument, descriptor.sha256)
                 WebProgramStructureBuilder.build(snapshot, profile, manifest, ::evidence).also { cache.put(key, it) }
             }
-            check(index.reference == reference && index.manifestSha256 == captured.sha256 && index.descriptorSha256 == descriptor.sha256)
+            // Retention pins change the attempt version without changing the candidate; the projection depends
+            // only on the keyed commitments, so it stays valid for the current reference.
+            check(index.reference.copy(attemptVersion = reference.attemptVersion) == reference && index.manifestSha256 == captured.sha256 && index.descriptorSha256 == descriptor.sha256)
             val result = project(index) {
                 val model = checkNotNull(index.model)
                 val record = readArtifact(reference.jobId, "$root/${model.path}", WebProgramStructureBuilder.MAXIMUM_MODEL_BYTES.toLong())
