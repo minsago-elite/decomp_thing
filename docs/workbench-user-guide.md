@@ -75,9 +75,12 @@ Open the second URL in your browser. The legacy workbench prints the same pair, 
 
 Verified against the running preview:
 
-- **Runtime status** (`/runtime`): what the server reports about workflow availability. The server currently reports a
-  single `workflows` capability as `unavailable` with the message *"Workflow actions are unavailable in this preview."*
-  and overall readiness as `degraded`. That is expected, not a fault.
+- **Runtime status** (`/runtime`): what the server reports about workflow availability. The server reports a
+  `workflows` capability as `unavailable` with the message *"Workflow actions are unavailable in this preview."*
+  and overall readiness as `degraded`. That is expected, not a fault. Builds newer than the verified one also report a
+  `harness` capability describing whether an agent harness is configured; without one it is `unavailable`
+  (*"No agent harness is configured."*). It grants no workflow authority. (Read from the source, not observed in the
+  verified run.)
 - **Upload a binary** (`/upload`): the server's reported `maxUploadBytes` is **32 MiB (33,554,432 bytes) for the whole
   upload request**, including its multipart framing, so a file at or just under 32 MiB can be rejected with
   `UPLOAD_TOO_LARGE`; keep files comfortably smaller. The page shows progress. A successful upload creates a job with status `uploaded`; **no analysis starts**. The server
