@@ -146,6 +146,19 @@
       "valid": true
     },
     {
+      "file": "fixtures/request-git-stage.json",
+      "valid": true
+    },
+    {
+      "file": "fixtures/git-operation-commit-completed.json",
+      "valid": true
+    },
+    {
+      "file": "fixtures/invalid-request-git-stage-path.json",
+      "valid": false,
+      "reason": "Staging selects registered file identities only; a path or pathspec is never a request field."
+    },
+    {
       "file": "fixtures/git-history.json",
       "valid": true
     },

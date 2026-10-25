@@ -34,7 +34,10 @@ internal class WebGitCapability(
                 "Repository import needs an operator-configured import root on the server.")
             else -> Triple("supported", null, "Repositories placed under the server's import root can be imported by name.")
         }
-        return listOf(entry("git", git), entry("git-import", import))
+        // Commits are always unsigned: no signing key handle exists, and hooks never run.
+        val signing = Triple("unsupported", "GIT_SIGNING_UNSUPPORTED",
+            "Commits are created unsigned with the server identity; no signing key handle is configured.")
+        return listOf(entry("git", git), entry("git-import", import), entry("git-signing", signing))
     }
 
     /** The managed registry, or an explicit unavailable refusal for every Git route. */

@@ -246,6 +246,52 @@ class WebGitControllerTest {
         }
     }
 
+    @Test fun `stage and commit over HTTP use reviewed guards and return a validated mapping`(): Unit = Fixture().use { f ->
+        val (base, _) = f.initialized()
+        fun guards(): Pair<JsonObject, JsonObject> {
+            val status = data(f.read("$base/status"), 200, "gitStatus")
+            return status to buildJsonObject {
+                put("repositoryVersion", status.getValue("repositoryVersion")); put("worktreeVersion", status.getValue("worktreeVersion"))
+                put("expectedHeadObjectId", status.getValue("headObjectId")); put("expectedRefId", JsonNull); put("expectedRefObjectId", JsonNull)
+            }
+        }
+        fun change(body: JsonObject, version: String, key: String) = f.send("POST", body.toString(),
+            f.headers(key = key) + ("If-Match" to "\"$version\""), "$base/operations")
+        val (status, guards) = guards()
+        val ids = status.getValue("entries").jsonArray.map { it.jsonObject }.filter { it.getValue("untracked").jsonPrimitive.content.toBoolean() }
+            .map { it.getValue("fileId") }
+        val version = guards.getValue("worktreeVersion").jsonPrimitive.content
+        val stage = buildJsonObject { put("action", "git.stage"); put("worktreeId", status.getValue("worktreeId")); put("guards", guards); put("selectedFileIds", JsonArray(ids)) }
+        error(change(stage, "other_version", "http_stage_intent_01"), 400, "INVALID_HEADER")
+        error(f.send("POST", stage.toString(), f.headers(key = "http_stage_intent_01") - "If-Match", "$base/operations"), 428, "PRECONDITION_REQUIRED")
+        error(change(JsonObject(stage + ("paths" to JsonArray(listOf(JsonPrimitive("."))))), version, "http_stage_intent_01"), 422, "VALIDATION_FAILED")
+        val stagedResponse = change(stage, version, "http_stage_intent_01")
+        data(stagedResponse, 202, "operation")
+        val staged = f.awaitOperation(stagedResponse.headers().firstValue("Location").orElseThrow())
+        assertEquals("completed", staged.getValue("state").jsonPrimitive.content, staged.toString())
+        error(change(stage, version, "http_stage_intent_02"), 409, "WORKTREE_CHANGED")
+        val (reviewed, commitGuards) = guards()
+        val stagedIds = reviewed.getValue("entries").jsonArray.map { it.jsonObject }.filter { it.getValue("staged").jsonPrimitive.content != "none" }.map { it.getValue("fileId") }
+        val commit = buildJsonObject { put("action", "git.commit"); put("worktreeId", reviewed.getValue("worktreeId")); put("guards", commitGuards)
+            put("selectedFileIds", JsonArray(stagedIds)); put("message", "Record snapshot ünïcode") }
+        val commitResponse = change(commit, commitGuards.getValue("worktreeVersion").jsonPrimitive.content, "http_commit_intent_1")
+        data(commitResponse, 202, "operation")
+        val committed = f.awaitOperation(commitResponse.headers().firstValue("Location").orElseThrow())
+        assertEquals("completed", committed.getValue("state").jsonPrimitive.content, committed.toString())
+        val objectId = committed.getValue("resultObjectId").jsonPrimitive.content
+        val workspace = data(f.read(base), 200, "gitWorkspace")
+        val mapping = workspace.getValue("mapping").jsonObject
+        assertEquals(objectId, mapping.getValue("objectId").jsonPrimitive.content)
+        assertEquals("revision_one", mapping.getValue("revisionId").jsonPrimitive.content)
+        assertEquals("not-evaluated", mapping.getValue("acceptance").jsonPrimitive.content)
+        val history = data(f.read("$base/history"), 200, "gitHistory").getValue("entries").jsonArray.single().jsonObject
+        assertEquals(mapping, history.getValue("mapping"))
+        val replay = change(commit, commitGuards.getValue("worktreeVersion").jsonPrimitive.content, "http_commit_intent_1")
+        assertEquals(committed.getValue("operationId"), data(replay, 202, "operation")["operationId"])
+        assertEquals("true", replay.headers().firstValue("Idempotency-Replayed").orElseThrow())
+        error(f.send(headers = mapOf("Cookie" to f.cookie), target = "$base/operations"), 405)
+    }
+
     @Test fun `authorization guards and strict bodies precede any repository operation`(): Unit = Fixture().use { f ->
         val body = f.init()
         error(f.send(), 401)

@@ -2049,6 +2049,8 @@
         "action": {
           "type": "string",
           "enum": [
+            "git.stage",
+            "git.unstage",
             "git.commit",
             "git.fetch",
             "git.push",
@@ -5491,6 +5493,40 @@
         "nextCursor"
       ],
       "additionalProperties": false
+    },
+    "gitStage": {
+      "type": "object",
+      "properties": {
+        "action": {
+          "type": "string",
+          "enum": [
+            "git.stage",
+            "git.unstage"
+          ]
+        },
+        "worktreeId": {
+          "$ref": "#/definitions/id"
+        },
+        "guards": {
+          "$ref": "#/definitions/gitGuards"
+        },
+        "selectedFileIds": {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/id"
+          },
+          "minItems": 1,
+          "maxItems": 200,
+          "uniqueItems": true
+        }
+      },
+      "required": [
+        "action",
+        "worktreeId",
+        "guards",
+        "selectedFileIds"
+      ],
+      "additionalProperties": false
     }
   },
   "oneOf": [
@@ -6389,6 +6425,26 @@
         "apiVersion",
         "kind",
         "requestId",
+        "data"
+      ],
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "properties": {
+        "apiVersion": {
+          "const": 1
+        },
+        "kind": {
+          "const": "gitStageRequest"
+        },
+        "data": {
+          "$ref": "#/definitions/gitStage"
+        }
+      },
+      "required": [
+        "apiVersion",
+        "kind",
         "data"
       ],
       "additionalProperties": false

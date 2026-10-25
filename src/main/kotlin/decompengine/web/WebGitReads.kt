@@ -100,6 +100,7 @@ internal class WebGitReads(private val repositories: () -> ManagedGitRepositorie
         } else (query["start"]?.also { requireObjectIdText(it) }) to 0
         val (origin, page) = repositories().history(jobId, repositoryId, start, offset, limit)
         val record = repositories().repository(jobId, repositoryId)
+        val mappings = repositories().mappings(jobId, repositoryId, page.entries.map { it.objectId })
         return buildJsonObject {
             put("repositoryId", repositoryId); put("worktreeId", record.worktreeId)
             put("startObjectId", origin?.let(::JsonPrimitive) ?: JsonNull)
@@ -111,7 +112,7 @@ internal class WebGitReads(private val repositories: () -> ManagedGitRepositorie
                     put("authoredAt", entry.authoredAt.toString()); put("committedAt", entry.committedAt.toString())
                     put("subject", entry.subject); put("subjectTruncated", entry.subjectTruncated)
                     // A Git commit maps to a reconstruction revision only through an explicit, validated record.
-                    put("mapping", JsonNull)
+                    put("mapping", mappings[entry.objectId]?.let(::webGitMapping) ?: JsonNull)
                 }
             }))
             put("nextCursor", if (page.more && origin != null) JsonPrimitive("$origin~${offset + page.entries.size}") else JsonNull)

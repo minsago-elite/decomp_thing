@@ -1,0 +1,21 @@
+{
+  "apiVersion": 1,
+  "kind": "gitStageRequest",
+  "data": {
+    "action": "git.stage",
+    "worktreeId": "worktree_example_2",
+    "guards": {
+      "repositoryVersion": "repository_v_1",
+      "worktreeVersion": "worktree_v_1",
+      "expectedHeadObjectId": null,
+      "expectedRefId": null,
+      "expectedRefObjectId": null
+    },
+    "selectedFileIds": [
+      "file_0123456789abcdef0123456789abcdef"
+    ],
+    "paths": [
+      "."
+    ]
+  }
+}

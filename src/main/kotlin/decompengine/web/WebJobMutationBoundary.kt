@@ -55,6 +55,10 @@ internal class AuthorizedWebGitRepository internal constructor() {
     fun request(repositories: decompengine.git.ManagedGitRepositories, jobId: String,
         request: decompengine.git.GitRepositoryRequest, requestKey: String, precondition: () -> Unit,
     ): decompengine.git.GitOperationAdmission = repositories.request(jobId, request, requestKey, precondition)
+
+    fun requestWorkspace(repositories: decompengine.git.ManagedGitRepositories, jobId: String, repositoryId: String,
+        request: decompengine.git.GitRepositoryRequest, requestKey: String,
+    ): decompengine.git.GitOperationAdmission = repositories.requestWorkspace(jobId, repositoryId, request, requestKey)
 }
 
 /** Upload-only capability shared by the legacy and versioned HTTP adapters. */

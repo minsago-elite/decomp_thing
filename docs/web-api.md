@@ -176,7 +176,7 @@ internal storage optimization and must not merge identity, permissions or histor
 | `GET G/{status,history,diff,refs}` | `200 gitStatus`, `gitHistory`, `gitDiff`, `gitRefs` | Bounded, anchored pages; full object IDs; opaque file IDs; implemented by #202 |
 | `GET G/{worktrees,remotes,conflicts}` | Bounded typed Git read | Scoped worktree/ref/object IDs; #204/#207/#210/#211 |
 | `POST J/repositories` | `202 operation` | Strict `gitRepositoryInit`/`gitRepositoryAttach`, session/Origin/CSRF, job If-Match and idempotency; init/attach implemented by #201, clone #209 |
-| `POST G/operations` | `202 operation` | Named action, selected IDs, guards, idempotency; #203–#212 |
+| `POST G/operations` | `202 operation` | Named action, selected file IDs, full guards, work-tree If-Match, idempotency; stage/unstage/commit implemented by #203, others #204–#212 |
 | `GET G/operations/{operationId}` | `200 operation` | Durable outcome/recovery state; init/attach operations implemented by #201, others #209 |
 | `POST G/operations/{operationId}/cancel` | `202 operation` or terminal `200` | Explicit cancellation, optimistic guard; #209 |
 
@@ -758,6 +758,68 @@ conflicts, unusual and invalid-UTF-8 names, anchored history pages across a merg
 branch, renames, binary sizes, a large patch truncated within its bound, staged diffs on an unborn
 branch, and paged peeled tags. `WebGitControllerTest` covers the HTTP shapes, cursors and
 refusals.
+
+### Staging and deliberate commits
+
+`POST G/operations` accepts `git.stage`, `git.unstage` and `git.commit` (#576, #577). The body
+holds the target `worktreeId`, the full `guards` taken from the reviewed status and the exact
+`selectedFileIds`; a commit also carries its `message`. Bodies are strict JSON of at most 64 KiB
+and never contain a path or pathspec. `If-Match` must name the guarded `worktreeVersion`, and an
+`Idempotency-Key` is required. Keyed replay returns the original operation. The response is
+`202 operation`, already terminal for most local actions, with the durable operation at
+`Location`.
+
+The server checks guards and selection twice: at admission under the job lock, and again by the
+single operation executor immediately before Git runs. A race with another tab, a worker or an
+external edit therefore fails instead of applying something nobody reviewed.
+
+| Refusal | Meaning |
+| --- | --- |
+| `409 REF_CHANGED` | `repositoryVersion`, HEAD or the guarded ref changed |
+| `409 WORKTREE_CHANGED` | The work tree or index changed (any status entry, index blob or file stat) |
+| `409 SELECTION_CHANGED` | A selected file identity is no longer in the current status |
+| `409 INDEX_CHANGED` | A commit's `selectedFileIds` differ from today's staged set; nothing is swept in or left out |
+| `409 CONFLICTED`, `409 NOTHING_TO_COMMIT` | Unmerged paths exist, or nothing is staged |
+| `422 EXCLUDED_PATH` | The file is excluded by the source-only policy (decided independently of any repository `.gitignore`), is a submodule, or has a non-UTF-8 name |
+| `422 NOTHING_SELECTED`, `422 STATUS_INCOMPLETE` | A selected file has nothing to stage or unstage, or the status was too large to review completely |
+| `503 SIGNING_UNAVAILABLE` | Server policy requires signed commits, which no capability provides |
+
+Staging runs `git add -- <paths>` with literal pathspecs. Unstaging runs `reset -q HEAD -- <paths>`
+(or `rm --cached` on an unborn branch), so work-tree contents never change. A commit uses the
+server's configured identity, passed as allowlisted author and committer variables.
+`--no-verify` and `--no-gpg-sign` back up the command-line hook and signing settings, and the
+message is read verbatim from an operation-private file. Nothing is pushed. Bootstrap reports
+`git-signing` as `unsupported`, so a signing requirement can never hang on a hidden prompt.
+
+A successful commit returns its object ID as `resultObjectId`. It is mapped to the repository's
+candidate revision only when its tree, compared by Git blob IDs computed from the recorded
+snapshot, equals exactly the copied snapshot minus policy-excluded files. The mapping is stored
+under the repository as `(repositoryId, objectId, revisionId, sourceSha256)` with the
+work-tree's dirty state. `gitWorkspace.mapping` and history entries show it. `acceptance` is read
+from the job's canonical accepted revision at view time, never stored and never changed by a
+commit. Any other commit is a new candidate and stays unmapped.
+
+After a restart, stage and unstage operations become `interrupted`, since the index may have been
+partly updated and status must be re-read. A commit is `interrupted` when HEAD is still the
+reviewed parent. It becomes `recovery-required` with the new HEAD as `resultObjectId` when HEAD
+moved, because the commit may or may not be the requested one. Nothing is repeated
+automatically.
+
+Job retention: uncommitted or unpublished Git work should hold the job against deletion. The
+`JobRetentionHold` interface arrives with #1694 (D10, #509) and has not merged yet. Registering a
+hold for a dirty work tree or for unmapped commits is left as a follow-up once it lands.
+
+`GitWorkspaceMutationsTest` covers:
+- exact partial staging, unstaging on an unborn branch, a mapped commit with the server identity
+  and verbatim message, and a second, unmapped commit;
+- acceptance derived at read time;
+- every refusal above, including a `.gitignore` negation that tries to re-include a credential;
+- keyed replay and idempotency conflict;
+- an external edit between admission and execution, which fails with `WORKTREE_CHANGED`;
+- restart before and after the commit.
+
+`WebGitControllerTest` covers the HTTP guards, `If-Match` binding, strict bodies and the mapping
+shown on the workspace and in history.
 
 ## Legacy compatibility
 
