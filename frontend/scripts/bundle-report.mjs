@@ -127,13 +127,49 @@ export function bundleBudgets(manifest, files, html) {
   return { initial, total, entryJs, entryCss, chunks };
 }
 
-/** Graph and source feature modules may load only after their view opens, never with the initial shell. */
-export function assertLazyFeatures(composition, entryJs) {
-  const initial = new Set(entryJs);
+/** Source browsing, highlighting and graph code must stay out of the initial closure (#622). */
+export function assertDeferredFeatures(composition, initialJs) {
+  const initial = new Set(initialJs);
   for (const module of composition) {
-    assert.ok(module.lazyFeature === undefined || ['graph', 'sources'].includes(module.lazyFeature), 'Unknown lazy feature');
-    assert.ok(module.lazyFeature === undefined || !initial.has(module.chunk),
-      `Initial chunk includes a lazily loaded ${module.lazyFeature} module: ${module.chunk}`);
+    assert.ok(module.feature === undefined || ['sources', 'graph'].includes(module.feature), `Unknown deferred feature: ${module.feature}`);
+    if (module.feature) assert.ok(!initial.has(module.chunk), `Deferred ${module.feature} code is in the initial chunk ${module.chunk}`);
+  }
+}
+
+// Load syntax that names a remote target, kept for a precise diagnostic.
+const remoteLoads = [
+  /\burl\(\s*["']?(?:https?:)?\/\//i,
+  /@import\s+(?:url\()?\s*["']?(?:https?:)?\/\//i,
+  /\bimport\(\s*["'`](?:https?:)?\/\//i,
+  /\bfrom\s*["'`](?:https?:)?\/\//i,
+  /\bimport\s*["'`](?:https?:)?\/\//i,
+  /\bnew\s+(?:Shared)?Worker\(\s*["'`](?:https?:)?\/\//i,
+  /\bimportScripts\(\s*["'`](?:https?:)?\/\//i,
+  /<(?:script|link|img|iframe)\b[^>]*\b(?:src|href)\s*=\s*["']?(?:https?:)?\/\//i,
+];
+// Scripts can also build URLs for DOM elements, fetch or JSX props, so every absolute or
+// protocol-relative URL literal must name a reviewed inert host: XML namespaces, the
+// non-resolvable .invalid parsing base (RFC 6761) and one documentation link inside a
+// bundled router error message. Anything else fails, whatever code would use it.
+const urlLiteral = /(?:https?:)?\/\/[^\s"'`)<>\\]+/gi;
+const inertUrls = [
+  url => url.hostname === 'www.w3.org',
+  url => url.hostname.endsWith('.invalid'),
+  url => url.hostname === 'github.com' && `${url.pathname}${url.hash}` === '/preactjs/preact-iso#locationprovider',
+];
+
+/** Parse the literal as the browser would, so userinfo or an allowed prefix cannot hide the real host. */
+function inertUrl(literal) {
+  let url;
+  try { url = new URL(literal.startsWith('//') ? `https:${literal}` : literal); } catch { return true; }
+  return url.username === '' && url.password === '' && url.port === '' && inertUrls.some(inert => inert(url));
+}
+
+/** Shipped HTML, scripts and styles never fetch from a CDN or any other remote origin. */
+export function assertNoRemoteLoads(source, name) {
+  for (const pattern of remoteLoads) assert.ok(!pattern.test(source), `Production asset loads a remote resource: ${name}`);
+  for (const [literal] of source.matchAll(urlLiteral)) {
+    assert.ok(inertUrl(literal), `Production asset loads a remote resource: ${name} names unreviewed URL ${literal.slice(0, 80)}`);
   }
 }
 
@@ -162,6 +198,7 @@ export async function buildBundleReport(output = new URL('../../build/frontend/'
           'DECOMP_DEV_BACKEND_ORIGIN', 'DECOMP_DEV_ONLY_ENDPOINT_SENTINEL', 'synthetic_non_secret_']) {
           assert.ok(!source.includes(marker), `Production asset contains ${marker}: ${name}`);
         }
+        assertNoRemoteLoads(source, name);
       }
       files.push({ file: name, rawBytes: bytes.length, gzipBytes: gzipSync(bytes, { level: 9 }).length,
         sha256: createHash('sha256').update(bytes).digest('hex') });
@@ -171,7 +208,7 @@ export async function buildBundleReport(output = new URL('../../build/frontend/'
   assert.ok(typeof html === 'string', 'Missing index.html');
   files.sort((left, right) => left.file.localeCompare(right.file));
   const budgets = bundleBudgets(manifest, files, html);
-  assertLazyFeatures(composition, budgets.entryJs);
+  assertDeferredFeatures(composition, budgets.entryJs);
   const owners = {};
   for (const module of composition) {
     assert.ok(['application', 'preact', 'preact-iso'].includes(module.owner), `Unreviewed production dependency: ${module.owner}`);
