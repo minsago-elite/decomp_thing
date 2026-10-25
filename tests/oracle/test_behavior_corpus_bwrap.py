@@ -159,7 +159,8 @@ class PairTests(unittest.TestCase):
 
     def test_report_file_round_trip_and_offline_replay(self) -> None:
         corpus, payload, report = valid_pair()
-        with tempfile.TemporaryDirectory(dir=ROOT / "build" if (ROOT / "build").is_dir() else None) as directory:
+        (ROOT / "build").mkdir(exist_ok=True)
+        with tempfile.TemporaryDirectory(dir=ROOT / "build") as directory:
             path = Path(directory) / "report.json"
             path.write_bytes(backend.report_json_bytes(report))
             loaded, _ = backend.load_report(path)
@@ -496,7 +497,8 @@ class WritableQuotaTests(unittest.TestCase):
     LIMITS = {"writableEntries": 4, "writableBytes": 64 * 1024}
 
     def setUp(self) -> None:
-        directory = tempfile.TemporaryDirectory(dir=ROOT / "build" if (ROOT / "build").is_dir() else None)
+        (ROOT / "build").mkdir(exist_ok=True)
+        directory = tempfile.TemporaryDirectory(dir=ROOT / "build")
         self.addCleanup(directory.cleanup)
         self.root = Path(directory.name)
         self.work, self.tmp = self.root / "work", self.root / "tmp"
@@ -760,7 +762,8 @@ class ManifestTests(unittest.TestCase):
         self.assertEqual(adapter.build_corpus()["executable"], dict(CLANG))
 
     def test_locate_clang_rejects_an_unpinned_manifest(self) -> None:
-        with tempfile.TemporaryDirectory(dir=ROOT / "build" if (ROOT / "build").is_dir() else None) as directory:
+        (ROOT / "build").mkdir(exist_ok=True)
+        with tempfile.TemporaryDirectory(dir=ROOT / "build") as directory:
             manifest = Path(directory) / "oracle-manifest.json"
             manifest.write_text("{}")
             with self.assertRaisesRegex(BehaviorCorpusError, "manifest identity mismatch"):
