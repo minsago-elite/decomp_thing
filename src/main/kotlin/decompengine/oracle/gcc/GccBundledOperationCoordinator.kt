@@ -665,19 +665,23 @@ internal class GccBundledPreparedOperation internal constructor(
             }, StructuralBoundaryReplayWorkerV1::class.java.name, requestPath.toString(), requestSha)
         try {
             return lease.withCurrentOperationRunRootForContainedExecution(runRoot) { borrowed ->
+                val frozenReports = borrowed.withPinnedDescriptor { run ->
+                    GccBundledReplayReportsV1.capture(run, directories.getValue("reports"))
+                }
                 fun requireFrozenModel() {
                     deadline.requireCurrent()
                     inputs.verify("before structural replay")
                     journal.verify("before structural replay")
                     borrowed.withPinnedDescriptor { run ->
                         LinuxFilesystemSyscalls.openDirectoryAt(run.fd, "reports").use { reports ->
-                            require(reports.identity == directories.getValue("reports"))
+                            frozenReports.requireCurrent(reports)
                             val files = GccBoundExportFiles(authenticated.programModelBytes) { deadline.requireCurrent() }
                             val actual = files.read(reports, "program_model.json", request.modelBytes)
                             require(actual.size == request.modelBytes && OracleArtifacts.sha256(actual) == request.modelSha256) {
                                 "structural replay model differs from the immutable recovered snapshot"
                             }
                             files.verify()
+                            frozenReports.requireCurrent(reports)
                         }
                     }
                 }
