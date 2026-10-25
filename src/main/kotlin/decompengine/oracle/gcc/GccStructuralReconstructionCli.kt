@@ -178,16 +178,39 @@ internal class GccOwnedStructuralProgramModelAnalyzer(
         used = true
         invocation.requireCurrent()
         val publication = GccBundledCliCommand.runDriverAnalysis(options.analysisOptions, options.analysisArguments, invocation)
-        val inputs = requireNotNull(publication.selectedInputs) { "owned driver analysis did not admit selected structural evidence" }
-        invocation.requireCurrent()
+        requireNotNull(publication.selectedInputs) { "owned driver analysis did not admit selected structural evidence" }
         // This is a bounded report-snapshot phase after execution, not a renewed execution lease.
+        // Both full invocation validations consume this same allowance.
         val deadline = AnalysisDeadline.start(TimeUnit.MILLISECONDS.toNanos(options.reconstructionProfile.budgets.exportWallClockMillis),
             "owned structural reconstruction snapshot")
-        return ProgramAnalysisResult(publication.canonicalProgramModelBytes, inputs) { stage ->
-            deadline.checkpoint(stage)
-            invocation.requireCurrent()
-        }.also { deadline.checkpoint("after owned snapshot"); invocation.requireCurrent() }
+        return snapshotStructuralAnalysis(publication, deadline, invocation::requireCurrent)
     }
+}
+
+/**
+ * Composes the existing passive model transport; this does not execute a producer or issue admission.
+ * The owned caller fixes [requireInvocationCurrent] to its retained invocation. Component controls
+ * can observe model checkpoints without replacing the deadline or the final validation.
+ */
+internal fun snapshotStructuralAnalysis(
+    publication: GccBundledFullExportPublication,
+    deadline: AnalysisDeadline,
+    requireInvocationCurrent: () -> Unit,
+    modelCheckpoint: (String) -> Unit = {},
+): ProgramAnalysisResult {
+    deadline.checkpoint("before owned snapshot invocation validation")
+    requireInvocationCurrent()
+    deadline.checkpoint("after owned snapshot invocation validation")
+    // These are defensive in-memory bytes. Per-token checks must not reopen invocation paths.
+    val snapshot = ProgramAnalysisResult(publication.canonicalProgramModelBytes, publication.selectedInputs) { stage ->
+        deadline.checkpoint(stage)
+        modelCheckpoint(stage)
+        deadline.checkpoint(stage)
+    }
+    requireInvocationCurrent()
+    // No observer runs after final validation, and its work is charged before the result escapes.
+    deadline.checkpoint("after owned snapshot final invocation validation")
+    return snapshot
 }
 
 internal object GccStructuralReconstructionCli {
