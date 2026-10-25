@@ -177,7 +177,7 @@ internal storage optimization and must not merge identity, permissions or histor
 | `GET G/worktrees` | `200 gitWorktrees` | Primary and linked work trees with owner and HEAD; implemented by #204 |
 | `GET G/provenance/{objectId}`, `GET G/exports/{objectId}` | `200 gitProvenance`, `200 application/zip` | Exact-object provenance envelope and deterministic tree export; implemented by #205 |
 | `GET G/remotes`, `GET G/audit` | `200 gitRemotes`, `200 gitAudit` | Registered remotes with credential state (never the credential) and tracking refs; audit history; implemented by #207/#209 |
-| `GET G/conflicts` | Bounded typed Git read | Scoped worktree/ref/object IDs; #210/#211 |
+| `GET G/divergence?tracking=`, `GET G/conflicts`, `GET G/conflicts/{fileId}` | `200 gitDivergence`, `gitConflicts`, `gitConflictFile` | Fetched divergence and offered strategies; unresolved paths with stage objects; bounded conflict text; implemented by #210/#211 |
 | `POST J/repositories` | `202 operation` | Strict `gitRepositoryInit`/`gitRepositoryAttach`, session/Origin/CSRF, job If-Match and idempotency; init/attach implemented by #201, clone (`gitRepositoryClone`) by #209 |
 | `POST G/operations` | `202 operation` | Named action, selected file IDs, full guards, work-tree If-Match, idempotency; stage/unstage/commit by #203, branch/switch/worktree by #204, tag by #205, others #207–#212 |
 | `GET G/operations/{operationId}` | `200 operation` | Durable outcome/recovery state; init/attach operations implemented by #201, others #209 |
@@ -1014,6 +1014,84 @@ credential.
 - restart reconciliation of an interrupted fetch.
 
 `WebGitControllerTest` covers the HTTP routes.
+
+### Divergence, explicit integration and conflict resolution
+
+Fetching never integrates (#595). `GET G/divergence?tracking=<refId>&worktree=<id>` compares the
+work tree's branch with one remote-tracking ref, using fetched state only. It reports:
+
+- both object IDs, the merge base, and the ahead and behind counts;
+- the remote's freshness: `current`, `stale` (fetched more than an hour ago) or `unknown` (never
+  fetched);
+- each strategy and whether it is available. `fast-forward` needs no local commits. `merge` needs
+  remote commits to integrate. `rebase` is never available, because history rewriting is not
+  supported and nothing ever force-updates a remote.
+
+Integration is the separate, reviewed `git.merge` action (#596). Its fields are `trackingRefId`,
+`targetObjectId` and `strategy` (`fast-forward` or `merge`), plus the full guards. The server
+refuses:
+
+- a dirty work tree with `WORKTREE_DIRTY`;
+- a work tree leased to an active attempt with `ACTIVE_RUN`;
+- a detached or unborn branch with `DETACHED` or `NO_COMMITS`;
+- a tracking ref that moved since review with `REF_CHANGED`;
+- a merge already in progress with `MERGE_IN_PROGRESS`;
+- nothing to integrate with `NOTHING_TO_INTEGRATE`, and a fast-forward over local commits with
+  `FAST_FORWARD_UNAVAILABLE`.
+
+Git runs with hooks, signing, autostash and rerere off, under the server identity. The base and
+target are recorded before Git runs. A clean merge or fast-forward returns the new HEAD. It is a new
+source candidate: it is never mapped to or accepted as an existing revision, and it needs the normal
+validation.
+
+A merge that stops with conflicts leaves Git's merge state in place (#597):
+
+- `GET G/conflicts` names the integration (branch, pre-merge HEAD, target and tracking ref) and every
+  unresolved path with its base, ours and theirs blob IDs.
+- `GET G/conflicts/{fileId}` returns each side and the current file as text, with the current
+  file's SHA-256 (or `absent`) as its concurrency token. A side that is binary, deleted or larger
+  than 256 KiB is reported with `supported: false` and a reason, never as an editable file.
+
+These actions resolve or end the merge:
+
+- `git.conflict.save` writes one conflicted file. Its `resolution` is `ours`, `theirs` or `base`,
+  or `text` with `content`. Its `expectedSha256` must still match the file, so a newer worker or
+  user change is never overwritten (`CONTENT_CHANGED`). Only policy-admitted plain files inside the
+  work tree can be written, and nothing is staged.
+- `git.conflict.complete` (#598) stages exactly the reviewed `files`, each with the digest it was
+  reviewed at. A file that still has conflict markers is refused with `UNRESOLVED_MARKERS`. The
+  final commit stays the explicit `git.commit` review: it lists every staged file and creates the
+  merge commit.
+- `git.merge.abort` runs `merge --abort`, which restores the branch and the work tree that the
+  clean-work-tree precondition guaranteed. Accepted snapshots and audit entries are untouched.
+
+Merges and aborts are audited.
+
+After a restart:
+
+- A merge whose state Git retained becomes `recovery-required` with `MERGE_IN_PROGRESS`. Its
+  conflicts can then be resolved and committed, or aborted.
+- A merge that never changed the branch becomes `interrupted`, and one whose commit exists
+  becomes `completed`.
+- A save is `completed` when the file holds the saved digest.
+
+Nothing is repeated.
+
+The workspace's **Integrate remote changes** panel works through these steps:
+
+1. Pick a remote-tracking branch and review its divergence and freshness.
+2. Offer only the available strategies. Rebase is shown disabled with its reason.
+3. During a merge, show each conflict's sides, offer **Use your version**, **Use the remote
+   version**, **Use the common ancestor** or an edited text, and stage only the files marked
+   reviewed.
+4. Offer **Abort merge**.
+
+`GitIntegrationTest` covers:
+
+- divergence from fetched state only, the refusals, and a fast-forward to an unmapped candidate;
+- a real conflict that is reviewed, refused while it has markers or a stale digest, saved, staged
+  and committed as a two-parent merge;
+- abort, and restart with Git's merge state retained or not yet created.
 
 ### Git workspace view and packaged journey
 
