@@ -6,6 +6,9 @@ import { message } from '../shared/messages';
 import { StateMark, capabilityTone } from '../shared/StateMark';
 import { reportedCapabilityFacts } from './capabilityFacts';
 
+import { MetadataReceipt } from '../shared/MetadataReceipt';
+import type { ReceiptTime } from '../shared/receiptTime';
+
 const workflows = ['explore', 'reconstruct', 'build', 'validate', 'repair'] as const;
 const labels = {
   explore: copy.exploration,
@@ -33,12 +36,13 @@ function CapabilityReport({ capability }: { capability: Capability }) {
 }
 
 /** Display the last authenticated report. It cannot admit work or select a harness. */
-export function WorkflowAvailability({ runtime }: { runtime: RuntimeSnapshot }) {
+export function WorkflowAvailability({ runtime, receipt }: { runtime: RuntimeSnapshot; receipt?: ReceiptTime }) {
   const generalCapabilities = runtime.capabilities.filter(capability => capability.workflows.length === 0);
   return <section aria-labelledby="job-workflow-availability-title">
     <h3 id="job-workflow-availability-title">{copy.workflowAvailabilityForThisJob}</h3>
     <p>{message(copy.reportedReadiness, { readiness: <code>{runtime.readiness}</code> })}</p>
     <p>{copy.capabilitiesAreTheLastSessionReport}</p>
+    <MetadataReceipt kind="runtime" receipt={receipt} />
     <p>{copy.jobPrerequisitesNotReported}</p>
     <p>{copy.capabilityLimitsBoundary}</p>
     {generalCapabilities.length > 0 && <section aria-labelledby="job-general-capabilities-title">
