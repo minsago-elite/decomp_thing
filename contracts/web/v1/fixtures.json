@@ -921,6 +921,19 @@
     {
       "file": "fixtures/git-conflict-file.json",
       "valid": true
+    },
+    {
+      "file": "fixtures/invalid-request-git-push-force.json",
+      "valid": false,
+      "reason": "Pushes never force; the request has no force, deletion or refspec field."
+    },
+    {
+      "file": "fixtures/request-git-push-reconcile.json",
+      "valid": true
+    },
+    {
+      "file": "fixtures/git-push-preview.json",
+      "valid": true
     }
   ]
 }

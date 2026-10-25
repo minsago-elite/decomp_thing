@@ -176,6 +176,7 @@ internal storage optimization and must not merge identity, permissions or histor
 | `GET G/{status,history,diff,refs}` | `200 gitStatus`, `gitHistory`, `gitDiff`, `gitRefs` | Bounded, anchored pages; full object IDs; opaque file IDs; implemented by #202 |
 | `GET G/worktrees` | `200 gitWorktrees` | Primary and linked work trees with owner and HEAD; implemented by #204 |
 | `GET G/provenance/{objectId}`, `GET G/exports/{objectId}` | `200 gitProvenance`, `200 application/zip` | Exact-object provenance envelope and deterministic tree export; implemented by #205 |
+| `GET G/push-preview?remote=&branch=` | `200 gitPushPreview` | What an explicit push would publish, from fetched state; implemented by #212 |
 | `GET G/remotes`, `GET G/audit` | `200 gitRemotes`, `200 gitAudit` | Registered remotes with credential state (never the credential) and tracking refs; audit history; implemented by #207/#209 |
 | `GET G/divergence?tracking=`, `GET G/conflicts`, `GET G/conflicts/{fileId}` | `200 gitDivergence`, `gitConflicts`, `gitConflictFile` | Fetched divergence and offered strategies; unresolved paths with stage objects; bounded conflict text; implemented by #210/#211 |
 | `POST J/repositories` | `202 operation` | Strict `gitRepositoryInit`/`gitRepositoryAttach`, session/Origin/CSRF, job If-Match and idempotency; init/attach implemented by #201, clone (`gitRepositoryClone`) by #209 |
@@ -1092,6 +1093,65 @@ The workspace's **Integrate remote changes** panel works through these steps:
 - a real conflict that is reviewed, refused while it has markers or a stale digest, saved, staged
   and committed as a two-parent merge;
 - abort, and restart with Git's merge state retained or not yet created.
+
+### Explicit publication and push reconciliation
+
+Nothing pushes automatically: commits, tags, workflow completion and navigation never publish
+(#599). `GET G/push-preview?remote=<remoteId>&branch=<name>&worktree=<id>` describes a push of the
+work tree's branch from fetched state. It reports:
+
+- the destination, the local branch and object, and the remote branch;
+- the expected remote object from the remote-tracking ref, or null for a new branch;
+- the remote's freshness;
+- whether the push fast-forwards;
+- up to 50 of the commits it would publish, and their total;
+- any unconfirmed earlier push to the same branch.
+
+`git.push` names `remoteId`, `localRefId`, `remoteBranch`, `localObjectId` and
+`expectedRemoteObjectId`. It has no force, deletion or refspec field. The server refuses:
+
+- a moved local branch with `REF_CHANGED`;
+- a fetched remote branch that no longer matches the preview with `REMOTE_CHANGED`;
+- a non-fast-forward with `NON_FAST_FORWARD`;
+- a branch that already names the commit with `NOTHING_TO_PUSH`;
+- any branch with an unconfirmed push with `PUSH_UNCONFIRMED`.
+
+At execution, `ls-remote` rechecks the remote itself, and a remote that moved is refused before
+anything is sent. The server then records a push intent and runs `git push --porcelain` of exactly
+`localObjectId:refs/heads/<branch>` without `+` or `--force`, with hooks, signing, tag following
+and submodule recursion off. The remote therefore rejects any non-fast-forward itself, and that
+rejection is reported as `NON_FAST_FORWARD` or `PUSH_REJECTED`. Ref deletion and force pushes are
+unavailable; any future support needs its own scope and expected-object protection. Credentials,
+authentication failures and rejections surface only as the fixed transport codes.
+
+A push whose outcome is unknown never claims publication (#601). This happens when the transfer
+fails after starting or the server restarts while it runs. The operation becomes
+`recovery-required` with `PUSH_UNCONFIRMED`, and its intent blocks retries and removal of that
+remote. `git.push.reconcile` with `pushOperationId` reads the remote and settles the original
+operation:
+
+- `completed` when the remote branch names the pushed commit;
+- `failed` with `PUSH_NOT_PUBLISHED` when it still names the expected object;
+- `failed` with `PUSH_SUPERSEDED` when it names something else.
+
+The repository audit records the destination, ref, old and new objects and outcome of every push
+start, publication, rejection, unconfirmed state and reconciliation. It never accepts or rejects a
+reconstruction revision. The shared audit API (#1704) has not merged; this per-repository audit is
+used until then.
+
+The workspace's **Publish commits** panel previews the push: destination, expected remote object,
+freshness and commit list. It then offers one explicit **Push N commit(s) to branch**. It replaces
+that control with an explanation for a non-fast-forward push, and with **Reconcile with the
+remote** for an unconfirmed one.
+
+`GitPushTest` covers:
+
+- a reviewed fast-forward that publishes exactly one commit, with its audit, and creation of a new
+  branch;
+- a remote that moved after fetch, refused without pushing, and a diverged branch refused as a
+  non-fast-forward;
+- process death after the intent but before Git ran, reconciled as not published;
+- process death after Git pushed, reconciled as confirmed.
 
 ### Git workspace view and packaged journey
 

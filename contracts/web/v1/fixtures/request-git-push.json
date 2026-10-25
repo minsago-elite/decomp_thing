@@ -3,17 +3,18 @@
   "kind": "gitPushRequest",
   "data": {
     "action": "git.push",
-    "worktreeId": "worktree_example_1",
+    "worktreeId": "worktree_example_2",
     "guards": {
-      "repositoryVersion": "repo_version_1",
-      "worktreeVersion": "worktree_version_1",
-      "expectedHeadObjectId": "cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd",
+      "repositoryVersion": "repository_v_1",
+      "worktreeVersion": "worktree_v_1",
+      "expectedHeadObjectId": "0123456789abcdef0123456789abcdef01234567",
       "expectedRefId": "ref_main",
-      "expectedRefObjectId": "cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd"
+      "expectedRefObjectId": "0123456789abcdef0123456789abcdef01234567"
     },
     "remoteId": "remote_example_1",
-    "remoteRefId": "remote_ref_main",
-    "localObjectId": "cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd",
-    "expectedRemoteObjectId": "efefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefef"
+    "localRefId": "ref_main",
+    "remoteBranch": "main",
+    "localObjectId": "0123456789abcdef0123456789abcdef01234567",
+    "expectedRemoteObjectId": "89abcdef0123456789abcdef0123456789abcdef"
   }
 }

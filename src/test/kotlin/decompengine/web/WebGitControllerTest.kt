@@ -421,6 +421,16 @@ class WebGitControllerTest {
                 "targetObjectId" to tracking.getValue("trackingRefs").jsonArray.single().jsonObject.getValue("objectId"),
                 "strategy" to JsonPrimitive("merge")), "http_merge_intent_02"), 409, "NO_COMMITS")
             error(change(mapOf("action" to JsonPrimitive("git.merge.abort")), "http_abort_intent_01"), 409, "NO_MERGE")
+            // Publication: an unborn branch has nothing to push, and no force or deletion field exists.
+            val remoteId = remote.getValue("remoteId").jsonPrimitive.content
+            error(f.read("$base/push-preview?remote=$remoteId"), 409, "DETACHED")
+            error(f.read("$base/push-preview"), 422, "VALIDATION_FAILED")
+            val push = mapOf("action" to JsonPrimitive("git.push"), "remoteId" to JsonPrimitive(remoteId), "localRefId" to JsonPrimitive("ref_main"),
+                "remoteBranch" to JsonPrimitive("main"), "localObjectId" to JsonPrimitive("1".repeat(40)), "expectedRemoteObjectId" to JsonNull)
+            error(change(push + ("force" to JsonPrimitive(true)), "http_push_intent_01"), 422, "VALIDATION_FAILED")
+            error(change(push, "http_push_intent_02"), 404, "NOT_FOUND")
+            error(change(mapOf("action" to JsonPrimitive("git.push.reconcile"), "pushOperationId" to JsonPrimitive("operation_${"0".repeat(32)}")),
+                "http_push_intent_03"), 404, "NOT_FOUND")
         }
     }
 

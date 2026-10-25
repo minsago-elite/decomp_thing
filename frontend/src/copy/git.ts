@@ -150,3 +150,24 @@ export const gitIntegrationCopy = {
   abort: 'Abort merge',
   commitAfter: 'Staging a resolution does not commit. The merge finishes only when you commit the reviewed staged files.',
 } as const;
+
+export const gitPushCopy = {
+  title: 'Publish commits',
+  note: 'Nothing is pushed automatically. Preview exactly what would be published, then push it explicitly. Pushes never force, delete or rewrite remote branches.',
+  remote: 'Remote',
+  branch: 'Remote branch',
+  preview: 'Preview push',
+  destination: 'Destination',
+  local: 'Local branch',
+  expected: 'Remote branch now (fetched)',
+  newBranch: 'Not present; the push creates it',
+  fetched: 'Remote state',
+  states: { current: 'Fetched recently', stale: 'Fetched over an hour ago; the push rechecks the remote', unknown: 'Never fetched; fetch first' },
+  unconfirmed: 'An earlier push to this branch did not report its outcome. Reconcile it against the remote before pushing again.',
+  reconcile: 'Reconcile with the remote',
+  notFastForward: 'This push would not fast-forward the remote branch. Fetch and integrate the remote commits first; force pushes are not supported.',
+  nothing: 'The remote branch already names your latest commit.',
+  commits: 'This push publishes {count} commit(s):',
+  commitList: 'Commits to publish',
+  push: 'Push {count} commit(s) to {branch}',
+} as const;

@@ -1,0 +1,28 @@
+{
+  "apiVersion": 1,
+  "kind": "gitPushPreview",
+  "requestId": "request_example_1",
+  "data": {
+    "repositoryId": "repository_example_2",
+    "worktreeId": "worktree_example_2",
+    "remoteId": "remote_example_1",
+    "destination": "https://git.example.org/team/project.git",
+    "allowed": true,
+    "localRefId": "ref_main",
+    "localRefName": "refs/heads/main",
+    "localObjectId": "0123456789abcdef0123456789abcdef01234567",
+    "remoteBranch": "main",
+    "expectedRemoteObjectId": "89abcdef0123456789abcdef0123456789abcdef",
+    "fetchedAt": "2026-10-25T00:00:00Z",
+    "remoteState": "current",
+    "fastForward": true,
+    "commitCount": "1",
+    "commits": [
+      {
+        "objectId": "0123456789abcdef0123456789abcdef01234567",
+        "subject": "Resolve the merge"
+      }
+    ],
+    "unconfirmedPushOperationId": null
+  }
+}

@@ -31,7 +31,7 @@ enum class GitOperationAction(val wireName: String, val workspace: Boolean = fal
     TAG("git.tag", true), WORKTREE_ADD("git.worktree.add", true), WORKTREE_REMOVE("git.worktree.remove", true),
     CLONE("git.clone"), REMOTE_ADD("git.remote.add", true), REMOTE_REMOVE("git.remote.remove", true), FETCH("git.fetch", true),
     MERGE("git.merge", true), MERGE_ABORT("git.merge.abort", true), CONFLICT_SAVE("git.conflict.save", true),
-    CONFLICT_COMPLETE("git.conflict.complete", true),
+    CONFLICT_COMPLETE("git.conflict.complete", true), PUSH("git.push", true), PUSH_RECONCILE("git.push.reconcile", true),
 }
 
 enum class GitOperationState(val wireName: String, val terminal: Boolean) {
@@ -732,11 +732,154 @@ class ManagedGitRepositories(
             }
             GitOperationAction.REMOTE_REMOVE -> {
                 requireRepositoryGuard(located, observation, request.guards)
-                remoteFor(located, request.parameters["remoteId"])
+                val remote = remoteFor(located, request.parameters["remoteId"])
+                if (GitPushes.list(directory).any { it.remoteId == remote.remoteId }) GitWorkspaceMutations.refuse("PUSH_UNCONFIRMED",
+                    "A push to this remote is unconfirmed. Reconcile it before removing the remote.")
             }
             GitOperationAction.FETCH -> allowedLocation(remoteFor(located, request.parameters["remoteId"]))
+            GitOperationAction.PUSH -> {
+                requireRepositoryGuard(located, observation, request.guards)
+                val remote = remoteFor(located, request.parameters["remoteId"])
+                allowedLocation(remote)
+                val branch = request.text("remoteBranch")
+                try { GitRefNames.requireBranchName(runner, branch) } catch (_: IllegalArgumentException) {
+                    GitWorkspaceMutations.refuse("VALIDATION_FAILED", "The remote branch name is not a valid Git branch name.")
+                }
+                if (branch.startsWith("-")) GitWorkspaceMutations.refuse("VALIDATION_FAILED", "The remote branch name cannot start with '-'.")
+                val (_, tip) = branchFor(runner, located, request.parameters["localRefId"])
+                val local = request.text("localObjectId")
+                if (tip != local) GitWorkspaceMutations.refuse("REF_CHANGED", "The local branch moved since the push was reviewed. Preview it again.")
+                if (GitPushes.list(directory).any { it.remoteId == remote.remoteId && it.branch == branch }) GitWorkspaceMutations.refuse("PUSH_UNCONFIRMED",
+                    "An earlier push to this branch is unconfirmed. Reconcile it against the remote before pushing again.")
+                val expected = request.parameters["expectedRemoteObjectId"]
+                val tracking = GitRefOperations.refObject(runner, located.commonDir, located.record.objectFormat, "${remote.trackingPrefix}$branch")
+                if (tracking != expected) GitWorkspaceMutations.refuse("REMOTE_CHANGED",
+                    "The fetched remote branch differs from the reviewed one. Fetch, review the divergence and preview the push again.")
+                if (expected == local) GitWorkspaceMutations.refuse("NOTHING_TO_PUSH", "The remote branch already names this commit.")
+                if (expected != null && !GitPushes.isAncestor(runner, located.commonDir, expected, local)) GitWorkspaceMutations.refuse("NON_FAST_FORWARD",
+                    "The push would not fast-forward the remote branch. Fetch and integrate the remote commits first; force pushes are not supported.")
+            }
+            GitOperationAction.PUSH_RECONCILE -> {
+                val intent = GitPushes.list(directory).singleOrNull { it.operationId == request.parameters["pushOperationId"] }
+                    ?: GitWorkspaceMutations.refuse("NOT_FOUND", "No unconfirmed push has that operation identity.")
+                allowedLocation(remoteFor(located, intent.remoteId))
+            }
             else -> error("not a sync request")
         }
+    }
+
+    // ---- Publication (#599, #601) -----------------------------------------------------------
+
+    data class GitPushPreview(val remote: GitRemoteRecord, val allowed: Boolean, val localRef: String, val localObjectId: String,
+        val remoteBranch: String, val expectedRemoteObjectId: String?, val fetchedAt: Instant?, val fastForward: Boolean,
+        val commits: List<Pair<String, String>>, val commitCount: Long, val unconfirmed: GitPushIntent?)
+
+    /**
+     * What a push of the work tree's branch would publish, from fetched state only (#599). The
+     * expected remote object comes from the remote-tracking ref; the push rechecks it on the remote.
+     */
+    fun pushPreview(jobId: String, repositoryId: String, worktreeId: String?, remoteId: String, remoteBranch: String?): GitPushPreview {
+        val runner = requireRunner()
+        val located = locate(jobId, repositoryId, worktreeId)
+        val directory = repositoryDirectory(jobId, repositoryId)
+        return refusing {
+            val remote = remoteFor(located, remoteId)
+            val head = GitRepositoryInspector.head(runner, located.gitDir, located.record.objectFormat)
+            val local = head.refName?.takeIf { head.state == GitHeadState.ATTACHED && head.objectId != null } ?: GitWorkspaceMutations.refuse("DETACHED",
+                "Only a branch with commits can be pushed. Switch to it first.")
+            val branch = remoteBranch ?: local.removePrefix("refs/heads/")
+            try { GitRefNames.requireBranchName(runner, branch) } catch (_: IllegalArgumentException) {
+                GitWorkspaceMutations.refuse("VALIDATION_FAILED", "The remote branch name is not a valid Git branch name.")
+            }
+            val tip = checkNotNull(head.objectId)
+            val expected = GitRefOperations.refObject(runner, located.commonDir, located.record.objectFormat, "${remote.trackingPrefix}$branch")
+            val (commits, count) = GitPushes.outgoing(runner, located.commonDir, tip, expected, 50)
+            val allowed = try { allowedLocation(remote); true } catch (_: GitOperationRefusal) { false }
+            GitPushPreview(remote, allowed, local, tip, branch, expected, fetchState(directory, remote.remoteId)?.first,
+                expected == null || GitPushes.isAncestor(runner, located.commonDir, expected, tip), commits, count,
+                GitPushes.list(directory).firstOrNull { it.remoteId == remote.remoteId && it.branch == branch })
+        }
+    }
+
+    /** Unconfirmed pushes of one repository; each blocks a retry to its branch until reconciled. */
+    fun unconfirmedPushes(jobId: String, repositoryId: String): List<GitPushIntent> {
+        requireRunner()
+        locate(jobId, repositoryId)
+        return GitPushes.list(repositoryDirectory(jobId, repositoryId))
+    }
+
+    private fun executePush(runner: GitCommandRunner, located: Located, operation: GitOperationRecord, request: GitSyncRequest): Pair<String?, String?> {
+        val directory = repositoryDirectory(operation.jobId, operation.repositoryId)
+        val remote = remoteFor(located, request.parameters["remoteId"])
+        val location = allowedLocation(remote)
+        val branch = request.text("remoteBranch")
+        val local = request.text("localObjectId")
+        val expected = request.parameters["expectedRemoteObjectId"]
+        val format = located.record.objectFormat
+        fun audit(outcome: String, newObjectId: String? = local) = GitRemoteStore.audit(directory, GitRemoteStore.auditEntry("push", operation.operationId,
+            outcome, remote, clock.instant(), ref = "refs/heads/$branch", oldObjectId = expected, newObjectId = newObjectId))
+        // The remote itself must still name the reviewed object; a fetched ref can be stale.
+        val current = try { GitPushes.remoteObject(runner, location, remotePolicy, branch, format) } catch (failure: GitCommandException) {
+            audit(GitTransports.classify(failure, failure.diagnostic, location.transport).first.lowercase())
+            throw failure
+        }
+        if (current != expected) {
+            audit("remote_changed", current)
+            GitWorkspaceMutations.refuse("REMOTE_CHANGED", "The remote branch changed since it was fetched. Fetch, review and preview the push again; nothing was pushed.")
+        }
+        GitPushes.write(directory, GitPushIntent(operation.operationId, remote.remoteId, branch, expected, local, clock.instant()))
+        audit("started")
+        crash(GitOperationCrashPoint.AFTER_STAGING)
+        val result = try { GitPushes.push(runner, located.commonDir, location, remotePolicy, local, branch) } catch (failure: GitCommandException) {
+            // The remote may or may not have accepted the update: never claim either outcome.
+            audit("unconfirmed")
+            throw GitOperationRefusal("PUSH_UNCONFIRMED", "The push did not report its outcome. Reconcile it against the remote before any retry; " +
+                "publication is not claimed.")
+        }
+        crash(GitOperationCrashPoint.AFTER_PUBLISH)
+        return when (result) {
+            GitPushResult.PUBLISHED, GitPushResult.UP_TO_DATE -> {
+                runner.run(GitInvocation("update-ref", listOf("${remote.trackingPrefix}$branch", local), gitDir = located.commonDir))
+                GitPushes.delete(directory, operation.operationId)
+                audit("published")
+                local to "Published ${local.take(12)} to ${remote.name}/$branch. Publication is not validation or acceptance."
+            }
+            else -> {
+                GitPushes.delete(directory, operation.operationId)
+                audit(when (result) { GitPushResult.REJECTED_NON_FAST_FORWARD -> "rejected_non_fast_forward"; GitPushResult.REJECTED_REMOTE_CHANGED -> "rejected_remote_changed"; else -> "rejected" })
+                GitWorkspaceMutations.refuse(if (result == GitPushResult.REJECTED_NON_FAST_FORWARD) "NON_FAST_FORWARD" else "PUSH_REJECTED",
+                    if (result == GitPushResult.REJECTED_NON_FAST_FORWARD) "The remote rejected a non-fast-forward update. Fetch and integrate first; nothing was force-pushed."
+                    else "The remote rejected the push. Fetch and review the remote state; nothing was published.")
+            }
+        }
+    }
+
+    /** Compare an unconfirmed push with the remote and settle its outcome (#601). */
+    private fun reconcilePush(runner: GitCommandRunner, located: Located, operation: GitOperationRecord, request: GitSyncRequest): Pair<String?, String?> {
+        val directory = repositoryDirectory(operation.jobId, operation.repositoryId)
+        val intent = GitPushes.list(directory).single { it.operationId == request.parameters["pushOperationId"] }
+        val remote = remoteFor(located, intent.remoteId)
+        val current = GitPushes.remoteObject(runner, allowedLocation(remote), remotePolicy, intent.branch, located.record.objectFormat)
+        val (state, code, message) = when (current) {
+            intent.pushedObjectId -> Triple(GitOperationState.COMPLETED, null, "Reconciliation confirmed that the remote branch names the pushed commit.")
+            intent.expectedObjectId -> Triple(GitOperationState.FAILED, "PUSH_NOT_PUBLISHED", "Reconciliation found the remote branch unchanged: the push was not published.")
+            else -> Triple(GitOperationState.FAILED, "PUSH_SUPERSEDED", "Reconciliation found the remote branch at another commit; the pushed commit is not published there.")
+        }
+        synchronized(lock) {
+            val original = operations(operation.jobId).singleOrNull { it.operationId == intent.operationId }
+            if (original != null && !(original.state == GitOperationState.COMPLETED)) {
+                persist(root.resolve(operation.jobId).resolve("git"), finish(original, state, code, message,
+                    if (state == GitOperationState.COMPLETED) intent.pushedObjectId else null))
+            }
+        }
+        if (state == GitOperationState.COMPLETED) {
+            runner.run(GitInvocation("update-ref", listOf("${remote.trackingPrefix}${intent.branch}", intent.pushedObjectId), gitDir = located.commonDir))
+        }
+        GitPushes.delete(directory, intent.operationId)
+        GitRemoteStore.audit(directory, GitRemoteStore.auditEntry("push.reconcile", operation.operationId,
+            when (code) { null -> "confirmed"; "PUSH_NOT_PUBLISHED" -> "not_published"; else -> "superseded" }, remote, clock.instant(),
+            ref = "refs/heads/${intent.branch}", oldObjectId = intent.expectedObjectId, newObjectId = current, detail = "push ${intent.operationId}"))
+        return current to message
     }
 
     // ---- Integration and conflicts (#595-#598) ----------------------------------------------
@@ -992,6 +1135,8 @@ class ManagedGitRepositories(
                 GitRemoteStore.audit(directory, GitRemoteStore.auditEntry("remote.remove", operation.operationId, "completed", remote, clock.instant()))
                 null to "Removed remote ${remote.name} and its remote-tracking refs. Local branches and commits are unchanged."
             }
+            GitOperationAction.PUSH -> executePush(runner, located, operation, request)
+            GitOperationAction.PUSH_RECONCILE -> reconcilePush(runner, located, operation, request)
             GitOperationAction.FETCH -> {
                 val remote = remoteFor(located, request.parameters["remoteId"])
                 val location = allowedLocation(remote)
@@ -1380,6 +1525,7 @@ class ManagedGitRepositories(
                 val state = when (code) {
                     "INTERRUPTED" -> GitOperationState.INTERRUPTED
                     "CANCELLED" -> GitOperationState.CANCELLED
+                    "PUSH_UNCONFIRMED" -> GitOperationState.RECOVERY_REQUIRED
                     else -> GitOperationState.FAILED
                 }
                 current = finish(current, state, code, message.take(500))
@@ -1627,6 +1773,12 @@ class ManagedGitRepositories(
             GitOperationAction.REMOTE_ADD -> if (remotes.any { it.name == request.parameters["name"] })
                 finish(operation, GitOperationState.COMPLETED, null, "The remote was registered before the server restarted.")
                 else finish(operation, GitOperationState.INTERRUPTED, "INTERRUPTED", "Interrupted by a server restart before the remote was registered.")
+            GitOperationAction.PUSH -> if (GitPushes.list(directory).any { it.operationId == operation.operationId })
+                finish(operation, GitOperationState.RECOVERY_REQUIRED, "PUSH_UNCONFIRMED",
+                    "The server restarted while pushing. Reconcile the push against the remote before any retry; publication is not claimed.")
+                else finish(operation, GitOperationState.INTERRUPTED, "INTERRUPTED", "Interrupted by a server restart before anything was pushed.")
+            GitOperationAction.PUSH_RECONCILE -> finish(operation, GitOperationState.INTERRUPTED, "INTERRUPTED",
+                "Interrupted by a server restart; the push is still unconfirmed. Reconcile it again.")
             GitOperationAction.REMOTE_REMOVE -> if (remotes.none { it.remoteId == request.parameters["remoteId"] })
                 finish(operation, GitOperationState.COMPLETED, null, "The remote was removed before the server restarted.")
                 else finish(operation, GitOperationState.INTERRUPTED, "INTERRUPTED",
@@ -1953,6 +2105,8 @@ class ManagedGitRepositories(
         GitOperationAction.MERGE_ABORT -> "Aborted the merge."
         GitOperationAction.CONFLICT_SAVE -> "Saved the resolution; it is not staged."
         GitOperationAction.CONFLICT_COMPLETE -> "Staged the reviewed resolutions. Commit explicitly to finish."
+        GitOperationAction.PUSH -> "Published the reviewed commit. Publication is not validation or acceptance."
+        GitOperationAction.PUSH_RECONCILE -> "Reconciled the unconfirmed push against the remote."
     }
 
     internal companion object {
