@@ -1,4 +1,4 @@
-import type { ContractDocument, Page, RevisionDirectory, Run, SourceChunk, ValidationBytePreview, ValidationCases, ValidationFailure, ValidationHistory, ValidationSummary } from './generated';
+import type { AttemptControls, ContractDocument, Page, RevisionDirectory, Run, SourceChunk, ValidationBytePreview, ValidationCases, ValidationFailure, ValidationHistory, ValidationSummary } from './generated';
 import { ApiClientError } from './errors';
 import { normalizeBasePath, validateResourceHref } from '../app/paths';
 import type { ApiResource } from '../app/paths';
@@ -170,6 +170,22 @@ function checkRun(run: Run): void {
   requireValue(reasons[run.state].includes(run.terminalReason));
   if (run.state === 'queued') requireValue(run.startedAt === null);
   if (run.state === 'running' || run.state === 'completed') requireValue(run.startedAt !== null);
+  const recovery = run.recovery;
+  if (recovery) {
+    requireValue(run.previousRunId !== null && (recovery.restores === null) === (recovery.checkpointSha256 === null));
+    requireValue((recovery.mode === 'retry') === (recovery.restores === null));
+  }
+}
+
+/** Eligibility per command; never a reservation, result or authorization. */
+function checkAttemptControls(value: AttemptControls): void {
+  const { cancel, retry, resume } = value;
+  for (const control of [cancel, retry, resume]) requireValue(control.available === (control.reason === null));
+  requireValue((value.resumeRestores !== null) === value.resume.available);
+  if (value.cancel.available) requireValue(value.state === 'queued' || value.state === 'running');
+  const recoverable = ['failed', 'cancelled', 'interrupted'].includes(value.state);
+  if (value.retry.available || value.resume.available) requireValue(recoverable && value.successorRunId === null);
+  requireValue(value.successorRunId !== value.runId);
 }
 
 function checkSourcePage(items: ReadonlyArray<{ fileId: string; displayName: string }>, totalFiles: number, page: Page, version: string): void {
@@ -264,6 +280,9 @@ export function checkSemantics(document: ContractDocument, basePath = '/'): void
     }
     case 'run':
       checkRun(document.data);
+      break;
+    case 'attemptControls':
+      checkAttemptControls(document.data);
       break;
     case 'runs': {
       const { items, page, jobId } = document.data;
