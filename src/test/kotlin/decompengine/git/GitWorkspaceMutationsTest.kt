@@ -244,10 +244,10 @@ class GitWorkspaceMutationsTest {
         fun raw(vararg args: String) = f.repositories.git("--git-dir=$gitDir", "--work-tree=$workTree", *args, cwd = workTree)
         raw("rm", "-q", "--cached", "--", "src/util.c")
         Files.writeString(workTree.resolve("src/util.c"), "int replacement;\n")
-        // Status now holds a staged deletion (D.) and an untracked record (?) with one identity.
+        // Git reports a staged deletion (D.) and an untracked record (?); status merges them into one entry.
         val (view, guards) = service.guards(repositoryId)
         val records = view.observation.status.entries.filter { it.path.exact == "src/util.c" }
-        assertEquals(setOf(GitIndexChange.DELETED to false, GitIndexChange.NONE to true), records.map { it.staged to it.untracked }.toSet())
+        assertEquals(listOf(GitIndexChange.DELETED to true), records.map { it.staged to it.untracked })
         val id = view.ids { it.path.exact == "src/util.c" }.distinct().single()
         val unstaged = service.run(repositoryId, GitStageRequest(view.record.worktreeId, guards, listOf(id), false), "unstage_key_00061")
         assertEquals(GitOperationState.COMPLETED, unstaged.state, unstaged.message)
