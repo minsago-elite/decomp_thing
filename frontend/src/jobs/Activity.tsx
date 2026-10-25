@@ -149,8 +149,12 @@ function LiveActivity({ jobId, runId, basePath, windowLinks }: { jobId: string; 
           void poll();
           return;
         }
-        const transient = failure instanceof ApiClientError && (failure.code === 'network_error' || failure.code === 'timeout' || failure.status === 502 || failure.status === 504);
-        if (transient && readingStream && ++streamFailures.current >= 2) {
+        // A read that overlaps an atomic journal republication is reported as 503 PROGRESS_UNAVAILABLE.
+        // Retry it within the same bounded, jittered budget; only exhaustion is shown as unavailable.
+        const republishing = failure instanceof ApiClientError && failure.status === 503 && failure.serverCode === 'PROGRESS_UNAVAILABLE';
+        const transient = failure instanceof ApiClientError && (failure.code === 'network_error' || failure.code === 'timeout'
+          || failure.status === 502 || failure.status === 504 || republishing);
+        if (transient && !republishing && readingStream && ++streamFailures.current >= 2) {
           fallback.current = true; setPeriodic(true);
         }
         if (transient && failures.current < 4) {
@@ -166,7 +170,7 @@ function LiveActivity({ jobId, runId, basePath, windowLinks }: { jobId: string; 
           ? copy.theLocalSessionExpiredOrIsUnavailableReconnectTheSession
           : failure instanceof ApiClientError && failure.status === 403
           ? copy.activityAccessWasDeniedCheckTheLocalSessionAndServer
-          : transient ? copy.activityReconnectAttemptsWereExhaustedDisplayedObservationsMayBeStale
+          : transient && !republishing ? copy.activityReconnectAttemptsWereExhaustedDisplayedObservationsMayBeStale
           : failure instanceof ApiClientError && ['EVENT_GAP', 'PROGRESS_GAP'].includes(failure.serverCode ?? '')
           ? copy.retainedHistoryHasAGapReadAFreshHistoryTo
           : copy.activityCouldNotBeVerifiedDisplayedObservationsMayBeStale, failure));

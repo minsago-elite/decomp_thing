@@ -168,6 +168,43 @@ it('uses polling when the server explicitly reports exhausted stream capacity', 
   expect(fetcher).toHaveBeenCalledOnce();
 });
 
+// Packaged history flake (#514): the stream opened while the journal was atomically republished,
+// its first descriptor-pinned read failed before headers and Activity stopped following.
+it('retries a stream refused during journal republication over a fresh stream without polling', async () => {
+  const error = fixture<{ error: { code: string } }>('error-validation');
+  error.error.code = 'PROGRESS_UNAVAILABLE';
+  const resumed = connection();
+  fetcher.mockResolvedValueOnce(new Response(JSON.stringify(error), { status: 503,
+    headers: { 'Content-Type': 'application/json', 'X-Request-ID': 'request_example_1' } })).mockResolvedValueOnce(resumed.response);
+  transport.get.mockResolvedValueOnce(snapshot);
+  await start();
+  expect(screen.queryByRole('alert')).toBeNull();
+  expect(screen.getByRole('status').textContent).toContain('Reconnecting');
+  await advance(1000);
+  expect(fetcher).toHaveBeenCalledTimes(2);
+  expect(new Headers(fetcher.mock.calls[1]![1]?.headers).get('Last-Event-ID')).toBe(page.data.nextCursor);
+  await act(async () => { await Promise.resolve(); resumed.send(next(1)); }); await advance(0);
+  expect(screen.getAllByRole('listitem')).toHaveLength(2);
+  expect(screen.queryByRole('alert')).toBeNull();
+  expect(screen.getByRole('status').textContent).not.toContain('Using periodic refresh');
+  // Catch-up page, then exactly one reconciling snapshot; no polling page after the refusal.
+  expect(transport.get.mock.calls.map(call => call[0])).toEqual(['snapshot', 'events', 'snapshot']);
+});
+
+it('reports a persistently unavailable journal after bounded jittered retries', async () => {
+  const error = fixture<{ error: { code: string } }>('error-validation');
+  error.error.code = 'PROGRESS_UNAVAILABLE';
+  fetcher.mockImplementation(() => Promise.resolve(new Response(JSON.stringify(error), { status: 503,
+    headers: { 'Content-Type': 'application/json', 'X-Request-ID': 'request_example_1' } })));
+  transport.get.mockResolvedValue(snapshot);
+  await start();
+  await advance(60_000);
+  expect(fetcher).toHaveBeenCalledTimes(5);
+  expect(screen.getByRole('alert').textContent).toContain('could not be verified');
+  await advance(60_000);
+  expect(fetcher).toHaveBeenCalledTimes(5);
+});
+
 // These consumer controls reuse the existing in-memory transport and fake clock.
 const contextUpdate = (offset: number): WebEvent => ({
   ...first, sequence: String(BigInt(first.sequence) + BigInt(offset)), cursor: `cursor_usage_${offset}`,

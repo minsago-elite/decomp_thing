@@ -672,6 +672,24 @@ makes queue/history omissions and retained-record counts explicit. Missing
 journals fail with `PROGRESS_UNAVAILABLE`; replay gaps require a fresh snapshot
 via `EVENT_GAP` with typed recovery metadata. See [the implemented boundary and qualification limits](web-progress-adapter.md).
 
+The journal writer republishes by atomic rename, and a descriptor-pinned read that overlaps
+a rename sees its path binding change. Snapshot, polling and SSE reads now re-read the journal
+up to three times before reporting `503 PROGRESS_UNAVAILABLE`; budget refusals and
+interruption are not retried. Activity treats `503 PROGRESS_UNAVAILABLE` as transient: it
+reconciles a fresh snapshot and reconnects within its existing four-retry, ±20% jittered
+budget, keeps SSE rather than falling back to polling, and shows the unavailable alert only
+when that budget is exhausted. This was the cause of the intermittent packaged
+appended-SSE timeout (#514): the browser journey publishes its appended observation as the
+stream opens, and a pre-header read that overlapped the rename returned 503, which Activity
+previously treated as final.
+
+A dropped SSE peer (navigation, tab close, network loss) holds no worker: its reservation is
+released when the next heartbeat or event write fails, and at the latest by the 30-second
+lease. Server stream shutdown closes observers only; it never cancels, completes or otherwise
+changes the observed attempt. Background tabs stop Activity reads and streams, first-page
+dashboard refreshes and upload-progress sampling until visible again; an upload in a hidden
+tab keeps transferring.
+
 ### Current scheduler snapshot
 
 Authenticated bootstrap responses now include optional `runtime.scheduler` for
