@@ -208,7 +208,26 @@ object GitReads {
                 else -> throw GitRepositoryException("REPOSITORY_CORRUPT", "Git status output is malformed.")
             }
         }
-        return GitStatusSnapshot(entries, !result.stdoutTruncated)
+        return GitStatusSnapshot(coalesce(entries), !result.stdoutTruncated)
+    }
+
+    /**
+     * `git rm --cached` leaves the file in place, so Git reports a staged deletion and an
+     * untracked record for one path. A path has one file identity, so the records are merged:
+     * the tracked record is kept and also marked untracked.
+     */
+    private fun coalesce(entries: List<GitStatusEntry>): List<GitStatusEntry> {
+        val byPath = LinkedHashMap<GitPath, GitStatusEntry>()
+        for (entry in entries) {
+            val existing = byPath[entry.path]
+            byPath[entry.path] = when {
+                existing == null -> entry
+                entry.untracked && !existing.untracked && !existing.ignored -> existing.copy(untracked = true)
+                existing.untracked && !entry.untracked && !entry.ignored -> entry.copy(untracked = true)
+                else -> existing
+            }
+        }
+        return byPath.values.toList()
     }
 
     private fun ordinary(code: String, submodule: String, path: GitPath, original: GitPath?, index: String,
@@ -347,7 +366,8 @@ object GitReads {
             gitDir = gitDir, workTree = if (scope == GitDiffScope.COMMIT) null else workTree, truncateStdout = true,
             limits = LIMITS.copy(maxStdoutBytes = MAX_PATCH_BYTES * 4)))
         val text = result.stdout.toString(Charsets.UTF_8)
-        val sections = Regex("(?m)^diff --git ").findAll(text).map { it.range.first }.toList().let { starts ->
+        // An unresolved conflict prints a combined `diff --cc <path>` section instead of `diff --git`.
+        val sections = Regex("(?m)^diff --(?:git|cc|combined) ").findAll(text).map { it.range.first }.toList().let { starts ->
             starts.mapIndexed { index, start -> text.substring(start, starts.getOrElse(index + 1) { text.length }) }
         }
         val zero = "0".repeat(file.oldObjectId?.length ?: file.newObjectId?.length ?: 40)
@@ -366,8 +386,10 @@ object GitReads {
         // Pure renames and mode-only changes have no index line; identify them by their exact
         // header, quoted the way Git quotes unusual names.
         val header = "diff --git ${quoted("a/" + (file.originalPath?.exact ?: path))} ${quoted("b/$path")}\n"
+        val combined = listOf("diff --cc ${quoted(path)}\n", "diff --combined ${quoted(path)}\n")
         val selected = typeChange ?: matching.firstOrNull()
-            ?: sections.firstOrNull { it.startsWith(header) && !Regex("(?m)^index ").containsMatchIn(it) } ?: ""
+            ?: sections.firstOrNull { it.startsWith(header) && !Regex("(?m)^index ").containsMatchIn(it) }
+            ?: sections.firstOrNull { section -> combined.any(section::startsWith) } ?: ""
         val bytes = selected.toByteArray(Charsets.UTF_8)
         val cut = bytes.size > MAX_PATCH_BYTES || (result.stdoutTruncated && selected === sections.lastOrNull())
         return GitPatch(if (bytes.size > MAX_PATCH_BYTES) bytes.copyOf(MAX_PATCH_BYTES).toString(Charsets.UTF_8).trimEnd('\uFFFD') else selected,
