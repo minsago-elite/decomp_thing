@@ -136,6 +136,17 @@ describe('log viewer', () => {
     expect(screen.getByText('line 42')).toBeTruthy();
   });
 
+  it('loads earlier lines as a page that ends just before the loaded window', async () => {
+    transport.get.mockResolvedValueOnce({ data: range(438, 63, 500) });
+    mount();
+    await screen.findByText(/Showing lines 438–500 of 500/);
+    // A byte-limited backward page still ends at line 437, so nothing between the two is skipped.
+    transport.get.mockResolvedValueOnce({ data: { ...range(375, 63, 500), range: { firstLine: '375', lineCount: '63', truncatedBefore: true, truncatedAfter: true, byteLimited: true } } });
+    fireEvent.click(screen.getByRole('button', { name: 'Load earlier lines' }));
+    expect(await screen.findByText(/Showing lines 375–500 of 500/)).toBeTruthy();
+    expect(transport.get.mock.calls[1]![1]).toContain('beforeLine=438&limit=500');
+  });
+
   it('keeps a jump target when the buffer is already full', async () => {
     transport.get.mockResolvedValueOnce({ data: range(1, 500, 3000) });
     mount();

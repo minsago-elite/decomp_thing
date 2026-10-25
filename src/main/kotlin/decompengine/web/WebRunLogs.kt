@@ -17,7 +17,8 @@ import kotlinx.serialization.json.*
  * cannot carry terminal sequences or markup into a consumer.
  */
 internal class WebRunLogs(private val redaction: WebLogRedaction) {
-    data class Query(val fromLine: Long?, val tail: Boolean, val limit: Int, val search: String?)
+    /** [beforeLine] selects a byte-bounded range ending just before that line, so backward pages stay adjacent. */
+    data class Query(val fromLine: Long?, val tail: Boolean, val limit: Int, val search: String?, val beforeLine: Long? = null)
 
     data class Line(val number: Long, val text: String, val truncated: Boolean, val replaced: Boolean, val redacted: Boolean)
 
@@ -31,15 +32,16 @@ internal class WebRunLogs(private val redaction: WebLogRedaction) {
 
     fun parseQuery(raw: String?): Query {
         fun invalid(): Nothing = throw WebAccessDenied(422, "VALIDATION_FAILED",
-            "Log ranges accept fromLine or tail=true, limit (1-$MAXIMUM_PAGE_LINES) and an optional literal search of at most $MAXIMUM_SEARCH_CHARACTERS characters.")
+            "Log ranges accept one of fromLine, beforeLine or tail=true, limit (1-$MAXIMUM_PAGE_LINES) and an optional literal search of at most $MAXIMUM_SEARCH_CHARACTERS characters.")
         if (raw.isNullOrEmpty()) return Query(1, false, DEFAULT_PAGE_LINES, null)
-        if (raw.length > 1024) invalid()
+        // Room for a maximal percent-encoded search (128 characters, up to 12 encoded bytes each) and the other fields.
+        if (raw.length > 2048) invalid()
         val values = mutableMapOf<String, String>()
         for (part in raw.split('&')) {
             val split = part.indexOf('=')
             if (split < 1) invalid()
             val key = part.substring(0, split)
-            if (key !in setOf("fromLine", "tail", "limit", "search") || key in values) invalid()
+            if (key !in setOf("fromLine", "beforeLine", "tail", "limit", "search") || key in values) invalid()
             values[key] = try { URLDecoder.decode(part.substring(split + 1), StandardCharsets.UTF_8) } catch (_: Exception) { invalid() }
         }
         val tail = when (values["tail"]) { null -> false; "true" -> true; else -> invalid() }
@@ -47,7 +49,11 @@ internal class WebRunLogs(private val redaction: WebLogRedaction) {
             if (!value.matches(Regex("[1-9][0-9]{0,8}"))) invalid()
             value.toLong()
         }
-        if (tail && from != null) invalid()
+        val before = values["beforeLine"]?.let { value ->
+            if (!value.matches(Regex("[1-9][0-9]{0,8}"))) invalid()
+            value.toLong()
+        }
+        if (listOf(tail, from != null, before != null).count { it } > 1) invalid()
         val limit = values["limit"]?.let { value ->
             if (!value.matches(Regex("[1-9][0-9]{0,2}"))) invalid()
             value.toInt().takeIf { it <= MAXIMUM_PAGE_LINES } ?: invalid()
@@ -56,7 +62,7 @@ internal class WebRunLogs(private val redaction: WebLogRedaction) {
             // Literal text only: no pattern language can make a search expensive.
             if (value.isEmpty() || value.length > MAXIMUM_SEARCH_CHARACTERS || value.any { it.code < 32 || it.code == 127 }) invalid()
         }
-        return Query(if (tail) null else from ?: 1, tail, limit, search)
+        return Query(if (tail || before != null) null else from ?: 1, tail, limit, search, before)
     }
 
     /** Null when the log exceeds the line budget; callers report it as oversized, never as a failure. */
@@ -109,9 +115,10 @@ internal class WebRunLogs(private val redaction: WebLogRedaction) {
         var bytes = 0
         val selected = ArrayDeque<Line>()
         val first: Long
-        if (query.tail) {
-            // Spend the byte budget backward from the final line, so the newest lines are always included.
-            var index = total
+        val backward = query.tail || query.beforeLine != null
+        if (backward) {
+            // Spend the byte budget backward from the final (or requested) line, so the range always ends there.
+            var index = if (query.beforeLine != null) minOf(query.beforeLine - 1, total) else total
             while (index >= 1 && selected.size < query.limit) {
                 val line = capture.line((index - 1).toInt())
                 if (selected.isNotEmpty() && bytes + size(line) > MAXIMUM_RESPONSE_TEXT_BYTES) break
@@ -128,7 +135,7 @@ internal class WebRunLogs(private val redaction: WebLogRedaction) {
                 bytes += size(line); selected.addLast(line); index += 1
             }
         }
-        val budgetStopped = selected.size < query.limit && if (query.tail) first > 1 else first + selected.size - 1 < total
+        val budgetStopped = selected.size < query.limit && if (backward) first > 1 else first + selected.size - 1 < total
         put("range", buildJsonObject {
             put("firstLine", first.toString()); put("lineCount", selected.size.toString())
             put("truncatedBefore", first > 1); put("truncatedAfter", first + selected.size - 1 < total)

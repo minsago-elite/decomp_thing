@@ -165,9 +165,9 @@ export function LogViewer({ jobId, runId, basePath }: { jobId: string; runId: st
       {notice && <p role="status">{notice}</p>}
       <div class="job-actions">
         <button type="button" disabled={buffer.firstLine <= 1n} onClick={() => {
-          const from = buffer.firstLine > BigInt(LOG_PAGE_LINES) ? buffer.firstLine - BigInt(LOG_PAGE_LINES) : 1n;
           setFollow('off');
-          void read({ fromLine: String(from), limit: String(buffer.firstLine - from) }, 'start');
+          // The server fills this page backward from the line before the window, so it is always adjacent.
+          void read({ beforeLine: String(buffer.firstLine), limit: String(LOG_PAGE_LINES) }, 'start');
         }}>{copy.loadEarlier}</button>
         <button type="button" disabled={lastLine(buffer) >= buffer.totalLines} onClick={() => {
           void read({ fromLine: String(lastLine(buffer) + 1n), limit: String(LOG_PAGE_LINES) }, 'end');

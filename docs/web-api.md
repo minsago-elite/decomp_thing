@@ -640,8 +640,9 @@ capacity. See [scheduler summary and verification](web-scheduler-summary.md).
 
 `GET jobs/J/runs/R/logs/build` reads `reports/runs/R/source-tree/reports/build.log` (at most
 8 MiB; larger logs report `oversized`, absent logs `missing`) and returns one contiguous range:
-`tail=true` for the newest lines or `fromLine=N` (a position just past the end returns an empty,
-current range for following), `limit` 1–500 lines (default 200) and at most 256 KiB of text. The
+`tail=true` for the newest lines, `beforeLine=N` for the lines ending just before line N (both fill
+their byte budget backward, so the range always ends at the final or requested line), or
+`fromLine=N` (a position just past the end returns an empty, current range for following), `limit` 1–500 lines (default 200) and at most 256 KiB of text. The
 range states `firstLine`, `lineCount`, `truncatedBefore`/`truncatedAfter` and `byteLimited`, with
 `totalLines`, `totalBytes`, the recording's `sourceSha256`, the attempt state with its start/end
 times and the server `readAt` time. Lines are decoded as UTF-8 with replacement (flagged), cut at

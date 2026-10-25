@@ -35,7 +35,11 @@ class WebRunLogsTest {
         assertEquals(WebRunLogs.Query(1, false, 200, null), logs.parseQuery(null))
         assertEquals(WebRunLogs.Query(null, true, 50, null), logs.parseQuery("tail=true&limit=50"))
         assertEquals(WebRunLogs.Query(7, false, 500, "(a+)+\$"), logs.parseQuery("fromLine=7&limit=500&search=%28a%2B%29%2B%24"))
-        for (invalid in listOf("tail=true&fromLine=2", "limit=501", "limit=0", "fromLine=0", "tail=yes", "search=", "search=a%0Ab",
+        assertEquals(WebRunLogs.Query(null, false, 500, null, 438), logs.parseQuery("beforeLine=438&limit=500"))
+        // A maximal non-ASCII search still fits the raw query bound after percent encoding.
+        val wide = java.net.URLEncoder.encode("界".repeat(128), Charsets.UTF_8)
+        assertEquals("界".repeat(128), logs.parseQuery("fromLine=1&limit=500&search=$wide").search)
+        for (invalid in listOf("tail=true&fromLine=2", "beforeLine=3&tail=true", "beforeLine=3&fromLine=1", "beforeLine=0", "limit=501", "limit=0", "fromLine=0", "tail=yes", "search=", "search=a%0Ab",
             "search=" + "x".repeat(129), "regex=a", "limit=1&limit=2", "fromLine=1e3")) {
             assertEquals("VALIDATION_FAILED", assertFailsWith<WebAccessDenied>(invalid) { logs.parseQuery(invalid) }.code)
         }
@@ -83,6 +87,12 @@ class WebRunLogsTest {
         assertTrue(limitedWindow.getValue("byteLimited").jsonPrimitive.boolean)
         assertTrue(limited.toString().toByteArray().size < 300 * 1024)
         assertTrue(limitedWindow.getValue("lineCount").jsonPrimitive.int in 1 until 500)
+        // A backward page ends immediately before the loaded window, even when its byte budget stops it early.
+        val earlier = logs.range(jobId, run, wide, false, logs.parseQuery("beforeLine=438&limit=437"), now)
+        assertEquals("437", earlier.getValue("lines").jsonArray.last().jsonObject.getValue("number").jsonPrimitive.content)
+        assertTrue(earlier.getValue("range").jsonObject.getValue("byteLimited").jsonPrimitive.boolean)
+        assertEquals("0", logs.range(jobId, run, wide, false, logs.parseQuery("beforeLine=1"), now)
+            .getValue("range").jsonObject.getValue("lineCount").jsonPrimitive.content)
         // A byte-limited tail still ends at the final line instead of stopping partway through its window.
         val newest = logs.range(jobId, run, wide, false, logs.parseQuery("tail=true&limit=200"), now)
         val newestWindow = newest.getValue("range").jsonObject
