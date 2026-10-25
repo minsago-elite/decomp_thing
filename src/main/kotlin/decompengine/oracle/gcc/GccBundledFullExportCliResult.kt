@@ -234,7 +234,7 @@ internal object GccBundledFullExportCliResultV2 {
             "structuralBinding" to JsonPrimitive(structuralBindingPath.toString()),
             "structuralBindingSha256" to JsonPrimitive(OracleArtifacts.sha256(structuralBindingBytes)),
             "operationWallTime" to operationWallTime,
-            "scratchDisposition" to JsonPrimitive("retained; structural replay and release eligibility unqualified"),
+            "scratchDisposition" to JsonPrimitive("retained; full structural scoring and release eligibility unqualified"),
         ) + boundaryFields))
     }
 
