@@ -56,8 +56,8 @@ The record's `identitySubstitutions` lists the only differences a candidate may
 show, each with patterns that bound the replaceable span: the driver basename in
 diagnostic prefixes, the `--version` banner and the `--help` usage text; the
 invocation `argv[0]` in the `-v` `COLLECT_GCC=` line; and the install prefix in
-path output. The capture re-runs every metadata case through a symlinked driver
-named `candidate-cc` and fails unless the driver-name substitutions account for
+path output and the complete `--prefix=` configure argument in `-v`. The capture
+re-runs every metadata case through a symlinked driver named `candidate-cc` and fails unless the driver-name substitutions account for
 every difference. Everything else must match byte-for-byte.
 
 ## Reproduction
