@@ -830,7 +830,7 @@ class ManagedGitRepositories(
         GitPushes.write(directory, GitPushIntent(operation.operationId, remote.remoteId, branch, expected, local, clock.instant()))
         audit("started")
         crash(GitOperationCrashPoint.AFTER_STAGING)
-        val result = try { GitPushes.push(runner, located.commonDir, location, remotePolicy, local, branch) } catch (failure: GitCommandException) {
+        val result = try { GitPushes.push(runner, located.commonDir, location, remotePolicy, local, branch, expected) } catch (failure: GitCommandException) {
             // The remote may or may not have accepted the update: never claim either outcome.
             audit("unconfirmed")
             throw GitOperationRefusal("PUSH_UNCONFIRMED", "The push did not report its outcome. Reconcile it against the remote before any retry; " +
@@ -853,6 +853,8 @@ class ManagedGitRepositories(
             else -> {
                 GitPushes.delete(directory, operation.operationId)
                 audit(when (result) { GitPushResult.REJECTED_NON_FAST_FORWARD -> "rejected_non_fast_forward"; GitPushResult.REJECTED_REMOTE_CHANGED -> "rejected_remote_changed"; else -> "rejected" })
+                if (result == GitPushResult.REJECTED_REMOTE_CHANGED) GitWorkspaceMutations.refuse("REMOTE_CHANGED",
+                    "The remote branch changed while pushing, so the reviewed expectation no longer held. Fetch and review again; nothing was published.")
                 GitWorkspaceMutations.refuse(if (result == GitPushResult.REJECTED_NON_FAST_FORWARD) "NON_FAST_FORWARD" else "PUSH_REJECTED",
                     if (result == GitPushResult.REJECTED_NON_FAST_FORWARD) "The remote rejected a non-fast-forward update. Fetch and integrate first; nothing was force-pushed."
                     else "The remote rejected the push. Fetch and review the remote state; nothing was published.")

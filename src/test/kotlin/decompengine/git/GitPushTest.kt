@@ -207,4 +207,18 @@ class GitPushTest {
         assertEquals(GitOperationState.COMPLETED, run(pushRequest(service.pushPreview(jobId, repositoryId, null, remoteId(), null))).state)
         assertTrue(service.unconfirmedPushes(jobId, repositoryId).isEmpty())
     }
+
+    @Test fun `the reviewed remote expectation is enforced by the push itself`(): Unit = Fixture().use { f ->
+        f.cloned()
+        f.localCommit("notes.txt", "local work\n")
+        val preview = service.pushPreview(jobId, repositoryId, null, remoteId(), null)
+        // Another client deletes the branch after the server's ls-remote check but before the push.
+        f.hook = { point -> if (point == GitOperationCrashPoint.AFTER_STAGING) f.repositories.git("--git-dir=${f.bare}", "update-ref", "-d", "refs/heads/main") }
+        val raced = run(pushRequest(preview))
+        f.hook = {}
+        assertEquals(GitOperationState.FAILED, raced.state, raced.message)
+        assertEquals("REMOTE_CHANGED", raced.failureCode)
+        assertNull(f.remoteTip(), "The push must not recreate a branch it did not review as absent")
+        assertTrue(service.unconfirmedPushes(jobId, repositoryId).isEmpty())
+    }
 }

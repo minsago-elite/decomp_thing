@@ -79,9 +79,13 @@ internal object GitPushes {
      * refuses a non-fast-forward itself. Hooks, signing and submodule recursion are off.
      */
     fun push(runner: GitCommandRunner, gitDir: Path, location: GitRemoteLocation, policy: GitRemotePolicy, objectId: String,
-        branch: String): GitPushResult {
+        branch: String, expected: String?): GitPushResult {
+        // The remote applies the reviewed expectation atomically with the update: it must still name
+        // `expected` (or not exist), so a change between our ls-remote and the push is refused as stale.
+        // The local ancestry check already guarantees the update fast-forwards from `expected`.
+        val lease = "--force-with-lease=refs/heads/$branch:${expected ?: ""}"
         val result = runner.run(GitInvocation("push", listOf("--porcelain", "--no-verify", "--signed=false", "--no-recurse-submodules",
-            "--no-follow-tags", "--no-atomic", "--", location.url, "$objectId:refs/heads/$branch"), gitDir = gitDir,
+            "--no-follow-tags", "--no-atomic", lease, "--", location.url, "$objectId:refs/heads/$branch"), gitDir = gitDir,
             limits = GitTransfers.limits(policy), transport = GitTransports.context(location, policy), allowedExitCodes = setOf(0, 1)))
         return classify(result.exitCode, result.text, branch)
     }

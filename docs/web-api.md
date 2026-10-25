@@ -1118,10 +1118,15 @@ work tree's branch from fetched state. It reports:
 
 At execution, `ls-remote` rechecks the remote itself, and a remote that moved is refused before
 anything is sent. The server then records a push intent and runs `git push --porcelain` of exactly
-`localObjectId:refs/heads/<branch>` without `+` or `--force`, with hooks, signing, tag following
-and submodule recursion off. The remote therefore rejects any non-fast-forward itself, and that
-rejection is reported as `NON_FAST_FORWARD` or `PUSH_REJECTED`. Ref deletion and force pushes are
-unavailable; any future support needs its own scope and expected-object protection. Credentials,
+`localObjectId:refs/heads/<branch>` without `+`, with hooks, signing, tag following and submodule
+recursion off. The push carries `--force-with-lease=refs/heads/<branch>:<expectedRemoteObjectId>`,
+with an empty expectation for a new branch. The remote therefore applies the update only while the
+branch still names the reviewed object or is still absent. A change between the `ls-remote` check
+and the push, including a deletion, is refused as `REMOTE_CHANGED` and never recreates or overwrites
+anything. The lease never makes a non-fast-forward possible, because admission already requires
+the reviewed expected object to be an ancestor of `localObjectId`. Explicit remote rejections are
+reported as `NON_FAST_FORWARD` or `PUSH_REJECTED`. Ref deletion and force pushes are unavailable;
+any future support needs its own scope and expected-object protection. Credentials,
 authentication failures and rejections surface only as the fixed transport codes.
 
 A push whose outcome is unknown never claims publication (#601). This happens when:
