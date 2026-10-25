@@ -205,8 +205,8 @@ class DurableWebWorkflowTest {
             assertEquals(ULong.MAX_VALUE, service.getAttempt(job.id, first.runId).usage!!.outputTokens)
             assertEquals(first.runId, service.getAttempt(job.id, second.runId).previousRunId)
             assertTrue(service.getAttempt(job.id, second.runId).publicationPending)
-            assertEquals(first.runId, service.resolveArtifact(job.id, "reports/runs/${first.runId}/report.txt").readText())
-            assertEquals(second.runId, service.resolveArtifact(job.id, "reports/runs/${second.runId}/report.txt").readText())
+            assertEquals(first.runId, service.readArtifact(job.id, "reports/runs/${first.runId}/report.txt", 4096).bytes.decodeToString())
+            assertEquals(second.runId, service.readArtifact(job.id, "reports/runs/${second.runId}/report.txt", 4096).bytes.decodeToString())
             assertEquals(first.runId, service.readArtifact(job.id, "reports/runs/${first.runId}/report.txt", 4096).bytes.toString(Charsets.UTF_8))
             assertFailsWith<Exception> { service.readArtifact(job.id, "reports/runs/${first.runId}/report.txt", 1) }
             assertFailsWith<WebJobServiceException> { service.readArtifact(job.id, "reports/runs/run_unknown/report.txt", 4096) }
@@ -404,14 +404,14 @@ class DurableWebWorkflowTest {
             assertTrue(before.contains("/source/src/modules/source.c?runId=${first.runId}"))
             assertFalse(before.contains("action=\"/jobs/${job.id}/reconstruct\""))
             service.startDurable(job.id, version(service, job.id), DurableWebWorkflowRequest(WorkflowKind.RECONSTRUCT))
-            val source = service.resolveArtifact(job.id, "${old.artifactPrefix}/source-tree/src/modules/source.c").readText()
+            val source = service.readArtifact(job.id, "${old.artifactPrefix}/source-tree/src/modules/source.c", 4096).bytes.decodeToString()
             assertTrue(source.contains(first.runId))
             assertEquals(source, evidence.read(job.id, old.artifactPrefix).text("src/modules/source.c"))
             val html = renderSourceFile(service.get(job.id), "src/modules/source.c", source, old)
             assertTrue(html.contains("reports/runs/${first.runId}/source-tree/src/modules/source.c"))
             assertEquals(job.binaryPath, service.get(job.id).binaryPath)
             val other = service.upload("other.elf", elfFixture())
-            assertFailsWith<WebJobServiceException> { service.resolveArtifact(other.id, "${old.artifactPrefix}/source-tree/src/modules/source.c") }
+            assertFailsWith<WebJobServiceException> { service.readArtifact(other.id, "${old.artifactPrefix}/source-tree/src/modules/source.c", 4096) }
         }
     }
 
