@@ -123,6 +123,13 @@ internal class ReferenceCorpusOperationJournal private constructor(
         path.resolve("reference-observations.json")
     }
 
+    /** Defensive evidence snapshots while this exact completed journal remains locked and pinned. */
+    @Synchronized
+    fun completedSnapshots(): Map<String, ByteArray> = guarded("completed reference consumption") {
+        check(phase == Phase.COMPLETE) { "reference journal has no completed capture" }
+        java.util.Collections.unmodifiableMap(snapshots.mapValues { it.value.bytes.copyOf() })
+    }
+
     private fun requireBatch(batchId: String, expected: Phase) {
         check(phase == expected && batchIndex < batchIds.size && batchIds[batchIndex] == batchId) {
             "reference batch does not follow its retained lifecycle"

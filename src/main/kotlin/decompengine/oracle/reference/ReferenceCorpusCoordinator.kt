@@ -13,6 +13,7 @@ import decompengine.oracle.fulltree.FullTreeDiskScratchBorrowedRunRoot
 import decompengine.oracle.fulltree.FullTreeDiskScratchLease
 import decompengine.oracle.fulltree.FullTreeDiskScratchOperation
 import decompengine.oracle.fulltree.FullTreeDiskScratchPolicy
+import decompengine.oracle.fulltree.FullTreeDiskScratchRunRoot
 import decompengine.oracle.fulltree.FullTreeFunctionObservationIsolationConfiguration
 import decompengine.oracle.fulltree.FullTreeFunctionObservationRuntimeMount
 import decompengine.oracle.fulltree.KotlinSystemdCgroupCommandExecutionException
@@ -47,7 +48,18 @@ internal object ReferenceCorpusCoordinator {
         journalRoot: Path,
         provisionedScratch: Path,
         expectedCgroupParent: String,
-    ): Path {
+    ): Path = captureRetained(profile, nativeRuntime, configuration, journalRoot, provisionedScratch,
+        expectedCgroupParent).use { it.referencePath }
+
+    /** Keeps completed execution ownership live for a same-process qualification consumer. */
+    fun captureRetained(
+        profile: AuthenticatedReferenceCorpusProfile,
+        nativeRuntime: AdmittedReferenceNativeRuntime,
+        configuration: FullTreeFunctionObservationIsolationConfiguration,
+        journalRoot: Path,
+        provisionedScratch: Path,
+        expectedCgroupParent: String,
+    ): RetainedReferenceCorpusCapture {
         requireRoot(journalRoot)
         requireRoot(provisionedScratch)
         require(!overlap(journalRoot, provisionedScratch)) { "reference journal and scratch must be disjoint" }
@@ -79,6 +91,7 @@ internal object ReferenceCorpusCoordinator {
         val journal = ReferenceCorpusOperationJournal.create(journalRoot, operationId, intent, batches)
         var lease: FullTreeDiskScratchLease? = null
         var retainedFailure: KotlinSystemdCgroupCommandExecutionException? = null
+        var retainedSuccess = false
         try {
             val openedLease = FullTreeDiskScratchAuthority.acquireDedicatedFilesystem(provisionedScratch,
                 FullTreeDiskScratchOperation(operationId, intentSha, "reference-corpus", profile.profileSha256), DISK_POLICY)
@@ -170,7 +183,9 @@ internal object ReferenceCorpusCoordinator {
             profile.requireCurrent("before completed reference publication")
             nativeRuntime.requireCurrent("before completed reference publication")
             deadline.requireCurrent()
-            return journal.complete(reference)
+            val referencePath = journal.complete(reference)
+            return RetainedReferenceCorpusCapture.create(referencePath, operationId, reference, profile, nativeRuntime,
+                openedLease, runRoot, journal, REFERENCE_CAPTURE_PERMIT).also { retainedSuccess = true }
         } catch (failure: Throwable) {
             if (failure is KotlinSystemdCgroupCommandExecutionException && !failure.cleanup.absenceProved) {
                 retainedFailure = failure
@@ -178,7 +193,7 @@ internal object ReferenceCorpusCoordinator {
             }
             throw failure
         } finally {
-            if (retainedFailure == null) {
+            if (retainedFailure == null && !retainedSuccess) {
                 try { lease?.abandonForRecovery() } finally { journal.close() }
             }
         }
@@ -208,6 +223,68 @@ internal object ReferenceCorpusCoordinator {
         return value
     }
 }
+
+/**
+ * A completed reference execution, minted only by the coordinator after whole-scope absence.
+ * The journal and disk lease stay owned until consumption finishes. Serialized records cannot
+ * construct this capability; the profile/runtime are borrowed and must outlive it.
+ */
+internal class RetainedReferenceCorpusCapture private constructor(
+    val referencePath: Path,
+    val operationId: String,
+    reference: ByteArray,
+    private val profile: AuthenticatedReferenceCorpusProfile,
+    private val nativeRuntime: AdmittedReferenceNativeRuntime,
+    private val lease: FullTreeDiskScratchLease,
+    private val runRoot: FullTreeDiskScratchRunRoot,
+    private val journal: ReferenceCorpusOperationJournal,
+) : AutoCloseable {
+    private val storedReference = reference.copyOf()
+    private var closed = false
+
+    val canonicalBytes: ByteArray get() {
+        requireCurrent("reference capture consumption")
+        return storedReference.copyOf()
+    }
+
+    @Synchronized
+    fun requireCurrent(label: String = "retained reference capture") {
+        check(!closed) { "retained reference capture is closed" }
+        profile.requireCurrent(label)
+        nativeRuntime.requireCurrent(label)
+        lease.requireCurrentOperationRunRootAfterCgroupAbsence(runRoot)
+        journal.verify(label)
+        require(journal.completedSnapshots().getValue("reference-observations.json").contentEquals(storedReference)) {
+            "retained reference bytes differ from the completed execution"
+        }
+    }
+
+    @Synchronized
+    fun journalSnapshots(): Map<String, ByteArray> {
+        requireCurrent("reference journal consumption")
+        return journal.completedSnapshots()
+    }
+
+    @Synchronized
+    override fun close() {
+        if (closed) return
+        closed = true
+        try { lease.abandonForRecovery() } finally { journal.close() }
+    }
+
+    companion object {
+        internal fun create(referencePath: Path, operationId: String, reference: ByteArray,
+            profile: AuthenticatedReferenceCorpusProfile, nativeRuntime: AdmittedReferenceNativeRuntime,
+            lease: FullTreeDiskScratchLease, runRoot: FullTreeDiskScratchRunRoot,
+            journal: ReferenceCorpusOperationJournal, permit: Any): RetainedReferenceCorpusCapture {
+            require(permit === REFERENCE_CAPTURE_PERMIT) { "reference captures require the live coordinator" }
+            return RetainedReferenceCorpusCapture(referencePath, operationId, reference, profile, nativeRuntime,
+                lease, runRoot, journal).also { it.requireCurrent("completed reference handoff") }
+        }
+    }
+}
+
+private val REFERENCE_CAPTURE_PERMIT = Any()
 
 /** Retains the lease/journal until the same launcher can prove whole-cgroup absence. */
 internal class ReferenceCorpusRetainedFailure internal constructor(

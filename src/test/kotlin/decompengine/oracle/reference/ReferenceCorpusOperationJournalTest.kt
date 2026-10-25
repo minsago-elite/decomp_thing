@@ -35,6 +35,10 @@ class ReferenceCorpusOperationJournalTest {
             }
             val output = journal.complete(PAYLOAD)
             assertContentEquals(PAYLOAD, Files.readAllBytes(output))
+            val snapshots = journal.completedSnapshots()
+            snapshots.getValue("reference-observations.json")[0] = 0
+            assertContentEquals(PAYLOAD, journal.completedSnapshots().getValue("reference-observations.json"))
+            assertFails { (snapshots as MutableMap<String, ByteArray>).clear() }
             val complete = OracleJson.parseCanonical(Files.readAllBytes(journal.path.resolve("complete.json"))).jsonObject
             val payload = complete.getValue("payload").jsonObject
             assertEquals(JsonPrimitive(false), payload["candidateQualified"])
@@ -57,7 +61,7 @@ class ReferenceCorpusOperationJournalTest {
     }
 
     @Test fun `missing lifecycle transitions poison operation and cannot publish reference`() {
-        for (step in 0..4) withRoot { root ->
+        for (step in 0..5) withRoot { root ->
             ReferenceCorpusOperationJournal.create(root, ID, PAYLOAD, listOf("first")).use { journal ->
                 journal.recordLease(evidence())
                 assertFails {
@@ -66,7 +70,8 @@ class ReferenceCorpusOperationJournalTest {
                         1 -> journal.prepareBatch("second", PAYLOAD, SHA)
                         2 -> journal.authorizeStart("first")
                         3 -> journal.recordExecution("first", PAYLOAD)
-                        else -> journal.recordObservations("first", PAYLOAD)
+                        4 -> journal.recordObservations("first", PAYLOAD)
+                        else -> journal.completedSnapshots()
                     }
                 }
                 assertFalse(Files.exists(journal.path.resolve("reference-observations.json")))
