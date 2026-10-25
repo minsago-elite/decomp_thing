@@ -122,7 +122,7 @@ export const activityRowCopy = {
   "trackingExhausted": "Producer message tracking limit reached.",
   "correlation": "Correlation details for sequence {sequence}",
   "otherObservation": "{type} metadata retained; content is not displayed in this observation view.",
-  "theseAreRecordedReferencesTaskSessionAndRevisionEvidencePages": "These are recorded references. Task, session and revision evidence pages are not available from this view.",
+  "theseAreRecordedReferencesTaskSessionAndRevisionEvidencePages": "These are recorded references. Each one states whether this view links it to attempt or revision evidence, or why it does not.",
   "taskDigest": "Task digest",
   "sessionDigest": "Session digest",
   "revisionDigest": "Revision digest",

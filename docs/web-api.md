@@ -989,6 +989,33 @@ Run state now stays locked during bounded journal capture, with locks released b
 Controlled authenticated HTTP snapshot/replay and SSE eviction/resume checks now cover concurrent
 cutover. Slow-socket qualification and timed retention remain outstanding under #174.
 
+### Activity stages, correlation and private reasoning
+
+The Activity view summarizes the retained page as stages. The attempt row comes from the
+durable snapshot (`queued` waiting, `running`, `cancelling` blocked, `completed` accepted or
+completed without acceptance, `cancelled`, `failed`/`interrupted` terminal failure). Task rows
+group observations by `taskIdSha256` and keep the latest reported stage: analysis, planning
+and agent work are running; policy, build and behavior checks plus provisional/compile-valid
+results are validating; `unresolved` or a denied permission is blocked; `accepted`,
+`rolled_back`, `completed`, `cancelled` and failure phases are final. Rows without a stage
+(messages, tools, usage) keep the previous stage. Journal stages never establish acceptance.
+
+A percentage is shown only for an authoritative, producer-declared total. Observed task counts
+are not a denominator because tasks that have not started are invisible, so the view states
+how many observed tasks reached a final stage and that no percentage is shown.
+
+Correlation disclosures render on demand. The browser hashes the loaded attempt's own
+identities (attempt, previous attempt, input and result revision) with SHA-256, the same plain
+commitment the journal uses, and links only exact matches: a result revision to its source
+browser and a workflow-run digest to the previous attempt. Every other reference states why
+it is not linked (not recorded, not compared yet, no published task or session evidence page,
+or no matching revision). A task digest can narrow the page filter instead.
+
+Provider reasoning (`agent_thought_chunk`, role `thought`) is private. The journal records only
+its position, role, completion and `textOmitted: true`; it never buffers, stores, measures or
+commits to its text. Public projection also withholds `contentSha256`/`chunkCharacters` from
+older thought records. The ACP client never requests reasoning and no workflow depends on it.
+
 ## Agent preflight and harness readiness
 
 `GET /api/v1/agent/preflight` returns `agentPreflight` with `status` (`idle`, `inspecting`, `ready`, `failed`, `cancelled`), an application-generated `inspectionId` and a fixed `reasonCode` (`AGENT_PREFLIGHT_FAILED` only). `POST` with the exact body `{"action":"inspect"}` starts one inspection and returns `202`; a second request while one runs returns `409 AGENT_PREFLIGHT_IN_PROGRESS`. The inspection runs the configured harness's `preflight(WEB)` (initialize negotiation, no session, no model prompt) and is cancelled when the server stops. Exception text, inventories and configuration are discarded and never appear in the response.
