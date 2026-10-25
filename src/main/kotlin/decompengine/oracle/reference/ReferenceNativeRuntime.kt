@@ -11,8 +11,8 @@ import decompengine.oracle.behavior.LlvmBehaviorNativeOciImageV2
 import decompengine.oracle.core.OracleArtifacts
 import decompengine.oracle.core.OracleJson
 import decompengine.oracle.fulltree.FullTreeFunctionObservationRuntimeMount
-import decompengine.oracle.fulltree.StableControlFile
 import decompengine.oracle.fulltree.calculateFullTreeObservationRuntimeManifestSha256
+import java.io.OutputStream
 import java.math.BigDecimal
 import java.nio.file.Files
 import java.nio.file.LinkOption.NOFOLLOW_LINKS
@@ -22,6 +22,7 @@ import java.nio.file.StandardOpenOption.WRITE
 import java.nio.file.attribute.BasicFileAttributeView
 import java.nio.file.attribute.BasicFileAttributes
 import java.nio.file.attribute.FileTime
+import java.security.DigestOutputStream
 import java.security.MessageDigest
 import java.util.Collections
 import java.util.concurrent.TimeUnit
@@ -230,7 +231,7 @@ internal object ReferenceNativeRuntime {
         return Plan(nodes.values.toList(), mounts, bytes)
     }
 
-    internal fun verify(root: Path, plan: Plan, trustedOwnership: Boolean) {
+    internal fun verify(root: Path, plan: Plan, trustedOwnership: Boolean) = LinuxFilesystemSyscalls.openRoot(root).use { pinnedRoot ->
         val found = Files.walk(root, MAXIMUM_DEPTH + 1).use { paths -> paths.limit(MAXIMUM_ENTRIES.toLong() + 2).toList() }
         require(found.size == plan.nodes.size + 1) { "native runtime namespace has extra or missing entries" }
         val expected = plan.nodes.associateBy { it.relative }
@@ -260,14 +261,7 @@ internal object ReferenceNativeRuntime {
                     require((Files.getAttribute(path, "unix:nlink", NOFOLLOW_LINKS) as Number).toInt() == expectedLinks) {
                         "native runtime has an external or substituted hardlink alias: $relative"
                     }
-                    if (node.bytes == 0L) {
-                        verifyEmptyFile(path, node, attrs)
-                    } else {
-                        StableControlFile.open(path, MAXIMUM_FILE_BYTES, "native runtime $relative").use { guard ->
-                            require(guard.size == node.bytes && guard.authenticatedSha256 == node.sha256) { "native runtime bytes differ from authenticated input: $relative" }
-                            guard.verifyUnchanged("native runtime $relative")
-                        }
-                    }
+                    verifyRegularFile(root, pinnedRoot, node, attrs)
                     node.imageEntry?.let { entry ->
                         val key = requireNotNull(attrs.fileKey()) { "native runtime file identity unavailable" }
                         require(inodeKeys.putIfAbsent(entry.inode, key)?.let { it == key } != false) { "native runtime hardlink alias changed: $relative" }
@@ -276,36 +270,73 @@ internal object ReferenceNativeRuntime {
                 }
             }
         }
+        LinuxFilesystemSyscalls.openRoot(root).use { named ->
+            require(named.identity == pinnedRoot.identity) { "native runtime root was substituted during verification" }
+        }
     }
 
-    /** StableControlFile deliberately excludes empty control documents; image data may be empty. */
-    private fun verifyEmptyFile(path: Path, node: Node, attributes: BasicFileAttributes) {
-        LinuxFilesystemSyscalls.openRoot(path.parent).use { parent ->
-            requireNotNull(LinuxFilesystemSyscalls.openRegularFileAtOrNull(parent.fd, path.fileName.toString())).use { selected ->
+    /**
+     * These are image data with independently authenticated expected SHA-256 values, not mutable
+     * control documents. Production admission establishes recursively root-owned, non-writable
+     * ancestry before this walk and verifies its complete manifest again afterwards. Staging is
+     * explicitly cooperative and confers no authority. Thus this boundary uses pinned, no-follow
+     * descriptors and complete expected-content checks, rather than cycling the process-global
+     * control-document mutation watches for every image member. No watch bypass is added to the
+     * control-document mechanism. Per-chunk inode/metadata/ctime checks also reject writes whose
+     * original mtime was restored; every retained directory and final name is rechecked at EOF.
+     */
+    private fun verifyRegularFile(root: Path, pinnedRoot: LinuxDescriptor, node: Node, attributes: BasicFileAttributes) {
+        val components = Path.of(node.relative).map { it.toString() }
+        val parents = ArrayList<LinuxDescriptor>()
+        try {
+            var parent = pinnedRoot
+            components.dropLast(1).forEach { component ->
+                parent = LinuxFilesystemSyscalls.openDirectoryAt(parent.fd, component).also(parents::add)
+            }
+            requireNotNull(LinuxFilesystemSyscalls.openRegularFileAtOrNull(parent.fd, components.last())).use { selected ->
                 val descriptorPath = LinuxFilesystemSyscalls.descriptorPath(selected)
                 val before = Files.readAttributes(descriptorPath, BasicFileAttributes::class.java)
                 val changeTime = Files.getAttribute(descriptorPath, "unix:ctime")
-                require(before.fileKey() == attributes.fileKey() && before.size() == 0L &&
+                require(before.fileKey() == attributes.fileKey() && before.size() == node.bytes &&
                     before.lastModifiedTime() == node.time && selected.identity.mode and 0xfff == node.mode) {
-                    "empty native runtime file identity changed: ${node.relative}"
+                    "native runtime file identity changed: ${node.relative}"
                 }
-                val bytes = LinuxFilesystemSyscalls.readPrefix(selected, 1)
-                require(bytes.isEmpty() && OracleArtifacts.sha256(bytes) == node.sha256) {
-                    "empty native runtime bytes differ from authenticated input: ${node.relative}"
+                fun requireCurrent() {
+                    val current = Files.readAttributes(descriptorPath, BasicFileAttributes::class.java)
+                    require(LinuxFilesystemSyscalls.identity(selected.fd) == selected.identity &&
+                        current.isRegularFile && current.fileKey() == before.fileKey() && current.size() == node.bytes &&
+                        current.lastModifiedTime() == before.lastModifiedTime() && Files.getAttribute(descriptorPath, "unix:ctime") == changeTime) {
+                        "native runtime file changed during measurement: ${node.relative}"
+                    }
                 }
-                val after = Files.readAttributes(descriptorPath, BasicFileAttributes::class.java)
-                require(after.fileKey() == before.fileKey() && after.size() == 0L &&
-                    after.lastModifiedTime() == before.lastModifiedTime() && Files.getAttribute(descriptorPath, "unix:ctime") == changeTime) {
-                    "empty native runtime file changed during measurement: ${node.relative}"
+                requireCurrent()
+                val digest = MessageDigest.getInstance("SHA-256")
+                val count = DigestOutputStream(OutputStream.nullOutputStream(), digest).use { output ->
+                    LinuxFilesystemSyscalls.copyReadableTo(selected, output, node.bytes, cancellationCheck = ::requireCurrent)
                 }
-                requireNotNull(LinuxFilesystemSyscalls.openRegularFileAtOrNull(parent.fd, path.fileName.toString())).use { named ->
-                    require(named.identity == selected.identity) { "empty native runtime file was substituted: ${node.relative}" }
+                requireCurrent()
+                require(count == node.bytes && hex(digest.digest()) == node.sha256) {
+                    "native runtime bytes differ from authenticated input: ${node.relative}"
+                }
+                // Reopen from the absolute retained root, then walk every component without following
+                // links. Comparing only the final parent would miss an exchanged ancestor directory.
+                LinuxFilesystemSyscalls.openRoot(root).use { namedRoot ->
+                    require(namedRoot.identity == pinnedRoot.identity) { "native runtime root was substituted" }
+                    var namedParent = namedRoot
+                    val namedDirectories = ArrayList<LinuxDescriptor>()
+                    try {
+                        components.dropLast(1).forEachIndexed { index, component ->
+                            namedParent = LinuxFilesystemSyscalls.openDirectoryAt(namedParent.fd, component).also(namedDirectories::add)
+                            require(namedParent.identity == parents[index].identity) { "native runtime ancestor was substituted: ${node.relative}" }
+                        }
+                        requireNotNull(LinuxFilesystemSyscalls.openRegularFileAtOrNull(namedParent.fd, components.last())).use { named ->
+                            require(named.identity == selected.identity) { "native runtime file was substituted: ${node.relative}" }
+                        }
+                        requireCurrent()
+                    } finally { namedDirectories.asReversed().forEach(LinuxDescriptor::close) }
                 }
             }
-            LinuxFilesystemSyscalls.openRoot(path.parent).use { named ->
-                require(named.identity == parent.identity) { "empty native runtime parent was substituted" }
-            }
-        }
+        } finally { parents.asReversed().forEach(LinuxDescriptor::close) }
     }
 
     private fun newRoot(path: Path): Path {

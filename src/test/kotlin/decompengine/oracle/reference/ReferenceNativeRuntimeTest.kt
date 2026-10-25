@@ -87,7 +87,7 @@ class ReferenceNativeRuntimeTest {
         val originalTime = Files.getLastModifiedTime(tool)
         Files.writeString(tool, "evil\n")
         Files.setLastModifiedTime(tool, originalTime)
-        assertFails { fixture.verify(stage.root) }
+        assertTrue(assertFails { fixture.verify(stage.root) }.message.orEmpty().contains("bytes differ from authenticated input"))
         Files.writeString(tool, "tool\n")
         Files.setLastModifiedTime(tool, originalTime)
         val link = stage.root.resolve("image/lib")
@@ -148,7 +148,7 @@ class ReferenceNativeRuntimeTest {
         val time = Files.getLastModifiedTime(empty)
         Files.writeString(empty, "x")
         Files.setLastModifiedTime(empty, time)
-        assertTrue(assertFails { fixture.verify(stage.root) }.message.orEmpty().contains("empty native runtime"))
+        assertTrue(assertFails { fixture.verify(stage.root) }.message.orEmpty().contains("native runtime file identity changed"))
         Files.write(empty, byteArrayOf())
         Files.setLastModifiedTime(empty, time)
         fixture.verify(stage.root)
@@ -157,6 +157,22 @@ class ReferenceNativeRuntimeTest {
         Files.createSymbolicLink(empty, Path.of("/dev/null"))
         Files.setLastModifiedTime(empty.parent, parentTime)
         assertTrue(assertFails { fixture.verify(stage.root) }.message.orEmpty().contains("node type changed"))
+    }
+
+    @Test
+    fun `unrelated ancestor sibling writes do not change measured runtime bytes`(): Unit = Fixture().use { fixture ->
+        val stage = fixture.stage()
+        LlvmBehaviorNativeOciImageV2.openLayout(fixture.layout).use { image ->
+            val plan = ReferenceNativeRuntime.plan(image, fixture.config, fixture.artifacts)
+            val sibling = fixture.root.resolve("unrelated-control-output")
+            val running = java.util.concurrent.atomic.AtomicBoolean(true)
+            val writer = Thread.ofPlatform().start {
+                while (running.get()) Files.writeString(sibling, "unrelated output")
+            }
+            try { repeat(8) { ReferenceNativeRuntime.verify(stage.root, plan, trustedOwnership = false) } }
+            finally { running.set(false); writer.join(10_000); assertFalse(writer.isAlive) }
+            image.requireCurrent()
+        }
     }
 
     @Test
