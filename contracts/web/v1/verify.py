@@ -223,6 +223,11 @@ def check_run(run: dict) -> None:
         raise ValueError("queued attempt has already started")
     if run["state"] in ("running", "completed") and run["startedAt"] is None:
         raise ValueError("running or completed attempt has no start timestamp")
+    configuration = run.get("configuration")
+    # A recorded agent configuration names the harness the attempt submitted, never another one.
+    if configuration is not None and configuration["harness"] is not None and \
+            run["harnessCapabilityId"] != "agent-" + configuration["harness"]["kind"]:
+        raise ValueError("recorded harness provenance and submitted harness disagree")
 
 
 def check_source_page(data: dict, version: str) -> None:
@@ -405,6 +410,12 @@ def check_semantics(document: dict) -> None:
             # An agent contract version is reported exactly for launch options that contact an agent.
             if launch is not None and launch["contactsAgent"] != (item["agentContractVersion"] is not None):
                 raise ValueError("launch agent contact and agent contract version disagree")
+            harness = launch["harness"] if launch is not None else None
+            if harness is not None and launch["harnessCapabilityId"] != "agent-" + harness["kind"]:
+                raise ValueError("launch harness facts and submitted harness disagree")
+            # The built-in harness is reported but never selectable until a workflow runs it.
+            if harness is not None and harness["kind"] == "builtin" and item["state"] != "unsupported":
+                raise ValueError("the built-in harness was reported as selectable")
     elif kind == "report":
         artifact = data["sourceArtifact"]
         if artifact is not None and artifact["binding"] != data["binding"]:

@@ -42,8 +42,10 @@ import java.nio.file.attribute.BasicFileAttributes
  */
 internal interface WebWorkflowEngines {
     fun explore(binary: Path, reportsDirectory: Path)
-    fun reconstruct(binary: Path, reportsDirectory: Path, mode: WebReconstructionMode, progress: AgentWorkflowProgress)
-    fun repair(project: Path, binary: Path, reportsDirectory: Path, harness: String): RepairRunStatus
+    /** [harness] is the admitted selection for an agent run, null for evidence-only reconstruction. */
+    fun reconstruct(binary: Path, reportsDirectory: Path, mode: WebReconstructionMode, progress: AgentWorkflowProgress,
+        harness: WebAdmittedHarness? = null)
+    fun repair(project: Path, binary: Path, reportsDirectory: Path, harness: WebAdmittedHarness): RepairRunStatus
 
     companion object {
         fun production(environment: Map<String, String>, sensitiveValues: Collection<String>): WebWorkflowEngines = object : WebWorkflowEngines {
@@ -51,26 +53,60 @@ internal interface WebWorkflowEngines {
                 AutomaticExplorer().explore(binary, listOf(CandidateInput("seed_default", CandidateSource.SEED)), reportsDirectory)
             }
 
-            override fun reconstruct(binary: Path, reportsDirectory: Path, mode: WebReconstructionMode, progress: AgentWorkflowProgress) {
-                // The explicit request mode replaces the legacy WEB_RECONSTRUCTION_MODE environment choice.
-                val selected = environment + (WEB_RECONSTRUCTION_MODE_KEY to mode.configurationValue)
+            override fun reconstruct(binary: Path, reportsDirectory: Path, mode: WebReconstructionMode, progress: AgentWorkflowProgress,
+                harness: WebAdmittedHarness?) {
+                // The explicit request mode and harness replace the legacy environment choices.
+                var selected = environment + (WEB_RECONSTRUCTION_MODE_KEY to mode.configurationValue)
+                if (harness != null) selected = selected + ("ACP_HARNESS" to harness.selector)
                 val strategy = selectWebReconstructionStrategy(selected, progress)
+                harness?.requireResolved(strategy.harnessProvenance?.stableDescriptor)
                 Files.createDirectories(reportsDirectory)
                 Files.writeString(reportsDirectory.resolve("reconstruction_harness_selection.json"), renderWebReconstructionHarnessSelection(strategy))
                 ArchivalReconstructionService(GhidraHeadlessProgramModelAnalyzer.bundled(), strategy.reconstructor,
                     profile = strategy.profile, progress = progress).reconstruct(binary, reportsDirectory)
             }
 
-            override fun repair(project: Path, binary: Path, reportsDirectory: Path, harness: String): RepairRunStatus {
+            override fun repair(project: Path, binary: Path, reportsDirectory: Path, harness: WebAdmittedHarness): RepairRunStatus {
                 val configuration = RepairRuntimeConfiguration("generated-c-make-v1", reportsDirectory.resolve("repair_history.json"),
-                    harnessOverride = harness)
+                    harnessOverride = harness.selector)
                 return SecureRepairRuntime.open(configuration).use { runtime ->
+                    // The gate made the sole selection; refuse before any repair if it is not the admitted one.
+                    harness.requireResolved(runtime.harnessProvenance)
                     runtime.runRepair(project, binary, listOf(ProcessInput("default")), reportsDirectory, REPAIR_ITERATIONS).runState.status
                 }
             }
         }
     }
 }
+
+/**
+ * The harness an attempt was admitted with: its exact factory selector and, when the admission snapshot
+ * resolved it, the stable provenance descriptor. A run never proceeds under a different resolution.
+ */
+internal data class WebAdmittedHarness(val harness: WebAgentHarness, val expectedDescriptor: String?) {
+    val selector: String get() = checkNotNull(harness.selector) { "the built-in harness is not executable" }
+
+    fun requireResolved(actualDescriptor: String?) {
+        if (expectedDescriptor != null && actualDescriptor != expectedDescriptor) throw WebHarnessConfigurationChanged()
+    }
+
+    companion object {
+        /** Rebuilds the recorded descriptor; a record the current factory cannot reproduce never matches. */
+        fun of(harness: WebAgentHarness, recorded: decompengine.jobs.WorkflowAttemptHarness?): WebAdmittedHarness {
+            val descriptor = recorded?.takeIf { it.kind == harness.wireName && it.implementationId != null }?.let {
+                try {
+                    decompengine.acp.AcpHarnessProvenance(it.kind, checkNotNull(it.implementationId), it.agentContractVersion,
+                        it.protocolVersion, it.sdkVersion, it.configurationSha256, it.deprecated).stableDescriptor
+                } catch (_: IllegalArgumentException) { UNREPRODUCIBLE }
+            }
+            return WebAdmittedHarness(harness, descriptor)
+        }
+        private const val UNREPRODUCIBLE = "unreproducible-recorded-harness"
+    }
+}
+
+/** The harness resolved at execution differs from the one recorded at admission; nothing ran under it. */
+internal class WebHarnessConfigurationChanged : RuntimeException("the agent harness configuration changed after admission")
 
 private const val WEB_RECONSTRUCTION_MODE_KEY = "WEB_RECONSTRUCTION_MODE"
 private const val REPAIR_ITERATIONS = 5
@@ -83,20 +119,23 @@ internal fun webSourceRevisionId(sourceSha256: String): String {
     return "source_$sourceSha256"
 }
 
-/** Builds production registrations. The configured agent selection names the agent harness option. */
+/**
+ * Builds production registrations: one agent option per executable harness. ACP is the default and is
+ * always registered; the deprecated legacy adapter only when the operator explicitly selected it. The
+ * built-in harness has no registration, so it is reported as unsupported and can never be admitted.
+ */
 internal fun productionDurableWebWorkflows(
     environment: Map<String, String> = System.getenv(),
     sensitiveValues: Collection<String> = environment.values,
     engines: WebWorkflowEngines = WebWorkflowEngines.production(environment, sensitiveValues),
     executor: BoundedWorkflowExecutor = BoundedWorkflowExecutor(),
 ): List<DurableWebWorkflowAdapter> {
-    val agentHarness = WebHarnessReadinessProjector.agentHarnessCapabilityId(environment)
-    return listOf(
-        ExploreWorkflowAdapter(engines, executor),
-        ReconstructWorkflowAdapter(engines, executor, WebReconstructionMode.AGENT, agentHarness, sensitiveValues),
-        ReconstructWorkflowAdapter(engines, executor, WebReconstructionMode.EVIDENCE_ONLY, EVIDENCE_ONLY_CAPABILITY, sensitiveValues),
-        RepairWorkflowAdapter(engines, executor, agentHarness),
-    )
+    val harnesses = listOfNotNull(WebAgentHarness.ACP,
+        WebAgentHarness.LEGACY_OPENAI.takeIf { WebHarnessReadinessProjector.legacyHarnessConfigured(environment) })
+    return listOf(ExploreWorkflowAdapter(engines, executor)) +
+        harnesses.map { ReconstructWorkflowAdapter(engines, executor, WebReconstructionMode.AGENT, it, sensitiveValues) } +
+        ReconstructWorkflowAdapter(engines, executor, WebReconstructionMode.EVIDENCE_ONLY, null, sensitiveValues) +
+        harnesses.map { RepairWorkflowAdapter(engines, executor, it) }
 }
 
 internal const val EVIDENCE_ONLY_CAPABILITY = "evidence-only"
@@ -145,10 +184,12 @@ internal class ReconstructWorkflowAdapter(
     private val engines: WebWorkflowEngines,
     private val executor: BoundedWorkflowExecutor,
     private val mode: WebReconstructionMode,
-    override val harnessCapabilityId: String,
+    /** The agent option's single harness; null for evidence-only reconstruction. */
+    private val harness: WebAgentHarness?,
     private val sensitiveValues: Collection<String>,
 ) : DurableWebWorkflowAdapter {
     private val agent = mode == WebReconstructionMode.AGENT
+    override val harnessCapabilityId: String = harness?.capabilityId ?: EVIDENCE_ONLY_CAPABILITY
     override val workflow = WorkflowKind.RECONSTRUCT
     override val limits = if (agent) WebWorkflowDefaults.RECONSTRUCT_AGENT else WebWorkflowDefaults.RECONSTRUCT_EVIDENCE
     override val limitsAdjustable = true
@@ -156,19 +197,20 @@ internal class ReconstructWorkflowAdapter(
         else setOf(WebWorkflowRequirement.GHIDRA)
     override val input = DurableWebWorkflowInput.NONE
     override val launch = if (agent) DurableWebWorkflowLaunch(DurableWebWorkflowMode.AGENT, executesBinary = false,
-        contactsAgent = true, requiredTools = listOf("ghidra", "agent-harness", "c-toolchain"))
+        contactsAgent = true, requiredTools = listOf("ghidra", "agent-harness", "c-toolchain"), harness = harness)
         else DurableWebWorkflowLaunch(DurableWebWorkflowMode.EVIDENCE_ONLY, executesBinary = false, contactsAgent = false,
         requiredTools = listOf("ghidra", "c-toolchain"))
 
-    init { require(harnessCapabilityId.matches(Regex("[A-Za-z0-9][A-Za-z0-9_-]{0,127}"))) }
+    init { require(agent == (harness != null)) { "only agent reconstruction names a harness" } }
 
     override fun execute(context: DurableWebWorkflowContext): DurableWebWorkflowOutcome {
+        val admitted = harness?.let { WebAdmittedHarness.of(it, context.attempt.configuration?.harness) }
         val meter = WorkflowExecutionMeter(context.reportsDirectory, toolCallsMetered = true)
         val (result, usage) = executor.run(context.attempt.limits, meter) {
             BestEffortProgressJournal(context.reportsDirectory, "reconstruction", sensitiveValues).use { journal ->
                 val progress = MeteredWorkflowProgress(journal, meter)
                 try {
-                    engines.reconstruct(context.job.binaryPath, context.reportsDirectory, mode, progress)
+                    engines.reconstruct(context.job.binaryPath, context.reportsDirectory, mode, progress, admitted)
                 } catch (failure: Exception) {
                     progress.phase(AgentWorkflowPhase.FAILED)
                     throw failure
@@ -177,13 +219,17 @@ internal class ReconstructWorkflowAdapter(
         }
         // Candidate output is recorded whenever a canonical source revision exists; it is never acceptance.
         val candidate = reconstructionCandidate(context.reportsDirectory.resolve("source-tree"))
-        return when (unwrap(result)) {
+        return when (val completed = unwrap(result)) {
             is BoundedWorkflowResult.Returned -> DurableWebWorkflowOutcome.Completed(candidate, usage)
             is BoundedWorkflowResult.Exhausted -> DurableWebWorkflowOutcome.Failed(WorkflowTerminalReason.LIMIT_EXHAUSTED, candidate, usage)
-            is BoundedWorkflowResult.Threw -> DurableWebWorkflowOutcome.Failed(candidate = candidate, usage = usage)
+            is BoundedWorkflowResult.Threw -> DurableWebWorkflowOutcome.Failed(refusal(completed.failure), candidate, usage)
         }
     }
 }
+
+/** A changed harness refuses the attempt; it is not a workflow failure of the selected harness. */
+private fun refusal(failure: Throwable): WorkflowTerminalReason =
+    if (failure is WebHarnessConfigurationChanged) WorkflowTerminalReason.REFUSED else WorkflowTerminalReason.FAILED
 
 /** The schema-3 build contract records the canonical source digest of the generated inputs. */
 internal fun reconstructionCandidate(sourceTree: Path): WorkflowCandidate? {
@@ -202,10 +248,11 @@ private const val MAXIMUM_CONTRACT_BYTES = 16L * 1024 * 1024
 internal class RepairWorkflowAdapter(
     private val engines: WebWorkflowEngines,
     private val executor: BoundedWorkflowExecutor,
-    override val harnessCapabilityId: String,
+    private val harness: WebAgentHarness,
     // Test seam only: production never accepts a test-only, release-ineligible graph publication.
     private val acceptTestOnlyPublication: Boolean = false,
 ) : DurableWebWorkflowAdapter {
+    override val harnessCapabilityId: String = harness.capabilityId
     override val workflow = WorkflowKind.REPAIR
     override val limits = WebWorkflowDefaults.REPAIR
     // The tool-call ceiling is structural (iterations times the per-invocation agent limit), so it is fixed.
@@ -213,26 +260,23 @@ internal class RepairWorkflowAdapter(
     override val requirements = setOf(WebWorkflowRequirement.SANDBOX, WebWorkflowRequirement.AGENT_HARNESS)
     override val input = DurableWebWorkflowInput.RECORDED_REQUIRED
     override val launch = DurableWebWorkflowLaunch(DurableWebWorkflowMode.AGENT, executesBinary = true, contactsAgent = true,
-        requiredTools = listOf("sandbox", "agent-harness", "c-toolchain"))
+        requiredTools = listOf("sandbox", "agent-harness", "c-toolchain"), harness = harness)
     override val publication = DurableWebWorkflowPublication { context -> verifyRepairAcceptance(context, acceptTestOnlyPublication) }
-    private val harness = when (harnessCapabilityId) {
-        "agent-legacy-openai" -> "legacy-openai"
-        else -> "acp"
-    }
 
     override fun execute(context: DurableWebWorkflowContext): DurableWebWorkflowOutcome {
         val input = checkNotNull(context.inputSourceTree) { "repair requires a recorded input revision" }
         val project = context.reportsDirectory.resolve("source-tree")
+        val admitted = WebAdmittedHarness.of(harness, context.attempt.configuration?.harness)
         val meter = WorkflowExecutionMeter(context.reportsDirectory, toolCallsMetered = false)
         val (result, usage) = executor.run(context.attempt.limits, meter) {
             // The attempt owns a private copy; the selected revision's retained evidence is never modified.
             copyWebSourceTree(input, project)
-            engines.repair(project, context.job.binaryPath, context.reportsDirectory, harness)
+            engines.repair(project, context.job.binaryPath, context.reportsDirectory, admitted)
         }
         val candidate = repairCandidate(project, context.attempt.startedAt?.toEpochMilli(), acceptTestOnlyPublication)
         return when (val completed = unwrap(result)) {
             is BoundedWorkflowResult.Exhausted -> DurableWebWorkflowOutcome.Failed(WorkflowTerminalReason.LIMIT_EXHAUSTED, candidate, usage)
-            is BoundedWorkflowResult.Threw -> DurableWebWorkflowOutcome.Failed(candidate = candidate, usage = usage)
+            is BoundedWorkflowResult.Threw -> DurableWebWorkflowOutcome.Failed(refusal(completed.failure), candidate, usage)
             is BoundedWorkflowResult.Returned -> when (completed.value) {
                 RepairRunStatus.FULLY_ACCEPTED, RepairRunStatus.COMPILE_VALID -> DurableWebWorkflowOutcome.Completed(candidate, usage)
                 RepairRunStatus.NO_CHANGES -> DurableWebWorkflowOutcome.Completed(candidate, usage, WorkflowTerminalReason.NO_CHANGES)

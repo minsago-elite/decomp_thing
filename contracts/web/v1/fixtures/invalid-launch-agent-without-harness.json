@@ -1,0 +1,328 @@
+{
+  "apiVersion": 1,
+  "kind": "bootstrap",
+  "requestId": "request_example_1",
+  "data": {
+    "apiVersions": [
+      1
+    ],
+    "applicationBuildId": "app_fixture_1",
+    "uiBuildId": "ui_fixture_1",
+    "serverInstanceId": "server_fixture_1",
+    "basePath": "/",
+    "readiness": "degraded",
+    "sessionExpiresAt": "2026-09-05T08:00:00Z",
+    "capabilities": [
+      {
+        "id": "workflow-explore-tools",
+        "state": "supported",
+        "reasonCode": null,
+        "message": "Every prerequisite this workflow declares was present at the last readiness check.",
+        "workflows": [
+          "explore"
+        ],
+        "agentContractVersion": null,
+        "limits": {
+          "wallClockMs": "1800000",
+          "idleMs": "300000",
+          "maxOutputBytes": "268435456",
+          "maxToolCalls": "0"
+        },
+        "launch": {
+          "harnessCapabilityId": null,
+          "mode": "tools",
+          "executesBinary": true,
+          "contactsAgent": false,
+          "requiredTools": [
+            "sandbox",
+            "angr"
+          ],
+          "input": "none",
+          "limitsAdjustable": true,
+          "harness": null
+        }
+      },
+      {
+        "id": "workflow-reconstruct-agent-acp",
+        "state": "supported",
+        "reasonCode": null,
+        "message": "Every prerequisite this workflow declares was present at the last readiness check.",
+        "workflows": [
+          "reconstruct"
+        ],
+        "agentContractVersion": 1,
+        "limits": {
+          "wallClockMs": "21600000",
+          "idleMs": "1200000",
+          "maxOutputBytes": "4294967296",
+          "maxToolCalls": "10000"
+        },
+        "launch": {
+          "harnessCapabilityId": "agent-acp",
+          "mode": "agent",
+          "executesBinary": false,
+          "contactsAgent": true,
+          "requiredTools": [
+            "ghidra",
+            "agent-harness",
+            "c-toolchain"
+          ],
+          "input": "none",
+          "limitsAdjustable": true,
+          "harness": null
+        }
+      },
+      {
+        "id": "workflow-reconstruct-agent-legacy-openai",
+        "state": "supported",
+        "reasonCode": null,
+        "message": "Every prerequisite this workflow declares was present at the last readiness check.",
+        "workflows": [
+          "reconstruct"
+        ],
+        "agentContractVersion": 1,
+        "limits": {
+          "wallClockMs": "21600000",
+          "idleMs": "1200000",
+          "maxOutputBytes": "4294967296",
+          "maxToolCalls": "10000"
+        },
+        "launch": {
+          "harnessCapabilityId": "agent-legacy-openai",
+          "mode": "agent",
+          "executesBinary": false,
+          "contactsAgent": true,
+          "requiredTools": [
+            "ghidra",
+            "agent-harness",
+            "c-toolchain"
+          ],
+          "input": "none",
+          "limitsAdjustable": true,
+          "harness": {
+            "kind": "legacy-openai",
+            "implementationId": "legacy-openai-compatible",
+            "protocolVersion": null,
+            "deprecated": true,
+            "operations": [
+              "reconstruct",
+              "repair"
+            ]
+          }
+        }
+      },
+      {
+        "id": "workflow-reconstruct-agent-builtin",
+        "state": "unsupported",
+        "reasonCode": "BUILTIN_HARNESS_NOT_INTEGRATED",
+        "message": "The built-in agent harness is not yet integrated with this workflow. It is never substituted for another harness.",
+        "workflows": [
+          "reconstruct"
+        ],
+        "agentContractVersion": 1,
+        "limits": {
+          "wallClockMs": "21600000",
+          "idleMs": "1200000",
+          "maxOutputBytes": "4294967296",
+          "maxToolCalls": "10000"
+        },
+        "launch": {
+          "harnessCapabilityId": "agent-builtin",
+          "mode": "agent",
+          "executesBinary": false,
+          "contactsAgent": true,
+          "requiredTools": [
+            "ghidra",
+            "agent-harness",
+            "c-toolchain"
+          ],
+          "input": "none",
+          "limitsAdjustable": true,
+          "harness": {
+            "kind": "builtin",
+            "implementationId": null,
+            "protocolVersion": null,
+            "deprecated": false,
+            "operations": []
+          }
+        }
+      },
+      {
+        "id": "workflow-reconstruct-evidence-only",
+        "state": "supported",
+        "reasonCode": null,
+        "message": "Every prerequisite this workflow declares was present at the last readiness check.",
+        "workflows": [
+          "reconstruct"
+        ],
+        "agentContractVersion": null,
+        "limits": {
+          "wallClockMs": "7200000",
+          "idleMs": "1200000",
+          "maxOutputBytes": "4294967296",
+          "maxToolCalls": "0"
+        },
+        "launch": {
+          "harnessCapabilityId": "evidence-only",
+          "mode": "evidence-only",
+          "executesBinary": false,
+          "contactsAgent": false,
+          "requiredTools": [
+            "ghidra",
+            "c-toolchain"
+          ],
+          "input": "none",
+          "limitsAdjustable": true,
+          "harness": null
+        }
+      },
+      {
+        "id": "workflow-repair-agent-acp",
+        "state": "supported",
+        "reasonCode": null,
+        "message": "Every prerequisite this workflow declares was present at the last readiness check.",
+        "workflows": [
+          "repair"
+        ],
+        "agentContractVersion": 1,
+        "limits": {
+          "wallClockMs": "21600000",
+          "idleMs": "1200000",
+          "maxOutputBytes": "4294967296",
+          "maxToolCalls": "1280"
+        },
+        "launch": {
+          "harnessCapabilityId": "agent-acp",
+          "mode": "agent",
+          "executesBinary": true,
+          "contactsAgent": true,
+          "requiredTools": [
+            "sandbox",
+            "agent-harness",
+            "c-toolchain"
+          ],
+          "input": "recorded-required",
+          "limitsAdjustable": false,
+          "harness": {
+            "kind": "acp",
+            "implementationId": "fixture-agent",
+            "protocolVersion": 1,
+            "deprecated": false,
+            "operations": [
+              "reconstruct",
+              "repair"
+            ]
+          }
+        }
+      },
+      {
+        "id": "workflow-repair-agent-legacy-openai",
+        "state": "supported",
+        "reasonCode": null,
+        "message": "Every prerequisite this workflow declares was present at the last readiness check.",
+        "workflows": [
+          "repair"
+        ],
+        "agentContractVersion": 1,
+        "limits": {
+          "wallClockMs": "21600000",
+          "idleMs": "1200000",
+          "maxOutputBytes": "4294967296",
+          "maxToolCalls": "1280"
+        },
+        "launch": {
+          "harnessCapabilityId": "agent-legacy-openai",
+          "mode": "agent",
+          "executesBinary": true,
+          "contactsAgent": true,
+          "requiredTools": [
+            "sandbox",
+            "agent-harness",
+            "c-toolchain"
+          ],
+          "input": "recorded-required",
+          "limitsAdjustable": false,
+          "harness": {
+            "kind": "legacy-openai",
+            "implementationId": "legacy-openai-compatible",
+            "protocolVersion": null,
+            "deprecated": true,
+            "operations": [
+              "reconstruct",
+              "repair"
+            ]
+          }
+        }
+      },
+      {
+        "id": "workflow-repair-agent-builtin",
+        "state": "unsupported",
+        "reasonCode": "BUILTIN_HARNESS_NOT_INTEGRATED",
+        "message": "The built-in agent harness is not yet integrated with this workflow. It is never substituted for another harness.",
+        "workflows": [
+          "repair"
+        ],
+        "agentContractVersion": 1,
+        "limits": {
+          "wallClockMs": "21600000",
+          "idleMs": "1200000",
+          "maxOutputBytes": "4294967296",
+          "maxToolCalls": "1280"
+        },
+        "launch": {
+          "harnessCapabilityId": "agent-builtin",
+          "mode": "agent",
+          "executesBinary": true,
+          "contactsAgent": true,
+          "requiredTools": [
+            "sandbox",
+            "agent-harness",
+            "c-toolchain"
+          ],
+          "input": "recorded-required",
+          "limitsAdjustable": false,
+          "harness": {
+            "kind": "builtin",
+            "implementationId": null,
+            "protocolVersion": null,
+            "deprecated": false,
+            "operations": []
+          }
+        }
+      },
+      {
+        "id": "workflow-build",
+        "state": "unsupported",
+        "reasonCode": "WORKFLOW_NOT_IMPLEMENTED",
+        "message": "This server has no standalone build workflow. Reconstruction and repair build and validate their own candidates.",
+        "workflows": [
+          "build"
+        ],
+        "agentContractVersion": null,
+        "limits": null,
+        "launch": null
+      }
+    ],
+    "limits": {
+      "requestDeadlineMs": "30000",
+      "uploadDeadlineMs": "120000",
+      "downloadIdleMs": "120000",
+      "maxJsonBytes": "1048576",
+      "maxUploadBytes": "33554432",
+      "maxSourceChunkBytes": "262144",
+      "maxLogChunkBytes": "65536",
+      "maxEventCount": "10000",
+      "maxEventBytes": "16777216",
+      "terminalEventRetentionMs": "86400000",
+      "defaultPageLimit": 50,
+      "maxPageLimit": 200
+    },
+    "runtime": {
+      "javaVersion": "21-fixture",
+      "osName": "linux",
+      "architecture": "x86_64",
+      "gitVersion": null
+    },
+    "csrfToken": "synthetic_non_secret_csrf_fixture_1234567890"
+  }
+}

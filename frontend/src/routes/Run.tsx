@@ -13,6 +13,7 @@ import { Activity } from '../jobs/Activity';
 import { ProgressPin } from '../jobs/ProgressPin';
 import { ExplorationEvidence } from '../jobs/ExplorationEvidence';
 import { RecordedValidationEvidence } from '../jobs/RecordedValidationEvidence';
+import { RecordedConfiguration } from '../jobs/RecordedConfiguration';
 import type { ValidationNavigation } from '../jobs/validationNavigation';
 import { useSession } from '../session/useSession';
 import { canRetainMetadata, metadataFailureKind } from '../shared/retainMetadata';
@@ -75,6 +76,7 @@ function Details({ jobId, runId, basePath, session, view, navigation }: {
       <p>{copy.completionAloneDoesNotEstablishAcceptedReconstructionAcceptanceBelongsTo}</p>
       <p>{copy.recordedHarnessBoundary}</p>
       {run.previousRunId && <a href={runPath(basePath, jobId, run.previousRunId)}>{copy.openPreviousAttempt}</a>}
+      <RecordedConfiguration run={run} />
       <h2>{copy.recordedLimits}</h2>
       <p>{copy.sourceThePersistedConfigurationForThisAttemptLimitsDoNot}</p>
       <dl class="job-facts">

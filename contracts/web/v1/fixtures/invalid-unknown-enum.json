@@ -23,6 +23,7 @@
       "idleMs": "15000",
       "maxOutputBytes": "1048576",
       "maxToolCalls": "16"
-    }
+    },
+    "configuration": null
   }
 }

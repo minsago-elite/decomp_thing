@@ -366,6 +366,20 @@ export const runCopy = {
   "notReported": "Not reported"
 } as const;
 
+export const recordedConfigurationCopy = {
+  title: 'Recorded configuration',
+  source: 'Source: the configuration the server validated and recorded when it admitted this attempt. It is never rewritten; a later server configuration change is recorded on a new attempt. Configuration values, paths and credentials are never recorded.',
+  notRecorded: 'This attempt was recorded before admission configuration was retained. Only its harness capability and limits above are recorded.',
+  option: 'Workflow option', mode: 'Mode', executesBinary: 'Runs the uploaded binary', contactsAgent: 'Contacts an agent',
+  requiredTools: 'Required tools', input: 'Input policy', limitsAdjustable: 'Limits adjustable at start', profile: 'Reconstruction profile',
+  yes: 'Yes', no: 'No', none: 'None', notApplicable: 'Not applicable',
+  harness: 'Agent harness', harnessKind: 'Harness kind', implementation: 'Implementation', contract: 'Agent contract version',
+  protocol: 'Harness protocol version', sdk: 'Harness SDK version', configurationDigest: 'Configuration digest (SHA-256)',
+  status: 'Harness status', current: 'Current', deprecated: 'Deprecated (retained for compatibility)',
+  unresolved: 'Not resolved at admission', noHarness: 'No agent harness: this attempt never contacts an agent.',
+  digestBoundary: 'The digest identifies the canonical harness configuration the server resolved; it is not the configuration and does not prove that an agent session ran.',
+} as const;
+
 /** Relative receipt age is display copy; the monotonic clock remains in the component. */
 export function receiptAge(seconds: number): string {
   if (seconds < 10) return activityReceiptAgeCopy.lessThan10SecondsAgo;

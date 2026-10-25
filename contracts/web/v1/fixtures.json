@@ -769,6 +769,38 @@
     {
       "file": "fixtures/invalid-launch-unknown-tool.json",
       "valid": false
+    },
+    {
+      "file": "fixtures/bootstrap-harness-options.json",
+      "valid": true
+    },
+    {
+      "file": "fixtures/run-configured-agent.json",
+      "valid": true
+    },
+    {
+      "file": "fixtures/invalid-launch-agent-without-harness.json",
+      "valid": false
+    },
+    {
+      "file": "fixtures/invalid-launch-builtin-selectable.json",
+      "valid": false
+    },
+    {
+      "file": "fixtures/invalid-launch-builtin-implementation.json",
+      "valid": false
+    },
+    {
+      "file": "fixtures/invalid-run-configuration-harness-mismatch.json",
+      "valid": false
+    },
+    {
+      "file": "fixtures/invalid-run-configuration-secret-field.json",
+      "valid": false
+    },
+    {
+      "file": "fixtures/invalid-run-configuration-evidence-harness.json",
+      "valid": false
     }
   ]
 }

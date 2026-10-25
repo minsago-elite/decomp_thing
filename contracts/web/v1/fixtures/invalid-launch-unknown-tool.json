@@ -37,11 +37,12 @@
             "network"
           ],
           "input": "none",
-          "limitsAdjustable": true
+          "limitsAdjustable": true,
+          "harness": null
         }
       },
       {
-        "id": "workflow-reconstruct-agent",
+        "id": "workflow-reconstruct-agent-acp",
         "state": "unavailable",
         "reasonCode": "HARNESS_NOT_CONFIGURED",
         "message": "No agent harness is configured.",
@@ -66,7 +67,17 @@
             "c-toolchain"
           ],
           "input": "none",
-          "limitsAdjustable": true
+          "limitsAdjustable": true,
+          "harness": {
+            "kind": "acp",
+            "implementationId": null,
+            "protocolVersion": null,
+            "deprecated": false,
+            "operations": [
+              "reconstruct",
+              "repair"
+            ]
+          }
         }
       },
       {
@@ -94,11 +105,12 @@
             "c-toolchain"
           ],
           "input": "none",
-          "limitsAdjustable": true
+          "limitsAdjustable": true,
+          "harness": null
         }
       },
       {
-        "id": "workflow-repair-agent",
+        "id": "workflow-repair-agent-acp",
         "state": "unavailable",
         "reasonCode": "HARNESS_NOT_CONFIGURED",
         "message": "No agent harness is configured.",
@@ -123,7 +135,17 @@
             "c-toolchain"
           ],
           "input": "recorded-required",
-          "limitsAdjustable": false
+          "limitsAdjustable": false,
+          "harness": {
+            "kind": "acp",
+            "implementationId": null,
+            "protocolVersion": null,
+            "deprecated": false,
+            "operations": [
+              "reconstruct",
+              "repair"
+            ]
+          }
         }
       },
       {

@@ -55,13 +55,16 @@ class WebApiControllerTest {
             assertEquals("degraded", first.getValue("readiness").jsonPrimitive.content)
             // Production registrations report one capability per launch option, never the preview refusal.
             val capabilities = first.getValue("capabilities").jsonArray.map { it.jsonObject }.associateBy { it.getValue("id").jsonPrimitive.content }
-            assertTrue(capabilities.keys.containsAll(setOf("workflow-explore-tools", "workflow-reconstruct-agent",
-                "workflow-reconstruct-evidence-only", "workflow-repair-agent", "workflow-build", "workflow-validate", "harness")))
+            assertTrue(capabilities.keys.containsAll(setOf("workflow-explore-tools", "workflow-reconstruct-agent-acp",
+                "workflow-reconstruct-agent-builtin", "workflow-reconstruct-evidence-only", "workflow-repair-agent-acp",
+                "workflow-repair-agent-builtin", "workflow-build", "workflow-validate", "harness")))
             assertFalse("workflows" in capabilities)
-            val agent = capabilities.getValue("workflow-reconstruct-agent")
+            val agent = capabilities.getValue("workflow-reconstruct-agent-acp")
             assertEquals(listOf("reconstruct"), agent.getValue("workflows").jsonArray.map { it.jsonPrimitive.content })
             assertEquals("true", agent.getValue("launch").jsonObject.getValue("contactsAgent").jsonPrimitive.content)
             assertTrue(agent.getValue("state").jsonPrimitive.content in setOf("supported", "unavailable", "unknown"))
+            assertEquals("acp", agent.getValue("launch").jsonObject.getValue("harness").jsonObject.getValue("kind").jsonPrimitive.content)
+            assertEquals("unsupported", capabilities.getValue("workflow-repair-agent-builtin").getValue("state").jsonPrimitive.content)
             assertEquals("WORKFLOW_NOT_IMPLEMENTED", capabilities.getValue("workflow-build").getValue("reasonCode").jsonPrimitive.content)
             val limits = first.getValue("limits").jsonObject
             assertEquals(StreamingMultipartUpload.MAX_REQUEST_BYTES.toString(), limits.getValue("maxUploadBytes").jsonPrimitive.content)

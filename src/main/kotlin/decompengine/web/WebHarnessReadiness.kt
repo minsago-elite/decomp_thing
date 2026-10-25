@@ -21,23 +21,66 @@ internal data class WebPrerequisite(val available: Boolean, val reasonCode: Stri
 }
 
 /**
+ * Non-secret identity the harness factory resolved for one configured harness. The configuration digest
+ * is the factory's canonical digest; no configuration text, path, credential or environment value is kept.
+ */
+internal data class WebHarnessProvenance(
+    val implementationId: String,
+    val agentContractVersion: Int,
+    val protocolVersion: Int?,
+    val sdkVersion: String?,
+    val configurationSha256: String?,
+    val deprecated: Boolean,
+    val stableDescriptor: String,
+) {
+    companion object {
+        fun of(provenance: decompengine.acp.AcpHarnessProvenance) = WebHarnessProvenance(provenance.implementationId,
+            provenance.agentExecutionContractVersion, provenance.acpProtocolVersion, provenance.acpSdkVersion,
+            provenance.configurationSha256, provenance.deprecated, provenance.stableDescriptor)
+    }
+}
+
+/**
+ * One harness's readiness. Provenance is present only when its configuration resolved; [selected] marks
+ * the environment-selected harness that the explicit agent inspection starts.
+ */
+internal data class WebHarnessFacts(val prerequisite: WebPrerequisite, val provenance: WebHarnessProvenance?, val selected: Boolean = false) {
+    init { require(provenance == null || prerequisite.available || prerequisite.reasonCode == WebAgentPreflight.REASON_FAILED) }
+}
+
+private val PREFLIGHT_FAILED = WebPrerequisite(false, WebAgentPreflight.REASON_FAILED,
+    "The last operator inspection could not start the configured agent.")
+
+/**
  * Independent workflow prerequisites from the same cached probe as harness readiness. Admission
  * rechecks a fresh snapshot; a probe that did not finish yields no snapshot, never a supported one.
+ * [agent] is the environment-selected harness; [harnesses] reports each selectable harness separately.
  */
 internal data class WebWorkflowPrerequisites(
     val agent: WebPrerequisite,
     val sandbox: WebPrerequisite,
     val ghidra: WebPrerequisite,
+    val harnesses: Map<WebAgentHarness, WebHarnessFacts> = emptyMap(),
 ) {
+    /** The named harness's own readiness; a snapshot without per-harness facts reports the selected agent. */
+    fun harness(harness: WebAgentHarness?): WebPrerequisite = when {
+        harness == WebAgentHarness.BUILTIN -> BUILTIN_UNSUPPORTED
+        harness == null -> agent
+        else -> harnesses[harness]?.prerequisite ?: agent
+    }
+
     /** Agent first: its configuration is the most specific operator action. */
-    fun unmet(requirements: Set<WebWorkflowRequirement>): WebPrerequisite? = listOf(
-        WebWorkflowRequirement.AGENT_HARNESS to agent, WebWorkflowRequirement.SANDBOX to sandbox,
+    fun unmet(requirements: Set<WebWorkflowRequirement>, harness: WebAgentHarness? = null): WebPrerequisite? = listOf(
+        WebWorkflowRequirement.AGENT_HARNESS to harness(harness), WebWorkflowRequirement.SANDBOX to sandbox,
         WebWorkflowRequirement.GHIDRA to ghidra,
     ).firstOrNull { (requirement, fact) -> requirement in requirements && !fact.available }?.second
 
     companion object {
         /** In-process callers without a runtime probe (inert fixtures). The HTTP path always supplies a snapshot. */
         val UNCHECKED = WebWorkflowPrerequisites(WebPrerequisite.AVAILABLE, WebPrerequisite.AVAILABLE, WebPrerequisite.AVAILABLE)
+        /** The built-in harness exists as a library but no workflow runs it yet (#79, #76, #77). */
+        val BUILTIN_UNSUPPORTED = WebPrerequisite(false, "BUILTIN_HARNESS_NOT_INTEGRATED",
+            "The built-in agent harness is not yet integrated with this workflow. It is never substituted for another harness.")
     }
 }
 
@@ -52,8 +95,13 @@ internal data class WebHarnessReadiness(val state: String, val reasonCode: Strin
         state != "supported" -> this
         status == "failed" -> WebHarnessReadiness("unavailable", WebAgentPreflight.REASON_FAILED,
             "The last operator inspection could not start the configured agent. Inspect the agent configuration and retry.",
-            prerequisites?.copy(agent = WebPrerequisite(false, WebAgentPreflight.REASON_FAILED,
-                "The last operator inspection could not start the configured agent.")))
+            prerequisites?.let { facts ->
+                // The inspection starts only the environment-selected harness; other harnesses keep their own facts.
+                val selected = facts.harnesses.entries.singleOrNull { it.value.selected }?.key
+                facts.copy(agent = PREFLIGHT_FAILED, harnesses = facts.harnesses.mapValues { (harness, value) ->
+                    if (harness == selected) value.copy(prerequisite = PREFLIGHT_FAILED) else value
+                })
+            })
         status == "ready" -> copy(message = "An agent harness and sandbox helpers are available; the last operator inspection started the configured agent.")
         else -> copy(message = "An agent harness and sandbox helpers are available. The agent has not been started by an operator inspection, so its readiness is unproven.")
     }
@@ -159,13 +207,14 @@ internal class WebHarnessReadinessProjector(
             ghidraPresent: () -> Boolean = ::bundledGhidraPresent,
         ): WebHarnessReadiness {
             val agent = agentPrerequisite(environment)
+            val harnesses = harnessFacts(environment)
             val sandbox = if (!Files.isExecutable(bubblewrap) || !Files.isExecutable(timeoutHelper) || !jsonStatusSupported(bubblewrap)) {
                 WebPrerequisite(false, "SANDBOX_HELPER_MISSING", "The sandbox helpers required to run analyzed binaries are not available.")
             } else WebPrerequisite.AVAILABLE
             val ghidra = if (!ghidraPresent()) {
                 WebPrerequisite(false, "GHIDRA_MISSING", "The bundled Ghidra distribution is not present; reinstall the complete application.")
             } else WebPrerequisite.AVAILABLE
-            val prerequisites = WebWorkflowPrerequisites(agent, sandbox, ghidra)
+            val prerequisites = WebWorkflowPrerequisites(agent, sandbox, ghidra, harnesses)
             // Harness readiness keeps its established precedence: harness, sandbox, then Ghidra.
             val first = listOf(agent, sandbox, ghidra).firstOrNull { !it.available }
                 ?: return WebHarnessReadiness("supported", null, "An agent harness, sandbox helpers and bundled Ghidra are available.", prerequisites)
@@ -190,6 +239,41 @@ internal class WebHarnessReadinessProjector(
                 WebPrerequisite(false, "HARNESS_CONFIGURATION_INVALID", "The agent harness configuration is invalid.")
             }
         }
+
+        /**
+         * Each selectable harness resolved independently through the same factory, with its exact selector.
+         * ACP is the default and always reported; the retained legacy adapter is reported only when the
+         * operator explicitly selected it. Nothing here starts an agent process or contacts a provider.
+         */
+        internal fun harnessFacts(environment: Map<String, String>): Map<WebAgentHarness, WebHarnessFacts> {
+            val selected = environment["ACP_HARNESS"]
+            val unsupported = selected != null && selected != "acp" && selected != "legacy-openai"
+            fun resolve(harness: WebAgentHarness): WebHarnessFacts {
+                val isSelected = !unsupported && (selected ?: "acp") == harness.selector
+                if (unsupported) return WebHarnessFacts(WebPrerequisite(false, "HARNESS_UNSUPPORTED",
+                    "The configured harness selection is not supported."), null)
+                val effective = environment + ("ACP_HARNESS" to checkNotNull(harness.selector))
+                if (harness == WebAgentHarness.ACP && environment["ACP_CONFIG_FILE"].isNullOrBlank()) {
+                    return WebHarnessFacts(WebPrerequisite(false, "HARNESS_NOT_CONFIGURED", "No agent harness is configured."), null, isSelected)
+                }
+                return try {
+                    val selection = AcpHarnessFactory.fromEnvironment(effective)
+                    if (selection.kind == AcpHarnessKind.LEGACY_OPENAI) selection.createHarness()
+                    WebHarnessFacts(WebPrerequisite.AVAILABLE, WebHarnessProvenance.of(selection.provenance), isSelected)
+                } catch (_: Exception) {
+                    WebHarnessFacts(WebPrerequisite(false, "HARNESS_CONFIGURATION_INVALID", "The agent harness configuration is invalid."),
+                        null, isSelected)
+                }
+            }
+            return buildMap {
+                put(WebAgentHarness.ACP, resolve(WebAgentHarness.ACP))
+                if (selected == "legacy-openai") put(WebAgentHarness.LEGACY_OPENAI, resolve(WebAgentHarness.LEGACY_OPENAI))
+            }
+        }
+
+        /** Whether the operator explicitly retained the deprecated legacy adapter. */
+        fun legacyHarnessConfigured(environment: Map<String, String> = System.getenv()): Boolean =
+            environment["ACP_HARNESS"] == "legacy-openai"
 
         /** Stable public identity of the configured agent selection; never a path or configuration value. */
         fun agentHarnessCapabilityId(environment: Map<String, String> = System.getenv()): String =

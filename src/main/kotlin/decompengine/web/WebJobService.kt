@@ -981,7 +981,7 @@ class WebJobService(
         if (!registration.admits(request.limits)) throw WebJobServiceException("WORKFLOW_LIMITS_UNAVAILABLE", "The requested workflow limits are unavailable.")
         val requirements = registration.adapter.requirements
         val unmet = if (requirements.isEmpty()) null
-            else prerequisites?.unmet(requirements) ?: if (prerequisites == null)
+            else prerequisites?.unmet(requirements, registration.adapter.launch?.harness) ?: if (prerequisites == null)
                 WebPrerequisite(false, "PREREQUISITES_UNKNOWN", "Runtime prerequisites could not be determined. Refresh runtime readiness before retrying.") else null
         if (unmet != null) throw WebJobServiceException("WORKFLOW_PREREQUISITE_UNAVAILABLE", unmet.message)
         if (owner == null) throw WebJobServiceException("JOB_NOT_FOUND", "The requested job is unavailable.")
@@ -997,7 +997,8 @@ class WebJobService(
         val inputSourceTree = selectInput(jobId, view.snapshot, registration.adapter.input, request.inputRevisionId)
         val job = store.get(jobId)
         val admitted = publishStart(jobId) {
-            owner.createIdempotent(jobId, view.snapshot.version, request, requestKey, expectedJobVersion)
+            owner.createIdempotent(jobId, view.snapshot.version,
+                request.copy(configuration = webAttemptConfiguration(registration.adapter, prerequisites)), requestKey, expectedJobVersion)
         }
         if (admitted.replayed) return DurableWebWorkflowStartResult(admitted.attempt, replayed = true)
         val task = DurableTask(job, admitted.attempt, registration.adapter, inputSourceTree)

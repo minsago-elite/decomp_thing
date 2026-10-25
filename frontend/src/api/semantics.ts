@@ -170,6 +170,9 @@ function checkRun(run: Run): void {
   requireValue(reasons[run.state].includes(run.terminalReason));
   if (run.state === 'queued') requireValue(run.startedAt === null);
   if (run.state === 'running' || run.state === 'completed') requireValue(run.startedAt !== null);
+  // A recorded agent configuration names the harness the attempt submitted, never another one.
+  const harness = run.configuration?.harness ?? null;
+  if (harness !== null) requireValue(run.harnessCapabilityId === `agent-${harness.kind}`);
 }
 
 function checkSourcePage(items: ReadonlyArray<{ fileId: string; displayName: string }>, totalFiles: number, page: Page, version: string): void {
@@ -338,6 +341,10 @@ export function checkSemantics(document: ContractDocument, basePath = '/'): void
       // An agent contract version is reported exactly for launch options that contact an agent.
       requireValue(capabilities.every((item) => item.launch === null
         || item.launch.contactsAgent === (item.agentContractVersion !== null)));
+      // Harness facts match the submitted harness; the built-in harness is never reported as selectable.
+      requireValue(capabilities.every((item) => item.launch?.harness == null
+        || (item.launch.harnessCapabilityId === `agent-${item.launch.harness.kind}`
+          && (item.launch.harness.kind !== 'builtin' || item.state === 'unsupported'))));
       if (!apiVersions.includes(1)) throw new ApiClientError('unsupported_contract');
       try {
         requireValue(document.data.basePath === `${normalizeBasePath(basePath)}/`);
