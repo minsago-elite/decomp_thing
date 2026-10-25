@@ -137,6 +137,15 @@ class WebArtifactCatalogTest {
         assertEquals(listOf("run_2"), items(second).map { it.getValue("binding").jsonObject.getValue("runId").jsonPrimitive.content })
     }
 
+    @Test fun `catalog and detail reads stop when their exchange is cancelled`() {
+        val store = Store(listOf(attempt("run_a", 1)), mutableMapOf(("run_a" to "source-tree.zip") to ByteArray(20_000)))
+        val catalog = WebArtifactCatalog(store)
+        val id = field(items(catalog.page("s", jobId, null, "/")).single(), "artifactId")
+        val cancelled = { throw java.util.concurrent.CancellationException("exchange closed") }
+        assertFailsWith<java.util.concurrent.CancellationException> { catalog.page("s", jobId, null, "/", cancelled) }
+        assertFailsWith<java.util.concurrent.CancellationException> { catalog.detail(jobId, id, "/", cancelled) }
+    }
+
     @Test fun `request deadlines are keyed by exchange identity rather than shared attributes`() {
         val scheduler = java.util.concurrent.ScheduledThreadPoolExecutor(1)
         try {

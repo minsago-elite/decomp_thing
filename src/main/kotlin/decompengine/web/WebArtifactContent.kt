@@ -92,7 +92,7 @@ internal class WebArtifactContent(private val store: WebArtifactStore,
         }
         val selection = resolveWebArtifact(store, jobId, artifactId)
         if (!store.present(jobId, selection.attempt.runId, selection.family.path)) webArtifactUnavailable()
-        val cancellation = cancellationCheck(exchange)
+        val cancellation = webExchangeCancellation(exchange)
         val deadline = WebRequestDeadline.of(exchange)
         var size = -1L
         val observed = try {
@@ -163,11 +163,13 @@ internal class WebArtifactContent(private val store: WebArtifactStore,
         output.flush()
     }
 
-    private fun cancellationCheck(exchange: HttpExchange): () -> Unit {
-        val deadline = WebRequestDeadline.of(exchange)
-        return {
-            if (Thread.currentThread().isInterrupted) throw CancellationException("download interrupted")
-            if (deadline?.expired == true) throw CancellationException("download deadline expired")
-        }
+}
+
+/** Stops hashing or streaming once the handler is interrupted or this exchange's own deadline closed it. */
+internal fun webExchangeCancellation(exchange: Any): () -> Unit {
+    val deadline = WebRequestDeadline.of(exchange)
+    return {
+        if (Thread.currentThread().isInterrupted) throw CancellationException("artifact read interrupted")
+        if (deadline?.expired == true) throw CancellationException("artifact read deadline expired")
     }
 }

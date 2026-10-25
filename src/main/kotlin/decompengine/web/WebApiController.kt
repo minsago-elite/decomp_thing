@@ -128,13 +128,13 @@ internal class WebApiController(
                     access.authorize(exchange, WebEndpointPolicy.privateRead(allowHead = true))
                     requireNoWebApiQuery(exchange); requireJsonAccept(exchange)
                     val parts = resource.split('/')
-                    sendWebApiResponse(exchange, 200, "artifact", artifactCatalog.detail(parts[1], parts[3], assets.basePath))
+                    sendWebApiResponse(exchange, 200, "artifact", artifactCatalog.detail(parts[1], parts[3], assets.basePath, webExchangeCancellation(exchange)))
                 }
                 resource.matches(Regex("jobs/[^/]+/artifacts")) -> {
                     val session = checkNotNull(access.authorize(exchange, WebEndpointPolicy.privateRead(allowHead = true)))
                     requireJsonAccept(exchange)
                     sendWebApiResponse(exchange, 200, "artifacts", artifactCatalog.page(session.sessionId, resource.split('/')[1],
-                        exchange.requestURI.rawQuery, assets.basePath))
+                        exchange.requestURI.rawQuery, assets.basePath, webExchangeCancellation(exchange)))
                 }
                 resource == "agent/preflight" -> agentPreflights.handle(exchange)
                 resource.matches(Regex("jobs/[^/]+/runs/[^/]+/cancel")) -> {

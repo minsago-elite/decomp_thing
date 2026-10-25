@@ -96,7 +96,7 @@ internal class WebArtifactCatalog(
         return Filter(fields["runId"], fields["revisionId"], limit, fields["cursor"])
     }
 
-    fun page(owner: String, jobId: String, rawQuery: String?, basePath: String): JsonObject {
+    fun page(owner: String, jobId: String, rawQuery: String?, basePath: String, cancellationCheck: () -> Unit = {}): JsonObject {
         val filter = parse(rawQuery)
         val attempts = store.attempts(jobId).sortedWith(compareBy<WorkflowAttempt> { it.createdAt }.thenBy { it.runId })
         val selected = if (filter.runId == null) attempts else listOf(attempts.singleOrNull { it.runId == filter.runId }
@@ -133,10 +133,10 @@ internal class WebArtifactCatalog(
                     // Keep at least one hash per page so every continuation advances.
                     if (hashed > 0 && hashed + declared > maximumPageHashBytes) throw PageBudget()
                     size = declared
-                }, { _, count -> consumed += count }, {})
+                }, { _, count -> consumed += count }, cancellationCheck)
             } catch (_: PageBudget) { break }
             catch (failure: Exception) {
-                if (failure is WebAccessDenied) throw failure
+                if (failure is WebAccessDenied || failure is java.util.concurrent.CancellationException) throw failure
                 // A read that fails late still did its hashing work; charge it so unstable files cannot bypass the budget.
                 hashed += consumed; unavailable++; position++; continue
             }
@@ -171,14 +171,14 @@ internal class WebArtifactCatalog(
     }
 
     /** Detail re-hashes current bytes; the ID's digest must still describe them. */
-    fun detail(jobId: String, artifactId: String, basePath: String): JsonObject {
+    fun detail(jobId: String, artifactId: String, basePath: String, cancellationCheck: () -> Unit = {}): JsonObject {
         val selection = resolveWebArtifact(store, jobId, artifactId)
         if (!store.present(jobId, selection.attempt.runId, selection.family.path)) webArtifactUnavailable()
         val digest = try {
             store.stream(jobId, selection.attempt.runId, selection.family.path,
-                { if (it > maximumArtifactBytes) throw WebArtifactTooLarge() }, { _, _ -> }, {})
+                { if (it > maximumArtifactBytes) throw WebArtifactTooLarge() }, { _, _ -> }, cancellationCheck)
         } catch (failure: Exception) {
-            if (failure is WebAccessDenied) throw failure
+            if (failure is WebAccessDenied || failure is java.util.concurrent.CancellationException) throw failure
             throw WebAccessDenied(503, "ARTIFACT_UNAVAILABLE", "The artifact could not be read within its limits.")
         }
         if (digest.sha256 != selection.sha256) webArtifactChanged()

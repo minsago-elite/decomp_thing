@@ -166,6 +166,37 @@ class WebArtifactStreamingTest {
         waitFor { fixture.server.activeArtifactDownloads() == 0 }
     }
 
+    @Test fun `a growing artifact is refused before bytes beyond its authorized size are consumed`() {
+        val parent = Files.createDirectories(Path.of("build/test-tmp/web-artifacts").toAbsolutePath())
+        val root = createTempDirectory(parent, "grow-")
+        try {
+            val store = JobStore(root)
+            val job = store.createFromUpload("inert.elf", elfFixture())
+            val file = Files.createDirectories(root.resolve(job.id).resolve("reports/runs/run_1")).resolve("source-tree.zip")
+            val initial = ByteArray(256 * 1024) { it.toByte() }
+            Files.write(file, initial)
+            var declared = -1L; var consumed = 0L; var grown = false
+            val failure = assertFailsWith<IllegalArgumentException> {
+                store.streamArtifact(job.id, "reports/runs/run_1/source-tree.zip", { declared = it }, { _, count ->
+                    consumed += count
+                    if (!grown) { grown = true; Files.write(file, ByteArray(4 * 1024 * 1024), java.nio.file.StandardOpenOption.APPEND) }
+                }, {})
+            }
+            assertTrue(failure.message.orEmpty().contains("grew"))
+            assertEquals(initial.size.toLong(), declared)
+            assertTrue(consumed <= declared, "consumed $consumed bytes beyond the authorized $declared")
+            // Cancellation is observed between chunks as well.
+            Files.write(file, ByteArray(1024 * 1024))
+            var chunks = 0
+            assertFailsWith<java.util.concurrent.CancellationException> {
+                store.streamArtifact(job.id, "reports/runs/run_1/source-tree.zip", {}, { _, _ -> chunks++ }, {
+                    if (chunks >= 2) throw java.util.concurrent.CancellationException("closed")
+                })
+            }
+            assertEquals(2, chunks)
+        } finally { root.toFile().deleteRecursively() }
+    }
+
     @Test fun `bytes changed during a stream are never delivered as a complete download`() = withFixture { fixture ->
         val file = fixture.reports.resolve("source-tree.zip")
         val archive = ByteArray(48 * 1024 * 1024) { (it % 239).toByte() }
