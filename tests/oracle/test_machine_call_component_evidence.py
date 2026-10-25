@@ -543,6 +543,66 @@ class ExternalCallComponentEvidenceTest(unittest.TestCase):
                 with self.assertRaises(VERIFY.VerificationError):
                     self.verify()
 
+    def test_external_direct_call_cannot_be_rehashed_as_same_site_indirect_transfer(self) -> None:
+        site = self.report["sites"][0]
+        site["viaForwarder"] = False
+        site["memoryProbe"].update(address="0x1010", availableBytes="ff15ea1f0000")
+        site["memoryTransfer"].update(address="0x1010", bytes="ff15ea1f0000", classification="indirect-call",
+            rawReadOpcode="CALLIND", rawTransferOpcode="CALLIND")
+        self.write_payloads()
+        with self.assertRaises(VERIFY.VerificationError):
+            self.verify()
+
+    def test_external_forwarding_mode_is_bound_even_without_a_probe(self) -> None:
+        site = self.report["sites"][0]
+        disposition = "unresolved-forwarder-byte-ownership"
+        site.update(memoryProbe=None, memoryTransfer=None, relocationBinding=None, externalTargetId=None,
+            targetBindingDisposition=disposition, compositionDisposition=disposition)
+        self.report["counts"]["dispositions"] = {disposition: 1}
+        self.evidence["counts"] = copy.deepcopy(self.report["counts"])
+        self.write_payloads()
+        self.verify()  # The original noncanonical direct destination still requires forwarding mode.
+        site["viaForwarder"] = False
+        self.write_payloads()
+        with self.assertRaises(VERIFY.VerificationError):
+            self.verify()
+
+    def test_nonforwarded_receipt_requires_the_exact_physical_instruction(self) -> None:
+        symbols, relocations, imports = VERIFY.verify_external_inventory(self.report["dynamicInventory"],
+            self.report["externalNamespace"], self.report["externalNamespaceSha256"], self.report["inputSha256"], self.report["imageBase"])
+        index = VERIFY.RetainedRelocationIndex(self.report["dynamicInventory"], symbols, self.report["inputBytes"])
+        site = copy.deepcopy(self.report["sites"][0])
+        site.update(physicalClassification="indirect-call", physicalTargetAddress=None, viaForwarder=False,
+            instructionBytes="ff15ea1f0000", instructionLength=6, returnAddress="0x1016")
+        site["memoryProbe"].update(address="0x1010", availableBytes=site["instructionBytes"])
+        site["memoryTransfer"].update(address="0x1010", bytes=site["instructionBytes"], classification="indirect-call",
+            rawReadOpcode="CALLIND", rawTransferOpcode="CALLIND")
+        VERIFY.verify_external_site(site, 0x1010, symbols, relocations, imports, index)
+        mutations = [lambda row: row["memoryTransfer"].update(length=5, bytes="ff15ea1f00"),
+            lambda row: (row["memoryTransfer"].update(bytes="ff15eb1f0000"), row["memoryProbe"].update(availableBytes="ff15eb1f0000")),
+            lambda row: row["memoryTransfer"].update(classification="indirect-jump", rawReadOpcode="BRANCHIND", rawTransferOpcode="BRANCHIND"),
+            lambda row: row.update(viaForwarder=True)]
+        for ordinal, change in enumerate(mutations):
+            with self.subTest(mutation=ordinal):
+                changed = copy.deepcopy(site)
+                change(changed)
+                with self.assertRaises(VERIFY.VerificationError):
+                    VERIFY.verify_external_site(changed, 0x1010, symbols, relocations, imports, index)
+
+    def test_direct_self_target_preserves_same_instruction_unresolved_receipt(self) -> None:
+        symbols, relocations, imports = VERIFY.verify_external_inventory(self.report["dynamicInventory"],
+            self.report["externalNamespace"], self.report["externalNamespaceSha256"], self.report["inputSha256"], self.report["imageBase"])
+        index = VERIFY.RetainedRelocationIndex(self.report["dynamicInventory"], symbols, self.report["inputBytes"])
+        site = copy.deepcopy(self.report["sites"][0])
+        site.update(physicalTargetAddress="0x1010", viaForwarder=False, instructionBytes="e8fbffffff", instructionLength=5,
+            relocationBinding=None, externalTargetId=None, targetBindingDisposition="unresolved-forwarder-sequence",
+            compositionDisposition="unresolved-forwarder-sequence")
+        site["memoryProbe"].update(address="0x1010", availableBytes=site["instructionBytes"])
+        site["memoryTransfer"].update(address="0x1010", bytes=site["instructionBytes"], length=5, classification="direct-call",
+            pointerSlotAddress=None, pointerWidthBytes=None, relationship="unresolved", rawReadOpcode=None, rawReadOpIndex=None,
+            rawTransferOpcode=None, rawTransferOpIndex=None, rawCopyOpIndices=[], unresolvedReason="unsupported-transfer-profile")
+        VERIFY.verify_external_site(site, 0x1010, symbols, relocations, imports, index)
+
     def test_static_import_rejects_irelative_after_rehash(self) -> None:
         for kind in (6, 7):
             self.report["dynamicInventory"]["relocations"][0]["type"] = kind

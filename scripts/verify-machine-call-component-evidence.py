@@ -659,6 +659,10 @@ def verify_external_bindings(evidence: dict, request: dict, report: dict, source
             require(type(site[key]) is type(call[key]) and site[key] == call[key], "source physical site differs")
         require(site["physicalClassification"] == call["classification"] and site["physicalTargetAddress"] == call["directTargetAddress"] and
                 site["sourceDisposition"] == call["disposition"] and site["returnAddress"] == call["fallthroughAddress"], "source physical transfer differs")
+        classification = site["physicalClassification"]
+        target = address(site["physicalTargetAddress"], nullable=True)
+        require(classification in {"direct-call", "indirect-call"} and (classification == "direct-call") == (target is not None),
+                "physical call classification/target differs")
         location = base + address(site["instructionRva"])
         require(location <= (1 << 64) - 1 and re.fullmatch(r"(?:[0-9a-f]{2}){1,15}", site["instructionBytes"]) is not None and
                 len(site["instructionBytes"]) == 2 * integer(site["instructionLength"], 1, 15) and
@@ -677,11 +681,14 @@ def verify_external_bindings(evidence: dict, request: dict, report: dict, source
         else:
             expected_status = site["targetBindingDisposition"]
         require(status == expected_status, "source disposition authority differs")
-        if site["sourceDisposition"] == "unresolved-instruction-overlap" or address(site["physicalTargetAddress"], nullable=True) in canonical_addresses:
+        if site["sourceDisposition"] == "unresolved-instruction-overlap" or target in canonical_addresses:
             expected_binding = "unresolved-source-instruction-boundary" if site["sourceDisposition"] == "unresolved-instruction-overlap" else "retained-canonical-target"
             require(site["targetBindingDisposition"] == expected_binding and site["viaForwarder"] is False and
                     all(site[key] is None for key in ("memoryProbe", "memoryTransfer", "relocationBinding", "externalTargetId")),
                     "canonical/source-boundary site gained external evidence")
+        else:
+            probe_location = target if classification == "direct-call" else location
+            require(site["viaForwarder"] is (probe_location != location), "forwarding mode differs from physical call destination")
         counts[status] = counts.get(status, 0) + 1
         verify_external_site(site, location, symbols, relocations, imports, relocation_index)
     expected_counts = {"sourcePhysicalSites": len(sites), "composedSiteRecords": len(sites), "namespaceEntries": len(imports), "dispositions": counts}
@@ -699,7 +706,8 @@ def verify_external_site(site: dict, location: int, symbols: dict, relocations: 
         return
     fields(probe, {"address", "availableBytes", "refusal"}, "memory probe")
     probe_address = address(probe["address"])
-    expected_address = address(site["physicalTargetAddress"]) if site["viaForwarder"] else location
+    expected_address = address(site["physicalTargetAddress"]) if site["physicalClassification"] == "direct-call" else location
+    require(site["viaForwarder"] is (expected_address != location), "forwarding mode differs from physical call destination")
     require(probe_address == expected_address and re.fullmatch(r"(?:[0-9a-f]{2}){1,15}", probe["availableBytes"]) is not None, "memory probe coordinates differ")
     if probe["refusal"] is not None:
         require(re.fullmatch(r"[a-z0-9-]{1,128}", text(probe["refusal"], 128)) is not None and transfer is None and binding is None and
@@ -710,6 +718,9 @@ def verify_external_site(site: dict, location: int, symbols: dict, relocations: 
     require(address(transfer["address"]) == probe_address and type(transfer["bytes"]) is str and
             re.fullmatch(r"(?:[0-9a-f]{2}){1,15}", transfer["bytes"]) is not None and
             len(transfer["bytes"]) == 2 * integer(transfer["length"], 1, 15) and probe["availableBytes"].startswith(transfer["bytes"]), "memory transfer byte commitment differs")
+    if not site["viaForwarder"]:
+        require(transfer["length"] == site["instructionLength"] and transfer["bytes"] == site["instructionBytes"] and
+                transfer["classification"] == site["physicalClassification"], "same-instruction memory receipt differs from physical call")
     require(type(transfer["rawCopyOpIndices"]) is list and len(transfer["rawCopyOpIndices"]) <= 4096 and
             transfer["rawCopyOpIndices"] == sorted(set(transfer["rawCopyOpIndices"])), "invalid copy opcode inventory")
     for index in transfer["rawCopyOpIndices"]:
