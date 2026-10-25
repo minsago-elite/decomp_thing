@@ -133,22 +133,23 @@ jobs:
       - name: Release the first dedicated ext4 lease through the existing helper
         id: release-first
         if: always() && steps.capture.outcome == 'success' && steps.collect.outcome == 'success' && steps.upload.outcome == 'success'
-        env:
-          RUNNER_TEMP: ${{ github.workspace }}/build/gcc-metadata-reference/tmp
-        run: bash scripts/ci-release-oracle-ext4-scratch.sh --gcc-metadata-reference-first
+        run: |
+          env RUNNER_TEMP="$GITHUB_WORKSPACE/build/gcc-metadata-reference/tmp" \
+            bash scripts/ci-release-oracle-ext4-scratch.sh --gcc-metadata-reference-first
       - name: Release the independent replay ext4 lease through the existing helper
         id: release-replay
         if: always() && steps.capture.outcome == 'success' && steps.collect.outcome == 'success' && steps.upload.outcome == 'success'
-        env:
-          RUNNER_TEMP: ${{ github.workspace }}/build/gcc-metadata-reference/tmp
-        run: bash scripts/ci-release-oracle-ext4-scratch.sh --gcc-metadata-reference-replay
+        run: |
+          env RUNNER_TEMP="$GITHUB_WORKSPACE/build/gcc-metadata-reference/tmp" \
+            bash scripts/ci-release-oracle-ext4-scratch.sh --gcc-metadata-reference-replay
       - name: Release the admitted metadata extension after successful absence proofs
         id: release-runtime
         if: always() && steps.capture.outcome == 'success' && steps.collect.outcome == 'success' && steps.upload.outcome == 'success' && steps.release-first.outcome == 'success' && steps.release-replay.outcome == 'success'
         run: bash scripts/ci-qualify-gcc-metadata-reference.sh cleanup
       - name: Release the existing application installation after successful qualification
+        id: release-application
         if: always() && steps.release-runtime.outcome == 'success'
         run: bash scripts/ci-release-bundled-ghidra-runtime.sh --application
       - name: Preserve incomplete qualification state until runner teardown
-        if: always() && (steps.capture.outcome != 'success' || steps.collect.outcome != 'success' || steps.upload.outcome != 'success')
-        run: echo 'Any provisioned scratch mounts, images and installed metadata runtime remain retained until ephemeral runner teardown; no successful qualification reset was authorized.'
+        if: always() && (steps.capture.outcome != 'success' || steps.collect.outcome != 'success' || steps.upload.outcome != 'success' || steps.release-first.outcome != 'success' || steps.release-replay.outcome != 'success' || steps.release-runtime.outcome != 'success' || steps.release-application.outcome != 'success')
+        run: echo 'Qualification or cleanup is incomplete; only remaining incomplete resources are retained until ephemeral runner teardown. Resources already released are not claimed as retained.'
