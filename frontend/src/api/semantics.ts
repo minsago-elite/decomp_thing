@@ -338,6 +338,12 @@ export function checkSemantics(document: ContractDocument, basePath = '/'): void
         const used = recorded.promptCharacters; const maximum = recorded.promptBudgetCharacters;
         requireValue((used === null) === (maximum === null));
         if (used !== null && maximum !== null) requireValue(BigInt(maximum) > 0n && BigInt(used) <= BigInt(maximum));
+        const compilation = recorded.validation?.compilation;
+        if (compilation) {
+          requireValue(compilation.sourceSha256 === recorded.implementationSha256);
+          requireValue(compilation.outcome !== 'passed' || compilation.returnCode === 0);
+          requireValue(compilation.outcome !== 'failed-to-start' || compilation.returnCode === null);
+        }
       }
       break;
     }
