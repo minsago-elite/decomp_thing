@@ -72,6 +72,16 @@ class WebModuleProgressTest {
         val failedBuild = stages(attempt(WorkflowRunState.FAILED, candidate = candidate, reason = WorkflowTerminalReason.FAILED),
             progress = """{"phase":"modules","completed":3,"total":3}""", plan = true)
         assertEquals("stopped", states(failedBuild)["validation"]); assertEquals("stopped", states(failedBuild)["publication"])
+        // Reports captured separately still yield one ordered sequence: a later stage's evidence establishes its predecessors.
+        for ((name, value) in listOf(
+            "summary only" to stages(attempt(WorkflowRunState.COMPLETED, candidate = candidate), summary = SUMMARY),
+            "stale planning record" to stages(attempt(WorkflowRunState.COMPLETED, candidate = candidate),
+                progress = """{"phase":"planning","completed":0,"total":0}""", summary = SUMMARY),
+        )) {
+            assertEquals(listOf("completed"), states(value).values.distinct(), name)
+            val counted = value.getValue("stages").jsonArray[2].jsonObject
+            assertEquals("3", counted.getValue("completedUnits").jsonPrimitive.content, name)
+        }
         val explore = webModuleProgress(JOB, WebModuleProgressCapture(attempt(WorkflowRunState.COMPLETED, workflow = WorkflowKind.EXPLORE),
             null, null, null, null), adapters, null)
         assertEquals("not-applicable", explore.getValue("state").jsonPrimitive.content)
@@ -139,6 +149,8 @@ class WebModuleProgressTest {
             val reports = store.runReportsDirectory(job.id, run.runId, create = true)
             reports.resolve("reconstruction_progress.json").writeText("""{"phase":"modules","completed":1,"total":3,"module":"module_a"}""")
             reports.resolve("source-tree/reports").createDirectories().resolve("module_plan.json").writeText(PLAN)
+            // Generation outcomes are retained even though the attempt never reached a successful build.
+            reports.resolve("source-tree/reports/confidence.json").writeText(GENERATION)
             // A sibling attempt's directory is never read for this attempt.
             store.runReportsDirectory(job.id, "run_other", create = true).resolve("reconstruction.json").writeText(SUMMARY)
             WebJobService(store, JobAnalyzer { _, _ -> error("legacy") }, JobReconstructor { _, _ -> error("legacy") }, Executor(Runnable::run),
@@ -147,7 +159,7 @@ class WebModuleProgressTest {
                 val capture = service.readModuleProgress(job.id, run.runId)
                 // Startup recovery interrupted the running attempt; its reports remain readable as retained evidence.
                 assertEquals(WorkflowRunState.INTERRUPTED, capture.attempt.state)
-                assertNotNull(capture.progress); assertNotNull(capture.plan); assertNull(capture.summary); assertNull(capture.generation)
+                assertNotNull(capture.progress); assertNotNull(capture.plan); assertNull(capture.summary); assertNotNull(capture.generation)
                 val value = webModuleProgress(job.id, capture, service.durableRegistrations(), null)
                 assertEquals("stopped", value.getValue("stages").jsonArray[2].jsonObject.getValue("state").jsonPrimitive.content)
                 assertFailsWith<WebJobServiceException> { service.readModuleProgress(job.id, "run_missing") }

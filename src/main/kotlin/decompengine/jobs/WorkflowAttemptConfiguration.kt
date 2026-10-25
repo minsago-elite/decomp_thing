@@ -129,14 +129,22 @@ data class WorkflowAttemptConfiguration(
         private val INPUTS = setOf("none", "accepted-optional", "recorded-required")
         private val TOOLS = setOf("sandbox", "ghidra", "agent-harness", "c-toolchain", "angr")
 
+        private val BASE_FIELDS = setOf("optionId", "mode", "executesBinary", "contactsAgent", "requiredTools", "input",
+            "limitsAdjustable", "harness")
+
+        /**
+         * Accepts the current record and the earlier one with a `profileId` field, which no admission ever set to
+         * a value; that earlier record carries no reconstruction profile digest, so it decodes as unrecorded.
+         */
         fun decode(value: JsonObject): WorkflowAttemptConfiguration {
-            require(value.keys == setOf("optionId", "mode", "executesBinary", "contactsAgent", "requiredTools", "input",
-                "limitsAdjustable", "harness", "reconstruction")) { "invalid recorded configuration fields" }
+            val current = value.keys == BASE_FIELDS + "reconstruction"
+            val earlier = value.keys == BASE_FIELDS + "profileId" && value.getValue("profileId") == JsonNull
+            require(current || earlier) { "invalid recorded configuration fields" }
             val tools = (value.getValue("requiredTools") as? JsonArray ?: error("tool list required")).map { it.textValue() }
             return WorkflowAttemptConfiguration(value.text("optionId"), value.text("mode"), value.flag("executesBinary"),
                 value.flag("contactsAgent"), tools, value.text("input"), value.flag("limitsAdjustable"),
                 value.objectOrNull("harness")?.let(WorkflowAttemptHarness::decode),
-                value.objectOrNull("reconstruction")?.let(WorkflowAttemptReconstruction::decode))
+                if (current) value.objectOrNull("reconstruction")?.let(WorkflowAttemptReconstruction::decode) else null)
         }
     }
 }
