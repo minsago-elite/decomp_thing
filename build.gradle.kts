@@ -1562,6 +1562,13 @@ private fun configureOracleTestRuntime(testTask: Test) {
     val testInstalledGhidra = providers.environmentVariable("RUN_REAL_GHIDRA").orNull == "true" ||
         providers.environmentVariable("RUN_REAL_GHIDRA_CALL_SITES").orNull == "true" ||
         providers.environmentVariable("RUN_REAL_GHIDRA_NATIVE_CALLS").orNull == "true"
+    if (providers.environmentVariable("RUN_REAL_GHIDRA_PURE_RENDERING").orNull == "true") {
+        require(providers.environmentVariable("RUN_REAL_GHIDRA").orNull == "true") {
+            "native rendering parity requires installed bundled Ghidra execution"
+        }
+        testTask.outputs.upToDateWhen { false }
+        testTask.outputs.cacheIf("native rendering parity must execute") { false }
+    }
     if (testInstalledGhidra) testTask.dependsOn("installDist")
     testTask.dependsOn(generateAcpGateHelperChecksum)
     testTask.dependsOn(generateLlvmBehaviorHelperChecksum)

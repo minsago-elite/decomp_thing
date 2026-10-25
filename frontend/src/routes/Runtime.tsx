@@ -5,6 +5,7 @@ import { useLayoutEffect, useState } from 'preact/hooks';
 import type { BrowserSession } from '../session/session';
 import { SchedulerSummary } from '../jobs/SchedulerSummary';
 import { ProgressRetentionSummary } from '../jobs/ProgressRetentionSummary';
+import { MetadataReceipt } from '../shared/MetadataReceipt';
 import type { BuildIdentity } from '../app/buildIdentity';
 
 export default function Runtime({ identity, session = null }: { identity: BuildIdentity; session?: BrowserSession | null }) {
@@ -30,6 +31,7 @@ export default function Runtime({ identity, session = null }: { identity: BuildI
       </section>
       {snapshot ? <section aria-labelledby="server-runtime-title">
         <h2 id="server-runtime-title">{copy.connectedServer}</h2>
+        <MetadataReceipt kind="runtime" receipt={state?.status === 'authenticated' ? state.runtimeReceipt : undefined} />
         <p>{copy.reportedWhenTheLocalSessionWasCheckedOpeningThisView}</p>
         {snapshot.uiBuildId !== identity.uiBuildId && <p role="status" class="notice">{copy.theServerReportsADifferentUIBuildReloadTheApplication}</p>}
         <dl>

@@ -72,7 +72,8 @@ if [[ -n "$frontend_cache_dir" && ( -e "$frontend_cached_archive" || -L "$fronte
   frontend_archive_from_cache=true
 else
   curl --fail --silent --show-error --location --proto '=https' --proto-redir '=https' \
-    --tlsv1.2 --retry 3 --connect-timeout 15 --max-time 180 \
+    --tlsv1.2 --retry 3 --retry-all-errors --retry-max-time 300 \
+    --connect-timeout 15 --max-time 180 \
     "https://nodejs.org/download/release/v${frontend_node_version}/${frontend_archive}" \
     --output "$frontend_stage/$frontend_archive"
 fi

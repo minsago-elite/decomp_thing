@@ -287,8 +287,8 @@ public class ReferencedBytesProbe {
             .filter(c->c.getSimpleName().equals("PlanningBatchEvidence")).findFirst().orElseThrow();
         try {
             invoke(exporter,"exportFunction",new Class<?>[]{Function.class,ghidra.app.decompiler.DecompInterface.class,
-                java.nio.file.Path.class,java.nio.file.Path.class,planningEvidence,boolean.class},
-                function,null,null,null,null,false);
+                java.nio.file.Path.class,java.nio.file.Path.class,planningEvidence,boolean.class,int.class},
+                function,null,null,null,null,false,60);
             throw new AssertionError("thread-only interrupted export returned a FunctionExport");
         } catch(InvocationTargetException failure) {
             check(enteredDataReference[0] && failure.getCause() instanceof InterruptedException,failure.getCause());
