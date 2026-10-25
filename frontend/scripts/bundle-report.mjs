@@ -136,7 +136,7 @@ export function assertDeferredFeatures(composition, initialJs) {
   }
 }
 
-// Resource loads only; namespace strings such as the SVG XML namespace are not fetches.
+// Load syntax that names a remote target, kept for a precise diagnostic.
 const remoteLoads = [
   /\burl\(\s*["']?(?:https?:)?\/\//i,
   /@import\s+(?:url\()?\s*["']?(?:https?:)?\/\//i,
@@ -147,10 +147,24 @@ const remoteLoads = [
   /\bimportScripts\(\s*["'`](?:https?:)?\/\//i,
   /<(?:script|link|img|iframe)\b[^>]*\b(?:src|href)\s*=\s*["']?(?:https?:)?\/\//i,
 ];
+// Scripts can also build URLs for DOM elements, fetch or JSX props, so every absolute or
+// protocol-relative URL literal must name a reviewed inert host: XML namespaces, the
+// non-resolvable .invalid parsing base (RFC 6761) and one documentation link inside a
+// bundled router error message. Anything else fails, whatever code would use it.
+const urlLiteral = /(?:https?:)?\/\/([A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)+)(\/[^\s"'`)<>]*)?/gi;
+const inertUrls = [
+  host => host === 'www.w3.org',
+  host => host.endsWith('.invalid'),
+  (host, path) => host === 'github.com' && path === '/preactjs/preact-iso#locationprovider',
+];
 
 /** Shipped HTML, scripts and styles never fetch from a CDN or any other remote origin. */
 export function assertNoRemoteLoads(source, name) {
   for (const pattern of remoteLoads) assert.ok(!pattern.test(source), `Production asset loads a remote resource: ${name}`);
+  for (const [, host, path = ''] of source.matchAll(urlLiteral)) {
+    assert.ok(inertUrls.some(inert => inert(host.toLowerCase(), path)),
+      `Production asset loads a remote resource: ${name} names unreviewed host ${host}`);
+  }
 }
 
 /** Import-safe producer so fixtures exercise the actual byte/gzip/manifest path. */

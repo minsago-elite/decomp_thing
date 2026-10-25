@@ -261,12 +261,13 @@ test('source and graph modules must stay outside the initial closure', () => {
 
 test('shipped assets reject remote resource loads but keep inert namespace strings', () => {
   for (const safe of ['const ns = "http://www.w3.org/2000/svg";', 'body { background: url("./mark-abc.svg"); }',
-    'import("./Run-abc.js")', 'new Worker(new URL("./highlight.worker-abc.js", import.meta.url))', '<a href="https://example.test/docs">docs</a>']) {
+    'import("./Run-abc.js")', 'new Worker(new URL("./highlight.worker-abc.js", import.meta.url))', 'new URL(path, "https://source.invalid")',
+    'throw new Error("see https://github.com/preactjs/preact-iso#locationprovider")', 'const xlink = "http://www.w3.org/1999/xlink";']) {
     assert.doesNotThrow(() => assertNoRemoteLoads(safe, 'fixture'), safe);
   }
   for (const remote of ['@import url("https://fonts.example.test/a.css");', 'main { background: url(//cdn.example.test/a.png) }',
     'import("https://cdn.example.test/lib.js")', 'import x from "https://cdn.example.test/x.js"', 'import "https://cdn.example.test/side-effect.js";', "import'//cdn.example.test/a.js'", 'new Worker("https://cdn.example.test/w.js")',
-    'importScripts("//cdn.example.test/w.js")', '<script src="https://cdn.example.test/a.js"></script>', '<link rel="stylesheet" href="//cdn.example.test/a.css">']) {
+    'importScripts("//cdn.example.test/w.js")', 'const s=document.createElement("script");s.src="https://cdn.example.test/h.js";', 'h("img",{src:"//images.example.test/a.png"})', 'fetch(`https://api.example.test/x`)', '<script src="https://cdn.example.test/a.js"></script>', '<link rel="stylesheet" href="//cdn.example.test/a.css">']) {
     assert.throws(() => assertNoRemoteLoads(remote, 'fixture'), /loads a remote resource/, remote);
   }
 });
