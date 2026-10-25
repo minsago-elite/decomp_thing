@@ -41,6 +41,7 @@ internal class WebSourceArchives(
     private val verify: (String, String, String) -> WebArchiveSnapshot,
     private val executor: ExecutorService,
     private val clock: Clock = Clock.systemUTC(),
+    private val shutdownTimeoutMs: Long = 60_000,
 ) : AutoCloseable {
     private val records = LinkedHashMap<String, WebArchiveVerification>()
     private val keys = HashMap<String, String>()
@@ -125,21 +126,15 @@ internal class WebSourceArchives(
     fun start(jobId: String, runId: String, revisionId: String, archiveSha256: String, key: String): Started {
         val snapshot = revision(jobId, runId, revisionId)
         val intent = listOf(jobId, runId, revisionId, archiveSha256).joinToString("\u0000")
-        synchronized(this) {
-            keys[key]?.let { id ->
-                val prior = records.getValue(id)
-                if (listOf(prior.jobId, prior.runId, prior.revisionId, prior.archiveSha256).joinToString("\u0000") != intent) {
-                    throw WebAccessDenied(409, "IDEMPOTENCY_CONFLICT", "The request key was used for a different archive verification.")
-                }
-                return Started(prior, true)
-            }
-        }
+        synchronized(this) { replay(key, intent)?.let { return it } }
         val current = try { observe(jobId, runId) } catch (_: WebArtifactTooLarge) {
             throw WebAccessDenied(413, "ARCHIVE_TOO_LARGE", "The retained source archive exceeds the verifier's 64 MiB limit.")
         } ?: throw WebAccessDenied(404, "ARCHIVE_NOT_FOUND", "No source archive is retained for this attempt.")
         if (current.first != archiveSha256) throw WebAccessDenied(409, "ARCHIVE_CHANGED",
             "The retained archive differs from the displayed digest. Refresh the archive status before verifying.")
         synchronized(this) {
+            // Recheck under the admission lock: a concurrent request with this key may have been admitted meanwhile.
+            replay(key, intent)?.let { return it }
             records.values.lastOrNull { !it.terminal && it.jobId == jobId && it.runId == runId && it.revisionId == revisionId &&
                 it.archiveSha256 == archiveSha256 && it.metadataVersion == snapshot.metadataVersion }?.let { running ->
                 keys[key] = running.operationId // A deduplicated request still binds its key to the returned operation.
@@ -162,6 +157,15 @@ internal class WebSourceArchives(
             }
             return Started(record, false)
         }
+    }
+
+    /** Caller holds the monitor. A bound key replays its operation; another intent under that key conflicts. */
+    private fun replay(key: String, intent: String): Started? {
+        val prior = keys[key]?.let(records::getValue) ?: return null
+        if (listOf(prior.jobId, prior.runId, prior.revisionId, prior.archiveSha256).joinToString("\u0000") != intent) {
+            throw WebAccessDenied(409, "IDEMPOTENCY_CONFLICT", "The request key was used for a different archive verification.")
+        }
+        return Started(prior, true)
     }
 
     private fun run(record: WebArchiveVerification) {
@@ -204,9 +208,17 @@ internal class WebSourceArchives(
             ?: throw WebAccessDenied(404, "OPERATION_NOT_FOUND", "The archive verification is unavailable. After a restart, request a new verification.")
     }
 
+    /**
+     * Stop admission, interrupt, and wait for the verifier to release storage and remove its extraction directory.
+     * Extraction is bounded by the 64 MiB archive limit; a worker still running after the deadline fails shutdown
+     * so the caller keeps store ownership instead of releasing it under a live reader.
+     */
     override fun close() {
         executor.shutdownNow()
+        val stopped = try { executor.awaitTermination(shutdownTimeoutMs, java.util.concurrent.TimeUnit.MILLISECONDS) }
+            catch (_: InterruptedException) { Thread.currentThread().interrupt(); false }
         synchronized(this) { records.values.filter { !it.terminal }.forEach { finish(it, "interrupted", "SERVER_STOPPING") } }
+        if (!stopped) throw WebJobServiceException("SHUTDOWN_INCOMPLETE", "Archive verification did not stop; job storage remains owned.")
     }
 
     companion object {

@@ -22,7 +22,8 @@ class WebSourceArchivesTest {
         "d".repeat(64), "e".repeat(64), listOf(WebRevisionSourceFile(GeneratedFileEvidence("Makefile", "f".repeat(64), "fixture",
             roles = setOf(ProjectFileRole.BUILD_INPUT), contentKind = ProjectContentKind.UTF8_TEXT), 1)))
 
-    private fun archives(release: CountDownLatch, verified: CountDownLatch): WebSourceArchives {
+    private fun archives(release: CountDownLatch, verified: CountDownLatch, observe: () -> Unit = {},
+        shutdownTimeoutMs: Long = 60_000): WebSourceArchives {
         val at = Instant.parse("2026-10-25T00:00:00Z")
         val attempt = WorkflowAttempt("run_1", jobId, WorkflowKind.RECONSTRUCT, WorkflowRunState.COMPLETED, "version_1", at, at, at, null, null, null,
             WorkflowExecutionLimits(1u, 1u, 1u, 0u), WorkflowTerminalReason.COMPLETED, null, WorkflowCandidate("revision_1", "c".repeat(64)), null)
@@ -30,14 +31,16 @@ class WebSourceArchivesTest {
             override fun attempts(jobId: String) = listOf(attempt)
             override fun present(jobId: String, runId: String, path: String) = true
             override fun stream(jobId: String, runId: String, path: String, declaredSize: (Long) -> Unit,
-                consume: (ByteArray, Int) -> Unit, cancellationCheck: () -> Unit) = StableFileDigest(digest, 10, identity)
+                consume: (ByteArray, Int) -> Unit, cancellationCheck: () -> Unit): StableFileDigest { observe(); return StableFileDigest(digest, 10, identity) }
             override fun revisionCommitments(jobId: String, runId: String, revisionId: String) = null
         }
         return WebSourceArchives({ _, _, _ -> snapshot }, { _, _ -> attempt }, store, { _, _ -> null }, { _, _, sha ->
-            assertTrue(release.await(10, TimeUnit.SECONDS))
+            // Like ZIP extraction, this verifier does not stop when interrupted.
+            var waiting = true
+            while (waiting) try { assertTrue(release.await(10, TimeUnit.SECONDS)); waiting = false } catch (_: InterruptedException) { }
             verified.countDown()
             WebArchiveSnapshot(ByteArray(0), sha, WebSourceArchivesTestViews.view, kotlinx.serialization.json.JsonObject(emptyMap()), snapshot.descriptorSha256)
-        }, Executors.newSingleThreadExecutor())
+        }, Executors.newSingleThreadExecutor(), shutdownTimeoutMs = shutdownTimeoutMs)
     }
 
     @Test fun `a deduplicated request binds its own key to the returned operation`() {
@@ -56,6 +59,44 @@ class WebSourceArchivesTest {
             assertEquals("IDEMPOTENCY_CONFLICT", assertFailsWith<WebAccessDenied> {
                 archives.start(jobId, "run_1", "revision_2", digest, "key-second-00000001") }.code)
         }
+    }
+
+    @Test fun `a key admitted concurrently for another intent conflicts instead of being overwritten`() {
+        val release = CountDownLatch(1); val verified = CountDownLatch(1)
+        val firstObserving = CountDownLatch(1); val secondAdmitted = CountDownLatch(1)
+        var observations = 0
+        archives(release, verified, observe = {
+            // The first request pauses after its initial key check until the second has been admitted.
+            if (synchronized(this) { ++observations } == 1) { firstObserving.countDown(); assertTrue(secondAdmitted.await(10, TimeUnit.SECONDS)) }
+        }).use { archives ->
+            val key = "key-shared-0000001"
+            val first = java.util.concurrent.CompletableFuture.supplyAsync { runCatching { archives.start(jobId, "run_1", "revision_1", digest, key) } }
+            assertTrue(firstObserving.await(10, TimeUnit.SECONDS))
+            val second = archives.start(jobId, "run_1", "revision_2", digest, key)
+            assertFalse(second.replayed); secondAdmitted.countDown()
+            val failure = first.get(10, TimeUnit.SECONDS).exceptionOrNull()
+            assertEquals("IDEMPOTENCY_CONFLICT", (failure as WebAccessDenied).code)
+            assertEquals(second.record, archives.start(jobId, "run_1", "revision_2", digest, key).record)
+            release.countDown()
+        }
+    }
+
+    @Test fun `shutdown waits for a running verifier and reports an unfinished one`() {
+        val release = CountDownLatch(1); val verified = CountDownLatch(1)
+        val archives = archives(release, verified)
+        archives.start(jobId, "run_1", "revision_1", digest, "key-shutdown-00001")
+        val closing = Thread { archives.close() }.apply { start() }
+        closing.join(300)
+        assertTrue(closing.isAlive, "close must wait while the verifier still reads storage")
+        release.countDown(); closing.join(10_000)
+        assertFalse(closing.isAlive); assertEquals(0, verified.count)
+
+        val stuck = CountDownLatch(1)
+        val bounded = archives(stuck, CountDownLatch(1), shutdownTimeoutMs = 100)
+        val record = bounded.start(jobId, "run_1", "revision_1", digest, "key-shutdown-00002").record
+        assertEquals("SHUTDOWN_INCOMPLETE", assertFailsWith<WebJobServiceException> { bounded.close() }.code)
+        assertEquals("interrupted", record.state)
+        stuck.countDown()
     }
 }
 

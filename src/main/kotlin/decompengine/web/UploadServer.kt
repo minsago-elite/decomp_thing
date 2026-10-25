@@ -448,12 +448,13 @@ class UploadServer(
         server.stop(delaySeconds)
         if (!streamsClosed && !streamResources.shutdown()) System.err.println("Event stream shutdown did not complete cleanly.")
         requestExecutor.shutdownNow()
-        api?.close()
         overloadResponders.shutdownNow()
         requestDeadlines.shutdownNow()
         harnessReadiness.close()
         agentPreflight.close()
         access.close()
+        // Archive verification reads job storage; an unfinished verifier keeps ownership by failing shutdown here.
+        api?.close()
         jobs.close()
         var inspectionWaitInterrupted = false
         try {
