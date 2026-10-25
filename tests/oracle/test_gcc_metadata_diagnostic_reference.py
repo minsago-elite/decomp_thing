@@ -13,6 +13,7 @@ from unittest.mock import patch
 
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
+TEMPORARY_ROOT = REPOSITORY_ROOT / "build" / "gcc-metadata-reference-test-tmp"
 CAPTURE = runpy.run_path(str(REPOSITORY_ROOT / "scripts/capture-gcc-preprocessing-reference.py"))
 ORACLE = REPOSITORY_ROOT / "oracle/gcc/16.2.0"
 RECORD = json.loads((ORACLE / "metadata-diagnostic-reference.json").read_text())
@@ -34,6 +35,10 @@ def streams(case: dict):
 
 
 class MetadataDiagnosticReferenceTest(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls) -> None:
+        TEMPORARY_ROOT.mkdir(parents=True, exist_ok=True)
+
     def test_metadata_cases_never_pass_nostdinc(self) -> None:
         for spec in CAPTURE["METADATA_CASES"]:
             self.assertNotIn("-nostdinc", spec["arguments"], spec["id"])
@@ -104,7 +109,7 @@ class MetadataDiagnosticReferenceTest(unittest.TestCase):
 
     def test_frontend_archive_is_verified_before_extraction_is_published(self) -> None:
         prepare = CAPTURE["prepare_oracle_frontend"]
-        with tempfile.TemporaryDirectory() as directory:
+        with tempfile.TemporaryDirectory(dir=TEMPORARY_ROOT) as directory:
             scratch = Path(directory)
             identity = prepare(scratch)
             artifact = scratch / "oracle-cc1"
@@ -118,7 +123,7 @@ class MetadataDiagnosticReferenceTest(unittest.TestCase):
             "oversize-output": lzma.compress(bytes(RECORD["oracleFrontend"]["bytes"] + 1)),
         }
         for name, data in invalid_archives.items():
-            with self.subTest(name=name), tempfile.TemporaryDirectory() as directory:
+            with self.subTest(name=name), tempfile.TemporaryDirectory(dir=TEMPORARY_ROOT) as directory:
                 scratch = Path(directory)
                 archive = scratch / "bad.xz"
                 archive.write_bytes(data)
@@ -130,7 +135,7 @@ class MetadataDiagnosticReferenceTest(unittest.TestCase):
         prepare = CAPTURE["prepare_oracle_frontend"]
         manifest = json.loads(CAPTURE["ORACLE_FRONTEND_MANIFEST"].read_text())
         manifest["oracle"]["sourceRevision"] = "0" * 40
-        with tempfile.TemporaryDirectory() as directory:
+        with tempfile.TemporaryDirectory(dir=TEMPORARY_ROOT) as directory:
             scratch = Path(directory)
             changed = scratch / "manifest.json"
             changed.write_text(json.dumps(manifest))
