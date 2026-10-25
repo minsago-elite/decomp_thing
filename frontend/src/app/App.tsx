@@ -1,10 +1,8 @@
 import { appCopy as copy } from '../copy/shell';
-import { sourceCopy } from '../copy/sources';
+import { sourceTitleCopy } from '../copy/sourceTitles';
 import { message as displayMessage, textMessage } from '../shared/messages';
 import { useLayoutEffect, useMemo, useRef, useState } from 'preact/hooks';
 import { LocationProvider, Route, Router, useLocation } from 'preact-iso/router';
-import Home from '../routes/Home';
-import UploadPage from '../routes/UploadPage';
 import { NotFound } from '../routes/NotFound';
 import { ViewBoundary } from '../shared/ViewBoundary';
 import { AssetRecoveryNotice } from '../shared/AssetRecoveryNotice';
@@ -43,6 +41,10 @@ function ConnectionNotice() {
 }
 
 function Shell({ basePath, identity, recovery, reload, session }: ShellProps) {
+  // Every route, including the workspace landing page, loads on demand so the initial
+  // closure stays the shell, session and transport (#622).
+  const Home = useMemo(() => lazyRoute(() => import('../routes/Home'), recovery), [recovery]);
+  const UploadPage = useMemo(() => lazyRoute(() => import('../routes/UploadPage'), recovery), [recovery]);
   const Job = useMemo(() => lazyRoute(() => import('../routes/Job'), recovery), [recovery]);
   const RunHistory = useMemo(() => lazyRoute(() => import('../routes/RunHistory'), recovery), [recovery]);
   const Run = useMemo(() => lazyRoute(() => import('../routes/Run'), recovery), [recovery]);
@@ -82,7 +84,7 @@ function Shell({ basePath, identity, recovery, reload, session }: ShellProps) {
     : location.path === runtimePath ? copy.runtimeStatus : isJob ? copy.jobOverview
       : isRunActivity ? copy.attemptActivity : isRunEvidence ? copy.attemptEvidence
         : isRun ? copy.workflowAttempt : isHistory ? copy.attemptHistory
-      : isSourceDirectory ? sourceCopy.title : isSourceFile ? sourceCopy.fileTitle : copy.pageUnavailable;
+      : isSourceDirectory ? sourceTitleCopy.title : isSourceFile ? sourceTitleCopy.fileTitle : copy.pageUnavailable;
 
   function focusRouteHeading(url: string) {
     const path = new URL(url, window.location.origin).pathname.replace(/\/+$/g, '') || '/';
@@ -148,10 +150,11 @@ function Shell({ basePath, identity, recovery, reload, session }: ShellProps) {
         </a>
         <span class="build-label">{copy.earlyPreview}</span>
         <DisplayPreferences />
+        {session && <SessionStatus session={session} placement="header" />}
       </header>
       <AssetRecoveryNotice recovery={recovery} identity={identity} reload={reload} />
       <ConnectionNotice />
-      {session && <SessionStatus session={session} />}
+      {session && <SessionStatus session={session} placement="page" />}
       <div class="app-layout">
         <nav class="app-nav" aria-label={copy.mainNavigation} ref={navigation} onKeyDown={event => {
           if (narrowNavigation && navigationOpen && event.key === 'Escape') {

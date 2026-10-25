@@ -45,12 +45,20 @@ internal class GccBundledGhidraRuntime(
     val invocationVersion: Int = 3,
     val nativeCallCollector: GccBundledNativeCallCollectorIdentityV1? = null,
 ) {
-    val recoveryMode: String = if (invocationVersion == 5 || invocationVersion == 8) "full" else "planning"
+    val recoveryMode: String = if (invocationVersion >= 5) "full" else "planning"
+    val runtimeDiagnostics: Boolean = invocationVersion == 7
+    val workerOperation: String = if (runtimeDiagnostics) "analyze-diagnostics-v1" else "analyze"
+    val diagnosticPolicy: String? = if (runtimeDiagnostics) "jvm-mxbean-stdout-v1" else null
+    val maximumJavaHeapBytes: Long = 2L * 1024 * 1024 * 1024
+    private val parallelRecovery: Boolean = invocationVersion in setOf(6, 7)
+    val processorCount: Int = if (parallelRecovery) 4 else 1
+    val analysisThreadCount: Int = if (parallelRecovery) 4 else 1
+    val decompilerWorkerCount: Int = if (parallelRecovery) 4 else 1
     val classPath: List<GccBundledGhidraClassPathEntry>
     val release: Path
 
     init {
-        require(invocationVersion in 1..5 || invocationVersion == 8) { "bundled Ghidra invocation version is unsupported" }
+        require(invocationVersion in 1..8) { "bundled Ghidra invocation version is unsupported" }
         require((invocationVersion == 8) == (nativeCallCollector != null)) {
             "native call collector identity requires its distinct runtime invocation"
         }
@@ -124,6 +132,9 @@ internal class GccBundledGhidraRuntime(
         lease: GccCompilerEngineOutputLeaseIdentity,
         runKind: GccCompilerEngineContainmentRunKind = GccCompilerEngineContainmentRunKind.FRESH_CONTROL,
     ): List<String> {
+        require(!runtimeDiagnostics || runKind == GccCompilerEngineContainmentRunKind.FRESH_CONTROL) {
+            "bundled Ghidra runtime diagnostics require fresh uninterrupted execution"
+        }
         val resumed = invocationVersion == 4
         require(state.mode == if (resumed) GccCompilerEngineAnalysisStateMode.RESUME_MANIFEST
             else GccCompilerEngineAnalysisStateMode.FRESH_EMPTY) {
@@ -134,7 +145,7 @@ internal class GccBundledGhidraRuntime(
         val byRole = artifacts.associateBy { it.role }
         val exporter = byRole.getValue(GccCompilerEngineContainmentArtifactRole.EXPORTER_SOURCE)
         val archive = byRole.getValue(GccCompilerEngineContainmentArtifactRole.GHIDRA_ARCHIVE)
-        require(invocationVersion !in setOf(5, 8) || runKind != GccCompilerEngineContainmentRunKind.INTERRUPTED) {
+        require(invocationVersion < 5 || runKind != GccCompilerEngineContainmentRunKind.INTERRUPTED) {
             "full-recovery export does not support planning checkpoint interruption"
         }
         require(invocationVersion != 8 || runKind == GccCompilerEngineContainmentRunKind.FRESH_CONTROL) {
@@ -148,6 +159,8 @@ internal class GccBundledGhidraRuntime(
             lease.path.resolve("reports/program_model.json").toString(),
         ) + if (runKind == GccCompilerEngineContainmentRunKind.INTERRUPTED && invocationVersion >= 3) {
             listOf("hold-first-planning-checkpoint-v1")
+        } else if (parallelRecovery) {
+            listOf("full-recovery-workers-v1:$decompilerWorkerCount")
         } else emptyList()
         val postScripts = listOf(GhidraPostScript("ExportProgramModel.java", exporterArguments)) +
             if (invocationVersion == 8) listOf(GhidraPostScript("ExportNativeCallsV1.class", listOf(
@@ -170,12 +183,13 @@ internal class GccBundledGhidraRuntime(
         val isolatedPrefix = if (invocationVersion >= 2) {
             listOf(
                 prefix.first(), "-Duser.home=${temporaryDirectory}", "-Djava.io.tmpdir=${temporaryDirectory}",
-                "-XX:ActiveProcessorCount=1", "-XX:+DisableAttachMechanism",
-            ) + prefix.drop(1)
+                "-XX:ActiveProcessorCount=$processorCount", "-XX:+DisableAttachMechanism",
+            ) + (if (parallelRecovery) listOf("-Dcpu.core.override=$analysisThreadCount") else emptyList()) + prefix.drop(1)
         } else {
             prefix
         }
-        return isolatedPrefix + invocation.arguments()
+        val arguments = invocation.arguments()
+        return isolatedPrefix + if (runtimeDiagnostics) listOf(workerOperation) + arguments.drop(1) else arguments
     }
 
     fun toJson(): JsonObject = JsonObject(mapOf(
@@ -186,7 +200,15 @@ internal class GccBundledGhidraRuntime(
             "bytes" to JsonPrimitive(entry.bytes),
             "sha256" to JsonPrimitive(entry.sha256),
         )) }),
-    ) + (nativeCallCollector?.let { mapOf("nativeCallCollector" to it.toJson()) } ?: emptyMap()))
+    ) + (if (parallelRecovery) mapOf(
+        "processorCount" to JsonPrimitive(processorCount),
+        "analysisThreadCount" to JsonPrimitive(analysisThreadCount),
+        "decompilerWorkerCount" to JsonPrimitive(decompilerWorkerCount),
+    ) else emptyMap()) + (if (runtimeDiagnostics) mapOf(
+        "workerOperation" to JsonPrimitive(workerOperation),
+        "diagnosticPolicy" to JsonPrimitive(diagnosticPolicy),
+        "maximumJavaHeapBytes" to JsonPrimitive(maximumJavaHeapBytes),
+    ) else emptyMap()) + (nativeCallCollector?.let { mapOf("nativeCallCollector" to it.toJson()) } ?: emptyMap()))
 
     companion object {
         private const val PROVIDER_PREFIX = "bundled-ghidra-java-api-runtime-v"
@@ -203,11 +225,29 @@ internal class GccBundledGhidraRuntime(
                 "${PROVIDER_PREFIX}3" -> 3
                 "${PROVIDER_PREFIX}4" -> 4
                 "${PROVIDER_PREFIX}5" -> 5
+                "${PROVIDER_PREFIX}6" -> 6
+                "${PROVIDER_PREFIX}7" -> 7
                 "${PROVIDER_PREFIX}8" -> 8
                 else -> throw IllegalArgumentException("bundled Ghidra runtime provider is invalid")
             }
+            val throughputFields = setOf("processorCount", "analysisThreadCount", "decompilerWorkerCount")
+            val diagnosticFields = setOf("workerOperation", "diagnosticPolicy", "maximumJavaHeapBytes")
             require(document.keys == setOf("provider", "root", "classPath") +
-                if (version == 8) setOf("nativeCallCollector") else emptySet()) { "bundled Ghidra runtime fields are invalid" }
+                (if (version in setOf(6, 7)) throughputFields else emptySet()) +
+                (if (version == 7) diagnosticFields else emptySet()) +
+                (if (version == 8) setOf("nativeCallCollector") else emptySet())) { "bundled Ghidra runtime fields are invalid" }
+            if (version in setOf(6, 7)) throughputFields.forEach { name ->
+                val value = document[name] as? JsonPrimitive
+                require(value != null && !value.isString && value.content == "4") {
+                    "bundled Ghidra runtime throughput count is unsupported"
+                }
+            }
+            if (version == 7) {
+                require(document.strictString("workerOperation") == "analyze-diagnostics-v1" &&
+                    document.strictString("diagnosticPolicy") == "jvm-mxbean-stdout-v1" &&
+                    document["maximumJavaHeapBytes"] == JsonPrimitive(2L * 1024 * 1024 * 1024)
+                ) { "bundled Ghidra diagnostic policy is unsupported" }
+            }
             val collector = if (version == 8) {
                 val value = document["nativeCallCollector"] as? JsonObject
                     ?: throw IllegalArgumentException("native call collector identity must be an object")
