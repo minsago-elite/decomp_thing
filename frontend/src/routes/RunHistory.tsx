@@ -1,6 +1,7 @@
 import { runHistoryCopy as copy } from '../copy/history';
-import { message as displayMessage } from '../shared/messages';
-import { formatExactTimestamp } from '../jobs/metadataFormat';
+import { message as displayMessage, textMessage } from '../shared/messages';
+import { commonCopy } from '../copy/common';
+import { formatExactTimestamp } from '../copy/format';
 import { usePrivateTransport } from '../session/PrivateTransport';
 import { useEffect, useMemo, useRef, useState } from 'preact/hooks';
 import { useLocation } from 'preact-iso/router';
@@ -86,7 +87,7 @@ function History({ jobId, basePath, session }: { jobId: string; basePath: string
     {data && <MetadataReceipt kind="history" receipt={observation?.receipt} />}
     {data?.items.length === 0 && <p>{copy.noDurableAttemptsAreRecordedForThisJobLegacyActivity}</p>}
     {data && <ul aria-label={copy.recordedAttempts}>{data.items.map(run => <li key={run.runId}>
-      <a href={runPath(basePath, jobId, run.runId)}>{run.workflow}: {run.runId}</a>
+      <a href={runPath(basePath, jobId, run.runId)}>{textMessage(commonCopy.labeledValue, { label: run.workflow, value: run.runId })}</a>
       <p>{displayMessage(copy.state, { state: run.state, acceptance: run.acceptance })}</p>
       <time dateTime={run.createdAt} title={run.createdAt}>{formatExactTimestamp(run.createdAt)}</time>
     </li>)}</ul>}

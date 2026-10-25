@@ -263,6 +263,21 @@ Type checking requires every named slot; changing a locale must preserve those
 slot names. No language selector or locale persistence is introduced by these
 catalogs.
 
+`tests/copy-catalog.test.ts` parses every component with the TypeScript compiler and
+fails on inline JSX text, inline accessible names/titles/placeholders, prose string
+literals and punctuation that composes a sentence around values. Compose such text
+with a catalog template (for example `commonCopy.labeledValue`, `{label}: {value}`)
+so a translation can reorder it. The exported validation record's limitation sentences
+are catalogued separately as stable record text because they belong to a versioned file
+format, not to the interface.
+
+`src/copy/format.ts` is the single display-format layer. It names the one display
+locale, selects plural forms with `Intl.PluralRules`, and owns every formatter that turns
+a value into text (`formatExactCount`, `formatExactBytes`, `formatExactTimestamp`,
+`formatJobStatus`). Adding digit grouping or translated units for another locale changes
+only this module and the catalogs; exact digits must survive (format `BigInt`, never
+`Number`).
+
 Use `formatExactTimestamp` for reported timestamps and retain the original string
 in both `dateTime` and `title`. It preserves fractional digits and the source
 offset, displaying `Z` as `UTC` without converting through `Date`. Use

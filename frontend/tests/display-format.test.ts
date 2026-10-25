@@ -1,5 +1,5 @@
 import { expect, it } from 'vitest';
-import { formatExactBytes, formatExactTimestamp, formatJobStatus } from '../src/jobs/metadataFormat';
+import { formatExactBytes, formatExactTimestamp, formatJobStatus } from '../src/copy/format';
 
 it('preserves every uint64 byte digit and original timestamp offset and precision', () => {
   expect(formatExactBytes('18446744073709551615')).toBe('18446744073709551615 bytes');

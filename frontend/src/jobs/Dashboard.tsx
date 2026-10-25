@@ -1,4 +1,4 @@
-import { formatJobStatus } from './metadataFormat';
+import { formatJobStatus } from '../copy/format';
 import { dashboardCopy as copy } from '../copy/workspace';
 import { message as displayMessage } from '../shared/messages';
 import { usePrivateTransport } from '../session/PrivateTransport';
@@ -331,8 +331,8 @@ export function Dashboard({ basePath }: { basePath: string }) {
       <label>{copy.workflowState}<select {...fieldA11y('status')} value={draft.status} onChange={event => field('status', event.currentTarget.value)}>
         <option value="">{copy.allStates}</option>{JOB_STATUSES.map(status => <option key={status} value={status}>{formatJobStatus(status)}</option>)}
       </select></label>
-      <label>{copy.createdAtOrAfter}<input {...fieldA11y('createdAfter')} value={draft.createdAfter} placeholder="2026-09-05T00:00:00Z" onInput={event => field('createdAfter', event.currentTarget.value)} /></label>
-      <label>{copy.createdBefore}<input {...fieldA11y('createdBefore')} value={draft.createdBefore} placeholder="2026-09-06T00:00:00Z" onInput={event => field('createdBefore', event.currentTarget.value)} /></label>
+      <label>{copy.createdAtOrAfter}<input {...fieldA11y('createdAfter')} value={draft.createdAfter} placeholder={copy.createdAfterExample} onInput={event => field('createdAfter', event.currentTarget.value)} /></label>
+      <label>{copy.createdBefore}<input {...fieldA11y('createdBefore')} value={draft.createdBefore} placeholder={copy.createdBeforeExample} onInput={event => field('createdBefore', event.currentTarget.value)} /></label>
       <label>{copy.sortBy}<select {...fieldA11y('sort')} value={draft.sort} onChange={event => field('sort', event.currentTarget.value)}>
         <option value="newest">{copy.newestFirst}</option><option value="oldest">{copy.oldestFirst}</option>
       </select></label>

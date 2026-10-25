@@ -2,7 +2,7 @@ import { Fragment } from 'preact';
 import { useState } from 'preact/hooks';
 import { activityRowCopy as copy } from '../copy/attempt';
 import { message as displayMessage } from '../shared/messages';
-import { formatExactTimestamp } from './metadataFormat';
+import { formatExactTimestamp } from '../copy/format';
 import type { WebEvent } from '../api/generated';
 import { ObservedUsage } from './ObservedUsage';
 import { runPath } from '../app/paths';

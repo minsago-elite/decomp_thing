@@ -1,7 +1,7 @@
 import { runCopy as copy } from '../copy/attempt';
 import { sourceCopy } from '../copy/sources';
 import { message as displayMessage } from '../shared/messages';
-import { formatExactTimestamp } from '../jobs/metadataFormat';
+import { formatExactTimestamp } from '../copy/format';
 import { usePrivateTransport } from '../session/PrivateTransport';
 import { useEffect, useMemo, useState } from 'preact/hooks';
 import { useLocation } from 'preact-iso/router';

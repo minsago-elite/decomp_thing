@@ -1,7 +1,7 @@
 import { jobSummaryCopy as copy } from '../copy/workspace';
 import type { Job } from '../api/generated';
 import { StateMark, jobStatusTone } from '../shared/StateMark';
-import { formatExactBytes, formatExactTimestamp, formatJobStatus } from './metadataFormat';
+import { formatExactBytes, formatExactTimestamp, formatJobStatus } from '../copy/format';
 
 export function JobSummary({ job }: { job: Job }) {
   return <dl class="job-facts">
