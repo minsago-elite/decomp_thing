@@ -356,11 +356,18 @@ def normalize_artifact(
     result = payload
     for name in names:
         pattern, replacement = normalizations[name]
-        result, count = pattern.subn(lambda _match: replacement, result)
-        if count != 1:
+        match = pattern.search(result)
+        if match is None:
             raise BehaviorCorpusError(
-                f"{label} normalization {name} matched {count} times instead of exactly once"
+                f"{label} normalization {name} matched 0 times instead of exactly once"
             )
+        # Stop after a second nonoverlapping match. Expanding every replacement first can
+        # multiply an otherwise bounded artifact before the exactly-once rule rejects it.
+        if pattern.search(result, match.end()) is not None:
+            raise BehaviorCorpusError(
+                f"{label} normalization {name} matched 2 times or more instead of exactly once"
+            )
+        result = pattern.sub(lambda _match: replacement, result, count=1)
     return result
 
 

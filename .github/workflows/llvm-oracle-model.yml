@@ -222,6 +222,7 @@ jobs:
             tests.oracle.test_function_recovery_oracle_generation \
             tests.oracle.test_behavior_corpus \
             tests.oracle.test_behavior_corpus_bwrap \
+            tests.oracle.test_behavior_corpus_bwrap_normalization \
             tests.oracle.test_behavior_corpus_bwrap_loader \
             tests.oracle.test_behavior_storage_lease \
             tests.oracle.test_behavior_corpus_bwrap_seccomp \
@@ -848,6 +849,7 @@ jobs:
         run: |
           python3 -B -m unittest \
             tests.oracle.test_behavior_corpus_bwrap \
+            tests.oracle.test_behavior_corpus_bwrap_normalization \
             tests.oracle.test_behavior_corpus_bwrap_loader \
             tests.oracle.test_behavior_storage_lease \
             tests.oracle.test_behavior_corpus_bwrap_seccomp \
