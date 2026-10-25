@@ -139,6 +139,28 @@ it('refuses a response from a different structure version than the pinned link',
     const alert = await screen.findByRole('alert');
     expect(alert.textContent).toContain(copy.expired);
     expect(screen.queryByRole('heading', { name: 'helper', level: 2 })).toBeNull();
+    // The inventory link survives the failed pinned read, and refresh reads the current, unpinned records.
+    expect(screen.getByRole('link', { name: copy.returnFunctions }).getAttribute('href')).toBe(`${revision}/functions`);
+    fireEvent.click(screen.getByRole('button', { name: copy.refresh }));
+    await screen.findByRole('heading', { name: 'helper', level: 2 });
+    expect(location.search).toBe('');
+    expect(transport.get).toHaveBeenLastCalledWith('entityDetail', `${api}/globals/global_0000000000404000`, expect.anything());
+  } finally { auth.dispose(); }
+});
+
+it('keeps module recovery navigation and refreshes a changed pinned module to current records', async () => {
+  const auth = await session();
+  const detail = fixture<ModuleDetail>('module-detail');
+  transport.get.mockImplementation((_kind, path) => path.includes('structureVersion=')
+    ? Promise.reject(new ApiClientError('http_error', { status: 409, serverCode: 'STRUCTURE_CHANGED' })) : Promise.resolve({ data: detail }));
+  history.replaceState(null, '', `${revision}/modules/extra?structureVersion=${'8'.repeat(64)}&kind=globals`);
+  try {
+    render(<App basePath="/nested" session={auth} />);
+    expect((await screen.findByRole('alert')).textContent).toContain(copy.expired);
+    expect(screen.getByRole('link', { name: copy.returnModules }).getAttribute('href')).toBe(`${revision}/modules`);
+    fireEvent.click(screen.getByRole('button', { name: copy.refresh }));
+    await screen.findByRole('table', { name: copy.ownedKinds.globals });
+    expect(location.search).toBe('?kind=globals');
   } finally { auth.dispose(); }
 });
 

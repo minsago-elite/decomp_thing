@@ -24,7 +24,7 @@ export const structureCopy = {
   recordState: '{state}: {reason}',
   notRecorded: 'Not recorded',
   boundary: 'These are recorded facts from the committed program model and module plan of this revision. Extraction labels are producer labels, not verified recovery; nothing on this page establishes accepted reconstruction.',
-  pinnedNotice: 'This view is pinned to the structure records you navigated from. If they change, return to the inventory to read the current records.',
+  pinnedNotice: 'This view is pinned to the structure records you navigated from. If they change, refresh to read the current records or return to the inventory.',
   loading: 'Loading recorded structure…',
   refresh: 'Refresh from the first page',
   states: {
