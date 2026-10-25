@@ -950,9 +950,10 @@ reports `budget-exceeded`. None of these states has hunks.
 
 Text comparisons use a Myers line diff over LF-separated lines, where a missing final
 newline is part of the last line's identity. Hunks have three context lines, merge when
-at most six unchanged lines separate changes, and are split at 400 rows so every row stays
-reachable. A page holds at most 20 hunks, 2,000 rows and about 512 Ki characters, and
-always at least one hunk. `nextHunk` continues it; an offset past the end is
+at most six unchanged lines separate changes, and are split at 128 rows so every row stays
+reachable. A page holds at most 20 hunks, 2,000 rows and 768 KiB of serialized UTF-8 lines
+(including JSON escapes), and always at least one hunk. A 128-row hunk of 1,000-unit lines
+stays below the 1 MiB response ceiling even when every unit escapes to six bytes. `nextHunk` continues it; an offset past the end is
 `416 SOURCE_DIFF_RANGE_INVALID`. Each hunk reports exact 1-based starts and counts per
 side and `unchangedBefore`; the response reports `unchangedAfter`, so omitted unchanged
 ranges are counted. Line text is cut at 1,000 UTF-16 units without splitting a surrogate
@@ -961,7 +962,9 @@ pair, with `truncated` and the full `characters`. The final line reports a missi
 `source-diff/patch` (with the same pair, without `hunk`) returns the complete unified
 diff of a text comparison as an inert `application/octet-stream` attachment named
 `<file>.diff`, with `X-Decomp-Diff-Authority`, both source commitments and both metadata
-versions. Other representations are `409 SOURCE_DIFF_NOT_TEXT`; both complete files
+versions. Other representations are `409 SOURCE_DIFF_NOT_TEXT`, as is an added or removed
+empty file: no line changes, so a unified diff cannot recreate it and `patchAvailable` is
+false. In every case both complete files
 remain available through their own content routes. Comparisons are presentation
 evidence: they do not verify compilation, behavior or accepted reconstruction.
 

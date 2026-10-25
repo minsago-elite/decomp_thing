@@ -356,36 +356,38 @@ internal class WebRevisionSourceDiffs(
             throw WebAccessDenied(416, "SOURCE_DIFF_RANGE_INVALID", "The hunk offset is outside this comparison.")
         }
         val pageHunks = ArrayList<JsonObject>()
-        var rows = 0; var characters = 0
+        var rows = 0; var bytes = 0
         var position = query.hunk
         while (position < comparison.hunks.size && pageHunks.size < HUNKS_PER_PAGE) {
             val hunk = comparison.hunks[position]
             val size = hunk.end - hunk.start
             if (pageHunks.isNotEmpty() && rows + size > ROWS_PER_PAGE) break
             val lines = ArrayList<JsonObject>(size)
-            var hunkCharacters = 0
+            var hunkBytes = 0
             for (row in comparison.rows.subList(hunk.start, hunk.end)) {
                 val text = if (row.baseLine != null) comparison.baseText!!.lines[row.baseLine - 1] else comparison.headText!!.lines[row.headLine!! - 1]
                 val shown = displayPrefix(text)
                 val missing = if (row.headLine != null) row.headLine == comparison.headText!!.lines.size && comparison.headText.missingFinalNewline
                     else row.baseLine == comparison.baseText!!.lines.size && comparison.baseText.missingFinalNewline
-                hunkCharacters += shown.length
-                lines += buildJsonObject {
+                val line = buildJsonObject {
                     put("kind", when (row.op) { WebDiffOp.EQUAL -> "context"; WebDiffOp.DELETE -> "removed"; WebDiffOp.INSERT -> "added" })
                     put("baseLine", row.baseLine?.let(::JsonPrimitive) ?: JsonNull)
                     put("headLine", row.headLine?.let(::JsonPrimitive) ?: JsonNull)
                     put("text", shown); put("truncated", shown.length < text.length)
                     put("characters", text.length); put("missingFinalNewline", missing)
                 }
+                // Serialized UTF-8 size, including escapes: multibyte text cannot exceed the response ceiling.
+                hunkBytes += line.toString().toByteArray(Charsets.UTF_8).size + 1
+                lines += line
             }
-            if (pageHunks.isNotEmpty() && characters + hunkCharacters > CHARACTERS_PER_PAGE) break
+            if (pageHunks.isNotEmpty() && bytes + hunkBytes > PAGE_BYTES) break
             val base = comparison.basePrefix; val head = comparison.headPrefix
             pageHunks += buildJsonObject {
                 put("baseStart", 1 + base[hunk.start]); put("baseCount", base[hunk.end] - base[hunk.start])
                 put("headStart", 1 + head[hunk.start]); put("headCount", head[hunk.end] - head[hunk.start])
                 put("unchangedBefore", hunk.unchangedBefore); put("lines", JsonArray(lines))
             }
-            rows += size; characters += hunkCharacters; position++
+            rows += size; bytes += hunkBytes; position++
         }
         val unchangedAfter = comparison.hunks.lastOrNull()?.let { comparison.rows.size - it.end } ?: comparison.rows.size
         return buildJsonObject {
@@ -400,7 +402,7 @@ internal class WebRevisionSourceDiffs(
             put("nextHunk", if (position < comparison.hunks.size) JsonPrimitive(position) else JsonNull)
             put("unchangedAfter", if (comparison.representation == "text") JsonPrimitive(unchangedAfter) else JsonNull)
             put("hunks", JsonArray(pageHunks))
-            put("patchAvailable", comparison.representation == "text")
+            put("patchAvailable", patchAvailable(comparison))
             put("limits", buildJsonObject {
                 put("maximumFileBytes", MAXIMUM_FILE_BYTES.toString()); put("maximumLines", MAXIMUM_LINES)
                 put("maximumEdits", maximumEdits); put("contextLines", CONTEXT_LINES); put("hunksPerPage", HUNKS_PER_PAGE)
@@ -417,7 +419,7 @@ internal class WebRevisionSourceDiffs(
         val pair = capture(jobId, runId, revisionId, query)
         val entry = select(pair, query)
         val comparison = compare(pair, entry)
-        if (comparison.representation != "text") throw WebAccessDenied(409, "SOURCE_DIFF_NOT_TEXT",
+        if (!patchAvailable(comparison)) throw WebAccessDenied(409, "SOURCE_DIFF_NOT_TEXT",
             "This comparison has no text patch. Download both complete files instead.")
         val basePath = entry.base?.let { "a/" + pair.base.files[it].evidence.path } ?: "/dev/null"
         val headPath = entry.head?.let { "b/" + pair.head.files[it].evidence.path } ?: "/dev/null"
@@ -451,6 +453,12 @@ internal class WebRevisionSourceDiffs(
         ))
     }
 
+    /**
+     * A unified patch is offered only when it reproduces the head side: adding or removing an empty file changes
+     * existence without any line, which a plain unified diff cannot express.
+     */
+    private fun patchAvailable(comparison: Comparison) = comparison.representation == "text" && comparison.hunks.isNotEmpty()
+
     /** Display prefix that never splits a surrogate pair. */
     private fun displayPrefix(text: String): String {
         if (text.length <= LINE_CHARACTERS) return text
@@ -479,10 +487,11 @@ internal class WebRevisionSourceDiffs(
         const val MAXIMUM_LINES = 50_000
         const val MAXIMUM_EDITS = 2_000
         const val CONTEXT_LINES = 3
-        const val MAXIMUM_HUNK_ROWS = 400
+        // 128 rows of 1,000 UTF-16 units stay below the 1 MiB response ceiling even when every unit escapes to 6 bytes.
+        const val MAXIMUM_HUNK_ROWS = 128
         const val HUNKS_PER_PAGE = 20
         const val ROWS_PER_PAGE = 2_000
-        const val CHARACTERS_PER_PAGE = 512 * 1024
+        const val PAGE_BYTES = 768 * 1024
         const val LINE_CHARACTERS = 1_000
         const val DEADLINE_MS = 2_000L
         private val SHA256 = Regex("[a-f0-9]{64}")

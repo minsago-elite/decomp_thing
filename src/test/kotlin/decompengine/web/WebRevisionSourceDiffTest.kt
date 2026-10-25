@@ -174,6 +174,38 @@ class WebRevisionSourceDiffTest {
             paged.summary("other-session", jobId, "run_2", "revision_2", "$base&limit=1&cursor=$cursor") }.code)
     }
 
+    @Test fun `multibyte and escaped lines keep every hunk page inside the response byte ceiling`() {
+        for (unit in listOf("€", "\u0001")) {
+            val before = (1..200).joinToString("") { "${unit.repeat(999)}a\n" }
+            val after = (1..200).joinToString("") { "${unit.repeat(999)}b\n" }
+            val fixture = fixture(listOf(side("src/wide.c", before)), listOf(side("src/wide.c", after)))
+            val entry = items(diffs(fixture).summary("owner", jobId, "run_2", "revision_2", base)).single()
+            var hunk: Int? = 0; var changed = 0
+            while (hunk != null) {
+                val page = diffs(fixture).file(jobId, "run_2", "revision_2", fileQuery(entry, hunk))
+                assertEquals("text", page.getValue("representation").jsonPrimitive.content)
+                // The envelope adds well under 1 KiB to the data object.
+                assertTrue(page.toString().toByteArray().size < 1024 * 1024 - 1024, "page at hunk $hunk is ${page.toString().toByteArray().size} bytes")
+                changed += page.getValue("hunks").jsonArray.sumOf { item -> item.jsonObject.getValue("lines").jsonArray.count {
+                    it.jsonObject.getValue("kind").jsonPrimitive.content != "context" } }
+                hunk = page.getValue("nextHunk").jsonPrimitive.intOrNull
+            }
+            assertEquals(400, changed, "every changed row stays reachable across pages")
+        }
+    }
+
+    @Test fun `an added empty file is a text comparison without a patch that could not recreate it`() {
+        val fixture = fixture(listOf(side("Makefile", "all:\n")), listOf(side("Makefile", "all:\n"), side("src/empty.c", "")))
+        val entry = items(diffs(fixture).summary("owner", jobId, "run_2", "revision_2", base)).single()
+        assertEquals("added", entry.getValue("status").jsonPrimitive.content)
+        val result = diffs(fixture).file(jobId, "run_2", "revision_2", fileQuery(entry))
+        assertEquals("text", result.getValue("representation").jsonPrimitive.content)
+        assertEquals(0, result.getValue("totalHunks").jsonPrimitive.int)
+        assertFalse(result.getValue("patchAvailable").jsonPrimitive.boolean)
+        assertEquals("SOURCE_DIFF_NOT_TEXT", assertFailsWith<WebAccessDenied> {
+            diffs(fixture).patch(jobId, "run_2", "revision_2", fileQuery(entry)) }.code)
+    }
+
     @Test fun `myers edits are minimal on known pairs and bounded by the edit budget`() {
         fun edits(a: String, b: String, budget: Int = 100) = revisionLineEdits(a.map { it.code }.toIntArray(), b.map { it.code }.toIntArray(), budget) { false }
         val ops = assertNotNull(edits("ABCABBA", "CBABAC"))

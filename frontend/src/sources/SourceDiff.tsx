@@ -208,6 +208,7 @@ export function SourceFileDiff({ selected, basePath, search }: { selected: Sourc
           base: data.baseLines ?? 0, head: data.headLines ?? 0 })
         : data.representation === 'binary' ? copy.diffFallback[data.fallbackReason!] : copy.diffRepresentation[data.representation]}</p>
       {data.representation !== 'text' && data.representation !== 'identical' && <p>{copy.diffEvidence}</p>}
+      {data.representation === 'text' && data.totalHunks === 0 && <p>{copy.diffEmptyExistence}</p>}
       {data.patchAvailable && <p><a href={apiPath(basePath, sourcePatchRoute(selected, chosen))} download="">{copy.diffPatch}</a> {copy.diffPatchNotice}</p>}
       {data.hunks.map((item, index) => <div class="source-diff-hunk" key={`${data.hunkOffset + index}`}>
         {item.unchangedBefore > 0 && <p class="source-diff-omitted">{message(copy.diffOmitted, { count: item.unchangedBefore })}</p>}

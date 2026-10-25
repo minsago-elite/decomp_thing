@@ -156,3 +156,12 @@ it('explains binary and identical comparisons without hunks or a patch', async (
     view.unmount();
   }
 });
+
+it('explains an added empty file without offering a patch that could not recreate it', async () => {
+  const document = fixture('source-file-diff-empty-added', 'sourceFileDiff');
+  const search = `?baseRunId=run_1&baseRevisionId=revision_1&headFileId=${document.data.headFile!.fileId}`;
+  vi.stubGlobal('fetch', vi.fn<typeof fetch>().mockResolvedValueOnce(response(document)));
+  mount('file', search);
+  await screen.findByText(/An empty file was added or removed/u);
+  expect(screen.queryByRole('link', { name: 'Download the complete unified diff' })).toBeNull();
+});

@@ -5996,7 +5996,7 @@
                 "maximum": 50000
               },
               "patchAvailable": {
-                "const": true
+                "type": "boolean"
               }
             }
           },
@@ -6065,6 +6065,23 @@
             "properties": {
               "representation": {
                 "const": "identical"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "patchAvailable": {
+                "const": true
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "totalHunks": {
+                "type": "integer",
+                "minimum": 1
               }
             }
           }

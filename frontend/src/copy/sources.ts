@@ -219,6 +219,7 @@ export const sourceCopy = {
     binary: '',
   },
   diffEvidence: 'Open each file to read it in bounded ranges or download its complete recorded bytes.',
+  diffEmptyExistence: 'An empty file was added or removed. No line changed, and a unified diff cannot express that, so no patch is offered; open the file instead.',
   diffPatch: 'Download the complete unified diff',
   diffPatchNotice: 'The download contains every change group, including those not shown on this page.',
   diffHunkLabel: 'Change group {index}: base line {baseStart}, compared line {headStart}',

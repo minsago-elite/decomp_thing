@@ -965,6 +965,14 @@
     {
       "file": "fixtures/invalid-revision-directory-input-without-size.json",
       "valid": false
+    },
+    {
+      "file": "fixtures/source-file-diff-empty-added.json",
+      "valid": true
+    },
+    {
+      "file": "fixtures/invalid-source-file-diff-empty-patch.json",
+      "valid": false
     }
   ]
 }
