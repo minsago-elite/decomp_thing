@@ -9,11 +9,11 @@ function metadata(): RevisionFile {
     authority: 'source-input-commitments', contentVerification: 'not-performed', sourceSha256: 'b'.repeat(64),
     metadataVersion: 'c'.repeat(64), parentDirectoryId: 'root', implementationDeclaration: 'accepted',
     item: { fileId: `file_0_${'d'.repeat(64)}`, displayName: 'input.c', sizeBytes: '42', sha256: 'e'.repeat(64),
-      declaredUtf8Text: true, declaredViewable: true, declaredArchivable: true } };
+      declaredUtf8Text: true, declaredViewable: true, declaredArchivable: true, commitment: 'source-input' } };
 }
 function headers(value = metadata()): Record<string, string> {
   return { 'X-Request-ID': 'request_digest_1', 'Content-Type': 'application/octet-stream',
-    'X-Content-Type-Options': 'nosniff', 'Content-Length': value.item.sizeBytes,
+    'X-Content-Type-Options': 'nosniff', 'Content-Length': value.item.sizeBytes ?? '17',
     'X-Decomp-Content-Verification': 'committed-digest', 'X-Decomp-Source-SHA256': value.sourceSha256,
     'X-Decomp-File-ID': value.item.fileId, 'X-Decomp-Metadata-Version': value.metadataVersion, 'X-Decomp-Content-SHA256': value.item.sha256 };
 }
@@ -97,4 +97,20 @@ it('preserves only trusted bodyless session denials for the existing generation-
       expect(rejected.serverCode).toBeUndefined(); expect(rejected.message).not.toContain('PRIVATE');
     }
   }
+});
+
+it('checks a manifest-only entry by its echoed bounded length without inventing a recorded size', () => {
+  const value = metadata(); value.item.commitment = 'manifest-digest'; value.item.sizeBytes = null;
+  const expected = sourceDigestExpectation(value);
+  expect(expected.sizeBytes).toBeNull();
+  const result = readSourceDigestHead(200, true, lookup({ ...headers(value), 'Content-Length': '17' }), expected);
+  expect(result.sizeBytes).toBe('17');
+  for (const length of ['', '017', '8388609', '-1']) {
+    expect(() => readSourceDigestHead(200, true, lookup({ ...headers(value), 'Content-Length': length }), expected)).toThrow();
+  }
+  // A recorded size and its commitment kind must agree before any request route is created.
+  const inconsistent = metadata(); inconsistent.item.commitment = 'manifest-digest';
+  expect(() => sourceDigestExpectation(inconsistent)).toThrow();
+  const missing = metadata(); missing.item.sizeBytes = null;
+  expect(() => sourceDigestExpectation(missing)).toThrow();
 });

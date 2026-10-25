@@ -88,9 +88,11 @@ internal class WebSourceCatalogEvidence(
             revision(reference, manifest, captured) { snapshot ->
                 if (expectedMetadataVersion != null && expectedMetadataVersion != snapshot.metadataVersion) expiredSourceMetadata()
                 val file = selectRevisionSourceFile(snapshot, fileId, purpose)
-                val content = WebRevisionSourceContent(snapshot, fileId, file,
-                    readSource(reference.jobId, reference.runId, file.evidence.path, WebRevisionSourceContent.MAXIMUM_FILE_BYTES))
-                content.requireSame(readSource(reference.jobId, reference.runId, file.evidence.path, WebRevisionSourceContent.MAXIMUM_FILE_BYTES))
+                fun capture() = try {
+                    readSource(reference.jobId, reference.runId, file.evidence.path, WebRevisionSourceContent.MAXIMUM_FILE_BYTES)
+                } catch (_: RepairBudgetExceededException) { sourceFileTooLarge() } // Only manifest-only sizes are unrecorded.
+                val content = WebRevisionSourceContent(snapshot, fileId, file, capture())
+                content.requireSame(capture())
                 content
             }
         }

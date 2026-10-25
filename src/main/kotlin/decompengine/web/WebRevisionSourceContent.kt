@@ -33,10 +33,12 @@ internal fun selectRevisionSourceFile(snapshot: WebRevisionSourceSnapshot, fileI
     val role = if (purpose == WebSourceReadPurpose.PREVIEW) ProjectFileRole.VIEWABLE else ProjectFileRole.ARCHIVE_PAYLOAD
     if (role !in file.evidence.roles) throw WebAccessDenied(403, "SOURCE_REPRESENTATION_UNAVAILABLE",
         "The configured source declaration does not permit this representation.")
-    if (file.sizeBytes > WebRevisionSourceContent.MAXIMUM_FILE_BYTES) throw WebAccessDenied(413, "SOURCE_FILE_TOO_LARGE",
-        "The selected source file exceeds this reader's byte limit.")
+    if ((file.sizeBytes ?: 0) > WebRevisionSourceContent.MAXIMUM_FILE_BYTES) sourceFileTooLarge()
     return file
 }
+
+internal fun sourceFileTooLarge(): Nothing = throw WebAccessDenied(413, "SOURCE_FILE_TOO_LARGE",
+    "The selected source file exceeds this reader's byte limit.")
 
 private fun sourceFileNotFound(): Nothing = throw WebAccessDenied(404, "SOURCE_FILE_NOT_FOUND",
     "The requested file is not registered in this revision source input set.")
@@ -77,7 +79,8 @@ internal class WebRevisionSourceContent(snapshot: WebRevisionSourceSnapshot, val
     private val reference = snapshot.reference
     private val metadataVersion = snapshot.metadataVersion
     private val bytes = captured.bytes.also {
-        if (it.size.toLong() != file.sizeBytes || it.size.toLong() > MAXIMUM_FILE_BYTES) revisionSourceChanged()
+        // Manifest-only entries have no recorded size; their digest below remains the binding check.
+        if ((file.sizeBytes != null && it.size.toLong() != file.sizeBytes) || it.size.toLong() > MAXIMUM_FILE_BYTES) revisionSourceChanged()
     }.copyOf()
     private val sha256 = file.evidence.sha256
     private val identity = captured.identity

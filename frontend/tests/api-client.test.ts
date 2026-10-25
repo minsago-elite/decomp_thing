@@ -68,7 +68,7 @@ describe('bounded v1 fetch client', () => {
     const metadata = (JSON.parse(fixture('revision-file-root')) as { data: RevisionFile }).data;
     metadata.binding.jobId = 'a'.repeat(32);
     const fetcher = vi.fn<typeof fetch>().mockResolvedValue(new Response(null, { status: 200, headers: {
-      'Content-Type': 'application/octet-stream', 'Content-Length': metadata.item.sizeBytes, 'X-Content-Type-Options': 'nosniff',
+      'Content-Type': 'application/octet-stream', 'Content-Length': metadata.item.sizeBytes!, 'X-Content-Type-Options': 'nosniff',
       'X-Request-ID': 'request_source_head_1', 'X-Decomp-Content-Verification': 'committed-digest',
       'X-Decomp-File-ID': metadata.item.fileId, 'X-Decomp-Source-SHA256': metadata.sourceSha256,
       'X-Decomp-Metadata-Version': metadata.metadataVersion, 'X-Decomp-Content-SHA256': metadata.item.sha256,

@@ -1,7 +1,5 @@
 package decompengine.web
 
-import decompengine.project.ProjectContentKind
-import decompengine.project.ProjectFileRole
 import java.security.MessageDigest
 import java.security.SecureRandom
 import javax.crypto.Mac
@@ -118,9 +116,7 @@ internal class WebRevisionDirectoryPages(private val source: (String, String, St
                 val file = snapshot.files[child.first]
                 buildJsonObject {
                     put("kind", "file"); put("fileId", revisionSourceFileId(ref, child.first, file.evidence.path))
-                    put("displayName", child.name); put("sizeBytes", file.sizeBytes.toString()); put("sha256", file.evidence.sha256)
-                    put("declaredUtf8Text", file.evidence.contentKind == ProjectContentKind.UTF8_TEXT)
-                    put("declaredViewable", ProjectFileRole.VIEWABLE in file.evidence.roles)
+                    put("displayName", child.name); putRevisionSourceFileFacts(file)
                 }
             }
             val bytes = item.toString().toByteArray(Charsets.UTF_8).size + 1

@@ -148,12 +148,14 @@ internal class WebRevisionSourceSearch(
             val file = snapshot.files[index]
             val path = file.evidence.path
             if (!path.startsWith(prefix)) break
+            // Search covers canonical source inputs only; manifest-only reports remain browsable but unsearched.
+            if (!file.committedInput) continue
             if (pathFilter != null && !(if (query.caseSensitive) path else fold(path)).contains(pathFilter)) continue
             inScope++
             when {
                 ProjectFileRole.VIEWABLE !in file.evidence.roles -> notViewable++
                 file.evidence.contentKind != ProjectContentKind.UTF8_TEXT -> declaredBinary++
-                file.sizeBytes > WebRevisionSourceContent.MAXIMUM_FILE_BYTES -> tooLarge++
+                file.sizeBytes!! > WebRevisionSourceContent.MAXIMUM_FILE_BYTES -> tooLarge++
                 else -> searchable += index
             }
         }
@@ -163,7 +165,7 @@ internal class WebRevisionSourceSearch(
             if (version != snapshot.metadataVersion) throw WebAccessDenied(410, "CURSOR_EXPIRED",
                 "Source metadata changed since this search page. Start the search again.")
             position = searchable.binarySearch(fileIndex).also { if (it < 0) invalidCursor() }
-            if (offset.toLong() > snapshot.files[fileIndex].sizeBytes) invalidCursor()
+            if (offset.toLong() > snapshot.files[fileIndex].sizeBytes!!) invalidCursor()
             resumeOffset = offset
         }
         val items = ArrayList<JsonObject>(query.limit)
@@ -176,7 +178,7 @@ internal class WebRevisionSourceSearch(
             val file = snapshot.files[fileIndex]
             val from = resumeOffset
             if (expired()) { stop = Stop("deadline", fileIndex, from); break }
-            if (scannedBytes > 0 && scannedBytes + file.sizeBytes > maximumScannedBytes) { stop = Stop("byte-limit", fileIndex, from); break }
+            if (scannedBytes > 0 && scannedBytes + file.sizeBytes!! > maximumScannedBytes) { stop = Stop("byte-limit", fileIndex, from); break }
             val bytes = read(file)
             progressed = true; resumeOffset = 0; position++
             if (bytes == null) { unavailable++; continue }
