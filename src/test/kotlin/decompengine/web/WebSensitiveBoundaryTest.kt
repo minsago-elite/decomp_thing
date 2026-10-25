@@ -5,6 +5,7 @@ import decompengine.jobs.elfFixture
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.buildJsonArray
+import kotlinx.serialization.json.contentOrNull
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonObject
@@ -126,6 +127,11 @@ class WebSensitiveBoundaryTest {
                 "support.export:accepted:null").sorted(), summary.sorted())
             val digests = audit.map { it.getValue("actor").jsonObject.getValue("sessionDigest").jsonPrimitive.content }.toSet()
             assertEquals(1, digests.size, "one browser session performed every audited action")
+            val exportTargets = audit.filter { it.getValue("action").jsonPrimitive.content == "support.export" }
+                .map { (it.getValue("target").jsonObject.getValue("jobId") as? kotlinx.serialization.json.JsonPrimitive)?.contentOrNull }
+            assertTrue(jobId in exportTargets, "a job-scoped export is attributed to its job")
+            assertTrue("e".repeat(32) in exportTargets, "a refused export of a validated job ID keeps that target")
+            assertEquals(1, server.audit.read(jobId).entries.count { it.action == WebAuditAction.SUPPORT_EXPORT })
             val cancelEntry = audit.single { it.getValue("action").jsonPrimitive.content == "run.cancel" }
             assertEquals("version_1", cancelEntry.getValue("target").jsonObject.getValue("expectedVersion").jsonPrimitive.content)
             assertEquals("run_missing", cancelEntry.getValue("target").jsonObject.getValue("runId").jsonPrimitive.content)
