@@ -37,7 +37,9 @@ authority. Uploaded content is never executed as a negative web test.
 Default binding remains `127.0.0.1`. The local server uses its configured canonical
 origin (scheme, exact host, actual port and normalized base path), with explicit
 loopback aliases if configured; it never derives authority from request Host or
-forwarded headers. Bracketed IPv6 loopback can be an explicit alternative. Reject
+forwarded headers. The exact allowlist is the listener's own authority plus at most
+eight explicitly configured loopback aliases (for example `--dev-frontend-origin`);
+`localhost`, `127.0.0.2` or `[::1]` are not implied aliases of `127.0.0.1`. Bracketed IPv6 loopback can be an explicit alternative. Reject
 unexpected/duplicate Host, malformed authority and cross-origin requests before
 looking up jobs. Loopback binding alone does not authorize another website.
 
@@ -205,14 +207,17 @@ version guards and audit records. No silent discard, background push, force push
 or publication on navigation. Imported or edited source is a candidate requiring
 existing validation before acceptance. These are #200–#215 obligations.
 
-Non-loopback deployment is an explicit optional profile under #216. Require TLS
-termination, authenticated single-user access, a configured exact external origin
-and base path, and an authenticated/isolated connection from the trusted proxy to
-the JVM. Reject broader binding without a complete profile. Ignore forwarded
-headers except from the configured proxy peer; strip inbound spoofed identity
-headers there. Public authenticated mode retains CSRF, file containment, quotas
-and redaction. The local bootstrap must not be printed as a remotely usable
-credential. Multi-tenant authorization remains outside this release.
+Remote use is the explicit optional [reverse-proxy profile](web-reverse-proxy.md) (#216).
+It requires `--ui spa`, an exact HTTPS `--public-origin`, a declared base path and one or
+more loopback `--trusted-proxy` peers; an incomplete profile is refused at startup. The JVM
+listener stays loopback-only, so the proxy-to-JVM hop is isolated to the host, and the proxy
+terminates TLS and authenticates the single operator. Only listed peers are admitted;
+their allowlisted forwarding headers must agree with the configured origin and base path and
+never confer identity, while identity headers are refused. The public origin replaces the
+loopback origin as the only Host/Origin pair, and the session cookie gains `__Secure-` and
+`Secure`. CSRF, file containment, quotas and redaction are unchanged. The printed one-use
+handoff still reaches only the operator terminal and also requires proxy authentication.
+Multi-tenant authorization remains outside this release.
 
 ## Privacy, deletion and review evidence
 

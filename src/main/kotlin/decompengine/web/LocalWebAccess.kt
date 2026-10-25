@@ -11,6 +11,7 @@ import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.put
 import java.io.ByteArrayOutputStream
+import java.net.InetAddress
 import java.net.URI
 import java.security.MessageDigest
 import java.security.SecureRandom
@@ -21,15 +22,71 @@ import java.util.UUID
 import javax.crypto.Mac
 import javax.crypto.spec.SecretKeySpec
 
+/**
+ * Optional reverse-proxy profile (#216/#613). The operator names the exact public HTTPS origin and
+ * the loopback peers whose forwarding headers are honoured; nothing is discovered from a request.
+ * The JVM listener stays loopback-only, so the proxy-to-JVM hop is isolated to the host. Requests
+ * from any other peer, including direct loopback clients, are refused before routing. Forwarding
+ * headers are consistency checks only: they never select an origin, a path or an identity.
+ */
+class WebReverseProxyProfile(
+    val publicOrigin: String,
+    trustedProxies: Set<String>,
+) {
+    internal val publicAuthority: String
+    internal val publicPort: Int
+    internal val trustedPeers: Set<InetAddress>
+
+    init {
+        require(publicOrigin.length <= 256) { "the reverse-proxy public origin is too long" }
+        val uri = try { URI(publicOrigin) } catch (_: Exception) { throw IllegalArgumentException("invalid reverse-proxy public origin") }
+        require(uri.scheme == "https" && uri.rawUserInfo == null && uri.rawPath.isNullOrEmpty() && uri.rawQuery == null &&
+            uri.rawFragment == null && uri.host != null && uri.port in -1..65535 && uri.port != 0 && uri.port != 443) {
+            "the reverse-proxy public origin must be an exact https://host[:port] origin without a default port, path or credentials"
+        }
+        val host = uri.host
+        require(host.matches(PUBLIC_DNS_HOST) || host.matches(IPV4_LITERAL) || host.matches(BRACKETED_IPV6)) {
+            "the reverse-proxy public origin must name a lowercase DNS host or an IP literal"
+        }
+        publicAuthority = host + if (uri.port == -1) "" else ":${uri.port}"
+        require(publicOrigin == "https://$publicAuthority") { "the reverse-proxy public origin must use its exact canonical spelling" }
+        publicPort = if (uri.port == -1) 443 else uri.port
+        require(trustedProxies.size in 1..8) { "the reverse-proxy profile requires one to eight --trusted-proxy addresses" }
+        trustedPeers = trustedProxies.map { address ->
+            require(address.length <= 64 && (address.matches(IPV4_LITERAL) || address.matches(IPV6_LITERAL))) {
+                "a trusted proxy must be an IP address literal; names are never resolved"
+            }
+            // Validated literals never reach a resolver.
+            val parsed = try { InetAddress.getByName(address) } catch (_: Exception) { throw IllegalArgumentException("invalid trusted proxy address") }
+            require(parsed.isLoopbackAddress) {
+                "a trusted proxy must be a loopback address: the JVM listener stays loopback-only behind the proxy"
+            }
+            parsed
+        }.toSet()
+    }
+
+    internal companion object {
+        /** The forwarding header names a trusted proxy may send; values are verified, never adopted. */
+        val FORWARDING_HEADERS = setOf("forwarded", "x-forwarded-for", "x-forwarded-proto", "x-forwarded-host", "x-forwarded-port", "x-real-ip")
+        private val PUBLIC_DNS_HOST = Regex("(?=.{1,253}$)[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?(?:\\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)*")
+        private val IPV4_LITERAL = Regex("(?:(?:25[0-5]|2[0-4][0-9]|1[0-9]{2}|[1-9]?[0-9])\\.){3}(?:25[0-5]|2[0-4][0-9]|1[0-9]{2}|[1-9]?[0-9])")
+        private val IPV6_LITERAL = Regex("[0-9a-f]{0,4}(?::[0-9a-f]{0,4}){2,7}")
+        private val BRACKETED_IPV6 = Regex("\\[[0-9a-f:.]{2,45}\\]")
+    }
+}
+
 /** Local origins are configured by the operator, never discovered from Host or forwarding headers. */
 class LocalWebAccessConfiguration(
     val canonicalOrigin: String,
     val basePath: String = "/",
     additionalLoopbackOrigins: Set<String> = emptySet(),
+    val reverseProxy: WebReverseProxyProfile? = null,
 ) {
     internal val originsByAuthority: Map<String, String>
     internal val secure: Boolean
     val cookieName: String
+    /** The origin used in the operator handoff: the public origin in reverse-proxy mode. */
+    val browserOrigin: String get() = reverseProxy?.publicOrigin ?: canonicalOrigin
 
     init {
         require(basePath.length <= 256 && basePath.matches(Regex("/([A-Za-z0-9_-]+/)*"))) {
@@ -57,9 +114,17 @@ class LocalWebAccessConfiguration(
         }
         require(parsed.map(URI::getScheme).distinct().size == 1) { "local browser aliases cannot downgrade the configured transport" }
         require(parsed.map(URI::getRawAuthority).distinct().size == parsed.size) { "configured local browser authorities must be unique" }
-        originsByAuthority = parsed.associate { it.rawAuthority to it.toString() }
-        secure = parsed.first().scheme == "https"
-        cookieName = "decomp_session_" + digest((canonicalOrigin + "\n" + basePath).toByteArray()).hex().take(16)
+        if (reverseProxy == null) {
+            originsByAuthority = parsed.associate { it.rawAuthority to it.toString() }
+            secure = parsed.first().scheme == "https"
+            cookieName = "decomp_session_" + digest((canonicalOrigin + "\n" + basePath).toByteArray()).hex().take(16)
+        } else {
+            require(additionalLoopbackOrigins.isEmpty()) { "development browser origins cannot be combined with the reverse-proxy profile" }
+            // Only the public origin is a browser authority; the loopback listener origin is never admitted.
+            originsByAuthority = mapOf(reverseProxy.publicAuthority to reverseProxy.publicOrigin)
+            secure = true
+            cookieName = "__Secure-decomp_session_" + digest((reverseProxy.publicOrigin + "\n" + basePath).toByteArray()).hex().take(16)
+        }
     }
 }
 
@@ -131,7 +196,8 @@ class WebSessionCredentials internal constructor(
  * Session/bootstrap/CSRF records contain only domain-separated SHA-256 token digests.
  * A process-only HMAC key derives a stable CSRF token from each authenticated cookie, allowing
  * reload and concurrent tabs without retaining plaintext tokens or rotating another tab's token.
- * The key and all records disappear on restart. Forwarded headers confer no authority.
+ * The key and all records disappear on restart. Forwarded headers confer no authority; only the
+ * optional reverse-proxy profile admits them, from its configured peers, as consistency checks.
  */
 class LocalWebAccess(
     val configuration: LocalWebAccessConfiguration,
@@ -312,9 +378,12 @@ class LocalWebAccess(
 
     private fun validateBoundary(exchange: HttpExchange, policy: WebEndpointPolicy) {
         if (exchange.requestHeaders.size > 64) deny(400, "INVALID_HEADER", "The request contains too many headers.")
-        if (exchange.requestHeaders.keys.any { it.equals("Forwarded", true) || it.startsWith("X-Forwarded-", true) || it.equals("X-Real-IP", true) }) {
-            deny(403, "FORWARDED_HEADERS_DENIED", "Forwarding headers are not supported by this local access profile.")
-        }
+        val proxy = configuration.reverseProxy
+        if (proxy == null) {
+            if (exchange.requestHeaders.keys.any { it.equals("Forwarded", true) || it.startsWith("X-Forwarded-", true) || it.equals("X-Real-IP", true) }) {
+                deny(403, "FORWARDED_HEADERS_DENIED", "Forwarding headers are not supported by this local access profile.")
+            }
+        } else validateProxyHop(exchange, proxy)
         val host = singleHeader(exchange, "Host", 256) ?: deny(403, "HOST_DENIED", "The request host is not configured.")
         val originForHost = configuration.originsByAuthority[host] ?: deny(403, "HOST_DENIED", "The request host is not configured.")
         val origin = singleHeader(exchange, "Origin", 256)
@@ -332,6 +401,79 @@ class LocalWebAccess(
             val valid = if (policy.multipart) contentType?.let(MULTIPART_TYPE::matches) == true else contentType?.let(JSON_TYPE::matches) == true
             if (!valid) deny(415, "UNSUPPORTED_MEDIA_TYPE", "The request body has an unsupported content type.")
         }
+    }
+
+    /**
+     * Admit only the configured proxy peers, then require their forwarding headers to agree with the
+     * configured public origin and base path. Exact Host/Origin pairing and the Secure session cookie
+     * still apply afterwards; a header value can refuse a request but never widens authority.
+     */
+    private fun validateProxyHop(exchange: HttpExchange, proxy: WebReverseProxyProfile) {
+        val peer = exchange.remoteAddress?.address
+        if (peer == null || peer !in proxy.trustedPeers) {
+            deny(403, "PROXY_PEER_DENIED", "This workbench accepts requests only through its configured reverse proxy.")
+        }
+        val names = exchange.requestHeaders.keys.map(String::lowercase)
+        if (names.any { it in PROXY_IDENTITY_HEADERS || it.startsWith("x-auth-request-") } ||
+            names.any { (it.startsWith("x-forwarded-") || it == "forwarded" || it == "x-real-ip") && it !in WebReverseProxyProfile.FORWARDING_HEADERS }) {
+            deny(403, "FORWARDED_HEADERS_DENIED", "Remove forwarded identity headers at the reverse proxy; they confer no authority here.")
+        }
+        fun forwarded(name: String, limit: Int): String? {
+            val values = exchange.requestHeaders[name] ?: return null
+            val joined = values.joinToString(",")
+            if (values.size > 4 || joined.length > limit || joined.any { it.code < 32 || it.code == 127 }) {
+                deny(400, "INVALID_HEADER", "The request contains an invalid forwarding header.")
+            }
+            return joined
+        }
+        fun invalid(): Nothing = deny(403, "PROXY_FORWARDING_INVALID",
+            "The reverse proxy must forward the configured public origin over HTTPS; see the reverse-proxy deployment guide.")
+        forwarded("X-Forwarded-For", 1024)
+        forwarded("X-Real-IP", 64)
+        val proto = forwarded("X-Forwarded-Proto", 16)?.trim()
+        if (proto != null && proto != "https") invalid()
+        forwarded("X-Forwarded-Host", 256)?.let { if (it.trim() != proxy.publicAuthority) invalid() }
+        forwarded("X-Forwarded-Port", 8)?.let { if (it.trim() != proxy.publicPort.toString()) invalid() }
+        // RFC 7239: the nearest proxy appends the last element; only that element describes this hop.
+        val element = forwarded("Forwarded", 1024)?.let { lastForwardedElement(it) ?: invalid() }
+        element?.get("proto")?.let { if (!it.equals("https", true)) invalid() }
+        element?.get("host")?.let { if (it != proxy.publicAuthority) invalid() }
+        if (proto == null && element?.get("proto") == null) invalid()
+        val path = exchange.requestURI.rawPath.orEmpty()
+        if (!path.startsWith(configuration.basePath) && path != configuration.basePath.dropLast(1)) {
+            deny(404, "PROXY_BASE_PATH_MISMATCH", "The reverse proxy must forward the configured base path unchanged; prefix stripping is unsupported.")
+        }
+    }
+
+    /** Parses only the final RFC 7239 element into lowercase parameter names; null means malformed. */
+    private fun lastForwardedElement(value: String): Map<String, String>? {
+        val elements = mutableListOf(StringBuilder())
+        var quoted = false
+        var escaped = false
+        for (char in value) {
+            when {
+                escaped -> { escaped = false; elements.last().append(char) }
+                quoted && char == '\\' -> { escaped = true; elements.last().append(char) }
+                char == '"' -> { quoted = !quoted; elements.last().append(char) }
+                !quoted && char == ',' -> elements += StringBuilder()
+                else -> elements.last().append(char)
+            }
+        }
+        if (quoted || escaped || elements.size > 16) return null
+        val pairs = elements.last().toString().split(';').map(String::trim).filter(String::isNotEmpty)
+        if (pairs.isEmpty()) return null
+        val parsed = mutableMapOf<String, String>()
+        for (pair in pairs) {
+            val name = pair.substringBefore('=', "").lowercase()
+            var raw = pair.substringAfter('=', "")
+            if (!name.matches(FORWARDED_PARAMETER) || raw.isEmpty() || name in parsed) return null
+            if (raw.startsWith('"')) {
+                if (raw.length < 2 || !raw.endsWith('"')) return null
+                raw = raw.substring(1, raw.length - 1).replace(QUOTED_PAIR, "$1")
+            } else if (!raw.matches(FORWARDED_TOKEN)) return null
+            parsed[name] = raw
+        }
+        return parsed
     }
 
     private fun authenticate(exchange: HttpExchange, mutation: Boolean): SessionRecord {
@@ -415,6 +557,12 @@ class LocalWebAccess(
         private val SESSION_LIFETIME = Duration.ofHours(8)
         private val IDLE_LIFETIME = Duration.ofMinutes(30)
         private val TOKEN = Regex("[A-Za-z0-9_-]{43}")
+        // Common authenticating-proxy identity headers. The workbench keeps its own session; none is accepted.
+        private val PROXY_IDENTITY_HEADERS = setOf("remote-user", "x-remote-user", "x-forwarded-user", "x-forwarded-email",
+            "x-forwarded-preferred-username", "x-forwarded-groups", "x-forwarded-access-token", "x-webauth-user")
+        private val FORWARDED_PARAMETER = Regex("[a-z][a-z0-9_-]{0,31}")
+        private val FORWARDED_TOKEN = Regex("[A-Za-z0-9!#$%&'*+.^_`|~:\\[\\]-]{1,256}")
+        private val QUOTED_PAIR = Regex("\\\\(.)")
         private val BOOTSTRAP_JSON_LIMITS = StrictJsonLimits(
             maximumInputBytes = MAX_BOOTSTRAP_BODY_BYTES,
             maximumCanonicalBytes = MAX_BOOTSTRAP_BODY_BYTES,

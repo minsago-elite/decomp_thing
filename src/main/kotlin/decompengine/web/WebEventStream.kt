@@ -53,6 +53,8 @@ internal class WebEventStream(
                         authorize()
                         webApiHeaders(exchange, UUID.randomUUID().toString())
                         exchange.responseHeaders.set("Content-Type", "text/event-stream; charset=utf-8")
+                        // Reverse proxies must neither buffer nor transform (compress) frames; see docs/web-reverse-proxy.md.
+                        exchange.responseHeaders.set("Cache-Control", "no-store, no-transform")
                         exchange.responseHeaders.set("X-Accel-Buffering", "no")
                         exchange.sendResponseHeaders(200, 0)
                         write(": connected\n\n".toByteArray())
