@@ -9,7 +9,7 @@ import { message, textMessage } from '../shared/messages';
 import { usePrivateTransport } from '../session/PrivateTransport';
 import { beginSourceRead, currentSourceRead, sourceReadMessage } from './navigation';
 import type { SourceReadState } from './navigation';
-import { SOURCE_SEARCH_PATH_LIMIT, SOURCE_SEARCH_QUERY_LIMIT, bindSourceSearch, sourceSearchLiteral, sourceSearchPath,
+import { SOURCE_SEARCH_PATH_LIMIT, SOURCE_SEARCH_QUERY_LIMIT, bindSourceSearch, sourceSearchFits, sourceSearchLiteral, sourceSearchPath,
   sourceSearchResultPath, sourceSearchRoute, sourceSearchSelection, sourceSearchSkipped } from './search';
 import type { SourceSearchRequest } from './search';
 import { visibleSourceText } from './viewer';
@@ -18,13 +18,18 @@ function SearchStatus({ data }: { data: SourceSearchPage }) {
   const skipped = sourceSearchSkipped(data);
   const missing = skipped.reduce((total, entry) => total + entry.count, 0);
   const complete = data.status === 'complete';
+  const unread = data.coverageGaps.unsearchableText + data.coverageGaps.unavailableFiles;
+  const searched = data.scope.searchableFiles - unread;
   const reason = data.stopReason ? copy.searchStopped[data.stopReason] : '';
   return <div class={`source-search-status ${complete && missing === 0 ? 'source-search-status-complete' : 'source-search-status-incomplete'}`}
     role="status" data-search-state={complete ? (data.items.length ? 'complete' : 'no-matches') : (data.items.length ? 'partial' : 'partial-empty')}>
     {complete
       ? <p><strong>{data.scope.searchableFiles === 0 ? copy.searchNothingSearchable
         : data.items.length ? message(copy.searchCompleteMatches, { count: data.items.length })
-          : message(copy.searchNoMatches, { count: data.scope.searchableFiles })}</strong> {data.scope.searchableFiles > 0 && message(copy.searchComplete, { count: data.scope.searchableFiles })}</p>
+          : unread ? message(copy.searchNoMatchesSearched, { count: searched })
+            : message(copy.searchNoMatches, { count: data.scope.searchableFiles })}</strong> {data.scope.searchableFiles > 0 && (unread
+          ? message(copy.searchCompleteUnread, { count: unread, total: data.scope.searchableFiles })
+          : message(copy.searchComplete, { count: data.scope.searchableFiles }))}</p>
       : <p><strong>{data.items.length
         ? message(copy.searchIncomplete, { reason, count: data.progress.remainingFiles })
         : message(copy.searchIncompleteEmpty, { reason, count: data.progress.remainingFiles })}</strong></p>}
@@ -50,7 +55,7 @@ export function SourceSearch({ selected, basePath, search }: { selected: SourceS
   const [symbol, setSymbol] = useState(request?.match === 'symbol');
   const [exactCase, setExactCase] = useState(request?.caseSensitive ?? true);
   const [path, setPath] = useState(request?.path ?? '');
-  const [formError, setFormError] = useState(false);
+  const [formError, setFormError] = useState<'invalid' | 'too-long' | null>(null);
   const [refresh, setRefresh] = useState(0);
   const key = [selected.jobId, selected.runId, selected.revisionId, search, refresh].join('/');
   const [read, setRead] = useState<SourceReadState<SourceSearchPage>>({ key, state: 'loading' });
@@ -77,9 +82,11 @@ export function SourceSearch({ selected, basePath, search }: { selected: SourceS
     const trimmedPath = path === '' ? null : path;
     const match = symbol ? 'symbol' as const : 'text' as const;
     if (!sourceSearchLiteral(text, SOURCE_SEARCH_QUERY_LIMIT) || (symbol && !/^[A-Za-z_][A-Za-z0-9_]*$/u.test(text))
-      || (trimmedPath !== null && !sourceSearchLiteral(trimmedPath, SOURCE_SEARCH_PATH_LIMIT))) { setFormError(true); return; }
-    setFormError(false);
+      || (trimmedPath !== null && !sourceSearchLiteral(trimmedPath, SOURCE_SEARCH_PATH_LIMIT))) { setFormError('invalid'); return; }
     const next = { q: text, match, caseSensitive: exactCase, path: trimmedPath, cursor: null };
+    // Explicit encoded-length check: accepted code points can still exceed the address ceiling once percent-encoded.
+    if (!sourceSearchFits(directory, next)) { setFormError('too-long'); return; }
+    setFormError(null);
     if (request && request.cursor === null && request.q === next.q && request.match === next.match
       && request.caseSensitive === next.caseSensitive && request.path === next.path) { moveFocus.current = true; setRefresh(value => value + 1); }
     else go(next);
@@ -89,7 +96,7 @@ export function SourceSearch({ selected, basePath, search }: { selected: SourceS
     <form role="search" aria-label={copy.searchForm} class="source-search-form" onSubmit={submit} noValidate>
       <label>{copy.searchText}
         <input type="search" name="q" value={text} maxLength={SOURCE_SEARCH_QUERY_LIMIT * 2} required aria-describedby="source-search-hint"
-          aria-invalid={formError} onInput={event => setText((event.target as HTMLInputElement).value)} />
+          aria-invalid={formError !== null} onInput={event => setText((event.target as HTMLInputElement).value)} />
       </label>
       <p id="source-search-hint">{copy.searchTextHint}</p>
       <fieldset><legend>{copy.searchMatch}</legend>
@@ -102,7 +109,7 @@ export function SourceSearch({ selected, basePath, search }: { selected: SourceS
           onInput={event => setPath((event.target as HTMLInputElement).value)} />
       </label>
       <p id="source-search-path-hint">{copy.searchPathHint}</p>
-      {formError && <p role="alert">{copy.searchInvalid}</p>}
+      {formError && <p role="alert">{formError === 'too-long' ? copy.searchTooLong : copy.searchInvalid}</p>}
       <button type="submit" disabled={current?.state === 'loading'}>{copy.searchSubmit}</button>
     </form>
     {directory !== 'root' && <p>{copy.searchScopeDirectory} <a href={sourceSearchPath(basePath, selected, 'root', request && { ...request, cursor: null })}>{copy.searchAll}</a></p>}

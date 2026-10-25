@@ -249,6 +249,9 @@ export function checkSourceSearch(data: SourceSearch): void {
   requireValue(progress.unsearchableText <= progress.scannedFiles
     && progress.scannedFiles + progress.unavailableFiles + progress.remainingFiles <= scope.searchableFiles + (complete ? 0 : 1)
     && BigInt(progress.scannedBytes) <= BigInt(limits.maxScannedBytes));
+  const gaps = data.coverageGaps;
+  requireValue(gaps.unsearchableText >= progress.unsearchableText && gaps.unavailableFiles >= progress.unavailableFiles
+    && gaps.unsearchableText + gaps.unavailableFiles <= scope.searchableFiles);
   if (query.match === 'symbol') requireValue(/^[A-Za-z_][A-Za-z0-9_]*$/u.test(query.text));
   const seen = new Set<string>(); let previous: SourceSearch['items'][number] | undefined;
   for (const item of items) {

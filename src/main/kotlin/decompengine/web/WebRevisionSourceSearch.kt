@@ -35,7 +35,8 @@ internal data class WebSourceSearchQuery(
         const val MAXIMUM_LIMIT = 100
         private val SYMBOL = Regex("[A-Za-z_][A-Za-z0-9_]*")
         private val HEX_ESCAPE = Regex("[0-9A-Fa-f]{2}")
-        internal val CURSOR = Regex("([a-f0-9]{64})_(0|[1-9][0-9]{0,4})_(0|[1-9][0-9]{0,7})_([a-f0-9]{32})")
+        // Version, file index, byte offset, then the coverage gaps observed by earlier pages and the signature.
+        internal val CURSOR = Regex("([a-f0-9]{64})_(0|[1-9][0-9]{0,4})_(0|[1-9][0-9]{0,7})_(0|[1-9][0-9]{0,4})_(0|[1-9][0-9]{0,4})_([a-f0-9]{32})")
 
         fun parse(rawQuery: String?): WebSourceSearchQuery {
             if (rawQuery.isNullOrEmpty() || rawQuery.length > 4096) invalid()
@@ -118,9 +119,9 @@ internal class WebRevisionSourceSearch(
         // Verify the signature before any capture; the position is trusted only after its version matches the snapshot.
         val continuation = query.cursor?.let { cursor ->
             val parts = WebSourceSearchQuery.CURSOR.matchEntire(cursor)!!.groupValues
-            if (!MessageDigest.isEqual(signature(owner, jobId, runId, revisionId, query.identity, parts[1], parts[2], parts[3]).toByteArray(),
-                    parts[4].toByteArray())) invalidCursor()
-            Triple(parts[1], parts[2].toInt(), parts[3].toInt())
+            if (!MessageDigest.isEqual(signature(owner, jobId, runId, revisionId, query.identity, parts[1], parts[2], parts[3], parts[4], parts[5]).toByteArray(),
+                    parts[6].toByteArray())) invalidCursor()
+            Continuation(parts[1], parts[2].toInt(), parts[3].toInt(), parts[4].toInt(), parts[5].toInt())
         }
         val started = nanoTime()
         return source(jobId, runId, revisionId) { snapshot, read ->
@@ -131,9 +132,10 @@ internal class WebRevisionSourceSearch(
     }
 
     private class Stop(val reason: String, val fileIndex: Int, val offset: Int)
+    private data class Continuation(val version: String, val fileIndex: Int, val offset: Int, val unsearchableText: Int, val unavailable: Int)
 
     private fun scan(owner: String, snapshot: WebRevisionSourceSnapshot, query: WebSourceSearchQuery,
-        continuation: Triple<String, Int, Int>?, started: Long, read: (WebRevisionSourceFile) -> ByteArray?): JsonObject {
+        continuation: Continuation?, started: Long, read: (WebRevisionSourceFile) -> ByteArray?): JsonObject {
         val ref = snapshot.reference
         val directory = resolveRevisionSourceDirectory(snapshot, query.directoryId)
         val prefix = directory.path?.let { "$it/" }.orEmpty()
@@ -157,6 +159,7 @@ internal class WebRevisionSourceSearch(
         }
         var position = 0; var resumeOffset = 0
         continuation?.let { (version, fileIndex, offset) ->
+            if (continuation.unsearchableText + continuation.unavailable > searchable.size) invalidCursor()
             if (version != snapshot.metadataVersion) throw WebAccessDenied(410, "CURSOR_EXPIRED",
                 "Source metadata changed since this search page. Start the search again.")
             position = searchable.binarySearch(fileIndex).also { if (it < 0) invalidCursor() }
@@ -184,10 +187,11 @@ internal class WebRevisionSourceSearch(
             var lineStart = from
             while (lineStart > 0 && bytes[lineStart - 1] != 10.toByte()) lineStart--
             var line = 1L + (0 until lineStart).count { bytes[it] == 10.toByte() }
-            var linesSinceCheck = 0
+            var linesSinceCheck = 0; var bytesSinceCheck = 0L
             while (lineStart < bytes.size) {
-                if (++linesSinceCheck >= 256) {
-                    linesSinceCheck = 0
+                // Check before every 256 lines or 64 KiB, so even long lines cannot defer the deadline by more than one line.
+                if (++linesSinceCheck >= 256 || bytesSinceCheck >= DEADLINE_CHECK_BYTES) {
+                    linesSinceCheck = 0; bytesSinceCheck = 0
                     if (expired()) { stop = Stop("deadline", fileIndex, lineStart); position--; break@files }
                 }
                 var lineEnd = lineStart
@@ -209,11 +213,16 @@ internal class WebRevisionSourceSearch(
                     }
                     items += item; itemBytes += size
                 }
+                bytesSinceCheck += lineEnd + 1 - lineStart
                 lineStart = lineEnd + 1; line++
             }
         }
-        val next = stop?.let { "${snapshot.metadataVersion}_${it.fileIndex}_${it.offset}_" +
-            signature(owner, ref.jobId, ref.runId, ref.revisionId, query.identity, snapshot.metadataVersion, it.fileIndex, it.offset) }
+        // Gaps are cumulative from the first page, so a continued page never reports more coverage than the search had.
+        val gapText = (continuation?.unsearchableText ?: 0) + unsearchableText
+        val gapUnavailable = (continuation?.unavailable ?: 0) + unavailable
+        val next = stop?.let { "${snapshot.metadataVersion}_${it.fileIndex}_${it.offset}_${gapText}_${gapUnavailable}_" +
+            signature(owner, ref.jobId, ref.runId, ref.revisionId, query.identity, snapshot.metadataVersion, it.fileIndex, it.offset,
+                gapText, gapUnavailable) }
         return buildJsonObject {
             put("binding", buildJsonObject { put("jobId", ref.jobId); put("runId", ref.runId); put("revisionId", ref.revisionId) })
             put("authority", "source-input-commitments"); put("sourceSha256", ref.sourceSha256)
@@ -234,6 +243,7 @@ internal class WebRevisionSourceSearch(
                 put("unsearchableText", unsearchableText); put("unavailableFiles", unavailable)
                 put("remainingFiles", searchable.size - position)
             })
+            put("coverageGaps", buildJsonObject { put("unsearchableText", gapText); put("unavailableFiles", gapUnavailable) })
             put("limits", buildJsonObject {
                 put("maxResults", query.limit); put("maxScannedBytes", maximumScannedBytes.toString())
                 put("deadlineMs", (deadlineNanos / 1_000_000).toString())
@@ -276,6 +286,7 @@ internal class WebRevisionSourceSearch(
         const val DEFAULT_DEADLINE_MS = 2_000L
         const val MAXIMUM_SCANNED_BYTES = 32L * 1024 * 1024
         const val CONTEXT_CODE_POINTS = 80
+        private const val DEADLINE_CHECK_BYTES = 64L * 1024
         private const val MAXIMUM_ITEM_BYTES = 900_000
 
         /** Per-code-point simple case folding; it never changes the code point count of the matched text. */

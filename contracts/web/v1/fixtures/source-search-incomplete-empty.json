@@ -35,6 +35,10 @@
       "unavailableFiles": 1,
       "remainingFiles": 1
     },
+    "coverageGaps": {
+      "unsearchableText": 0,
+      "unavailableFiles": 1
+    },
     "limits": {
       "maxResults": 50,
       "maxScannedBytes": "33554432",
@@ -44,7 +48,7 @@
     "page": {
       "limit": 50,
       "snapshotVersion": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
-      "nextCursor": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc_3_120_ffffffffffffffffffffffffffffffff"
+      "nextCursor": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc_3_120_0_1_ffffffffffffffffffffffffffffffff"
     }
   }
 }

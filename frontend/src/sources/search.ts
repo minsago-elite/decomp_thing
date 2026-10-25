@@ -7,8 +7,10 @@ import { sourcePositionPath } from './viewer';
 export const SOURCE_SEARCH_LIMIT = 50;
 export const SOURCE_SEARCH_QUERY_LIMIT = 128;
 export const SOURCE_SEARCH_PATH_LIMIT = 256;
+/** Encoded query budget before a cursor: leaves room for the cursor, limit, route and the 4096-character URL ceilings. */
+export const SOURCE_SEARCH_ENCODED_LIMIT = 3200;
 const DIRECTORY = /^(?:root|dir_(?:0|[1-9][0-9]{0,4})_[1-9][0-9]{0,3}_[a-f0-9]{64})$/u;
-const CURSOR = /^[a-f0-9]{64}_(?:0|[1-9][0-9]{0,4})_(?:0|[1-9][0-9]{0,7})_[a-f0-9]{32}$/u;
+const CURSOR = /^[a-f0-9]{64}_(?:0|[1-9][0-9]{0,4})_(?:0|[1-9][0-9]{0,7})_(?:0|[1-9][0-9]{0,4})_(?:0|[1-9][0-9]{0,4})_[a-f0-9]{32}$/u;
 const SYMBOL = /^[A-Za-z_][A-Za-z0-9_]*$/u;
 
 export interface SourceSearchRequest {
@@ -30,7 +32,7 @@ function invalid(): never { throw new ApiClientError('invalid_request'); }
 /** Closed canonical document query; unknown, repeated or malformed values never reach the transport. */
 export function sourceSearchSelection(search: string): SourceSearchSelection {
   if (search === '') return { directory: 'root', request: null };
-  if (search.length > 2048 || !search.startsWith('?')) invalid();
+  if (search.length > 4096 || !search.startsWith('?')) invalid();
   const fields = new Map<string, string>();
   for (const part of search.slice(1).split('&')) {
     const split = part.indexOf('=');
@@ -77,6 +79,11 @@ function searchQuery(directory: string, request: SourceSearchRequest | null): st
   return query;
 }
 
+/** Whether the canonical encoded request, without a cursor, fits the budget every continuation also fits. */
+export function sourceSearchFits(directory: string, request: SourceSearchRequest): boolean {
+  try { return searchQuery(directory, { ...request, cursor: null }).length <= SOURCE_SEARCH_ENCODED_LIMIT; } catch { return false; }
+}
+
 /** SPA document route for one explicit search; display labels never enter it. */
 export function sourceSearchPath(basePath: string, selected: SourceSelection, directory = 'root', request: SourceSearchRequest | null = null): string {
   const query = searchQuery(directory, request);
@@ -112,6 +119,7 @@ export function sourceSearchResultPath(basePath: string, selected: SourceSelecti
 /** Files in scope that this page did not search, by explicit reason; zero means no known coverage gap. */
 export function sourceSearchSkipped(data: SourceSearch): { reason: 'notViewable' | 'declaredBinary' | 'tooLarge' | 'unsearchableText' | 'unavailableFiles'; count: number }[] {
   const counts = { notViewable: data.scope.notViewable, declaredBinary: data.scope.declaredBinary, tooLarge: data.scope.tooLarge,
-    unsearchableText: data.progress.unsearchableText, unavailableFiles: data.progress.unavailableFiles };
+    // Read gaps are cumulative across continued pages, so a final page cannot hide an earlier gap.
+    unsearchableText: data.coverageGaps.unsearchableText, unavailableFiles: data.coverageGaps.unavailableFiles };
   return (Object.keys(counts) as (keyof typeof counts)[]).filter(reason => counts[reason] > 0).map(reason => ({ reason, count: counts[reason] }));
 }

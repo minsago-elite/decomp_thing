@@ -201,6 +201,40 @@ class WebRevisionSourceSearchTest {
         assertEquals(12, found.size)
     }
 
+    @Test fun `long lines are deadline checked within a file and resume at a line boundary`() {
+        // Fewer than 256 lines: the deadline must still be observed between these 192 KiB lines.
+        val body = (1..20).joinToString("") { "a".repeat(192 * 1024) + "Needle $it\n" }
+        val entries = listOf(entry("long.c", body))
+        var now = 0L
+        val engine = WebRevisionSourceSearch(harness(entries)::source, nanoTime = { now.also { now += 1_000_000 } }, deadlineNanos = 3_000_000)
+        val first = search(engine, "q=needle&case=insensitive")
+        assertEquals("deadline", first.getValue("stopReason").jsonPrimitive.content)
+        assertTrue(items(first).size < 20)
+        val resume = cursor(first)!!.split('_')
+        assertEquals("0", resume[1])
+        val offset = resume[2].toInt()
+        assertTrue(offset > 0 && body.toByteArray()[offset - 1] == 10.toByte())
+        val found = all(engine, "q=needle&case=insensitive")
+        assertEquals(truth(body.toByteArray(), "Needle").map { it.toString() }, found.map { string(it, "offsetBytes") })
+    }
+
+    @Test fun `coverage gaps from earlier pages are carried by signed continuations`() {
+        val entries = listOf(entry("a.c", "needle\n"), entry("b.c", "needle needle needle\n"), Entry("c.c", byteArrayOf(0xff.toByte()), text))
+        val state = harness(entries).also { it.bodies = it.bodies + ("a.c" to null) }
+        val engine = WebRevisionSourceSearch(state::source)
+        val pages = mutableListOf<JsonObject>()
+        val found = all(engine, "q=needle&limit=1") { pages += it }
+        assertEquals(3, found.size); assertTrue(pages.size >= 3)
+        assertEquals(1, pages.first().getValue("progress").jsonObject.getValue("unavailableFiles").jsonPrimitive.int)
+        val last = pages.last()
+        assertEquals(0, last.getValue("progress").jsonObject.getValue("unavailableFiles").jsonPrimitive.int)
+        assertEquals(1, last.getValue("coverageGaps").jsonObject.getValue("unavailableFiles").jsonPrimitive.int)
+        assertEquals(1, last.getValue("coverageGaps").jsonObject.getValue("unsearchableText").jsonPrimitive.int)
+        val next = cursor(pages.first())!!
+        val parts = next.split('_').toMutableList(); parts[4] = "0"
+        assertEquals("INVALID_CURSOR", assertFailsWith<WebAccessDenied> { search(engine, "q=needle&limit=1&cursor=${parts.joinToString("_")}") }.code)
+    }
+
     @Test fun `query grammar is closed bounded and canonical before any capture`() {
         val state = harness(listOf(entry("a.c", "x\n"))); val engine = WebRevisionSourceSearch(state::source)
         val invalid = listOf(null, "", "q=", "q=+", "q=${"a".repeat(129)}", "q=${encode("😀".repeat(129))}", "q=a%0Ab", "q=a%7Fb",

@@ -7,7 +7,8 @@ import type { ResponseOf, SourceSearch as SourceSearchPage } from '../src/api/ge
 import { ApiClientError } from '../src/api/errors';
 import { decodeResponse } from '../src/api/decode';
 import { SourceSearch } from '../src/sources/SourceSearch';
-import { bindSourceSearch, sourceSearchPath, sourceSearchResultPath, sourceSearchRoute, sourceSearchSelection, sourceSearchSkipped } from '../src/sources/search';
+import { SOURCE_SEARCH_ENCODED_LIMIT, bindSourceSearch, sourceSearchFits, sourceSearchPath, sourceSearchResultPath, sourceSearchRoute, sourceSearchSelection, sourceSearchSkipped } from '../src/sources/search';
+import { apiPath } from '../src/app/paths';
 import type { SourceSearchRequest } from '../src/sources/search';
 import { sourcePosition } from '../src/sources/viewer';
 import { sourceSnapshotSelection } from '../src/sources/navigation';
@@ -17,7 +18,7 @@ const fixture = (name: string) => JSON.parse(readFileSync(resolve(process.cwd(),
 const selected = { jobId: '1234567890abcdef1234567890abcdef', runId: 'run_1', revisionId: 'revision_1' };
 const request: SourceSearchRequest = { q: 'needle', match: 'text', caseSensitive: true, path: null, cursor: null };
 const directory = `dir_1_1_${'d'.repeat(64)}`;
-const cursor = `${'c'.repeat(64)}_3_120_${'f'.repeat(32)}`;
+const cursor = `${'c'.repeat(64)}_3_120_0_1_${'f'.repeat(32)}`;
 const base = `/nested/jobs/${selected.jobId}/runs/run_1/revisions/revision_1/source-search`;
 
 function response(document: { requestId: string }) {
@@ -57,7 +58,7 @@ it('binds a page to its exact request and opens results on the same pinned snaps
     { ...request, path: 'src' }]) expect(() => bindSourceSearch(page, selected, 'root', changed)).toThrow(ApiClientError);
   expect(() => bindSourceSearch(page, { ...selected, runId: 'other' }, 'root', request)).toThrow(ApiClientError);
   expect(() => bindSourceSearch(page, selected, directory, request)).toThrow(ApiClientError);
-  expect(() => bindSourceSearch(page, selected, 'root', { ...request, cursor: `${'9'.repeat(64)}_0_0_${'f'.repeat(32)}` })).toThrow(ApiClientError);
+  expect(() => bindSourceSearch(page, selected, 'root', { ...request, cursor: `${'9'.repeat(64)}_0_0_0_0_${'f'.repeat(32)}` })).toThrow(ApiClientError);
   const item = page.items[2]!;
   const link = new URL(sourceSearchResultPath('/nested', selected, page, item), 'https://x.invalid');
   expect(link.pathname).toBe(`/nested/jobs/${selected.jobId}/runs/run_1/revisions/revision_1/source-files/${item.fileId}`);
@@ -90,7 +91,7 @@ it('renders complete matches as escaped context with links and no continuation',
 it('distinguishes no matches, skipped coverage and an incomplete empty page', async () => {
   vi.stubGlobal('fetch', vi.fn<typeof fetch>().mockResolvedValueOnce(response(fixture('source-search-no-matches'))));
   const view = mount('?q=absent');
-  const empty = await screen.findByText(/No matches in the 2 searchable files in scope\./u);
+  const empty = await screen.findByText(/No matches in the 1 files that could be searched\./u);
   expect(empty.closest('[data-search-state]')?.getAttribute('data-search-state')).toBe('no-matches');
   expect(screen.getByText(/Coverage is incomplete: 4 files in scope were not searched\./u)).toBeTruthy();
   expect(screen.getByText(/1 not declared viewable/u)).toBeTruthy();
@@ -142,8 +143,43 @@ it('submits an explicit search, withholds late results after navigation and refu
 });
 
 it('accepts every authored positive search fixture through the shared decoder', () => {
-  for (const name of ['source-search-complete', 'source-search-partial', 'source-search-no-matches', 'source-search-incomplete-empty']) {
+  for (const name of ['source-search-complete', 'source-search-partial', 'source-search-no-matches', 'source-search-incomplete-empty', 'source-search-continued-gaps']) {
     const page: SourceSearchPage = decodeResponse(JSON.stringify(fixture(name)), 'sourceSearch').data;
     expect(page.status === 'complete').toBe(page.page.nextCursor === null);
   }
+});
+
+it('accepts long encoded Unicode searches with continuation room and refuses oversized ones in the form', () => {
+  const unicode = { q: 'needle', match: 'text' as const, caseSensitive: true, path: '東'.repeat(230), cursor: null };
+  expect(sourceSearchFits('root', unicode)).toBe(true);
+  // The longest cursor still fits both the document address and the API URL ceiling.
+  const continued = { ...unicode, cursor: `${'c'.repeat(64)}_24999_8388608_24999_24999_${'f'.repeat(32)}` };
+  const address = sourceSearchPath('/nested', selected, directory, continued);
+  expect(sourceSearchSelection(new URL(address, 'https://x.invalid').search).request).toEqual(continued);
+  expect(apiPath('/nested', sourceSearchRoute(selected, directory, continued)).length).toBeLessThanOrEqual(4096);
+  const oversized = { ...unicode, q: '😀'.repeat(128), path: '😀'.repeat(256) };
+  expect(sourceSearchFits('root', oversized)).toBe(false);
+  expect(SOURCE_SEARCH_ENCODED_LIMIT).toBeLessThan(4096);
+  const local = vi.fn<typeof fetch>(); vi.stubGlobal('fetch', local);
+  mount('');
+  fireEvent.input(screen.getByRole('searchbox', { name: /Search text/u }), { target: { value: oversized.q } });
+  fireEvent.input(screen.getByRole('textbox', { name: /Path contains/u }), { target: { value: oversized.path } });
+  fireEvent.click(screen.getByRole('button', { name: 'Search' }));
+  expect(screen.getByRole('alert').textContent).toContain('too long once encoded');
+  expect(local).not.toHaveBeenCalled();
+  fireEvent.input(screen.getByRole('textbox', { name: /Path contains/u }), { target: { value: unicode.path } });
+  fireEvent.input(screen.getByRole('searchbox', { name: /Search text/u }), { target: { value: 'needle' } });
+  fireEvent.click(screen.getByRole('button', { name: 'Search' }));
+  expect(screen.queryByRole('alert')).toBeNull();
+  expect(new URLSearchParams(window.location.search).get('path')).toBe(unicode.path);
+});
+
+it('keeps coverage gaps from earlier pages on a final continued page', async () => {
+  vi.stubGlobal('fetch', vi.fn<typeof fetch>().mockResolvedValueOnce(response(fixture('source-search-continued-gaps'))));
+  mount(`?q=needle&cursor=${cursor}`);
+  const status = await screen.findByText(/Search finished, but 2 of the 3 searchable files could not be read as text/u);
+  expect(status.closest('.source-search-status')?.classList.contains('source-search-status-incomplete')).toBe(true);
+  expect(screen.queryByText(/All 3 searchable files in scope were checked/u)).toBeNull();
+  expect(screen.getByText(/Coverage is incomplete: 2 files in scope were not searched\./u)).toBeTruthy();
+  expect(screen.getByText('This is a continued search page. Earlier matches are on previous pages.')).toBeTruthy();
 });

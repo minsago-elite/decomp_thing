@@ -3819,6 +3819,26 @@
           ],
           "additionalProperties": false
         },
+        "coverageGaps": {
+          "type": "object",
+          "properties": {
+            "unsearchableText": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 25000
+            },
+            "unavailableFiles": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 25000
+            }
+          },
+          "required": [
+            "unsearchableText",
+            "unavailableFiles"
+          ],
+          "additionalProperties": false
+        },
         "limits": {
           "type": "object",
           "properties": {
@@ -3863,6 +3883,7 @@
         "stopReason",
         "scope",
         "progress",
+        "coverageGaps",
         "limits",
         "items",
         "page"

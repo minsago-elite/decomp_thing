@@ -35,6 +35,10 @@
       "unavailableFiles": 0,
       "remainingFiles": 1
     },
+    "coverageGaps": {
+      "unsearchableText": 0,
+      "unavailableFiles": 0
+    },
     "limits": {
       "maxResults": 50,
       "maxScannedBytes": "33554432",

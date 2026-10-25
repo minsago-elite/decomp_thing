@@ -323,6 +323,10 @@ def check_source_search(data: dict) -> None:
             progress["scannedFiles"] + progress["unavailableFiles"] + progress["remainingFiles"] > scope["searchableFiles"] + (0 if complete else 1) or \
             int(progress["scannedBytes"]) > int(limits["maxScannedBytes"]):
         raise ValueError("source search progress exceeds its scope or byte bound")
+    gaps = data["coverageGaps"]
+    if gaps["unsearchableText"] < progress["unsearchableText"] or gaps["unavailableFiles"] < progress["unavailableFiles"] or \
+            gaps["unsearchableText"] + gaps["unavailableFiles"] > scope["searchableFiles"]:
+        raise ValueError("source search cumulative coverage gaps disagree with this page or scope")
     identifier = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
     if query["match"] == "symbol" and identifier.fullmatch(query["text"]) is None:
         raise ValueError("symbol search requires an identifier query")

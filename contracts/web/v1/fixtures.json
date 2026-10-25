@@ -805,6 +805,18 @@
     {
       "file": "fixtures/invalid-source-search-index.json",
       "valid": false
+    },
+    {
+      "file": "fixtures/source-search-continued-gaps.json",
+      "valid": true
+    },
+    {
+      "file": "fixtures/invalid-source-search-gaps-below-page.json",
+      "valid": false
+    },
+    {
+      "file": "fixtures/invalid-source-search-gaps-over-scope.json",
+      "valid": false
     }
   ]
 }

@@ -865,16 +865,23 @@ not-viewable, declared-binary and too-large counts. Each read body must match it
 committed size and SHA-256; a mismatch refuses the page with `409
 SOURCE_REVISION_CHANGED`. Bodies that fail the preview reader's UTF-8/256 KiB line rule
 count as `progress.unsearchableText`; unreadable bodies count as
-`progress.unavailableFiles`. Both counts describe the current page only.
+`progress.unavailableFiles`. Both counts describe the current page only;
+`coverageGaps` carries the same two counts cumulatively from the first page through
+signed continuations, so a final continued page cannot report complete coverage after an
+earlier page skipped a file.
 
 Each page reads at most 32 MiB of bodies (at least one file is always read), stops after
-2,000 ms of elapsed work and returns at most `limit` matches below a 900,000-byte item
+2,000 ms of elapsed work (checked between files and before every 256 lines or 64 KiB of
+lines, so one line of at most 256 KiB is the largest unit between checks) and returns at most `limit` matches below a 900,000-byte item
 ceiling. `status: "partial"` with `stopReason` `result-limit`, `byte-limit` or
 `deadline` always has a signed `nextCursor`; `status: "complete"` has neither and
 `remainingFiles` is zero. `remainingFiles` counts searchable files not completely
 checked, including a file the page stopped inside. No total match count is computed.
 The cursor binds the session, job, run, revision, exact normalized query and limit,
-captured metadata version, file position and byte offset. Another session or query
+captured metadata version, file position, byte offset and cumulative coverage gaps.
+Encoded document queries are limited to 4,096 characters; the SPA refuses a search whose
+encoded text and path filter exceed 3,200 characters, leaving room for any cursor, the limit
+and the API path within the 4,096-character URL ceilings. Another session or query
 returns `400 INVALID_CURSOR`; a changed metadata observation returns `410 CURSOR_EXPIRED`.
 Every page performs a full revision source capture before and after its scan and
 compares their metadata versions, then rechecks the persisted candidate.
