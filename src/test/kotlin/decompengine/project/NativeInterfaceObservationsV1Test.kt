@@ -1,6 +1,7 @@
 package decompengine.project
 
 import decompengine.oracle.core.OracleJson
+import decompengine.oracle.structural.CanonicalProgramModelStreaming
 import io.github.optimumcode.json.schema.JsonSchema
 import java.io.ByteArrayInputStream
 import java.security.MessageDigest
@@ -191,6 +192,20 @@ class NativeInterfaceObservationsV1Test {
         assertFails { assessBytes(bytes.copyOf().apply { this[lastIndex] = 'x'.code.toByte() }, manifest) }
         assertFails { assessBytes(bytes, manifest, model(listOf("replacement" to 0x10uL))) }
         assertFails { assessBytes(bytes, canonical(JsonObject(OracleJson.parseCanonical(manifest).jsonObject + ("authority" to JsonPrimitive(true))))) }
+    }
+
+    @Test
+    fun `paired full model accepts a prototype beyond historical scoring limits within explicit byte bounds`() {
+        val expandedModel = RecoveredProgramModel(inputSha256 = INPUT, functions = listOf(
+            RecoveredFunction("large-prototype", "same-display-name", 0x10uL, "p".repeat(1024 * 1024 + 1)),
+        )).toJson().toByteArray()
+        assertFails { CanonicalProgramModelStreaming.readCanonical(expandedModel) }
+        val result = assess(fixture(expandedModel), expandedModel)
+        assertEquals("matched", result.modelFunctions.single().state)
+        assertEquals(expandedModel.size.toLong(), result.bindings.programModelBytes)
+        assertEquals(sha(expandedModel), result.bindings.programModelSha256)
+        assertFails { assess(fixture(expandedModel), expandedModel,
+            NativeInterfaceObservationLimitsV1(maximumModelBytes = expandedModel.size - 1)) }
     }
 
     @Test

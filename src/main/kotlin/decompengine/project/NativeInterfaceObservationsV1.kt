@@ -134,8 +134,21 @@ object NativeInterfaceObservationsV1 {
         val manifest = NativeInterfaceManifestV1(count(manifestNode, "bytes"), digest(manifestNode, "collectorSha256"),
             digest(manifestNode, "inputSha256"), digest(manifestNode, "programModelSha256"), digest(manifestNode, "sha256"))
         require(manifest.bytes in 1..(limits.maximumCombinedBytes - manifestBytes.size)) { "interface output exceeds its combined byte bound" }
+        // The paired full exporter already supports 64 MiB function records and one million
+        // references per record. Do not accidentally apply the historical scorer's smaller
+        // prototype/text/reference defaults to this observation sibling. These remain parse
+        // bounds, never evidence that a caller-authored model passed the full capture boundary.
+        val modelScalarBound = minOf(64 * 1024 * 1024, limits.maximumModelBytes)
         val model = CanonicalProgramModelStreaming.readCanonical(programModelBytes, CanonicalProgramModelStreamingLimits(
             maximumInputBytes = limits.maximumModelBytes, maximumFunctions = limits.maximumFunctions,
+            maximumGlobals = 131_072, maximumTypes = 131_072,
+            maximumReferencesPerFunction = minOf(1_000_000, limits.maximumModelBytes),
+            maximumIdentifierCodePoints = modelScalarBound,
+            maximumPrototypeCodePoints = modelScalarBound,
+            maximumTextCodePoints = modelScalarBound,
+            maximumTotalStringBytes = limits.maximumModelBytes.toLong(),
+            maximumNodes = limits.maximumModelBytes.toLong(),
+            maximumTokens = limits.maximumModelBytes.toLong(),
         ))
         require(model.sha256 == manifest.programModelSha256 && model.model.inputSha256 == manifest.inputSha256) {
             "interface manifest does not bind the exact model and input"
