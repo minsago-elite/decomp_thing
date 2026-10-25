@@ -15,7 +15,6 @@ import java.nio.file.Files
 import java.nio.file.LinkOption.NOFOLLOW_LINKS
 import java.nio.file.Path
 import java.nio.file.StandardCopyOption
-import java.nio.file.StandardOpenOption.APPEND
 import java.nio.file.StandardOpenOption.CREATE
 import java.nio.file.StandardOpenOption.READ
 import java.nio.file.StandardOpenOption.WRITE
@@ -191,6 +190,8 @@ internal class WebAuditLog(
     private val clock: Clock = Clock.systemUTC(),
     private val segmentEntries: Int = DEFAULT_SEGMENT_ENTRIES,
     private val prepareStorage: () -> Unit = {},
+    // Test seam for append faults; production writes the whole buffer.
+    private val append: (FileChannel, ByteBuffer) -> Unit = { channel, buffer -> while (buffer.hasRemaining()) channel.write(buffer) },
 ) {
     init { require(segmentEntries in 1..65_536) }
     private val directory = root.toAbsolutePath().normalize().resolve(DIRECTORY)
@@ -219,10 +220,17 @@ internal class WebAuditLog(
             val line = (buildJsonObject { put("schemaVersion", 1); put("entry", entry.toJson()) }.toString() + "\n")
                 .toByteArray(Charsets.UTF_8)
             check(line.size <= MAXIMUM_LINE_BYTES)
-            FileChannel.open(current, CREATE, WRITE, APPEND, NOFOLLOW_LINKS).use { channel ->
-                val buffer = ByteBuffer.wrap(line)
-                while (buffer.hasRemaining()) channel.write(buffer)
-                channel.force(true)
+            FileChannel.open(current, CREATE, WRITE, NOFOLLOW_LINKS).use { channel ->
+                val boundary = channel.size()
+                try {
+                    channel.position(boundary)
+                    append(channel, ByteBuffer.wrap(line))
+                    channel.force(true)
+                } catch (failure: Exception) {
+                    // Restore the last complete record so a later append never extends a torn line.
+                    try { channel.truncate(boundary); channel.force(true) } catch (cleanup: Exception) { failure.addSuppressed(cleanup) }
+                    throw failure
+                }
             }
             nextSequence++
             currentEntries++
@@ -230,6 +238,8 @@ internal class WebAuditLog(
         } catch (failure: Exception) {
             if (failure is InterruptedException) Thread.currentThread().interrupt()
             unrecorded++
+            // Reopen before the next write: open() discards any torn tail a failed truncation left behind.
+            opened = false
             null
         }
     }

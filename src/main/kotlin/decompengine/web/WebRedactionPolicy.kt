@@ -41,18 +41,20 @@ internal class WebRedactionPolicy private constructor(
     private val diagnosticRedactor: ProgressRedactor?,
 ) {
     /** Replace every redactable span; stable when applied twice. */
-    fun text(value: String): String {
+    fun text(value: String): String = text(value, paths = true)
+
+    private fun text(value: String, paths: Boolean): String {
         if (value.isEmpty()) return value
         if (value.length > MAXIMUM_TEXT_CHARACTERS) return OVERSIZED_MARK
         var current = value
         // Replacement can synthesize a literal ("fooX" with literals "foo" and "[redacted]X"); repeat
         // until stable and withhold anything that still contains a configured value.
         repeat(MAXIMUM_PASSES) {
-            val next = redactOnce(current)
+            val next = redactOnce(current, paths)
             if (next == current) return if (leaksLiteral(next)) SECRET_MARK else next
             current = next
         }
-        return if (leaksLiteral(current) || redactOnce(current) != current) SECRET_MARK else current
+        return if (leaksLiteral(current) || redactOnce(current, paths) != current) SECRET_MARK else current
     }
 
     /** Recursively redact string values. Object keys are fixed contract vocabulary and are kept. */
@@ -70,9 +72,13 @@ internal class WebRedactionPolicy private constructor(
             val latin = String(bytes, Charsets.ISO_8859_1)
             return if (leaksLiteral(latin)) SECRET_MARK.toByteArray() else bytes
         }
-        if (text(text) == text) return bytes
+        // Decide on decoded JSON values: escaping can hide a literal (quotes, backslashes) or a path from the raw text.
         val parsed = try { Json.parseToJsonElement(text) } catch (_: Exception) { null }
-        return (parsed?.let { json(it).toString() } ?: text(text)).toByteArray(Charsets.UTF_8)
+        if (parsed != null) {
+            val safe = json(parsed)
+            return if (safe == parsed && !leaksLiteral(text)) bytes else safe.toString().toByteArray(Charsets.UTF_8)
+        }
+        return if (text(text) == text) bytes else text(text).toByteArray(Charsets.UTF_8)
     }
 
     /** Persisted prose: every configured sensitive value (including short ones) plus this policy. */
@@ -86,26 +92,30 @@ internal class WebRedactionPolicy private constructor(
 
     private fun leaksLiteral(value: String): Boolean = literals.any { value.contains(it) }
 
-    private fun json(value: JsonElement, opaque: Boolean): JsonElement = when (value) {
-        is JsonObject -> JsonObject(value.mapValues { (key, child) -> json(child, opaqueKey(key)) })
-        is JsonArray -> JsonArray(value.map { json(it, opaque) })
+    private fun json(value: JsonElement, opaque: Boolean, routing: Boolean = false): JsonElement = when (value) {
+        is JsonObject -> JsonObject(value.mapValues { (key, child) -> json(child, opaqueKey(key), routingKey(key)) })
+        is JsonArray -> JsonArray(value.map { json(it, opaque, routing) })
         is JsonNull -> value
         is JsonPrimitive -> if (!value.isString) value else {
             val content = value.content
             val safe = if (opaque && OPAQUE_SYNTAX.matches(content)) {
                 if (leaksLiteral(content)) SECRET_MARK else content
+            } else if (routing && ROUTE_SYNTAX.matches(content)) {
+                // Public URL routes (a base path such as "/home/" or an API href) are not host paths.
+                text(content, paths = false)
             } else text(content)
             if (safe == content) value else JsonPrimitive(safe)
         }
     }
 
-    private fun redactOnce(source: String): String {
+    private fun redactOnce(source: String, paths: Boolean = true): String {
         var result = source
         for (literal in literals) if (result.contains(literal)) result = result.replace(literal, SECRET_MARK)
         result = URL_USER_INFO.replace(result) { "${it.groupValues[1]}$SECRET_MARK@" }
         for ((pattern, keepPrefix) in CREDENTIAL_PATTERNS) {
             result = pattern.replace(result) { if (keepPrefix) it.groupValues[1] + SECRET_MARK else SECRET_MARK }
         }
+        if (!paths) return result
         for (root in privateRoots) result = root.replace(result, PATH_MARK)
         result = GENERIC_PRIVATE_PATH.replace(result, PATH_MARK)
         return result
@@ -127,6 +137,8 @@ internal class WebRedactionPolicy private constructor(
             "(?i)(?:^|_)(?:API|AUTH|AUTHORIZATION|TOKEN|SECRET|PASS|PASSWORD|PASSWD|PASSPHRASE|CREDENTIAL|CREDENTIALS|" +
                 "COOKIE|PRIVATE|KEY|PAT|DSN|WEBHOOK|SIGNING|BEARER)(?:_|$)|(?i)(?:APIKEY|ACCESSKEY|SECRETKEY)")
         private val OPAQUE_SYNTAX = Regex("[A-Za-z0-9_.:+=-]{1,512}")
+        /** A same-origin URL path (optionally with a query): what basePath and *Href fields carry. */
+        private val ROUTE_SYNTAX = Regex("/(?:[A-Za-z0-9._~!$&'()*+,;=:@%-]+/?)*(?:\\?[A-Za-z0-9._~!$&'()*+,;=:@%/?-]*)?")
         private val URL_USER_INFO = Regex("(?i)\\b([a-z][a-z0-9+.-]{1,31}://)[^/\\s:@\"'<>]{1,256}:[^/\\s@\"'<>]{1,512}@")
         private val CREDENTIAL_PATTERNS = listOf(
             Regex("(?i)\\b((?:proxy-)?authorization\\s*[:=]\\s*)(?:basic|bearer|token|digest)\\s+[^\\s,;\"'<>]+") to true,
@@ -197,6 +209,9 @@ internal class WebRedactionPolicy private constructor(
 
 private val opaqueKeySuffixes = listOf("Id", "Ids", "Sha256", "sha256", "Digest", "digest", "Version", "version",
     "Cursor", "cursor", "Token", "token", "etag", "ETag", "Key")
+
+/** Public same-origin routing fields; their URL paths are server routes, never host filesystem paths. */
+private fun routingKey(key: String): Boolean = key == "basePath" || key.endsWith("Href")
 
 /** Closed-syntax protocol fields whose exact bytes are load-bearing. */
 private fun opaqueKey(key: String): Boolean = key == "id" || key == "version" || opaqueKeySuffixes.any(key::endsWith)

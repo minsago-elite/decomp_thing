@@ -147,6 +147,27 @@ class WebSensitiveBoundaryTest {
         assertTrue(diagnostics.isNotEmpty() && diagnostics.all { it.startsWith("web-http-failure request_id=") || it.startsWith("web-capacity-summary ") })
     }
 
+    @Test fun `a base path that looks like a host directory survives bootstrap redaction`() {
+        val root = Files.createTempDirectory(Files.createDirectories(Path.of("build/test-tmp/web-sensitive").toAbsolutePath()), "base-")
+        val server = UploadServer("127.0.0.1", 0, root, JobAnalyzer { _, _ -> error("unexpected") },
+            JobReconstructor { _, _ -> error("unexpected") }, uiMode = WebUiMode.SPA, basePath = "/home/")
+        try {
+            server.start()
+            val origin = "http://127.0.0.1:${server.serverPort}"
+            val token = server.issueBrowserBootstrap().token
+            val login = client.send(HttpRequest.newBuilder(URI("$origin/home/api/v1/session")).header("Origin", origin)
+                .header("Content-Type", "application/json").header("Accept", "application/json")
+                .POST(HttpRequest.BodyPublishers.ofString("{\"token\":\"$token\"}")).build(), HttpResponse.BodyHandlers.ofString())
+            assertEquals(200, login.statusCode(), login.body())
+            val cookie = login.headers().firstValue("Set-Cookie").orElseThrow().substringBefore(';')
+            val bootstrap = client.send(HttpRequest.newBuilder(URI("$origin/home/api/v1/bootstrap")).header("Cookie", cookie)
+                .header("Accept", "application/json").build(), HttpResponse.BodyHandlers.ofString())
+            assertEquals(200, bootstrap.statusCode())
+            assertEquals("/home/", Json.parseToJsonElement(bootstrap.body()).jsonObject.getValue("data").jsonObject
+                .getValue("basePath").jsonPrimitive.content)
+        } finally { server.stop(); root.toFile().deleteRecursively() }
+    }
+
     @Test fun `live and replayed event representations apply the same listener policy`() {
         val http = HttpServer.create(InetSocketAddress("127.0.0.1", 0), 0)
         val origin = "http://127.0.0.1:${http.address.port}"

@@ -97,6 +97,36 @@ class WebRedactionPolicyTest {
         assertContentEquals(binary, policy.document(binary))
     }
 
+    @Test fun `escaped JSON values are judged after decoding, never by their serialized spelling`() {
+        val quoted = WebRedactionPolicy.create(mapOf("DECOMP_TEST_TOKEN" to "ab\"cd\\ef0123"), emptyList(), emptyList())
+        val document = buildJsonObject {
+            put("note", "token ab\"cd\\ef0123 here")
+            put("location", "C:\\Users\\someone\\report.json")
+        }.toString().toByteArray()
+        val safe = Json.parseToJsonElement(quoted.document(document).decodeToString()).jsonObject
+        assertEquals("token [redacted] here", safe.getValue("note").jsonPrimitive.content)
+        assertEquals("[private-path]", safe.getValue("location").jsonPrimitive.content)
+    }
+
+    @Test fun `public routing fields under a private-looking base path are preserved`() {
+        val bootstrap = buildJsonObject {
+            put("basePath", "/home/")
+            put("snapshotHref", "/home/api/v1/jobs/abc/runs/r/snapshot")
+            put("contentHref", "/tmp/api/v1/jobs/abc/artifacts/x/content?limit=1")
+            put("message", "failed at /home/someone/private.txt")
+            put("nextHref", "/home/someone/private.txt token=abcdef")
+        }
+        val safe = policy.json(bootstrap).jsonObject
+        assertEquals("/home/", safe.getValue("basePath").jsonPrimitive.content)
+        assertEquals("/home/api/v1/jobs/abc/runs/r/snapshot", safe.getValue("snapshotHref").jsonPrimitive.content)
+        assertEquals("/tmp/api/v1/jobs/abc/artifacts/x/content?limit=1", safe.getValue("contentHref").jsonPrimitive.content)
+        assertEquals("failed at [private-path]", safe.getValue("message").jsonPrimitive.content)
+        // Text outside URL-route syntax is not exempt, even under a routing key.
+        assertEquals("[private-path] token=[redacted]", safe.getValue("nextHref").jsonPrimitive.content)
+        // Credential literals are never exempt.
+        assertFalse(policy.json(buildJsonObject { put("basePath", "/w/$canary/") }).toString().contains(canary))
+    }
+
     @Test fun `persisted diagnostics also redact short configured values before storage`() {
         val diagnostic = WebRedactionPolicy.create(emptyMap(), listOf("s3cr"), emptyList())
         assertEquals("value [redacted] at [private-path]", diagnostic.diagnostic("value s3cr at /home/x/y"))
