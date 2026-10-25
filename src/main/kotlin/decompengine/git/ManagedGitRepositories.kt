@@ -813,8 +813,10 @@ class ManagedGitRepositories(
             GitOperationAction.WORKTREE_REMOVE -> {
                 if (located.primary) GitRefOperations.refuse("WORKTREE_PRIMARY", "The primary work tree cannot be removed.")
                 requireNoLease(located)
-                if (relevant(observation).isNotEmpty()) GitRefOperations.refuse("WORKTREE_DIRTY",
-                    "The work tree has uncommitted or untracked files. Commit or move them first; nothing is force-removed.")
+                // Ignored files count too: `git worktree remove` deletes them without --force,
+                // and they are often experiment output. An incomplete status is never clean.
+                if (observation.status.entries.isNotEmpty() || !observation.status.complete) GitRefOperations.refuse("WORKTREE_DIRTY",
+                    "The work tree has uncommitted, untracked or ignored local files. Commit or move them first; nothing is force-removed.")
                 val head = observation.head
                 if (head.state == GitHeadState.DETACHED) {
                     val unmerged = GitRefOperations.unmergedCount(runner, located.commonDir, checkNotNull(head.objectId), null)

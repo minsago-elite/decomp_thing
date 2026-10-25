@@ -847,7 +847,7 @@ staging and committing.
 | `git.branch.delete` | `refId`, `expectedObjectId` | `update-ref -d` with the expected tip. Refused with `BRANCH_CURRENT` when any work tree has it checked out, `REF_CHANGED` when it moved, or `BRANCH_UNMERGED` (with a count) when commits are reachable only from it. Never forced. |
 | `git.tag` | `name`, `targetObjectId` | A lightweight tag with no timestamps, created only if absent (`409 TAG_EXISTS`); existing tags are never overwritten |
 | `git.worktree.add` | `startObjectId`, `branchName` or null, `runId` or null | `git worktree add` under the repository's private `worktrees/<worktreeId>`. At most four linked work trees, a checkout-size bound, and an optional owning attempt that must belong to the job. The new identity is the operation's `worktreeId`. |
-| `git.worktree.remove` | none | Removes a linked work tree. Refused with `WORKTREE_PRIMARY`, `ACTIVE_RUN` while its owner runs, `WORKTREE_DIRTY` for any uncommitted or untracked file, or `WORKTREE_UNMERGED` for detached commits that no branch or tag reaches. Uses `git worktree remove` without `--force`. |
+| `git.worktree.remove` | none | Removes a linked work tree. Refused with `WORKTREE_PRIMARY`, `ACTIVE_RUN` while its owner runs, `WORKTREE_DIRTY` for any uncommitted, untracked or ignored local file (Git would delete ignored files), or `WORKTREE_UNMERGED` for detached commits that no branch or tag reaches. Uses `git worktree remove` without `--force`. |
 
 Leases: the primary work tree is leased to every active workflow attempt of the job, and a linked
 work tree to the attempt that owns it. While a lease is held, switch and removal answer `409
