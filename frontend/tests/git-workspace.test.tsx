@@ -38,6 +38,7 @@ const operation = (state: string, action = 'git.stage') => ({ data: { operationI
 let entries: unknown[];
 let historyPages: Record<string, { entries: unknown[]; nextCursor: string | null }>;
 let listing: unknown[];
+let paged: boolean;
 
 function status(dirty: boolean) {
   return { repositoryId, worktreeId, repositoryVersion: 'repo_v1', worktreeVersion: 'tree_v1', headState: 'attached', headObjectId: head,
@@ -50,7 +51,14 @@ function serve(kind: string, path: string): Promise<unknown> {
   const [route = '', query = ''] = path.split('?');
   const data = (() => {
     if (route === `/jobs/${jobId}/repositories`) return { jobId, repositories: listing, operations: [] };
-    if (route === `${base}/status`) return status(entries.length > 0);
+    if (route === `${base}/status`) {
+      const cursor = new URLSearchParams(query).get('cursor');
+      const all = status(entries.length > 0);
+      if (!paged) return all;
+      // Second page holds the remaining entries; the first page names its anchored cursor.
+      return cursor === 'status_page_2' ? { ...all, entries: entries.slice(1), nextCursor: null }
+        : { ...all, entries: entries.slice(0, 1), nextCursor: 'status_page_2' };
+    }
     if (route === `${base}/worktrees`) return { repositoryId, worktrees: [
       { worktreeId, primary: true, ownerRunId: null, worktreeVersion: 'tree_v1', headState: 'attached', headObjectId: head, headRefName: 'refs/heads/main', dirty: entries.length > 0 },
       { worktreeId: linkedId, primary: false, ownerRunId: 'run_2', worktreeVersion: 'tree_v2', headState: 'detached', headObjectId: older, headRefName: null, dirty: false },
@@ -89,6 +97,7 @@ beforeEach(() => {
   transport.get.mockReset(); transport.post.mockReset();
   transport.get.mockImplementation(serve);
   listing = [repository];
+  paged = false;
   entries = [entry('file_s', 'src/util.c', 'modified', 'modified'), entry('file_u', 'src/new.c', 'none', 'none', true)];
   historyPages = { first: { entries: [commitSummary(head, 'Work in progress', false)], nextCursor: 'page2' },
     page2: { entries: [commitSummary(older, 'Record candidate', true)], nextCursor: null } };
@@ -202,4 +211,19 @@ it('reports a refused change without retrying it', async () => {
   expect(await screen.findByText(/The server refused Unstage selected/)).toBeTruthy();
   expect(transport.post).toHaveBeenCalledOnce();
   expect(transport.post.mock.calls[0]?.[3]).toMatchObject({ action: 'git.unstage', selectedFileIds: ['file_s'] });
+});
+
+it('reads every status page before review and keeps the commit message when the commit fails', async () => {
+  paged = true;
+  entries = [entry('file_s', 'src/util.c', 'modified', 'none'), entry('file_t', 'src/two.c', 'added', 'none')];
+  transport.post.mockResolvedValueOnce({ data: { ...operation('failed', 'git.commit').data, message: 'The staged set changed.' } });
+  mount();
+  const review = await screen.findByRole('list', { name: /Exactly these staged files/ });
+  expect(within(review).getAllByRole('listitem').map(item => item.textContent)).toEqual(['src/util.c modified', 'src/two.c added']);
+  expect(transport.get).toHaveBeenCalledWith('gitStatus', `${base}/status?limit=200&cursor=status_page_2`, expect.anything());
+  fireEvent.input(screen.getByLabelText('Commit message'), { target: { value: 'Keep this draft' } });
+  fireEvent.click(screen.getByRole('button', { name: 'Commit staged files' }));
+  expect(await screen.findByText(/Commit staged files did not complete/)).toBeTruthy();
+  expect(transport.post.mock.calls[0]?.[3]).toMatchObject({ selectedFileIds: ['file_s', 'file_t'] });
+  expect(screen.getByLabelText('Commit message')).toHaveProperty('value', 'Keep this draft');
 });

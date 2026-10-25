@@ -18,6 +18,8 @@ function sleep(milliseconds: number, signal: AbortSignal) {
   });
 }
 
+const MAX_STATUS_PAGES = 10;
+
 const terminal = new Set<Operation['state']>(['completed', 'failed', 'cancelled', 'interrupted', 'recovery-required']);
 
 interface Loaded {
@@ -80,15 +82,15 @@ export function GitWorkspace({ jobId, basePath, session, capabilities, pollInter
         const prefix = `/jobs/${jobId}/repositories/${found.repositoryId}`;
         const suffix = worktree ? `?worktree=${worktree}` : '';
         const [status, worktrees, refs, history] = await Promise.all([
-          client.get('gitStatus', `${prefix}/status${suffix ? `${suffix}&limit=200` : '?limit=200'}`, { signal: controller.signal }),
+          readStatus(prefix, controller.signal),
           client.get('gitWorktrees', `${prefix}/worktrees`, { signal: controller.signal }),
           client.get('gitRefs', `${prefix}/refs?limit=200`, { signal: controller.signal }),
           client.get('gitHistory', `${prefix}/history${suffix ? `${suffix}&limit=20` : '?limit=20'}`, { signal: controller.signal }),
         ]);
         if (controller.signal.aborted) return;
-        setLoaded({ listing, status: status.data, worktrees: worktrees.data, refs: refs.data, history: history.data });
+        setLoaded({ listing, status, worktrees: worktrees.data, refs: refs.data, history: history.data });
         // A selection survives a refresh only while the same file identity is still listed.
-        setSelected(previous => new Set([...previous].filter(key => status.data.entries.some(entry => key.endsWith(`:${entry.fileId}`)))));
+        setSelected(previous => new Set([...previous].filter(key => status.entries.some(entry => key.endsWith(`:${entry.fileId}`)))));
       } catch (failure: unknown) {
         if (!controller.signal.aborted) setError(withApiFailureReference(copy.readFailed, failure));
       }
@@ -97,6 +99,24 @@ export function GitWorkspace({ jobId, basePath, session, capabilities, pollInter
   }, [client, jobId, supported, worktree, refresh]);
 
   useEffect(() => () => { active.current?.abort(); }, []);
+
+  /**
+   * Every status page under its anchored cursor, so review and selection always see the whole
+   * staged set. A status that needs more than the page budget is presented as incomplete, which
+   * disables selection and committing instead of reviewing a partial set.
+   */
+  async function readStatus(prefix: string, signal: AbortSignal): Promise<GitStatus> {
+    const scope = worktree ? `worktree=${worktree}&` : '';
+    let page = (await client.get('gitStatus', `${prefix}/status?${scope}limit=200`, { signal })).data;
+    const entries = [...page.entries];
+    let pages = 1;
+    while (page.nextCursor && pages < MAX_STATUS_PAGES) {
+      page = (await client.get('gitStatus', `${prefix}/status?${scope}limit=200&cursor=${page.nextCursor}`, { signal })).data;
+      entries.push(...page.entries);
+      pages++;
+    }
+    return { ...page, entries, complete: page.complete && page.nextCursor === null, nextCursor: null };
+  }
 
   const statusData = loaded?.status ?? null;
   const groups = useMemo(() => {
@@ -115,11 +135,12 @@ export function GitWorkspace({ jobId, basePath, session, capabilities, pollInter
       expectedHeadObjectId: statusData.headObjectId, expectedRefId: null, expectedRefObjectId: null };
   }
 
-  async function act<Q extends Mutation>(kind: Q, label: string, body: (guarded: NonNullable<ReturnType<typeof guards>>) => RequestData<Q>) {
+  /** Resolves true only when the durable operation completed; drafts are kept otherwise. */
+  async function act<Q extends Mutation>(kind: Q, label: string, body: (guarded: NonNullable<ReturnType<typeof guards>>) => RequestData<Q>): Promise<boolean> {
     const guarded = guards();
-    if (!base || !guarded || !statusData || active.current) return;
+    if (!base || !guarded || !statusData || active.current) return false;
     const csrfToken = session.csrf();
-    if (!csrfToken) { setStatus(copy.reconnect); return; }
+    if (!csrfToken) { setStatus(copy.reconnect); return false; }
     const controller = new AbortController(); active.current = controller;
     setBusy(true); setStatus(textMessage(copy.running, { action: label }));
     try {
@@ -130,9 +151,11 @@ export function GitWorkspace({ jobId, basePath, session, capabilities, pollInter
         operation = (await client.get('operation', `${base}/operations/${operation.operationId}`, { signal: controller.signal })).data;
       }
       setStatus(textMessage(operation.state === 'completed' ? copy.completed : copy.failed, { action: label, message: operation.message ?? operation.state }));
-      if (operation.state === 'completed') { setSelected(new Set()); setDiff(null); }
+      if (operation.state === 'completed') { setSelected(new Set()); setDiff(null); return true; }
+      return false;
     } catch (failure: unknown) {
       if (!controller.signal.aborted) setStatus(withApiFailureReference(textMessage(copy.refused, { action: label }), failure));
+      return false;
     } finally {
       if (active.current === controller) { active.current = null; setBusy(false); setRefresh(value => value + 1); }
     }
@@ -334,16 +357,16 @@ function ImportForm({ disabled, onImport }: { disabled: boolean; onImport: (name
   </form>;
 }
 
-function NameForm({ label, action, disabled, onSubmit }: { label: string; action: string; disabled: boolean; onSubmit: (name: string) => Promise<void> }) {
+function NameForm({ label, action, disabled, onSubmit }: { label: string; action: string; disabled: boolean; onSubmit: (name: string) => Promise<boolean> }) {
   const [name, setName] = useState('');
-  return <form onSubmit={event => { event.preventDefault(); if (name.trim()) void onSubmit(name.trim()).then(() => { setName(''); }); }}>
+  return <form onSubmit={event => { event.preventDefault(); if (name.trim()) void onSubmit(name.trim()).then(done => { if (done) setName(''); }); }}>
     <label>{label} <input value={name} maxLength={200} onInput={event => { setName(event.currentTarget.value); }} required /></label>
     <button type="submit" disabled={disabled}>{action}</button>
   </form>;
 }
 
 function CommitForm({ staged, parent, disabled, onCommit }: {
-  staged: GitStatusEntry[]; parent: string | null; disabled: boolean; onCommit: (message: string) => Promise<void>;
+  staged: GitStatusEntry[]; parent: string | null; disabled: boolean; onCommit: (message: string) => Promise<boolean>;
 }) {
   const [message, setMessage] = useState('');
   return <section aria-labelledby="git-commit-form-title">
@@ -352,7 +375,7 @@ function CommitForm({ staged, parent, disabled, onCommit }: {
       <p>{copy.commitFiles}</p>
       <ul aria-label={copy.commitFiles}>{staged.map(entry => <li key={entry.fileId}><code>{entry.path}</code> {entry.staged}</li>)}</ul>
       <p>{parent ? textMessage(copy.parent, { object: parent }) : copy.noParent}</p>
-      <form onSubmit={event => { event.preventDefault(); if (message.trim()) void onCommit(message).then(() => { setMessage(''); }); }}>
+      <form onSubmit={event => { event.preventDefault(); if (message.trim()) void onCommit(message).then(done => { if (done) setMessage(''); }); }}>
         <label for="git-commit-message">{copy.message}</label>
         <textarea id="git-commit-message" value={message} maxLength={8192} required onInput={event => { setMessage(event.currentTarget.value); }} />
         <button type="submit" disabled={disabled}>{copy.commitAction}</button>
