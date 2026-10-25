@@ -288,7 +288,8 @@ internal class ValidateWorkflowAdapter(
     override val workflow = WorkflowKind.VALIDATE
     override val limits = WebWorkflowDefaults.VALIDATE
     override val limitsAdjustable = true
-    override val requirements = setOf(WebWorkflowRequirement.SANDBOX)
+    // The validation-only session uses the same contained validator as repair, so it shares its qualification gate.
+    override val requirements = setOf(WebWorkflowRequirement.SANDBOX, WebWorkflowRequirement.REPAIR_VALIDATOR)
     override val input = DurableWebWorkflowInput.RECORDED_REQUIRED
     override val launch = DurableWebWorkflowLaunch(DurableWebWorkflowMode.TOOLS, executesBinary = true, contactsAgent = false,
         requiredTools = listOf("sandbox", "c-toolchain"))

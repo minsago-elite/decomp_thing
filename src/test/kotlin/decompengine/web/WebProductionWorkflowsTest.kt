@@ -675,6 +675,13 @@ class WebProductionWorkflowsTest {
             .associateBy { it.getValue("id").jsonPrimitive.content }
         assertEquals("supported", capabilities.getValue("workflow-validate-tools").getValue("state").jsonPrimitive.content)
         assertFalse("workflow-validate" in capabilities, "a registered validation is still reported as unimplemented")
+        // Validation runs the same contained validator as repair, so it is unavailable until that validator is qualified.
+        val unqualified = harnessPrerequisites(ACP_PROVENANCE).copy(repairValidator = WebPrerequisite(false, "REPAIR_VALIDATOR_UNQUALIFIED",
+            "The contained repair validator is not yet qualified for production use, so repair cannot run on this server."))
+        val closed = webWorkflowCapabilities(adapters, WebHarnessReadiness("supported", null, "ready", prerequisites = unqualified))
+            .single { it.getValue("id").jsonPrimitive.content == "workflow-validate-tools" }
+        assertEquals("unavailable" to "REPAIR_VALIDATOR_UNQUALIFIED",
+            closed.getValue("state").jsonPrimitive.content to closed.getValue("reasonCode").jsonPrimitive.content)
         service(store, adapters).use { service ->
             service.initializeExistingStorage()
             fun start(request: NewWorkflowAttempt, key: String) = service.requestDurableStart(job.id, version(service, job.id), request, key)
@@ -697,6 +704,9 @@ class WebProductionWorkflowsTest {
                 start(NewWorkflowAttempt(WorkflowKind.EXPLORE, WebWorkflowDefaults.EXPLORE, cases = reviewed), "explore_with_cases_01")
             }
             assertCode("INPUT_REVISION_REQUIRED") { start(request.copy(inputRevisionId = null, cases = reviewed), "validate_without_input") }
+            assertCode("WORKFLOW_PREREQUISITE_UNAVAILABLE") {
+                service.requestDurableStart(job.id, version(service, job.id), request.copy(cases = reviewed), "validate_unqualified_01", unqualified)
+            }
             assertEquals(before, engines.calls.get(), "a refused validation executed an engine")
             val validated = start(request.copy(cases = reviewed), "validate_revision_a_01").attempt
             assertEquals(WorkflowRunState.COMPLETED, validated.state); assertEquals(revisionA, validated.inputRevisionId)

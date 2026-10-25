@@ -526,7 +526,7 @@ evidence-only). The agent reconstructor runs with that recorded budget.
 ### Validation requests
 
 The `validate` workflow is registered as `workflow-validate-tools` (mode `tools`, input
-`recorded-required`, sandbox and C toolchain, adjustable limits, no agent). It copies the
+`recorded-required`, sandbox, C toolchain and the qualified contained repair validator (`REPAIR_VALIDATOR_UNQUALIFIED` until it is), adjustable limits, no agent). It copies the
 selected revision into the attempt and runs the secure repair gate's validation-only session
 (`SecureRepairRuntime.openValidation`): the same registered profile, strict contained build and
 behavior validation, retained corpus and acceptance predicate as repair, with no repair
