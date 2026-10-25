@@ -21,6 +21,7 @@ import java.util.*;
 public final class ExportNativeInterfacesV1 extends GhidraScript {
     private static final long MAXIMUM_BYTES = 1024L * 1024 * 1024;
     private static final long MAXIMUM_MODEL_BYTES = 512L * 1024 * 1024;
+    private static final int MAXIMUM_MANIFEST_BYTES = 65536;
     private static final int MAXIMUM_FUNCTIONS = 131072;
     private static final int MAXIMUM_PARAMETERS_PER_FUNCTION = 1024;
     private static final long MAXIMUM_PARAMETERS = 1000000;
@@ -32,21 +33,39 @@ public final class ExportNativeInterfacesV1 extends GhidraScript {
     private static final String POLICY = "ghidra-native-interface-observations-v1";
     private final Program program;
     private final TaskMonitor task;
+    private final StagingBudget stagingBudget;
     private final List<AddressSpace> spaces = new ArrayList<>();
     private final Map<AddressSpace, Integer> spaceIndices = new HashMap<>();
     private final Totals totals = new Totals();
     private BoundedOutput typeOutput;
     private long functionCount;
 
-    public ExportNativeInterfacesV1() { program = null; task = null; }
+    public ExportNativeInterfacesV1() { program = null; task = null; stagingBudget = null; }
     private ExportNativeInterfacesV1(Program program, TaskMonitor task) {
+        this(program, task, null);
+    }
+    private ExportNativeInterfacesV1(Program program, TaskMonitor task, StagingBudget stagingBudget) {
         this.program = Objects.requireNonNull(program);
         this.task = Objects.requireNonNull(task);
+        this.stagingBudget = stagingBudget;
     }
     @Override protected void run() throws Exception { collect(currentProgram, monitor, getScriptArgs()); }
     /** Tests invoke this same compiled collector in a fresh bundled JVM. */
     public static void collect(Program program, TaskMonitor monitor, String[] arguments) throws Exception {
         new ExportNativeInterfacesV1(program, monitor).export(arguments);
+    }
+
+    /**
+     * Additive enclosing-operation limit. Existing collect callers keep their original policy.
+     * The caller has already charged retained inputs; this allowance covers every output byte
+     * and the simultaneously live type spool, with 64 KiB reserved for the committing manifest.
+     * Returns the peak charged bytes (including that reservation), not filesystem block usage.
+     */
+    public static long collectWithStagingBudget(Program program, TaskMonitor monitor, String[] arguments,
+            long maximumStagingBytes) throws Exception {
+        StagingBudget budget = new StagingBudget(maximumStagingBytes);
+        new ExportNativeInterfacesV1(program, monitor, budget).export(arguments);
+        return budget.peak;
     }
 
     private void export(String[] arguments) throws Exception {
@@ -106,8 +125,8 @@ public final class ExportNativeInterfacesV1 extends GhidraScript {
             MessageDigest typeDigest = MessageDigest.getInstance("SHA-256");
             long bytes;
             // Type rows are spooled in occurrence order, never retained as an unbounded in-memory table.
-            try (BoundedOutput output = new BoundedOutput(new BufferedOutputStream(Files.newOutputStream(stage)), outputDigest, MAXIMUM_BYTES, task);
-                 BoundedOutput types = new BoundedOutput(new BufferedOutputStream(Files.newOutputStream(typeStage)), typeDigest, MAXIMUM_BYTES, task)) {
+            try (BoundedOutput output = new BoundedOutput(new BufferedOutputStream(Files.newOutputStream(stage)), outputDigest, MAXIMUM_BYTES, task, stagingBudget, false);
+                 BoundedOutput types = new BoundedOutput(new BufferedOutputStream(Files.newOutputStream(typeStage)), typeDigest, MAXIMUM_BYTES, task, stagingBudget, true)) {
                 typeOutput = types;
                 output.writeUtf8("{\n  \"addressSpaces\": "); output.value(spaceRecords, 2, false);
                 output.writeUtf8(",\n  \"bindings\": "); output.value(bindings, 2, false);
@@ -140,14 +159,19 @@ public final class ExportNativeInterfacesV1 extends GhidraScript {
                 bytes = output.bytes;
             } finally { typeOutput = null; }
             Files.delete(typeStage); typeStage = null;
+            // Closing/flushing does not free the spool's occupied bytes; only deletion does.
+            if (stagingBudget != null) stagingBudget.releaseDeletedTypeSpool();
             if (manager.getFunctionCount() != expectedFunctions || totals.functions != expectedFunctions) throw new IllegalStateException("native function census changed during capture");
             String sha256 = HexFormat.of().formatHex(outputDigest.digest());
             requireModelUnchanged(before, hashModel(model)); task.checkCancelled();
             requireProgramUnchanged(programModification);
             byte[] manifest = canonical(object("bytes", bytes, "collectorSha256", collector, "file", "native-interfaces.json",
                 "inputSha256", input, "kind", "ghidra-native-interface-observation-manifest-v1",
-                "programModelSha256", before.sha256, "schemaVersion", 1, "sha256", sha256), 65536);
+                "programModelSha256", before.sha256, "schemaVersion", 1, "sha256", sha256), MAXIMUM_MANIFEST_BYTES);
             if (Math.addExact(bytes, manifest.length) > MAXIMUM_BYTES) throw new IllegalStateException("combined native-interface inventory bound exceeded");
+            // Actual manifest bytes were reserved before any output/spool write. Keep those
+            // bytes charged before Files.write and release only the unused reservation.
+            if (stagingBudget != null) stagingBudget.finalizeManifestReservation(manifest.length);
             Files.setPosixFilePermissions(stage, PosixFilePermissions.fromString("r--------"));
             Files.createLink(observations, stage); Files.delete(stage); stage = null;
             manifestStage = privateTemporary(directory, ".native-interface-manifest-");
@@ -405,14 +429,47 @@ public final class ExportNativeInterfacesV1 extends GhidraScript {
         if (value instanceof Boolean || value instanceof Integer || value instanceof Long) { output.writeUtf8(value.toString()); return; }
         throw new IllegalStateException("unsupported canonical value");
     }
+    private static final class StagingBudget {
+        private final long maximum;
+        private long outputBytes, typeSpoolBytes;
+        private int manifestBytes = MAXIMUM_MANIFEST_BYTES;
+        private long peak;
+        StagingBudget(long maximum) throws IOException {
+            if (maximum < 1 || maximum > MAXIMUM_BYTES) throw new IllegalArgumentException("invalid native listing staging byte limit");
+            this.maximum = maximum;
+            if (maximum < manifestBytes) throw new IOException("native listing staging byte bound cannot reserve its manifest");
+            peak = manifestBytes;
+        }
+        void charge(int count, boolean typeSpool) throws IOException {
+            long live = outputBytes + typeSpoolBytes + manifestBytes;
+            if (count < 0 || live > maximum - count) {
+                String simultaneous = outputBytes > 0 && typeSpoolBytes > 0 ? " while output and type spool are live" : "";
+                throw new IOException("native listing staging byte bound exceeded" + simultaneous);
+            }
+            if (typeSpool) typeSpoolBytes += count; else outputBytes += count;
+            peak = Math.max(peak, live + count);
+        }
+        void releaseDeletedTypeSpool() { typeSpoolBytes = 0; }
+        void finalizeManifestReservation(int bytes) {
+            if (bytes < 1 || bytes > MAXIMUM_MANIFEST_BYTES) throw new IllegalStateException("native manifest exceeds its staging reservation");
+            manifestBytes = bytes;
+        }
+    }
     private static final class BoundedOutput extends OutputStream {
         final OutputStream output; final MessageDigest digest; final long maximum; final TaskMonitor monitor; long bytes;
+        final StagingBudget stagingBudget; final boolean typeSpool;
         BoundedOutput(OutputStream output, MessageDigest digest, long maximum, TaskMonitor monitor) {
+            this(output, digest, maximum, monitor, null, false);
+        }
+        BoundedOutput(OutputStream output, MessageDigest digest, long maximum, TaskMonitor monitor,
+                StagingBudget stagingBudget, boolean typeSpool) {
             this.output = output; this.digest = digest; this.maximum = maximum; this.monitor = monitor;
+            this.stagingBudget = stagingBudget; this.typeSpool = typeSpool;
         }
         @Override public void write(int value) throws IOException { write(new byte[] { (byte) value }); }
         @Override public void write(byte[] value, int offset, int length) throws IOException {
             if (bytes > maximum - length) throw new IOException("native JSON byte bound exceeded");
+            if (stagingBudget != null) stagingBudget.charge(length, typeSpool);
             bytes += length; output.write(value, offset, length); if (digest != null) digest.update(value, offset, length);
         }
         void writeUtf8(String value) throws Exception { monitor.checkCancelled(); write(value.getBytes(StandardCharsets.UTF_8)); }

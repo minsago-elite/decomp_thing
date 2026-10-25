@@ -34,6 +34,7 @@ public final class ExportInferredInterfacesV1 extends GhidraScript {
         "decompiler-error", "completed-without-high-function", "unsupported-high-representation"};
     private final Program program;
     private final TaskMonitor task;
+    private final long maximumCombinedBytes;
     private final long started = System.nanoTime();
     private final List<AddressSpace> spaces = new ArrayList<>();
     private final Map<AddressSpace, Integer> spaceIndices = new HashMap<>();
@@ -44,14 +45,25 @@ public final class ExportInferredInterfacesV1 extends GhidraScript {
     private NativeInterfaceTypeGraphV1 graph;
     private NativeInterfaceTypeGraphV1.Budget graphBudget;
 
-    public ExportInferredInterfacesV1() { program = null; task = null; }
+    public ExportInferredInterfacesV1() { program = null; task = null; maximumCombinedBytes = MAXIMUM_BYTES; }
     private ExportInferredInterfacesV1(Program program, TaskMonitor task) {
+        this(program, task, MAXIMUM_BYTES);
+    }
+    private ExportInferredInterfacesV1(Program program, TaskMonitor task, long maximumCombinedBytes) {
         this.program = Objects.requireNonNull(program); this.task = Objects.requireNonNull(task);
+        if (maximumCombinedBytes < 1 || maximumCombinedBytes > MAXIMUM_BYTES)
+            throw new IllegalArgumentException("invalid inferred-interface combined byte limit");
+        this.maximumCombinedBytes = maximumCombinedBytes;
         for (String state : DISPOSITIONS) dispositions.put(state, 0L);
     }
     @Override protected void run() throws Exception { collect(currentProgram, monitor, getScriptArgs()); }
     public static void collect(Program program, TaskMonitor monitor, String[] arguments) throws Exception {
         new ExportInferredInterfacesV1(program, monitor).export(arguments);
+    }
+    /** Lower-only enclosing-operation limit; the default compiled invocation remains unchanged. */
+    public static void collectWithByteLimit(Program program, TaskMonitor monitor, String[] arguments,
+            long maximumCombinedBytes) throws Exception {
+        new ExportInferredInterfacesV1(program, monitor, maximumCombinedBytes).export(arguments);
     }
     private void checkpoint() throws Exception {
         task.checkCancelled();
@@ -90,8 +102,8 @@ public final class ExportInferredInterfacesV1 extends GhidraScript {
         if (Set.of(modelBefore.attributes.fileKey(), listingBefore.attributes.fileKey(), manifestBefore.attributes.fileKey()).size() != 3)
             throw new IllegalArgumentException("inferred input files alias");
         long inputsBytes = Math.addExact(modelBefore.bytes, Math.addExact(listingBefore.bytes, manifestBefore.bytes));
-        if (Math.addExact(inputsBytes, Math.addExact(listingBefore.bytes, manifestBefore.bytes)) >= MAXIMUM_BYTES)
-            throw new IllegalArgumentException("combined staging inventory bound exceeded");
+        if (inputsBytes >= maximumCombinedBytes)
+            throw new IllegalArgumentException("combined retained input inventory bound exceeded");
         inventorySpaces();
         FunctionManager manager = program.getFunctionManager();
         int count = manager.getFunctionCount();
@@ -117,14 +129,18 @@ public final class ExportInferredInterfacesV1 extends GhidraScript {
         Files.createDirectory(directory, PosixFilePermissions.asFileAttribute(PosixFilePermissions.fromString("rwx------")));
         try {
             // Prove graph roots refer to this exact pre-inference listing, not same-input stale bytes.
-            ExportNativeInterfacesV1.collect(program, listingMonitor(), new String[]{input, exporter, archive, listingCollector, model.toString(), comparison.toString()});
+            // The re-render may be larger than the frozen listing. Charge actual comparison
+            // output and simultaneous type-spool writes, never a multiple of stale input size.
+            ExportNativeInterfacesV1.collectWithStagingBudget(program, listingMonitor(),
+                new String[]{input, exporter, archive, listingCollector, model.toString(), comparison.toString()},
+                maximumCombinedBytes - inputsBytes);
             requireContent(listingBefore, hashFile(comparison.resolve("native-interfaces.json"), MAXIMUM_BYTES));
             requireContent(manifestBefore, hashFile(comparison.resolve("manifest.json"), 65536));
             removeComparison(comparison); checkpoint(); requireProgramUnchanged(modification);
             stage = privateTemporary(directory, ".inferred-");
             MessageDigest outputDigest = MessageDigest.getInstance("SHA-256"); long bytes;
             try (BoundedOutput target = new BoundedOutput(new BufferedOutputStream(Files.newOutputStream(stage)), outputDigest,
-                    MAXIMUM_BYTES - inputsBytes - 65536, task)) {
+                    maximumCombinedBytes - inputsBytes - 65536, task)) {
                 output = target;
                 graphBudget = new NativeInterfaceTypeGraphV1.Budget(NativeInterfaceTypeGraphV1.Limits.defaults(), this::checkpoint);
                 graph = new NativeInterfaceTypeGraphV1(program.getDataTypeManager().getDataOrganization(), graphBudget, this::record);
@@ -162,7 +178,7 @@ public final class ExportInferredInterfacesV1 extends GhidraScript {
                 "file", "native-inferred-interfaces.json", "inputSha256", input,
                 "kind", "ghidra-native-inferred-interface-observation-manifest-v1", "listingSha256", listingBefore.sha256,
                 "programModelSha256", modelBefore.sha256, "schemaVersion", 1, "sha256", HexFormat.of().formatHex(outputDigest.digest())), 65536);
-            if (Math.addExact(inputsBytes, Math.addExact(bytes, manifest.length)) > MAXIMUM_BYTES) throw new IllegalStateException("combined output bound exceeded");
+            if (Math.addExact(inputsBytes, Math.addExact(bytes, manifest.length)) > maximumCombinedBytes) throw new IllegalStateException("combined output bound exceeded");
             Files.setPosixFilePermissions(stage, PosixFilePermissions.fromString("r--------"));
             Files.createLink(observations, stage); Files.delete(stage); stage = null;
             manifestStage = privateTemporary(directory, ".inferred-manifest-"); Files.write(manifestStage, manifest, StandardOpenOption.TRUNCATE_EXISTING);

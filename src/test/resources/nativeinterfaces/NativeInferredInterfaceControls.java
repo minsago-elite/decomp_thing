@@ -370,13 +370,15 @@ public final class NativeInferredInterfaceControls {
         cancelledCollection(program);
         changingProgramCollection(program, functions.get("integer_add"));
         changedListingCollection(program);
+        stagingBudgetControls(program, functions.get("integer_add"));
         writeControlReceipt(program, functions, document);
         Files.writeString(root.resolve("verified-controls.txt"),
             "actual-bundled-native-decompilation default-listing-zero-versus-inferred-parameters integer SSE stack-use " +
             "ninth-SSE-stack-use-not-promoted-to-parameter " +
             "complete-function-dispositions external thunk unsupported-body typed-first-mapping separate-listing-inferred " +
             "recursive-type-graph union packed array typedef bitfield deterministic model-unchanged listing-unchanged " +
-            "program-unchanged cancellation stale-output-rejected same-census-mutation-rejected changed-listing-rejected\n");
+            "program-unchanged cancellation stale-output-rejected same-census-mutation-rejected changed-listing-rejected " +
+            "actual-staging-exact-peak actual-staging-one-byte-below-peak actual-stale-listing-larger-rerender-bounded\n");
     }
 
     private static void assertObserved(Program program, Map<String, Function> functions, JsonObject document) {
@@ -601,6 +603,110 @@ public final class NativeInferredInterfaceControls {
         try { ExportInferredInterfacesV1.collect(program, MONITOR, arguments); }
         catch (IllegalArgumentException | IllegalStateException expected) { rejected = true; }
         require(rejected && !Files.exists(destination), "changed frozen listing accepted or left partial capture");
+    }
+
+    private static void stagingBudgetControls(ProgramDB program, Function function) throws Exception {
+        final long manifestReservation = 65536;
+        final long generousBudget = 4L * 1024 * 1024;
+        Path evidence = Files.createDirectory(root.resolve("staging-budget-controls"));
+        Map<Path, String> originalModel = snapshots(root.resolve("reports"));
+        Map<Path, String> originalListing = snapshots(listing);
+        long modification = program.getModificationNumber();
+        Path measured = evidence.resolve("measured-listing");
+        long peak = ExportNativeInterfacesV1.collectWithStagingBudget(program, MONITOR, listingArguments(measured), generousBudget);
+        long finalListingBytes = Files.size(measured.resolve("native-interfaces.json"));
+        long finalManifestBytes = Files.size(measured.resolve("manifest.json"));
+        require(peak > finalListingBytes + manifestReservation && peak < generousBudget,
+            "authored listing does not exercise overlapping output and type-spool storage");
+        Path exact = evidence.resolve("exact-peak-listing");
+        long repeatedPeak = ExportNativeInterfacesV1.collectWithStagingBudget(program, MONITOR, listingArguments(exact), peak);
+        equal(repeatedPeak, peak, "exact permitted staging peak");
+        for (String file : List.of("native-interfaces.json", "manifest.json")) {
+            require(Arrays.equals(Files.readAllBytes(listing.resolve(file)), Files.readAllBytes(measured.resolve(file))) &&
+                Arrays.equals(Files.readAllBytes(measured.resolve(file)), Files.readAllBytes(exact.resolve(file))),
+                "bounded staging changed ordinary listing wire bytes: " + file);
+        }
+        Path below = evidence.resolve("one-below-peak-listing");
+        java.io.IOException belowFailure = null;
+        try { ExportNativeInterfacesV1.collectWithStagingBudget(program, MONITOR, listingArguments(below), peak - 1); }
+        catch (java.io.IOException expected) { belowFailure = expected; }
+        require(belowFailure != null && belowFailure.getMessage() != null &&
+            belowFailure.getMessage().contains("while output and type spool are live"),
+            "one-byte-below peak did not fail during coexisting bounded output/spool writes");
+        require(!Files.exists(below, LinkOption.NOFOLLOW_LINKS), "one-byte-below peak left partial listing or manifest");
+        require(program.getModificationNumber() == modification, "bounded listing control mutated native Program");
+        require(originalModel.equals(snapshots(root.resolve("reports"))) && originalListing.equals(snapshots(listing)),
+            "bounded staging changed frozen inputs");
+
+        JsonObject receipt = new JsonObject();
+        receipt.addProperty("kind", "authored-native-interface-staging-budget-control-v1");
+        receipt.addProperty("fixtureOnly", true);
+        receipt.addProperty("manifestReservationBytes", manifestReservation);
+        receipt.addProperty("measuredChargedPeakBytes", peak);
+        receipt.addProperty("exactLimitBytes", peak);
+        receipt.addProperty("exactObservedPeakBytes", repeatedPeak);
+        receipt.addProperty("finalListingBytes", finalListingBytes);
+        receipt.addProperty("finalManifestBytes", finalManifestBytes);
+        receipt.addProperty("belowLimitBytes", peak - 1);
+        receipt.addProperty("belowFailure", belowFailure.getMessage());
+        receipt.addProperty("belowRejectedWithOutputAndSpoolLive", true);
+        receipt.addProperty("belowOutputRemoved", true);
+        receipt.addProperty("boundedOutputMatchesOrdinaryBytes", true);
+        receipt.addProperty("authoritativeOracleEvidence", false);
+        receipt.addProperty("productionInterfacesAdmitted", false);
+        receipt.addProperty("releaseEligible", false);
+
+        // The original model/listing remain frozen. Only the actual Program signature becomes
+        // larger, so the inferred collector must budget the actual rerender before its later
+        // equality check can reject stale listing bytes. Rollback restores the fixture afterward.
+        int originalParameterCount = function.getParameterCount();
+        SourceType originalSignatureSource = function.getSignatureSource();
+        int transaction = program.startTransaction("authored larger actual listing than frozen sibling");
+        try {
+            List<Variable> parameters = new ArrayList<>();
+            for (int index = 0; index < 64; index++) parameters.add(new ParameterImpl("large_parameter_" + index,
+                UnsignedLongLongDataType.dataType, program, SourceType.USER_DEFINED));
+            function.updateFunction("__stdcall", new ReturnParameterImpl(UnsignedLongLongDataType.dataType, program), parameters,
+                Function.FunctionUpdateType.DYNAMIC_STORAGE_FORMAL_PARAMS, true, SourceType.USER_DEFINED);
+            require(function.getParameterCount() == 64, "authored larger listing signature missing");
+            Path larger = evidence.resolve("larger-current-listing");
+            long largerPeak = ExportNativeInterfacesV1.collectWithStagingBudget(program, MONITOR, listingArguments(larger), generousBudget);
+            long largerFinalBytes = Files.size(larger.resolve("native-interfaces.json"));
+            require(largerFinalBytes > finalListingBytes, "actual rerender must be larger than frozen listing");
+            long available = Math.addExact(largerFinalBytes, manifestReservation);
+            require(available < largerPeak, "stale listing control must distinguish final bytes from transient peak");
+            long frozenInputBytes = Math.addExact(Files.size(model), Math.addExact(
+                Files.size(listing.resolve("native-interfaces.json")), Files.size(listing.resolve("manifest.json"))));
+            long combinedLimit = Math.addExact(frozenInputBytes, available);
+            require(combinedLimit < generousBudget, "authored inferred control is not a small budget");
+            Path destination = evidence.resolve("stale-smaller-inferred");
+            java.io.IOException staleFailure = null;
+            try { ExportInferredInterfacesV1.collectWithByteLimit(program, MONITOR, collectorArguments(destination), combinedLimit); }
+            catch (java.io.IOException expected) { staleFailure = expected; }
+            require(staleFailure != null && staleFailure.getMessage() != null &&
+                staleFailure.getMessage().contains("while output and type spool are live"),
+                "larger actual rerender was not refused during bounded staging writes before equality");
+            require(!Files.exists(destination, LinkOption.NOFOLLOW_LINKS),
+                "stale smaller listing left inferred output, comparison output or success manifest");
+            require(originalModel.equals(snapshots(root.resolve("reports"))) && originalListing.equals(snapshots(listing)),
+                "stale listing control changed frozen inputs");
+            receipt.addProperty("staleFrozenInputBytes", frozenInputBytes);
+            receipt.addProperty("largerActualFinalListingBytes", largerFinalBytes);
+            receipt.addProperty("largerActualChargedPeakBytes", largerPeak);
+            receipt.addProperty("staleComparisonAvailableBytes", available);
+            receipt.addProperty("staleCombinedLimitBytes", combinedLimit);
+            receipt.addProperty("staleFailure", staleFailure.getMessage());
+            receipt.addProperty("staleRejectedDuringBoundedWrites", true);
+            receipt.addProperty("staleInferredAndComparisonRemoved", true);
+            receipt.addProperty("frozenInputsUnchanged", true);
+        } finally { program.endTransaction(transaction, false); }
+        require(function.getParameterCount() == originalParameterCount && function.getSignatureSource() == originalSignatureSource,
+            "stale listing control did not restore original native signature");
+        Files.writeString(evidence.resolve("verified-staging-controls.json"), receipt.toString() + "\n");
+    }
+
+    private static String[] listingArguments(Path destination) throws Exception {
+        return new String[] {sha256(input), sha256(modelSource), ARCHIVE_SHA, sha256(listingSource), model.toString(), destination.toString()};
     }
 
     private static String[] collectorArguments(Path destination) throws Exception {

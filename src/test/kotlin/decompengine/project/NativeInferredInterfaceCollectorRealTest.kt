@@ -12,7 +12,7 @@ import kotlinx.serialization.json.*
 /** Real bounded native decompilation of authored instructions; no constructor-only HighFunction proof. */
 class NativeInferredInterfaceCollectorRealTest {
     @Test
-    fun `fresh bundled inference preserves listing census type graphs and unknown semantics`() {
+    fun `fresh bundled inference preserves listing census type graphs and unknown semantics`(): Unit {
         val repository = Path.of("").toAbsolutePath().normalize()
         val parent = repository.resolve("build/native-inferred-interface-real-controls")
         Files.createDirectories(parent)
@@ -67,6 +67,7 @@ class NativeInferredInterfaceCollectorRealTest {
                 assertTrue(JsonSchema.fromDefinition(definition).validate(actual) {}, "actual output violates $schema at $captureRoot")
             }
         }
+        assertStagingControls(root)
         val controlReceipt = Json.parseToJsonElement(Files.readString(root.resolve("verified-control-receipt.json"))).jsonObject
         assertTrue(controlReceipt.getValue("fixtureOnly").jsonPrimitive.boolean)
         val nativeRows = controlReceipt.getValue("functions").jsonArray.map { it.jsonObject }
@@ -94,6 +95,34 @@ class NativeInferredInterfaceCollectorRealTest {
         assertEquals("unavailable-for-plain-decoded-storage", windowsReceipt.getValue("forcedIndirectMeaning").jsonPrimitive.content)
         assertFalse(windowsReceipt.getValue("productionInterfacesAdmitted").jsonPrimitive.boolean)
         validateActual(windows, collector, listingCollector, typeGraph, exporter, dispatch, nativeDecompiler)
+    }
+
+    private fun assertStagingControls(root: Path) {
+        val evidence = root.resolve("staging-budget-controls")
+        val receipt = Json.parseToJsonElement(Files.readString(evidence.resolve("verified-staging-controls.json"))).jsonObject
+        fun number(name: String) = receipt.getValue(name).jsonPrimitive.long
+        assertEquals("authored-native-interface-staging-budget-control-v1", receipt.getValue("kind").jsonPrimitive.content)
+        assertTrue(receipt.getValue("fixtureOnly").jsonPrimitive.boolean)
+        assertEquals(number("measuredChargedPeakBytes"), number("exactLimitBytes"))
+        assertEquals(number("exactLimitBytes"), number("exactObservedPeakBytes"))
+        assertEquals(number("exactLimitBytes") - 1, number("belowLimitBytes"))
+        assertTrue(number("belowLimitBytes") >= number("finalListingBytes") + number("manifestReservationBytes"))
+        assertTrue(number("largerActualFinalListingBytes") > number("finalListingBytes"))
+        assertEquals(number("largerActualFinalListingBytes") + number("manifestReservationBytes"), number("staleComparisonAvailableBytes"))
+        assertTrue(number("staleComparisonAvailableBytes") < number("largerActualChargedPeakBytes"))
+        assertEquals(number("staleFrozenInputBytes") + number("staleComparisonAvailableBytes"), number("staleCombinedLimitBytes"))
+        assertTrue(number("staleCombinedLimitBytes") < 4L * 1024 * 1024)
+        for (field in listOf("belowRejectedWithOutputAndSpoolLive", "belowOutputRemoved", "boundedOutputMatchesOrdinaryBytes",
+            "staleRejectedDuringBoundedWrites", "staleInferredAndComparisonRemoved", "frozenInputsUnchanged")) {
+            assertTrue(receipt.getValue(field).jsonPrimitive.boolean, "staging control missing: $field")
+        }
+        assertTrue(receipt.getValue("belowFailure").jsonPrimitive.content.contains("while output and type spool are live"))
+        assertTrue(receipt.getValue("staleFailure").jsonPrimitive.content.contains("while output and type spool are live"))
+        assertFalse(Files.exists(evidence.resolve("one-below-peak-listing")))
+        assertFalse(Files.exists(evidence.resolve("stale-smaller-inferred")))
+        assertFalse(receipt.getValue("authoritativeOracleEvidence").jsonPrimitive.boolean)
+        assertFalse(receipt.getValue("productionInterfacesAdmitted").jsonPrimitive.boolean)
+        assertFalse(receipt.getValue("releaseEligible").jsonPrimitive.boolean)
     }
 
     private fun validateActual(root: Path, collector: Path, listingCollector: Path, typeGraph: Path, exporter: Path, dispatch: Path, nativeDecompiler: Path) {
