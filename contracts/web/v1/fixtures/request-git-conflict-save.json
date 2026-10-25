@@ -1,0 +1,19 @@
+{
+  "apiVersion": 1,
+  "kind": "gitConflictSaveRequest",
+  "data": {
+    "action": "git.conflict.save",
+    "worktreeId": "worktree_example_2",
+    "guards": {
+      "repositoryVersion": "repository_v_1",
+      "worktreeVersion": "worktree_v_1",
+      "expectedHeadObjectId": "0123456789abcdef0123456789abcdef01234567",
+      "expectedRefId": "ref_main",
+      "expectedRefObjectId": "0123456789abcdef0123456789abcdef01234567"
+    },
+    "fileId": "file_example_1",
+    "expectedSha256": "abababababababababababababababababababababababababababababababab",
+    "resolution": "text",
+    "content": "int main(void) { return 0; }\n"
+  }
+}

@@ -759,6 +759,8 @@ class ManagedGitRepositories(
         val located = locate(jobId, repositoryId, worktreeId)
         return refusing {
             val head = GitRepositoryInspector.head(runner, located.gitDir, located.record.objectFormat)
+            if (head.state == GitHeadState.UNBORN) GitWorkspaceMutations.refuse("NO_COMMITS",
+                "The branch has no commits yet. Commit first, or clone the remote into a new repository.")
             val local = head.refName?.takeIf { head.state == GitHeadState.ATTACHED } ?: GitWorkspaceMutations.refuse("DETACHED",
                 "The work tree is not on a branch. Switch to the branch you want to integrate into first.")
             val tracking = trackingRef(runner, located, trackingRefId)
@@ -844,6 +846,8 @@ class ManagedGitRepositories(
                 if (strategy == GitIntegrationStrategy.REBASE) GitWorkspaceMutations.refuse("STRATEGY_UNSUPPORTED",
                     "Rebasing rewrites history and is not supported by the workbench. Use a fast-forward or a merge.")
                 if (merging) GitWorkspaceMutations.refuse("MERGE_IN_PROGRESS", "A merge is already in progress. Resolve and commit it, or abort it, first.")
+                if (observation.head.state == GitHeadState.UNBORN) GitWorkspaceMutations.refuse("NO_COMMITS",
+                    "The branch has no commits yet. Commit first, or clone the remote into a new repository.")
                 if (observation.head.state != GitHeadState.ATTACHED) GitWorkspaceMutations.refuse("DETACHED",
                     "The work tree is not on a branch. Switch to the branch you want to integrate into first.")
                 val entries = relevant(observation)

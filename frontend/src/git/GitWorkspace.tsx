@@ -4,15 +4,17 @@ import { textMessage } from '../shared/messages';
 import { usePrivateTransport } from '../session/PrivateTransport';
 import { ApiClientError, withApiFailureReference } from '../api/client';
 import type {
-  Capability, GitAudit, GitDiff, GitHistory, GitProvenance, GitRefs, GitRemotes, GitRepositories, GitStatus, GitStatusEntry, GitWorktrees,
+  Capability, GitAudit, GitConflicts, GitDiff, GitHistory, GitProvenance, GitRefs, GitRemotes, GitRepositories, GitStatus, GitStatusEntry, GitWorktrees,
   Operation, RequestData, RequestKind,
 } from '../api/generated';
 import type { BrowserSession } from '../session/session';
 import { apiPath, runPath, sourceDirectoryPath } from '../app/paths';
 import { StateMark, capabilityTone } from '../shared/StateMark';
 import { GitRemotesPanel } from './GitRemotesPanel';
+import { GitIntegrationPanel } from './GitIntegrationPanel';
+import type { IntegrationAction } from './GitIntegrationPanel';
 import type { RemoteAction } from './GitRemotesPanel';
-import { gitRemotesCopy } from '../copy/git';
+import { gitIntegrationCopy, gitRemotesCopy } from '../copy/git';
 
 function sleep(milliseconds: number, signal: AbortSignal) {
   return new Promise<void>((resolve, reject) => {
@@ -36,11 +38,12 @@ interface Loaded {
   history: GitHistory | null;
   remotes: GitRemotes | null;
   audit: GitAudit | null;
+  conflicts: GitConflicts | null;
 }
 
 type Mutation = 'gitStageRequest' | 'gitCommitRequest' | 'gitBranchCreateRequest' | 'gitSwitchRequest' | 'gitBranchDeleteRequest'
   | 'gitTagRequest' | 'gitWorktreeAddRequest' | 'gitWorktreeRemoveRequest' | 'gitRemoteAddRequest' | 'gitRemoteRemoveRequest'
-  | 'gitFetchRequest';
+  | 'gitFetchRequest' | 'gitMergeRequest' | 'gitMergeAbortRequest' | 'gitConflictSaveRequest' | 'gitConflictCompleteRequest';
 
 function short(objectId: string | null): string { return objectId ? objectId.slice(0, 12) : ''; }
 const HEADS = 'refs/heads/';
@@ -91,21 +94,22 @@ export function GitWorkspace({ jobId, basePath, session, capabilities, pollInter
         const listing = (await client.get('gitRepositories', `/jobs/${jobId}/repositories`, { signal: controller.signal })).data;
         if (listing.jobId !== jobId) throw new ApiClientError('invalid_response');
         const found = listing.repositories[0];
-        if (!found) { setLoaded({ listing, status: null, worktrees: null, refs: null, history: null, remotes: null, audit: null }); return; }
+        if (!found) { setLoaded({ listing, status: null, worktrees: null, refs: null, history: null, remotes: null, audit: null, conflicts: null }); return; }
         const prefix = `/jobs/${jobId}/repositories/${found.repositoryId}`;
         const suffix = worktree ? `?worktree=${worktree}` : '';
-        const [status, worktrees, refs, history, remotes, audit] = await Promise.all([
+        const [status, worktrees, refs, history, remotes, audit, conflicts] = await Promise.all([
           readStatus(prefix, controller.signal),
           client.get('gitWorktrees', `${prefix}/worktrees`, { signal: controller.signal }),
           readRefs(prefix, controller.signal),
           client.get('gitHistory', `${prefix}/history${suffix ? `${suffix}&limit=20` : '?limit=20'}`, { signal: controller.signal }),
           client.get('gitRemotes', `${prefix}/remotes`, { signal: controller.signal }),
           client.get('gitAudit', `${prefix}/audit?limit=50`, { signal: controller.signal }),
+          client.get('gitConflicts', `${prefix}/conflicts${suffix}`, { signal: controller.signal }),
         ]);
         if (controller.signal.aborted) return;
         diffGeneration.current++;
         setDiff(null);
-        setLoaded({ listing, status, worktrees: worktrees.data, refs, history: history.data, remotes: remotes.data, audit: audit.data });
+        setLoaded({ listing, status, worktrees: worktrees.data, refs, history: history.data, remotes: remotes.data, audit: audit.data, conflicts: conflicts.data });
         // A selection survives a refresh only while the same file identity is still listed.
         setSelected(previous => new Set([...previous].filter(key => status.entries.some(entry => key.endsWith(`:${entry.fileId}`)))));
       } catch (failure: unknown) {
@@ -214,6 +218,33 @@ export function GitWorkspace({ jobId, basePath, session, capabilities, pollInter
         ({ action: 'git.remote.remove', worktreeId, guards: guarded, remoteId: action.remoteId }));
       case 'gitFetchRequest': return act('gitFetchRequest', textMessage(gitRemotesCopy.fetch, { name: action.name }), guarded =>
         ({ action: 'git.fetch', worktreeId, guards: guarded, remoteId: action.remoteId }));
+    }
+  }
+
+  async function readDivergence(trackingRefId: string) {
+    if (!base) return null;
+    try {
+      return (await client.get('gitDivergence', `${base}/divergence?tracking=${trackingRefId}${query ? `&${query}` : ''}`)).data;
+    } catch (failure: unknown) { setStatus(withApiFailureReference(copy.readFailed, failure)); return null; }
+  }
+
+  async function readConflict(fileId: string) {
+    if (!base) return null;
+    try {
+      return (await client.get('gitConflictFile', `${base}/conflicts/${fileId}${query ? `?${query}` : ''}`)).data;
+    } catch (failure: unknown) { setStatus(withApiFailureReference(copy.readFailed, failure)); return null; }
+  }
+
+  function integrationAction(action: IntegrationAction): Promise<boolean> {
+    const worktreeId = statusData?.worktreeId ?? '';
+    switch (action.kind) {
+      case 'gitMergeRequest': return act('gitMergeRequest', action.label, guarded => ({ action: 'git.merge', worktreeId, guards: guarded,
+        trackingRefId: action.trackingRefId, targetObjectId: action.targetObjectId, strategy: action.strategy }));
+      case 'gitMergeAbortRequest': return act('gitMergeAbortRequest', gitIntegrationCopy.abort, guarded => ({ action: 'git.merge.abort', worktreeId, guards: guarded }));
+      case 'gitConflictSaveRequest': return act('gitConflictSaveRequest', gitIntegrationCopy.save, guarded => ({ action: 'git.conflict.save', worktreeId,
+        guards: guarded, fileId: action.fileId, expectedSha256: action.expectedSha256, resolution: action.resolution, content: action.content }));
+      case 'gitConflictCompleteRequest': return act('gitConflictCompleteRequest', gitIntegrationCopy.complete, guarded => ({ action: 'git.conflict.complete',
+        worktreeId, guards: guarded, files: action.files }));
     }
   }
 
@@ -399,6 +430,8 @@ export function GitWorkspace({ jobId, basePath, session, capabilities, pollInter
             ({ action: 'git.tag', worktreeId, guards: guarded, name, targetObjectId: commit.provenance.objectId }))} />
         </section>}
       </section>
+      <GitIntegrationPanel remotes={loaded.remotes} conflicts={loaded.conflicts} writable={writable}
+        readDivergence={readDivergence} readConflict={readConflict} onAction={integrationAction} />
       <GitRemotesPanel capability={remoting} remotes={loaded.remotes} audit={loaded.audit} writable={writable} running={running}
         onAction={remoteAction} onCancel={operation => { void cancelTransfer(operation); }} />
       <section aria-labelledby="git-branches-title">

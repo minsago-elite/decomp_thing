@@ -1,0 +1,29 @@
+{
+  "apiVersion": 1,
+  "kind": "gitConflicts",
+  "requestId": "request_example_1",
+  "data": {
+    "repositoryId": "repository_example_2",
+    "worktreeId": "worktree_example_2",
+    "mergeInProgress": true,
+    "integration": {
+      "operationId": "operation_example_7",
+      "strategy": "merge",
+      "branch": "refs/heads/main",
+      "headBeforeObjectId": "0123456789abcdef0123456789abcdef01234567",
+      "targetObjectId": "89abcdef0123456789abcdef0123456789abcdef",
+      "trackingRefName": "refs/remotes/origin/main",
+      "startedAt": "2026-10-25T00:00:00Z"
+    },
+    "files": [
+      {
+        "fileId": "file_example_1",
+        "path": "src/main.c",
+        "pathEscaped": false,
+        "baseObjectId": "fedcba9876543210fedcba9876543210fedcba98",
+        "oursObjectId": "0123456789abcdef0123456789abcdef01234567",
+        "theirsObjectId": "89abcdef0123456789abcdef0123456789abcdef"
+      }
+    ]
+  }
+}

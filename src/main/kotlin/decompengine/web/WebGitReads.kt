@@ -28,6 +28,8 @@ internal class WebGitReads(private val repositories: () -> ManagedGitRepositorie
             "status" -> setOf("worktree", "cursor", "limit")
             "refs" -> setOf("cursor", "limit")
             "remotes" -> emptySet()
+            "divergence" -> setOf("worktree", "tracking")
+            "conflicts" -> setOf("worktree")
             "audit" -> setOf("limit")
             "history" -> setOf("worktree", "start", "cursor", "limit")
             else -> setOf("worktree", "scope", "commit", "file", "cursor", "limit")
@@ -45,6 +47,10 @@ internal class WebGitReads(private val repositories: () -> ManagedGitRepositorie
                 "history" -> sendWebApiResponse(exchange, 200, "gitHistory", history(jobId, repositoryId, query, limit, worktree))
                 "diff" -> sendWebApiResponse(exchange, 200, "gitDiff", diff(jobId, repositoryId, query, limit, worktree))
                 "remotes" -> sendWebApiResponse(exchange, 200, "gitRemotes", remotes(jobId, repositoryId))
+                "divergence" -> sendWebApiResponse(exchange, 200, "gitDivergence", divergence(jobId, repositoryId, worktree,
+                    query["tracking"]?.takeIf { it.matches(Regex("[A-Za-z0-9][A-Za-z0-9_-]{0,127}")) }
+                        ?: throw WebAccessDenied(422, "VALIDATION_FAILED", "tracking must name one remote-tracking ref identity.")))
+                "conflicts" -> sendWebApiResponse(exchange, 200, "gitConflicts", conflicts(jobId, repositoryId, worktree))
                 "audit" -> sendWebApiResponse(exchange, 200, "gitAudit", buildJsonObject {
                     put("repositoryId", repositoryId)
                     put("entries", JsonArray(repositories().auditLog(jobId, repositoryId, limit)))
@@ -54,6 +60,82 @@ internal class WebGitReads(private val repositories: () -> ManagedGitRepositorie
         } catch (failure: ManagedGitException) {
             throw webGitDenied(failure)
         }
+    }
+
+    /** `G/divergence` (#595): fetched state only; strategies are offered, never chosen. */
+    private fun divergence(jobId: String, repositoryId: String, worktree: String?, tracking: String): JsonObject {
+        val view = repositories().divergence(jobId, repositoryId, worktree, tracking)
+        val (ahead, behind) = view.divergence.ahead to view.divergence.behind
+        val state = when {
+            view.fetchedAt == null -> "unknown"
+            java.time.Duration.between(view.fetchedAt, java.time.Instant.now()) > java.time.Duration.ofHours(1) -> "stale"
+            else -> "current"
+        }
+        fun strategy(name: String, reason: String?) = buildJsonObject {
+            put("strategy", name); put("available", reason == null); put("reason", reason?.let(::JsonPrimitive) ?: JsonNull)
+        }
+        val blocked = when {
+            view.mergeInProgress -> "A merge is in progress. Resolve and commit it, or abort it, first."
+            behind == 0L -> "The branch already contains every commit of this ref."
+            else -> null
+        }
+        return buildJsonObject {
+            put("repositoryId", repositoryId); put("worktreeId", view.worktreeId)
+            put("localRefName", view.localRef); put("localObjectId", view.localObjectId)
+            put("trackingRefId", tracking); put("trackingRefName", view.tracking.name); put("trackingObjectId", view.tracking.objectId)
+            put("remoteId", view.remote?.remoteId?.let(::JsonPrimitive) ?: JsonNull)
+            put("fetchedAt", view.fetchedAt?.toString()?.let(::JsonPrimitive) ?: JsonNull); put("remoteState", state)
+            put("ahead", ahead.toString()); put("behind", behind.toString())
+            put("mergeBaseObjectId", view.divergence.mergeBase?.let(::JsonPrimitive) ?: JsonNull)
+            put("mergeInProgress", view.mergeInProgress)
+            put("strategies", JsonArray(listOf(
+                strategy("fast-forward", blocked ?: if (ahead > 0) "The branch has $ahead local commit(s), so it cannot be fast-forwarded." else null),
+                strategy("merge", blocked),
+                strategy("rebase", "Rebasing rewrites history and is not supported by the workbench. Use a fast-forward or a merge."))))
+        }
+    }
+
+    private fun conflictFile(entry: decompengine.git.GitConflictEntry, worktreeId: String) = buildJsonObject {
+        put("fileId", entry.path.fileId(worktreeId)); put("path", entry.path.display); put("pathEscaped", entry.path.exact == null)
+        put("baseObjectId", entry.baseObjectId?.let(::JsonPrimitive) ?: JsonNull)
+        put("oursObjectId", entry.oursObjectId?.let(::JsonPrimitive) ?: JsonNull)
+        put("theirsObjectId", entry.theirsObjectId?.let(::JsonPrimitive) ?: JsonNull)
+    }
+
+    /** `G/conflicts` (#597): the integration and every unresolved path. */
+    private fun conflicts(jobId: String, repositoryId: String, worktree: String?): JsonObject {
+        val view = repositories().conflicts(jobId, repositoryId, worktree)
+        return buildJsonObject {
+            put("repositoryId", repositoryId); put("worktreeId", view.worktreeId); put("mergeInProgress", view.mergeInProgress)
+            put("integration", view.integration?.let { record ->
+                buildJsonObject {
+                    put("operationId", record.operationId); put("strategy", record.strategy.wireName); put("branch", record.branch)
+                    put("headBeforeObjectId", record.headBefore); put("targetObjectId", record.target)
+                    put("trackingRefName", record.trackingRef); put("startedAt", record.startedAt.toString())
+                }
+            } ?: JsonNull)
+            put("files", JsonArray(view.files.map { conflictFile(it, view.worktreeId) }))
+        }
+    }
+
+    /** `G/conflicts/{fileId}` (#597): bounded text of each side; binary or large content is honestly unsupported. */
+    fun conflictDetail(exchange: HttpExchange, jobId: String, repositoryId: String, fileId: String) {
+        val query = parseQuery(exchange.requestURI.rawQuery, setOf("worktree"))
+        val worktree = query["worktree"]?.also {
+            if (!it.matches(Regex("worktree_[0-9a-f]{32}"))) throw WebAccessDenied(422, "VALIDATION_FAILED", "worktree must be a registered work-tree identity.")
+        }
+        try {
+            val view = repositories().conflictFile(jobId, repositoryId, worktree, fileId)
+            val supported = view.ours != null && view.theirs != null && (view.current != null || view.currentSize == null)
+            sendWebApiResponse(exchange, 200, "gitConflictFile", buildJsonObject {
+                put("repositoryId", repositoryId); put("worktreeId", view.worktreeId); put("file", conflictFile(view.entry, view.worktreeId))
+                put("base", view.base?.let(::JsonPrimitive) ?: JsonNull); put("ours", view.ours?.let(::JsonPrimitive) ?: JsonNull)
+                put("theirs", view.theirs?.let(::JsonPrimitive) ?: JsonNull); put("current", view.current?.let(::JsonPrimitive) ?: JsonNull)
+                put("currentSha256", view.currentSha256); put("currentSizeBytes", view.currentSize?.toString()?.let(::JsonPrimitive) ?: JsonNull)
+                put("supported", supported)
+                put("reason", if (supported) JsonNull else JsonPrimitive("A side is binary, deleted or larger than 256 KiB; resolve this file outside the workbench."))
+            })
+        } catch (failure: ManagedGitException) { throw webGitDenied(failure) }
     }
 
     /** `G/remotes` (#585): registered remotes, credential state (never the credential) and tracking refs. */
@@ -79,6 +161,7 @@ internal class WebGitReads(private val repositories: () -> ManagedGitRepositorie
 
     /** `G/worktrees`, `G/worktrees/{id}`, `G/provenance/{objectId}` and `G/exports/{objectId}`. */
     fun nested(exchange: HttpExchange, jobId: String, repositoryId: String, resource: String, item: String?) {
+        if (resource == "conflicts") return conflictDetail(exchange, jobId, repositoryId, checkNotNull(item))
         if (!exchange.requestURI.rawQuery.isNullOrEmpty()) throw WebAccessDenied(400, "VALIDATION_FAILED", "This endpoint does not accept query parameters.")
         val service = repositories()
         try {

@@ -406,6 +406,21 @@ class WebGitControllerTest {
             val capabilities = data(f.read("/workbench/api/v1/bootstrap"), 200, "bootstrap").getValue("capabilities").jsonArray
                 .map { it.jsonObject }.associateBy { it.getValue("id").jsonPrimitive.content }
             assertEquals("supported", capabilities.getValue("git-remotes").getValue("state").jsonPrimitive.content)
+            // Integration reads: an unborn branch has nothing to integrate into, and no merge is in progress.
+            val trackingId = tracking.getValue("trackingRefs").jsonArray.single().jsonObject.getValue("refId").jsonPrimitive.content
+            error(f.read("$base/divergence?tracking=$trackingId"), 409, "NO_COMMITS")
+            error(f.read("$base/divergence"), 422, "VALIDATION_FAILED")
+            val conflicts = data(f.read("$base/conflicts"), 200, "gitConflicts")
+            assertFalse(conflicts.getValue("mergeInProgress").jsonPrimitive.boolean)
+            assertEquals(0, conflicts.getValue("files").jsonArray.size)
+            error(f.read("$base/conflicts/file_${"0".repeat(32)}"), 404, "NOT_FOUND")
+            error(change(mapOf("action" to JsonPrimitive("git.merge"), "trackingRefId" to JsonPrimitive(trackingId),
+                "targetObjectId" to tracking.getValue("trackingRefs").jsonArray.single().jsonObject.getValue("objectId"),
+                "strategy" to JsonPrimitive("rebase")), "http_merge_intent_01"), 422, "VALIDATION_FAILED")
+            error(change(mapOf("action" to JsonPrimitive("git.merge"), "trackingRefId" to JsonPrimitive(trackingId),
+                "targetObjectId" to tracking.getValue("trackingRefs").jsonArray.single().jsonObject.getValue("objectId"),
+                "strategy" to JsonPrimitive("merge")), "http_merge_intent_02"), 409, "NO_COMMITS")
+            error(change(mapOf("action" to JsonPrimitive("git.merge.abort")), "http_abort_intent_01"), 409, "NO_MERGE")
         }
     }
 

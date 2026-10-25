@@ -1,0 +1,25 @@
+{
+  "apiVersion": 1,
+  "kind": "gitConflictFile",
+  "requestId": "request_example_1",
+  "data": {
+    "repositoryId": "repository_example_2",
+    "worktreeId": "worktree_example_2",
+    "file": {
+      "fileId": "file_example_1",
+      "path": "src/main.c",
+      "pathEscaped": false,
+      "baseObjectId": "fedcba9876543210fedcba9876543210fedcba98",
+      "oursObjectId": "0123456789abcdef0123456789abcdef01234567",
+      "theirsObjectId": "89abcdef0123456789abcdef0123456789abcdef"
+    },
+    "base": "int main(void) { return 0; }\n",
+    "ours": "int main(void) { return 1; }\n",
+    "theirs": "int main(void) { return 2; }\n",
+    "current": "<<<<<<< ours\nint main(void) { return 1; }\n=======\nint main(void) { return 2; }\n>>>>>>> theirs\n",
+    "currentSha256": "efefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefef",
+    "currentSizeBytes": "84",
+    "supported": true,
+    "reason": null
+  }
+}

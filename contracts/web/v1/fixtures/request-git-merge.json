@@ -1,0 +1,18 @@
+{
+  "apiVersion": 1,
+  "kind": "gitMergeRequest",
+  "data": {
+    "action": "git.merge",
+    "worktreeId": "worktree_example_2",
+    "guards": {
+      "repositoryVersion": "repository_v_1",
+      "worktreeVersion": "worktree_v_1",
+      "expectedHeadObjectId": "0123456789abcdef0123456789abcdef01234567",
+      "expectedRefId": "ref_main",
+      "expectedRefObjectId": "0123456789abcdef0123456789abcdef01234567"
+    },
+    "trackingRefId": "ref_origin_main",
+    "targetObjectId": "89abcdef0123456789abcdef0123456789abcdef",
+    "strategy": "merge"
+  }
+}
