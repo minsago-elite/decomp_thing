@@ -91,7 +91,7 @@
       "depth": 1,
       "nodeLimit": 60,
       "edgeLimit": 150,
-      "unresolved": "include"
+      "unresolved": "show"
     },
     "graphState": "not-recorded",
     "graphReason": "MODEL_NOT_RECORDED",

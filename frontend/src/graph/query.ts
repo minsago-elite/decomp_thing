@@ -10,10 +10,10 @@ export interface GraphQuery {
   depth: number;
   nodeLimit: number;
   edgeLimit: number;
-  unresolved: 'include' | 'exclude';
+  unresolved: 'show' | 'omit';
 }
 export const GRAPH_LIMITS = { depth: 3, nodes: 200, edges: 400 } as const;
-export const GRAPH_DEFAULTS = { direction: 'both', depth: 1, nodeLimit: 60, edgeLimit: 150, unresolved: 'include' } as const;
+export const GRAPH_DEFAULTS = { direction: 'both', depth: 1, nodeLimit: 60, edgeLimit: 150, unresolved: 'show' } as const;
 
 const ID = /^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/;
 const VERSION = /^[a-f0-9]{64}$/;
@@ -41,7 +41,7 @@ export function graphLocation(search: string): { query: GraphQuery; version?: st
   const direction = values.get('direction') ?? GRAPH_DEFAULTS.direction;
   const unresolved = values.get('unresolved') ?? GRAPH_DEFAULTS.unresolved;
   if ((view !== 'calls' && view !== 'modules') || focus === undefined || !ID.test(focus)
-    || !['outgoing', 'incoming', 'both'].includes(direction) || (unresolved !== 'include' && unresolved !== 'exclude')
+    || !['outgoing', 'incoming', 'both'].includes(direction) || (unresolved !== 'show' && unresolved !== 'omit')
     || (view === 'modules' && values.has('unresolved'))) invalid();
   const version = values.get('structureVersion');
   if (version !== undefined && !VERSION.test(version)) invalid();

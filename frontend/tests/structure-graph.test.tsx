@@ -57,7 +57,7 @@ it('reads one bounded neighborhood with explicit limits and lists every node and
     render(<App basePath="/nested" session={auth} />);
     const nodes = await screen.findByRole('table', { name: copy.nodesTitle });
     expect(transport.get).toHaveBeenCalledWith('structureNeighborhood',
-      `${api}/graph?view=calls&focus=fn_0000000000401000&direction=both&depth=2&nodeLimit=60&edgeLimit=150&unresolved=include`, expect.anything());
+      `${api}/graph?view=calls&focus=fn_0000000000401000&direction=both&depth=2&nodeLimit=60&edgeLimit=150&unresolved=show`, expect.anything());
     expect(within(nodes).getAllByRole('row')).toHaveLength(calls.neighborhood!.nodes.length + 1);
     const edges = screen.getByRole('table', { name: copy.edgesTitle });
     expect(within(edges).getAllByRole('row')).toHaveLength(calls.neighborhood!.edges.length + 1);
@@ -164,7 +164,7 @@ it('applies new limits through the URL and draws module dependencies with plan l
     expect(within(details).getByText(copy.derivedNote)).toBeTruthy();
     expect(within(details).getByRole('link', { name: copy.links.plan }).getAttribute('href')).toContain('/records/module-plan?structureVersion=');
     expect(within(details).getByRole('link', { name: `${copy.links.targetModule}: util` })).toBeTruthy();
-    expect(() => graphLocation('?view=modules&focus=core&unresolved=exclude')).toThrow();
+    expect(() => graphLocation('?view=modules&focus=core&unresolved=omit')).toThrow();
     expect(() => graphLocation('?view=calls&focus=fn_1&depth=4')).toThrow();
     expect(() => graphLocation('?view=calls')).toThrow();
   } finally { auth.dispose(); }

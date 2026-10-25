@@ -55,7 +55,7 @@ function Controls({ query, onApply }: { query: GraphQuery; onApply: (query: Grap
     {number('edgeLimit', GRAPH_LIMITS.edges)}
     {query.view === 'calls' && <label>{copy.unresolved}<select name="unresolved" value={draft.unresolved}
       onChange={event => { const unresolved = event.currentTarget.value as GraphQuery['unresolved']; setDraft(current => ({ ...current, unresolved })); }}>
-      {(['include', 'exclude'] as const).map(value => <option key={value} value={value}>{copy.unresolvedOptions[value]}</option>)}
+      {(['show', 'omit'] as const).map(value => <option key={value} value={value}>{copy.unresolvedOptions[value]}</option>)}
     </select></label>}
     <p>{textMessage(copy.limitsHint, { depth: GRAPH_LIMITS.depth, nodes: GRAPH_LIMITS.nodes, edges: GRAPH_LIMITS.edges })}</p>
     <div class="job-actions"><button type="submit">{copy.apply}</button></div>

@@ -224,7 +224,7 @@ export async function qualifyStructure({ fixture, makeTarget, cdp, evaluate, rea
   const graphTablesMs = performance.now() - started;
   await ready(tab, `document.querySelector('svg[role="img"] .graph-node') !== null`, 'call neighborhood drawing');
   const graphDrawnMs = performance.now() - started;
-  assert.match(graphReads.at(-1), /^\?view=calls&focus=fn_[0-9a-f]{16}&direction=both&depth=1&nodeLimit=60&edgeLimit=150&unresolved=include&structureVersion=[a-f0-9]{64}$/);
+  assert.match(graphReads.at(-1), /^\?view=calls&focus=fn_[0-9a-f]{16}&direction=both&depth=1&nodeLimit=60&edgeLimit=150&unresolved=show&structureVersion=[a-f0-9]{64}$/);
   assert.ok(await evaluate(tab, `document.body.innerText.includes('Complete within the requested depth')`));
   await evaluate(tab, `[...document.querySelectorAll('button')].find(b => b.textContent === 'Inspect synthetic_function_99999').focus()`);
   await enter();

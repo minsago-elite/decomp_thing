@@ -217,7 +217,7 @@ internal class WebProgramStructurePages(
         val query = parse(rawQuery, setOf("view", "focus", "direction", "depth", "nodeLimit", "edgeLimit", "unresolved"), paged = false)
         val view = query.fields["view"] ?: "calls"
         val direction = query.fields["direction"] ?: "both"
-        val unresolved = query.fields["unresolved"] ?: "include"
+        val unresolved = query.fields["unresolved"] ?: "show"
         fun bounded(name: String, default: Int, range: IntRange): Int = query.fields[name]?.let {
             if (!it.matches(Regex("[1-9][0-9]{0,2}"))) invalidFilter(); it.toInt()
         }?.takeIf { it in range } ?: if (name in query.fields) invalidFilter() else default
@@ -226,7 +226,7 @@ internal class WebProgramStructurePages(
         val edgeLimit = bounded("edgeLimit", 150, 1..MAXIMUM_GRAPH_EDGES)
         val focus = query.fields["focus"]?.takeIf(::addressable) ?: invalidFilter()
         if (view !in setOf("calls", "modules") || direction !in setOf("outgoing", "incoming", "both") ||
-            unresolved !in setOf("include", "exclude") || (view == "modules" && "unresolved" in query.fields)) invalidFilter()
+            unresolved !in setOf("show", "omit") || (view == "modules" && "unresolved" in query.fields)) invalidFilter()
         return read(jobId, runId, revisionId) { index, _ ->
             pinned(index, query)
             header(index).apply {
@@ -248,7 +248,7 @@ internal class WebProgramStructurePages(
                 if (start == null) throw WebAccessDenied(404, if (view == "calls") "ENTITY_NOT_FOUND" else "MODULE_NOT_FOUND",
                     "The requested focus is not recorded in this revision's ${if (view == "calls") "program model" else "module plan"}.")
                 val result = WebGraphNeighborhood.of(graph, start, depth, direction != "incoming", direction != "outgoing",
-                    nodeLimit, edgeLimit, admit = { it < graph.recorded || unresolved == "include" })
+                    nodeLimit, edgeLimit, admit = { it < graph.recorded || unresolved == "show" })
                 // Node and edge limits bound counts; long recorded identities could still exceed the browser's byte limit.
                 var bounded = result
                 var json = neighborhoodJson(index, graph, view, bounded)

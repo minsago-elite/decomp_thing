@@ -71,7 +71,7 @@ class WebProgramGraphTest {
         // The graph continues past depth 1 and the focus has two callers outside the requested direction.
         assertEquals(1, outgoing.completeness().int("edgesBeyondDepth"))
         assertEquals(2, outgoing.nodes().first().getValue("incoming").jsonObject.int("total"))
-        val excluded = read("view=calls&focus=${id(6)}&unresolved=exclude")
+        val excluded = read("view=calls&focus=${id(6)}&unresolved=omit")
         assertTrue(excluded.nodes().none { it.text("kind") == "unrecorded-function" })
         assertEquals(1, excluded.completeness().int("filteredEdges"))
     }
@@ -156,7 +156,7 @@ class WebProgramGraphTest {
     @Test fun `limits focus and pins are validated`() {
         standard()
         for (query in listOf("view=calls", "view=calls&focus=${id(0)}&depth=4", "view=calls&focus=${id(0)}&nodeLimit=201",
-            "view=calls&focus=${id(0)}&edgeLimit=0", "view=modules&focus=core&unresolved=exclude", "view=other&focus=${id(0)}",
+            "view=calls&focus=${id(0)}&edgeLimit=0", "view=modules&focus=core&unresolved=omit", "view=other&focus=${id(0)}",
             "view=calls&focus=${id(0)}&direction=sideways", "view=calls&focus=${id(0)}&limit=5")) {
             assertEquals("VALIDATION_FAILED", assertFailsWith<WebAccessDenied>(query) { read(query) }.code, query)
         }

@@ -7399,8 +7399,8 @@
                 {
                   "type": "string",
                   "enum": [
-                    "include",
-                    "exclude"
+                    "show",
+                    "omit"
                   ]
                 },
                 {

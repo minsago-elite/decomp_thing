@@ -91,7 +91,7 @@
       "depth": 2,
       "nodeLimit": 60,
       "edgeLimit": 150,
-      "unresolved": "include"
+      "unresolved": "show"
     },
     "graphState": "available",
     "graphReason": null,

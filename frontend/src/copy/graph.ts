@@ -6,7 +6,7 @@ export const graphCopy = {
   direction: 'Direction', depth: 'Depth', nodeLimit: 'Node limit', edgeLimit: 'Relationship limit', unresolved: 'Unrecorded call targets',
   directions: { calls: { outgoing: 'Callees', incoming: 'Callers', both: 'Callers and callees' },
     modules: { outgoing: 'Dependencies', incoming: 'Dependants', both: 'Dependants and dependencies' } },
-  unresolvedOptions: { include: 'Include', exclude: 'Leave out (counted below)' },
+  unresolvedOptions: { show: 'Show', omit: 'Leave out (counted below)' },
   limitsHint: 'Depth up to {depth}, at most {nodes} nodes and {edges} relationships.',
   apply: 'Apply limits',
   graphStates: {

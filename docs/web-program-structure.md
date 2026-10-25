@@ -127,7 +127,7 @@ Issues #537 and #538 (tracker #184). `GET R/graph` → `structureNeighborhood` r
 bounded neighborhood around one recorded focus. Query: `view` (`calls` with a
 function `focus`, or `modules` with a module `focus`), `direction` (`outgoing`,
 `incoming`, `both`), `depth` (1–3, default 1), `nodeLimit` (1–200, default 60),
-`edgeLimit` (1–400, default 150), `unresolved` (`include`, `exclude`; calls only) and
+`edgeLimit` (1–400, default 150), `unresolved` (`show`, `omit`; calls only) and
 `structureVersion`. The response restates the request, so a view never shows limits it
 did not ask for.
 
@@ -145,7 +145,7 @@ Relationships keep the report semantics:
 
 The reader explores breadth first from the focus. Within one million adjacency visits
 it counts the reachable nodes and the edges among them exactly, plus edges that continue
-past the depth limit and edges to targets the `unresolved=exclude` filter leaves out.
+past the depth limit and edges to targets the `unresolved=omit` filter leaves out.
 It returns the first `nodeLimit` nodes in discovery order (the focus first) and the
 first `edgeLimit` edges among them, nearest relationships first. `completeness.state`
 is `complete` only when nothing reachable is left out; otherwise it is `truncated` with
