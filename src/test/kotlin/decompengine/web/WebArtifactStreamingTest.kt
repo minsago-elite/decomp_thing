@@ -129,6 +129,10 @@ class WebArtifactStreamingTest {
         assertEquals("bytes */${archive.size}", unsatisfiable.headers().firstValue("Content-Range").orElseThrow())
         assertEquals(304, get(fixture, href, octets, mapOf("If-None-Match" to etag)).statusCode())
         assertEquals(304, get(fixture, href, octets, mapOf("If-None-Match" to etag), "HEAD").statusCode())
+        assertEquals(304, get(fixture, href, octets, mapOf("If-None-Match" to "\"other\", W/$etag")).statusCode())
+        assertEquals(200, get(fixture, href, octets, mapOf("If-None-Match" to "W/\"${"0".repeat(64)}\""), "HEAD").statusCode())
+        // If-Match keeps strong comparison: a weak validator never satisfies it.
+        assertEquals(412, get(fixture, href, octets, mapOf("If-Match" to "W/$etag"), "HEAD").statusCode())
         assertEquals(412, get(fixture, href, octets, mapOf("If-Match" to "\"${"0".repeat(64)}\"")).statusCode())
         assertEquals(200, get(fixture, href, octets, mapOf("If-Match" to etag), "HEAD").statusCode())
         assertEquals(400, get(fixture, href, octets, mapOf("If-Unmodified-Since" to "Mon, 01 Jan 2024 00:00:00 GMT")).statusCode())

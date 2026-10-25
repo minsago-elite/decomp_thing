@@ -378,7 +378,7 @@ def check_catalog_artifact(item: dict) -> None:
         raise ValueError("catalog artifact identity does not bind its family and digest")
     if item["binding"]["runId"] is None:
         raise ValueError("catalog artifacts belong to one attempt")
-    if item["verification"] == "revision-commitment" and (item["family"] not in ("source-manifest", "build-contract")
+    if item["verification"] == "source-inventory-checked" and (item["family"] not in ("source-manifest", "build-contract")
                                                           or item["binding"]["revisionId"] is None):
         raise ValueError("only revision-bound source metadata can be verified against a revision commitment")
 

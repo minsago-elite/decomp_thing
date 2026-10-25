@@ -873,7 +873,7 @@
         "verification": {
           "enum": [
             "not-verified",
-            "revision-commitment"
+            "source-inventory-checked"
           ]
         }
       },

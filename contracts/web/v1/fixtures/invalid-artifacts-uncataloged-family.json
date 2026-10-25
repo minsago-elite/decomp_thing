@@ -28,7 +28,7 @@
         "role": "source",
         "derivedFromArtifactId": null,
         "family": "build-contract",
-        "verification": "revision-commitment"
+        "verification": "source-inventory-checked"
       }
     ],
     "page": {

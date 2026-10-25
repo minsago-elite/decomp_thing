@@ -107,9 +107,11 @@ internal class WebArtifactContent(private val store: WebArtifactStore,
         }
         if (observed.sha256 != selection.sha256 || observed.size != size) webArtifactChanged()
         val etag = "\"${selection.sha256}\""
+        // RFC 9110: If-Match uses strong comparison; If-None-Match uses weak comparison (a W/ prefix still matches).
         fun matches(value: String) = value.split(',').any { it.trim() == "*" || it.trim() == etag }
+        fun weaklyMatches(value: String) = value.split(',').any { it.trim() == "*" || it.trim().removePrefix("W/") == etag }
         headers.getFirst("If-Match")?.let { if (!matches(it)) throw WebAccessDenied(412, "PRECONDITION_FAILED", "The artifact representation does not match If-Match.") }
-        val notModified = headers.getFirst("If-None-Match")?.let(::matches) == true
+        val notModified = headers.getFirst("If-None-Match")?.let(::weaklyMatches) == true
         val ifRange = headers.getFirst("If-Range")
         val range = if (notModified || exchange.requestMethod == "HEAD" || (ifRange != null && ifRange.trim() != etag)) null else try {
             headers.getFirst("Range")?.let { parseWebByteRange(it, size) }

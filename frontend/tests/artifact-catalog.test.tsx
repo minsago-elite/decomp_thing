@@ -38,8 +38,9 @@ it('lists artifacts explicitly and distinguishes verified digests from available
   fireEvent.click(screen.getByRole('button', { name: 'List retained artifacts' }));
   expect(await screen.findByText('Showing 3 artifacts on this page.')).toBeTruthy();
   expect(fetcher.mock.calls[0]![0] as string).toBe(`/api/v1/jobs/${jobId}/artifacts?runId=${runId}&limit=50`);
-  expect(screen.getAllByText(/^Verified digest:/u)).toHaveLength(1);
-  expect(screen.getAllByText(/^Available file, not verified:/u)).toHaveLength(2);
+  expect(screen.getAllByText(/^Digest not validated; source inventory checked:/u)).toHaveLength(1);
+  expect(screen.getAllByText(/^Available file, digest not validated:/u)).toHaveLength(2);
+  expect(screen.queryByText(/^Verified/u)).toBeNull();
   const links = screen.getAllByRole('link', { name: /^Download /u });
   expect(links.map(link => link.getAttribute('download'))).toEqual(['exploration.json', 'source_tree_manifest.json', 'source-tree.zip']);
   expect(links[2]!.getAttribute('href')).toBe(first.data.items[2]!.contentHref);

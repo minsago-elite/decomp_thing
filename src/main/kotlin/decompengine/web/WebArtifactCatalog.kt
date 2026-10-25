@@ -223,6 +223,7 @@ internal fun webArtifactDescriptor(selection: WebArtifactSelection, size: Long, 
     put("contentHref", "${basePath}api/v1/jobs/${selection.jobId}/artifacts/${selection.artifactId}/content")
     put("role", family.role); put("derivedFromArtifactId", JsonNull)
     put("family", family.wire)
-    // An observed digest identifies current bytes; only a persisted candidate commitment makes it verified.
-    put("verification", if (revisionVerified) "revision-commitment" else "not-verified")
+    // No independently persisted digest exists for these files: the digest is always observed. The inventory check only
+    // says the recorded source inputs reproduce the candidate's source commitment; it never covers other bytes.
+    put("verification", if (revisionVerified) "source-inventory-checked" else "not-verified")
 }

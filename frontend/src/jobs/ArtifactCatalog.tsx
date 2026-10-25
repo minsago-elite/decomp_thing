@@ -74,8 +74,8 @@ export function ArtifactCatalog({ jobId, runId, revisionId, basePath }: { jobId:
       <ul class="job-list" aria-label={copy.title}>
         {data.items.map(item => <li key={item.artifactId}>
           <h3>{copy.family[item.family!]}</h3>
-          <p class={item.verification === 'revision-commitment' ? 'artifact-verified' : 'artifact-unverified'}>
-            <strong>{item.verification === 'revision-commitment' ? copy.verified : copy.available}</strong></p>
+          <p class={item.verification === 'source-inventory-checked' ? 'artifact-inventory-checked' : 'artifact-unverified'}>
+            <strong>{item.verification === 'source-inventory-checked' ? copy.inventoryChecked : copy.available}</strong></p>
           <dl class="job-facts">
             <dt>{copy.size}</dt><dd>{formatExactBytes(item.sizeBytes)}</dd>
             <dt>{copy.digest}</dt><dd><code>{item.sha256}</code></dd>

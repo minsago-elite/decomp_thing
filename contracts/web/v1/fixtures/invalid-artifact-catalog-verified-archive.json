@@ -17,6 +17,6 @@
     "role": "archive",
     "derivedFromArtifactId": null,
     "family": "source-archive",
-    "verification": "revision-commitment"
+    "verification": "source-inventory-checked"
   }
 }

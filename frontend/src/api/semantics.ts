@@ -287,7 +287,7 @@ export function checkSemantics(document: ContractDocument, basePath = '/'): void
     if (item.family === undefined) return;
     requireValue(item.artifactId === `${ARTIFACT_CODES[item.family]}_${item.artifactId.split('_')[1] ?? ''}_${item.sha256}`
       && /^[a-z]+_[a-f0-9]{32}_[a-f0-9]{64}$/u.test(item.artifactId) && item.binding.runId !== null);
-    if (item.verification === 'revision-commitment') {
+    if (item.verification === 'source-inventory-checked') {
       requireValue((item.family === 'source-manifest' || item.family === 'build-contract') && item.binding.revisionId !== null);
     }
   }

@@ -933,11 +933,14 @@ another session or filter returns `400 INVALID_CURSOR`, and a changed attempt se
 candidate revision returns `410 CURSOR_EXPIRED`.
 
 Entries reuse the `artifact` DTO with `family` and `verification`. `sizeBytes` and `sha256`
-are measured from the current bytes during the listing. `verification: "revision-commitment"`
-appears only for the source manifest or build contract of a revision-bound attempt when the
-revision source capture verified that the same manifest and build contract reproduce the
-persisted candidate's source commitment. Every other entry is `not-verified`: an available
-file whose digest the server observed but no producer or revision commitment has validated.
+are measured from the current bytes during the listing. No independently persisted digest
+exists for these families, so every listed digest is a server observation and the catalog
+never claims byte verification. `verification: "source-inventory-checked"` appears only for
+the source manifest or build contract of a revision-bound attempt when the revision source
+capture confirmed that the source inputs those files record reproduce the persisted
+candidate's source commitment. That check does not cover their other bytes (formatting or
+unrelated fields could differ under the same commitment). Every other entry is
+`not-verified`: an available file with an observed digest.
 Neither state verifies compilation, behavior, archive contents or accepted reconstruction.
 The artifact ID is `<family>_<job/run binding>_<sha256>`, so it is stable for the same bytes
 and the existing exploration report descriptor names the same artifact. `GET`/`HEAD
@@ -950,7 +953,7 @@ changed bytes return `409 ARTIFACT_CHANGED`.
 denial and the sandboxed inert CSP. Active content is therefore never served as trusted UI.
 A first pinned pass must reproduce the ID's digest before any header is sent; otherwise
 the response is 409. `ETag` is the strong `"<sha256>"`, and `Accept-Ranges: bytes`,
-`X-Decomp-Artifact-ID` and `X-Decomp-Content-SHA256` repeat that identity. HEAD performs
+`X-Decomp-Artifact-ID` and `X-Decomp-Content-SHA256` repeat that identity. `If-None-Match` uses weak comparison and `If-Match` strong comparison. HEAD performs
 the same verification and returns headers only. `If-None-Match` with the current ETag (or
 `*`) returns 304; a non-matching `If-Match` returns 412. A single `bytes=a-b`, `bytes=a-` or
 `bytes=-n` range returns 206 with `Content-Range`. An unsatisfiable range returns 416 with
@@ -973,8 +976,8 @@ ends an in-progress download short of its length.
 
 The attempt evidence view lists the catalog only after an explicit action. It can restrict
 the list to the result revision, pages with explicit controls, shows exact size, SHA-256,
-declared type and revision binding, and distinguishes a verified digest from an available
-file that is not verified. Downloads use ordinary browser attachment links (`<a download>`),
+declared type and revision binding, states that no digest has been validated, and marks
+entries whose source inventory was checked separately from other available files. Downloads use ordinary browser attachment links (`<a download>`),
 never a whole-file JavaScript blob. JVM controls cover family selection, filters, cursor
 binding and expiry, page budgets, verification and change refusal. A real-listener test
 streams a 24 MiB archive with range, precondition, HEAD and change semantics. Other

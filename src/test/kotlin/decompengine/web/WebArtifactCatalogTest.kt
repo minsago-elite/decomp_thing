@@ -62,7 +62,7 @@ class WebArtifactCatalogTest {
         assertEquals(listOf("exploration-report", "progress-journal", "source-manifest", "build-contract", "source-archive"), listed.map { field(it, "family") })
         assertEquals(listOf("run_a", "run_a", "run_b", "run_b", "run_b"), listed.map { it.getValue("binding").jsonObject.getValue("runId").jsonPrimitive.content })
         assertEquals(listOf(null, null, "revision_b", "revision_b", "revision_b"), listed.map { it.getValue("binding").jsonObject.getValue("revisionId").jsonPrimitive.contentOrNull })
-        assertEquals(listOf("not-verified", "not-verified", "revision-commitment", "not-verified", "not-verified"), listed.map { field(it, "verification") })
+        assertEquals(listOf("not-verified", "not-verified", "source-inventory-checked", "not-verified", "not-verified"), listed.map { field(it, "verification") })
         val archive = listed.last()
         assertEquals("10000", field(archive, "sizeBytes")); assertEquals("application/zip", field(archive, "mediaType"))
         assertEquals("archive", field(archive, "role")); assertEquals(WebExplorationArtifact.sha256(ByteArray(10_000) { it.toByte() }), field(archive, "sha256"))
