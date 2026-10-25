@@ -57,7 +57,7 @@ class WebApiControllerTest {
             val capabilities = first.getValue("capabilities").jsonArray.map { it.jsonObject }.associateBy { it.getValue("id").jsonPrimitive.content }
             assertTrue(capabilities.keys.containsAll(setOf("workflow-explore-tools", "workflow-reconstruct-agent-acp",
                 "workflow-reconstruct-agent-builtin", "workflow-reconstruct-evidence-only", "workflow-repair-agent-acp",
-                "workflow-repair-agent-builtin", "workflow-build", "workflow-validate", "harness")))
+                "workflow-repair-agent-builtin", "workflow-build", "workflow-validate-tools", "harness")))
             assertFalse("workflows" in capabilities)
             val agent = capabilities.getValue("workflow-reconstruct-agent-acp")
             assertEquals(listOf("reconstruct"), agent.getValue("workflows").jsonArray.map { it.jsonPrimitive.content })

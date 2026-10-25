@@ -5521,7 +5521,7 @@ private fun recordedHistoryCapture(
         state.regressionCorpusSha256, identities.revision(state.headId), identity(state.provisionalHeadId),
         identity(state.fullyAcceptedHeadId), runs, attempts, pending,
         state.retainedRegressionInputs.map { identities.case(it.id) }, acceptedBaseline)
-    return RepairHistoryArtifactCapture(snapshot, artifactPaths)
+    return RepairHistoryArtifactCapture(snapshot, artifactPaths, state.retainedRegressionInputs)
 }
 
 private fun validateGraphBeforeRecovery(

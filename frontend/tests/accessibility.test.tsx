@@ -47,6 +47,7 @@ const responses: Record<string, () => unknown> = {
   recovery: () => fixture('recovery-empty'),
   progressPin: () => fixture('progress-pin'),
   moduleProgress: () => bound('module-progress-interrupted', { jobId, runId }),
+  validationCasePlan: () => bound('validation-case-plan', { jobId, revisionId: 'revision_example_1' }),
 };
 
 beforeEach(() => {
@@ -148,6 +149,23 @@ it('has no automated WCAG A/AA violations on the workflow launch form with setti
   await settle();
   expect(screen.getByRole('region', { name: 'Configuration to submit' })).toBeTruthy();
   fireEvent.input(screen.getByLabelText('Wall-clock limit (ms)'), { target: { value: 'invalid' } });
+  await settle();
+  expect(await violations()).toEqual([]);
+});
+
+it('has no automated WCAG A/AA violations on a validation launch with its reviewed cases', async () => {
+  const launch = fixture('bootstrap-harness-options').data as unknown as Bootstrap;
+  const value = createBrowserSession({
+    bootstrap: () => Promise.resolve({ ...launch, basePath: '/nested/', sessionExpiresAt: new Date(Date.now() + 60000).toISOString() }),
+    exchange: vi.fn(), logout: () => Promise.resolve(),
+  }, '/nested');
+  sessions.push(value);
+  await value.initialize({ kind: 'absent' });
+  history.replaceState(null, '', `/nested/jobs/${jobId}`);
+  render(<App basePath="/nested" session={value} />);
+  fireEvent.click(await screen.findByLabelText('Validation: local tools'));
+  fireEvent.change(await screen.findByLabelText('Input revision'), { target: { value: 'revision_example_1' } });
+  await screen.findByRole('table', { name: 'Cases this validation runs' });
   await settle();
   expect(await violations()).toEqual([]);
 });

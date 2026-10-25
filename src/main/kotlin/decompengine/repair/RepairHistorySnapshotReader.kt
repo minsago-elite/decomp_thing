@@ -17,6 +17,14 @@ internal class RepairHistoryReadResult private constructor(
     val projection: RepairHistoryProjectionDiagnostic = RepairHistoryProjectionDiagnostic(RepairHistoryProjectionStatus.NOT_INSPECTED),
     private val artifactCapture: RepairHistoryArtifactCapture? = null,
 ) {
+    /**
+     * The captured graph's retained regression corpus, as private case data for exact digest
+     * recomputation and bounded display by a caller that authorized this selection. It is never part
+     * of the public snapshot and grants no execution authority.
+     */
+    internal fun retainedCorpus(): List<decompengine.validation.ProcessInput>? =
+        artifactCapture?.retainedCorpus()?.takeIf { status == RepairHistoryReadStatus.RECORDED }
+
     internal fun selectedArtifactPaths(page: RepairRecordedHistoryPage): List<String> {
         require(status == RepairHistoryReadStatus.RECORDED && page.snapshot === snapshot) {
             "Recorded history page does not match its capture."
@@ -42,8 +50,13 @@ internal class RepairHistoryReadResult private constructor(
 internal class RepairHistoryArtifactCapture internal constructor(
     val snapshot: RepairHistorySnapshot,
     paths: Map<RepairRecordedArtifactReference, String>,
+    retainedCorpus: List<decompengine.validation.ProcessInput> = emptyList(),
 ) {
     private val paths = paths.toMap()
+    private val corpus = retainedCorpus.map { decompengine.validation.ProcessInput(it.id, it.args.toList(), it.stdin.copyOf()) }
+
+    internal fun retainedCorpus(): List<decompengine.validation.ProcessInput> =
+        corpus.map { decompengine.validation.ProcessInput(it.id, it.args.toList(), it.stdin.copyOf()) }
 
     internal fun selectedPaths(page: RepairRecordedHistoryPage): List<String> {
         require(page.snapshot === snapshot) { "Recorded history page does not match its capture." }

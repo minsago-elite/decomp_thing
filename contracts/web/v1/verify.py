@@ -401,6 +401,11 @@ def check_semantics(document: dict) -> None:
         check_run(data)
     elif kind == "moduleProgress":
         check_module_progress(data)
+    elif kind == "validationCasePlan":
+        cases = data["cases"]
+        if len({item["caseId"] for item in cases}) != len(cases) or len(cases) > data["totalCases"] or \
+                data["truncated"] != (data["totalCases"] > len(cases)):
+            raise ValueError("validation case plan listing disagrees with its total")
     elif kind == "runs":
         items = data["items"]
         if len(items) > data["page"]["limit"] or len({item["runId"] for item in items}) != len(items):

@@ -14,7 +14,9 @@ export const recordedValidationCopy = {
   historyState: 'History state', historyPage: 'History page', historyNavigation: 'Validation history pages',
   previousHistory: 'Newer validation operations', nextHistory: 'Earlier validation operations',
   owners: 'Recorded validation operations', operation: 'Recorded operation', candidate: 'Candidate', source: 'Source SHA-256',
-  receipt: 'Receipt metadata', inspect: 'Inspect cases', withheld: 'Unavailable or withheld', notRecorded: 'Not recorded',
+  receipt: 'Receipt metadata', origin: 'Recorded by', inspect: 'Inspect cases',
+  originThisAttempt: 'This attempt', originInherited: 'Inherited with the input revision', originUnknown: 'Unknown',
+  validatorAttempt: 'repair candidate validation', validatorBaseline: 'revision validation', validatorFailure: 'validator failure', withheld: 'Unavailable or withheld', notRecorded: 'Not recorded',
   noOwners: 'No operations are retained on this history page.', limitations: 'History limitations',
   reportState: 'Report state', reportLimitations: 'Validation report limitations',
   acceptance: 'These are recorded observations. Repair acceptance has not been evaluated by this view.',
@@ -379,6 +381,9 @@ export const recordedConfigurationCopy = {
   status: 'Harness status', current: 'Current', deprecated: 'Deprecated (retained for compatibility)',
   unresolved: 'Not resolved at admission', noHarness: 'No agent harness: this attempt never contacts an agent.',
   digestBoundary: 'The digest identifies the canonical harness configuration the server resolved; it is not the configuration and does not prove that an agent session ran.',
+  validation: 'Validation cases', validationPreset: 'Case preset', validationCorpus: 'Corpus digest (SHA-256)', validationCount: 'Cases',
+  validationBoundary: 'Admission bound this exact server-approved corpus of the input revision. Each compile, behavior and repair result of this attempt keeps its own validator identity in the evidence view.',
+  openValidators: 'Open this attempt\'s validator results',
 } as const;
 
 export const moduleProgressCopy = {

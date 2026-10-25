@@ -13,6 +13,7 @@
     },
     "scope": {
       "maxContextCharacters": "60000"
-    }
+    },
+    "cases": null
   }
 }

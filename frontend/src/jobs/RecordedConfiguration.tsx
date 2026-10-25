@@ -1,5 +1,6 @@
 import { Fragment } from 'preact';
 import type { Run } from '../api/generated';
+import { runViewPath } from '../app/paths';
 import { recordedConfigurationCopy as copy } from '../copy/attempt';
 
 const flag = (value: boolean) => value ? copy.yes : copy.no;
@@ -7,7 +8,7 @@ const code = (value: string | number | null, missing: string = copy.notApplicabl
   value === null ? missing : <code>{value}</code>;
 
 /** The admission record exactly as persisted; it describes this attempt, never the current server. */
-export function RecordedConfiguration({ run }: { run: Run }) {
+export function RecordedConfiguration({ run, basePath }: { run: Run; basePath: string }) {
   const configuration = run.configuration;
   return <section aria-labelledby="recorded-configuration-title">
     <h2 id="recorded-configuration-title">{copy.title}</h2>
@@ -42,6 +43,17 @@ export function RecordedConfiguration({ run }: { run: Run }) {
         </dl>
         <p>{copy.digestBoundary}</p>
       </>}
+      {configuration.validation && <>
+        <h3>{copy.validation}</h3>
+        <dl class="job-facts">
+          <dt>{copy.validationPreset}</dt><dd><code>{configuration.validation.presetId}</code></dd>
+          <dt>{copy.validationCorpus}</dt><dd><code>{configuration.validation.corpusSha256}</code></dd>
+          <dt>{copy.validationCount}</dt><dd>{configuration.validation.caseCount}</dd>
+        </dl>
+        <p>{copy.validationBoundary}</p>
+      </>}
     </>}
+    {(run.workflow === 'validate' || run.workflow === 'repair') && <p>
+      <a href={runViewPath(basePath, run.jobId, run.runId, 'evidence')}>{copy.openValidators}</a></p>}
   </section>;
 }

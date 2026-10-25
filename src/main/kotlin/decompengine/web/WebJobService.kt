@@ -957,7 +957,8 @@ class WebJobService(
      */
     @Synchronized
     internal fun requestDurableStart(jobId: String, expectedJobVersion: String, request: NewWorkflowAttempt,
-        requestKey: String, prerequisites: WebWorkflowPrerequisites? = WebWorkflowPrerequisites.UNCHECKED): DurableWebWorkflowStartResult {
+        requestKey: String, prerequisites: WebWorkflowPrerequisites? = WebWorkflowPrerequisites.UNCHECKED,
+        preparedValidationPlan: Pair<String, WebValidationCasePlan>? = null): DurableWebWorkflowStartResult {
         requireInitializedRead()
         requirePublicationAvailable()
         if (!jobId.matches(Regex("[0-9a-f]{32}"))) throw WebJobServiceException("JOB_NOT_FOUND", "The requested job is unavailable.")
@@ -997,10 +998,19 @@ class WebJobService(
         // Admission uses owned task accounting, never sampled executor telemetry.
         if (active.size >= maximumInFlight) throw WebJobServiceException("CAPACITY_UNAVAILABLE", "Workflow capacity is currently full.")
         val inputSourceTree = selectInput(jobId, view.snapshot, registration.adapter.input, request.inputRevisionId)
+        // The reviewed corpus is recomputed from the selected revision itself; a caller names it only by digest.
+        val validation = when {
+            registration.adapter.validationCases -> webAdmitValidationCases(preparedValidationPlan?.takeIf { it.first == request.inputRevisionId }
+                ?.second ?: WebValidationCasePlan.of(checkNotNull(inputSourceTree)),
+                request.cases ?: throw WebJobServiceException("VALIDATION_CASES_REQUIRED",
+                    "A validation request must name the reviewed cases of its revision."))
+            request.cases != null -> throw WebJobServiceException("VALIDATION_CASES_UNAVAILABLE", "This option does not accept a validation case selection.")
+            else -> null
+        }
         val job = store.get(jobId)
         val admitted = publishStart(jobId) {
             owner.createIdempotent(jobId, view.snapshot.version,
-                request.copy(configuration = configuration), requestKey, expectedJobVersion)
+                request.copy(configuration = configuration?.copy(validation = validation)), requestKey, expectedJobVersion)
         }
         if (admitted.replayed) return DurableWebWorkflowStartResult(admitted.attempt, replayed = true)
         val task = DurableTask(job, admitted.attempt, registration.adapter, inputSourceTree)
@@ -1090,6 +1100,22 @@ class WebJobService(
 
     /** Last startup reconciliation, or null when no registered workflow publishes acceptance. */
     internal fun startupReconciliation(): WebStartupReconciliation? = startupReconciliation
+
+    /**
+     * The server-approved validation corpus for one revision this job recorded, resolved exactly as a
+     * validation start resolves its input. Display data only; admission recomputes it.
+     */
+    internal fun readValidationCasePlan(jobId: String, revisionId: String): WebValidationCasePlan {
+        requireInitializedRead()
+        if (!jobId.matches(Regex("[0-9a-f]{32}"))) throw WebJobServiceException("JOB_NOT_FOUND", "The requested job is unavailable.")
+        val tree = synchronized(this) {
+            val owner = attempts ?: throw WebJobServiceException("JOB_NOT_FOUND", "The requested job is unavailable.")
+            val view = inspectStoredJob(owner, jobId) as? WorkflowJobInspection.Available
+                ?: throw WebJobServiceException("JOB_RECORD_UNAVAILABLE", "The job record is unavailable; inspect its storage diagnostic.")
+            checkNotNull(selectInput(jobId, view.snapshot, DurableWebWorkflowInput.RECORDED_REQUIRED, revisionId))
+        }
+        return WebValidationCasePlan.of(tree)
+    }
 
     /** Applies the adapter's input policy under the service monitor; the returned source tree never leaves the service. */
     private fun selectInput(jobId: String, snapshot: decompengine.jobs.WorkflowJobSnapshot, policy: DurableWebWorkflowInput,

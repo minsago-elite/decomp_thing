@@ -1,0 +1,44 @@
+{
+  "apiVersion": 1,
+  "kind": "validationCasePlan",
+  "requestId": "request_example_1",
+  "data": {
+    "binding": {
+      "jobId": "1234567890abcdef1234567890abcdef",
+      "revisionId": "source_eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+    },
+    "presetId": "retained-corpus-v1",
+    "state": "available",
+    "reasonCode": null,
+    "corpusSha256": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+    "totalCases": 3,
+    "truncated": false,
+    "cases": [
+      {
+        "caseId": "default",
+        "origin": "server-default",
+        "arguments": [],
+        "stdinBytes": "0"
+      },
+      {
+        "caseId": "explore_args_1",
+        "origin": "retained",
+        "arguments": [
+          "line\nbreak",
+          "3"
+        ],
+        "stdinBytes": "0"
+      },
+      {
+        "caseId": "explore_stdin_2",
+        "origin": "retained",
+        "arguments": null,
+        "stdinBytes": "17"
+      }
+    ],
+    "limitations": [
+      "Cases are recorded data the server runs inside its sandbox; they are never commands, paths or runner settings.",
+      "A request names these cases only by the corpus digest. Admission recomputes it and refuses a different corpus."
+    ]
+  }
+}

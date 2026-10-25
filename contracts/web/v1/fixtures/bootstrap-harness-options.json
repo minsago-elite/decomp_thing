@@ -363,6 +363,36 @@
         "agentContractVersion": null,
         "limits": null,
         "launch": null
+      },
+      {
+        "id": "workflow-validate-tools",
+        "state": "supported",
+        "reasonCode": null,
+        "message": "Every prerequisite this workflow declares was present at the last readiness check.",
+        "workflows": [
+          "validate"
+        ],
+        "agentContractVersion": null,
+        "limits": {
+          "wallClockMs": "7200000",
+          "idleMs": "1200000",
+          "maxOutputBytes": "4294967296",
+          "maxToolCalls": "0"
+        },
+        "launch": {
+          "harnessCapabilityId": null,
+          "mode": "tools",
+          "executesBinary": true,
+          "contactsAgent": false,
+          "requiredTools": [
+            "sandbox",
+            "c-toolchain"
+          ],
+          "input": "recorded-required",
+          "limitsAdjustable": true,
+          "harness": null,
+          "reconstruction": null
+        }
       }
     ],
     "limits": {

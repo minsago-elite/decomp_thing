@@ -77,7 +77,7 @@ function Details({ jobId, runId, basePath, session, view, navigation }: {
       <p>{copy.completionAloneDoesNotEstablishAcceptedReconstructionAcceptanceBelongsTo}</p>
       <p>{copy.recordedHarnessBoundary}</p>
       {run.previousRunId && <a href={runPath(basePath, jobId, run.previousRunId)}>{copy.openPreviousAttempt}</a>}
-      <RecordedConfiguration run={run} />
+      <RecordedConfiguration run={run} basePath={basePath} />
       <h2>{copy.recordedLimits}</h2>
       <p>{copy.sourceThePersistedConfigurationForThisAttemptLimitsDoNot}</p>
       <dl class="job-facts">

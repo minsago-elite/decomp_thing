@@ -4,8 +4,12 @@ import decompengine.project.sha256
 import decompengine.repair.*
 import kotlinx.serialization.json.*
 
-/** Metadata discovery never reads a receipt, invocation, output or source body. */
-internal data class WebValidationHistoryCapture(val recorded: RepairHistoryReadResult, val page: RepairRecordedHistoryPage?)
+/**
+ * Metadata discovery never reads a receipt, invocation, output or source body. [attemptStartedMillis] is the
+ * selected web attempt's start, which separates validators it ran from history copied with its input revision.
+ */
+internal data class WebValidationHistoryCapture(val recorded: RepairHistoryReadResult, val page: RepairRecordedHistoryPage?,
+    val attemptStartedMillis: Long? = null)
 
 internal fun parseWebValidationHistoryQuery(raw: String?): RepairRecordedHistorySelection = try {
     if (raw == null) RepairRecordedHistorySelection() else {
@@ -21,6 +25,7 @@ internal fun parseWebValidationHistoryQuery(raw: String?): RepairRecordedHistory
 internal fun WebJobService.readValidationHistory(jobId: String, runId: String,
     selection: RepairRecordedHistorySelection): WebValidationHistoryCapture = captureValidationHistory(selection,
     version = { getAttempt(jobId, runId).version }, history = { readRecordedRepairHistory(jobId, runId) })
+    .copy(attemptStartedMillis = getAttempt(jobId, runId).startedAt?.toEpochMilli())
 
 internal fun captureValidationHistory(selection: RepairRecordedHistorySelection, version: () -> String,
     history: () -> RepairHistoryReadResult): WebValidationHistoryCapture {
@@ -43,8 +48,17 @@ internal fun webValidationHistory(jobId: String, runId: String, value: WebValida
     require(value.recorded.status != RepairHistoryReadStatus.RECORDED || snapshot != null)
     require((page == null) == (value.recorded.status != RepairHistoryReadStatus.RECORDED || snapshot == null))
     if (page != null) require(page.snapshot === snapshot)
+    // A graph run that began within the selected attempt is that attempt's own; earlier runs came with its input.
+    fun origin(run: RepairRecordedRun?): String {
+        val started = value.attemptStartedMillis ?: return "unknown"
+        return when {
+            run == null -> "unknown"
+            run.startedEpochMillis >= started -> "this-attempt"
+            else -> "inherited"
+        }
+    }
     fun owner(kind: String, identity: RepairRecordedIdentity, binding: RepairRecordedValidationObservation?,
-        failure: RepairRecordedValidationDiagnostic? = null): JsonObject = buildJsonObject {
+        failure: RepairRecordedValidationDiagnostic? = null, run: RepairRecordedRun? = null): JsonObject = buildJsonObject {
         require(binding == null || failure == null)
         val candidate = binding?.candidate ?: failure?.candidate
         val present = binding != null || failure != null
@@ -57,11 +71,13 @@ internal fun webValidationHistory(jobId: String, runId: String, value: WebValida
         put("corpusSha256", (binding?.proof?.regressionCorpusSha256 ?: failure?.regressionCorpusSha256)?.takeUnless { withheld }?.let(::JsonPrimitive) ?: JsonNull)
         put("normalOutcome", binding?.outcome?.name?.lowercase()?.replace('_', '-')?.let(::JsonPrimitive) ?: JsonNull)
         put("failureKind", failure?.failureKind?.name?.lowercase()?.replace('_', '-')?.let(::JsonPrimitive) ?: JsonNull)
+        put("origin", origin(run))
     }
     val items = buildList {
-        page?.attempts?.forEach { add(owner("attempt", it.identity, it.validationObservation)) }
-        page?.runs?.forEach { add(owner("run-baseline", it.identity, it.baselineValidationObservation)) }
-        page?.runs?.forEach { run -> run.validationDiagnostic?.let { add(owner("run-failure", run.identity, null, it)) } }
+        page?.attempts?.forEach { attempt -> add(owner("attempt", attempt.identity, attempt.validationObservation,
+            run = snapshot?.runs?.singleOrNull { it.identity == attempt.run })) }
+        page?.runs?.forEach { add(owner("run-baseline", it.identity, it.baselineValidationObservation, run = it)) }
+        page?.runs?.forEach { run -> run.validationDiagnostic?.let { add(owner("run-failure", run.identity, null, it, run)) } }
     }
     require(items.size <= 61 && items.map { it.getValue("ownerKind") to it.getValue("ownerId") }.distinct().size == items.size)
     return buildJsonObject {

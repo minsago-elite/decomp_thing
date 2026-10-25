@@ -288,6 +288,12 @@ export function checkSemantics(document: ContractDocument, basePath = '/'): void
     case 'moduleProgress':
       checkModuleProgress(document.data);
       break;
+    case 'validationCasePlan': {
+      const { cases, totalCases, truncated } = document.data;
+      requireValue(new Set(cases.map(item => item.caseId)).size === cases.length && cases.length <= totalCases
+        && truncated === totalCases > cases.length);
+      break;
+    }
     case 'runs': {
       const { items, page, jobId } = document.data;
       requireValue(items.length <= page.limit && new Set(items.map(item => item.runId)).size === items.length);

@@ -151,13 +151,14 @@ internal storage optimization and must not merge identity, permissions or histor
 | `PUT R/progress-pin` | `200 progressPin`, original result on keyed replay | Strict `progressPinRequest`, session/Origin/CSRF, run If-Match and idempotency; #172/#177 |
 | `GET /agent/preflight` | `200 agentPreflight` | Last explicit agent inspection result; never starts the agent; #493 |
 | `POST /agent/preflight` | `202 agentPreflight`, `409` while one runs | Strict `agentPreflightRequest` (`{"action":"inspect"}`), session/Origin/CSRF; starts one single-flight `preflight(WEB)`; #493 |
-| `POST J/runs` | `202 run`, `Location: R` | `workflowStart` request, explicit option, server-approved limits and reconstruction scope, input policy and fresh readiness checks, job If-Match; #163/#478/#559 |
+| `POST J/runs` | `202 run`, `Location: R` | `workflowStart` request, explicit option, server-approved limits, reconstruction scope and reviewed validation cases, input policy and fresh readiness checks, job If-Match; #163/#478/#559/#561 |
 | `POST R/cancel` | `202 run` or `200 run` if already terminal | Closed `workflowCancel` request, idempotent recorded intent, run If-Match; #163 |
 | `POST R/recover` | `202 run`, `Location` of a new attempt | Explicit `retry` or capability-gated `resume`; If-Match; #163 |
 | `GET R/snapshot` | `200 snapshot`, ETag | Run state and consistent event watermark; #174 |
 | `GET R/events` | `200 text/event-stream` | Resume with `Last-Event-ID` or `after`, never both; #174 |
 | `GET R/events?transport=poll` | `200 events` | Same retention/cursor semantics, bounded page; #174 |
 | `GET R/reports/{reportId}` | `200 report` | State may be missing/partial/unsupported/unknown; #165 |
+| `GET J/validation-cases?revision={revisionId}` | `200 validationCasePlan`, `404 REVISION_NOT_FOUND` | Server-approved validation cases of one revision this job recorded, resolved as a validation start resolves its input; display data only; #561 |
 | `GET R/reports/module-progress` | `200 moduleProgress` | Stage-separated reconstruction progress and retained-plan reuse explanation from the attempt's own reports; read-only, no query; #560 |
 | `GET R/source-catalog` | `200 sourceCatalog` | Bounded flat manifest metadata; selected durable job/run; #490 |
 | `GET`, `HEAD R/reports/revision-validation` | `200 report` | Explicit graph and evidence-owner selection; checked normal summary and bounded case pages; #489, #543 |
@@ -521,6 +522,51 @@ starts, so earlier receipts keep their digest). The attempt records the exact ef
 in `configuration.reconstruction`: `profileId`, the profile's `profileSha256` and the
 `maxContextCharacters` the run used (the default when none was requested; null for
 evidence-only). The agent reconstructor runs with that recorded budget.
+
+### Validation requests
+
+The `validate` workflow is registered as `workflow-validate-tools` (mode `tools`, input
+`recorded-required`, sandbox and C toolchain, adjustable limits, no agent). It copies the
+selected revision into the attempt and runs the secure repair gate's validation-only session
+(`SecureRepairRuntime.openValidation`): the same registered profile, strict contained build and
+behavior validation, retained corpus and acceptance predicate as repair, with no repair
+iteration and no agent harness. A fully matching head is accepted as an assessed baseline and
+published through the existing repair-graph attestation; compile-only evidence finishes
+`COMPILE_VALID`; any mismatch or compile failure finishes `REJECTED`. Each is a completed
+attempt whose validator results carry the outcome.
+
+The only case preset is `retained-corpus-v1`: the server's `default` case (no arguments, empty
+standard input) merged by identity with the revision's retained regression corpus, exactly as
+the repair graph merges them. `GET J/validation-cases?revision=` returns `validationCasePlan`
+for review: each case's identity, origin (`server-default` or `retained`), its arguments
+(printable text up to 16 × 256 characters; otherwise `null`, recorded but not displayed) and
+its standard-input byte count, at most 50 rows with the total, and the merged corpus digest. A
+corpus that cannot be reproduced from the recorded graph is `unavailable` with
+`CASES_UNVERIFIABLE`.
+
+A validation start must carry `cases: {"presetId": "retained-corpus-v1", "corpusSha256":
+"<digest>"}`; every other option sends `cases: null`. The caller can never supply a case,
+command, executable path or runner setting. Admission recomputes the plan from the selected
+revision and refuses a missing selection (`422 VALIDATION_CASES_REQUIRED`), another preset, an
+unverifiable corpus or a selection on another option (`422 VALIDATION_CASES_UNAVAILABLE`) and a
+different digest (`409 VALIDATION_CASES_CHANGED`). The selection is part of the start intent and
+the attempt records `configuration.validation` (`presetId`, `corpusSha256`, `caseCount`). The
+adapter checks the copied revision's corpus again before validating and refuses the attempt
+(`REFUSED`) if it differs. Revision identities are content-addressed and the request names one
+explicitly, so a newer accepted revision never retargets a configured or running validation.
+
+The start form shows the target revision as fixed, notes when the job's accepted revision is a
+different one, lists the reviewed cases and submits only their digest; a changed corpus reloads
+the cases for review.
+
+### Validator results per attempt
+
+Each `validationHistory` owner reports `origin`: `this-attempt` when its graph run began
+within the selected web attempt, `inherited` when it came with the attempt's input revision
+history, or `unknown`. Owners keep their own identity (`attempt` for a repair candidate
+validation, `run-baseline` for a revision validation, `run-failure` for a validator failure),
+and inspecting one opens the existing recorded case pages and mismatch navigation. Validation
+and repair attempts link their overview to this evidence view.
 
 ### Module progress and retained plans
 

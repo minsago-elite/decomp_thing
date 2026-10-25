@@ -52,6 +52,8 @@ internal interface WebWorkflowEngines {
     fun reconstruct(binary: Path, reportsDirectory: Path, mode: WebReconstructionMode, progress: AgentWorkflowProgress,
         harness: WebAdmittedHarness? = null, maxContextCharacters: Int? = null)
     fun repair(project: Path, binary: Path, reportsDirectory: Path, harness: WebAdmittedHarness): RepairRunStatus
+    /** Validation-only run of [project]'s current head; never contacts an agent. */
+    fun validate(project: Path, binary: Path, reportsDirectory: Path, inputs: List<ProcessInput>): RepairRunStatus
 
     companion object {
         fun production(environment: Map<String, String>, sensitiveValues: Collection<String>): WebWorkflowEngines = object : WebWorkflowEngines {
@@ -80,6 +82,13 @@ internal interface WebWorkflowEngines {
                     // The gate made the sole selection; refuse before any repair if it is not the admitted one.
                     harness.requireResolved(runtime.harnessProvenance)
                     runtime.runRepair(project, binary, listOf(ProcessInput("default")), reportsDirectory, REPAIR_ITERATIONS).runState.status
+                }
+            }
+
+            override fun validate(project: Path, binary: Path, reportsDirectory: Path, inputs: List<ProcessInput>): RepairRunStatus {
+                val configuration = RepairRuntimeConfiguration("generated-c-make-v1", reportsDirectory.resolve("repair_history.json"))
+                return SecureRepairRuntime.openValidation(configuration).use { runtime ->
+                    runtime.runValidation(project, binary, inputs, reportsDirectory).runState.status
                 }
             }
         }
@@ -142,7 +151,8 @@ internal fun productionDurableWebWorkflows(
     return listOf(ExploreWorkflowAdapter(engines, executor)) +
         harnesses.map { ReconstructWorkflowAdapter(engines, executor, WebReconstructionMode.AGENT, it, sensitiveValues) } +
         ReconstructWorkflowAdapter(engines, executor, WebReconstructionMode.EVIDENCE_ONLY, null, sensitiveValues) +
-        harnesses.map { RepairWorkflowAdapter(engines, executor, it) }
+        harnesses.map { RepairWorkflowAdapter(engines, executor, it) } +
+        ValidateWorkflowAdapter(engines, executor)
 }
 
 internal const val EVIDENCE_ONLY_CAPABILITY = "evidence-only"
@@ -153,6 +163,7 @@ internal object WebWorkflowDefaults {
     val RECONSTRUCT_AGENT = WorkflowExecutionLimits(6uL * 3_600_000uL, 20uL * 60_000uL, 4uL * 1024uL * 1024uL * 1024uL, 10_000uL)
     val RECONSTRUCT_EVIDENCE = WorkflowExecutionLimits(2uL * 3_600_000uL, 20uL * 60_000uL, 4uL * 1024uL * 1024uL * 1024uL, 0uL)
     val REPAIR = WorkflowExecutionLimits(6uL * 3_600_000uL, 20uL * 60_000uL, 4uL * 1024uL * 1024uL * 1024uL, REPAIR_TOOL_CALLS)
+    val VALIDATE = WorkflowExecutionLimits(2uL * 3_600_000uL, 20uL * 60_000uL, 4uL * 1024uL * 1024uL * 1024uL, 0uL)
 }
 
 private fun limitFailure(usage: decompengine.jobs.WorkflowUsage) =
@@ -262,6 +273,57 @@ internal fun reconstructionCandidate(sourceTree: Path): WorkflowCandidate? {
 }
 
 private const val MAXIMUM_CONTRACT_BYTES = 16L * 1024 * 1024
+
+/**
+ * Validation of one recorded revision through the secure repair gate's validation-only session: the same
+ * contained build, behavior comparison, retained corpus and acceptance predicate as repair, with no
+ * repair iteration and no agent. The attempt validates a private copy; the selected revision is unchanged.
+ */
+internal class ValidateWorkflowAdapter(
+    private val engines: WebWorkflowEngines,
+    private val executor: BoundedWorkflowExecutor,
+    // Test seam only: production never accepts a test-only, release-ineligible graph publication.
+    private val acceptTestOnlyPublication: Boolean = false,
+) : DurableWebWorkflowAdapter {
+    override val workflow = WorkflowKind.VALIDATE
+    override val limits = WebWorkflowDefaults.VALIDATE
+    override val limitsAdjustable = true
+    override val requirements = setOf(WebWorkflowRequirement.SANDBOX)
+    override val input = DurableWebWorkflowInput.RECORDED_REQUIRED
+    override val launch = DurableWebWorkflowLaunch(DurableWebWorkflowMode.TOOLS, executesBinary = true, contactsAgent = false,
+        requiredTools = listOf("sandbox", "c-toolchain"))
+    override val validationCases = true
+    override val publication = DurableWebWorkflowPublication { context -> verifyRepairAcceptance(context, acceptTestOnlyPublication) }
+
+    override fun execute(context: DurableWebWorkflowContext): DurableWebWorkflowOutcome {
+        val input = checkNotNull(context.inputSourceTree) { "validation requires a recorded input revision" }
+        val project = context.reportsDirectory.resolve("source-tree")
+        val meter = WorkflowExecutionMeter(context.reportsDirectory, toolCallsMetered = false)
+        val (result, usage) = executor.run(context.attempt.limits, meter) {
+            copyWebSourceTree(input, project)
+            // The copied graph contributes its retained corpus; admission bound the merged digest.
+            val recorded = context.attempt.configuration?.validation
+            if (recorded != null && WebValidationCasePlan.of(project).corpusSha256 != recorded.corpusSha256) throw WebValidationCasesChanged()
+            engines.validate(project, context.job.binaryPath, context.reportsDirectory, WEB_VALIDATION_DEFAULT_CASES)
+        }
+        val candidate = repairCandidate(project, context.attempt.startedAt?.toEpochMilli(), acceptTestOnlyPublication)
+        return when (val completed = unwrap(result)) {
+            is BoundedWorkflowResult.Exhausted -> DurableWebWorkflowOutcome.Failed(WorkflowTerminalReason.LIMIT_EXHAUSTED, candidate, usage)
+            is BoundedWorkflowResult.Threw -> DurableWebWorkflowOutcome.Failed(
+                if (completed.failure is WebValidationCasesChanged) WorkflowTerminalReason.REFUSED else WorkflowTerminalReason.FAILED, candidate, usage)
+            // A completed validation with differences is a result, not a failure; its validator records them.
+            is BoundedWorkflowResult.Returned -> when (completed.value) {
+                RepairRunStatus.FULLY_ACCEPTED, RepairRunStatus.COMPILE_VALID, RepairRunStatus.REJECTED ->
+                    DurableWebWorkflowOutcome.Completed(candidate, usage)
+                RepairRunStatus.RESOURCE_EXHAUSTED -> DurableWebWorkflowOutcome.Failed(WorkflowTerminalReason.LIMIT_EXHAUSTED, candidate, usage)
+                else -> DurableWebWorkflowOutcome.Failed(candidate = candidate, usage = usage)
+            }
+        }
+    }
+}
+
+/** The copied revision's corpus differs from the one admission bound; nothing was validated. */
+internal class WebValidationCasesChanged : RuntimeException("the validation corpus changed after admission")
 
 internal class RepairWorkflowAdapter(
     private val engines: WebWorkflowEngines,

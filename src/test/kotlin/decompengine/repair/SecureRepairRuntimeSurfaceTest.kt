@@ -61,6 +61,31 @@ class SecureRepairRuntimeSurfaceTest {
     }
 
     @Test
+    fun `validation-only sessions select no harness and fail closed before history mutation`() {
+        val root = createTempDirectory("secure-validation-open-")
+        val selected = root.resolve("selected/reports/repair_history.json")
+        assertFailsWith<IllegalArgumentException> {
+            SecureRepairRuntime.openValidation(RepairRuntimeConfiguration("generated-c-make-v1", selected, harnessOverride = "acp"))
+        }
+        assertFalse(selected.parent.exists())
+        assertFailsWith<IllegalArgumentException> {
+            SecureRepairRuntime.openValidation(RepairRuntimeConfiguration("unknown-profile", root.resolve("unknown/reports/repair_history.json")))
+        }
+        val unavailable = root.resolve("unavailable/reports/repair_history.json")
+        assertFailsWith<SandboxUnavailableException> {
+            SecureRepairRuntime.openValidation(RepairRuntimeConfiguration("generated-c-make-v1", unavailable))
+        }
+        assertFalse(unavailable.parent.exists())
+        assertTrue(javap(SecureRepairRuntime::class.java).lineSequence()
+            .any { "public static decompengine.repair.SecureRepairSession openValidation(" in it })
+        assertFailsWith<IllegalStateException> {
+            ValidationOnlyAgentHarness.execute(decompengine.agent.AgentExecutionRequest("inert",
+                listOf(decompengine.agent.AgentWorkspaceRoot("project", root)),
+                accessPolicy = decompengine.agent.AgentAccessPolicy(emptyList()))) { }
+        }
+    }
+
+    @Test
     fun `main bytecode exposes only the data configured session facade`() {
         val gate = javap(SecureRepairRuntime::class.java)
         val session = javap(SecureRepairSession::class.java)

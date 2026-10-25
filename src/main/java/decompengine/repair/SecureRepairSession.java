@@ -84,6 +84,17 @@ public final class SecureRepairSession implements AutoCloseable {
         ));
     }
 
+    /** Validation of the current head only: no repair iteration and no agent invocation. */
+    public synchronized RepairRunOutcome runValidation(
+        Path projectDirectory, Path originalBinary, List<ProcessInput> inputs, Path reportsDirectory
+    ) {
+        requireOpen();
+        RepairRunOutcome result = loop.runValidation(Objects.requireNonNull(projectDirectory),
+            Objects.requireNonNull(originalBinary), copyInputs(inputs), Objects.requireNonNull(reportsDirectory));
+        return new RepairRunOutcome(List.of(),
+            result.getValidation() == null ? null : copyReport(result.getValidation()), result.getRunState());
+    }
+
     /** Versioned whole-run result, including provisional/exhausted/non-release outcomes. */
     public synchronized RepairRunOutcome runRepair(
         Path projectDirectory, Path originalBinary, List<ProcessInput> inputs,

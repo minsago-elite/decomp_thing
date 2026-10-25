@@ -134,6 +134,30 @@ class RepairRunSemanticsTest {
     }
 
     @Test
+    fun `validation-only runs assess the current head with no repair iteration or agent turn`() {
+        val passing = fixture("pass3")
+        val accepted = passing.loop.runValidation(passing.root, passing.original, inputs)
+        assertEquals(RepairRunStatus.FULLY_ACCEPTED, accepted.runState.status)
+        assertEquals(0, accepted.runState.attemptedCount); assertTrue(accepted.iterations.isEmpty()); assertNotNull(accepted.validation)
+        assertTrue(passing.seenSources.isEmpty(), "validation invoked the agent")
+        // The recorded retained corpus is available as display data and reproduces the graph's corpus digest.
+        val recorded = readProjectRecordedRepairHistory(passing.root)
+        val snapshot = assertNotNull(recorded.snapshot)
+        val corpus = assertNotNull(recorded.retainedCorpus())
+        assertEquals(inputs, corpus)
+        assertEquals(snapshot.corpusSha256, repairRegressionCorpusSha256(corpus))
+        for (source in listOf("pass1", "broken")) {
+            val failing = fixture(source)
+            val rejected = failing.loop.runValidation(failing.root, failing.original, inputs)
+            assertEquals(RepairRunStatus.REJECTED, rejected.runState.status, source)
+            assertEquals(0, rejected.runState.attemptedCount); assertNull(rejected.validation); assertNull(rejected.runState.acceptedHeadId)
+            assertTrue(failing.seenSources.isEmpty(), "validation repaired $source")
+            assertEquals(source, failing.root.resolve("code.c").readText(), "validation changed the validated source")
+            ModuleRevisionGraph.open(failing.root, profile).use { graph -> assertNull(graph.snapshot.fullyAcceptedHeadId) }
+        }
+    }
+
+    @Test
     fun `a failed history projection cannot turn committed acceptance into an unsuccessful API result`() {
         lateinit var fixture: Fixture
         fixture = fixture("broken", "pass3", afterValidation = { source ->

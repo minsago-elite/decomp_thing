@@ -1,0 +1,22 @@
+{
+  "apiVersion": 1,
+  "kind": "validationCasePlan",
+  "requestId": "request_example_1",
+  "data": {
+    "binding": {
+      "jobId": "1234567890abcdef1234567890abcdef",
+      "revisionId": "source_eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+    },
+    "presetId": "retained-corpus-v1",
+    "state": "unavailable",
+    "reasonCode": "CASES_UNVERIFIABLE",
+    "corpusSha256": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+    "totalCases": 0,
+    "truncated": false,
+    "cases": [],
+    "limitations": [
+      "Cases are recorded data the server runs inside its sandbox; they are never commands, paths or runner settings.",
+      "A request names these cases only by the corpus digest. Admission recomputes it and refuses a different corpus."
+    ]
+  }
+}

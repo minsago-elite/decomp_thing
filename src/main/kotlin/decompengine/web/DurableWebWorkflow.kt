@@ -28,6 +28,8 @@ interface DurableWebWorkflowAdapter {
     val publication: DurableWebWorkflowPublication? get() = null
     /** Reconstruction scope facts, or null for workflows without a reconstruction plan. */
     val reconstruction: DurableWebReconstructionScope? get() = null
+    /** Whether a start must name the reviewed server-approved validation corpus of its input revision. */
+    val validationCases: Boolean get() = false
     fun execute(context: DurableWebWorkflowContext): DurableWebWorkflowOutcome
 }
 

@@ -56,6 +56,8 @@ internal class WebWorkflowStartController(
                 "INPUT_REVISION_UNAVAILABLE" -> throw WebAccessDenied(422, failure.code, "The selected input revision is unavailable for this job.")
                 "INPUT_REVISION_REQUIRED" -> throw WebAccessDenied(422, failure.code, "This workflow starts from a revision recorded by this job. Select one before starting.")
                 "RECONSTRUCTION_SCOPE_UNAVAILABLE" -> throw WebAccessDenied(422, failure.code, "The requested reconstruction scope is outside the server-approved range for this option.")
+                "VALIDATION_CASES_REQUIRED", "VALIDATION_CASES_UNAVAILABLE" -> throw WebAccessDenied(422, failure.code, failure.message ?: "The validation cases are unavailable.")
+                "VALIDATION_CASES_CHANGED" -> throw WebAccessDenied(409, failure.code, "The selected revision's validation cases differ from the reviewed cases. Review them again.")
                 "SCHEDULING_FAILED" -> throw WebAccessDenied(503, failure.code, "Scheduling did not finish. Inspect the retained run before retrying.")
                 else -> throw failure
             }
@@ -87,7 +89,7 @@ internal class WebWorkflowStartController(
         catch (_: Exception) { throw WebAccessDenied(400, "MALFORMED_JSON", "The workflow start must be bounded strict JSON.") }
         val body = value as? JsonObject ?: invalid()
         val declared = setOf("workflow", "inputRevisionId", "harnessCapabilityId", "limits")
-        if (body.keys != declared && body.keys != declared + "scope") invalid()
+        if (!body.keys.containsAll(declared) || !setOf("scope", "cases").containsAll(body.keys - declared)) invalid()
         val workflow = WorkflowKind.entries.singleOrNull { it.wireName == text(body["workflow"]) } ?: invalid()
         val limits = body["limits"] as? JsonObject ?: invalid()
         if (limits.keys != setOf("wallClockMs", "idleMs", "maxOutputBytes", "maxToolCalls")) invalid()
@@ -96,11 +98,17 @@ internal class WebWorkflowStartController(
             if (fields.keys != setOf("maxContextCharacters")) invalid()
             fields["maxContextCharacters"]
         }
+        val cases = body["cases"]?.takeUnless { it == JsonNull }?.let { value ->
+            val fields = value as? JsonObject ?: invalid()
+            if (fields.keys != setOf("presetId", "corpusSha256")) invalid()
+            text(fields["presetId"]) to text(fields["corpusSha256"])
+        }
         return try {
             NewWorkflowAttempt(workflow, WorkflowExecutionLimits(number(limits["wallClockMs"]), number(limits["idleMs"]),
                 number(limits["maxOutputBytes"]), number(limits["maxToolCalls"])),
                 nullableId(body["inputRevisionId"]), nullableId(body["harnessCapabilityId"]),
-                scope = scope?.let { decompengine.jobs.WorkflowReconstructionScope(number(it)) })
+                scope = scope?.let { decompengine.jobs.WorkflowReconstructionScope(number(it)) },
+                cases = cases?.let { (preset, corpus) -> decompengine.jobs.WorkflowValidationCases(preset, corpus) })
         } catch (_: IllegalArgumentException) { invalid() }
     }
 

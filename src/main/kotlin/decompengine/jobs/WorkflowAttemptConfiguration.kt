@@ -93,6 +93,37 @@ data class WorkflowAttemptReconstruction(val profileId: String, val profileSha25
 }
 
 /**
+ * A validation request's case selection: a server-approved preset and the digest of the exact corpus the
+ * caller reviewed. The caller names cases only by this digest; it can never supply a case, command or path.
+ */
+data class WorkflowValidationCases(val presetId: String, val corpusSha256: String) {
+    init { require(PRESET.matches(presetId) && DIGEST.matches(corpusSha256)) { "invalid validation case selection" } }
+
+    internal fun encode(): JsonObject = buildJsonObject { put("presetId", presetId); put("corpusSha256", corpusSha256) }
+
+    internal companion object {
+        fun decode(value: JsonObject): WorkflowValidationCases {
+            require(value.keys == setOf("presetId", "corpusSha256")) { "invalid validation case selection fields" }
+            return WorkflowValidationCases(value.text("presetId"), value.text("corpusSha256"))
+        }
+    }
+}
+
+/** The validation corpus an attempt was admitted to run: preset, exact digest and case count. */
+data class WorkflowAttemptValidation(val presetId: String, val corpusSha256: String, val caseCount: Int) {
+    init { require(PRESET.matches(presetId) && DIGEST.matches(corpusSha256) && caseCount in 1..100_000) { "invalid recorded validation corpus" } }
+
+    internal fun encode(): JsonObject = buildJsonObject { put("presetId", presetId); put("corpusSha256", corpusSha256); put("caseCount", caseCount) }
+
+    internal companion object {
+        fun decode(value: JsonObject): WorkflowAttemptValidation {
+            require(value.keys == setOf("presetId", "corpusSha256", "caseCount")) { "invalid recorded validation fields" }
+            return WorkflowAttemptValidation(value.text("presetId"), value.text("corpusSha256"), value.integer("caseCount"))
+        }
+    }
+}
+
+/**
  * The server-validated configuration an attempt was admitted with. It is recorded atomically with the
  * attempt and never rewritten, so a later server configuration change creates a different record on a
  * new attempt instead of mutating past provenance.
@@ -107,6 +138,7 @@ data class WorkflowAttemptConfiguration(
     val limitsAdjustable: Boolean,
     val harness: WorkflowAttemptHarness?,
     val reconstruction: WorkflowAttemptReconstruction? = null,
+    val validation: WorkflowAttemptValidation? = null,
 ) {
     init {
         require(OPTION.matches(optionId)) { "invalid recorded option identity" }
@@ -122,6 +154,7 @@ data class WorkflowAttemptConfiguration(
         put("requiredTools", JsonArray(requiredTools.map(::JsonPrimitive))); put("input", input)
         put("limitsAdjustable", limitsAdjustable); put("harness", harness?.encode() ?: JsonNull)
         put("reconstruction", reconstruction?.encode() ?: JsonNull)
+        put("validation", validation?.encode() ?: JsonNull)
     }
 
     internal companion object {
@@ -131,12 +164,13 @@ data class WorkflowAttemptConfiguration(
 
         fun decode(value: JsonObject): WorkflowAttemptConfiguration {
             require(value.keys == setOf("optionId", "mode", "executesBinary", "contactsAgent", "requiredTools", "input",
-                "limitsAdjustable", "harness", "reconstruction")) { "invalid recorded configuration fields" }
+                "limitsAdjustable", "harness", "reconstruction", "validation")) { "invalid recorded configuration fields" }
             val tools = (value.getValue("requiredTools") as? JsonArray ?: error("tool list required")).map { it.textValue() }
             return WorkflowAttemptConfiguration(value.text("optionId"), value.text("mode"), value.flag("executesBinary"),
                 value.flag("contactsAgent"), tools, value.text("input"), value.flag("limitsAdjustable"),
                 value.objectOrNull("harness")?.let(WorkflowAttemptHarness::decode),
-                value.objectOrNull("reconstruction")?.let(WorkflowAttemptReconstruction::decode))
+                value.objectOrNull("reconstruction")?.let(WorkflowAttemptReconstruction::decode),
+                value.objectOrNull("validation")?.let(WorkflowAttemptValidation::decode))
         }
     }
 }
@@ -144,6 +178,7 @@ data class WorkflowAttemptConfiguration(
 private val OPTION = Regex("[A-Za-z0-9][A-Za-z0-9_-]{0,127}")
 private val IMPLEMENTATION = Regex("[A-Za-z0-9_][A-Za-z0-9_.-]{0,127}")
 private val PROFILE = Regex("[A-Za-z0-9_][A-Za-z0-9_.-]{0,127}")
+private val PRESET = Regex("[a-z0-9][a-z0-9-]{0,63}")
 private val SDK_VERSION = Regex("[0-9A-Za-z][0-9A-Za-z.+-]{0,63}")
 private val DIGEST = Regex("[0-9a-f]{64}")
 
