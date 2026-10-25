@@ -9,7 +9,7 @@ public final class RunBundledExports extends GhidraScript {
         BundledGhidraWorker.diagnosticsGuard();
         String[] arguments = getScriptArgs();
         if (arguments.length == 0) throw new IllegalArgumentException("No bundled exporters requested");
-        Set<String> exporters = Set.of("ExportProgramModel.java", "ExportRecoveredCallSites.java", "ExportDecompiledC.java", "ExportNativeCallsV1.class", "ExportNativeInterfacesV1.class");
+        Set<String> exporters = Set.of("ExportProgramModel.java", "ExportRecoveredCallSites.java", "ExportDecompiledC.java", "ExportNativeCallsV1.class", "ExportNativeInterfacesV1.class", "ExportInferredInterfacesV1.class");
         for (int index = 0; index < arguments.length;) {
             String name = arguments[index++];
             if (!exporters.contains(name) || index == arguments.length) {
@@ -27,6 +27,8 @@ public final class RunBundledExports extends GhidraScript {
                     ExportNativeCallsV1.collect(currentProgram, monitor, exporterArguments);
                 } else if (name.equals("ExportNativeInterfacesV1.class")) {
                     ExportNativeInterfacesV1.collect(currentProgram, monitor, exporterArguments);
+                } else if (name.equals("ExportInferredInterfacesV1.class")) {
+                    ExportInferredInterfacesV1.collect(currentProgram, monitor, exporterArguments);
                 } else {
                     runScript(name, exporterArguments);
                 }
