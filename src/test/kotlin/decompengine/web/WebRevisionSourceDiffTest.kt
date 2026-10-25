@@ -19,6 +19,8 @@ class WebRevisionSourceDiffTest {
 
     private class Fixture(val snapshots: Map<Pair<String, String>, WebRevisionSourceSnapshot>, val bodies: Map<Pair<String, String>, ByteArray>) {
         var reads = 0
+        /** Metadata the body reader observes; it can differ from the compared capture to emulate a concurrent change. */
+        var readerSnapshots: Map<Pair<String, String>, WebRevisionSourceSnapshot> = snapshots
     }
 
     private fun snapshot(run: String, revision: String, sides: List<Side>): WebRevisionSourceSnapshot {
@@ -42,9 +44,11 @@ class WebRevisionSourceDiffTest {
 
     private fun diffs(fixture: Fixture, maximumEdits: Int = WebRevisionSourceDiffs.MAXIMUM_EDITS) = WebRevisionSourceDiffs(
         { job, run, revision -> assertEquals(jobId, job); fixture.snapshots.getValue(run to revision) },
-        { _, run, revision, fileId ->
+        { _, run, revision, fileId, metadataVersion ->
             fixture.reads++
-            val snapshot = fixture.snapshots.getValue(run to revision)
+            // Same rule as the production reader: a different current observation expires the request.
+            val snapshot = fixture.readerSnapshots.getValue(run to revision)
+            if (snapshot.metadataVersion != metadataVersion) expiredSourceMetadata()
             val file = resolveRevisionSourceFile(snapshot, fileId)
             val bytes = fixture.bodies.getValue(run to file.evidence.path)
             WebRevisionSourceContent(snapshot, fileId, selectRevisionSourceFile(snapshot, fileId, WebSourceReadPurpose.PREVIEW),
@@ -204,6 +208,29 @@ class WebRevisionSourceDiffTest {
         assertFalse(result.getValue("patchAvailable").jsonPrimitive.boolean)
         assertEquals("SOURCE_DIFF_NOT_TEXT", assertFailsWith<WebAccessDenied> {
             diffs(fixture).patch(jobId, "run_2", "revision_2", fileQuery(entry)) }.code)
+    }
+
+    @Test fun `a downloaded patch keeps long change groups whole so it applies with ordinary context`() {
+        val before = (1..200).joinToString("") { "old $it\n" }
+        val after = (1..200).joinToString("") { "new $it\n" }
+        val fixture = fixture(listOf(side("src/a.c", before)), listOf(side("src/a.c", after)))
+        val entry = items(diffs(fixture).summary("owner", jobId, "run_2", "revision_2", base)).single()
+        // The display splits the 400-row group into 128-row hunks; the patch must not.
+        assertEquals(4, diffs(fixture).file(jobId, "run_2", "revision_2", fileQuery(entry)).getValue("totalHunks").jsonPrimitive.int)
+        val patch = String(diffs(fixture).patch(jobId, "run_2", "revision_2", fileQuery(entry)).bytes)
+        assertEquals(1, Regex("(?m)^@@ ").findAll(patch).count())
+        assertTrue(patch.contains("@@ -1,200 +1,200 @@\n"))
+        assertEquals(after, applyPatch(before, patch))
+    }
+
+    @Test fun `body reads are bound to the compared metadata and a concurrent manifest change is refused`() {
+        val fixture = fixture(listOf(side("src/a.c", "1\n")), listOf(side("src/a.c", "2\n")))
+        val entry = items(diffs(fixture).summary("owner", jobId, "run_2", "revision_2", base)).single()
+        val head = fixture.snapshots.getValue("run_2" to "revision_2")
+        fixture.readerSnapshots = fixture.snapshots + (("run_2" to "revision_2") to
+            WebRevisionSourceSnapshot(head.reference, "f".repeat(64), head.descriptorSha256, head.files))
+        assertEquals("CURSOR_EXPIRED", assertFailsWith<WebAccessDenied> { diffs(fixture).file(jobId, "run_2", "revision_2", fileQuery(entry)) }.code)
+        assertEquals("CURSOR_EXPIRED", assertFailsWith<WebAccessDenied> { diffs(fixture).patch(jobId, "run_2", "revision_2", fileQuery(entry)) }.code)
     }
 
     @Test fun `myers edits are minimal on known pairs and bounded by the edit budget`() {

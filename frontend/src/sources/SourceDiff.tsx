@@ -48,7 +48,7 @@ function fileFacts(file: SourceDiffFile | null): string {
 }
 
 /** Explicit base choice. The parent suggestion comes from the head attempt's recorded input or previous attempt. */
-function BaseChooser({ selected, basePath }: { selected: SourceSelection; basePath: string }) {
+function BaseChooser({ selected, basePath, onChoose }: { selected: SourceSelection; basePath: string; onChoose: () => void }) {
   const location = useLocation();
   const { client } = usePrivateTransport(basePath);
   const key = [selected.jobId, selected.runId, selected.revisionId].join('/');
@@ -73,7 +73,7 @@ function BaseChooser({ selected, basePath }: { selected: SourceSelection; basePa
     {value && (options.length === 0 ? <p>{copy.diffNoOtherRevision}</p> : <form class="source-search-form" onSubmit={event => {
       event.preventDefault();
       const [runId, revisionId] = selectedValue.split('/');
-      if (runId && revisionId) location.route(sourceDiffPath(basePath, selected, { runId, revisionId }));
+      if (runId && revisionId) { onChoose(); location.route(sourceDiffPath(basePath, selected, { runId, revisionId })); }
     }}>
       <label>{copy.diffBaseChoice}
         <select value={selectedValue} onChange={event => setChoice((event.target as HTMLSelectElement).value)}>
@@ -118,7 +118,8 @@ export function SourceDiff({ selected, basePath, search }: { selected: SourceSel
     if (current && current.state !== 'loading' && moveFocus.current) { moveFocus.current = false; heading.current?.focus(); }
   }, [current?.state, key]);
   if (!selection) return <p role="alert">{copy.diffInvalid}</p>;
-  if (!base) return <BaseChooser selected={selected} basePath={basePath} />;
+  // The view stays mounted across query navigation, so keyboard focus can follow the chosen comparison.
+  if (!base) return <BaseChooser selected={selected} basePath={basePath} onChoose={() => { moveFocus.current = true; }} />;
   function go(next: string | null) {
     moveFocus.current = true;
     if (next === null) expected.current = undefined;

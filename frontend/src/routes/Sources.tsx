@@ -265,9 +265,9 @@ export default function Sources({ jobId, runId, revisionId, directoryId, fileId,
       <p><a href={runPath(basePath, jobId, runId)}>{copy.returnAttempt}</a></p>
       {session && state?.status === 'authenticated'
         ? resource === 'diff'
-          ? <SourceDiff key={`${state.generation}/${jobId}/${runId}/${revisionId}/${rawSearch}`} selected={selected} basePath={basePath} search={rawSearch} />
+          ? <SourceDiff key={`${state.generation}/${jobId}/${runId}/${revisionId}`} selected={selected} basePath={basePath} search={rawSearch} />
           : resource === 'file-diff'
-          ? <SourceFileDiff key={`${state.generation}/${jobId}/${runId}/${revisionId}/${rawSearch}`} selected={selected} basePath={basePath} search={rawSearch} />
+          ? <SourceFileDiff key={`${state.generation}/${jobId}/${runId}/${revisionId}`} selected={selected} basePath={basePath} search={rawSearch} />
           : resource === 'search'
           ? <SourceSearch key={`${state.generation}/${jobId}/${runId}/${revisionId}/${rawSearch}`} selected={selected} basePath={basePath} search={rawSearch} />
           : resource === 'directory'

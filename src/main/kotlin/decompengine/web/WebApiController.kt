@@ -45,8 +45,8 @@ internal class WebApiController(
     private val revisionDirectoryPages = WebRevisionDirectoryPages(jobs::readRevisionSources)
     private val revisionFileMetadata = WebRevisionFileMetadata(jobs::readRevisionFileMetadata)
     private val revisionSourceSearch = WebRevisionSourceSearch(jobs::searchRevisionSources)
-    private val revisionSourceDiffs = WebRevisionSourceDiffs(jobs::readRevisionSources, content = { job, run, revision, file ->
-        jobs.readRevisionSourceFile(job, run, revision, file, WebSourceReadPurpose.PREVIEW)
+    private val revisionSourceDiffs = WebRevisionSourceDiffs(jobs::readRevisionSources, content = { job, run, revision, file, metadataVersion ->
+        jobs.readRevisionSourceFile(job, run, revision, file, WebSourceReadPurpose.PREVIEW, metadataVersion)
     })
     private val artifactStore = WebJobArtifactStore(jobs)
     private val artifactCatalog = WebArtifactCatalog(artifactStore)

@@ -180,3 +180,28 @@ it('terminates the highlighting worker and clears its deadline when the viewer i
     expect(workers.cleared).toHaveLength(1);
   } finally { auth.dispose(); }
 });
+
+it('keeps keyboard focus with the comparison across query-only navigation', async () => {
+  const auth = await session();
+  const head = { ...fixture('run-completed-unaccepted.json') as Record<string, unknown>, jobId: selected.jobId, runId: 'run_1', previousRunId: 'run_0' };
+  const parent = { ...head, runId: 'run_0', previousRunId: null, resultRevisionId: 'revision_0' };
+  const page = { ...fixture('source-diff-page.json') as Record<string, unknown>, binding: selected, base: { runId: 'run_0', revisionId: 'revision_0' } } as unknown as
+    { page: Record<string, unknown> } & Record<string, unknown>;
+  page.page = { ...page.page, limit: 50 };
+  transport.get.mockImplementation(kind => Promise.resolve({ data: kind === 'run' ? head
+    : kind === 'runs' ? { jobId: selected.jobId, items: [head, parent], page: { nextCursor: null, snapshotVersion: 'version_1', limit: 200 } } : page }));
+  history.replaceState(null, '', `${revision}/source-diff`);
+  try {
+    render(<App basePath="/nested" session={auth} />);
+    const submit = await screen.findByRole('button', { name: sourceCopy.diffCompare });
+    submit.focus();
+    fireEvent.click(submit);
+    await waitFor(() => { expect(document.activeElement).toBe(screen.getByRole('heading', { name: sourceCopy.diffChanged })); });
+    expect(location.search).toBe('?baseRunId=run_0&baseRevisionId=revision_0');
+    const next = screen.getByRole('button', { name: sourceCopy.diffNext });
+    next.focus();
+    fireEvent.click(next);
+    await waitFor(() => { expect(location.search).toContain('&cursor='); });
+    await waitFor(() => { expect(document.activeElement).toBe(screen.getByRole('heading', { name: sourceCopy.diffChanged })); });
+  } finally { auth.dispose(); }
+});

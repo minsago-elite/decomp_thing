@@ -206,7 +206,8 @@ internal fun revisionDiffHunks(rows: List<WebDiffRow>, context: Int, maximumRows
  */
 internal class WebRevisionSourceDiffs(
     private val snapshot: (String, String, String) -> WebRevisionSourceSnapshot,
-    private val content: (String, String, String, String) -> WebRevisionSourceContent,
+    /** Body reader bound to the compared snapshot: the last argument is its expected metadata version. */
+    private val content: (String, String, String, String, String) -> WebRevisionSourceContent,
     private val nanoTime: () -> Long = System::nanoTime,
     private val deadlineNanos: Long = DEADLINE_MS * 1_000_000,
     private val maximumEdits: Int = MAXIMUM_EDITS,
@@ -317,7 +318,9 @@ internal class WebRevisionSourceDiffs(
         try {
             fun read(snapshot: WebRevisionSourceSnapshot, index: Int?): ByteArray? = index?.let {
                 val ref = snapshot.reference
-                val captured = content(ref.jobId, ref.runId, ref.revisionId, revisionSourceFileId(ref, it, snapshot.files[it].evidence.path))
+                // A changed manifest between capture and read is refused rather than mixing two observations.
+                val captured = content(ref.jobId, ref.runId, ref.revisionId, revisionSourceFileId(ref, it, snapshot.files[it].evidence.path),
+                    snapshot.metadataVersion)
                 captured.fallbackReason?.let { reason -> throw Fallback(reason) }
                 captured.previewBytes()
             }
@@ -425,7 +428,15 @@ internal class WebRevisionSourceDiffs(
         val headPath = entry.head?.let { "b/" + pair.head.files[it].evidence.path } ?: "/dev/null"
         val text = StringBuilder()
         text.append("--- ").append(basePath).append('\n').append("+++ ").append(headPath).append('\n')
+        // Display pages split long change groups at 128 rows; a downloaded patch keeps each group whole so it applies
+        // with ordinary context rules.
+        val groups = ArrayList<WebDiffHunk>()
         for (hunk in comparison.hunks) {
+            val previous = groups.lastOrNull()
+            if (previous != null && previous.end == hunk.start && hunk.unchangedBefore == 0) groups[groups.size - 1] = WebDiffHunk(previous.start, hunk.end, previous.unchangedBefore)
+            else groups += hunk
+        }
+        for (hunk in groups) {
             val inside = comparison.rows.subList(hunk.start, hunk.end)
             val baseCount = comparison.basePrefix[hunk.end] - comparison.basePrefix[hunk.start]
             val headCount = comparison.headPrefix[hunk.end] - comparison.headPrefix[hunk.start]
