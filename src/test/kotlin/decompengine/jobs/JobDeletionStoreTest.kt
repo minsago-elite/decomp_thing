@@ -59,6 +59,27 @@ class JobDeletionStoreTest {
         }
     }
 
+    @Test fun `a purge that finished without persisted records still reconciles as deleted after restart`() {
+        val root = Files.createTempDirectory("job-deletion-store-")
+        try {
+            val job = JobStore(root).createFromUpload("inert.elf", elfFixture())
+            // The running record cannot be written (disk full), and the process stops before the terminal record.
+            val store = JobDeletionStore(root, faults = JobDeletionFaults { point ->
+                if (point == JobDeletionFaultPoint.AFTER_DETACH) throw java.io.IOException("No space left on device")
+            })
+            store.load()
+            val running = store.detach(store.admit(job.id, digest, "1".repeat(64), "2".repeat(64)))
+            assertTrue(store.purge(running, { true }).complete)
+            assertFalse(Files.exists(root.resolve(job.id)))
+            val reopened = JobDeletionStore(root).also { it.load() }
+            val persisted = assertNotNull(reopened.get(running.operationId))
+            assertEquals(JobDeletionState.ACCEPTED, persisted.state, "only the intent reached disk")
+            val reconciled = reopened.reconcileBeforePurge(persisted)
+            assertEquals(JobDeletionState.COMPLETED, reconciled.state)
+            assertEquals(reconciled.operationId, reopened.deleted(job.id)?.operationId, "the tombstone survives")
+        } finally { root.toFile().deleteRecursively() }
+    }
+
     @Test fun `a deletion that failed before detachment is not a tombstone`() {
         val root = Files.createTempDirectory("job-deletion-store-")
         try {

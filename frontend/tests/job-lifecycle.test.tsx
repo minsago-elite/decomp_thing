@@ -80,6 +80,24 @@ it('keeps previous organization visible when storage is read-only', async () => 
   expect(await screen.findByText(/previous label and archive state are kept/)).toBeTruthy();
 });
 
+it('hands a running deletion to the page before announcing it to this and other tabs', async () => {
+  const deleted = vi.fn();
+  const seen: unknown[] = [];
+  const stop = onLibraryChange('/', () => { seen.push(deleted.mock.calls[0]?.[0]); });
+  client.get.mockResolvedValueOnce({ data: preview() }).mockRejectedValueOnce(new ApiClientError('network_error'));
+  client.put.mockResolvedValueOnce({ data: operation('running') });
+  try {
+    render(<JobDeletion job={job()} client={typed} basePath="/" session={session} onDeleted={deleted} />);
+    fireEvent.click(screen.getByRole('button', { name: 'Review what would be deleted' }));
+    fireEvent.input(await screen.findByLabelText(/Type the file name/), { target: { value: 'router.elf' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Delete permanently' }));
+    await waitFor(() => expect(seen).toHaveLength(1), { timeout: 4000 });
+    // A failed status read keeps the accepted running operation instead of reporting a failed deletion.
+    expect(deleted).toHaveBeenCalledWith(expect.objectContaining({ state: 'running' }));
+    expect(seen[0]).toEqual(expect.objectContaining({ state: 'running' }));
+  } finally { stop(); }
+});
+
 it('shows affected storage, retained audit and finality, and requires the typed file name before one guarded DELETE', async () => {
   const deleted = vi.fn();
   client.get.mockResolvedValueOnce({ data: preview() });

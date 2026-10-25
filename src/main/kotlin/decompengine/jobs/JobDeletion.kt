@@ -302,7 +302,13 @@ internal class JobDeletionStore(
                 records[it.operationId] = it
                 try { write(it) } catch (_: IOException) { }
             }
-        } else finish(operation, JobDeletionState.FAILED, failureCode = "INTERRUPTED_BEFORE_REMOVAL")
+        } else if (Files.exists(root.resolve(operation.jobId), NOFOLLOW_LINKS)) {
+            finish(operation, JobDeletionState.FAILED, failureCode = "INTERRUPTED_BEFORE_REMOVAL")
+        } else {
+            // Neither the job nor its detached directory remains: the rename and purge both happened but
+            // their records were never persisted (for example, a full disk). The job is gone; keep the tombstone.
+            finish(operation, JobDeletionState.COMPLETED)
+        }
     }
 
     private fun finish(operation: JobDeletionOperation, state: JobDeletionState, failureCode: String? = null): JobDeletionOperation {
