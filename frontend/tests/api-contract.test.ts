@@ -28,6 +28,21 @@ function mismatchContract(page = 1) {
 }
 
 describe('generated v1 contract pipeline', () => {
+  it('accepts only coherent preflight status identity and fixed reason combinations', () => {
+    const allowed = new Set(['idle:null:null', 'inspecting:inspection_fixture:null', 'ready:inspection_fixture:null',
+      'cancelled:inspection_fixture:null', 'failed:inspection_fixture:AGENT_PREFLIGHT_FAILED']);
+    for (const status of ['idle', 'inspecting', 'ready', 'failed', 'cancelled']) {
+      for (const inspectionId of [null, 'inspection_fixture']) for (const reasonCode of [null, 'AGENT_PREFLIGHT_FAILED', 'OTHER_REASON']) {
+        const document = { apiVersion: 1, kind: 'agentPreflight', requestId: 'request_preflight_fixture',
+          data: { status, inspectionId, reasonCode } };
+        for (const mode of ['producer', 'response'] as const) {
+          const decode = () => decodeContract(JSON.stringify(document), { mode });
+          if (allowed.has(`${status}:${inspectionId}:${reasonCode}`)) expect(decode()).toEqual(document);
+          else expect(decode).toThrow(ApiClientError);
+        }
+      }
+    }
+  });
   it('accepts complete bounded mismatch bitmaps on every case page and legacy omission', () => {
     for (let page = 1; page <= 4; page++) for (const mode of ['producer', 'response'] as const) {
       const document = mismatchContract(page);

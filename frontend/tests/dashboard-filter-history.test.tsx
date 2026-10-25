@@ -78,23 +78,6 @@ it('makes filter reset reversible without adding duplicate history for unchanged
   expect(transport.get).toHaveBeenCalledTimes(5);
 });
 
-it('replaces an invalid saved filter on explicit reset and keeps invalid drafts out of history', async () => {
-  history.replaceState(null, '', '/nested/?limit=10000');
-  const length = history.length;
-  render(<Dashboard basePath="/nested" />);
-  expect(screen.getByRole('alert').textContent).toContain('saved filters are invalid');
-  expect(transport.get).not.toHaveBeenCalled();
-  fireEvent.click(screen.getByRole('button', { name: 'Reset filters' }));
-  expect(await screen.findByText('unfiltered-result.elf')).toBeTruthy(); selected(DEFAULT_FILTERS);
-  expect(history.length).toBe(length);
-  fireEvent.input(screen.getByLabelText('Created at or after'), { target: { value: 'invalid-private-date-fixture' } });
-  fireEvent.click(screen.getByRole('button', { name: 'Apply filters' }));
-  expect(await screen.findByRole('alert')).toBeTruthy();
-  expect(screen.getByLabelText('Created at or after')).toHaveProperty('value', 'invalid-private-date-fixture');
-  expect(location.pathname + location.search).toBe('/nested/');
-  expect(history.length).toBe(length); expect(transport.get).toHaveBeenCalledOnce();
-});
-
 it('aborts the superseded filter read on Back and rejects its late result', async () => {
   let finish: (value: ReturnType<typeof page>) => void = () => undefined;
   transport.get.mockImplementation((_kind, path) => nameFor(path) === 'second-result.elf'

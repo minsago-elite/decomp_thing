@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'preact/hooks';
+import { useEffect, useMemo, useRef, useState } from 'preact/hooks';
 import type { Report, ValidationBytePreview, ValidationHistory, ValidationOwner } from '../api/generated';
 import { withApiFailureReference } from '../api/errors';
 import { recordedValidationCopy as copy } from '../copy/attempt';
@@ -7,62 +7,112 @@ import { ValidationSourceSnapshot } from './ValidationSourceSnapshot';
 import { validationPageDownload } from './recordedValidationExport';
 import { compareValidationSnapshots, validationComparisonSnapshot } from './recordedValidationComparison';
 import type { ValidationComparisonSnapshot } from './recordedValidationComparison';
-
-import { receive } from '../shared/receiptTime';
-import type { Received } from '../shared/receiptTime';
-import { MetadataReceipt } from '../shared/MetadataReceipt';
+import { validationLocation, validationLocationOwner, validationObservationLocation, validationRouteLocation, validationRouteSearch, validationSearch } from './validationNavigation';
+import type { ValidationLocation, ValidationNavigation } from './validationNavigation';
+import { captureReceiptTime } from '../shared/receiptTime';
 import type { ReceiptTime } from '../shared/receiptTime';
+import { MetadataReceipt } from '../shared/MetadataReceipt';
 
-export function RecordedValidationEvidence({ jobId, runId, basePath }: { jobId: string; runId: string; basePath: string }) {
+function requestedValidation(search: string, preserveRouteContext = false) {
+  try {
+    const location = preserveRouteContext ? validationRouteLocation(search) : validationLocation(search);
+    return { location, key: preserveRouteContext ? search : validationSearch(location), invalid: false };
+  }
+  catch { return { location: null, key: 'invalid:' + search.slice(0, 4097), invalid: true }; }
+}
+
+export function RecordedValidationEvidence({ jobId, runId, basePath, navigation }: {
+  jobId: string; runId: string; basePath: string; navigation?: ValidationNavigation;
+}) {
   const { client } = usePrivateTransport(basePath);
-  const binding = useMemo(() => ({ client, jobId, runId, active: null as AbortController | null }), [client, jobId, runId]);
-  type View = { binding: typeof binding; history: Received<ValidationHistory> | null; selected: ValidationOwner | null;
-    report: Received<Report> | null; loading: boolean; error: string };
+  const binding = useMemo(() => ({ client, jobId, runId, active: null as AbortController | null,
+    requestSearch: null as string | null }), [client, jobId, runId]);
+  const activeBinding = useRef(binding); activeBinding.current = binding;
+  const liveNavigation = useRef(navigation); liveNavigation.current = navigation;
+  const installed = useRef<{ binding: typeof binding; key: string } | null>(null);
+  const requested = useMemo(() => requestedValidation(navigation?.search ?? '', navigation?.preserveRouteContext),
+    [navigation?.search, navigation?.preserveRouteContext]);
+  const [comparisonPage, setComparisonPage] = useState(1);
+  type View = { binding: typeof binding; locationKey: string; history: ValidationHistory | null; selected: ValidationOwner | null;
+    report: Report | null; loading: boolean; error: string };
   const [stored, setStored] = useState<View | null>(null);
-  type Baseline = { binding: typeof binding; snapshot: ValidationComparisonSnapshot; history: Received<ValidationHistory>; receipt: ReceiptTime; owner: ValidationOwner };
+  type Baseline = { binding: typeof binding; snapshot: ValidationComparisonSnapshot; history: ValidationHistory; owner: ValidationOwner; page: number;
+    receipt: ReceiptTime | undefined };
+  // Local receipt coordinates follow the accepted response object, so reselecting retained
+  // history or a pinned baseline keeps its original receipt instead of minting a new one.
+  const receipts = useRef(new WeakMap<object, ReceiptTime>());
+  function accepted<T extends object>(data: T): T { receipts.current.set(data, captureReceiptTime()); return data; }
   const [savedBaseline, setSavedBaseline] = useState<Baseline | null>(null);
   const baseline = savedBaseline?.binding === binding ? savedBaseline : null;
-  const view = stored?.binding === binding ? stored : null;
+  const view = stored?.binding === binding && (!navigation || stored.locationKey === requested.key) ? stored : null;
   useEffect(() => () => { binding.active?.abort(); }, [binding]);
   const root = `/jobs/${jobId}/runs/${runId}`;
 
-  function begin(history: Received<ValidationHistory> | null = null, selected: ValidationOwner | null = null) {
+  function atRequestedLocation(): boolean {
+    if (activeBinding.current !== binding) return false;
+    const nav = liveNavigation.current;
+    if (!nav) return true;
+    const search = nav.currentSearch();
+    return search !== null && requestedValidation(search, nav.preserveRouteContext).key === requested.key &&
+      (!requested.invalid || search === nav.search);
+  }
+  function current(controller: AbortController): boolean {
+    const nav = liveNavigation.current;
+    const search = nav?.currentSearch();
+    return activeBinding.current === binding && binding.active === controller && !controller.signal.aborted &&
+      (nav ? search !== null && search !== undefined && requestedValidation(search, nav.preserveRouteContext).key === binding.requestSearch : binding.requestSearch === null);
+  }
+  function begin(history: ValidationHistory | null = null, selected: ValidationOwner | null = null) {
     binding.active?.abort();
     const controller = new AbortController(); binding.active = controller;
-    setStored({ binding, history, selected, report: null, loading: true, error: '' });
+    binding.requestSearch = liveNavigation.current ? requested.key : null;
+    if (liveNavigation.current) installed.current = { binding, key: requested.key };
+    setStored({ binding, locationKey: requested.key, history, selected, report: null, loading: true, error: '' });
     return controller;
   }
-  function failed(controller: AbortController, failure: unknown) {
-    if (!controller.signal.aborted) {
-      setSavedBaseline(null);
-      setStored({ binding, history: null, selected: null, report: null, loading: false,
-        error: withApiFailureReference(copy.failed, failure) });
+  function failed(controller: AbortController, failure: unknown, restoring = false) {
+    if (current(controller)) {
+      setSavedBaseline(null); setComparisonPage(1);
+      setStored({ binding, locationKey: requested.key, history: null, selected: null, report: null, loading: false,
+        error: withApiFailureReference(restoring ? copy.savedSelectionUnavailable : copy.failed, failure) });
     }
   }
-  async function readHistory(page?: number, graph?: string) {
-    if (page === undefined) setSavedBaseline(null);
-    const controller = begin();
-    try {
-      const query = page === undefined ? '' : `?historyGraph=${graph}&historyPage=${page}`;
-      const { data } = await client.get('validationHistory', `${root}/validation-history${query}`, { signal: controller.signal });
-      if (controller.signal.aborted) return;
+  function publish(history: ValidationHistory, owner: ValidationOwner | null, report: Report | null, saved: Baseline | null, window = 1): string | null {
+    const nav = liveNavigation.current;
+    if (!nav) return '';
+    const actualSearch = nav.currentSearch();
+    if (activeBinding.current !== binding || actualSearch === null || requestedValidation(actualSearch, nav.preserveRouteContext).key !== requested.key ||
+      (requested.invalid && actualSearch !== nav.search)) return null;
+    let location: ValidationLocation | null = null;
+    if (history.graphSha256 !== null && history.page !== null) {
+      location = { graphSha256: history.graphSha256, historyPage: history.page,
+        selected: owner && report ? validationObservationLocation(history, owner, report) : null,
+        baseline: saved ? { historyPage: saved.history.page!, ownerKind: saved.snapshot.ownerKind,
+          ownerId: saved.snapshot.ownerId, candidateId: saved.snapshot.candidateId,
+          sourceSha256: saved.snapshot.sourceSha256, corpusSha256: saved.snapshot.corpusSha256,
+          reportId: saved.snapshot.reportId, casePage: saved.page } : null, comparisonPage: window };
+    }
+    const selectedSearch = validationSearch(location);
+    const search = nav.preserveRouteContext ? validationRouteSearch(actualSearch, selectedSearch) : selectedSearch;
+    installed.current = { binding, key: search }; binding.requestSearch = search;
+    if (search !== requested.key) nav.navigate(search, actualSearch);
+    return search;
+  }
+  async function loadHistory(controller: AbortController, page?: number, graph?: string) {
+    const query = page === undefined ? '' : `?historyGraph=${graph}&historyPage=${page}`;
+    const { data } = await client.get('validationHistory', `${root}/validation-history${query}`, { signal: controller.signal });
+    if (!current(controller)) throw new Error('obsolete validation history');
       if (data.binding.jobId !== jobId || data.binding.runId !== runId || data.binding.revisionId !== null ||
         data.authority !== 'recorded-metadata' || (page !== undefined && (data.page !== page || data.graphSha256 !== graph)))
         throw new Error('validation history binding');
-      setStored({ binding, history: receive(data), selected: null, report: null, loading: false, error: '' });
-    } catch (failure: unknown) { failed(controller, failure); }
+    return accepted(data);
   }
-  async function readCases(historyObservation: Received<ValidationHistory>, owner: ValidationOwner, page = 1, reportId?: string) {
-    const history = historyObservation.value;
-    if (!owner.canInspect || history.graphSha256 === null || history.page === null) return;
-    if (baseline && baseline.snapshot.graphSha256 !== history.graphSha256) setSavedBaseline(null);
-    const controller = begin(historyObservation, owner);
-    try {
-      const failureOwner = owner.ownerKind === 'run-failure';
-      const ownerKey = owner.ownerKind === 'attempt' ? 'historyEvidence' : failureOwner ? 'historyFailureRun' : 'historyRunEvidence';
-      const query = `historyGraph=${history.graphSha256}&historyPage=${history.page}&${ownerKey}=${owner.ownerId}&historyValidationPage=${page}`;
-      const { data } = await client.get('report', `${root}/reports/revision-validation?${query}`, { signal: controller.signal });
-      if (controller.signal.aborted) return;
+  async function loadReport(controller: AbortController, history: ValidationHistory, owner: ValidationOwner, page: number, reportId?: string) {
+    const failureOwner = owner.ownerKind === 'run-failure';
+    const ownerKey = owner.ownerKind === 'attempt' ? 'historyEvidence' : failureOwner ? 'historyFailureRun' : 'historyRunEvidence';
+    const query = `historyGraph=${history.graphSha256}&historyPage=${history.page}&${ownerKey}=${owner.ownerId}&historyValidationPage=${page}`;
+    const { data } = await client.get('report', `${root}/reports/revision-validation?${query}`, { signal: controller.signal });
+    if (!current(controller)) throw new Error('obsolete validation report');
       const cases = data.validationCases;
       const failure = data.validationFailure;
       if (data.binding.jobId !== jobId || data.binding.runId !== runId || data.binding.revisionId !== owner.candidateId ||
@@ -77,11 +127,89 @@ export function RecordedValidationEvidence({ jobId, runId, basePath }: { jobId: 
         (cases && (cases.graphSha256 !== history.graphSha256 || cases.ownerKind !== owner.ownerKind || cases.ownerId !== owner.ownerId ||
           cases.sourceSha256 !== owner.sourceSha256 || cases.corpusSha256 !== owner.corpusSha256 ||
           cases.normalOutcome !== owner.normalOutcome || cases.page !== page))) throw new Error('validation receipt binding');
-      setStored({ binding, history: historyObservation, selected: owner, report: receive(data), loading: false, error: '' });
+    return accepted(data);
+  }
+  async function readHistory(page?: number, graph?: string) {
+    if (!atRequestedLocation()) return;
+    const saved = page === undefined ? null : baseline;
+    if (page === undefined) setSavedBaseline(null);
+    setComparisonPage(1);
+    const controller = begin();
+    try {
+      const data = await loadHistory(controller, page, graph);
+      if (!current(controller)) return;
+      const retained = saved?.snapshot.graphSha256 === data.graphSha256 ? saved : null;
+      const locationKey = publish(data, null, null, retained);
+      if (locationKey === null) return;
+      setSavedBaseline(retained);
+      setStored({ binding, locationKey, history: data, selected: null, report: null, loading: false, error: '' });
     } catch (failure: unknown) { failed(controller, failure); }
   }
-  const historyObservation = view?.history, reportObservation = view?.report;
-  const history = historyObservation?.value, report = reportObservation?.value, cases = report?.validationCases, failure = report?.validationFailure, selected = view?.selected;
+  async function readCases(history: ValidationHistory, owner: ValidationOwner, page = 1, reportId?: string, nextBaseline = baseline) {
+    if (!atRequestedLocation()) return;
+    if (!owner.canInspect || history.graphSha256 === null || history.page === null) return;
+    const retained = nextBaseline?.snapshot.graphSha256 === history.graphSha256 ? nextBaseline : null;
+    if (!retained) setSavedBaseline(null);
+    const controller = begin(history, owner);
+    try {
+      const data = await loadReport(controller, history, owner, page, reportId);
+      if (!current(controller)) return;
+      const window = data.reportId === view?.report?.reportId && retained?.snapshot.reportId === baseline?.snapshot.reportId ? comparisonPage : 1;
+      const locationKey = publish(history, owner, data, retained, window);
+      if (locationKey === null) return;
+      setSavedBaseline(retained); setComparisonPage(window);
+      setStored({ binding, locationKey, history, selected: owner, report: data, loading: false, error: '' });
+    } catch (failure: unknown) { failed(controller, failure); }
+  }
+  useEffect(() => {
+    if (!navigation || (installed.current?.binding === binding && installed.current.key === requested.key)) return;
+    if (!atRequestedLocation()) return;
+    installed.current = { binding, key: requested.key };
+    binding.active?.abort(); setSavedBaseline(null); setComparisonPage(1);
+    if (requested.invalid) {
+      setStored({ binding, locationKey: requested.key, history: null, selected: null, report: null, loading: false, error: copy.savedSelectionInvalid });
+      return;
+    }
+    const location = requested.location;
+    if (!location) { setStored(null); return; }
+    const graphSha256 = location.graphSha256;
+    const controller = begin();
+    void (async () => {
+      const histories = new Map<number, ValidationHistory>();
+      async function historyAt(page: number) {
+        const cached = histories.get(page);
+        if (cached) return cached;
+        const data = await loadHistory(controller, page, graphSha256);
+        histories.set(page, data); return data;
+      }
+      const history = await historyAt(location.historyPage);
+      const owner = location.selected ? validationLocationOwner(history, location.selected) : null;
+      const report = location.selected && owner ? await loadReport(controller, history, owner, location.selected.casePage, location.selected.reportId) : null;
+      let saved: Baseline | null = null;
+      if (location.baseline) {
+        const selected = location.baseline, baselineHistory = await historyAt(selected.historyPage);
+        const baselineOwner = validationLocationOwner(baselineHistory, selected);
+        const same = location.selected && selected.historyPage === location.selected.historyPage &&
+          selected.ownerKind === location.selected.ownerKind && selected.ownerId === location.selected.ownerId &&
+          selected.reportId === location.selected.reportId && selected.casePage === location.selected.casePage;
+        const baselineReport = same && report ? report : await loadReport(controller, baselineHistory, baselineOwner, selected.casePage, selected.reportId);
+        const snapshot = validationComparisonSnapshot(baselineReport, { jobId, runId, graphSha256: location.graphSha256, owner: baselineOwner });
+        if (!snapshot) throw new Error('saved baseline unavailable');
+        saved = { binding, snapshot, history: baselineHistory, owner: baselineOwner, page: selected.casePage, receipt: receipts.current.get(baselineReport) };
+      }
+      if (location.comparisonPage > 1) {
+        const snapshot = owner && report ? validationComparisonSnapshot(report, { jobId, runId, graphSha256: location.graphSha256, owner }) : null;
+        const result = snapshot && saved ? compareValidationSnapshots(saved.snapshot, snapshot) : null;
+        if (!result || result.state !== 'available' || location.comparisonPage > Math.max(1,
+          Math.ceil(Math.max(result.newMismatches.length, result.persistentMismatches.length, result.resolvedMismatches.length) / 20))) throw new Error('saved comparison page unavailable');
+      }
+      if (!current(controller)) return;
+      setSavedBaseline(saved); setComparisonPage(location.comparisonPage);
+      setStored({ binding, locationKey: requested.key, history, selected: owner, report, loading: false, error: '' });
+    })().catch((failure: unknown) => { failed(controller, failure, true); });
+    return () => controller.abort();
+  }, [binding, navigation !== undefined, requested.key]);
+  const history = view?.history, report = view?.report, cases = report?.validationCases, failure = report?.validationFailure, selected = view?.selected;
   const download = useMemo(() => report && history && selected
     ? validationPageDownload(report, { jobId, runId, graphSha256: history.graphSha256, owner: selected }) : null,
   [report, history, selected, jobId, runId]);
@@ -97,7 +225,7 @@ export function RecordedValidationEvidence({ jobId, runId, basePath }: { jobId: 
     {loading && <p role="status">{copy.loading}</p>}
     {view?.error && <p role="alert">{view.error}</p>}
     {history && <>
-      <MetadataReceipt kind="validationHistory" receipt={historyObservation?.receipt} />
+      <MetadataReceipt kind="validationHistory" receipt={receipts.current.get(history)} />
       <p>{copy.historyState}: {history.state}</p>
       <ul aria-label={copy.limitations}>{history.limitations.map((text, index) => <li key={index}>{text}</li>)}</ul>
       {history.state === 'recorded' && <>
@@ -110,7 +238,7 @@ export function RecordedValidationEvidence({ jobId, runId, basePath }: { jobId: 
             <td><code>{owner.candidateId ?? copy.withheld}</code></td><td><code>{owner.sourceSha256 ?? copy.withheld}</code></td>
             <td>{owner.normalOutcome ?? owner.failureKind ?? copy.notRecorded} <button type="button" disabled={loading || !owner.canInspect}
               aria-label={`${owner.ownerKind === 'run-failure' ? copy.inspectFailure : copy.inspect}: ${owner.ownerKind} ${owner.ownerId}`}
-              onClick={() => { void readCases(historyObservation, owner); }}>{owner.ownerKind === 'run-failure' ? copy.inspectFailure : copy.inspect}</button></td>
+              onClick={() => { void readCases(history, owner); }}>{owner.ownerKind === 'run-failure' ? copy.inspectFailure : copy.inspect}</button></td>
           </tr>)}</tbody></table>
         </div>
         {history.items.length === 0 && <p>{copy.noOwners}</p>}
@@ -125,7 +253,7 @@ export function RecordedValidationEvidence({ jobId, runId, basePath }: { jobId: 
       </>}
     </>}
     {report && <>
-      <MetadataReceipt kind="validationReport" receipt={reportObservation?.receipt} />
+      <MetadataReceipt kind="validationReport" receipt={receipts.current.get(report)} />
       <p>{copy.reportState}: {report.state}</p>
       <p>{copy.acceptance}</p>
       {report.state === 'available' && (cases || failure) && <>
@@ -153,21 +281,42 @@ export function RecordedValidationEvidence({ jobId, runId, basePath }: { jobId: 
         <section aria-labelledby="validation-comparison-title">
           <h3 id="validation-comparison-title">{copy.comparisonTitle}</h3><p>{copy.comparisonScope}</p>
           {comparisonSnapshot ? <button type="button" disabled={loading} onClick={() => {
-            if (historyObservation && reportObservation && selected) setSavedBaseline({ binding, snapshot: comparisonSnapshot, history: historyObservation, receipt: reportObservation.receipt, owner: selected });
+            if (history && selected) {
+              const saved = { binding, snapshot: comparisonSnapshot, history, owner: selected, page: cases.page, receipt: receipts.current.get(report) };
+              const locationKey = publish(history, selected, report, saved);
+              if (locationKey === null) return;
+              setSavedBaseline(saved); setComparisonPage(1);
+              setStored(previous => previous ? { ...previous, locationKey } : previous);
+            }
           }}>{copy.setComparisonBaseline}</button> : <p>{copy.comparisonUnavailable}</p>}
           {baseline && <>
             <MetadataReceipt kind="baseline" receipt={baseline.receipt} />
             <dl><dt>{copy.comparisonBaseline}</dt><dd><code>{baseline.snapshot.ownerKind}: {baseline.snapshot.ownerId}</code></dd>
               <dt>{copy.candidate}</dt><dd><code>{baseline.snapshot.candidateId}</code></dd>
               <dt>{copy.source}</dt><dd><code>{baseline.snapshot.sourceSha256}</code></dd></dl>
-            <button type="button" onClick={() => { setSavedBaseline(null); }}>{copy.clearComparisonBaseline}</button>
+            <button type="button" onClick={() => {
+              if (history && selected) {
+                const locationKey = publish(history, selected, report, null);
+                if (locationKey === null) return;
+                setSavedBaseline(null); setComparisonPage(1);
+                setStored(previous => previous ? { ...previous, locationKey } : previous);
+              }
+            }}>{copy.clearComparisonBaseline}</button>
             {comparisonSnapshot && <MismatchComparison key={`${baseline.snapshot.reportId}:${comparisonSnapshot.reportId}`}
-              first={baseline.snapshot} second={comparisonSnapshot} onInspectPage={page => {
-                if (history && selected) void readCases(historyObservation, selected, page, report.reportId);
+              first={baseline.snapshot} second={comparisonSnapshot} page={comparisonPage} onPageChange={page => {
+                if (history && selected) {
+                  const locationKey = publish(history, selected, report, baseline, page);
+                  if (locationKey === null) return;
+                  setComparisonPage(page); setStored(previous => previous ? { ...previous, locationKey } : previous);
+                }
+              }} onInspectPage={page => {
+                if (history && selected) void readCases(history, selected, page, report.reportId);
               }} onSwap={() => {
-                if (historyObservation && reportObservation && selected) {
-                  setSavedBaseline({ binding, snapshot: comparisonSnapshot, history: historyObservation, receipt: reportObservation.receipt, owner: selected });
-                  void readCases(baseline.history, baseline.owner, 1, baseline.snapshot.reportId);
+                if (!atRequestedLocation()) return;
+                if (history && selected) {
+                  const saved = { binding, snapshot: comparisonSnapshot, history, owner: selected, page: cases.page, receipt: receipts.current.get(report) };
+                  setSavedBaseline(saved); setComparisonPage(1);
+                  void readCases(baseline.history, baseline.owner, baseline.page, baseline.snapshot.reportId, saved);
                 }
               }} />}
           </>}
@@ -192,22 +341,22 @@ export function RecordedValidationEvidence({ jobId, runId, basePath }: { jobId: 
           <p>{copy.mismatchScope}</p>
           {cases.firstMismatchPage === undefined ? <p>{copy.mismatchUnavailable}</p> : <nav aria-label={copy.mismatchNavigation}>
             <button type="button" disabled={loading || cases.firstMismatchPage == null || cases.firstMismatchPage === cases.page} onClick={() => {
-              if (history && selected && cases.firstMismatchPage != null) void readCases(historyObservation, selected, cases.firstMismatchPage, report.reportId);
+              if (history && selected && cases.firstMismatchPage != null) void readCases(history, selected, cases.firstMismatchPage, report.reportId);
             }}>{copy.firstMismatch}</button>
             <button type="button" disabled={loading || cases.previousMismatchPage == null} onClick={() => {
-              if (history && selected && cases.previousMismatchPage != null) void readCases(historyObservation, selected, cases.previousMismatchPage, report.reportId);
+              if (history && selected && cases.previousMismatchPage != null) void readCases(history, selected, cases.previousMismatchPage, report.reportId);
             }}>{copy.previousMismatch}</button>
             <button type="button" disabled={loading || cases.nextMismatchPage == null} onClick={() => {
-              if (history && selected && cases.nextMismatchPage != null) void readCases(historyObservation, selected, cases.nextMismatchPage, report.reportId);
+              if (history && selected && cases.nextMismatchPage != null) void readCases(history, selected, cases.nextMismatchPage, report.reportId);
             }}>{copy.nextMismatch}</button>
           </nav>}
         </>}
         <nav aria-label={copy.caseNavigation}>
           <button type="button" disabled={loading || cases.previousPage === null} onClick={() => {
-            if (history && selected && cases.previousPage !== null) void readCases(historyObservation, selected, cases.previousPage, report.reportId);
+            if (history && selected && cases.previousPage !== null) void readCases(history, selected, cases.previousPage, report.reportId);
           }}>{copy.previousCases}</button>
           <button type="button" disabled={loading || cases.nextPage === null} onClick={() => {
-            if (history && selected && cases.nextPage !== null) void readCases(historyObservation, selected, cases.nextPage, report.reportId);
+            if (history && selected && cases.nextPage !== null) void readCases(history, selected, cases.nextPage, report.reportId);
           }}>{copy.nextCases}</button>
         </nav>
       </> : !failure && <p>{copy.noCases}</p>}
@@ -215,9 +364,9 @@ export function RecordedValidationEvidence({ jobId, runId, basePath }: { jobId: 
   </section>;
 }
 
-function MismatchComparison({ first, second, onInspectPage, onSwap }: { first: ValidationComparisonSnapshot;
-  second: ValidationComparisonSnapshot; onInspectPage: (page: number) => void; onSwap: () => void }) {
-  const [page, setPage] = useState(1);
+function MismatchComparison({ first, second, page, onPageChange, onInspectPage, onSwap }: { first: ValidationComparisonSnapshot;
+  second: ValidationComparisonSnapshot; page: number; onPageChange: (page: number) => void;
+  onInspectPage: (page: number) => void; onSwap: () => void }) {
   const result = useMemo(() => compareValidationSnapshots(first, second), [first, second]);
   if (result.state !== 'available') return <p>{result.state === 'same-observation' ? copy.selectComparisonTarget : copy.comparisonIncompatible}</p>;
   const groups = [[copy.newMismatch, result.newMismatches], [copy.persistentMismatch, result.persistentMismatches],
@@ -239,8 +388,8 @@ function MismatchComparison({ first, second, onInspectPage, onSwap }: { first: V
     </div>
     {groups.every(([, ordinals]) => ordinals.length === 0) && <p>{copy.noComparisonDifferences}</p>}
     <nav aria-label={copy.comparisonNavigation}>
-      <button type="button" disabled={page === 1} onClick={() => { setPage(page - 1); }}>{copy.previousComparison}</button>
-      <button type="button" disabled={page === pages} onClick={() => { setPage(page + 1); }}>{copy.nextComparison}</button>
+      <button type="button" disabled={page === 1} onClick={() => { onPageChange(page - 1); }}>{copy.previousComparison}</button>
+      <button type="button" disabled={page === pages} onClick={() => { onPageChange(page + 1); }}>{copy.nextComparison}</button>
     </nav>
     <button type="button" onClick={onSwap}>{copy.swapComparison}</button>
   </>;

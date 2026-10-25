@@ -2,14 +2,14 @@
 
 Submitting a different valid library filter or explicitly resetting valid filters creates a history entry.
 Back and Forward restore the complete documented filter selection and perform only the bounded list read.
-An unchanged submitted URL does not add a duplicate entry. Resetting invalid saved filters replaces that
-invalid entry, preserving the existing visible recovery and keeping malformed values out of subsequent URLs.
+An unchanged submitted URL does not add a duplicate entry. Resetting invalid saved filters keeps the
+landed dashboard behaviour: Back returns to the invalid entry and its visible recovery without a read.
 Typing a draft, background refresh and rejected validation do not add entries. Existing cancellation rejects
 late results from a filter selection abandoned through browser history.
 
-The focused implementation has one production hunk and four synthetic JSDOM/client controls: all six
-filter fields and result identity through Back/Forward; reversible reset and duplicate submission; invalid
-saved/draft recovery; and a pending read completed after Back. No actual service, native process, provider,
+The production behaviour is the landed dashboard filter history; three synthetic JSDOM/client controls cover
+all six filter fields and result identity through Back/Forward, reversible reset and duplicate submission, and
+a pending read completed after Back. No actual service, native process, provider,
 authenticated session or browser is started by those controls. Original commands, bounds, native fixtures,
 assertions and bundle budgets remain unchanged. Qualification uses ordinary Actions on the exact source.
 

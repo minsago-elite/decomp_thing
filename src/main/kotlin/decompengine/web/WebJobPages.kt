@@ -81,13 +81,13 @@ internal class WebJobPages(
     fun page(owner: String, query: WebJobQuery, cursor: String?): JsonObject {
         if (cursor != null) return synchronized(snapshots) {
             val parts = cursor.split('_', limit = 3)
-            if (parts.size != 3 || !parts[0].matches(Regex("[a-f0-9]{32}")) || !parts[1].matches(Regex("[1-9][0-9]{0,4}")) ||
+            if (parts.size != 3 || !parts[0].matches(Regex("[a-f0-9]{32}")) || !parts[1].matches(Regex("0|[1-9][0-9]{0,4}")) ||
                 !MessageDigest.isEqual(signature(parts[0], parts[1]).toByteArray(), parts[2].toByteArray())) invalidCursor()
             expire()
             val snapshot = snapshots[parts[0]] ?: throw WebAccessDenied(410, "CURSOR_EXPIRED", "The job snapshot expired. Refresh the collection.")
             if (snapshot.owner != owner || snapshot.query != query) invalidCursor()
             val offset = parts[1].toInt()
-            if (offset >= snapshot.items.size || offset % query.limit != 0) invalidCursor()
+            if ((offset != 0 && offset >= snapshot.items.size) || offset % query.limit != 0) invalidCursor()
             response(snapshot, offset)
         }
         if (!admission.tryAcquire()) throw WebAccessDenied(503, "LISTING_BUSY", "Another job snapshot is being collected. Retry this read shortly.")
@@ -120,12 +120,12 @@ internal class WebJobPages(
             return synchronized(snapshots) {
                 expire()
                 deadline.checkpoint()
-                if (items.size > query.limit) {
-                    while (snapshots.isNotEmpty() && (snapshots.size >= 8 || snapshots.values.sumOf { it.bytes } + bytes > 32L * 1024 * 1024)) {
-                        snapshots.remove(snapshots.keys.first())
-                    }
-                    snapshots[snapshot.id] = snapshot
+                // First pages, including empty results, also need an authenticated return token.
+                // The existing count, byte and expiry bounds apply to every retained snapshot.
+                while (snapshots.isNotEmpty() && (snapshots.size >= 8 || snapshots.values.sumOf { it.bytes } + bytes > 32L * 1024 * 1024)) {
+                    snapshots.remove(snapshots.keys.first())
                 }
+                snapshots[snapshot.id] = snapshot
                 response(snapshot, 0)
             }
         } finally { admission.release() }
@@ -138,6 +138,9 @@ internal class WebJobPages(
         mac.init(SecretKeySpec(secret, "HmacSHA256"))
         return Base64.getUrlEncoder().withoutPadding().encodeToString(mac.doFinal("jobs-v1:$id:$offset".toByteArray()))
     }
+    private fun pageCursor(snapshot: Snapshot, offset: Int) =
+        JsonPrimitive("${snapshot.id}_${offset}_${signature(snapshot.id, offset.toString())}")
+
     private fun response(snapshot: Snapshot, offset: Int): JsonObject {
         val end = minOf(offset + snapshot.query.limit, snapshot.items.size)
         return buildJsonObject {
@@ -145,7 +148,10 @@ internal class WebJobPages(
             put("page", buildJsonObject {
                 put("limit", snapshot.query.limit)
                 put("snapshotVersion", snapshot.id)
-                put("nextCursor", if (end < snapshot.items.size) JsonPrimitive("${snapshot.id}_${end}_${signature(snapshot.id, end.toString())}") else JsonNull)
+                put("nextCursor", if (end < snapshot.items.size) pageCursor(snapshot, end) else JsonNull)
+                put("currentCursor", pageCursor(snapshot, offset))
+                put("previousCursor", if (offset > 0) pageCursor(snapshot, offset - snapshot.query.limit) else JsonNull)
+                put("pageNumber", offset / snapshot.query.limit + 1)
             })
         }
     }

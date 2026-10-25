@@ -1,7 +1,9 @@
+import { Fragment } from 'preact';
 import type { Capability, Workflow } from '../api/generated';
 import { jobCopy as copy } from '../copy/job';
 import type { RuntimeSnapshot } from '../session/session';
 import { message } from '../shared/messages';
+import { reportedCapabilityFacts } from './capabilityFacts';
 
 import { MetadataReceipt } from '../shared/MetadataReceipt';
 import type { ReceiptTime } from '../shared/receiptTime';
@@ -24,6 +26,12 @@ function CapabilityReport({ capability }: { capability: Capability }) {
     {capability.reasonCode && <p>{message(copy.capabilityReason, {
       reason: <code>{capability.reasonCode}</code>,
     })}</p>}
+    <dl class="job-facts">
+      {reportedCapabilityFacts(capability).map(fact => <Fragment key={fact.key}>
+        <dt>{fact.label}</dt><dd>{fact.value}</dd>
+      </Fragment>)}
+    </dl>
+    <p>{copy.capabilityLimitsBoundary}</p>
   </li>;
 }
 

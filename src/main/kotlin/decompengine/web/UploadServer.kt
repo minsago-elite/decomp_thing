@@ -62,7 +62,7 @@ internal fun canonicalSpaDocumentPath(base: String, path: String): String? {
         "${base}runtime/" -> "${base}runtime"
         "${base}upload/" -> "${base}upload"
         else -> path.takeIf { it.startsWith("${base}jobs/") &&
-            it.removePrefix("${base}jobs/").matches(Regex("[0-9a-f]{32}(?:/runs(?:/$id(?:/revisions/$id/(?:sources|source-files)/$id)?)?)?/?")) }?.removeSuffix("/")
+            it.removePrefix("${base}jobs/").matches(Regex("[0-9a-f]{32}(?:/runs(?:/$id(?:/(?:activity|evidence)|/revisions/$id/(?:sources|source-files)/$id)?)?)?/?")) }?.removeSuffix("/")
     }
 }
 
@@ -278,11 +278,30 @@ class UploadServer(
     private val legacySessions = WebSessionController(access)
     internal val streamResources = WebStreamResources()
     private val harnessReadiness = WebHarnessReadinessProjector()
-    private val api = spaAssets?.let { WebApiController(access, it, jobs, jobMutations, streamResources, harnessReadiness = harnessReadiness) }
+    private val agentPreflight = WebAgentPreflight { cancellation ->
+        check(withActiveRequest {
+            authenticationInspector(decompengine.agent.AgentCancellation {
+                stopRequested.get() || cancellation.isCancellationRequested()
+            })
+        }) { "Server is stopping" }
+    }
+    private val api = spaAssets?.let { WebApiController(access, it, jobs, jobMutations, streamResources,
+        harnessReadiness = harnessReadiness, agentPreflight = agentPreflight) }
+    // A request that finds every worker and queue slot taken is answered by this tiny pool with a stable 429
+    // instead of a reset connection. It has no queue, so overload still never buffers more than the main pool does;
+    // when it too is busy the rejection propagates and the dispatcher closes the connection, as before.
+    private val overloadResponders = ThreadPoolExecutor(
+        2, 2, 0, TimeUnit.MILLISECONDS, java.util.concurrent.SynchronousQueue(),
+        { task -> Thread(task, OVERLOAD_RESPONDER_THREAD).apply { isDaemon = true } },
+        ThreadPoolExecutor.AbortPolicy(),
+    )
     private val requestExecutor = ThreadPoolExecutor(
         16, 16, 0, TimeUnit.MILLISECONDS, ArrayBlockingQueue(64),
         { task -> Thread(task, "decomp-web-http").apply { isDaemon = true } },
-        ThreadPoolExecutor.AbortPolicy(),
+        { task, executor ->
+            if (executor.isShutdown) throw java.util.concurrent.RejectedExecutionException("web request executor is shut down")
+            overloadResponders.execute(task)
+        },
     )
     private val requestDeadlines = ScheduledThreadPoolExecutor(1) { task ->
         Thread(task, "decomp-web-deadline").apply { isDaemon = true }
@@ -334,6 +353,12 @@ class UploadServer(
         }
         server.executor = requestExecutor
         server.createContext("/") { exchange ->
+            if (Thread.currentThread().name == OVERLOAD_RESPONDER_THREAD) {
+                // Admitted only to be refused: no routing, no deadline, no session or storage access.
+                exchange.responseHeaders.set("Connection", "close")
+                access.sendDenied(exchange, WebAccessDenied(429, "SERVER_BUSY", "The workbench is handling its maximum number of requests. Retry shortly."))
+                return@createContext
+            }
             val upload = exchange.requestMethod == "POST" &&
                 exchange.requestHeaders.getFirst("Content-Type")?.startsWith("multipart/form-data", true) == true
             val deadline = requestDeadlines.schedule({ exchange.close() }, if (upload) 120 else 30, TimeUnit.SECONDS)
@@ -374,6 +399,7 @@ class UploadServer(
         jobs.signalShutdown()
         stopRequested.set(true)
         authenticationInspectionCancellation.set(true)
+        agentPreflight.requestStop()
         jobs.beginShutdown()
     }
 
@@ -411,8 +437,10 @@ class UploadServer(
         server.stop(delaySeconds)
         if (!streamsClosed && !streamResources.shutdown()) System.err.println("Event stream shutdown did not complete cleanly.")
         requestExecutor.shutdownNow()
+        overloadResponders.shutdownNow()
         requestDeadlines.shutdownNow()
         harnessReadiness.close()
+        agentPreflight.close()
         access.close()
         jobs.close()
         var inspectionWaitInterrupted = false
@@ -1089,6 +1117,7 @@ class UploadServer(
 }
 
 private const val MAX_UPLOAD_BYTES = 32L * 1024 * 1024
+private const val OVERLOAD_RESPONDER_THREAD = "decomp-web-overload"
 
 private fun encodeJob(job: Job): String = Json.encodeToString(JsonElement.serializer(), legacyJobPresentation(job))
 

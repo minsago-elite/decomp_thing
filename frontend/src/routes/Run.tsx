@@ -4,21 +4,25 @@ import { message as displayMessage } from '../shared/messages';
 import { formatExactTimestamp } from '../jobs/metadataFormat';
 import { usePrivateTransport } from '../session/PrivateTransport';
 import { useEffect, useMemo, useState } from 'preact/hooks';
+import { useLocation } from 'preact-iso/router';
 import type { Run as RunData } from '../api/generated';
 import { withApiFailureReference } from '../api/client';
-import { jobPath, runPath, sourceDirectoryPath } from '../app/paths';
+import { jobPath, runPath, runViewPath, sourceDirectoryPath, type RunView } from '../app/paths';
 import type { BrowserSession } from '../session/session';
 import { Activity } from '../jobs/Activity';
 import { ProgressPin } from '../jobs/ProgressPin';
 import { ExplorationEvidence } from '../jobs/ExplorationEvidence';
 import { RecordedValidationEvidence } from '../jobs/RecordedValidationEvidence';
+import type { ValidationNavigation } from '../jobs/validationNavigation';
 import { useSession } from '../session/useSession';
 import { receive } from '../shared/receiptTime';
 import type { Received } from '../shared/receiptTime';
 import { MetadataReceipt } from '../shared/MetadataReceipt';
 import { canRetainMetadata, metadataFailureKind } from '../shared/retainMetadata';
 
-function Details({ jobId, runId, basePath, session }: { jobId: string; runId: string; basePath: string; session: BrowserSession }) {
+function Details({ jobId, runId, basePath, session, view, navigation }: {
+  jobId: string; runId: string; basePath: string; session: BrowserSession; view: RunView; navigation?: ValidationNavigation;
+}) {
   const { client } = usePrivateTransport(basePath);
   const binding = useMemo(() => ({ client, basePath, jobId, runId, session }), [client, basePath, jobId, runId, session]);
   const [stored, setStored] = useState<{ binding: typeof binding; data: Received<RunData> | null; error: string; loading: boolean }>(
@@ -54,6 +58,13 @@ function Details({ jobId, runId, basePath, session }: { jobId: string; runId: st
     <button type="button" disabled={loading} onClick={() => setRefresh(value => value + 1)}>{copy.refreshAttempt}</button>
     {run && <>
       <MetadataReceipt kind="run" receipt={observation?.receipt} />
+      {view !== 'overview' && <dl class="job-facts">
+        <dt>{copy.attemptIdentity}</dt><dd><code>{run.runId}</code></dd>
+        <dt>{copy.attemptState}</dt><dd>{run.state}</dd>
+        <dt>{copy.acceptance}</dt><dd>{run.acceptance}</dd>
+        <dt>{copy.resultRevision}</dt><dd>{run.resultRevisionId ?? copy.noResultRevisionRecorded}</dd>
+      </dl>}
+      {view === 'overview' && <>
       <dl class="job-facts">
         <dt>{copy.attemptIdentity}</dt><dd><code>{run.runId}</code></dd>
         <dt>{copy.workflow}</dt><dd>{run.workflow}</dd><dt>{copy.attemptState}</dt><dd>{run.state}</dd>
@@ -86,25 +97,50 @@ function Details({ jobId, runId, basePath, session }: { jobId: string; runId: st
         <dt>{copy.toolCalls}</dt><dd>{run.usage.toolCalls ?? copy.notReported}</dd>
         <dt>{copy.wallClockUsage2}</dt><dd>{run.usage.wallClockMs === null ? copy.notReported : displayMessage(copy.wallClockUsage, { value: run.usage.wallClockMs })}</dd>
       </dl> : <p>{copy.usageWasNotReportedForThisAttempt}</p>}
-      <ProgressPin key={`pin/${jobId}/${runId}`} jobId={jobId} runId={runId} basePath={basePath} session={session} />
-      <Activity key={`activity/${jobId}/${runId}`} jobId={jobId} runId={runId} basePath={basePath} />
-      <ExplorationEvidence key={`${jobId}/${runId}`} jobId={jobId} runId={runId} basePath={basePath} />
-      <RecordedValidationEvidence key={`${jobId}/${runId}`} jobId={jobId} runId={runId} basePath={basePath} />
+      </>}
+      {view !== 'evidence' && <>
+        <ProgressPin key={`pin/${jobId}/${runId}`} jobId={jobId} runId={runId} basePath={basePath} session={session} />
+        <Activity key={`activity/${jobId}/${runId}`} jobId={jobId} runId={runId} basePath={basePath} {...(view === 'activity' && navigation !== undefined ? { navigation } : {})} />
+      </>}
+      {view !== 'activity' && <>
+        <ExplorationEvidence key={`${jobId}/${runId}`} jobId={jobId} runId={runId} basePath={basePath} />
+        <RecordedValidationEvidence key={`${jobId}/${runId}`} jobId={jobId} runId={runId} basePath={basePath} {...(navigation === undefined ? {} : { navigation })} />
+      </>}
       {run.resultRevisionId ? <p><a href={sourceDirectoryPath(basePath, { jobId, runId, revisionId: run.resultRevisionId })}>{sourceCopy.browse}</a></p>
         : <p>{sourceCopy.noRevision}</p>}
     </>}
   </>;
 }
 
-export default function Run({ jobId, runId, basePath, session }: { jobId: string; runId: string; basePath: string; session: BrowserSession | null }) {
+export default function Run({ jobId, runId, basePath, session, view = 'overview', navigation: suppliedNavigation }: {
+  jobId: string; runId: string; basePath: string; session: BrowserSession | null; view?: RunView; navigation?: ValidationNavigation;
+}) {
   const state = useSession(session);
+  const route = useLocation();
+  const routedNavigation = useMemo<ValidationNavigation | undefined>(() => {
+    if (!route.url) return undefined; // The legacy embedding has no router provider.
+    const address = new URL(route.url, window.location.origin), pathname = address.pathname;
+    return { search: address.search, preserveRouteContext: true,
+      currentSearch: () => window.location.pathname === pathname ? window.location.search : null,
+      navigate: (search: string, expectedSearch: string) => {
+        if (window.location.pathname === pathname && window.location.search === expectedSearch)
+          route.route(`${pathname}${search}`);
+      },
+    };
+  }, [route.url, route.route]);
+  const navigation = suppliedNavigation ?? routedNavigation;
   const valid = /^[0-9a-f]{32}$/.test(jobId) && /^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/.test(runId);
   return <section aria-labelledby="attempt-title">
-    <h1 id="attempt-title">{copy.workflowAttempt}</h1>
+    <h1 id="attempt-title">{view === 'activity' ? copy.activityTitle : view === 'evidence' ? copy.evidenceTitle : copy.workflowAttempt}</h1>
     {valid ? <>
       <a href={jobPath(basePath, jobId)}>{copy.returnToJobOverview}</a>
       <p><a href={`${jobPath(basePath, jobId)}/runs`}>{copy.browseAttemptHistory}</a></p>
-      {session && state?.status === 'authenticated' ? <Details key={`${state.generation}/${jobId}/${runId}`} jobId={jobId} runId={runId} basePath={basePath} session={session} />
+      <nav class="job-actions" aria-label={copy.attemptViews}>
+        <a href={runViewPath(basePath, jobId, runId, 'overview')} aria-current={view === 'overview' ? 'page' : undefined}>{copy.overviewView}</a>
+        <a href={runViewPath(basePath, jobId, runId, 'activity')} aria-current={view === 'activity' ? 'page' : undefined}>{copy.activityView}</a>
+        <a href={runViewPath(basePath, jobId, runId, 'evidence')} aria-current={view === 'evidence' ? 'page' : undefined}>{copy.evidenceView}</a>
+      </nav>
+      {session && state?.status === 'authenticated' ? <Details key={`${state.generation}/${jobId}/${runId}/${view}`} jobId={jobId} runId={runId} basePath={basePath} session={session} view={view} {...(navigation === undefined ? {} : { navigation })} />
         : <p>{copy.connectALocalSessionToViewThisAttempt}</p>}
     </> : <p role="alert">{copy.theRequestedJobOrAttemptIdentityIsInvalid}</p>}
   </section>;

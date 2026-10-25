@@ -20,6 +20,8 @@ export const appCopy = {
   "uploadABinary": "Upload a binary",
   "jobOverview": "Job overview",
   "workflowAttempt": "Workflow attempt",
+  "attemptActivity": "Attempt activity",
+  "attemptEvidence": "Attempt evidence",
   "attemptHistory": "Attempt history",
   "pageUnavailable": "Page unavailable",
   "openingView": "Opening view…",

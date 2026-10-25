@@ -1,4 +1,4 @@
-import { activityCopy as copy } from '../copy/attempt';
+import { activityCopy as copy, activityHistoryCopy } from '../copy/attempt';
 import { message as displayMessage } from '../shared/messages';
 import { usePrivateTransport } from '../session/PrivateTransport';
 import { useEffect, useRef, useState } from 'preact/hooks';
@@ -11,12 +11,32 @@ import type { ActivityGroup } from './ActivityRow';
 import { useBrowserAvailability } from '../session/useBrowserAvailability';
 import { createUsageDisplay, isContextUsageUpdate } from './usageDisplay';
 
+import { ActivityHistory } from './ActivityHistory';
+import { activityWindowLocation, activityWindowSearch, type ActivityNavigation } from './activityNavigation';
+import { runViewPath } from '../app/paths';
+
 const capacity = 200;
 type ActivityPosition = { initialized: boolean; cursor: string | null; rows: WebEvent[]; last: WebEvent | null };
 type ActivityDisplay = { position: ActivityPosition; receipt: ActivityReceiptTime };
 
 /** Retained journal observations are display evidence, never acceptance receipts. */
-export function Activity({ jobId, runId, basePath }: { jobId: string; runId: string; basePath: string }) {
+export function Activity({ jobId, runId, basePath, navigation }: {
+  jobId: string; runId: string; basePath: string; navigation?: ActivityNavigation;
+}) {
+  let window: ReturnType<typeof activityWindowLocation>;
+  try { window = activityWindowLocation(navigation?.search ?? ''); }
+  catch {
+    return <section aria-labelledby="activity-history-title">
+      <h2 id="activity-history-title">{activityHistoryCopy.title}</h2>
+      <p role="alert">{activityHistoryCopy.invalid}</p>
+      <a href={runViewPath(basePath, jobId, runId, 'activity')}>{activityHistoryCopy.fresh}</a>
+    </section>;
+  }
+  return window && navigation ? <ActivityHistory jobId={jobId} runId={runId} basePath={basePath} navigation={navigation} window={window} />
+    : <LiveActivity jobId={jobId} runId={runId} basePath={basePath} windowLinks={navigation !== undefined} />;
+}
+
+function LiveActivity({ jobId, runId, basePath, windowLinks }: { jobId: string; runId: string; basePath: string; windowLinks: boolean }) {
   const { client, stream } = usePrivateTransport(basePath);
   const fallback = useRef(false);
   const streamFailures = useRef(0);
@@ -33,6 +53,7 @@ export function Activity({ jobId, runId, basePath }: { jobId: string; runId: str
   const [group, setGroup] = useState<'all' | ActivityGroup>('all');
   const [taskDigest, setTaskDigest] = useState('');
   const [reset, setReset] = useState(0);
+  const pageAfter = useRef<string | null>(null);
   const position = useRef<ActivityPosition>({ initialized: false, cursor: null, rows: [], last: null });
   const binding = useRef({ client, stream, jobId, runId });
   binding.current = { client, stream, jobId, runId };
@@ -89,7 +110,10 @@ export function Activity({ jobId, runId, basePath }: { jobId: string; runId: str
           if (controller.signal.aborted) return;
           if (data.run.jobId !== jobId || data.run.runId !== runId) throw new Error('binding');
           setSnapshot(data);
-          if (!position.current.initialized) position.current = { initialized: true, cursor: data.oldestCursor ?? data.throughCursor, rows: [], last: null };
+          if (!position.current.initialized) {
+            pageAfter.current = data.oldestCursor ?? data.throughCursor;
+            position.current = { initialized: true, cursor: data.oldestCursor ?? data.throughCursor, rows: [], last: null };
+          }
           reconcile.current = false;
         }
         readingStream = useStreaming && !fallback.current;
@@ -159,15 +183,20 @@ export function Activity({ jobId, runId, basePath }: { jobId: string; runId: str
     <p>{copy.journalObservationsDoNotEstablishValidationOrAcceptanceMessageText}</p>
     <button type="button" disabled={!!error} onClick={() => {
       if (rows.length === capacity) {
+        pageAfter.current = position.current.cursor;
         position.current = { ...position.current, rows: [] }; setRows([]); setFollowing(true);
       } else setFollowing(value => !value);
     }}>
       {rows.length === capacity ? copy.continueActivityOnNextPage : following ? copy.pauseActivity : position.current.initialized ? copy.resumeActivity : copy.followActivity}
     </button>{' '}
     <button type="button" onClick={() => {
+      pageAfter.current = null;
       position.current = { initialized: false, cursor: null, rows: [], last: null };
       setRows([]); setSnapshot(null); setLastRead(null); setRetry(0); failures.current = 0; streamFailures.current = 0; fallback.current = false; setPeriodic(false); reconcile.current = true; setError(''); setReset(value => value + 1); setFollowing(true);
     }}>{copy.readFreshActivityHistory}</button>
+    {windowLinks && !following && pageAfter.current && rows.at(-1)?.cursor && pageAfter.current !== rows.at(-1)!.cursor && <p>
+      <a href={`${runViewPath(basePath, jobId, runId, 'activity')}${activityWindowSearch({ after: pageAfter.current, through: rows.at(-1)!.cursor!, event: null })}`}>{activityHistoryCopy.save}</a>
+    </p>}
     <fieldset class="activity-filters">
       <legend>{copy.filterThisActivityPage}</legend>
       <label>{copy.observationCategory}<select value={group} onChange={event => setGroup(event.currentTarget.value as 'all' | ActivityGroup)}>

@@ -1,0 +1,7 @@
+{
+  "apiVersion": 1,
+  "kind": "agentPreflightRequest",
+  "data": {
+    "action": "login"
+  }
+}

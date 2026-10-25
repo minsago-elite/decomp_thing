@@ -254,5 +254,5 @@ exercises DWARF form handling plus source/schema/artifact mutation during
 generation:
 
 ```bash
-python3 -m unittest discover -s tests/oracle -v
+python3 -m unittest discover -s tests/oracle -t . -v
 ```
