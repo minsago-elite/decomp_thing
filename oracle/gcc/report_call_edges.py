@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import argparse
 from collections import Counter
+from dataclasses import dataclass
 import gc
 import hashlib
 import io
@@ -45,17 +46,19 @@ from oracle.full_tree_call_observations import (  # noqa: E402
     _parent_subprogram,
     _target,
 )
+from oracle.function_recovery import MAX_MANIFEST_BYTES, MAX_REPORT_BYTES  # noqa: E402
 from oracle.function_recovery_oracle import (  # noqa: E402
     _dwarf_starts,
     _in_executable_range,
 )
 from oracle.gcc.bound_recovered_model import (  # noqa: E402
     TWIN,
+    BoundStrippedModel,
     load_bound_stripped_model,
 )
 from oracle.gcc.report_accuracy_coverage import (  # noqa: E402
     CoverageError,
-    _json,
+    _json_snapshot,
     _ratio,
     _read_regular,
     _required_mapping,
@@ -70,8 +73,14 @@ FUNCTION_ID_PREFIX = "function-rva-"
 MODEL_ID_PREFIX = "fn_"
 
 
-def _full_artifact(profile_directory: Path) -> tuple[bytes, str]:
-    manifest = _json(profile_directory / "oracle-manifest.json", "oracle artifact manifest")
+def _full_artifact(
+    profile_directory: Path, expected_manifest_sha256: str
+) -> tuple[bytes, str]:
+    manifest, manifest_record = _json_snapshot(
+        profile_directory / "oracle-manifest.json", "oracle artifact manifest", MAX_MANIFEST_BYTES
+    )
+    if manifest_record["sha256"] != expected_manifest_sha256:
+        raise CoverageError("oracle artifact manifest changed after model binding")
     record = _required_mapping(
         _required_mapping(manifest.get("artifacts"), "manifest.artifacts").get("full"),
         "manifest.artifacts.full",
@@ -79,7 +88,7 @@ def _full_artifact(profile_directory: Path) -> tuple[bytes, str]:
     relative = record.get("path")
     if not isinstance(relative, str):
         raise CoverageError("manifest.artifacts.full.path must be a string")
-    payload = _read_regular(profile_directory / relative, "full artifact")
+    payload = _read_regular(profile_directory / relative, "full artifact", record["bytes"])
     digest = hashlib.sha256(payload).hexdigest()
     if digest != record.get("sha256"):
         raise CoverageError("full artifact disagrees with the manifest")
@@ -197,23 +206,39 @@ def _oracle_edges(
     return edges, callers_with_sites, kinds
 
 
+@dataclass(frozen=True)
+class ScoredReport:
+    report: dict[str, Any]
+    evidence: dict[str, Any]
+
+
 def _recovered_edges(
-    program_model_path: Path, model_sha256: str, image_base: int, function_count: int
+    program_model_path: Path, bound: BoundStrippedModel
 ) -> set[tuple[int, int]]:
-    payload = _read_regular(program_model_path, "program model")
-    if hashlib.sha256(payload).hexdigest() != model_sha256:
+    # The boundary projection does not retain calls. Reopen only within the
+    # verified byte budget, and require this snapshot to match that projection.
+    model, record = _json_snapshot(
+        program_model_path, "program model", bound.model_record["bytes"]
+    )
+    if record != bound.model_record:
         raise CoverageError("program model changed after it was bound")
-    functions = json.loads(payload).get("functions")
-    if not isinstance(functions, list) or len(functions) != function_count:
+    functions = model.get("functions")
+    if not isinstance(functions, list) or len(functions) != len(bound.model.functions):
         raise CoverageError("program model function list disagrees with the bound model")
+    rvas = {function.identifier: function.rva for function in bound.model.functions}
     edges: set[tuple[int, int]] = set()
     try:
         for function in functions:
-            caller = int(function["id"].removeprefix(MODEL_ID_PREFIX), 16) - image_base
+            caller = rvas[function["id"]]
             for callee in function.get("calls", []):
-                edges.add(
-                    (caller, int(callee.removeprefix(MODEL_ID_PREFIX), 16) - image_base)
-                )
+                # Known identifiers resolve through validated addresses, not
+                # through an assumed address embedded in the identifier.
+                target = rvas.get(callee)
+                if target is None:
+                    if not callee.startswith(MODEL_ID_PREFIX):
+                        raise ValueError("unresolved callee has no address identifier")
+                    target = int(callee[len(MODEL_ID_PREFIX):], 16) - bound.model.image_base
+                edges.add((caller, target))
     except (AttributeError, KeyError, TypeError, ValueError) as error:
         raise CoverageError("program model call list is malformed") from error
     return edges
@@ -225,13 +250,26 @@ def build_report(
     binding_path: Path,
     qualification_path: Path,
 ) -> dict[str, Any]:
+    return score_report(
+        profile_directory, program_model_path, binding_path, qualification_path
+    ).report
+
+
+def score_report(
+    profile_directory: Path,
+    program_model_path: Path,
+    binding_path: Path,
+    qualification_path: Path,
+) -> ScoredReport:
     bound = load_bound_stripped_model(
         profile_directory,
         program_model_path,
         binding_path,
         qualification_path,
     )
-    full_payload, full_sha256 = _full_artifact(profile_directory)
+    full_payload, full_sha256 = _full_artifact(
+        profile_directory, bound.provenance["artifactManifestSha256"]
+    )
     oracle = bound.oracle
     scoreable = {
         function.rva
@@ -251,12 +289,7 @@ def build_report(
     oracle_edges, callers_with_sites, kinds = _oracle_edges(
         full_payload, oracle, scoreable, excluded
     )
-    recovered = _recovered_edges(
-        program_model_path,
-        bound.provenance["programModel"]["sha256"],
-        bound.model.image_base,
-        len(bound.model.functions),
-    )
+    recovered = _recovered_edges(program_model_path, bound)
     unrestricted = {
         edge for edge in recovered if edge[0] in scoreable and edge[1] in scoreable
     }
@@ -264,6 +297,26 @@ def build_report(
     reference = set(oracle_edges)
     true_positives = len(scored & reference)
     unrestricted_true_positives = len(unrestricted & reference)
+
+    # Reserve fixed metadata and conservative per-record JSON overhead, then
+    # charge escaped names once per emitted outcome before allocating them.
+    projected = (
+        16 * 1024
+        + len(json.dumps(bound.provenance, ensure_ascii=True, indent=2).encode("ascii"))
+        + 160 * len(reference)
+        + 32 * len(callers_with_sites)
+    )
+    name_bytes = {
+        rva: len(json.dumps(name, ensure_ascii=True).encode("ascii"))
+        for rva, name in names.items()
+    }
+    for population in (reference - scored, scored - reference, unrestricted - scored):
+        for caller, callee in population:
+            projected += 256 + name_bytes[caller] + name_bytes[callee]
+            if projected > MAX_REPORT_BYTES:
+                raise CoverageError("call edge report exceeds its projected output byte limit")
+    if projected > MAX_REPORT_BYTES:
+        raise CoverageError("call edge report exceeds its projected output byte limit")
 
     def edge(pair: tuple[int, int]) -> dict[str, Any]:
         return {
@@ -273,7 +326,7 @@ def build_report(
             "calleeName": names[pair[1]],
         }
 
-    return {
+    report = {
         "schemaVersion": 1,
         "reportId": REPORT_ID,
         "twin": TWIN,
@@ -321,6 +374,15 @@ def build_report(
             edge(pair) for pair in sorted(unrestricted - scored)
         ],
     }
+
+    return ScoredReport(
+        report=report,
+        evidence={
+            "programModel": bound.model_record,
+            "binding": bound.binding_record,
+            "qualification": bound.qualification_record,
+        },
+    )
 
 
 def main() -> int:

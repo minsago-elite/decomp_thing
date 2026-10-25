@@ -3,9 +3,24 @@
     "callEdges": {
       "currentScore": {
         "evidence": {
+          "binding": {
+            "bytes": 2740,
+            "path": "surviving-symbol-identity-binding.json",
+            "sha256": "3293afb3fd547fafb0f84c423b8a971a18bb0a7568f230db3383d7c84b7dd90d"
+          },
           "bytes": 843767,
           "path": "call-edge-score.json",
+          "programModel": {
+            "bytes": 7634939,
+            "path": "stripped-recovered-program-model.json",
+            "sha256": "0c6814473ef9e05d5b9f77c3fea837bc16e0812c4bb0c2e273bd5d695736f379"
+          },
           "programModelSha256": "0c6814473ef9e05d5b9f77c3fea837bc16e0812c4bb0c2e273bd5d695736f379",
+          "qualification": {
+            "bytes": 1122,
+            "path": "surviving-symbol-identity-qualification.json",
+            "sha256": "bead696e9755375578e8adbaa67cc432789954acee96b20cf9f621308227552b"
+          },
           "sha256": "24062d35c2d859c47b84f10f2e0f1334166ff4d2fef479547129ef89f307032c"
         },
         "precision": {

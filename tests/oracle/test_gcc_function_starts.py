@@ -117,6 +117,8 @@ class RetainedFunctionStartTest(unittest.TestCase):
             recovery, "_read_regular_snapshot", counting(recovery_read)
         ), mock.patch.object(
             coverage, "_symbol_identity_score", return_value=unavailable
+        ), mock.patch.object(
+            coverage, "_call_edge_score", return_value=unavailable
         ):
             build_coverage(PROFILE)
         # Each record is read once, for validation, and recorded from that read.

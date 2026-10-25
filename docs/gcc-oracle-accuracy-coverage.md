@@ -96,8 +96,11 @@ precision is 0.83841 over 6894 scored edges. Most of the 417 fabricated edges
 are calls into constructor and destructor exception-cleanup paths that DWARF
 does not record as call sites. 79 of the 80 missing edges target
 `string_slice::strcmp`. The report retains every oracle, missing and fabricated
-edge. The coverage generator recomputes the counts, tail-call total and ratios
-from those outcomes. It rejects a report whose endpoints are not scoreable or
+edge. The coverage generator rescores the retained binding-verified recovered
+model against the full artifact's DWARF and requires exact report equality,
+including provenance, every outcome, counts, tail-call total and ratios. It
+records the bounded report snapshot and the verified model, binding and
+qualification snapshots as evidence. It rejects a report whose endpoints are not scoreable or
 whose callers have no call site. It also rejects a report bound to another
 manifest, stripped input or full artifact. The dimension is
 `measured-not-release-eligible` for the same #679 gate:

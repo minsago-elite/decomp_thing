@@ -436,14 +436,13 @@ def _call_edge_score(
     profile_directory: Path,
     loaded_oracle: Any,
     manifest_sha256: str,
-    full_path: Path,
     full_sha256: str,
 ) -> dict[str, Any]:
     """Return the current score from a retained, oracle-bound call-edge report.
 
-    The oracle side is re-derived from the verified full artifact's DWARF. The
-    recovered side needs the program model, which the profile does not retain,
-    so it is bound only by digest and the score is never release-eligible.
+    Both sides are rescored from the verified full artifact's DWARF and the
+    retained, binding-verified recovered model. The capture still lacks release
+    admission, so a consistent score is never release-eligible.
     """
 
     report_path = profile_directory / CALL_EDGE_REPORT
@@ -453,7 +452,9 @@ def _call_edge_score(
             "reasonCode": "no-retained-current-recovered-call-model",
             "productionVerified": False,
         }
-    report = _json(report_path, "call edge report")
+    report, report_record = _json_snapshot(
+        report_path, "call edge report", MAX_REPORT_BYTES
+    )
     if report.get("reportId") != CALL_EDGE_REPORT_ID or report.get("twin") != "stripped":
         raise CoverageError("call edge report has an unexpected identity")
     provenance = _required_mapping(report.get("provenance"), "call edge provenance")
@@ -555,27 +556,25 @@ def _call_edge_score(
     if qualification.get("releaseEligible") is not False:
         raise CoverageError("call edge report must not claim release eligibility")
 
-    # Imported here because the report module imports helpers from this one.
-    from oracle.gcc.report_call_edges import _oracle_edges
+    # Arithmetic alone cannot authenticate the recovered outcomes. Rebuild the
+    # entire score from both independently verified populations and compare it.
+    model_path = profile_directory / FUNCTION_START_MODEL
+    binding_path = profile_directory / FUNCTION_START_BINDING
+    qualification_path = profile_directory / FUNCTION_START_QUALIFICATION
+    for path in (model_path, binding_path, qualification_path):
+        if not path.exists():
+            raise CoverageError(
+                f"call edge report has no retained recovered model record: {path.name}"
+            )
+    # Imported here because the reporter reuses this module's bounded readers.
+    from oracle.gcc.report_call_edges import score_report
 
-    full_payload = _read_regular(full_path, "full artifact")
-    if hashlib.sha256(full_payload).hexdigest() != full_sha256:
-        raise CoverageError("full artifact changed after manifest verification")
-    excluded = {
-        function.rva
-        for function in loaded_oracle.functions
-        if function.rva is not None and function.exclusion is not None
-    }
-    derived_edges, derived_callers, derived_kinds = _oracle_edges(
-        full_payload, loaded_oracle, scoreable, excluded
-    )
-    derived = {pair: sorted(tails) != [False] for pair, tails in derived_edges.items()}
-    if (
-        derived != dict(zip(reference_list, tail_flags))
-        or derived_callers != callers
-        or oracle.get("callSiteKinds") != dict(sorted(derived_kinds.items()))
-    ):
-        raise CoverageError("call edge oracle disagrees with the full artifact DWARF")
+    scored = score_report(profile_directory, model_path, binding_path, qualification_path)
+    if report != scored.report:
+        raise CoverageError(
+            "call edge report disagrees with a rescore of its retained recovered model "
+            "and the full artifact DWARF"
+        )
     return {
         "status": "measured",
         "precision": precision,
@@ -591,8 +590,8 @@ def _call_edge_score(
             "populationDefinition": report.get("populationDefinition"),
         },
         "evidence": {
-            **_record(report_path, "call edge report"),
-            "path": report_path.name,
+            **report_record,
+            **scored.evidence,
             "programModelSha256": _required_mapping(
                 provenance.get("programModel"), "call edge program model"
             ).get("sha256"),
@@ -704,7 +703,6 @@ def build_report(profile_directory: Path) -> dict[str, Any]:
         profile_directory,
         loaded_oracle,
         manifest_sha256,
-        profile_directory / artifact_files["full"]["manifestPath"],
         artifact_files["full"]["sha256"],
     )
     edge_status = _measured_status(edge_score, "unavailable")
