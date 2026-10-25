@@ -59,8 +59,13 @@ internal class WebRunLogs(private val redaction: WebLogRedaction) {
         return Query(if (tail) null else from ?: 1, tail, limit, search)
     }
 
-    fun capture(bytes: ByteArray, sha256: String): Capture {
+    /** Null when the log exceeds the line budget; callers report it as oversized, never as a failure. */
+    fun capture(bytes: ByteArray, sha256: String): Capture? {
         require(bytes.size <= MAXIMUM_LOG_BYTES)
+        var newlines = 0
+        for (byte in bytes) if (byte == '\n'.code.toByte()) newlines += 1
+        val lineCount = newlines + if (bytes.isNotEmpty() && bytes.last() != '\n'.code.toByte()) 1 else 0
+        if (lineCount > MAXIMUM_LOG_LINES) return null
         val lines = mutableListOf<Line>()
         var start = 0
         var number = 1L

@@ -44,11 +44,13 @@ export function LogViewer({ jobId, runId, basePath }: { jobId: string; runId: st
   const pendingScroll = useRef<'end' | bigint | null>(null);
   const mounted = useRef(true);
   const [attemptState, setAttemptState] = useState<string | null>(null);
+  // Each completed follow read schedules the next one, including consecutive missing responses.
+  const [followTick, setFollowTick] = useState(0);
   const followRef = useRef<Follow>('off');
   followRef.current = follow;
 
   /** `scroll` is decided when the response arrives, so a reader who paused meanwhile keeps their position. */
-  const read = useCallback(async (parameters: Record<string, string>, keep: 'start' | 'end',
+  const read = useCallback(async (parameters: Record<string, string>, keep: 'start' | 'end' | 'replace',
     scroll?: () => 'end' | bigint | null): Promise<AvailableLog | null> => {
     const controller = new AbortController();
     requests.current.add(controller);
@@ -63,7 +65,8 @@ export function LogViewer({ jobId, runId, basePath }: { jobId: string; runId: st
         setStatus(data.state === 'oversized' ? { state: 'oversized', limit: data.maximumBytes } : { state: 'missing' });
         return null;
       }
-      const merged = mergeLogRange(bufferRef.current, data, keep);
+      // An explicit jump replaces the window, so eviction can never discard its target.
+      const merged = mergeLogRange(keep === 'replace' ? null : bufferRef.current, data, keep === 'replace' ? 'start' : keep);
       if (scroll) pendingScroll.current = scroll();
       bufferRef.current = merged.buffer; setBuffer(merged.buffer);
       setNotice(merged.replaced ? copy.replaced : merged.released > 0 ? textMessage(copy.released, { count: merged.released }) : '');
@@ -99,10 +102,10 @@ export function LogViewer({ jobId, runId, basePath }: { jobId: string; runId: st
       timer = undefined;
       const current = bufferRef.current;
       void read(current ? { fromLine: String(lastLine(current) + 1n), limit: String(LOG_PAGE_LINES) } : { tail: 'true', limit: '200' }, 'end',
-        () => followRef.current === 'on' ? 'end' : null);
+        () => followRef.current === 'on' ? 'end' : null).then(() => { if (mounted.current) setFollowTick(value => value + 1); });
     }, FOLLOW_INTERVAL_MS);
     return () => { if (timer !== undefined) clearTimeout(timer); };
-  }, [follow, availability.visible, availability.online, status.state, ended, buffer, read]);
+  }, [follow, availability.visible, availability.online, status.state, ended, followTick, read]);
 
   const lines = buffer?.lines ?? [];
   const displayed = find ? lines.filter(line => line.text.includes(find)) : lines;
@@ -133,7 +136,7 @@ export function LogViewer({ jobId, runId, basePath }: { jobId: string; runId: st
     followRef.current = 'off';
     // Little leading context: even maximal lines keep the target inside one byte-budgeted response.
     const from = line > 10n ? line - 10n : 1n;
-    void read({ fromLine: String(from), limit: String(LOG_PAGE_LINES) }, 'start', () => line);
+    void read({ fromLine: String(from), limit: String(LOG_PAGE_LINES) }, 'replace', () => line);
   };
 
   const rows = visibleWindow(scrollTop, LOG_VIEWPORT_PX, LOG_ROW_PX, displayed.length);

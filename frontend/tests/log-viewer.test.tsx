@@ -136,6 +136,24 @@ describe('log viewer', () => {
     expect(screen.getByText('line 42')).toBeTruthy();
   });
 
+  it('keeps a jump target when the buffer is already full', async () => {
+    transport.get.mockResolvedValueOnce({ data: range(1, 500, 3000) });
+    mount();
+    await screen.findByText(/Showing lines 1–500 of 3000/);
+    for (const first of [501, 1001, 1501]) {
+      transport.get.mockResolvedValueOnce({ data: range(first, 500, 3000) });
+      fireEvent.click(screen.getByRole('button', { name: 'Load later lines' }));
+      await screen.findByText(new RegExp(`Showing lines 1–${first + 499} of 3000`));
+    }
+    transport.get.mockResolvedValueOnce({ data: { ...range(1, 1, 3000), search: { query: 'x', scope: 'whole-log', matchCount: '1', matches: ['2010'], matchesTruncated: false } } });
+    fireEvent.input(screen.getByLabelText('Search the whole log'), { target: { value: 'x' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Search the whole log' }));
+    transport.get.mockResolvedValueOnce({ data: range(2000, 500, 3000) });
+    fireEvent.click(await screen.findByRole('button', { name: 'Go to line 2010' }));
+    expect(await screen.findByText(/Showing lines 2000–2499 of 3000/)).toBeTruthy();
+    expect(screen.getByText('line 2010')).toBeTruthy();
+  });
+
   it('keeps a missing log refreshable and follows it until the build publishes one', async () => {
     vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
     const { jobId, runId, logId, source, readAt, redactionPolicy } = fixture;
@@ -146,9 +164,14 @@ describe('log viewer', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Check again' })); await flush();
     expect(transport.get).toHaveBeenCalledTimes(2);
     fireEvent.click(screen.getByRole('button', { name: 'Follow new lines' }));
+    // Consecutive missing responses keep the follow loop alive.
+    transport.get.mockResolvedValueOnce({ data: missing }).mockResolvedValueOnce({ data: missing });
+    await act(async () => { await vi.advanceTimersByTimeAsync(3000); }); await flush();
+    await act(async () => { await vi.advanceTimersByTimeAsync(3000); }); await flush();
+    expect(transport.get).toHaveBeenCalledTimes(4);
     transport.get.mockResolvedValueOnce({ data: range(1, 3, 3, { attempt: running }) });
     await act(async () => { await vi.advanceTimersByTimeAsync(3000); }); await flush();
-    expect(transport.get.mock.calls[2]![1]).toContain('tail=true');
+    expect(transport.get.mock.calls[4]![1]).toContain('tail=true');
     expect(screen.getByText(/Showing lines 1–3 of 3/)).toBeTruthy();
   });
 
@@ -172,7 +195,7 @@ describe('log viewer', () => {
     const { jobId, runId, logId, source, attempt, readAt, redactionPolicy } = fixture;
     transport.get.mockResolvedValueOnce({ data: { jobId, runId, logId, source, attempt, readAt, redactionPolicy, state: 'oversized', maximumBytes: '8388608' } });
     mount();
-    expect(await screen.findByText('The build log exceeds the 8388608-byte reading limit and cannot be shown.')).toBeTruthy();
+    expect(await screen.findByText('The build log exceeds the reading limit (8388608 bytes or 1,000,000 lines) and cannot be shown.')).toBeTruthy();
     expect(rows()).toHaveLength(0);
   });
 });

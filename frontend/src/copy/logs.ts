@@ -5,7 +5,7 @@ export const logCopy = {
   missing: 'This attempt has no recorded build log yet.',
   checkAgain: 'Check again',
   waitingForLog: 'Checking every few seconds; the build publishes its log when it finishes.',
-  oversized: 'The build log exceeds the {limit}-byte reading limit and cannot be shown.',
+  oversized: 'The build log exceeds the reading limit ({limit} bytes or 1,000,000 lines) and cannot be shown.',
   failed: 'The build log could not be read.',
   session: 'Reconnect the local session to read this log.',
   provenance: 'Source SHA-256 {sha} · {bytes} bytes · {lines} lines · {redacted} lines redacted · read at {read}.',

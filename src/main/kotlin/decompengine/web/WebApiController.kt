@@ -280,7 +280,8 @@ internal class WebApiController(
                     val query = runLogs.parseQuery(exchange.requestURI.rawQuery)
                     val (attempt, file, oversized) = jobs.readRunBuildLog(parts[1], parts[3], WebRunLogs.MAXIMUM_LOG_BYTES.toLong())
                     val capture = file?.let { runLogs.capture(it.bytes, it.sha256) }
-                    sendWebApiResponse(exchange, 200, "logRange", runLogs.range(parts[1], attempt, capture, oversized, query, clock.instant()))
+                    sendWebApiResponse(exchange, 200, "logRange", runLogs.range(parts[1], attempt, capture,
+                        oversized || (file != null && capture == null), query, clock.instant()))
                 }
                 resource.matches(Regex("jobs/[^/]+/runs/[^/]+/logs/build/content")) -> {
                     access.authorize(exchange, WebEndpointPolicy.privateRead())
@@ -292,7 +293,9 @@ internal class WebApiController(
                     val parts = resource.split('/')
                     val (attempt, file, _) = jobs.readRunBuildLog(parts[1], parts[3], WebRunLogs.MAXIMUM_LOG_BYTES.toLong())
                     if (file == null) throw WebAccessDenied(404, "NOT_FOUND", "This attempt has no downloadable build log.")
-                    val bytes = runLogs.download(parts[1], attempt, runLogs.capture(file.bytes, file.sha256), clock.instant())
+                    val capture = runLogs.capture(file.bytes, file.sha256)
+                        ?: throw WebAccessDenied(413, "LOG_TOO_LARGE", "The build log exceeds its line budget and cannot be downloaded here.")
+                    val bytes = runLogs.download(parts[1], attempt, capture, clock.instant())
                     webApiHeaders(exchange, UUID.randomUUID().toString())
                     exchange.responseHeaders.set("Content-Type", "text/plain; charset=utf-8")
                     exchange.responseHeaders.set("Content-Disposition", "attachment; filename=\"build-${attempt.runId}.log\"")

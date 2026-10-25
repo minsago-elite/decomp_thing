@@ -46,7 +46,7 @@ class WebRunLogsTest {
         val text = "cc -c $root/module.c\r\n" + "\u001b[31merror\u001b[0m <script>x</script>\n" +
             "spoof ‮exe.txt\n" + "x".repeat(4095) + pair + "tail\n"
         val bytes = text.toByteArray() + byteArrayOf(0xff.toByte(), 0x41)
-        val capture = logs.capture(bytes, sha)
+        val capture = assertNotNull(logs.capture(bytes, sha))
         assertEquals(5, capture.totalLines)
         val lines = capture.allLines()
         assertEquals("cc -c [job-store]/module.c", lines[0].text); assertTrue(lines[0].redacted)
@@ -61,7 +61,7 @@ class WebRunLogsTest {
     @Test fun `ranges enforce line and byte budgets with explicit markers`() {
         val (jobId, run) = attempt()
         val now = Instant.parse("2026-09-05T00:00:00Z")
-        val capture = logs.capture((1..1000).joinToString("\n") { "line $it error" }.toByteArray(), sha)
+        val capture = assertNotNull(logs.capture((1..1000).joinToString("\n") { "line $it error" }.toByteArray(), sha))
         val tail = logs.range(jobId, run, capture, false, logs.parseQuery("tail=true"), now)
         val window = tail.getValue("range").jsonObject
         assertEquals("801", window.getValue("firstLine").jsonPrimitive.content)
@@ -77,7 +77,7 @@ class WebRunLogsTest {
         assertEquals(200, search.getValue("matches").jsonArray.size); assertTrue(search.getValue("matchesTruncated").jsonPrimitive.boolean)
         assertEquals("whole-log", search.getValue("scope").jsonPrimitive.content)
 
-        val wide = logs.capture((1..500).joinToString("\n") { "y".repeat(4096) }.toByteArray(), sha)
+        val wide = assertNotNull(logs.capture((1..500).joinToString("\n") { "y".repeat(4096) }.toByteArray(), sha))
         val limited = logs.range(jobId, run, wide, false, logs.parseQuery("limit=500"), now)
         val limitedWindow = limited.getValue("range").jsonObject
         assertTrue(limitedWindow.getValue("byteLimited").jsonPrimitive.boolean)
@@ -91,6 +91,9 @@ class WebRunLogsTest {
         assertTrue(newestWindow.getValue("byteLimited").jsonPrimitive.boolean)
         assertEquals(500 - newestWindow.getValue("lineCount").jsonPrimitive.int + 1, newestWindow.getValue("firstLine").jsonPrimitive.int)
 
+        // Many short lines stay under the byte cap but exceed the line budget: an explicit bound, not a failure.
+        assertNull(logs.capture(ByteArray(WebRunLogs.MAXIMUM_LOG_LINES + 1) { '\n'.code.toByte() }, sha))
+        assertNotNull(logs.capture(ByteArray(WebRunLogs.MAXIMUM_LOG_LINES) { '\n'.code.toByte() }, sha))
         val missing = logs.range(jobId, run, null, false, logs.parseQuery(null), now)
         assertEquals("missing", missing.getValue("state").jsonPrimitive.content); assertFalse("lines" in missing)
         assertEquals("oversized", logs.range(jobId, run, null, true, logs.parseQuery(null), now).getValue("state").jsonPrimitive.content)
@@ -98,7 +101,7 @@ class WebRunLogsTest {
 
     @Test fun `downloads share the live redaction and carry provenance`() {
         val (jobId, run) = attempt()
-        val capture = logs.capture("first $root/a.c\n\u001b[1mbold\n".toByteArray(), sha)
+        val capture = assertNotNull(logs.capture("first $root/a.c\n\u001b[1mbold\n".toByteArray(), sha))
         val live = logs.range(jobId, run, capture, false, logs.parseQuery(null), Instant.EPOCH).getValue("lines").jsonArray
             .map { it.jsonObject.getValue("text").jsonPrimitive.content }
         val download = logs.download(jobId, run, capture, Instant.EPOCH).decodeToString()

@@ -384,6 +384,10 @@ class WebApiControllerTest {
             assertTrue(download.body().contains("# job ${job.id} attempt ${run.runId}"))
             assertTrue(download.body().contains(lines.first() + "\n"))
             assertError(request(server, "$path/content", headers = headers + mapOf("Accept" to "text/plain", "Range" to "bytes=0-1")), 400, "UNSUPPORTED_HEADER")
+            Files.write(log, ByteArray(1_000_001) { '\n'.code.toByte() })
+            assertEquals("oversized", assertEnvelopeRaw(request(server, "$path?tail=true&limit=1", headers = headers), "logRange")
+                .getValue("state").jsonPrimitive.content)
+            assertError(request(server, "$path/content", headers = headers + ("Accept" to "text/plain")), 413, "LOG_TOO_LARGE")
         } finally { server.stop(); root.toFile().deleteRecursively() }
     }
 
