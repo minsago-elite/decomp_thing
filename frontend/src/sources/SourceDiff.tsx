@@ -52,16 +52,40 @@ function BaseChooser({ selected, basePath, onChoose }: { selected: SourceSelecti
   const location = useLocation();
   const { client } = usePrivateTransport(basePath);
   const key = [selected.jobId, selected.runId, selected.revisionId].join('/');
-  const [read, setRead] = useState<SourceReadState<{ head: Run; runs: Run[] }>>({ key, state: 'loading' });
+  type Attempts = { head: Run; runs: Run[]; nextCursor: string | null };
+  const [read, setRead] = useState<SourceReadState<Attempts>>({ key, state: 'loading' });
+  const [older, setOlder] = useState<SourceReadState<Attempts> | null>(null);
   const [choice, setChoice] = useState('');
+  const stopOlder = useRef<(() => void) | null>(null);
+  useEffect(() => () => { stopOlder.current?.(); stopOlder.current = null; }, []);
   useEffect(() => beginSourceRead(key, async signal => {
     const head = (await client.get('run', `/jobs/${selected.jobId}/runs/${selected.runId}`, { signal })).data;
-    const runs = (await client.get('runs', jobRunsRoute(selected.jobId), { signal })).data;
-    if (head.jobId !== selected.jobId || head.runId !== selected.runId || runs.jobId !== selected.jobId) throw new ApiClientError('invalid_response');
-    return { head, runs: runs.items };
+    const page = (await client.get('runs', jobRunsRoute(selected.jobId), { signal })).data;
+    if (head.jobId !== selected.jobId || head.runId !== selected.runId || page.jobId !== selected.jobId) throw new ApiClientError('invalid_response');
+    const runs = [...page.items];
+    // The recorded previous attempt may be older than the first page; read it directly so the parent stays selectable.
+    if (head.previousRunId !== null && !runs.some(run => run.runId === head.previousRunId)) {
+      const previous = (await client.get('run', `/jobs/${selected.jobId}/runs/${head.previousRunId}`, { signal })).data;
+      if (previous.jobId !== selected.jobId || previous.runId !== head.previousRunId) throw new ApiClientError('invalid_response');
+      runs.push(previous);
+    }
+    return { head, runs, nextCursor: page.page.nextCursor };
   }, setRead), [client, key]);
-  const current = currentSourceRead(read, key);
+  const loaded = currentSourceRead(read, key);
+  const latest = older?.state === 'ready' ? older : null;
+  const current = latest ?? loaded;
   const value = current.state === 'ready' ? current.value : null;
+  function loadOlder(attempts: Attempts) {
+    if (attempts.nextCursor === null) return;
+    const cursor = attempts.nextCursor;
+    stopOlder.current?.();
+    stopOlder.current = beginSourceRead(`${key}/${cursor}`, async signal => {
+      const page = (await client.get('runs', jobRunsRoute(selected.jobId, cursor), { signal })).data;
+      if (page.jobId !== selected.jobId) throw new ApiClientError('invalid_response');
+      const known = new Set(attempts.runs.map(run => run.runId));
+      return { head: attempts.head, runs: [...attempts.runs, ...page.items.filter(run => !known.has(run.runId))], nextCursor: page.page.nextCursor };
+    }, setOlder);
+  }
   const options = value ? value.runs.filter(run => run.resultRevisionId !== null && run.runId !== selected.runId) : [];
   const parent = value ? sourceDiffParent(value.head, value.runs) : null;
   const selectedValue = choice || (parent ? `${parent.runId}/${parent.revisionId}` : options[0] ? `${options[0].runId}/${options[0].resultRevisionId}` : '');
@@ -85,6 +109,9 @@ function BaseChooser({ selected, basePath, onChoose }: { selected: SourceSelecti
       {!parent && <p>{copy.diffNoParent}</p>}
       <button type="submit">{copy.diffCompare}</button>
     </form>)}
+    {value && <p role="status">{message(value.nextCursor === null ? copy.diffAttemptsAll : copy.diffAttemptsPartial, { count: value.runs.length })}</p>}
+    {value?.nextCursor != null && <button type="button" disabled={older?.state === 'loading'} onClick={() => { loadOlder(value); }}>{copy.diffLoadOlder}</button>}
+    {older?.state === 'failed' && <p role="alert">{sourceReadMessage(older.failure)}</p>}
   </section>;
 }
 

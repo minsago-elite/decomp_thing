@@ -1082,7 +1082,8 @@ Failures use fixed recovery copy plus a canonical reference ID, never raw diagno
 Authenticated state owns the views; expiry or logout removes their private metadata.
 
 Directory pages link to `jobs/J/runs/R/revisions/V/source-diff`, which first asks for a
-base revision. It reads the head attempt and the first 200 attempts of the job, offers
+base revision. It reads the head attempt and the first 200 attempts of the job (plus the recorded
+previous attempt when it is older), states whether older attempts exist, loads them only on request, offers
 every other attempt with a result revision, and preselects the recorded parent: the
 attempt whose revision is the head's `inputRevisionId`, otherwise its `previousRunId`.
 The comparison address always carries `baseRunId` and `baseRevisionId`. The changed-file

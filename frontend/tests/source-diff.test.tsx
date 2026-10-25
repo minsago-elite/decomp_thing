@@ -70,6 +70,32 @@ it('binds diff pages to both requested revisions and expires continuations when 
   expect(() => bindSourceFileDiff(text, selected, { ...selection, hunk: 1 })).toThrow(ApiClientError);
 });
 
+it('keeps an older recorded parent selectable and loads older attempts only on request', async () => {
+  const head = run('run_2', 'revision_2', { previousRunId: 'run_old' });
+  const parent = run('run_old', 'revision_old');
+  const page = (items: Run[], nextCursor: string | null, requestId: string) => response({ apiVersion: 1, kind: 'runs', requestId,
+    data: { jobId, items, page: { nextCursor, snapshotVersion: 'version_1', limit: 200 } } });
+  const fetcher = vi.fn<typeof fetch>()
+    .mockResolvedValueOnce(response({ apiVersion: 1, kind: 'run', requestId: 'request_head', data: head }))
+    .mockResolvedValueOnce(page([head, run('run_1', 'revision_1')], 'cursor_older_1', 'request_page_1'))
+    .mockResolvedValueOnce(response({ apiVersion: 1, kind: 'run', requestId: 'request_parent', data: parent }))
+    .mockResolvedValueOnce(page([run('run_0', 'revision_0')], null, 'request_page_2'));
+  vi.stubGlobal('fetch', fetcher);
+  mount('list', '');
+  const choice = await screen.findByLabelText('Base revision');
+  // The parent is outside the first page but read directly, so it remains the suggested base.
+  expect((choice as HTMLSelectElement).value).toBe('run_old/revision_old');
+  expect(fetcher.mock.calls[2]?.[0] as string).toContain(`/jobs/${jobId}/runs/run_old`);
+  expect(screen.getByText(/Older attempts are not listed until you load them/u)).toBeTruthy();
+  expect(screen.queryByRole('option', { name: /run_0/u })).toBeNull();
+  fireEvent.click(screen.getByRole('button', { name: 'Load older attempts' }));
+  await screen.findByRole('option', { name: /Attempt run_0, revision revision_0/u });
+  expect(fetcher.mock.calls[3]?.[0] as string).toContain('/runs?limit=200&cursor=cursor_older_1');
+  expect(screen.getByText(/All 4 retained attempts of this job were read/u)).toBeTruthy();
+  expect(screen.queryByRole('button', { name: 'Load older attempts' })).toBeNull();
+  expect((screen.getByLabelText('Base revision')).value).toBe('run_old/revision_old');
+});
+
 it('suggests the recorded parent attempt but leaves the choice explicit', async () => {
   const head = run('run_2', 'revision_2', { inputRevisionId: 'revision_1', previousRunId: 'run_3' });
   const runs = [run('run_0', null), run('run_1', 'revision_1'), run('run_3', 'revision_3'), head];

@@ -130,7 +130,8 @@ export function sourceDiffParent(head: Run, runs: readonly Run[]): SourceDiffBas
   return parent ? { runId: parent.runId, revisionId: parent.resultRevisionId! } : null;
 }
 
-/** First bounded attempt page; the comparison chooser never fetches further pages in the background. */
-export function jobRunsRoute(jobId: string): string {
-  return `${jobPath('', jobId)}/runs?limit=200`;
+/** One bounded attempt page; later pages are read only when the chooser asks for older attempts. */
+export function jobRunsRoute(jobId: string, cursor: string | null = null): string {
+  if (cursor !== null && !ID.test(cursor)) invalid();
+  return `${jobPath('', jobId)}/runs?limit=200${cursor === null ? '' : `&cursor=${cursor}`}`;
 }
