@@ -1,0 +1,358 @@
+Picked up JAVA_TOOL_OPTIONS: -Djava.io.tmpdir=/home/june/decomp_thing/.claude/worktrees/a-series-20261026-junit-signatures/build/tmp -Djna.tmpdir=/home/june/decomp_thing/.claude/worktrees/a-series-20261026-junit-signatures/build/tmp -Duser.home=/home/june/decomp_thing/.claude/worktrees/a-series-20261026-junit-signatures/build/task-tmp/home -XX:-UsePerfData
+To honour the JVM settings for this build a single-use Daemon process will be forked. For more on this, please refer to https://docs.gradle.org/9.6.1/userguide/gradle_daemon.html#sec:disabling_the_daemon in the Gradle documentation.
+Daemon will be stopped at the end of the build
+
+> Task :junitSignatureTaskGraphAudit
+All 6 root Test routes require compiled-signature verification
+
+> Task :checkKotlinGradlePluginConfigurationErrors SKIPPED
+> Task :stageOracleNativeLibraries
+> Task :stageLlvmBehaviorHelperBootstrapResources
+> Task :buildAcpGateHelper
+> Task :verifyAcpGateHelper
+> Task :generateAcpGateHelperChecksum
+> Task :ghidra-bridge:fetchGhidra
+> Task :ghidra-bridge:unpackGhidra
+> Task :ghidra-bridge:compileJava FROM-CACHE
+> Task :ghidra-bridge:processResources NO-SOURCE
+> Task :ghidra-bridge:classes UP-TO-DATE
+> Task :ghidra-bridge:jar
+> Task :ghidra-bridge:stageBundle
+> Task :processTestResources
+
+> Task :verifyJunitSignatureGuard
+test_all_supported_nonvoid_ordinary_methods_are_rejected (__main__.CompiledSignatureControls.test_all_supported_nonvoid_ordinary_methods_are_rejected) ... ok
+test_annotation_nodes_and_depth_are_bounded (__main__.CompiledSignatureControls.test_annotation_nodes_and_depth_are_bounded) ... ok
+test_class_byte_method_and_report_budgets_fail_closed (__main__.CompiledSignatureControls.test_class_byte_method_and_report_budgets_fail_closed) ... ok
+test_cli_retains_failure_evidence_and_nonzero_exit (__main__.CompiledSignatureControls.test_cli_retains_failure_evidence_and_nonzero_exit) ... ok
+test_composed_annotation_cycle_propagates_test_marker_once (__main__.CompiledSignatureControls.test_composed_annotation_cycle_propagates_test_marker_once) ... ok
+test_directory_depth_is_bounded_before_filesystem_recursion (__main__.CompiledSignatureControls.test_directory_depth_is_bounded_before_filesystem_recursion) ... ok
+test_empty_missing_linked_and_duplicate_roots_fail (__main__.CompiledSignatureControls.test_empty_missing_linked_and_duplicate_roots_fail) ... ok
+test_evidence_is_deterministic_and_binds_exact_compiled_bytes (__main__.CompiledSignatureControls.test_evidence_is_deterministic_and_binds_exact_compiled_bytes) ... ok
+test_invalid_constant_pool_reference_fails (__main__.CompiledSignatureControls.test_invalid_constant_pool_reference_fails) ... ok
+test_linked_class_and_inconsistent_binary_name_fail (__main__.CompiledSignatureControls.test_linked_class_and_inconsistent_binary_name_fail) ... ok
+test_malformed_method_descriptor_and_utf8_fail (__main__.CompiledSignatureControls.test_malformed_method_descriptor_and_utf8_fail) ... ok
+test_oversized_class_rejected_before_reading_body (__main__.CompiledSignatureControls.test_oversized_class_rejected_before_reading_body) ... ok
+test_truncation_header_constant_pool_and_last_attribute_fail (__main__.CompiledSignatureControls.test_truncation_header_constant_pool_and_last_attribute_fail) ... ok
+test_unsupported_class_version_and_pool_tag_fail (__main__.CompiledSignatureControls.test_unsupported_class_version_and_pool_tag_fail) ... ok
+test_valid_dynamic_factory_return_types_remain_exempt (__main__.CompiledSignatureControls.test_valid_dynamic_factory_return_types_remain_exempt) ... ok
+test_valid_void_parameterized_repeated_and_template_methods (__main__.CompiledSignatureControls.test_valid_void_parameterized_repeated_and_template_methods) ... ok
+
+----------------------------------------------------------------------
+Ran 16 tests in 0.477s
+
+OK
+
+> Task :ghidra-bridge:compileTestJava NO-SOURCE
+> Task :ghidra-bridge:processTestResources NO-SOURCE
+> Task :ghidra-bridge:testClasses UP-TO-DATE
+> Task :ghidra-bridge:test NO-SOURCE
+> Task :compileKotlin
+w: file:///home/june/decomp_thing/.claude/worktrees/a-series-20261026-junit-signatures/src/main/kotlin/decompengine/RepairCliProgress.kt:80:26 This class is not recommended for use in Kotlin. Use 'kotlin.Any' instead.
+w: file:///home/june/decomp_thing/.claude/worktrees/a-series-20261026-junit-signatures/src/main/kotlin/decompengine/acp/AcpAgentHarness.kt:134:33 'interface AcpExecutionEvidenceSource : Any' is deprecated. Use the invocation-bound AgentHarness.executeReceipt result.
+w: file:///home/june/decomp_thing/.claude/worktrees/a-series-20261026-junit-signatures/src/main/kotlin/decompengine/acp/AcpAgentHarness.kt:3176:20 This API is unstable and may change in the future
+w: file:///home/june/decomp_thing/.claude/worktrees/a-series-20261026-junit-signatures/src/main/kotlin/decompengine/acp/AcpAuthenticationInventory.kt:101:16 This API is unstable and may change in the future
+w: file:///home/june/decomp_thing/.claude/worktrees/a-series-20261026-junit-signatures/src/main/kotlin/decompengine/acp/AcpAuthenticationInventory.kt:102:16 This API is unstable and may change in the future
+w: file:///home/june/decomp_thing/.claude/worktrees/a-series-20261026-junit-signatures/src/main/kotlin/decompengine/analysis/AnalysisNativeIoHelper.kt:474:16 'fun objectFieldOffset(p0: Field!): Long' is deprecated. Deprecated in Java.
+w: file:///home/june/decomp_thing/.claude/worktrees/a-series-20261026-junit-signatures/src/main/kotlin/decompengine/analysis/AnalysisNativeIoHelper.kt:478:16 'fun objectFieldOffset(p0: Field!): Long' is deprecated. Deprecated in Java.
+w: file:///home/june/decomp_thing/.claude/worktrees/a-series-20261026-junit-signatures/src/main/kotlin/decompengine/jobs/AgentProgressJournal.kt:50:27 This class is not recommended for use in Kotlin. Use 'kotlin.Any' instead.
+w: file:///home/june/decomp_thing/.claude/worktrees/a-series-20261026-junit-signatures/src/main/kotlin/decompengine/jobs/BestEffortProgressJournal.kt:88:27 This class is not recommended for use in Kotlin. Use 'kotlin.Any' instead.
+w: file:///home/june/decomp_thing/.claude/worktrees/a-series-20261026-junit-signatures/src/main/kotlin/decompengine/jobs/WorkflowPinAudit.kt:9:29 Non-public primary constructor is exposed via the generated 'copy()' method of the 'data' class.
+
+The generated 'copy()' will change its visibility in future releases.
+
+To suppress the warning do one of the following:
+- Annotate the data class with the '@ConsistentCopyVisibility' annotation.
+- Use the '-Xconsistent-data-class-copy-visibility' compiler flag.
+- Annotate the data class with the '@ExposedCopyVisibility' annotation
+  (Discouraged, but can be used to keep binary compatibility).
+
+To learn more, see the documentation of the '@ConsistentCopyVisibility' and '@ExposedCopyVisibility' annotations.
+
+This will become an error in language version 2.5. See https://youtrack.jetbrains.com/issue/KT-11914.
+w: file:///home/june/decomp_thing/.claude/worktrees/a-series-20261026-junit-signatures/src/main/kotlin/decompengine/mvp/MvpLogPrivacy.kt:38:38 Unnecessary safe call on a non-null receiver of type 'MvpLogPrivacy.Lines'.
+w: file:///home/june/decomp_thing/.claude/worktrees/a-series-20261026-junit-signatures/src/main/kotlin/decompengine/oracle/behavior/LlvmBehaviorNativeRuntimeMeasurementV2.kt:923:71 Unnecessary non-null assertion (!!) on a non-null receiver of type 'Throwable'.
+w: file:///home/june/decomp_thing/.claude/worktrees/a-series-20261026-junit-signatures/src/main/kotlin/decompengine/oracle/fulltree/BoundedDwarfInterfaceFacts.kt:534:45 No cast needed.
+w: file:///home/june/decomp_thing/.claude/worktrees/a-series-20261026-junit-signatures/src/main/kotlin/decompengine/oracle/fulltree/BoundedDwarfInterfaceFacts.kt:539:104 Unnecessary non-null assertion (!!) on a non-null receiver of type 'Long'.
+w: file:///home/june/decomp_thing/.claude/worktrees/a-series-20261026-junit-signatures/src/main/kotlin/decompengine/oracle/fulltree/BoundedDwarfInterfaceFacts.kt:638:45 No cast needed.
+w: file:///home/june/decomp_thing/.claude/worktrees/a-series-20261026-junit-signatures/src/main/kotlin/decompengine/oracle/fulltree/FullTreeDataBaselineSqlite.kt:2616:73 Unnecessary safe call on a non-null receiver of type 'Throwable'.
+w: file:///home/june/decomp_thing/.claude/worktrees/a-series-20261026-junit-signatures/src/main/kotlin/decompengine/oracle/fulltree/FullTreeDataBaselineSqlite.kt:2757:89 Unnecessary safe call on a non-null receiver of type 'Throwable'.
+w: file:///home/june/decomp_thing/.claude/worktrees/a-series-20261026-junit-signatures/src/main/kotlin/decompengine/oracle/fulltree/FullTreeDwarfSupport.kt:1101:73 Unnecessary non-null assertion (!!) on a non-null receiver of type 'Throwable'.
+w: file:///home/june/decomp_thing/.claude/worktrees/a-series-20261026-junit-signatures/src/main/kotlin/decompengine/oracle/fulltree/FullTreeDwarfSupport.kt:1107:69 Unnecessary non-null assertion (!!) on a non-null receiver of type 'Throwable'.
+w: file:///home/june/decomp_thing/.claude/worktrees/a-series-20261026-junit-signatures/src/main/kotlin/decompengine/oracle/fulltree/FullTreeDwarfSupport.kt:1845:75 Unnecessary non-null assertion (!!) on a non-null receiver of type 'Throwable'.
+w: file:///home/june/decomp_thing/.claude/worktrees/a-series-20261026-junit-signatures/src/main/kotlin/decompengine/oracle/fulltree/FullTreeDwarfSupport.kt:1851:71 Unnecessary non-null assertion (!!) on a non-null receiver of type 'Throwable'.
+w: file:///home/june/decomp_thing/.claude/worktrees/a-series-20261026-junit-signatures/src/main/kotlin/decompengine/oracle/fulltree/FullTreeFunctionObservationsV2.kt:665:50 Unnecessary safe call on a non-null receiver of type 'String'.
+w: file:///home/june/decomp_thing/.claude/worktrees/a-series-20261026-junit-signatures/src/main/kotlin/decompengine/oracle/fulltree/FullTreeFunctionObservationsV2.kt:1088:43 Projection is redundant: the corresponding type parameter of 'Map<String, out Set<String>>' has the same variance.
+w: file:///home/june/decomp_thing/.claude/worktrees/a-series-20261026-junit-signatures/src/main/kotlin/decompengine/oracle/fulltree/FullTreeFunctionObservationsV2.kt:1132:55 Projection is redundant: the corresponding type parameter of 'Map<String, out Set<String>>' has the same variance.
+w: file:///home/june/decomp_thing/.claude/worktrees/a-series-20261026-junit-signatures/src/main/kotlin/decompengine/oracle/fulltree/FullTreeGenericTemplateFrontendReceiptV1.kt:126:66 Unnecessary non-null assertion (!!) on a non-null receiver of type 'Pair<String, String>'.
+w: file:///home/june/decomp_thing/.claude/worktrees/a-series-20261026-junit-signatures/src/main/kotlin/decompengine/oracle/fulltree/FullTreeGenericTemplateFrontendReceiptV1.kt:482:98 Unnecessary non-null assertion (!!) on a non-null receiver of type 'String'.
+w: file:///home/june/decomp_thing/.claude/worktrees/a-series-20261026-junit-signatures/src/main/kotlin/decompengine/oracle/gcc/GccDriverAutomaticLocalPopulationPolicy.kt:364:93 Expression is unused.
+w: file:///home/june/decomp_thing/.claude/worktrees/a-series-20261026-junit-signatures/src/main/kotlin/decompengine/oracle/gcc/GccDriverDwarfInterfaceEvidence.kt:234:115 Unnecessary non-null assertion (!!) on a non-null receiver of type 'Throwable'.
+w: file:///home/june/decomp_thing/.claude/worktrees/a-series-20261026-junit-signatures/src/main/kotlin/decompengine/oracle/gcc/GccRetainedCompilerEngineProfile.kt:281:87 Unnecessary non-null assertion (!!) on a non-null receiver of type 'Throwable'.
+w: file:///home/june/decomp_thing/.claude/worktrees/a-series-20261026-junit-signatures/src/main/kotlin/decompengine/project/ArchivalReconstruction.kt:362:43 Unnecessary safe call on a non-null receiver of type 'Throwable'.
+w: file:///home/june/decomp_thing/.claude/worktrees/a-series-20261026-junit-signatures/src/main/kotlin/decompengine/project/GeneratedCArchiveBuildPolicy.kt:50:104 Redundant call of conversion method.
+w: file:///home/june/decomp_thing/.claude/worktrees/a-series-20261026-junit-signatures/src/main/kotlin/decompengine/project/ReferencedDataByteEvidence.kt:75:84 Unnecessary safe call on a non-null receiver of type 'ReferencedDataByteSegment'.
+w: file:///home/june/decomp_thing/.claude/worktrees/a-series-20261026-junit-signatures/src/main/kotlin/decompengine/project/RepairAcpEvidenceArchiveVerifier.kt:444:58 Unnecessary safe call on a non-null receiver of type 'ReleaseRepairMetadata'.
+w: file:///home/june/decomp_thing/.claude/worktrees/a-series-20261026-junit-signatures/src/main/kotlin/decompengine/repair/ModuleRevisionGraph.kt:3112:51 Unnecessary safe call on a non-null receiver of type 'PendingAttempt'.
+w: file:///home/june/decomp_thing/.claude/worktrees/a-series-20261026-junit-signatures/src/main/kotlin/decompengine/repair/ModuleRevisionGraph.kt:6929:17 Condition is always 'false'.
+w: file:///home/june/decomp_thing/.claude/worktrees/a-series-20261026-junit-signatures/src/main/kotlin/decompengine/repair/RepairHistorySnapshot.kt:172:53 Non-public primary constructor is exposed via the generated 'copy()' method of the 'data' class.
+
+The generated 'copy()' will change its visibility in future releases.
+
+To suppress the warning do one of the following:
+- Annotate the data class with the '@ConsistentCopyVisibility' annotation.
+- Use the '-Xconsistent-data-class-copy-visibility' compiler flag.
+- Annotate the data class with the '@ExposedCopyVisibility' annotation
+  (Discouraged, but can be used to keep binary compatibility).
+
+To learn more, see the documentation of the '@ConsistentCopyVisibility' and '@ExposedCopyVisibility' annotations.
+
+This will become an error in language version 2.5. See https://youtrack.jetbrains.com/issue/KT-11914.
+w: file:///home/june/decomp_thing/.claude/worktrees/a-series-20261026-junit-signatures/src/main/kotlin/decompengine/repair/RepairHistorySnapshot.kt:173:44 Non-public primary constructor is exposed via the generated 'copy()' method of the 'data' class.
+
+The generated 'copy()' will change its visibility in future releases.
+
+To suppress the warning do one of the following:
+- Annotate the data class with the '@ConsistentCopyVisibility' annotation.
+- Use the '-Xconsistent-data-class-copy-visibility' compiler flag.
+- Annotate the data class with the '@ExposedCopyVisibility' annotation
+  (Discouraged, but can be used to keep binary compatibility).
+
+To learn more, see the documentation of the '@ConsistentCopyVisibility' and '@ExposedCopyVisibility' annotations.
+
+This will become an error in language version 2.5. See https://youtrack.jetbrains.com/issue/KT-11914.
+w: file:///home/june/decomp_thing/.claude/worktrees/a-series-20261026-junit-signatures/src/main/kotlin/decompengine/repair/RepairHistorySnapshot.kt:179:44 Non-public primary constructor is exposed via the generated 'copy()' method of the 'data' class.
+
+The generated 'copy()' will change its visibility in future releases.
+
+To suppress the warning do one of the following:
+- Annotate the data class with the '@ConsistentCopyVisibility' annotation.
+- Use the '-Xconsistent-data-class-copy-visibility' compiler flag.
+- Annotate the data class with the '@ExposedCopyVisibility' annotation
+  (Discouraged, but can be used to keep binary compatibility).
+
+To learn more, see the documentation of the '@ConsistentCopyVisibility' and '@ExposedCopyVisibility' annotations.
+
+This will become an error in language version 2.5. See https://youtrack.jetbrains.com/issue/KT-11914.
+w: file:///home/june/decomp_thing/.claude/worktrees/a-series-20261026-junit-signatures/src/main/kotlin/decompengine/repair/RepairHistorySnapshot.kt:181:44 Non-public primary constructor is exposed via the generated 'copy()' method of the 'data' class.
+
+The generated 'copy()' will change its visibility in future releases.
+
+To suppress the warning do one of the following:
+- Annotate the data class with the '@ConsistentCopyVisibility' annotation.
+- Use the '-Xconsistent-data-class-copy-visibility' compiler flag.
+- Annotate the data class with the '@ExposedCopyVisibility' annotation
+  (Discouraged, but can be used to keep binary compatibility).
+
+To learn more, see the documentation of the '@ConsistentCopyVisibility' and '@ExposedCopyVisibility' annotations.
+
+This will become an error in language version 2.5. See https://youtrack.jetbrains.com/issue/KT-11914.
+w: file:///home/june/decomp_thing/.claude/worktrees/a-series-20261026-junit-signatures/src/main/kotlin/decompengine/repair/RepairHistorySnapshot.kt:196:46 Non-public primary constructor is exposed via the generated 'copy()' method of the 'data' class.
+
+The generated 'copy()' will change its visibility in future releases.
+
+To suppress the warning do one of the following:
+- Annotate the data class with the '@ConsistentCopyVisibility' annotation.
+- Use the '-Xconsistent-data-class-copy-visibility' compiler flag.
+- Annotate the data class with the '@ExposedCopyVisibility' annotation
+  (Discouraged, but can be used to keep binary compatibility).
+
+To learn more, see the documentation of the '@ConsistentCopyVisibility' and '@ExposedCopyVisibility' annotations.
+
+This will become an error in language version 2.5. See https://youtrack.jetbrains.com/issue/KT-11914.
+w: file:///home/june/decomp_thing/.claude/worktrees/a-series-20261026-junit-signatures/src/main/kotlin/decompengine/repair/RepairHistorySnapshot.kt:232:39 Non-public primary constructor is exposed via the generated 'copy()' method of the 'data' class.
+
+The generated 'copy()' will change its visibility in future releases.
+
+To suppress the warning do one of the following:
+- Annotate the data class with the '@ConsistentCopyVisibility' annotation.
+- Use the '-Xconsistent-data-class-copy-visibility' compiler flag.
+- Annotate the data class with the '@ExposedCopyVisibility' annotation
+  (Discouraged, but can be used to keep binary compatibility).
+
+To learn more, see the documentation of the '@ConsistentCopyVisibility' and '@ExposedCopyVisibility' annotations.
+
+This will become an error in language version 2.5. See https://youtrack.jetbrains.com/issue/KT-11914.
+w: file:///home/june/decomp_thing/.claude/worktrees/a-series-20261026-junit-signatures/src/main/kotlin/decompengine/repair/RepairHistorySnapshot.kt:253:56 Non-public primary constructor is exposed via the generated 'copy()' method of the 'data' class.
+
+The generated 'copy()' will change its visibility in future releases.
+
+To suppress the warning do one of the following:
+- Annotate the data class with the '@ConsistentCopyVisibility' annotation.
+- Use the '-Xconsistent-data-class-copy-visibility' compiler flag.
+- Annotate the data class with the '@ExposedCopyVisibility' annotation
+  (Discouraged, but can be used to keep binary compatibility).
+
+To learn more, see the documentation of the '@ConsistentCopyVisibility' and '@ExposedCopyVisibility' annotations.
+
+This will become an error in language version 2.5. See https://youtrack.jetbrains.com/issue/KT-11914.
+w: file:///home/june/decomp_thing/.claude/worktrees/a-series-20261026-junit-signatures/src/main/kotlin/decompengine/repair/RepairHistorySnapshot.kt:272:62 Non-public primary constructor is exposed via the generated 'copy()' method of the 'data' class.
+
+The generated 'copy()' will change its visibility in future releases.
+
+To suppress the warning do one of the following:
+- Annotate the data class with the '@ConsistentCopyVisibility' annotation.
+- Use the '-Xconsistent-data-class-copy-visibility' compiler flag.
+- Annotate the data class with the '@ExposedCopyVisibility' annotation
+  (Discouraged, but can be used to keep binary compatibility).
+
+To learn more, see the documentation of the '@ConsistentCopyVisibility' and '@ExposedCopyVisibility' annotations.
+
+This will become an error in language version 2.5. See https://youtrack.jetbrains.com/issue/KT-11914.
+w: file:///home/june/decomp_thing/.claude/worktrees/a-series-20261026-junit-signatures/src/main/kotlin/decompengine/repair/RepairHistorySnapshot.kt:282:57 Non-public primary constructor is exposed via the generated 'copy()' method of the 'data' class.
+
+The generated 'copy()' will change its visibility in future releases.
+
+To suppress the warning do one of the following:
+- Annotate the data class with the '@ConsistentCopyVisibility' annotation.
+- Use the '-Xconsistent-data-class-copy-visibility' compiler flag.
+- Annotate the data class with the '@ExposedCopyVisibility' annotation
+  (Discouraged, but can be used to keep binary compatibility).
+
+To learn more, see the documentation of the '@ConsistentCopyVisibility' and '@ExposedCopyVisibility' annotations.
+
+This will become an error in language version 2.5. See https://youtrack.jetbrains.com/issue/KT-11914.
+w: file:///home/june/decomp_thing/.claude/worktrees/a-series-20261026-junit-signatures/src/main/kotlin/decompengine/validation/BehaviorValidation.kt:185:36 Unnecessary non-null assertion (!!) on a non-null receiver of type 'Process'.
+w: file:///home/june/decomp_thing/.claude/worktrees/a-series-20261026-junit-signatures/src/main/kotlin/decompengine/validation/BehaviorValidation.kt:186:19 Unnecessary non-null assertion (!!) on a non-null receiver of type 'Thread'.
+w: file:///home/june/decomp_thing/.claude/worktrees/a-series-20261026-junit-signatures/src/main/kotlin/decompengine/web/UploadServer.kt:1214:13 Expression is unused.
+
+> Task :compileJava
+
+> Task :buildAnalysisIoHelper
+b0dfe60fcbd898824ea8e68202419f243fe0ac9024e3e3326104108a1b11c48c  decomp-analysis-io-helper-v1.properties
+
+> Task :buildLlvmBehaviorHelper
+Picked up JAVA_TOOL_OPTIONS: -Djava.io.tmpdir=/home/june/decomp_thing/.claude/worktrees/a-series-20261026-junit-signatures/build/tmp -Djna.tmpdir=/home/june/decomp_thing/.claude/worktrees/a-series-20261026-junit-signatures/build/tmp -Duser.home=/home/june/decomp_thing/.claude/worktrees/a-series-20261026-junit-signatures/build/task-tmp/home -XX:-UsePerfData
+f00f0e5a539383433cc0cf5c2f90be46d1dac23ed639e6df3a63db6eb1d14cf6  llvm-behavior-native-helper-deployment-reference-v1.json
+
+> Task :processResources
+> Task :classes
+> Task :jar
+> Task :generateGccBundledGhidraReference
+> Task :stageKotlinBootRuntime
+> Task :generateKotlinBootClasspathReference
+> Task :verifyLlvmBehaviorHelper
+> Task :generateLlvmBehaviorHelperChecksum
+> Task :generateLlvmHostedWorkerClasspathReference
+> Task :startScripts
+> Task :installDist
+> Task :compileTestKotlin
+w: file:///home/june/decomp_thing/.claude/worktrees/a-series-20261026-junit-signatures/src/test/kotlin/decompengine/acp/AcpAgentHarnessTest.kt:114:114 This class is not recommended for use in Kotlin. Use 'kotlin.Int' instead.
+w: file:///home/june/decomp_thing/.claude/worktrees/a-series-20261026-junit-signatures/src/test/kotlin/decompengine/acp/AcpAgentHarnessTest.kt:115:38 This class is not recommended for use in Kotlin. Use 'kotlin.Int' instead.
+w: file:///home/june/decomp_thing/.claude/worktrees/a-series-20261026-junit-signatures/src/test/kotlin/decompengine/acp/AcpAgentHarnessTest.kt:115:69 This class is not recommended for use in Kotlin. Use 'kotlin.Int' instead.
+w: file:///home/june/decomp_thing/.claude/worktrees/a-series-20261026-junit-signatures/src/test/kotlin/decompengine/acp/AcpAgentHarnessTest.kt:214:96 This class is not recommended for use in Kotlin. Use 'kotlin.Int' instead.
+w: file:///home/june/decomp_thing/.claude/worktrees/a-series-20261026-junit-signatures/src/test/kotlin/decompengine/acp/AcpAgentHarnessTest.kt:215:38 This class is not recommended for use in Kotlin. Use 'kotlin.Int' instead.
+w: file:///home/june/decomp_thing/.claude/worktrees/a-series-20261026-junit-signatures/src/test/kotlin/decompengine/acp/AcpAgentHarnessTest.kt:215:69 This class is not recommended for use in Kotlin. Use 'kotlin.Int' instead.
+w: file:///home/june/decomp_thing/.claude/worktrees/a-series-20261026-junit-signatures/src/test/kotlin/decompengine/acp/AcpAgentHarnessTest.kt:253:96 This class is not recommended for use in Kotlin. Use 'kotlin.Int' instead.
+w: file:///home/june/decomp_thing/.claude/worktrees/a-series-20261026-junit-signatures/src/test/kotlin/decompengine/acp/AcpAgentHarnessTest.kt:254:38 This class is not recommended for use in Kotlin. Use 'kotlin.Int' instead.
+w: file:///home/june/decomp_thing/.claude/worktrees/a-series-20261026-junit-signatures/src/test/kotlin/decompengine/acp/AcpAgentHarnessTest.kt:254:69 This class is not recommended for use in Kotlin. Use 'kotlin.Int' instead.
+w: file:///home/june/decomp_thing/.claude/worktrees/a-series-20261026-junit-signatures/src/test/kotlin/decompengine/acp/AcpAgentHarnessTest.kt:288:41 No cast needed.
+w: file:///home/june/decomp_thing/.claude/worktrees/a-series-20261026-junit-signatures/src/test/kotlin/decompengine/acp/AcpAgentHarnessTest.kt:1092:89 'fun latestDiagnostics(): AcpProcessDiagnostics?' is deprecated. Use invocation-bound ACP provider evidence from executeReceipt.
+w: file:///home/june/decomp_thing/.claude/worktrees/a-series-20261026-junit-signatures/src/test/kotlin/decompengine/acp/AcpAgentHarnessTest.kt:1093:44 'fun latestSandboxEvidence(): AcpSandboxEvidence?' is deprecated. Use invocation-bound ACP provider evidence from executeReceipt.
+w: file:///home/june/decomp_thing/.claude/worktrees/a-series-20261026-junit-signatures/src/test/kotlin/decompengine/acp/AcpAgentHarnessTest.kt:1100:47 'fun latestAcpExecutionEvidence(): AcpExecutionEvidenceSnapshot?' is deprecated. Use invocation-bound ACP provider evidence from executeReceipt.
+w: file:///home/june/decomp_thing/.claude/worktrees/a-series-20261026-junit-signatures/src/test/kotlin/decompengine/acp/AcpAgentHarnessTest.kt:1127:28 'fun latestDiagnostics(): AcpProcessDiagnostics?' is deprecated. Use invocation-bound ACP provider evidence from executeReceipt.
+w: file:///home/june/decomp_thing/.claude/worktrees/a-series-20261026-junit-signatures/src/test/kotlin/decompengine/acp/AcpAgentHarnessTest.kt:1128:28 'fun latestSandboxEvidence(): AcpSandboxEvidence?' is deprecated. Use invocation-bound ACP provider evidence from executeReceipt.
+w: file:///home/june/decomp_thing/.claude/worktrees/a-series-20261026-junit-signatures/src/test/kotlin/decompengine/acp/AcpAgentHarnessTest.kt:1144:28 'fun latestSandboxEvidence(): AcpSandboxEvidence?' is deprecated. Use invocation-bound ACP provider evidence from executeReceipt.
+w: file:///home/june/decomp_thing/.claude/worktrees/a-series-20261026-junit-signatures/src/test/kotlin/decompengine/acp/AcpAgentHarnessTest.kt:1207:75 'fun latestDiagnostics(): AcpProcessDiagnostics?' is deprecated. Use invocation-bound ACP provider evidence from executeReceipt.
+w: file:///home/june/decomp_thing/.claude/worktrees/a-series-20261026-junit-signatures/src/test/kotlin/decompengine/acp/AcpAgentHarnessTest.kt:1208:40 'fun latestSandboxEvidence(): AcpSandboxEvidence?' is deprecated. Use invocation-bound ACP provider evidence from executeReceipt.
+w: file:///home/june/decomp_thing/.claude/worktrees/a-series-20261026-junit-signatures/src/test/kotlin/decompengine/acp/AcpAgentHarnessTest.kt:1231:49 'fun latestDiagnostics(): AcpProcessDiagnostics?' is deprecated. Use invocation-bound ACP provider evidence from executeReceipt.
+w: file:///home/june/decomp_thing/.claude/worktrees/a-series-20261026-junit-signatures/src/test/kotlin/decompengine/acp/AcpAgentHarnessTest.kt:1763:32 'fun latestPermissionAudit(): List<AcpPermissionAuditRecord>' is deprecated. Use invocation-bound ACP provider evidence from executeReceipt.
+w: file:///home/june/decomp_thing/.claude/worktrees/a-series-20261026-junit-signatures/src/test/kotlin/decompengine/acp/AcpAgentHarnessTest.kt:1825:78 'fun latestTerminalAudit(): List<AcpTerminalAuditRecord>' is deprecated. Use invocation-bound ACP provider evidence from executeReceipt.
+w: file:///home/june/decomp_thing/.claude/worktrees/a-series-20261026-junit-signatures/src/test/kotlin/decompengine/acp/AcpAgentHarnessTest.kt:1831:31 'fun latestTerminalAudit(): List<AcpTerminalAuditRecord>' is deprecated. Use invocation-bound ACP provider evidence from executeReceipt.
+w: file:///home/june/decomp_thing/.claude/worktrees/a-series-20261026-junit-signatures/src/test/kotlin/decompengine/acp/AcpAgentHarnessTest.kt:1837:28 'fun latestTerminalAudit(): List<AcpTerminalAuditRecord>' is deprecated. Use invocation-bound ACP provider evidence from executeReceipt.
+w: file:///home/june/decomp_thing/.claude/worktrees/a-series-20261026-junit-signatures/src/test/kotlin/decompengine/acp/AcpAgentHarnessTest.kt:1845:69 'fun latestPermissionAudit(): List<AcpPermissionAuditRecord>' is deprecated. Use invocation-bound ACP provider evidence from executeReceipt.
+w: file:///home/june/decomp_thing/.claude/worktrees/a-series-20261026-junit-signatures/src/test/kotlin/decompengine/acp/AcpAgentHarnessTest.kt:1846:46 'fun latestSandboxEvidence(): AcpSandboxEvidence?' is deprecated. Use invocation-bound ACP provider evidence from executeReceipt.
+w: file:///home/june/decomp_thing/.claude/worktrees/a-series-20261026-junit-signatures/src/test/kotlin/decompengine/acp/AcpAgentHarnessTest.kt:1867:34 'fun latestTerminalAudit(): List<AcpTerminalAuditRecord>' is deprecated. Use invocation-bound ACP provider evidence from executeReceipt.
+w: file:///home/june/decomp_thing/.claude/worktrees/a-series-20261026-junit-signatures/src/test/kotlin/decompengine/acp/AcpAgentHarnessTest.kt:1892:40 'fun latestTerminalAudit(): List<AcpTerminalAuditRecord>' is deprecated. Use invocation-bound ACP provider evidence from executeReceipt.
+w: file:///home/june/decomp_thing/.claude/worktrees/a-series-20261026-junit-signatures/src/test/kotlin/decompengine/acp/AcpAgentHarnessTest.kt:1913:42 'fun latestTerminalAudit(): List<AcpTerminalAuditRecord>' is deprecated. Use invocation-bound ACP provider evidence from executeReceipt.
+w: file:///home/june/decomp_thing/.claude/worktrees/a-series-20261026-junit-signatures/src/test/kotlin/decompengine/acp/AcpAgentHarnessTest.kt:1946:45 'fun latestTerminalAudit(): List<AcpTerminalAuditRecord>' is deprecated. Use invocation-bound ACP provider evidence from executeReceipt.
+w: file:///home/june/decomp_thing/.claude/worktrees/a-series-20261026-junit-signatures/src/test/kotlin/decompengine/acp/AcpAgentHarnessTest.kt:2011:31 'fun latestTerminalAudit(): List<AcpTerminalAuditRecord>' is deprecated. Use invocation-bound ACP provider evidence from executeReceipt.
+w: file:///home/june/decomp_thing/.claude/worktrees/a-series-20261026-junit-signatures/src/test/kotlin/decompengine/acp/AcpAgentHarnessTest.kt:2018:28 'fun latestTerminalAudit(): List<AcpTerminalAuditRecord>' is deprecated. Use invocation-bound ACP provider evidence from executeReceipt.
+w: file:///home/june/decomp_thing/.claude/worktrees/a-series-20261026-junit-signatures/src/test/kotlin/decompengine/acp/AcpAgentHarnessTest.kt:2019:64 'fun latestPermissionAudit(): List<AcpPermissionAuditRecord>' is deprecated. Use invocation-bound ACP provider evidence from executeReceipt.
+w: file:///home/june/decomp_thing/.claude/worktrees/a-series-20261026-junit-signatures/src/test/kotlin/decompengine/acp/AcpAgentHarnessTest.kt:2020:69 'fun latestPermissionAudit(): List<AcpPermissionAuditRecord>' is deprecated. Use invocation-bound ACP provider evidence from executeReceipt.
+w: file:///home/june/decomp_thing/.claude/worktrees/a-series-20261026-junit-signatures/src/test/kotlin/decompengine/acp/AcpAgentHarnessTest.kt:2090:55 'fun latestFilesystemAudit(): List<AcpFilesystemAuditRecord>' is deprecated. Use invocation-bound ACP provider evidence from executeReceipt.
+w: file:///home/june/decomp_thing/.claude/worktrees/a-series-20261026-junit-signatures/src/test/kotlin/decompengine/acp/AcpAgentHarnessTest.kt:2093:30 'fun latestFilesystemAudit(): List<AcpFilesystemAuditRecord>' is deprecated. Use invocation-bound ACP provider evidence from executeReceipt.
+w: file:///home/june/decomp_thing/.claude/worktrees/a-series-20261026-junit-signatures/src/test/kotlin/decompengine/acp/AcpAgentHarnessTest.kt:2105:35 'fun latestFilesystemAudit(): List<AcpFilesystemAuditRecord>' is deprecated. Use invocation-bound ACP provider evidence from executeReceipt.
+w: file:///home/june/decomp_thing/.claude/worktrees/a-series-20261026-junit-signatures/src/test/kotlin/decompengine/acp/AcpAgentHarnessTest.kt:2118:36 'fun latestFilesystemAudit(): List<AcpFilesystemAuditRecord>' is deprecated. Use invocation-bound ACP provider evidence from executeReceipt.
+w: file:///home/june/decomp_thing/.claude/worktrees/a-series-20261026-junit-signatures/src/test/kotlin/decompengine/acp/AcpAgentHarnessTest.kt:2289:57 'fun latestDiagnostics(): AcpProcessDiagnostics?' is deprecated. Use invocation-bound ACP provider evidence from executeReceipt.
+w: file:///home/june/decomp_thing/.claude/worktrees/a-series-20261026-junit-signatures/src/test/kotlin/decompengine/acp/AcpAgentHarnessTest.kt:2407:53 'fun latestDiagnostics(): AcpProcessDiagnostics?' is deprecated. Use invocation-bound ACP provider evidence from executeReceipt.
+w: file:///home/june/decomp_thing/.claude/worktrees/a-series-20261026-junit-signatures/src/test/kotlin/decompengine/acp/AcpAgentHarnessTest.kt:2453:53 'fun latestDiagnostics(): AcpProcessDiagnostics?' is deprecated. Use invocation-bound ACP provider evidence from executeReceipt.
+w: file:///home/june/decomp_thing/.claude/worktrees/a-series-20261026-junit-signatures/src/test/kotlin/decompengine/acp/AcpAgentHarnessTest.kt:2474:49 'fun latestDiagnostics(): AcpProcessDiagnostics?' is deprecated. Use invocation-bound ACP provider evidence from executeReceipt.
+w: file:///home/june/decomp_thing/.claude/worktrees/a-series-20261026-junit-signatures/src/test/kotlin/decompengine/acp/AcpAgentHarnessTest.kt:2497:53 'fun latestDiagnostics(): AcpProcessDiagnostics?' is deprecated. Use invocation-bound ACP provider evidence from executeReceipt.
+w: file:///home/june/decomp_thing/.claude/worktrees/a-series-20261026-junit-signatures/src/test/kotlin/decompengine/acp/AcpAgentHarnessTest.kt:2518:49 'fun latestDiagnostics(): AcpProcessDiagnostics?' is deprecated. Use invocation-bound ACP provider evidence from executeReceipt.
+w: file:///home/june/decomp_thing/.claude/worktrees/a-series-20261026-junit-signatures/src/test/kotlin/decompengine/acp/AcpAgentHarnessTest.kt:2553:55 'fun latestDiagnostics(): AcpProcessDiagnostics?' is deprecated. Use invocation-bound ACP provider evidence from executeReceipt.
+w: file:///home/june/decomp_thing/.claude/worktrees/a-series-20261026-junit-signatures/src/test/kotlin/decompengine/acp/AcpAgentHarnessTest.kt:2577:59 'fun latestDiagnostics(): AcpProcessDiagnostics?' is deprecated. Use invocation-bound ACP provider evidence from executeReceipt.
+w: file:///home/june/decomp_thing/.claude/worktrees/a-series-20261026-junit-signatures/src/test/kotlin/decompengine/acp/AcpAgentHarnessTest.kt:2582:56 'fun latestSandboxEvidence(): AcpSandboxEvidence?' is deprecated. Use invocation-bound ACP provider evidence from executeReceipt.
+w: file:///home/june/decomp_thing/.claude/worktrees/a-series-20261026-junit-signatures/src/test/kotlin/decompengine/acp/AcpAgentHarnessTest.kt:2602:79 'fun latestDiagnostics(): AcpProcessDiagnostics?' is deprecated. Use invocation-bound ACP provider evidence from executeReceipt.
+w: file:///home/june/decomp_thing/.claude/worktrees/a-series-20261026-junit-signatures/src/test/kotlin/decompengine/acp/AcpAgentHarnessTest.kt:2606:38 'fun latestSandboxEvidence(): AcpSandboxEvidence?' is deprecated. Use invocation-bound ACP provider evidence from executeReceipt.
+w: file:///home/june/decomp_thing/.claude/worktrees/a-series-20261026-junit-signatures/src/test/kotlin/decompengine/acp/AcpAgentHarnessTest.kt:2705:45 'fun latestDiagnostics(): AcpProcessDiagnostics?' is deprecated. Use invocation-bound ACP provider evidence from executeReceipt.
+w: file:///home/june/decomp_thing/.claude/worktrees/a-series-20261026-junit-signatures/src/test/kotlin/decompengine/acp/AcpAgentHarnessTest.kt:2728:43 'fun latestDiagnostics(): AcpProcessDiagnostics?' is deprecated. Use invocation-bound ACP provider evidence from executeReceipt.
+w: file:///home/june/decomp_thing/.claude/worktrees/a-series-20261026-junit-signatures/src/test/kotlin/decompengine/acp/AcpAgentHarnessTest.kt:2729:43 'fun latestSandboxEvidence(): AcpSandboxEvidence?' is deprecated. Use invocation-bound ACP provider evidence from executeReceipt.
+w: file:///home/june/decomp_thing/.claude/worktrees/a-series-20261026-junit-signatures/src/test/kotlin/decompengine/acp/AcpAgentHarnessTest.kt:2808:43 'fun latestDiagnostics(): AcpProcessDiagnostics?' is deprecated. Use invocation-bound ACP provider evidence from executeReceipt.
+w: file:///home/june/decomp_thing/.claude/worktrees/a-series-20261026-junit-signatures/src/test/kotlin/decompengine/acp/AcpAgentHarnessTest.kt:2833:29 'fun latestFilesystemAudit(): List<AcpFilesystemAuditRecord>' is deprecated. Use invocation-bound ACP provider evidence from executeReceipt.
+w: file:///home/june/decomp_thing/.claude/worktrees/a-series-20261026-junit-signatures/src/test/kotlin/decompengine/acp/AcpAgentHarnessTest.kt:2841:52 'fun latestDiagnostics(): AcpProcessDiagnostics?' is deprecated. Use invocation-bound ACP provider evidence from executeReceipt.
+w: file:///home/june/decomp_thing/.claude/worktrees/a-series-20261026-junit-signatures/src/test/kotlin/decompengine/acp/AcpAgentHarnessTest.kt:2864:29 'fun latestFilesystemAudit(): List<AcpFilesystemAuditRecord>' is deprecated. Use invocation-bound ACP provider evidence from executeReceipt.
+w: file:///home/june/decomp_thing/.claude/worktrees/a-series-20261026-junit-signatures/src/test/kotlin/decompengine/acp/AcpAgentHarnessTest.kt:2872:49 'fun latestDiagnostics(): AcpProcessDiagnostics?' is deprecated. Use invocation-bound ACP provider evidence from executeReceipt.
+w: file:///home/june/decomp_thing/.claude/worktrees/a-series-20261026-junit-signatures/src/test/kotlin/decompengine/acp/AcpAgentHarnessTest.kt:2876:46 'fun latestSandboxEvidence(): AcpSandboxEvidence?' is deprecated. Use invocation-bound ACP provider evidence from executeReceipt.
+w: file:///home/june/decomp_thing/.claude/worktrees/a-series-20261026-junit-signatures/src/test/kotlin/decompengine/acp/AcpAgentHarnessTest.kt:2909:21 'fun latestFilesystemAudit(): List<AcpFilesystemAuditRecord>' is deprecated. Use invocation-bound ACP provider evidence from executeReceipt.
+w: file:///home/june/decomp_thing/.claude/worktrees/a-series-20261026-junit-signatures/src/test/kotlin/decompengine/acp/AcpAgentHarnessTest.kt:2913:21 'fun latestFilesystemAudit(): List<AcpFilesystemAuditRecord>' is deprecated. Use invocation-bound ACP provider evidence from executeReceipt.
+w: file:///home/june/decomp_thing/.claude/worktrees/a-series-20261026-junit-signatures/src/test/kotlin/decompengine/acp/AcpAgentHarnessTest.kt:2916:49 'fun latestDiagnostics(): AcpProcessDiagnostics?' is deprecated. Use invocation-bound ACP provider evidence from executeReceipt.
+w: file:///home/june/decomp_thing/.claude/worktrees/a-series-20261026-junit-signatures/src/test/kotlin/decompengine/acp/AcpAgentHarnessTest.kt:2964:32 'fun latestFilesystemAudit(): List<AcpFilesystemAuditRecord>' is deprecated. Use invocation-bound ACP provider evidence from executeReceipt.
+w: file:///home/june/decomp_thing/.claude/worktrees/a-series-20261026-junit-signatures/src/test/kotlin/decompengine/acp/AcpAgentHarnessTest.kt:3561:76 'fun latestDiagnostics(): AcpProcessDiagnostics?' is deprecated. Use invocation-bound ACP provider evidence from executeReceipt.
+w: file:///home/june/decomp_thing/.claude/worktrees/a-series-20261026-junit-signatures/src/test/kotlin/decompengine/acp/AcpAgentHarnessTest.kt:3570:52 'fun latestSandboxEvidence(): AcpSandboxEvidence?' is deprecated. Use invocation-bound ACP provider evidence from executeReceipt.
+w: file:///home/june/decomp_thing/.claude/worktrees/a-series-20261026-junit-signatures/src/test/kotlin/decompengine/acp/AcpAgentHarnessTest.kt:3573:73 'fun latestFilesystemAudit(): List<AcpFilesystemAuditRecord>' is deprecated. Use invocation-bound ACP provider evidence from executeReceipt.
+w: file:///home/june/decomp_thing/.claude/worktrees/a-series-20261026-junit-signatures/src/test/kotlin/decompengine/acp/AcpAgentHarnessTest.kt:3574:73 'fun latestPermissionAudit(): List<AcpPermissionAuditRecord>' is deprecated. Use invocation-bound ACP provider evidence from executeReceipt.
+w: file:///home/june/decomp_thing/.claude/worktrees/a-series-20261026-junit-signatures/src/test/kotlin/decompengine/acp/AcpAgentHarnessTest.kt:3575:69 'fun latestTerminalAudit(): List<AcpTerminalAuditRecord>' is deprecated. Use invocation-bound ACP provider evidence from executeReceipt.
+w: file:///home/june/decomp_thing/.claude/worktrees/a-series-20261026-junit-signatures/src/test/kotlin/decompengine/acp/AcpAuthenticationInventoryTest.kt:251:24 This API is unstable and may change in the future
+w: file:///home/june/decomp_thing/.claude/worktrees/a-series-20261026-junit-signatures/src/test/kotlin/decompengine/acp/AcpAuthenticationInventoryTest.kt:318:35 This API is unstable and may change in the future
+w: file:///home/june/decomp_thing/.claude/worktrees/a-series-20261026-junit-signatures/src/test/kotlin/decompengine/acp/AcpAuthenticationInventoryTest.kt:319:31 This API is unstable and may change in the future
+w: file:///home/june/decomp_thing/.claude/worktrees/a-series-20261026-junit-signatures/src/test/kotlin/decompengine/acp/AcpAuthenticationInventoryTest.kt:321:53 This API is unstable and may change in the future
+w: file:///home/june/decomp_thing/.claude/worktrees/a-series-20261026-junit-signatures/src/test/kotlin/decompengine/acp/AcpAuthenticationInventoryTest.kt:321:62 This API is unstable and may change in the future
+w: file:///home/june/decomp_thing/.claude/worktrees/a-series-20261026-junit-signatures/src/test/kotlin/decompengine/acp/AcpAuthenticationInventoryTest.kt:323:53 This API is unstable and may change in the future
+w: file:///home/june/decomp_thing/.claude/worktrees/a-series-20261026-junit-signatures/src/test/kotlin/decompengine/acp/AcpAuthenticationInventoryTest.kt:324:30 This API is unstable and may change in the future
+w: file:///home/june/decomp_thing/.claude/worktrees/a-series-20261026-junit-signatures/src/test/kotlin/decompengine/acp/AcpAuthenticationInventoryTest.kt:325:48 This API is unstable and may change in the future
+w: file:///home/june/decomp_thing/.claude/worktrees/a-series-20261026-junit-signatures/src/test/kotlin/decompengine/acp/AcpAuthenticationInventoryTest.kt:325:55 This API is unstable and may change in the future
+w: file:///home/june/decomp_thing/.claude/worktrees/a-series-20261026-junit-signatures/src/test/kotlin/decompengine/acp/AcpDoctorPreflightTest.kt:41:96 This class is not recommended for use in Kotlin. Use 'kotlin.Int' instead.
+w: file:///home/june/decomp_thing/.claude/worktrees/a-series-20261026-junit-signatures/src/test/kotlin/decompengine/acp/AcpDoctorPreflightTest.kt:42:38 This class is not recommended for use in Kotlin. Use 'kotlin.Int' instead.
+w: file:///home/june/decomp_thing/.claude/worktrees/a-series-20261026-junit-signatures/src/test/kotlin/decompengine/acp/AcpDoctorPreflightTest.kt:42:69 This class is not recommended for use in Kotlin. Use 'kotlin.Int' instead.
+w: file:///home/june/decomp_thing/.claude/worktrees/a-series-20261026-junit-signatures/src/test/kotlin/decompengine/acp/AcpDoctorPreflightTest.kt:58:105 This class is not recommended for use in Kotlin. Use 'kotlin.Int' instead.
+w: file:///home/june/decomp_thing/.claude/worktrees/a-series-20261026-junit-signatures/src/test/kotlin/decompengine/acp/AcpDoctorPreflightTest.kt:59:38 This class is not recommended for use in Kotlin. Use 'kotlin.Int' instead.
+w: file:///home/june/decomp_thing/.claude/worktrees/a-series-20261026-junit-signatures/src/test/kotlin/decompengine/acp/AcpDoctorPreflightTest.kt:59:69 This class is not recommended for use in Kotlin. Use 'kotlin.Int' instead.
+w: file:///home/june/decomp_thing/.claude/worktrees/a-series-20261026-junit-signatures/src/test/kotlin/decompengine/acp/AcpTerminalFailureContextTest.kt:139:96 This class is not recommended for use in Kotlin. Use 'kotlin.Int' instead.
+w: file:///home/june/decomp_thing/.claude/worktrees/a-series-20261026-junit-signatures/src/test/kotlin/decompengine/acp/AcpTerminalFailureContextTest.kt:140:38 This class is not recommended for use in Kotlin. Use 'kotlin.Int' instead.
+w: file:///home/june/decomp_thing/.claude/worktrees/a-series-20261026-junit-signatures/src/test/kotlin/decompengine/acp/AcpTerminalFailureContextTest.kt:140:69 This class is not recommended for use in Kotlin. Use 'kotlin.Int' instead.
+w: file:///home/june/decomp_thing/.claude/worktrees/a-series-20261026-junit-signatures/src/test/kotlin/decompengine/agent/AgentSessionJournalCrashTest.kt:53:52 Unnecessary non-null assertion (!!) on a non-null receiver of type 'String'.
+w: file:///home/june/decomp_thing/.claude/worktrees/a-series-20261026-junit-signatures/src/test/kotlin/decompengine/doctor/DoctorTest.kt:109:96 This class is not recommended for use in Kotlin. Use 'kotlin.Int' instead.
+w: file:///home/june/decomp_thing/.claude/worktrees/a-series-20261026-junit-signatures/src/test/kotlin/decompengine/doctor/DoctorTest.kt:110:38 This class is not recommended for use in Kotlin. Use 'kotlin.Int' instead.
+w: file:///home/june/decomp_thing/.claude/worktrees/a-series-20261026-junit-signatures/src/test/kotlin/decompengine/doctor/DoctorTest.kt:110:69 This class is not recommended for use in Kotlin. Use 'kotlin.Int' instead.
+w: file:///home/june/decomp_thing/.claude/worktrees/a-series-20261026-junit-signatures/src/test/kotlin/decompengine/doctor/DoctorTest.kt:457:96 This class is not recommended for use in Kotlin. Use 'kotlin.Int' instead.
+w: file:///home/june/decomp_thing/.claude/worktrees/a-series-20261026-junit-signatures/src/test/kotlin/decompengine/doctor/DoctorTest.kt:458:38 This class is not recommended for use in Kotlin. Use 'kotlin.Int' instead.
+w: file:///home/june/decomp_thing/.claude/worktrees/a-series-20261026-junit-signatures/src/test/kotlin/decompengine/doctor/DoctorTest.kt:458:69 This class is not recommended for use in Kotlin. Use 'kotlin.Int' instead.
+w: file:///home/june/decomp_thing/.claude/worktrees/a-series-20261026-junit-signatures/src/test/kotlin/decompengine/oracle/behavior/PinnedDockerRuntimeBindingsTest.kt:141:87 This class is not recommended for use in Kotlin. Use 'kotlin.Function1' instead.
+w: file:///home/june/decomp_thing/.claude/worktrees/a-series-20261026-junit-signatures/src/test/kotlin/decompengine/oracle/fulltree/FullTreeFunctionTruthSqliteV3Test.kt:1199:44 Unnecessary non-null assertion (!!) on a non-null receiver of type 'FullTreeSourceEntityIdentityScan'.
+w: file:///home/june/decomp_thing/.claude/worktrees/a-series-20261026-junit-signatures/src/test/kotlin/decompengine/oracle/fulltree/FullTreeFunctionTruthSqliteV3Test.kt:1200:44 Unnecessary non-null assertion (!!) on a non-null receiver of type 'FullTreeSourceEntityIdentityScan'.
+w: file:///home/june/decomp_thing/.claude/worktrees/a-series-20261026-junit-signatures/src/test/kotlin/decompengine/oracle/fulltree/FullTreeFunctionTruthSqliteV3Test.kt:1201:44 Unnecessary non-null assertion (!!) on a non-null receiver of type 'FullTreeSourceEntityIdentityScan'.
+w: file:///home/june/decomp_thing/.claude/worktrees/a-series-20261026-junit-signatures/src/test/kotlin/decompengine/oracle/structural/DwarfSysvAmd64InterfaceProjectionTest.kt:213:40 Unnecessary non-null assertion (!!) on a non-null receiver of type 'DwarfProjectedType'.
+w: file:///home/june/decomp_thing/.claude/worktrees/a-series-20261026-junit-signatures/src/test/kotlin/decompengine/oracle/structural/DwarfSysvAmd64InterfaceProjectionTest.kt:247:51 Unnecessary non-null assertion (!!) on a non-null receiver of type 'DwarfProjectedType'.
+w: file:///home/june/decomp_thing/.claude/worktrees/a-series-20261026-junit-signatures/src/test/kotlin/decompengine/web/UploadServerTest.kt:1001:45 Unnecessary non-null assertion (!!) on a non-null receiver of type 'String'.
+
+> Task :compileTestJava NO-SOURCE
+> Task :testClasses
+
+> Task :verifyCompiledJunitSignatures
+JUnit signature guard: passed; 1696 classes, 4387 annotated methods; evidence /home/june/decomp_thing/.claude/worktrees/a-series-20261026-junit-signatures/build/reports/junit-signatures/compiled-signatures.json
+
+> Task :test
+Picked up JAVA_TOOL_OPTIONS: -Djava.io.tmpdir=/home/june/decomp_thing/.claude/worktrees/a-series-20261026-junit-signatures/build/tmp -Djna.tmpdir=/home/june/decomp_thing/.claude/worktrees/a-series-20261026-junit-signatures/build/tmp -Duser.home=/home/june/decomp_thing/.claude/worktrees/a-series-20261026-junit-signatures/build/task-tmp/home -XX:-UsePerfData
+
+[Incubating] Problems report is available at: file:///home/june/decomp_thing/.claude/worktrees/a-series-20261026-junit-signatures/build/reports/problems/problems-report.html
+
+Deprecated Gradle features were used in this build, making it incompatible with Gradle 10.
+
+You can use '--warning-mode all' to show the individual deprecation warnings and determine if they come from your own scripts or plugins.
+
+For more on this, please refer to https://docs.gradle.org/9.6.1/userguide/command_line_interface.html#sec:command_line_warnings in the Gradle documentation.
+
+BUILD SUCCESSFUL in 2m 14s
+30 actionable tasks: 29 executed, 1 from cache
+Consider enabling configuration cache to speed up this build: https://docs.gradle.org/9.6.1/userguide/configuration_cache_enabling.html
