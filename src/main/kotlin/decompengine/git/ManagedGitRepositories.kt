@@ -89,6 +89,16 @@ data class GitRepositoryRecord(
 /** Read view of one registered repository plus its current bounded observation. */
 data class GitWorkspaceView(val record: GitRepositoryRecord, val observation: GitWorkspaceObservation)
 
+/** One diff read: the comparison, its changed files and an optional selected patch. */
+data class GitDiffView(
+    val record: GitRepositoryRecord,
+    val scope: GitDiffScope,
+    val commit: String?,
+    val parent: String?,
+    val listing: GitDiffListing,
+    val patch: Pair<GitDiffFile, GitPatch>?,
+)
+
 data class GitRepositoryListing(val repositories: List<GitRepositoryRecord>, val operations: List<GitOperationRecord>)
 
 data class GitOperationAdmission(val operation: GitOperationRecord, val replayed: Boolean)
@@ -271,6 +281,84 @@ class ManagedGitRepositories(
         }
         return GitWorkspaceView(record, observation)
     }
+
+    /** True while a queued or running operation holds this job's repository. */
+    fun busy(jobId: String): Boolean = synchronized(lock) {
+        reconcile(jobId)
+        operations(jobId).any { !it.state.terminal }
+    }
+
+    /** Resolved storage of one registered repository's primary work tree. */
+    private data class Located(val record: GitRepositoryRecord, val gitDir: Path, val workTree: Path)
+
+    private fun locate(jobId: String, repositoryId: String): Located {
+        val record = synchronized(lock) {
+            reconcile(jobId)
+            repositories(jobId).singleOrNull { it.repositoryId == repositoryId }
+                ?: throw ManagedGitException("NOT_FOUND", "The managed repository is unavailable.")
+        }
+        val directory = jobGitDirectory(jobId).resolve("repositories").resolve(record.repositoryId)
+        return Located(record, directory.resolve(GIT_DIR), directory.resolve(WORK_TREE))
+    }
+
+    fun repository(jobId: String, repositoryId: String): GitRepositoryRecord {
+        requireRunner()
+        return locate(jobId, repositoryId).record
+    }
+
+    private fun <T> reading(block: () -> T): T = try { block() } catch (failure: GitRepositoryException) {
+        throw ManagedGitException(failure.code, failure.message ?: "The repository could not be read.")
+    } catch (failure: GitCommandException) {
+        throw ManagedGitException(if (failure.kind == GitCommandException.Kind.FAILED) "REPOSITORY_CORRUPT" else "REPOSITORY_UNAVAILABLE",
+            "The repository could not be read within its bounds.")
+    }
+
+    /** History from a fixed start object; null starts at HEAD (an unborn HEAD has no history). */
+    fun history(jobId: String, repositoryId: String, start: String?, skip: Int, limit: Int): Pair<String?, GitHistoryPage> {
+        val runner = requireRunner()
+        val located = locate(jobId, repositoryId)
+        return reading {
+            GitConfigurationAudit.requireManaged(runner, located.gitDir)
+            val format = located.record.objectFormat
+            val origin = start ?: GitRepositoryInspector.head(runner, located.gitDir, format).objectId
+                ?: return@reading null to GitHistoryPage(emptyList(), false)
+            if (!commitExists(runner, located.gitDir, origin)) throw ManagedGitException("NOT_FOUND", "The commit is not in this repository.")
+            origin to GitReads.history(runner, located.gitDir, format, origin, skip, limit)
+        }
+    }
+
+    /** Changed files for one comparison and, when [file] selects one, its bounded patch. */
+    fun diff(jobId: String, repositoryId: String, scope: GitDiffScope, commit: String?, fileId: String?): GitDiffView {
+        val runner = requireRunner()
+        val located = locate(jobId, repositoryId)
+        return reading {
+            GitConfigurationAudit.requireManaged(runner, located.gitDir)
+            val format = located.record.objectFormat
+            val parent = commit?.let {
+                if (!commitExists(runner, located.gitDir, it)) throw ManagedGitException("NOT_FOUND", "The commit is not in this repository.")
+                GitReads.history(runner, located.gitDir, format, it, 0, 1).entries.single().parentObjectIds.firstOrNull()
+            }
+            val listing = GitReads.diff(runner, located.gitDir, located.workTree, format, scope, commit, parent)
+            val selected = fileId?.let { id ->
+                listing.files.firstOrNull { it.path.fileId(located.record.worktreeId) == id }
+                    ?: throw ManagedGitException("NOT_FOUND", "The file is not part of this comparison.")
+            }
+            GitDiffView(located.record, scope, commit, parent, listing,
+                selected?.let { it to GitReads.patch(runner, located.gitDir, located.workTree, scope, commit, parent, it) })
+        }
+    }
+
+    fun refs(jobId: String, repositoryId: String, skip: Int, limit: Int): Pair<GitRepositoryRecord, Pair<List<GitRefEntry>, Boolean>> {
+        val runner = requireRunner()
+        val located = locate(jobId, repositoryId)
+        return reading {
+            GitConfigurationAudit.requireManaged(runner, located.gitDir)
+            located.record to GitReads.refs(runner, located.gitDir, located.record.objectFormat, skip, limit)
+        }
+    }
+
+    private fun commitExists(runner: GitCommandRunner, gitDir: Path, objectId: String): Boolean =
+        runner.run(GitInvocation("cat-file", listOf("-e", "$objectId^{commit}"), gitDir = gitDir, allowedExitCodes = setOf(0, 1, 128))).exitCode == 0
 
     /** Startup sweep. Each job is also reconciled before its first use by this instance. */
     fun recover(jobIds: Collection<String>) = synchronized(lock) {

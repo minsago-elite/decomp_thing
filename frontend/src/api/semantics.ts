@@ -415,6 +415,19 @@ export function checkSemantics(document: ContractDocument, basePath = '/'): void
       if (items.length) requireValue(nextCursor === items.at(-1)?.cursor);
       break;
     }
+    case 'gitStatus': {
+      const { headState, headRefName, headObjectId, entries } = document.data;
+      const expected = { attached: [true, true], unborn: [true, false], detached: [false, true] }[headState];
+      requireValue(expected[0] === (headRefName !== null) && expected[1] === (headObjectId !== null));
+      requireValue(new Set(entries.map((entry) => entry.fileId)).size === entries.length);
+      break;
+    }
+    case 'gitDiff': {
+      const { scope, commitObjectId, patch, files } = document.data;
+      requireValue((scope === 'commit') === (commitObjectId !== null));
+      if (patch) requireValue(files.some((file) => file.fileId === patch.fileId));
+      break;
+    }
     case 'gitWorkspace': {
       const { objectFormat, headObjectId, refs, mapping, repositoryId, headState, headRefId, headRefName } = document.data;
       const expected = { attached: [true, true, true], unborn: [true, false, false], detached: [false, true, false] }[headState];

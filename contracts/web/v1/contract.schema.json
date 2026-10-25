@@ -4852,6 +4852,645 @@
         "sha256",
         "unknown"
       ]
+    },
+    "gitChange": {
+      "type": "string",
+      "enum": [
+        "none",
+        "added",
+        "modified",
+        "deleted",
+        "renamed",
+        "copied",
+        "type-changed"
+      ]
+    },
+    "gitStatusEntry": {
+      "type": "object",
+      "properties": {
+        "fileId": {
+          "$ref": "#/definitions/id"
+        },
+        "path": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 16384
+        },
+        "pathEscaped": {
+          "type": "boolean"
+        },
+        "originalPath": {
+          "anyOf": [
+            {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 16384
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "staged": {
+          "$ref": "#/definitions/gitChange"
+        },
+        "unstaged": {
+          "$ref": "#/definitions/gitChange"
+        },
+        "untracked": {
+          "type": "boolean"
+        },
+        "ignored": {
+          "type": "boolean"
+        },
+        "conflict": {
+          "anyOf": [
+            {
+              "type": "string",
+              "enum": [
+                "both-deleted",
+                "added-by-us",
+                "deleted-by-them",
+                "added-by-them",
+                "deleted-by-us",
+                "both-added",
+                "both-modified"
+              ]
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "submodule": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "fileId",
+        "path",
+        "pathEscaped",
+        "originalPath",
+        "staged",
+        "unstaged",
+        "untracked",
+        "ignored",
+        "conflict",
+        "submodule"
+      ],
+      "additionalProperties": false
+    },
+    "gitNotice": {
+      "type": "object",
+      "properties": {
+        "code": {
+          "type": "string",
+          "enum": [
+            "clean",
+            "dirty",
+            "unborn",
+            "detached",
+            "conflicted",
+            "busy",
+            "incomplete"
+          ]
+        },
+        "message": {
+          "type": "string",
+          "maxLength": 500
+        }
+      },
+      "required": [
+        "code",
+        "message"
+      ],
+      "additionalProperties": false
+    },
+    "gitStatus": {
+      "type": "object",
+      "properties": {
+        "repositoryId": {
+          "$ref": "#/definitions/id"
+        },
+        "worktreeId": {
+          "$ref": "#/definitions/id"
+        },
+        "repositoryVersion": {
+          "$ref": "#/definitions/version"
+        },
+        "worktreeVersion": {
+          "$ref": "#/definitions/version"
+        },
+        "headState": {
+          "type": "string",
+          "enum": [
+            "attached",
+            "detached",
+            "unborn"
+          ]
+        },
+        "headObjectId": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/objectId"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "headRefName": {
+          "anyOf": [
+            {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 1024
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "busy": {
+          "type": "boolean"
+        },
+        "complete": {
+          "type": "boolean"
+        },
+        "counts": {
+          "type": "object",
+          "properties": {
+            "staged": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 1000000
+            },
+            "unstaged": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 1000000
+            },
+            "untracked": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 1000000
+            },
+            "ignored": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 1000000
+            },
+            "conflicted": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 1000000
+            }
+          },
+          "required": [
+            "staged",
+            "unstaged",
+            "untracked",
+            "ignored",
+            "conflicted"
+          ],
+          "additionalProperties": false
+        },
+        "notices": {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/gitNotice"
+          },
+          "maxItems": 7
+        },
+        "entries": {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/gitStatusEntry"
+          },
+          "maxItems": 200
+        },
+        "nextCursor": {
+          "anyOf": [
+            {
+              "type": "string",
+              "pattern": "^[A-Za-z0-9._~-]{1,256}$"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "repositoryId",
+        "worktreeId",
+        "repositoryVersion",
+        "worktreeVersion",
+        "headState",
+        "headObjectId",
+        "headRefName",
+        "busy",
+        "complete",
+        "counts",
+        "notices",
+        "entries",
+        "nextCursor"
+      ],
+      "additionalProperties": false
+    },
+    "gitCommitSummary": {
+      "type": "object",
+      "properties": {
+        "objectId": {
+          "$ref": "#/definitions/objectId"
+        },
+        "parentObjectIds": {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/objectId"
+          },
+          "maxItems": 64
+        },
+        "authorName": {
+          "type": "string",
+          "maxLength": 256
+        },
+        "authorEmail": {
+          "type": "string",
+          "maxLength": 256
+        },
+        "authoredAt": {
+          "$ref": "#/definitions/instant"
+        },
+        "committedAt": {
+          "$ref": "#/definitions/instant"
+        },
+        "subject": {
+          "type": "string",
+          "maxLength": 200
+        },
+        "subjectTruncated": {
+          "type": "boolean"
+        },
+        "mapping": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/gitMapping"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "objectId",
+        "parentObjectIds",
+        "authorName",
+        "authorEmail",
+        "authoredAt",
+        "committedAt",
+        "subject",
+        "subjectTruncated",
+        "mapping"
+      ],
+      "additionalProperties": false
+    },
+    "gitHistory": {
+      "type": "object",
+      "properties": {
+        "repositoryId": {
+          "$ref": "#/definitions/id"
+        },
+        "worktreeId": {
+          "$ref": "#/definitions/id"
+        },
+        "startObjectId": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/objectId"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "entries": {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/gitCommitSummary"
+          },
+          "maxItems": 200
+        },
+        "nextCursor": {
+          "anyOf": [
+            {
+              "type": "string",
+              "pattern": "^[A-Za-z0-9._~-]{1,256}$"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "repositoryId",
+        "worktreeId",
+        "startObjectId",
+        "entries",
+        "nextCursor"
+      ],
+      "additionalProperties": false
+    },
+    "gitDiffFile": {
+      "type": "object",
+      "properties": {
+        "fileId": {
+          "$ref": "#/definitions/id"
+        },
+        "path": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 16384
+        },
+        "pathEscaped": {
+          "type": "boolean"
+        },
+        "originalPath": {
+          "anyOf": [
+            {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 16384
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "change": {
+          "$ref": "#/definitions/gitChange"
+        },
+        "oldObjectId": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/objectId"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "newObjectId": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/objectId"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "oldMode": {
+          "type": "string",
+          "pattern": "^[0-7]{6}$"
+        },
+        "newMode": {
+          "type": "string",
+          "pattern": "^[0-7]{6}$"
+        },
+        "binary": {
+          "type": "boolean"
+        },
+        "additions": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/uint64"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "deletions": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/uint64"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "newSizeBytes": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/uint64"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "fileId",
+        "path",
+        "pathEscaped",
+        "originalPath",
+        "change",
+        "oldObjectId",
+        "newObjectId",
+        "oldMode",
+        "newMode",
+        "binary",
+        "additions",
+        "deletions",
+        "newSizeBytes"
+      ],
+      "additionalProperties": false
+    },
+    "gitDiff": {
+      "type": "object",
+      "properties": {
+        "repositoryId": {
+          "$ref": "#/definitions/id"
+        },
+        "worktreeId": {
+          "$ref": "#/definitions/id"
+        },
+        "scope": {
+          "type": "string",
+          "enum": [
+            "staged",
+            "unstaged",
+            "commit"
+          ]
+        },
+        "commitObjectId": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/objectId"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "parentObjectId": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/objectId"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "files": {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/gitDiffFile"
+          },
+          "maxItems": 200
+        },
+        "complete": {
+          "type": "boolean"
+        },
+        "nextCursor": {
+          "anyOf": [
+            {
+              "type": "string",
+              "pattern": "^[A-Za-z0-9._~-]{1,256}$"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "patch": {
+          "anyOf": [
+            {
+              "type": "object",
+              "properties": {
+                "fileId": {
+                  "$ref": "#/definitions/id"
+                },
+                "text": {
+                  "type": "string",
+                  "maxLength": 262144
+                },
+                "truncated": {
+                  "type": "boolean"
+                },
+                "binary": {
+                  "type": "boolean"
+                }
+              },
+              "required": [
+                "fileId",
+                "text",
+                "truncated",
+                "binary"
+              ],
+              "additionalProperties": false
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "repositoryId",
+        "worktreeId",
+        "scope",
+        "commitObjectId",
+        "parentObjectId",
+        "files",
+        "complete",
+        "nextCursor",
+        "patch"
+      ],
+      "additionalProperties": false
+    },
+    "gitRefs": {
+      "type": "object",
+      "properties": {
+        "repositoryId": {
+          "$ref": "#/definitions/id"
+        },
+        "refs": {
+          "type": "array",
+          "maxItems": 200,
+          "items": {
+            "type": "object",
+            "properties": {
+              "refId": {
+                "$ref": "#/definitions/id"
+              },
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "branch",
+                  "tag"
+                ]
+              },
+              "displayName": {
+                "type": "string",
+                "maxLength": 1024
+              },
+              "objectId": {
+                "$ref": "#/definitions/objectId"
+              },
+              "peeledObjectId": {
+                "anyOf": [
+                  {
+                    "$ref": "#/definitions/objectId"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "version": {
+                "$ref": "#/definitions/version"
+              },
+              "current": {
+                "type": "boolean"
+              }
+            },
+            "required": [
+              "refId",
+              "kind",
+              "displayName",
+              "objectId",
+              "peeledObjectId",
+              "version",
+              "current"
+            ],
+            "additionalProperties": false
+          }
+        },
+        "nextCursor": {
+          "anyOf": [
+            {
+              "type": "string",
+              "pattern": "^[A-Za-z0-9._~-]{1,256}$"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "repositoryId",
+        "refs",
+        "nextCursor"
+      ],
+      "additionalProperties": false
     }
   },
   "oneOf": [
@@ -5654,6 +6293,102 @@
       "required": [
         "apiVersion",
         "kind",
+        "data"
+      ],
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "properties": {
+        "apiVersion": {
+          "const": 1
+        },
+        "kind": {
+          "const": "gitStatus"
+        },
+        "requestId": {
+          "$ref": "#/definitions/requestId"
+        },
+        "data": {
+          "$ref": "#/definitions/gitStatus"
+        }
+      },
+      "required": [
+        "apiVersion",
+        "kind",
+        "requestId",
+        "data"
+      ],
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "properties": {
+        "apiVersion": {
+          "const": 1
+        },
+        "kind": {
+          "const": "gitHistory"
+        },
+        "requestId": {
+          "$ref": "#/definitions/requestId"
+        },
+        "data": {
+          "$ref": "#/definitions/gitHistory"
+        }
+      },
+      "required": [
+        "apiVersion",
+        "kind",
+        "requestId",
+        "data"
+      ],
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "properties": {
+        "apiVersion": {
+          "const": 1
+        },
+        "kind": {
+          "const": "gitDiff"
+        },
+        "requestId": {
+          "$ref": "#/definitions/requestId"
+        },
+        "data": {
+          "$ref": "#/definitions/gitDiff"
+        }
+      },
+      "required": [
+        "apiVersion",
+        "kind",
+        "requestId",
+        "data"
+      ],
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "properties": {
+        "apiVersion": {
+          "const": 1
+        },
+        "kind": {
+          "const": "gitRefs"
+        },
+        "requestId": {
+          "$ref": "#/definitions/requestId"
+        },
+        "data": {
+          "$ref": "#/definitions/gitRefs"
+        }
+      },
+      "required": [
+        "apiVersion",
+        "kind",
+        "requestId",
         "data"
       ],
       "additionalProperties": false

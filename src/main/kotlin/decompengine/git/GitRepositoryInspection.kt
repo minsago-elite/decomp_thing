@@ -108,8 +108,12 @@ data class GitWorkspaceObservation(
     val refs: List<GitRefObservation>,
     val refsTruncated: Boolean,
     val dirty: Boolean,
-    /** SHA-256 of the bounded status output plus HEAD, so any observed change produces a new value. */
+    /**
+     * SHA-256 of HEAD, every non-ignored status entry (with its index blob and the work-tree file's
+     * size and modification time) and completeness, so any observed change produces a new value.
+     */
     val statusDigest: String,
+    val status: GitStatusSnapshot = GitStatusSnapshot(emptyList(), true),
 )
 
 object GitRepositoryInspector {
@@ -161,13 +165,20 @@ object GitRepositoryInspector {
             if (format == GitObjectFormat.UNKNOWN) throw GitRepositoryException("REPOSITORY_UNSUPPORTED", "The repository object format is not supported.")
             val head = head(runner, gitDir, format)
             val (refs, truncated) = refs(runner, gitDir, format)
-            val status = runner.run(GitInvocation("status", listOf("--porcelain=v1", "-z", "--untracked-files=all",
-                "--ignore-submodules=all", "--no-renames"), gitDir = gitDir, workTree = workTree, truncateStdout = true, limits = READ))
+            val status = GitReads.status(runner, gitDir, workTree)
+            val relevant = status.entries.filter { !it.ignored }
             val digest = MessageDigest.getInstance("SHA-256").apply {
-                update("git-workspace-status-v1\n${head.state.wireName}\n${head.refName ?: ""}\n${head.objectId ?: ""}\n${status.stdoutTruncated}\n".toByteArray())
-                update(status.stdout)
+                update("git-workspace-status-v2\n${head.state.wireName}\n${head.refName ?: ""}\n${head.objectId ?: ""}\n${status.complete}\n".toByteArray())
+                for (entry in relevant) {
+                    update(entry.path.bytes); update(0)
+                    update("${entry.originalPath?.display ?: ""}\u0000${entry.staged}\u0000${entry.unstaged}\u0000${entry.untracked}\u0000${entry.conflict}\u0000${entry.indexObjectId ?: ""}\u0000".toByteArray())
+                    // Re-editing an already modified file changes no status code; its size and time do.
+                    val file = entry.path.exact?.let { runCatching { workTree.resolve(it) }.getOrNull() }
+                    val stat = file?.let { runCatching { Files.readAttributes(it, java.nio.file.attribute.BasicFileAttributes::class.java, NOFOLLOW_LINKS) }.getOrNull() }
+                    update("${stat?.size() ?: -1}\u0000${stat?.lastModifiedTime()?.toInstant() ?: ""}\n".toByteArray())
+                }
             }.digest().joinToString("") { "%02x".format(it) }
-            return GitWorkspaceObservation(format, head, refs, truncated, status.stdout.isNotEmpty() || status.stdoutTruncated, digest)
+            return GitWorkspaceObservation(format, head, refs, truncated, relevant.isNotEmpty() || !status.complete, digest, status)
         } catch (failure: GitCommandException) {
             throw GitRepositoryException(if (failure.kind == GitCommandException.Kind.FAILED) "REPOSITORY_CORRUPT" else "REPOSITORY_UNAVAILABLE",
                 "The repository could not be read within its bounds.")

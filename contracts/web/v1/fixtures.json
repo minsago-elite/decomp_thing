@@ -142,6 +142,22 @@
       "valid": true
     },
     {
+      "file": "fixtures/git-status.json",
+      "valid": true
+    },
+    {
+      "file": "fixtures/git-history.json",
+      "valid": true
+    },
+    {
+      "file": "fixtures/git-diff.json",
+      "valid": true
+    },
+    {
+      "file": "fixtures/git-refs.json",
+      "valid": true
+    },
+    {
       "file": "fixtures/git-operation-init-completed.json",
       "valid": true
     },

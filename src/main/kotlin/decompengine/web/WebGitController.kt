@@ -31,6 +31,8 @@ internal class WebGitController(
     private val git: WebGitCapability,
     private val basePath: String,
 ) {
+    private val reads = WebGitReads { git.repositories() }
+
     fun handle(exchange: HttpExchange, parts: List<String>) {
         val jobId = parts[1]
         val mutation = if (parts.size == 3 && exchange.requestMethod == "POST") jobMutations.authorizeGitRepository(exchange) else null
@@ -42,8 +44,10 @@ internal class WebGitController(
                 throw WebAccessDenied(400, "UNSUPPORTED_HEADER", "Repository reads do not support conditional headers.")
             }
         }
-        requireNoWebApiQuery(exchange); requireJsonAccept(exchange)
-        if (!jobId.matches(JOB) || parts.drop(3).filterIndexed { index, _ -> index != 1 }.any { !it.matches(ID) }) {
+        val read = parts.size == 5
+        if (!read) requireNoWebApiQuery(exchange)
+        requireJsonAccept(exchange)
+        if (!jobId.matches(JOB) || (if (read) listOf(parts[3]) else parts.drop(3).filterIndexed { index, _ -> index != 1 }).any { !it.matches(ID) }) {
             throw WebAccessDenied(404, "NOT_FOUND", "The requested repository resource is unavailable.")
         }
         // A job must exist before any repository fact is disclosed; it also supplies the job version guard.
@@ -85,6 +89,7 @@ internal class WebGitController(
                         put("operations", JsonArray(listing.operations.map(::webGitOperation)))
                     })
                 }
+                read -> reads.handle(exchange, jobId, parts[3], parts[4])
                 parts.size == 4 -> {
                     val workspace = webGitWorkspace(repositories.workspace(jobId, parts[3]))
                     val etag = "\"${(workspace.getValue("worktreeVersion") as JsonPrimitive).content}\""
@@ -169,6 +174,10 @@ internal fun webGitDenied(failure: ManagedGitException): WebAccessDenied {
 private fun digest(prefix: String, text: String): String = prefix + MessageDigest.getInstance("SHA-256")
     .digest(text.toByteArray(Charsets.UTF_8)).joinToString("") { "%02x".format(it) }.take(32)
 
+internal fun webGitRefId(repositoryId: String, name: String) = digest("ref_", "$repositoryId\n$name")
+
+internal fun webGitRefVersion(name: String, objectId: String) = digest("ref_v_", "$name\n$objectId")
+
 internal fun webGitOperation(operation: GitOperationRecord): JsonObject = buildJsonObject {
     put("operationId", operation.operationId)
     put("jobId", operation.jobId)
@@ -204,7 +213,7 @@ internal fun webGitWorkspace(view: GitWorkspaceView): JsonObject {
     val record = view.record
     val observation = view.observation
     val head = observation.head
-    fun refId(name: String) = digest("ref_", "${record.repositoryId}\n$name")
+    fun refId(name: String) = webGitRefId(record.repositoryId, name)
     val headRef = if (head.state == GitHeadState.ATTACHED) GitRefObservation(checkNotNull(head.refName), checkNotNull(head.objectId)) else null
     val refs = (listOfNotNull(headRef) + observation.refs.filter { it != headRef }).take(200)
     val refsText = refs.joinToString("") { "${it.name}\u0000${it.objectId}\n" }
@@ -225,7 +234,7 @@ internal fun webGitWorkspace(view: GitWorkspaceView): JsonObject {
         put("refs", JsonArray(refs.map { ref ->
             buildJsonObject {
                 put("refId", refId(ref.name)); put("displayName", ref.name); put("objectId", ref.objectId)
-                put("version", digest("ref_v_", "${ref.name}\n${ref.objectId}"))
+                put("version", webGitRefVersion(ref.name, ref.objectId))
             }
         }))
         // No commit is mapped to a source revision until an explicit, validated commit records one.

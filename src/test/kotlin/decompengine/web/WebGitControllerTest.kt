@@ -182,6 +182,66 @@ class WebGitControllerTest {
         error(f.read("${f.collection}/${summary.getValue("repositoryId").jsonPrimitive.content}/operations/operation_${"0".repeat(32)}"), 404, "NOT_FOUND")
     }
 
+    /** Initialize through HTTP and return the repository path prefix and its on-disk directory. */
+    private fun Fixture.initialized(): Pair<String, Path> {
+        val admitted = send("POST", init(), headers())
+        awaitOperation(admitted.headers().firstValue("Location").orElseThrow())
+        val repositoryId = data(admitted, 202, "operation").getValue("repositoryId").jsonPrimitive.content
+        return "$collection/$repositoryId" to root.resolve("${job.id}/git/repositories/$repositoryId")
+    }
+
+    @Test fun `status history diff and refs reads are bounded anchored and path-free`(): Unit = Fixture().use { f ->
+        val (base, directory) = f.initialized()
+        decompengine.git.GitTestRepositories().use { g ->
+            val gitDir = directory.resolve("repository.git"); val workTree = directory.resolve("worktree")
+            fun raw(vararg args: String) = g.git("--git-dir=$gitDir", "--work-tree=$workTree", *args, cwd = workTree)
+            val unborn = data(f.read("$base/status"), 200, "gitStatus")
+            assertEquals("unborn", unborn.getValue("headState").jsonPrimitive.content)
+            assertTrue(unborn.getValue("notices").jsonArray.any { it.jsonObject.getValue("code").jsonPrimitive.content == "unborn" })
+            val untracked = unborn.getValue("entries").jsonArray.map { it.jsonObject }
+            assertTrue(untracked.single { it.getValue("path").jsonPrimitive.content == "src/main.c" }.getValue("untracked").jsonPrimitive.content.toBoolean())
+            assertEquals(schema.getValue("gitStatusEntry").jsonObject.getValue("properties").jsonObject.keys, untracked.first().keys)
+            raw("add", "-A"); raw("commit", "-q", "-m", "first")
+            repeat(3) { index -> Files.writeString(workTree.resolve("src/n$index.c"), "int n$index;\n"); raw("add", "-A"); raw("commit", "-q", "-m", "c$index") }
+            Files.writeString(workTree.resolve("src/main.c"), "int main(void) { return 2; }\n")
+            Files.writeString(workTree.resolve("src/untracked.c"), "int untracked;\n")
+            val status = data(f.read("$base/status?limit=1"), 200, "gitStatus")
+            assertEquals("attached", status.getValue("headState").jsonPrimitive.content)
+            val entry = status.getValue("entries").jsonArray.single().jsonObject
+            assertEquals("modified", entry.getValue("unstaged").jsonPrimitive.content)
+            val history = data(f.read("$base/history?limit=2"), 200, "gitHistory")
+            assertEquals(2, history.getValue("entries").jsonArray.size)
+            val cursor = history.getValue("nextCursor").jsonPrimitive.content
+            val head = history.getValue("startObjectId").jsonPrimitive.content
+            assertEquals(40, head.length)
+            val second = data(f.read("$base/history?cursor=$cursor&limit=2"), 200, "gitHistory")
+            assertEquals(2, second.getValue("entries").jsonArray.size); assertEquals(JsonNull, second["nextCursor"])
+            assertEquals(JsonNull, second.getValue("entries").jsonArray.first().jsonObject["mapping"])
+            val diff = data(f.read("$base/diff?scope=unstaged"), 200, "gitDiff")
+            val file = diff.getValue("files").jsonArray.single().jsonObject
+            val patch = data(f.read("$base/diff?scope=unstaged&file=${file.getValue("fileId").jsonPrimitive.content}"), 200, "gitDiff")
+            assertTrue(patch.getValue("patch").jsonObject.getValue("text").jsonPrimitive.content.contains("return 2"))
+            val commitDiff = data(f.read("$base/diff?scope=commit&commit=$head"), 200, "gitDiff")
+            assertEquals("src/n2.c", commitDiff.getValue("files").jsonArray.single().jsonObject.getValue("path").jsonPrimitive.content)
+            val refs = data(f.read("$base/refs"), 200, "gitRefs")
+            assertTrue(refs.getValue("refs").jsonArray.single().jsonObject.getValue("current").jsonPrimitive.content.toBoolean())
+            for (body in listOf(status, history, diff, refs)) assertFalse(body.toString().contains(f.root.toString()))
+            // A status page cursor is bound to the work-tree version it was taken from.
+            val statusCursor = data(f.read("$base/status?limit=1"), 200, "gitStatus").getValue("nextCursor")
+            Files.writeString(workTree.resolve("src/extra.c"), "int extra;\n")
+            error(f.read("$base/status?cursor=${statusCursor!!.jsonPrimitive.content}"), 409, "REF_CHANGED")
+            error(f.read("$base/history?start=${head.take(12)}"), 422, "VALIDATION_FAILED")
+            error(f.read("$base/history?start=$head&cursor=$cursor"), 400, "INVALID_CURSOR")
+            error(f.read("$base/history?start=${"0".repeat(40)}"), 404, "NOT_FOUND")
+            error(f.read("$base/diff?scope=commit"), 422, "VALIDATION_FAILED")
+            error(f.read("$base/diff?scope=staged&commit=$head"), 422, "VALIDATION_FAILED")
+            error(f.read("$base/diff?scope=unstaged&file=file_${"0".repeat(32)}"), 404, "NOT_FOUND")
+            error(f.read("$base/status?path=/etc"), 400, "VALIDATION_FAILED")
+            error(f.read("$base/status?limit=0"), 422, "VALIDATION_FAILED")
+            error(f.read("$base/status?limit=1&limit=2"), 400, "VALIDATION_FAILED")
+        }
+    }
+
     @Test fun `authorization guards and strict bodies precede any repository operation`(): Unit = Fixture().use { f ->
         val body = f.init()
         error(f.send(), 401)

@@ -1,0 +1,325 @@
+package decompengine.git
+
+import java.nio.ByteBuffer
+import java.nio.charset.CharacterCodingException
+import java.nio.charset.CodingErrorAction
+import java.nio.file.Path
+import java.time.Duration
+import java.time.Instant
+
+/**
+ * A path as Git reported it: exact bytes for identity, plus an unambiguous display form. Control
+ * characters, backslashes and invalid UTF-8 are escaped, so two different names never display
+ * alike and nothing in a name can be read as markup, an option or a second entry.
+ */
+class GitPath private constructor(val bytes: ByteArray, val display: String, val exact: String?) {
+    /** Opaque per-work-tree identity; the server maps it back to these bytes. */
+    fun fileId(worktreeId: String): String = "file_" + GitStorage.sha256(
+        "git-file-v1\n$worktreeId\n".toByteArray() + bytes).take(32)
+
+    override fun equals(other: Any?) = other is GitPath && other.bytes.contentEquals(bytes)
+    override fun hashCode() = bytes.contentHashCode()
+
+    companion object {
+        fun of(bytes: ByteArray): GitPath {
+            val decoded = try {
+                Charsets.UTF_8.newDecoder().onMalformedInput(CodingErrorAction.REPORT)
+                    .onUnmappableCharacter(CodingErrorAction.REPORT).decode(ByteBuffer.wrap(bytes)).toString()
+            } catch (_: CharacterCodingException) { null }
+            val display = if (decoded == null) bytes.joinToString("") { byte ->
+                val value = byte.toInt() and 0xff
+                if (value in 0x20..0x7e && value != '\\'.code) value.toChar().toString() else "\\x%02x".format(value)
+            } else buildString {
+                for (char in decoded) when {
+                    char == '\\' -> append("\\\\")
+                    char == '\n' -> append("\\n")
+                    char == '\t' -> append("\\t")
+                    char == '\r' -> append("\\r")
+                    char.isISOControl() || char == ' ' || char == ' ' -> append("\\u%04x".format(char.code))
+                    else -> append(char)
+                }
+            }
+            return GitPath(bytes, display, decoded)
+        }
+    }
+}
+
+enum class GitIndexChange(val wireName: String) {
+    NONE("none"), ADDED("added"), MODIFIED("modified"), DELETED("deleted"), RENAMED("renamed"),
+    COPIED("copied"), TYPE_CHANGED("type-changed");
+
+    companion object {
+        fun of(code: Char): GitIndexChange = when (code) {
+            '.' -> NONE; 'A' -> ADDED; 'M' -> MODIFIED; 'D' -> DELETED; 'R' -> RENAMED; 'C' -> COPIED; 'T' -> TYPE_CHANGED
+            else -> throw GitRepositoryException("REPOSITORY_CORRUPT", "Git status reported an unknown change code.")
+        }
+    }
+}
+
+enum class GitConflict(val wireName: String) {
+    BOTH_DELETED("both-deleted"), ADDED_BY_US("added-by-us"), DELETED_BY_THEM("deleted-by-them"),
+    ADDED_BY_THEM("added-by-them"), DELETED_BY_US("deleted-by-us"), BOTH_ADDED("both-added"), BOTH_MODIFIED("both-modified");
+
+    companion object {
+        fun of(code: String): GitConflict = when (code) {
+            "DD" -> BOTH_DELETED; "AU" -> ADDED_BY_US; "UD" -> DELETED_BY_THEM; "UA" -> ADDED_BY_THEM
+            "DU" -> DELETED_BY_US; "AA" -> BOTH_ADDED; "UU" -> BOTH_MODIFIED
+            else -> throw GitRepositoryException("REPOSITORY_CORRUPT", "Git status reported an unknown conflict code.")
+        }
+    }
+}
+
+/** One status record. Staged and unstaged changes of the same path are reported together. */
+data class GitStatusEntry(
+    val path: GitPath,
+    val originalPath: GitPath?,
+    val staged: GitIndexChange,
+    val unstaged: GitIndexChange,
+    val untracked: Boolean,
+    val ignored: Boolean,
+    val conflict: GitConflict?,
+    val submodule: Boolean,
+    /** Index blob for tracked entries, so re-staging different content is observable. */
+    val indexObjectId: String? = null,
+)
+
+data class GitStatusSnapshot(val entries: List<GitStatusEntry>, val complete: Boolean)
+
+data class GitHistoryEntry(
+    val objectId: String,
+    val parentObjectIds: List<String>,
+    val authorName: String,
+    val authorEmail: String,
+    val authoredAt: Instant,
+    val committedAt: Instant,
+    val subject: String,
+    val subjectTruncated: Boolean,
+)
+
+data class GitHistoryPage(val entries: List<GitHistoryEntry>, val more: Boolean)
+
+enum class GitDiffScope(val wireName: String) { STAGED("staged"), UNSTAGED("unstaged"), COMMIT("commit") }
+
+data class GitDiffFile(
+    val path: GitPath,
+    val originalPath: GitPath?,
+    val change: GitIndexChange,
+    val oldObjectId: String?,
+    val newObjectId: String?,
+    val oldMode: String,
+    val newMode: String,
+    val binary: Boolean,
+    val additions: Long?,
+    val deletions: Long?,
+    val newSizeBytes: Long?,
+)
+
+data class GitDiffListing(val files: List<GitDiffFile>, val complete: Boolean)
+
+data class GitPatch(val text: String, val truncated: Boolean, val binary: Boolean)
+
+data class GitRefEntry(val name: String, val objectId: String, val peeledObjectId: String?)
+
+/**
+ * Bounded, NUL-delimited reads of a managed repository (#574, #575). Every command disables
+ * external diff tools and textconv, never resolves submodules, and passes paths after `--` as
+ * literal pathspecs. Output limits produce explicit incompleteness rather than silent truncation.
+ */
+object GitReads {
+    const val MAX_STATUS_BYTES = 4 * 1024 * 1024
+    const val MAX_PATCH_BYTES = 128 * 1024
+    const val MAX_DIFF_FILES = 2000
+    const val MAX_SUBJECT = 200
+    private val LIMITS = GitExecutionLimits(Duration.ofSeconds(30), MAX_STATUS_BYTES, 16 * 1024)
+    private val DIFF_OPTIONS = listOf("--no-ext-diff", "--no-textconv", "--no-color", "--ignore-submodules=all", "-M")
+
+    /** Split NUL-terminated records at the byte level so arbitrary path bytes survive. */
+    internal fun records(bytes: ByteArray): MutableList<ByteArray> {
+        val records = mutableListOf<ByteArray>()
+        var start = 0
+        for (index in bytes.indices) if (bytes[index] == 0.toByte()) {
+            records += bytes.copyOfRange(start, index); start = index + 1
+        }
+        if (start < bytes.size) records += bytes.copyOfRange(start, bytes.size)
+        return records
+    }
+
+    /** Split a header record into exactly [count] space-separated fields, the last keeping its spaces. */
+    private fun fields(record: ByteArray, count: Int): Pair<List<String>, ByteArray> {
+        val values = mutableListOf<String>()
+        var start = 0
+        for (index in record.indices) {
+            if (values.size == count - 1) break
+            if (record[index] == ' '.code.toByte()) { values += String(record, start, index - start, Charsets.US_ASCII); start = index + 1 }
+        }
+        if (values.size != count - 1) throw GitRepositoryException("REPOSITORY_CORRUPT", "Git status output is malformed.")
+        return values to record.copyOfRange(start, record.size)
+    }
+
+    fun status(runner: GitCommandRunner, gitDir: Path, workTree: Path): GitStatusSnapshot {
+        val result = runner.run(GitInvocation("status", listOf("--porcelain=v2", "-z", "--untracked-files=all",
+            "--ignored=matching", "--find-renames", "--ignore-submodules=all", "--no-ahead-behind"),
+            gitDir = gitDir, workTree = workTree, truncateStdout = true, limits = LIMITS))
+        val records = records(result.stdout)
+        // A truncated final record may be partial; drop it and report incompleteness instead.
+        if (result.stdoutTruncated && records.isNotEmpty()) records.removeAt(records.lastIndex)
+        val entries = mutableListOf<GitStatusEntry>()
+        var index = 0
+        while (index < records.size) {
+            val record = records[index++]
+            if (record.isEmpty()) continue
+            when (record[0].toInt().toChar()) {
+                '1' -> {
+                    val (values, path) = fields(record, 9)
+                    entries += ordinary(values[1], values[2], GitPath.of(path), null, values[7])
+                }
+                '2' -> {
+                    val (values, path) = fields(record, 10)
+                    if (index >= records.size) break
+                    entries += ordinary(values[1], values[2], GitPath.of(path), GitPath.of(records[index++]), values[7])
+                }
+                'u' -> {
+                    val (values, path) = fields(record, 11)
+                    entries += GitStatusEntry(GitPath.of(path), null, GitIndexChange.NONE, GitIndexChange.NONE, false, false,
+                        GitConflict.of(values[1]), values[2] != "N...")
+                }
+                '?' -> entries += GitStatusEntry(GitPath.of(record.copyOfRange(2, record.size)), null, GitIndexChange.NONE,
+                    GitIndexChange.NONE, untracked = true, ignored = false, conflict = null, submodule = false)
+                '!' -> entries += GitStatusEntry(GitPath.of(record.copyOfRange(2, record.size)), null, GitIndexChange.NONE,
+                    GitIndexChange.NONE, untracked = false, ignored = true, conflict = null, submodule = false)
+                '#' -> Unit
+                else -> throw GitRepositoryException("REPOSITORY_CORRUPT", "Git status output is malformed.")
+            }
+        }
+        return GitStatusSnapshot(entries, !result.stdoutTruncated)
+    }
+
+    private fun ordinary(code: String, submodule: String, path: GitPath, original: GitPath?, index: String): GitStatusEntry {
+        if (code.length != 2) throw GitRepositoryException("REPOSITORY_CORRUPT", "Git status output is malformed.")
+        return GitStatusEntry(path, original, GitIndexChange.of(code[0]), GitIndexChange.of(code[1]), false, false, null,
+            submodule != "N...", index.takeIf { it.isNotEmpty() && it.any { char -> char != '0' } })
+    }
+
+    /** First-page start is fixed by the caller, so moving refs cannot shift later pages. */
+    fun history(runner: GitCommandRunner, gitDir: Path, format: GitObjectFormat, start: String, skip: Int, limit: Int): GitHistoryPage {
+        val objectId = format.requireObjectId(start)
+        require(skip in 0..1_000_000 && limit in 1..200)
+        val result = runner.run(GitInvocation("log", listOf("-z", "--no-decorate", "--no-color", "--no-show-signature",
+            "--no-notes", "--no-use-mailmap", "--topo-order", "--skip=$skip", "--max-count=${limit + 1}",
+            "--format=%H%x1f%P%x1f%an%x1f%ae%x1f%at%x1f%ct%x1f%s", objectId, "--"), gitDir = gitDir, limits = LIMITS))
+        val entries = records(result.stdout).filter { it.isNotEmpty() }.map { record ->
+            val values = record.toString(Charsets.UTF_8).split('\u001f')
+            if (values.size != 7) throw GitRepositoryException("REPOSITORY_CORRUPT", "Git history output is malformed.")
+            val parents = values[1].split(' ').filter { it.isNotEmpty() }.map(format::requireObjectId)
+            GitHistoryEntry(format.requireObjectId(values[0]), parents, values[2].take(256), values[3].take(256),
+                Instant.ofEpochSecond(values[4].toLong()), Instant.ofEpochSecond(values[5].toLong()),
+                values[6].take(MAX_SUBJECT), values[6].length > MAX_SUBJECT)
+        }
+        return GitHistoryPage(entries.take(limit), entries.size > limit)
+    }
+
+    /** Arguments selecting one comparison; commit scope compares against the first parent (or nothing). */
+    private fun comparison(scope: GitDiffScope, commit: String?, parent: String?): Pair<String, List<String>> = when (scope) {
+        GitDiffScope.UNSTAGED -> "diff" to emptyList()
+        GitDiffScope.STAGED -> "diff" to listOf("--cached")
+        GitDiffScope.COMMIT -> "diff-tree" to listOf("-r", "--no-commit-id") +
+            (if (parent == null) listOf("--root", checkNotNull(commit)) else listOf(parent, checkNotNull(commit)))
+    }
+
+    fun diff(runner: GitCommandRunner, gitDir: Path, workTree: Path?, format: GitObjectFormat, scope: GitDiffScope,
+        commit: String?, parent: String?): GitDiffListing {
+        val (command, selection) = comparison(scope, commit, parent)
+        val tree = if (scope == GitDiffScope.COMMIT) null else workTree
+        val raw = runner.run(GitInvocation(command, selection + DIFF_OPTIONS + listOf("--raw", "-z", "--no-abbrev"),
+            gitDir = gitDir, workTree = tree, truncateStdout = true, limits = LIMITS))
+        val numstat = runner.run(GitInvocation(command, selection + DIFF_OPTIONS + listOf("--numstat", "-z"),
+            gitDir = gitDir, workTree = tree, truncateStdout = true, limits = LIMITS))
+        val counts = HashMap<GitPath, Pair<Long?, Long?>>()
+        run {
+            val records = records(numstat.stdout)
+            var index = 0
+            while (index < records.size) {
+                val record = records[index++]
+                if (record.isEmpty()) continue
+                val text = String(record, Charsets.ISO_8859_1)
+                val added = text.substringBefore('\t'); val deleted = text.substringAfter('\t').substringBefore('\t')
+                val pathBytes = record.copyOfRange(added.length + deleted.length + 2, record.size)
+                // A rename or copy has an empty path field followed by its original and new paths.
+                val path = if (pathBytes.isEmpty()) {
+                    if (index + 1 >= records.size) break
+                    index++
+                    GitPath.of(records[index++])
+                } else GitPath.of(pathBytes)
+                counts[path] = added.toLongOrNull() to deleted.toLongOrNull()
+            }
+        }
+        val zero = "0".repeat(format.hexLength ?: 40)
+        val files = mutableListOf<GitDiffFile>()
+        val records = records(raw.stdout)
+        if (raw.stdoutTruncated && records.isNotEmpty()) records.removeAt(records.lastIndex)
+        var index = 0
+        while (index < records.size && files.size < MAX_DIFF_FILES) {
+            val header = records[index++].toString(Charsets.US_ASCII)
+            if (header.isEmpty()) continue
+            val parts = header.removePrefix(":").split(' ')
+            if (!header.startsWith(":") || parts.size != 5 || index >= records.size) {
+                throw GitRepositoryException("REPOSITORY_CORRUPT", "Git diff output is malformed.")
+            }
+            val code = parts[4][0]
+            val change = GitIndexChange.of(if (code == 'U') 'M' else code)
+            val first = GitPath.of(records[index++])
+            val (original, path) = if (change == GitIndexChange.RENAMED || change == GitIndexChange.COPIED) {
+                if (index >= records.size) break
+                first to GitPath.of(records[index++])
+            } else null to first
+            val (added, deleted) = counts[path] ?: (null to null)
+            val oldId = parts[2].takeIf { it != zero }?.let(format::requireObjectId)
+            val newId = parts[3].takeIf { it != zero }?.let(format::requireObjectId)
+            files += GitDiffFile(path, original, change, oldId, newId, parts[0], parts[1],
+                binary = counts.containsKey(path) && added == null && deleted == null, additions = added, deletions = deleted, newSizeBytes = null)
+        }
+        val sizes = objectSizes(runner, gitDir, files.mapNotNull { it.newObjectId }.distinct())
+        return GitDiffListing(files.map { it.copy(newSizeBytes = it.newObjectId?.let(sizes::get)) },
+            !raw.stdoutTruncated && !numstat.stdoutTruncated && index >= records.size)
+    }
+
+    /** Sizes from object headers only; contents are never read for metadata. */
+    fun objectSizes(runner: GitCommandRunner, gitDir: Path, objectIds: List<String>): Map<String, Long> {
+        if (objectIds.isEmpty()) return emptyMap()
+        val result = runner.run(GitInvocation("cat-file", listOf("--batch-check=%(objectname) %(objectsize)"), gitDir = gitDir,
+            input = objectIds.take(MAX_DIFF_FILES).joinToString("") { "$it\n" }.toByteArray(), limits = LIMITS))
+        return result.text.lineSequence().mapNotNull { line ->
+            val parts = line.split(' ')
+            if (parts.size == 2) parts[1].toLongOrNull()?.let { parts[0] to it } else null
+        }.toMap()
+    }
+
+    /** A bounded unified patch for one file. Binary content is never rendered. */
+    fun patch(runner: GitCommandRunner, gitDir: Path, workTree: Path?, scope: GitDiffScope, commit: String?, parent: String?,
+        file: GitDiffFile): GitPatch {
+        if (file.binary) return GitPatch("", truncated = false, binary = true)
+        val path = file.path.exact ?: return GitPatch("", truncated = false, binary = false)
+        val paths = listOfNotNull(file.originalPath?.exact, path)
+        val (command, selection) = comparison(scope, commit, parent)
+        val result = runner.run(GitInvocation(command, selection + DIFF_OPTIONS + listOf("-p", "-U3", "--") + paths,
+            gitDir = gitDir, workTree = if (scope == GitDiffScope.COMMIT) null else workTree, truncateStdout = true,
+            limits = LIMITS.copy(maxStdoutBytes = MAX_PATCH_BYTES)))
+        return GitPatch(result.stdout.toString(Charsets.UTF_8), result.stdoutTruncated, binary = false)
+    }
+
+    /** Branches and tags with peeled tag targets, at most [limit] after [skip]. */
+    fun refs(runner: GitCommandRunner, gitDir: Path, format: GitObjectFormat, skip: Int, limit: Int): Pair<List<GitRefEntry>, Boolean> {
+        require(skip in 0..100_000 && limit in 1..200)
+        val result = runner.run(GitInvocation("for-each-ref", listOf("--format=%(objectname)%00%(refname)%00%(*objectname)",
+            "--count=${skip + limit + 1}", "refs/heads", "refs/tags"), gitDir = gitDir, limits = LIMITS))
+        val entries = result.text.lineSequence().filter { it.isNotEmpty() }.map { line ->
+            val parts = line.split('\u0000')
+            if (parts.size != 3 || !GitRefNames.isObservedRefName(parts[1])) {
+                throw GitRepositoryException("REPOSITORY_CORRUPT", "A reference has an invalid name or object ID.")
+            }
+            GitRefEntry(parts[1], format.requireObjectId(parts[0]), parts[2].takeIf { it.isNotEmpty() }?.let(format::requireObjectId))
+        }.toList()
+        val page = entries.drop(skip)
+        return page.take(limit) to (page.size > limit)
+    }
+}
