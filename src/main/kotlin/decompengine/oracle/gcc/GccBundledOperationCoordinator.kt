@@ -110,6 +110,16 @@ internal class GccBundledFullExportOperation(
     }
 }
 
+/** Passive transport of a published result and its existing same-process selected admission. */
+internal class GccBundledFullExportPublication(
+    val resultPath: Path,
+    canonicalProgramModelBytes: ByteArray,
+    val selectedInputs: VerifiedStructuralInputsV1?,
+) {
+    private val model = canonicalProgramModelBytes.copyOf()
+    val canonicalProgramModelBytes: ByteArray get() = model.copyOf()
+}
+
 /** Issued only after a second contained worker replays the frozen recovered model. */
 internal class GccBundledStructuralReplayOperation(
     val profile: GccDriverStructuralInputsV1,
@@ -752,8 +762,12 @@ internal class GccBundledPreparedOperation internal constructor(
     }
 
     /** Publishes the immutable model; only supported, independently replayed dimensions are scored. */
+    fun publishFullExportCliResult(authenticatedExport: GccDriverStructuralAuthenticatedFullExportV1): Path =
+        publishFullExportResult(authenticatedExport).resultPath
+
+    /** Retains the genuine admission for a same-process consumer; persisted receipts cannot recreate it. */
     @Synchronized
-    fun publishFullExportCliResult(authenticatedExport: GccDriverStructuralAuthenticatedFullExportV1): Path {
+    fun publishFullExportResult(authenticatedExport: GccDriverStructuralAuthenticatedFullExportV1): GccBundledFullExportPublication {
         check(!closed && !poisoned && !cliPublicationAttempted)
         check(intent.bundledRuntime.recoveryMode == "full" && intent.bundledRuntime.invocationVersion != 8) {
             "structural binding publication requires a full-recovery operation"
@@ -872,7 +886,8 @@ internal class GccBundledPreparedOperation internal constructor(
             journal.verify("after full-export result publication")
             lease.requireCurrentOperationRunRootAfterCgroupAbsence(runRoot)
             deadline.requireCurrent()
-            return cli.options.output.resolve("result.json")
+            return GccBundledFullExportPublication(cli.options.output.resolve("result.json"),
+                authenticatedExport.canonicalProgramModelBytes, verifiedBoundaryInputs).also { deadline.requireCurrent() }
         } catch (failure: Throwable) {
             poisoned = true
             throw failure

@@ -12,6 +12,14 @@ import decompengine.oracle.structural.CanonicalProgramModelStreaming
 import decompengine.oracle.structural.StructuralBoundaryReplayWorkerV1
 import decompengine.oracle.structural.StructuralProductionReplayContract
 import decompengine.oracle.structural.StructuralSelectedFunctionAssessmentV1
+import decompengine.project.ArchivalBundleLimits
+import decompengine.project.ArchivalBundleVerifier
+import decompengine.project.ArchivalProjectAuditor
+import decompengine.project.ModulePlanJson
+import decompengine.project.ProgramAnalysisResult
+import decompengine.project.RecoveryAssessmentProjectionV1
+import decompengine.project.ReconstructionProfile
+import decompengine.project.SourceTreeManifestReader
 import java.nio.ByteBuffer
 import java.nio.channels.FileChannel
 import java.nio.file.Files
@@ -30,6 +38,7 @@ import kotlin.test.assertFailsWith
 import kotlin.test.assertFalse
 import kotlin.test.assertSame
 import kotlin.test.assertTrue
+import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.JsonObject
@@ -1054,12 +1063,14 @@ class GccProductionFullExportQualificationTest {
 
     @Test
     fun `live selected GCC full export retains its profile-bound model and receipt evidence`() {
+        val qualifyConsumers = System.getenv("DECOMP_REQUIRE_GCC_ASSESSMENT_CONSUMERS") == "true"
         assumeTrue(
-            System.getenv("DECOMP_REQUIRE_GCC_CLI_FULL_EXPORT") == "true",
+            System.getenv("DECOMP_REQUIRE_GCC_CLI_FULL_EXPORT") == "true" || qualifyConsumers,
             "real GCC full-export qualification is opt-in",
         )
         val engine = System.getenv("DECOMP_GCC_CLI_FULL_EXPORT_ENGINE") ?: "cc1"
         require(engine in setOf("cc1", "driver")) { "qualification requires cc1 or driver" }
+        require(!qualifyConsumers || engine == "driver") { "assessment consumer qualification requires the fixed driver route" }
         val profilePath = configured("DECOMP_GCC_CLI_PROFILE")
         // Refuse before preparing output or launching a CLI; serial success cannot qualify runtime6.
         if (engine == "cc1") requireParallelCc1QualificationProfile(profilePath)
@@ -1076,13 +1087,15 @@ class GccProductionFullExportQualificationTest {
             assertFalse(input.startsWith(scratch) || scratch.startsWith(input), "inputs/evidence must be outside scratch")
         }
 
-        val output = privateDirectory(evidenceRoot.resolve("cli-output"))
+        val commandOutput = privateDirectory(evidenceRoot.resolve("cli-output"))
+        val output = if (qualifyConsumers) commandOutput.resolve("analysis") else commandOutput
         val launcherEvidence = privateDirectory(evidenceRoot.resolve("launcher"))
-        val arguments = listOf(
-            engine, binary.toString(),
+        val command = if (qualifyConsumers) "gcc-driver-reconstruct" else "gcc-engine-full-export"
+        val arguments = (if (qualifyConsumers) emptyList() else listOf(engine)) + listOf(
+            binary.toString(),
             "--profile", profilePath.toString(),
             "--ghidra-archive", archive.toString(),
-            "--output", output.toString(),
+            "--output", commandOutput.toString(),
             "--scratch", scratch.toString(),
         )
         withFailedCommandStdout(scratch, evidenceRoot) {
@@ -1093,12 +1106,12 @@ class GccProductionFullExportQualificationTest {
                     launcherEvidence,
                     timeoutSeconds = if (engine == "driver") 2100 else 9900,
                     installation = installation,
-                    command = "gcc-engine-full-export",
+                    command = command,
                 ),
                 "installed GCC full-export CLI failed; inspect retained launcher evidence",
             )
             val launcherSummary = verifyInstalledCliEvidence(
-                launcherEvidence, arguments, installation, expectedExit = 0, command = "gcc-engine-full-export",
+                launcherEvidence, arguments, installation, expectedExit = 0, command = command,
             )
 
             val resultBytes = readStable(output.resolve("result.json"), MAXIMUM_RESULT_BYTES)
@@ -1422,8 +1435,11 @@ class GccProductionFullExportQualificationTest {
                     "referenceBudgetPassed" to JsonPrimitive(wallNanos <= 1_800_000_000_000L),
                 )
             } else emptyMap()
+            val consumerFields = if (qualifyConsumers) qualifyAssessmentConsumers(commandOutput, captured,
+                launcherEvidence, binary, GccStructuralReconstructionOptions.parse(arguments).reconstructionProfile) else emptyMap()
             val summary = JsonObject(mapOf(
-                "provider" to JsonPrimitive(if (engine == "driver") "gcc-driver-live-full-export-capture-v1" else "gcc-live-full-export-capture-v1"),
+                "provider" to JsonPrimitive(if (qualifyConsumers) "gcc-driver-live-assessment-consumer-capture-v1"
+                    else if (engine == "driver") "gcc-driver-live-full-export-capture-v1" else "gcc-live-full-export-capture-v1"),
                 "engine" to JsonPrimitive(engine),
                 "operationId" to JsonPrimitive(operationId),
                 "requestSha256" to JsonPrimitive(result.requiredText("requestSha256")),
@@ -1441,12 +1457,136 @@ class GccProductionFullExportQualificationTest {
                 "limitation" to JsonPrimitive(if (engine == "driver")
                     "live contained driver export with admitted selected function findings and a complete unassessed model census; interfaces, calls, globals, types, calibration, full recovery, and release eligibility remain unavailable"
                     else "live contained export only; independent identity replay and production scoring remain open"),
-            ) + boundaryFields + throughputFields)
+            ) + boundaryFields + throughputFields + consumerFields)
             publish(evidenceRoot.resolve("qualification.json"), OracleJson.canonicalBytes(summary))
             if (engine == "cc1") assertTrue(summary.getValue("referenceBudgetPassed").jsonPrimitive.boolean,
                 "cc1 export exceeded the 30-minute reference budget; completed diagnostic evidence was retained")
             println("Retained unscored live $engine full-export evidence at $captured (${modelBytes} model bytes, $functionCount functions)")
         }
+    }
+
+    /** Checks the fresh installed consumer output without importing any live capability. */
+    private fun qualifyAssessmentConsumers(output: Path, producerCapture: Path, launcher: Path,
+        binary: Path, profile: ReconstructionProfile): Map<String, JsonElement> {
+        val reconstruction = output.resolve("reconstruction")
+        val project = reconstruction.resolve("source-tree")
+        val captured = privateDirectory(producerCapture.resolve("assessment-consumers"))
+        val manifestBytes = readStable(project.resolve("source_tree_manifest.json"), 16 * 1024 * 1024)
+        val manifest = SourceTreeManifestReader.parse(manifestBytes.decodeToString(), profile)
+        assertEquals(4, manifest.schemaVersion)
+        val summary = requireNotNull(manifest.recordedRecoverySummary)
+        val evidenceByPath = manifest.files.associateBy { it.path }
+        fun evidence(id: String, maximumBytes: Int): ByteArray {
+            val path = profile.layout.declaration(id).materialize()
+            return readStable(project.resolve(path), maximumBytes).also { bytes ->
+                assertEquals(evidenceByPath.getValue(path).sha256, OracleArtifacts.sha256(bytes))
+            }
+        }
+        val modelBytes = evidence("program-model-evidence", ProgramAnalysisResult.MAXIMUM_MODEL_BYTES)
+        assertContentEquals(readStable(producerCapture.resolve("program_model.json"), ProgramAnalysisResult.MAXIMUM_MODEL_BYTES), modelBytes)
+        val ordinaryAnalysis = ProgramAnalysisResult(modelBytes)
+        val planBytes = evidence("module-plan-evidence", RecoveryAssessmentProjectionV1.MAXIMUM_BYTES)
+        val plan = ModulePlanJson.readCanonical(planBytes, RecoveryAssessmentProjectionV1.MAXIMUM_BYTES)
+        val confidenceBytes = evidence("confidence-evidence", RecoveryAssessmentProjectionV1.MAXIMUM_BYTES)
+        val confidence = Json.parseToJsonElement(confidenceBytes.decodeToString()).jsonObject
+        assertEquals(JsonPrimitive(3), confidence.getValue("schemaVersion"))
+        val projection = RecoveryAssessmentProjectionV1.parsePassive(
+            confidence.getValue("recoveryAssessment").toString().toByteArray(Charsets.UTF_8), ordinaryAnalysis, plan)
+        assertEquals(JsonPrimitive(projection.sha256), confidence.getValue("recoveryAssessmentSha256"))
+        assertContentEquals(summary.canonicalBytes, projection.publicSummary(OracleArtifacts.sha256(confidenceBytes)).canonicalBytes)
+        assertEquals("recorded-origin-unverified", projection.verificationDisposition(ordinaryAnalysis, plan))
+        val document = projection.document
+        assertEquals("reported-assessment", document.requiredText("authority"))
+        assertEquals("unassessed", document.requiredText("recoveryAssessmentState"))
+        assertEquals(JsonPrimitive(false), document.getValue("complete"))
+        assertEquals(JsonPrimitive(false), document.getValue("releaseEligible"))
+        assertEquals(20, document.getValue("dimensions").jsonArray.size)
+        assertTrue(document.getValue("dimensions").jsonArray.all {
+            it.jsonObject["state"] == JsonPrimitive("unassessed") && it.jsonObject["factDenominator"] == JsonNull
+        })
+        val population = document.getValue("population").jsonObject
+        assertEquals(JsonPrimitive(0), population.getValue("assessedEntityCount"))
+        assertEquals(population.getValue("modelEntityCount"), population.getValue("unassessedEntityCount"))
+        val selectedBytes = readStable(producerCapture.resolve(GccBundledFullExportCliResultV2.SELECTED_FUNCTION_ASSESSMENT_NAME),
+            StructuralSelectedFunctionAssessmentV1.MAXIMUM_BYTES)
+        val selected = OracleJson.parseCanonical(selectedBytes, StructuralProductionReplayContract.FUNCTION_ACCURACY_LIMITS).jsonObject
+        val sourceOverlay = document.getValue("bindings").jsonObject.getValue("sourceOverlay").jsonObject
+        assertEquals(OracleArtifacts.sha256(selectedBytes), sourceOverlay.requiredText("sha256"))
+        assertEquals(selectedBytes.size.toLong(), sourceOverlay.getValue("bytes").jsonPrimitive.long)
+        for (field in listOf("modelEntityCount", "functionCount", "globalCount", "typeCount", "unassessedEntityCount"))
+            assertEquals(selected.getValue("population").jsonObject.getValue(field), population.getValue(field), field)
+        val originalMeasurements = selected.getValue("measurements").jsonObject
+        val measurements = document.getValue("measurements").jsonObject
+        val starts = measurements.getValue("functionStarts").jsonObject
+        val originalStarts = originalMeasurements.getValue("functionStarts").jsonObject
+        for (field in listOf("rawRecoveredCount", "scoredRecoveredCount", "ignoredExcludedCount", "exactMatches",
+            "nearMisses", "falsePositives", "falseNegatives")) assertEquals(originalStarts.getValue(field), starts.getValue(field), field)
+        val ratios = selected.getValue("ratios").jsonObject
+        assertEquals(ratios.getValue("exactStartPrecision"), starts.getValue("precision"))
+        assertEquals(ratios.getValue("exactStartRecall"), starts.getValue("recall"))
+        val aliases = measurements.getValue("survivingSymbolIdentity").jsonObject
+        for (field in listOf("population", "exact", "nameMismatch", "missing")) assertEquals(
+            originalMeasurements.getValue("survivingSymbolIdentity").jsonObject.getValue(field), aliases.getValue(field), field)
+        assertEquals(ratios.getValue("survivingSymbolIdentity"), aliases.getValue("identityRecovery"))
+
+        val auditBytes = readStable(project.resolve("reports/archival_audit.json"), RecoveryAssessmentProjectionV1.MAXIMUM_BYTES)
+        val audit = Json.parseToJsonElement(auditBytes.decodeToString()).jsonObject
+        val reporting = audit.getValue("recoveryReporting").jsonObject
+        assertEquals(JsonPrimitive(1), reporting.getValue("schemaVersion"))
+        assertEquals("same-process-owned-selected-evidence", reporting.requiredText("verificationDisposition"))
+        assertEquals(summary.document, reporting.getValue("recordedRecoverySummary"))
+        assertEquals(document, audit.getValue("recoveryAssessment"))
+        val reconstructionBytes = readStable(reconstruction.resolve("reconstruction.json"), 256 * 1024)
+        val reconstructed = Json.parseToJsonElement(reconstructionBytes.decodeToString()).jsonObject
+        assertEquals(reporting, reconstructed.getValue("recoveryReporting"))
+        assertEquals("unresolved", reconstructed.requiredText("implementationStatus"))
+        assertTrue(manifest.files.filter { decompengine.project.ProjectFileRole.MODULE_IMPLEMENTATION in it.roles }
+            .all { it.acceptedImplementation == false })
+        val markdown = evidence("unresolved-evidence", RecoveryAssessmentProjectionV1.MAXIMUM_BYTES).decodeToString()
+        assertTrue(markdown.contains(projection.sha256) && markdown.contains("origin unverified"))
+        val stdoutBytes = readStable(launcher.resolve("launcher-stdout.bin"), 16 * 1024)
+        val stdout = stdoutBytes.decodeToString()
+        assertTrue(stdout.contains("assessment projection sha256: ${projection.sha256}"))
+        assertTrue(stdout.contains("assessment origin: compared with owned selected evidence in this process"))
+        assertTrue(stdout.contains("model entities: ${population.getValue("modelEntityCount")}; overall unassessed: ${population.getValue("unassessedEntityCount")}"))
+
+        val limits = ArchivalBundleLimits(profile.budgets.archiveMaximumEntries,
+            profile.budgets.archiveMaximumFileBytes, profile.budgets.archiveMaximumTotalBytes)
+        val archive = reconstruction.resolve("source-tree.zip")
+        StableControlFile.open(archive, profile.budgets.archiveMaximumTotalBytes, "consumer qualification archive").use { guard ->
+            assertEquals(reconstructed.requiredText("archiveSha256"), guard.authenticatedSha256)
+            val extracted = captured.resolve("extracted")
+            ArchivalBundleVerifier.extractAndVerify(archive, extracted, limits, profile)
+            assertContentEquals(modelBytes, readStable(extracted.resolve(profile.layout.declaration("program-model-evidence").materialize()),
+                ProgramAnalysisResult.MAXIMUM_MODEL_BYTES))
+            assertContentEquals(confidenceBytes, readStable(extracted.resolve(profile.layout.declaration("confidence-evidence").materialize()),
+                RecoveryAssessmentProjectionV1.MAXIMUM_BYTES))
+            assertContentEquals(auditBytes, readStable(extracted.resolve("reports/archival_audit.json"), RecoveryAssessmentProjectionV1.MAXIMUM_BYTES))
+            val cold = ArchivalProjectAuditor.audit(extracted, profile, limits = limits, publish = false)
+            assertEquals("recorded-origin-unverified", cold.recoveryAssessmentVerificationDisposition)
+            assertEquals(document, cold.recoveryAssessment)
+            assertContentEquals(summary.canonicalBytes, requireNotNull(cold.recordedRecoverySummary).canonicalBytes)
+            val metadata = decompengine.web.qualifyRecordedRecoveryMetadata(extracted, binary, profile, summary)
+            publish(captured.resolve("metadata.json"), OracleJson.canonicalBytes(metadata))
+            publish(captured.resolve("cold-audit.json"), cold.toJson().toByteArray(Charsets.UTF_8))
+            guard.verifyUnchanged("after consumer qualification archive extraction")
+        }
+        for ((name, bytes) in listOf("source_tree_manifest.json" to manifestBytes, "confidence.json" to confidenceBytes,
+            "archival_audit.json" to auditBytes, "reconstruction.json" to reconstructionBytes,
+            "projection.json" to projection.canonicalBytes, "recorded-summary.json" to summary.canonicalBytes,
+            "cli-stdout.bin" to stdoutBytes)) publish(captured.resolve(name), bytes)
+        return mapOf("assessmentConsumers" to JsonObject(mapOf(
+            "schemaVersion" to JsonPrimitive(1), "route" to JsonPrimitive("gcc-driver-reconstruct"),
+            "mode" to JsonPrimitive("evidence-only"), "projectionSha256" to JsonPrimitive(projection.sha256),
+            "confidenceSha256" to JsonPrimitive(OracleArtifacts.sha256(confidenceBytes)),
+            "sourceManifestSha256" to JsonPrimitive(OracleArtifacts.sha256(manifestBytes)),
+            "archiveSha256" to reconstructed.getValue("archiveSha256"), "bindings" to document.getValue("bindings"),
+            "population" to population, "measurements" to measurements,
+            "sameProcessDisposition" to reporting.getValue("verificationDisposition"),
+            "importDisposition" to JsonPrimitive("recorded-origin-unverified"),
+            "metadataSha256" to JsonPrimitive(OracleArtifacts.sha256(readStable(captured.resolve("metadata.json"), 128 * 1024))),
+            "complete" to JsonPrimitive(false), "releaseEligible" to JsonPrimitive(false),
+        )))
     }
 
     @Test

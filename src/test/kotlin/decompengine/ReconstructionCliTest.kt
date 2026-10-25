@@ -26,6 +26,35 @@ import kotlin.test.assertTrue
 
 class ReconstructionCliTest {
     @Test
+    fun `reported assessment CLI shows complete unassessed population without private model text`() {
+        val model = decompengine.project.RecoveredProgramModel(inputSha256 = "a".repeat(64), functions = listOf(
+            decompengine.project.RecoveredFunction("private-function-id", "private_function_name", 0x1000u,
+                "int private_function_name(void)", decompiledC = "private source text")))
+        val analysis = decompengine.project.ProgramAnalysisResult.fromModel(model)
+        val plan = decompengine.project.DeterministicModulePlanner().plan(model)
+        val projection = decompengine.project.RecoveryAssessmentProjectionV1.derive(analysis, plan)
+        val summary = projection.publicSummary("b".repeat(64))
+        val bytes = ByteArrayOutputStream()
+        PrintStream(bytes, true, Charsets.UTF_8).use { output ->
+            renderReconstructionSuccess("project", "archive.zip", "c".repeat(64), emptyList(), output,
+                summary, "no-structural-evidence")
+            val rendered = bytes.toString(Charsets.UTF_8)
+            assertTrue(rendered.contains("model entities: 1; overall unassessed: 1"))
+            assertTrue(rendered.contains("assessment projection sha256: ${projection.sha256}"))
+            assertTrue(rendered.contains("selected measurements: unavailable"))
+            assertTrue(rendered.contains("assessment origin: no structural evidence"))
+            for (privateValue in listOf("private-function-id", "private_function_name", "private source text"))
+                assertFalse(rendered.contains(privateValue))
+            bytes.reset()
+            assertFailsWith<IllegalArgumentException> {
+                renderReconstructionSuccess("project", "archive.zip", "c".repeat(64), emptyList(), output,
+                    summary, "production-verified")
+            }
+            assertEquals(0, bytes.size())
+        }
+    }
+
+    @Test
     fun `reconstruction completion masks paths and full framing while preserving computed public SHA`() {
         val bytes = ByteArrayOutputStream()
         val hash = "1".repeat(64)

@@ -15,6 +15,7 @@ import kotlinx.serialization.json.longOrNull
 
 private val INSTALLED_GCC_CLI_COMMANDS = setOf(
     "gcc-engine-plan", "gcc-engine-full-export", "gcc-engine-runtime-diagnostic", "gcc-engine-native-calls",
+    "gcc-driver-reconstruct",
 )
 
 /** Test orchestration only; the CLI's production controller remains the authority. */

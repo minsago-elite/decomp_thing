@@ -100,11 +100,13 @@ internal data class GccBundledCliOptions(
 
 /** Immutable CLI selection and directory identity, committed as part of the operation request. */
 internal class GccBundledCliInvocation(val options: GccBundledCliOptions, arguments: List<String>,
-    identities: Map<Path, LinuxFileIdentity>) {
+    identities: Map<Path, LinuxFileIdentity>,
+    private val reconstruction: GccStructuralReconstructionInvocation? = null) {
     private val directories = java.util.Map.copyOf(identities)
     val path: Path = options.output.resolve("invocation.json")
     private val encoded = OracleJson.canonicalBytes(JsonObject(mapOf(
-        "provider" to JsonPrimitive("gcc-bundled-cli-invocation-v1"), "schemaVersion" to JsonPrimitive(1),
+        "provider" to JsonPrimitive(if (reconstruction == null) "gcc-bundled-cli-invocation-v1" else "gcc-bundled-cli-invocation-v2"),
+        "schemaVersion" to JsonPrimitive(if (reconstruction == null) 1 else 2),
         "argv" to JsonArray((listOf(options.commandName) + arguments)
             .map(::JsonPrimitive)),
         "engineId" to JsonPrimitive(options.engineId), "binary" to JsonPrimitive(options.binary.toString()),
@@ -117,7 +119,7 @@ internal class GccBundledCliInvocation(val options: GccBundledCliOptions, argume
                 "inode" to JsonPrimitive(identity.key.inode), "mountId" to JsonPrimitive(identity.mountId),
                 "uid" to JsonPrimitive(identity.uid), "gid" to JsonPrimitive(identity.gid), "mode" to JsonPrimitive(identity.mode)))
         }),
-    )))
+    ) + (reconstruction?.let { mapOf("reconstructionInvocation" to OracleJson.parseCanonical(it.canonicalBytes)) } ?: emptyMap())))
     val canonicalBytes: ByteArray get() = encoded.copyOf()
 
     init {
@@ -126,9 +128,11 @@ internal class GccBundledCliInvocation(val options: GccBundledCliOptions, argume
             runtimeDiagnostics = options.runtimeDiagnostics, nativeCallObservations = options.nativeCallObservations) == options) {
             "CLI argv differs from its selected options"
         }
+        reconstruction?.requireAnalysisSelection(options, arguments)
     }
 
     fun requireCurrent() {
+        reconstruction?.requireCurrent()
         directories.forEach { (path, expected) ->
             require(path.toRealPath() == path)
             LinuxFilesystemSyscalls.openRoot(path).use { current ->

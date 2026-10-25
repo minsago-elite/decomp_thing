@@ -20,6 +20,16 @@ if [[ "$mode" != qualification && "$DECOMP_GCC_CLI_FULL_EXPORT_ENGINE" != cc1 ]]
   echo "$mode requires cc1" >&2
   exit 64
 fi
+export DECOMP_REQUIRE_GCC_ASSESSMENT_CONSUMERS="${DECOMP_REQUIRE_GCC_ASSESSMENT_CONSUMERS:-false}"
+case "$DECOMP_REQUIRE_GCC_ASSESSMENT_CONSUMERS" in
+  false) ;;
+  true)
+    if [[ "$mode" != qualification || "$DECOMP_GCC_CLI_FULL_EXPORT_ENGINE" != driver ]]; then
+      echo 'selected assessment consumers require the driver qualification route' >&2
+      exit 64
+    fi ;;
+  *) echo 'assessment consumer selection requires true or false' >&2; exit 64 ;;
+esac
 export DECOMP_GCC_CLI_EXPORT_BINARY="${DECOMP_GCC_CLI_EXPORT_BINARY:-${DECOMP_GCC_CLI_CC1_BINARY:-}}"
 export DECOMP_GCC_CLI_EXPORT_SCRATCH="${DECOMP_GCC_CLI_EXPORT_SCRATCH:-${DECOMP_GCC_CLI_CC1_FRESH_SCRATCH:-}}"
 

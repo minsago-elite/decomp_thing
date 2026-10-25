@@ -8,7 +8,42 @@ import java.nio.file.Path
 import java.security.SecureRandom
 
 internal object GccBundledCliCommand {
-    fun run(options: GccBundledCliOptions, arguments: List<String>): Path {
+    fun run(options: GccBundledCliOptions, arguments: List<String>): Path = runOwned(options, arguments, null) { owner ->
+        if (options.runtimeDiagnostics) {
+            owner.executeRuntimeDiagnostic()
+        } else if (options.nativeCallObservations) {
+            owner.executeNativeCallObservations()
+            owner.publishNativeCallCliResult()
+        } else if (options.fullRecoveryExport) {
+            publishFullExport(owner, options).resultPath
+        } else {
+            if (options.resumeAfterCheckpoint == null) owner.execute()
+            else {
+                owner.executeUntilCheckpoint(options.resumeAfterCheckpoint)
+                owner.resume()
+            }
+            owner.plan()
+            owner.publishCliResult()
+        }
+    }
+
+    fun runDriverAnalysis(options: GccBundledCliOptions, arguments: List<String>,
+        reconstruction: GccStructuralReconstructionInvocation): GccBundledFullExportPublication {
+        require(options.engineId == "driver" && options.fullRecoveryExport && !options.runtimeDiagnostics &&
+            !options.nativeCallObservations && options.resumeAfterCheckpoint == null)
+        reconstruction.requireAnalysisSelection(options, arguments)
+        return runOwned(options, arguments, reconstruction) { owner -> publishFullExport(owner, options) }
+    }
+
+    private fun publishFullExport(owner: GccBundledPreparedOperation, options: GccBundledCliOptions): GccBundledFullExportPublication {
+        val fullExport = owner.executeFullExport()
+        val parallelProfile = options.profile.fileName.toString() == "compiler-engines-exporter17-parallel.json"
+        val structuralInputs = GccDriverStructuralInputsV1.load(options.profile.parent, options.engineId, parallelProfile)
+        return owner.publishFullExportResult(structuralInputs.captureFullExport(fullExport))
+    }
+
+    private fun <T> runOwned(options: GccBundledCliOptions, arguments: List<String>,
+        reconstruction: GccStructuralReconstructionInvocation?, operation: (GccBundledPreparedOperation) -> T): T {
         require(GccBundledCliOptions.parse(arguments, fullRecoveryExport = options.fullRecoveryExport,
             runtimeDiagnostics = options.runtimeDiagnostics, nativeCallObservations = options.nativeCallObservations) == options)
         listOf(options.binary, options.profile, options.archive, options.output, options.scratch).forEach { path ->
@@ -28,7 +63,7 @@ internal object GccBundledCliCommand {
                 }
             }
             LinuxFilesystemSyscalls.synchronize(output)
-            GccBundledCliInvocation(options, arguments, identities).also { selected ->
+            GccBundledCliInvocation(options, arguments, identities, reconstruction).also { selected ->
                 selected.requireCurrent()
                 DescriptorBoundAtomicStateFile.publishNoReplace(output, "invocation.json", selected.canonicalBytes, 256 * 1024)
                 selected.requireCurrent()
@@ -46,25 +81,6 @@ internal object GccBundledCliCommand {
             GccDriverStructuralInputsV1.load(options.profile.parent, options.engineId, parallelProfile)
                 .requireFullExportIntent(intent.canonicalBytes)
         }
-        return GccBundledOperationCoordinator.prepareNew(intent, journal, options.scratch).use { owner ->
-            if (options.runtimeDiagnostics) {
-                owner.executeRuntimeDiagnostic()
-            } else if (options.nativeCallObservations) {
-                owner.executeNativeCallObservations()
-                owner.publishNativeCallCliResult()
-            } else if (options.fullRecoveryExport) {
-                val fullExport = owner.executeFullExport()
-                val structuralInputs = GccDriverStructuralInputsV1.load(options.profile.parent, options.engineId, parallelProfile)
-                owner.publishFullExportCliResult(structuralInputs.captureFullExport(fullExport))
-            } else {
-                if (options.resumeAfterCheckpoint == null) owner.execute()
-                else {
-                    owner.executeUntilCheckpoint(options.resumeAfterCheckpoint)
-                    owner.resume()
-                }
-                owner.plan()
-                owner.publishCliResult()
-            }
-        }
+        return GccBundledOperationCoordinator.prepareNew(intent, journal, options.scratch).use(operation)
     }
 }
