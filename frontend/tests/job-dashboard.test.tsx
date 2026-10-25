@@ -317,7 +317,7 @@ it.each(['unavailable', 'unsupported', 'unknown', 'missing', 'empty'] as const)(
           expect(selectedCapability?.textContent).toContain('The selected harness cannot start these workflows.');
         }
       }
-      expect(screen.getAllByRole('button').map(button => button.textContent)).toEqual(['Display preferences', 'Sign out']);
+      expect(screen.getAllByRole('button').map(button => button.textContent)).toEqual(['Display preferences', 'Sign out', 'Preview export']);
       expect(gateway.bootstrap).toHaveBeenCalledOnce();
       expect(gateway.exchange).not.toHaveBeenCalled();
       expect(gateway.logout).not.toHaveBeenCalled();

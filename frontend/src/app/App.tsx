@@ -186,7 +186,7 @@ function Shell({ basePath, identity, recovery, reload, session }: ShellProps) {
             <Router onLoadStart={() => setLoading(true)} onLoadEnd={viewReady} onRouteChange={viewReady}>
               <Route path={homePath} component={Home} basePath={basePath} session={session} />
               <Route path={uploadPath} component={UploadPage} basePath={basePath} session={session} />
-              <Route path={runtimePath} component={Runtime} identity={identity} session={session} />
+              <Route path={runtimePath} component={Runtime} identity={identity} session={session} basePath={basePath} />
               <Route path={`${basePath}/jobs/:jobId/runs/:runId/revisions/:revisionId/sources/:directoryId`} component={Sources} resource="directory" basePath={basePath} session={session} />
               <Route path={`${basePath}/jobs/:jobId/runs/:runId/revisions/:revisionId/source-files/:fileId`} component={Sources} resource="file" basePath={basePath} session={session} />
               <Route path={`${basePath}/jobs/:jobId/runs`} component={RunHistory} basePath={basePath} session={session} />

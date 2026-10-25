@@ -1,0 +1,175 @@
+{
+  "apiVersion": 1,
+  "kind": "supportExport",
+  "requestId": "request_example_1",
+  "data": {
+    "schemaVersion": 1,
+    "exportId": "0e9f6c8a-2d4b-4f61-9a7e-5c3b2a190817",
+    "generatedAt": "2026-09-05T00:00:03Z",
+    "redactionVersion": "web-redaction-v1",
+    "scope": {
+      "kind": "server",
+      "jobId": null
+    },
+    "sections": [
+      {
+        "id": "runtime",
+        "content": {
+          "javaVersion": "21-fixture",
+          "osName": "linux",
+          "architecture": "x86_64",
+          "gitVersion": null
+        }
+      },
+      {
+        "id": "limits",
+        "content": {
+          "requestDeadlineMs": "30000",
+          "uploadDeadlineMs": "120000",
+          "downloadIdleMs": "120000",
+          "maxJsonBytes": "1048576",
+          "maxUploadBytes": "33554432",
+          "maxSourceChunkBytes": "262144",
+          "maxLogChunkBytes": "65536",
+          "maxEventCount": "10000",
+          "maxEventBytes": "16777216",
+          "terminalEventRetentionMs": "86400000",
+          "defaultPageLimit": 50,
+          "maxPageLimit": 200
+        }
+      },
+      {
+        "id": "capabilities",
+        "content": [
+          {
+            "id": "harness_acp",
+            "state": "unavailable",
+            "reasonCode": "AGENT_NOT_CONFIGURED",
+            "message": "Configure an available agent before starting this workflow.",
+            "workflows": [
+              "reconstruct"
+            ],
+            "agentContractVersion": 1,
+            "limits": null
+          },
+          {
+            "id": "git_local",
+            "state": "unsupported",
+            "reasonCode": "FEATURE_NOT_IMPLEMENTED",
+            "message": "This fixture does not claim managed Git is implemented.",
+            "workflows": [],
+            "agentContractVersion": null,
+            "limits": null
+          }
+        ]
+      },
+      {
+        "id": "recovery",
+        "content": {
+          "schemaVersion": 1,
+          "displayOnly": true,
+          "scannedEntries": 0,
+          "retainedUploadStages": 0,
+          "retainedMetadataFiles": 0,
+          "observedBytes": "0",
+          "uninspectedEntries": 0,
+          "inventoryComplete": true
+        }
+      },
+      {
+        "id": "audit",
+        "content": {
+          "entries": [
+            {
+              "sequence": "7",
+              "recordedAt": "2026-09-05T00:00:02Z",
+              "requestId": "0f3c2b1a-1111-4222-8333-944455556666",
+              "actor": {
+                "kind": "browser_session",
+                "sessionDigest": "abababababababababababababababababababababababababababababababab"
+              },
+              "action": "run.cancel",
+              "target": {
+                "jobId": "1234567890abcdef1234567890abcdef",
+                "runId": "run_example_1",
+                "expectedVersion": "run_version_1",
+                "resultVersion": "run_version_2"
+              },
+              "outcome": "accepted",
+              "status": 202,
+              "reasonCode": null
+            },
+            {
+              "sequence": "8",
+              "recordedAt": "2026-09-05T00:00:02Z",
+              "requestId": null,
+              "actor": {
+                "kind": "unauthenticated",
+                "sessionDigest": null
+              },
+              "action": "run.cancel",
+              "target": {
+                "jobId": "1234567890abcdef1234567890abcdef",
+                "runId": "run_example_1",
+                "expectedVersion": "run_version_1",
+                "resultVersion": null
+              },
+              "outcome": "rejected",
+              "status": 403,
+              "reasonCode": "CSRF_DENIED"
+            }
+          ],
+          "omittedEntries": "6",
+          "unrecordedEntries": "0",
+          "complete": true
+        }
+      }
+    ],
+    "omittedSections": [
+      {
+        "id": "job",
+        "reason": "not-in-scope"
+      },
+      {
+        "id": "runs",
+        "reason": "not-in-scope"
+      },
+      {
+        "id": "input-binary",
+        "reason": "job-content"
+      },
+      {
+        "id": "source-content",
+        "reason": "job-content"
+      },
+      {
+        "id": "artifact-content",
+        "reason": "job-content"
+      },
+      {
+        "id": "progress-events",
+        "reason": "job-content"
+      },
+      {
+        "id": "environment",
+        "reason": "private-configuration"
+      },
+      {
+        "id": "host-paths",
+        "reason": "private-configuration"
+      },
+      {
+        "id": "credentials",
+        "reason": "secret"
+      },
+      {
+        "id": "session-material",
+        "reason": "secret"
+      },
+      {
+        "id": "agent-reasoning",
+        "reason": "not-recorded"
+      }
+    ]
+  }
+}

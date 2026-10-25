@@ -141,6 +141,7 @@ internal storage optimization and must not merge identity, permissions or histor
 | `GET /api/v1/bootstrap` | `200 bootstrap` | Sanitized capabilities/readiness/build IDs/limits; #166 |
 | `GET /api/v1/jobs` | `200 jobs` | Bounded cursor/filter query; #162 |
 | `GET`, `HEAD /api/v1/recovery` | `200 recovery` | Private, bounded, display-only recovery-file summary; no query parameters |
+| `GET /api/v1/support-export?scope=server` or `?scope=job&jobId={jobId}` | `200 supportExport` | Explicitly scoped redacted diagnostic export; no default scope; audited; #177/#522 |
 | `GET /api/v1/uploads/{uploadId}` | `200 uploadProgress` | Ephemeral session-bound transfer bytes and publication phase; #169 |
 | `POST /api/v1/jobs` | `201 job`, `Location: J` | Multipart, upload limits, idempotency; #162 |
 | `GET J` | `200 job`, ETag | Snapshot read; #159/#160 |
@@ -988,6 +989,48 @@ Activity uses SSE after bounded polling catch-up, with bounded reconnect and pol
 Run state now stays locked during bounded journal capture, with locks released before HTTP delivery.
 Controlled authenticated HTTP snapshot/replay and SSE eviction/resume checks now cover concurrent
 cutover. Slow-socket qualification and timed retention remain outstanding under #174.
+
+## Shared redaction, audit and support export
+
+**Redaction (`web-redaction-v1`).** One policy (`WebRedactionPolicy`) is installed on the listener and applied
+where bytes leave the server: every versioned JSON document (success and error envelopes), each live SSE frame
+and polling page (so live and replayed events are identical), legacy JSON, the server-generated exploration
+download and support exports. Persisted failure prose is passed through the same policy before it is stored. It
+replaces values of credential-named environment variables and long opaque configured values with `[redacted]`
+(short generic environment values such as `1` or `development` are deliberately not treated as secrets, because
+substituting them would corrupt public vocabulary), credential syntax (authorization headers, bearer tokens,
+`password=`/`token=`-style assignments, URL user information and well-known token prefixes) and private host
+paths (the storage root, home, temporary, working and Java directories plus the generic per-user and temporary
+directory families) with `[private-path]`. Closed-syntax protocol fields (`*Id`, `*Cursor`, `*Token`, `*Sha256`,
+`version` and similar) keep their exact bytes unless they contain a configured literal, so cursors and ETags stay
+valid. A download is byte-identical when nothing needs redaction, and the exploration artifact digest is computed
+over the same projection the download serves. Committed job content (`sourceChunk` and source-file downloads) is
+digest-bound user data, not server configuration, and is served verbatim under job authorization. Progress events
+remain allowlisted projections: journal prose, paths, usage that was not reported and any agent reasoning are never
+requested or displayed (the activity view shows "Not reported").
+
+**Audit.** Every sensitive action is recorded durably in `<store>/.web-audit/` before the request thread
+finishes, including refused and failed requests: `session.start`, `session.end`, `job.upload`, `job.update`,
+`job.delete`, `run.start`, `run.cancel`, `run.recover`, `run.progress-pin`, `agent.preflight`,
+`operator.auth-inspection` (legacy) and `support.export`. An entry records a sequence, time, the response request
+ID, the actor (`browser_session` with a domain-separated SHA-256 digest of the authorization-owned session
+identity, or `unauthenticated`), the action, the target job/run, the client's strong `If-Match` version and the
+version the response reported, the outcome (`accepted`, `replayed`, `rejected` for 4xx, `failed` for 5xx) with its
+status and public error code. Every stored field is closed syntax, so no credential, cookie, CSRF token, filename,
+request body or host path can be recorded. Retention is two fsync'd segments of 2048 entries; rotation advances an
+exact omitted-entry count, a torn final append is discarded on reopen and a write that cannot be made durable is
+counted as unrecorded (never thrown into the request). New mutation routes are audited by adding their method and
+route to `WebAuditRecorder.versionedAction`.
+
+**Support export.** `GET /api/v1/support-export` requires an explicit scope: `scope=server` (runtime, limits,
+capabilities, recovery inventory and the latest 100 audit entries) or `scope=job&jobId=…` (the job, its latest 50
+attempts and that job's latest 100 audit entries). Any other parameter, a missing scope or a malformed job ID is
+`400 VALIDATION_FAILED`; an unknown job is `404 NOT_FOUND`. The `supportExport` document records `redactionVersion`
+and lists every `omittedSections` entry with a reason: `not-in-scope`, `unavailable` (a section that could not be
+read; its state is unknown), or the sections never exported (`input-binary`, `source-content`, `artifact-content`,
+`progress-events` as `job-content`; `environment`, `host-paths` as `private-configuration`; `credentials`,
+`session-material` as `secret`; `agent-reasoning` as `not-recorded`). The Runtime view previews the document only on
+an explicit request and downloads exactly the previewed bytes; it never issues a second request for the download.
 
 ## Agent preflight and harness readiness
 
