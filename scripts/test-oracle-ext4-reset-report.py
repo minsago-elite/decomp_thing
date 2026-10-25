@@ -243,6 +243,7 @@ class ReportGateTests(unittest.TestCase):
             private + "oracle-ext4-reset-install.py": "scripts/oracle-ext4-reset-install.py",
             private + "oracle-ext4-reset-fixture-mutations.py": "scripts/oracle-ext4-reset-fixture-mutations.py",
             private + "ci-oracle-ext4-reset.py": "scripts/ci-oracle-ext4-reset.py",
+            private + "verify-oracle-ext4-reset.py": "scripts/verify-oracle-ext4-reset.py",
             private + "mke2fs.conf": "scripts/oracle-ext4-reset-mke2fs.conf",
             "/etc/systemd/system/decomp-oracle-ext4-reset-ci.service": "scripts/systemd/decomp-oracle-ext4-reset-ci.service",
             "/etc/systemd/system/decomp-oracle-ext4-reset-retain.target": "scripts/systemd/decomp-oracle-ext4-reset-retain.target",
@@ -265,6 +266,9 @@ class ReportGateTests(unittest.TestCase):
         (self.evidence / "cases").mkdir(parents=True)
         self.receipts = {}
         generation = 1
+        budget_timestamps = []
+        last_terminal = 0
+        clock = 10000000000
         order = [case for case in GATE.CASE_NAMES if case != "K30"] + ["K30"]
         for case_id in order:
             before = {"generation": str(generation), "filesystemUuid": str(uuid.UUID(int=generation)), "scratch": f"/var/lib/decomp-oracle-ext4-reset-ci/public/g-{generation:016x}/scratch", "phase": "PUBLISHED", "gateMode": 0o711, "mountId": generation + 100, "loopRdev": os.makedev(7, 100), "imageDevice": 8, "imageInode": 900, "imageBytes": GATE.IMAGE_BYTES, "availableBytes": 32 * 1024 * 1024, "availableInodes": 4000}
@@ -276,18 +280,27 @@ class ReportGateTests(unittest.TestCase):
             elif outcome == "teardown":
                 after.update(phase="RESERVED_UNMOUNTED", gateMode=0, mountId=0, availableBytes=0, availableInodes=0)
             attempts = []
+            if case_id in {"K01", "K30"}:
+                attempts.append({"action": "request", "exitCode": 1, "phaseBefore": "PUBLISHED", "phaseAfter": "PUBLISHED", "invocationId": None if case_id == "K01" else "1" * 32, "formatterCount": 0})
             if outcome == "reset":
                 if case_id in {"K02", "K07", "K08", "K09", "K11", "K12", "K22", "K23", "K24", "K25", "K27", "K29", "K32"}:
                     attempts.append({"action": "request", "exitCode": 1, "phaseBefore": "PUBLISHED", "phaseAfter": "PUBLISHED", "invocationId": None, "formatterCount": 0})
-                attempts.append({"action": "resume" if attempts else "request", "exitCode": 0, "phaseBefore": "PUBLISHED", "phaseAfter": "PUBLISHED", "invocationId": "1" * 32, "formatterCount": 1})
+                if case_id == "K25":
+                    attempts.append(copy.deepcopy(attempts[0]))
+                attempts.append({"action": "resume" if attempts else "request", "exitCode": 0, "phaseBefore": "PUBLISHED", "phaseAfter": "READY_PRIVATE", "invocationId": "1" * 32, "formatterCount": 0})
+                attempts.append({"action": "finalize", "exitCode": 0, "phaseBefore": "READY_PRIVATE", "phaseAfter": "PUBLISHED", "invocationId": "1" * 32, "formatterCount": 1})
             deaths = []
             if case_id in GATE.REQUIRED_DEATHS or case_id == "K29":
-                role, barrier = GATE.REQUIRED_DEATHS.get(case_id, ("controller", "ACTION_TIMEOUT"))
+                role, barrier = GATE.REQUIRED_DEATHS.get(case_id, ("custodian", "ACTION_TIMEOUT"))
                 deaths = [{"role": role, "pid": 1000 + int(case_id[1:]), "startTicks": 100, "signal": 9, "reaped": True, "barrier": barrier}]
             canaries = []
             if case_id in GATE.REQUIRED_CANARIES:
                 label = GATE.REQUIRED_CANARIES[case_id]
                 canaries = [{"label": label, "beforeSha256": GATE._digest(label.encode()), "afterSha256": GATE._digest(label.encode())}]
+                if case_id == "K23":
+                    canaries.append({"label": "nested-mount", "beforeSha256": "6" * 64, "afterSha256": "6" * 64})
+                if case_id == "K25":
+                    canaries.append({"label": "state-anchor", "beforeSha256": "6" * 64, "afterSha256": "6" * 64})
             holders = []
             if case_id in {"K07", "K08", "K12"}:
                 holders = [{"kind": {"K07": "file", "K08": "namespace", "K12": "utility"}[case_id], "pid": 2000, "startTicks": 101, "reaped": True, "refusalExitCode": 1}]
@@ -300,12 +313,41 @@ class ReportGateTests(unittest.TestCase):
                 facts["allocatedLoopRdev"] = os.makedev(7, 101)
             if case_id == "K30":
                 facts.update(removedOwnedFixture=True, retainedReservation=True)
-            events = [{"operation": "state-read", "startMonotonicNs": 1, "endMonotonicNs": 2, "exitCode": 0, "details": {"phaseBefore": "PUBLISHED"}}]
-            for attempt in attempts:
-                events.append({"operation": "broker-" + attempt["action"], "startMonotonicNs": 3, "endMonotonicNs": 4, "exitCode": attempt["exitCode"], "details": {"phaseBefore": attempt["phaseBefore"], "phaseAfter": attempt["phaseAfter"]}})
+            if case_id == "K27":
+                facts.update(missingRegistrationRefused=True, registrationRestored=True, registrationBeforeSha256="9" * 64, registrationAfterSha256="9" * 64)
+            if case_id == "K25":
+                facts.update(stateAnchorReplacementRefused=True, stateAnchorRestored=True)
+            clock += 100
+            events = [{"operation": "state-read", "startMonotonicNs": clock, "endMonotonicNs": clock + 1, "exitCode": 0, "details": {"phaseBefore": "PUBLISHED"}}]
+            for attempt_index, attempt in enumerate(attempts):
+                if attempt["action"] in {"request", "resume"}:
+                    clock = max(clock + 10, (budget_timestamps[-1] if budget_timestamps else 0) + GATE.START_SPACING_NS, last_terminal + GATE.START_SPACING_NS)
+                    budget_timestamps.append(clock)
+                details = {"phaseBefore": attempt["phaseBefore"], "phaseAfter": attempt["phaseAfter"]}
+                if case_id == "K27" and attempt["exitCode"] != 0:
+                    details["missingRegistration"] = True
+                if case_id == "K25" and attempt_index == 1:
+                    details["reason"] = "state-anchor-replacement"
+                events.append({"operation": "broker-" + attempt["action"], "startMonotonicNs": clock, "endMonotonicNs": clock + 1, "exitCode": attempt["exitCode"], "details": details})
+                clock += 10
             for death in deaths:
-                events.append({"operation": "signal", "startMonotonicNs": 5, "endMonotonicNs": 6, "exitCode": 0, "details": {key: death[key] for key in ("pid", "startTicks", "signal", "barrier")}})
-            service = {"schemaVersion": 1, "unit": "decomp-oracle-ext4-reset-ci.service", "properties": {"ActiveState": "inactive", "SubState": "dead", "ControlGroup": "", "MainPID": "0", "InvocationID": "1" * 32, "Result": "success", "Job": ""}, "cgroup": {"path": "/system.slice/decomp-oracle-ext4-reset-ci.service", "exists": False, "pids": [], "children": [], "identity": None}, "bootId": "11111111-1111-4111-8111-111111111111", "retentionTarget": {"LoadState": "loaded", "ActiveState": "active", "SubState": "active", "FragmentPath": "/etc/systemd/system/decomp-oracle-ext4-reset-retain.target", "DropInPaths": "", "DefaultDependencies": "no", "After": "decomp-oracle-ext4-reset-ci.service", "Wants": "", "Requires": "", "Job": ""}}
+                details = {key: death[key] for key in ("pid", "startTicks", "signal", "barrier")}
+                if case_id == "K29":
+                    events.append({"operation": "signal", "startMonotonicNs": clock + 1, "endMonotonicNs": clock + 2, "exitCode": 0, "details": {**details, "signal": 19}})
+                    clock += 10
+                events.append({"operation": "signal", "startMonotonicNs": clock + 1, "endMonotonicNs": clock + 2, "exitCode": 0, "details": details})
+                clock += 10
+            if case_id == "K30":
+                events.append({"operation": "fixture-teardown", "startMonotonicNs": clock + 1, "endMonotonicNs": clock + 2, "exitCode": 1, "details": {"reason": "original filesystem mount differs"}})
+                events.append({"operation": "fixture-teardown", "startMonotonicNs": clock + 3, "endMonotonicNs": clock + 4, "exitCode": 0, "details": {"reason": "public mount removed; allocation reserved"}})
+                clock += 10
+            invocation = "" if case_id == "K01" else "1" * 32
+            clock += 100
+            if outcome == "reset":
+                last_terminal = clock + 1
+            events.append({"operation": "property-read", "startMonotonicNs": clock, "endMonotonicNs": clock + 2, "exitCode": 0, "details": {"reason": "terminal-empty" if outcome == "reset" else "final-empty", "invocationId": invocation or None}})
+            clock += 10
+            service = {"schemaVersion": 1, "unit": "decomp-oracle-ext4-reset-ci.service", "properties": {"ActiveState": "inactive", "SubState": "dead", "ControlGroup": "", "MainPID": "0", "InvocationID": invocation, "Result": "success", "Job": "", "ExecMainPID": "0" if case_id == "K01" else "1234", "ExecMainCode": "0" if case_id == "K01" else "1", "ExecMainStatus": "0", "StartLimitIntervalUSec": "10s", "StartLimitBurst": "5", "StartLimitAction": "none"}, "completedInvocationId": invocation, "startBudget": {"bootId": "11111111-1111-4111-8111-111111111111", "sessionId": "b" * 64, "timestampsMonotonicNs": list(budget_timestamps), "lastTerminalMonotonicNs": last_terminal}, "cgroup": {"path": "/system.slice/decomp-oracle-ext4-reset-ci.service", "exists": False, "pids": [], "children": [], "identity": None}, "bootId": "11111111-1111-4111-8111-111111111111", "retentionTarget": {"LoadState": "loaded", "ActiveState": "active", "SubState": "active", "FragmentPath": "/etc/systemd/system/decomp-oracle-ext4-reset-retain.target", "DropInPaths": "", "DefaultDependencies": "no", "After": "decomp-oracle-ext4-reset-ci.service", "Wants": "", "Requires": "", "Job": ""}}
             raw_artifacts = {"formatter.trace": trace_raw, "events.json": GATE.canonical({"schemaVersion": 1, "caseId": case_id, "events": events}, newline=False), "manifest.json": manifest_raw, "service.properties": GATE.canonical(service, newline=False)}
             raw_directory = self.evidence / "raw" / case_id
             raw_directory.mkdir(parents=True)
@@ -443,6 +485,13 @@ class ReportGateTests(unittest.TestCase):
             ("K14", lambda r: r["observations"].update(deaths=[])),
             ("K14", lambda r: r["observations"]["deaths"][0].update(role="controller")),
             ("K22", lambda r: r["observations"]["canaries"][0].update(afterSha256="0" * 64)),
+            ("K23", lambda r: r["observations"]["canaries"].pop()),
+            ("K25", lambda r: r["observations"]["canaries"].pop()),
+            ("K25", lambda r: r["observations"]["facts"].update(stateAnchorReplacementRefused=False)),
+            ("K25", lambda r: r["observations"]["facts"].update(stateAnchorRestored=False)),
+            ("K27", lambda r: r["observations"]["facts"].update(missingRegistrationRefused=False)),
+            ("K27", lambda r: r["observations"]["facts"].update(registrationRestored=False)),
+            ("K27", lambda r: r["observations"]["facts"].update(registrationAfterSha256="0" * 64)),
             ("K28", lambda r: r["observations"]["trace"].update(truncated=True)),
             ("K28", lambda r: r["observations"]["trace"].update(mutationsBeforeExclusiveOpen=1)),
             ("K29", lambda r: r["observations"].update(deaths=[])),
@@ -533,6 +582,125 @@ class ReportGateTests(unittest.TestCase):
                 with self.assertRaises(ValueError):
                     self.check_bundle()
                 self.rewrite_artifact("K01", "manifest.json", original)
+
+    def test_retained_completion_requires_actual_exited_zero_process(self):
+        self.synthetic_bundle()
+        original = (self.evidence / "raw/K02/service.properties").read_bytes()
+        mutations = (
+            lambda v: v.pop("completedInvocationId"),
+            lambda v: v.update(completedInvocationId="2" * 32),
+            lambda v: v["properties"].pop("ExecMainPID"),
+            lambda v: v["properties"].update(ExecMainPID="0"),
+            lambda v: v["properties"].update(ExecMainPID="1"),
+            lambda v: v["properties"].update(ExecMainPID="01234"),
+            lambda v: v["properties"].update(ExecMainPID=1234),
+            lambda v: v["properties"].update(ExecMainCode="0"),
+            lambda v: v["properties"].update(ExecMainCode="2"),
+            lambda v: v["properties"].update(ExecMainCode="7"),
+            lambda v: v["properties"].update(ExecMainStatus="9"),
+            lambda v: v["properties"].update(ExecMainStatus="256"),
+            lambda v: v["properties"].update(StartLimitIntervalUSec="0"),
+            lambda v: v["properties"].update(StartLimitBurst="0"),
+            lambda v: v["properties"].update(StartLimitAction="reboot"),
+            lambda v: v["properties"].update(Result="start-limit-hit"),
+        )
+        for mutate in mutations:
+            with self.subTest(mutation=mutate.__code__.co_firstlineno):
+                value = json.loads(original)
+                mutate(value)
+                self.rewrite_artifact("K02", "service.properties", value)
+                with self.assertRaises(ValueError):
+                    self.check_bundle()
+                self.rewrite_artifact("K02", "service.properties", original)
+
+    def test_durable_start_budget_mutations_are_refused(self):
+        self.synthetic_bundle()
+        previous_terminal = json.loads((self.evidence / "raw/K02/service.properties").read_bytes())["startBudget"]["lastTerminalMonotonicNs"]
+        mutations = (
+            ("K01", lambda v: v.pop("startBudget")),
+            ("K01", lambda v: v["startBudget"].update(timestampsMonotonicNs=[])),
+            ("K01", lambda v: v["startBudget"].update(timestampsMonotonicNs=[True])),
+            ("K01", lambda v: v["startBudget"].update(timestampsMonotonicNs=[0])),
+            ("K01", lambda v: v["startBudget"].update(sessionId="invalid")),
+            ("K02", lambda v: v["startBudget"].update(sessionId="c" * 64)),
+            ("K02", lambda v: v["startBudget"].update(bootId="22222222-2222-4222-8222-222222222222")),
+            ("K02", lambda v: v["startBudget"].update(timestampsMonotonicNs=v["startBudget"]["timestampsMonotonicNs"][1:])),
+            ("K02", lambda v: v["startBudget"]["timestampsMonotonicNs"].__setitem__(0, v["startBudget"]["timestampsMonotonicNs"][0] + 1)),
+            ("K02", lambda v: v["startBudget"].update(timestampsMonotonicNs=v["startBudget"]["timestampsMonotonicNs"][:-1])),
+            ("K02", lambda v: v["startBudget"]["timestampsMonotonicNs"].__setitem__(1, v["startBudget"]["timestampsMonotonicNs"][0] + GATE.START_SPACING_NS - 1)),
+            ("K02", lambda v: v["startBudget"].update(timestampsMonotonicNs=[(index + 1) * GATE.START_SPACING_NS for index in range(65)])),
+            ("K02", lambda v: v["startBudget"].update(lastTerminalMonotonicNs=0)),
+            ("K02", lambda v: v["startBudget"].update(lastTerminalMonotonicNs=2**63 - 1)),
+            ("K03", lambda v: v["startBudget"]["timestampsMonotonicNs"].__setitem__(-1, previous_terminal + GATE.START_SPACING_NS - 1)),
+            ("K30", lambda v: v["startBudget"].update(lastTerminalMonotonicNs=v["startBudget"]["lastTerminalMonotonicNs"] - 1)),
+        )
+        for case_id, mutate in mutations:
+            with self.subTest(case=case_id, mutation=mutate.__code__.co_firstlineno):
+                original = (self.evidence / "raw" / case_id / "service.properties").read_bytes()
+                value = json.loads(original)
+                mutate(value)
+                self.rewrite_artifact(case_id, "service.properties", value)
+                with self.assertRaises(ValueError):
+                    self.check_bundle()
+                self.rewrite_artifact(case_id, "service.properties", original)
+
+    def test_exact_start_spacing_and_64_charge_boundary_are_accepted(self):
+        self.synthetic_bundle()
+        service = json.loads((self.evidence / "raw/K02/service.properties").read_bytes())
+        service["startBudget"]["timestampsMonotonicNs"] = [(index + 1) * GATE.START_SPACING_NS for index in range(64)]
+        service["startBudget"]["lastTerminalMonotonicNs"] = service["startBudget"]["timestampsMonotonicNs"][-1]
+        GATE.verify_service(GATE.canonical(service, newline=False), "reset")
+        unstarted = (self.evidence / "raw/K01/service.properties").read_bytes()
+        self.assertEqual("0", GATE.verify_service(unstarted, "refused")["properties"]["ExecMainPID"])
+        teardown = (self.evidence / "raw/K30/service.properties").read_bytes()
+        budget = GATE.verify_service(teardown, "teardown")["startBudget"]
+        self.assertLess(budget["lastTerminalMonotonicNs"], budget["timestampsMonotonicNs"][-1])
+
+    def test_control_and_budget_joins_reject_rebound_raw_event_mutations(self):
+        self.synthetic_bundle()
+        def terminal_event(value):
+            return next(event for event in value["events"] if event["operation"] == "property-read")
+        def move_stop_after_kill(value):
+            stop = next(event for event in value["events"] if event["operation"] == "signal" and event["details"]["signal"] == 19)
+            kill = next(event for event in value["events"] if event["operation"] == "signal" and event["details"]["signal"] == 9)
+            stop.update(startMonotonicNs=kill["endMonotonicNs"] + 1, endMonotonicNs=kill["endMonotonicNs"] + 2)
+        def reverse_teardowns(value):
+            positions = [index for index, event in enumerate(value["events"]) if event["operation"] == "fixture-teardown"]
+            value["events"][positions[0]], value["events"][positions[1]] = value["events"][positions[1]], value["events"][positions[0]]
+        def start_before_charge(value):
+            event = next(event for event in value["events"] if event["operation"] == "broker-request")
+            event["startMonotonicNs"] -= 1
+        mutations = (
+            ("K01", start_before_charge),
+            ("K02", lambda v: terminal_event(v).update(exitCode=1)),
+            ("K02", lambda v: terminal_event(v)["details"].update(reason="not-terminal")),
+            ("K02", lambda v: terminal_event(v)["details"].update(invocationId="2" * 32)),
+            ("K25", lambda v: next(event for event in v["events"] if event["details"].get("reason") == "state-anchor-replacement")["details"].pop("reason")),
+            ("K27", lambda v: next(event for event in v["events"] if event["details"].get("missingRegistration"))["details"].pop("missingRegistration")),
+            ("K29", move_stop_after_kill),
+            ("K29", lambda v: next(event for event in v["events"] if event["details"].get("signal") == 19)["details"].update(signal=18)),
+            ("K29", lambda v: next(event for event in v["events"] if event["details"].get("signal") == 19)["details"].update(barrier="SERVICE_RUNNING")),
+            ("K30", lambda v: v["events"].remove(next(event for event in v["events"] if event["operation"] == "fixture-teardown"))),
+            ("K30", lambda v: next(event for event in v["events"] if event["operation"] == "fixture-teardown")["details"].update(reason="other failure")),
+            ("K30", reverse_teardowns),
+        )
+        for case_id, mutate in mutations:
+            with self.subTest(case=case_id, mutation=mutate.__code__.co_firstlineno):
+                original = (self.evidence / "raw" / case_id / "events.json").read_bytes()
+                value = json.loads(original)
+                mutate(value)
+                self.rewrite_artifact(case_id, "events.json", value)
+                with self.assertRaises(ValueError):
+                    self.check_bundle()
+                self.rewrite_artifact(case_id, "events.json", original)
+
+    def test_reusable_trace_api_has_its_own_input_bounds(self):
+        with self.assertRaises(ValueError):
+            GATE.decode_formatter_trace(b"x" * (GATE.ARTIFACT_LIMITS["formatter.trace"] + 1), os.makedev(7, 100))
+        with self.assertRaises(ValueError):
+            GATE.decode_formatter_trace(b"", True)
+        with self.assertRaises(ValueError):
+            GATE.decode_formatter_trace(b"", os.makedev(7, 100), "not-a-uuid")
 
     def test_missing_extra_and_cross_case_artifacts_refused(self):
         self.synthetic_bundle()

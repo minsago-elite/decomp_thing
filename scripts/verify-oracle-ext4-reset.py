@@ -87,7 +87,7 @@ LEASE_FIELDS = ("device", "evidenceSha256", "filesystemDevice", "filesystemType"
 PHASES = {"REGISTERED", "INTENT", "FENCED", "UNMOUNTED", "FORMAT_STARTED", "FORMATTED", "MOUNT_INTENT", "READY_PRIVATE", "EXPOSURE_INTENT", "PUBLISHED"}
 BARRIERS = {"INTENT_FSYNC", "GATE_CLOSED", "MOUNT_MOVED", "UNMOUNTED_BEFORE_COMMIT", "FORMAT_STARTED", "FORMAT_FLUSHED", "READY_RENAMED_BEFORE_FSYNC", "CANDIDATE_MOUNTED", "EXPOSURE_INTENT", "GATE_OPENED", "FORMAT_RUNNING", "SERVICE_RUNNING", "ACTION_TIMEOUT"}
 EVENT_OPERATIONS = {"broker-request", "broker-resume", "broker-finalize", "broker-status", "mount", "umount", "loop-allocate", "namespace-holder", "file-holder", "fault-arm", "barrier-observe", "signal", "property-read", "fixture-restore", "fixture-teardown", "trace-read", "state-read"}
-CANARY_LABELS = {"file-holder", "namespace-holder", "mount-replacement", "alias", "image-replacement", "anchor-replacement", "teardown-replacement", "candidate-lease"}
+CANARY_LABELS = {"file-holder", "namespace-holder", "mount-replacement", "alias", "nested-mount", "image-replacement", "anchor-replacement", "state-anchor", "teardown-replacement", "candidate-lease"}
 REQUIRED_DEATHS = {
     "K11": ("controller", "SERVICE_RUNNING"), "K12": ("custodian", "SERVICE_RUNNING"),
     "K13": ("utility", "FORMAT_RUNNING"), "K14": ("custodian", "INTENT_FSYNC"),
@@ -107,7 +107,9 @@ EXPECTED_PROFILE = {
     "metadataBytes": 1048576, "maximumEntries": 32, "maximumGenerationDirectories": 2,
     "recordBytes": 16384, "actionSeconds": 45, "unit": "decomp-oracle-ext4-reset-ci.service",
     "retentionUnit": "decomp-oracle-ext4-reset-retain.target",
+    "startLimitIntervalSeconds": 10, "startLimitBurst": 5, "startLimitAction": "none",
 }
+START_SPACING_NS = 2100000000
 
 
 def _require(condition, message):
@@ -121,6 +123,13 @@ def _keys(value, names, label):
 
 def _integer(value, low, high, label):
     _require(type(value) is int and low <= value <= high, f"invalid {label}")
+
+
+def _decimal_property(value, low, high, label):
+    _require(type(value) is str and re.fullmatch(r"0|[1-9][0-9]{0,9}", value) is not None, f"invalid {label}")
+    number = int(value)
+    _integer(number, low, high, label)
+    return number
 
 
 def _hash(value, label):
@@ -477,6 +486,8 @@ def verify_events(raw, case_id):
     _require(value["caseId"] == case_id, "raw events case mismatch")
     _require(type(value["events"]) is list and 1 <= len(value["events"]) <= 256, "missing or excessive measured events")
     keys = {"reason", "phaseBefore", "phaseAfter", "pid", "startTicks", "signal", "barrier", "invocationId", "artifactSha256", "device", "imageInode"}
+    if case_id == "K27":
+        keys.add("missingRegistration")
     for event in value["events"]:
         _keys(event, ("operation", "startMonotonicNs", "endMonotonicNs", "exitCode", "details"), "measured event")
         _require(type(event["operation"]) is str and event["operation"] in EVENT_OPERATIONS, "unknown measured operation")
@@ -493,13 +504,16 @@ def verify_events(raw, case_id):
             elif name == "device":
                 _integer(item, 0, 2**64 - 1, "event device")
             elif name == "signal":
-                _integer(item, 9, 9, "event signal")
+                _integer(item, 9, 19, "event signal")
+                _require(item == 9 or item == 19 and case_id == "K29" and event["operation"] == "signal" and details.get("barrier") == "ACTION_TIMEOUT", "signal is outside the closed case action")
             elif name == "barrier":
                 _require(type(item) is str and item in BARRIERS, "invalid event barrier")
             elif name == "invocationId":
                 _invocation(item)
             elif name == "artifactSha256":
                 _hash(item, "event artifact hash")
+            elif name == "missingRegistration":
+                _require(item is True and event["operation"] == "broker-request" and event["exitCode"] == 1, "invalid missing-registration refusal event")
             else:
                 _require(type(item) is str and 1 <= len(item) <= 1024 and "\0" not in item, "invalid measured reason")
     return value["events"]
@@ -524,7 +538,7 @@ def verify_observations(receipt, artifacts):
     if receipt["outcome"] == "reset":
         _require(any(attempt["exitCode"] == 0 and attempt["phaseAfter"] == "PUBLISHED" for attempt in attempts), "no successful measured publication")
         _require(any(attempt["formatterCount"] > 0 and attempt["invocationId"] is not None for attempt in attempts), "no actual formatter invocation")
-    if case_id in {"K02", "K07", "K08", "K09", "K11", "K12", "K22", "K23", "K24", "K25", "K27", "K29", "K32"}:
+    if case_id in {"K02", "K07", "K08", "K09", "K11", "K12", "K22", "K23", "K24", "K25", "K27", "K29", "K30", "K32"}:
         _require(any(attempt["exitCode"] != 0 for attempt in attempts), "required actual refusal absent")
     deaths = set()
     for death in observations["deaths"]:
@@ -552,6 +566,10 @@ def verify_observations(receipt, artifacts):
         _require(canary["beforeSha256"] == canary["afterSha256"], "canary changed during refused operation")
     if case_id in REQUIRED_CANARIES:
         _require(REQUIRED_CANARIES[case_id] in labels, "required actual canary observation absent")
+    if case_id == "K23":
+        _require({"alias", "nested-mount"} <= labels, "visible alias and nested mount both require preservation evidence")
+    if case_id == "K25":
+        _require({"anchor-replacement", "state-anchor"} <= labels, "generation and state anchors both require preservation evidence")
     for holder in observations["holders"]:
         _keys(holder, ("kind", "pid", "startTicks", "reaped", "refusalExitCode"), "holder")
         _require(type(holder["kind"]) is str and holder["kind"] in {"file", "namespace", "utility"}, "unknown holder kind")
@@ -580,7 +598,12 @@ def verify_observations(receipt, artifacts):
     else:
         _require(trace["deviceMutationCount"] == 0, "non-reset case mutated the device")
     facts = observations["facts"]
-    _require(type(facts) is dict and set(facts) <= {"allocatedLoopRdev", "oldTreeEntriesVisited", "oldContentBytesRead", "mutatorCount", "restored", "removedOwnedFixture", "retainedReservation"}, "unknown fixture facts")
+    fact_keys = {"allocatedLoopRdev", "oldTreeEntriesVisited", "oldContentBytesRead", "mutatorCount", "restored", "removedOwnedFixture", "retainedReservation"}
+    if case_id == "K25":
+        fact_keys |= {"stateAnchorReplacementRefused", "stateAnchorRestored"}
+    if case_id == "K27":
+        fact_keys |= {"missingRegistrationRefused", "registrationRestored", "registrationBeforeSha256", "registrationAfterSha256"}
+    _require(type(facts) is dict and set(facts) <= fact_keys, "unknown fixture facts")
     for name in ("oldTreeEntriesVisited", "oldContentBytesRead"):
         _integer(facts.get(name), 0, 0, name)
     _integer(facts.get("mutatorCount"), 0, 64, "mutator count")
@@ -596,11 +619,28 @@ def verify_observations(receipt, artifacts):
     if case_id == "K30":
         _require(facts.get("removedOwnedFixture") is True, "exact owned teardown not observed")
         _require(facts.get("retainedReservation") is True, "teardown lost the bound allocation reservation")
+    if case_id == "K27":
+        _require(facts.get("missingRegistrationRefused") is True and facts.get("registrationRestored") is True, "missing registration was not refused and restored")
+        _hash(facts.get("registrationBeforeSha256"), "original registration hash")
+        _hash(facts.get("registrationAfterSha256"), "restored registration hash")
+        _require(facts["registrationBeforeSha256"] == facts["registrationAfterSha256"], "registration changed during missing-state refusal")
+    if case_id == "K25":
+        _require(facts.get("stateAnchorReplacementRefused") is True and facts.get("stateAnchorRestored") is True, "state-anchor replacement was not refused and exactly restored")
     events = verify_events(artifacts["events.json"], case_id)
     for attempt in attempts:
         _require(any(event["operation"] == "broker-" + attempt["action"] and event["exitCode"] == attempt["exitCode"] and event["details"].get("phaseBefore") == attempt["phaseBefore"] and event["details"].get("phaseAfter") == attempt["phaseAfter"] for event in events), "reset attempt not bound to raw measured event")
     for death in observations["deaths"]:
         _require(any(event["operation"] == "signal" and all(event["details"].get(key) == death[key] for key in ("pid", "startTicks", "signal", "barrier")) for event in events), "process death not bound to raw measured event")
+    if case_id == "K27":
+        _require(any(event["details"].get("missingRegistration") is True and event["details"].get("phaseBefore") == event["details"].get("phaseAfter") and any(attempt["action"] == "request" and attempt["exitCode"] == event["exitCode"] and attempt["phaseBefore"] == event["details"].get("phaseBefore") and attempt["phaseAfter"] == event["details"].get("phaseAfter") and attempt["formatterCount"] == 0 for attempt in attempts) for event in events), "missing-registration refusal lacks a matching non-mutating actual request")
+    if case_id == "K29":
+        _require(any(stop["operation"] == "signal" and stop["exitCode"] == 0 and stop["details"].get("signal") == 19 and stop["details"].get("barrier") == "ACTION_TIMEOUT" and any(death["role"] == "custodian" and all(stop["details"].get(key) == death[key] for key in ("pid", "startTicks", "barrier")) and any(kill["operation"] == "signal" and kill["exitCode"] == 0 and kill["details"].get("signal") == 9 and all(kill["details"].get(key) == death[key] for key in ("pid", "startTicks", "barrier")) and stop["endMonotonicNs"] <= kill["startMonotonicNs"] for kill in events) for death in observations["deaths"]) for stop in events), "timeout lacks the exact stopped and subsequently killed custodian")
+    if case_id == "K25":
+        _require(any(event["operation"] == "broker-request" and event["exitCode"] != 0 and event["details"].get("reason") == "state-anchor-replacement" and any(attempt["action"] == "request" and attempt["exitCode"] == event["exitCode"] and attempt["phaseBefore"] == event["details"].get("phaseBefore") and attempt["phaseAfter"] == event["details"].get("phaseAfter") for attempt in attempts) for event in events), "state-anchor preservation lacks its actual broker refusal")
+    if case_id == "K30":
+        teardowns = [event for event in events if event["operation"] == "fixture-teardown"]
+        _require(len(teardowns) == 2 and teardowns[0]["exitCode"] == 1 and teardowns[0]["details"].get("reason") == "original filesystem mount differs" and teardowns[1]["exitCode"] == 0 and teardowns[1]["details"].get("reason") == "public mount removed; allocation reserved" and teardowns[0]["endMonotonicNs"] <= teardowns[1]["startMonotonicNs"], "teardown lacks ordered exact refusal and owned unmount observations")
+    return events
 
 
 def decode_formatter_trace(raw, loop_rdev, filesystem_uuid=None):
@@ -610,6 +650,10 @@ def decode_formatter_trace(raw, loop_rdev, filesystem_uuid=None):
     including failed opens (which have no returned descriptor annotation).
     Writable claims are tracked until close for each traced process/descriptor.
     """
+    _require(type(raw) is bytes and len(raw) <= ARTIFACT_LIMITS["formatter.trace"], "formatter trace exceeds its byte bound")
+    _integer(loop_rdev, 1, 2**64 - 1, "formatter loop device")
+    if filesystem_uuid is not None:
+        _require(type(filesystem_uuid) is str and str(uuid.UUID(filesystem_uuid)) == filesystem_uuid, "invalid expected formatter UUID")
     result = {"exclusiveOpenFlags": [], "exclusiveOpenErrno": None, "deviceMutationCount": 0, "mutationsBeforeExclusiveOpen": 0, "truncated": False}
     if not raw:
         return result
@@ -784,6 +828,7 @@ def verify_installed_manifest(raw, source_hashes, profile_hash):
         private + "oracle-ext4-reset-install.py": "scripts/oracle-ext4-reset-install.py",
         private + "oracle-ext4-reset-fixture-mutations.py": "scripts/oracle-ext4-reset-fixture-mutations.py",
         private + "ci-oracle-ext4-reset.py": "scripts/ci-oracle-ext4-reset.py",
+        private + "verify-oracle-ext4-reset.py": "scripts/verify-oracle-ext4-reset.py",
         private + "mke2fs.conf": "scripts/oracle-ext4-reset-mke2fs.conf",
         "/etc/systemd/system/decomp-oracle-ext4-reset-ci.service": "scripts/systemd/decomp-oracle-ext4-reset-ci.service",
         "/etc/systemd/system/decomp-oracle-ext4-reset-retain.target": "scripts/systemd/decomp-oracle-ext4-reset-retain.target",
@@ -797,7 +842,7 @@ def verify_installed_manifest(raw, source_hashes, profile_hash):
 
 def verify_service(raw, outcome):
     service = _json(raw, "service observation", newline=False)
-    _keys(service, ("schemaVersion", "unit", "properties", "cgroup", "bootId", "retentionTarget"), "service observation")
+    _keys(service, ("schemaVersion", "unit", "properties", "cgroup", "bootId", "retentionTarget", "completedInvocationId", "startBudget"), "service observation")
     _integer(service["schemaVersion"], 1, 1, "service observation schema")
     unit = "decomp-oracle-ext4-reset-ci.service"
     group_path = "/system.slice/" + unit
@@ -808,12 +853,21 @@ def verify_service(raw, outcome):
     _require(all(target[key] == value for key, value in expected_target.items()) and target["Job"] in ("", "0"), "retention target is inactive, modified, or activates service work")
     _require(type(service["bootId"]) is str and str(uuid.UUID(service["bootId"])) == service["bootId"], "invalid observed boot ID")
     properties = service["properties"]
-    _keys(properties, ("ActiveState", "SubState", "ControlGroup", "MainPID", "InvocationID", "Result", "Job"), "service properties")
+    _keys(properties, ("ActiveState", "SubState", "ControlGroup", "MainPID", "InvocationID", "Result", "Job", "ExecMainPID", "ExecMainCode", "ExecMainStatus", "StartLimitIntervalUSec", "StartLimitBurst", "StartLimitAction"), "service properties")
     _require(all(type(item) is str and len(item) <= 256 for item in properties.values()), "invalid service property types")
     _require(properties["ActiveState"] in {"inactive", "failed"} and properties["SubState"] in {"dead", "failed"} and properties["MainPID"] == "0" and properties["Job"] in {"", "0"}, "service is active, queued, or ambiguous")
     _require(properties["ControlGroup"] in {"", group_path}, "unexpected service cgroup")
     _require(properties["InvocationID"] == "" or re.fullmatch(r"[0-9a-f]{32}", properties["InvocationID"]) is not None, "invalid service invocation")
+    _require(type(service["completedInvocationId"]) is str and service["completedInvocationId"] == properties["InvocationID"], "completed invocation differs from retained manager identity")
     _require(properties["Result"] in {"success", "signal", "timeout", "exit-code"}, "unknown service result")
+    exec_pid = _decimal_property(properties["ExecMainPID"], 0, 2**31 - 1, "retained ExecMainPID")
+    exec_code = _decimal_property(properties["ExecMainCode"], 0, 6, "retained ExecMainCode")
+    exec_status = _decimal_property(properties["ExecMainStatus"], 0, 255, "retained ExecMainStatus")
+    if properties["InvocationID"] == "":
+        _require((exec_pid, exec_code, exec_status) == (0, 0, 0), "unstarted unit carries a completed process")
+    elif properties["Result"] == "success":
+        _require(exec_pid > 1 and exec_code == 1 and exec_status == 0, "successful retained invocation lacks actual exited-zero main process")
+    _require(properties["StartLimitIntervalUSec"] == "10s" and properties["StartLimitBurst"] == "5" and properties["StartLimitAction"] == "none", "effective start limit differs from finite fixed profile")
     if outcome == "reset":
         _require(properties["ActiveState"] == "inactive" and properties["SubState"] == "dead" and properties["Result"] == "success" and properties["InvocationID"] != "", "reset lacks successful completed service invocation")
     group = service["cgroup"]
@@ -832,6 +886,19 @@ def verify_service(raw, outcome):
         _require(identity["kind"] == "directory" and identity["mode"] & 0o022 == 0, "untrusted cgroup identity")
     else:
         _require(group["identity"] is None, "absent cgroup carries an identity")
+    budget = service["startBudget"]
+    _keys(budget, ("bootId", "sessionId", "timestampsMonotonicNs", "lastTerminalMonotonicNs"), "durable start budget")
+    _require(budget["bootId"] == service["bootId"], "start budget belongs to another boot")
+    _hash(budget["sessionId"], "start budget fixture session")
+    timestamps = budget["timestampsMonotonicNs"]
+    _require(type(timestamps) is list and len(timestamps) <= 64, "durable start budget exceeds its finite cap")
+    for timestamp in timestamps:
+        _integer(timestamp, 1, 2**63 - 1, "charged start timestamp")
+    _require(all(later - earlier >= START_SPACING_NS for earlier, later in zip(timestamps, timestamps[1:])), "charged starts violate minimum spacing")
+    terminal = budget["lastTerminalMonotonicNs"]
+    _integer(terminal, 0, 2**63 - 1, "last terminal observation timestamp")
+    if outcome == "reset":
+        _require(timestamps and terminal >= timestamps[-1], "successful reset lacks a terminal observation after its last charged start")
     return service
 
 
@@ -847,6 +914,8 @@ def verify(reports, evidence, source_root, expected_source_commit):
     tokens = set()
     controls = []
     receipts = {}
+    budgets = {}
+    case_events = {}
     boot_id = None
     total_artifact_bytes = 0
     for case_id, name in CASE_NAMES.items():
@@ -889,10 +958,20 @@ def verify(reports, evidence, source_root, expected_source_commit):
             installed_raw = artifacts["manifest.json"]
         else:
             _require(artifacts["manifest.json"] == installed_raw, "installed profile/tools changed between cases")
-        verify_observations(receipt, artifacts)
+        events = verify_observations(receipt, artifacts)
+        case_events[case_id] = events
         service = verify_service(artifacts["service.properties"], receipt["outcome"])
+        captures = [event for event in events if event["operation"] == "property-read"]
+        _require(captures, "service properties lack a bounded actual capture event")
+        final_capture = max(captures, key=lambda event: event["endMonotonicNs"])
+        _require(final_capture["exitCode"] == 0, "final service property capture did not succeed")
+        capture_end = final_capture["endMonotonicNs"]
+        budget = service["startBudget"]
+        _require(all(stamp <= capture_end for stamp in budget["timestampsMonotonicNs"]) and budget["lastTerminalMonotonicNs"] <= capture_end, "start budget timestamp exceeds actual property capture")
         if receipt["outcome"] == "reset":
-            _require(any(attempt["exitCode"] == 0 and attempt["phaseAfter"] == "PUBLISHED" and attempt["invocationId"] == service["properties"]["InvocationID"] for attempt in receipt["observations"]["attempts"]), "published reset does not bind the retained completed invocation")
+            _require(any(attempt["action"] == "finalize" and attempt["exitCode"] == 0 and attempt["phaseAfter"] == "PUBLISHED" and attempt["invocationId"] == service["completedInvocationId"] for attempt in receipt["observations"]["attempts"]), "published reset does not bind the retained completed invocation")
+            _require(any(event["exitCode"] == 0 and event["details"].get("reason") == "terminal-empty" and event["details"].get("invocationId") == service["completedInvocationId"] and event["startMonotonicNs"] <= budget["lastTerminalMonotonicNs"] <= event["endMonotonicNs"] for event in captures), "terminal timestamp lacks the matching empty-cgroup completed-invocation observation")
+        budgets[case_id] = service["startBudget"]
         if boot_id is None:
             boot_id = service["bootId"]
         _require(service["bootId"] == boot_id, "same-boot reset evidence crosses a reboot")
@@ -905,6 +984,24 @@ def verify(reports, evidence, source_root, expected_source_commit):
     continuity_fields = ("generation", "filesystemUuid", "scratch", "mountId", "loopRdev", "imageDevice", "imageInode", "imageBytes")
     for previous, current in zip(ordered, ordered[1:]):
         _require(all(receipts[previous]["after"][field] == receipts[current]["before"][field] for field in continuity_fields), "cases do not preserve one continuous reserved fixture")
+    previous_timestamps = []
+    previous_terminal = 0
+    budget_session = budgets[ordered[0]]["sessionId"]
+    for case_id in ordered:
+        budget = budgets[case_id]
+        timestamps = budget["timestampsMonotonicNs"]
+        _require(budget["sessionId"] == budget_session, "start budget fixture session changed")
+        _require(timestamps[:len(previous_timestamps)] == previous_timestamps, "durable start budget lost or rewrote prior charges")
+        starts = sum(attempt["action"] in {"request", "resume"} for attempt in receipts[case_id]["observations"]["attempts"])
+        _require(len(timestamps) - len(previous_timestamps) >= starts, "request or resume is missing its conservative durable charge")
+        observed_starts = sorted((event for event in case_events[case_id] if event["operation"] in {"broker-request", "broker-resume"}), key=lambda event: event["startMonotonicNs"])
+        new_charges = timestamps[len(previous_timestamps):]
+        _require(len(new_charges) >= len(observed_starts) and all(charge <= event["startMonotonicNs"] for charge, event in zip(new_charges, observed_starts)), "actual request or resume precedes its distinct durable start charge")
+        _require(budget["lastTerminalMonotonicNs"] >= previous_terminal, "terminal observation timestamp moved backwards")
+        if len(timestamps) > len(previous_timestamps) and previous_terminal:
+            _require(timestamps[len(previous_timestamps)] - previous_terminal >= START_SPACING_NS, "new start precedes minimum spacing after prior terminal observation")
+        previous_timestamps = timestamps
+        previous_terminal = budget["lastTerminalMonotonicNs"]
     verify_git_sources(source_root, expected_source_commit, expected_sources)
     return {"schemaVersion": 1, "status": "passed", "class": CLASS, "profile": PROFILE, "profileSha256": profile_hash,
             "sourceCommit": expected_source_commit, "sourceHashes": expected_sources, "installedManifestSha256": _digest(installed_raw), "bootId": boot_id,
