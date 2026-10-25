@@ -2,6 +2,8 @@ import { ApiClientError, apiFailureReference } from '../api/errors';
 import type { Bootstrap, Session } from '../api/generated';
 import { normalizeBasePath } from '../app/paths';
 import { createInvalidationChannel } from './invalidationChannel';
+import { captureReceiptTime } from '../shared/receiptTime';
+import type { ReceiptTime } from '../shared/receiptTime';
 import type { BootstrapFragment } from './fragment';
 
 export type SessionGateway = {
@@ -14,7 +16,7 @@ export type RuntimeSnapshot = Pick<Bootstrap, 'applicationBuildId' | 'uiBuildId'
 
 export type SessionState =
   | { status: 'public' | 'checking' | 'signing-out' }
-  | { status: 'authenticated'; expiresAt: string; generation: number; runtime: RuntimeSnapshot; serverChanged?: true }
+  | { status: 'authenticated'; expiresAt: string; generation: number; runtime: RuntimeSnapshot; runtimeReceipt?: ReceiptTime; serverChanged?: true }
   | { status: 'required'; reason: 'missing' | 'expired' | 'bootstrap-required' | 'bootstrap-expired' | 'invalid-link' | 'signed-out' | 'session-changed'; referenceId?: string }
   | { status: 'unavailable'; reason: 'connection' | 'configuration' | 'incompatible' | 'logout-unconfirmed' | 'removal-failed'; referenceId?: string };
 
@@ -100,7 +102,7 @@ export function createBrowserSession(gateway: SessionGateway, basePath: string) 
         limits: { ...bootstrap.limits }, runtime: { ...bootstrap.runtime },
       };
       // A new bootstrap generation replaces private views even when intermediate renders coalesce.
-      publish({ status: 'authenticated', expiresAt: bootstrap.sessionExpiresAt, generation, runtime,
+      publish({ status: 'authenticated', expiresAt: bootstrap.sessionExpiresAt, generation, runtime, runtimeReceipt: captureReceiptTime(),
         ...(serverChanged ? { serverChanged: true as const } : {}) });
       expiry = setTimeout(() => {
         forget();

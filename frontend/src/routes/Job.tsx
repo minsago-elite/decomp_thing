@@ -9,14 +9,19 @@ import type { BrowserSession, RuntimeSnapshot } from '../session/session';
 import { useSession } from '../session/useSession';
 import { JobSummary } from '../jobs/JobSummary';
 import { WorkflowAvailability } from '../jobs/WorkflowAvailability';
+import { receive } from '../shared/receiptTime';
+import type { ReceiptTime } from '../shared/receiptTime';
+import type { Received } from '../shared/receiptTime';
+import { MetadataReceipt } from '../shared/MetadataReceipt';
 import { canRetainMetadata, metadataFailureKind } from '../shared/retainMetadata';
 
-function JobDetails({ jobId, basePath, runtime }: { jobId: string; basePath: string; runtime: RuntimeSnapshot }) {
+function JobDetails({ jobId, basePath, runtime, runtimeReceipt }: { jobId: string; basePath: string; runtime: RuntimeSnapshot; runtimeReceipt: ReceiptTime | undefined }) {
   const { client } = usePrivateTransport(basePath);
   const binding = useMemo(() => ({ client, basePath, jobId }), [client, basePath, jobId]);
-  const [stored, setStored] = useState<{ binding: typeof binding; data: JobData | null; error: string; loading: boolean }>(
+  const [stored, setStored] = useState<{ binding: typeof binding; data: Received<JobData> | null; error: string; loading: boolean }>(
     { binding, data: null, error: '', loading: true });
-  const { data: job, error, loading } = stored.binding === binding ? stored : { data: null, error: '', loading: true };
+  const { data: observation, error, loading } = stored.binding === binding ? stored : { data: null, error: '', loading: true };
+  const job = observation?.value;
   const [refresh, setRefresh] = useState(0);
   useEffect(() => {
     const controller = new AbortController();
@@ -29,7 +34,7 @@ function JobDetails({ jobId, basePath, runtime }: { jobId: string; basePath: str
         if (response.data.jobId !== jobId) {
           setStored({ binding, data: null, error: copy.theServerReturnedADifferentJobIdentity, loading: false }); return;
         }
-        setStored({ binding, data: response.data, error: '', loading: false });
+        setStored({ binding, data: receive(response.data), error: '', loading: false });
       }
     }).catch((failure: unknown) => {
       if (!controller.signal.aborted) setStored(previous => ({ binding,
@@ -49,6 +54,7 @@ function JobDetails({ jobId, basePath, runtime }: { jobId: string; basePath: str
     {error && job && <p>{copy.previousJobMetadataMayBeOutdated}</p>}
     <button type="button" disabled={loading} onClick={() => setRefresh(value => value + 1)}>{copy.refreshJob}</button>
     {job && <>
+      <MetadataReceipt kind="job" receipt={observation?.receipt} />
       <h2>{job.displayFilename}</h2><p>{displayMessage(copy.identity, { identity: <code>{job.jobId}</code> })}</p>
       <JobSummary job={job} />
       <p><a href={`${jobPath(basePath, job.jobId)}/runs`}>{copy.browseAttemptHistory}</a></p>
@@ -63,7 +69,7 @@ function JobDetails({ jobId, basePath, runtime }: { jobId: string; basePath: str
       <p>{copy.completionIsAnAttemptOutcomeOnlyTheRecordedAcceptedRevision}</p>
       <p>{copy.theAttemptPageRetainsItsExactIdentityAsNewerWork}</p>
       <p>{copy.startingExplorationReconstructionBuildsValidationOrRepairIsUnavailableIn}</p>
-      <WorkflowAvailability runtime={runtime} />
+      <WorkflowAvailability runtime={runtime} {...(runtimeReceipt ? { receipt: runtimeReceipt } : {})} />
       <a href={appPath(basePath, '/runtime')}>{copy.viewReportedWorkflowAvailability}</a>
     </>}
   </>;
@@ -74,7 +80,7 @@ export default function Job({ jobId, basePath, session }: { jobId: string; baseP
   return <section aria-labelledby="job-title">
     <h1 id="job-title">{copy.jobOverview}</h1>
     <a href={appPath(basePath, '/')}>{copy.returnToJobs}</a>
-    {state?.status === 'authenticated' ? <JobDetails key={`${state.generation}/${jobId}`} jobId={jobId} basePath={basePath} runtime={state.runtime} />
+    {state?.status === 'authenticated' ? <JobDetails key={`${state.generation}/${jobId}`} jobId={jobId} basePath={basePath} runtime={state.runtime} runtimeReceipt={state.runtimeReceipt} />
       : <p>{copy.connectALocalSessionToViewThisJob}</p>}
   </section>;
 }
