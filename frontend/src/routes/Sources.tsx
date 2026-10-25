@@ -250,7 +250,7 @@ export default function Sources({ jobId, runId, revisionId, directoryId, fileId,
       <p><a href={runPath(basePath, jobId, runId)}>{copy.returnAttempt}</a></p>
       {session && state?.status === 'authenticated'
         ? resource === 'search'
-          ? <SourceSearch key={`${state.generation}/${jobId}/${runId}/${revisionId}/${rawSearch}`} selected={selected} basePath={basePath} search={rawSearch} />
+          ? <SourceSearch key={`${state.generation}/${jobId}/${runId}/${revisionId}`} selected={selected} basePath={basePath} search={rawSearch} />
           : resource === 'directory'
           ? <Directory key={`${state.generation}/${jobId}/${runId}/${revisionId}/${directoryId ?? ''}/${pin?.sourceSha256}/${pin?.metadataVersion}`}
               selected={{ ...selected, directoryId: directoryId ?? '' }} basePath={basePath} pin={pin} search={search} historyEntry={historyEntry} />

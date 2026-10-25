@@ -56,6 +56,14 @@ export function SourceSearch({ selected, basePath, search }: { selected: SourceS
   const [exactCase, setExactCase] = useState(request?.caseSensitive ?? true);
   const [path, setPath] = useState(request?.path ?? '');
   const [formError, setFormError] = useState<'invalid' | 'too-long' | null>(null);
+  // The view stays mounted across query navigation so focus intent survives; history moves refresh the fields.
+  const shownSearch = useRef(search);
+  useEffect(() => {
+    if (shownSearch.current === search) return;
+    shownSearch.current = search;
+    setText(request?.q ?? ''); setSymbol(request?.match === 'symbol');
+    setExactCase(request?.caseSensitive ?? true); setPath(request?.path ?? ''); setFormError(null);
+  }, [search]);
   const [refresh, setRefresh] = useState(0);
   const key = [selected.jobId, selected.runId, selected.revisionId, search, refresh].join('/');
   const [read, setRead] = useState<SourceReadState<SourceSearchPage>>({ key, state: 'loading' });
