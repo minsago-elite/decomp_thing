@@ -769,6 +769,10 @@
     {
       "file": "fixtures/invalid-launch-unknown-tool.json",
       "valid": false
+    },
+    {
+      "file": "fixtures/bootstrap-without-launch.json",
+      "valid": true
     }
   ]
 }

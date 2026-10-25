@@ -42,14 +42,16 @@ import java.nio.file.attribute.BasicFileAttributes
  * entry points the `explore`, `reconstruct` and `repair` commands use.
  */
 internal interface WebWorkflowEngines {
-    fun explore(binary: Path, reportsDirectory: Path)
+    /** [activity] is called after each completed exploration sample. */
+    fun explore(binary: Path, reportsDirectory: Path, activity: () -> Unit)
     fun reconstruct(binary: Path, reportsDirectory: Path, mode: WebReconstructionMode, progress: AgentWorkflowProgress)
     fun repair(project: Path, binary: Path, reportsDirectory: Path, harness: String): RepairRunStatus
 
     companion object {
         fun production(environment: Map<String, String>, sensitiveValues: Collection<String>): WebWorkflowEngines = object : WebWorkflowEngines {
-            override fun explore(binary: Path, reportsDirectory: Path) {
-                AutomaticExplorer().explore(binary, listOf(CandidateInput("seed_default", CandidateSource.SEED)), reportsDirectory)
+            override fun explore(binary: Path, reportsDirectory: Path, activity: () -> Unit) {
+                AutomaticExplorer(coverage = decompengine.exploration.OutputCoverageMeasurer(onSample = activity))
+                    .explore(binary, listOf(CandidateInput("seed_default", CandidateSource.SEED)), reportsDirectory)
             }
 
             override fun reconstruct(binary: Path, reportsDirectory: Path, mode: WebReconstructionMode, progress: AgentWorkflowProgress) {
@@ -133,7 +135,10 @@ internal class ExploreWorkflowAdapter(private val engines: WebWorkflowEngines, p
 
     override fun execute(context: DurableWebWorkflowContext): DurableWebWorkflowOutcome {
         val meter = WorkflowExecutionMeter(context.reportsDirectory, toolCallsMetered = false)
-        val (result, usage) = executor.run(context.attempt.limits, meter) { engines.explore(context.job.binaryPath, context.reportsDirectory) }
+        // Completed samples are progress: a long healthy exploration writes its report only at the end.
+        val (result, usage) = executor.run(context.attempt.limits, meter) {
+            engines.explore(context.job.binaryPath, context.reportsDirectory, meter::activity)
+        }
         return when (unwrap(result)) {
             is BoundedWorkflowResult.Returned -> DurableWebWorkflowOutcome.Completed(usage = usage)
             is BoundedWorkflowResult.Exhausted -> limitFailure(usage)

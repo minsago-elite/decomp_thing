@@ -253,8 +253,10 @@ class StaticHintGenerator(
         val process = ProcessBuilder(stringsPath.pathString, "-a", "-n", "3", binaryPath.pathString)
             .redirectErrorStream(true)
             .start()
-        val output = process.inputStream.bufferedReader().readText()
+        // Read on an owned reader so the interruptible wait, not a blocking pipe read, owns cancellation.
+        val outputFuture = CompletableFuture.supplyAsync { process.inputStream.bufferedReader().readText() }
         val exitCode = awaitOwnedProcess(process)
+        val output = outputFuture.join()
         if (exitCode != 0) error("strings failed with exit code $exitCode: $output")
         val hints = output.lineSequence()
             .map(String::trim)
@@ -328,7 +330,11 @@ data class CoverageReport(
     val networkIsolated: Boolean = observations.isNotEmpty() && observations.all { it.networkIsolated }
 }
 
-class OutputCoverageMeasurer(private val sandbox: SandboxRunner = SandboxRunner()) {
+class OutputCoverageMeasurer(
+    private val sandbox: SandboxRunner = SandboxRunner(),
+    /** Called after every finished sample, successful or not; an owner can treat it as progress. */
+    private val onSample: () -> Unit = {},
+) {
     fun measure(binaryPath: Path, baseline: List<CandidateInput>, expanded: List<CandidateInput>): CoverageReport =
         measure(binaryPath, baseline, expanded, capture = null)
 
@@ -373,7 +379,7 @@ class OutputCoverageMeasurer(private val sandbox: SandboxRunner = SandboxRunner(
                 stdoutHex = stdoutHex,
                 stderrHex = stderrHex,
                 networkIsolated = output.networkIsolated,
-            ).also { capture?.completed(phase, it) }
+            ).also { capture?.completed(phase, it); onSample() }
         } catch (failure: Exception) {
             if (capture != null) capture.failed(phase, index, failure)
             throw failure

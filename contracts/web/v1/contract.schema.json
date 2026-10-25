@@ -338,8 +338,7 @@
         "message",
         "workflows",
         "agentContractVersion",
-        "limits",
-        "launch"
+        "limits"
       ],
       "additionalProperties": false,
       "allOf": [

@@ -85,6 +85,17 @@ class WebProductionWorkflowsTest {
     }
 
     @Test
+    fun `completed exploration samples keep a long healthy exploration active`() = withRoot { root ->
+        val engines = FakeEngines()
+        // No report is written until the end; only per-sample progress shows activity.
+        engines.exploreBody = { reports -> repeat(15) { Thread.sleep(20); engines.activity() }; reports.resolve("exploration.json").writeText("{}") }
+        val limits = WorkflowExecutionLimits(60_000uL, 100uL, 1_048_576uL, 0uL)
+        assertIs<DurableWebWorkflowOutcome.Completed>(ExploreWorkflowAdapter(engines, FAST).execute(context(root, root.resolve("active"), limits)))
+        engines.exploreBody = { reports -> Thread.sleep(300); reports.resolve("exploration.json").writeText("{}") }
+        assertLimitExhausted(ExploreWorkflowAdapter(engines, FAST).execute(context(root, root.resolve("idle"), limits)))
+    }
+
+    @Test
     fun `time limits are rechecked when a body finishes between samples`() = withRoot { root ->
         val engines = FakeEngines()
         engines.exploreBody = { Thread.sleep(100) }
@@ -479,7 +490,10 @@ class WebProductionWorkflowsTest {
             modes += mode; writeSourceTree(reports.resolve("source-tree"), "base")
         }
         var repairBody: (Path) -> Unit = { project -> acceptRepairGraph(project) }
-        override fun explore(binary: Path, reportsDirectory: Path) { calls.incrementAndGet(); exploreBody(reportsDirectory) }
+        var activity: () -> Unit = {}
+        override fun explore(binary: Path, reportsDirectory: Path, activity: () -> Unit) {
+            calls.incrementAndGet(); this.activity = activity; exploreBody(reportsDirectory)
+        }
         override fun reconstruct(binary: Path, reportsDirectory: Path, mode: WebReconstructionMode, progress: AgentWorkflowProgress) {
             calls.incrementAndGet(); reconstructBody(reportsDirectory, mode, progress)
         }

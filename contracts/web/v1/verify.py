@@ -401,7 +401,7 @@ def check_semantics(document: dict) -> None:
         if len(capabilities) != len(set(capabilities)):
             raise ValueError("duplicate capability identity")
         for item in data["capabilities"]:
-            launch = item["launch"]
+            launch = item.get("launch")  # Optional: older v1 producers omit it.
             # An agent contract version is reported exactly for launch options that contact an agent.
             if launch is not None and launch["contactsAgent"] != (item["agentContractVersion"] is not None):
                 raise ValueError("launch agent contact and agent contract version disagree")

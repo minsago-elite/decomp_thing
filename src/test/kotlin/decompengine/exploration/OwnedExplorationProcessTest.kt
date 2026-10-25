@@ -22,7 +22,16 @@ class OwnedExplorationProcessTest {
         // The helper execs into a process that never waits: its killed child stays a zombie until the helper dies.
         interruptedHelper("#!/bin/sh\nsleep 300 &\necho \"$$ $!\" > '%s'\nexec sleep 400\n")
 
-    private fun interruptedHelper(script: String) {
+    @Test
+    fun `interrupting strings hints kills a helper whose child still holds its output pipe`() =
+        // The child inherits stdout, so a blocking pipe read would never reach EOF before the kill.
+        interruptedHelper("#!/bin/sh\nsleep 300 &\necho \"$$ $!\" > '%s'\nwait\n") { helper, directory ->
+            StaticHintGenerator(stringsPath = helper).generate(directory.resolve("binary"))
+        }
+
+    private fun interruptedHelper(script: String, run: (Path, Path) -> Unit = { helper, directory ->
+        PythonAngrExplorer(python = Path.of("/bin/true"), timeout = helper).generate(directory.resolve("binary"))
+    }) {
         val parent = Files.createDirectories(Path.of("build/test-tmp/owned-exploration").toAbsolutePath())
         val directory = Files.createTempDirectory(parent, "angr-")
         try {
@@ -34,7 +43,7 @@ class OwnedExplorationProcessTest {
             }
             val failure = AtomicReference<Throwable>()
             val worker = Thread {
-                try { PythonAngrExplorer(python = Path.of("/bin/true"), timeout = helper).generate(directory.resolve("binary")) }
+                try { run(helper, directory) }
                 catch (thrown: Throwable) { failure.set(thrown) }
             }
             worker.start()
