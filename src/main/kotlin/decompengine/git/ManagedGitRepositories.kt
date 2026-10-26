@@ -837,7 +837,7 @@ class ManagedGitRepositories(
         GitPushes.write(directory, GitPushIntent(operation.operationId, remote.remoteId, branch, expected, local, clock.instant()))
         audit("started")
         crash(GitOperationCrashPoint.AFTER_STAGING)
-        val result = try { GitPushes.push(runner, located.commonDir, location, remotePolicy, local, branch) } catch (failure: GitCommandException) {
+        val result = try { GitPushes.push(runner, located.commonDir, location, remotePolicy, local, branch, expected) } catch (failure: GitCommandException) {
             // The remote may or may not have accepted the update: never claim either outcome.
             audit("unconfirmed")
             throw GitOperationRefusal("PUSH_UNCONFIRMED", "The push did not report its outcome. Reconcile it against the remote before any retry; " +
@@ -847,13 +847,21 @@ class ManagedGitRepositories(
         return when (result) {
             GitPushResult.PUBLISHED, GitPushResult.UP_TO_DATE -> {
                 runner.run(GitInvocation("update-ref", listOf("${remote.trackingPrefix}$branch", local), gitDir = located.commonDir))
-                GitPushes.delete(directory, operation.operationId)
+                // The intent stays until the completed operation is durable (see executeWorkspace), so a
+                // crash or audit failure from here on still leaves a reconcilable record.
                 audit("published")
                 local to "Published ${local.take(12)} to ${remote.name}/$branch. Publication is not validation or acceptance."
+            }
+            GitPushResult.UNCONFIRMED -> {
+                audit("unconfirmed")
+                throw GitOperationRefusal("PUSH_UNCONFIRMED", "The remote did not confirm the update. Reconcile the push against the remote " +
+                    "before any retry; publication is not claimed.")
             }
             else -> {
                 GitPushes.delete(directory, operation.operationId)
                 audit(when (result) { GitPushResult.REJECTED_NON_FAST_FORWARD -> "rejected_non_fast_forward"; GitPushResult.REJECTED_REMOTE_CHANGED -> "rejected_remote_changed"; else -> "rejected" })
+                if (result == GitPushResult.REJECTED_REMOTE_CHANGED) GitWorkspaceMutations.refuse("REMOTE_CHANGED",
+                    "The remote branch changed while pushing, so the reviewed expectation no longer held. Fetch and review again; nothing was published.")
                 GitWorkspaceMutations.refuse(if (result == GitPushResult.REJECTED_NON_FAST_FORWARD) "NON_FAST_FORWARD" else "PUSH_REJECTED",
                     if (result == GitPushResult.REJECTED_NON_FAST_FORWARD) "The remote rejected a non-fast-forward update. Fetch and integrate first; nothing was force-pushed."
                     else "The remote rejected the push. Fetch and review the remote state; nothing was published.")
@@ -873,6 +881,7 @@ class ManagedGitRepositories(
             else -> Triple(GitOperationState.FAILED, "PUSH_SUPERSEDED", "Reconciliation found the remote branch at another commit; the pushed commit is not published there.")
         }
         synchronized(lock) {
+            // A push already recorded as completed keeps its record; only its leftover intent is settled.
             val original = operations(operation.jobId).singleOrNull { it.operationId == intent.operationId }
             if (original != null && !(original.state == GitOperationState.COMPLETED)) {
                 persist(root.resolve(operation.jobId).resolve("git"), finish(original, state, code, message,
@@ -1688,6 +1697,11 @@ class ManagedGitRepositories(
                 else -> error("not a workspace request")
             }
             synchronized(lock) { current = finish(current, GitOperationState.COMPLETED, null, message, result); persist(directory, current) }
+            if (queued.action == GitOperationAction.PUSH) {
+                // Only now is publication durably recorded; the intent can go.
+                crash(GitOperationCrashPoint.BEFORE_PUBLISH)
+                GitPushes.delete(repositoryDirectory(queued.jobId, queued.repositoryId), queued.operationId)
+            }
             // As for push completion, this boundary is after the terminal record but before intent cleanup.
             if (queued.action in GitSyncRequest.GITHUB) crash(GitOperationCrashPoint.BEFORE_PUBLISH)
             cleanupPullIntent(current)
