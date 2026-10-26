@@ -4,7 +4,6 @@ import hashlib
 import math
 import time
 import os
-import shutil
 import tempfile
 import re
 from pathlib import Path
@@ -65,7 +64,7 @@ def _complete_execution(result):
 
 
 class owned_worker_leaf:
-    """Explicit attempt lifetime; unknown worker absence retains the owned leaf."""
+    """Explicit attempt lifetime; no deletion without exclusive namespace authority."""
     def __init__(self, root, prefix):
         workspace = root/'worker-work'
         workspace.mkdir(mode=0o700,exist_ok=True)
@@ -103,19 +102,21 @@ class owned_worker_leaf:
             if (current.st_dev,current.st_ino,current.st_uid,current.st_mode) != tuple(self.identity[k] for k in ('device','inode','uid','mode')):
                 facts['reason']='leaf identity changed; no deletion'
             elif not self.launched or absence:
-                facts['deletionAttempted']=True
-                shutil.rmtree(self.path)
-                facts['retained']=False
+                # A matching lstat cannot authorize rmtree: its fresh lookup can
+                # select a same-UID replacement, including after this check.
+                # Retain diagnostics until an independently protected cleanup
+                # owner exists. Process absence is not namespace exclusivity.
+                facts['reason']='exclusive-deletion-authority-unavailable'
             else:
                 facts['reason']='worker absence unverified; leaf retained'
         except Exception as cleanup_error:
-            facts['reason']='leaf deletion/identity error'
+            facts['reason']='leaf identity inspection error'
             facts['secondaryError']=type(cleanup_error).__name__+': '+str(cleanup_error)[:300]
         if isinstance(result,dict):
             result['leafCleanup']=facts
         if error is not None:
             error.leafCleanup=facts
-        elif facts.get('secondaryError') or facts.get('reason'):
+        elif facts.get('secondaryError') or facts.get('reason') not in (None,'exclusive-deletion-authority-unavailable'):
             failure=ValueError('worker leaf cleanup incomplete')
             failure.bounded_result=result
             failure.leafCleanup=facts

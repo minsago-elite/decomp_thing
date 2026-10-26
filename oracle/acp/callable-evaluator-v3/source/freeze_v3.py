@@ -299,7 +299,7 @@ def _pairs(pairs):
 _FREEZE_DEPENDENCY_SOURCES = (
     ('build_contract',26463,'a54fb8b508ebf85a2f576972f5809095b50763c7ef3ef265ce1864a456ffeb6c'),
     ('bounded_runtime',136314,'1095decb5115e513bcf30973c0543d45e2d5a4aef2ee4e757d14bfe4d33c67a5'),
-    ('interface_gate_v3',34978,'5896370c03f4f683f0ad469bf347f09f9769bc0852fbff1513d67b6e0551d617'),
+    ('interface_gate_v3',35287,'caefa9fa3859715dab6a9202f1b0e75280730e8b2bd20b2c8745645336ec8e2e'),
     ('evaluate_candidate_v3',49702,'ee9a700de49d811c3774e08b82df0b835c01077c6f17fd84b166e6d089fe741f'),
 )
 _FREEZE_IMPORT_EDGES = {

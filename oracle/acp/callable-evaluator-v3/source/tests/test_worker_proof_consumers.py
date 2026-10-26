@@ -154,14 +154,14 @@ class WorkerProofConsumers(unittest.TestCase):
                     self.assertEqual(primary.leafCleanup['identity']['inode'],leaf.path.stat().st_ino)
                 leaf=gate.owned_worker_leaf(root,prefix)
                 result=completed_result();primary=ValueError('primary');primary.bounded_result=result
-                with patch.object(gate.shutil,'rmtree',side_effect=OSError('injected delete failure')):
+                with patch.object(Path,'lstat',side_effect=OSError('injected identity failure')):
                     with self.assertRaisesRegex(ValueError,'primary') as caught:
                         with leaf:
                             leaf.run(lambda:result)
                             raise primary
                 self.assertIs(caught.exception,primary)
                 self.assertIs(primary.bounded_result,result)
-                self.assertIn('injected delete failure',primary.leafCleanup['secondaryError'])
+                self.assertIn('injected identity failure',primary.leafCleanup['secondaryError'])
                 self.assertTrue(leaf.path.is_dir())
 
     def test_owned_leaf_success_prelaunch_and_stale_identity(self):
@@ -171,7 +171,11 @@ class WorkerProofConsumers(unittest.TestCase):
                 with gate.owned_worker_leaf(root,'helper-build-') as leaf:
                     if launched:leaf.run(completed_result)
                     path=leaf.path
-                self.assertFalse(path.exists())
+                self.assertTrue(path.is_dir())
+                if launched:
+                    self.assertTrue(leaf.result['leafCleanup']['retained'])
+                    self.assertFalse(leaf.result['leafCleanup']['deletionAttempted'])
+                    self.assertEqual('exclusive-deletion-authority-unavailable',leaf.result['leafCleanup']['reason'])
             leaf=gate.owned_worker_leaf(root,'helper-inspection-')
             original=leaf.path.with_name(leaf.path.name+'-retained')
             with self.assertRaisesRegex(ValueError,'cleanup incomplete'):
@@ -181,6 +185,73 @@ class WorkerProofConsumers(unittest.TestCase):
                     leaf.path.mkdir()
             self.assertTrue(original.is_dir())
             self.assertTrue(leaf.path.is_dir())
+
+    def test_owned_leaf_retains_replacement_after_final_identity_check(self):
+        for launched in (False,True):
+            for replacement in ('directory','symlink','file'):
+                with self.subTest(launched=launched,replacement=replacement), tempfile.TemporaryDirectory(dir=ROOT) as directory:
+                    root=Path(directory);leaf=gate.owned_worker_leaf(root,'helper-inspection-')
+                    moved=root/'original-leaf';foreign=root/'foreign';foreign.mkdir()
+                    (foreign/'canary').write_bytes(b'foreign canary')
+                    result=completed_result();leaf.result=result
+                    real_lstat=Path.lstat;checks=[]
+                    def replace_after_check(path,*args,**kwargs):
+                        metadata=real_lstat(path,*args,**kwargs)
+                        if path==leaf.path:
+                            checks.append(metadata.st_ino)
+                            path.rename(moved)
+                            if replacement=='directory':
+                                path.mkdir();(path/'canary').write_bytes(b'replacement canary')
+                            elif replacement=='symlink':path.symlink_to(foreign,target_is_directory=True)
+                            else:path.write_bytes(b'replacement canary')
+                        return metadata
+                    with patch.object(Path,'lstat',replace_after_check):
+                        with leaf:
+                            if launched:leaf.run(lambda:result)
+                    self.assertEqual([leaf.identity['inode']],checks)
+                    self.assertEqual(leaf.identity['inode'],moved.stat().st_ino)
+                    self.assertEqual(b'foreign canary',(foreign/'canary').read_bytes())
+                    if replacement=='directory':self.assertEqual(b'replacement canary',(leaf.path/'canary').read_bytes())
+                    elif replacement=='symlink':self.assertTrue(leaf.path.is_symlink())
+                    else:self.assertEqual(b'replacement canary',leaf.path.read_bytes())
+                    facts=result['leafCleanup']
+                    self.assertTrue(facts['retained']);self.assertFalse(facts['deletionAttempted'])
+                    self.assertEqual(not launched,facts['prelaunch'])
+                    self.assertEqual('exclusive-deletion-authority-unavailable',facts['reason'])
+
+    def test_owned_leaf_uses_no_destructive_cleanup_even_with_verified_absence(self):
+        for launched in (False,True):
+            with self.subTest(launched=launched), tempfile.TemporaryDirectory(dir=ROOT) as directory:
+                root=Path(directory);leaf=gate.owned_worker_leaf(root,'helper-build-')
+                (leaf.path/'output').write_bytes(b'owned output')
+                result=completed_result();leaf.result=result
+                with patch('shutil.rmtree',side_effect=AssertionError('no recursive deletion')) as recursive, \
+                        patch.object(gate.os,'unlink',side_effect=AssertionError('no unlink')) as unlink, \
+                        patch.object(gate.os,'rmdir',side_effect=AssertionError('no rmdir')) as rmdir:
+                    with leaf:
+                        if launched:leaf.run(lambda:result)
+                recursive.assert_not_called();unlink.assert_not_called();rmdir.assert_not_called()
+                self.assertEqual(b'owned output',(leaf.path/'output').read_bytes())
+                self.assertTrue(result['leafCleanup']['absenceVerified'])
+                self.assertTrue(result['leafCleanup']['retained'])
+                self.assertFalse(result['leafCleanup']['deletionAttempted'])
+
+    def test_owned_leaf_retention_does_not_accept_unknown_worker_absence(self):
+        for missing in ('cleanupVerified','rootReaped','finalAbsenceVerified','kernelScope'):
+            with self.subTest(missing=missing), tempfile.TemporaryDirectory(dir=ROOT) as directory:
+                leaf=gate.owned_worker_leaf(Path(directory),'helper-inspection-')
+                (leaf.path/'output').write_bytes(b'owned output')
+                result=completed_result()
+                if missing=='kernelScope':result['kernelScope']['finalAbsenceVerified']=False
+                else:result[missing]=False
+                with self.assertRaisesRegex(ValueError,'worker leaf cleanup incomplete') as caught:
+                    with leaf:leaf.run(lambda:result)
+                self.assertIs(caught.exception.bounded_result,result)
+                facts=caught.exception.leafCleanup
+                self.assertFalse(facts['absenceVerified']);self.assertTrue(facts['retained'])
+                self.assertFalse(facts['deletionAttempted'])
+                self.assertEqual('worker absence unverified; leaf retained',facts['reason'])
+                self.assertEqual(b'owned output',(leaf.path/'output').read_bytes())
 
     def test_wrapper_success_without_worker_proof_is_incomplete(self):
         result = completed_result()
@@ -249,11 +320,13 @@ class WorkerProofConsumers(unittest.TestCase):
             runner.side_effect=None
             cleanup_bad=completed_result();cleanup_bad['workerTerminationVerified']=False
             runner.return_value=cleanup_bad
-            with patch.dict(build.__globals__,ROOT=root,contained_command=command,bounded_run=runner), patch.object(gate.shutil,'rmtree',side_effect=OSError('injected build deletion')):
+            with patch.dict(build.__globals__,ROOT=root,contained_command=command,bounded_run=runner), patch('shutil.rmtree',side_effect=OSError('injected build deletion')) as deletion:
                 with self.assertRaisesRegex(ValueError,'incomplete helper build') as caught:
                     build('cleanup-not-created.json')
             self.assertIs(caught.exception.bounded_result,cleanup_bad)
-            self.assertIn('injected build deletion',caught.exception.leafCleanup['secondaryError'])
+            deletion.assert_not_called()
+            self.assertNotIn('secondaryError',caught.exception.leafCleanup)
+            self.assertEqual('exclusive-deletion-authority-unavailable',caught.exception.leafCleanup['reason'])
 
     def test_helper_staged_outputs_publish_only_after_complete_and_valid_elf(self):
         import struct
@@ -290,7 +363,8 @@ class WorkerProofConsumers(unittest.TestCase):
                 result=build('receipt.json')
             self.assertTrue(result['publication']['published'])
             self.assertEqual((root/'toolchain-001/record_identity_probe').read_bytes(),elf)
-            self.assertFalse(Path(result['workerCwd']).exists())
+            self.assertTrue(Path(result['workerCwd']).is_dir())
+            self.assertEqual((Path(result['workerCwd'])/'record_identity_probe').read_bytes(),elf)
             self.assertEqual(source.read_bytes(),b'// fixed')
 
     def test_actual_containment_recipe_writes_only_leaf_and_keeps_inputs_readonly(self):
@@ -371,11 +445,13 @@ class WorkerProofConsumers(unittest.TestCase):
             runner.side_effect=None
             cleanup_bad=completed_result();cleanup_bad['workerTerminationVerified']=False
             runner.return_value=cleanup_bad
-            with patch.dict(pin.__globals__,ROOT=root,contained_command=command,bounded_run=runner,load_inspection_binding=lambda profile:binding), patch.object(gate.shutil,'rmtree',side_effect=OSError('injected inspection deletion')):
+            with patch.dict(pin.__globals__,ROOT=root,contained_command=command,bounded_run=runner,load_inspection_binding=lambda profile:binding), patch('shutil.rmtree',side_effect=OSError('injected inspection deletion')) as deletion:
                 with self.assertRaisesRegex(ValueError,'incomplete helper dependency inspection') as caught:
                     pin('cleanup-not-created.json','build.json')
             self.assertIs(caught.exception.bounded_result,cleanup_bad)
-            self.assertIn('injected inspection deletion',caught.exception.leafCleanup['secondaryError'])
+            deletion.assert_not_called()
+            self.assertNotIn('secondaryError',caught.exception.leafCleanup)
+            self.assertEqual('exclusive-deletion-authority-unavailable',caught.exception.leafCleanup['reason'])
             self.assertFalse((work / 'not-created.json').exists())
 
     def test_fixed_inspection_recipe_rejects_substitution_and_other_shebangs(self):
