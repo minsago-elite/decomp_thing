@@ -13,6 +13,9 @@ import kotlinx.serialization.json.put
 import java.io.ByteArrayOutputStream
 import java.net.InetAddress
 import java.net.URI
+import java.nio.file.Files
+import java.nio.file.LinkOption
+import java.nio.file.Path
 import java.security.MessageDigest
 import java.security.SecureRandom
 import java.time.Duration
@@ -25,19 +28,23 @@ import javax.crypto.spec.SecretKeySpec
 /**
  * Optional reverse-proxy profile (#216/#613). The operator names the exact public HTTPS origin and
  * the loopback peers whose forwarding headers are honoured; nothing is discovered from a request.
- * The JVM listener stays loopback-only, so the proxy-to-JVM hop is isolated to the host. Requests
- * from any other peer, including direct loopback clients, are refused before routing. Forwarding
- * headers are consistency checks only: they never select an origin, a path or an identity.
+ * The JVM listener stays loopback-only. A private upstream credential authenticates the proxy;
+ * source addresses alone cannot distinguish it from other local processes. Both checks run before
+ * routing. Forwarding headers never select an origin, a path or an identity.
  */
 class WebReverseProxyProfile(
     val publicOrigin: String,
     trustedProxies: Set<String>,
+    proxySecret: String,
 ) {
+    private val secretDigest: ByteArray
     internal val publicAuthority: String
     internal val publicPort: Int
     internal val trustedPeers: Set<InetAddress>
 
     init {
+        require(proxySecret.matches(SECRET_FORMAT)) { "the proxy secret must contain exactly 64 lowercase hexadecimal characters" }
+        secretDigest = digest(proxySecret.toByteArray(Charsets.US_ASCII))
         require(publicOrigin.length <= 256) { "the reverse-proxy public origin is too long" }
         val uri = try { URI(publicOrigin) } catch (_: Exception) { throw IllegalArgumentException("invalid reverse-proxy public origin") }
         require(uri.scheme == "https" && uri.rawUserInfo == null && uri.rawPath.isNullOrEmpty() && uri.rawQuery == null &&
@@ -65,9 +72,30 @@ class WebReverseProxyProfile(
         }.toSet()
     }
 
-    internal companion object {
+    internal fun authenticates(secret: String): Boolean =
+        secret.matches(SECRET_FORMAT) && MessageDigest.isEqual(secretDigest, digest(secret.toByteArray(Charsets.US_ASCII)))
+
+    companion object {
+        internal const val SECRET_HEADER = "X-Decomp-Proxy-Secret"
+        private val SECRET_FORMAT = Regex("[0-9a-f]{64}")
+
+        /** Read a bounded operator-owned secret, never including its value or path in diagnostics. */
+        fun fromSecretFile(publicOrigin: String, trustedProxies: Set<String>, path: Path): WebReverseProxyProfile {
+            val bytes = try {
+                require(Files.isRegularFile(path, LinkOption.NOFOLLOW_LINKS))
+                Files.newInputStream(path, LinkOption.NOFOLLOW_LINKS).use { it.readNBytes(66) }
+            } catch (_: Exception) {
+                throw IllegalArgumentException("--proxy-secret-file must name a readable regular file, not a symbolic link")
+            }
+            try {
+                // A single trailing LF is allowed for secret files created by common CLI generators.
+                val secret = bytes.toString(Charsets.US_ASCII).removeSuffix("\n")
+                return WebReverseProxyProfile(publicOrigin, trustedProxies, secret)
+            } finally { bytes.fill(0) }
+        }
+
         /** The forwarding header names a trusted proxy may send; values are verified, never adopted. */
-        val FORWARDING_HEADERS = setOf("forwarded", "x-forwarded-for", "x-forwarded-proto", "x-forwarded-host", "x-forwarded-port", "x-real-ip")
+        internal val FORWARDING_HEADERS = setOf("forwarded", "x-forwarded-for", "x-forwarded-proto", "x-forwarded-host", "x-forwarded-port", "x-real-ip")
         private val PUBLIC_DNS_HOST = Regex("(?=.{1,253}$)[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?(?:\\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)*")
         private val IPV4_LITERAL = Regex("(?:(?:25[0-5]|2[0-4][0-9]|1[0-9]{2}|[1-9]?[0-9])\\.){3}(?:25[0-5]|2[0-4][0-9]|1[0-9]{2}|[1-9]?[0-9])")
         private val IPV6_LITERAL = Regex("[0-9a-f]{0,4}(?::[0-9a-f]{0,4}){2,7}")
@@ -404,13 +432,19 @@ class LocalWebAccess(
     }
 
     /**
-     * Admit only the configured proxy peers, then require their forwarding headers to agree with the
-     * configured public origin and base path. Exact Host/Origin pairing and the Secure session cookie
+     * Admit only configured proxy peers presenting the private upstream credential, then require
+     * forwarding headers to agree with the configured public origin and base path. Exact Host/Origin pairing and the Secure session cookie
      * still apply afterwards; a header value can refuse a request but never widens authority.
      */
     private fun validateProxyHop(exchange: HttpExchange, proxy: WebReverseProxyProfile) {
         val peer = exchange.remoteAddress?.address
         if (peer == null || peer !in proxy.trustedPeers) {
+            deny(403, "PROXY_PEER_DENIED", "This workbench accepts requests only through its configured reverse proxy.")
+        }
+        // Local clients can bind any loopback alias, including the proxy's own source address.
+        // Require a separate operator-provisioned credential, overwritten by the proxy after edge auth.
+        val secrets = exchange.requestHeaders[WebReverseProxyProfile.SECRET_HEADER]
+        if (secrets == null || secrets.size != 1 || !proxy.authenticates(secrets.single())) {
             deny(403, "PROXY_PEER_DENIED", "This workbench accepts requests only through its configured reverse proxy.")
         }
         val names = exchange.requestHeaders.keys.map(String::lowercase)

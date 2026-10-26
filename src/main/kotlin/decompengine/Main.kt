@@ -889,6 +889,7 @@ private fun runWeb(args: List<String>) {
     var basePath = "/"
     var devFrontendOrigin: String? = null
     var publicOrigin: String? = null
+    var proxySecretFile: Path? = null
     val trustedProxies = mutableListOf<String>()
     var index = 0
     while (index < args.size) {
@@ -936,16 +937,24 @@ private fun runWeb(args: List<String>) {
                 trustedProxies += args[index + 1]
                 index += 2
             }
+            "--proxy-secret-file" -> {
+                require(proxySecretFile == null) { "--proxy-secret-file may be given once" }
+                proxySecretFile = Path.of(args[index + 1])
+                index += 2
+            }
             else -> error("unknown web argument: ${args[index]}")
         }
     }
     require(port in 0..65535) { "--port must be between 0 and 65535 (0 selects an available port)" }
     // The optional reverse-proxy profile is complete or absent; see docs/web-reverse-proxy.md.
-    require((publicOrigin == null) == trustedProxies.isEmpty()) {
-        "the reverse-proxy profile requires both --public-origin and at least one --trusted-proxy"
+    require((publicOrigin == null && trustedProxies.isEmpty() && proxySecretFile == null) ||
+        (publicOrigin != null && trustedProxies.isNotEmpty() && proxySecretFile != null)) {
+        "the reverse-proxy profile requires --public-origin, at least one --trusted-proxy and --proxy-secret-file together"
     }
     require(trustedProxies.distinct().size == trustedProxies.size) { "--trusted-proxy addresses must be unique" }
-    val reverseProxy = publicOrigin?.let { decompengine.web.WebReverseProxyProfile(it, trustedProxies.toSet()) }
+    val reverseProxy = publicOrigin?.let {
+        decompengine.web.WebReverseProxyProfile.fromSecretFile(it, trustedProxies.toSet(), requireNotNull(proxySecretFile))
+    }
     val server = try {
         decompengine.web.startWebServerWithShutdownHook { cancellation ->
             UploadServer(host, port, dataDir, uiMode = uiMode, basePath = basePath, devFrontendOrigin = devFrontendOrigin,
@@ -958,7 +967,7 @@ private fun runWeb(args: List<String>) {
     val urlHost = if (':' in host && !host.startsWith('[')) "[$host]" else host
     println("Serving decomp_engine ${uiMode.name.lowercase()} UI on http://$urlHost:${server.serverPort}$basePath")
     if (reverseProxy != null) {
-        println("Reverse-proxy profile: only trusted proxy peers ${trustedProxies.joinToString(", ")} are admitted for ${reverseProxy.publicOrigin}$basePath")
+        println("Reverse-proxy profile: authenticated trusted proxy peers ${trustedProxies.joinToString(", ")} are admitted for ${reverseProxy.publicOrigin}$basePath")
     }
     val bootstrap = server.issueBrowserBootstrap()
     val sessionPath = if (uiMode == WebUiMode.SPA) basePath else "/login"
@@ -986,7 +995,7 @@ private fun printHelp() {
           llm_bin_patch gcc-engine-native-calls <cc1> <stripped-binary> --profile <file> --ghidra-archive <file> --output <empty-private-directory> --scratch <provisioned-mount>
           llm_bin_patch llvm-native-runtime-measurement [--listener-continuity] <oci-layout> <fixed-client> <empty-config> <private-socket> <fresh-output>
           llm_bin_patch web [--host 127.0.0.1] [--port 8000] [--listen-backlog 64] [--data-dir .decomp_engine/jobs] [--ui legacy|spa] [--base-path /] [--dev-frontend-origin http://127.0.0.1:5173]
-          llm_bin_patch web --ui spa --public-origin https://<host> --trusted-proxy 127.0.0.1 [--base-path /<prefix>/]  (reverse-proxy profile; docs/web-reverse-proxy.md)
+          llm_bin_patch web --ui spa --public-origin https://<host> --trusted-proxy 127.0.0.1 --proxy-secret-file <private-file> [--base-path /<prefix>/]  (reverse-proxy profile; docs/web-reverse-proxy.md)
 
         Agent harness selection for doctor, patch, reconstruction, and repair:
           --harness acp            use the ACP agent provisioned by ACP_CONFIG_FILE (default)

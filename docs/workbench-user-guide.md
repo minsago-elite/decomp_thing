@@ -45,7 +45,7 @@ build/install/llm_bin_patch/bin/llm_bin_patch web --ui spa
 | `--data-dir` | `.decomp_engine/jobs` | Where uploaded jobs are stored (see [Your data](#your-data)). |
 | `--ui` | `legacy` | `legacy` or `spa`. |
 | `--base-path` | `/` | Serve under a prefix such as `/workbench/`. **Only with `--ui spa`**: the legacy workbench refuses to start with `--base-path is supported by --ui spa`. |
-| `--public-origin`, `--trusted-proxy` | unset | Optional reverse-proxy profile; both are required together with `--ui spa`. See [reverse-proxy profile](web-reverse-proxy.md). |
+| `--public-origin`, `--trusted-proxy`, `--proxy-secret-file` | unset | Optional reverse-proxy profile; all three are required together with `--ui spa`. The secret file holds the private proxy-to-JVM credential, not the operator login. See [reverse-proxy profile and qualification limits](web-reverse-proxy.md). |
 
 On start the launcher prints two lines:
 

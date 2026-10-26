@@ -44,15 +44,15 @@ import kotlin.test.assertTrue
 
 /**
  * The optional reverse-proxy profile (#216/#613/#614/#480) on a real listener. The JVM stays on
- * 127.0.0.1; the trusted proxy peer is 127.0.0.2 and every other peer, including 127.0.0.1 itself,
- * is a direct or spoofing client. A test-owned nginx-like hop exercises streams, uploads, downloads
- * and subpath assets end to end.
+ * 127.0.0.1; the trusted proxy peer is 127.0.0.2, with a separate private upstream credential.
+ * Direct clients can select that same source address and must still be refused without the secret.
+ * A test-owned nginx-like hop exercises login, streams, uploads, downloads and subpath assets.
  */
 class WebReverseProxyProfileTest {
     private val root: Path = Files.createTempDirectory(Path.of("build"), "reverse-proxy-profile")
     private val http: HttpClient = HttpClient.newBuilder().version(HttpClient.Version.HTTP_1_1).build()
     private val public = "https://decomp.example"
-    private val profile get() = WebReverseProxyProfile(public, setOf(TRUSTED_PEER))
+    private val profile get() = WebReverseProxyProfile(public, setOf(TRUSTED_PEER), PROXY_SECRET)
 
     @AfterTest fun cleanup() { http.close(); root.toFile().deleteRecursively() }
 
@@ -102,7 +102,9 @@ class WebReverseProxyProfileTest {
         }
     }
 
-    private val forwarding = listOf("Host" to "decomp.example", "X-Forwarded-Proto" to "https",
+    // Unit-level hop requests explicitly carry the upstream credential; end-to-end tests use the proxy.
+    private val forwarding = listOf(WebReverseProxyProfile.SECRET_HEADER to PROXY_SECRET,
+        "Host" to "decomp.example", "X-Forwarded-Proto" to "https",
         "X-Forwarded-Host" to "decomp.example", "X-Forwarded-For" to "198.51.100.7")
 
     private fun exchangeToken(server: UploadServer, peer: String = TRUSTED_PEER, headers: List<Pair<String, String>> = forwarding,
@@ -110,8 +112,15 @@ class WebReverseProxyProfileTest {
         raw(server.serverPort, peer, "POST", "${BASE}api/v1/session", headers + listOfNotNull(origin?.let { "Origin" to it }) +
             listOf("Content-Type" to "application/json", "Accept" to "application/json"), "{\"token\":\"$token\"}")
 
-    private fun signIn(server: UploadServer): Pair<String, String> {
-        val response = exchangeToken(server)
+    private fun signIn(server: UploadServer): Pair<String, String> = credentials(exchangeToken(server))
+
+    private fun signInVia(server: UploadServer, proxy: FakeReverseProxy, token: String = server.issueBrowserBootstrap().token): Pair<String, String> =
+        credentials(raw(URI(proxy.origin).port, "127.0.0.1", "POST", "${BASE}api/v1/session",
+            listOf("Host" to "decomp.example", "Origin" to public, "Content-Type" to "application/json",
+                "Accept" to "application/json", "Authorization" to OPERATOR_CREDENTIAL,
+                WebReverseProxyProfile.SECRET_HEADER to "client-forged-secret"), "{\"token\":\"$token\"}"))
+
+    private fun credentials(response: RawResponse): Pair<String, String> {
         assertEquals(200, response.status, response.body)
         val csrf = Json.parseToJsonElement(response.body).jsonObject.getValue("data").jsonObject.getValue("csrfToken").jsonPrimitive.content
         return response.header("Set-Cookie")!!.substringBefore(';') to csrf
@@ -123,17 +132,31 @@ class WebReverseProxyProfileTest {
     @Test
     fun `profile configuration accepts only an exact public HTTPS origin and loopback literal proxy peers`() {
         for (origin in listOf("https://decomp.example", "https://decomp.example:8443", "https://a.b-c.example", "https://192.0.2.10", "https://[2001:db8::1]")) {
-            WebReverseProxyProfile(origin, setOf("127.0.0.1"))
+            WebReverseProxyProfile(origin, setOf("127.0.0.1"), PROXY_SECRET)
         }
         for (origin in listOf("http://decomp.example", "https://decomp.example:443", "https://Decomp.example", "https://decomp.example/",
                 "https://decomp.example/base", "https://user@decomp.example", "https://decomp.example?x=1", "https://decomp.example#f",
                 "https://*.example", "https://decomp.example:0", "https://decomp_example", "decomp.example", "")) {
-            assertFailsWith<IllegalArgumentException>(origin) { WebReverseProxyProfile(origin, setOf("127.0.0.1")) }
+            assertFailsWith<IllegalArgumentException>(origin) { WebReverseProxyProfile(origin, setOf("127.0.0.1"), PROXY_SECRET) }
         }
-        WebReverseProxyProfile(public, setOf("127.0.0.1", "127.0.0.2", "::1"))
+        WebReverseProxyProfile(public, setOf("127.0.0.1", "127.0.0.2", "::1"), PROXY_SECRET)
+        for (secret in listOf("", "a".repeat(63), "a".repeat(65), "A".repeat(64), "z".repeat(64), "$PROXY_SECRET\n")) {
+            assertFailsWith<IllegalArgumentException> { WebReverseProxyProfile(public, setOf(TRUSTED_PEER), secret) }
+        }
+        val secretFile = root.resolve("proxy-secret")
+        Files.writeString(secretFile, "$PROXY_SECRET\n")
+        assertTrue(WebReverseProxyProfile.fromSecretFile(public, setOf(TRUSTED_PEER), secretFile).authenticates(PROXY_SECRET))
+        val link = Files.createSymbolicLink(root.resolve("secret-link"), secretFile.toAbsolutePath())
+        for (path in listOf(root.resolve("missing-secret"), root, link)) {
+            assertFailsWith<IllegalArgumentException> { WebReverseProxyProfile.fromSecretFile(public, setOf(TRUSTED_PEER), path) }
+        }
+        for (secret in listOf("", "invalid", PROXY_SECRET + "\n\n", "a".repeat(1024))) {
+            Files.writeString(secretFile, secret)
+            assertFailsWith<IllegalArgumentException> { WebReverseProxyProfile.fromSecretFile(public, setOf(TRUSTED_PEER), secretFile) }
+        }
         for (proxies in listOf(emptySet(), setOf("192.0.2.1"), setOf("10.0.0.1"), setOf("0.0.0.0"), setOf("localhost"), setOf("[::1]"),
                 setOf("127.0.0.1/8"), setOf("::"), setOf("2001:db8::1"), (1..9).map { "127.0.0.$it" }.toSet())) {
-            assertFailsWith<IllegalArgumentException>(proxies.toString()) { WebReverseProxyProfile(public, proxies) }
+            assertFailsWith<IllegalArgumentException>(proxies.toString()) { WebReverseProxyProfile(public, proxies, PROXY_SECRET) }
         }
         val configuration = LocalWebAccessConfiguration("http://127.0.0.1:8000", "/decomp/", reverseProxy = profile)
         assertEquals(public, configuration.browserOrigin)
@@ -195,6 +218,44 @@ class WebReverseProxyProfileTest {
             val logout = raw(server.serverPort, TRUSTED_PEER, "DELETE", "${BASE}api/v1/session", logoutHeaders + ("X-CSRF-Token" to csrf), "{}")
             assertEquals(204, logout.status)
             assertTrue(logout.headers("Set-Cookie").single().let { it.contains("Max-Age=0") && it.contains("; Secure") && it.contains("Path=$BASE") })
+        } finally { server.stop() }
+    }
+
+    @Test
+    fun `direct clients using the proxy source address cannot exchange a token or replay a session without the upstream credential`() {
+        val server = server()
+        try {
+            FakeReverseProxy(server.serverPort, "decomp.example").use { proxy ->
+                val token = server.issueBrowserBootstrap().token
+                val directHeaders = forwarding.filterNot { it.first == WebReverseProxyProfile.SECRET_HEADER }
+                val attempts = listOf(directHeaders, directHeaders + (WebReverseProxyProfile.SECRET_HEADER to "0".repeat(64)),
+                    forwarding + (WebReverseProxyProfile.SECRET_HEADER to PROXY_SECRET))
+                for (headers in attempts) {
+                    val denied = exchangeToken(server, peer = TRUSTED_PEER, headers = headers, token = token)
+                    assertEquals(403, denied.status); assertEquals("PROXY_PEER_DENIED", denied.code)
+                    assertNull(denied.header("Set-Cookie")); assertFalse(denied.body.contains(PROXY_SECRET))
+                }
+                // Edge authentication is required even with a valid bootstrap and a forged upstream header.
+                val noEdgeAuth = raw(URI(proxy.origin).port, "127.0.0.1", "POST", "${BASE}api/v1/session",
+                    forwarding + listOf("Origin" to public, "Content-Type" to "application/json"), "{\"token\":\"$token\"}")
+                assertEquals(401, noEdgeAuth.status); assertEquals(0, proxy.forwardedRequests.get())
+                // None of the denied exchanges consumed the token. The hop overwrites the forged secret.
+                val (session, _) = signInVia(server, proxy, token)
+                assertEquals(1, proxy.forwardedRequests.get())
+                val unauthenticatedReplay = raw(URI(proxy.origin).port, "127.0.0.1", "GET", "${BASE}api/v1/bootstrap",
+                    forwarding + listOf("Cookie" to session, "Accept" to "application/json"))
+                assertEquals(401, unauthenticatedReplay.status); assertEquals(1, proxy.forwardedRequests.get())
+                for (headers in attempts) {
+                    val replay = raw(server.serverPort, TRUSTED_PEER, "GET", "${BASE}api/v1/bootstrap",
+                        headers + listOf("Cookie" to session, "Accept" to "application/json"))
+                    assertEquals(403, replay.status); assertEquals("PROXY_PEER_DENIED", replay.code)
+                }
+                val admitted = raw(URI(proxy.origin).port, "127.0.0.1", "GET", "${BASE}api/v1/bootstrap",
+                    listOf("Host" to "decomp.example", "Cookie" to session, "Accept" to "application/json", "Authorization" to OPERATOR_CREDENTIAL))
+                assertEquals(200, admitted.status, admitted.body)
+                assertNull(admitted.header(WebReverseProxyProfile.SECRET_HEADER))
+                assertFalse(admitted.body.contains(PROXY_SECRET))
+            }
         } finally { server.stop() }
     }
 
@@ -283,7 +344,8 @@ class WebReverseProxyProfileTest {
     /**
      * A minimal authenticating nginx-like hop. It answers 401 itself unless the single operator's basic
      * credential is present (and strips it), overwrites Host and all client forwarding headers, connects from the
-     * trusted source address and, like nginx's default `proxy_buffering on`, holds a response until the
+     * trusted source address, overwrites the private upstream credential, enforces the documented
+     * declared Content-Length edge ceiling and, like nginx's default `proxy_buffering on`, holds a response until the
      * upstream finishes unless the upstream sends `X-Accel-Buffering: no` (or [alwaysBuffer] is set).
      */
     private class FakeReverseProxy(private val upstreamPort: Int, private val authority: String, private val alwaysBuffer: Boolean = false) : AutoCloseable {
@@ -329,15 +391,22 @@ class WebReverseProxyProfileTest {
                     "Content-Length: 0\r\nConnection: close\r\n\r\n").toByteArray())
                 return
             }
-            forwardedRequests.incrementAndGet()
-            val hopByHop = setOf("authorization", "host", "connection", "keep-alive", "upgrade", "http2-settings", "te", "forwarded", "x-real-ip")
-            val kept = headers.filterNot { (name, _) -> name.lowercase() in hopByHop || name.lowercase().startsWith("x-forwarded-") }
             val length = headers.firstOrNull { it.first.equals("Content-Length", true) }?.second?.toLong() ?: 0L
+            if (length > EDGE_MAX_REQUEST_BYTES) {
+                client.getOutputStream().write(("HTTP/1.1 413 Content Too Large\r\nContent-Type: text/html\r\n" +
+                    "Content-Length: 0\r\nConnection: close\r\n\r\n").toByteArray())
+                return
+            }
+            forwardedRequests.incrementAndGet()
+            val hopByHop = setOf("authorization", "host", "connection", "keep-alive", "upgrade", "http2-settings", "te", "forwarded", "x-real-ip",
+                WebReverseProxyProfile.SECRET_HEADER.lowercase())
+            val kept = headers.filterNot { (name, _) -> name.lowercase() in hopByHop || name.lowercase().startsWith("x-forwarded-") }
             upstream.bind(InetSocketAddress(TRUSTED_PEER, 0))
             upstream.connect(InetSocketAddress("127.0.0.1", upstreamPort), 5_000)
             val forwarded = buildString {
                 append(lines.first()).append("\r\nHost: $authority\r\n")
                 kept.forEach { (name, value) -> append("$name: $value\r\n") }
+                append("${WebReverseProxyProfile.SECRET_HEADER}: $PROXY_SECRET\r\n")
                 append("X-Forwarded-Proto: https\r\nX-Forwarded-Host: $authority\r\nX-Forwarded-For: ${client.inetAddress.hostAddress}\r\nConnection: close\r\n\r\n")
             }
             val upstreamOut = upstream.getOutputStream()
@@ -393,13 +462,13 @@ class WebReverseProxyProfileTest {
         val proxy = FakeReverseProxy(server.serverPort, "decomp.example")
         val buffering = FakeReverseProxy(server.serverPort, "decomp.example", alwaysBuffer = true)
         try {
-            val (session, csrf) = signIn(server)
             // Denied access: without the operator credential the proxy answers 401 and nothing reaches the JVM.
             for (path in listOf(BASE, "${BASE}api/v1/bootstrap", "${BASE}jobs/${run.jobId}")) {
-                val denied = http.send(HttpRequest.newBuilder(URI(proxy.origin + path)).header("Cookie", session).build(), HttpResponse.BodyHandlers.ofString())
+                val denied = http.send(HttpRequest.newBuilder(URI(proxy.origin + path)).build(), HttpResponse.BodyHandlers.ofString())
                 assertEquals(401, denied.statusCode()); assertTrue(denied.headers().firstValue("WWW-Authenticate").isPresent)
             }
             assertEquals(0, proxy.forwardedRequests.get())
+            val (session, csrf) = signInVia(server, proxy)
             fun call(path: String, accept: String = "application/json", via: FakeReverseProxy = proxy, method: String = "GET",
                      headers: Map<String, String> = emptyMap(), body: HttpRequest.BodyPublisher = HttpRequest.BodyPublishers.noBody(),
                      cookie: String = session): HttpResponse<String> {
@@ -438,7 +507,7 @@ class WebReverseProxyProfileTest {
                 }.get(within, TimeUnit.SECONDS)
             // Positive control: a proxy that buffers regardless delivers nothing promptly. It uses its own session so
             // its held upstream stream does not count against the two-stream quota of the session under test.
-            val (control, _) = signIn(server)
+            val (control, _) = signInVia(server, proxy)
             assertFailsWith<TimeoutException> { firstFrame(buffering, control, "?after=${oldest(control)}&limit=1", within = 2) }
             val (stream, eventIdOrNull) = firstFrame(proxy, session, "?after=${oldest(session)}&limit=1")
             assertEquals(200, stream.statusCode())
@@ -473,7 +542,29 @@ class WebReverseProxyProfileTest {
             assertTrue(created.headers().firstValue("Location").orElseThrow().startsWith("${BASE}api/v1/jobs/"))
             val oversized = call("${BASE}api/v1/jobs", method = "POST", headers = mutation + ("Idempotency-Key" to "proxy-upload-000002"),
                 body = HttpRequest.BodyPublishers.ofByteArray(multipart(ByteArray(StreamingMultipartUpload.MAX_REQUEST_BYTES.toInt()))))
-            assertEquals(413, oversized.statusCode()); assertTrue(oversized.body().contains("UPLOAD_TOO_LARGE"), oversized.body())
+            assertEquals(413, oversized.statusCode())
+            val requestId = oversized.headers().firstValue("X-Request-ID").orElseThrow()
+            assertEquals(requestId, java.util.UUID.fromString(requestId).toString())
+            assertTrue(oversized.headers().firstValue("Content-Type").orElseThrow().startsWith("application/json"))
+            val envelope = Json.parseToJsonElement(oversized.body()).jsonObject
+            assertEquals(setOf("apiVersion", "kind", "requestId", "error"), envelope.keys)
+            assertEquals("1", envelope.getValue("apiVersion").jsonPrimitive.content)
+            assertEquals("error", envelope.getValue("kind").jsonPrimitive.content)
+            assertEquals(requestId, envelope.getValue("requestId").jsonPrimitive.content)
+            val error = envelope.getValue("error").jsonObject
+            assertEquals(setOf("code", "message", "retryable", "details", "retryAfterMs"), error.keys)
+            assertEquals("UPLOAD_TOO_LARGE", error.getValue("code").jsonPrimitive.content)
+            assertTrue(error.getValue("message").jsonPrimitive.content.isNotBlank())
+            assertEquals("false", error.getValue("retryable").jsonPrimitive.content)
+            assertEquals("[]", error.getValue("details").toString())
+            assertEquals("null", error.getValue("retryAfterMs").toString())
+            // Above the independent finite edge ceiling the proxy refuses before forwarding or reading a body.
+            val beforeEdgeRefusal = proxy.forwardedRequests.get()
+            val edgeRefused = raw(URI(proxy.origin).port, "127.0.0.1", "POST", "${BASE}api/v1/jobs",
+                listOf("Host" to "decomp.example", "Authorization" to OPERATOR_CREDENTIAL,
+                    "Content-Length" to (EDGE_MAX_REQUEST_BYTES + 1).toString()))
+            assertEquals(413, edgeRefused.status); assertNull(edgeRefused.code); assertNull(edgeRefused.header("X-Request-ID"))
+            assertEquals(beforeEdgeRefusal, proxy.forwardedRequests.get())
             // A client-supplied forwarding header is overwritten by the proxy, and a forged Origin still fails.
             assertEquals(403, call("${BASE}api/v1/jobs", method = "POST", headers = mutation + mapOf("Idempotency-Key" to "proxy-upload-000003",
                 "Origin" to "https://evil.example"), body = HttpRequest.BodyPublishers.ofByteArray(multipart(elfFixture()))).statusCode())
@@ -484,7 +575,9 @@ class WebReverseProxyProfileTest {
     fun `documented proxy examples match the server's bounded limits`() {
         val guide = Files.readString(Path.of("docs/web-reverse-proxy.md"))
         assertEquals(32L * 1024 * 1024, StreamingMultipartUpload.MAX_REQUEST_BYTES)
-        for (required in listOf("client_max_body_size 32m;", "max_size 32MiB", "proxy_buffering off;", "proxy_request_buffering off;",
+        assertEquals(64L * 1024 * 1024, EDGE_MAX_REQUEST_BYTES)
+        assertTrue(EDGE_MAX_REQUEST_BYTES > StreamingMultipartUpload.MAX_REQUEST_BYTES)
+        for (required in listOf("client_max_body_size 64m;", "max_size 64MiB", "--proxy-secret-file", "X-Decomp-Proxy-Secret", "proxy_buffering off;", "proxy_request_buffering off;",
                 "X-Accel-Buffering", "proxy_set_header X-Forwarded-Proto \$scheme;", "proxy_set_header Forwarded \"\";",
                 "--trusted-proxy 127.0.0.1", "--public-origin https://", "flush_interval -1")) {
             assertTrue(guide.contains(required), "the reverse-proxy guide no longer states: $required")
@@ -503,8 +596,16 @@ class WebReverseProxyProfileTest {
     @Test
     fun `the web command refuses an incomplete profile and prints the public handoff for a complete one`() {
         val storage = root.resolve("cli-incomplete")
+        val secretFile = root.resolve("cli-secret")
+        Files.writeString(secretFile, "$PROXY_SECRET\n")
+        val fullProfile = listOf("--public-origin", public, "--trusted-proxy", "127.0.0.1", "--proxy-secret-file", secretFile.toString())
         for (arguments in listOf(listOf("--public-origin", public), listOf("--trusted-proxy", "127.0.0.1"),
-                listOf("--public-origin", public, "--trusted-proxy", "127.0.0.1"))) { // the last one omits --ui spa
+                listOf("--proxy-secret-file", secretFile.toString()),
+                listOf("--ui", "spa", "--public-origin", public, "--trusted-proxy", "127.0.0.1"),
+                listOf("--ui", "spa", "--public-origin", public, "--proxy-secret-file", secretFile.toString()),
+                listOf("--ui", "spa", "--trusted-proxy", "127.0.0.1", "--proxy-secret-file", secretFile.toString()),
+                listOf("--ui", "spa") + fullProfile.dropLast(1) + root.resolve("missing-secret").toString(),
+                fullProfile)) { // the last one omits --ui spa
             val process = runCli("--port", "0", "--data-dir", storage.toString(), *arguments.toTypedArray())
             try {
                 assertTrue(process.waitFor(60, TimeUnit.SECONDS), "$arguments did not exit")
@@ -514,17 +615,20 @@ class WebReverseProxyProfileTest {
         }
         assertFalse(Files.exists(storage))
         val process = runCli("--port", "0", "--ui", "spa", "--base-path", BASE, "--data-dir", root.resolve("cli-complete").toString(),
-            "--public-origin", public, "--trusted-proxy", "127.0.0.1")
+            *fullProfile.toTypedArray())
         try {
             val reader = BufferedReader(InputStreamReader(process.inputStream))
             val lines = CompletableFuture.supplyAsync { listOf(reader.readLine(), reader.readLine(), reader.readLine()) }.get(60, TimeUnit.SECONDS)
             assertTrue(lines[0].startsWith("Serving decomp_engine spa UI on http://127.0.0.1:"), lines.toString())
             assertTrue(lines[1].startsWith("Reverse-proxy profile:") && lines[1].contains("127.0.0.1"), lines.toString())
             assertTrue(lines[2].contains(": $public$BASE#bootstrap="), lines.toString())
+            assertFalse(lines.any { it.contains(PROXY_SECRET) }, "the upstream credential must never be printed")
         } finally { process.destroyForcibly().waitFor(10, TimeUnit.SECONDS) }
     }
 
     private companion object {
+        const val PROXY_SECRET = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+        const val EDGE_MAX_REQUEST_BYTES = 64L * 1024 * 1024
         const val TRUSTED_PEER = "127.0.0.2"
         const val BASE = "/decomp/"
         const val OPERATOR_CREDENTIAL = "Basic b3BlcmF0b3I6c3ludGhldGljLWZpeHR1cmU=" // operator:synthetic-fixture

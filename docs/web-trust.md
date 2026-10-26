@@ -208,16 +208,21 @@ or publication on navigation. Imported or edited source is a candidate requiring
 existing validation before acceptance. These are #200–#215 obligations.
 
 Remote use is the explicit optional [reverse-proxy profile](web-reverse-proxy.md) (#216).
-It requires `--ui spa`, an exact HTTPS `--public-origin`, a declared base path and one or
-more loopback `--trusted-proxy` peers; an incomplete profile is refused at startup. The JVM
-listener stays loopback-only, so the proxy-to-JVM hop is isolated to the host, and the proxy
-terminates TLS and authenticates the single operator. Only listed peers are admitted;
-their allowlisted forwarding headers must agree with the configured origin and base path and
-never confer identity, while identity headers are refused. The public origin replaces the
+It requires `--ui spa`, an exact HTTPS `--public-origin`, a declared base path, one or
+more loopback `--trusted-proxy` peers and a private 256-bit upstream credential loaded from
+`--proxy-secret-file`; an incomplete profile is refused at startup. The JVM listener stays
+loopback-only; a source IP is not process isolation. Only listed peers presenting the private
+`X-Decomp-Proxy-Secret` credential are admitted. The proxy overwrites that header after TLS
+termination and single-operator authentication. Protect the credential with dedicated service
+identities and private configuration as described in the guide; processes able to read those
+secrets are outside this boundary. Allowlisted forwarding headers must agree with the configured
+origin and base path and never confer identity, while identity headers are refused. The public origin replaces the
 loopback origin as the only Host/Origin pair, and the session cookie gains `__Secure-` and
 `Secure`. CSRF, file containment, quotas and redaction are unchanged. The printed one-use
 handoff still reaches only the operator terminal and also requires proxy authentication.
-Multi-tenant authorization remains outside this release.
+Multi-tenant authorization remains outside this release. The proposed adapters and HTTP fixture
+are not approval or complete production qualification of #216/#613/#614; those issues and the
+prerequisite #174 remain open.
 
 ## Privacy, deletion and review evidence
 
