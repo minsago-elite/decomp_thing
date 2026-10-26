@@ -683,9 +683,11 @@ this failure mechanism: an overlapping rename can produce a pre-header 503, whic
 previously treated as final. This is a possible cause of the intermittent packaged appended-SSE
 timeout (#514), not a confirmed diagnosis of the historical failure: the retained failed report
 records a timeout without the response needed to establish that cause. Hosted packaged verification
-now includes `--mode history`, which exercises the Sequence 205 append without polling and the
-graceful restart journey. Exact-head packaged qualification remains required; adding the CI step
-or obtaining a passing retry alone does not close the retained #514 limitation.
+now includes `--mode history`, which exercises the Sequence 205 append without polling,
+explicit history recovery, and final shutdown/cleanup. It does not stop and restart the server
+mid-journey or qualify authenticated same-store restart. Exact-head packaged qualification remains
+required; adding the CI step or obtaining a passing retry alone does not close the retained #514
+limitation.
 
 A dropped SSE peer (navigation, tab close, network loss) holds no workflow worker: its reservation is
 released when the next heartbeat or event write fails, and at the latest by the 30-second

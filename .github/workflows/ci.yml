@@ -205,7 +205,7 @@ jobs:
             --archive "$WEB_TEST_ARCHIVE" \
             --chrome "$RUNNER_TEMP/web-test-browser/chrome" --java-home "$JAVA_HOME" \
             --python "$(command -v python3)" --work-parent "$RUNNER_TEMP" --mode session --no-sandbox
-      - name: Exercise packaged history, appended SSE and graceful restart
+      - name: Exercise packaged history, appended SSE and recovery
         run: |
           node scripts/check-packaged-web-browser.mjs \
             --archive "$WEB_TEST_ARCHIVE" \
