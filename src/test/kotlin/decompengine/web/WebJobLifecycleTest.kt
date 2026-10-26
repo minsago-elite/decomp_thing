@@ -183,6 +183,7 @@ class WebJobLifecycleTest {
         val capturedCorrupt = f.service.collectionRecords()
         f.root.resolve("${corrupt.id}/job.json").writeBytes("{}".toByteArray())
         assertFailsWith<WebJobServiceException> { capturedCorrupt.toList() }
+        Unit
     }
 
     @Test fun `organization requests are authorized strict and bounded before any write`() = Fixture().start().use { f ->
