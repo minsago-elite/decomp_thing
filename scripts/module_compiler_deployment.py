@@ -28,8 +28,8 @@ def _fail(message: str) -> None:
     raise DeploymentError(message)
 
 
-def _version(info: os.stat_result) -> tuple[int, int, int, int, int, int, int]:
-    return (info.st_dev, info.st_ino, info.st_mode, info.st_nlink, info.st_size,
+def _version(info: os.stat_result) -> tuple[int, int, int, int, int, int, int, int, int]:
+    return (info.st_dev, info.st_ino, info.st_mode, info.st_nlink, info.st_uid, info.st_gid, info.st_size,
             info.st_mtime_ns, info.st_ctime_ns)
 
 
@@ -163,7 +163,7 @@ def _strict_manifest_bytes(value: bytes) -> dict[str, object]:
     return document
 
 
-def _read_manifest(parent_fd: int, name: str, display_path: Path) -> tuple[bytes, dict[str, object]]:
+def _read_manifest(parent_fd: int, name: str, display_path: Path) -> tuple[bytes, dict[str, object], tuple[int, int]]:
     descriptor = os.open(name, os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=parent_fd)
     try:
         before = os.fstat(descriptor)
@@ -175,6 +175,7 @@ def _read_manifest(parent_fd: int, name: str, display_path: Path) -> tuple[bytes
             _fail("worker classpath manifest exceeds its fixed byte bound")
         if stat.S_IMODE(before.st_mode) != 0o444:
             _fail("worker classpath manifest is not read-only")
+        owner = (before.st_uid, before.st_gid)
         chunks = []
         total = 0
         while True:
@@ -196,22 +197,30 @@ def _read_manifest(parent_fd: int, name: str, display_path: Path) -> tuple[bytes
     canonical = json.dumps(document, separators=(",", ":"), ensure_ascii=True).encode("utf-8") + b"\n"
     if raw != canonical:
         _fail("worker classpath manifest is not the exact published encoding")
-    return raw, document
+    return raw, document, owner
 
 
-def _stage_directory(parent_fd: int, name: str, display_path: Path) -> tuple[int, os.stat_result]:
+def _stage_directory(parent_fd: int, name: str, display_path: Path, *,
+                     expected_owner: tuple[int, int] | None = None,
+                     allow_initial_mode: bool = False) -> tuple[int, os.stat_result]:
     descriptor = os.open(name, os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW | os.O_DIRECTORY, dir_fd=parent_fd)
     info = os.fstat(descriptor)
     if (not stat.S_ISDIR(info.st_mode) or
             _version(os.stat(name, dir_fd=parent_fd, follow_symlinks=False)) != _version(info)):
         os.close(descriptor)
         _fail(f"worker deployment stage is not the expected real directory: {display_path}")
+    if not allow_initial_mode and stat.S_IMODE(info.st_mode) != 0o700:
+        os.close(descriptor)
+        _fail("published worker deployment stage is not owner-only")
+    if expected_owner is not None and (info.st_uid, info.st_gid) != expected_owner:
+        os.close(descriptor)
+        _fail("published worker deployment stage owner differs from its manifest")
     return descriptor, info
 
 
 def _verify_staged(parent_fd: int, stage_name: str, stage: Path, pins: list[dict[str, object]],
-                   manifest: dict[str, object]) -> None:
-    stage_fd, stage_before = _stage_directory(parent_fd, stage_name, stage)
+                   manifest: dict[str, object], expected_owner: tuple[int, int] | None = None) -> None:
+    stage_fd, stage_before = _stage_directory(parent_fd, stage_name, stage, expected_owner=expected_owner)
     try:
         expected = []
         expected_manifest_entries = []
@@ -289,19 +298,22 @@ def materialize(manifest_path: Path, stage: Path, sources: list[Path]) -> bytes:
         if manifest_exists:
             if not stage_exists:
                 _fail("prepared worker deployment is incomplete; preserving existing state")
-            manifest_bytes, manifest = _read_manifest(parent_fd, manifest_path.name, manifest_path)
-            _verify_staged(parent_fd, stage.name, stage, pins, manifest)
+            manifest_bytes, manifest, manifest_owner = _read_manifest(parent_fd, manifest_path.name, manifest_path)
+            _verify_staged(parent_fd, stage.name, stage, pins, manifest, manifest_owner)
             return manifest_bytes
         if stage_exists:
-            empty_fd, _ = _stage_directory(parent_fd, stage.name, stage)
+            empty_fd, _ = _stage_directory(parent_fd, stage.name, stage, allow_initial_mode=True)
             try:
                 if os.listdir(empty_fd):
                     _fail("unpublished worker deployment stage is not empty; preserving existing state")
+                os.fchmod(empty_fd, 0o700)
+                os.fsync(empty_fd)
             finally:
                 os.close(empty_fd)
         else:
             os.mkdir(stage.name, 0o700, dir_fd=parent_fd)
-        stage_fd, _ = _stage_directory(parent_fd, stage.name, stage)
+        stage_fd, stage_identity = _stage_directory(parent_fd, stage.name, stage)
+        stage_owner = (stage_identity.st_uid, stage_identity.st_gid)
         manifest_entries = []
         try:
             for pin in pins:
@@ -346,8 +358,10 @@ def materialize(manifest_path: Path, stage: Path, sources: list[Path]) -> bytes:
         document = {"schemaVersion": 1, "entries": manifest_entries}
         manifest_bytes = json.dumps(document, separators=(",", ":"), ensure_ascii=True).encode("utf-8") + b"\n"
         parsed = _strict_manifest_bytes(manifest_bytes)
-        _verify_staged(parent_fd, stage.name, stage, pins, parsed)
+        _verify_staged(parent_fd, stage.name, stage, pins, parsed, stage_owner)
         _publish_manifest(parent_fd, manifest_path.name, document)
+        _, _, manifest_owner = _read_manifest(parent_fd, manifest_path.name, manifest_path)
+        _verify_staged(parent_fd, stage.name, stage, pins, parsed, manifest_owner)
         return manifest_bytes
     finally:
         os.close(parent_fd)

@@ -65,7 +65,23 @@ class DeploymentFixture(unittest.TestCase):
         self.assertEqual({"000-app.jar", "001-dependency.jar"}, set(before[1]))
         self.assertEqual({"schemaVersion", "entries"}, set(json.loads(first)))
         self.assertEqual(0o444, self.manifest.stat().st_mode & 0o777)
+        self.assertEqual(0o700, self.stage.stat().st_mode & 0o777)
         self.assertTrue(all(path.stat().st_mode & 0o777 == 0o444 for path in self.stage.iterdir()))
+
+    def test_empty_gradle_stage_is_tightened_and_published_stage_mode_is_pinned(self) -> None:
+        self.stage.mkdir(mode=0o755)
+        self.assertEqual(0o755, self.stage.stat().st_mode & 0o777)
+        self.prepare()
+        frozen = self.snapshot()
+        self.assertEqual(0o700, self.stage.stat().st_mode & 0o777)
+
+        os.chmod(self.stage, 0o750)
+        altered_mode_state = self.snapshot()
+        with self.assertRaises(DEPLOYMENT.DeploymentError):
+            self.prepare()
+        self.assertEqual(altered_mode_state, self.snapshot())
+        self.assertEqual(0o750, self.stage.stat().st_mode & 0o777)
+        self.assertEqual(frozen[0], self.manifest.read_bytes())
 
     def test_missing_extra_substituted_and_symlinked_members_refuse_without_repair(self) -> None:
         self.prepare()
@@ -198,6 +214,7 @@ class GradleTaskReentryTest(DeploymentFixture):
         stage = project / "build/module-compilation-qualification/deployment"
         frozen_manifest = manifest.read_bytes()
         frozen_entries = {path.name: path.read_bytes() for path in stage.iterdir()}
+        self.assertEqual(0o700, stage.stat().st_mode & 0o777)
 
         second = run_gradle()
         self.assertEqual(0, second.returncode, second.stdout[-4000:])
