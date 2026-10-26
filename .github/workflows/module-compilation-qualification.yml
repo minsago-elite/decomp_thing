@@ -51,6 +51,8 @@ jobs:
           sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
       - name: Verify fixed module scratch profile
         run: bash scripts/test-module-compile-ext4-scratch-profile.sh
+      - name: Verify frozen module deployment task re-entry
+        run: python3 scripts/test-module-compiler-deployment.py
       - name: Prepare existing root-owned Java and ABI runtime
         run: bash scripts/ci-prepare-oracle-runtime.sh
       - name: Prepare existing user-session sandbox services

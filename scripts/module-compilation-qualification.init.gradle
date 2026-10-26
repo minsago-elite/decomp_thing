@@ -19,9 +19,14 @@ allprojects {
         tasks.register('moduleCompilerDeploymentManifest') {
             dependsOn tasks.named('jar'), tasks.named('stageOracleNativeLibraries')
             def output = layout.buildDirectory.file('module-compilation-qualification/worker-classpath.json')
+            def staged = layout.buildDirectory.dir('module-compilation-qualification/deployment')
             inputs.file(tasks.named('jar').flatMap { it.archiveFile })
             inputs.files(configurations.runtimeClasspath)
             outputs.file(output)
+            outputs.dir(staged)
+            // Re-entry must authenticate the published directory on every invocation, even when
+            // Gradle would otherwise skip the action after observing unchanged task inputs.
+            outputs.upToDateWhen { false }
             doLast {
                 def required = ['kotlin-stdlib', 'kotlinx-serialization-core-jvm', 'kotlinx-serialization-json-jvm', 'jna', 'sqlite-jdbc'] as Set
                 def optional = ['kotlin-reflect', 'slf4j-api', 'slf4j-simple'] as Set
@@ -29,25 +34,18 @@ allprojects {
                 def selected = artifacts.findAll { required.contains(it.name) || optional.contains(it.name) }
                 assert selected.collect { it.name }.containsAll(required): 'module compiler deployment dependency is absent'
                 assert selected.collect { it.name }.unique().size() == selected.size(): 'module compiler deployment dependency duplicates'
-                def staged = file('build/module-compilation-qualification/deployment')
-                assert !staged.exists(): 'refusing to replace staged compiler deployment'
-                staged.mkdirs()
                 def sources = [tasks.named('jar').get().archiveFile.get().asFile] + selected.sort { it.name }.collect { it.file }
-                long total = 0
-                def entries = sources.withIndex().collect { source, index ->
-                    assert source.isFile() && source.name.endsWith('.jar') && source.length() > 0
-                    total = Math.addExact(total, source.length())
-                    assert total <= 256L * 1024 * 1024: 'module compiler deployment exceeds finite bound'
-                    def target = new File(staged, String.format('%03d-%s', index, source.name))
-                    java.nio.file.Files.copy(source.toPath(), target.toPath())
-                    def digest = MessageDigest.getInstance('SHA-256')
-                    target.withInputStream { input ->
-                        byte[] buffer = new byte[65536]
-                        for (int count; (count = input.read(buffer)) >= 0;) if (count > 0) digest.update(buffer, 0, count)
-                    }
-                    [path: target.canonicalPath, bytes: target.length(), sha256: digest.digest().encodeHex().toString()]
-                }
-                output.get().asFile.text = JsonOutput.toJson([schemaVersion: 1, entries: entries]) + '\n'
+                def helper = new File(rootProject.projectDir, 'scripts/module_compiler_deployment.py')
+                assert helper.isFile(): 'module compiler deployment verifier is missing'
+                def command = ['python3', helper.absolutePath,
+                    '--manifest', output.get().asFile.absolutePath,
+                    '--stage', staged.get().asFile.absolutePath]
+                sources.each { source -> command.addAll(['--source', source.absolutePath]) }
+                def process = new ProcessBuilder(command).redirectErrorStream(true).start()
+                String helperOutput = process.inputStream.getText('UTF-8')
+                int exitCode = process.waitFor()
+                if (!helperOutput.isEmpty()) println(helperOutput)
+                assert exitCode == 0: 'module compiler deployment verification failed'
             }
         }
         tasks.register('moduleCompilerWriteConfig', JavaExec) {
