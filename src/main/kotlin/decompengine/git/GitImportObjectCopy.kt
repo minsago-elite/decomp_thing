@@ -18,12 +18,13 @@ import java.nio.file.attribute.BasicFileAttributeView
  * opens. Providers without secure directory streams fail closed rather than use path-based copy.
  */
 internal object GitImportObjectCopy {
-    private const val MAX_FILES = 100_000
+    /** Files and directories together: directory breadth is charged before anything is created. */
+    const val MAX_ENTRIES = 100_000
     private const val MAX_BYTES = 512L * 1024 * 1024
 
-    /** [beforeOpen] is an internal deterministic replacement-race test seam. */
-    fun copy(source: Path, target: Path, beforeOpen: (Path) -> Unit = {}) {
-        var files = 0
+    /** [beforeOpen] is an internal deterministic replacement-race test seam; [maxEntries] is lowered only by tests. */
+    fun copy(source: Path, target: Path, maxEntries: Int = MAX_ENTRIES, beforeOpen: (Path) -> Unit = {}) {
+        var entries = 0
         var bytes = 0L
         fun walk(directory: SecureDirectoryStream<Path>, destination: Path, relative: Path, depth: Int) {
             for (entry in directory) {
@@ -36,11 +37,13 @@ internal object GitImportObjectCopy {
                 beforeOpen(path)
                 if (attributes.isDirectory) {
                     if (depth >= 3) unsupported()
+                    // Empty directories cost inodes too, so they count against the same entry quota.
+                    if (++entries > maxEntries) tooLarge()
                     directory.newDirectoryStream(name, NOFOLLOW_LINKS).use { child ->
                         walk(child, GitStorage.directories(destination, name.toString()), path, depth + 1)
                     }
                 } else {
-                    if (++files > MAX_FILES || attributes.size() > MAX_BYTES - bytes) tooLarge()
+                    if (++entries > maxEntries || attributes.size() > MAX_BYTES - bytes) tooLarge()
                     if (name.toString().startsWith("tmp_") || name.toString().endsWith(".lock")) continue
                     directory.newByteChannel(name, setOf(READ, NOFOLLOW_LINKS)).use { input ->
                         // Size is taken from the opened descriptor as well, not just the walk-time stat.

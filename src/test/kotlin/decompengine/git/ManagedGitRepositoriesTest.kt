@@ -340,7 +340,7 @@ class ManagedGitRepositoriesTest {
             val objectFile = Files.writeString(source.resolve("blob"), "original bytes")
             val rejected = Files.createDirectory(g.root.resolve("rejected objects"))
             val failure = assertFailsWith<GitOperationFailure> {
-                GitImportObjectCopy.copy(source.parent, rejected) { relative ->
+                GitImportObjectCopy.copy(source.parent, rejected) { relative: java.nio.file.Path ->
                     if (relative.toString() == "ab/blob") {
                         Files.delete(objectFile)
                         Files.createSymbolicLink(objectFile, external.resolve("blob"))
@@ -352,7 +352,7 @@ class ManagedGitRepositoriesTest {
             Files.delete(objectFile)
             Files.writeString(objectFile, "original bytes")
             val copied = Files.createDirectory(g.root.resolve("copied objects"))
-            GitImportObjectCopy.copy(source.parent, copied) { relative ->
+            GitImportObjectCopy.copy(source.parent, copied) { relative: java.nio.file.Path ->
                 if (relative.toString() == "ab/blob") {
                     Files.move(source, source.resolveSibling("old"))
                     Files.createSymbolicLink(source, external)
@@ -367,6 +367,21 @@ class ManagedGitRepositoriesTest {
             assertEquals("REPOSITORY_UNSUPPORTED", assertFailsWith<GitOperationFailure> {
                 GitImportObjectCopy.copy(source, Files.createDirectory(g.root.resolve("linked root target")))
             }.code)
+        }
+    }
+
+    @Test fun `object-store imports charge empty directories against the entry quota before creating them`() {
+        GitTestRepositories().use { g ->
+            val source = Files.createDirectories(g.root.resolve("wide/objects"))
+            repeat(20) { Files.createDirectory(source.resolve("%02x".format(it))) }
+            val target = Files.createDirectory(g.root.resolve("wide target"))
+            assertEquals("REPOSITORY_UNSUPPORTED", assertFailsWith<GitOperationFailure> {
+                GitImportObjectCopy.copy(source, target, maxEntries = 10)
+            }.code)
+            val created = Files.list(target).use { it.count() }
+            assertTrue(created <= 10, "only charged directories may be created, found $created")
+            // Within the quota the same layout copies.
+            GitImportObjectCopy.copy(source, Files.createDirectory(g.root.resolve("narrow target")), maxEntries = 20)
         }
     }
 
