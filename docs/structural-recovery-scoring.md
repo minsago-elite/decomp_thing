@@ -232,6 +232,25 @@ No checked production report should be published until its recovered model and
 adapter replay receipt exist. An oracle derived from a rich binary is not a
 substitute for independently recovered evidence.
 
+### Live model provenance and selected boundary admission
+
+The fixed adapter registry accepts an owned, contained replay of a frozen
+recovered model and independently pinned function oracle. The oracle is
+introduced only after recovery finishes. Admission binds the exact model,
+input, exporter, runtime, loader, target and operation receipts; it also requires
+independently verified worker absence and descriptor-captured replay outputs.
+
+The resulting opaque `VerifiedStructuralInputsV1` admits only model provenance
+and function boundaries. `scoreSelectedBoundary` consumes that capability
+without replacement model or report arguments.
+
+Interface, call, global and type requests refuse until their independent truth
+and identity relations are admitted. Whole-result scoring, calibrated confidence,
+completeness and release eligibility remain unavailable. Fixture transcripts,
+stored JSON receipts and recomputed hashes cannot create the live capability.
+Adapter commands, result bindings and hosted qualification belong in the
+corresponding adapter documentation.
+
 ## Determinism and resource limits
 
 Each input is a bounded regular-file snapshot, and scoring additionally enforces

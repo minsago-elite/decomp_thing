@@ -7,6 +7,11 @@ import decompengine.oracle.fulltree.ContainedCommandOperationDeadline
 import decompengine.oracle.core.DescriptorBoundAtomicStateFile
 import decompengine.oracle.core.OracleArtifacts
 import decompengine.oracle.core.OracleJson
+import decompengine.oracle.structural.StructuralBoundaryReplayRequestV1
+import decompengine.oracle.structural.StructuralBoundaryReplayWorkerV1
+import decompengine.oracle.structural.StructuralProductionReplayContract
+import decompengine.oracle.structural.StructuralReplayAdapterRegistry
+import decompengine.oracle.structural.VerifiedStructuralInputsV1
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
 import decompengine.oracle.fulltree.FullTreeDiskScratchBorrowedRunRoot
@@ -100,6 +105,27 @@ internal class GccBundledFullExportOperation(
     init {
         check(constructionPermit === GCC_BUNDLED_PREPARED_OPERATION_PERMIT) {
             "GCC full export requires retained coordinator ownership"
+        }
+    }
+}
+
+/** Issued only after a second contained worker replays the frozen recovered model. */
+internal class GccBundledStructuralReplayOperation(
+    val profile: GccDriverStructuralInputsV1,
+    val export: GccDriverStructuralAuthenticatedFullExportV1,
+    val request: StructuralBoundaryReplayRequestV1,
+    val capture: GccBundledStructuralReplayCapture,
+    attachmentBytes: ByteArray,
+    executionBytes: ByteArray,
+    constructionPermit: Any,
+) {
+    private val attachment = attachmentBytes.copyOf()
+    private val execution = executionBytes.copyOf()
+    val attachmentBytes: ByteArray get() = attachment.copyOf()
+    val executionBytes: ByteArray get() = execution.copyOf()
+    init {
+        check(constructionPermit === GCC_BUNDLED_PREPARED_OPERATION_PERMIT) {
+            "structural replay requires retained live coordinator ownership"
         }
     }
 }
@@ -596,7 +622,136 @@ internal class GccBundledPreparedOperation internal constructor(
         }
     }
 
-    /** Publishes the descriptor-captured full model and its authenticated profile binding, never a score. */
+    /** Oracle truth is admitted only after recovery stopped and its complete model was frozen. */
+    private fun replayFullExportBoundary(
+        exported: GccBundledFullExportOperation,
+        authenticated: GccDriverStructuralAuthenticatedFullExportV1,
+    ): VerifiedStructuralInputsV1 {
+        val cli = checkNotNull(intent.cliInvocation)
+        val deadline = checkNotNull(operationDeadline)
+        val profile = GccDriverStructuralInputsV1.load(cli.options.profile.parent, "driver")
+        authenticated.requireSameSnapshot(exported.snapshot)
+        val oraclePath = profile.root.resolve("function-recovery-oracle.json")
+        val oracleBytes = 12_558_460
+        val original = GccCompilerEngineContainmentContract.parseDefinitionForLiveController(definition)
+        val configuration = deriveRuntimeConfiguration(original, inputs.classPathEntries)
+        val controlName = "control-" + OracleArtifacts.sha256(
+            ("structural-boundary-replay-v1\n" + intent.requestSha256 + "\n" + authenticated.binding.sha256).toByteArray(),
+        )
+        val controlPath = original.outputLease.path.resolve(controlName)
+        val request = StructuralBoundaryReplayRequestV1(
+            original.outputLease.path.resolve("reports/program_model.json"),
+            Math.toIntExact(authenticated.programModelBytes), authenticated.programModelSha256,
+            profile.strippedBinary.sha256, oraclePath, oracleBytes,
+            GccDriverStructuralBoundaryEvidenceV1.FUNCTION_ORACLE_SHA256, profile.imageBase,
+            controlPath.resolve("reports"), intent.requestSha256, authenticated.binding.sha256,
+        )
+        val requestBytes = request.canonicalBytes
+        val requestSha = OracleArtifacts.sha256(requestBytes)
+        val requestPath = cli.options.output.resolve("structural-replay-request.json")
+        fun publish(name: String, bytes: ByteArray) {
+            deadline.requireCurrent()
+            LinuxFilesystemSyscalls.openRoot(cli.options.output).use { output ->
+                cli.requireCurrent()
+                DescriptorBoundAtomicStateFile.publishNoReplace(output, name, bytes, 256 * 1024)
+                cli.requireCurrent()
+            }
+            deadline.requireCurrent()
+        }
+        publish(requestPath.fileName.toString(), requestBytes)
+        val runtime = intent.bundledRuntime.root
+        val runtimeMount = FullTreeFunctionObservationRuntimeMount(runtime, runtime,
+            calculateFullTreeObservationRuntimeManifestSha256(runtime))
+        val unit = "decomp-structural-${requestSha.take(32)}.scope"
+        val command = listOf(configuration.javaExecutable.toString(),
+            "-Xmx${minOf(intent.budgets.maximumResidentBytes / (1024 * 1024) * 3 / 4, 3072)}m",
+            "-XX:+DisableAttachMechanism", "-Duser.home=${controlPath.resolve("state")}",
+            "-Djava.io.tmpdir=${controlPath.resolve("tmp")}", "-cp",
+            inputs.classPathEntries.indices.joinToString(java.io.File.pathSeparator) {
+                controlPath.resolve("runtime/classpath-$it.jar").toString()
+            }, StructuralBoundaryReplayWorkerV1::class.java.name, requestPath.toString(), requestSha)
+        try {
+            return lease.withCurrentOperationRunRootForContainedExecution(runRoot) { borrowed ->
+                val frozenReports = borrowed.withPinnedDescriptor { run ->
+                    GccBundledReplayReportsV1.capture(run, directories.getValue("reports"))
+                }
+                fun requireFrozenModel() {
+                    deadline.requireCurrent()
+                    inputs.verify("before structural replay")
+                    journal.verify("before structural replay")
+                    borrowed.withPinnedDescriptor { run ->
+                        LinuxFilesystemSyscalls.openDirectoryAt(run.fd, "reports").use { reports ->
+                            frozenReports.requireCurrent(reports)
+                            val files = GccBoundExportFiles(authenticated.programModelBytes) { deadline.requireCurrent() }
+                            val actual = files.read(reports, "program_model.json", request.modelBytes)
+                            require(actual.size == request.modelBytes && OracleArtifacts.sha256(actual) == request.modelSha256) {
+                                "structural replay model differs from the immutable recovered snapshot"
+                            }
+                            files.verify()
+                            frozenReports.requireCurrent(reports)
+                        }
+                    }
+                }
+                requireFrozenModel()
+                val protectedDirectories = borrowed.withPinnedDescriptor { run ->
+                    listOf("state", "reports").associateWith { name ->
+                        LinuxFilesystemSyscalls.openDirectoryAt(run.fd, name).use { it.identity }
+                    }
+                }
+                var attachmentBytes: ByteArray? = null
+                val execution = KotlinSystemdCgroupCommandLauncher.execute(
+                    borrowed, configuration, unit, original.expectedControlGroup.substringBeforeLast('/') + "/" + unit,
+                    requestSha, command, original.environment,
+                    listOf(KotlinSystemdCgroupCommandInput(requestPath, requestBytes.size.toLong(), requestSha),
+                        KotlinSystemdCgroupCommandInput(oraclePath, oracleBytes.toLong(), request.functionOracleSha256)),
+                    listOf(runtimeMount), KotlinSystemdCgroupCommandResources(
+                        deadline.remainingWholeSecondsMillis(minOf(intent.budgets.wallClockMillis, 300_000)),
+                        minOf(intent.budgets.maximumResidentBytes, 4L * 1024 * 1024 * 1024),
+                        intent.budgets.pidsMax, GccBundledStructuralReplayOutputCapture.MAXIMUM_OBSERVATION_BYTES.toLong()),
+                    inputs.deploymentClosureSha256, controlDirectoryName = controlName,
+                    readOnlyControlDirectories = completedControls.toMap(),
+                    readOnlyStateDirectory = protectedDirectories.getValue("state"),
+                    readOnlyReportsDirectory = protectedDirectories.getValue("reports"), operationDeadline = deadline,
+                    beforeStart = { attachment ->
+                        lease.requireCurrentOperationRunRootAfterScopeAttachment(runRoot)
+                        requireFrozenModel()
+                        attachmentBytes = attachment.canonicalBytes
+                        publish("structural-replay-attachment.json", attachment.canonicalBytes)
+                        publish("structural-replay-start-authorized.json", OracleJson.canonicalBytes(JsonObject(mapOf(
+                            "provider" to JsonPrimitive("structural-replay-start-authorized-v1"),
+                            "operationRequestSha256" to JsonPrimitive(intent.requestSha256),
+                            "requestSha256" to JsonPrimitive(requestSha),
+                            "attachmentSha256" to JsonPrimitive(OracleArtifacts.sha256(attachment.canonicalBytes)),
+                            "fullExportBindingSha256" to JsonPrimitive(authenticated.binding.sha256),
+                        ))))
+                        requireFrozenModel()
+                        lease.requireCurrentOperationRunRootAfterScopeAttachment(runRoot)
+                    },
+                )
+                lease.requireCurrentOperationRunRootAfterCgroupAbsence(runRoot)
+                requireFrozenModel()
+                publish("structural-replay-execution.json", execution.canonicalBytes)
+                val captured = borrowed.withPinnedDescriptor { run ->
+                    GccBundledStructuralReplayOutputCapture.capture(run, controlName,
+                        checkNotNull(execution.controlDirectoryIdentity), request) { deadline.requireCurrent() }
+                }
+                lease.requireCurrentOperationRunRootAfterCgroupAbsence(runRoot)
+                requireFrozenModel()
+                publish("structural-replay-output.json", captured.metadataBytes)
+                publish("structural-replay-capture.json", captured.assessmentBytes)
+                completedControls[controlName] = checkNotNull(execution.controlDirectoryIdentity)
+                val replay = GccBundledStructuralReplayOperation(profile, authenticated, request, captured,
+                    checkNotNull(attachmentBytes), execution.canonicalBytes, GCC_BUNDLED_PREPARED_OPERATION_PERMIT)
+                StructuralReplayAdapterRegistry.production.admitSelectedBoundary(replay).also { deadline.requireCurrent() }
+            }
+        } catch (failure: Throwable) {
+            poisoned = true
+            if (failure is KotlinSystemdCgroupCommandExecutionException) pendingCleanup = failure.cleanup
+            throw failure
+        }
+    }
+
+    /** Publishes the immutable model; only supported, independently replayed dimensions are scored. */
     @Synchronized
     fun publishFullExportCliResult(authenticatedExport: GccDriverStructuralAuthenticatedFullExportV1): Path {
         check(!closed && !poisoned && !cliPublicationAttempted)
@@ -632,6 +787,16 @@ internal class GccBundledPreparedOperation internal constructor(
                     GccDriverStructuralInputsV1.load(cli.options.profile.parent, "driver"), authenticatedExport,
                 )
             } else null
+            val verifiedBoundaryInputs = if (boundaryEvidence != null) {
+                replayFullExportBoundary(exported, authenticatedExport).also { verified ->
+                    val scored = OracleJson.parse(StructuralProductionReplayContract.scoreSelectedBoundary(verified),
+                        GccBundledFullExportCliResultV2.TREE_MANIFEST_JSON_LIMITS) as JsonObject
+                    require(scored["boundaryObservationSha256"] == JsonPrimitive(
+                        OracleArtifacts.sha256(boundaryEvidence.observationBytes))) {
+                        "contained boundary replay differs from independent host observation"
+                    }
+                }
+            } else null
             deadline.requireCurrent()
             val resultBytes = GccBundledFullExportCliResultV2.create(
                 operationId = intent.operationId,
@@ -649,6 +814,7 @@ internal class GccBundledPreparedOperation internal constructor(
                 treeManifestBytes = manifestBytes,
                 outputTreeSha256 = snapshot.outputTreeSha256,
                 operationWallTime = deadline.snapshot(),
+                verifiedBoundaryInputs = verifiedBoundaryInputs,
             )
             LinuxFilesystemSyscalls.openRoot(cli.options.output).use { output ->
                 cli.requireCurrent()
@@ -672,6 +838,14 @@ internal class GccBundledPreparedOperation internal constructor(
                         output, GccDriverStructuralBoundaryEvidenceV1.BINDING_NAME,
                         evidence.bindingBytes, GccDriverStructuralBoundaryEvidenceV1.MAXIMUM_BINDING_BYTES,
                     )
+                }
+                verifiedBoundaryInputs?.let { verified ->
+                    authenticatedExport.requireSameSnapshot(snapshot)
+                    cli.requireCurrent()
+                    DescriptorBoundAtomicStateFile.publishManifestNoReplace(output,
+                        GccBundledFullExportCliResultV2.PRODUCTION_BOUNDARY_SCORE_NAME,
+                        StructuralProductionReplayContract.scoreSelectedBoundary(verified),
+                        GccBundledStructuralReplayOutputCapture.MAXIMUM_OBSERVATION_BYTES)
                 }
                 inputs.verify("after full-export binding publication")
                 journal.verify("after full-export binding publication")

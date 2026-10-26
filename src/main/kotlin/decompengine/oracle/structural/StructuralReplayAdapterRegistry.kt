@@ -1,12 +1,22 @@
 package decompengine.oracle.structural
 
+import decompengine.oracle.core.OracleArtifacts
+import decompengine.oracle.core.OracleJson
+import decompengine.oracle.core.StrictJsonLimits
+import decompengine.oracle.gcc.GccBundledStructuralReplayOperation
+import decompengine.oracle.gcc.GccDriverStructuralBoundaryEvidenceV1
 import java.util.Collections
+import kotlinx.serialization.json.JsonArray
+import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.JsonPrimitive
+import kotlinx.serialization.json.jsonObject
 
 /**
  * An exact-match registry, rather than an adapter injection point. Production callers cannot pass
  * an implementation, registry, observation, receipt, or verification flag. Every future production
  * registration must be constructed here around a host-owned private output sink and independent
- * snapshots. The production table is deliberately empty until that full-recovery adapter lands.
+ * snapshots. Full interface/call/global/type registrations remain unavailable. The separate selected
+ * boundary registration below consumes a real contained operation, never a transcript or callback.
  * The transcript machinery below is test-only and is rejected before lookup by [production].
  */
 internal class StructuralReplayAdapterRegistry private constructor(
@@ -14,6 +24,97 @@ internal class StructuralReplayAdapterRegistry private constructor(
     private val testOnly: Boolean,
 ) {
     private val entries = Collections.unmodifiableMap(LinkedHashMap(registrations))
+
+    /** Fixed application wiring; benchmark pins stay in the adapter, scoring stays program-neutral. */
+    internal fun admitSelectedBoundary(replay: GccBundledStructuralReplayOperation): VerifiedStructuralInputsV1 {
+        if (this !== production || testOnly) replayFail("test replay registry cannot grant production model authority")
+        return VerifiedStructuralInputsV1.fromOwnedAdmission(SelectedBoundaryAdmission.capture(replay))
+    }
+
+    /** Its only constructor consumes the coordinator-owned operation, not caller-authored evidence. */
+    internal class SelectedBoundaryAdmission private constructor(
+        replay: GccBundledStructuralReplayOperation,
+    ) {
+        // Kotlin may expose a synthetic constructor bridge. It must take the permit-guarded
+        // operation and execute validation, never accept already-validated raw strings/bytes.
+        val profileId: String = replay.profile.profileId
+        val inputSha256: String = replay.request.inputSha256
+        val programModelSha256: String = replay.export.programModelSha256
+        val programModelBytes: Long = replay.export.programModelBytes
+        private val binding = replay.export.binding.canonicalBytes
+        private val score = captureReport(replay)
+        val fullExportBindingBytes: ByteArray get() = binding.copyOf()
+        val reportBytes: ByteArray get() = score.copyOf()
+
+        companion object {
+            fun capture(replay: GccBundledStructuralReplayOperation): SelectedBoundaryAdmission =
+                SelectedBoundaryAdmission(replay)
+
+            private fun captureReport(replay: GccBundledStructuralReplayOperation): ByteArray {
+                val profile = replay.profile
+                val export = replay.export
+                val request = replay.request
+                val binding = OracleJson.parseCanonical(export.binding.canonicalBytes).jsonObject
+                val lineage = binding.getValue("receiptLineage").jsonObject
+                require(request.modelSha256 == export.programModelSha256 &&
+                    request.modelBytes.toLong() == export.programModelBytes &&
+                    request.fullExportBindingSha256 == export.binding.sha256 &&
+                    request.operationRequestSha256 == lineage.getValue("intentSha256").let { (it as JsonPrimitive).content } &&
+                    request.inputSha256 == profile.strippedBinary.sha256 && request.imageBase == profile.imageBase &&
+                    request.functionOracleSha256 == GccDriverStructuralBoundaryEvidenceV1.FUNCTION_ORACLE_SHA256 &&
+                    request.functionOracleBytes == 12_558_460 &&
+                    binding["profileId"] == JsonPrimitive(profile.profileId) &&
+                    binding["artifactManifestSha256"] == JsonPrimitive(profile.artifactManifestSha256)
+                ) { "production boundary replay differs from the host-owned model or fixed profile" }
+                val observation = replay.capture.observationBytes
+                val metadata = replay.capture.metadataBytes
+                StructuralBoundaryReplayWorkerV1.verifyOutput(request, observation, metadata)
+                val execution = OracleJson.parseCanonical(replay.executionBytes).jsonObject
+                val attachment = OracleJson.parseCanonical(replay.attachmentBytes).jsonObject
+                require(attachment["provider"] == JsonPrimitive("kotlin-lease-contained-command-attachment-v1") &&
+                    attachment["schemaVersion"] == JsonPrimitive(1) &&
+                    attachment["nonce"] == JsonPrimitive(OracleArtifacts.sha256(request.canonicalBytes)) &&
+                    attachment["attachmentSha256"] == JsonPrimitive(OracleArtifacts.sha256(
+                        OracleJson.canonicalBytes(JsonObject(attachment - "attachmentSha256")))) &&
+                    attachment["requestSha256"] == execution["requestSha256"] && attachment["requestSha256"] != null
+                ) { "production boundary replay attachment differs from its contained request" }
+                require(execution["provider"] == JsonPrimitive("kotlin-lease-contained-command-execution-v1") &&
+                    execution["schemaVersion"] == JsonPrimitive(1) && execution["childExitCode"] == JsonPrimitive(0) &&
+                    listOf("unitAbsent", "cgroupAbsent", "processesAbsent").all { execution[it] == JsonPrimitive(true) } &&
+                    execution["attachmentSha256"] == JsonPrimitive(OracleArtifacts.sha256(replay.attachmentBytes)) &&
+                    execution["executionSha256"] == JsonPrimitive(OracleArtifacts.sha256(
+                        OracleJson.canonicalBytes(JsonObject(execution - "executionSha256"))))
+                ) { "production boundary replay lacks matching contained execution and proved absence" }
+                val parsed = OracleJson.parse(observation, REPORT_LIMITS).jsonObject
+                require(parsed["programModelSha256"] == JsonPrimitive(export.programModelSha256) &&
+                    parsed["functionOracleSha256"] == JsonPrimitive(request.functionOracleSha256))
+                val report = OracleJson.canonicalBytes(JsonObject(mapOf(
+                    "provider" to JsonPrimitive("structural-selected-boundary-production-score-v1"),
+                    "schemaVersion" to JsonPrimitive(1),
+                    "scope" to JsonPrimitive("model-provenance-and-selected-function-boundaries"),
+                    "admittedDomains" to JsonArray(listOf("model-provenance", "function-boundaries").map(::JsonPrimitive)),
+                    "profileId" to JsonPrimitive(profile.profileId),
+                    "inputSha256" to JsonPrimitive(request.inputSha256),
+                    "programModelSha256" to JsonPrimitive(export.programModelSha256),
+                    "programModelBytes" to JsonPrimitive(export.programModelBytes),
+                    "fullExportBindingSha256" to JsonPrimitive(export.binding.sha256),
+                    "fullExportBinding" to binding,
+                    "functionOracleSha256" to JsonPrimitive(request.functionOracleSha256),
+                    "replayRequestSha256" to JsonPrimitive(OracleArtifacts.sha256(request.canonicalBytes)),
+                    "replayAttachmentSha256" to JsonPrimitive(OracleArtifacts.sha256(replay.attachmentBytes)),
+                    "replayExecutionSha256" to JsonPrimitive(OracleArtifacts.sha256(replay.executionBytes)),
+                    "replayCaptureSha256" to JsonPrimitive(OracleArtifacts.sha256(replay.capture.assessmentBytes)),
+                    "replayMetadataSha256" to JsonPrimitive(OracleArtifacts.sha256(metadata)),
+                    "boundaryObservationSha256" to JsonPrimitive(OracleArtifacts.sha256(observation)),
+                    "boundaryObservation" to parsed,
+                    "productionVerified" to JsonPrimitive(true), "scored" to JsonPrimitive(true),
+                    "complete" to JsonPrimitive(false), "releaseEligible" to JsonPrimitive(false),
+                    "unavailableDomains" to JsonArray(listOf("interfaces", "calls", "globals", "types", "calibration").map(::JsonPrimitive)),
+                )), REPORT_LIMITS)
+                return report
+            }
+        }
+    }
 
     private fun replayFresh(request: StructuralReplayRequestV1): AuthenticatedStructuralReplayReceiptsV1 {
         if (!testOnly) {
@@ -143,6 +244,10 @@ internal class StructuralReplayAdapterRegistry private constructor(
         val model: StructuralModelReplayObservationV1,
     )
 }
+
+private val REPORT_LIMITS = StrictJsonLimits(maximumInputBytes = 64 * 1024 * 1024,
+    maximumCanonicalBytes = 64 * 1024 * 1024, maximumNodes = 1_000_000,
+    maximumStringBytes = 16 * 1024 * 1024, maximumTotalStringBytes = 48 * 1024 * 1024)
 
 /** Immutable values consumed by the fixed test-only registry; never a production adapter API. */
 internal data class StructuralReplayTestTranscriptV1(

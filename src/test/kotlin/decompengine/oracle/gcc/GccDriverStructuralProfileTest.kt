@@ -6,6 +6,11 @@ import decompengine.oracle.core.StrictJsonLimits
 import decompengine.oracle.structural.CanonicalProgramModelStreaming
 import decompengine.oracle.structural.CanonicalProgramModelStreamingLimits
 import decompengine.oracle.structural.StructuralRecoveryV1Exception
+import decompengine.oracle.structural.StructuralBoundaryReplayRequestV1
+import decompengine.oracle.structural.StructuralBoundaryReplayWorkerV1
+import decompengine.oracle.structural.StructuralProductionReplayContract
+import decompengine.oracle.structural.StructuralReplayAdapterRegistry
+import decompengine.oracle.structural.StructuralReplayDomainV1
 import decompengine.project.RecoveredFunction
 import decompengine.project.RecoveredProgramModel
 import java.nio.file.Files
@@ -386,6 +391,91 @@ class GccDriverStructuralProfileTest {
         val changedCopy = evidence.observationBytes
         changedCopy[0] = (changedCopy[0].toInt() xor 1).toByte()
         assertContentEquals(repeated.observationBytes, evidence.observationBytes)
+    }
+
+    @Test
+    fun `owned production admission binds model snapshot and refuses all unverified dimensions`() {
+        // Reflection supplies only a component fixture. The installed CLI qualification below
+        // owns proof that the real private permit follows actual contained execution and capture.
+        val parent = Path.of("build/test-tmp").toAbsolutePath().normalize()
+        Files.createDirectories(parent)
+        val directory = Files.createTempDirectory(parent, "production-boundary-")
+        try {
+            val driver = profile("driver")
+            val model = modelBytes(driver, executableAddress(driver))
+            val exported = driver.captureFullExport(fullOperation(driver, fullSnapshot(driver, model)))
+            val modelPath = directory.resolve("model.json")
+            Files.write(modelPath, model)
+            val output = Files.createDirectory(directory.resolve("reports"))
+            val lineage = OracleJson.parseCanonical(exported.binding.canonicalBytes).jsonObject.getValue("receiptLineage").jsonObject
+            val request = StructuralBoundaryReplayRequestV1(modelPath, model.size, OracleArtifacts.sha256(model),
+                driver.strippedBinary.sha256, driver.root.resolve("function-recovery-oracle.json"), 12_558_460,
+                GccDriverStructuralBoundaryEvidenceV1.FUNCTION_ORACLE_SHA256, driver.imageBase, output,
+                lineage.getValue("intentSha256").jsonPrimitive.content, exported.binding.sha256)
+            StructuralBoundaryReplayWorkerV1.run(request)
+            val observation = Files.readAllBytes(output.resolve("boundary-observation.json"))
+            val metadata = Files.readAllBytes(output.resolve("boundary-replay-output.json"))
+            val capture = GccBundledStructuralReplayCapture(observation, metadata, "{}\n".toByteArray())
+            val attachmentFields = JsonObject(mapOf(
+                "provider" to JsonPrimitive("kotlin-lease-contained-command-attachment-v1"),
+                "schemaVersion" to JsonPrimitive(1), "requestSha256" to JsonPrimitive("a".repeat(64)),
+                "nonce" to JsonPrimitive(OracleArtifacts.sha256(request.canonicalBytes)),
+            ))
+            val attachment = OracleJson.canonicalBytes(JsonObject(attachmentFields +
+                ("attachmentSha256" to JsonPrimitive(OracleArtifacts.sha256(OracleJson.canonicalBytes(attachmentFields))))))
+            val executionFields = JsonObject(mapOf(
+                "provider" to JsonPrimitive("kotlin-lease-contained-command-execution-v1"),
+                "schemaVersion" to JsonPrimitive(1), "childExitCode" to JsonPrimitive(0),
+                "unitAbsent" to JsonPrimitive(true), "cgroupAbsent" to JsonPrimitive(true), "processesAbsent" to JsonPrimitive(true),
+                "attachmentSha256" to JsonPrimitive(OracleArtifacts.sha256(attachment)),
+                "requestSha256" to JsonPrimitive("a".repeat(64)),
+            ))
+            val execution = OracleJson.canonicalBytes(JsonObject(executionFields +
+                ("executionSha256" to JsonPrimitive(OracleArtifacts.sha256(OracleJson.canonicalBytes(executionFields))))))
+            assertFailsWith<IllegalStateException> {
+                GccBundledStructuralReplayOperation(driver, exported, request, capture, attachment, execution, Any())
+            }
+            val permit = Class.forName("decompengine.oracle.gcc.GCC_BUNDLED_PREPARED_OPERATION_PERMIT")
+                .getDeclaredField("INSTANCE").also { it.isAccessible = true }.get(null)
+            val operation = GccBundledStructuralReplayOperation(driver, exported, request, capture, attachment, execution, permit)
+            val verified = StructuralReplayAdapterRegistry.production.admitSelectedBoundary(operation)
+            assertEquals(exported.programModelSha256, verified.programModelSha256)
+            assertEquals(setOf(StructuralReplayDomainV1.MODEL_PROVENANCE, StructuralReplayDomainV1.FUNCTION_BOUNDARIES), verified.admittedDomains)
+            for (domain in listOf(StructuralReplayDomainV1.INTERFACES, StructuralReplayDomainV1.CALLS,
+                StructuralReplayDomainV1.GLOBALS, StructuralReplayDomainV1.TYPES)) {
+                assertFailsWith<IllegalArgumentException> { verified.requireDomain(domain) }
+            }
+            val score = StructuralProductionReplayContract.scoreSelectedBoundary(verified)
+            val parsed = OracleJson.parseCanonical(score, GccBundledFullExportCliResultV2.TREE_MANIFEST_JSON_LIMITS).jsonObject
+            assertEquals(JsonPrimitive(true), parsed["productionVerified"])
+            assertEquals(JsonPrimitive(false), parsed["complete"])
+            assertEquals(JsonPrimitive(false), parsed["releaseEligible"])
+            assertEquals(JsonPrimitive(exported.programModelSha256), parsed["programModelSha256"])
+            assertEquals(JsonPrimitive(OracleArtifacts.sha256(observation)), parsed["boundaryObservationSha256"])
+            score[0] = 0
+            assertTrue(StructuralProductionReplayContract.scoreSelectedBoundary(verified)[0] != 0.toByte())
+
+            // A fully canonical alternate model with the correct binary hash remains ineligible:
+            // its model commitment no longer equals the exact live operation snapshot.
+            val otherModel = modelBytes(driver, executableAddress(driver) + 1UL)
+            val other = driver.captureFullExport(fullOperation(driver, fullSnapshot(driver, otherModel)))
+            assertFailsWith<IllegalArgumentException> {
+                StructuralReplayAdapterRegistry.production.admitSelectedBoundary(
+                    GccBundledStructuralReplayOperation(driver, other, request, capture, attachment, execution, permit))
+            }
+            assertFailsWith<IllegalArgumentException> {
+                StructuralReplayAdapterRegistry.production.admitSelectedBoundary(
+                    GccBundledStructuralReplayOperation(profile(), exported, request, capture, attachment, execution, permit))
+            }
+            val changed = observation.copyOf().also { it[0] = 0 }
+            assertFailsWith<IllegalArgumentException> {
+                StructuralReplayAdapterRegistry.production.admitSelectedBoundary(GccBundledStructuralReplayOperation(
+                    driver, exported, request, GccBundledStructuralReplayCapture(changed, metadata, "{}\n".toByteArray()),
+                    attachment, execution, permit))
+            }
+        } finally {
+            directory.toFile().deleteRecursively()
+        }
     }
 
     @Test

@@ -3,6 +3,8 @@ package decompengine.oracle.gcc
 import decompengine.oracle.core.OracleArtifacts
 import decompengine.oracle.core.OracleJson
 import decompengine.oracle.core.StrictJsonLimits
+import decompengine.oracle.structural.StructuralProductionReplayContract
+import decompengine.oracle.structural.VerifiedStructuralInputsV1
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.longOrNull
@@ -11,6 +13,7 @@ import kotlinx.serialization.json.jsonPrimitive
 
 /** Immutable result-pointer document for a captured, deliberately unscored full export. */
 internal object GccBundledFullExportCliResultV2 {
+    const val PRODUCTION_BOUNDARY_SCORE_NAME = "structural-boundary-production-score.json"
     const val TREE_MANIFEST_NAME = "full-export-tree-manifest.json"
     const val MAXIMUM_TREE_MANIFEST_BYTES = 64 * 1024 * 1024
     internal val TREE_MANIFEST_JSON_LIMITS = StrictJsonLimits(
@@ -37,6 +40,7 @@ internal object GccBundledFullExportCliResultV2 {
         treeManifestBytes: ByteArray,
         outputTreeSha256: String,
         operationWallTime: JsonObject,
+        verifiedBoundaryInputs: VerifiedStructuralInputsV1? = null,
     ): ByteArray {
         require(operationId.matches(Regex("[a-f0-9]{64}"))) { "full-export operation ID is invalid" }
         listOf(
@@ -192,9 +196,21 @@ internal object GccBundledFullExportCliResultV2 {
         require(manifestTree.getValue("programModelSha256").jsonPrimitive.content == programModelSha256 &&
             manifestTree.getValue("programModelBytes").jsonPrimitive.longOrNull == programModelBytes
         ) { "retained full-export tree model differs from the profile-bound model" }
+        val boundaryFields = verifiedBoundaryInputs?.let { verified ->
+            require(verified.programModelSha256 == programModelSha256 && verified.programModelBytes == programModelBytes &&
+                verified.profileId == profileId && verified.fullExportBindingBytes.contentEquals(structuralBindingBytes)) {
+                "production boundary score belongs to another captured model or binding"
+            }
+            val score = StructuralProductionReplayContract.scoreSelectedBoundary(verified)
+            mapOf("boundaryScore" to JsonObject(mapOf(
+                "path" to JsonPrimitive(structuralBindingPath.parent.resolve(PRODUCTION_BOUNDARY_SCORE_NAME).toString()),
+                "sha256" to JsonPrimitive(OracleArtifacts.sha256(score)), "bytes" to JsonPrimitive(score.size),
+                "scope" to JsonPrimitive("model-provenance-and-selected-function-boundaries"),
+            )))
+        }.orEmpty()
         return OracleJson.canonicalBytes(JsonObject(mapOf(
-            "provider" to JsonPrimitive("gcc-bundled-cli-full-export-result-v2"),
-            "schemaVersion" to JsonPrimitive(2),
+            "provider" to JsonPrimitive(if (verifiedBoundaryInputs == null) "gcc-bundled-cli-full-export-result-v2" else "gcc-bundled-cli-full-export-result-v3"),
+            "schemaVersion" to JsonPrimitive(if (verifiedBoundaryInputs == null) 2 else 3),
             "complete" to JsonPrimitive(false),
             "releaseEligible" to JsonPrimitive(false),
             "scored" to JsonPrimitive(false),
@@ -214,7 +230,7 @@ internal object GccBundledFullExportCliResultV2 {
             "structuralBindingSha256" to JsonPrimitive(OracleArtifacts.sha256(structuralBindingBytes)),
             "operationWallTime" to operationWallTime,
             "scratchDisposition" to JsonPrimitive("retained; structural replay and release eligibility unqualified"),
-        )))
+        ) + boundaryFields))
     }
 
     private val BINDING_KEYS = setOf(
