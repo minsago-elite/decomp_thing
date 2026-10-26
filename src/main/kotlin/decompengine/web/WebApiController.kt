@@ -410,7 +410,8 @@ internal class WebApiController(
                     requireNoWebApiQuery(exchange); requireJsonAccept(exchange)
                     val parts = resource.split('/')
                     val attempt = jobs.getAttempt(parts[1], parts[3])
-                    val bytes = try { WebRedactionPolicy.of(exchange).document(jobs.readArtifact(parts[1], "reports/runs/${attempt.runId}/exploration.json", 1_048_576).bytes) }
+                    // The descriptor binds the stored bytes the digest-bound artifact route serves; the envelope itself is redacted.
+                    val bytes = try { jobs.readArtifact(parts[1], "reports/runs/${attempt.runId}/exploration.json", 1_048_576).bytes }
                         catch (_: JobStoreException) { null }
                     if (jobs.getAttempt(parts[1], parts[3]).version != attempt.version) throw WebJobServiceException("REPORT_CHANGED", "The attempt changed during this read. Refresh its evidence.")
                     sendWebApiResponse(exchange, 200, "report", webExplorationReport(parts[1], parts[3], bytes, assets.basePath))
