@@ -249,7 +249,7 @@ class WebApiControllerTest {
         server.start()
         try {
             val path = "/workbench/api/v1/jobs/${job.id}/runs/${run.runId}"
-            for (suffix in listOf("snapshot", "events")) assertError(request(server, "$path/$suffix"), 401, "SESSION_REQUIRED")
+            for (suffix in listOf("snapshot", "events", "queue-position")) assertError(request(server, "$path/$suffix"), 401, "SESSION_REQUIRED")
             val cookie = establish(server); val headers = mapOf("Cookie" to cookie)
             assertError(request(server, "$path/events", headers = headers + ("Origin" to "https://invalid.example")), 403, "ORIGIN_DENIED")
             assertError(request(server, "$path/snapshot", "POST", "{}", headers), 405, "METHOD_NOT_ALLOWED")
@@ -258,6 +258,18 @@ class WebApiControllerTest {
             assertError(request(server, "$path/events?transport=poll", headers = headers + ("Last-Event-ID" to "fixture_cursor")), 400, "UNSUPPORTED_HEADER")
             assertError(request(server, "$path/events?transport=stream", headers = headers), 422, "VALIDATION_FAILED")
             val before = Files.readString(journalFile)
+            // The queue sample names only the selected attempt and never a host diagnostic.
+            val queue = request(server, "$path/queue-position", headers = headers)
+            assertEquals(200, queue.statusCode())
+            val queueBody = Json.parseToJsonElement(queue.body()).jsonObject
+            assertEquals("queuePosition", queueBody.getValue("kind").jsonPrimitive.content)
+            val queueData = queueBody.getValue("data").jsonObject
+            assertEquals(job.id, queueData.getValue("jobId").jsonPrimitive.content)
+            assertEquals(run.runId, queueData.getValue("runId").jsonPrimitive.content)
+            assertTrue(queueData.getValue("state").jsonPrimitive.content in setOf("queued", "not-queued", "unavailable"))
+            assertFalse(queue.body().contains(other.id)); assertFalse(queue.body().contains(root.toString()))
+            assertError(request(server, "$path/queue-position?detail=host", headers = headers), 400, "VALIDATION_FAILED")
+            assertError(request(server, "/workbench/api/v1/jobs/${other.id}/runs/${run.runId}/queue-position", headers = headers), 404, "NOT_FOUND")
             val snapshot = assertEnvelope(request(server, "$path/snapshot", headers = headers), 200, "snapshot")
             assertEquals("2", snapshot.getValue("progress").jsonObject.getValue("nextSequence").jsonPrimitive.content)
             assertEquals("observations", snapshot.getValue("progress").jsonObject.getValue("authority").jsonPrimitive.content)

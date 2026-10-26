@@ -798,12 +798,14 @@ def load_program_model(
     artifact: Artifact,
     model_image_base: int,
     expected_sha256: str | None = None,
+    expected_bytes: int | None = None,
 ) -> RecoveredModel:
     """Project schema-1/2 model functions into diagnostic boundary/name inputs.
 
-    When ``expected_sha256`` is supplied, the exact snapshot that is parsed
-    must hash to it, so a caller's digest binding cannot be raced by a file
-    replaced between hashing and parsing.
+    When ``expected_sha256`` (and ``expected_bytes``) is supplied, the exact
+    snapshot that is parsed must hash to it (and have that length), so a
+    caller's digest binding cannot be raced by a file replaced between hashing
+    and parsing.
     """
 
     if twin not in _TWIN_NAMES:
@@ -821,6 +823,8 @@ def load_program_model(
         and hashlib.sha256(payload).hexdigest() != expected_sha256
     ):
         raise ScoringError(f"{twin} program model snapshot does not match its bound SHA-256")
+    if expected_bytes is not None and len(payload) != expected_bytes:
+        raise ScoringError(f"{twin} program model snapshot does not match its bound byte length")
     try:
         admit_program_model_bytes(payload)
     except (ValueError, UnicodeDecodeError) as error:
