@@ -1,9 +1,11 @@
 package decompengine.jobs
 
+import decompengine.testing.RecoveryMatrixEvidence
+import decompengine.testing.recoveryMatrixTempDirectory as createTempDirectory
+import org.junit.jupiter.api.extension.ExtendWith
 import java.nio.file.Files
 import java.nio.file.Path
 import java.util.concurrent.TimeUnit
-import kotlin.io.path.createTempDirectory
 import kotlin.io.path.exists
 import kotlin.io.path.readBytes
 import kotlin.io.path.readText
@@ -13,6 +15,7 @@ import kotlin.test.assertEquals
 import kotlin.test.assertFalse
 import kotlin.test.assertTrue
 
+@ExtendWith(RecoveryMatrixEvidence::class)
 class JobMetadataCrashTest {
     @Test fun `death before metadata write preserves the old record`() = verify(MetadataCrashPoint.BEFORE_WRITE)
     @Test fun `death after partial metadata write preserves the old record`() = verify(MetadataCrashPoint.PARTIAL_WRITE)

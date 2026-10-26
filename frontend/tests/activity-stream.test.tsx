@@ -167,3 +167,121 @@ it('uses polling when the server explicitly reports exhausted stream capacity', 
   expect(transport.get.mock.calls.at(-1)![1]).toContain('transport=poll');
   expect(fetcher).toHaveBeenCalledOnce();
 });
+
+// These consumer controls reuse the existing in-memory transport and fake clock.
+const contextUpdate = (offset: number): WebEvent => ({
+  ...first, sequence: String(BigInt(first.sequence) + BigInt(offset)), cursor: `cursor_usage_${offset}`,
+  payload: { ...first.payload, observationKind: 'context_usage', fields: {
+    ...first.payload.fields, contextUsedTokens: String(offset), contextWindowTokens: '4096',
+    reportedCostAmount: '37.125', reportedCostCurrency: 'USD',
+  } },
+});
+
+it('coalesces rendered context usage bursts while preserving checked records receipt time and evidence', async () => {
+  const evidence = JSON.stringify({ snapshot, page });
+  const live = connection(); fetcher.mockResolvedValueOnce(live.response);
+  await start();
+  const pause = screen.getByRole('button', { name: 'Pause activity' }); pause.focus();
+  const firstReceivedAt = new Date().toISOString();
+  await act(async () => { await Promise.resolve(); live.send(contextUpdate(1)); });
+  await advance(0);
+  expect(screen.getAllByRole('listitem')).toHaveLength(2);
+  expect(screen.getByText(/Last activity received:/).querySelector('time')?.getAttribute('datetime')).toBe(firstReceivedAt);
+  await advance(25);
+  const latestReceivedAt = new Date().toISOString();
+  expect(latestReceivedAt).not.toBe(firstReceivedAt);
+  await act(async () => { await Promise.resolve(); live.send(...Array.from({ length: 99 }, (_, index) => contextUpdate(index + 2))); });
+  await advance(0);
+  expect(screen.getAllByRole('listitem')).toHaveLength(2);
+  expect(transport.get).toHaveBeenCalledTimes(2);
+  expect(screen.getByText(/Last activity received:/).querySelector('time')?.getAttribute('datetime')).toBe(firstReceivedAt);
+  await advance(74);
+  expect(screen.getAllByRole('listitem')).toHaveLength(2);
+  await advance(1);
+  expect(screen.getAllByRole('listitem')).toHaveLength(101);
+  expect(screen.getByText(`Sequence ${contextUpdate(100).sequence}`)).toBeTruthy();
+  const times = [...document.querySelectorAll('time')].map(time => time.getAttribute('datetime'));
+  expect(times).toContain(latestReceivedAt);
+  expect(screen.getByText(/Last activity received:/).querySelector('time')?.getAttribute('datetime')).toBe(latestReceivedAt);
+  expect(screen.getByText(/Last activity received:/).querySelector('time')?.getAttribute('datetime')).not.toBe(firstReceivedAt);
+  expect(times).not.toContain(new Date().toISOString());
+  expect(document.activeElement).toBe(pause);
+  expect(document.body.textContent).not.toContain('37.125');
+  expect(document.body.textContent).not.toContain('USD');
+  expect(JSON.stringify({ snapshot, page })).toBe(evidence);
+  expect(transport.get).toHaveBeenCalledTimes(2);
+  expect(fetcher).toHaveBeenCalledOnce();
+  expect(fetcher.mock.calls[0]![1]?.method).toBe('GET');
+  await act(async () => { await Promise.resolve(); fireEvent.click(pause); });
+  transport.get.mockResolvedValueOnce({ data: { items: [], nextCursor: contextUpdate(100).cursor, hasMore: false } });
+  await act(async () => { await Promise.resolve(); fireEvent.click(screen.getByRole('button', { name: 'Resume activity' })); });
+  expect(transport.get.mock.calls.at(-1)![1]).toContain('after=cursor_usage_100');
+});
+
+it('flushes pending context rows on pause and discards a later pending display on fresh history reset', async () => {
+  const evidence = JSON.stringify({ snapshot, page });
+  const timeouts = vi.spyOn(globalThis, 'setTimeout');
+  const cancellations = vi.spyOn(globalThis, 'clearTimeout');
+  let finishFresh: (response: unknown) => void = () => undefined;
+  const one = connection(); const two = connection();
+  fetcher.mockResolvedValueOnce(one.response).mockResolvedValueOnce(two.response);
+  await start();
+  await act(async () => { await Promise.resolve(); one.send(contextUpdate(1), contextUpdate(2)); }); await advance(0);
+  expect(screen.getAllByRole('listitem')).toHaveLength(2);
+  await act(async () => { await Promise.resolve(); fireEvent.click(screen.getByRole('button', { name: 'Pause activity' })); });
+  expect(screen.getAllByRole('listitem')).toHaveLength(3);
+  expect(one.cancel).toHaveBeenCalledOnce();
+  await advance(100);
+  expect(screen.getAllByRole('listitem')).toHaveLength(3);
+  expect(transport.get).toHaveBeenCalledTimes(2);
+  transport.get.mockResolvedValueOnce({ data: { items: [], nextCursor: contextUpdate(2).cursor, hasMore: false } });
+  await act(async () => { await Promise.resolve(); fireEvent.click(screen.getByRole('button', { name: 'Resume activity' })); });
+  expect(transport.get.mock.calls.at(-1)![1]).toContain('after=cursor_usage_2');
+  await advance(2500);
+  await act(async () => { await Promise.resolve(); two.send(contextUpdate(3), contextUpdate(4)); }); await advance(0);
+  expect(screen.getAllByRole('listitem')).toHaveLength(4);
+  const scheduled = timeouts.mock.calls.map((args, index) => ({ args, index })).filter(call => call.args[1] === 100).at(-1);
+  if (!scheduled || typeof scheduled.args[0] !== 'function') throw new Error('No pending display callback');
+  const staleCallback = scheduled.args[0];
+  expect(staleCallback.length).toBe(0);
+  const scheduledResult = timeouts.mock.results[scheduled.index];
+  if (scheduledResult?.type !== 'return') throw new Error('No pending display handle');
+  // Keep the new snapshot unresolved so a fresh response cannot hide a stale cleanup publication.
+  transport.get.mockImplementationOnce(() => new Promise(resolve => { finishFresh = resolve; }))
+    .mockResolvedValueOnce({ data: { items: [], nextCursor: page.data.nextCursor, hasMore: false } });
+  await act(async () => { await Promise.resolve(); fireEvent.click(screen.getByRole('button', { name: 'Read fresh activity history' })); });
+  expect(screen.queryAllByRole('listitem')).toHaveLength(0);
+  expect(two.cancel).toHaveBeenCalledOnce();
+  expect(cancellations).toHaveBeenCalledWith(scheduledResult.value);
+  expect(transport.get).toHaveBeenCalledTimes(4);
+  await act(async () => { Reflect.apply(staleCallback, undefined, []); await Promise.resolve(); });
+  expect(screen.queryAllByRole('listitem')).toHaveLength(0);
+  expect(transport.get).toHaveBeenCalledTimes(4);
+  await advance(100);
+  expect(screen.queryAllByRole('listitem')).toHaveLength(0);
+  expect(screen.queryByRole('alert')).toBeNull();
+  expect(fetcher).toHaveBeenCalledTimes(2);
+  await act(async () => { finishFresh(snapshot); await Promise.resolve(); });
+  await advance(0);
+  expect(transport.get).toHaveBeenCalledTimes(5);
+  expect(screen.queryAllByRole('listitem')).toHaveLength(0);
+  expect(JSON.stringify({ snapshot, page })).toBe(evidence);
+});
+
+it('publishes the full context page immediately and continues after its last checked cursor', async () => {
+  const evidence = JSON.stringify({ snapshot, page });
+  const live = connection(); fetcher.mockResolvedValueOnce(live.response);
+  await start();
+  await act(async () => { await Promise.resolve(); live.send(...Array.from({ length: 200 }, (_, index) => contextUpdate(index + 1))); }); await advance(0);
+  expect(screen.getAllByRole('listitem')).toHaveLength(200);
+  expect(live.cancel).toHaveBeenCalledOnce();
+  transport.get.mockResolvedValueOnce({ data: { items: [contextUpdate(200)], nextCursor: contextUpdate(200).cursor, hasMore: false } });
+  await act(async () => { await Promise.resolve(); fireEvent.click(screen.getByRole('button', { name: 'Continue activity on next page' })); }); await advance(0);
+  expect(transport.get.mock.calls.at(-1)![1]).toContain('after=cursor_usage_199');
+  expect(screen.getAllByRole('listitem')).toHaveLength(1);
+  expect(screen.getByText(`Sequence ${contextUpdate(200).sequence}`)).toBeTruthy();
+  await advance(100);
+  expect(screen.getAllByRole('listitem')).toHaveLength(1);
+  expect(fetcher).toHaveBeenCalledOnce();
+  expect(JSON.stringify({ snapshot, page })).toBe(evidence);
+});

@@ -455,7 +455,7 @@ internal class AnalysisArtifactStagingOwner(
                     try { if (child.isAlive) child.destroyForcibly() }
                     catch (caught: Throwable) { markUnconfirmed(caught) }
                 }
-                while (handles.values.any { it.isAlive }) {
+                awaitReportStagingProcessAbsence({ child.isAlive }, { handles.values.any { it.isAlive } }) {
                     if (stagingRemaining(cleanupCutoff()) == 0L) markUnconfirmed(
                         GhidraAnalysisException("native report staging process absence remains unproved"))
                     TimeUnit.NANOSECONDS.sleep(STAGING_POLL_NANOS)
@@ -500,6 +500,12 @@ internal class AnalysisArtifactStagingOwner(
             handles[handle.pid()] = handle
         } }
     }
+}
+
+/** Both independent exit observations must settle before the retained controller can finish. */
+internal fun awaitReportStagingProcessAbsence(processAlive: () -> Boolean, recordedHandleAlive: () -> Boolean,
+    whileWaiting: () -> Unit) {
+    while (processAlive() || recordedHandleAlive()) whileWaiting()
 }
 
 private data class ReportStagingReceipt(val bytes: Long, val sha256: ByteArray)

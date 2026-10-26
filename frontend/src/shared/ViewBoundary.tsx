@@ -1,3 +1,4 @@
+import { viewBoundaryCopy as copy } from '../copy/shell';
 import { Component } from 'preact';
 import type { ComponentChildren } from 'preact';
 import { ErrorBoundary as AsyncBoundary } from 'preact-iso/lazy';
@@ -16,9 +17,9 @@ export class ViewBoundary extends Component<BoundaryProps, BoundaryState> {
     if (this.state.failed) {
       return (
         <section class="notice notice-error" aria-labelledby="view-error-title" role="alert">
-          <h1 id="view-error-title">This view could not be opened</h1>
-          <p>Your work remains on the server. Try opening the view again.</p>
-          <button type="button" onClick={() => this.setState({ failed: false })}>Try again</button>
+          <h1 id="view-error-title">{copy.thisViewCouldNotBeOpened}</h1>
+          <p>{copy.yourWorkRemainsOnTheServerTryOpeningTheView}</p>
+          <button type="button" onClick={() => this.setState({ failed: false })}>{copy.tryAgain}</button>
         </section>
       );
     }

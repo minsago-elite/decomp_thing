@@ -238,7 +238,7 @@ source-lock binding, tool executable hashes, duplicate/unknown JSON fields,
 and deterministic CLI output. Run the complete oracle test group with:
 
 ```bash
-python3 -m unittest discover -s tests/oracle -v
+python3 -m unittest discover -s tests/oracle -t . -v
 ```
 
 ## Recorded production result

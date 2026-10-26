@@ -22,7 +22,13 @@ internal class GccBundledCapturedPlannerOutput(plan: ByteArray, assessment: Byte
 internal object GccBundledPlannerOutputCapture {
     fun capture(run: LinuxDescriptor, controlName: String, expectedControl: LinuxFileIdentity,
         request: GccBundledPlannerRequest, capturedModel: ByteArray,
-        maximumStdoutBytes: Int, maximumStderrBytes: Int): GccBundledCapturedPlannerOutput {
+        maximumStdoutBytes: Int, maximumStderrBytes: Int): GccBundledCapturedPlannerOutput =
+        capture(run, controlName, expectedControl, request, capturedModel, maximumStdoutBytes, maximumStderrBytes) {}
+
+    internal fun capture(run: LinuxDescriptor, controlName: String, expectedControl: LinuxFileIdentity,
+        request: GccBundledPlannerRequest, capturedModel: ByteArray,
+        maximumStdoutBytes: Int, maximumStderrBytes: Int, checkpoint: (String) -> Unit): GccBundledCapturedPlannerOutput {
+        checkpoint("before planner output capture")
         require(controlName.matches(Regex("control-[a-f0-9]{64}")))
         require(maximumStdoutBytes.toLong() in 0..KotlinContainedCommandRequest.MAXIMUM_LOG_BYTES &&
             maximumStderrBytes.toLong() in 0..KotlinContainedCommandRequest.MAXIMUM_LOG_BYTES)
@@ -40,6 +46,7 @@ internal object GccBundledPlannerOutputCapture {
                 requirePrivateDirectory(reports.identity, control.identity)
                 val names = setOf("module_plan.json", "planner-output.json", "contained-command.stdout", "contained-command.stderr")
                 fun verifyDirectories() {
+                    checkpoint("verifying planner output directories")
                     require(LinuxFilesystemSyscalls.identity(run.fd) == runIdentity)
                     require(LinuxFilesystemSyscalls.stableDescriptorPath(run.fd).toRealPath() == runPath)
                     requireNamedDirectory(run, controlName, control)
@@ -49,12 +56,15 @@ internal object GccBundledPlannerOutputCapture {
                     }
                 }
                 verifyDirectories()
-                val files = GccBoundExportFiles(request.maximumPlanBytes.toLong() + METADATA_BYTES + maximumStdoutBytes + maximumStderrBytes)
+                val files = GccBoundExportFiles(request.maximumPlanBytes.toLong() + METADATA_BYTES + maximumStdoutBytes + maximumStderrBytes) {
+                    checkpoint("reading planner output file")
+                }
                 val plan = files.read(reports, "module_plan.json", request.maximumPlanBytes)
                 val metadata = files.read(reports, "planner-output.json", METADATA_BYTES)
                 val stdout = files.read(reports, "contained-command.stdout", maximumStdoutBytes)
                 val stderr = files.read(reports, "contained-command.stderr", maximumStderrBytes)
-                val assessed = GccBundledPlannerOutputAssessment.assess(request, capturedModel, plan, metadata)
+                checkpoint("before planner assessment")
+                val assessed = GccBundledPlannerOutputAssessment.assess(request, capturedModel, plan, metadata, checkpoint)
                 files.verify()
                 verifyDirectories()
                 val fields = OracleJson.parseCanonical(assessed.canonicalBytes).jsonObject
@@ -66,7 +76,9 @@ internal object GccBundledPlannerOutputCapture {
                     "stdoutBytes" to JsonPrimitive(stdout.size), "stdoutSha256" to JsonPrimitive(OracleArtifacts.sha256(stdout)),
                     "stderrBytes" to JsonPrimitive(stderr.size), "stderrSha256" to JsonPrimitive(OracleArtifacts.sha256(stderr)),
                 )))
-                GccBundledCapturedPlannerOutput(assessed.planBytes, record)
+                val result = GccBundledCapturedPlannerOutput(assessed.planBytes, record)
+                checkpoint("before returning captured planner output")
+                result
             }
         }
     }

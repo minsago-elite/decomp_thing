@@ -986,7 +986,18 @@ class BoundedAnalysisArtifactStagingProcessTest {
             val flags = owners.mapIndexed { index, owner ->
                 val booleans = STAGING_OWNER_BOOLEAN_FLAGS.joinToString(",") { name -> "$name=${ownerFlag(owner, name)}" }
                 val references = STAGING_OWNER_REFERENCE_FLAGS.joinToString(",") { name -> "$name=${ownerReferencePresent(owner, name)}" }
-                "owner$index{$booleans,$references}"
+                val problems = listOf("failure", "cleanupProblem").joinToString(",") { name ->
+                    val field = AnalysisArtifactStagingOwner::class.java.getDeclaredField(name).apply { isAccessible = true }
+                    val cause = (field.get(owner) as AtomicReference<*>).get() as? Throwable
+                    val kind = cause?.javaClass?.name?.take(128) ?: "NONE"
+                    val site = cause?.stackTrace?.asSequence()?.take(32)?.firstOrNull {
+                        it.className == AnalysisArtifactStagingOwner::class.java.name &&
+                            (it.methodName == "control" || it.methodName == "observe")
+                    }
+                    val location = if (site != null && site.lineNumber in 1..10_000) "${site.methodName}:${site.lineNumber}" else "UNKNOWN"
+                    "$name=$kind@$location"
+                }
+                "owner$index{$booleans,$references,$problems}"
             }.joinToString(";")
             "$tasks;$flags".take(2_048)
         }.getOrElse { "ownership diagnostics unavailable:${it.javaClass.simpleName}".take(128) }

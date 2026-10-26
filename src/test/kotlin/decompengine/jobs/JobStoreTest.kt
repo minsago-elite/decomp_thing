@@ -1,8 +1,11 @@
 package decompengine.jobs
 
+import decompengine.testing.RecoveryMatrixEvidence
+import decompengine.testing.recoveryMatrixTempDirectory as createTempDirectory
+import org.junit.jupiter.api.extension.ExtendWith
+import decompengine.repair.open
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.jsonObject
-import kotlin.io.path.createTempDirectory
 import kotlin.io.path.exists
 import kotlin.io.path.readBytes
 import kotlin.io.path.readText
@@ -12,7 +15,47 @@ import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
 import kotlin.test.assertTrue
 
+@ExtendWith(RecoveryMatrixEvidence::class)
 class JobStoreTest {
+    @Test
+    fun `artifact reads enforce the selected byte bound and reject retained file or directory substitution`() {
+        val root = createTempDirectory("jobs-artifact-snapshot-")
+        val store = JobStore(root)
+        val job = store.createFromUpload("snapshot.elf", elfFixture())
+        val reports = java.nio.file.Files.createDirectory(root.resolve(job.id).resolve("reports"))
+        val path = reports.resolve("ordinary.json")
+        val payload = "{\"observation\":\"bounded\"}".toByteArray()
+        java.nio.file.Files.write(path, payload)
+        val selected = store.readArtifact(job.id, "reports/ordinary.json", payload.size.toLong())
+        kotlin.test.assertContentEquals(payload, selected.bytes)
+        assertEquals(decompengine.project.sha256(payload), selected.sha256)
+        assertFailsWith<decompengine.repair.RepairBudgetExceededException> {
+            store.readArtifact(job.id, "reports/ordinary.json", payload.size.toLong() - 1)
+        }
+        val moved = reports.resolve("retained.json")
+        val replacedFile = assertFailsWith<IllegalArgumentException> {
+            decompengine.repair.readStableRegularFile(root, "${job.id}/reports/ordinary.json", payload.size.toLong(),
+                afterAuthorization = {
+                    java.nio.file.Files.move(path, moved)
+                    java.nio.file.Files.write(path, payload)
+                })
+        }
+        assertTrue(replacedFile.message.orEmpty().contains("target binding changed"))
+        java.nio.file.Files.delete(path)
+        java.nio.file.Files.move(moved, path)
+        val replacementReports = java.nio.file.Files.createDirectory(reports.resolveSibling("replacement-reports"))
+        java.nio.file.Files.write(replacementReports.resolve("ordinary.json"), payload)
+        val replacedDirectory = assertFailsWith<IllegalArgumentException> {
+            decompengine.repair.readStableRegularFile(root, "${job.id}/reports/ordinary.json", payload.size.toLong(),
+                afterRead = {
+                    java.nio.file.Files.move(reports, reports.resolveSibling("retained-reports"))
+                    java.nio.file.Files.move(replacementReports, reports)
+                })
+        }
+        assertTrue(replacedDirectory.message.orEmpty().contains("directory binding changed"))
+        kotlin.test.assertContentEquals(payload, store.readArtifact(job.id, "reports/ordinary.json", payload.size.toLong()).bytes)
+    }
+
     @Test
     fun `upload admission reserves room for every supported status message`() {
         val root = createTempDirectory("jobs-status-reserve-")
@@ -296,6 +339,140 @@ class JobStoreTest {
         assertEquals("failed", recovered.status)
         assertTrue(recovered.statusMessage.orEmpty().contains("interrupted"))
     }
+    @Test
+    fun `recorded history selects only the exact legacy or named run layout`() {
+        val root = historyTestRoot()
+        val id = "a".repeat(32)
+        val legacy = historyProject(root.resolve("$id/reports/source-tree"))
+        val run = historyProject(root.resolve("$id/reports/runs/selected-run/source-tree"), "run-base")
+        val store = JobStore(root)
+        val legacyResult = store.readRecordedRepairHistory(id, null)
+        val runResult = store.readRecordedRepairHistory(id, "selected-run")
+        assertEquals(decompengine.repair.RepairHistoryReadStatus.RECORDED, legacyResult.status)
+        assertEquals(decompengine.repair.RepairHistoryReadStatus.RECORDED, runResult.status)
+        assertEquals(decompengine.project.sha256(legacy.resolve("reports/repair-revisions/graph.json").readBytes()), legacyResult.snapshot?.graphSha256)
+        assertEquals(decompengine.project.sha256(run.resolve("reports/repair-revisions/graph.json").readBytes()), runResult.snapshot?.graphSha256)
+        assertTrue(legacyResult.snapshot?.graphSha256 != runResult.snapshot?.graphSha256)
+        assertEquals(decompengine.repair.RepairHistoryReadStatus.NOT_RECORDED, store.readRecordedRepairHistory(id, "missing-run").status)
+        assertEquals(decompengine.repair.RepairHistoryReadStatus.NOT_RECORDED, store.readRecordedRepairHistory("b".repeat(32), null).status)
+        for (bad in listOf("../selected-run", "", "a/b", "a".repeat(129))) {
+            val refused = store.readRecordedRepairHistory(id, bad)
+            assertEquals(decompengine.repair.RepairHistoryReadStatus.UNAVAILABLE, refused.status)
+            kotlin.test.assertNull(refused.snapshot)
+        }
+        assertEquals(decompengine.repair.RepairHistoryReadStatus.UNAVAILABLE, store.readRecordedRepairHistory("../outside", null).status)
+    }
+
+    @Test
+    fun `recorded history absence is read only and never constructs store or recovery`() {
+        val root = historyTestRoot()
+        val absent = root.resolve("absent-store")
+        val missingRoot = JobStore(absent).readRecordedRepairHistory("a".repeat(32), null)
+        assertEquals(decompengine.repair.RepairHistoryReadStatus.UNAVAILABLE, missingRoot.status)
+        assertTrue(!java.nio.file.Files.exists(absent))
+        val selected = root.resolve("a".repeat(32))
+        java.nio.file.Files.createDirectory(selected)
+        val store = JobStore(root)
+        val missingHistory = store.readRecordedRepairHistory("a".repeat(32), null)
+        assertEquals(decompengine.repair.RepairHistoryReadStatus.NOT_RECORDED, missingHistory.status)
+        java.nio.file.Files.list(selected).use { assertEquals(0L, it.count()) }
+    }
+
+    @Test
+    fun `recorded history rejects selected symlink and cancellation without fallback or private failures`() {
+        val root = historyTestRoot()
+        val id = "a".repeat(32)
+        val legacy = historyProject(root.resolve("$id/reports/source-tree"))
+        val before = legacy.resolve("reports/repair-revisions/graph.json").readBytes()
+        val runs = root.resolve("$id/reports/runs")
+        java.nio.file.Files.createDirectory(runs)
+        java.nio.file.Files.createSymbolicLink(runs.resolve("selected-run"), root.resolve("$id/reports"))
+        val store = JobStore(root)
+        val link = store.readRecordedRepairHistory(id, "selected-run")
+        assertEquals(decompengine.repair.RepairHistoryReadStatus.UNAVAILABLE, link.status)
+        kotlin.test.assertNull(link.snapshot)
+        val cancelled = store.readRecordedRepairHistory(id, null) { throw IllegalStateException("PRIVATE-job-path-token") }
+        assertEquals(decompengine.repair.RepairHistoryReadStatus.UNAVAILABLE, cancelled.status)
+        kotlin.test.assertNull(cancelled.snapshot)
+        kotlin.test.assertContentEquals(before, legacy.resolve("reports/repair-revisions/graph.json").readBytes())
+        assertEquals(decompengine.repair.RepairHistoryReadStatus.RECORDED, store.readRecordedRepairHistory(id, null).status)
+    }
+
+
+    @Test
+    fun `recorded projection uses only selected source tree reports without outer fallback`() {
+        val root = historyTestRoot()
+        val id = "a".repeat(32)
+        val legacy = historyProject(root.resolve("$id/reports/source-tree"))
+        val run = historyProject(root.resolve("$id/reports/runs/selected-run/source-tree"), "run-base")
+        val store = JobStore(root)
+        val outer = root.resolve("$id/reports/repair_history.json")
+        outer.writeText("PRIVATE-outer-history-must-not-be-selected")
+        val legacyH = legacy.resolve("reports/repair_history.json")
+        val runH = run.resolve("reports/repair_history.json")
+        java.nio.file.Files.deleteIfExists(legacyH)
+        java.nio.file.Files.deleteIfExists(runH)
+        assertEquals(decompengine.repair.RepairHistoryProjectionStatus.MISSING,
+            store.readRecordedRepairHistory(id, null).projection.status)
+        assertEquals(decompengine.repair.RepairHistoryProjectionStatus.MISSING,
+            store.readRecordedRepairHistory(id, "selected-run").projection.status)
+        runH.writeText("")
+        legacyH.writeText("PRIVATE-corrupt-legacy-only")
+        val selected = store.readRecordedRepairHistory(id, "selected-run")
+        assertEquals(decompengine.repair.RepairHistoryReadStatus.RECORDED, selected.status)
+        assertEquals(decompengine.repair.RepairHistoryProjectionStatus.EMPTY, selected.projection.status)
+        assertEquals(decompengine.repair.RepairHistoryProjectionStatus.INVALID,
+            store.readRecordedRepairHistory(id, null).projection.status)
+        val profile = decompengine.repair.DeclarativeRepairIndexProfile("job-history-reader",
+            decompengine.repair.RepairIndexLayout(listOf("code.c"), listOf("code.c")))
+        decompengine.repair.ModuleRevisionGraph.open(run, profile).use { it.synchronizeRepairHistory() }
+        val beforeH = runH.readBytes()
+        val beforeG = run.resolve("reports/repair-revisions/graph.json").readBytes()
+        val beforeSource = run.resolve("code.c").readBytes()
+        val matched = store.readRecordedRepairHistory(id, "selected-run")
+        assertEquals(decompengine.repair.RepairHistoryProjectionStatus.MATCHED_CAPTURED_PROJECTION, matched.projection.status)
+        assertEquals(decompengine.project.sha256(beforeH), matched.projection.capturedSha256)
+        kotlin.test.assertContentEquals(beforeH, runH.readBytes())
+        kotlin.test.assertContentEquals(beforeG, run.resolve("reports/repair-revisions/graph.json").readBytes())
+        kotlin.test.assertContentEquals(beforeSource, run.resolve("code.c").readBytes())
+        assertEquals("PRIVATE-outer-history-must-not-be-selected", outer.readText())
+        assertEquals(decompengine.repair.RepairHistoryReadStatus.NOT_RECORDED,
+            store.readRecordedRepairHistory(id, "not-selected").status)
+    }
+
+    @Test
+    fun `selected projection cannot turn cancellation or absent selected run into recorded credit`() {
+        val root = historyTestRoot()
+        val id = "a".repeat(32)
+        val project = historyProject(root.resolve("$id/reports/source-tree"))
+        project.resolve("reports/repair_history.json").writeText("PRIVATE-malformed")
+        val store = JobStore(root)
+        val cancelled = store.readRecordedRepairHistory(id, null) { throw IllegalStateException("PRIVATE-cancel") }
+        assertEquals(decompengine.repair.RepairHistoryReadStatus.UNAVAILABLE, cancelled.status)
+        kotlin.test.assertNull(cancelled.snapshot)
+        assertEquals(decompengine.repair.RepairHistoryProjectionStatus.NOT_INSPECTED, cancelled.projection.status)
+        val missing = root.resolve("$id/reports/runs/missing-run")
+        assertEquals(decompengine.repair.RepairHistoryReadStatus.NOT_RECORDED,
+            store.readRecordedRepairHistory(id, "missing-run").status)
+        assertTrue(!java.nio.file.Files.exists(missing))
+        assertEquals("base", project.resolve("code.c").readText())
+    }
+
+    private fun historyTestRoot(): java.nio.file.Path {
+        val parent = java.nio.file.Path.of("build/test-tmp").toAbsolutePath().normalize()
+        java.nio.file.Files.createDirectories(parent)
+        return createTempDirectory(parent, "job-history-reader-")
+    }
+
+    private fun historyProject(root: java.nio.file.Path, source: String = "base"): java.nio.file.Path {
+        java.nio.file.Files.createDirectories(root)
+        root.resolve("code.c").writeText(source)
+        val profile = decompengine.repair.DeclarativeRepairIndexProfile("job-history-reader",
+            decompengine.repair.RepairIndexLayout(listOf("code.c"), listOf("code.c")))
+        decompengine.repair.ModuleRevisionGraph.open(root, profile).use { it.enableRunContract() }
+        return root
+    }
+
 }
 
 fun elfFixture(): ByteArray {

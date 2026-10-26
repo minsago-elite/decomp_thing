@@ -20,12 +20,13 @@ import java.util.concurrent.TimeUnit
  * filesystem read can then be cancelled by stopping this helper process at the admitted deadline.
  */
 internal class BundledGhidraVerificationProcess(
-    private val commandFactory: (Path) -> List<String> = ::verificationCommand,
+    private val commandFactory: ((Path) -> List<String>)? = null,
     private val processStarter: (List<String>, Path) -> Process = ::startVerificationProcess,
     private val captureExecutor: Executor = CAPTURE_EXECUTOR,
     private val maximumStdoutBytes: Int = MAXIMUM_INVENTORY_BYTES,
     private val maximumStderrBytes: Int = MAXIMUM_DIAGNOSTIC_BYTES,
     private val maximumWallMillis: Long = MAXIMUM_WALL_MILLIS,
+    private val launchExecutor: Executor = ANALYSIS_PROCESS_LAUNCH_EXECUTOR,
 ) {
     init {
         require(maximumStdoutBytes in 1..MAXIMUM_INVENTORY_BYTES)
@@ -38,14 +39,18 @@ internal class BundledGhidraVerificationProcess(
         checkpoint("before starting bundled Ghidra verifier")
         val started = System.nanoTime()
         val maximumNanos = TimeUnit.MILLISECONDS.toNanos(maximumWallMillis)
+        // Reject malformed default directory policy without occupying a launch slot. This
+        // immutable snapshot is consumed by worker-side preparation, not re-read there.
+        val directoryOptions = if (commandFactory == null) bundledGhidraDirectoryOptions() else null
         val launch = try {
             CompletableFuture.supplyAsync({
-                val command = commandFactory(normalizedRoot)
+                val command = commandFactory?.invoke(normalizedRoot)
+                    ?: verificationCommand(normalizedRoot, checkNotNull(directoryOptions))
                 require(command.isNotEmpty() && command.all { it.isNotEmpty() && it.none(::isControl) }) {
                     "bundled Ghidra verifier command is empty or ambiguous"
                 }
                 processStarter(command, normalizedRoot)
-            }, ANALYSIS_PROCESS_LAUNCH_EXECUTOR)
+            }, launchExecutor)
         } catch (failure: RejectedExecutionException) {
             throw GhidraAnalysisException("bundled Ghidra verifier launch capacity is exhausted", failure)
         }
@@ -258,7 +263,7 @@ internal object BundledGhidraVerificationWorker {
     }
 }
 
-private fun verificationCommand(root: Path): List<String> {
+private fun verificationCommand(root: Path, directoryOptions: List<String>): List<String> {
     val java = Path.of(System.getProperty("java.home"), "bin", if (File.separatorChar == '\\') "java.exe" else "java")
         .toAbsolutePath().normalize()
     require(Files.isExecutable(java)) { "The application JDK has no executable Java verifier: $java" }
@@ -272,7 +277,7 @@ private fun verificationCommand(root: Path): List<String> {
     return listOf(
         java.toString(), "-Xmx256m", "-XX:MaxMetaspaceSize=128m", "-XX:+DisableAttachMechanism",
         "-XX:-UsePerfData",
-    ) + bundledGhidraDirectoryOptions() + listOf(
+    ) + directoryOptions + listOf(
         "-Dfile.encoding=UTF-8", "-Duser.language=en", "-Duser.country=US",
         "-cp", entries.joinToString(File.pathSeparator), BundledGhidraVerificationWorker::class.java.name, root.toString(),
     )

@@ -44,6 +44,7 @@ def generate(base_path: str, schema_path: Path) -> dict:
     bootstrap["data"]["basePath"] = base_path
     bootstrap["data"]["applicationBuildId"] = "SIMULATED_DEVELOPMENT_DATA"
     bootstrap["data"]["uiBuildId"] = "SIMULATED_DEVELOPMENT_DATA"
+    bootstrap["data"]["serverInstanceId"] = "SIMULATED_DEVELOPMENT_INSTANCE"
     record(api + "/bootstrap", bootstrap)
     for name, state, description in [
         ("running", "running", "Simulated active attempt; no native process is running."),
@@ -81,6 +82,19 @@ def generate(base_path: str, schema_path: Path) -> dict:
         snapshot["data"].update(run=deepcopy(run["data"]), throughCursor=event["cursor"],
                                   throughSequence=event["sequence"], oldestCursor=event["cursor"])
         record(run_path + "/snapshot", snapshot)
+        # Read-only simulated eligibility: the fixture server registers no workflow and owns no worker.
+        controls = source("attempt-controls-retry")
+        terminal = run["data"]["state"] in ("failed", "interrupted", "completed", "cancelled")
+        recovery_reason = ("ATTEMPT_COMPLETED" if run["data"]["state"] == "completed"
+                           else "WORKFLOW_UNAVAILABLE" if terminal else "ATTEMPT_ACTIVE")
+        controls["data"].update(jobId=job_id, runId=run_id, runVersion=run["data"]["version"], state=run["data"]["state"],
+                                inputRevisionId=None, resumeRestores=None, successorRunId=None,
+                                cancel={"available": False, "reason": "ATTEMPT_TERMINAL" if terminal else "NO_OWNED_WORKER"},
+                                retry={"available": False, "reason": recovery_reason},
+                                resume={"available": False, "reason": recovery_reason})
+        validate(controls)
+        check_semantics(controls)
+        record(run_path + "/controls", controls)
         report = source("report-unsupported" if name == "unsupported" else "report-partial" if name == "partial" else "report-missing")
         report["data"]["binding"].update(jobId=job_id, runId=run_id, revisionId=None)
         report["data"]["sourceArtifact"] = None
@@ -92,6 +106,7 @@ def generate(base_path: str, schema_path: Path) -> dict:
     page = source("jobs-page")
     page["data"]["items"] = jobs
     record(api + "/jobs", page)
+    record(api + "/recovery", source("recovery-empty"))
     download = "SIMULATED_DEVELOPMENT_DATA\nThis synthetic attachment is not execution evidence.\n"
     artifact = source("artifact")
     artifact["data"].update(artifactId="fixture_attachment", displayName="SIMULATED-evidence.txt",

@@ -1,3 +1,5 @@
+import { commonCopy } from '../copy/common';
+import { textMessage } from '../shared/messages';
 export type ApiErrorCode = 'invalid_json' | 'response_too_large' | 'invalid_response'
   | 'unsupported_contract' | 'unexpected_response' | 'http_error' | 'network_error'
   | 'timeout' | 'aborted' | 'invalid_request' | 'invalid_headers';
@@ -33,5 +35,5 @@ export function apiFailureReference(error: unknown): string | undefined {
 /** Append only a vetted correlation ID to a fixed, locally authored message. */
 export function withApiFailureReference(message: string, error: unknown): string {
   const requestId = apiFailureReference(error);
-  return requestId ? `${message} Reference ID: ${requestId}.` : message;
+  return requestId ? textMessage(commonCopy.failureReference, { message, reference: requestId }) : message;
 }

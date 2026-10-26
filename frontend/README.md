@@ -12,11 +12,59 @@ server shell when that metadata is available.
 
 Use **Node 24.20.0 and npm 11.19.0**. The root `.node-version`, package engines and
 `packageManager` record the exact versions. Node 24.20.0 ships the selected npm.
-Use an existing version manager that honors `.node-version`, or obtain the exact
-[official Node distribution](https://nodejs.org/download/release/v24.20.0/) and
-verify its [published checksums](https://nodejs.org/download/release/v24.20.0/SHASUMS256.txt)
-before putting its `bin` directory on PATH. Repository commands do not download a
-replacement runtime or silently use a different installed Node version.
+
+### Provision the pinned tools inside the repository
+
+The existing [CI and Docker installer](../scripts/install-frontend-node.sh) also
+supports developer setup on Linux x86-64. It needs Bash, curl, sha256sum, tar with
+gzip support, mktemp, awk and uname. It uses the reviewed official archive digest
+in [frontend-node-sha256.txt](../scripts/frontend-node-sha256.txt), checks that digest
+before extraction or running Node, and validates Node/npm and all repository pins
+before publishing the installation. It does not need an existing Node installation.
+
+From the repository root, install once into an absent directory:
+
+```sh
+mkdir -p build
+export NPM_CONFIG_CACHE="$PWD/build/npm-download-cache"
+bash scripts/install-frontend-node.sh "$PWD/build/frontend-node-24.20.0-npm-11.19.0"
+export PATH="$PWD/build/frontend-node-24.20.0-npm-11.19.0/bin:$PATH"
+```
+
+The installation, temporary staging directory and npm cache stay under the ignored
+`build/` directory. The installer refuses an existing destination or symlink. After
+a successful installation, select the same tools and cache in each new shell:
+
+```sh
+export NPM_CONFIG_CACHE="$PWD/build/npm-download-cache"
+export PATH="$PWD/build/frontend-node-24.20.0-npm-11.19.0/bin:$PATH"
+```
+
+After a pin change, leave any stale installation in place. Use the new versioned
+directory above if it is absent. If that destination already exists and is not the
+verified installation you intend to select, the toolchain error supplies this
+fresh-directory recovery path instead:
+
+```sh
+mkdir -p build
+export NPM_CONFIG_CACHE="$PWD/build/npm-download-cache"
+frontend_node_parent="$(mktemp -d "$PWD/build/frontend-node-24.20.0-npm-11.19.0.XXXXXX")"
+bash scripts/install-frontend-node.sh "$frontend_node_parent/node"
+export PATH="$frontend_node_parent/node/bin:$PATH"
+```
+
+The new parent is inside `build/`; its `node` destination is absent even when
+older installations exist. Keep the actual installation path for future shells
+and use that path in the PATH-selection command instead of the fixed example.
+
+An existing version manager that honors `.node-version` is also supported. For
+manual installation, verify the exact [official distribution](https://nodejs.org/download/release/v24.20.0/)
+against its [published checksums](https://nodejs.org/download/release/v24.20.0/SHASUMS256.txt)
+before selecting its `bin` directory. Keep the repository-local npm cache setting
+above for these setups as well. Frontend commands retain exact pin checks
+and do not silently download or select a fallback runtime.
+
+### Run the frontend commands
 
 From the repository root:
 
@@ -52,13 +100,17 @@ never a browser-exposed `VITE_*` variable or an environment-file credential.
 
 ```sh
 # Terminal 1: normal JVM task, with the explicit development browser origin.
-./gradlew -PfrontendNodeHome=/absolute/node-v24.20.0-linux-x64 run \
+./gradlew run \
   --args='web --ui spa --host 127.0.0.1 --port 8000 --base-path /nested/ --dev-frontend-origin http://127.0.0.1:5173'
 
 # Terminal 2: Preact HMR, same base path; no manual asset copy or rebuild per edit.
 DECOMP_DEV_BACKEND_ORIGIN=http://127.0.0.1:8000 \
 DECOMP_DEV_BASE_PATH=/nested/ npm --prefix frontend run dev:backend
 ```
+
+Gradle uses the pinned Node/npm selected on PATH by any of the supported setup
+methods. `-PfrontendNodeHome` is optional; pass it only when it names the actual
+absolute installation directory you selected, rather than an assumed local path.
 
 Open `http://127.0.0.1:5173/nested/`. The JVM flag adds only the exact explicitly
 configured loopback browser origin to its local access policy. Vite proxies
@@ -163,6 +215,7 @@ The Vite behavior used here is documented in its official
 - `src/app/` contains navigation, local brand SVG and route URL helpers.
 - `src/routes/` contains home, missing-page and lazily loaded runtime views.
 - `src/shared/` contains the native Preact render-error boundary and async wrapper.
+- `src/copy/` contains interface copy scoped to the shell and existing deferred views.
 - `src/api/` contains generated v1 contracts, strict decoding and bounded native fetch.
 - `src/session/` removes bootstrap fragments and owns page-local session state.
 - `src/styles/` contains local CSS; typography uses system fonts.
@@ -193,6 +246,32 @@ The architecture and trust contracts are in
 [web trust](../docs/web-trust.md). Kotlin retains job, workflow, filesystem, archive
 and Git authority. The frontend does not implement these services.
 
+## Interface copy and exact values
+
+Put labels, accessible names, validation feedback and explanatory sentences in
+`src/copy/`. The shell, workspace, attempt, history, job and runtime catalogs keep
+their existing loading boundaries; common formatting and correlation labels have
+a small shared catalog. Keep protocol enums, selectors, routes, storage keys and
+reported technical values separate from translated copy.
+
+Use `message(template, namedValues)` from `src/shared/messages.ts` for sentences
+containing values or existing markup. Named slots let a translation reorder a
+`time`, `code` or interactive element without changing the component. Values are
+ordinary Preact children, and templates do not interpret HTML. `textMessage` is
+the corresponding string-only formatter for document titles and diagnostic text.
+Type checking requires every named slot; changing a locale must preserve those
+slot names. No language selector or locale persistence is introduced by these
+catalogs.
+
+Use `formatExactTimestamp` for reported timestamps and retain the original string
+in both `dateTime` and `title`. It preserves fractional digits and the source
+offset, displaying `Z` as `UTC` without converting through `Date`. Use
+`formatExactBytes` for byte labels and preserve decimal counters and addresses as
+their original strings; `Number` can round valid unsigned 64-bit values. Relative
+receipt age is separately coalesced display text and does not replace the exact
+timestamp or establish source freshness. Filter options use catalog status
+labels with explicit, unchanged protocol values.
+
 ## Verification and bundle evidence
 
 `npm test` exercises accessible shell landmarks, honest unavailable state,
@@ -204,6 +283,15 @@ tests and build configuration with strict options; lint checks typed promises an
 prevents React compatibility imports. No `skipLibCheck` or ambient untyped shim
 is used to hide dependency declaration problems.
 
+`tests/accessibility.test.tsx` runs axe-core (pinned dev dependency, never bundled)
+against every routed view with contract fixtures: the public shell, workspace with jobs,
+upload, runtime, job overview, attempt history/overview/activity/evidence, source
+directory and file, the not-found page, the open display-preference panel and a failed
+job read. Any WCAG 2.0/2.1/2.2 A or AA rule violation fails `npm test`. jsdom has no
+layout or colour, so contrast and reflow stay in the packaged Chrome checks
+(`scripts/packaged-browser-contrast.mjs`); manual screen-reader audit evidence is
+recorded separately (#617). Add a new route or state to that suite when you add a view.
+
 A production build empties the output directory, builds split assets and writes
 `build/frontend/bundle-report.json`. The report includes every output's SHA-256,
 raw/gzip bytes, the initial static JS/CSS closure and bundler module ownership.
@@ -212,6 +300,18 @@ Builds enforce the D1 initial limits of 50 KiB gzip JavaScript and 10 KiB gzip C
 reject production source maps/test/dev sentinels, and reject unexpected production
 module owners. `BUNDLE.md` records the initial measured result. These measurements
 do not establish packaged serving, browser performance or the full D-series gate.
+
+The report also enforces two #622 loading rules on the shipped bytes. Modules under
+`src/sources/` (browsing, preview, highlighting worker) and `src/graph/` are tagged in
+`bundle-composition.json` and must not land in any initial chunk; each `chunks[]` entry
+records whether it loads `initial` or `deferred`. Every shipped HTML, JS and CSS file is
+also scanned for remote resource loads (CSS `url()`/`@import`, `import()`/`from`,
+`Worker`/`importScripts`, and `src`/`href` on loading elements). Because scripts can
+also build element URLs, `fetch` targets or JSX props, every absolute or protocol-relative
+URL literal must name a reviewed inert host (XML namespaces, the non-resolvable `.invalid`
+parsing base and one router error-message documentation link); any other host fails the
+build, so no CDN asset can ship. Interface copy therefore links to repository docs, not
+external sites.
 
 ## Dependency updates
 

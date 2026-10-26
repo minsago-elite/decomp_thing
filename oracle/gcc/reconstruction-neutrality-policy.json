@@ -18,7 +18,10 @@
     "src/main/kotlin/decompengine/oracle",
     "src/test/kotlin/decompengine/oracle",
     "tests/oracle",
+    ".github/workflows/gcc-cc1-full-export.yml",
     ".github/workflows/gcc-oracle-model.yml",
+    ".github/workflows/llvm-reference-runtime-capture.yml",
+    "scripts/capture-gcc-preprocessing-reference.py",
     "scripts/fetch-gcc-oracle-source.py",
     "scripts/generate-gcc-behavior-corpus.py",
     "scripts/generate-gcc-compiler-engine-build-records.py",
@@ -129,6 +132,18 @@
     {
       "path": "src/main/kotlin/decompengine/project/GeneratedCValidationBudgetPolicy.kt",
       "reason": "Generated-C repair validation behavior limits and independent host admission policy."
+    },
+    {
+      "path": "src/main/kotlin/decompengine/project/GeneratedCValidationFailureRecord.kt",
+      "reason": "Generated-C repair validation failure classification and receipt-bound diagnostic projection."
+    },
+    {
+      "path": "src/main/kotlin/decompengine/web/RepairValidationDiagnostics.kt",
+      "reason": "Generated-C repair diagnostic receipt pairing and bounded read-only presentation."
+    },
+    {
+      "path": "src/main/kotlin/decompengine/web/RepairValidationObservations.kt",
+      "reason": "Generated-C normal validation primary receipt and derived-diff role integrity presentation."
     },
     {
       "path": "src/main/kotlin/decompengine/project/GeneratedCValidationSnapshot.kt",
@@ -311,7 +326,7 @@
     {
       "path": "src/main/kotlin/decompengine/project/RepairAcpEvidenceArchiveVerifier.kt",
       "rule": "generic-adapter-reference",
-      "fragment": "GeneratedCValidationBudgetPolicy.DEFAULT.admit(graph.budget)",
+      "fragment": "GeneratedCValidationBudgetPolicy.DEFAULT.admit(budget)",
       "count": 1,
       "reason": "The generated-C repair release verifier rechecks its adapter-owned validation budget policy; #824 owns migration of remaining archive policy behind the adapter boundary."
     },

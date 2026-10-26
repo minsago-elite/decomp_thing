@@ -10,6 +10,8 @@ import com.sun.jna.Structure
 import java.io.ByteArrayOutputStream
 import java.io.IOException
 import java.io.OutputStream
+import java.nio.ByteBuffer
+import java.nio.ByteOrder
 import java.nio.file.FileSystems
 import java.nio.file.Files
 import java.nio.file.Path
@@ -82,13 +84,17 @@ internal class RuntimeCopyStatistics {
             failure(Phase.entries.getOrNull(if (depth > 0) stack[depth - 1] else -1), kind)
         }
         fun statistics(owner: Owner): RuntimeCopyStatistics? = try {
-            RuntimeCopyStatistics().also { retain(owner, it) }
+            statisticsWith(owner) { RuntimeCopyStatistics() }
+        } catch (_: Throwable) { supported = false; null }
+        // Private allocation-only control seam; production always hardwires the constructor above.
+        private fun statisticsWith(owner: Owner, allocate: () -> RuntimeCopyStatistics): RuntimeCopyStatistics? = try {
+            allocate().also { retain(owner, it) }
         } catch (_: Throwable) { supported = false; null }
         fun retain(owner: Owner, statistics: RuntimeCopyStatistics) = observe {
             if (owners[owner.ordinal] != null) supported = false
             else owners[owner.ordinal] = statistics
         }
-        fun <T> measure(phase: Phase, action: () -> T): T {
+        internal inline fun <T> measure(phase: Phase, action: () -> T): T {
             start(phase)
             var returned = false
             try {
@@ -100,41 +106,38 @@ internal class RuntimeCopyStatistics {
                 throw failure
             } finally { finish(phase, returned) }
         }
-        fun attachFailure(primary: Throwable) = observe {
-            if (emitted) return@observe
-            emitted = true
-            val phases = Phase.entries.joinToString(";") { phase ->
-                val i = phase.ordinal
-                // Exceptional inclusive spans are unknown, never invented normal timings.
-                val duration = if (states[i] == 2 && entered[i] >= 0 && exited[i] >= entered[i])
-                    (exited[i] - entered[i]).toString() else "unknown"
-                "${phase.name}:${states[i]},entryNs=${entered[i]},exitNs=${exited[i]}," +
-                    "remainingEntryNs=${remainingAtEntry[i]},remainingExitNs=${remainingAtExit[i]},inclusiveNs=$duration"
+        fun failureDiagnostic(): IOException? {
+            var diagnostic: IOException? = null
+            observe {
+                if (emitted) return@observe
+                emitted = true
+                val phases = Phase.entries.joinToString(";") { phase ->
+                    val i = phase.ordinal
+                    // Exceptional inclusive spans are unknown, never invented normal timings.
+                    val duration = if (states[i] == 2 && entered[i] >= 0 && exited[i] >= entered[i])
+                        (exited[i] - entered[i]).toString() else "unknown"
+                    "${phase.name}:${states[i]},entryNs=${entered[i]},exitNs=${exited[i]}," +
+                        "remainingEntryNs=${remainingAtEntry[i]},remainingExitNs=${remainingAtExit[i]},inclusiveNs=$duration"
+                }
+                val leaves = Owner.entries.joinToString(";") { owner ->
+                    val statistics = owners[owner.ordinal]
+                    if (statistics == null) "${owner.name}:unobserved"
+                    else "${owner.name}:COPY[${statistics.copy.summary()}],HASH[${statistics.hash.summary()}]"
+                }
+                val first = Phase.entries.getOrNull(firstFailure)?.name ?: "unobserved"
+                diagnostic = IOException("acp-prelaunch-prefix-observation-v1;supported=$supported;" +
+                    "firstObservedFailure=$first,kind=${Failure.entries.getOrNull(firstFailureKind)?.name ?: "unobserved"}," +
+                    "failureElapsedNs=$failureElapsed,failureRemainingNs=$failureRemaining;" +
+                    "lastEntered=${Phase.entries.getOrNull(lastEntered)?.name ?: "unobserved"};" +
+                    "lastReturned=${Phase.entries.getOrNull(lastReturned)?.name ?: "unobserved"};" +
+                    "states=0-unseen/1-active/2-returned/3-threw;inclusive-overlap-do-not-sum;" +
+                    "cleanup-return-is-not-cleanup-proof;other-counters=unsupported;" +
+                    "coverage=phase-and-existing-loop-only;unobserved-work=not-attributed;" +
+                    "first-failure-time=observation-not-throw-instant;phases[$phases];leaves[$leaves]")
             }
-            val leaves = Owner.entries.joinToString(";") { owner ->
-                val statistics = owners[owner.ordinal]
-                if (statistics == null) "${owner.name}:unobserved"
-                else "${owner.name}:COPY[${statistics.copy.summary()}],HASH[${statistics.hash.summary()}]"
-            }
-            val first = Phase.entries.getOrNull(firstFailure)?.name ?: "unobserved"
-            primary.addSuppressed(IOException("acp-prelaunch-prefix-observation-v1;supported=$supported;" +
-                "firstObservedFailure=$first,kind=${Failure.entries.getOrNull(firstFailureKind)?.name ?: "unobserved"}," +
-                "failureElapsedNs=$failureElapsed,failureRemainingNs=$failureRemaining;" +
-                "lastEntered=${Phase.entries.getOrNull(lastEntered)?.name ?: "unobserved"};" +
-                "lastReturned=${Phase.entries.getOrNull(lastReturned)?.name ?: "unobserved"};" +
-                "states=0-unseen/1-active/2-returned/3-threw;inclusive-overlap-do-not-sum;" +
-                "cleanup-return-is-not-cleanup-proof;other-counters=unsupported;" +
-                "coverage=phase-and-existing-loop-only;unobserved-work=not-attributed;" +
-                "first-failure-time=observation-not-throw-instant;phases[$phases];leaves[$leaves]"))
+            return diagnostic
         }
         companion object {
-            fun attach(observation: Prefix?, primary: Throwable) {
-                try {
-                    if (observation == null || Thread.currentThread() !== observation.ownerThread) primary.addSuppressed(IOException(
-                        "acp-prelaunch-prefix-observation-v1;supported=false;record=unavailable;observational-only"))
-                    else observation.attachFailure(primary)
-                } catch (_: Throwable) { /* Never replace a real failure with diagnostics. */ }
-            }
             fun create(budget: (Long) -> LongArray): Prefix? = try {
                 Prefix(budget).also { it.start(Phase.ENTRY); it.finish(Phase.ENTRY, true) }
             } catch (_: Throwable) { null }
@@ -156,7 +159,7 @@ internal class RuntimeCopyStatistics {
         fun completed() { filesCompleted = add(filesCompleted, 1) }
         fun read(bytes: Long) { if (bytes > 0) readBytes = add(readBytes, bytes) }
         fun written(bytes: Long) { if (bytes > 0) writtenBytes = add(writtenBytes, bytes) }
-        fun <T> measure(operation: Operation, action: () -> T): T {
+        internal inline fun <T> measure(operation: Operation, action: () -> T): T {
             val before = try { System.nanoTime() } catch (_: Throwable) {
                 supported = false
                 return action()
@@ -175,22 +178,20 @@ internal class RuntimeCopyStatistics {
     }
     val copy = Bucket()
     val hash = Bucket()
-    private var emitted = false
-    fun attachFailure(primary: Throwable) {
-        if (emitted) return
-        emitted = true
-        try {
-            primary.addSuppressed(IOException("runtime-copy-observation-v1;COPY[${copy.summary()}];HASH[${hash.summary()}];" +
-                "copy-loop-only;operation-calls-include-retries;observational-only;zero-is-not-success"))
-        } catch (_: Throwable) { /* Diagnostics never replace the primary failure. */ }
-    }
+
 }
 
-private fun <T> measuredCopyOperation(
+private inline fun <T> measuredCopyOperation(
     statistics: RuntimeCopyStatistics.Bucket?,
     operation: RuntimeCopyStatistics.Operation,
     action: () -> T,
 ): T = if (statistics == null) action() else statistics.measure(operation, action)
+
+/** Keep the existing read buffer bound and permit only one byte beyond the remaining allowance. */
+internal fun boundedDescriptorReadRequest(maximumBytes: Int, consumed: Long, bufferBytes: Int): Long {
+    require(maximumBytes >= 0 && consumed >= 0 && consumed <= maximumBytes.toLong() && bufferBytes > 0)
+    return minOf(bufferBytes.toLong(), maximumBytes.toLong() - consumed + 1L)
+}
 
 /**
  * The small Linux descriptor/syscall surface used by the ACP filesystem and process boundaries.
@@ -202,6 +203,23 @@ private fun <T> measuredCopyOperation(
  */
 internal object LinuxFilesystemSyscalls {
     private val libc: LibC by lazy { Native.load(Platform.C_LIBRARY_NAME, LibC::class.java) }
+    // Register one call site against the existing proxy's library, never an identity/approval cache.
+    private val ownedStatxDirectReady: Boolean by lazy {
+        try {
+            Native.register(LinuxOwnedStatxDirect::class.java, Native.getNativeLibrary(libc))
+            true
+        } catch (_: Throwable) {
+            false // Keep the original proxy/backend/fallback behavior if optional registration is unavailable.
+        }
+    }
+    private val ownedMountPollDirectReady: Boolean by lazy {
+        try {
+            Native.register(LinuxOwnedMountPollDirect::class.java, Native.getNativeLibrary(libc))
+            true
+        } catch (_: Throwable) {
+            false // Optional dispatch optimization; preserve the original poll backend on failure.
+        }
+    }
 
     fun requireSupported(path: Path) {
         val operatingSystem = System.getProperty("os.name", "")
@@ -319,7 +337,15 @@ internal object LinuxFilesystemSyscalls {
     /** Owns only eight scratch bytes; the event descriptor remains borrowed from its scope. */
     class MountMetadataPollScratch(private val handle: LinuxDescriptor) : AutoCloseable {
         private var closed = false
+        // Diagnostic-only token/scalars: never reuse prior query facts or change its outcome.
+        private var failurePrimary: Throwable? = null
+        private var failureResult = 0
+        private var failureEvents = 0
+        private var failureError = 0
+        private var failureHasEvents = false
         private val descriptorCount = NativeLong(1)
+        private val encodedPollfd = ByteArray(POLLFD_BYTES)
+        private val pollfdFields = ByteBuffer.wrap(encodedPollfd).order(ByteOrder.nativeOrder())
         // Allocate this callback once, not at each protected checkpoint.
         private val pollAction: (Int) -> Long = { descriptor -> pollDescriptor(descriptor, null) }
         // Allocate native storage last: no subsequent callback/object initialization can fail.
@@ -328,6 +354,7 @@ internal object LinuxFilesystemSyscalls {
         /** Production has no query argument and hardwires the native poll below. */
         @Synchronized
         fun poll(): Long {
+            failurePrimary = null
             check(!closed) { "mount event poll scratch is closed" }
             return handle.whileOpen(pollAction)
         }
@@ -335,32 +362,67 @@ internal object LinuxFilesystemSyscalls {
         // Private reflection seam mirrors the statx-query controls: never a production permit.
         @Synchronized
         private fun pollWith(query: (Memory) -> Int): Long {
+            failurePrimary = null
             check(!closed) { "mount event poll scratch is closed" }
             return handle.whileOpen { descriptor -> pollDescriptor(descriptor, query) }
         }
 
         private fun pollDescriptor(descriptor: Int, query: ((Memory) -> Int)?): Long {
-            // These original field writes reset all eight bytes, including prior revents.
-            polled.setInt(0, descriptor)
-            polled.setShort(Int.SIZE_BYTES.toLong(), (POLLPRI or POLLERR).toShort())
-            polled.setShort((Int.SIZE_BYTES + Short.SIZE_BYTES).toLong(), 0)
+            // Reset the same complete pollfd once before the original EINTR loop, in one JNI write.
+            pollfdFields.putInt(0, descriptor)
+            pollfdFields.putShort(Int.SIZE_BYTES, (POLLPRI or POLLERR).toShort())
+            pollfdFields.putShort(Int.SIZE_BYTES + Short.SIZE_BYTES, 0)
+            polled.write(0, encodedPollfd, 0, encodedPollfd.size)
             while (true) {
-                val result = if (query == null) libc.poll(polled, descriptorCount, 0) else query(polled)
+                val result = if (query == null) {
+                    val backend = libc // Preserve original libc loading failure before optional registration.
+                    if (ownedMountPollDirectReady) LinuxOwnedMountPollDirect.poll(polled, descriptorCount, 0)
+                    else backend.poll(polled, descriptorCount, 0)
+                } else query(polled)
                 // Capture errno before any other native memory/cleanup operation can alter it.
                 val error = if (result < 0) Native.getLastError() else 0
                 if (result >= 0) {
                     val events = polled.getShort((Int.SIZE_BYTES + Short.SIZE_BYTES).toLong()).toInt() and 0xffff
-                    if (events and (POLLNVAL or POLLHUP) != 0) throw IOException("mountinfo event descriptor is invalid")
+                    if (events and (POLLNVAL or POLLHUP) != 0) {
+                        failureResult = result
+                        failureEvents = events
+                        failureHasEvents = true
+                        val failure = IOException("mountinfo event descriptor is invalid")
+                        failurePrimary = failure
+                        throw failure
+                    }
                     return (result.toLong() shl 32) or events.toLong()
                 }
-                if (error != EINTR) throw LinuxSyscallException("inspect host mount metadata events", error)
+                if (error != EINTR) {
+                    failureResult = result
+                    failureError = error
+                    failureHasEvents = false
+                    val failure = LinuxSyscallException("inspect host mount metadata events", error)
+                    failurePrimary = failure
+                    throw failure
+                }
             }
         }
+
+        /**
+         * Same owner's immediate catch consumes only our exact newly constructed failure once.
+         * Constructor -> throw -> Boundary catch adds no suppression entries. Foreign/query/closed
+         * failures have no token. No lock, exception-graph access, native read or errno lookup.
+         */
+        fun claimFailureObservation(failure: Throwable): FailureObservation? {
+            if (failurePrimary !== failure) return null
+            failurePrimary = null
+            return FailureObservation(failureResult, if (failureHasEvents) failureEvents else null,
+                if (failureHasEvents) null else failureError)
+        }
+
+        class FailureObservation(val result: Int, val events: Int?, val error: Int?)
 
         @Synchronized
         override fun close() {
             if (closed) return
             closed = true
+            failurePrimary = null
             polled.close()
         }
     }
@@ -634,7 +696,7 @@ internal object LinuxFilesystemSyscalls {
         while (true) {
             cancellationCheck()
             val count = retryOnInterrupted("read authorized filesystem entry") {
-                libc.read(descriptor.fd, buffer, NativeLong(BUFFER_BYTES.toLong())).toLong()
+                libc.read(descriptor.fd, buffer, NativeLong(boundedDescriptorReadRequest(maximumBytes, total, BUFFER_BYTES))).toLong()
             }
             if (count == 0L) break
             if (count < 0L) throw syscallFailure("read authorized filesystem entry")
@@ -674,6 +736,7 @@ internal object LinuxFilesystemSyscalls {
         openReadableFrom(authorized).use { readable ->
             Memory(BUFFER_BYTES.toLong()).use { buffer ->
                 var total = 0L
+                var copyBuffer: ByteArray? = null
                 while (true) {
                     measuredCopyOperation(statistics, RuntimeCopyStatistics.Operation.CHECK) { cancellationCheck() }
                     val count = measuredCopyOperation(statistics, RuntimeCopyStatistics.Operation.READ) {
@@ -687,7 +750,14 @@ internal object LinuxFilesystemSyscalls {
                     total = Math.addExact(total, count)
                     if (total > maximumBytes) throw LinuxResourceLimitException()
                     measuredCopyOperation(statistics, RuntimeCopyStatistics.Operation.WRITE) {
-                        output.write(buffer.getByteArray(0, count.toInt()))
+                        val length = count.toInt()
+                        val previous = copyBuffer
+                        // Preserve small-file allocation size; a later larger short read grows once
+                        // to the fixed read bound. No payload array is allocated for EOF/refusal.
+                        val bytes = if (previous != null && previous.size >= length) previous
+                            else ByteArray(if (previous == null) length else BUFFER_BYTES).also { copyBuffer = it }
+                        buffer.read(0, bytes, 0, length)
+                        output.write(bytes, 0, length)
                     }
                     statistics?.written(count)
                     measuredCopyOperation(statistics, RuntimeCopyStatistics.Operation.CHECK) { cancellationCheck() }
@@ -1020,6 +1090,76 @@ internal object LinuxFilesystemSyscalls {
 
     fun identity(fd: Int): LinuxFileIdentity = descriptorStatxIdentity(fd) ?: descriptorProcIdentity(fd)
 
+    /** Scope-owned query storage only; fd ownership and every fresh observation stay with the caller. */
+    class StatxIdentityScratch : AutoCloseable {
+        private var closed = false
+        // Explicit NUL storage avoids per-call JNA NativeString allocation; allocate before native ownership.
+        private val emptyPath = byteArrayOf(0)
+        // Heap-only decoding storage is allocated before the existing single native owner.
+        private val decodedStatistics = ByteArray(STATX_BYTES.toInt())
+        private val decodedView = ByteBuffer.wrap(decodedStatistics).order(ByteOrder.nativeOrder())
+        private val statistics = Memory(STATX_BYTES)
+
+        @Synchronized
+        fun identity(fd: Int): LinuxFileIdentity {
+            check(!closed) { "descriptor identity scratch is closed" }
+            return queryIdentity(fd, null, null)
+        }
+
+        // Script only through reflection in controls; production always uses libc and the proc fallback.
+        @Synchronized
+        private fun identityWith(fd: Int, query: (Memory) -> Long, fallback: () -> LinuxFileIdentity): LinuxFileIdentity {
+            check(!closed) { "descriptor identity scratch is closed" }
+            return queryIdentity(fd, query, fallback)
+        }
+
+        private fun queryIdentity(fd: Int, query: ((Memory) -> Long)?, fallback: (() -> LinuxFileIdentity)?): LinuxFileIdentity {
+            val observed = descriptorStatxQueryOrNull {
+                retryOnInterrupted("inspect pinned descriptor identity") {
+                    statistics.clear() // Reset all 256 bytes even after an interrupted syscall.
+                    emptyPath[0] = 0 // A fresh explicit empty pathname on every attempt; never NULL.
+                    if (query == null) {
+                        val proxy = libc // Preserve the original first library-load failure before optional registration.
+                        if (ownedStatxDirectReady) LinuxOwnedStatxDirect.statx(fd, emptyPath,
+                            AT_EMPTY_PATH or AT_SYMLINK_NOFOLLOW, STATX_BASIC_STATS or STATX_MNT_ID, statistics).toLong()
+                        else proxy.statx(fd, emptyPath, AT_EMPTY_PATH or AT_SYMLINK_NOFOLLOW,
+                            STATX_BASIC_STATS or STATX_MNT_ID, statistics).toLong()
+                    } else query(statistics)
+                }
+            }
+            return (if (observed == null) null else {
+                statistics.read(0, decodedStatistics, 0, decodedStatistics.size)
+                decodeDescriptorStatxIdentity(decodedView)
+            }) ?: if (fallback == null) descriptorProcIdentity(fd) else fallback()
+        }
+
+        @Synchronized
+        override fun close() {
+            if (closed) return
+            closed = true
+            statistics.close()
+        }
+    }
+
+    // Same field interpretation as the generic decoder, over the just-copied owned snapshot.
+    private fun decodeDescriptorStatxIdentity(statistics: ByteBuffer): LinuxFileIdentity? {
+        if (statistics.getInt(0) and STATX_IDENTITY_MASK != STATX_IDENTITY_MASK) return null
+        val mountId = statistics.getLong(0x90)
+        if (mountId <= 0) throw IOException("descriptor statx returned an invalid mount identity")
+        val major = statistics.getInt(0x88).toLong() and 0xffffffffL
+        val minor = statistics.getInt(0x8c).toLong() and 0xffffffffL
+        // Linux dev_t encoding, including synthetic Btrfs subvolume st_dev identities.
+        val device = ((major and 0xfffL) shl 8) or ((major and 0xfffff000L) shl 32) or
+            (minor and 0xffL) or ((minor and 0xffffff00L) shl 12)
+        val mode = statistics.getShort(0x1c).toInt() and 0xffff
+        val type = mode and 0xf000
+        return LinuxFileIdentity(
+            LinuxFileKey(device, statistics.getLong(0x20)), mode,
+            statistics.getInt(0x14), statistics.getInt(0x18), statistics.getInt(0x10), mountId,
+            isRegularFile = type == 0x8000, isDirectory = type == 0x4000, isSymbolicLink = type == 0xa000,
+        )
+    }
+
     /** One descriptor-relative query preserves live checks without repeated stat/fdinfo reads. */
     private fun descriptorStatxIdentity(fd: Int): LinuxFileIdentity? = Memory(STATX_BYTES).use { statistics ->
         statistics.clear()
@@ -1291,6 +1431,7 @@ internal object LinuxFilesystemSyscalls {
         fun getxattr(path: String, name: String, value: Pointer?, size: NativeLong): NativeLong
         fun fstatvfs(fd: Int, statistics: LinuxStatVfs): Int
         fun statx(fd: Int, path: String, flags: Int, mask: Int, statistics: Pointer): Int
+        fun statx(fd: Int, path: ByteArray, flags: Int, mask: Int, statistics: Pointer): Int
     }
 
     /** Linux/glibc 64-bit `struct statvfs`; older spare[6] layouts have the same size/alignment. */

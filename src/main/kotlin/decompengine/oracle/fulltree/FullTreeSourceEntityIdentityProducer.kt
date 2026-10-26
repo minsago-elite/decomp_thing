@@ -25,6 +25,9 @@ internal enum class FullTreeSourceIdentityTraversalOrder(
 
 internal data class FullTreeSourceIdentityTraversal(
     val order: FullTreeSourceIdentityTraversalOrder = FullTreeSourceIdentityTraversalOrder.FORWARD,
+    /** Changes sequential processing only; authenticated membership and publication order stay fixed. */
+    val reverseShards: Boolean = false,
+    val onShardVisit: ((phase: String, shardId: String) -> Unit)? = null,
     /** Observes actual processing; global claim phases carry the candidate hash and use offset zero. */
     val onVisit: ((phase: String, compilationUnitOffset: Long, dieOffset: Long?) -> Unit)? = null,
 ) {

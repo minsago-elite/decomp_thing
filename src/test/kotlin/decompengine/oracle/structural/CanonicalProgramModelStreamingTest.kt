@@ -257,5 +257,19 @@ class CanonicalProgramModelStreamingTest {
 
     private companion object {
         const val FROZEN_MODEL_SHA256 = "bff3c74034c33b1be6b55d8bfd452a6c152b0a2ac1e9f29625c4bbc8c0134952"
+    }    @Test
+    fun `model four omission-only mutation changes exact canonical commitment`() {
+        val evidence = decompengine.project.ReferencedDataByteEvidence(2, emptyList(), collectionOmissions = listOf("reference_work_limit"))
+        val model = RecoveredProgramModel(4, "a".repeat(64), emptyList(),
+            listOf(decompengine.project.RecoveredGlobal("g", "g", 1uL, "int", byteEvidence = evidence)))
+        val first = CanonicalProgramModelStreaming.readCanonical(model.toJson().toByteArray())
+        val changed = model.copy(globals = listOf(model.globals.single().copy(byteEvidence = evidence.copy(collectionOmissions = listOf("model_window_limit")))))
+        val second = CanonicalProgramModelStreaming.readCanonical(changed.toJson().toByteArray())
+        kotlin.test.assertNotEquals(first.sha256, second.sha256)
+        assertContentEquals(model.toJson().toByteArray(), first.model.toJson().toByteArray())
+        val thirdReason = model.toJson().replace("[\"reference_work_limit\"]", "[\"global_window_limit\",\"model_window_limit\",\"reference_work_limit\"]")
+        assertFailsWith<IllegalArgumentException> { ProgramModelJson.readCanonical(thirdReason.toByteArray()) }
+        kotlin.test.assertFails { CanonicalProgramModelStreaming.readCanonical(thirdReason.toByteArray()) }
     }
+
 }

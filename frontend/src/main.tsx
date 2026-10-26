@@ -1,3 +1,4 @@
+import { mainCopy as copy } from './copy/shell';
 import { render } from 'preact';
 import { App } from './app/App';
 import { normalizeBasePath } from './app/paths';
@@ -24,9 +25,9 @@ function mount() {
     });
   } catch {
     const heading = document.createElement('h1');
-    heading.textContent = 'The workbench could not start';
+    heading.textContent = copy.startupFailed;
     const message = document.createElement('p');
-    message.textContent = 'Check the application configuration and reload this page.';
+    message.textContent = copy.startupGuidance;
     root.replaceChildren(heading, message);
   }
 }

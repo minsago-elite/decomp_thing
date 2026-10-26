@@ -58,7 +58,7 @@ class GhidraExportLaunchTest {
                     failure.set(caught)
                 }
             }
-            try {
+            preserveFixtureFailure({
                 caller.start()
                 assertTrue(entered.await(2, TimeUnit.SECONDS), "process launch did not start")
                 caller.join(1_500)
@@ -66,23 +66,22 @@ class GhidraExportLaunchTest {
                 assertIs<GhidraAnalysisException>(failure.get())
                 assertContentEquals(previous, model.readBytes())
                 assertContentEquals(previous, report.readBytes())
-            } finally {
+            }, {
                 release.countDown()
                 caller.join(2_000)
-                try {
-                    val process = launched.get(2, TimeUnit.SECONDS)
-                    try {
-                        process.onExit().get(2, TimeUnit.SECONDS)
-                        assertFalse(process.isAlive, "late export worker survived cancellation")
-                    } finally {
-                        ensureStopped(process)
-                    }
-                    assertContentEquals(previous, model.readBytes())
-                    assertContentEquals(previous, report.readBytes())
-                } finally {
-                    awaitLaunchPoolIdle()
-                }
-            }
+            }, {
+                val process = launched.get(2, TimeUnit.SECONDS)
+                preserveFixtureFailure({
+                    process.onExit().get(2, TimeUnit.SECONDS)
+                    assertFalse(process.isAlive, "late export worker survived cancellation")
+                }, {
+                    ensureStopped(process)
+                })
+                assertContentEquals(previous, model.readBytes())
+                assertContentEquals(previous, report.readBytes())
+            }, {
+                awaitLaunchPoolIdle()
+            })
         }
 
     @Test
@@ -93,22 +92,21 @@ class GhidraExportLaunchTest {
             val caller = ExportCall {
                 fixture.analyzer(starter::start).analyzeWithDeadline(fixture.input, fixture.work, deadline(250))
             }
-            try {
+            preserveFixtureFailure({
                 caller.thread.start()
                 assertTrue(starter.entered.await(2, TimeUnit.SECONDS), "gated worker did not reach its stdin wait")
                 assertTrue(starter.launched.get(2, TimeUnit.SECONDS).isAlive, "fixture worker did not remain gated")
                 caller.assertFailure<GhidraAnalysisException>()
                 fixture.assertPriorEvidence()
-            } finally {
+            }, {
                 starter.release.countDown()
                 caller.thread.join(2_000)
-                try {
-                    starter.assertLateWorkerReaped()
-                    fixture.assertPriorEvidence()
-                } finally {
-                    awaitLaunchPoolIdle()
-                }
-            }
+            }, {
+                starter.assertLateWorkerReaped()
+                fixture.assertPriorEvidence()
+            }, {
+                awaitLaunchPoolIdle()
+            })
         }
 
     @Test
@@ -128,7 +126,7 @@ class GhidraExportLaunchTest {
                 exportWallClockMillis = 3_000,
                 exportMaximumResidentBytes = 64L * 1024 * 1024,
             ))
-            try {
+            preserveFixtureFailure({
                 val actual = analyzer.analyzeWithDeadline(fixture.input, fixture.work, deadline(5_000))
 
                 assertEquals(fixture.expected, actual)
@@ -140,13 +138,11 @@ class GhidraExportLaunchTest {
                 assertTrue(usage.contains("\"wallClockMillisLimit\":3000"))
                 assertTrue(usage.contains("\"maximumResidentBytesLimit\":67108864"))
                 assertFalse(checkNotNull(launched.get()).isAlive)
-            } finally {
-                try {
-                    launched.get()?.let(::ensureStopped)
-                } finally {
-                    awaitLaunchPoolIdle()
-                }
-            }
+            }, {
+                launched.get()?.let(::ensureStopped)
+            }, {
+                awaitLaunchPoolIdle()
+            })
         }
 
     @Test
@@ -238,6 +234,54 @@ class GhidraExportLaunchTest {
             }
             failures.finish(starters, callers + rejectedExport + rejectedVerifier)
         }
+
+    @Test
+    fun `fixture cleanup preserves body failure and ordered later failures without self suppression`() {
+        val order = mutableListOf<String>()
+        val bodyFailure = IllegalStateException("authored body failure")
+        val firstCleanup = IllegalArgumentException("authored first cleanup failure")
+        val secondCleanup = UnsupportedOperationException("authored second cleanup failure")
+        val actual = runCatching {
+            preserveFixtureFailure({
+                order += "body"
+                throw bodyFailure
+            }, {
+                order += "first cleanup"
+                throw firstCleanup
+            }, {
+                order += "second cleanup"
+                throw secondCleanup
+            })
+        }.exceptionOrNull()
+        assertTrue(actual === bodyFailure, "cleanup must not replace the original body failure")
+        assertEquals(listOf("body", "first cleanup", "second cleanup"), order)
+        assertEquals(listOf(firstCleanup, secondCleanup), bodyFailure.suppressed.toList())
+
+        val cleanupOnly = IllegalStateException("authored cleanup-only failure")
+        val laterCleanup = IllegalArgumentException("authored later cleanup failure")
+        order.clear()
+        val successfulBody = runCatching {
+            preserveFixtureFailure({
+                order += "successful body"
+            }, {
+                order += "first cleanup"
+                throw cleanupOnly
+            }, {
+                order += "second cleanup"
+                throw laterCleanup
+            })
+        }.exceptionOrNull()
+        assertTrue(successfulBody === cleanupOnly, "a successful body must still fail on cleanup failure")
+        assertEquals(listOf("successful body", "first cleanup", "second cleanup"), order)
+        assertEquals(listOf(laterCleanup), cleanupOnly.suppressed.toList())
+
+        val sharedFailure = IllegalStateException("authored shared failure")
+        val selfSuppression = runCatching {
+            preserveFixtureFailure({ throw sharedFailure }, { throw sharedFailure })
+        }.exceptionOrNull()
+        assertTrue(selfSuppression === sharedFailure)
+        assertTrue(sharedFailure.suppressed.isEmpty(), "the same throwable must not suppress itself")
+    }
 
     private class GatedExportFixture(root: Path) {
         val work = root.resolve("analysis")
@@ -427,6 +471,26 @@ class GhidraExportLaunchTest {
     }
 
     private companion object {
+        // Fixture-only: keep the first failure and attempt every already-owned cleanup action in order.
+        private fun preserveFixtureFailure(body: () -> Unit, vararg cleanup: () -> Unit) {
+            var failure: Throwable? = null
+            try {
+                body()
+            } catch (caught: Throwable) {
+                failure = caught
+            }
+            for (step in cleanup) {
+                try {
+                    step()
+                } catch (caught: Throwable) {
+                    val primary = failure
+                    if (primary == null) failure = caught
+                    else if (primary !== caught) primary.addSuppressed(caught)
+                }
+            }
+            failure?.let { throw it }
+        }
+
         fun deadline(milliseconds: Long) = AnalysisDeadline.start(TimeUnit.MILLISECONDS.toNanos(milliseconds), "launch parent")
 
         fun assertWorkerReady(process: Process) {

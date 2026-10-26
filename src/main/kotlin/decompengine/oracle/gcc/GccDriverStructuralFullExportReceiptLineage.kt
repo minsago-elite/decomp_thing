@@ -21,7 +21,11 @@ internal class GccDriverStructuralFullExportReceiptLineageV1 private constructor
         fun validate(
             operation: GccBundledFullExportOperation,
             expectedCompilerEngineProfileSha256: String,
+            expectedEngineId: String = "cc1",
         ): GccDriverStructuralFullExportReceiptLineageV1 {
+            require(expectedEngineId in setOf("cc1", "driver")) {
+                "GCC full-export receipt target must be cc1 or driver"
+            }
             require(!operation.complete && !operation.releaseEligible) {
                 "GCC full-export operation unexpectedly grants completion or release eligibility"
             }
@@ -33,9 +37,10 @@ internal class GccDriverStructuralFullExportReceiptLineageV1 private constructor
             require(operationId.matches(Regex("[a-f0-9]{64}"))) { "GCC full-export operation ID is invalid" }
             val schemaVersion = intent.long("schemaVersion")
             val provider = intent.string("provider")
-            require(schemaVersion == 2L && provider == "gcc-bundled-operation-intent-v2" &&
-                intent.string("engineId") == "cc1"
-            ) { "GCC full-export intent is not the pinned cc1 compiler-engine operation" }
+            val parallel = schemaVersion == 3L && provider == "gcc-bundled-operation-intent-v3" && expectedEngineId == "cc1"
+            require((parallel || (schemaVersion == 2L && provider == "gcc-bundled-operation-intent-v2")) &&
+                intent.string("engineId") == expectedEngineId
+            ) { "GCC full-export intent differs from the authenticated $expectedEngineId operation" }
             val plannerProfile = intent.getValue("plannerProfile").jsonObject
             require(plannerProfile.string("profileSha256") == expectedCompilerEngineProfileSha256) {
                 "GCC full-export intent does not bind the authenticated compiler-engine profile"
@@ -43,8 +48,23 @@ internal class GccDriverStructuralFullExportReceiptLineageV1 private constructor
             require(intent.string("runKind") == "fresh-control") {
                 "GCC full export was not authorized as a fresh uninterrupted operation"
             }
-            require(intent.getValue("bundledRuntime").jsonObject.string("provider") == "bundled-ghidra-java-api-runtime-v5") {
+            val runtime = intent.getValue("bundledRuntime").jsonObject
+            require(runtime.string("provider") == if (parallel) "bundled-ghidra-java-api-runtime-v6" else "bundled-ghidra-java-api-runtime-v5") {
                 "GCC full export intent does not select the pinned full-recovery runtime"
+            }
+
+            val throughput = plannerProfile["fullRecoveryCc1Throughput"] as? JsonObject
+            if (parallel) {
+                require(throughput != null && throughput.keys == setOf("schemaVersion", "runtimeInvocationVersion",
+                    "processorCount", "analysisThreadCount", "decompilerWorkerCount") &&
+                    throughput["schemaVersion"] == JsonPrimitive(1) && throughput["runtimeInvocationVersion"] == JsonPrimitive(6) &&
+                    listOf("processorCount", "analysisThreadCount", "decompilerWorkerCount").all { name ->
+                        throughput[name] == JsonPrimitive(4) && runtime[name] == JsonPrimitive(4)
+                    }) { "GCC parallel full export differs from its retained throughput policy" }
+            } else {
+                require(expectedEngineId != "cc1" || throughput == null) {
+                    "GCC cc1 full export cannot substitute a legacy runtime for its throughput policy"
+                }
             }
 
             val artifacts = intent.getValue("artifacts").jsonArray.map { it.jsonObject }
@@ -83,8 +103,8 @@ internal class GccDriverStructuralFullExportReceiptLineageV1 private constructor
             }
 
             val execution = executionRecord.payload
-            require(execution.string("provider") == "kotlin-lease-contained-command-execution-v1" &&
-                execution.long("schemaVersion") == 1L && execution.long("childExitCode") == 0L &&
+            require(execution.string("provider") == (if (parallel) "kotlin-lease-contained-command-execution-v2" else "kotlin-lease-contained-command-execution-v1") &&
+                execution.long("schemaVersion") == (if (parallel) 2L else 1L) && execution.long("childExitCode") == 0L &&
                 execution.bool("unitAbsent") && execution.bool("cgroupAbsent") && execution.bool("processesAbsent") &&
                 !execution.bool("releaseEligible")
             ) { "GCC full-export execution receipt does not prove successful worker absence" }
@@ -108,11 +128,11 @@ internal class GccDriverStructuralFullExportReceiptLineageV1 private constructor
             ) { "GCC full-export assessment receipt differs from its captured snapshot" }
 
             val fields = JsonObject(linkedMapOf(
-                "provider" to JsonPrimitive("gcc-bundled-full-export-receipt-lineage-v1"),
-                "schemaVersion" to JsonPrimitive(1),
+                "provider" to JsonPrimitive(if (parallel) "gcc-bundled-full-export-receipt-lineage-v2" else "gcc-bundled-full-export-receipt-lineage-v1"),
+                "schemaVersion" to JsonPrimitive(if (parallel) 2 else 1),
                 "operationId" to JsonPrimitive(operationId),
                 "intentSha256" to JsonPrimitive(intentSha256),
-                "engineId" to JsonPrimitive("cc1"),
+                "engineId" to JsonPrimitive(expectedEngineId),
                 "compilerEngineProfileSha256" to JsonPrimitive(expectedCompilerEngineProfileSha256),
                 "executionReceiptSha256" to JsonPrimitive(OracleArtifacts.sha256(executionBytes)),
                 "executionPayloadSha256" to JsonPrimitive(executionRecord.payloadSha256),

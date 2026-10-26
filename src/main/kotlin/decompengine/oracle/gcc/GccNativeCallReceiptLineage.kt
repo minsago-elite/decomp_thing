@@ -11,8 +11,9 @@ internal object GccNativeCallReceiptLineage {
         val intentBytes = operation.intentBytes
         val intent = OracleJson.parseCanonical(intentBytes).jsonObject
         require(intent.string("provider") == "gcc-bundled-operation-intent-v5" && intent.long("schemaVersion") == 5L &&
-            intent.string("engineId") == "cc1" && intent.string("runKind") == "fresh-control") {
-            "native observation lineage requires the pinned fresh cc1 v5 intent"
+            intent.string("engineId") in setOf("cc1", "driver") &&
+            intent.string("engineId") == operation.snapshot.target.engineId && intent.string("runKind") == "fresh-control") {
+            "native observation lineage requires the matching pinned fresh cc1 or driver v5 intent"
         }
         val operationId = intent.digest("operationId")
         val intentDigest = OracleArtifacts.sha256(intentBytes)
@@ -23,7 +24,7 @@ internal object GccNativeCallReceiptLineage {
         val profile = intent.getValue("plannerProfile").jsonObject
         require(profile.digest("profileSha256") == operation.snapshot.target.profileSha256)
         val cli = intent.getValue("cliInvocation").jsonObject
-        require(cli.getValue("argv").jsonArray.first().jsonPrimitive.content == "gcc-engine-native-calls")
+        requireCliSelection(cli, intent.string("engineId"))
         val artifacts = intent.getValue("artifacts").jsonArray.map { it.jsonObject }
         fun artifact(role: String, bytes: Long, digest: String) {
             val item = artifacts.single { it.string("role") == role }
@@ -98,6 +99,24 @@ internal object GccNativeCallReceiptLineage {
             "receiptLineage" to lineage,
             "receiptLineageSha256" to JsonPrimitive(OracleArtifacts.sha256(OracleJson.canonicalBytes(lineage))),
         )))
+    }
+
+    internal fun requireCliSelection(cli: JsonObject, expectedEngineId: String) {
+        require(expectedEngineId in setOf("cc1", "driver") && cli.string("engineId") == expectedEngineId) {
+            "native CLI selection differs from its pinned capture target"
+        }
+        val argv = cli.getValue("argv").jsonArray
+        require(argv.size in 3..33 && argv.first() == JsonPrimitive("gcc-engine-native-calls")) {
+            "native CLI selection requires the native observation command"
+        }
+        val arguments = argv.drop(1).map { argument ->
+            argument.jsonPrimitive.let { require(it.isString); it.content }
+        }
+        // The command accepts options before and between positionals. Reuse that parser rather
+        // than assuming the engine immediately follows the command in the retained argv.
+        require(GccBundledCliOptions.parse(arguments, nativeCallObservations = true).engineId == expectedEngineId) {
+            "native CLI arguments differ from its pinned capture target"
+        }
     }
 
     private fun commitment(bytes: Long, sha256: String) = JsonObject(mapOf("bytes" to JsonPrimitive(bytes), "sha256" to JsonPrimitive(sha256)))

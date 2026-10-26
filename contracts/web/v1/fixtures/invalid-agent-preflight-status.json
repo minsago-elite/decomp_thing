@@ -1,0 +1,10 @@
+{
+  "apiVersion": 1,
+  "kind": "agentPreflight",
+  "requestId": "request_preflight_bad",
+  "data": {
+    "status": "authenticated",
+    "inspectionId": null,
+    "reasonCode": null
+  }
+}

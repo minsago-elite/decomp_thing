@@ -1,6 +1,11 @@
 from __future__ import annotations
 
 import copy
+from contextlib import redirect_stdout
+import io
+import runpy
+import sys
+from unittest.mock import patch
 import hashlib
 import json
 from pathlib import Path
@@ -20,9 +25,35 @@ PROFILE = REPOSITORY_ROOT / "oracle/gcc/16.2.0/compiler-engines.json"
 
 
 class GccCompilerEngineProfileTest(unittest.TestCase):
+    def test_active_seventeen_and_historical_eleven_twelve_thirteen_use_distinct_closed_schemas(self) -> None:
+        for version, path in ((11, PROFILE), (12, PROFILE.with_name("compiler-engines-exporter12.json")), (13, PROFILE.with_name("compiler-engines-exporter13.json")), (17, PROFILE.with_name("compiler-engines-exporter17.json"))):
+            profile, records = load_compiler_engine_profile(path)
+            self.assertEqual(version, profile["analysis"]["exporter"]["version"])
+            self.assertEqual(["cc1", "lto1"], list(records))
+            unknown = copy.deepcopy(profile)
+            unknown["analysis"]["exporter"]["unchecked"] = True
+            parent = REPOSITORY_ROOT / "build/python-test-tmp"
+            parent.mkdir(parents=True, exist_ok=True)
+            with tempfile.TemporaryDirectory(dir=parent) as directory:
+                modified = Path(directory) / "profile.json"
+                modified.write_bytes(canonical_json_bytes(unknown))
+                with self.assertRaisesRegex(VerificationError, "fails JSON Schema"):
+                    load_compiler_engine_profile(modified)
+        for version in (True, 14, "13", None):
+            value = json.loads(PROFILE.read_text())
+            value["analysis"]["exporter"]["version"] = version
+            parent = REPOSITORY_ROOT / "build/python-test-tmp"
+            parent.mkdir(parents=True, exist_ok=True)
+            with tempfile.TemporaryDirectory(dir=parent) as directory:
+                path = Path(directory) / "profile.json"
+                path.write_bytes(canonical_json_bytes(value))
+                with self.assertRaisesRegex(VerificationError, "unsupported exporter version"):
+                    load_compiler_engine_profile(path)
+
     def test_checked_profile_binds_budgets_provenance_and_derived_records(self) -> None:
-        profile, records = load_compiler_engine_profile(PROFILE)
+        profile, records = load_compiler_engine_profile(PROFILE.with_name("compiler-engines-exporter17.json"))
         self.assertEqual(1800, profile["budgets"]["exportWallClockSeconds"])
+        self.assertEqual(14400, profile["budgets"]["fullRecoveryCc1ExportWallClockSeconds"])
         self.assertEqual(16 * 1024 * 1024 * 1024, profile["budgets"]["exportMaximumResidentBytes"])
         self.assertEqual(["cc1", "lto1"], list(records))
         for engine in profile["engines"]:
@@ -88,6 +119,26 @@ class GccCompilerEngineProfileTest(unittest.TestCase):
                 path.write_bytes(canonical_json_bytes(value))
                 with self.assertRaisesRegex(VerificationError, message):
                     load_compiler_engine_profile(path)
+
+    def test_generator_default_thirteen_only_writes_fresh_authored_output(self) -> None:
+        source = REPOSITORY_ROOT / "scripts/generate-gcc-compiler-engine-build-records.py"
+        namespace = runpy.run_path(str(source), run_name="inert_generator_import")
+        historical = [PROFILE, PROFILE.with_name("compiler-engines-exporter12.json"), PROFILE.with_name("compiler-engines-exporter13.json"),
+            PROFILE.with_name("cc1-build-record.json"), PROFILE.with_name("lto1-build-record.json")]
+        before = {str(path): hashlib.sha256(path.read_bytes()).hexdigest() for path in historical}
+        parent = REPOSITORY_ROOT / "build/python-test-tmp"; parent.mkdir(parents=True, exist_ok=True)
+        with tempfile.TemporaryDirectory(dir=parent) as directory:
+            calls = []
+            def tracked(path: Path):
+                calls.append(path); return load_compiler_engine_profile(path)
+            main = namespace["main"]
+            with patch.dict(main.__globals__, {"load_compiler_engine_profile": tracked}), patch.object(sys, "argv", [str(source), "--output-root", directory]), redirect_stdout(io.StringIO()):
+                self.assertEqual(0, main())
+            self.assertEqual([PROFILE.with_name("compiler-engines-exporter17.json")], calls)
+            profile, records = load_compiler_engine_profile(calls[0])
+            for engine in profile["engines"]:
+                self.assertEqual(canonical_json_bytes(records[engine["id"]]), (Path(directory) / engine["buildRecord"]).read_bytes())
+        self.assertEqual(before, {str(path): hashlib.sha256(path.read_bytes()).hexdigest() for path in historical})
 
 
 if __name__ == "__main__":

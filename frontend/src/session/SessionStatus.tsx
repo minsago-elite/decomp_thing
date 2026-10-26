@@ -1,30 +1,34 @@
+import { sessionStatusCopy as copy } from '../copy/shell';
+import { message as displayMessage } from '../shared/messages';
 import { useLayoutEffect, useState } from 'preact/hooks';
 import type { BrowserSession, SessionState } from './session';
 
 function explanation(state: SessionState): string {
   if (state.status === 'required') {
     switch (state.reason) {
-      case 'session-changed': return 'Another tab reported a session change. Private data was cleared. Check the session to reconnect.';
-      case 'signed-out': return 'You signed out of this browser. Public pages remain available.';
-      case 'expired': return 'Your local session expired. Open a fresh sign-in link from the application terminal.';
-      case 'bootstrap-expired': return 'This sign-in link expired. Open a fresh link from the application terminal.';
-      case 'bootstrap-required': return 'This sign-in link is no longer available. Open a fresh link from the application terminal.';
-      case 'invalid-link': return 'This sign-in link is incomplete or invalid. Open a fresh link from the application terminal.';
-      case 'missing': return 'To access private work, open the sign-in link printed by your local application.';
+      case 'session-changed': return copy.anotherTabReportedASessionChangePrivateDataWasCleared;
+      case 'signed-out': return copy.youSignedOutOfThisBrowserPublicPagesRemainAvailable;
+      case 'expired': return copy.yourLocalSessionExpiredOpenAFreshSignInLink;
+      case 'bootstrap-expired': return copy.thisSignInLinkExpiredOpenAFreshLinkFrom;
+      case 'bootstrap-required': return copy.thisSignInLinkIsNoLongerAvailableOpenA;
+      case 'invalid-link': return copy.thisSignInLinkIsIncompleteOrInvalidOpenA;
+      case 'missing': return copy.toAccessPrivateWorkOpenTheSignInLinkPrinted;
     }
   }
   if (state.status === 'unavailable') {
     switch (state.reason) {
-      case 'logout-unconfirmed': return 'Sign-out could not be confirmed. Check the session before trying again.';
-      case 'configuration': return 'The browser address and application configuration do not match. Open the configured local address.';
-      case 'removal-failed': return 'The sign-in link could not be cleared from this tab. Close it and open a fresh local link in a supported browser.';
-      case 'connection': return 'The local session could not be checked. Confirm the application is running, then check the session.';
+      case 'logout-unconfirmed': return copy.signOutCouldNotBeConfirmedCheckTheSessionBefore;
+      case 'configuration': return copy.theBrowserAddressAndApplicationConfigurationDoNotMatchOpen;
+      case 'removal-failed': return copy.theSignInLinkCouldNotBeClearedFromThis;
+      case 'connection': return copy.theLocalSessionCouldNotBeCheckedConfirmTheApplication;
+      case 'incompatible': return copy.thisPageAndTheLocalServerUseIncompatibleAPIFormats;
     }
   }
   return '';
 }
 
-export function SessionStatus({ session }: { session: BrowserSession }) {
+/** The connected state is quiet header chrome; every other state is a page notice. */
+export function SessionStatus({ session, placement = 'any' }: { session: BrowserSession; placement?: 'header' | 'page' | 'any' }) {
   const [state, setState] = useState(session.snapshot);
   useLayoutEffect(() => {
     const unsubscribe = session.subscribe(setState);
@@ -32,20 +36,22 @@ export function SessionStatus({ session }: { session: BrowserSession }) {
     return unsubscribe;
   }, [session]);
   if (state.status === 'public') return null;
+  if (placement !== 'any' && (placement === 'header') !== (state.status === 'authenticated')) return null;
   if (state.status === 'checking' || state.status === 'signing-out') {
     return <aside class="session-notice notice" role="status">
-      <p>{state.status === 'checking' ? 'Checking local session…' : 'Signing out…'}</p>
+      <p>{state.status === 'checking' ? copy.checkingLocalSession : copy.signingOut}</p>
     </aside>;
   }
   if (state.status === 'authenticated') {
-    return <aside class="session-notice notice" aria-label="Local session">
-      <p>Local session connected.</p>
-      <button type="button" onClick={() => { void session.logout(); }}>Sign out</button>
+    return <aside class="session-notice is-connected" aria-label={copy.localSession}>
+      <p>{copy.localSessionConnected}</p>
+      {state.serverChanged && <p role="status">{copy.applicationInstanceChanged}</p>}
+      <button type="button" onClick={() => { void session.logout(); }}>{copy.signOut}</button>
     </aside>;
   }
-  const removalFailed = state.status === 'unavailable' && state.reason === 'removal-failed';
-  return <aside class="session-notice notice" aria-label="Local session" role="status">
-    <p>{explanation(state)}{'referenceId' in state && state.referenceId && <> Reference ID: <code>{state.referenceId}</code>.</>}</p>
-    {!removalFailed && <button type="button" onClick={() => { void session.refresh(); }}>Check session</button>}
+  const canCheck = state.status !== 'unavailable' || !['removal-failed', 'incompatible'].includes(state.reason);
+  return <aside class="session-notice notice" aria-label={copy.localSession} role="status">
+    <p>{explanation(state)}{'referenceId' in state && state.referenceId && <>{displayMessage(copy.reference, { reference: <code>{state.referenceId}</code> })}</>}</p>
+    {canCheck && <button type="button" onClick={() => { void session.refresh(); }}>{copy.checkSession}</button>}
   </aside>;
 }

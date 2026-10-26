@@ -144,3 +144,50 @@ export function runPath(basePath: string, jobId: string, runId: string): string 
   if (!ID.test(runId)) return invalidUrl();
   return `${jobPath(basePath, jobId)}/runs/${runId}`;
 }
+
+export type RunView = 'overview' | 'activity' | 'evidence';
+
+/** Named, read-only views of the same immutable attempt identity. */
+export function runViewPath(basePath: string, jobId: string, runId: string, view: RunView): string {
+  if (view !== 'overview' && view !== 'activity' && view !== 'evidence') return invalidUrl();
+  const path = runPath(basePath, jobId, runId);
+  return view === 'overview' ? path : `${path}/${view}`;
+}
+
+export interface SourceSelection { jobId: string; runId: string; revisionId: string }
+export interface SourceSnapshotPin { sourceSha256: string; metadataVersion: string }
+
+function sourceSnapshotQuery(pin: SourceSnapshotPin): string {
+  if (!/^[a-f0-9]{64}$/.test(pin.sourceSha256) || !/^[a-f0-9]{64}$/.test(pin.metadataVersion)) return invalidUrl();
+  return `sourceSha256=${pin.sourceSha256}&metadataVersion=${pin.metadataVersion}`;
+}
+
+function sourceRevisionPath(basePath: string, selected: SourceSelection): string {
+  return `${runPath(basePath, selected.jobId, selected.runId)}/revisions/${identifier(selected.revisionId)}`;
+}
+
+/** Source links contain opaque identities only. Display labels never enter these routes. */
+export function sourceDirectoryPath(basePath: string, selected: SourceSelection, directoryId = 'root', cursor?: string, pin?: SourceSnapshotPin): string {
+  const path = `${sourceRevisionPath(basePath, selected)}/sources/${identifier(directoryId)}`;
+  const query = [cursor === undefined ? '' : `cursor=${identifier(cursor)}`, pin === undefined ? '' : sourceSnapshotQuery(pin)].filter(Boolean).join('&');
+  return query === '' ? path : `${path}?${query}`;
+}
+
+export function sourceFilePath(basePath: string, selected: SourceSelection, fileId: string, pin?: SourceSnapshotPin): string {
+  const path = `${sourceRevisionPath(basePath, selected)}/source-files/${identifier(fileId)}`;
+  return pin === undefined ? path : `${path}?${sourceSnapshotQuery(pin)}`;
+}
+
+export function sourceDownloadRoute(selected: SourceSelection, fileId: string, metadataVersion: string): string {
+  if (!/^[a-f0-9]{64}$/.test(metadataVersion)) return invalidUrl();
+  return `${sourceReadRoute(selected, 'download', fileId)}?metadataVersion=${metadataVersion}`;
+}
+
+/** Relative API route for the existing bounded transport or an explicit native download link. */
+export function sourceReadRoute(selected: SourceSelection, kind: 'directory' | 'file' | 'download', id: string): string {
+  const revision = sourceRevisionPath('', selected);
+  if (kind === 'directory') return `${revision}/source-directories/${identifier(id)}`;
+  if (kind === 'file') return `${revision}/source-files/${identifier(id)}`;
+  if (kind === 'download') return `${revision}/source-files/${identifier(id)}/content`;
+  return invalidUrl();
+}

@@ -1,0 +1,415 @@
+{
+  "$id": "https://github.com/minsago-elite/decomp_thing/oracle/gcc/source-build-ownership-action-receipt-v1.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "properties": {
+    "argv": {
+      "items": {
+        "maxLength": 65536,
+        "type": "string"
+      },
+      "maxItems": 16384,
+      "minItems": 1,
+      "type": "array"
+    },
+    "authority": {
+      "additionalProperties": false,
+      "properties": {
+        "captureAuthenticated": {
+          "const": false
+        },
+        "modelBound": {
+          "const": false
+        },
+        "ownershipComplete": {
+          "const": false
+        },
+        "productionVerified": {
+          "const": false
+        },
+        "releaseEligible": {
+          "const": false
+        },
+        "runtimeAuthenticated": {
+          "const": false
+        },
+        "scored": {
+          "const": false
+        },
+        "sealed": {
+          "const": false
+        },
+        "sourceAuthenticated": {
+          "const": false
+        }
+      },
+      "required": [
+        "sourceAuthenticated",
+        "runtimeAuthenticated",
+        "ownershipComplete",
+        "modelBound",
+        "sealed",
+        "scored",
+        "productionVerified",
+        "releaseEligible",
+        "captureAuthenticated"
+      ],
+      "type": "object"
+    },
+    "completion": {
+      "additionalProperties": false,
+      "properties": {
+        "closureComplete": {
+          "const": false
+        },
+        "collectorReceipt": {
+          "type": "null"
+        },
+        "state": {
+          "const": "not-authenticated"
+        }
+      },
+      "required": [
+        "state",
+        "collectorReceipt",
+        "closureComplete"
+      ],
+      "type": "object"
+    },
+    "configurationSha256": {
+      "pattern": "^[0-9a-f]{64}$",
+      "type": "string"
+    },
+    "cwd": {
+      "$comment": "Full canonical scoped-path checks are performed by the bounded typed validator.",
+      "maxLength": 4096,
+      "minLength": 1,
+      "pattern": "^build(/|$)",
+      "type": "string"
+    },
+    "environment": {
+      "$comment": "Only these reviewed public build keys may be retained. Unknown names refuse before canonical retention; this is not a credential-value detector.",
+      "additionalProperties": {
+        "maxLength": 65536,
+        "type": "string"
+      },
+      "maxProperties": 4096,
+      "propertyNames": {
+        "enum": [
+          "PATH",
+          "LANG",
+          "LC_ALL",
+          "TZ",
+          "SOURCE_DATE_EPOCH",
+          "CFLAGS",
+          "CXXFLAGS",
+          "CPPFLAGS",
+          "LDFLAGS"
+        ]
+      },
+      "type": "object"
+    },
+    "evidenceKind": {
+      "const": "untrusted-offline-observation"
+    },
+    "exitCode": {
+      "maximum": 255,
+      "minimum": 0,
+      "type": "integer"
+    },
+    "inputFiles": {
+      "items": {
+        "additionalProperties": false,
+        "properties": {
+          "bytes": {
+            "maximum": 9223372036854775807,
+            "minimum": 0,
+            "type": "integer"
+          },
+          "kind": {
+            "enum": [
+              "source",
+              "generated",
+              "header",
+              "tool",
+              "runtime",
+              "response",
+              "script",
+              "object",
+              "archive",
+              "other"
+            ]
+          },
+          "path": {
+            "$comment": "Full segment, traversal, byte and control-character checks are performed by the bounded typed validator.",
+            "maxLength": 4096,
+            "minLength": 1,
+            "pattern": "^(source|generated|build|toolchain|external)(/|$)",
+            "type": "string"
+          },
+          "sha256": {
+            "pattern": "^[0-9a-f]{64}$",
+            "type": "string"
+          }
+        },
+        "required": [
+          "path",
+          "bytes",
+          "sha256",
+          "kind"
+        ],
+        "type": "object"
+      },
+      "maxItems": 4096,
+      "type": "array"
+    },
+    "metadataSetSha256": {
+      "pattern": "^[0-9a-f]{64}$",
+      "type": "string"
+    },
+    "outputFiles": {
+      "items": {
+        "additionalProperties": false,
+        "properties": {
+          "bytes": {
+            "maximum": 9223372036854775807,
+            "minimum": 0,
+            "type": "integer"
+          },
+          "kind": {
+            "enum": [
+              "source",
+              "generated",
+              "header",
+              "tool",
+              "runtime",
+              "response",
+              "script",
+              "object",
+              "archive",
+              "other"
+            ]
+          },
+          "path": {
+            "$comment": "Full segment, traversal, byte and control-character checks are performed by the bounded typed validator.",
+            "maxLength": 4096,
+            "minLength": 1,
+            "pattern": "^(source|generated|build|toolchain|external)(/|$)",
+            "type": "string"
+          },
+          "sha256": {
+            "pattern": "^[0-9a-f]{64}$",
+            "type": "string"
+          }
+        },
+        "required": [
+          "path",
+          "bytes",
+          "sha256",
+          "kind"
+        ],
+        "type": "object"
+      },
+      "maxItems": 4096,
+      "type": "array"
+    },
+    "phase": {
+      "enum": [
+        "configure",
+        "compile",
+        "install",
+        "stage-full",
+        "strip",
+        "link-diagnostic"
+      ]
+    },
+    "profileSha256": {
+      "pattern": "^[0-9a-f]{64}$",
+      "type": "string"
+    },
+    "responseFiles": {
+      "items": {
+        "additionalProperties": false,
+        "properties": {
+          "bytes": {
+            "maximum": 4194304,
+            "minimum": 0,
+            "type": "integer"
+          },
+          "bytesHex": {
+            "$comment": "The typed validator separately checks exact even hex length, byte count, SHA256 and input-file binding.",
+            "maxLength": 8388608,
+            "pattern": "^[0-9a-f]*$",
+            "type": "string"
+          },
+          "ordinal": {
+            "maximum": 255,
+            "minimum": 0,
+            "type": "integer"
+          },
+          "path": {
+            "$comment": "Full segment, traversal, byte and control-character checks are performed by the bounded typed validator.",
+            "maxLength": 4096,
+            "minLength": 1,
+            "pattern": "^(source|generated|build|toolchain|external)(/|$)",
+            "type": "string"
+          },
+          "sha256": {
+            "pattern": "^[0-9a-f]{64}$",
+            "type": "string"
+          }
+        },
+        "required": [
+          "ordinal",
+          "path",
+          "bytes",
+          "sha256",
+          "bytesHex"
+        ],
+        "type": "object"
+      },
+      "maxItems": 256,
+      "type": "array"
+    },
+    "role": {
+      "enum": [
+        "source-compile",
+        "generator-compile",
+        "configure-probe",
+        "assemble",
+        "archive",
+        "archive-index",
+        "link",
+        "generate",
+        "install",
+        "strip",
+        "other-build-output"
+      ]
+    },
+    "runtime": {
+      "additionalProperties": false,
+      "properties": {
+        "bridgeReceipt": {
+          "type": "null"
+        },
+        "claimState": {
+          "const": "unverified"
+        },
+        "effectiveImageIdClaim": {
+          "enum": [
+            "sha256:510c510f300d811df22c7769633575a94939073b529a73125bf96cfb96dc7248",
+            "sha256:807f16e03368e1e0ff3c904f21f1a13c260d78a8b7226a52284a2ee68a4d1511"
+          ]
+        },
+        "recordedOriginImageId": {
+          "const": "sha256:510c510f300d811df22c7769633575a94939073b529a73125bf96cfb96dc7248"
+        }
+      },
+      "required": [
+        "recordedOriginImageId",
+        "effectiveImageIdClaim",
+        "claimState",
+        "bridgeReceipt"
+      ],
+      "type": "object"
+    },
+    "schema": {
+      "const": "gcc-source-build-ownership-action-observation-v1"
+    },
+    "schemaVersion": {
+      "const": 1
+    },
+    "source": {
+      "oneOf": [
+        {
+          "type": "null"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "kind": {
+              "enum": [
+                "source",
+                "generated"
+              ]
+            },
+            "path": {
+              "$comment": "Full segment, traversal, byte and control-character checks are performed by the bounded typed validator.",
+              "maxLength": 4096,
+              "minLength": 1,
+              "pattern": "^(source|generated|build|toolchain|external)(/|$)",
+              "type": "string"
+            },
+            "sha256": {
+              "pattern": "^[0-9a-f]{64}$",
+              "type": "string"
+            }
+          },
+          "required": [
+            "path",
+            "sha256",
+            "kind"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "target": {
+      "maxLength": 256,
+      "minLength": 1,
+      "type": "string"
+    },
+    "tool": {
+      "additionalProperties": false,
+      "properties": {
+        "bytes": {
+          "maximum": 9223372036854775807,
+          "minimum": 1,
+          "type": "integer"
+        },
+        "path": {
+          "$comment": "Full segment, traversal, byte and control-character checks are performed by the bounded typed validator.",
+          "maxLength": 4096,
+          "minLength": 1,
+          "pattern": "^(source|generated|build|toolchain|external)(/|$)",
+          "type": "string"
+        },
+        "sha256": {
+          "pattern": "^[0-9a-f]{64}$",
+          "type": "string"
+        }
+      },
+      "required": [
+        "path",
+        "bytes",
+        "sha256"
+      ],
+      "type": "object"
+    }
+  },
+  "required": [
+    "schema",
+    "evidenceKind",
+    "profileSha256",
+    "metadataSetSha256",
+    "phase",
+    "role",
+    "target",
+    "cwd",
+    "configurationSha256",
+    "source",
+    "tool",
+    "runtime",
+    "argv",
+    "environment",
+    "inputFiles",
+    "outputFiles",
+    "responseFiles",
+    "exitCode",
+    "completion",
+    "authority",
+    "schemaVersion"
+  ],
+  "title": "Untrusted offline action observation input; never an execution receipt",
+  "type": "object"
+}

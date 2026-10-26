@@ -8,6 +8,7 @@
     ],
     "applicationBuildId": "app_fixture_1",
     "uiBuildId": "ui_fixture_1",
+    "serverInstanceId": "server_fixture_1",
     "basePath": "/",
     "readiness": "degraded",
     "sessionExpiresAt": "2026-09-05T08:00:00Z",

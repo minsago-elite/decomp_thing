@@ -22,7 +22,7 @@ class GccBundledCliIntentBuilderTest {
         val identities = children.associateWith { path -> LinuxFilesystemSyscalls.openRoot(path).use { it.identity } }
         val binary = Files.writeString(root.resolve("binary"), "fixture")
         val archive = Files.writeString(root.resolve("archive"), "fixture")
-        val profile = Path.of(System.getProperty("user.dir"), "oracle/gcc/16.2.0/compiler-engines.json").toRealPath()
+        val profile = Path.of(System.getProperty("user.dir"), "oracle/gcc/16.2.0/compiler-engines-exporter17.json").toRealPath()
         val arguments = listOf("cc1", binary.toString(), "--profile", profile.toString(),
             "--ghidra-archive", archive.toString(), "--output", output.toString(), "--scratch", scratch.toString())
         for (invocationFullMode in listOf(false, true)) {
@@ -37,6 +37,14 @@ class GccBundledCliIntentBuilderTest {
         assertFails {
             GccBundledCliIntentBuilder.build(SHA, "lto1", GccCompilerEngineContainmentRunKind.FRESH_CONTROL,
                 binary, profile, archive, controls, operationJournal, scratch, POLICY, fullRecoveryExport = true)
+        }
+        for ((kind, full) in listOf(
+            GccCompilerEngineContainmentRunKind.FRESH_CONTROL to false,
+            GccCompilerEngineContainmentRunKind.INTERRUPTED to true,
+            GccCompilerEngineContainmentRunKind.RESUMED to true,
+        )) assertFails {
+            GccBundledCliIntentBuilder.build(SHA, "driver", kind,
+                binary, profile, archive, controls, operationJournal, scratch, POLICY, fullRecoveryExport = full)
         }
         assertEmpty(controls)
         assertEmpty(operationJournal)
@@ -66,7 +74,7 @@ class GccBundledCliIntentBuilderTest {
         val scratch = privateDirectory(root.resolve("scratch"))
         val binary = Files.writeString(root.resolve("wrong-engine"), "not the selected profile binary")
         val archive = Files.writeString(root.resolve("archive"), "not the archive")
-        val profile = Path.of(System.getProperty("user.dir"), "oracle/gcc/16.2.0/compiler-engines.json").toRealPath()
+        val profile = Path.of(System.getProperty("user.dir"), "oracle/gcc/16.2.0/compiler-engines-exporter17.json").toRealPath()
         assertFails {
             GccBundledCliIntentBuilder.build(SHA, "cc1", GccCompilerEngineContainmentRunKind.FRESH_CONTROL,
                 binary, profile, archive, controls, journal, scratch, POLICY)
@@ -84,7 +92,7 @@ class GccBundledCliIntentBuilderTest {
         val scratch = privateDirectory(root.resolve("scratch"))
         val binary = Files.writeString(root.resolve("binary"), "binary")
         val archive = Files.writeString(root.resolve("archive"), "archive")
-        val profile = Path.of(System.getProperty("user.dir"), "oracle/gcc/16.2.0/compiler-engines.json").toRealPath()
+        val profile = Path.of(System.getProperty("user.dir"), "oracle/gcc/16.2.0/compiler-engines-exporter17.json").toRealPath()
         fun build(selectedBinary: Path = binary, selectedJournal: Path = journal,
             operation: String = SHA, engine: String = "cc1", kind: GccCompilerEngineContainmentRunKind = GccCompilerEngineContainmentRunKind.FRESH_CONTROL) =
             GccBundledCliIntentBuilder.build(operation, engine, kind, selectedBinary, profile, archive, controls, selectedJournal, scratch, POLICY)
@@ -106,7 +114,8 @@ class GccBundledCliIntentBuilderTest {
     private fun privateDirectory(path: Path): Path = Files.createDirectory(path,
         PosixFilePermissions.asFileAttribute(PosixFilePermissions.fromString("rwx------")))
     private fun fixture(action: (Path) -> Unit) {
-        val root = Files.createTempDirectory("gcc-cli-intent-").toRealPath()
+        val parent = Files.createDirectories(Path.of("build/test-tmp").toAbsolutePath().normalize())
+        val root = Files.createTempDirectory(parent, "gcc-cli-intent-").toRealPath()
         try { action(root) } finally {
             Files.walk(root).use { paths -> paths.sorted(Comparator.reverseOrder()).forEach(Files::delete) }
         }

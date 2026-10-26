@@ -1,5 +1,27 @@
 # Shared analysis deadline
 
+## Watchdog delivery retirement
+
+Each synchronous deadline scope now serializes retirement with dispatch of its
+watchdog interrupt. A callback that reaches dispatch after retirement cannot
+interrupt the reused caller. If dispatch is already in progress, retirement
+acknowledges its return before timeout handling consumes the watchdog flag. The
+operation, timeout reporting and timer cancellation run outside the dispatch
+monitor; retirement does not join the entire scheduled task. Cancelling a timer
+alone does not establish that an already-entered callback has stopped.
+
+The existing two-argument entry point still uses the same watchdog, admitted
+monotonic allowance and tighter parent limit. An internal scheduling seam allows
+controlled callback delivery in tests. External cancellation without a watchdog
+delivery retains its original failure and interrupt state; this is not a claim
+that the JVM's single interrupt bit can identify separate coalesced signals.
+
+Seven authored JVM methods cover delayed and claimed delivery, exceptional and
+fatal exits, independent cancellation, inherited allowance and a real blocked
+synchronous phase. They await their own Actions qualification. These controls
+do not qualify native process cleanup, whole-parent memory, every in-flight I/O
+path or supported-scale resources. The full #1066 and #825 scope remains open.
+
 The JVM wrapper now passes its original elapsed allowance into the bundled
 program-model analyzer. Previously the wrapper checked an injected analyzer only
 after it returned, while the bundled worker used a later start time and bundle
@@ -21,8 +43,9 @@ summary publication continue to use the wrapper's original deadline.
 `withExportBudgets` retains stricter configured worker limits and the
 checkpoint-aware bundled command factory. It does not mutate profile identity or
 the requested budget descriptor. An arbitrary injected `ProgramModelAnalyzer`
-SAM keeps its existing calling contract: the wrapper checks before dispatch and
-after return, but cannot interrupt its implementation internally.
+SAM keeps its existing calling contract: the wrapper watchdog can interrupt its
+synchronous caller, and the injected implementation must honor cancellation.
+It does not gain preemption of arbitrary native operations.
 
 The bundled path checks time and cancellation before preparation, after command
 construction, immediately before worker launch, and after launch inside cleanup

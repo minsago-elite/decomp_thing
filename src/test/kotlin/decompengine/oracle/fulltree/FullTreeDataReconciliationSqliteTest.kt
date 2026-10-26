@@ -21,7 +21,7 @@ import kotlinx.serialization.json.JsonPrimitive
 
 class FullTreeDataReconciliationSqliteTest {
     @Test
-    fun `streaming reader rejects a permission mutation after speculative callbacks`() =
+    fun `streaming reader rejects a permission mutation after speculative callbacks`(): Unit =
         inTemporaryDirectory { directory ->
             val fixture = createFixture(directory.resolve("permission-mutation"))
             var callbacks = 0

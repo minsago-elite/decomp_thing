@@ -472,6 +472,7 @@ internal object FullTreeFunctionTruthSqliteV3 {
                     workspace.root,
                     limits,
                     deadline,
+                    traversal,
                 )
                 requireV3WorkspaceBound(workspace.root, limits)
                 legacySnapshot.verifyPrivateSnapshotUnchanged(deadline::checkpoint)
@@ -581,7 +582,7 @@ internal object FullTreeFunctionTruthSqliteV3 {
             Files.createDirectory(derivedRoot, PosixFilePermissions.asFileAttribute(V3_WRITABLE_DIRECTORY))
             val projection = composeV3Tree(
                 derivedRoot, legacySnapshot.root, observationSnapshot.root, v2Run, legacyTruth, scope, workspace.root, limits,
-                deadline,
+                deadline, traversal,
             )
             requireV3WorkspaceBound(workspace.root, limits)
             legacySnapshot.verifyPrivateSnapshotUnchanged(deadline::checkpoint)
@@ -1126,6 +1127,7 @@ internal object FullTreeFunctionTruthSqliteV3 {
         scratchRoot: Path,
         limits: FullTreeFunctionTruthV3Limits,
         deadline: V3RunDeadline,
+        traversal: FullTreeSourceIdentityTraversal,
     ): V3Projection {
         val targetNormalized = target.toAbsolutePath().normalize()
         if (!Files.isDirectory(targetNormalized, LinkOption.NOFOLLOW_LINKS) || Files.isSymbolicLink(targetNormalized)) {
@@ -1181,8 +1183,12 @@ internal object FullTreeFunctionTruthSqliteV3 {
         var outputBytes = 0L
         val v3ShardRecords = ArrayList<JsonObject>(v2Run.binding.outputs.size)
 
-        v2Run.binding.outputs.forEachIndexed { shardIndex, observation ->
+        val shardIndices = v2Run.binding.outputs.indices
+        val shardVisitation = if (traversal.reverseShards) shardIndices.reversed() else shardIndices
+        for (shardIndex in shardVisitation) {
+            val observation = v2Run.binding.outputs[shardIndex]
             val shardStart = deadline.beginShard(observation.shardId)
+            traversal.onShardVisit?.invoke("v3-project", observation.shardId)
             val shardSourceEntities = v2Run.outputs.getOrNull(shardIndex)?.sourceEntities
                 ?: v3Fail("observation-v2 source census receipt is missing for ${observation.shardId}")
             val nextSourceEntityTotal = Math.addExact(allSourceEntities, shardSourceEntities)
@@ -1310,6 +1316,7 @@ internal object FullTreeFunctionTruthSqliteV3 {
             checkV3Scratch(scratchRoot, maximumScratchBound(limits))
         }
 
+        if (traversal.reverseShards) v3ShardRecords.reverse()
         if (allSourceEntities != v2Run.sourceEntities) v3Fail("v3 full-run census total differs from raw observation-v2")
         try {
             fullTreeFunctionTruthV3CombinedEntityCount(truthEntities, allSourceEntities, wholeRunEntityBound)

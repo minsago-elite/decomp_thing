@@ -3495,11 +3495,25 @@ class FullTreeFunctionObservationIsolatedFixtureRunnerTest {
                 FullTreeFunctionObservationClassPathEntry(regular, sha256(regular))
             }
         val manifestCache = mutableMapOf<Path, String>()
-        val libraryMounts = listOf("/lib", "/lib64", "/usr/lib", "/usr/lib64")
+        // The worker needs the platform ABI libraries, not every unrelated tool installed
+        // under /usr/lib on the CI image. Keep the production manifest bounds unchanged.
+        val systemAbi = when (System.getProperty("os.arch")) {
+            "amd64", "x86_64" -> "x86_64-linux-gnu"
+            "aarch64", "arm64" -> "aarch64-linux-gnu"
+            else -> error("isolated worker fixture has no system ABI library mapping")
+        }
+        val libraryMounts = listOf("/lib/$systemAbi", "/lib64", "/usr/lib/$systemAbi", "/usr/lib64")
             .map(Path::of)
             .filter { Files.isDirectory(it) }
-            .map { destination ->
-                val source = destination.toRealPath()
+            .map { libraryDirectory ->
+                val source = libraryDirectory.toRealPath()
+                // AArch64's interpreter is /lib/ld-linux-aarch64.so.1. Expose the
+                // same authenticated ABI directory at /lib for that loader, and at
+                // /usr/lib/aarch64-linux-gnu for the normal multiarch library search.
+                // These destinations remain disjoint; no whole /lib tree is mounted.
+                val destination = if (systemAbi == "aarch64-linux-gnu" &&
+                    libraryDirectory == Path.of("/lib/$systemAbi")
+                ) Path.of("/lib") else libraryDirectory
                 FullTreeFunctionObservationRuntimeMount(
                     source = source,
                     destination = destination,
@@ -3836,5 +3850,78 @@ class FullTreeFunctionObservationIsolatedFixtureRunnerTest {
         const val FROZEN_LEGACY_ISOLATION_CONFIGURATION_SHA256 =
             "107fe58551ea95533bada45432758c1882ba3876c5681a1c43282c10433138d3"
         const val TEST_LEASE_RECORD_FILE = "lease.json"
+    }
+}
+
+/** Pure diagnostic controls; no live tag, native setup, controller or filesystem access. */
+class FullTreeFunctionObservationCleanupDiagnosticTest {
+    @Test
+    fun `cleanup diagnostic retains bounded comparison shapes without raw manager identities`() {
+        val name = "owned.scope"
+        val invocation = "1234567890abcdef".repeat(2)
+        val cgroup = "/controlled/owned.scope"
+        val properties = mapOf(
+            "Id" to name, "Transient" to "yes", "InvocationID" to invocation,
+            "ControlGroup" to cgroup, "LoadState" to "loaded", "ActiveState" to "active",
+        )
+        val matching = describeObservationCleanupTarget(properties, name, invocation, cgroup)
+        assertTrue(matching.contains("idMatches=true"))
+        assertTrue(matching.contains("invocationMatches=true"))
+        assertTrue(matching.contains("controlGroupMatchesRetained=true"))
+        val foreign = describeObservationCleanupTarget(properties + mapOf(
+            "Id" to "foreign.scope", "InvocationID" to "ab".repeat(16), "ControlGroup" to "/foreign",
+        ), name, invocation, cgroup)
+        assertTrue(foreign.contains("idMatches=false"))
+        assertTrue(foreign.contains("invocationMatches=false"))
+        assertTrue(foreign.contains("controlGroupMatchesRetained=false"))
+        val reserved = describeObservationCleanupTarget(properties + ("InvocationID" to "0".repeat(32)), name, invocation, cgroup)
+        assertTrue(reserved.contains("invocationReserved=true"))
+        val marker = "PRIVATE-manager-text\n/path/credential"
+        val malformed = describeObservationCleanupTarget(properties.mapValues { marker.repeat(2048) }, name, invocation, cgroup)
+        assertTrue(malformed.contains("loadState=other"))
+        assertTrue(malformed.contains("activeState=other"))
+        assertTrue(malformed.contains("invocationSyntaxValid=false"))
+        for (diagnostic in listOf(matching, foreign, reserved, malformed)) {
+            assertTrue(diagnostic.length <= 768)
+            assertTrue(marker !in diagnostic && invocation !in diagnostic && cgroup !in diagnostic && name !in diagnostic)
+            assertTrue("PRIVATE-manager-text" !in diagnostic && "/path/credential" !in diagnostic)
+            assertTrue("foreign.scope" !in diagnostic && "/foreign" !in diagnostic)
+        }
+    }
+
+    @Test
+    fun `cleanup selection diagnostics retain missing errno shape without raw failure text`() {
+        val marker = "PRIVATE-selection-text\n/private/credential-path"
+        fun failure(message: String, cause: Throwable? = null) =
+            FullTreeFunctionObservationIsolationException(message, cause)
+        val prefix = "cgroupSelectionFailure="
+        val metadata = describeObservationCleanupTarget(
+            mapOf("LoadState" to "not-found", "ActiveState" to "deactivating"), marker, marker, marker,
+        )
+        val cases = listOf(
+            failure("cannot reselect the descriptor-pinned isolated cgroup",
+                decompengine.acp.LinuxSyscallException(marker, decompengine.acp.LinuxFilesystemSyscalls.ENOENT)) to
+                "${prefix}reselection-failed; cgroupSelectionErrnoPresent=true; cgroupSelectionMissingErrno=true",
+            failure("cannot reselect the descriptor-pinned isolated cgroup",
+                decompengine.acp.LinuxSyscallException(marker, decompengine.acp.LinuxFilesystemSyscalls.ENOENT + 1)) to
+                "${prefix}reselection-failed; cgroupSelectionErrnoPresent=true; cgroupSelectionMissingErrno=false",
+            failure("cannot reselect the descriptor-pinned isolated cgroup", java.io.IOException(marker)) to
+                "${prefix}reselection-failed; cgroupSelectionErrnoPresent=false; cgroupSelectionMissingErrno=false",
+            failure("descriptor-pinned isolated cgroup changed identity") to
+                "${prefix}retained-identity; cgroupSelectionErrnoPresent=false; cgroupSelectionMissingErrno=false",
+            failure("isolated cgroup path selected a replacement directory") to
+                "${prefix}path-replacement; cgroupSelectionErrnoPresent=false; cgroupSelectionMissingErrno=false",
+            failure(marker.repeat(2048), decompengine.acp.LinuxSyscallException(marker, 2)) to
+                "${prefix}other; cgroupSelectionErrnoPresent=false; cgroupSelectionMissingErrno=false",
+            IllegalStateException(marker) to
+                "${prefix}other; cgroupSelectionErrnoPresent=false; cgroupSelectionMissingErrno=false",
+        )
+        for ((cause, expected) in cases) {
+            val diagnostic = describeObservationCgroupSelectionFailure(cause)
+            assertEquals(expected, diagnostic)
+            assertTrue(diagnostic.length <= 192)
+            assertTrue("$metadata; $diagnostic".length <= 768)
+            assertTrue("PRIVATE-selection-text" !in diagnostic && "/private/credential-path" !in diagnostic)
+        }
     }
 }

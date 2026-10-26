@@ -9,6 +9,7 @@ import java.nio.file.Path
 import java.nio.file.attribute.BasicFileAttributes
 import java.nio.file.attribute.PosixFilePermissions
 import java.security.MessageDigest
+import java.time.Duration
 import java.util.concurrent.TimeUnit
 import java.util.Properties
 import java.util.UUID
@@ -29,6 +30,17 @@ plugins {
 
 group = "dev.decompengine"
 version = "0.1.0"
+
+// Reuse compilation only. Qualification results must be produced by this build.
+allprojects {
+    tasks.configureEach {
+        if (this !is org.gradle.api.tasks.compile.JavaCompile &&
+            this !is org.jetbrains.kotlin.gradle.tasks.KotlinCompile
+        ) {
+            outputs.doNotCacheIf("Only JVM compilation outputs may use the build cache") { true }
+        }
+    }
+}
 
 kotlin {
     jvmToolchain(21)
@@ -292,7 +304,7 @@ val frontendInstall = tasks.register<Exec>("frontendInstall") {
 
 val frontendBuild = tasks.register<Exec>("frontendBuild") {
     group = "build"
-    description = "Type-checks and builds the pinned Preact application from current frontend inputs"
+    description = "Type-checks, lints and builds the pinned Preact application from current frontend inputs"
     dependsOn(frontendInstall)
     inputs.files(fileTree(frontendDirectory) {
         include("src/**", "tests/**", "dev/**", "public/**", "scripts/**", "index.html", "*config.*", "package*.json", ".npmrc")
@@ -305,6 +317,11 @@ val frontendBuild = tasks.register<Exec>("frontendBuild") {
     outputs.files(layout.buildDirectory.file("frontend/bundle-report.json"),
         layout.buildDirectory.file("frontend/bundle-composition.json"))
     frontendNpm("run", "build")
+}
+
+// Reject frontend validation failures before Kotlin work when both already belong to the graph.
+listOf("compileKotlin", "compileTestKotlin").forEach { taskName ->
+    tasks.named(taskName) { mustRunAfter(frontendBuild) }
 }
 
 val generateFrontendAssetManifest = tasks.register<Exec>("generateFrontendAssetManifest") {
@@ -354,6 +371,77 @@ val stageFrontend = tasks.register<Sync>("stageFrontend") {
 }
 
 sourceSets.main { resources.srcDir(stageFrontend) }
+
+// Offline synthetic class DATA only: keep application/test outputs and native oracles off this classpath.
+val snapshotCapsuleAuditAsm by configurations.creating {
+    isCanBeConsumed = false
+    isCanBeResolved = true
+    isTransitive = false
+}
+dependencies {
+    add(snapshotCapsuleAuditAsm.name, "org.jetbrains.kotlin:kotlin-compiler-embeddable:2.4.0")
+}
+val snapshotCapsuleAuditData = sourceSets.create("snapshotCapsuleAuditData") {
+    java.setSrcDirs(listOf("src/snapshotCapsuleAuditData/java"))
+    compileClasspath = files(snapshotCapsuleAuditAsm)
+    runtimeClasspath = output + compileClasspath
+}
+val verifySnapshotCapsuleAuditAsm = tasks.register("verifySnapshotCapsuleAuditAsm") {
+    group = "verification"
+    description = "Checks the exact shaded ASM artifact before isolated class-data compilation or execution"
+    inputs.files(snapshotCapsuleAuditAsm)
+    doLast {
+        val jar = snapshotCapsuleAuditAsm.singleFile
+        check(jar.name == "kotlin-compiler-embeddable-2.4.0.jar" && jar.length() == 60_351_320L) {
+            "snapshot capsule fixture ASM artifact differs"
+        }
+        val digest = MessageDigest.getInstance("SHA-256")
+        jar.inputStream().use { input ->
+            val buffer = ByteArray(65_536)
+            var remaining = 60_351_320L
+            while (remaining > 0) {
+                val read = input.read(buffer, 0, minOf(buffer.size.toLong(), remaining).toInt())
+                check(read > 0) { "snapshot capsule fixture ASM artifact is truncated" }
+                digest.update(buffer, 0, read)
+                remaining -= read
+            }
+            check(input.read() == -1) { "snapshot capsule fixture ASM artifact exceeds its bound" }
+        }
+        check(digest.digest().joinToString("") { "%02x".format(it) } ==
+            "c2b25e8c1c93ec416ba4327f5e31eaec0f0c8847241b9353e294b8db9dce564f") {
+            "snapshot capsule fixture ASM artifact checksum differs"
+        }
+    }
+}
+tasks.named<JavaCompile>(snapshotCapsuleAuditData.compileJavaTaskName) {
+    dependsOn(verifySnapshotCapsuleAuditAsm)
+    classpath = files(snapshotCapsuleAuditAsm)
+    options.release.set(21)
+    options.compilerArgs.add("-proc:none")
+}
+val snapshotCapsuleAuditDataTest = tasks.register<JavaExec>("snapshotCapsuleAuditDataTest") {
+    group = "verification"
+    description = "Runs all 115 synthetic class-data controls without application classes or native oracle execution"
+    dependsOn(verifySnapshotCapsuleAuditAsm, tasks.named(snapshotCapsuleAuditData.classesTaskName))
+    javaLauncher.set(javaToolchains.launcherFor { languageVersion.set(JavaLanguageVersion.of(21)) })
+    classpath = files(snapshotCapsuleAuditData.output.classesDirs, snapshotCapsuleAuditAsm)
+    mainClass.set("SnapshotCapsuleAuditDataTest")
+    maxHeapSize = "256m"
+    timeout.set(Duration.ofMinutes(2))
+    jvmArgs("-XX:-UsePerfData")
+    doFirst {
+        check(classpath.files == snapshotCapsuleAuditData.output.classesDirs.files + snapshotCapsuleAuditAsm.files) {
+            "snapshot capsule fixture classpath differs"
+        }
+        check(temporaryDir.isDirectory || temporaryDir.mkdirs()) { "snapshot capsule fixture temporary directory unavailable" }
+        systemProperty("java.io.tmpdir", temporaryDir.absolutePath)
+        environment("TMPDIR", temporaryDir.absolutePath)
+    }
+}
+// Refuse isolated data-fixture failures before expensive Kotlin compilation in the same graph.
+listOf("compileKotlin", "compileTestKotlin").forEach { taskName ->
+    tasks.named(taskName) { mustRunAfter(snapshotCapsuleAuditDataTest) }
+}
 tasks.processResources {
     duplicatesStrategy = DuplicatesStrategy.FAIL
     from(layout.projectDirectory.file("ghidra-bridge/src/main/java/ExportNativeCallsV1.java")) {
@@ -378,7 +466,8 @@ val testFrontendAssetManifest = tasks.register<Exec>("testFrontendAssetManifest"
     description = "Checks split UI bundles and rejection of omitted, duplicate, stale or changed resources"
     dependsOn(verifyFrontendToolchain)
     inputs.files(layout.projectDirectory.file("scripts/web-asset-manifest.mjs"),
-        layout.projectDirectory.file("scripts/web-asset-manifest.test.mjs"))
+        layout.projectDirectory.file("scripts/web-asset-manifest.test.mjs"),
+        layout.projectDirectory.file("frontend/scripts/bundle-report.mjs"))
     doFirst {
         commandLine(
             frontendNodeHome.orNull?.let { "$it/bin/node" } ?: "node",
@@ -1822,6 +1911,7 @@ private val v3BoundaryIsolatedTestMethods = listOf(
 private val isolateV3BoundaryTests = providers.gradleProperty("isolateV3BoundaryTests")
     .map { it == "true" }
     .orElse(false)
+private val gccCompilerEnginePlanningTestClass = "decompengine.oracle.gcc.GccCompilerEnginePlanningTest"
 
 private fun configureOracleTestRuntime(testTask: Test) {
     if (providers.environmentVariable("DECOMP_REQUIRE_GCC_ENGINE_CLI").orNull == "true") {
@@ -1847,6 +1937,13 @@ private fun configureOracleTestRuntime(testTask: Test) {
     val testInstalledGhidra = providers.environmentVariable("RUN_REAL_GHIDRA").orNull == "true" ||
         providers.environmentVariable("RUN_REAL_GHIDRA_CALL_SITES").orNull == "true" ||
         providers.environmentVariable("RUN_REAL_GHIDRA_NATIVE_CALLS").orNull == "true"
+    if (providers.environmentVariable("RUN_REAL_GHIDRA_PURE_RENDERING").orNull == "true") {
+        require(providers.environmentVariable("RUN_REAL_GHIDRA").orNull == "true") {
+            "native rendering parity requires installed bundled Ghidra execution"
+        }
+        testTask.outputs.upToDateWhen { false }
+        testTask.outputs.cacheIf("native rendering parity must execute") { false }
+    }
     if (testInstalledGhidra) testTask.dependsOn("installDist")
     testTask.dependsOn(generateAcpGateHelperChecksum)
     testTask.dependsOn(generateAcpProviderGuardianChecksum)
@@ -1931,6 +2028,86 @@ private fun configureOracleTestRuntime(testTask: Test) {
     )
 }
 
+// This task is a required real-tool lane when selected, with no optional no-op or cached credit.
+tasks.register<Test>("realAngrQualification") {
+    group = "verification"
+    description = "Requires real Angr discovery on the authored argv/stdin fixture"
+    testClassesDirs = sourceSets["test"].output.classesDirs
+    classpath = sourceSets["test"].runtimeClasspath
+    useJUnitPlatform()
+    filter {
+        includeTestsMatching("decompengine.exploration.AutomaticExplorationTest.real angr symbolically discovers branching argv and stdin when configured")
+        isFailOnNoMatchingTests = true
+    }
+    val python = providers.environmentVariable("ANGR_PYTHON").orElse("")
+    val evidenceRoot = layout.buildDirectory.dir("angr-qualification").get().asFile
+    val temporaryRoot = evidenceRoot.resolve("tmp")
+    environment = mapOf(
+        "ANGR_PYTHON" to python.get(),
+        "PATH" to "/usr/bin:/bin",
+        "LANG" to "C.UTF-8",
+        "LC_ALL" to "C.UTF-8",
+        "TMPDIR" to temporaryRoot.absolutePath,
+        "PYTHONDONTWRITEBYTECODE" to "1",
+        "PYTHONNOUSERSITE" to "1",
+    )
+    systemProperty("java.io.tmpdir", temporaryRoot.absolutePath)
+    systemProperty("decompengine.angr.evidenceRoot", evidenceRoot.absolutePath)
+    maxHeapSize = "512m"
+    maxParallelForks = 1
+    timeout.set(Duration.ofMinutes(3))
+    outputs.upToDateWhen { false }
+    outputs.cacheIf("Real Angr qualification requires fresh discovery") { false }
+    doFirst {
+        require(python.get().isNotBlank() && File(python.get()).isAbsolute && File(python.get()).canExecute()) {
+            "realAngrQualification requires an executable absolute ANGR_PYTHON"
+        }
+        Files.createDirectories(temporaryRoot.toPath())
+    }
+}
+
+// JUnit can silently omit expression-bodied Kotlin tests with non-void JVM returns.
+// Inspect compiled metadata before every root Test route; do not alter selection or worker bounds.
+val junitSignatureEvidence = layout.buildDirectory.dir("reports/junit-signatures")
+val junitSignatureCompiler = javaToolchains.compilerFor {
+    languageVersion.set(JavaLanguageVersion.of(21))
+}
+val verifyJunitSignatureGuard = tasks.register<Exec>("verifyJunitSignatureGuard") {
+    group = "verification"
+    description = "Exercises compiled JUnit signature validation with real authored javac fixtures"
+    inputs.files("scripts/check-junit-signatures.py", "scripts/test-junit-signatures.py")
+    outputs.file(junitSignatureEvidence.map { it.file("controls.json") })
+    outputs.upToDateWhen { false }
+    timeout.set(Duration.ofMinutes(2))
+    doFirst {
+        commandLine("python3", "-B", "scripts/test-junit-signatures.py",
+            "--javac", junitSignatureCompiler.get().executablePath.asFile.absolutePath,
+            "--work-root", layout.buildDirectory.dir("junit-signature-controls").get().asFile.absolutePath,
+            "--report", junitSignatureEvidence.get().file("controls.json").asFile.absolutePath)
+    }
+}
+val verifyCompiledJunitSignatures = tasks.register<Exec>("verifyCompiledJunitSignatures") {
+    group = "verification"
+    description = "Rejects non-void ordinary JUnit methods before discovery can silently omit them"
+    dependsOn(tasks.named("testClasses"), verifyJunitSignatureGuard)
+    inputs.file("scripts/check-junit-signatures.py")
+    inputs.files(sourceSets["test"].output.classesDirs)
+    outputs.file(junitSignatureEvidence.map { it.file("compiled-signatures.json") })
+    outputs.upToDateWhen { false }
+    timeout.set(Duration.ofMinutes(2))
+    doFirst {
+        // Java's NO-SOURCE output directory need not exist; at least one compiled root is mandatory.
+        val roots = sourceSets["test"].output.classesDirs.files.filter { it.exists() }.sortedBy { it.absolutePath }
+        require(roots.isNotEmpty()) { "No root-project compiled test classes exist for JUnit signature verification" }
+        commandLine(listOf("python3", "-B", "scripts/check-junit-signatures.py",
+            "--report", junitSignatureEvidence.get().file("compiled-signatures.json").asFile.absolutePath) +
+            roots.flatMap { listOf("--class-root", it.absolutePath) })
+    }
+}
+tasks.withType<Test>().configureEach {
+    dependsOn(verifyCompiledJunitSignatures)
+}
+
 tasks.test {
     // Required native fixture executor is explicitly serial in this actual task.
     maxParallelForks = 1
@@ -1947,14 +2124,73 @@ tasks.test {
     val shard = providers.gradleProperty("ciTestShard").orNull
     when (shard) {
         null -> useJUnitPlatform()
-        "core" -> useJUnitPlatform { excludeTags("ci-live") }
+        "core", "core-main", "core-oracle" -> useJUnitPlatform { excludeTags("ci-live") }
         "live" -> useJUnitPlatform { includeTags("ci-live") }
         else -> error("unsupported ciTestShard: $shard")
+    }
+    val livePackagePartition = providers.gradleProperty("ciLivePackagePartition").orNull
+    if (livePackagePartition != null) {
+        require(shard == "live") { "ciLivePackagePartition requires ciTestShard=live" }
+        filter {
+            when (livePackagePartition) {
+                "fulltree" -> includeTestsMatching("decompengine.oracle.fulltree.*")
+                "rest" -> {
+                    includeTestsMatching("*")
+                    excludeTestsMatching("decompengine.oracle.fulltree.*")
+                }
+                else -> error("unsupported ciLivePackagePartition: $livePackagePartition")
+            }
+            isFailOnNoMatchingTests = true
+        }
+    }
+    // A package and its complement partition future classes without a hand-maintained inventory.
+    when (shard) {
+        "core-main" -> filter {
+            includeTestsMatching("*")
+            excludeTestsMatching("decompengine.oracle.*")
+            isFailOnNoMatchingTests = true
+        }
+        "core-oracle" -> filter {
+            includeTestsMatching("decompengine.oracle.*")
+            isFailOnNoMatchingTests = true
+        }
+        else -> Unit
     }
     if (isolateV3BoundaryTests.get() && shard != "live") {
         filter { v3BoundaryIsolatedTestMethods.forEach { excludeTestsMatching(it) } }
     }
+    if (shard != "live") {
+        // Its production RSS monitor observes process-wide history, including earlier tests.
+        filter { excludeTestsMatching(gccCompilerEnginePlanningTestClass) }
+    }
+    if (shard == null || shard == "core" || shard == "core-oracle") {
+        // These existing required gates have one owner in partitioned CI; full/core retain them.
+        dependsOn(snapshotCapsuleAuditDataTest)
+        dependsOn("gccCompilerEnginePlanningIsolated")
+    }
     configureOracleTestRuntime(this)
+}
+
+// Select the entire class, including future methods, in a worker with no earlier suite RSS peak.
+// A dependency of test keeps this required for local check and the full/core CI entry points.
+tasks.register<Test>("gccCompilerEnginePlanningIsolated") {
+    group = "verification"
+    description = "Runs GCC planning RSS-sensitive tests in a fresh bounded test JVM"
+    testClassesDirs = sourceSets["test"].output.classesDirs
+    classpath = sourceSets["test"].runtimeClasspath
+    useJUnitPlatform { excludeTags("ci-live") }
+    filter {
+        includeTestsMatching(gccCompilerEnginePlanningTestClass)
+        isFailOnNoMatchingTests = true
+    }
+    forkEvery = 1
+    maxParallelForks = 1
+    outputs.upToDateWhen { false }
+    outputs.cacheIf("GCC planning tests must measure a fresh test JVM") { false }
+    onlyIf { providers.gradleProperty("ciTestShard").orNull in listOf(null, "core", "core-oracle") }
+    configureOracleTestRuntime(this)
+    // Leave headroom below the unchanged 2 GiB production/fixture RSS cap, even with live env flags.
+    maxHeapSize = "512m"
 }
 
 private fun registerV3BoundaryIsolatedTest(taskName: String, testMethod: String) =
@@ -1970,7 +2206,8 @@ private fun registerV3BoundaryIsolatedTest(taskName: String, testMethod: String)
         outputs.upToDateWhen { false }
         outputs.cacheIf("V3 boundary tests must measure a fresh test JVM") { false }
         onlyIf {
-            isolateV3BoundaryTests.get() && providers.gradleProperty("ciTestShard").orNull != "live"
+            isolateV3BoundaryTests.get() &&
+                providers.gradleProperty("ciTestShard").orNull in listOf(null, "core", "core-oracle")
         }
         configureOracleTestRuntime(this)
     }

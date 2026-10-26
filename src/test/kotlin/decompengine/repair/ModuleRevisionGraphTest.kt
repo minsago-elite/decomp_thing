@@ -97,8 +97,11 @@ import kotlin.io.path.writeBytes
 import kotlin.test.Test
 import kotlin.test.assertContentEquals
 import kotlin.test.assertEquals
+import kotlin.test.assertNotEquals
+import kotlin.test.assertNotNull
 import kotlin.test.assertFailsWith
 import kotlin.test.assertFalse
+import kotlin.test.assertNull
 import kotlin.test.assertTrue
 
 class ModuleRevisionGraphTest {
@@ -188,7 +191,7 @@ class ModuleRevisionGraphTest {
             reportContext = decompengine.web.WebReportContext(project.resolve("reports")),
             payload = rejectedProjection,
         )
-        assertTrue(rejectedHtml.contains("Rollback: Completed; the rejected candidate did not advance the source head."), rejectedHtml)
+        assertTrue(rejectedHtml.contains("Rollback: Unverified; this history does not record restoration completion or failure."), rejectedHtml)
         assertTrue(rejectedHtml.contains("ACP receipt is unavailable; release completeness is not established."), rejectedHtml)
         assertFalse(rejectedHtml.contains("bounded failure"), rejectedHtml)
         assertFalse(rejectedHtml.contains("provider invocation failed"), rejectedHtml)
@@ -1266,6 +1269,13 @@ class ModuleRevisionGraphTest {
         val parent = byteArrayOf(1, 3, 5, 7)
         val candidate = byteArrayOf(2, 4, 6, 8)
         source.writeBytes(parent)
+        val layout = RepairIndexLayout(
+            sourcePaths = listOf("code/program.bin"),
+            editablePaths = listOf("code/program.bin"),
+            fallbackModuleIdsByPath = mapOf("code/program.bin" to "program"),
+        )
+        var liveResolutions = 0
+        var recoveryResolutions = 0
         val profile = object : RepairIndexProfile {
             override fun profileId() = "content-sensitive-binary-v1"
             override fun configurationSha256() = "7".repeat(64)
@@ -1278,11 +1288,20 @@ class ModuleRevisionGraphTest {
                 require(!projectRoot.resolve("code/program.bin").readBytes().contentEquals(candidate)) {
                     "profile cannot resolve a dirty candidate"
                 }
-                return RepairIndexLayout(
-                    sourcePaths = listOf("code/program.bin"),
-                    editablePaths = listOf("code/program.bin"),
-                    fallbackModuleIdsByPath = mapOf("code/program.bin" to "program"),
-                )
+                assertContentEquals(parent, projectRoot.resolve("code/program.bin").readBytes())
+                liveResolutions++
+                return layout
+            }
+            override fun resolveForRecovery(
+                projectRoot: Path, budget: RepairResourceBudget,
+                sourcePaths: List<String>, editablePaths: List<String>, readSource: (String) -> ByteArray,
+            ): RepairIndexLayout {
+                assertEquals(layout.sourcePaths, sourcePaths)
+                assertEquals(layout.editablePaths, editablePaths)
+                assertContentEquals(candidate, projectRoot.resolve("code/program.bin").readBytes())
+                assertContentEquals(parent, readSource("code/program.bin"))
+                recoveryResolutions++
+                return layout
             }
         }
         val graph = ModuleRevisionGraph.openForTesting(
@@ -1301,7 +1320,10 @@ class ModuleRevisionGraphTest {
         graph.close()
         assertContentEquals(candidate, source.readBytes())
 
+        val beforeRecoveryLiveResolutions = liveResolutions
         ModuleRevisionGraph.open(project, profile).use { recovered ->
+            assertTrue(recoveryResolutions > 0)
+            assertTrue(liveResolutions > beforeRecoveryLiveResolutions)
             assertContentEquals(parent, source.readBytes())
             assertTrue(recovered.snapshot.nodes.last().recoveredAfterCrash)
         }
@@ -1530,9 +1552,14 @@ class ModuleRevisionGraphTest {
         }
 
         assertContentEquals(concurrent, target.readBytes())
+        val failedRecord = project.resolve("reports/repair-revisions/graph.json").readText()
+        assertTrue(failedRecord.contains("restore_failed_unresolved"))
+        assertTrue(failedRecord.contains("unrecognized_source_state") ||
+            failedRecord.contains("restore_operation_failed"))
         Files.delete(target)
         Files.move(held, target)
-        graph.reject(attempt, RepairEvidence("cas-conflict", "concurrent rollback publication rejected"))
+        val rejected = graph.reject(attempt, RepairEvidence("cas-conflict", "concurrent rollback publication rejected"))
+        assertEquals(RepairRollbackState.RESTORED_AFTER_FAILURE, requireNotNull(rejected.rollbackRecord).state)
         graph.close()
         assertContentEquals(parent, target.readBytes())
     }
@@ -1853,6 +1880,86 @@ class ModuleRevisionGraphTest {
             graph.close()
             ModuleRevisionGraph.open(project, GeneratedCRepairIndexProfile, budget).use { }
         }
+    }
+
+    @Test
+    fun `aggregate rejection evidence is refused before restoration or schema upgrade`() {
+        for (nativeSchema in listOf(false, true)) for (graphLimit in listOf(false, true)) {
+            val project = generatedProject()
+            val target = project.resolve("src/modules/alpha.c")
+            val original = target.readBytes()
+            val candidate = original + "\n/* aggregate evidence preflight */\n".toByteArray()
+            val budget = if (graphLimit) RepairResourceBudget(maximumGraphBytes = 16L * 1024)
+                else RepairResourceBudget(maximumProjectionBytes = 16L * 1024)
+            val graphPath = project.resolve("reports/repair-revisions/graph.json")
+            ModuleRevisionGraph.open(project, GeneratedCRepairIndexProfile, budget).use { graph ->
+                if (nativeSchema) graph.enableRunContract()
+                val corpus = graph.retainedRegressionCorpus()
+                val attempt = graph.beginAttempt(listOf("src/modules/alpha.c"),
+                    RevisionRepairMetadata(1, "compile", "short", "bounded", emptyList(), null, corpus.sha256,
+                        publicationMode = RepairPublicationMode.TEST_ONLY_NON_RELEASE))
+                graph.installCandidate(attempt, mapOf("src/modules/alpha.c" to candidate))
+                val before = graphPath.readBytes()
+                val snapshot = graph.snapshot
+                val graphKey = Files.readAttributes(graphPath, BasicFileAttributes::class.java).fileKey()
+                val sourceKey = Files.readAttributes(target, BasicFileAttributes::class.java).fileKey()
+                val evidence = RepairEvidence("rejected", "x".repeat(32 * 1024))
+                assertTrue(evidence.summary.length < budget.maximumRequestBytes)
+                assertFailsWith<RepairBudgetExceededException> { graph.reject(attempt, evidence) }
+                assertContentEquals(before, graphPath.readBytes())
+                assertContentEquals(candidate, target.readBytes())
+                assertEquals(graphKey, Files.readAttributes(graphPath, BasicFileAttributes::class.java).fileKey())
+                assertEquals(sourceKey, Files.readAttributes(target, BasicFileAttributes::class.java).fileKey())
+                assertEquals(snapshot, graph.snapshot)
+                assertEquals(if (nativeSchema) 4 else 2, graph.snapshot.schemaVersion)
+                val rejected = graph.reject(attempt, RepairEvidence("rejected", "bounded evidence"))
+                assertEquals(attempt.id, rejected.id)
+                assertContentEquals(original, target.readBytes())
+            }
+            ModuleRevisionGraph.open(project, GeneratedCRepairIndexProfile, budget).close()
+        }
+    }
+
+    @Test
+    fun `only the first rollback record may retain a legacy migration origin`() {
+        val project = generatedProject()
+        val budget = RepairResourceBudget(maximumGraphBytes = 16L * 1024)
+        val graphPath = project.resolve("reports/repair-revisions/graph.json")
+        val target = project.resolve("src/modules/alpha.c")
+        ModuleRevisionGraph.open(project, GeneratedCRepairIndexProfile, budget).use { graph ->
+            val first = graph.beginAttempt(listOf("src/modules/alpha.c"))
+            graph.reject(first, RepairEvidence("rejected", "legacy pending attempt"))
+            val second = graph.beginAttempt(listOf("src/modules/alpha.c"))
+            graph.reject(second, RepairEvidence("rejected", "native attempt"))
+        }
+        val authentic = graphPath.readText()
+        val source = target.readBytes()
+        ModuleRevisionGraph.open(project, GeneratedCRepairIndexProfile, budget).close()
+        val twoOrigins = authentic.replace("\"legacyPendingStateUnknown\":false", "\"legacyPendingStateUnknown\":true")
+        // Swap the two flags without changing any identities, source facts, or record ordering.
+        val split = authentic.split("\"legacyPendingStateUnknown\":")
+        assertEquals(3, split.size)
+        val swapped = split[0] + "\"legacyPendingStateUnknown\":" + split[1].replaceFirst("true", "false") +
+            "\"legacyPendingStateUnknown\":" + split[2].replaceFirst("false", "true")
+        val padding = (budget.maximumGraphBytes + 1024 - twoOrigins.toByteArray().size).toInt()
+        assertTrue(padding > 0)
+        val oversizedOrigins = twoOrigins.replace("legacy pending attempt", "legacy pending attempt" + "x".repeat(padding))
+        assertEquals(budget.maximumGraphBytes + 1024, oversizedOrigins.toByteArray().size.toLong())
+        val budgetFailure = assertFailsWith<IllegalArgumentException> {
+            requireRepairGraphByteBudget(oversizedOrigins.toByteArray(), budget)
+        }
+        assertTrue(budgetFailure.message.orEmpty().contains("legacy rollback origins"))
+        for (forged in listOf(twoOrigins, swapped, oversizedOrigins)) {
+            graphPath.writeText(forged)
+            val key = Files.readAttributes(graphPath, BasicFileAttributes::class.java).fileKey()
+            val failure = assertFailsWith<IllegalArgumentException> { ModuleRevisionGraph.open(project, GeneratedCRepairIndexProfile, budget) }
+            assertTrue(failure.message.orEmpty().contains("legacy rollback origins"))
+            assertEquals(forged, graphPath.readText())
+            assertEquals(key, Files.readAttributes(graphPath, BasicFileAttributes::class.java).fileKey())
+            assertContentEquals(source, target.readBytes())
+        }
+        graphPath.writeText(authentic)
+        ModuleRevisionGraph.open(project, GeneratedCRepairIndexProfile, budget).close()
     }
 
     @Test
@@ -2216,10 +2323,489 @@ class ModuleRevisionGraphTest {
                     assertContentEquals(alphaBefore, alpha.readBytes())
                     assertContentEquals(betaBefore, beta.readBytes())
                     assertTrue(recovered.snapshot.nodes.last().recoveredAfterCrash)
+                    assertEquals(
+                        RepairRollbackState.RESTORED_VERIFIED,
+                        requireNotNull(recovered.snapshot.nodes.last().rollbackRecord).state,
+                    )
                 }
             }
             }
         }
+    }
+
+    @Test
+    fun `durable rollback failure remains visible and later recovery records restoration after failure`() {
+        val project = generatedProject()
+        val alpha = project.resolve("src/modules/alpha.c")
+        val beta = project.resolve("src/modules/beta.c")
+        val alphaOriginal = alpha.readBytes()
+        val betaOriginal = beta.readBytes()
+        val alphaCandidate = alphaOriginal + "\n/* rollback retry alpha */\n".toByteArray()
+        val betaCandidate = betaOriginal + "\n/* rollback retry beta */\n".toByteArray()
+        var armed = false
+        var failRollbackOnce = true
+        val graph = ModuleRevisionGraph.openForTesting(
+            project,
+            GeneratedCRepairIndexProfile,
+            faultInjector = ModuleRevisionFaultInjector { point ->
+                if (armed && failRollbackOnce && point is ModuleRevisionFaultPoint.AfterPublicationMove &&
+                    point.phase == "rollback" && point.index == 0
+                ) {
+                    failRollbackOnce = false
+                    throw IllegalStateException("injected failure after first restored source")
+                }
+            },
+        )
+        graph.enableRunContract()
+        val attempt = graph.beginAttempt(listOf("src/modules/alpha.c", "src/modules/beta.c"))
+        graph.installCandidate(
+            attempt,
+            mapOf("src/modules/alpha.c" to alphaCandidate, "src/modules/beta.c" to betaCandidate),
+        )
+        armed = true
+
+        assertFailsWith<IllegalStateException> {
+            graph.reject(attempt, RepairEvidence("rejected", "rollback failure is retained"))
+        }
+        assertContentEquals(alphaOriginal, alpha.readBytes())
+        assertContentEquals(betaCandidate, beta.readBytes())
+        val unresolvedGraph = project.resolve("reports/repair-revisions/graph.json").readText()
+        assertTrue(unresolvedGraph.contains("restore_failed_unresolved"))
+        assertTrue(unresolvedGraph.contains("restore_operation_failed"))
+        val failedRecord = Json.parseToJsonElement(unresolvedGraph).jsonObject
+            .getValue("pending").jsonObject.getValue("rollbackRecord").jsonObject
+        assertTrue(
+            failedRecord.getValue("observedSourceRevisionSha256").jsonPrimitive.content !=
+                failedRecord.getValue("expectedSourceRevisionSha256").jsonPrimitive.content,
+        )
+        assertEquals(attempt.id, graph.snapshot.pendingAttemptId)
+        graph.close()
+
+        ModuleRevisionGraph.open(project, GeneratedCRepairIndexProfile).use { recovered ->
+            assertContentEquals(alphaOriginal, alpha.readBytes())
+            assertContentEquals(betaOriginal, beta.readBytes())
+            val outcome = requireNotNull(recovered.snapshot.nodes.last().rollbackRecord)
+            assertEquals(attempt.id, outcome.attemptId)
+            assertEquals(RepairRollbackState.RESTORED_AFTER_FAILURE, outcome.state)
+            assertEquals(RepairRollbackStage.SOURCE_RESTORE, outcome.failureStage)
+            assertEquals(RepairRollbackFailureCode.RESTORE_OPERATION_FAILED, outcome.failureCode)
+            assertEquals(outcome.expectedSourceRevisionSha256, outcome.observedSourceRevisionSha256)
+            assertEquals(true, outcome.candidateSourceInstallStarted)
+        }
+    }
+
+    @Test
+    fun `failure record publication failure leaves only the write ahead marker durable`() {
+        val project = generatedProject()
+        val target = project.resolve("src/modules/alpha.c")
+        val original = target.readBytes()
+        val candidate = original + "\n/* marker survives failed record write */\n".toByteArray()
+        var armed = false
+        var rollbackFaulted = false
+        var graphSyncCount = 0
+        var markerDurableBeforeExchange = false
+        val graph = ModuleRevisionGraph.openForTesting(
+            project,
+            GeneratedCRepairIndexProfile,
+            faultInjector = ModuleRevisionFaultInjector { point ->
+                if (armed) {
+                    if (!rollbackFaulted && point is ModuleRevisionFaultPoint.BeforePublicationExchange &&
+                        point.phase == "rollback"
+                    ) {
+                        rollbackFaulted = true
+                        val durableGraph = project.resolve("reports/repair-revisions/graph.json").readText()
+                        markerDurableBeforeExchange = durableGraph.contains("restore_in_progress") &&
+                            !durableGraph.contains("restore_failed_unresolved")
+                        throw IllegalStateException("injected rollback exchange failure")
+                    }
+                    if (point is ModuleRevisionFaultPoint.AfterStateTemporaryDirectorySync &&
+                        point.scope == "revision-state" && point.name == "graph.json"
+                    ) {
+                        graphSyncCount++
+                        if (graphSyncCount == 3) {
+                            throw IllegalStateException("injected failure-record publication failure")
+                        }
+                    }
+                }
+            },
+        )
+        val attempt = graph.beginAttempt(listOf("src/modules/alpha.c"))
+        graph.installCandidate(attempt, mapOf("src/modules/alpha.c" to candidate))
+        armed = true
+
+        assertFailsWith<IllegalStateException> { graph.reject(attempt, RepairEvidence("rejected", "retry after write failure")) }
+        assertTrue(markerDurableBeforeExchange)
+        assertContentEquals(candidate, target.readBytes())
+        val marker = project.resolve("reports/repair-revisions/graph.json").readText()
+        assertTrue(marker.contains("restore_in_progress"))
+        assertFalse(marker.contains("restore_failed_unresolved"))
+        graph.close()
+
+        ModuleRevisionGraph.open(project, GeneratedCRepairIndexProfile).use { recovered ->
+            assertContentEquals(original, target.readBytes())
+            val outcome = requireNotNull(recovered.snapshot.nodes.last().rollbackRecord)
+            assertEquals(RepairRollbackState.RESTORED_VERIFIED, outcome.state)
+            assertEquals(null, outcome.failureCode)
+        }
+    }
+
+    @Test
+    fun `persisted schema two pending attempt migrates as unknown and restores its bound parent`() {
+        val project = generatedProject()
+        val target = project.resolve("src/modules/alpha.c")
+        val original = target.readBytes()
+        val candidate = original + "\n/* schema two recovery */\n".toByteArray()
+        val graphPath = project.resolve("reports/repair-revisions/graph.json")
+        ModuleRevisionGraph.open(project, GeneratedCRepairIndexProfile).use { graph ->
+            val attempt = graph.beginAttempt(listOf("src/modules/alpha.c"))
+            graph.installCandidate(attempt, mapOf("src/modules/alpha.c" to candidate))
+            assertTrue(graphPath.readText().contains("\"schemaVersion\": 2"))
+        }
+        val legacyGraph = graphPath.readBytes()
+
+        ModuleRevisionGraph.open(project, GeneratedCRepairIndexProfile).use { recovered ->
+            assertContentEquals(original, target.readBytes())
+            val outcome = requireNotNull(recovered.snapshot.nodes.last().rollbackRecord)
+            assertEquals(RepairRollbackState.RESTORED_VERIFIED, outcome.state)
+            assertTrue(outcome.legacyPendingStateUnknown)
+            assertEquals(null, outcome.candidateSourceInstallStarted)
+            assertEquals(null, outcome.runId)
+        }
+        assertContentEquals(
+            legacyGraph,
+            graphPath.parent.resolve("legacy-graph-${sha256(legacyGraph)}.json").readBytes(),
+        )
+    }
+
+    @Test
+    fun `saturated legacy pending graphs retain bounded recovery headroom across marker crash and failure`() {
+        val parent = Path.of("build/test-tmp").toAbsolutePath().normalize().also { Files.createDirectories(it) }
+        for (schema in 1..3) {
+            val project = generatedProject(temporaryParent = parent)
+            val target = project.resolve("src/modules/alpha.c")
+            val original = target.readBytes()
+            val candidate = original + "\n/* saturated legacy recovery */\n".toByteArray()
+            val budget = RepairResourceBudget(maximumGraphBytes = 16 * 1024)
+            val graphPath = project.resolve("reports/repair-revisions/graph.json")
+            val bindingPath = graphPath.parent.resolve("recovery-binding.json")
+            ModuleRevisionGraph.open(project, GeneratedCRepairIndexProfile, budget).use { graph ->
+                if (schema == 3) {
+                    graph.enableRunContract()
+                    graph.beginRun(2, 60_000)
+                }
+                val corpus = graph.retainedRegressionCorpus()
+                val metadata = RevisionRepairMetadata(1, "compile", "short", "LEGACY_PADDING", emptyList(),
+                    null, corpus.sha256, publicationMode = RepairPublicationMode.TEST_ONLY_NON_RELEASE)
+                val attempt = graph.beginAttempt(listOf("src/modules/alpha.c"), metadata)
+                graph.installCandidate(attempt, mapOf("src/modules/alpha.c" to candidate))
+            }
+            var legacy = graphPath.readText()
+            if (schema == 1) legacy = legacy.replaceFirst("\"schemaVersion\": 2", "\"schemaVersion\": 1")
+                .replace(",\"agentInvocation\":null,\"publicationMode\":\"test_only_non_release\"", "")
+            if (schema == 3) legacy = legacy.replaceFirst("\"schemaVersion\": 4", "\"schemaVersion\": 3")
+                .replace("      \"rollbackRecord\": null,\n", "")
+                .replace(",\"legacyRecoveryRequired\":false,\"rollbackRecord\":null", "")
+            val fill = (budget.maximumGraphBytes - legacy.toByteArray().size).toInt()
+            assertTrue(fill > 0)
+            legacy = legacy.replace("LEGACY_PADDING", "x".repeat("LEGACY_PADDING".length + fill))
+            graphPath.writeText(legacy)
+            assertEquals(budget.maximumGraphBytes, graphPath.readBytes().size.toLong(), "source schema=$schema")
+            val binding = bindingPath.readBytes()
+            val installedBefore = target.readBytes()
+            graphPath.writeText(legacy.replace("\"summary\":\"", "\"summary\":\"z"))
+            assertFailsWith<RepairBudgetExceededException> {
+                ModuleRevisionGraph.open(project, GeneratedCRepairIndexProfile, budget)
+            }
+            assertContentEquals(installedBefore, target.readBytes())
+            graphPath.writeText(legacy)
+
+            assertFailsWith<SimulatedRepairCrash> {
+                ModuleRevisionGraph.openForTesting(project, GeneratedCRepairIndexProfile, budget,
+                    ModuleRevisionFaultInjector { point ->
+                        if (point is ModuleRevisionFaultPoint.AfterStatePublicationDirectorySync &&
+                            point.scope == "revision-state" && point.name == "graph.json") throw SimulatedRepairCrash()
+                    }).close()
+            }
+            val marker = graphPath.readBytes()
+            assertTrue(marker.size.toLong() > budget.maximumGraphBytes)
+            assertContentEquals(installedBefore, target.readBytes())
+            assertContentEquals(binding, bindingPath.readBytes())
+            requireDeclaredGraphBudget(project, marker, budget)
+            // Retained prior producers wrote every null node explicitly. Their allowance is
+            // computed using that recognized wire, not the new compact serializer's byte count.
+            val oldMarker = explicitNullNodeWire(marker.toString(Charsets.UTF_8)).toByteArray()
+            assertTrue(oldMarker.size.toLong() > budget.maximumGraphBytes)
+            requireDeclaredGraphBudget(project, oldMarker, budget)
+            val compactMarker = Json.parseToJsonElement(marker.toString(Charsets.UTF_8)).toString().toByteArray()
+            assertTrue(compactMarker.size.toLong() > budget.maximumGraphBytes)
+            assertFailsWith<IllegalArgumentException> { requireDeclaredGraphBudget(project, compactMarker, budget) }
+
+            // The read envelope is not admission: ordinary metadata cannot spend the reserved
+            // migration bytes, and rejection still precedes any source exchange.
+            graphPath.writeText(marker.toString(Charsets.UTF_8).replace("\"summary\":\"", "\"summary\":\"" + "y".repeat(2048)))
+            assertFailsWith<RepairBudgetExceededException> {
+                ModuleRevisionGraph.open(project, GeneratedCRepairIndexProfile, budget)
+            }
+            assertContentEquals(installedBefore, target.readBytes())
+            graphPath.writeBytes(marker)
+            target.writeText("unrecognized concurrent replacement")
+            assertFailsWith<IllegalStateException> {
+                ModuleRevisionGraph.open(project, GeneratedCRepairIndexProfile, budget)
+            }
+            assertTrue(graphPath.readText().contains("restore_failed_unresolved"))
+            target.writeBytes(installedBefore)
+            ModuleRevisionGraph.open(project, GeneratedCRepairIndexProfile, budget).use { recovered ->
+                assertContentEquals(original, target.readBytes())
+                val rollback = requireNotNull(recovered.snapshot.nodes.last().rollbackRecord)
+                assertEquals(RepairRollbackState.RESTORED_AFTER_FAILURE, rollback.state)
+                assertTrue(rollback.legacyPendingStateUnknown)
+                assertEquals(null, rollback.candidateSourceInstallStarted)
+                assertEquals(RepairRollbackFailureCode.UNRECOGNIZED_SOURCE_STATE, rollback.failureCode)
+            }
+            assertContentEquals(binding, bindingPath.readBytes())
+            requireDeclaredGraphBudget(project, graphPath.readBytes(), budget)
+            ModuleRevisionGraph.open(project, GeneratedCRepairIndexProfile, budget).close()
+        }
+    }
+
+    @Test
+    fun `declared schema one two and three sources reserve successful recovery and interruption at the original cap`() {
+        for (schema in 1..3) {
+            val fixture = declaredBudgetFixture(schema)
+            val path = fixture.project.resolve("reports/repair-revisions/graph.json")
+            val binding = path.parent.resolve("recovery-binding.json").readBytes()
+            ModuleRevisionGraph.open(fixture.project, GeneratedCRepairIndexProfile, fixture.budget).use { graph ->
+                val record = requireNotNull(graph.snapshot.nodes.last().rollbackRecord)
+                assertEquals(RepairRollbackState.RESTORED_VERIFIED, record.state, "schema=$schema")
+                assertTrue(record.legacyPendingStateUnknown)
+                assertNull(record.candidateSourceInstallStarted)
+                assertEquals(record.expectedSourceRevisionSha256, record.observedSourceRevisionSha256)
+                if (schema == 3) {
+                    val run = graph.snapshot.runs.single()
+                    assertEquals(RepairRunStatus.INTERRUPTED, run.status)
+                    assertEquals(RepairEvidence("interrupted", "repair run reopened without a completed terminal publication"), run.lastEvidence)
+                    assertNull(run.rollbackFailureAttemptId)
+                } else assertTrue(graph.snapshot.runs.isEmpty())
+                graph.synchronizeRepairHistory()
+            }
+            assertContentEquals(binding, path.parent.resolve("recovery-binding.json").readBytes())
+            assertContentEquals(fixture.originalSource, fixture.project.resolve("src/modules/alpha.c").readBytes())
+            requireDeclaredGraphBudget(fixture.project, path.readBytes(), fixture.budget)
+            val preserved = path.parent.resolve("legacy-graph-${sha256(fixture.legacy)}.json")
+            assertContentEquals(fixture.legacy, preserved.readBytes())
+            // Schema3 legitimately retains the older nonpending schema2 graph as well.
+            if (schema == 3) assertTrue(Files.newDirectoryStream(path.parent, "legacy-graph-*.json").use { it.count() } >= 2)
+            ModuleRevisionGraph.open(fixture.project, GeneratedCRepairIndexProfile, fixture.budget).close()
+        }
+    }
+
+    @Test
+    fun `over cap migration requires a unique joined source and charges schema two ordinary plus one growth`() {
+        val fixture = declaredBudgetFixture(2)
+        val root = fixture.project
+        val path = root.resolve("reports/repair-revisions/graph.json")
+        assertFailsWith<SimulatedRepairCrash> {
+            ModuleRevisionGraph.openForTesting(root, GeneratedCRepairIndexProfile, fixture.budget,
+                ModuleRevisionFaultInjector { point ->
+                    if (point is ModuleRevisionFaultPoint.AfterStatePublicationDirectorySync &&
+                        point.scope == "revision-state" && point.name == "graph.json") throw SimulatedRepairCrash()
+                }).close()
+        }
+        val marker = path.readBytes()
+        assertTrue(marker.size.toLong() > fixture.budget.maximumGraphBytes)
+        requireDeclaredGraphBudget(root, marker, fixture.budget) // Actual producer at charged M.
+        assertFailsWith<RepairBudgetExceededException> { requireRepairGraphByteBudget(marker, fixture.budget) }
+        val source = root.resolve("src/modules/alpha.c")
+        val bytes = source.readBytes()
+        val key = Files.readAttributes(source, BasicFileAttributes::class.java).fileKey()
+        fun refuse(action: () -> Unit) {
+            val graphKey = Files.readAttributes(path, BasicFileAttributes::class.java).fileKey()
+            action()
+            assertContentEquals(marker, path.readBytes())
+            assertContentEquals(bytes, source.readBytes())
+            assertEquals(key, Files.readAttributes(source, BasicFileAttributes::class.java).fileKey())
+            assertEquals(graphKey, Files.readAttributes(path, BasicFileAttributes::class.java).fileKey())
+        }
+        val declaredPath = path.parent.resolve("legacy-graph-${sha256(fixture.legacy)}.json")
+        Files.delete(declaredPath)
+        refuse { assertFailsWith<RepairBudgetExceededException> { ModuleRevisionGraph.open(root, GeneratedCRepairIndexProfile, fixture.budget) } }
+        declaredPath.writeBytes(fixture.legacy)
+        // A canonical cross-snapshot declaration does not join even when self-hashed.
+        Files.delete(declaredPath)
+        val originalText = fixture.legacy.toString(Charsets.UTF_8)
+        val index = Json.parseToJsonElement(originalText).jsonObject.getValue("indexSha256").jsonPrimitive.content
+        val originalGraph = Json.parseToJsonElement(originalText).jsonObject
+        val originalRoot = originalGraph.getValue("nodes").jsonArray.first().jsonObject
+        val originalPending = originalGraph.getValue("pending").jsonObject
+        val rootId = originalRoot.getValue("id").jsonPrimitive.content
+        val foreignRoot = "root_${sha256(("0".repeat(64) + "\n" + originalRoot.getValue("sourceRevisionSha256").jsonPrimitive.content).toByteArray()).take(24)}"
+        val ordinal = originalPending.getValue("ordinal").jsonPrimitive.content
+        val allowed = originalPending.getValue("allowedPaths").jsonArray.map { it.jsonPrimitive.content }
+        val foreignAttempt = "revision_${ordinal.padStart(8, '0')}_${sha256((foreignRoot + "\n" + ordinal + "\n" + allowed.joinToString("\n")).toByteArray()).take(16)}"
+        val unjoined = originalText.replace("\"indexSha256\": \"$index\"", "\"indexSha256\": \"${"0".repeat(64)}\"")
+            .replace(rootId, foreignRoot).replace(originalPending.getValue("id").jsonPrimitive.content, foreignAttempt).toByteArray()
+        assertFalse(fixture.legacy.contentEquals(unjoined))
+        rollbackPairPrivate("validateDeclaredGraphSemantics", requireNotNull(rollbackPairPrivate("parseGraph", unjoined.toString(Charsets.UTF_8))))
+        val unjoinedPath = path.parent.resolve("legacy-graph-${sha256(unjoined)}.json").also { it.writeBytes(unjoined) }
+        refuse { assertFailsWith<RepairBudgetExceededException> { ModuleRevisionGraph.open(root, GeneratedCRepairIndexProfile, fixture.budget) } }
+        Files.delete(unjoinedPath)
+        declaredPath.writeBytes(fixture.legacy)
+        // Both declarations can have identical semantic defaults. Never choose schema1's larger credit.
+        val schemaOne = originalText.replaceFirst("\"schemaVersion\": 2", "\"schemaVersion\": 1")
+            .replace(",\"agentInvocation\":null,\"publicationMode\":\"test_only_non_release\"", "").toByteArray()
+        val alternative = path.parent.resolve("legacy-graph-${sha256(schemaOne)}.json").also { it.writeBytes(schemaOne) }
+        refuse {
+            val failure = assertFailsWith<IllegalArgumentException> { ModuleRevisionGraph.open(root, GeneratedCRepairIndexProfile, fixture.budget) }
+            assertTrue(failure.message.orEmpty().contains("multiple declared legacy graphs"))
+        }
+        Files.delete(alternative)
+        val corruptName = path.parent.resolve("legacy-graph-${"0".repeat(64)}.json")
+        corruptName.writeBytes(fixture.legacy)
+        refuse {
+            val failure = assertFailsWith<IllegalArgumentException> { ModuleRevisionGraph.open(root, GeneratedCRepairIndexProfile, fixture.budget) }
+            assertEquals("declared legacy graph digest changed", failure.message)
+        }
+        Files.delete(corruptName)
+        val plusOne = marker.toString(Charsets.UTF_8).replace("\"summary\":\"", "\"summary\":\"z").toByteArray()
+        assertEquals(marker.size + 1, plusOne.size)
+        assertFailsWith<RepairBudgetExceededException> { requireDeclaredGraphBudget(root, plusOne, fixture.budget) }
+        path.writeBytes(plusOne)
+        val plusOneKey = Files.readAttributes(path, BasicFileAttributes::class.java).fileKey()
+        assertFailsWith<RepairBudgetExceededException> { ModuleRevisionGraph.open(root, GeneratedCRepairIndexProfile, fixture.budget) }
+        assertEquals(plusOneKey, Files.readAttributes(path, BasicFileAttributes::class.java).fileKey())
+        assertContentEquals(plusOne, path.readBytes())
+        assertContentEquals(bytes, source.readBytes())
+        path.writeBytes(marker)
+        ModuleRevisionGraph.open(root, GeneratedCRepairIndexProfile, fixture.budget).close()
+    }
+
+    @Test
+    fun `empty run context cannot turn a declared schema three source into schema two credit`() {
+        // Authored budget-helper input only: old schema3 without a run is not native recovery authority.
+        val fixture = declaredBudgetFixture(3, withRun = false)
+        val marker = fixture.nativeGraph.toString(Charsets.UTF_8)
+            .replace("\"legacyRecoveryRequired\":false", "\"legacyRecoveryRequired\":true")
+            .replace("\"legacyPendingStateUnknown\":false", "\"legacyPendingStateUnknown\":true")
+            .replace("\"candidateSourceInstallStarted\":true", "\"candidateSourceInstallStarted\":null").toByteArray()
+        val name = "legacy-graph-${sha256(fixture.legacy)}.json"
+        requireRepairGraphByteBudget(marker, fixture.budget) { consume -> consume(name, fixture.legacy) }
+        val plusOne = marker.toString(Charsets.UTF_8).replace("\"summary\":\"", "\"summary\":\"z").toByteArray()
+        assertEquals(marker.size + 1, plusOne.size)
+        assertFailsWith<RepairBudgetExceededException> {
+            requireRepairGraphByteBudget(plusOne, fixture.budget) { consume -> consume(name, fixture.legacy) }
+        }
+    }
+
+    @Test
+    fun `declared graph store admits exact aggregate bytes and refuses all name and payload overruns`() {
+        val parent = Path.of("build/test-tmp").toAbsolutePath().normalize().also { Files.createDirectories(it) }
+        val root = Files.createTempDirectory(parent, "declared-source-bounds-")
+        LinuxFilesystemSyscalls.openRoot(root).use { descriptor ->
+            RepairStateStore.open(descriptor).use { store ->
+                val revisions = root.resolve("reports/repair-revisions")
+                fun body(value: String): Path = revisions.resolve("legacy-graph-${sha256(value.toByteArray())}.json")
+                    .also { it.writeText(value) }
+                val one = body("a")
+                val two = body("bc")
+                val budget = RepairResourceBudget(maximumGraphBytes = 2, maximumIndexEvidenceBytes = 3)
+                val seen = mutableListOf<ByteArray>()
+                // Raw body-reader control only; these strings are not graph or history evidence.
+                store.forEachDeclaredLegacyGraph(budget) { _, bytes -> seen += bytes }
+                assertEquals(3, seen.sumOf { it.size })
+                val extra = body("d")
+                val failure = assertFailsWith<RepairBudgetExceededException> {
+                    store.forEachDeclaredLegacyGraph(budget) { _, _ -> }
+                }
+                assertTrue(failure.message.orEmpty().contains("remaining evidence budget"))
+                Files.delete(extra)
+                val tooLarge = body("xyz")
+                assertFailsWith<RepairBudgetExceededException> { store.forEachDeclaredLegacyGraph(budget) { _, _ -> } }
+                Files.delete(tooLarge)
+                // Every direct name counts against T, including irrelevant files and blobs directory.
+                val traversal = budget.copy(maximumRevisionNodes = 2, maximumStateDirectoryEntries = 3)
+                val limit = repairRevisionDirectoryEntryLimit(traversal)
+                val present = Files.list(revisions).use { it.count().toInt() }
+                val fillers = (0..(limit - present)).map { index ->
+                    revisions.resolve("irrelevant-$index").also { it.writeText("") }
+                }
+                assertEquals(limit + 1L, Files.list(revisions).use { it.count() })
+                assertFailsWith<decompengine.acp.LinuxResourceLimitException> {
+                    store.forEachDeclaredLegacyGraph(traversal) { _, _ -> }
+                }
+                Files.delete(fillers.last())
+                assertEquals(limit.toLong(), Files.list(revisions).use { it.count() })
+                store.forEachDeclaredLegacyGraph(traversal) { _, _ -> }
+                fillers.dropLast(1).forEach { Files.delete(it) }
+                Files.delete(two)
+                val link = revisions.resolve("legacy-graph-${"0".repeat(64)}.json")
+                Files.createSymbolicLink(link, one.fileName)
+                var reachedLink = false
+                kotlin.test.assertFails { store.forEachDeclaredLegacyGraph(budget) { name, _ -> if (name == link.fileName.toString()) reachedLink = true } }
+                assertFalse(reachedLink)
+            }
+        }
+    }
+
+    @Test
+    fun `later native run evidence cannot enlarge a declared migration allowance`() {
+        val fixture = declaredBudgetFixture(2, reserve = 8192)
+        assertEquals(16L * 1024, fixture.budget.maximumGraphBytes)
+        assertTrue(fixture.reservedBytes in 1L..8192L, "actual producer must leave positive ordinary-run slack")
+        assertEquals(fixture.budget.maximumGraphBytes - fixture.reservedBytes, fixture.legacy.size.toLong())
+        val path = fixture.project.resolve("reports/repair-revisions/graph.json")
+        ModuleRevisionGraph.open(fixture.project, GeneratedCRepairIndexProfile, fixture.budget).use { graph ->
+            assertNull(graph.snapshot.pendingAttemptId)
+            assertTrue(graph.snapshot.runs.isEmpty())
+            requireDeclaredGraphBudget(fixture.project, path.readBytes(), fixture.budget)
+            graph.beginRun(1, 60_000)
+            assertEquals(RepairRunStatus.RUNNING, graph.snapshot.runs.single().status)
+            val completed = graph.finishRun(RepairRunStatus.NO_CHANGES, RepairEvidence("unchanged", "bounded later native run"))
+            assertEquals(RepairRunStatus.NO_CHANGES, completed.status)
+            requireDeclaredGraphBudget(fixture.project, path.readBytes(), fixture.budget)
+            graph.beginRun(1, 60_000)
+            assertEquals(listOf(RepairRunStatus.NO_CHANGES, RepairRunStatus.RUNNING), graph.snapshot.runs.map { it.status })
+            requireDeclaredGraphBudget(fixture.project, path.readBytes(), fixture.budget)
+            val before = path.readBytes()
+            val snapshot = graph.snapshot
+            val source = fixture.project.resolve("src/modules/alpha.c")
+            val sourceBytes = source.readBytes()
+            val key = Files.readAttributes(path, BasicFileAttributes::class.java).fileKey()
+            assertFailsWith<RepairBudgetExceededException> {
+                graph.finishRun(RepairRunStatus.INTERRUPTED, RepairEvidence("interrupted", "n".repeat(20 * 1024)))
+            }
+            assertEquals(snapshot, graph.snapshot)
+            assertContentEquals(before, path.readBytes())
+            assertEquals(key, Files.readAttributes(path, BasicFileAttributes::class.java).fileKey())
+            assertContentEquals(sourceBytes, source.readBytes())
+        }
+    }
+
+    @Test
+    fun `archive over cap source scanning cannot skip a corrupt declaration for a later valid history`() {
+        val parent = Path.of("build/test-tmp").toAbsolutePath().normalize().also { Files.createDirectories(it) }
+        val fixture = releaseRepairFixture(temporaryParent = parent, legacyRejectedPrefix = true)
+        val bundle = ArchivalPackager.create(fixture.project, fixture.project.parent.resolve("declared-source-base.zip"))
+        ArchivalBundleVerifier.extractAndVerify(bundle.archivePath, fixture.project.parent.resolve("declared-source-base-control"))
+        val forged = fixture.project.parent.resolve("declared-source-corrupt.zip")
+        rewriteArchive(bundle.archivePath, forged) { entries ->
+            val graphPath = "reports/repair-revisions/graph.json"
+            val text = entries.getValue(graphPath).toString(Charsets.UTF_8)
+            val graph = Json.parseToJsonElement(text).jsonObject
+            val oldCap = graph.getValue("budget").jsonObject.getValue("maximumGraphBytes").jsonPrimitive.content
+            val cap = text.toByteArray().size - 128
+            assertTrue(cap > 0)
+            val changed = text.replace("\"maximumGraphBytes\":$oldCap", "\"maximumGraphBytes\":$cap")
+            assertTrue(changed.toByteArray().size > cap)
+            entries[graphPath] = changed.toByteArray() // Preserve the real canonical graph whitespace.
+            val retained = entries.entries.single { it.key.startsWith("reports/repair-revisions/legacy-graph-") &&
+                Json.parseToJsonElement(it.value.toString(Charsets.UTF_8)).jsonObject["pending"] != JsonNull }.value
+            assertTrue(retained.size <= cap, "source body admission must reach its digest check")
+            entries["reports/repair-revisions/legacy-graph-${"0".repeat(64)}.json"] = retained
+        }
+        val output = fixture.project.parent.resolve("declared-source-corrupt-refused")
+        val failure = assertFailsWith<IllegalArgumentException> { ArchivalBundleVerifier.extractAndVerify(forged, output) }
+        assertTrue(failure.message.orEmpty().contains("declared legacy graph digest changed"), failure.message)
+        assertFalse(output.exists())
     }
 
     @Test
@@ -3022,6 +3608,1133 @@ class ModuleRevisionGraphTest {
     }
 
     @Test
+    fun `compact and old explicit null node wires remain readable with raw archive identity`() {
+        val parent = Path.of("build/test-tmp").toAbsolutePath().normalize().also { Files.createDirectories(it) }
+        val fixture = releaseRepairFixture(temporaryParent = parent)
+        val graphPath = fixture.project.resolve("reports/repair-revisions/graph.json")
+        val compact = graphPath.readText()
+        val explicit = explicitNullNodeWire(compact)
+        assertNotEquals(compact, explicit)
+        assertEquals(JsonNull, Json.parseToJsonElement(explicit).jsonObject.getValue("nodes")
+            .jsonArray.first().jsonObject.getValue("rollbackRecord")) // Prior producer compatibility.
+        for ((name, wire) in listOf("compact" to compact, "explicit" to explicit)) {
+            graphPath.writeText(wire)
+            ModuleRevisionGraph.open(fixture.project, GeneratedCRepairIndexProfile).use { graph ->
+                assertEquals(4, graph.snapshot.schemaVersion)
+                assertEquals(RepairRunStatus.FULLY_ACCEPTED, graph.snapshot.runs.last().status)
+            }
+            assertEquals(wire, graphPath.readText()) // Admission does not normalize/hash other bytes.
+            val bundle = ArchivalPackager.create(fixture.project, fixture.project.parent.resolve("$name-wire.zip"))
+            val extracted = fixture.project.parent.resolve("$name-wire-extracted")
+            ArchivalBundleVerifier.extractAndVerify(bundle.archivePath, extracted)
+            assertContentEquals(wire.toByteArray(), extracted.resolve("reports/repair-revisions/graph.json").readBytes())
+            assertContentEquals(fixture.after, extracted.resolve(fixture.relativePath).readBytes())
+        }
+        graphPath.writeText(compact)
+        val bundle = ArchivalPackager.create(fixture.project, fixture.project.parent.resolve("archive-whitespace-base.zip"))
+        val minified = fixture.project.parent.resolve("archive-whitespace-minified.zip")
+        rewriteArchive(bundle.archivePath, minified) { entries ->
+            entries["reports/repair-revisions/graph.json"] = Json.parseToJsonElement(compact).toString().toByteArray()
+        }
+        val extracted = fixture.project.parent.resolve("archive-whitespace-extracted")
+        ArchivalBundleVerifier.extractAndVerify(minified, extracted) // Existing under-cap archive formatting contract.
+        assertContentEquals(fixture.after, extracted.resolve(fixture.relativePath).readBytes())
+    }
+
+    @Test
+    fun `mixed null node styles unknown malformed and duplicate fields refuse before source changes`() {
+        val parent = Path.of("build/test-tmp").toAbsolutePath().normalize().also { Files.createDirectories(it) }
+        val fixture = releaseRepairFixture(temporaryParent = parent)
+        val graphPath = fixture.project.resolve("reports/repair-revisions/graph.json")
+        val compact = graphPath.readText()
+        val anchor = "      \"recoveredAfterCrash\": "
+        val nullLine = "      \"rollbackRecord\": null,\n"
+        assertTrue(compact.indexOf(anchor) != compact.lastIndexOf(anchor)) // Two null nodes, so a mixture is real.
+        val forgeries = listOf(
+            compact.replaceFirst(anchor, nullLine + anchor),
+            compact.replaceFirst(anchor, "      \"unexpected\": true,\n" + anchor),
+            compact.replaceFirst(anchor, "      \"rollbackRecord\": 0,\n" + anchor),
+            compact.replaceFirst(anchor, nullLine + nullLine + anchor),
+        )
+        val source = fixture.project.resolve(fixture.relativePath)
+        val originalSource = source.readBytes()
+        val key = Files.readAttributes(source, BasicFileAttributes::class.java).fileKey()
+        val valid = ArchivalPackager.create(fixture.project, fixture.project.parent.resolve("null-style-valid.zip"))
+        for ((number, forged) in forgeries.withIndex()) {
+            graphPath.writeText(forged)
+            val graphKey = Files.readAttributes(graphPath, BasicFileAttributes::class.java).fileKey()
+            assertFailsWith<IllegalArgumentException> { ModuleRevisionGraph.open(fixture.project, GeneratedCRepairIndexProfile).close() }
+            assertEquals(forged, graphPath.readText())
+            assertEquals(graphKey, Files.readAttributes(graphPath, BasicFileAttributes::class.java).fileKey())
+            assertContentEquals(originalSource, source.readBytes())
+            assertEquals(key, Files.readAttributes(source, BasicFileAttributes::class.java).fileKey())
+            val archive = fixture.project.parent.resolve("null-style-forged-$number.zip")
+            rewriteArchive(valid.archivePath, archive) { entries ->
+                entries["reports/repair-revisions/graph.json"] = forged.toByteArray()
+            }
+            val destination = fixture.project.parent.resolve("null-style-refused-$number")
+            assertFailsWith<IllegalArgumentException> { ArchivalBundleVerifier.extractAndVerify(archive, destination) }
+            assertFalse(destination.exists())
+        }
+        graphPath.writeText(" \n$compact")
+        assertFailsWith<IllegalArgumentException> { ModuleRevisionGraph.open(fixture.project, GeneratedCRepairIndexProfile).close() }
+        graphPath.writeText(compact)
+        ModuleRevisionGraph.open(fixture.project, GeneratedCRepairIndexProfile).close()
+    }
+
+    @Test
+    fun `nonpending schema three upgrades at exact graph cap without artifacts or native four credit`() {
+        val parent = Path.of("build/test-tmp").toAbsolutePath().normalize().also { Files.createDirectories(it) }
+        val budget = RepairResourceBudget(maximumGraphBytes = 32L * 1024)
+        val fixture = releaseRepairFixture(temporaryParent = parent, budget = budget)
+        val graphPath = fixture.project.resolve("reports/repair-revisions/graph.json")
+        val bindingPath = graphPath.parent.resolve("recovery-binding.json")
+        val binding = bindingPath.readBytes()
+        val sourcePath = fixture.project.resolve(fixture.relativePath)
+        val source = sourcePath.readBytes()
+        val compact = graphPath.readText()
+        val nativePrefix = "{\n  \"schemaVersion\": 4,"
+        val legacyPrefix = "{\n  \"schemaVersion\": 3,"
+        assertTrue(compact.startsWith(nativePrefix)) // Select only the root; nested schemas stay unchanged.
+        val legacy = legacyPrefix + compact.removePrefix(nativePrefix)
+        assertEquals(JsonPrimitive(3), Json.parseToJsonElement(legacy).jsonObject.getValue("schemaVersion"))
+        val summary = "synthetic archive fixture observations matched"
+        val summaryField = "      \"evidenceSummary\": \"$summary\","
+        assertEquals(1, Regex(Regex.escape(summaryField)).findAll(legacy).count())
+        val padding = (budget.maximumGraphBytes - legacy.toByteArray().size).toInt()
+        assertTrue(padding > 0)
+        val paddedSummary = summary + "p".repeat(padding)
+        val paddedSummaryField = "      \"evidenceSummary\": \"$paddedSummary\","
+        val saturated = legacy.replace(summaryField, paddedSummaryField)
+        assertEquals(budget.maximumGraphBytes, saturated.toByteArray().size.toLong())
+        graphPath.writeText(saturated)
+        val artifacts = Files.list(graphPath.parent).use { files -> files.map { it.fileName.toString() }.sorted().toList() }
+        ModuleRevisionGraph.open(fixture.project, GeneratedCRepairIndexProfile, budget).use { graph ->
+            assertEquals(3, graph.snapshot.schemaVersion)
+            val before = graph.snapshot
+            graph.enableRunContract()
+            assertEquals(4, graph.snapshot.schemaVersion)
+            assertEquals(before.profileSha256, graph.snapshot.profileSha256)
+            assertEquals(before.indexSha256, graph.snapshot.indexSha256)
+            assertEquals(before.runs, graph.snapshot.runs)
+            graph.synchronizeRepairHistory()
+        }
+        assertTrue(saturated.startsWith(legacyPrefix))
+        val native = nativePrefix + saturated.removePrefix(legacyPrefix)
+        assertEquals(native, graphPath.readText())
+        assertEquals(budget.maximumGraphBytes, graphPath.readBytes().size.toLong())
+        val preservedName = "legacy-graph-${sha256(saturated.toByteArray())}.json"
+        assertContentEquals(saturated.toByteArray(), graphPath.parent.resolve(preservedName).readBytes())
+        assertEquals(artifacts, Files.list(graphPath.parent).use { files ->
+            files.map { it.fileName.toString() }.filter { it != preservedName }.sorted().toList() })
+        assertContentEquals(binding, bindingPath.readBytes())
+        assertContentEquals(source, sourcePath.readBytes())
+        requireRepairGraphByteBudget(native.toByteArray(), budget)
+        ModuleRevisionGraph.open(fixture.project, GeneratedCRepairIndexProfile, budget).use { graph ->
+            assertFailsWith<RepairBudgetExceededException> { graph.beginRun(1, 60_000) }
+            assertFailsWith<RepairBudgetExceededException> { graph.beginAttempt(listOf(fixture.relativePath)) }
+            assertEquals(native, graphPath.readText())
+        }
+        assertEquals(1, Regex(Regex.escape(paddedSummaryField)).findAll(native).count())
+        val plusOne = native.replace(paddedSummaryField, paddedSummaryField.replace(paddedSummary, paddedSummary + "q"))
+        assertEquals(budget.maximumGraphBytes + 1, plusOne.toByteArray().size.toLong())
+        assertFailsWith<RepairBudgetExceededException> { requireRepairGraphByteBudget(plusOne.toByteArray(), budget) }
+        // Explicit-null native4 bytes are also fully charged: only real legacy pending origins
+        // retain the earlier bounded allowance, not every null node.
+        assertFailsWith<RepairBudgetExceededException> { requireRepairGraphByteBudget(explicitNullNodeWire(native).toByteArray(), budget) }
+        graphPath.writeText(plusOne)
+        val key = Files.readAttributes(graphPath, BasicFileAttributes::class.java).fileKey()
+        assertFailsWith<RepairBudgetExceededException> { ModuleRevisionGraph.open(fixture.project, GeneratedCRepairIndexProfile, budget).close() }
+        assertEquals(plusOne, graphPath.readText())
+        assertEquals(key, Files.readAttributes(graphPath, BasicFileAttributes::class.java).fileKey())
+        assertContentEquals(source, sourcePath.readBytes())
+        graphPath.writeText(native)
+        val bundle = ArchivalPackager.create(fixture.project, fixture.project.parent.resolve("exact-cap-compact.zip"))
+        val extracted = fixture.project.parent.resolve("exact-cap-compact-extracted")
+        ArchivalBundleVerifier.extractAndVerify(bundle.archivePath, extracted)
+        assertContentEquals(native.toByteArray(), extracted.resolve("reports/repair-revisions/graph.json").readBytes())
+        assertContentEquals(source, extracted.resolve(fixture.relativePath).readBytes())
+    }
+
+    /** Exact prior node wire; leave nonnull records and every other byte untouched. */
+    private fun explicitNullNodeWire(compact: String): String = compact.replace(
+        Regex("(?m)(      \"validationProof\": [^\n]*,\n)(      \"recoveredAfterCrash\": )"),
+    ) { match -> match.groupValues[1] + "      \"rollbackRecord\": null,\n" + match.groupValues[2] }
+
+    @Test
+    fun `archive requires native and recovered pending rollback records with either null encoding`() {
+        val parent = Path.of("build/test-tmp").toAbsolutePath().normalize().also { Files.createDirectories(it) }
+        for (legacyPending in listOf(false, true)) {
+            val fixture = releaseRepairFixture(temporaryParent = parent,
+                rejectedAttempts = if (legacyPending) 0 else 1, legacyRejectedPrefix = legacyPending)
+            val valid = ArchivalPackager.create(fixture.project,
+                fixture.project.parent.resolve("required-record-$legacyPending.zip"))
+            ArchivalBundleVerifier.extractAndVerify(valid.archivePath,
+                fixture.project.parent.resolve("required-record-$legacyPending-control"))
+            for (explicitNull in listOf(false, true)) {
+                val tampered = fixture.project.parent.resolve("missing-record-$legacyPending-$explicitNull.zip")
+                rewriteArchive(valid.archivePath, tampered) { entries ->
+                    val path = "reports/repair-revisions/graph.json"
+                    val graph = Json.parseToJsonElement(entries.getValue(path).decodeToString()).jsonObject
+                    assertEquals(JsonPrimitive(4), graph.getValue("schemaVersion"))
+                    val rejected = graph.getValue("nodes").jsonArray.single {
+                        it.jsonObject.getValue("status").jsonPrimitive.content == "rejected" }.jsonObject
+                    assertTrue(rejected.getValue("rollbackRecord") is JsonObject)
+                    val nodes = graph.getValue("nodes").jsonArray.map { element ->
+                        val node = element.jsonObject
+                        val stripped = if (node.getValue("id") == rejected.getValue("id")) node - "rollbackRecord" else node
+                        if (explicitNull && (stripped["rollbackRecord"] == null || stripped["rollbackRecord"] is JsonNull))
+                            JsonObject(stripped + ("rollbackRecord" to JsonNull)) else JsonObject(stripped)
+                    }
+                    entries[path] = JsonObject(graph + ("nodes" to JsonArray(nodes))).toString().toByteArray()
+                    // ACP receipts, blobs, validation receipts and history remain complete and unchanged.
+                }
+                val output = fixture.project.parent.resolve("missing-record-$legacyPending-$explicitNull-refused")
+                val failure = assertFailsWith<IllegalArgumentException> { ArchivalBundleVerifier.extractAndVerify(tampered, output) }
+                assertTrue(failure.message.orEmpty().contains("lacks a finalized rollback record"), failure.message)
+                assertFalse(output.exists())
+            }
+        }
+    }
+
+    @Test
+    fun `archive cannot erase a prior rollback failure by deleting its record and downgrading both run copies`() {
+        val parent = Path.of("build/test-tmp").toAbsolutePath().normalize().also { Files.createDirectories(it) }
+        val fixture = releaseRepairFixture(temporaryParent = parent, recoveredRollbackPrefix = true)
+        val valid = ArchivalPackager.create(fixture.project, fixture.project.parent.resolve("failure-record-present.zip"))
+        ArchivalBundleVerifier.extractAndVerify(valid.archivePath, fixture.project.parent.resolve("failure-record-present-control"))
+        for (mode in listOf("plain", "fabricated-legacy", "graph-schema-three")) {
+            val tampered = fixture.project.parent.resolve("failure-record-erased-$mode.zip")
+            rewriteArchive(valid.archivePath, tampered) { entries ->
+                val path = "reports/repair-revisions/graph.json"
+                val graph = Json.parseToJsonElement(entries.getValue(path).decodeToString()).jsonObject
+                val failed = graph.getValue("nodes").jsonArray.single { element ->
+                    element.jsonObject["rollbackRecord"]?.takeUnless { it is JsonNull }?.jsonObject
+                        ?.get("failureCode")?.let { it !is JsonNull } == true }.jsonObject
+                val record = failed.getValue("rollbackRecord").jsonObject
+                assertEquals("restored_after_failure", record.getValue("state").jsonPrimitive.content)
+                val owner = record.getValue("runId")
+                val nodes = graph.getValue("nodes").jsonArray.map { element ->
+                    val node = element.jsonObject
+                    if (node.getValue("id") == failed.getValue("id")) JsonObject(node - "rollbackRecord") else node
+                }
+                entries[path] = JsonObject(graph + ("nodes" to JsonArray(nodes))).toString().toByteArray()
+                for (documentPath in listOf(path, "reports/repair_history.json")) {
+                    val document = Json.parseToJsonElement(entries.getValue(documentPath).decodeToString()).jsonObject
+                    var rewritten = 0
+                    val runs = document.getValue("runs").jsonArray.map { element ->
+                        val run = element.jsonObject
+                        if (run.getValue("id") != owner) run else {
+                            rewritten++
+                            assertEquals("rollback_failed", run.getValue("status").jsonPrimitive.content)
+                            JsonObject((run - setOf("rollbackFailureAttemptId", "rollbackResolution")) + mapOf(
+                                "schemaVersion" to JsonPrimitive(1), "status" to JsonPrimitive("validation_failed")))
+                        }
+                    }
+                    assertEquals(1, rewritten)
+                    entries[documentPath] = JsonObject(document + ("runs" to JsonArray(runs))).toString().toByteArray()
+                }
+                if (mode != "plain") {
+                    val stripped = Json.parseToJsonElement(entries.getValue(path).decodeToString()).jsonObject
+                    val declared = JsonObject(stripped + mapOf(
+                        "schemaVersion" to JsonPrimitive(3),
+                        "nodes" to JsonArray(stripped.getValue("nodes").jsonArray.map { JsonObject(it.jsonObject - "rollbackRecord") }),
+                    )).toString().toByteArray()
+                    if (mode == "fabricated-legacy") {
+                        // Same resealed context/nodes/runs/proofs/blobs: a correct hash is not a
+                        // pre-migration commitment and must not exempt the missing failure record.
+                        entries["reports/repair-revisions/legacy-graph-${sha256(declared)}.json"] = declared
+                    } else {
+                        assertEquals("graph-schema-three", mode)
+                        entries[path] = declared // Downgrade every node, not merely the failed one.
+                    }
+                }
+            }
+            val output = fixture.project.parent.resolve("failure-record-erased-$mode-refused")
+            val failure = assertFailsWith<IllegalArgumentException> { ArchivalBundleVerifier.extractAndVerify(tampered, output) }
+            assertTrue(failure.message.orEmpty().contains("lacks a finalized rollback record"), failure.message)
+            assertFalse(output.exists())
+        }
+    }
+
+    @Test
+    fun `archive local schema three declarations never exempt missing finalized rollback records`() {
+        val parent = Path.of("build/test-tmp").toAbsolutePath().normalize().also { Files.createDirectories(it) }
+        val budget = RepairResourceBudget(maximumGraphBytes = 64L * 1024)
+        val fixture = releaseRepairFixture(temporaryParent = parent, rejectedAttempts = 1, budget = budget)
+        val graphPath = fixture.project.resolve("reports/repair-revisions/graph.json")
+        val current = graphPath.readText()
+        // AUTHORED historical wire compatibility input, not a claim that an old native writer ran.
+        // Retain this declared schema3 document before asking the real runtime to upgrade it.
+        val authored = current.replaceFirst("{\n  \"schemaVersion\": 4,", "{\n  \"schemaVersion\": 3,")
+            .replace(Regex("(?m)^      \"rollbackRecord\": [^\n]*,\n"), "")
+        assertNotEquals(current, authored)
+        val origin = Json.parseToJsonElement(authored).jsonObject
+        assertEquals(JsonPrimitive(3), origin.getValue("schemaVersion"))
+        assertEquals(JsonNull, origin.getValue("pending"))
+        assertTrue(origin.getValue("nodes").jsonArray.all { "rollbackRecord" !in it.jsonObject })
+        graphPath.writeText(authored)
+        val legacyFailure = assertFailsWith<IllegalArgumentException> {
+            ArchivalPackager.create(fixture.project, fixture.project.parent.resolve("authored-schema-three-refused.zip"))
+        }
+        assertTrue(legacyFailure.message.orEmpty().contains("lacks a finalized rollback record"), legacyFailure.message)
+        val originName = "legacy-graph-${sha256(authored.toByteArray())}.json"
+        graphPath.parent.resolve(originName).writeText(authored)
+        ModuleRevisionGraph.open(fixture.project, GeneratedCRepairIndexProfile, budget).use { graph ->
+            graph.enableRunContract()
+            graph.synchronizeRepairHistory()
+            assertEquals(4, graph.snapshot.schemaVersion)
+            assertNull(graph.snapshot.nodes.single { it.status == ModuleRevisionStatus.REJECTED }.rollbackRecord)
+        }
+        assertContentEquals(fixture.after, fixture.project.resolve(fixture.relativePath).readBytes())
+        val upgradedFailure = assertFailsWith<IllegalArgumentException> {
+            ArchivalPackager.create(fixture.project, fixture.project.parent.resolve("authored-origin-upgraded-refused.zip"))
+        }
+        assertTrue(upgradedFailure.message.orEmpty().contains("lacks a finalized rollback record"), upgradedFailure.message)
+
+        // Local compatibility reading/recovery is supported, but adding genuine current-writer
+        // attempts cannot supply the missing finalized outcome for an earlier rejected attempt.
+        val appended = fixture.after + "\n/* later native origin control */\n".toByteArray()
+        ModuleRevisionGraph.open(fixture.project, GeneratedCRepairIndexProfile, budget).use { graph ->
+            val corpus = graph.retainedRegressionCorpus()
+            val iteration = requireNotNull(graph.snapshot.nodes.last().repairMetadata).iterationIndex + 1
+            graph.beginRun(2, 60_000)
+            fun attempt(index: Int): ModuleRevisionAttempt {
+                val value = graph.beginAttempt(listOf(fixture.relativePath), RevisionRepairMetadata(
+                    index, "compile", "bounded failure", null, corpus.inputs.map(ProcessInput::id), null, corpus.sha256))
+                graph.persistAndBindAgentInvocation(value, completeAcpReceiptDocument(
+                    fixture.project, value, fixture.relativePath, fixture.after, appended))
+                graph.installCandidate(value, mapOf(fixture.relativePath to appended))
+                return value
+            }
+            val rejected = graph.reject(attempt(iteration), RepairEvidence("rejected", "later native rejection"))
+            assertEquals(false, requireNotNull(rejected.rollbackRecord).legacyPendingStateUnknown)
+            val accepted = attempt(iteration + 1)
+            val proof = archiveValidationProofFixture(graph, accepted, fixture.project, corpus.inputs,
+                receiptName = "archive-native-origin.validation.json")
+            graph.bindOriginalBinary(requireNotNull(proof.originalBinarySha256))
+            graph.bindExpectedObservations(sha256(buildString {
+                append(proof.originalBinarySha256).append('\n')
+                corpus.inputs.forEach { input -> append(input.id.length).append(':').append(input.id).append(":0:")
+                    .append(sha256(byteArrayOf())).append(':').append(sha256(byteArrayOf())).append('\n') }
+            }.toByteArray()))
+            graph.accept(accepted, RepairEvidence("valid", "later native fixture observations matched"), proof)
+            graph.synchronizeRepairHistory()
+        }
+        assertEquals(0, MakeProjectBuilder.build(fixture.project).returnCode)
+        val mixedFailure = assertFailsWith<IllegalArgumentException> {
+            ArchivalPackager.create(fixture.project, fixture.project.parent.resolve("authored-origin-native-append-refused.zip"))
+        }
+        assertTrue(mixedFailure.message.orEmpty().contains("lacks a finalized rollback record"), mixedFailure.message)
+        assertContentEquals(appended, fixture.project.resolve(fixture.relativePath).readBytes())
+        assertTrue(graphPath.readBytes().size.toLong() < budget.maximumGraphBytes,
+            "missing-record checks must run even when byte-credit admission returns early")
+
+        // Separate supported positive: complete current-writer records, not a nullable legacy
+        // baseline. Every resealed substitution below starts from this verified native archive.
+        val nativeFixture = releaseRepairFixture(temporaryParent = parent, rejectedAttempts = 1, budget = budget)
+        val valid = ArchivalPackager.create(nativeFixture.project, nativeFixture.project.parent.resolve("native-records-complete.zip"))
+        val control = nativeFixture.project.parent.resolve("native-records-complete-control")
+        ArchivalBundleVerifier.extractAndVerify(valid.archivePath, control)
+        assertContentEquals(nativeFixture.after, control.resolve(nativeFixture.relativePath).readBytes())
+        val nativeGraph = Json.parseToJsonElement(nativeFixture.project.resolve("reports/repair-revisions/graph.json").readText()).jsonObject
+        val nativeRejected = nativeGraph.getValue("nodes").jsonArray.filter {
+            it.jsonObject.getValue("status").jsonPrimitive.content == "rejected"
+        }
+        assertEquals(1, nativeRejected.size)
+        assertTrue(nativeRejected.all { it.jsonObject.getValue("rollbackRecord") is JsonObject })
+        val nativeOrigin = JsonObject(nativeGraph + mapOf(
+            "schemaVersion" to JsonPrimitive(3),
+            "nodes" to JsonArray(nativeGraph.getValue("nodes").jsonArray.map { JsonObject(it.jsonObject - "rollbackRecord") }),
+        ))
+        val nativeAuthored = nativeOrigin.toString()
+        val nativeOriginPath = "reports/repair-revisions/legacy-graph-${sha256(nativeAuthored.toByteArray())}.json"
+        for (mode in listOf("native-absent", "native-null", "missing", "malformed", "context", "prefix", "conflicting", "oversize")) {
+            val tampered = nativeFixture.project.parent.resolve("authored-origin-$mode.zip")
+            rewriteArchive(valid.archivePath, tampered) { entries ->
+                if (mode.startsWith("native-")) {
+                    val path = "reports/repair-revisions/graph.json"
+                    val graph = Json.parseToJsonElement(entries.getValue(path).decodeToString()).jsonObject
+                    val nodes = graph.getValue("nodes").jsonArray
+                    val rejected = nodes.last { it.jsonObject.getValue("status").jsonPrimitive.content == "rejected" }.jsonObject
+                    assertTrue(rejected.getValue("rollbackRecord") is JsonObject)
+                    val changed = nodes.map { element ->
+                        val node = element.jsonObject
+                        val stripped = if (node.getValue("id") == rejected.getValue("id")) node - "rollbackRecord" else node
+                        if (mode == "native-null" && (stripped["rollbackRecord"] == null || stripped["rollbackRecord"] is JsonNull))
+                            JsonObject(stripped + ("rollbackRecord" to JsonNull)) else JsonObject(stripped)
+                    }
+                    entries[path] = JsonObject(graph + ("nodes" to JsonArray(changed))).toString().toByteArray()
+                } else {
+                    val graphPath = "reports/repair-revisions/graph.json"
+                    val currentGraph = Json.parseToJsonElement(entries.getValue(graphPath).decodeToString()).jsonObject
+                    entries[graphPath] = JsonObject(currentGraph + ("nodes" to JsonArray(
+                        currentGraph.getValue("nodes").jsonArray.map { JsonObject(it.jsonObject - "rollbackRecord") }
+                    ))).toString().toByteArray()
+                    entries[nativeOriginPath] = nativeAuthored.toByteArray()
+                    if (mode != "conflicting") entries.remove(nativeOriginPath)
+                    val changed: ByteArray? = when (mode) {
+                        "missing" -> null
+                        "malformed" -> JsonObject(nativeOrigin + ("unexpectedOriginField" to JsonPrimitive(true))).toString().toByteArray()
+                        "context" -> JsonObject(nativeOrigin + ("indexSha256" to JsonPrimitive(
+                            if (nativeOrigin.getValue("indexSha256").jsonPrimitive.content == "0".repeat(64)) "1".repeat(64) else "0".repeat(64)
+                        ))).toString().toByteArray()
+                        "prefix", "conflicting" -> JsonObject(nativeOrigin + ("nodes" to JsonArray(nativeOrigin.getValue("nodes").jsonArray.map { element ->
+                            val node = element.jsonObject
+                            if (node.getValue("status").jsonPrimitive.content == "rejected")
+                                JsonObject(node + ("evidenceSummary" to JsonPrimitive("different declared node"))) else node
+                        }))).toString().toByteArray()
+                        "oversize" -> nativeAuthored.toByteArray().copyOf((budget.maximumGraphBytes + 1).toInt()).also { bytes ->
+                            java.util.Arrays.fill(bytes, nativeAuthored.toByteArray().size, bytes.size, ' '.code.toByte()) }
+                        else -> error("unhandled origin control")
+                    }
+                    changed?.let { bytes -> entries["reports/repair-revisions/legacy-graph-${sha256(bytes)}.json"] = bytes }
+                }
+                // Self-declared source variants are substitution/refusal controls, not authority
+                // tests for the removed context/prefix collector. All receipt/blob/validation evidence remains.
+            }
+            val output = nativeFixture.project.parent.resolve("authored-origin-$mode-refused")
+            val failure = assertFailsWith<IllegalArgumentException> { ArchivalBundleVerifier.extractAndVerify(tampered, output) }
+            val expected = if (mode == "oversize") "remaining evidence budget"
+                else "lacks a finalized rollback record"
+            assertTrue(failure.message.orEmpty().contains(expected), "$mode: ${failure.message}")
+            assertFalse(output.exists())
+        }
+    }
+
+    @Test
+    fun `archive extraction rejects a root rollback claim with valid payload hashes`() {
+        val fixture = releaseRepairFixture()
+        val valid = ArchivalPackager.create(fixture.project, fixture.project.parent.resolve("root-rollback-valid.zip"))
+        val verified = fixture.project.parent.resolve("root-rollback-valid-extracted")
+        ArchivalBundleVerifier.extractAndVerify(valid.archivePath, verified)
+        assertContentEquals(fixture.after, verified.resolve(fixture.relativePath).readBytes())
+
+        val tampered = fixture.project.parent.resolve("root-rollback-tampered.zip")
+        rewriteArchive(valid.archivePath, tampered) { entries ->
+            val graphPath = "reports/repair-revisions/graph.json"
+            val graph = Json.parseToJsonElement(requireNotNull(entries[graphPath]).toString(Charsets.UTF_8)).jsonObject
+            assertEquals(JsonPrimitive(4), graph.getValue("schemaVersion"))
+            val nodes = graph.getValue("nodes").jsonArray
+            val root = nodes.first().jsonObject
+            val accepted = nodes.last().jsonObject
+            assertFalse("rollbackRecord" in root) // New producer omits only null node records.
+            val rollback = JsonObject(mapOf(
+                "schemaVersion" to JsonPrimitive(1),
+                "attemptId" to accepted.getValue("id"),
+                "runId" to accepted.getValue("repairMetadata").jsonObject.getValue("runId"),
+                "targetRevisionId" to root.getValue("id"),
+                "expectedSourceRevisionSha256" to root.getValue("sourceRevisionSha256"),
+                "state" to JsonPrimitive("restored_verified"),
+                "failureStage" to JsonNull,
+                "failureCode" to JsonNull,
+                "observedSourceRevisionSha256" to root.getValue("sourceRevisionSha256"),
+                "legacyPendingStateUnknown" to JsonPrimitive(false),
+                "candidateSourceInstallStarted" to JsonPrimitive(true),
+            ))
+            // Keep the source revisions, runs, receipts, and recovery binding intact. The archive
+            // helper recomputes every payload hash, so rejection must come from root semantics.
+            val changedRoot = JsonObject(root + ("rollbackRecord" to rollback))
+            entries[graphPath] = JsonObject(graph + ("nodes" to JsonArray(listOf(changedRoot) + nodes.drop(1))))
+                .toString().toByteArray(Charsets.UTF_8)
+        }
+
+        val extracted = fixture.project.parent.resolve("root-rollback-rejected")
+        val failure = assertFailsWith<IllegalArgumentException> {
+            ArchivalBundleVerifier.extractAndVerify(tampered, extracted)
+        }
+        assertTrue(failure.message.orEmpty().contains("repair release graph root is invalid"), failure.message)
+        assertFalse(extracted.exists())
+    }
+
+    @Test
+    fun `recovery profile cache owns copies and charges distinct source bytes before retention`() {
+        val paths = listOf("a.src", "b.src")
+        val budget = RepairResourceBudget(maximumSourceFiles = 2, maximumSourceFileBytes = 8,
+            maximumSourceBytes = 8, maximumContextFiles = 2, maximumContextBytes = 8,
+            maximumStagingDirectories = 2, maximumStagingBytes = 8, maximumPatchFiles = 1, maximumPatchBytes = 8)
+        val bytes = mutableMapOf("a.src" to "aaaa".toByteArray(), "b.src" to "bbbb".toByteArray())
+        var physicalReads = 0
+        val view = object : RepairRecoverySourceView {
+            override val sourcePaths = paths
+            override val editablePaths = paths
+            override fun readSource(relative: String): ByteArray { physicalReads++; return bytes.getValue(relative) }
+        }
+        val type = Class.forName("decompengine.repair.RecoveryProfileSourceCache")
+        val constructor = type.getDeclaredConstructor(RepairRecoverySourceView::class.java, RepairResourceBudget::class.java)
+            .apply { isAccessible = true }
+        val read = type.getDeclaredMethod("readSource", String::class.java).apply { isAccessible = true }
+        fun source(cache: Any, path: String): ByteArray = try { read.invoke(cache, path) as ByteArray }
+            catch (failure: java.lang.reflect.InvocationTargetException) { throw failure.targetException }
+        val cache = constructor.newInstance(view, budget)
+        for (path in listOf("unknown.src", "../a.src")) assertFailsWith<IllegalArgumentException> { source(cache, path) }
+        assertEquals(0, physicalReads)
+        val first = source(cache, "a.src")
+        first.fill(0)
+        bytes.getValue("a.src").fill(1) // Neither callback nor reader aliases may retarget the retained bytes.
+        repeat(8) { assertContentEquals("aaaa".toByteArray(), source(cache, "a.src")) }
+        assertEquals(1, physicalReads)
+        assertContentEquals("bbbb".toByteArray(), source(cache, "b.src"))
+        assertEquals(2, physicalReads) // Exactly8 admitted bytes across two distinct paths.
+
+        bytes["a.src"] = ByteArray(9)
+        val refused = constructor.newInstance(view, budget)
+        assertFailsWith<RepairBudgetExceededException> { source(refused, "a.src") }
+        bytes["a.src"] = ByteArray(8)
+        assertEquals(8, source(refused, "a.src").size)
+        assertFailsWith<RepairBudgetExceededException> { source(refused, "b.src") } // Eight plus four is over cap.
+        bytes["b.src"] = byteArrayOf()
+        assertContentEquals(byteArrayOf(), source(refused, "b.src")) // Failed admission retained no partial entry.
+        assertEquals(6, physicalReads)
+    }
+
+    @Test
+    fun `concurrent recovery profile lookups admit same path once and return independent copies`() {
+        val paths = listOf("code.src")
+        val expected = "original".toByteArray()
+        val budget = RepairResourceBudget(maximumSourceFiles = 1, maximumSourceFileBytes = 8,
+            maximumSourceBytes = 8, maximumContextFiles = 1, maximumContextBytes = 8,
+            maximumStagingDirectories = 1, maximumStagingBytes = 8, maximumPatchFiles = 1, maximumPatchBytes = 8)
+        val ready = java.util.concurrent.CountDownLatch(2)
+        val start = java.util.concurrent.CountDownLatch(1)
+        val physicalEntered = java.util.concurrent.CountDownLatch(1)
+        val releasePhysical = java.util.concurrent.CountDownLatch(1)
+        val physicalReads = java.util.concurrent.atomic.AtomicInteger()
+        lateinit var cache: Any
+        val view = object : RepairRecoverySourceView {
+            override val sourcePaths = paths
+            override val editablePaths = paths
+            override fun readSource(relative: String): ByteArray {
+                physicalReads.incrementAndGet()
+                physicalEntered.countDown()
+                // Observe actual monitor ownership, not a delay guessed to imply exclusion.
+                assertTrue(Thread.holdsLock(cache))
+                assertTrue(releasePhysical.await(2, TimeUnit.SECONDS))
+                return expected
+            }
+        }
+        val type = Class.forName("decompengine.repair.RecoveryProfileSourceCache")
+        cache = type.getDeclaredConstructor(RepairRecoverySourceView::class.java, RepairResourceBudget::class.java)
+            .apply { isAccessible = true }.newInstance(view, budget)
+        val read = type.getDeclaredMethod("readSource", String::class.java).apply { isAccessible = true }
+        fun lookup(): ByteArray = try { read.invoke(cache, "code.src") as ByteArray }
+            catch (failure: java.lang.reflect.InvocationTargetException) { throw failure.targetException }
+        val executor = Executors.newFixedThreadPool(2)
+        try {
+            val results = (0..1).map {
+                executor.submit<ByteArray> {
+                    ready.countDown()
+                    assertTrue(start.await(2, TimeUnit.SECONDS))
+                    lookup()
+                }
+            }
+            assertTrue(ready.await(2, TimeUnit.SECONDS))
+            start.countDown()
+            assertTrue(physicalEntered.await(2, TimeUnit.SECONDS))
+            // Do not wait for a second physical admission: correctly serialized misses forbid it.
+            releasePhysical.countDown()
+            val first = results[0].get(2, TimeUnit.SECONDS)
+            val second = results[1].get(2, TimeUnit.SECONDS)
+            assertEquals(1, physicalReads.get())
+            assertTrue(first !== second)
+            assertContentEquals(expected, first)
+            assertContentEquals(expected, second)
+            first.fill(0)
+            assertContentEquals(expected, second)
+            assertContentEquals(expected, lookup())
+            assertEquals(1, physicalReads.get())
+        } finally {
+            start.countDown(); releasePhysical.countDown()
+            executor.shutdownNow()
+            assertTrue(executor.awaitTermination(2, TimeUnit.SECONDS))
+        }
+    }
+
+    @Test
+    fun `recovery profile may repeat immutable lookups while two physical snapshots still detect blob mutation`() {
+        val parent = Path.of("build/test-tmp").toAbsolutePath().normalize().also { Files.createDirectories(it) }
+        val paths = listOf("a.src", "b.src")
+        val originals = mapOf("a.src" to "aaaaaaaa".toByteArray(), "b.src" to "bbbbbbbb".toByteArray())
+        val candidate = "cccccccc".toByteArray()
+        val budget = RepairResourceBudget(maximumSourceFiles = 2, maximumSourceFileBytes = 8,
+            maximumSourceBytes = 16, maximumContextFiles = 2, maximumContextBytes = 16,
+            maximumStagingDirectories = 2, maximumStagingBytes = 16,
+            maximumPatchFiles = 1, maximumPatchBytes = 8)
+        for (mutateBlob in listOf(false, true)) {
+            val root = Files.createTempDirectory(parent, "repeated-recovery-lookup-")
+            originals.forEach { (path, bytes) -> root.resolve(path).writeBytes(bytes) }
+            val layout = RepairIndexLayout(paths, paths, modules = listOf(
+                RepairModuleEvidence("a", listOf("a.src")), RepairModuleEvidence("b", listOf("b.src"))))
+            var profileFinished = false
+            var lookups = 0
+            var blobMutated = false
+            val profile = object : RepairIndexProfile {
+                override fun profileId() = "repeated-authenticated-recovery-profile"
+                override fun resolve(projectRoot: Path, budget: RepairResourceBudget): RepairIndexLayout {
+                    originals.forEach { (path, bytes) ->
+                        require(projectRoot.resolve(path).readBytes().contentEquals(bytes)) { "source-sensitive layout requires target bytes" }
+                    }
+                    return layout
+                }
+                override fun authorizesRecoveryLayout(sourcePaths: List<String>, editablePaths: List<String>,
+                    budget: RepairResourceBudget) = sourcePaths == paths && editablePaths == paths
+                override fun resolveForRecovery(projectRoot: Path, budget: RepairResourceBudget,
+                    sourcePaths: List<String>, editablePaths: List<String>, readSource: (String) -> ByteArray): RepairIndexLayout {
+                    assertEquals(paths, sourcePaths)
+                    repeat(6) {
+                        paths.forEach { path ->
+                            val bytes = readSource(path)
+                            lookups++
+                            assertContentEquals(originals.getValue(path), bytes)
+                            bytes.fill(0) // A caller may mutate its copy, never the retained cache.
+                        }
+                    }
+                    profileFinished = true
+                    return layout
+                }
+                override fun validateSourceContent(path: String, bytes: ByteArray) {
+                    if (mutateBlob && profileFinished && !blobMutated && path == "a.src") {
+                        // Runs after the profile returns, during the first uncached snapshot.
+                        // A cached second snapshot would miss this physical content replacement.
+                        root.resolve("reports/repair-revisions/blobs/" + sha256(originals.getValue(path)))
+                            .writeBytes("xxxxxxxx".toByteArray())
+                        blobMutated = true
+                    }
+                }
+            }
+            class CandidateCrash : Error()
+            ModuleRevisionGraph.openForTesting(root, profile, budget, ModuleRevisionFaultInjector { point ->
+                if (point is ModuleRevisionFaultPoint.AfterPublicationExchange && point.phase == "candidate") throw CandidateCrash()
+            }).use { graph ->
+                graph.enableRunContract()
+                val attempt = graph.beginAttempt(listOf("a.src"))
+                assertFailsWith<CandidateCrash> { graph.installCandidate(attempt, mapOf("a.src" to candidate)) }
+            }
+            val graphPath = root.resolve("reports/repair-revisions/graph.json")
+            val beforeGraph = graphPath.readBytes()
+            val graphKey = Files.readAttributes(graphPath, BasicFileAttributes::class.java).fileKey()
+            val sourceKey = Files.readAttributes(root.resolve("a.src"), BasicFileAttributes::class.java).fileKey()
+            var exchanges = 0
+            if (mutateBlob) {
+                val failure = assertFailsWith<IllegalArgumentException> {
+                    ModuleRevisionGraph.openForTesting(root, profile, budget, ModuleRevisionFaultInjector { point ->
+                        if (point is ModuleRevisionFaultPoint.BeforePublicationExchange && point.phase == "startup-rollback") exchanges++
+                    }).close()
+                }
+                assertEquals("recovery source view preimage digest or size differs", failure.message)
+                assertTrue(blobMutated)
+                assertEquals(12, lookups)
+                assertEquals(0, exchanges)
+                assertContentEquals(beforeGraph, graphPath.readBytes())
+                assertEquals(graphKey, Files.readAttributes(graphPath, BasicFileAttributes::class.java).fileKey())
+                assertContentEquals(candidate, root.resolve("a.src").readBytes())
+                assertEquals(sourceKey, Files.readAttributes(root.resolve("a.src"), BasicFileAttributes::class.java).fileKey())
+            } else {
+                ModuleRevisionGraph.open(root, profile, budget).use { graph ->
+                    assertEquals(12, lookups)
+                    originals.forEach { (path, bytes) -> assertContentEquals(bytes, root.resolve(path).readBytes()) }
+                    assertEquals(RepairRollbackState.RESTORED_VERIFIED, graph.snapshot.nodes.last().rollbackRecord?.state)
+                    assertTrue(graph.snapshot.runs.isEmpty())
+                }
+            }
+        }
+    }
+
+    @Test
+    fun `native rollback marker state matrix preserves in progress and failure outcomes`() {
+        val digest = "a".repeat(64)
+        val record = RepairRollbackRecord(attemptId = "revision_marker", runId = null,
+            targetRevisionId = "root_marker", expectedSourceRevisionSha256 = digest,
+            state = RepairRollbackState.NOT_REQUIRED_VERIFIED, observedSourceRevisionSha256 = digest)
+        for (started in listOf(false, true)) {
+            record.copy(state = RepairRollbackState.RESTORE_IN_PROGRESS,
+                candidateSourceInstallStarted = started, observedSourceRevisionSha256 = null)
+            for (state in listOf(RepairRollbackState.RESTORE_FAILED_UNRESOLVED, RepairRollbackState.RESTORED_AFTER_FAILURE)) {
+                val failed = record.copy(state = state, candidateSourceInstallStarted = started,
+                    failureStage = RepairRollbackStage.SOURCE_RESTORE,
+                    failureCode = RepairRollbackFailureCode.RESTORE_OPERATION_FAILED)
+                assertEquals(started, failed.candidateSourceInstallStarted)
+                assertEquals(state, failed.state)
+            }
+        }
+        assertEquals(false, record.candidateSourceInstallStarted)
+        assertEquals(true, record.copy(state = RepairRollbackState.RESTORED_VERIFIED,
+            candidateSourceInstallStarted = true).candidateSourceInstallStarted)
+        // Null belongs to a genuinely changed legacy migration, checked with its node context on load.
+        assertNull(record.copy(state = RepairRollbackState.RESTORED_VERIFIED,
+            legacyPendingStateUnknown = true, candidateSourceInstallStarted = null).candidateSourceInstallStarted)
+        for (state in RepairRollbackState.entries) {
+            val failureState = state in setOf(RepairRollbackState.RESTORE_FAILED_UNRESOLVED, RepairRollbackState.RESTORED_AFTER_FAILURE)
+            val failure = assertFailsWith<IllegalArgumentException> {
+                record.copy(state = state, candidateSourceInstallStarted = null,
+                    failureStage = if (failureState) RepairRollbackStage.SOURCE_RESTORE else null,
+                    failureCode = if (failureState) RepairRollbackFailureCode.RESTORE_OPERATION_FAILED else null)
+            }
+            assertEquals("native rollback requires a known source-install marker", failure.message)
+        }
+        assertEquals("failure-free restored rollback has an unstarted source-install marker",
+            assertFailsWith<IllegalArgumentException> {
+                record.copy(state = RepairRollbackState.RESTORED_VERIFIED)
+            }.message)
+        assertEquals("not-required rollback requires an unstarted source-install marker",
+            assertFailsWith<IllegalArgumentException> {
+                record.copy(candidateSourceInstallStarted = true)
+            }.message)
+    }
+
+    @Test
+    fun `native pending and finalized records bind known install marker to actual restoration`() {
+        val parent = Path.of("build/test-tmp").toAbsolutePath().normalize().also { Files.createDirectories(it) }
+        val profile = DeclarativeRepairIndexProfile("native-install-marker",
+            RepairIndexLayout(listOf("code.c"), listOf("code.c"), modules = listOf(RepairModuleEvidence("code", listOf("code.c")))))
+        for (installed in listOf(false, true)) {
+            val root = Files.createTempDirectory(parent, "native-install-marker-")
+            val source = root.resolve("code.c").also { it.writeText("before") }
+            val path = root.resolve("reports/repair-revisions/graph.json")
+            var armed = false
+            val graph = ModuleRevisionGraph.openForTesting(root, profile, faultInjector = ModuleRevisionFaultInjector { point ->
+                if (armed && point is ModuleRevisionFaultPoint.AfterStatePublicationDirectorySync &&
+                    point.scope == "revision-state" && point.name == "graph.json") throw SimulatedRepairCrash()
+            })
+            try {
+                graph.enableRunContract() // Native schema4 without an active run uses actual non-detached source installation.
+                val attempt = graph.beginAttempt(listOf("code.c"))
+                if (installed) graph.installCandidate(attempt, mapOf("code.c" to "candidate".toByteArray()))
+                armed = true
+                assertFailsWith<SimulatedRepairCrash> { graph.reject(attempt, RepairEvidence("rejected", "marker recovery")) }
+            } finally {
+                graph.close()
+            }
+            fun refuseForgedRecord(canonical: String, pending: Boolean) {
+                val document = Json.parseToJsonElement(canonical).jsonObject
+                val record = if (pending) document.getValue("pending").jsonObject.getValue("rollbackRecord").jsonObject
+                    else document.getValue("nodes").jsonArray.last().jsonObject.getValue("rollbackRecord").jsonObject
+                val terminal = if (installed) "not_required_verified" else "restored_verified"
+                val cases = listOf(
+                    Triple<JsonElement, String, String>(JsonNull, record.getValue("state").jsonPrimitive.content,
+                        "native rollback requires a known source-install marker"),
+                    Triple(JsonPrimitive(installed), terminal, if (installed)
+                        "not-required rollback requires an unstarted source-install marker"
+                        else "failure-free restored rollback has an unstarted source-install marker"))
+                for ((marker, state, expectedMessage) in cases) {
+                    val forgedRecord = JsonObject(record + mapOf("candidateSourceInstallStarted" to marker,
+                        "state" to JsonPrimitive(state),
+                        "observedSourceRevisionSha256" to record.getValue("expectedSourceRevisionSha256")))
+                    val forgedDocument = if (pending) JsonObject(document + ("pending" to JsonObject(
+                        document.getValue("pending").jsonObject + ("rollbackRecord" to forgedRecord))))
+                        else JsonObject(document + ("nodes" to JsonArray(document.getValue("nodes").jsonArray.mapIndexed { index, node ->
+                            if (index == document.getValue("nodes").jsonArray.lastIndex)
+                                JsonObject(node.jsonObject + ("rollbackRecord" to forgedRecord)) else node
+                        })))
+                    val forged = forgedDocument.toString()
+                    assertNotEquals(canonical, forged)
+                    path.writeText(forged)
+                    val sourceBytes = source.readBytes()
+                    val sourceKey = Files.readAttributes(source, BasicFileAttributes::class.java).fileKey()
+                    val graphKey = Files.readAttributes(path, BasicFileAttributes::class.java).fileKey()
+                    val failure = assertFailsWith<IllegalArgumentException> { ModuleRevisionGraph.open(root, profile).close() }
+                    assertEquals(expectedMessage, failure.message)
+                    assertEquals(forged, path.readText())
+                    assertContentEquals(sourceBytes, source.readBytes())
+                    assertEquals(sourceKey, Files.readAttributes(source, BasicFileAttributes::class.java).fileKey())
+                    assertEquals(graphKey, Files.readAttributes(path, BasicFileAttributes::class.java).fileKey())
+                }
+                path.writeText(canonical)
+            }
+            val pending = path.readText()
+            val pendingRecord = Json.parseToJsonElement(pending).jsonObject.getValue("pending").jsonObject
+                .getValue("rollbackRecord").jsonObject
+            assertEquals(JsonPrimitive(false), pendingRecord.getValue("legacyPendingStateUnknown"))
+            assertEquals(JsonPrimitive(installed), pendingRecord.getValue("candidateSourceInstallStarted"))
+            assertEquals("restore_in_progress", pendingRecord.getValue("state").jsonPrimitive.content)
+            refuseForgedRecord(pending, true)
+            ModuleRevisionGraph.open(root, profile).use { recovered ->
+                val outcome = requireNotNull(recovered.snapshot.nodes.last().rollbackRecord)
+                assertFalse(outcome.legacyPendingStateUnknown)
+                assertEquals(installed, outcome.candidateSourceInstallStarted)
+                assertEquals(if (installed) RepairRollbackState.RESTORED_VERIFIED else RepairRollbackState.NOT_REQUIRED_VERIFIED, outcome.state)
+                assertEquals("before", source.readText())
+                assertTrue(recovered.snapshot.runs.isEmpty())
+            }
+            refuseForgedRecord(path.readText(), false)
+            ModuleRevisionGraph.open(root, profile).close()
+        }
+    }
+
+    @Test
+    fun `native unstarted rollback retains an actual verification failure through successful recovery`() {
+        val parent = Path.of("build/test-tmp").toAbsolutePath().normalize().also { Files.createDirectories(it) }
+        val root = Files.createTempDirectory(parent, "native-unstarted-failure-")
+        val source = root.resolve("code.c").also { it.writeText("before") }
+        val profile = DeclarativeRepairIndexProfile("native-unstarted-failure",
+            RepairIndexLayout(listOf("code.c"), listOf("code.c"), modules = listOf(RepairModuleEvidence("code", listOf("code.c")))))
+        var armed = false
+        val graph = ModuleRevisionGraph.openForTesting(root, profile, faultInjector = ModuleRevisionFaultInjector { point ->
+            if (armed && point is ModuleRevisionFaultPoint.AfterStatePublicationDirectorySync &&
+                point.scope == "revision-state" && point.name == "graph.json") {
+                armed = false
+                // An unrelated edit after the write-ahead marker must fail verification without claiming an install.
+                source.writeText("foreign")
+            }
+        })
+        try {
+            graph.enableRunContract()
+            val attempt = graph.beginAttempt(listOf("code.c"))
+            armed = true
+            assertFailsWith<IllegalStateException> { graph.reject(attempt, RepairEvidence("rejected", "unstarted failure")) }
+            val pending = Json.parseToJsonElement(root.resolve("reports/repair-revisions/graph.json").readText()).jsonObject
+                .getValue("pending").jsonObject.getValue("rollbackRecord").jsonObject
+            assertEquals(JsonPrimitive(false), pending.getValue("legacyPendingStateUnknown"))
+            assertEquals(JsonPrimitive(false), pending.getValue("candidateSourceInstallStarted"))
+            assertEquals("restore_failed_unresolved", pending.getValue("state").jsonPrimitive.content)
+            assertEquals("source_verification", pending.getValue("failureStage").jsonPrimitive.content)
+            assertEquals("target_digest_mismatch", pending.getValue("failureCode").jsonPrimitive.content)
+            assertEquals("foreign", source.readText())
+        } finally {
+            graph.close()
+        }
+        // The fixture restores the unrelated edit; recovery must retain the genuine failure instead of NOT_REQUIRED.
+        source.writeText("before")
+        ModuleRevisionGraph.open(root, profile).use { recovered ->
+            val outcome = requireNotNull(recovered.snapshot.nodes.last().rollbackRecord)
+            assertFalse(outcome.legacyPendingStateUnknown)
+            assertEquals(false, outcome.candidateSourceInstallStarted)
+            assertEquals(RepairRollbackState.RESTORED_AFTER_FAILURE, outcome.state)
+            assertEquals(RepairRollbackStage.SOURCE_VERIFICATION, outcome.failureStage)
+            assertEquals(RepairRollbackFailureCode.TARGET_DIGEST_MISMATCH, outcome.failureCode)
+            assertEquals(outcome.expectedSourceRevisionSha256, outcome.observedSourceRevisionSha256)
+            assertEquals("before", source.readText())
+        }
+    }
+
+    @Test
+    fun `legacy changed pending and finalized records require unknown install marker while no change remains false`() {
+        val parent = Path.of("build/test-tmp").toAbsolutePath().normalize().also { Files.createDirectories(it) }
+        val profile = DeclarativeRepairIndexProfile("legacy-install-marker",
+            RepairIndexLayout(listOf("code.c"), listOf("code.c"), modules = listOf(RepairModuleEvidence("code", listOf("code.c")))))
+        for (hasChanges in listOf(false, true)) {
+            val root = Files.createTempDirectory(parent, "legacy-install-marker-")
+            val source = root.resolve("code.c").also { it.writeText("before") }
+            ModuleRevisionGraph.open(root, profile).use { graph ->
+                val attempt = graph.beginAttempt(listOf("code.c")) // Schema2, before the install-marker wire existed.
+                if (hasChanges) graph.installCandidate(attempt, mapOf("code.c" to "candidate".toByteArray()))
+            }
+            assertFailsWith<SimulatedRepairCrash> {
+                ModuleRevisionGraph.openForTesting(root, profile, faultInjector = ModuleRevisionFaultInjector { point ->
+                    if (point is ModuleRevisionFaultPoint.AfterStatePublicationDirectorySync &&
+                        point.scope == "revision-state" && point.name == "graph.json") throw SimulatedRepairCrash()
+                }).close()
+            }
+            val path = root.resolve("reports/repair-revisions/graph.json")
+            fun refuseFalseCertainty(canonical: String, currentState: String) {
+                for (marker in listOf("false", "true")) {
+                    val forged = canonical.replace("\"candidateSourceInstallStarted\":null", "\"candidateSourceInstallStarted\":$marker")
+                        .let { if (marker == "false" && currentState != "restore_in_progress")
+                            it.replace("\"state\":\"$currentState\"", "\"state\":\"not_required_verified\"") else it }
+                    assertNotEquals(canonical, forged)
+                    path.writeText(forged)
+                    val bytes = source.readBytes()
+                    val key = Files.readAttributes(source, BasicFileAttributes::class.java).fileKey()
+                    val graphKey = Files.readAttributes(path, BasicFileAttributes::class.java).fileKey()
+                    val failure = assertFailsWith<IllegalArgumentException> { ModuleRevisionGraph.open(root, profile).close() }
+                    assertEquals("legacy changed attempt has a fabricated source-install marker", failure.message)
+                    assertEquals(forged, path.readText())
+                    assertContentEquals(bytes, source.readBytes())
+                    assertEquals(key, Files.readAttributes(source, BasicFileAttributes::class.java).fileKey())
+                    assertEquals(graphKey, Files.readAttributes(path, BasicFileAttributes::class.java).fileKey())
+                }
+                path.writeText(canonical)
+            }
+            fun refuseUnknownForUnchanged(canonical: String, finalized: Boolean) {
+                val forged = canonical.replace("\"candidateSourceInstallStarted\":false", "\"candidateSourceInstallStarted\":null")
+                    .let { if (finalized) it.replace("\"state\":\"not_required_verified\"", "\"state\":\"restored_verified\"") else it }
+                assertNotEquals(canonical, forged)
+                path.writeText(forged)
+                val bytes = source.readBytes()
+                val key = Files.readAttributes(source, BasicFileAttributes::class.java).fileKey()
+                val graphKey = Files.readAttributes(path, BasicFileAttributes::class.java).fileKey()
+                val failure = assertFailsWith<IllegalArgumentException> { ModuleRevisionGraph.open(root, profile).close() }
+                assertEquals("legacy unchanged attempt has a fabricated source-install marker", failure.message)
+                assertEquals(forged, path.readText())
+                assertContentEquals(bytes, source.readBytes())
+                assertEquals(key, Files.readAttributes(source, BasicFileAttributes::class.java).fileKey())
+                assertEquals(graphKey, Files.readAttributes(path, BasicFileAttributes::class.java).fileKey())
+                path.writeText(canonical)
+            }
+            val pending = path.readText()
+            val pendingRecord = Json.parseToJsonElement(pending).jsonObject.getValue("pending").jsonObject
+                .getValue("rollbackRecord").jsonObject
+            assertEquals(JsonPrimitive(true), pendingRecord.getValue("legacyPendingStateUnknown"))
+            assertEquals(if (hasChanges) JsonNull else JsonPrimitive(false), pendingRecord.getValue("candidateSourceInstallStarted"))
+            if (hasChanges) refuseFalseCertainty(pending, "restore_in_progress")
+            else refuseUnknownForUnchanged(pending, false)
+            ModuleRevisionGraph.open(root, profile).use { graph ->
+                val record = requireNotNull(graph.snapshot.nodes.last().rollbackRecord)
+                assertTrue(record.legacyPendingStateUnknown)
+                assertEquals(if (hasChanges) null else false, record.candidateSourceInstallStarted)
+                assertEquals(if (hasChanges) RepairRollbackState.RESTORED_VERIFIED else RepairRollbackState.NOT_REQUIRED_VERIFIED, record.state)
+                assertEquals("before", source.readText())
+                assertTrue(graph.snapshot.runs.isEmpty())
+            }
+            if (hasChanges) refuseFalseCertainty(path.readText(), "restored_verified")
+            else refuseUnknownForUnchanged(path.readText(), true)
+            ModuleRevisionGraph.open(root, profile).close()
+        }
+    }
+
+    @Test
+    fun `generated adapter recovers dirty C bodies and changed includes from authenticated virtual preimages`() {
+        val parent = Path.of("build/test-tmp").toAbsolutePath().normalize().also { Files.createDirectories(it) }
+        for (changeIncludes in listOf(false, true)) {
+            val project = generatedProject(temporaryParent = parent)
+            val target = project.resolve("src/modules/alpha.c")
+            val original = target.readBytes()
+            val before = GeneratedCRepairIndexProfile.resolve(project, RepairResourceBudget())
+            assertTrue(before.pathDependencies.getValue("src/modules/alpha.c").isNotEmpty())
+            val invalidBody = "int broken( { /* intentionally invalid C syntax */\n".toByteArray()
+            val candidate = if (changeIncludes) invalidBody else original + "\n".toByteArray() + invalidBody
+            class CandidateCrash : Error()
+            var indexSha = ""
+            ModuleRevisionGraph.openForTesting(project, GeneratedCRepairIndexProfile,
+                faultInjector = ModuleRevisionFaultInjector { point ->
+                    if (point is ModuleRevisionFaultPoint.AfterPublicationExchange && point.phase == "candidate") throw CandidateCrash()
+                }).use { graph ->
+                graph.enableRunContract()
+                indexSha = graph.snapshot.indexSha256
+                val attempt = graph.beginAttempt(listOf("src/modules/alpha.c"))
+                assertFailsWith<CandidateCrash> { graph.installCandidate(attempt, mapOf("src/modules/alpha.c" to candidate)) }
+            }
+            assertContentEquals(candidate, target.readBytes())
+            if (changeIncludes) {
+                assertNotEquals(before.pathDependencies,
+                    GeneratedCRepairIndexProfile.resolve(project, RepairResourceBudget()).pathDependencies)
+            }
+            ModuleRevisionGraph.open(project, GeneratedCRepairIndexProfile).use { graph ->
+                assertEquals(indexSha, graph.snapshot.indexSha256)
+                assertContentEquals(original, target.readBytes())
+                assertTrue(graph.snapshot.nodes.last().changedModules.isNotEmpty())
+                assertEquals(RepairRollbackState.RESTORED_VERIFIED, graph.snapshot.nodes.last().rollbackRecord?.state)
+                assertTrue(graph.snapshot.runs.isEmpty()) // No fabricated run for standalone recovery.
+            }
+        }
+    }
+
+    @Test
+    fun `archive retains genuine recovered rollback failure before a later accepted run`() {
+        val parent = Path.of("build/test-tmp").toAbsolutePath().normalize().also { Files.createDirectories(it) }
+        val fixture = releaseRepairFixture(recoveredRollbackPrefix = true, temporaryParent = parent)
+        val canonical = ModuleRevisionGraph.open(fixture.project, GeneratedCRepairIndexProfile).use { it.snapshot }
+        assertEquals(listOf(RepairRunStatus.ROLLBACK_FAILED, RepairRunStatus.FULLY_ACCEPTED), canonical.runs.map { it.status })
+        val failed = canonical.runs.first()
+        val recovered = canonical.nodes[1]
+        val rollback = requireNotNull(recovered.rollbackRecord)
+        assertEquals(RepairRollbackState.RESTORED_AFTER_FAILURE, failed.rollbackResolution)
+        assertEquals(recovered.id, failed.rollbackFailureAttemptId)
+        assertEquals(failed.id, rollback.runId)
+        assertEquals(recovered.id, rollback.attemptId)
+        assertEquals(failed.rollbackResolution, rollback.state)
+        assertTrue(recovered.recoveredAfterCrash)
+        assertEquals(ModuleRevisionStatus.REJECTED, recovered.status)
+        assertEquals(1, failed.attemptedCount)
+        assertNull(failed.acceptedHeadId)
+        assertEquals(canonical.headId, canonical.runs.last().acceptedHeadId)
+        assertEquals(canonical.headId, canonical.fullyAcceptedHeadId)
+        assertNull(canonical.provisionalHeadId)
+        assertNull(canonical.pendingAttemptId)
+
+        val bundle = ArchivalPackager.create(fixture.project, fixture.project.parent.resolve("recovered-failure-prefix.zip"))
+        val extracted = fixture.project.parent.resolve("recovered-failure-prefix-extracted")
+        val lineage = ArchivalBundleVerifier.extractAndVerifyCandidateLineage(bundle.archivePath, extracted)
+        val selected = lineage.source.acceptedAcpContributions.single()
+        assertEquals(canonical.nodes.last().id, selected.taskId)
+        assertTrue(selected.taskId != failed.rollbackFailureAttemptId)
+        assertContentEquals(fixture.after, extracted.resolve(fixture.relativePath).readBytes())
+        val archivedGraph = Json.parseToJsonElement(extracted.resolve("reports/repair-revisions/graph.json").readText()).jsonObject
+        val archivedHistory = Json.parseToJsonElement(extracted.resolve("reports/repair_history.json").readText()).jsonObject
+        for (document in listOf(archivedGraph, archivedHistory)) {
+            val runs = document.getValue("runs").jsonArray.map { parseRepairRunState(it.toString()) }
+            assertEquals(canonical.runs, runs)
+            assertEquals(RepairRunStatus.ROLLBACK_FAILED, runs.first().status)
+            assertEquals(RepairRollbackState.RESTORED_AFTER_FAILURE, runs.first().rollbackResolution)
+            assertEquals(RepairRunStatus.FULLY_ACCEPTED, runs.last().status)
+        }
+        assertEquals(JsonNull, archivedGraph.getValue("pending"))
+        assertEquals(archivedGraph.getValue("headId"), archivedGraph.getValue("fullyAcceptedHeadId"))
+        assertEquals("restored_after_failure", archivedGraph.getValue("nodes").jsonArray[1].jsonObject
+            .getValue("rollbackRecord").jsonObject.getValue("state").jsonPrimitive.content)
+    }
+
+    @Test
+    fun `archive refuses schema one run hiding a genuine resolved rollback failure`() {
+        val parent = Path.of("build/test-tmp").toAbsolutePath().normalize().also { Files.createDirectories(it) }
+        val fixture = releaseRepairFixture(recoveredRollbackPrefix = true, temporaryParent = parent)
+        val bundle = ArchivalPackager.create(fixture.project, fixture.project.parent.resolve("resolved-failure-schema-two.zip"))
+        // Genuine schema2 failure/recovery plus later accepted contribution remains a positive.
+        val positive = ArchivalBundleVerifier.extractAndVerifyCandidateLineage(bundle.archivePath,
+            fixture.project.parent.resolve("resolved-failure-schema-two-control"))
+        val contribution = positive.source.acceptedAcpContributions.single()
+        for (terminal in listOf("validation_failed", "interrupted", "rejected")) {
+            val tampered = fixture.project.parent.resolve("hidden-failure-schema-one-$terminal.zip")
+            rewriteArchive(bundle.archivePath, tampered) { entries ->
+                val graph = Json.parseToJsonElement(entries.getValue("reports/repair-revisions/graph.json").decodeToString()).jsonObject
+                val record = graph.getValue("nodes").jsonArray[1].jsonObject.getValue("rollbackRecord").jsonObject
+                assertEquals("restored_after_failure", record.getValue("state").jsonPrimitive.content)
+                assertTrue(record.getValue("failureCode") != JsonNull)
+                assertEquals(contribution.taskId, graph.getValue("nodes").jsonArray.last().jsonObject.getValue("id").jsonPrimitive.content)
+                for (path in listOf("reports/repair-revisions/graph.json", "reports/repair_history.json")) {
+                    val document = Json.parseToJsonElement(entries.getValue(path).decodeToString()).jsonObject
+                    val runs = document.getValue("runs").jsonArray
+                    assertEquals(2, runs.size)
+                    val historical = runs.first().jsonObject
+                    assertEquals("rollback_failed", historical.getValue("status").jsonPrimitive.content)
+                    assertEquals(record.getValue("attemptId"), historical.getValue("rollbackFailureAttemptId"))
+                    val hidden = JsonObject((historical - setOf("rollbackFailureAttemptId", "rollbackResolution")) + mapOf(
+                        "schemaVersion" to JsonPrimitive(1), "status" to JsonPrimitive(terminal)))
+                    assertEquals("fully_accepted", runs.last().jsonObject.getValue("status").jsonPrimitive.content)
+                    entries[path] = JsonObject(document + ("runs" to JsonArray(listOf(hidden) + runs.drop(1))))
+                        .toString().toByteArray()
+                }
+                // All node/source/receipt/contribution bytes remain unchanged; helper reseals outer manifest.
+            }
+            val output = fixture.project.parent.resolve("hidden-failure-schema-one-$terminal-rejected")
+            val failure = assertFailsWith<IllegalArgumentException> { ArchivalBundleVerifier.extractAndVerify(tampered, output) }
+            assertTrue(failure.message.orEmpty().contains("schema-1 repair release run owns failure-coded rollback records"), failure.message)
+            assertFalse(output.exists())
+        }
+    }
+
+    @Test
+    fun `archive supports both run schemas and refuses cross paired rollback run claims`() {
+        val parent = Path.of("build/test-tmp").toAbsolutePath().normalize().also { Files.createDirectories(it) }
+        val fixture = releaseRepairFixture(rejectedAttempts = 1, temporaryParent = parent)
+        val bundle = ArchivalPackager.create(fixture.project, fixture.project.parent.resolve("run-schema-two.zip"))
+        ArchivalBundleVerifier.extractAndVerify(bundle.archivePath, fixture.project.parent.resolve("run-schema-two-control"))
+        val legacy = fixture.project.parent.resolve("run-schema-one.zip")
+        rewriteArchive(bundle.archivePath, legacy) { entries ->
+            for (path in listOf("reports/repair-revisions/graph.json", "reports/repair_history.json")) {
+                val document = Json.parseToJsonElement(entries.getValue(path).decodeToString()).jsonObject
+                val runs = document.getValue("runs").jsonArray.map { element ->
+                    val run = element.jsonObject
+                    assertEquals(JsonPrimitive(2), run.getValue("schemaVersion"))
+                    JsonObject((run - setOf("rollbackFailureAttemptId", "rollbackResolution")) +
+                        ("schemaVersion" to JsonPrimitive(1)))
+                }
+                entries[path] = JsonObject(document + ("runs" to JsonArray(runs))).toString().toByteArray()
+            }
+        }
+        ArchivalBundleVerifier.extractAndVerify(legacy, fixture.project.parent.resolve("run-schema-one-control"))
+        // Payload hashes and graph/history pairing are recomputed; only semantic linkage is forged.
+        for (mode in listOf("missing-attempt", "accepted-attempt", "wrong-resolution")) {
+            val tampered = fixture.project.parent.resolve("run-rollback-$mode.zip")
+            rewriteArchive(bundle.archivePath, tampered) { entries ->
+                val graph = Json.parseToJsonElement(entries.getValue("reports/repair-revisions/graph.json").decodeToString()).jsonObject
+                val nodes = graph.getValue("nodes").jsonArray
+                val rejected = nodes[1].jsonObject.getValue("id")
+                val accepted = nodes.last().jsonObject.getValue("id")
+                val attempt = when (mode) {
+                    "missing-attempt" -> JsonPrimitive("revision_missing")
+                    "accepted-attempt" -> accepted
+                    else -> rejected
+                }
+                for (path in listOf("reports/repair-revisions/graph.json", "reports/repair_history.json")) {
+                    val document = Json.parseToJsonElement(entries.getValue(path).decodeToString()).jsonObject
+                    val run = document.getValue("runs").jsonArray.single().jsonObject
+                    val changed = JsonObject(run + mapOf(
+                        "status" to JsonPrimitive("rollback_failed"),
+                        "rollbackFailureAttemptId" to attempt,
+                        "rollbackResolution" to JsonPrimitive("restored_after_failure")))
+                    entries[path] = JsonObject(document + ("runs" to JsonArray(listOf(changed)))).toString().toByteArray()
+                }
+            }
+            val output = fixture.project.parent.resolve("run-rollback-$mode-refused")
+            val failure = assertFailsWith<IllegalArgumentException> { ArchivalBundleVerifier.extractAndVerify(tampered, output) }
+            assertTrue(failure.message.orEmpty().contains("rollback"), failure.message)
+            assertFalse(output.exists())
+        }
+    }
+
+    @Test
+    fun `archive distinguishes genuine legacy unknown install from native and no change false markers`() {
+        val parent = Path.of("build/test-tmp").toAbsolutePath().normalize().also { Files.createDirectories(it) }
+        for (mode in listOf("legacy-changed", "legacy-unchanged", "native-changed")) {
+            val fixture = releaseRepairFixture(temporaryParent = parent,
+                rejectedAttempts = if (mode == "native-changed") 1 else 0,
+                legacyRejectedPrefix = mode != "native-changed", legacyPrefixHasChanges = mode != "legacy-unchanged")
+            val document = Json.parseToJsonElement(fixture.project.resolve("reports/repair-revisions/graph.json").readText()).jsonObject
+            val rejected = document.getValue("nodes").jsonArray.single { it.jsonObject.getValue("status").jsonPrimitive.content == "rejected" }.jsonObject
+            val record = rejected.getValue("rollbackRecord").jsonObject
+            assertEquals(mode != "legacy-unchanged", rejected.getValue("changes").jsonArray.isNotEmpty())
+            assertEquals(JsonPrimitive(mode != "native-changed"), record.getValue("legacyPendingStateUnknown"))
+            assertEquals(if (mode == "legacy-changed") JsonNull else JsonPrimitive(false), record.getValue("candidateSourceInstallStarted"))
+            assertEquals(if (mode == "legacy-changed") "restored_verified" else "not_required_verified", record.getValue("state").jsonPrimitive.content)
+            val bundle = ArchivalPackager.create(fixture.project, fixture.project.parent.resolve("$mode-marker.zip"))
+            val extracted = fixture.project.parent.resolve("$mode-marker-control")
+            ArchivalBundleVerifier.extractAndVerify(bundle.archivePath, extracted)
+            assertContentEquals(fixture.after, extracted.resolve(fixture.relativePath).readBytes())
+            val forgeries: List<Triple<JsonElement, String, String>> = when (mode) {
+                "legacy-changed" -> listOf(
+                    Triple(JsonPrimitive(false), "not_required_verified", "repair release legacy changed attempt has a fabricated source-install marker"),
+                    Triple(JsonPrimitive(true), "restored_verified", "repair release legacy changed attempt has a fabricated source-install marker"))
+                "legacy-unchanged" -> listOf(
+                    Triple(JsonNull, "restored_verified", "repair release legacy unchanged attempt has a fabricated source-install marker"),
+                    Triple(JsonPrimitive(true), "restored_verified", "repair release legacy unchanged attempt has a fabricated source-install marker"))
+                else -> listOf(
+                    Triple(JsonNull, "not_required_verified", "repair release native rollback requires a known source-install marker"),
+                    Triple(JsonPrimitive(false), "restored_verified", "repair release failure-free restored rollback has an unstarted source-install marker"),
+                    Triple(JsonPrimitive(true), "not_required_verified", "repair release not-required rollback requires an unstarted source-install marker"))
+            }
+            for ((index, forgery) in forgeries.withIndex()) {
+                val (started, state, expectedMessage) = forgery
+                val forged = fixture.project.parent.resolve("$mode-marker-$index.zip")
+                rewriteArchive(bundle.archivePath, forged) { entries ->
+                    val path = "reports/repair-revisions/graph.json"
+                    val graph = Json.parseToJsonElement(entries.getValue(path).toString(Charsets.UTF_8)).jsonObject
+                    val nodes = graph.getValue("nodes").jsonArray.map { element ->
+                        val node = element.jsonObject
+                        if (node.getValue("id") != rejected.getValue("id")) node else JsonObject(node +
+                            ("rollbackRecord" to JsonObject(node.getValue("rollbackRecord").jsonObject + mapOf(
+                                "candidateSourceInstallStarted" to started,
+                                "state" to JsonPrimitive(state)))))
+                    }
+                    entries[path] = JsonObject(graph + ("nodes" to JsonArray(nodes))).toString().toByteArray()
+                }
+                val output = fixture.project.parent.resolve("$mode-marker-$index-refused")
+                val failure = assertFailsWith<IllegalArgumentException> { ArchivalBundleVerifier.extractAndVerify(forged, output) }
+                assertTrue(failure.message.orEmpty().contains(expectedMessage), failure.message)
+                assertFalse(output.exists())
+            }
+        }
+    }
+
+    @Test
+    fun `archive rejects duplicate migration origins on otherwise bound rejected attempts`() {
+        val fixture = releaseRepairFixture(rejectedAttempts = 2)
+        val bundle = ArchivalPackager.create(fixture.project, fixture.project.parent.resolve("rollback-origins.zip"))
+        ArchivalBundleVerifier.extractAndVerify(bundle.archivePath, fixture.project.parent.resolve("rollback-origins-control"))
+        val tampered = fixture.project.parent.resolve("duplicate-rollback-origins.zip")
+        rewriteArchive(bundle.archivePath, tampered) { entries ->
+            val graphPath = "reports/repair-revisions/graph.json"
+            val graph = Json.parseToJsonElement(entries.getValue(graphPath).toString(Charsets.UTF_8)).jsonObject
+            val nodes = graph.getValue("nodes").jsonArray.map { element ->
+                val node = element.jsonObject
+                if (node.getValue("status").jsonPrimitive.content != "rejected") node else {
+                    val rollback = node.getValue("rollbackRecord").jsonObject
+                    JsonObject(node + ("rollbackRecord" to JsonObject(rollback + mapOf(
+                        "legacyPendingStateUnknown" to JsonPrimitive(true),
+                        "candidateSourceInstallStarted" to JsonNull,
+                        "state" to JsonPrimitive("restored_verified"),
+                    ))))
+                }
+            }
+            entries[graphPath] = JsonObject(graph + ("nodes" to JsonArray(nodes))).toString().toByteArray()
+        }
+        val output = fixture.project.parent.resolve("duplicate-origins-rejected")
+        val failure = assertFailsWith<IllegalArgumentException> { ArchivalBundleVerifier.extractAndVerify(tampered, output) }
+        assertTrue(failure.message.orEmpty().contains("legacy rollback origins"), failure.message)
+        assertFalse(output.exists())
+    }
+
+    @Test
     fun `archive includes provisional contributions only through a fully accepted composed revision`() {
         val fixture = releaseRepairFixture(includeProvisional = true)
         val bundle = ArchivalPackager.create(fixture.project, fixture.project.parent.resolve("composed-repair.zip"))
@@ -3103,7 +4816,7 @@ class ModuleRevisionGraphTest {
             }),
             Mutation("legacy-schema", "schema-v1/v2 repair evidence is non-release", { fixture ->
                 val graph = fixture.project.resolve("reports/repair-revisions/graph.json")
-                graph.writeText(graph.readText().replaceFirst("\"schemaVersion\": 3", "\"schemaVersion\": 1"))
+                graph.writeText(graph.readText().replaceFirst("\"schemaVersion\": 4", "\"schemaVersion\": 1"))
             }),
             Mutation("receipt-record-cross-pair", "records differ from the exact workflow change set", { fixture ->
                 val receipt = fixture.project.resolve(fixture.receiptPath)
@@ -3995,8 +5708,18 @@ class ModuleRevisionGraphTest {
         )
         val blobs = project.resolve("reports/repair-revisions/blobs")
 
-        assertFailsWith<RepairBudgetExceededException> {
+        val sourceBytes = layout.sourcePaths.associateWith { project.resolve(it).readBytes() }
+        val sourceKeys = layout.sourcePaths.associateWith {
+            Files.readAttributes(project.resolve(it), BasicFileAttributes::class.java, LinkOption.NOFOLLOW_LINKS).fileKey()
+        }
+        val failure = assertFailsWith<RepairBudgetExceededException> {
             ModuleRevisionGraph.open(project, profile, failedBudget).close()
+        }
+        assertEquals("repair history exceeds its 1-byte limit", failure.message)
+        layout.sourcePaths.forEach { relative ->
+            assertContentEquals(sourceBytes.getValue(relative), project.resolve(relative).readBytes())
+            assertEquals(sourceKeys.getValue(relative),
+                Files.readAttributes(project.resolve(relative), BasicFileAttributes::class.java, LinkOption.NOFOLLOW_LINKS).fileKey())
         }
         assertFalse(project.resolve("reports/repair-revisions/graph.json").exists())
         assertEquals(2L, Files.list(blobs).use { it.count() })
@@ -4005,6 +5728,9 @@ class ModuleRevisionGraphTest {
 
         val validBudget = RepairResourceBudget(maximumStateDirectoryEntries = 2)
         ModuleRevisionGraph.open(project, profile, validBudget).use { reopened ->
+            assertEquals(2, reopened.snapshot.schemaVersion)
+            assertEquals(ModuleRevisionStatus.ROOT, reopened.snapshot.nodes.single().status)
+            assertTrue(reopened.derivedRepairIterations().isEmpty())
             assertEquals(null, reopened.snapshot.pendingAttemptId)
         }
         assertEquals(2L, Files.list(blobs).use { it.count() })
@@ -4144,11 +5870,414 @@ class ModuleRevisionGraphTest {
         }
     }
 
+    @Test
+    fun `under cap original pending origins are mandatory unique and reused for recorded admission`() {
+        for (schema in 1..3) {
+            // Schema3 uses the existing authored legacy-format fixture, not historical chronology.
+            val fixture = declaredBudgetFixture(schema, reserve = 8192)
+            val path = fixture.project.resolve("reports/repair-revisions/graph.json")
+            assertFailsWith<SimulatedRepairCrash> {
+                ModuleRevisionGraph.openForTesting(fixture.project, GeneratedCRepairIndexProfile, fixture.budget,
+                    ModuleRevisionFaultInjector { point ->
+                        if (point is ModuleRevisionFaultPoint.AfterStatePublicationDirectorySync &&
+                            point.scope == "revision-state" && point.name == "graph.json") throw SimulatedRepairCrash()
+                    }).close()
+            }
+            val marker = path.readBytes()
+            assertTrue(marker.size.toLong() <= fixture.budget.maximumGraphBytes)
+            val binding = path.parent.resolve("recovery-binding.json").readBytes()
+            val declarations = semanticDeclaredInputs(fixture.project)
+            var scans = 0
+            val view = recordedRepairHistorySnapshot(marker, binding, fixture.budget) { consume ->
+                scans++; declarations.forEach { consume(it.name, it.bytes) }
+            }
+            assertEquals(1, scans)
+            assertEquals(true, view.pending?.rollback?.legacyPendingStateUnknown)
+            assertFailsWith<RepairHistorySnapshotRefusal> { recordedRepairHistorySnapshot(marker, binding, fixture.budget) }
+            val source = path.parent.resolve("legacy-graph-${sha256(fixture.legacy)}.json")
+            assertContentEquals(fixture.legacy, source.readBytes())
+            Files.delete(source)
+            val key = Files.readAttributes(path, BasicFileAttributes::class.java).fileKey()
+            val installed = fixture.project.resolve("src/modules/alpha.c").readBytes()
+            assertFailsWith<IllegalArgumentException> { ModuleRevisionGraph.open(fixture.project, GeneratedCRepairIndexProfile, fixture.budget).close() }
+            assertContentEquals(marker, path.readBytes()); assertEquals(key, Files.readAttributes(path, BasicFileAttributes::class.java).fileKey())
+            assertContentEquals(installed, fixture.project.resolve("src/modules/alpha.c").readBytes())
+            source.writeBytes(fixture.legacy)
+            if (schema == 2) {
+                val other = fixture.legacy.toString(Charsets.UTF_8).replaceFirst("\"schemaVersion\": 2", "\"schemaVersion\": 1")
+                    .replace(",\"agentInvocation\":null,\"publicationMode\":\"test_only_non_release\"", "").toByteArray()
+                val ambiguous = declarations + RepairHistoryDeclaredGraph("legacy-graph-${sha256(other)}.json", other)
+                assertFailsWith<RepairHistorySnapshotRefusal> { recordedRepairHistorySnapshot(marker, binding, fixture.budget, ambiguous) }
+                val alternative = path.parent.resolve("legacy-graph-${sha256(other)}.json").also { it.writeBytes(other) }
+                assertTrue(assertFailsWith<IllegalArgumentException> {
+                    ModuleRevisionGraph.open(fixture.project, GeneratedCRepairIndexProfile, fixture.budget).close()
+                }.message.orEmpty().contains("multiple declared legacy graphs"))
+                Files.delete(alternative)
+            }
+            ModuleRevisionGraph.open(fixture.project, GeneratedCRepairIndexProfile, fixture.budget).use { recovered ->
+                assertEquals(RepairRollbackState.RESTORED_VERIFIED, recovered.snapshot.nodes.last().rollbackRecord?.state)
+            }
+            assertContentEquals(fixture.originalSource, fixture.project.resolve("src/modules/alpha.c").readBytes())
+            assertNotNull(recordedRepairHistorySnapshot(path.readBytes(), binding, fixture.budget,
+                semanticDeclaredInputs(fixture.project)).attempts.last().rollback)
+            val finalized = path.readText()
+            val finalRecord = Json.parseToJsonElement(finalized).jsonObject.getValue("nodes").jsonArray.last().jsonObject.getValue("rollbackRecord").toString()
+            val erased = finalized.replace("      \"rollbackRecord\": $finalRecord,\n", "")
+            assertNotEquals(finalized, erased)
+            for (wire in listOf(erased, explicitNullNodeWire(erased))) {
+                assertFailsWith<RepairHistorySnapshotRefusal> { recordedRepairHistorySnapshot(wire.toByteArray(), binding,
+                    fixture.budget, semanticDeclaredInputs(fixture.project)) }
+                path.writeText(wire)
+                assertFailsWith<IllegalArgumentException> { ModuleRevisionGraph.open(fixture.project, GeneratedCRepairIndexProfile, fixture.budget).close() }
+                assertEquals(wire, path.readText())
+            }
+            path.writeText(finalized)
+        }
+    }
+
+    @Test
+    fun `native flag or erased finalized records cannot acquire under cap local compatibility`() {
+        val parent = Path.of("build/test-tmp").toAbsolutePath().normalize().also { Files.createDirectories(it) }
+        val project = generatedProject(temporaryParent = parent)
+        val relative = "src/modules/alpha.c"
+        val source = project.resolve(relative); val original = source.readBytes()
+        ModuleRevisionGraph.open(project, GeneratedCRepairIndexProfile).use { graph ->
+            graph.enableRunContract()
+            val attempt = graph.beginAttempt(listOf(relative))
+            graph.installCandidate(attempt, mapOf(relative to original + "\n/* native */\n".toByteArray()))
+            graph.reject(attempt)
+            assertEquals(false, graph.snapshot.nodes.last().rollbackRecord?.legacyPendingStateUnknown)
+        }
+        val path = project.resolve("reports/repair-revisions/graph.json")
+        val canonical = path.readText(); val binding = path.parent.resolve("recovery-binding.json").readBytes()
+        val record = Json.parseToJsonElement(canonical).jsonObject.getValue("nodes").jsonArray.last().jsonObject.getValue("rollbackRecord").toString()
+        val invented = canonical.replace(record, record.replace("\"legacyPendingStateUnknown\":false", "\"legacyPendingStateUnknown\":true")
+            .replace("\"candidateSourceInstallStarted\":true", "\"candidateSourceInstallStarted\":null"))
+        val line = "      \"rollbackRecord\": $record,\n"
+        assertTrue(line in canonical); assertNotEquals(canonical, invented)
+        val missing = canonical.replace(line, "")
+        for (forged in listOf(invented, missing, explicitNullNodeWire(missing))) {
+            assertTrue(forged.toByteArray().size.toLong() <= RepairResourceBudget().maximumGraphBytes)
+            assertFailsWith<RepairHistorySnapshotRefusal> {
+                recordedRepairHistorySnapshot(forged.toByteArray(), binding, RepairResourceBudget(), semanticDeclaredInputs(project))
+            }
+            path.writeText(forged)
+            val key = Files.readAttributes(path, BasicFileAttributes::class.java).fileKey()
+            assertTrue(assertFailsWith<IllegalArgumentException> { ModuleRevisionGraph.open(project, GeneratedCRepairIndexProfile).close() }
+                .message.orEmpty().contains("complete declared rollback origin"))
+            assertEquals(forged, path.readText()); assertEquals(key, Files.readAttributes(path, BasicFileAttributes::class.java).fileKey())
+            assertContentEquals(original, source.readBytes())
+        }
+        path.writeText(canonical)
+        ModuleRevisionGraph.open(project, GeneratedCRepairIndexProfile).close()
+    }
+
+    @Test
+    fun `original schema two nonpending prefix is preserved unique and earns zero graph credit`() {
+        val fixture = semanticNonpendingFixture()
+        val root = fixture.project; val path = root.resolve("reports/repair-revisions/graph.json")
+        val original = path.readBytes(); val binding = path.parent.resolve("recovery-binding.json").readBytes()
+        assertEquals(JsonPrimitive(2), Json.parseToJsonElement(original.toString(Charsets.UTF_8)).jsonObject.getValue("schemaVersion"))
+        // This source is built from ORIGINAL schema2 pending bytes by the actual finalizer and
+        // original serializer, not by erasing a current schema4 record or authenticating chronology.
+        ModuleRevisionGraph.open(root, GeneratedCRepairIndexProfile, fixture.budget).use { graph -> graph.enableRunContract() }
+        val current = path.readBytes(); val declarations = semanticDeclaredInputs(root)
+        val name = "legacy-graph-${sha256(original)}.json"
+        assertContentEquals(original, path.parent.resolve(name).readBytes())
+        assertNull(recordedRepairHistorySnapshot(current, binding, fixture.budget, declarations).attempts.last().rollback)
+        assertEquals(RepairHistoryReadStatus.RECORDED, readProjectRecordedRepairHistory(root).status)
+        ModuleRevisionGraph.open(root, GeneratedCRepairIndexProfile, fixture.budget).close()
+        assertFailsWith<RepairHistorySnapshotRefusal> { recordedRepairHistorySnapshot(current, binding, fixture.budget) }
+        val text = original.toString(Charsets.UTF_8)
+        val equivalent = text.replaceFirst("\"schemaVersion\": 2", "\"schemaVersion\": 1")
+            .replace(",\"agentInvocation\":null,\"publicationMode\":\"test_only_non_release\"", "").toByteArray()
+        assertFailsWith<RepairHistorySnapshotRefusal> { recordedRepairHistorySnapshot(current, binding, fixture.budget,
+            declarations + RepairHistoryDeclaredGraph("legacy-graph-${sha256(equivalent)}.json", equivalent)) }
+        Files.delete(path.parent.resolve(name))
+        val changed = text.replace("PREFIX_PADDING", "DIFFERENT_PREFIX").toByteArray()
+        assertNotEquals(sha256(original), sha256(changed))
+        val changedPath = path.parent.resolve("legacy-graph-${sha256(changed)}.json").also { it.writeBytes(changed) }
+        val key = Files.readAttributes(path, BasicFileAttributes::class.java).fileKey()
+        assertFailsWith<IllegalArgumentException> { ModuleRevisionGraph.open(root, GeneratedCRepairIndexProfile, fixture.budget).close() }
+        assertEquals(key, Files.readAttributes(path, BasicFileAttributes::class.java).fileKey()); assertContentEquals(current, path.readBytes())
+        Files.delete(changedPath); path.parent.resolve(name).writeBytes(original)
+        // A later native rejection cannot use the earlier nullable-prefix declaration.
+        ModuleRevisionGraph.open(root, GeneratedCRepairIndexProfile, fixture.budget).use { graph ->
+            val attempt = graph.beginAttempt(listOf("src/modules/alpha.c")); graph.reject(attempt)
+            assertNotNull(graph.snapshot.nodes.last().rollbackRecord)
+        }
+        val tail = path.readText(); val record = Json.parseToJsonElement(tail).jsonObject.getValue("nodes").jsonArray.last().jsonObject.getValue("rollbackRecord").toString()
+        val erased = tail.replace("      \"rollbackRecord\": $record,\n", "")
+        assertNotEquals(tail, erased)
+        assertFailsWith<RepairHistorySnapshotRefusal> { recordedRepairHistorySnapshot(erased.toByteArray(), binding, fixture.budget, semanticDeclaredInputs(root)) }
+        for (saturated in listOf(false, true)) {
+            val bounded = semanticNonpendingFixture(saturate = saturated)
+            val selectedPath = bounded.project.resolve("reports/repair-revisions/graph.json")
+            val before = selectedPath.readBytes(); val source = bounded.project.resolve("src/modules/alpha.c").readBytes()
+            ModuleRevisionGraph.open(bounded.project, GeneratedCRepairIndexProfile, bounded.budget).use { graph ->
+                if (saturated) {
+                    assertEquals(bounded.budget.maximumGraphBytes, before.size.toLong())
+                    assertFailsWith<RepairBudgetExceededException> { graph.enableRunContract() }
+                    assertContentEquals(before, selectedPath.readBytes())
+                    assertContentEquals(source, bounded.project.resolve("src/modules/alpha.c").readBytes())
+                } else graph.enableRunContract()
+            }
+        }
+    }
+
+    @Test
+    fun `complete pending source validation refuses foreign context and changed original metadata before mutation`() {
+        val fixture = declaredBudgetFixture(2, reserve = 8192)
+        val path = fixture.project.resolve("reports/repair-revisions/graph.json")
+        assertFailsWith<SimulatedRepairCrash> {
+            ModuleRevisionGraph.openForTesting(fixture.project, GeneratedCRepairIndexProfile, fixture.budget,
+                ModuleRevisionFaultInjector { point -> if (point is ModuleRevisionFaultPoint.AfterStatePublicationDirectorySync &&
+                    point.scope == "revision-state" && point.name == "graph.json") throw SimulatedRepairCrash() }).close()
+        }
+        val marker = path.readBytes(); val binding = path.parent.resolve("recovery-binding.json").readBytes()
+        val original = fixture.legacy.toString(Charsets.UTF_8)
+        val parsed = Json.parseToJsonElement(original).jsonObject
+        val profileId = parsed.getValue("profileId").jsonPrimitive.content
+        val profileSha = parsed.getValue("profileSha256").jsonPrimitive.content
+        val originalPrompt = parsed.getValue("pending").jsonObject.getValue("repairMetadata").jsonObject
+            .getValue("prompt").jsonPrimitive.content
+        assertEquals(sha256("short".toByteArray()), originalPrompt)
+        val alternatives = listOf(
+            original.replace("\"profileId\": \"$profileId\"", "\"profileId\": \"foreign_profile\""),
+            original.replace("\"profileSha256\": \"$profileSha\"", "\"profileSha256\": \"${"0".repeat(64)}\""),
+            original.replace("\"maximumGraphBytes\":16384", "\"maximumGraphBytes\":16385"),
+            original.replace("\"prompt\":\"$originalPrompt\"", "\"prompt\":\"${sha256("changed original prompt".toByteArray())}\""),
+            original.replace("\"storedBlobBytes\": ", "\"storedBlobBytes\": -"),
+        )
+        for (alternative in alternatives) {
+            assertNotEquals(original, alternative)
+            assertFailsWith<RepairHistorySnapshotRefusal> { recordedRepairHistorySnapshot(marker, binding, fixture.budget,
+                listOf(RepairHistoryDeclaredGraph("legacy-graph-${sha256(alternative.toByteArray())}.json", alternative.toByteArray()))) }
+        }
+        val originalPath = path.parent.resolve("legacy-graph-${sha256(fixture.legacy)}.json")
+        Files.delete(originalPath)
+        val changed = alternatives.first().toByteArray(); val foreign = path.parent.resolve("legacy-graph-${sha256(changed)}.json").also { it.writeBytes(changed) }
+        val beforeSource = fixture.project.resolve("src/modules/alpha.c").readBytes(); val key = Files.readAttributes(path, BasicFileAttributes::class.java).fileKey()
+        assertFailsWith<IllegalArgumentException> { ModuleRevisionGraph.open(fixture.project, GeneratedCRepairIndexProfile, fixture.budget).close() }
+        assertContentEquals(marker, path.readBytes()); assertEquals(key, Files.readAttributes(path, BasicFileAttributes::class.java).fileKey())
+        assertContentEquals(beforeSource, fixture.project.resolve("src/modules/alpha.c").readBytes())
+        Files.delete(foreign); originalPath.writeBytes(fixture.legacy)
+    }
+
+    @Test
+    fun `archive joins complete pending origin under cap and rejects a resealed changed owning run`() {
+        val parent = Path.of("build/test-tmp").toAbsolutePath().normalize().also { Files.createDirectories(it) }
+        val fixture = releaseRepairFixture(temporaryParent = parent, legacyRejectedPrefix = true)
+        val path = fixture.project.resolve("reports/repair-revisions/graph.json")
+        val graphBytes = path.readBytes()
+        assertTrue(graphBytes.size.toLong() < RepairResourceBudget().maximumGraphBytes)
+        assertEquals(RepairHistoryReadStatus.RECORDED, readProjectRecordedRepairHistory(fixture.project).status)
+        val bundle = ArchivalPackager.create(fixture.project, fixture.project.parent.resolve("semantic-origin-valid.zip"))
+        val extracted = fixture.project.parent.resolve("semantic-origin-valid")
+        ArchivalBundleVerifier.extractAndVerify(bundle.archivePath, extracted)
+        assertContentEquals(fixture.after, extracted.resolve(fixture.relativePath).readBytes())
+        val forged = fixture.project.parent.resolve("semantic-origin-forged.zip")
+        rewriteArchive(bundle.archivePath, forged) { entries ->
+            val sourcePath = entries.keys.single { key -> key.startsWith("reports/repair-revisions/legacy-graph-") &&
+                Json.parseToJsonElement(entries.getValue(key).toString(Charsets.UTF_8)).jsonObject["pending"] != JsonNull }
+            val source = entries.remove(sourcePath)!!.toString(Charsets.UTF_8)
+            val parsed = Json.parseToJsonElement(source).jsonObject
+            val run = parseRepairRunState(parsed.getValue("runs").jsonArray.single().toString())
+            val changed = source.replace(run.toJson(), run.copy(maximumAttempts = run.maximumAttempts + 1).toJson()).toByteArray()
+            assertFalse(source.toByteArray().contentEquals(changed))
+            entries["reports/repair-revisions/legacy-graph-${sha256(changed)}.json"] = changed
+        }
+        val output = fixture.project.parent.resolve("semantic-origin-forged-refused")
+        val refusal = assertFailsWith<IllegalArgumentException> { ArchivalBundleVerifier.extractAndVerify(forged, output) }
+        assertTrue(refusal.message.orEmpty().contains("complete declared rollback origin"), refusal.message)
+        assertFalse(output.exists())
+    }
+
+    @Test
+    fun `genuine legacy pending failure origin retains all four valid pair replays through resolution`() {
+        val allowed = listOf(
+            RepairRollbackStage.SOURCE_RESTORE to RepairRollbackFailureCode.UNRECOGNIZED_SOURCE_STATE,
+            RepairRollbackStage.SOURCE_RESTORE to RepairRollbackFailureCode.RESTORE_OPERATION_FAILED,
+            RepairRollbackStage.SOURCE_VERIFICATION to RepairRollbackFailureCode.TARGET_DIGEST_MISMATCH,
+            RepairRollbackStage.SOURCE_VERIFICATION to RepairRollbackFailureCode.RESTORE_OPERATION_FAILED,
+        )
+        for ((stage, code) in allowed) {
+            val fixture = declaredBudgetFixture(2, reserve = 8192)
+            val path = fixture.project.resolve("reports/repair-revisions/graph.json")
+            val source = fixture.project.resolve("src/modules/alpha.c")
+            source.writeText("unknown concurrent replacement")
+            assertFailsWith<IllegalStateException> { ModuleRevisionGraph.open(fixture.project, GeneratedCRepairIndexProfile, fixture.budget).close() }
+            val failed = path.readText()
+            assertTrue("restore_failed_unresolved" in failed)
+            // Replay metadata uses an actually persisted failure/original source. It does not
+            // claim the filesystem injected each native failure site individually.
+            val replay = rollbackPairReplace(failed, true, stage, code)
+            val binding = path.parent.resolve("recovery-binding.json").readBytes()
+            val declarations = semanticDeclaredInputs(fixture.project)
+            val pending = recordedRepairHistorySnapshot(replay.toByteArray(), binding, fixture.budget, declarations)
+            assertEquals(stage, pending.pending?.rollback?.failureStage)
+            assertEquals(code, pending.pending?.rollback?.failureCode)
+            path.writeText(replay); source.writeBytes(fixture.originalSource)
+            ModuleRevisionGraph.open(fixture.project, GeneratedCRepairIndexProfile, fixture.budget).use { graph ->
+                val record = requireNotNull(graph.snapshot.nodes.last().rollbackRecord)
+                assertEquals(RepairRollbackState.RESTORED_AFTER_FAILURE, record.state)
+                assertEquals(stage, record.failureStage); assertEquals(code, record.failureCode)
+                assertTrue(record.legacyPendingStateUnknown)
+                assertTrue(graph.snapshot.runs.isEmpty())
+            }
+            val resolved = recordedRepairHistorySnapshot(path.readBytes(), binding, fixture.budget, semanticDeclaredInputs(fixture.project))
+            assertEquals(RepairRollbackState.RESTORED_AFTER_FAILURE, resolved.attempts.last().rollback?.state)
+            assertContentEquals(fixture.originalSource, source.readBytes())
+        }
+    }
+
+    @Test
+    fun `one pending source must cover every nullable finalized prefix without a second witness`() {
+        val fixture = semanticNonpendingFixture()
+        val root = fixture.project; val path = root.resolve("reports/repair-revisions/graph.json")
+        val nonpending = path.readBytes()
+        val source = root.resolve("src/modules/alpha.c")
+        ModuleRevisionGraph.open(root, GeneratedCRepairIndexProfile, fixture.budget).use { graph ->
+            val corpus = graph.retainedRegressionCorpus()
+            val attempt = graph.beginAttempt(listOf("src/modules/alpha.c"), RevisionRepairMetadata(2, "compile", "second original attempt",
+                null, emptyList(), null, corpus.sha256, publicationMode = RepairPublicationMode.TEST_ONLY_NON_RELEASE))
+            graph.installCandidate(attempt, mapOf("src/modules/alpha.c" to source.readBytes() + "\n/* second */\n".toByteArray()))
+        }
+        val pendingSource = path.readBytes()
+        assertFailsWith<SimulatedRepairCrash> {
+            ModuleRevisionGraph.openForTesting(root, GeneratedCRepairIndexProfile, fixture.budget,
+                ModuleRevisionFaultInjector { point -> if (point is ModuleRevisionFaultPoint.AfterStatePublicationDirectorySync &&
+                    point.scope == "revision-state" && point.name == "graph.json") throw SimulatedRepairCrash() }).close()
+        }
+        val marker = path.readBytes(); val binding = path.parent.resolve("recovery-binding.json").readBytes()
+        val declared = semanticDeclaredInputs(root)
+        val view = recordedRepairHistorySnapshot(marker, binding, fixture.budget, declared)
+        assertNull(view.attempts.single().rollback)
+        assertEquals(true, view.pending?.rollback?.legacyPendingStateUnknown)
+        val pendingName = "legacy-graph-${sha256(pendingSource)}.json"
+        assertContentEquals(pendingSource, path.parent.resolve(pendingName).readBytes())
+        // This complete NONPENDING frame covers the nullable prefix but cannot replace the
+        // one pending witness for the flagged attempt. A union of per-ID witnesses is forbidden.
+        val prefixOnly = RepairHistoryDeclaredGraph("legacy-graph-${sha256(nonpending)}.json", nonpending)
+        assertFailsWith<RepairHistorySnapshotRefusal> { recordedRepairHistorySnapshot(marker, binding, fixture.budget, listOf(prefixOnly)) }
+        ModuleRevisionGraph.open(root, GeneratedCRepairIndexProfile, fixture.budget).use { graph ->
+            assertNull(graph.snapshot.nodes[1].rollbackRecord)
+            assertEquals(RepairRollbackState.RESTORED_VERIFIED, graph.snapshot.nodes.last().rollbackRecord?.state)
+        }
+        assertEquals(RepairHistoryReadStatus.RECORDED, readProjectRecordedRepairHistory(root).status)
+        assertContentEquals(fixture.originalSource, source.readBytes())
+    }
+
+    /** Bounded test corpus only, not a production scan or historical-writer authority. */
+    private fun semanticDeclaredInputs(project: Path): List<RepairHistoryDeclaredGraph> =
+        Files.newDirectoryStream(project.resolve("reports/repair-revisions"), "legacy-graph-*.json").use { stream ->
+            stream.sortedBy { it.fileName.toString() }.map { RepairHistoryDeclaredGraph(it.fileName.toString(), it.readBytes()) }
+        }
+
+    private fun semanticNonpendingFixture(saturate: Boolean = false): DeclaredBudgetFixture {
+        val parent = Path.of("build/test-tmp").toAbsolutePath().normalize().also { Files.createDirectories(it) }
+        val root = generatedProject(temporaryParent = parent)
+        val relative = "src/modules/alpha.c"; val target = root.resolve(relative); val original = target.readBytes()
+        val selected = RepairResourceBudget(maximumGraphBytes = 16 * 1024)
+        val path = root.resolve("reports/repair-revisions/graph.json")
+        lateinit var finalized: String
+        ModuleRevisionGraph.open(root, GeneratedCRepairIndexProfile, selected).use { graph ->
+            val corpus = graph.retainedRegressionCorpus()
+            val attempt = graph.beginAttempt(listOf(relative), RevisionRepairMetadata(1, "compile", "PREFIX_PADDING", "PREFIX_PADDING",
+                emptyList(), null, corpus.sha256, publicationMode = RepairPublicationMode.TEST_ONLY_NON_RELEASE))
+            graph.installCandidate(attempt, mapOf(relative to original + "\n/* original2 */\n".toByteArray()))
+            val originalPending = path.readText()
+            assertEquals(JsonPrimitive(2), Json.parseToJsonElement(originalPending).jsonObject.getValue("schemaVersion"))
+            val state = requireNotNull(rollbackPairPrivate("parseGraph", originalPending))
+            fun value(name: String): Any? = state.javaClass.getDeclaredField(name).also { it.isAccessible = true }.get(state)
+            val pending = requireNotNull(value("pending"))
+            val finalizer = graph.javaClass.declaredMethods.single { it.name == "finalizeNode" }.also { it.isAccessible = true }
+            val node = finalizer.invoke(graph, pending, ModuleRevisionStatus.REJECTED, RepairEvidence("rejected", "original-format fixture"), false, null) as ModuleRevisionNode
+            val copy = state.javaClass.declaredMethods.single { it.name == "copy" }.also { it.isAccessible = true }
+            assertEquals(17, copy.parameterCount)
+            val fields: Array<Any?> = (1..copy.parameterCount).map { component -> state.javaClass.getDeclaredMethod("component$component")
+                .also { it.isAccessible = true }.invoke(state) }.toTypedArray()
+            @Suppress("UNCHECKED_CAST")
+            val nodes = value("nodes") as List<ModuleRevisionNode>
+            fields[9] = nodes + node; fields[10] = null
+            val completed = requireNotNull(copy.invoke(state, *fields))
+            val canonical = requireNotNull(rollbackPairPrivate("parseCanonicalGraph", originalPending.toByteArray(), "original schema2 fixture"))
+            val wire = requireNotNull(canonical.javaClass.getDeclaredField("nullNodeWire").also { it.isAccessible = true }.get(canonical))
+            finalized = requireNotNull(rollbackPairPrivate("renderGraph", completed, wire)).toString()
+        }
+        target.writeBytes(original)
+        if (saturate) {
+            val padding = (selected.maximumGraphBytes - finalized.toByteArray().size).toInt()
+            assertTrue(padding > 0)
+            finalized = finalized.replace("PREFIX_PADDING", "PREFIX_PADDING" + "p".repeat(padding))
+        }
+        path.writeText(finalized)
+        val binding = path.parent.resolve("recovery-binding.json").readBytes()
+        val originalView = recordedRepairHistorySnapshot(finalized.toByteArray(), binding, selected)
+        assertNull(originalView.attempts.last().rollback)
+        return DeclaredBudgetFixture(root, selected, finalized.toByteArray(), finalized.toByteArray(), original, 0)
+    }
+
+    private data class DeclaredBudgetFixture(val project: Path, val budget: RepairResourceBudget,
+        val legacy: ByteArray, val nativeGraph: ByteArray, val originalSource: ByteArray, val reservedBytes: Long)
+
+    private fun declaredBudgetFixture(schema: Int, withRun: Boolean = true, reserve: Int = 0): DeclaredBudgetFixture {
+        val parent = Path.of("build/test-tmp").toAbsolutePath().normalize().also { Files.createDirectories(it) }
+        val project = generatedProject(temporaryParent = parent)
+        val target = project.resolve("src/modules/alpha.c")
+        val original = target.readBytes()
+        val budget = RepairResourceBudget(maximumGraphBytes = 16 * 1024)
+        val path = project.resolve("reports/repair-revisions/graph.json")
+        ModuleRevisionGraph.open(project, GeneratedCRepairIndexProfile, budget).use { graph ->
+            if (schema == 3) {
+                graph.enableRunContract()
+                if (withRun) graph.beginRun(2, 60_000)
+            }
+            val metadata = RevisionRepairMetadata(1, "compile", "short", "DECLARED_GRAPH_PADDING", emptyList(),
+                null, graph.retainedRegressionCorpus().sha256, publicationMode = RepairPublicationMode.TEST_ONLY_NON_RELEASE)
+            val attempt = graph.beginAttempt(listOf("src/modules/alpha.c"), metadata)
+            graph.installCandidate(attempt, mapOf("src/modules/alpha.c" to original + "\n/* declared source */\n".toByteArray()))
+        }
+        var native = path.readText()
+        fun legacy(text: String): String = when (schema) {
+            1 -> text.replaceFirst("\"schemaVersion\": 2", "\"schemaVersion\": 1")
+                .replace(",\"agentInvocation\":null,\"publicationMode\":\"test_only_non_release\"", "")
+            2 -> text
+            else -> text.replaceFirst("\"schemaVersion\": 4", "\"schemaVersion\": 3")
+                .replace(",\"legacyRecoveryRequired\":false,\"rollbackRecord\":null", "")
+                .replace(Regex(",\"legacyRecoveryRequired\":false,\"rollbackRecord\":\\{[^{}\n]*\\}"), "")
+        }
+        val unpaddedBytes = legacy(native).toByteArray().size.toLong()
+        val headroom = budget.maximumGraphBytes - unpaddedBytes
+        assertTrue(headroom > 0, "declared schema=$schema unpadded=$unpaddedBytes cap=${budget.maximumGraphBytes}")
+        require(reserve >= 0)
+        // Reserve only slack actually available from this producer; keep at least one padding byte.
+        // Defaults still saturate the unchanged cap exactly. No compatibility credit is enlarged.
+        val admittedReserve = minOf(reserve.toLong(), headroom - 1)
+        val padding = (headroom - admittedReserve).toInt()
+        assertTrue(padding > 0)
+        native = native.replace("DECLARED_GRAPH_PADDING", "p".repeat("DECLARED_GRAPH_PADDING".length + padding))
+        val old = legacy(native).toByteArray()
+        assertEquals(budget.maximumGraphBytes - admittedReserve, old.size.toLong(), "declared schema=$schema")
+        path.writeBytes(old)
+        return DeclaredBudgetFixture(project, budget, old, native.toByteArray(), original, admittedReserve)
+    }
+
+    private fun requireDeclaredGraphBudget(project: Path, payload: ByteArray, budget: RepairResourceBudget) {
+        requireRepairGraphByteBudget(payload, budget) { consume ->
+            Files.newDirectoryStream(project.resolve("reports/repair-revisions"), "legacy-graph-*.json").use { paths ->
+                paths.sortedBy { it.fileName.toString() }.forEach { consume(it.fileName.toString(), it.readBytes()) }
+            }
+        }
+    }
+
     private fun generatedProject(
         undispatchedFallback: Boolean = false,
         profile: ReconstructionProfile = GeneratedCMakeReconstructionProfile.descriptor,
+        temporaryParent: Path? = null,
     ): Path {
-        val project = createTempDirectory("module-revision-").resolve("project")
+        val project = (if (temporaryParent == null) createTempDirectory("module-revision-")
+            else Files.createTempDirectory(temporaryParent, "module-revision-")).resolve("project")
         val promptContext = if (undispatchedFallback) "/* ${"context".repeat(900)} */" else null
         SourceTreeGenerator.generate(
             RecoveredProgramModel(
@@ -4176,6 +6305,358 @@ class ModuleRevisionGraphTest {
         return project
     }
 
+
+    @Test
+    fun `rollback failure records and parser admit only the four producer stage code pairs`() {
+        val allowed = listOf(
+            RepairRollbackStage.SOURCE_RESTORE to RepairRollbackFailureCode.UNRECOGNIZED_SOURCE_STATE,
+            RepairRollbackStage.SOURCE_RESTORE to RepairRollbackFailureCode.RESTORE_OPERATION_FAILED,
+            RepairRollbackStage.SOURCE_VERIFICATION to RepairRollbackFailureCode.TARGET_DIGEST_MISMATCH,
+            RepairRollbackStage.SOURCE_VERIFICATION to RepairRollbackFailureCode.RESTORE_OPERATION_FAILED,
+        )
+        val forbidden = listOf(
+            RepairRollbackStage.SOURCE_RESTORE to RepairRollbackFailureCode.TARGET_DIGEST_MISMATCH,
+            RepairRollbackStage.SOURCE_VERIFICATION to RepairRollbackFailureCode.UNRECOGNIZED_SOURCE_STATE,
+        )
+        for (state in listOf(RepairRollbackState.RESTORE_FAILED_UNRESOLVED, RepairRollbackState.RESTORED_AFTER_FAILURE)) {
+            val digest = "a".repeat(64)
+            val base = RepairRollbackRecord(attemptId = "revision_pair", runId = null, targetRevisionId = "root_pair",
+                expectedSourceRevisionSha256 = digest, state = state,
+                failureStage = allowed.first().first, failureCode = allowed.first().second,
+                observedSourceRevisionSha256 = if (state == RepairRollbackState.RESTORED_AFTER_FAILURE) digest else null,
+                candidateSourceInstallStarted = true)
+            for ((stage, code) in allowed) {
+                val record = base.copy(failureStage = stage, failureCode = code)
+                val parsed = rollbackPairPrivate("parseRepairRollbackRecord", rollbackPairJson(record)) as RepairRollbackRecord
+                assertEquals(record, parsed)
+                assertEquals(stage, parsed.failureStage); assertEquals(code, parsed.failureCode)
+            }
+            for ((stage, code) in forbidden) {
+                assertEquals("rollback failure stage/code pair is invalid",
+                    assertFailsWith<IllegalArgumentException> { base.copy(failureStage = stage, failureCode = code) }.message)
+                val forged = JsonObject(rollbackPairJson(base) + mapOf(
+                    "failureStage" to JsonPrimitive(stage.name.lowercase()), "failureCode" to JsonPrimitive(code.name.lowercase())))
+                assertEquals("rollback failure stage/code pair is invalid",
+                    assertFailsWith<IllegalArgumentException> { rollbackPairPrivate("parseRepairRollbackRecord", forged) }.message)
+            }
+        }
+        val digest = "a".repeat(64)
+        val noFailure = RepairRollbackRecord(attemptId = "revision_none", runId = null, targetRevisionId = "root_none",
+            expectedSourceRevisionSha256 = digest, state = RepairRollbackState.NOT_REQUIRED_VERIFIED,
+            observedSourceRevisionSha256 = digest)
+        assertNull(noFailure.failureStage); assertNull(noFailure.failureCode)
+        assertEquals(noFailure, rollbackPairPrivate("parseRepairRollbackRecord", rollbackPairJson(noFailure)))
+    }
+
+    @Test
+    fun `recorded and reopened pending and resolved failures preserve every allowed pair`() {
+        val allowed = listOf(
+            RepairRollbackStage.SOURCE_RESTORE to RepairRollbackFailureCode.UNRECOGNIZED_SOURCE_STATE,
+            RepairRollbackStage.SOURCE_RESTORE to RepairRollbackFailureCode.RESTORE_OPERATION_FAILED,
+            RepairRollbackStage.SOURCE_VERIFICATION to RepairRollbackFailureCode.TARGET_DIGEST_MISMATCH,
+            RepairRollbackStage.SOURCE_VERIFICATION to RepairRollbackFailureCode.RESTORE_OPERATION_FAILED,
+        )
+        for (pending in listOf(true, false)) for ((stage, code) in allowed) {
+            val fixture = rollbackPairFixture(pending)
+            val changed = rollbackPairReplace(fixture.canonical, pending, stage, code)
+            val view = recordedRepairHistorySnapshot(changed.toByteArray(), fixture.binding, RepairResourceBudget())
+            val record = requireNotNull(if (pending) view.pending?.rollback else view.attempts.last().rollback)
+            assertEquals(stage, record.failureStage); assertEquals(code, record.failureCode)
+            assertEquals(if (pending) RepairRollbackState.RESTORE_FAILED_UNRESOLVED else RepairRollbackState.RESTORED_AFTER_FAILURE, record.state)
+            fixture.root.resolve("reports/repair-revisions/graph.json").writeText(changed)
+            ModuleRevisionGraph.open(fixture.root, fixture.profile).use { reopened ->
+                val restored = requireNotNull(reopened.snapshot.nodes.last().rollbackRecord)
+                assertEquals(RepairRollbackState.RESTORED_AFTER_FAILURE, restored.state)
+                assertEquals(stage, restored.failureStage); assertEquals(code, restored.failureCode)
+                assertEquals(restored.expectedSourceRevisionSha256, restored.observedSourceRevisionSha256)
+                assertEquals("before", fixture.root.resolve("code.c").readText())
+                assertTrue(reopened.snapshot.runs.isEmpty()) // No fabricated run for a standalone failure.
+            }
+        }
+    }
+
+    @Test
+    fun `impossible pending and resolved pairs refuse before reopen mutation or recorded credit`() {
+        val forbidden = listOf(
+            RepairRollbackStage.SOURCE_RESTORE to RepairRollbackFailureCode.TARGET_DIGEST_MISMATCH,
+            RepairRollbackStage.SOURCE_VERIFICATION to RepairRollbackFailureCode.UNRECOGNIZED_SOURCE_STATE,
+        )
+        for (pending in listOf(true, false)) for ((stage, code) in forbidden) {
+            val fixture = rollbackPairFixture(pending)
+            val baseline = recordedRepairHistorySnapshot(fixture.canonical.toByteArray(), fixture.binding, RepairResourceBudget())
+            assertNotNull(if (pending) baseline.pending?.rollback else baseline.attempts.last().rollback)
+            val changed = rollbackPairReplace(fixture.canonical, pending, stage, code)
+            val graphPath = fixture.root.resolve("reports/repair-revisions/graph.json")
+            graphPath.writeText(changed)
+            val graphKey = Files.readAttributes(graphPath, BasicFileAttributes::class.java).fileKey()
+            val source = fixture.root.resolve("code.c")
+            val sourceBytes = source.readBytes()
+            val sourceKey = Files.readAttributes(source, BasicFileAttributes::class.java).fileKey()
+            val refusal = assertFailsWith<RepairHistorySnapshotRefusal> {
+                recordedRepairHistorySnapshot(changed.toByteArray(), fixture.binding, RepairResourceBudget())
+            }
+            assertEquals("Recorded repair metadata is invalid or exceeds its bound.", refusal.message)
+            assertEquals("rollback failure stage/code pair is invalid",
+                assertFailsWith<IllegalArgumentException> { ModuleRevisionGraph.open(fixture.root, fixture.profile).close() }.message)
+            assertEquals(changed, graphPath.readText())
+            assertEquals(graphKey, Files.readAttributes(graphPath, BasicFileAttributes::class.java).fileKey())
+            assertContentEquals(sourceBytes, source.readBytes())
+            assertEquals(sourceKey, Files.readAttributes(source, BasicFileAttributes::class.java).fileKey())
+            assertContentEquals(fixture.binding, fixture.root.resolve("reports/repair-revisions/recovery-binding.json").readBytes())
+        }
+    }
+
+    @Test
+    fun `resealed archive preserves valid failure pairs and refuses only impossible cross pairs`() {
+        val parent = Path.of("build/test-tmp").toAbsolutePath().normalize().also { Files.createDirectories(it) }
+        val fixture = releaseRepairFixture(recoveredRollbackPrefix = true, temporaryParent = parent)
+        val bundle = ArchivalPackager.create(fixture.project, fixture.project.parent.resolve("rollback-pairs-original.zip"))
+        val positive = ArchivalBundleVerifier.extractAndVerifyCandidateLineage(bundle.archivePath,
+            fixture.project.parent.resolve("rollback-pairs-original-control"))
+        val accepted = positive.source.acceptedAcpContributions.single().taskId
+        val pairs = listOf(
+            Triple("source_restore", "unrecognized_source_state", true),
+            Triple("source_restore", "restore_operation_failed", true),
+            Triple("source_verification", "target_digest_mismatch", true),
+            Triple("source_verification", "restore_operation_failed", true),
+            Triple("source_restore", "target_digest_mismatch", false),
+            Triple("source_verification", "unrecognized_source_state", false),
+        )
+        for ((stage, code, valid) in pairs) {
+            val archive = fixture.project.parent.resolve("rollback-pair-$stage-$code.zip")
+            rewriteArchive(bundle.archivePath, archive) { entries ->
+                val path = "reports/repair-revisions/graph.json"
+                val graph = Json.parseToJsonElement(entries.getValue(path).decodeToString()).jsonObject
+                val nodes = graph.getValue("nodes").jsonArray
+                val failed = nodes[1].jsonObject
+                val record = failed.getValue("rollbackRecord").jsonObject
+                val run = graph.getValue("runs").jsonArray.first().jsonObject
+                assertEquals("restored_after_failure", record.getValue("state").jsonPrimitive.content)
+                assertEquals("rejected", failed.getValue("status").jsonPrimitive.content)
+                assertEquals("rollback_failed", run.getValue("status").jsonPrimitive.content)
+                assertEquals(record.getValue("attemptId"), run.getValue("rollbackFailureAttemptId"))
+                assertEquals(record.getValue("runId"), run.getValue("id"))
+                assertEquals(record.getValue("state"), run.getValue("rollbackResolution"))
+                assertEquals(record.getValue("expectedSourceRevisionSha256"), record.getValue("observedSourceRevisionSha256"))
+                assertEquals(accepted, nodes.last().jsonObject.getValue("id").jsonPrimitive.content)
+                assertEquals(nodes.last().jsonObject.getValue("id"), graph.getValue("fullyAcceptedHeadId"))
+                val changed = JsonObject(record + mapOf("failureStage" to JsonPrimitive(stage), "failureCode" to JsonPrimitive(code)))
+                entries[path] = JsonObject(graph + ("nodes" to JsonArray(nodes.mapIndexed { index, element ->
+                    if (index == 1) JsonObject(element.jsonObject + ("rollbackRecord" to changed)) else element
+                }))).toString().toByteArray()
+                // Only this record pair changes. Run/history/source/receipt/proof bytes stay coherent; manifest is resealed.
+            }
+            val output = fixture.project.parent.resolve("rollback-pair-$stage-$code-output")
+            if (valid) {
+                val lineage = ArchivalBundleVerifier.extractAndVerifyCandidateLineage(archive, output)
+                assertEquals(accepted, lineage.source.acceptedAcpContributions.single().taskId)
+                assertContentEquals(fixture.after, output.resolve(fixture.relativePath).readBytes())
+            } else {
+                val failure = assertFailsWith<IllegalArgumentException> { ArchivalBundleVerifier.extractAndVerify(archive, output) }
+                assertEquals("repair release rollback failure stage/code pair is invalid", failure.message)
+                assertFalse(output.exists())
+            }
+        }
+    }
+
+    private data class RollbackFailurePairFixture(
+        val root: Path, val profile: RepairIndexProfile, val canonical: String, val binding: ByteArray,
+    )
+
+    private fun rollbackPairFixture(pending: Boolean): RollbackFailurePairFixture {
+        val parent = Path.of("build/test-tmp").toAbsolutePath().normalize().also { Files.createDirectories(it) }
+        val root = Files.createTempDirectory(parent, "rollback-pair-")
+        root.resolve("code.c").writeText("before")
+        val profile = DeclarativeRepairIndexProfile("rollback-pair", RepairIndexLayout(listOf("code.c"), listOf("code.c")))
+        class RestoreRefusal : IllegalStateException("authored rollback operation refusal")
+        var armed = false
+        ModuleRevisionGraph.openForTesting(root, profile, faultInjector = ModuleRevisionFaultInjector { point ->
+            if (armed && point is ModuleRevisionFaultPoint.BeforePublicationExchange && point.phase == "rollback") throw RestoreRefusal()
+        }).use { graph ->
+            graph.enableRunContract()
+            val attempt = graph.beginAttempt(listOf("code.c"))
+            graph.installCandidate(attempt, mapOf("code.c" to "candidate".toByteArray()))
+            armed = true
+            assertFailsWith<RestoreRefusal> { graph.reject(attempt) }
+        }
+        if (!pending) ModuleRevisionGraph.open(root, profile).close()
+        val revisions = root.resolve("reports/repair-revisions")
+        val canonical = revisions.resolve("graph.json").readText()
+        val json = Json.parseToJsonElement(canonical).jsonObject
+        val record = if (pending) json.getValue("pending").jsonObject.getValue("rollbackRecord").jsonObject
+            else json.getValue("nodes").jsonArray.last().jsonObject.getValue("rollbackRecord").jsonObject
+        assertEquals(if (pending) "restore_failed_unresolved" else "restored_after_failure", record.getValue("state").jsonPrimitive.content)
+        assertEquals("source_restore", record.getValue("failureStage").jsonPrimitive.content)
+        assertEquals("restore_operation_failed", record.getValue("failureCode").jsonPrimitive.content)
+        return RollbackFailurePairFixture(root, profile, canonical, revisions.resolve("recovery-binding.json").readBytes())
+    }
+
+    private fun rollbackPairReplace(canonical: String, pending: Boolean, stage: RepairRollbackStage, code: RepairRollbackFailureCode): String {
+        val graph = Json.parseToJsonElement(canonical).jsonObject
+        val record = if (pending) graph.getValue("pending").jsonObject.getValue("rollbackRecord").jsonObject
+            else graph.getValue("nodes").jsonArray.last().jsonObject.getValue("rollbackRecord").jsonObject
+        val before = record.toString()
+        assertTrue(before in canonical)
+        assertEquals(canonical.indexOf(before), canonical.lastIndexOf(before))
+        val changed = JsonObject(record + mapOf("failureStage" to JsonPrimitive(stage.name.lowercase()),
+            "failureCode" to JsonPrimitive(code.name.lowercase()))).toString()
+        return canonical.replace(before, changed) // Preserve every other canonical byte, including wire style.
+    }
+
+    private fun rollbackPairJson(record: RepairRollbackRecord): JsonObject = Json.parseToJsonElement(
+        rollbackPairPrivate("toJson", record).toString()).jsonObject
+
+    private fun rollbackPairPrivate(name: String, vararg arguments: Any): Any? = try {
+        Class.forName("decompengine.repair.ModuleRevisionGraphKt").declaredMethods
+            .single { method -> method.name == name && method.parameterCount == arguments.size &&
+                method.parameterTypes.indices.all { index -> method.parameterTypes[index].isAssignableFrom(arguments[index].javaClass) }
+            }.also { it.isAccessible = true }
+            .invoke(null, *arguments)
+    } catch (failure: java.lang.reflect.InvocationTargetException) { throw failure.targetException }
+
+
+    @Test
+    fun `revision directory role helper preserves admitted node arithmetic and blob budget`() {
+        assertFailsWith<IllegalArgumentException> { RepairResourceBudget(maximumRevisionNodes = 1) }
+        for ((nodes, expected) in listOf(2 to 18, 64 to 80, 1_000_000 to 1_000_016)) {
+            val selected = RepairResourceBudget(maximumRevisionNodes = nodes, maximumStateDirectoryEntries = 2)
+            assertEquals(expected, repairRevisionDirectoryEntryLimit(selected))
+            assertEquals(2, selected.maximumStateDirectoryEntries)
+            assertEquals(nodes, selected.maximumRevisionNodes)
+        }
+    }
+
+    @Test
+    fun `archive name iterator charges all observations before duplicates or filtering`() {
+        val selected = RepairResourceBudget(maximumRevisionNodes = 2, maximumStateDirectoryEntries = 2)
+        val limit = repairRevisionDirectoryEntryLimit(selected)
+        val fixed = listOf("graph.json", "recovery-binding.json", "blobs", "revision_00000001_abcd.acp-receipt.json",
+            "legacy-graph-" + "0".repeat(64) + ".json", "legacy-graph-" + "1".repeat(64) + ".json")
+        val names = fixed + (0 until limit - fixed.size).map { "irrelevant-$it" }
+        class Entries(private val values: List<String>) : Iterable<Path>, AutoCloseable {
+            var advanced = 0
+            var closes = 0
+            override fun iterator(): Iterator<Path> = object : Iterator<Path> {
+                private var index = 0
+                override fun hasNext() = index < values.size
+                override fun next(): Path { advanced++; return Path.of(values[index++]) }
+            }
+            override fun close() { closes++ }
+        }
+        val exact = Entries(names)
+        exact.use {
+            assertEquals(names.toSet(), decompengine.project.RepairAcpEvidenceArchiveVerifier.boundedDeclaredSourceEntryNames(it, limit))
+        }
+        assertEquals(limit, exact.advanced); assertEquals(1, exact.closes)
+        val overflow = Entries(names + "overflow")
+        overflow.use {
+            assertEquals("repair release declared source inventory exceeds its entry bound",
+                assertFailsWith<IllegalArgumentException> {
+                    decompengine.project.RepairAcpEvidenceArchiveVerifier.boundedDeclaredSourceEntryNames(it, limit)
+                }.message)
+        }
+        assertEquals(limit + 1, overflow.advanced); assertEquals(1, overflow.closes)
+        val duplicate = Entries(listOf("same", "same"))
+        duplicate.use {
+            assertEquals("repair release declared source inventory contains a duplicate entry",
+                assertFailsWith<IllegalArgumentException> {
+                    decompengine.project.RepairAcpEvidenceArchiveVerifier.boundedDeclaredSourceEntryNames(it, limit)
+                }.message)
+        }
+        assertEquals(2, duplicate.advanced); assertEquals(1, duplicate.closes)
+    }
+
+    @Test
+    fun `store candidate count refuses before first body while tiny blob migration really recovers`() {
+        val parent = Path.of("build/test-tmp").toAbsolutePath().normalize().also { Files.createDirectories(it) }
+        val raw = Files.createTempDirectory(parent, "role-bound-raw-")
+        LinuxFilesystemSyscalls.openRoot(raw).use { descriptor ->
+            RepairStateStore.open(descriptor).use { store ->
+                val revisions = raw.resolve("reports/repair-revisions")
+                val selected = RepairResourceBudget(maximumRevisionNodes = 16, maximumStateDirectoryEntries = 2)
+                val candidates = listOf("a", "b", "c").map { text ->
+                    revisions.resolve("legacy-graph-" + sha256(text.toByteArray()) + ".json").also { it.writeText(text) }
+                }
+                revisions.resolve("irrelevant").writeText("not a body")
+                revisions.resolve("revision_00000001_abcd.acp-receipt.json").writeText("traversal only; no receipt authority")
+                var bodies = 0
+                assertEquals("declared legacy graph candidate count exceeds its entry budget",
+                    assertFailsWith<IllegalArgumentException> { store.forEachDeclaredLegacyGraph(selected) { _, _ -> bodies++ } }.message)
+                assertEquals(0, bodies)
+                Files.delete(candidates.last())
+                val names = mutableListOf<String>()
+                store.forEachDeclaredLegacyGraph(selected) { name, bytes -> names += name; assertEquals(1, bytes.size); bodies++ }
+                assertEquals(2, bodies)
+                assertEquals(candidates.take(2).map { it.fileName.toString() }.sorted(), names)
+                assertTrue(Files.list(revisions).use { it.count() } > selected.maximumStateDirectoryEntries)
+            }
+        }
+        val root = Files.createTempDirectory(parent, "role-bound-migration-")
+        root.resolve("code.c").writeText("before")
+        val profile = DeclarativeRepairIndexProfile("role-bound-migration", RepairIndexLayout(listOf("code.c"), listOf("code.c")))
+        val selected = RepairResourceBudget(maximumRevisionNodes = 2, maximumStateDirectoryEntries = 2)
+        ModuleRevisionGraph.open(root, profile, selected).use { graph ->
+            val attempt = graph.beginAttempt(listOf("code.c")) // Actual pre-marker schema2.
+            graph.installCandidate(attempt, mapOf("code.c" to "candidate".toByteArray()))
+        }
+        val revisions = root.resolve("reports/repair-revisions")
+        assertEquals(2L, Files.list(revisions.resolve("blobs")).use { it.count() })
+        ModuleRevisionGraph.open(root, profile, selected).use { recovered ->
+            assertEquals(4, recovered.snapshot.schemaVersion)
+            assertNull(recovered.snapshot.pendingAttemptId)
+            val record = requireNotNull(recovered.snapshot.nodes.last().rollbackRecord)
+            assertEquals(RepairRollbackState.RESTORED_VERIFIED, record.state)
+            assertTrue(record.legacyPendingStateUnknown)
+            assertNull(record.candidateSourceInstallStarted)
+            assertEquals(record.expectedSourceRevisionSha256, record.observedSourceRevisionSha256)
+            assertEquals("before", root.resolve("code.c").readText())
+        }
+        assertTrue(Files.list(revisions).use { it.count() } > selected.maximumStateDirectoryEntries)
+        assertEquals(1L, Files.newDirectoryStream(revisions, "legacy-graph-*.json").use { it.count().toLong() })
+        assertEquals(2L, Files.list(revisions.resolve("blobs")).use { it.count() })
+        ModuleRevisionGraph.open(root, profile, selected).close()
+        assertEquals("before", root.resolve("code.c").readText())
+    }
+
+    @Test
+    fun `archive candidate count is independent and refuses before invalid first payload`() {
+        val parent = Path.of("build/test-tmp").toAbsolutePath().normalize().also { Files.createDirectories(it) }
+        val selected = RepairResourceBudget(maximumRevisionNodes = 128, maximumStateDirectoryEntries = 64)
+        val fixture = releaseRepairFixture(temporaryParent = parent, budget = selected)
+        val bundle = ArchivalPackager.create(fixture.project, fixture.project.parent.resolve("role-bound-archive.zip"))
+        val exact = fixture.project.parent.resolve("role-bound-declarations-exact.zip")
+        val declaredGraph = Regex("reports/repair-revisions/legacy-graph-[0-9a-f]{64}\\.json")
+        rewriteArchive(bundle.archivePath, exact) { entries ->
+            val retained = entries.filterKeys(declaredGraph::matches)
+            assertTrue(retained.isNotEmpty()) // Actual producer preserved its pre-upgrade schema2 graph.
+            assertTrue(retained.size <= selected.maximumStateDirectoryEntries)
+            // Resource-only authored declarations, NOT evidence of historical writer origin.
+            repeat(selected.maximumStateDirectoryEntries - retained.size) { index ->
+                val bytes = "{\"schemaVersion\":3,\"authoredIndex\":$index}".toByteArray()
+                entries["reports/repair-revisions/legacy-graph-" + sha256(bytes) + ".json"] = bytes
+            }
+            assertEquals(selected.maximumStateDirectoryEntries, entries.keys.count(declaredGraph::matches))
+            retained.forEach { (name, bytes) -> assertContentEquals(bytes, entries.getValue(name)) }
+        }
+        val output = fixture.project.parent.resolve("role-bound-declarations-exact-output")
+        val lineage = ArchivalBundleVerifier.extractAndVerifyCandidateLineage(exact, output)
+        assertEquals(fixture.receiptPath, lineage.source.acceptedAcpContributions.single().receiptPath)
+        assertContentEquals(fixture.after, output.resolve(fixture.relativePath).readBytes())
+        val overflow = fixture.project.parent.resolve("role-bound-declarations-overflow.zip")
+        rewriteArchive(exact, overflow) { entries ->
+            // Lexically first matching candidate would fail size/hash admission if any body opened.
+            entries["reports/repair-revisions/legacy-graph-" + "0".repeat(64) + ".json"] = byteArrayOf()
+            assertEquals(selected.maximumStateDirectoryEntries + 1, entries.keys.count(declaredGraph::matches))
+            val total = entries.keys.count { it.startsWith("reports/repair-revisions/") &&
+                '/' !in it.removePrefix("reports/repair-revisions/") } + 1 // blobs directory
+            assertTrue(total <= repairRevisionDirectoryEntryLimit(selected))
+        }
+        val refused = fixture.project.parent.resolve("role-bound-declarations-overflow-output")
+        val failure = assertFailsWith<IllegalArgumentException> { ArchivalBundleVerifier.extractAndVerify(overflow, refused) }
+        assertEquals("repair release declared graph candidate count exceeds its entry budget", failure.message)
+        assertFalse(refused.exists())
+    }
+
     private data class ReleaseRepairFixture(
         val project: Path,
         val relativePath: String,
@@ -4190,12 +6671,18 @@ class ModuleRevisionGraphTest {
     private fun releaseRepairFixture(
         includeProvisional: Boolean = false,
         abandonProvisional: Boolean = false,
+        rejectedAttempts: Int = 0,
         undispatchedFallback: Boolean = false,
         relativePath: String = "src/modules/alpha.c",
         profile: ReconstructionProfile = GeneratedCMakeReconstructionProfile.descriptor,
+        temporaryParent: Path? = null,
+        recoveredRollbackPrefix: Boolean = false,
+        budget: RepairResourceBudget = RepairResourceBudget(),
+        legacyRejectedPrefix: Boolean = false,
+        legacyPrefixHasChanges: Boolean = true,
     ): ReleaseRepairFixture {
         require(!abandonProvisional || includeProvisional)
-        val project = generatedProject(undispatchedFallback, profile)
+        val project = generatedProject(undispatchedFallback, profile, temporaryParent)
         val beforeManifest = project.resolve("source_tree_manifest.json").readBytes()
         val beforeConfidence = project.resolve(profile.layout.declaration("confidence-evidence").materialize()).readBytes()
         val beforeUnresolved = project.resolve(profile.layout.declaration("unresolved-evidence").materialize()).readBytes()
@@ -4203,10 +6690,112 @@ class ModuleRevisionGraphTest {
         val target = project.resolve(relative)
         val before = target.readBytes()
         val after = before + "\n/* archive release ACP repair */\n".toByteArray()
+        require(!(recoveredRollbackPrefix && legacyRejectedPrefix))
+        val prefixAttempts = if (recoveredRollbackPrefix || legacyRejectedPrefix) 1 else 0
+        if (legacyRejectedPrefix) {
+            require(!includeProvisional && rejectedAttempts == 0)
+            ModuleRevisionGraph.open(project, GeneratedCRepairIndexProfile.forProfile(profile), budget).use { graph ->
+                val corpus = graph.retainRegressionInputs(listOf(ProcessInput("archive-case", emptyList(), byteArrayOf())))
+                graph.beginRun(1, 60_000)
+                val attempt = graph.beginAttempt(listOf(relative), RevisionRepairMetadata(
+                    1, "compile", "bounded failure", null, corpus.inputs.map(ProcessInput::id), null, corpus.sha256))
+                graph.persistAndBindAgentInvocation(attempt, completeAcpReceiptDocument(project, attempt, relative, before, after,
+                    includeModification = legacyPrefixHasChanges))
+                if (legacyPrefixHasChanges) graph.installCandidate(attempt, mapOf(relative to after))
+                // Detached candidate installation does not exchange the canonical source tree.
+            }
+            val graphPath = project.resolve("reports/repair-revisions/graph.json")
+            val current = graphPath.readText()
+            val defaults = ",\"legacyRecoveryRequired\":false,\"rollbackRecord\":null"
+            assertTrue(defaults in current)
+            val schema3 = current.replaceFirst("\"schemaVersion\": 4", "\"schemaVersion\": 3").replace(defaults, "")
+            assertNotEquals(current, schema3)
+            graphPath.writeText(schema3)
+            ModuleRevisionGraph.open(project, GeneratedCRepairIndexProfile.forProfile(profile), budget).use { graph ->
+                val rejected = graph.snapshot.nodes.last()
+                val record = requireNotNull(rejected.rollbackRecord)
+                assertEquals(ModuleRevisionStatus.REJECTED, rejected.status)
+                assertEquals(legacyPrefixHasChanges, rejected.changes.isNotEmpty())
+                assertTrue(record.legacyPendingStateUnknown)
+                assertEquals(if (legacyPrefixHasChanges) null else false, record.candidateSourceInstallStarted)
+                assertEquals(if (legacyPrefixHasChanges) RepairRollbackState.RESTORED_VERIFIED
+                    else RepairRollbackState.NOT_REQUIRED_VERIFIED, record.state)
+                assertContentEquals(before, target.readBytes())
+                graph.synchronizeRepairHistory()
+            }
+        }
+        if (recoveredRollbackPrefix) {
+            require(!includeProvisional && rejectedAttempts == 0)
+            var prefixAttemptId = ""
+            ModuleRevisionGraph.openForTesting(project, GeneratedCRepairIndexProfile.forProfile(profile), budget,
+                faultInjector = ModuleRevisionFaultInjector { point ->
+                    if (point is ModuleRevisionFaultPoint.AfterPublicationExchange && point.phase == "promotion") {
+                        throw SimulatedRepairCrash()
+                    }
+                }).use { graph ->
+                val corpus = graph.retainRegressionInputs(listOf(ProcessInput("archive-case", emptyList(), byteArrayOf())))
+                graph.beginRun(1, 60_000)
+                val attempt = graph.beginAttempt(listOf(relative), RevisionRepairMetadata(
+                    1, "compile", "bounded failure", null, corpus.inputs.map(ProcessInput::id), null, corpus.sha256))
+                prefixAttemptId = attempt.id
+                graph.persistAndBindAgentInvocation(attempt, completeAcpReceiptDocument(project, attempt, relative, before, after))
+                graph.installCandidate(attempt, mapOf(relative to after))
+                // This source/input/runtime tuple is genuinely identical to the later accepted proof.
+                val proof = archiveValidationProofFixture(graph, attempt, project, corpus.inputs)
+                graph.bindOriginalBinary(requireNotNull(proof.originalBinarySha256))
+                graph.bindExpectedObservations(sha256(buildString {
+                    append(proof.originalBinarySha256).append('\n')
+                    corpus.inputs.forEach { input ->
+                        append(input.id.length).append(':').append(input.id).append(":0:")
+                            .append(sha256(byteArrayOf())).append(':').append(sha256(byteArrayOf())).append('\n')
+                    }
+                }.toByteArray()))
+                assertFailsWith<SimulatedRepairCrash> {
+                    graph.accept(attempt, RepairEvidence("valid", "synthetic archive prefix observations matched"), proof)
+                }
+                // Error poisons this instance. Only its close path is used after interruption.
+            }
+            assertContentEquals(after, target.readBytes())
+            class PrefixRestoreRefusal : IllegalStateException("authored archive prefix startup restoration failure")
+            var refusedExchanges = 0
+            assertFailsWith<PrefixRestoreRefusal> {
+                ModuleRevisionGraph.openForTesting(project, GeneratedCRepairIndexProfile.forProfile(profile), budget,
+                    faultInjector = ModuleRevisionFaultInjector { point ->
+                        if (point is ModuleRevisionFaultPoint.BeforePublicationExchange && point.phase == "startup-rollback") {
+                            refusedExchanges++
+                            throw PrefixRestoreRefusal()
+                        }
+                    }).use { }
+            }
+            assertEquals(1, refusedExchanges)
+            assertContentEquals(after, target.readBytes())
+            val durable = Json.parseToJsonElement(project.resolve("reports/repair-revisions/graph.json").readText()).jsonObject
+            val failedRun = parseRepairRunState(durable.getValue("runs").jsonArray.single().toString())
+            val pendingRecord = durable.getValue("pending").jsonObject.getValue("rollbackRecord").jsonObject
+            assertEquals(RepairRunStatus.ROLLBACK_FAILED, failedRun.status)
+            assertEquals(prefixAttemptId, failedRun.rollbackFailureAttemptId)
+            assertEquals(RepairRollbackState.RESTORE_FAILED_UNRESOLVED, failedRun.rollbackResolution)
+            assertEquals(prefixAttemptId, pendingRecord.getValue("attemptId").jsonPrimitive.content)
+            assertEquals(failedRun.id, pendingRecord.getValue("runId").jsonPrimitive.content)
+            assertEquals("restore_failed_unresolved", pendingRecord.getValue("state").jsonPrimitive.content)
+            assertEquals("source_restore", pendingRecord.getValue("failureStage").jsonPrimitive.content)
+            assertEquals("restore_operation_failed", pendingRecord.getValue("failureCode").jsonPrimitive.content)
+            assertEquals(1, durable.getValue("nodes").jsonArray.size) // Still pending; no invented finalized iteration.
+            ModuleRevisionGraph.open(project, GeneratedCRepairIndexProfile.forProfile(profile), budget).use { graph ->
+                assertContentEquals(before, target.readBytes())
+                val failed = graph.snapshot.runs.single()
+                val rollback = requireNotNull(graph.snapshot.nodes.last().rollbackRecord)
+                assertEquals(RepairRunStatus.ROLLBACK_FAILED, failed.status)
+                assertEquals(RepairRollbackState.RESTORED_AFTER_FAILURE, failed.rollbackResolution)
+                assertEquals(failed.rollbackFailureAttemptId, rollback.attemptId)
+                assertEquals(failed.id, rollback.runId)
+                assertEquals(failed.rollbackResolution, rollback.state)
+            }
+        }
         lateinit var binding: RepairAgentInvocationBinding
-        ModuleRevisionGraph.open(project, GeneratedCRepairIndexProfile.forProfile(profile)).use { graph ->
+        ModuleRevisionGraph.open(project, GeneratedCRepairIndexProfile.forProfile(profile), budget).use { graph ->
             val corpus = graph.retainRegressionInputs(listOf(ProcessInput("archive-case", emptyList(), byteArrayOf())))
-            graph.beginRun(if (includeProvisional && !abandonProvisional) 2 else 1, 60_000)
+            graph.beginRun((if (includeProvisional && !abandonProvisional) 2 else 1) + rejectedAttempts, 60_000)
             fun bindObservations(proof: RepairValidationProof) {
                 graph.bindOriginalBinary(requireNotNull(proof.originalBinarySha256))
                 graph.bindExpectedObservations(sha256(buildString {
@@ -4217,12 +6806,19 @@ class ModuleRevisionGraphTest {
                     }
                 }.toByteArray()))
             }
+            repeat(rejectedAttempts) { index ->
+                val rejected = graph.beginAttempt(listOf(relative), RevisionRepairMetadata(
+                    prefixAttempts + index + 1, "compile", "bounded failure", null, corpus.inputs.map(ProcessInput::id), null, corpus.sha256))
+                graph.persistAndBindAgentInvocation(rejected, completeAcpReceiptDocument(project, rejected, relative, before, after))
+                graph.installCandidate(rejected, mapOf(relative to after))
+                graph.reject(rejected, RepairEvidence("rejected", "synthetic prior rejected candidate"))
+            }
             if (includeProvisional) {
                 val path = "src/modules/beta.c"
                 val betaBefore = project.resolve(path).readBytes()
                 val betaAfter = betaBefore + "\n/* provisional archive improvement */\n".toByteArray()
                 val provisional = graph.beginAttempt(listOf(path), RevisionRepairMetadata(
-                    iterationIndex = 1, failureKind = "compile", prompt = "bounded failure", summary = null,
+                    iterationIndex = prefixAttempts + rejectedAttempts + 1, failureKind = "compile", prompt = "bounded failure", summary = null,
                     retainedRegressionIds = corpus.inputs.map(ProcessInput::id), before = null,
                     regressionCorpusSha256 = corpus.sha256))
                 graph.persistAndBindAgentInvocation(provisional,
@@ -4241,7 +6837,7 @@ class ModuleRevisionGraphTest {
             val attempt = graph.beginAttempt(
                 listOf(relative),
                 RevisionRepairMetadata(
-                    iterationIndex = if (includeProvisional) 2 else 1,
+                    iterationIndex = prefixAttempts + (if (includeProvisional) 2 else 1) + rejectedAttempts,
                     failureKind = "compile",
                     prompt = "bounded failure",
                     summary = null,
@@ -4357,7 +6953,14 @@ class ModuleRevisionGraphTest {
             "outcome" to "behavior-checked", "caseCount" to inputs.size, "matches" to matched,
             "cleanupVerified" to true, "assurance" to "strict-contained")
         val bytes = canonical(receipt)
-        project.resolve("reports/$receiptName").writeBytes(bytes)
+        val receiptPath = project.resolve("reports/$receiptName")
+        if (Files.exists(receiptPath, LinkOption.NOFOLLOW_LINKS)) {
+            // Reuse only an identical, currently bound payload; never rewrite an earlier proof.
+            assertTrue(Files.isRegularFile(receiptPath, LinkOption.NOFOLLOW_LINKS))
+            assertContentEquals(bytes, receiptPath.readBytes(), "archive fixture receipt path has different bound bytes")
+        } else {
+            Files.write(receiptPath, bytes, java.nio.file.StandardOpenOption.CREATE_NEW, java.nio.file.StandardOpenOption.WRITE)
+        }
         return RepairValidationProof(sourceDigest, snapshot.profileSha256, snapshot.indexSha256,
             repairRegressionCorpusSha256(inputs), referenceDigest, rebuiltDigest, runtimeDigest, sha256(bytes), true,
             RepairValidationAssurance.STRICT_CONTAINED)
@@ -4510,6 +7113,7 @@ class ModuleRevisionGraphTest {
         relativePath: String,
         before: ByteArray,
         after: ByteArray,
+        includeModification: Boolean = true,
     ): AcpExecutionReceiptDocument {
         val workspacePath = AgentWorkspacePath("project", relativePath)
         val request = AgentExecutionRequest(
@@ -4519,13 +7123,13 @@ class ModuleRevisionGraphTest {
                 listOf(AgentPathRule(workspacePath, setOf(AgentOperation.READ_FILE, AgentOperation.WRITE_FILE))),
             ),
         )
-        val change = AgentFileChange(
+        val changes = if (includeModification) listOf(AgentFileChange(
             workspacePath,
             AgentFileChangeKind.MODIFIED,
             sha256(before),
             sha256(after),
             after.size.toLong(),
-        )
+        )) else emptyList()
         val implementationId = "repair-test-acp"
         val factory = AcpHarnessProvenance(
             harness = "acp",
@@ -4598,11 +7202,11 @@ class ModuleRevisionGraphTest {
         val result = AgentExecutionResult(
             AgentStopReason.COMPLETED,
             "peer completion summary",
-            listOf(change),
+            changes,
             AgentSessionReference(implementationId, "repair-session"),
         )
         val recorder = BoundedAgentExecutionEventRecorder().also {
-            it.record(AgentFileChangeEvent(0, change))
+            changes.forEachIndexed { index, change -> it.record(AgentFileChangeEvent(index.toLong(), change)) }
         }
         val receipt = AgentExecutionReceipt(
             AgentExecutionRequestBinding.capture(request),
