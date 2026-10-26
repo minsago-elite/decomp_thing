@@ -265,3 +265,31 @@ such accepted artifact is available until all preceding gates pass. B's
 integration remains outside this issue's owned scope. The build-record schema
 is catalogued in the shared schema inventory as a separate, non-authoritative
 validator; this registration does not accept a toolchain profile.
+
+## Record comparison is not independent-build qualification
+
+`compare-runs` checks equality of bounded, schema-validated record inputs; it
+cannot prove that two builds actually ran. Distinct paths and device/inode
+identities do not prevent copying one record to a second file. Until distinct,
+authenticated supervisor-owned execution/workspace receipts exist and are
+retained, comparison emits only a **provisional fragment**, omitting any
+`reproducibility` assertion, including assertions supplied by both inputs. CLI
+success means record equality only. The unchanged final-record schema,
+`verify-record`, and loader-input gate reject that fragment. Consequently the
+native workflow cannot complete its final-record step merely by lifting the
+acquisition pause. No two-clean-build acceptance is claimed.
+
+Each comparison input has a 64-MiB raw byte ceiling, including JSON whitespace.
+Both held regular descriptors are size-checked before reading either record;
+capped reads with an overflow byte also reject growth before decoding/parsing.
+Exact-bound, one-over, growth, copied-record and unequal-record controls are
+inert authored-data tests, not native reproducibility evidence.
+
+Other qualification blockers are unchanged: approved immutable provisioning
+host authority, authenticated loader execution, and bounded authenticated
+construction accounting for generated/transformed rootfs artifacts remain
+unavailable. The package-only verifier correctly refuses generated
+`/etc/apt/sources.list`, even with the exact recipe bytes; that refusal still
+prevents legitimate provisioning. A path whitelist or weakened unknown-member
+check is not a repair. Construction inputs, outputs, ownership, modes and
+reviewed transformations must be authenticated independently of package data.

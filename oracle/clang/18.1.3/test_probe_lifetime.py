@@ -25,6 +25,8 @@ class ProbeLifetimeSourceContractTests(unittest.TestCase):
         self.assertNotIn("&files", self.main)
 
     def test_report_reads_main_owned_result_not_destroyed_action_or_consumer(self):
+        self.assertIn("ProbeResult result;", self.main)
+        self.assertIn("std::make_unique<ProbeAction>(result)", self.main)
         self.assertLess(self.main.index("ProbeResult result;"),
                         self.main.index("std::make_unique<ProbeAction>(result)"))
         self.assertNotIn("actionView", self.source)

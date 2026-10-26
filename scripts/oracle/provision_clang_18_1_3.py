@@ -97,6 +97,9 @@ MAX_SINGLE_DOWNLOAD = 1024 * 1024 * 1024
 MAX_INDEX_UNCOMPRESSED_BYTES = 1024 * 1024 * 1024
 MAX_INDEX_LINE_BYTES = 16 * 1024 * 1024
 MAX_DEB822_PARAGRAPH_BYTES = 16 * 1024 * 1024
+# Bound record bytes before UTF-8 decoding/JSON allocation, independently of
+# the later schema's structural limits. Includes any JSON whitespace padding.
+MAX_BUILD_RECORD_BYTES = 64 * 1024 * 1024
 MAX_SOURCE_DIAGNOSTIC_ROWS = 256
 MAX_UPSTREAM_ARCHIVE_MEMBERS = 300_000
 MAX_UPSTREAM_EXPANDED_BYTES = 3 * 1024 * 1024 * 1024
@@ -5078,8 +5081,8 @@ def reject_build_record_schema_unknown_fields(record: object, *,
     except (OSError, UnicodeDecodeError, json.JSONDecodeError) as error:
         raise ProvisionError(f"could not read checked-in build-record schema: {error}") from error
     if allow_fragment and isinstance(record, dict) and "reproducibility" not in record:
-        # Only compare-runs consumes provisional fragments. They obey the same
-        # schema except for the final evidence it creates after comparison.
+        # compare-runs accepts and emits provisional fragments. Equality alone
+        # cannot supply the final independent-execution evidence.
         schema = {**schema, "required": [name for name in schema["required"] if name != "reproducibility"]}
     validate_finite_build_record_schema(record, schema)
 
@@ -5288,10 +5291,16 @@ def validate_build_record(record: dict, contract: dict, contract_path: Path = CO
 def compare_build_runs(first_path: Path, second_path: Path, output_path: Path, contract: dict,
                        contract_path: Path = CONTRACT_PATH, *,
                        captured: dict[Path, bytes] | None = None) -> dict:
+    """Compare record content only; this is not independent-build attestation.
+
+    No authenticated supervisor-owned execution/workspace receipts exist yet.
+    In particular, two distinct files may simply be copies of one execution.
+    Emit only a provisional fragment, which final-record consumers must reject.
+    """
     captured = require_contract_snapshot(contract, contract_path, captured)
     try:
         if first_path.resolve(strict=True) == second_path.resolve(strict=True):
-            raise ProvisionError("two clean runs require distinct record paths and files")
+            raise ProvisionError("record comparison requires distinct record paths and files")
         flags = os.O_RDONLY | os.O_NONBLOCK | os.O_CLOEXEC
         with os.fdopen(os.open(first_path, flags), "rb") as first_file, \
                 os.fdopen(os.open(second_path, flags), "rb") as second_file:
@@ -5300,21 +5309,30 @@ def compare_build_runs(first_path: Path, second_path: Path, output_path: Path, c
             if (not stat.S_ISREG(first_identity.st_mode) or not stat.S_ISREG(second_identity.st_mode) or
                     (first_identity.st_dev, first_identity.st_ino) ==
                     (second_identity.st_dev, second_identity.st_ino)):
-                raise ProvisionError("two clean runs require distinct regular record files")
-            first = strict_json_loads(first_file.read().decode("utf-8"))
-            second = strict_json_loads(second_file.read().decode("utf-8"))
+                raise ProvisionError("record comparison requires distinct regular record files")
+            if any(identity.st_size > MAX_BUILD_RECORD_BYTES
+                   for identity in (first_identity, second_identity)):
+                raise ProvisionError("build record input exceeds its byte budget")
+            # The held descriptors, not pathnames, are authoritative. A capped
+            # read with one overflow byte also refuses growth since fstat.
+            first_bytes = first_file.read(MAX_BUILD_RECORD_BYTES + 1)
+            if len(first_bytes) > MAX_BUILD_RECORD_BYTES:
+                raise ProvisionError("build record input exceeds its byte budget")
+            second_bytes = second_file.read(MAX_BUILD_RECORD_BYTES + 1)
+            if len(second_bytes) > MAX_BUILD_RECORD_BYTES:
+                raise ProvisionError("build record input exceeds its byte budget")
+            first = strict_json_loads(first_bytes.decode("utf-8"))
+            second = strict_json_loads(second_bytes.decode("utf-8"))
     except OSError as error:
-        raise ProvisionError(f"could not inspect independent build records: {error}") from error
+        raise ProvisionError(f"could not inspect build record inputs: {error}") from error
     validate_build_record(first, contract, contract_path, captured=captured, allow_fragment=True)
     validate_build_record(second, contract, contract_path, captured=captured, allow_fragment=True)
     if canonical_json(first) != canonical_json(second):
-        raise ProvisionError("two clean rootfs/image/probe runs did not reproduce identical identity")
+        raise ProvisionError("build record inputs do not contain identical identity")
     record = dict(first)
-    record["reproducibility"] = {
-        "cleanBuilds": 2,
-        "matchingRootfsSha256": True,
-        "matchingImageDigest": True,
-    }
+    # Never create or carry forward an unsupported cleanBuilds claim, even if
+    # both caller-supplied inputs already contain identical such assertions.
+    record.pop("reproducibility", None)
     atomic_write(output_path, canonical_json(record))
     return record
 
@@ -5324,7 +5342,8 @@ def command_compare_runs(args: argparse.Namespace) -> int:
     contract = read_contract(args.contract, captured=captured)
     record = compare_build_runs(args.first, args.second, args.output, contract, args.contract,
                                 captured=captured)
-    print(f"two clean runs reproduced rootfs {record['rootfs']['sha256']} and image {record['image']['imageDigest']}")
+    print(f"record equality only: rootfs {record['rootfs']['sha256']} and image {record['image']['imageDigest']}; "
+          "provisional output is NOT independent clean-build evidence or a final qualified build record")
     return 0
 
 
@@ -6277,7 +6296,7 @@ def build_parser() -> argparse.ArgumentParser:
     provision.add_argument("--rootfs-tar-output", type=Path,
                            help="retain the canonical rootfs tar at this bounded, record-hashed artifact path")
     provision.set_defaults(run=provision_rootfs)
-    compare = sub.add_parser("compare-runs", help="require two clean rootfs/image runs to reproduce exactly")
+    compare = sub.add_parser("compare-runs", help="compare record equality only; emit an unqualified provisional fragment")
     compare.add_argument("--contract", type=Path, default=CONTRACT_PATH)
     compare.add_argument("--first", type=Path, required=True)
     compare.add_argument("--second", type=Path, required=True)

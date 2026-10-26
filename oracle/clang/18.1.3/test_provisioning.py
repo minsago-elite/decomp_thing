@@ -315,6 +315,19 @@ class AuthenticatedDebPayloadTests(unittest.TestCase):
                 self.assertEqual(len(result["files"]),13)
                 self.assertTrue(next(x for x in result["files"] if x["path"]=="/etc/clang.conf")["entry"]["conffile"])
 
+    def test_generated_source_list_does_not_acquire_package_authority_by_path_or_recipe_bytes(self):
+        # Known qualification blocker: package-only authority cannot attest the
+        # provisioner's construction outputs. Do not "fix" it with a whitelist.
+        (self.root / "etc/apt").mkdir(parents=True)
+        entries = [self.entry(name, kind=tarfile.DIRTYPE, mode=0o755)
+                   for name in (".", "etc", "etc/apt")]
+        row, _ = self.package_bytes(entries)
+        provision.verify_installed_package_payloads(self.root, self.payloads, [row], self.contract)
+        (self.root / "etc/apt/sources.list").write_bytes(provision.apt_source_list(self.contract))
+        with self.assertRaisesRegex(provision.ProvisionError,
+                "unapproved generated or omitted-package installed path: etc/apt/sources.list$"):
+            provision.verify_installed_package_payloads(self.root, self.payloads, [row], self.contract)
+
     def test_implicit_parents_have_recorded_signed_root_derivation_and_exact_metadata(self):
         row,_=self.fixture()
         manifest=provision.verify_installed_package_payloads(self.root,self.payloads,[row],self.contract)
@@ -1094,19 +1107,160 @@ class ProvisioningNegativeTests(unittest.TestCase):
                 self.assertFalse(output.exists())
                 self.assertEqual(first.read_bytes(), payload)
 
-    def test_compare_runs_accepts_distinct_regular_files_with_equal_fixture_records(self):
+    def test_compare_runs_copied_records_only_emit_unqualified_equality(self):
         with self.temporary_directory() as temp:
             base = Path(temp)
             first, second, output = base / "first.json", base / "second.json", base / "result.json"
-            payload = provision.canonical_json(self.valid_build_record())
+            original = self.valid_build_record()
+            payload = provision.canonical_json(original)
             first.write_bytes(payload)
             second.write_bytes(payload)
             self.assertFalse(first.samefile(second))
             record = provision.compare_build_runs(first, second, output, self.contract)
-            self.assertEqual(record["reproducibility"], {
-                "cleanBuilds": 2, "matchingRootfsSha256": True, "matchingImageDigest": True,
-            })
+            self.assertNotIn("reproducibility", record)
+            self.assertEqual(record, {key: value for key, value in original.items() if key != "reproducibility"})
             self.assertEqual(output.read_bytes(), provision.canonical_json(record))
+            # Neither an existing identical cleanBuilds assertion nor another
+            # inode can turn copied bytes into authenticated execution receipts.
+            args = provision.argparse.Namespace(contract=provision.CONTRACT_PATH, record=output)
+            for command in (provision.command_verify_record, provision.command_write_loader_input):
+                with self.subTest(command=command.__name__), self.assertRaisesRegex(
+                        provision.ProvisionError, r"checked-in schema at \$: required field missing$"):
+                    command(args)
+
+    def test_compare_runs_accepts_exact_record_byte_bound_with_capped_reads(self):
+        with self.temporary_directory() as temp:
+            base = Path(temp)
+            first, second, output = base / "first.json", base / "second.json", base / "result.json"
+            payload = provision.canonical_json(self.valid_build_record()) + b" " * 32
+            for path in (first, second):
+                path.write_bytes(payload)
+            original_fdopen = os.fdopen
+            sizes = []
+            record_inodes = {path.stat().st_ino for path in (first, second)}
+
+            @contextlib.contextmanager
+            def tracked_fdopen(descriptor, *args, **kwargs):
+                with original_fdopen(descriptor, *args, **kwargs) as stream:
+                    if os.fstat(descriptor).st_ino not in record_inodes:
+                        yield stream
+                        return
+                    wrapper = mock.Mock(wraps=stream)
+                    def read(size=-1):
+                        self.assertEqual(size, len(payload) + 1)
+                        sizes.append(size)
+                        return stream.read(size)
+                    wrapper.read.side_effect = read
+                    yield wrapper
+
+            with mock.patch.object(provision, "MAX_BUILD_RECORD_BYTES", len(payload)), \
+                    mock.patch.object(provision.os, "fdopen", side_effect=tracked_fdopen):
+                record = provision.compare_build_runs(first, second, output, self.contract)
+            self.assertEqual(sizes, [len(payload) + 1] * 2)
+            self.assertNotIn("reproducibility", record)
+            self.assertTrue(output.is_file())
+
+    def test_compare_runs_rejects_one_over_in_either_record_before_read_or_parse(self):
+        for oversized_index in (0, 1):
+            with self.subTest(oversized_index=oversized_index), self.temporary_directory() as temp:
+                base = Path(temp)
+                paths = (base / "first.json", base / "second.json")
+                for index, path in enumerate(paths):
+                    path.write_bytes(b" " * (33 if index == oversized_index else 32))
+                original_fdopen = os.fdopen
+
+                @contextlib.contextmanager
+                def no_read_fdopen(descriptor, *args, **kwargs):
+                    with original_fdopen(descriptor, *args, **kwargs) as stream:
+                        wrapper = mock.Mock(wraps=stream)
+                        wrapper.read.side_effect = AssertionError("oversized metadata must refuse before any read")
+                        yield wrapper
+
+                output = base / "result.json"
+                with mock.patch.object(provision, "MAX_BUILD_RECORD_BYTES", 32), \
+                        mock.patch.object(provision, "require_contract_snapshot", return_value={}), \
+                        mock.patch.object(provision.os, "fdopen", side_effect=no_read_fdopen), \
+                        mock.patch.object(provision, "strict_json_loads") as parse, \
+                        mock.patch.object(provision, "validate_build_record") as validate, \
+                        mock.patch.object(provision, "atomic_write") as write:
+                    with self.assertRaisesRegex(provision.ProvisionError, "record input exceeds its byte budget"):
+                        provision.compare_build_runs(*paths, output, self.contract)
+                    parse.assert_not_called()
+                    validate.assert_not_called()
+                    write.assert_not_called()
+                self.assertFalse(output.exists())
+
+    def test_compare_runs_refuses_growth_of_either_held_record_before_parse(self):
+        for growing_index in (0, 1):
+            with self.subTest(growing_index=growing_index), self.temporary_directory() as temp:
+                base = Path(temp)
+                paths = (base / "first.json", base / "second.json")
+                for path in paths:
+                    path.write_bytes(b"{}")
+                growing_inode = paths[growing_index].stat().st_ino
+                original_fdopen = os.fdopen
+                sizes = []
+
+                @contextlib.contextmanager
+                def growing_fdopen(descriptor, *args, **kwargs):
+                    with original_fdopen(descriptor, *args, **kwargs) as stream:
+                        wrapper = mock.Mock(wraps=stream)
+                        def read(size=-1):
+                            self.assertEqual(size, 33)
+                            sizes.append(size)
+                            if os.fstat(descriptor).st_ino == growing_inode:
+                                with paths[growing_index].open("ab") as writer:
+                                    writer.write(b" " * 31)
+                            return stream.read(size)
+                        wrapper.read.side_effect = read
+                        yield wrapper
+
+                output = base / "result.json"
+                with mock.patch.object(provision, "MAX_BUILD_RECORD_BYTES", 32), \
+                        mock.patch.object(provision, "require_contract_snapshot", return_value={}), \
+                        mock.patch.object(provision.os, "fdopen", side_effect=growing_fdopen), \
+                        mock.patch.object(provision, "strict_json_loads") as parse, \
+                        mock.patch.object(provision, "validate_build_record") as validate, \
+                        mock.patch.object(provision, "atomic_write") as write:
+                    with self.assertRaisesRegex(provision.ProvisionError, "record input exceeds its byte budget"):
+                        provision.compare_build_runs(*paths, output, self.contract)
+                    parse.assert_not_called()
+                    validate.assert_not_called()
+                    write.assert_not_called()
+                self.assertEqual(sizes, [33] * (growing_index + 1))
+                self.assertFalse(output.exists())
+
+    def test_compare_runs_cli_labels_record_equality_without_independent_build_claim(self):
+        with self.temporary_directory() as temp:
+            base = Path(temp)
+            first, second, output = base / "first.json", base / "second.json", base / "comparison.json"
+            record = self.valid_build_record()
+            record.pop("reproducibility")
+            for path in (first, second):
+                path.write_bytes(provision.canonical_json(record))
+            args = provision.argparse.Namespace(contract=provision.CONTRACT_PATH,
+                first=first, second=second, output=output)
+            message = io.StringIO()
+            with contextlib.redirect_stdout(message):
+                self.assertEqual(provision.command_compare_runs(args), 0)
+            self.assertIn("record equality only:", message.getvalue())
+            self.assertIn("NOT independent clean-build evidence", message.getvalue())
+            self.assertEqual(json.loads(output.read_bytes()), record)
+
+    def test_compare_runs_rejects_unequal_valid_records_without_output(self):
+        with self.temporary_directory() as temp:
+            base = Path(temp)
+            first, second, output = base / "first.json", base / "second.json", base / "comparison.json"
+            record = self.valid_build_record()
+            first.write_bytes(provision.canonical_json(record))
+            record["rootfs"]["sha256"] = "b" * 64
+            second.write_bytes(provision.canonical_json(record))
+            provision.validate_build_record(record, self.contract)
+            originals = [path.read_bytes() for path in (first, second)]
+            with self.assertRaisesRegex(provision.ProvisionError, "inputs do not contain identical identity"):
+                provision.compare_build_runs(first, second, output, self.contract)
+            self.assertFalse(output.exists())
+            self.assertEqual([path.read_bytes() for path in (first, second)], originals)
 
     def test_compare_runs_checks_opened_file_identity_after_path_replacement(self):
         with self.temporary_directory() as temp:
@@ -1516,7 +1670,7 @@ class ProvisioningNegativeTests(unittest.TestCase):
             with self.subTest(index=index), self.assertRaisesRegex(provision.ProvisionError, "checked-in schema"):
                 provision.validate_build_record(record, self.contract)
 
-    def test_compare_runs_alone_accepts_provisional_fragments_without_reproducibility(self):
+    def test_compare_runs_keeps_provisional_fragments_without_reproducibility(self):
         record = self.valid_build_record()
         record.pop("reproducibility")
         with self.assertRaisesRegex(provision.ProvisionError, "required field missing"):
@@ -1526,8 +1680,11 @@ class ProvisioningNegativeTests(unittest.TestCase):
             first, second = base / "first.json", base / "second.json"
             first.write_bytes(provision.canonical_json(record))
             second.write_bytes(provision.canonical_json(record))
-            result = provision.compare_build_runs(first, second, base / "final.json", self.contract)
-            provision.validate_build_record(result, self.contract)
+            result = provision.compare_build_runs(first, second, base / "comparison-fragment.json", self.contract)
+            self.assertEqual(result, record)
+            provision.validate_build_record(result, self.contract, allow_fragment=True)
+            with self.assertRaisesRegex(provision.ProvisionError, r"checked-in schema at \$: required field missing$"):
+                provision.validate_build_record(result, self.contract)
 
     def test_network_identity_normalization_is_deterministic_and_replaces_leaf_links(self):
         with self.temporary_directory() as temp:
