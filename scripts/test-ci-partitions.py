@@ -41,18 +41,19 @@ def load_required_regressions(path=REQUIRED_REGRESSIONS):
 
 
 def check_required_regressions(passed, partition, classes):
-    """Each named class must pass at least its authored case count, with no skip, in its owning shard."""
+    """Require distinct passing methods, with no skipped execution, in each class's owning shard."""
     observed = {}
     for name, minimum in sorted(classes.items()):
-        outcomes = passed[partition].get(name, Counter())
-        if outcomes["SKIP"]:
+        outcomes = passed[partition].get(name, {})
+        if outcomes.get("SKIP"):
             raise ValueError(f"required regression class skipped a case: {name}")
-        if outcomes["PASS"] < minimum:
-            raise ValueError(f"required regression class ran {outcomes['PASS']} of {minimum} cases in {partition}: {name}")
+        passing_methods = len(outcomes.get("PASS", set()))
+        if passing_methods < minimum:
+            raise ValueError(f"required regression class ran {passing_methods} of {minimum} cases in {partition}: {name}")
         elsewhere = [role for role in passed if role != partition and name in passed[role]]
         if elsewhere:
             raise ValueError(f"required regression class ran outside {partition}: {name}")
-        observed[name] = outcomes["PASS"]
+        observed[name] = passing_methods
     return {"partition": partition, "classes": observed}
 
 
@@ -108,7 +109,7 @@ def check_partition_reports(root, required=None):
                     raise ValueError(f"failed JUnit test in {role}: {classname}.{name}")
                 outcome = "SKIP" if case.find("skipped") is not None else "PASS"
                 outcomes[outcome] += 1
-                by_class[role].setdefault(classname, Counter())[outcome] += 1
+                by_class[role].setdefault(classname, {}).setdefault(outcome, set()).add(name)
         if not sum(outcomes.values()):
             raise ValueError(f"no JUnit test cases in {role}")
         shards[role] = {"executions": sum(outcomes.values()), "PASS": outcomes["PASS"],
@@ -412,6 +413,31 @@ class CiPartitionReportTest(unittest.TestCase):
         report = check_partition_reports(self.root, required)
         self.assertEqual({"decompengine.web.ExampleWebTest": 2}, report["requiredRegressions"]["classes"])
         self.write("core", "decompengine.web.ExampleWebTest", "third", "SKIP")
+        with self.assertRaisesRegex(ValueError, "skipped"):
+            check_partition_reports(self.root, required)
+
+    def test_required_regressions_count_distinct_methods_not_repeated_executions(self):
+        classname = "decompengine.web.ExampleWebTest"
+        required = ("core", {classname: 3})
+        path = self.write("core", classname, "first")
+        # Duplicates both within one XML report and across follow-up reports remain executions,
+        # but cannot compensate for the two missing authored methods.
+        suite = ET.parse(path).getroot()
+        ET.SubElement(suite, "testcase", classname=classname, name="first")
+        ET.ElementTree(suite).write(path, encoding="utf-8")
+        self.write("core", classname, "first")
+        with self.assertRaisesRegex(ValueError, "ran 1 of 3"):
+            check_partition_reports(self.root, required)
+        self.write("core", classname, "second")
+        self.write("core", classname, "third")
+        report = check_partition_reports(self.root, required)
+        self.assertEqual({classname: 3}, report["requiredRegressions"]["classes"])
+        self.assertEqual(6, report["reportShards"]["core"]["executions"])
+        self.assertEqual(6, report["reportShards"]["core"]["PASS"])
+        self.assertEqual(4, report["reportShards"]["core"]["uniqueClassMethodPairs"])
+        # A later successful retry must not erase a skipped execution of a required method.
+        self.write("core", classname, "first", "SKIP")
+        self.write("core", classname, "first")
         with self.assertRaisesRegex(ValueError, "skipped"):
             check_partition_reports(self.root, required)
 

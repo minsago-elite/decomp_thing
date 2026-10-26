@@ -253,9 +253,8 @@ class WebEventStreamTest {
             getOutputStream().write(("GET /events HTTP/1.1\r\nHost: 127.0.0.1:$port\r\nCookie: ${f.cookie}\r\n" +
                 "Accept: text/event-stream\r\nConnection: close\r\n\r\n").toByteArray())
             val reader = getInputStream().bufferedReader()
-            assertEquals("HTTP/1.1 200 OK", reader.readLine())
             // Admission has charged the slot once the stream announces itself.
-            while (reader.readLine() != ": connected") Unit
+            awaitWebTestStreamAnnouncement(this, reader)
         }
         val sockets = listOf(connect(), connect())
         assertEquals(2, f.resources.snapshot().active)

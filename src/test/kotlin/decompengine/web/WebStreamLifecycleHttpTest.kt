@@ -75,8 +75,7 @@ class WebStreamLifecycleHttpTest {
     private fun stream(port: Int, cookie: String, jobId: String, runId: String): Pair<Socket, BufferedReader> {
         val opened = raw(port, "GET /w/api/v1/jobs/$jobId/runs/$runId/events HTTP/1.1\r\nHost: 127.0.0.1:$port\r\n" +
             "Cookie: $cookie\r\nAccept: text/event-stream\r\nConnection: close\r\n\r\n")
-        assertEquals("HTTP/1.1 200 OK", opened.second.readLine())
-        while (opened.second.readLine() != ": connected") Unit
+        awaitWebTestStreamAnnouncement(opened.first, opened.second)
         return opened
     }
 

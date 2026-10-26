@@ -21,6 +21,7 @@
     "decompengine.web.WebRestartReconciliationHttpTest": 2,
     "decompengine.web.WebRouteMatrixTest": 3,
     "decompengine.web.WebSessionRealRoutesTest": 2,
+    "decompengine.web.WebStreamHandshakeTest": 4,
     "decompengine.web.WebStreamLifecycleHttpTest": 2
   }
 }
