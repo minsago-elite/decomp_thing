@@ -69,6 +69,50 @@ describe('feature detection (#631)', () => {
     expect(fetch).not.toHaveBeenCalled();
   });
 
+  /** A fetch Response as an engine without streams exposes it: no body stream, only arrayBuffer(). */
+  function bufferedResponse(bytes: Uint8Array, requestId: string, headers: Record<string, string> = {}) {
+    return { status: 200, ok: true, body: undefined, headers: new Headers({ 'Content-Type': 'application/json', 'X-Request-ID': requestId, ...headers }),
+      arrayBuffer: () => Promise.resolve(bytes.slice().buffer) } as unknown as Response;
+  }
+  const encoded = (value: unknown) => new TextEncoder().encode(JSON.stringify(value));
+
+  it('reads bounded, strictly decoded JSON through the real client without readable bodies or TextDecoder', async () => {
+    const snapshot = fixture<{ requestId: string }>('snapshot-progress-omissions');
+    vi.stubGlobal('TextDecoder', undefined);
+    const fetch = vi.fn<typeof globalThis.fetch>();
+    const client = createApiClient({ basePath: '/nested', fetch, maxResponseBytes: 1_048_576 });
+    const path = `/jobs/${'1234567890abcdef'.repeat(2)}/runs/run_example_1/snapshot`;
+    fetch.mockResolvedValueOnce(bufferedResponse(encoded(snapshot), snapshot.requestId));
+    expect((await client.get('snapshot', path)).data).toEqual((snapshot as unknown as { data: unknown }).data);
+    const invalid = new Uint8Array([...encoded(snapshot).slice(0, -2), 0xc0, 0xaf, 0x7d]); // overlong "/"
+    fetch.mockResolvedValueOnce(bufferedResponse(invalid, snapshot.requestId));
+    await expect(client.get('snapshot', path)).rejects.toMatchObject({ code: 'invalid_json' });
+    const small = createApiClient({ basePath: '/nested', fetch, maxResponseBytes: 64 });
+    fetch.mockResolvedValueOnce(bufferedResponse(encoded(snapshot), snapshot.requestId));
+    await expect(small.get('snapshot', path)).rejects.toMatchObject({ code: 'response_too_large' });
+  });
+
+  it('keeps following activity through the real client while streams and TextDecoder stay unavailable', async () => {
+    vi.useFakeTimers();
+    const snapshot = fixture<{ requestId: string; data: Snapshot }>('snapshot-progress-omissions');
+    const page = fixture<{ requestId: string; data: { items: unknown[]; nextCursor: string; hasMore: boolean } }>('events-observation-poll');
+    const empty = { ...page, data: { items: [], nextCursor: page.data.nextCursor, hasMore: false } };
+    vi.stubGlobal('ReadableStream', undefined);
+    vi.stubGlobal('TextDecoder', undefined);
+    const fetch = vi.fn<(input: string) => Promise<Response>>((input) => Promise.resolve(input.includes('/snapshot')
+      ? bufferedResponse(encoded(snapshot), snapshot.requestId) : bufferedResponse(encoded(empty), empty.requestId)));
+    const real = createApiClient({ basePath: '/nested', fetch: fetch as unknown as typeof globalThis.fetch });
+    transport.get.mockImplementation((kind, path, options) => real.get(kind as 'snapshot', path, options));
+    render(<Activity jobId={snapshot.data.run.jobId} runId={snapshot.data.run.runId} basePath="/nested" />);
+    await act(async () => { await Promise.resolve(); fireEvent.click(screen.getByRole('button', { name: 'Follow activity' })); });
+    for (let round = 0; round < 3; round += 1) await act(async () => { await Promise.resolve(); await vi.advanceTimersByTimeAsync(2500); });
+    expect(screen.queryByRole('alert')).toBeNull();
+    expect(document.body.textContent).toContain('Using periodic refresh because streaming was unavailable.');
+    const urls = fetch.mock.calls.map(call => call[0]);
+    expect(urls[0]).toContain('/snapshot');
+    expect(urls.filter(url => url.includes('/events?') && url.includes('transport=poll')).length).toBeGreaterThanOrEqual(3);
+  });
+
   function sourceFixtures() {
     const metadata = fixture<{ data: RevisionFile }>('revision-file-root').data;
     const text = 'int main(void) { return 0; }\n';
