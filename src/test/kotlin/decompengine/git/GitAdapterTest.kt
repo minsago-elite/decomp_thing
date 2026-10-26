@@ -112,11 +112,14 @@ class GitAdapterTest {
     }
 
     @Test fun `branch names are validated by local syntax and check-ref-format`(): Unit = GitTestRepositories().use { f ->
-        listOf("main", "trunk", "feature/one", "release-1.2", "功能", "x_y").forEach {
+        // JSON Schema's character bounds count Unicode code points, not UTF-16 code units.
+        val supplementaryBranch = List(4) { "🚀".repeat(49) }.joinToString("/") + "x"
+        assertEquals(200, supplementaryBranch.codePointCount(0, supplementaryBranch.length))
+        listOf("main", "trunk", "feature/one", "release-1.2", "功能", "x_y", supplementaryBranch).forEach {
             assertEquals(it, GitRefNames.requireBranchName(f.runner, it))
         }
         listOf("", "-x", "--upload-pack=touch", "a..b", "a b", "x.lock", "a/.hidden", "@{u}", "HEAD", "@", "a\u0001", "a~1", "a^",
-            "a:b", "a?", "a*", "a[", "a\\b", "/a", "a/", "a//b", "a.", "x".repeat(201)).forEach { name ->
+            "a:b", "a?", "a*", "a[", "a\\b", "/a", "a/", "a//b", "a.", "x".repeat(201), supplementaryBranch + "x").forEach { name ->
             assertFailsWith<IllegalArgumentException>(name) { GitRefNames.requireBranchName(f.runner, name) }
         }
     }

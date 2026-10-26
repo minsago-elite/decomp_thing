@@ -147,9 +147,15 @@ class ManagedGitRepositoriesTest {
             service.request(jobId, GitRepositoryRequest.Attach("source"), "import_unconfigured_1")
         }.code)
         assertTrue(service.listing(jobId).operations.isEmpty())
-        val completed = service.settle(service.request(jobId, GitRepositoryRequest.Init("run_1", "revision_1", "功能/branch"), "unicode_branch_key01"))
+        // 200 code points, with each path component below the filesystem's byte limit.
+        val branch = List(4) { "🚀".repeat(49) }.joinToString("/") + "x"
+        assertEquals("VALIDATION_FAILED", assertFailsWith<ManagedGitException> {
+            service.request(jobId, GitRepositoryRequest.Init("run_1", "revision_1", branch + "x"), "unicode_too_long_key")
+        }.code)
+        assertTrue(service.listing(jobId).operations.isEmpty())
+        val completed = service.settle(service.request(jobId, GitRepositoryRequest.Init("run_1", "revision_1", branch), "unicode_branch_key01"))
         assertEquals(GitOperationState.COMPLETED, completed.state)
-        assertEquals("refs/heads/功能/branch", service.workspace(jobId, completed.repositoryId).observation.head.refName)
+        assertEquals("refs/heads/$branch", service.workspace(jobId, completed.repositoryId).observation.head.refName)
     }
 
     @Test fun `unusable Git refuses every operation explicitly`(): Unit = Fixture().use { f ->
