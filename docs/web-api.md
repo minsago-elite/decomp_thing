@@ -391,7 +391,7 @@ cap is configured here; that part of #589 remains open, and capacity occupancy i
 | Overload responders | 2, no queue | Fixed `429 SERVER_BUSY` without routing, session or storage access |
 | Listen backlog | 64 | Kernel accept queue |
 | Header deadline | 10 s | From worker start through header parsing and header-limit/overload refusal cleanup; interruption aborts blocked socket-channel I/O even when response close is draining an unfinished body. Applies on the responder tier too; not to silent sockets before executor dispatch |
-| Request deadline | 30 s (120 s for multipart uploads) | The exchange is closed: a slow body, handler or response write releases its worker, staged upload and descriptors |
+| Request deadline | 30 s (120 s for multipart uploads) | Schedules `exchange.close()`; does not interrupt the worker or guarantee recovery from blocked refusal cleanup (see below) |
 | Header count / bytes | 100 / 32 KiB | `431 HEADERS_TOO_LARGE`, `Connection: close` |
 | JSON response / request bodies | 1 MiB response; per-route request ceilings (1–4 KiB mutations) | Checked before serialization or parsing |
 | Upload body | 32 MiB | `413 UPLOAD_TOO_LARGE` |
@@ -399,10 +399,20 @@ cap is configured here; that part of #589 remains open, and capacity occupancy i
 
 A request that finds every worker and queue slot taken is answered immediately with `429` and the fixed error code
 `SERVER_BUSY` (`retryable: true`, `retryAfterMs: "30000"`, `Retry-After: 30`, `Cache-Control: no-store`,
-`Connection: close`), in the same error envelope as every other denial. The 30-second guidance matches the request
-deadline, after which a slow request releases its worker. If the responder pool is also busy, the connection is closed
-without a response; clients should treat a reset connection like `SERVER_BUSY`. Response bodies are produced in memory
-before writing, so a slow reader holds no storage descriptor while its response is written.
+`Connection: close`), in the same error envelope as every other denial. The 30-second guidance matches the configured
+request deadline; it is retry guidance, not a guarantee that a worker or capacity will be available then. If the responder
+pool is also busy, the connection is closed without a response; clients should treat a reset connection like `SERVER_BUSY`.
+Response bodies are produced in memory before writing, so a slow reader holds no storage descriptor while its response
+is written.
+
+**Remaining request-deadline gap (#589):** requests that pass header admission disable the interrupting header watchdog
+and rely on `exchange.close()` at the request deadline. An ordinary authorization or other routing refusal can block while
+closing its response, because the JDK drains an incomplete fixed-length or chunked request body. If that drain is already
+blocked, the later exchange close need not abort it; the worker and socket descriptor can remain occupied beyond the
+request budget. This includes unauthenticated refusals with otherwise admissible headers. The interrupting cleanup bound
+for early `431` header-limit and `429 SERVER_BUSY` refusals does not cover these ordinary refusals. Effective ordinary-refusal
+cancellation and real-listener qualification with peers held open remain required under #589; do not infer unconditional
+worker, staging or descriptor recovery from the configured request deadline or its closure counter.
 
 `GET`/`HEAD /api/v1/capacity` (session, no query) returns `capacity`: the limits above, sampled worker/queue/responder/
 stream occupancy, aggregate outcome counts for the listener lifetime (successful, client and server errors, closed

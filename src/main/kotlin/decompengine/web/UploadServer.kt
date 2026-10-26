@@ -408,7 +408,8 @@ class UploadServer(
         val finished = java.util.concurrent.atomic.AtomicBoolean(false)
         val deadline = try {
             requestDeadlines.schedule({
-                // A slow or vanished client cannot keep a worker, a staged upload or a read descriptor past this point.
+                // This schedules exchange closure, not worker interruption. An ordinary refusal already
+                // draining an incomplete body can retain its worker/socket beyond this deadline (open #589).
                 if (!finished.get()) { capacity.requestDeadlineClosures.incrementAndGet(); exchange.close() }
             }, if (upload) limits.uploadDeadlineMs else limits.requestDeadlineMs, TimeUnit.MILLISECONDS)
         } catch (_: java.util.concurrent.RejectedExecutionException) {
