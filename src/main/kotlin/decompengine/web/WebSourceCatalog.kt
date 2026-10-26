@@ -16,7 +16,9 @@ import java.util.concurrent.Callable
 import java.util.concurrent.ExecutionException
 import java.util.concurrent.Executors
 import java.util.concurrent.Future
+import java.util.concurrent.FutureTask
 import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.AtomicInteger
 import javax.crypto.Mac
 import javax.crypto.spec.SecretKeySpec
 import kotlinx.serialization.json.*
@@ -105,13 +107,18 @@ internal class WebSourceCatalogEvidence(
      *
      * On a first read the profile-declared model and plan are read and parsed on two workers while this thread
      * parses the manifest. Each is used only after the manifest commits it and its bytes match that digest, so
-     * the result is identical to a sequential read; captures stay serialized, so at most two workers run.
+     * the result is identical to a sequential read. Admission stays held until both worker bodies exit, even
+     * after cancellation or a refused manifest; Future cancellation alone is not evidence of worker completion.
      */
     fun <T> readStructure(reference: WebRevisionSourceReference, cache: WebProgramStructureCache,
         project: (WebProgramStructureIndex, WebStructureRecordReader) -> T): T {
         if (!capturing.compareAndSet(false, true)) {
             throw WebAccessDenied(429, "SOURCE_CATALOG_BUSY", "Another source metadata capture is in progress. Try this read again later.")
         }
+        // One owner plus a reference for each submitted body. A cancelled Future may still be executing.
+        val pending = AtomicInteger(1)
+        fun finished() { if (pending.decrementAndGet() == 0) capturing.set(false) }
+        val tasks = mutableListOf<Future<*>>()
         try {
             val root = "reports/runs/${reference.runId}/source-tree"
             val manifestPath = "$root/source_tree_manifest.json"
@@ -124,12 +131,25 @@ internal class WebSourceCatalogEvidence(
             fun <R> speculate(profile: ReconstructionProfile, declaration: String, maximum: Int,
                 parse: (ByteArray) -> WebStructureParse<R>): Future<WebStructureEvidence<R>>? {
                 val path = WebProgramStructureBuilder.declaredPath(profile, declaration) ?: return null
-                return structureWorkers.submit(Callable {
+                val task = FutureTask(Callable {
+                    if (Thread.currentThread().isInterrupted) throw InterruptedException()
                     val record = try { readArtifact(reference.jobId, "$root/$path", maximum.toLong()) }
                         catch (_: RepairBudgetExceededException) { return@Callable WebStructureEvidence<R>(null, null, null) }
+                    if (Thread.currentThread().isInterrupted) throw InterruptedException()
                     if (record.bytes.size > maximum) WebStructureEvidence(null, null, null)
-                    else WebStructureEvidence(record, WebExplorationArtifact.sha256(record.bytes), parse(record.bytes))
+                    else {
+                        val digest = WebExplorationArtifact.sha256(record.bytes)
+                        if (Thread.currentThread().isInterrupted) throw InterruptedException()
+                        WebStructureEvidence(record, digest, parse(record.bytes))
+                    }
                 })
+                tasks += task
+                pending.incrementAndGet()
+                try {
+                    // The wrapper always runs its finally, even if task was cancelled before it started.
+                    structureWorkers.execute { try { task.run() } finally { finished() } }
+                } catch (failure: Throwable) { finished(); throw failure }
+                return task
             }
             fun <R> joined(task: Future<WebStructureEvidence<R>>?): WebStructureEvidence<R> = try {
                 checkNotNull(task).get()
@@ -148,18 +168,13 @@ internal class WebSourceCatalogEvidence(
                     WebProgramStructureBuilder::parseModel)
                 val plan = speculate(profile, "module-plan-evidence", WebProgramStructureBuilder.MAXIMUM_PLAN_BYTES,
                     WebProgramStructureBuilder::parsePlan)
-                try {
-                    val manifest = SourceTreeManifestReader.parse(document.toString(), profile)
-                    require(manifest.inputSha256 == input.sha256)
-                    val descriptorDocument = OracleJson.parse(descriptor.bytes, JSON_LIMITS) as? JsonObject
-                        ?: throw IllegalArgumentException("Source input descriptor is invalid.")
-                    val snapshot = parseWebRevisionSourceInputs(reference, manifest, captured.sha256, descriptorDocument, descriptor.sha256)
-                    WebProgramStructureBuilder.build(snapshot, profile, manifest, { joined(model) }, { joined(plan) })
-                        .also { cache.put(key, it) }
-                } finally {
-                    // A refused manifest abandons the speculative parse; a committed one has already been joined.
-                    model?.cancel(true); plan?.cancel(true)
-                }
+                val manifest = SourceTreeManifestReader.parse(document.toString(), profile)
+                require(manifest.inputSha256 == input.sha256)
+                val descriptorDocument = OracleJson.parse(descriptor.bytes, JSON_LIMITS) as? JsonObject
+                    ?: throw IllegalArgumentException("Source input descriptor is invalid.")
+                val snapshot = parseWebRevisionSourceInputs(reference, manifest, captured.sha256, descriptorDocument, descriptor.sha256)
+                WebProgramStructureBuilder.build(snapshot, profile, manifest, { joined(model) }, { joined(plan) })
+                    .also { cache.put(key, it) }
             }
             // Retention pins change the attempt version without changing the candidate; the projection depends
             // only on the keyed commitments, so it stays valid for the current reference.
@@ -174,7 +189,11 @@ internal class WebSourceCatalogEvidence(
             requireSame(captured, readArtifact(reference.jobId, manifestPath, MAXIMUM_MANIFEST_BYTES))
             requireSame(input, readInput(reference.jobId))
             return result
-        } finally { capturing.set(false) }
+        } finally {
+            // Covers rejection, submission failure and an early unavailable-model result that never joins the plan.
+            tasks.forEach { it.cancel(true) }
+            finished()
+        }
     }
 
     private fun <T> revision(reference: WebRevisionSourceReference, manifest: decompengine.project.SourceTreeManifest,

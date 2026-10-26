@@ -230,7 +230,7 @@ internal object WebProgramStructureBuilder {
     }
 
     fun parsePlan(bytes: ByteArray): WebStructureParse<ModulePlan> = try {
-        WebStructureParse(ModulePlanJson.readCanonical(bytes, MAXIMUM_PLAN_BYTES), WebStructureOutcome.AVAILABLE)
+        WebStructureParse(ModulePlanJson.readCanonical(bytes, MAXIMUM_PLAN_BYTES) { parseCheckpoint() }, WebStructureOutcome.AVAILABLE)
     } catch (failure: Exception) {
         if (failure is CancellationException || failure is InterruptedException) throw failure
         WebStructureParse(null, if (planSchema(bytes)?.let { it != 2L } == true) WebStructureOutcome("unsupported", "PLAN_SCHEMA_UNSUPPORTED")
@@ -330,6 +330,10 @@ internal object WebProgramStructureBuilder {
         return result(WebStructureOutcome.AVAILABLE, model, parsed.schemaVersion, planOutcome, planRecord, parsed.tables, modules, unknown)
     }
 
+    private fun parseCheckpoint() {
+        if (Thread.currentThread().isInterrupted) throw CancellationException("Structure parsing was cancelled.")
+    }
+
     private fun declaredTemplate(profile: ReconstructionProfile, id: String) =
         profile.layout.declarations.singleOrNull { it.id == id }
 
@@ -351,6 +355,7 @@ internal object WebProgramStructureBuilder {
         private var schema = 1
 
         fun read(): ParsedModel = JSON.createParser(bytes).use { parser ->
+            parseCheckpoint()
             expect(parser.nextToken(), JsonToken.START_OBJECT)
             field(parser, "schemaVersion")
             expect(parser.nextToken(), JsonToken.VALUE_NUMBER_INT)
@@ -367,6 +372,7 @@ internal object WebProgramStructureBuilder {
             val types = table(parser, WebStructureKind.TYPE, MAXIMUM_GLOBALS_OR_TYPES)
             expect(parser.nextToken(), JsonToken.END_OBJECT)
             if (parser.nextToken() != null) malformed()
+            parseCheckpoint()
             ParsedModel(schema, input, listOf(functions, globals, types))
         }
 
@@ -389,6 +395,7 @@ internal object WebProgramStructureBuilder {
             val complete = (1 shl expected.size) - 1
             val index = HashMap<String, Int>()
             while (true) {
+                parseCheckpoint()
                 val token = parser.nextToken()
                 if (token == JsonToken.END_ARRAY) break
                 expect(token, JsonToken.START_OBJECT)
@@ -399,6 +406,7 @@ internal object WebProgramStructureBuilder {
                 var label: String? = null; var assessment: String? = null
                 var called: Array<String> = NONE; var referenced: Array<String> = NONE; var stringCount = 0
                 while (true) {
+                    parseCheckpoint()
                     val next = parser.nextToken()
                     if (next == JsonToken.END_OBJECT) break
                     expect(next, JsonToken.FIELD_NAME)
@@ -471,6 +479,7 @@ internal object WebProgramStructureBuilder {
             if (parser.nextToken() == JsonToken.END_ARRAY) return NONE
             val values = ArrayList<String>(4)
             do {
+                parseCheckpoint()
                 if (parser.currentToken() != JsonToken.VALUE_STRING) malformed()
                 if (values.size >= MAXIMUM_REFERENCES) throw WebStructureFailure("limit-exceeded", "MODEL_REFERENCES_EXCEEDED")
                 val value = parser.text
@@ -483,6 +492,7 @@ internal object WebProgramStructureBuilder {
             expect(parser.nextToken(), JsonToken.START_ARRAY)
             var count = 0
             while (parser.nextToken() != JsonToken.END_ARRAY) {
+                parseCheckpoint()
                 if (parser.currentToken() != JsonToken.VALUE_STRING) malformed()
                 count++
             }

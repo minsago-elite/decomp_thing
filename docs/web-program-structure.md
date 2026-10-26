@@ -251,8 +251,13 @@ files by path, records model columns without decoding text bodies, and parses th
 profile-declared model and plan on two virtual-thread workers while the manifest is
 parsed; each record is used only after the manifest commits it and its digest matches,
 so the result equals a sequential read. Captures stay serialized, so at most two
-workers run. `WebProgramStructureTest` reports the median of three first reads with
-empty projection caches against the 500 ms budget and fails only above three times that
+worker bodies run. Cancellation requests interruption and the parsers check it cooperatively;
+read/library operations may still take time to exit. Capture admission remains held until
+both bodies actually exit, including after rejection or an unused speculative record, so
+subsequent metadata/structure reads receive `SOURCE_CATALOG_BUSY` while they drain.
+`WebStructureCaptureCancellationTest` holds both bodies across cancellation and checks
+this bound and eventual admission recovery. `WebProgramStructureTest` reports the median
+of three first reads with empty projection caches against the 500 ms budget and fails only above three times that
 budget, so noisy shared CI hosts catch a regression without flaking; on a host with load average about 15 they
 took 166–310 ms (previously 0.84–1.14 s), with warm page reads p50 1–2 ms, entity
 detail about 20 ms and a retained projection of about 45 MB.
