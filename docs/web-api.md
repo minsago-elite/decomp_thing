@@ -789,7 +789,8 @@ reviewed state still holds.
 
 After `git rm --cached`, a path is both staged for deletion and untracked, in one status entry.
 Selecting that entry for `git.unstage` unstages the deletion, and selecting it for `git.stage`
-stages the replacement.
+stages the replacement. Its staged deletion remains protected by overlap checks: an untracked
+replacement does not allow another selected path to silently unstage the deletion.
 
 The server checks guards and selection at admission under the job lock and again by the single
 operation executor immediately before Git runs. Commits additionally acquire Git's `index.lock`
@@ -797,6 +798,11 @@ and `HEAD.lock`, revalidate, and capture the reviewed index into a private immut
 commit uses that tree and the reviewed parent, never the later live index. Publication locks the
 target ref, compares the reviewed HEAD under that lock, and atomically replaces the ref. Busy
 writers or a changed parent are refused; no unreviewed index entries can enter the commit.
+Because read-only status suppresses submodules, commit validation separately reads a bounded,
+gitlink-inclusive index comparison at admission, execution and from the captured private index.
+Any staged gitlink addition, pointer change, deletion or type change is refused with
+`EXCLUDED_PATH`, even if it is absent from status and has not changed the status-derived guards.
+An incomplete index comparison fails closed with `STATUS_INCOMPLETE`.
 
 | Refusal | Meaning |
 | --- | --- |
@@ -808,7 +814,7 @@ writers or a changed parent are refused; no unreviewed index entries can enter t
 | `409 INDEX_CHANGED` | A commit's `selectedFileIds` differ from today's staged set; nothing is swept in or left out |
 | `409 CONFLICTED`, `409 NOTHING_TO_COMMIT` | Unmerged paths exist, or nothing is staged |
 | `422 EXCLUDED_PATH` | The file is excluded by the source-only policy (decided independently of any repository `.gitignore`), is a submodule, or has a non-UTF-8 name |
-| `422 NOTHING_SELECTED`, `422 STATUS_INCOMPLETE` | A selected file has nothing to stage or unstage, or the status was too large to review completely |
+| `422 NOTHING_SELECTED`, `422 STATUS_INCOMPLETE` | A selected file has nothing to stage or unstage, or the status/index comparison was too large to review completely |
 | `503 SIGNING_UNAVAILABLE` | Server policy requires signed commits, which no capability provides |
 
 Staging runs `git add -- <paths>` with literal pathspecs. Unstaging runs `reset -q HEAD -- <paths>`

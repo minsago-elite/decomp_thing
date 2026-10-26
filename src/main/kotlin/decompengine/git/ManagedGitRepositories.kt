@@ -620,6 +620,7 @@ class ManagedGitRepositories(
                 if (policy.requireSignedCommits) GitWorkspaceMutations.refuse("SIGNING_UNAVAILABLE",
                     "Policy requires signed commits, but this server has no signing capability. Nothing was committed.")
                 GitWorkspaceMutations.checkGuards(located.record, observation, request.guards)
+                GitWorkspaceMutations.requireNoStagedGitlinks(runner, located.gitDir, located.workTree, observation.head.objectId)
                 GitWorkspaceMutations.requireStagedSet(located.record, observation, request.fileIds)
             }
             else -> error("not a workspace request")

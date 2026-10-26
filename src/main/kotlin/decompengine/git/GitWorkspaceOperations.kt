@@ -136,7 +136,8 @@ internal object GitWorkspaceMutations {
         val paths = selected.mapNotNull { it.path.exact }
         val prefixes = selected.flatMap { listOfNotNull(it.path.exact, it.originalPath?.exact) }.map { "$it/" }
         val overlapping = observation.status.entries.any { entry ->
-            if (entry in chosen || entry.ignored || entry.untracked) false
+            val purelyUntracked = entry.untracked && entry.staged == GitIndexChange.NONE && entry.unstaged == GitIndexChange.NONE
+            if (entry in chosen || entry.ignored || purelyUntracked) false
             else {
                 val descendant = listOfNotNull(entry.path.exact, entry.originalPath?.exact).any { path ->
                     prefixes.any { path.startsWith(it) }
@@ -159,6 +160,31 @@ internal object GitWorkspaceMutations {
         val staged = observation.status.entries.filter { it.staged != GitIndexChange.NONE }.map { it.path.fileId(record.worktreeId) }.toSet()
         if (staged.isEmpty()) refuse("NOTHING_TO_COMMIT", "No changes are staged.")
         if (staged != fileIds.toSet()) refuse("INDEX_CHANGED", "The staged files differ from the reviewed selection. Review the staged diff again.")
+    }
+
+    /**
+     * Status deliberately suppresses submodules, so its staged set alone cannot authorize a
+     * commit. Inspect the complete index comparison (including removed gitlinks) and refuse
+     * unsupported submodule changes, even when the ordinary selected files still match.
+     */
+    fun requireNoStagedGitlinks(runner: GitCommandRunner, gitDir: Path, workTree: Path, headObjectId: String?, index: Path? = null) {
+        val result = runner.run(GitInvocation("diff", listOf("--cached", "--raw", "-z", "--no-abbrev", "--no-renames",
+            "--no-ext-diff", "--no-textconv", "--ignore-submodules=none") + listOfNotNull(headObjectId) + "--",
+            gitDir = gitDir, workTree = workTree, variables = index?.let { mapOf("GIT_INDEX_FILE" to it.toString()) } ?: emptyMap(),
+            truncateStdout = true, limits = COMMIT_LIMITS.copy(maxStdoutBytes = GitReads.MAX_STATUS_BYTES)))
+        if (result.stdoutTruncated) refuse("STATUS_INCOMPLETE", "The staged index comparison is too large to review completely.")
+        // With rename detection disabled, each NUL-delimited header has exactly one path record.
+        val records = GitReads.records(result.stdout)
+        if (records.size % 2 != 0) throw GitRepositoryException("REPOSITORY_CORRUPT", "Git index comparison output is malformed.")
+        for (position in records.indices step 2) {
+            val fields = records[position].toString(Charsets.US_ASCII).split(' ')
+            if (fields.size != 5 || !fields[0].startsWith(':')) {
+                throw GitRepositoryException("REPOSITORY_CORRUPT", "Git index comparison output is malformed.")
+            }
+            if (fields[0] == ":160000" || fields[1] == "160000") {
+                refuse("EXCLUDED_PATH", "Staged submodule changes cannot be committed by the workbench. Remove them from the index before committing source files.")
+            }
+        }
     }
 
     fun validateMessage(message: String) {
@@ -259,6 +285,8 @@ internal object GitWorkspaceMutations {
         policy: GitRepositoryPolicy, observation: GitWorkspaceObservation): String {
         val index = messageFile.parent.resolve("reviewed-index")
         Files.copy(gitDir.resolve("index"), index)
+        // Validate the actual captured index as well, never a later read of the live index.
+        requireNoStagedGitlinks(runner, gitDir, workTree, observation.head.objectId, index)
         val tree = runner.run(GitInvocation("write-tree", gitDir = gitDir, workTree = workTree,
             variables = mapOf("GIT_INDEX_FILE" to index.toString()), limits = COMMIT_LIMITS)).text.trim()
         check(observation.objectFormat.objectIdOrNull(tree) != null)
