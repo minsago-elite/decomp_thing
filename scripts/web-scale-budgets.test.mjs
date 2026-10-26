@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import test from 'node:test';
-import { assertBudgets, evaluateBudgets, validateBudgets } from './web-scale-budgets.mjs';
+import { assertBudgets, createPeakTracker, evaluateBudgets, validateBudgets } from './web-scale-budgets.mjs';
 
 const checked = JSON.parse(readFileSync(new URL('../contracts/web/scale-budgets-v1.json', import.meta.url)));
 const document = () => ({ schemaVersion: 1, regressionTolerance: 1.5, exemptions: [], fixtures: {
@@ -60,4 +60,15 @@ test('unknown fixtures, units and fields are refused', () => {
   const unit = document(); unit.fixtures['large-fixture'].budgets.latencyMs.unit = 'seconds';
   assert.throws(() => validateBudgets(unit), /known unit/);
   assert.throws(() => validateBudgets({ ...document(), extra: true }), /unknown top-level/);
+});
+
+test('peak tracking keeps the maximum of every sample, including an earlier process or page', () => {
+  const tracker = createPeakTracker();
+  tracker.observe({ serverPeakRssBytes: 900, peakBrowserHeapBytes: 50 });
+  // A restarted JVM or a navigated page reports a smaller value; the earlier peak must survive.
+  tracker.observe({ serverPeakRssBytes: 200, peakBrowserHeapBytes: 70, serverThreads: undefined });
+  tracker.observe({ serverThreads: 40, peakBrowserHeapBytes: Number.NaN });
+  assert.deepEqual(tracker.peaks(), { serverPeakRssBytes: 900, peakBrowserHeapBytes: 70, serverThreads: 40 });
+  assert.equal(tracker.samples(), 3);
+  assert.deepEqual(evaluateBudgets(document(), 'large-fixture', { payloadBytes: tracker.peaks().serverPeakRssBytes, latencyMs: 1 }).violations, []);
 });

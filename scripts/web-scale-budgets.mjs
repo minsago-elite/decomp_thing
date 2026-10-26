@@ -83,6 +83,25 @@ export async function readBaseline(path, fixture) {
   return Object.fromEntries(budgets.comparisons.filter((row) => Number.isFinite(row.measured)).map((row) => [row.metric, row.measured]));
 }
 
+/**
+ * Retain per-metric maxima across samples, e.g. several pages and both JVMs of a restart journey.
+ * A non-finite sample never lowers or replaces an observed value.
+ */
+export function createPeakTracker() {
+  const peaks = {};
+  let samples = 0;
+  return {
+    observe(measurements) {
+      samples += 1;
+      for (const [metric, value] of Object.entries(measurements)) {
+        if (Number.isFinite(value)) peaks[metric] = Math.max(peaks[metric] ?? value, value);
+      }
+    },
+    peaks: () => ({ ...peaks }),
+    samples: () => samples,
+  };
+}
+
 /** Linux /proc resource observation of one owned process; unavailable values stay absent. */
 export async function processResources(pid) {
   const status = await fs.readFile(`/proc/${pid}/status`, 'utf8').catch(() => '');

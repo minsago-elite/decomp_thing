@@ -14,7 +14,7 @@ import { seedLegacy, qualifyLegacy } from './packaged-browser-legacy.mjs';
 import { qualifyUpgrade, qualifyUpgradeCache } from './packaged-browser-upgrade.mjs';
 import { compareArchiveAssets, fetchArchiveAssets } from './packaged-browser-assets.mjs';
 import { qualifyWorkflow } from './packaged-browser-workflow.mjs';
-import { assertBudgets, evaluateBudgets, processResources, readBaseline } from './web-scale-budgets.mjs';
+import { assertBudgets, createPeakTracker, evaluateBudgets, processResources, readBaseline } from './web-scale-budgets.mjs';
 
 // Test driver only: the application is launched with a separate Node-free PATH.
 const repo = resolve(dirname(fileURLToPath(import.meta.url)), '..');
@@ -61,6 +61,7 @@ if (values['budget-baseline'] !== undefined) {
   assert.ok(budgetFixture && isAbsolute(values['budget-baseline']), '--budget-baseline needs scale or workflow mode and an absolute previous report.json');
 }
 const BUDGET_HEAP = '-Xmx512m';
+const peakTracker = createPeakTracker();
 const budgetDocument = JSON.parse(readFileSync(join(repo, 'contracts/web/scale-budgets-v1.json'), 'utf8'));
 if (values.mode === 'upgrade') {
   assert.ok(values['previous-archive'] && isAbsolute(values['previous-archive']), 'upgrade requires --previous-archive as an absolute existing ZIP path');
@@ -583,15 +584,12 @@ try {
     report.workflow = await qualifyWorkflow({ installation, makeTarget, cdp, evaluate, ready, waitFor, delay, capture,
       origin, launch: () => launchApplication(installation, new URL(origin).port), stop: () => stop(application),
       bootstrapUrl: () => applicationOutput.split(/\s+/).find((part) => part.startsWith(origin + '/nested/#bootstrap=')),
-      serverLog: () => serverLog, sensitiveValues, repo, python: values.python, applicationPid: () => application.pid });
+      serverLog: () => serverLog, sensitiveValues, repo, python: values.python, sample: samplePeaks });
     report.jobDataCreated = true;
+    await samplePeaks('journey end');
     const pages = targets.filter((target) => !target.cspProbe);
-    let peakBrowserHeapBytes = 0;
-    for (const target of pages) {
-      const heap = await cdp.call('Runtime.getHeapUsage', {}, target.sessionId).catch(() => null);
-      if (heap) peakBrowserHeapBytes = Math.max(peakBrowserHeapBytes, heap.usedSize);
-    }
-    await qualifyBudgets({ peakBrowserHeapBytes, ...await processResources(application.pid),
+    report.budgetSamples = peakTracker.samples();
+    await qualifyBudgets({ ...peakTracker.peaks(),
       apiPayloadBytesTotal: pages.flatMap((target) => target.loaded).filter((entry) => entry.url?.includes('/api/v1/')).reduce((sum, entry) => sum + entry.bytes, 0) });
   }
   if (legacyFixture) {
@@ -1222,6 +1220,18 @@ try {
   await fs.writeFile(join(root, 'report.json'), JSON.stringify(report, null, 2) + '\n');
   console.log(JSON.stringify(report, null, 2));
   console.log(`Shutdown ${report.shutdownConfirmed ? 'confirmed' : 'UNCONFIRMED'}. Report: ${join(root, 'report.json')}`);
+}
+
+// Budget peaks are sampled during a journey: page heaps reset on navigation and a restarted JVM
+// starts a new RSS high-water mark, so only maxima retained across samples are comparable.
+async function samplePeaks() {
+  let peakBrowserHeapBytes;
+  for (const target of targets.filter((item) => !item.cspProbe)) {
+    const heap = await cdp.call('Runtime.getHeapUsage', {}, target.sessionId).catch(() => null);
+    if (heap) peakBrowserHeapBytes = Math.max(peakBrowserHeapBytes ?? 0, heap.usedSize);
+  }
+  const server = application && application.exitCode === null && application.signalCode === null ? await processResources(application.pid) : {};
+  peakTracker.observe({ peakBrowserHeapBytes, ...server });
 }
 
 async function qualifyBudgets(measurements) {

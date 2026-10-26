@@ -64,6 +64,7 @@ export async function qualifyWorkflow(context) {
   await ready(main, `document.body.innerText.includes('The server has no upload capacity. Wait or free storage, then retry this file.')`, 'disk-full upload refusal');
   assert.equal(await fs.stat(data).then(async () => (await fs.readdir(data)).filter(name => /^[a-f0-9]{32}$/.test(name)).length, () => 0), 0,
     'A disk-full refusal published a job');
+  await context.sample('disk-full upload');
   result.diskFullUpload = { refused: true, jobsPublished: 0, explanation: 'no upload capacity' };
   await fs.rm(join(control, 'disk-full'));
 
@@ -99,6 +100,7 @@ export async function qualifyWorkflow(context) {
   assert.deepEqual([duplicate.status, duplicate.replayed, duplicate.runId], [202, 'true', runId], 'Duplicate start was not a replay');
   const second = await start(`packaged-${randomUUID()}`, await version());
   assert.equal(second.status, 409, 'A second key started concurrent work');
+  await context.sample('explicit start');
   result.start = { explicit: true, duplicateKeyReplayed: true, concurrentStartRefused: second.code };
 
   // 3. Live activity under a slow stream, then a browser-reported disconnect and reconnect.
@@ -128,6 +130,8 @@ export async function qualifyWorkflow(context) {
   await capture(activity, 'workflow-live-activity.png');
 
   // 4. Restart the server mid-attempt. The retained attempt must not claim to still run or to have completed.
+  // Sample the first JVM's RSS high-water mark before it exits.
+  await context.sample('before restart');
   await stop();
   await launch();
   await signIn(main);
@@ -135,6 +139,7 @@ export async function qualifyWorkflow(context) {
   await ready(main, `document.querySelector('h1')?.textContent === 'Workflow attempt' && /interrupted/i.test(document.body.innerText)`, 'interrupted attempt after restart');
   const interrupted = await text(main);
   assert.ok(!/\bRunning\b/.test(interrupted) && !interrupted.includes(sourceBrowse), 'Restarted attempt claimed progress or sources');
+  await context.sample('after restart');
   result.restart = { attemptInterrupted: true, sourcesClaimed: false };
 
   // 5. Explicit retry through the attempt controls, then complete it.
@@ -150,6 +155,7 @@ export async function qualifyWorkflow(context) {
   await settled(retryRun, 'completed');
   await cdp.call('Page.navigate', { url: `${origin}${retryHref}` }, main.sessionId);
   await ready(main, `[...document.querySelectorAll('a')].some(a => a.textContent === ${JSON.stringify(sourceBrowse)})`, 'completed retry offers its sources');
+  await context.sample('completed retry');
   result.retry = { throughAttemptControls: true, completed: true };
 
   // 6. Sources: directory, highlighted file through the worker, and an exact download digest.
@@ -157,6 +163,7 @@ export async function qualifyWorkflow(context) {
   await ready(main, `[...document.querySelectorAll('main a')].some(a => a.textContent.endsWith('.c') || a.textContent === 'src')`, 'source directory');
   result.sources = await inspectSources(context, main, jobId, retryRun);
   assert.deepEqual(await injected(main), { flag: 'undefined', images: 0 }, 'Generated source markup became active');
+  await context.sample('source inspection');
   await capture(main, 'workflow-source.png');
 
   // 7. A genuine ENOSPC inside the engine fails the next attempt without a candidate.
@@ -174,6 +181,7 @@ export async function qualifyWorkflow(context) {
   await ready(main, `/failed/i.test(document.body.innerText) && document.querySelector('h1')?.textContent === 'Workflow attempt'`, 'disk-full attempt failure');
   assert.equal(await evaluate(main, `[...document.querySelectorAll('a')].some(a => a.textContent === ${JSON.stringify(sourceBrowse)})`), false,
     'A disk-full attempt offered sources');
+  await context.sample('engine disk full');
   result.engineDiskFull = { errno: 'ENOSPC', attemptFailed: true, sourcesOffered: false };
 
   // 8. Canary and untrusted content across live and retained views, storage and logs.
