@@ -1301,7 +1301,7 @@ count as `progress.unsearchableText`; unreadable bodies count as
 signed continuations, so a final continued page cannot report complete coverage after an
 earlier page skipped a file.
 
-Each page reads at most 32 MiB of bodies (at least one file is always read), stops after
+Each page reads at most 32 MiB of bodies (failed reads are charged their committed size; at least one file is always read), stops after
 2,000 ms of elapsed work (checked between files and before every 256 lines or 64 KiB of
 lines, so one line of at most 256 KiB is the largest unit between checks) and returns at most `limit` matches below a 900,000-byte item
 ceiling. `status: "partial"` with `stopReason` `result-limit`, `byte-limit` or
@@ -1464,10 +1464,14 @@ catalog to the revision-bound source families. Unknown attempts and mismatched r
 return 404; other parameters, repeated keys and invalid limits return 422.
 
 Each page inspects at most 200 candidates in attempt creation order and fixed family
-order, returns at most `limit` (default 50, maximum 200) entries and hashes at most 512 MiB (reads that fail late are still charged) of
-current bytes through descriptor-pinned reads; at least one file is always hashed so every
-continuation advances. Absent files are not listed. Files that exist but cannot be read
-consistently or exceed the 4 GiB ceiling are counted in `unavailableFiles` and not listed.
+order, returns at most `limit` (default 50, maximum 200) entries and reserves at most 512 MiB
+of descriptor-pinned reads, including optional inventory captures and their repeated input
+and metadata reads. Each read reserves its full declared size before hashing; failed reads
+retain that reservation. A file larger than the whole 512 MiB page budget is counted in
+`unavailableFiles` without reading its body (including the first file), allowing pagination
+to advance. A smaller file that does not fit the remaining budget is deferred to the next
+page. Absent files are not listed. Files that exist but cannot be read consistently are
+also counted in `unavailableFiles`. Detail and content routes retain their 4 GiB artifact ceiling.
 The signed cursor binds the session, job, filters, page size and an attempt-set version;
 another session or filter returns `400 INVALID_CURSOR`, and a changed attempt set or
 candidate revision returns `410 CURSOR_EXPIRED`.
@@ -1480,7 +1484,12 @@ the source manifest or build contract of a revision-bound attempt when the revis
 capture confirmed that the source inputs those files record reproduce the persisted
 candidate's source commitment. That check does not cover their other bytes (formatting or
 unrelated fields could differ under the same commitment). Every other entry is
-`not-verified`: an available file with an observed digest.
+`not-verified`: an available file with an observed digest. Inventory capture is attempted
+only for manifests/build contracts, never archives. Unavailable captures are cached for
+the request, including negative results. If the shared read budget cannot admit the entire
+capture, the artifact remains `not-verified`; this does not claim corrupt source inputs.
+Inventory reads share the exchange cancellation/deadline boundary and do not hold the job
+service monitor during IO. Detail requests share their 4 GiB read budget with optional capture.
 Neither state verifies compilation, behavior, archive contents or accepted reconstruction.
 The artifact ID is `<family>_<job/run binding>_<sha256>`, so it is stable for the same bytes
 and the existing exploration report descriptor names the same artifact. `GET`/`HEAD
@@ -1508,7 +1517,9 @@ unchanged file identity. If bytes change, the connection closes short of `Conten
 so a browser never completes a different file under the listed digest. Each request is
 bounded by the 30 s request deadline. While bytes flow, a download renews it in idle
 intervals of `downloadIdleMs` (120 s), up to one hour. The server admits four concurrent
-downloads, at most two per session (`429 DOWNLOAD_LIMIT`). A client abort, stalled reader,
+artifact reads across catalog, detail and content routes (GET and HEAD), at most two per
+session (`429 DOWNLOAD_LIMIT`), preserving workers for lightweight status/control reads.
+Admission is released on success, failure or cancellation. A client abort, stalled reader,
 deadline or shutdown interrupt closes the exchange and releases descriptors and admission.
 Authorization runs under the job service monitor, but streaming does not hold it, so
 workflow publication, retention and deletion are never blocked by a reader. A deleted file

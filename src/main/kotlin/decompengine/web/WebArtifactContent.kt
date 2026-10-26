@@ -15,8 +15,8 @@ internal class WebJobArtifactStore(private val jobs: WebJobService) : WebArtifac
     override fun stream(jobId: String, runId: String, path: String, declaredSize: (Long) -> Unit,
         consume: (ByteArray, Int) -> Unit, cancellationCheck: () -> Unit) =
         jobs.streamRunArtifact(jobId, runId, path, declaredSize, consume, cancellationCheck)
-    override fun revisionCommitments(jobId: String, runId: String, revisionId: String): Pair<String, String>? = try {
-        jobs.readRevisionSources(jobId, runId, revisionId).let { it.manifestSha256 to it.descriptorSha256 }
+    override fun revisionCommitments(jobId: String, runId: String, revisionId: String, budget: WebArtifactReadBudget): Pair<String, String>? = try {
+        jobs.readArtifactRevisionSources(jobId, runId, revisionId, budget).let { it.manifestSha256 to it.descriptorSha256 }
     } catch (failure: Exception) {
         if (failure is InterruptedException || failure is CancellationException) throw failure
         null // Unavailable or inconsistent metadata is reported as not verified, never as verified.
@@ -49,7 +49,7 @@ internal fun parseWebByteRange(header: String, size: Long): WebByteRange? {
 
 internal class WebRangeNotSatisfiable : RuntimeException("range is not satisfiable")
 
-/** Bounded concurrent downloads, released after the exchange finishes or fails. */
+/** Shared admission for all artifact hashing (catalog, detail and content), released on success or failure. */
 internal class WebArtifactDownloads(private val maximum: Int = 4, private val perSession: Int = 2) {
     private val active = HashMap<String, Int>()
     private var total = 0
@@ -57,7 +57,7 @@ internal class WebArtifactDownloads(private val maximum: Int = 4, private val pe
     fun <T> admit(sessionId: String, work: () -> T): T {
         synchronized(this) {
             if (total >= maximum || (active[sessionId] ?: 0) >= perSession) {
-                throw WebAccessDenied(429, "DOWNLOAD_LIMIT", "Artifact download capacity is in use. Finish or cancel another download, then retry.")
+                throw WebAccessDenied(429, "DOWNLOAD_LIMIT", "Artifact read capacity is in use. Finish or cancel another artifact read, then retry.")
             }
             total++; active[sessionId] = (active[sessionId] ?: 0) + 1
         }
@@ -144,24 +144,13 @@ internal class WebArtifactContent(private val store: WebArtifactStore,
     private fun stream(exchange: HttpExchange, selection: WebArtifactSelection, size: Long, range: WebByteRange, cancellation: () -> Unit) {
         val output = exchange.responseBody
         val deadline = WebRequestDeadline.of(exchange)
-        var pending: ByteArray? = null
-        var position = 0L
-        var written = 0L
+        val forwarder = WebRangeForwarder(range, { output.write(it) }, { deadline?.renew() })
         val digest = store.stream(selection.jobId, selection.attempt.runId, selection.family.path, {
             if (it != size) webArtifactChanged()
-        }, { buffer, count ->
-            val chunkStart = position; val chunkEnd = position + count - 1
-            position += count
-            val from = maxOf(chunkStart, range.start); val to = minOf(chunkEnd, range.endInclusive)
-            if (from <= to) {
-                pending?.let { output.write(it); written += it.size; deadline?.renew() }
-                pending = buffer.copyOfRange((from - chunkStart).toInt(), (to - chunkStart + 1).toInt())
-            }
-        }, cancellation)
+        }, forwarder::accept, cancellation)
         // The final bytes are released only after the complete pass reproduced the listed digest and identity.
         if (digest.sha256 != selection.sha256 || digest.size != size) throw IllegalStateException("artifact changed while streaming")
-        pending?.let { output.write(it); written += it.size }
-        check(written == range.length)
+        check(forwarder.finish() == range.length)
         output.flush()
     }
 
@@ -173,5 +162,33 @@ internal fun webExchangeCancellation(exchange: Any): () -> Unit {
     return {
         if (Thread.currentThread().isInterrupted) throw CancellationException("artifact read interrupted")
         if (deadline?.expired == true) throw CancellationException("artifact read deadline expired")
+    }
+}
+
+/**
+ * Forwards the selected byte range of a verification pass, holding back its final slice until [finish]. Every
+ * consumed chunk, including chunks outside the range, reports progress so a long verification keeps its deadline.
+ */
+internal class WebRangeForwarder(private val range: WebByteRange, private val write: (ByteArray) -> Unit, private val progress: () -> Unit) {
+    private var pending: ByteArray? = null
+    private var position = 0L
+    private var written = 0L
+
+    fun accept(buffer: ByteArray, count: Int) {
+        val chunkStart = position; val chunkEnd = position + count - 1
+        position += count
+        val from = maxOf(chunkStart, range.start); val to = minOf(chunkEnd, range.endInclusive)
+        if (from <= to) {
+            pending?.let { write(it); written += it.size }
+            pending = buffer.copyOfRange((from - chunkStart).toInt(), (to - chunkStart + 1).toInt())
+        }
+        progress()
+    }
+
+    /** Releases the held-back slice; call only after the pass has been verified. Returns the bytes written. */
+    fun finish(): Long {
+        pending?.let { write(it); written += it.size }
+        pending = null
+        return written
     }
 }

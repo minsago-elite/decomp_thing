@@ -183,3 +183,17 @@ it('keeps coverage gaps from earlier pages on a final continued page', async () 
   expect(screen.getByText(/Coverage is incomplete: 2 files in scope were not searched\./u)).toBeTruthy();
   expect(screen.getByText('This is a continued search page. Earlier matches are on previous pages.')).toBeTruthy();
 });
+
+it('qualifies empty continued pages instead of claiming the search found nothing', async () => {
+  const final = fixture('source-search-no-matches');
+  vi.stubGlobal('fetch', vi.fn<typeof fetch>().mockResolvedValueOnce(response(withQuery(final, 'needle')))
+    .mockResolvedValueOnce(response(withQuery(fixture('source-search-incomplete-empty'), 'needle'))));
+  const view = mount(`?q=needle&cursor=${cursor}`);
+  const status = await screen.findByText('No further matches on this continued page. Matches on earlier pages are not repeated here.');
+  expect(status.closest('[data-search-state]')?.getAttribute('data-search-state')).toBe('no-further-matches');
+  expect(screen.queryByText(/No matches in the/u)).toBeNull();
+  view.unmount();
+  mount(`?q=needle&cursor=${cursor}`);
+  expect(await screen.findByText(/No further matches on this page, and the search is still incomplete\./u)).toBeTruthy();
+  expect(screen.queryByText(/No matches yet/u)).toBeNull();
+});

@@ -203,6 +203,19 @@ class WebRevisionSourceSearchTest {
         }.map { string(it, "displayName") })
     }
 
+    @Test fun `unavailable reads are charged to the scanned byte budget`() {
+        val large = ("x".repeat(1023) + "\n").repeat(5 * 1024) + "needle\n"
+        val entries = listOf(entry("a.c", large), entry("b.c", large), entry("c.c", large))
+        val state = harness(entries).also { it.bodies = it.bodies + ("a.c" to null) + ("b.c" to null) }
+        val engine = WebRevisionSourceSearch(state::source, maximumScannedBytes = WebRevisionSourceContent.MAXIMUM_FILE_BYTES)
+        val first = search(engine, "q=needle")
+        // The failed 5 MiB read leaves no room for another 5 MiB read on this page.
+        assertEquals("byte-limit", first.getValue("stopReason").jsonPrimitive.content)
+        assertEquals(1, state.reads)
+        assertEquals(entries[0].bytes.size.toString(), first.getValue("progress").jsonObject.getValue("scannedBytes").jsonPrimitive.content)
+        assertEquals(listOf("c.c"), all(engine, "q=needle").map { string(it, "displayName") })
+    }
+
     @Test fun `elapsed deadline stops with explicit progress and every continuation advances`() {
         val body = (1..3000).joinToString("") { if (it % 500 == 0) "needle $it\n" else "line $it\n" }
         val entries = listOf(entry("a.c", body), entry("b.c", body))

@@ -300,6 +300,28 @@ class JobStore internal constructor(
             relativePath.none { it == '\\' || it.code < 32 || it.code == 127 } &&
             relativePath.split('/').let { parts -> parts.size <= 32 && parts.none { it.isBlank() || it == "." || it == ".." } }
         ) { "artifact path must be a canonical report path" }
+        return streamContainedFile(jobId, relativePath, declaredSize, consume, cancellationCheck)
+    }
+
+    /** Catalog inventory reads use the same pinned streaming boundary, including input and failed-read accounting. */
+    internal fun readArtifactInventoryFile(jobId: String, relativePath: String, maximumBytes: Long,
+        reserveBytes: (Long) -> Unit, cancellationCheck: () -> Unit): StableRegularFile {
+        require(maximumBytes in 1 until Int.MAX_VALUE.toLong())
+        val bytes = java.io.ByteArrayOutputStream()
+        val authorize: (Long) -> Unit = { size ->
+            if (size > maximumBytes) throw decompengine.repair.RepairBudgetExceededException("artifact inventory file exceeds its byte limit")
+            reserveBytes(size)
+        }
+        val consume: (ByteArray, Int) -> Unit = { chunk, count -> bytes.write(chunk, 0, count) }
+        val digest = if (relativePath == "input.elf") {
+            jobDirectory(jobId)
+            streamContainedFile(jobId, relativePath, authorize, consume, cancellationCheck)
+        } else streamArtifact(jobId, relativePath, authorize, consume, cancellationCheck)
+        return StableRegularFile(bytes.toByteArray(), digest.sha256, digest.identity)
+    }
+
+    private fun streamContainedFile(jobId: String, relativePath: String, declaredSize: (Long) -> Unit,
+        consume: (ByteArray, Int) -> Unit, cancellationCheck: () -> Unit): decompengine.repair.StableFileDigest {
         var authorized = -1L
         return try {
             // Refuse growth before a chunk past the initially authorized size is hashed or consumed, so byte ceilings
