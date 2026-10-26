@@ -1455,9 +1455,10 @@ The Activity view summarizes the retained page as stages. The attempt row comes 
 durable snapshot (`queued` waiting, `running`, `cancelling` blocked, `completed` accepted or
 completed without acceptance, `cancelled`, `failed`/`interrupted` terminal failure). Task rows
 group observations by `taskIdSha256` and keep the latest reported stage: analysis, planning
-and agent work are running; policy, build and behavior checks plus provisional/compile-valid
-results are validating; `unresolved` or a denied permission is blocked; `accepted`,
-`rolled_back`, `completed`, `cancelled` and failure phases are final. Rows without a stage
+and agent work are running; policy, build and behavior checks plus provisional results are
+validating; `compile_valid` is terminal and shown as completed without acceptance;
+`unresolved` or a denied permission is blocked; `accepted`, `rolled_back`, `completed`,
+`cancelled` and failure phases are final. Rows without a stage
 (messages, tools, usage) keep the previous stage. Journal stages never establish acceptance.
 
 A percentage is shown only for an authoritative, producer-declared total. Observed task counts
