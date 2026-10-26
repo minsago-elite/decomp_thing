@@ -21,6 +21,7 @@ class GitIntegrationTest {
         var hook: (GitOperationCrashPoint) -> Unit = {}
         val runs = mutableMapOf("run_1" to false)
         var signed = false
+        var clock: java.time.Clock = java.time.Clock.systemUTC()
         var stable = false
         val activity = object : GitJobActivity {
             override fun runs(jobId: String) = runs.toMap()
@@ -45,7 +46,7 @@ class GitIntegrationTest {
             repositories.git("-C", seed.toString(), "push", "-q", bare.toString(), "main")
         }
         fun open() = ManagedGitRepositories(store, GitRuntime.detect(), { _, _, _ -> error("no snapshots") },
-            policy = GitRepositoryPolicy(defaultBranch = "main", requireSignedCommits = signed), crash = { hook(it) }, activity = activity,
+            policy = GitRepositoryPolicy(defaultBranch = "main", requireSignedCommits = signed), clock = clock, crash = { hook(it) }, activity = activity,
             remotePolicy = GitRemotePolicy(admittedRoot = admitted)).also(opened::add)
         override fun close() { opened.forEach { it.close() }; repositories.close() }
     }
@@ -485,6 +486,27 @@ class GitIntegrationTest {
         assertEquals("CONSUMER_TEST", assertFailsWith<GitOperationRefusal> {
             f.repositories.runner.stream(invocation, 1024 * 1024) { _, _ -> throw GitOperationRefusal("CONSUMER_TEST", "stop") }
         }.code)
+    }
+
+    @Test fun `terminal cleanup never consumes a running integration even when timestamps coincide`(): Unit = Fixture().use { f ->
+        f.clock = java.time.Clock.fixed(java.time.Instant.parse("2026-10-26T00:00:00Z"), java.time.ZoneOffset.UTC)
+        f.cloned()
+        // A completed commit predates the next merge logically, but has the exact same wall clock.
+        f.localCommit("local README\n")
+        Files.writeString(f.seed.resolve("util.c"), "int incoming = 10;\n"); f.remoteCommit("incoming")
+        fetch()
+        val before = service.workspace(jobId, repositoryId).observation.head.objectId
+        f.hook = { if (it == GitOperationCrashPoint.BEFORE_TERMINAL_PERSIST) throw SimulatedGitCrash() }
+        val (view, g) = guards()
+        val admission = service.requestWorkspace(jobId, repositoryId,
+            GitSyncRequest(GitOperationAction.MERGE, view.worktreeId, g, merge("merge")), key())
+        assertTrue(service.awaitIdle(60_000))
+        val published = service.workspace(jobId, repositoryId).observation.head.objectId
+        assertTrue(published != before)
+        service.close(); f.hook = {}; service = f.open()
+        val recovered = service.operation(jobId, repositoryId, admission.operation.operationId)
+        assertEquals(GitOperationState.COMPLETED, recovered.state, recovered.message)
+        assertEquals(published, recovered.resultObjectId)
     }
 
     @Test fun `merge evidence survives publication and a second crash during reconciliation`(): Unit = Fixture().use { f ->

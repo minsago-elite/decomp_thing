@@ -1833,7 +1833,9 @@ class ManagedGitRepositories(
             val integration = GitIntegrations.record(directory, operation.worktreeId) ?: return
             // Never let an older completed merge retire the evidence of a newer integration.
             if (operation.action == GitOperationAction.MERGE && integration.operationId != operation.operationId) return
-            if (operation.action != GitOperationAction.MERGE && integration.startedAt > operation.createdAt) return
+            // Wall clocks can coincide or move backwards. Only durable owner state proves that
+            // a different terminal commit/abort may clean this evidence during the startup sweep.
+            if (operations(operation.jobId).any { it.operationId == integration.operationId && !it.state.terminal }) return
             val record = repositories(operation.jobId).single { it.repositoryId == operation.repositoryId }
             val gitDir = directory.resolve(GIT_DIR).let { if (operation.worktreeId == record.worktreeId) it else it.resolve("worktrees").resolve(operation.worktreeId) }
             if (!GitIntegrations.mergeInProgress(gitDir)) GitIntegrations.delete(directory, operation.worktreeId)
