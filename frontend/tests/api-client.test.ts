@@ -78,6 +78,23 @@ describe('bounded v1 fetch client', () => {
     expect(fetcher.mock.calls[0]?.[0]).toContain(`/content?metadataVersion=${metadata.metadataVersion}`);
     expect(fetcher.mock.calls[0]?.[1]).toMatchObject({ method: 'HEAD', cache: 'no-store', credentials: 'same-origin' });
   });
+  it('accepts the empty HEAD stream real browsers expose and refuses any delivered HEAD byte', async () => {
+    const metadata = (JSON.parse(fixture('revision-file-root')) as { data: RevisionFile }).data;
+    metadata.binding.jobId = 'a'.repeat(32);
+    const headers = {
+      'Content-Type': 'application/octet-stream', 'Content-Length': metadata.item.sizeBytes, 'X-Content-Type-Options': 'nosniff',
+      'X-Request-ID': 'request_source_head_2', 'X-Decomp-Content-Verification': 'committed-digest',
+      'X-Decomp-File-ID': metadata.item.fileId, 'X-Decomp-Source-SHA256': metadata.sourceSha256,
+      'X-Decomp-Metadata-Version': metadata.metadataVersion, 'X-Decomp-Content-SHA256': metadata.item.sha256,
+    };
+    // Chrome 149 returns a non-null, immediately closed body for HEAD (observed in the packaged workflow journey).
+    const empty = () => new Response(new ReadableStream({ start(controller) { controller.close(); } }), { status: 200, headers });
+    const result = await createApiClient({ basePath: '/nested', fetch: vi.fn<typeof fetch>().mockResolvedValue(empty()) }).checkSourceFileDigest(metadata);
+    expect(result).toMatchObject({ basis: 'committed-digest', requestId: 'request_source_head_2', sha256: metadata.item.sha256 });
+    const delivered = new Response(new ReadableStream({ start(controller) { controller.enqueue(new Uint8Array([1])); controller.close(); } }), { status: 200, headers });
+    await expect(createApiClient({ basePath: '/nested', fetch: vi.fn<typeof fetch>().mockResolvedValue(delivered) }).checkSourceFileDigest(metadata))
+      .rejects.toMatchObject({ code: 'unexpected_response' });
+  });
   it('uses a deployment prefix, negotiated JSON and correlated response identity', async () => {
     const fetcher = vi.fn<typeof fetch>().mockResolvedValue(response());
     const result = await createApiClient({ basePath: '/workbench/', fetch: fetcher }).get('session', '/session');

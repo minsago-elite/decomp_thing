@@ -32,3 +32,24 @@ export async function boundedBody(response: Response, maxBytes: number, signal: 
     reader.releaseLock();
   }
 }
+
+/**
+ * HEAD responses carry no payload, yet browsers (Chrome 149) expose an empty stream rather than null.
+ * Absence means no delivered byte: a peer or injected transport that sends any HEAD byte is refused.
+ */
+export async function headBodyAbsent(response: Response, signal: AbortSignal): Promise<boolean> {
+  if (!response.body) return true;
+  const reader = response.body.getReader();
+  const cancel = () => { void reader.cancel().catch(() => undefined); };
+  signal.addEventListener('abort', cancel, { once: true });
+  try {
+    while (true) {
+      const next = await reader.read();
+      if (next.done) return true;
+      if (next.value.byteLength > 0) return false;
+    }
+  } finally {
+    signal.removeEventListener('abort', cancel);
+    cancel();
+  }
+}
