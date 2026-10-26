@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+from bisect import bisect_left, bisect_right
 from hashlib import sha256
 import json
 import os
@@ -716,6 +717,21 @@ class RetainedRelocationIndex:
             require(row[1] not in self.load_positions, "duplicate retained load index")
             self.load_positions[row[1]] = index
             self.load_prefix_ends.append(max(row[2], self.load_prefix_ends[-1] if self.load_prefix_ends else 0))
+        self.load_starts = [row[0] for row in self.loads]
+        self.load_ends = sorted(row[2] for row in self.loads)
+        self.load_flags = {row["index"]: row["flags"] for row in inventory["programHeaders"] if row["type"] == 1}
+        self.code_sections, self.code_prefix_ends = [], []
+        for section in self.sections.values():
+            start, size = address(section["address"]), address(section["size"])
+            if address(section["flags"]) & 2 and size:
+                require(start + size <= (1 << 64) - 1, "retained allocated section address overflow")
+                self.code_sections.append((start, section["index"], start + size - 1))
+        self.code_sections.sort()
+        self.code_starts = [row[0] for row in self.code_sections]
+        self.code_ends = sorted(row[2] for row in self.code_sections)
+        for row in self.code_sections:
+            self.code_prefix_ends.append(max(row[2], self.code_prefix_ends[-1] if self.code_prefix_ends else 0))
+        self.input_bytes, self.code_lengths = input_bytes, {}
         self.slot_counts, self.active, self.positions = {}, {}, {}
         self.unknown = self.overflow = False
         self.writes = []
@@ -747,6 +763,44 @@ class RetainedRelocationIndex:
         for index, row in enumerate(self.writes):
             self.positions[row[3]] = index
             self.prefix_ends.append(max(row[4], self.prefix_ends[-1] if self.prefix_ends else 0))
+
+    def code_window_length(self, location: int) -> int | None:
+        """Unique executable section/LOAD ownership, mirroring codeWindowLength().
+
+        Address-sorted intervals and prefix maxima bound even overlapping inventories;
+        cache repeated PLT destinations rather than scanning all sections per call.
+        """
+        if location in self.code_lengths:
+            return self.code_lengths[location]
+        self.code_lengths[location] = None
+
+        def unique_owner(rows: list, starts: list, ends: list, prefix_ends: list, end: int):
+            # Count intersecting intervals, including small intervals nested in a larger owner.
+            if bisect_right(starts, end) - bisect_left(ends, location) != 1:
+                return None
+            index = bisect_left(prefix_ends, location)
+            row = rows[index]
+            return row if row[0] <= location and row[2] >= end else None
+
+        section_row = unique_owner(self.code_sections, self.code_starts, self.code_ends, self.code_prefix_ends, location)
+        load = unique_owner(self.loads, self.load_starts, self.load_ends, self.load_prefix_ends, location)
+        if section_row is None or load is None:
+            return None
+        section = self.sections[section_row[1]]
+        if (section["type"] != 1 or address(section["flags"]) & 6 != 6 or not self.load_flags[load[1]] & 1 or
+                location >= load[0] + load[3] or section["offset"] + address(section["size"]) > self.input_bytes):
+            return None
+        length = min(15, section_row[2] - location + 1, load[0] + load[3] - location)
+        end = location + length - 1
+        if (unique_owner(self.code_sections, self.code_starts, self.code_ends, self.code_prefix_ends, end) != section_row or
+                unique_owner(self.loads, self.load_starts, self.load_ends, self.load_prefix_ends, end) != load):
+            return None
+        section_offset = section["offset"] + location - section_row[0]
+        load_offset = load[4] + location - load[0]
+        if section_offset != load_offset or load_offset > (1 << 63) - 1 or load_offset + length > self.input_bytes:
+            return None
+        self.code_lengths[location] = length
+        return length
 
     def safe_slot(self, locator: str, slot: int) -> bool:
         if self.unknown or self.overflow or self.active.get(locator) != (slot, 8) or slot > (1 << 64) - 8:
@@ -905,13 +959,16 @@ def verify_external_site(site: dict, location: int, symbols: dict, relocations: 
         if site["targetBindingDisposition"] not in {"retained-canonical-target", "unresolved-source-instruction-boundary"}:
             probe_location = address(site["physicalTargetAddress"]) if site["physicalClassification"] == "direct-call" else location
             expected = "unresolved-null-physical-target" if probe_location == 0 else "unresolved-forwarder-byte-ownership"
-            require(site["targetBindingDisposition"] == expected, "absent byte probe disposition differs")
+            require(site["targetBindingDisposition"] == expected and relocation_index.code_window_length(probe_location) is None,
+                    "absent byte probe disposition/ownership differs")
         return
     fields(probe, {"address", "availableBytes", "refusal"}, "memory probe")
     probe_address = address(probe["address"])
     expected_address = address(site["physicalTargetAddress"]) if site["physicalClassification"] == "direct-call" else location
     require(site["viaForwarder"] is (expected_address != location), "forwarding mode differs from physical call destination")
     require(probe_address == expected_address and re.fullmatch(r"(?:[0-9a-f]{2}){1,15}", probe["availableBytes"]) is not None, "memory probe coordinates differ")
+    require(relocation_index.code_window_length(probe_address) == len(probe["availableBytes"]) // 2,
+            "memory probe executable byte-window ownership/length differs")
     if probe["refusal"] is not None:
         require(re.fullmatch(r"[a-z0-9-]{1,128}", text(probe["refusal"], 128)) is not None and transfer is None and binding is None and
                 site["externalTargetId"] is None and site["targetBindingDisposition"] == "unresolved-memory-decoder-refusal",

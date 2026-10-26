@@ -331,6 +331,11 @@ class ExternalCallComponentEvidenceTest(unittest.TestCase):
             "dynamicSymbols": [symbol], "relocations": [relocation], "versionRequirements": [], "versionDefinitions": [],
             "neededLibraries": ["libexample.so"], "unsupportedReasons": ["dynamic-hash-population-not-reconciled",
                 "runtime-provider-and-interposition-unresolved"]}
+        for index, name, start, offset in ((9, ".text", 0x1010, 16), (10, ".plt", 0x2000, 32)):
+            inventory["sections"].append({"index": index, "name": name, "type": 1, "flags": "0x6", "address": hex(start),
+                "offset": offset, "size": "0xf", "link": 0, "info": 0, "alignment": "0x1", "entrySize": "0x0"})
+            inventory["programHeaders"].append({"index": index, "type": 1, "flags": 5, "offset": hex(offset),
+                "virtualAddress": hex(start), "physicalAddress": hex(start), "fileSize": "0xf", "memorySize": "0xf", "alignment": "0x1"})
         identity = {"schemaVersion": 1, "namespace": "elf-static-import-request-v1", "inputSha256": input_sha,
             "symbolTableSectionIndex": 1, "symbolIndex": 1, "name": "imported_function", "type": 2, "binding": 1, "visibility": 0,
             "version": None, "weakMayRemainNull": False, "ifuncImplementationUnresolved": False, "runtimeProviderAvailable": False,
@@ -355,7 +360,7 @@ class ExternalCallComponentEvidenceTest(unittest.TestCase):
         site.update(sourceOrdinal=0, returnAddress=call["fallthroughAddress"], physicalClassification=call["classification"],
             physicalTargetAddress=call["directTargetAddress"], sourceDisposition=call["disposition"], compositionDisposition="static-import-request-reference",
             targetBindingDisposition="static-import-request-reference", externalTargetId=identifier, viaForwarder=True,
-            memoryProbe={"address": "0x2000", "availableBytes": "ff25fa0f0000", "refusal": None}, memoryTransfer=transfer,
+            memoryProbe={"address": "0x2000", "availableBytes": "ff25fa0f0000" + "00" * 9, "refusal": None}, memoryTransfer=transfer,
             relocationBinding=binding, negativeCompleteness=False)
         counts = {"sourcePhysicalSites": 1, "composedSiteRecords": 1, "namespaceEntries": 1, "dispositions": {"static-import-request-reference": 1}}
         self.report = {"schemaVersion": 1, "kind": "independent-external-call-component-v1", "scope": "component",
@@ -573,6 +578,7 @@ class ExternalCallComponentEvidenceTest(unittest.TestCase):
     def test_external_forwarding_mode_is_bound_even_without_a_probe(self) -> None:
         site = self.report["sites"][0]
         disposition = "unresolved-forwarder-byte-ownership"
+        next(row for row in self.report["dynamicInventory"]["sections"] if row["name"] == ".plt")["flags"] = "0x2"
         site.update(memoryProbe=None, memoryTransfer=None, relocationBinding=None, externalTargetId=None,
             targetBindingDisposition=disposition, compositionDisposition=disposition)
         self.report["counts"]["dispositions"] = {disposition: 1}
@@ -591,7 +597,7 @@ class ExternalCallComponentEvidenceTest(unittest.TestCase):
         site = copy.deepcopy(self.report["sites"][0])
         site.update(physicalClassification="indirect-call", physicalTargetAddress=None, viaForwarder=False,
             instructionBytes="ff15ea1f0000", instructionLength=6, returnAddress="0x1016")
-        site["memoryProbe"].update(address="0x1010", availableBytes=site["instructionBytes"])
+        site["memoryProbe"].update(address="0x1010", availableBytes=site["instructionBytes"] + "00" * 9)
         site["memoryTransfer"].update(address="0x1010", bytes=site["instructionBytes"], classification="indirect-call",
             rawReadOpcode="CALLIND", rawTransferOpcode="CALLIND")
         VERIFY.verify_external_site(site, 0x1010, symbols, relocations, imports, index)
@@ -614,7 +620,7 @@ class ExternalCallComponentEvidenceTest(unittest.TestCase):
         site.update(physicalTargetAddress="0x1010", viaForwarder=False, instructionBytes="e8fbffffff", instructionLength=5,
             relocationBinding=None, externalTargetId=None, targetBindingDisposition="unresolved-forwarder-sequence",
             compositionDisposition="unresolved-forwarder-sequence")
-        site["memoryProbe"].update(address="0x1010", availableBytes=site["instructionBytes"])
+        site["memoryProbe"].update(address="0x1010", availableBytes=site["instructionBytes"] + "00" * 10)
         site["memoryTransfer"].update(address="0x1010", bytes=site["instructionBytes"], length=5, classification="direct-call",
             pointerSlotAddress=None, pointerWidthBytes=None, relationship="unresolved", rawReadOpcode=None, rawReadOpIndex=None,
             rawTransferOpcode=None, rawTransferOpIndex=None, rawCopyOpIndices=[], unresolvedReason="unsupported-transfer-profile")
@@ -691,6 +697,7 @@ class ExternalCallComponentEvidenceTest(unittest.TestCase):
                         targetBindingDisposition=disposition, compositionDisposition=disposition)
                     if refusal is None:
                         site["memoryProbe"] = None
+                        next(row for row in self.report["dynamicInventory"]["sections"] if row["name"] == ".plt")["flags"] = "0x2"
                     else:
                         site["memoryProbe"]["refusal"] = refusal
                     self.report["counts"]["dispositions"] = {disposition: 1}
@@ -841,8 +848,8 @@ class ExternalCallComponentEvidenceTest(unittest.TestCase):
         inventory["sections"].extend({"index": index, "name": name, "type": kind, "flags": "0x2", "address": "0x0", "offset": 0,
             "size": "0x0", "link": link, "info": 0, "alignment": "0x1", "entrySize": "0x0"}
             for index, name, kind, link in ((6, ".gnu.version", 0x6fffffff, 1), (7, ".gnu.version_r", 0x6ffffffe, 3)))
-        inventory["sections"][4].update(entrySize="0x2", size="0x4")
-        inventory["sections"][5].update(address="0x6000", offset=64, size="0x20", info=1)
+        inventory["sections"][6].update(entrySize="0x2", size="0x4")
+        inventory["sections"][7].update(address="0x6000", offset=64, size="0x20", info=1)
         inventory["programHeaders"].append({"index": 1, "type": 1, "flags": 4, "offset": "0x40",
             "virtualAddress": "0x6000", "physicalAddress": "0x6000", "fileSize": "0x20", "memorySize": "0x20", "alignment": "0x1"})
         inventory["dynamicEntries"][-1:-1] = [{"index": index + 8, "fileOffset": (index + 8) * 16, "tag": hex(tag), "value": hex(value)}
@@ -866,7 +873,7 @@ class ExternalCallComponentEvidenceTest(unittest.TestCase):
         self.verify()
         original = copy.deepcopy(self.report)
         changes = [lambda inv: inv["dynamicSymbols"][0].update(version=None),
-            lambda inv: inv["sections"].append(copy.deepcopy(inv["sections"][4]) | {"index": 8}),
+            lambda inv: inv["sections"].append(copy.deepcopy(inv["sections"][6]) | {"index": 8}),
             lambda inv: inv["dynamicEntries"][-2].update(value="0x1234"),
             lambda inv: inv["dynamicEntries"].pop(-2),
             lambda inv: inv["dynamicSymbols"][0]["version"].update(fileOffset=0),
@@ -879,10 +886,10 @@ class ExternalCallComponentEvidenceTest(unittest.TestCase):
             lambda inv: inv["versionRequirements"].append(copy.deepcopy(inv["versionRequirements"][0])),
             lambda inv: inv["versionRequirements"][0].update(providerRequest="other.so"),
             lambda inv: inv["versionRequirements"][0].update(rawIndex=3),
-            lambda inv: inv["sections"][0].update(link=9), lambda inv: inv["sections"][4].update(link=9),
-            lambda inv: inv["sections"][5].update(type=1), lambda inv: inv["sections"][5].update(link=1),
-            lambda inv: inv["sections"][5].update(info=2), lambda inv: inv["sections"][5].update(flags="0x802"),
-            lambda inv: inv["sections"][5].update(offset=4090), lambda inv: inv["sections"][5].update(address="0x6001"),
+            lambda inv: inv["sections"][0].update(link=9), lambda inv: inv["sections"][6].update(link=9),
+            lambda inv: inv["sections"][7].update(type=1), lambda inv: inv["sections"][7].update(link=1),
+            lambda inv: inv["sections"][7].update(info=2), lambda inv: inv["sections"][7].update(flags="0x802"),
+            lambda inv: inv["sections"][7].update(offset=4090), lambda inv: inv["sections"][7].update(address="0x6001"),
             lambda inv: inv["versionRequirements"][0].update(recordOffset=4096),
             lambda inv: inv["versionRequirements"][0].update(auxiliaryOffset=79),
             lambda inv: inv["versionRequirements"][0].update(auxiliaryOffset=81),
@@ -911,6 +918,118 @@ class ExternalCallComponentEvidenceTest(unittest.TestCase):
                 with self.assertRaises(VERIFY.VerificationError):
                     self.verify()
                 version[field] = previous
+
+    def test_probe_requires_unique_executable_file_backed_window_and_exact_length(self) -> None:
+        original = copy.deepcopy(self.report)
+        for length in (6, 7, 14, 15):
+            with self.subTest(valid_window=length):
+                self.report = copy.deepcopy(original)
+                inventory = self.report["dynamicInventory"]
+                next(row for row in inventory["sections"] if row["name"] == ".plt")["size"] = hex(length)
+                self.report["sites"][0]["memoryProbe"]["availableBytes"] = original["sites"][0]["memoryProbe"]["availableBytes"][:length * 2]
+                self.write_payloads()
+                self.verify()  # Section end may legitimately shorten the 15-byte window.
+                self.report = copy.deepcopy(original)
+                next(row for row in self.report["dynamicInventory"]["programHeaders"] if row["index"] == 10)["fileSize"] = hex(length)
+                self.report["sites"][0]["memoryProbe"]["availableBytes"] = original["sites"][0]["memoryProbe"]["availableBytes"][:length * 2]
+                self.write_payloads()
+                self.verify()  # A file-backed LOAD end independently bounds the window.
+        mutations = [("section", {"flags": "0x2"}), ("section", {"flags": "0x4"}), ("section", {"type": 8}),
+            ("section", {"offset": 33}), ("section", {"offset": 4090}), ("section", {"size": "0x8"}),
+            ("section", {"address": "0xfffffffffffffff8", "size": "0xf"}),
+            ("load", {"flags": 4}), ("load", {"fileSize": "0x0"}), ("load", {"fileSize": "0x8"}),
+            ("load", {"offset": "0x21"}), ("load", {"memorySize": "0xffffffffffffffff"}),
+            ("probe", {"availableBytes": "ff25fa0f0000"}),
+            ("probe", {"refusal": "decoder-refused", "availableBytes": "ff25fa0f0000"})]
+        for group, change in mutations:
+            with self.subTest(group=group, change=change):
+                self.report = copy.deepcopy(original)
+                inventory = self.report["dynamicInventory"]
+                target = (next(row for row in inventory["sections"] if row["name"] == ".plt") if group == "section" else
+                    next(row for row in inventory["programHeaders"] if row["index"] == 10) if group == "load" else
+                    self.report["sites"][0]["memoryProbe"])
+                target.update(change)
+                self.write_payloads()
+                with self.assertRaises(VERIFY.VerificationError):
+                    self.verify()
+        # Other allocated sections and LOADs can overlap at the first byte or later in the window,
+        # even if the other owner is nonexecutable or not file-backed.
+        for group in ("sections", "programHeaders"):
+            for delta in (0, 1, 14):
+                with self.subTest(overlap=group, delta=delta):
+                    self.report = copy.deepcopy(original)
+                    inventory = self.report["dynamicInventory"]
+                    if group == "sections":
+                        other = next(row for row in inventory[group] if row["name"] == ".plt") | {
+                            "index": 11, "type": 8, "flags": "0x2", "address": hex(0x2000 + delta), "size": "0x1"}
+                    else:
+                        other = next(row for row in inventory[group] if row["index"] == 10) | {
+                            "index": 11, "flags": 4, "virtualAddress": hex(0x2000 + delta), "fileSize": "0x0", "memorySize": "0x1"}
+                    inventory[group].append(other)
+                    self.write_payloads()
+                    with self.assertRaisesRegex(VERIFY.VerificationError, "byte-window ownership"):
+                        self.verify()
+        self.report = copy.deepcopy(original)
+        symbols, _, _ = VERIFY.verify_external_inventory(self.report["dynamicInventory"], self.report["externalNamespace"],
+            self.report["externalNamespaceSha256"], self.report["inputSha256"], self.report["imageBase"])
+        index = VERIFY.RetainedRelocationIndex(self.report["dynamicInventory"], symbols, self.report["inputBytes"])
+        for location, expected in ((0x1fff, None), (0x2000, 15), (0x200e, 1), (0x200f, None)):
+            self.assertEqual(expected, index.code_window_length(location))
+            self.assertEqual(expected, index.code_window_length(location))  # Cached positive and negative answers.
+
+    def test_indexed_code_windows_match_independent_linear_ownership_checks(self) -> None:
+        def linear_window(inventory: dict, location: int):
+            sections = [row for row in inventory["sections"] if int(row["flags"], 16) & 2 and
+                int(row["address"], 16) <= location < int(row["address"], 16) + int(row["size"], 16)]
+            loads = [row for row in inventory["programHeaders"] if row["type"] == 1 and
+                int(row["virtualAddress"], 16) <= location < int(row["virtualAddress"], 16) + int(row["memorySize"], 16)]
+            if len(sections) != 1 or len(loads) != 1:
+                return None
+            section, load = sections[0], loads[0]
+            if section["type"] != 1 or int(section["flags"], 16) & 6 != 6 or not load["flags"] & 1:
+                return None
+            file_end = int(load["virtualAddress"], 16) + int(load["fileSize"], 16)
+            if location >= file_end:
+                return None
+            length = min(15, int(section["address"], 16) + int(section["size"], 16) - location, file_end - location)
+            end = location + length
+            if any(row["index"] != section["index"] and int(row["flags"], 16) & 2 and
+                int(row["address"], 16) < end and location < int(row["address"], 16) + int(row["size"], 16)
+                for row in inventory["sections"]):
+                return None
+            if any(row["index"] != load["index"] and row["type"] == 1 and int(row["virtualAddress"], 16) < end and
+                location < int(row["virtualAddress"], 16) + int(row["memorySize"], 16) for row in inventory["programHeaders"]):
+                return None
+            return length if section["offset"] + location - int(section["address"], 16) == int(load["offset"], 16) + location - int(load["virtualAddress"], 16) else None
+
+        original = self.report["dynamicInventory"]
+        for group in ("sections", "programHeaders"):
+            for delta in (-4, -1, 0, 1, 8, 14, 15, 16):
+                for width in (1, 4, 20):
+                    inventory = copy.deepcopy(original)
+                    if group == "sections":
+                        other = next(row for row in inventory[group] if row["name"] == ".plt") | {
+                            "index": 11, "type": 8, "flags": "0x2", "address": hex(0x2000 + delta), "size": hex(width)}
+                    else:
+                        other = next(row for row in inventory[group] if row["index"] == 10) | {
+                            "index": 11, "flags": 4, "virtualAddress": hex(0x2000 + delta), "fileSize": "0x0", "memorySize": hex(width)}
+                    inventory[group].append(other)
+                    symbols = {(row["tableSectionIndex"], row["symbolIndex"]): row for row in inventory["dynamicSymbols"]}
+                    index = VERIFY.RetainedRelocationIndex(inventory, symbols, self.report["inputBytes"])
+                    for location in range(0x1fff, 0x2011):
+                        with self.subTest(group=group, delta=delta, width=width, location=hex(location)):
+                            self.assertEqual(linear_window(inventory, location), index.code_window_length(location))
+
+    def test_owned_window_cannot_be_hidden_by_an_absent_probe(self) -> None:
+        site = self.report["sites"][0]
+        disposition = "unresolved-forwarder-byte-ownership"
+        site.update(memoryProbe=None, memoryTransfer=None, relocationBinding=None, externalTargetId=None,
+            targetBindingDisposition=disposition, compositionDisposition=disposition)
+        self.report["counts"]["dispositions"] = {disposition: 1}
+        self.evidence["counts"] = copy.deepcopy(self.report["counts"])
+        self.write_payloads()
+        with self.assertRaisesRegex(VERIFY.VerificationError, "absent byte probe disposition/ownership"):
+            self.verify()
 
     def test_version_definition_provenance_tags_population_and_verdaux_are_checked(self) -> None:
         inventory = self.report["dynamicInventory"]
@@ -974,7 +1093,10 @@ class RetainedExternalEvidenceRegressionTest(unittest.TestCase):
                                     ("relcount-without-table", "relative relocation prefix"),
                                     ("verneed-zero-count", "GNU version tag"), ("verneed-invalid-pointer", "GNU version tag"),
                                     ("verneed-tags-absent", "GNU version tag"), ("verneed-wrong-section-type", "GNU version"),
-                                    ("verneed-out-of-file-records", "GNU version record bounds")):
+                                    ("verneed-out-of-file-records", "GNU version record bounds"),
+                                    ("plt-nonexecutable-section", "byte-window ownership"),
+                                    ("plt-file-mapping-disagrees", "byte-window ownership"),
+                                    ("plt-nonexecutable-load", "byte-window ownership")):
                 with self.subTest(mutation=mutation):
                     report, evidence = copy.deepcopy(original_report), copy.deepcopy(original_evidence)
                     if mutation == "packed-relr":
@@ -1001,6 +1123,18 @@ class RetainedExternalEvidenceRegressionTest(unittest.TestCase):
                             "relacount-exceeds-population": (0x6ffffff9, 9), "relcount-without-table": (0x6ffffffa, 1)}[mutation]
                         entry = next(row for row in report["dynamicInventory"]["dynamicEntries"] if row["tag"] == "0x15")
                         entry.update(tag=hex(tag), value=hex(value))
+                    elif mutation.startswith("plt-"):
+                        inventory = report["dynamicInventory"]
+                        section = next(row for row in inventory["sections"] if row["name"] == ".plt")
+                        if mutation == "plt-nonexecutable-section":
+                            section["flags"] = "0x2"
+                        elif mutation == "plt-file-mapping-disagrees":
+                            section["offset"] += 1
+                        else:
+                            location = int(section["address"], 16)
+                            load = next(row for row in inventory["programHeaders"] if row["type"] == 1 and
+                                int(row["virtualAddress"], 16) <= location < int(row["virtualAddress"], 16) + int(row["fileSize"], 16))
+                            load["flags"] &= ~1
                     elif mutation.startswith("verneed-"):
                         inventory = report["dynamicInventory"]
                         if mutation in {"verneed-zero-count", "verneed-invalid-pointer"}:
