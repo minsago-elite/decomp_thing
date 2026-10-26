@@ -931,18 +931,6 @@ class WebJobService(
         }
     }
 
-    @Synchronized
-    fun resolveArtifact(jobId: String, relativePath: String): Path {
-        requireInitializedRead()
-        val segments = canonicalReportSegments(relativePath)
-        if (segments[1] == "runs") {
-            getAttempt(jobId, segments[2])
-            return store.resolveRunArtifact(jobId, segments[2], segments.drop(3).joinToString("/"))
-        }
-        presentation(jobId) // Validate the record before resolving an explicitly legacy artifact.
-        return store.resolveArtifact(jobId, relativePath)
-    }
-
     /**
      * Authorize one fixed attempt artifact under the service monitor, then hash or stream it through pinned
      * descriptors without holding the monitor, so workflow publication and retention are never blocked by a reader.

@@ -26,6 +26,7 @@ internal class WebApiController(
     archiveEvidence: WebArchiveEvidence? = null,
     audit: WebAuditLog? = null,
     private val capacity: (() -> JsonObject)? = null,
+    private val readExplorationArtifact: (String, String, Long) -> decompengine.repair.StableRegularFile = jobs::readArtifact,
 ) : AutoCloseable {
     private val auditRecorder = WebAuditRecorder(access, audit)
     private val supportExport = WebSupportExport(jobs, audit, ::runtimeJson, ::limitsJson, ::capabilitiesJson, clock)
@@ -411,7 +412,8 @@ internal class WebApiController(
                     val parts = resource.split('/')
                     val attempt = jobs.getAttempt(parts[1], parts[3])
                     // The descriptor binds the stored bytes the digest-bound artifact route serves; the envelope itself is redacted.
-                    val bytes = try { jobs.readArtifact(parts[1], "reports/runs/${attempt.runId}/exploration.json", 1_048_576).bytes }
+                    val bytes = try { readExplorationArtifact(parts[1], "reports/runs/${attempt.runId}/exploration.json", 1_048_576).bytes }
+                        catch (failure: decompengine.jobs.ArtifactChangedException) { throw failure }
                         catch (_: JobStoreException) { null }
                     if (jobs.getAttempt(parts[1], parts[3]).version != attempt.version) throw WebJobServiceException("REPORT_CHANGED", "The attempt changed during this read. Refresh its evidence.")
                     sendWebApiResponse(exchange, 200, "report", webExplorationReport(parts[1], parts[3], bytes, assets.basePath))
@@ -494,6 +496,8 @@ internal class WebApiController(
                 access.sendDenied(exchange, WebAccessDenied(status, if (status == 404) "NOT_FOUND" else publicWebDiagnosticCode(failure.code),
                     publicWebDiagnosticMessage(failure.code)))
             }
+        } catch (_: decompengine.jobs.ArtifactChangedException) {
+            access.sendDenied(exchange, WebAccessDenied(409, "ARTIFACT_CHANGED", publicWebDiagnosticMessage("ARTIFACT_CHANGED")))
         } catch (_: JobStoreException) {
             access.sendDenied(exchange, if (deletedJobResource(resource)) WebAccessDenied(410, "RESOURCE_GONE", "This job was deleted. Only its deletion record is retained.")
                 else WebAccessDenied(404, "NOT_FOUND", "The requested job is unavailable."))

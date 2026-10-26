@@ -50,7 +50,9 @@ internal class WebArchiveEvidence(private val store: JobStore, private val sourc
         requireNormalizedProjectPath(layout.contractPath, "archive build contract path")
         requireNormalizedProjectPath(layout.artifactPath, "archive build artifact path")
         require(layout.contractPath != layout.artifactPath) { "archive build evidence paths are duplicated" }
-        val inventory = store.sourceArchiveInventory(jobId, transport, reportPrefix)
+        // One streamed size/digest receipt per inventoried file, admitted as an unchanged snapshot.
+        val receipts = store.sourceArchiveReceipts(jobId, transport, reportPrefix, MAXIMUM_FILE_BYTES, MAXIMUM_BYTES)
+        val inventory = receipts.inventory
         val temporary = Files.createTempDirectory("decomp-web-archive-")
         try {
             val extractedRoot = temporary.resolve("payload")
@@ -75,11 +77,11 @@ internal class WebArchiveEvidence(private val store: JobStore, private val sourc
             }
             val current = relatives.associateWith { relative ->
                 val expected = readStableRegularFile(extractedRoot, relative, MAXIMUM_FILE_BYTES)
-                val observed = readArtifact(jobId, "$reportPrefix/source-tree/$relative", MAXIMUM_FILE_BYTES)
-                require(expected.sha256 == observed.sha256 && expected.bytes.size == observed.bytes.size &&
+                val observed = receipts.files.getValue(relative)
+                require(expected.sha256 == observed.sha256 && expected.bytes.size.toLong() == observed.sizeBytes &&
                     observed.identity == inventory.getValue(relative)
                 ) { "archive payload differs from the current source tree: $relative" }
-                identity(observed)
+                ReadIdentity(observed.sha256, observed.identity)
             }
             require(current.getValue("source_tree_manifest.json").sha256 == sourceSnapshot.manifestSha256) {
                 "archive manifest differs from the checked source manifest"
@@ -96,8 +98,9 @@ internal class WebArchiveEvidence(private val store: JobStore, private val sourc
                 ) { "archive build contract differs from the current rebuilt executable" }
                 identity(snapshot)
             }
-            current.forEach { (relative, snapshot) ->
-                requireSame(snapshot, readArtifact(jobId, "$reportPrefix/source-tree/$relative", MAXIMUM_FILE_BYTES))
+            // A second complete receipt pass must observe the identical snapshot; otherwise this is a conflict.
+            if (store.sourceArchiveReceipts(jobId, transport, reportPrefix, MAXIMUM_FILE_BYTES, MAXIMUM_BYTES) != receipts) {
+                throw decompengine.jobs.ArtifactChangedException("archive source tree changed during verification")
             }
             require(inventory == store.sourceArchiveInventory(jobId, transport, reportPrefix)) { "archive source inventory changed during verification" }
             require(sourceSnapshot.manifestSha256 == sources.read(jobId, reportPrefix).manifestSha256) { "archive source revision changed during verification" }
