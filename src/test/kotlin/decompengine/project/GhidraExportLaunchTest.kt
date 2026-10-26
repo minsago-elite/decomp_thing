@@ -5,6 +5,7 @@ import decompengine.analysis.AnalysisDeadline
 import decompengine.analysis.BundledGhidraVerificationProcess
 import decompengine.analysis.BoundedAnalysisProcessLaunch
 import decompengine.analysis.GhidraAnalysisException
+import decompengine.oracle.core.OracleJson
 import decompengine.oracle.fulltree.inControlTemporaryDirectory
 import java.nio.file.Files
 import java.nio.file.Path
@@ -31,6 +32,9 @@ import kotlin.test.assertFailsWith
 import kotlin.test.assertFalse
 import kotlin.test.assertIs
 import kotlin.test.assertTrue
+import kotlinx.serialization.json.JsonArray
+import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.JsonPrimitive
 
 class GhidraExportLaunchTest {
     @Test
@@ -254,6 +258,62 @@ class GhidraExportLaunchTest {
             }
             assertEquals(1, launches.get(), "quarantine must refuse admission before another process starts")
         }
+
+    @Test
+    fun `returned call-site receipt names the readable published artifact`() = inControlTemporaryDirectory { root ->
+        val input = root.resolve("input.bin")
+        val inputBytes = "fixture executable bytes".toByteArray()
+        Files.write(input, inputBytes)
+        val inputSha256 = sha256(inputBytes)
+        val modelBytes = RecoveredProgramModel(inputSha256 = inputSha256, functions = emptyList())
+            .toJson().toByteArray()
+        val publishedCallOutput = root.resolve("analysis/reports/program_model_calls.json")
+            .toAbsolutePath().normalize()
+        val analyzer = GhidraHeadlessProgramModelAnalyzer(
+            commandFactory = { invocation ->
+                val callArguments = invocation.postScripts.last().arguments
+                val callCandidate = Path.of(callArguments.last())
+                val modelCandidate = Path.of(invocation.postScripts.first().arguments.last())
+                Files.write(modelCandidate, modelBytes)
+                Files.setPosixFilePermissions(
+                    modelCandidate,
+                    java.nio.file.attribute.PosixFilePermissions.fromString("rw-------"),
+                )
+                val callBytes = OracleJson.canonicalBytes(JsonObject(mapOf(
+                    "analysisToolSha256" to JsonPrimitive(callArguments[1]),
+                    "calls" to JsonArray(emptyList()),
+                    "exporterSha256" to JsonPrimitive(callArguments[0]),
+                    "imageBaseAddress" to JsonPrimitive("0x0"),
+                    "inputSha256" to JsonPrimitive(inputSha256),
+                    "programModelSha256" to JsonPrimitive(sha256(modelBytes)),
+                    "schemaVersion" to JsonPrimitive(1),
+                )))
+                Files.write(callCandidate, callBytes)
+                Files.setPosixFilePermissions(
+                    callCandidate,
+                    java.nio.file.attribute.PosixFilePermissions.fromString("rw-------"),
+                )
+                listOf("/bin/true")
+            },
+            limits = GhidraProgramModelExportLimits(
+                wallClockTimeout = Duration.ofSeconds(5), terminationGrace = Duration.ZERO,
+            ),
+            processStarter = { command, work -> ProcessBuilder(command).directory(work.toFile()).start() },
+        )
+
+        val result = analyzer.analyzeWithCallSites(input, root.resolve("analysis"))
+
+        assertEquals(publishedCallOutput, result.callSites.path)
+        assertTrue(Files.isRegularFile(result.callSites.path))
+        val reread = RecoveredCallSites.read(
+            result.callSites.path,
+            result.callSites.artifactSha256,
+            result.callSites.bindings,
+        ) {}
+        assertEquals(publishedCallOutput, reread.path)
+        assertEquals(result.callSites.artifactSha256, reread.artifactSha256)
+        assertEquals(result.callSites.bindings, reread.bindings)
+    }
 
     @Test
     fun `concurrent unconfirmed owners are all retained and repeated reports coalesce`() = inControlTemporaryDirectory { root ->

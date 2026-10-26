@@ -262,7 +262,7 @@ class GhidraHeadlessProgramModelAnalyzer private constructor(
                 deadline.checkpoint("before publishing validated call-site evidence")
                 moveExportCandidate(callCandidate, callOutput)
             }
-            model to calls
+            model to calls?.copy(path = callOutput.toAbsolutePath().normalize())
         }
     }
 
