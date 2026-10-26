@@ -385,6 +385,32 @@ class ManagedGitRepositoriesTest {
         }
     }
 
+    @Test fun `reference and work-tree copies charge empty directories before creating them`() {
+        GitTestRepositories().use { g ->
+            val source = g.root.resolve("wide-refs")
+            g.git("init", "-q", "--initial-branch=main", source.toString())
+            val heads = source.resolve(".git/refs/heads")
+            repeat(20) { Files.createDirectory(heads.resolve("empty$it")) }
+            val managed = g.root.resolve("managed.git")
+            g.git("init", "-q", "--bare", "--initial-branch=main", managed.toString())
+            val layout = ImportedRepositoryLayout(source.resolve(".git"), false, GitObjectFormat.SHA1)
+            assertEquals("REPOSITORY_UNSUPPORTED", assertFailsWith<GitOperationFailure> {
+                GitRepositoryImport.copyHistory(layout, managed, maxRefEntries = 10)
+            }.code)
+            val created = Files.list(managed.resolve("refs/heads")).use { it.count() }
+            assertTrue(created <= 10, "only charged reference directories may be created, found $created")
+            // Snapshot copies into a work tree are bounded the same way.
+            val snapshot = Files.createDirectories(g.root.resolve("wide-snapshot"))
+            repeat(20) { Files.createDirectory(snapshot.resolve("d$it")) }
+            val workTree = Files.createDirectory(g.root.resolve("wide-worktree"))
+            assertEquals("SOURCE_UNSUPPORTED", assertFailsWith<GitOperationFailure> {
+                GitSourceCopy.copy(snapshot, workTree, emptySet(), maxDirectories = 10)
+            }.code)
+            assertTrue(Files.list(workTree).use { it.count() } <= 10)
+            GitSourceCopy.copy(snapshot, Files.createDirectory(g.root.resolve("narrow-worktree")), emptySet(), maxDirectories = 20)
+        }
+    }
+
     @Test fun `import resolves symbolic branches and tags before dropping their target namespaces`() {
         for (format in listOf("sha1", "sha256")) {
             val (f, importRoot) = importFixture()

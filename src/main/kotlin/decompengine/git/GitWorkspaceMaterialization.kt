@@ -28,11 +28,16 @@ internal object GitSourceCopy {
     const val MAX_BYTES = 512L * 1024 * 1024
     private const val MAX_DEPTH = 64
 
-    /** Returns `relative path -> SHA-256` of every copied file. */
-    fun copy(source: Path, target: Path, uncopiedRoots: Set<String> = GitTrackingPolicy.UNCOPIED_ROOTS): Map<String, String> {
+    /** Directories created in a work tree; charged before each is created, like files. */
+    const val MAX_DIRECTORIES = 20_000
+
+    /** Returns `relative path -> SHA-256` of every copied file. [maxDirectories] is lowered only by tests. */
+    fun copy(source: Path, target: Path, uncopiedRoots: Set<String> = GitTrackingPolicy.UNCOPIED_ROOTS,
+        maxDirectories: Int = MAX_DIRECTORIES): Map<String, String> {
         if (!Files.isDirectory(source, NOFOLLOW_LINKS)) unavailable()
         val digests = sortedMapOf<String, String>()
         var bytes = 0L
+        var directories = 0
         Files.walkFileTree(source, emptySet(), MAX_DEPTH + 1, object : SimpleFileVisitor<Path>() {
             override fun preVisitDirectory(directory: Path, attributes: BasicFileAttributes): FileVisitResult {
                 GitStorage.checkInterrupted()
@@ -41,6 +46,8 @@ internal object GitSourceCopy {
                 if (directory != source) {
                     if (relative.nameCount == 1 && relative.toString() in uncopiedRoots) return FileVisitResult.SKIP_SUBTREE
                     if (directory.fileName.toString() == ".git") unsupported()
+                    // Empty directories cost inodes too; their breadth is bounded before any is created.
+                    if (++directories > maxDirectories) unsupported()
                     Files.createDirectory(target.resolve(relative.toString()))
                 }
                 return FileVisitResult.CONTINUE
@@ -165,8 +172,11 @@ internal object GitRepositoryImport {
         return ImportedRepositoryLayout(gitDir, bare, format)
     }
 
-    /** Copy objects, branch/tag refs and HEAD into an already initialized managed Git directory. */
-    fun copyHistory(layout: ImportedRepositoryLayout, managedGitDir: Path) {
+    /**
+     * Copy objects, branch/tag refs and HEAD into an already initialized managed Git directory.
+     * [maxRefEntries] bounds reference files and directories together and is lowered only by tests.
+     */
+    fun copyHistory(layout: ImportedRepositoryLayout, managedGitDir: Path, maxRefEntries: Int = MAX_REFS) {
         GitImportObjectCopy.copy(layout.gitDir.resolve("objects"), managedGitDir.resolve("objects"))
         val packed = layout.gitDir.resolve("packed-refs")
         val packedBytes = if (Files.exists(packed, NOFOLLOW_LINKS)) GitStorage.read(packed, MAX_PACKED_REFS_BYTES) else byteArrayOf()
@@ -184,13 +194,17 @@ internal object GitRepositoryImport {
             Files.walkFileTree(root, emptySet(), 32, object : SimpleFileVisitor<Path>() {
                 override fun preVisitDirectory(directory: Path, attributes: BasicFileAttributes): FileVisitResult {
                     if (attributes.isSymbolicLink || !attributes.isDirectory) unsupported("The repository references are not ordinary files.")
+                    GitStorage.checkInterrupted()
+                    // Directories, empty ones included, are charged against the reference quota before creation.
+                    if (++refs > maxRefEntries) unsupported("The repository has too many references.")
                     GitStorage.directories(managedGitDir.resolve("refs").resolve(namespace),
                         *root.relativize(directory).map { it.toString() }.filter { it.isNotEmpty() }.toTypedArray())
                     return FileVisitResult.CONTINUE
                 }
                 override fun visitFile(file: Path, attributes: BasicFileAttributes): FileVisitResult {
                     GitStorage.checkInterrupted()
-                    if (!attributes.isRegularFile || attributes.isSymbolicLink || ++refs > MAX_REFS) unsupported("The repository references are not ordinary files.")
+                    if (!attributes.isRegularFile || attributes.isSymbolicLink) unsupported("The repository references are not ordinary files.")
+                    if (++refs > maxRefEntries) unsupported("The repository has too many references.")
                     val name = "refs/$namespace/" + root.relativize(file).joinToString("/")
                     if (name.endsWith(".lock")) return FileVisitResult.CONTINUE
                     if (!validRefName(name)) unsupported("A repository reference has an unsupported name.")
