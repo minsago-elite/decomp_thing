@@ -99,6 +99,15 @@ routes; local success is not a hosted complete-closure guarantee. Empty headers 
 lack a retained kernel lease, and complete-set terminal-validation cutoff qualification
 remains separate. The read-only sandbox bind alone does not exclude host-side writes.
 
+This is snapshot-namespace protection, not mediation of every compiler read. In particular,
+source can name writable off-snapshot paths with relative includes. A local synchronized
+worker witness consumed a transient header in its output directory and still returned
+`compiled-object`; the snapshot monitor correctly does not reject ordinary sibling output
+writes. The production layout likewise has writable reports outside `state/snapshot`.
+Closing #738 requires a fail-closed complete compiler-input boundary, including these
+non-snapshot search locations, and actual configured qualification. Do not treat the
+snapshot regression positives as resolution of that broader P1 acceptance-integrity gap.
+
 The current shared NOFILE 512 policy also cannot retain every nonempty input in an
 otherwise admitted large snapshot. Issue #1786 and PR #1800 own the separately versioned,
 authenticated module-only finite descriptor correction and configured Make/Ninja scale
