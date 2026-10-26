@@ -15,8 +15,8 @@ internal class WebJobArtifactStore(private val jobs: WebJobService) : WebArtifac
     override fun stream(jobId: String, runId: String, path: String, declaredSize: (Long) -> Unit,
         consume: (ByteArray, Int) -> Unit, cancellationCheck: () -> Unit) =
         jobs.streamRunArtifact(jobId, runId, path, declaredSize, consume, cancellationCheck)
-    override fun revisionCommitments(jobId: String, runId: String, revisionId: String): Pair<String, String>? = try {
-        jobs.readRevisionSources(jobId, runId, revisionId).let { it.manifestSha256 to it.descriptorSha256 }
+    override fun revisionCommitments(jobId: String, runId: String, revisionId: String, budget: WebArtifactReadBudget): Pair<String, String>? = try {
+        jobs.readArtifactRevisionSources(jobId, runId, revisionId, budget).let { it.manifestSha256 to it.descriptorSha256 }
     } catch (failure: Exception) {
         if (failure is InterruptedException || failure is CancellationException) throw failure
         null // Unavailable or inconsistent metadata is reported as not verified, never as verified.
@@ -49,7 +49,7 @@ internal fun parseWebByteRange(header: String, size: Long): WebByteRange? {
 
 internal class WebRangeNotSatisfiable : RuntimeException("range is not satisfiable")
 
-/** Bounded concurrent downloads, released after the exchange finishes or fails. */
+/** Shared admission for all artifact hashing (catalog, detail and content), released on success or failure. */
 internal class WebArtifactDownloads(private val maximum: Int = 4, private val perSession: Int = 2) {
     private val active = HashMap<String, Int>()
     private var total = 0
@@ -57,7 +57,7 @@ internal class WebArtifactDownloads(private val maximum: Int = 4, private val pe
     fun <T> admit(sessionId: String, work: () -> T): T {
         synchronized(this) {
             if (total >= maximum || (active[sessionId] ?: 0) >= perSession) {
-                throw WebAccessDenied(429, "DOWNLOAD_LIMIT", "Artifact download capacity is in use. Finish or cancel another download, then retry.")
+                throw WebAccessDenied(429, "DOWNLOAD_LIMIT", "Artifact read capacity is in use. Finish or cancel another artifact read, then retry.")
             }
             total++; active[sessionId] = (active[sessionId] ?: 0) + 1
         }
