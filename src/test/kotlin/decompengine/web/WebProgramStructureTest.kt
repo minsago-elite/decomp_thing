@@ -271,8 +271,14 @@ class WebProgramStructureTest {
         val module = detail.getValue("module").jsonObject
         assertEquals("unaccepted", module.text("implementationDeclaration"))
         val snapshot = revision.evidence.readRevision(revision.reference)
-        val implementation = snapshot.files.indexOfFirst { it.evidence.path == "src/modules/extra.c" }
-        assertEquals(revisionSourceFileId(revision.reference, implementation, "src/modules/extra.c"), module.text("implementationFileId"))
+        // reports/* sort before src/modules/*, so display order and the input-first identity order differ here.
+        val displayed = snapshot.files.indexOfFirst { it.evidence.path == "src/modules/extra.c" }
+        val implementation = snapshot.files[displayed]
+        assertNotEquals(displayed, snapshot.identityIndex(implementation))
+        val linked = assertNotNull(module.text("implementationFileId"))
+        assertEquals(snapshot.fileId(implementation), linked)
+        // The link resolves through the same reader the file view uses.
+        assertEquals("src/modules/extra.c", resolveRevisionSourceFile(snapshot, linked).evidence.path)
         assertEquals("include/modules/extra.h", module.text("interfacePath"))
         val owned = detail.getValue("owned").jsonObject
         assertEquals(3, owned.getValue("total").jsonPrimitive.int)

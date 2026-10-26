@@ -37,7 +37,7 @@ class WebSourceArchivesTest {
             override fun present(jobId: String, runId: String, path: String) = true
             override fun stream(jobId: String, runId: String, path: String, declaredSize: (Long) -> Unit,
                 consume: (ByteArray, Int) -> Unit, cancellationCheck: () -> Unit): StableFileDigest { observe(); return StableFileDigest(digest, 10, identity) }
-            override fun revisionCommitments(jobId: String, runId: String, revisionId: String) = null
+            override fun revisionCommitments(jobId: String, runId: String, revisionId: String, budget: WebArtifactReadBudget) = null
         }
         return WebSourceArchives({ job, run, revision ->
             val captured = capture()
@@ -232,7 +232,7 @@ class WebSourceArchivesConsistencyTest {
             override fun present(jobId: String, runId: String, path: String) = true
             override fun stream(jobId: String, runId: String, path: String, declaredSize: (Long) -> Unit,
                 consume: (ByteArray, Int) -> Unit, cancellationCheck: () -> Unit) = StableFileDigest(digest, 10, identity)
-            override fun revisionCommitments(jobId: String, runId: String, revisionId: String) = null
+            override fun revisionCommitments(jobId: String, runId: String, revisionId: String, budget: WebArtifactReadBudget) = null
         }
         var round = 0
         val archives = WebSourceArchives({ _, _, _ -> snapshot }, { _, _ -> attempt }, store, { _, _ -> null }, { _, _, sha ->

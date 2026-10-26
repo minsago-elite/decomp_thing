@@ -209,7 +209,7 @@ internal class WebRevisionSourceSearch(
                     bytePosition += utf8Length(content, charPosition, start); charPosition = start
                     searchFrom = end
                     if (bytePosition < from) continue
-                    val item = item(ref, snapshot.identityIndex(file), file, content, start, end, line, lineStart, bytePosition)
+                    val item = item(snapshot.fileId(file), file, content, start, end, line, lineStart, bytePosition)
                     val size = item.toString().toByteArray(Charsets.UTF_8).size + 1
                     if (items.size >= query.limit || itemBytes + size > MAXIMUM_ITEM_BYTES) {
                         stop = Stop("result-limit", fileIndex, bytePosition); position--; break@files
@@ -259,14 +259,14 @@ internal class WebRevisionSourceSearch(
         }
     }
 
-    private fun item(ref: WebRevisionSourceReference, fileIndex: Int, file: WebRevisionSourceFile, line: String,
+    private fun item(fileId: String, file: WebRevisionSourceFile, line: String,
         start: Int, end: Int, lineNumber: Long, lineStart: Int, offset: Int): JsonObject {
         val before = line.codePointCount(0, start)
         val beforeStart = if (before > CONTEXT_CODE_POINTS) line.offsetByCodePoints(start, -CONTEXT_CODE_POINTS) else 0
         val after = line.codePointCount(end, line.length)
         val afterEnd = if (after > CONTEXT_CODE_POINTS) line.offsetByCodePoints(end, CONTEXT_CODE_POINTS) else line.length
         return buildJsonObject {
-            put("fileId", revisionSourceFileId(ref, fileIndex, file.evidence.path)); put("displayName", file.evidence.path)
+            put("fileId", fileId); put("displayName", file.evidence.path)
             put("sha256", file.evidence.sha256)
             put("line", lineNumber.toString()); put("column", (before + 1).toString())
             put("offsetBytes", offset.toString()); put("lineOffsetBytes", lineStart.toString())

@@ -152,6 +152,10 @@ private fun revisionSourceHex(bytes: ByteArray, length: Int = bytes.size): Strin
 internal fun revisionSourceDigest(text: String): String = revisionSourceHex(
     MessageDigest.getInstance("SHA-256").digest(text.toByteArray(Charsets.UTF_8)))
 
+/**
+ * Raw identity construction for one identity-order index. Producers must call [WebRevisionSourceSnapshot.fileId]
+ * so every listing, reader, search, diff, structure and archive link uses the same input-first identity order.
+ */
 internal fun revisionSourceFileId(reference: WebRevisionSourceReference, index: Int, path: String): String =
     "file_${index}_${revisionSourceDigest(listOf("revision-source-file-v1", reference.jobId, reference.runId,
         reference.revisionId, reference.sourceSha256, path).joinToString("\u0000"))}"

@@ -198,9 +198,8 @@ internal object WebProgramStructureBuilder {
         readEvidence: (GeneratedFileEvidence, Int) -> ByteArray?,
     ): WebProgramStructureIndex {
         val ref = snapshot.reference
-        val fileIds = snapshot.files.withIndex().associate { (index, file) ->
-            file.evidence.path to revisionSourceFileId(ref, index, file.evidence.path)
-        }
+        // Identity order, not display order: the same IDs the listings, readers, search and diffs resolve.
+        val fileIds = snapshot.files.associate { file -> file.evidence.path to snapshot.fileId(file) }
         val shared = declaredPath(profile, "shared-interface")?.takeIf { it in fileIds }
         val budget = RetainedBudget(64 * 1024L + fileIds.entries.sumOf { 128L + 2L * (it.key.length + it.value.length) })
         var retainedBytes = budget.bytes
