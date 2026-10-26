@@ -58,6 +58,12 @@ export function auditFixtures(repo, buildId) {
   Object.assign(retried.data, { jobId, previousRunId: runId });
   const cancelling = structuredClone(run);
   Object.assign(cancelling.data, { state: 'cancelling', terminalReason: null, endedAt: null, version: 'run_version_cancelling' });
+  const exploration = bound('report-exploration', selected);
+  exploration.data.sourceArtifact.binding = selected;
+  exploration.data.sourceArtifact.contentHref = `/nested${exploration.data.sourceArtifact.contentHref}`;
+  const history = bound('validation-history', { jobId, runId, revisionId: null });
+  const owner = history.data.items[0];
+  const validation = bound('report-normal-cases', { jobId, runId, revisionId: owner.candidateId });
   const routes = [
     [/^\/bootstrap$/, () => ok(bootstrap)],
     [new RegExp(`^/jobs/${jobId}/runs/${runId}/controls$`), () => ok(controlsFor())],
@@ -74,14 +80,33 @@ export function auditFixtures(repo, buildId) {
     [new RegExp(`^/jobs/${jobId}/runs/${runId}/events$`), (accept) => accept.includes('text/event-stream')
       ? error(406, 'STREAM_UNSUPPORTED') : ok(load('events-poll'))],
     [new RegExp(`^/jobs/${jobId}/runs/${runId}/progress-pin$`), () => ok(load('progress-pin'))],
-    [new RegExp(`^/jobs/${jobId}/runs/${runId}/reports/exploration$`), () => ok(load('report-exploration'))],
-    [new RegExp(`^/jobs/${jobId}/runs/${runId}/validation-history$`), () => ok(bound('validation-history', { jobId, runId, revisionId: null }))],
+    [new RegExp(`^/jobs/${jobId}/runs/${runId}/reports/exploration$`), () => ok(exploration)],
+    [new RegExp(`^/jobs/${jobId}/runs/${runId}/validation-history$`), () => ok(history)],
+    [new RegExp(`^/jobs/${jobId}/runs/${runId}/reports/revision-validation$`), () => ok(validation)],
     [new RegExp(`^/jobs/${jobId}/runs/${runId}/revisions/${revisionId}/source-directories/${id}$`), () => ok(directory)],
     [new RegExp(`^/jobs/${jobId}/runs/${runId}/revisions/${revisionId}/source-files/${id}/chunk$`), () => ok(chunk)],
     [new RegExp(`^/jobs/${jobId}/runs/${runId}/revisions/${revisionId}/source-files/${id}$`), () => ok(file)],
   ];
   const base = `/nested/jobs/${jobId}/runs/${runId}`;
-  // Each page names text that only its populated view renders, so a failed read cannot pass.
+  const api = `/jobs/${jobId}/runs/${runId}`;
+  // Query-free attempt routes intentionally start with explicit-read shells. Each measurement
+  // must activate these controls afresh and prove both the reads and distinctive DOM content.
+  const activity = [
+    { action: 'Follow activity', reads: [`${api}/snapshot`, `${api}/events`],
+      content: [{ selector: '.activity-row', text: 'Recorded attempt state: running.' }] },
+    { action: 'Pause activity', reads: [], content: [{ selector: '.activity-row', text: 'Recorded attempt state: running.' }] },
+  ];
+  const evidence = [
+    { action: 'Read exploration evidence', reads: [`${api}/reports/exploration`], content: [
+      { selector: '#exploration-report-binding', text: exploration.data.reportId },
+      { selector: '.output-signature-chart [role="img"]', text: '' },
+      { selector: '[aria-labelledby="output-signature-breadth-title"] .retained-case-table tbody', text: 'New distinct exit/output signatures' },
+    ] },
+    { action: 'Read validation evidence', reads: [`${api}/validation-history`],
+      content: [{ selector: '[aria-label="Recorded validation operations"] tbody', text: owner.ownerId }] },
+    { action: `Inspect cases: ${owner.ownerKind} ${owner.ownerId}`, reads: [`${api}/reports/revision-validation`],
+      content: [{ selector: '[aria-label="Recorded validation cases"] tbody', text: validation.data.validationCases.items[0].caseId }] },
+  ];
   // Unknown paths are a server 404 document, not an SPA view, so the router's not-found view
   // stays covered by the component accessibility gate.
   const pages = [
@@ -90,9 +115,9 @@ export function auditFixtures(repo, buildId) {
     { name: 'runtime', path: '/nested/runtime', rendered: 'Page build identity' },
     { name: 'job detail', path: `/nested/jobs/${jobId}`, rendered: 'Binary metadata' },
     { name: 'attempt history', path: `/nested/jobs/${jobId}/runs`, rendered: runId },
-    { name: 'attempt overview', path: base, rendered: 'Attempt identity' },
-    { name: 'attempt activity', path: `${base}/activity`, rendered: 'Attempt identity' },
-    { name: 'attempt evidence', path: `${base}/evidence`, rendered: 'Attempt identity' },
+    { name: 'attempt overview', path: base, rendered: 'Attempt identity', preparation: [...activity, ...evidence] },
+    { name: 'attempt activity', path: `${base}/activity`, rendered: 'Attempt identity', preparation: activity },
+    { name: 'attempt evidence', path: `${base}/evidence`, rendered: 'Attempt identity', preparation: evidence },
     { name: 'source directory', path: `${base}/revisions/${revisionId}/sources/root`, rendered: 'é space' },
     { name: 'source file', path: `${base}/revisions/${revisionId}/source-files/${file.data.item.fileId}?byte=0`, rendered: 'embedded_table_with_a_long_identifier' },
   ];
@@ -133,7 +158,11 @@ export const measurePage = `(() => {
     const region = element.closest(scrollRegions);
     if ((region && region !== element) || !shown(element)) continue;
     const box = element.getBoundingClientRect();
-    if (box.width > 0 && (box.right > width + 1 || box.left < -1)) overflow.push(describe(element));
+    const outside = box.width > 0 && (box.right > width + 1 || box.left < -1);
+    // A bounded local scroller or clipping container need not enlarge the root. Only the
+    // named source/table regions may retain horizontal overflow, including hidden overflow.
+    const local = !region && element.clientWidth > 0 && element.scrollWidth > element.clientWidth + 1;
+    if (outside || local) overflow.push(describe(element));
   }
   const actions = [...document.querySelectorAll('button, a[href], input, select, textarea, summary')].filter(shown);
   const clipped = actions.filter(element => {
@@ -244,6 +273,38 @@ function percentile(values, fraction) {
 }
 const summary = (values) => ({ samples: values.length, median: Number(percentile(values, 0.5).toFixed(1)), p95: Number(percentile(values, 0.95).toFixed(1)) });
 
+/** Shell readiness is used for initial-route metadata timing, not explicit-read coverage. */
+export const auditPageReady = (page, content = false) => `document.querySelector('main h1') !== null
+  && document.querySelector('main [aria-busy="true"]') === null
+  && document.body.innerText.includes(${JSON.stringify(page.rendered)}) && !document.querySelector('main [role="alert"]')
+  ${content ? `&& ${auditContentReady((page.preparation ?? []).flatMap(step => step.content))}` : ''}`;
+
+export const auditContentReady = (checks) => `(${JSON.stringify(checks)}).every(check =>
+  [...document.querySelectorAll(check.selector)].some(element => element.getClientRects().length > 0
+    && element.textContent.includes(check.text)))`;
+
+/** Runs after every fresh navigation, before any layout/contrast/focus measurement. */
+export async function prepareAuditPage({ tab, page, evaluate, ready, fulfilled }) {
+  const interactions = [];
+  for (const step of page.preparation ?? []) {
+    const before = fulfilled.length;
+    const started = Date.now();
+    const clicked = await evaluate(tab, `(() => {
+      const button = [...document.querySelectorAll('main button')].find(element =>
+        (element.getAttribute('aria-label') || element.textContent.trim()) === ${JSON.stringify(step.action)});
+      if (!button || button.disabled) return false;
+      button.click(); return true;
+    })()`);
+    assert.ok(clicked, `${page.name}: missing enabled control ${step.action}`);
+    await ready(tab, auditContentReady(step.content), `${page.name}: ${step.action} content`);
+    for (const path of step.reads) assert.ok(fulfilled.slice(before).some(entry =>
+      entry.method === 'GET' && entry.path === path && entry.status === 200), `${page.name}: ${step.action} did not read ${path}`);
+    interactions.push({ page: page.name, action: step.action, elapsedMs: Date.now() - started, reads: step.reads });
+  }
+  await ready(tab, auditPageReady(page, true), `${page.name}: populated content`);
+  return interactions;
+}
+
 export async function qualifyAudit({ origin, repo, manifest, evidenceDirectory, cdp, makeTarget, evaluate, ready, capture, delay }) {
   const waitForValue = async (check, label, timeout = 20000) => {
     const deadline = Date.now() + timeout;
@@ -270,8 +331,12 @@ export async function qualifyAudit({ origin, repo, manifest, evidenceDirectory, 
     }, tab.sessionId);
     await cdp.call('Fetch.enable', { patterns: [{ urlPattern: `${origin}/nested/api/v1/*`, requestStage: 'Request' }] }, tab.sessionId);
   }
-  const populated = (page) => `document.querySelector('main h1') !== null && document.querySelector('main [aria-busy="true"]') === null
-    && document.body.innerText.includes(${JSON.stringify(page.rendered)}) && !document.querySelector('main [role="alert"]')`;
+  const populated = auditPageReady;
+  const interactions = [];
+  const prepare = async (tab, page, context) => {
+    const results = await prepareAuditPage({ tab, page, evaluate, ready, fulfilled });
+    interactions.push(...results.map(result => ({ ...result, context })));
+  };
   const theme = async (tab, scheme) => cdp.call('Emulation.setEmulatedMedia', { features: [
     { name: 'prefers-color-scheme', value: scheme }, { name: 'prefers-reduced-motion', value: 'reduce' }] }, tab.sessionId);
   const tab = await makeTarget();
@@ -284,6 +349,7 @@ export async function qualifyAudit({ origin, repo, manifest, evidenceDirectory, 
       await theme(tab, 'light');
       await cdp.call('Page.navigate', { url: origin + page.path }, tab.sessionId);
       await ready(tab, populated(page), `${page.name} at ${viewport.name}`);
+      await prepare(tab, page, viewport.name);
       await delay(150);
       for (const scheme of ['light', 'dark']) {
         await theme(tab, scheme);
@@ -308,6 +374,7 @@ export async function qualifyAudit({ origin, repo, manifest, evidenceDirectory, 
       await theme(tab, scheme);
       await cdp.call('Page.navigate', { url: origin + page.path }, tab.sessionId);
       await ready(tab, populated(page), `${page.name} for focus`);
+      await prepare(tab, page, `focus ${scheme}`);
       // Route focus lands on the page heading. Walk forward to the end of the page, then back from
       // the heading to the skip link, so every stop is reached by real keyboard input.
       const stops = [];
@@ -405,7 +472,8 @@ export async function qualifyAudit({ origin, repo, manifest, evidenceDirectory, 
   await cdp.call('Browser.setDownloadBehavior', { behavior: 'default' });
 
   // Timing on the reference profile: cold loads use a new target with an empty cache; route
-  // changes are in-app link activations measured to heading focus and to populated data.
+  // changes are in-app link activations measured to heading focus and initial-route metadata.
+  // Explicit activity/evidence reads are recorded separately in interactions above.
   const cold = [];
   for (let sample = 0; sample < 20; sample += 1) {
     const probe = await makeTarget();
@@ -439,7 +507,7 @@ export async function qualifyAudit({ origin, repo, manifest, evidenceDirectory, 
     })`);
     feedback.push(timing.focused); data.push(timing.populated);
   }
-  return { fixtures: fixtures.pages.map(({ name, path }) => ({ name, path })), layout, contrast, focus, fulfilled, unmapped,
+  return { fixtures: fixtures.pages.map(({ name, path }) => ({ name, path })), layout, contrast, focus, fulfilled, unmapped, interactions,
     workers: { highlightedTokens: highlighted, targets: workers }, keyboard,
     timing: { coldLoad: summary(cold), routeFeedback: summary(feedback), routeData: summary(data), raw: { cold, feedback, data } } };
 }
@@ -450,6 +518,7 @@ export function assertAudit(audit, manifest, responses, origin, budgets = { cold
   for (const entry of audit.layout) {
     const where = `${entry.page} @ ${entry.viewport} (${entry.scheme})`;
     if (entry.pageOverflowPx > 1) failures.push(`${where}: page scrolls horizontally by ${entry.pageOverflowPx}px: ${entry.overflow.join('; ')}`);
+    if (entry.overflowCount > 0) failures.push(`${where}: non-exempt horizontal overflow (${entry.overflowCount}): ${entry.overflow.join('; ')}`);
     if (entry.clippedActions.length) failures.push(`${where}: actions outside the viewport: ${entry.clippedActions.join('; ')}`);
     if (entry.smallTargets.length) failures.push(`${where}: targets below 24x24: ${entry.smallTargets.join('; ')}`);
     if (!entry.headingWithinWidth) failures.push(`${where}: page heading is outside the viewport`);

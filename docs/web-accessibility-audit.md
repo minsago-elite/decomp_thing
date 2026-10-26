@@ -26,8 +26,26 @@ own live status; this page records what is checked, how, and what still needs a 
 | Breadcrumb links ("All jobs") rendered below 24×24 CSS px. | Packaged audit target-size check. | Breadcrumb links are inline-flex with a 1.5rem minimum height and width. |
 | "Download complete recorded input" used `download=""`. preact-iso only skips truthy `link.download`, so Enter or a click turned the attachment into an in-app route and no download began. | Packaged audit keyboard download, then a component regression test. | The link carries the file's display name; the server's `Content-Disposition` still names the saved file. |
 
-No scoped exceptions were needed for the measured routes. Contrast, reflow, focus, target-size
-and reduced-motion results are retained in the CI `packaged-web-verification` artifact
+### Audit coverage corrections
+
+The initial audit accepted the shared “Attempt identity” shell without activating the explicit
+activity/evidence reads. Its passing result did **not** qualify the activity rows, exploration
+chart/table or validation history/case tables. The corrected audit follows then pauses activity,
+reads exploration evidence and validation history, and inspects a populated validation receipt
+on every fresh overview/activity/evidence navigation before layout, contrast or focus measurement.
+It requires successful identity-bound API reads and visible distinctive rows, the chart and its
+table alternative; an unused fixture or empty shell fails preparation. Explicit-read interaction
+timings are retained separately from initial-route metadata timings.
+
+The initial verdict also ignored non-exempt overflow that did not widen the root. The corrected
+measurement and verdict reject both out-of-viewport content and local horizontal scrolling or
+clipping outside the named source/table exemptions. Dependency-free regression controls cover
+missing content/reads and bounded `auto`/`hidden`/`clip` overflow; these models are not browser
+rendering evidence. The expanded populated-content coverage requires its own hosted packaged
+qualification; earlier shell-only results must not be used as that evidence.
+
+Contrast, reflow, focus, target-size and reduced-motion results are retained in the CI
+`packaged-web-verification` artifact
 (`build/packaged-browser-*/report.json`, every route's 400% zoom screenshot and the dashboard, job
 detail and source views at every supported size).
 
