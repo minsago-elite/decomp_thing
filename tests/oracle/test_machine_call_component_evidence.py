@@ -1,4 +1,8 @@
-"""Authored offline provenance fixtures; no builds, network, or original-host input reads."""
+"""Offline provenance controls; no builds, network, or original-host input reads.
+
+The retained-driver regression requires the two recorded source commits locally;
+CI fetches those objects before these tests, never from inside the verifier.
+"""
 
 from __future__ import annotations
 
@@ -309,11 +313,22 @@ class ExternalCallComponentEvidenceTest(unittest.TestCase):
         inventory = {"schemaVersion": 1, "kind": "independent-elf-dynamic-bindings-v1", "authority": "diagnostic-authenticated-elf-metadata",
             "inputSha256": input_sha, "elfClass": 2, "byteOrder": 1, "elfType": "ET_DYN", "machine": 62, "imageBase": "0x1000",
             "activeSymbolTableSectionIndex": 1, "symbolPopulationBasis": "section-declared-dynsym", "complete": False,
-            "releaseEligible": False, "negativeCompleteness": False, "sections": [], "programHeaders": [{"index": 0, "type": 1,
+            "releaseEligible": False, "negativeCompleteness": False, "sections": [
+                {"index": index, "name": name, "type": kind, "flags": "0x2", "address": start, "offset": offset,
+                 "size": size, "link": link, "info": 0, "alignment": "0x8", "entrySize": width}
+                for index, name, kind, start, offset, size, link, width in (
+                    (1, ".dynsym", 11, "0x0", 0, "0x0", 3, "0x18"),
+                    (2, ".rela.plt", 4, "0x4000", 0, "0x18", 1, "0x18"),
+                    (3, ".dynstr", 3, "0x0", 0, "0x0", 0, "0x0"),
+                    (5, ".rela.dyn", 4, "0x5000", 24, "0x0", 1, "0x18"))], "programHeaders": [{"index": 0, "type": 1,
                 "flags": 6, "offset": "0x0", "virtualAddress": "0x3000", "physicalAddress": "0x3000", "fileSize": "0x8",
-                "memorySize": "0x8", "alignment": "0x1"}], "dynamicEntries": [],
+                "memorySize": "0x8", "alignment": "0x1"}], "dynamicEntries": [
+                    {"index": index, "fileOffset": index * 16, "tag": hex(tag), "value": hex(value)}
+                    for index, (tag, value) in enumerate(((23, 0x4000), (2, 24), (20, 7), (7, 0x5000), (8, 0), (9, 24),
+                                                         (6, 0), (11, 24), (0, 0)))],
             "dynamicSymbols": [symbol], "relocations": [relocation], "versionRequirements": [], "versionDefinitions": [],
-            "neededLibraries": ["libexample.so"], "unsupportedReasons": ["runtime-provider-and-interposition-unresolved"]}
+            "neededLibraries": ["libexample.so"], "unsupportedReasons": ["dynamic-hash-population-not-reconciled",
+                "runtime-provider-and-interposition-unresolved"]}
         identity = {"schemaVersion": 1, "namespace": "elf-static-import-request-v1", "inputSha256": input_sha,
             "symbolTableSectionIndex": 1, "symbolIndex": 1, "name": "imported_function", "type": 2, "binding": 1, "visibility": 0,
             "version": None, "weakMayRemainNull": False, "ifuncImplementationUnresolved": False, "runtimeProviderAvailable": False,
@@ -603,6 +618,89 @@ class ExternalCallComponentEvidenceTest(unittest.TestCase):
             rawTransferOpcode=None, rawTransferOpIndex=None, rawCopyOpIndices=[], unresolvedReason="unsupported-transfer-profile")
         VERIFY.verify_external_site(site, 0x1010, symbols, relocations, imports, index)
 
+    def test_raw_dynamic_mechanisms_cannot_omit_uncertainty_after_rehash(self) -> None:
+        original = copy.deepcopy(self.report)
+        for tags, reason in (((35, 36, 37), "packed-relr-relocations-not-expanded"),
+                ((0x6000000f, 0x60000010, 0x60000011, 0x60000012, 0x6fffe000, 0x6fffe001, 0x6fffe003),
+                 "android-packed-relocations-not-expanded"), ((0x12345678,), "unclassified-dynamic-tag")):
+            for tag in tags:
+                with self.subTest(tag=hex(tag)):
+                    self.report = copy.deepcopy(original)
+                    inventory = self.report["dynamicInventory"]
+                    inventory["dynamicEntries"].insert(-1, {"index": 7, "fileOffset": 112, "tag": hex(tag), "value": "0x1000"})
+                    self.write_payloads()
+                    with self.assertRaisesRegex(VERIFY.VerificationError, "unsupported reasons differ"):
+                        self.verify()
+                    inventory["unsupportedReasons"] = sorted(inventory["unsupportedReasons"] + [reason])
+                    self.write_payloads()
+                    with self.assertRaisesRegex(VERIFY.VerificationError, "static import disposition contradicts"):
+                        self.verify()
+
+    def test_raw_dynamic_ranges_and_section_membership_cannot_be_rehashed_away(self) -> None:
+        original = copy.deepcopy(self.report)
+        changes = [lambda inv: inv["dynamicEntries"][1].update(value="0x0"),
+            lambda inv: inv["dynamicEntries"][0].update(value="0x5000"),
+            lambda inv: inv["dynamicEntries"][1].update(value="0x17"),
+            lambda inv: inv["dynamicEntries"][2].update(value="0x11"),
+            lambda inv: inv["dynamicEntries"].pop(2),
+            lambda inv: inv["dynamicEntries"].insert(0, copy.deepcopy(inv["dynamicEntries"][0])),
+            lambda inv: inv["dynamicEntries"][4].update(value="0x18"),
+            lambda inv: inv["dynamicEntries"][6].update(value="0x1234"),
+            lambda inv: inv["dynamicEntries"][7].update(value="0x10"),
+            lambda inv: inv["sections"][1].update(link=3),
+            lambda inv: inv["sections"][1].update(address="0x4001"),
+            lambda inv: inv["sections"][1].update(entrySize="0x10"),
+            lambda inv: inv["relocations"][0].update(fileOffset=1),
+            lambda inv: inv["relocations"][0].update(relocationIndex=1),
+            lambda inv: inv["sections"][1].update(size="0x30")]
+        for index, change in enumerate(changes):
+            with self.subTest(index=index):
+                self.report = copy.deepcopy(original)
+                change(self.report["dynamicInventory"])
+                self.write_payloads()
+                with self.assertRaises(VERIFY.VerificationError):
+                    self.verify()
+        # REL and RELA use the same reconstruction; both remain valid positive profiles.
+        for kind, width, pointer, size, entry_size in ((4, 24, 7, 8, 9), (9, 16, 17, 18, 19)):
+            with self.subTest(positive_kind=kind):
+                self.report = copy.deepcopy(original)
+                inventory = self.report["dynamicInventory"]
+                inventory["sections"][1].update(type=kind, entrySize=hex(width), size=hex(width))
+                inventory["relocations"][0]["dynamicTables"] = ["rela" if kind == 4 else "rel"]
+                self.report["sites"][0]["relocationBinding"]["dynamicTables"] = inventory["relocations"][0]["dynamicTables"]
+                inventory["dynamicEntries"] = [{"index": index, "fileOffset": index * 16, "tag": hex(tag), "value": hex(value)}
+                    for index, (tag, value) in enumerate(((pointer, 0x4000), (size, width), (entry_size, width), (6, 0), (11, 24), (0, 0)))]
+                self.write_payloads()
+                self.verify()
+                inventory["dynamicEntries"][1]["value"] = "0x0"
+                self.write_payloads()
+                with self.assertRaisesRegex(VERIFY.VerificationError, "membership differs"):
+                    self.verify()
+
+    def test_absent_and_refused_probes_require_matching_unresolved_dispositions(self) -> None:
+        original = copy.deepcopy(self.report)
+        for refusal in (None, "decoder-refused"):
+            for disposition in ("retained-canonical-target", "unresolved-source-instruction-boundary", "unresolved-memory-transfer",
+                                "unresolved-null-physical-target", "unresolved-forwarder-byte-ownership", "unresolved-memory-decoder-refusal"):
+                with self.subTest(refusal=refusal, disposition=disposition):
+                    self.report = copy.deepcopy(original)
+                    site = self.report["sites"][0]
+                    site.update(memoryTransfer=None, relocationBinding=None, externalTargetId=None,
+                        targetBindingDisposition=disposition, compositionDisposition=disposition)
+                    if refusal is None:
+                        site["memoryProbe"] = None
+                    else:
+                        site["memoryProbe"]["refusal"] = refusal
+                    self.report["counts"]["dispositions"] = {disposition: 1}
+                    self.evidence["counts"] = copy.deepcopy(self.report["counts"])
+                    self.write_payloads()
+                    expected = "unresolved-forwarder-byte-ownership" if refusal is None else "unresolved-memory-decoder-refusal"
+                    if disposition == expected:
+                        self.verify()
+                    else:
+                        with self.assertRaises(VERIFY.VerificationError):
+                            self.verify()
+
     def test_static_import_rejects_irelative_after_rehash(self) -> None:
         for kind in (6, 7):
             self.report["dynamicInventory"]["relocations"][0]["type"] = kind
@@ -659,7 +757,9 @@ class ExternalCallComponentEvidenceTest(unittest.TestCase):
             with self.subTest(kind=kind, slot=hex(slot), tables=tables):
                 self.report = copy.deepcopy(original)
                 inventory = self.report["dynamicInventory"]
-                inventory["relocations"].append(inventory["relocations"][0] | {"relocationIndex": 1, "locator": "rela:2:1",
+                inventory["sections"][3]["size"] = "0x18"
+                inventory["dynamicEntries"][4]["value"] = "0x18" if tables else "0x0"
+                inventory["relocations"].append(inventory["relocations"][0] | {"sectionIndex": 5, "relocationIndex": 0, "locator": "rela:5:0",
                     "fileOffset": 24, "offset": hex(slot), "type": kind, "dynamicTables": tables,
                     "slotFileOffset": None, "slotLoadIndices": []})
                 self.write_payloads()
@@ -670,14 +770,17 @@ class ExternalCallComponentEvidenceTest(unittest.TestCase):
                         self.verify()
         self.report = copy.deepcopy(original)
         inventory = self.report["dynamicInventory"]
-        inventory["sections"] = [{"index": 4, "name": ".bss", "type": 8, "flags": "0x2", "address": "0x2fe0", "offset": 0,
-            "size": "0x40", "link": 0, "info": 0, "alignment": "0x8", "entrySize": "0x0"}]
+        inventory["sections"][3]["size"] = "0x30"
+        inventory["dynamicEntries"][4]["value"] = "0x30"
+        inventory["sections"].append({"index": 4, "name": ".bss", "type": 8, "flags": "0x2", "address": "0x2fe0", "offset": 0,
+            "size": "0x40", "link": 0, "info": 0, "alignment": "0x8", "entrySize": "0x0"})
         inventory["dynamicSymbols"].append(inventory["dynamicSymbols"][0] | {"symbolIndex": 2, "locator": "dynsym:1:2",
             "name": "copy_storage", "info": 17, "type": 1, "rawSectionIndex": 4, "resolvedSectionIndex": 4,
             "sectionKind": "defined", "value": "0x2fe0", "size": "0x40"})
         for index, kind, slot, symbol in ((1, 5, 0x2fe0, 2), (2, 2, 0x2ff0, 1)):
-            inventory["relocations"].append(inventory["relocations"][0] | {"relocationIndex": index, "locator": f"rela:2:{index}",
-                "offset": hex(slot), "type": kind, "symbolIndex": symbol, "dynamicTables": ["rela"], "slotFileOffset": None, "slotLoadIndices": []})
+            inventory["relocations"].append(inventory["relocations"][0] | {"sectionIndex": 5, "relocationIndex": index - 1, "locator": f"rela:5:{index - 1}",
+                "fileOffset": index * 24, "offset": hex(slot), "type": kind, "symbolIndex": symbol, "dynamicTables": ["rela"],
+                "slotFileOffset": None, "slotLoadIndices": []})
         self.write_payloads()
         # Earlier COPY encloses the slot although the immediately preceding short write does not.
         with self.assertRaises(VERIFY.VerificationError):
@@ -685,13 +788,12 @@ class ExternalCallComponentEvidenceTest(unittest.TestCase):
 
     def test_static_import_requires_consistent_retained_version_identity(self) -> None:
         inventory = self.report["dynamicInventory"]
-        inventory["sections"] = [{"index": index, "name": name, "type": kind, "flags": "0x2", "address": "0x0", "offset": 0,
+        inventory["sections"].extend({"index": index, "name": name, "type": kind, "flags": "0x2", "address": "0x0", "offset": 0,
             "size": "0x0", "link": link, "info": 0, "alignment": "0x1", "entrySize": "0x0"}
-            for index, name, kind, link in ((1, ".dynsym", 11, 2), (2, ".dynstr", 3, 0),
-                                           (3, ".gnu.version", 0x6fffffff, 1), (4, ".gnu.version_r", 0x6ffffffe, 2))]
-        inventory["dynamicSymbols"][0]["version"] = {"sectionIndex": 3, "fileOffset": 0, "raw": 2, "index": 2, "hidden": False,
+            for index, name, kind, link in ((6, ".gnu.version", 0x6fffffff, 1), (7, ".gnu.version_r", 0x6ffffffe, 3)))
+        inventory["dynamicSymbols"][0]["version"] = {"sectionIndex": 6, "fileOffset": 0, "raw": 2, "index": 2, "hidden": False,
             "kind": "required-version", "name": "VER_1", "providerRequest": "libexample.so"}
-        inventory["versionRequirements"] = [{"sectionIndex": 4, "stringSectionIndex": 2, "recordOffset": 0, "auxiliaryOffset": 16,
+        inventory["versionRequirements"] = [{"sectionIndex": 7, "stringSectionIndex": 3, "recordOffset": 0, "auxiliaryOffset": 16,
             "providerRequest": "libexample.so", "name": "VER_1", "rawIndex": 2, "index": 2, "flags": 0, "hash": 0x5aa821}]
 
         def rehash_identity() -> None:
@@ -715,7 +817,7 @@ class ExternalCallComponentEvidenceTest(unittest.TestCase):
             lambda inv: inv["versionRequirements"].append(copy.deepcopy(inv["versionRequirements"][0])),
             lambda inv: inv["versionRequirements"][0].update(providerRequest="other.so"),
             lambda inv: inv["versionRequirements"][0].update(rawIndex=3),
-            lambda inv: inv["sections"][0].update(link=9), lambda inv: inv["sections"][2].update(link=9)]
+            lambda inv: inv["sections"][0].update(link=9), lambda inv: inv["sections"][4].update(link=9)]
         for index, change in enumerate(changes):
             with self.subTest(version=index):
                 self.report = copy.deepcopy(original)
@@ -723,6 +825,53 @@ class ExternalCallComponentEvidenceTest(unittest.TestCase):
                 rehash_identity()
                 with self.assertRaises(VERIFY.VerificationError):
                     self.verify()
+
+
+class RetainedExternalEvidenceRegressionTest(unittest.TestCase):
+    def test_real_driver_rehashed_metadata_and_canonical_bypasses_are_rejected(self) -> None:
+        directory = ROOT / "oracle/gcc/16.2.0/external-call-component-v1"
+        original_evidence = json.loads((directory / "evidence.json").read_bytes())
+        original_report = json.loads(gzip.decompress((directory / "driver-report.json.gz").read_bytes()))
+        self.assertEqual(15376, VERIFY.verify_evidence(directory / "evidence.json")[1]["sourcePhysicalSites"])
+        temporary_root = ROOT / "build/machine-call-evidence-controls"
+        temporary_root.mkdir(parents=True, exist_ok=True)
+        with tempfile.TemporaryDirectory(prefix="real-driver-", dir=temporary_root) as temporary:
+            output = Path(temporary)
+            (output / "driver-request.json").write_bytes((directory / "driver-request.json").read_bytes())
+            for mutation, error in (("packed-relr", "unsupported reasons differ"), ("empty-jmprel", "membership differs"),
+                                    ("false-canonical", "noncanonical physical destination"),
+                                    ("indirect-canonical", "noncanonical physical destination")):
+                with self.subTest(mutation=mutation):
+                    report, evidence = copy.deepcopy(original_report), copy.deepcopy(original_evidence)
+                    if mutation == "packed-relr":
+                        entry = next(row for row in report["dynamicInventory"]["dynamicEntries"] if row["tag"] == "0x15")
+                        entry.update(tag="0x24", value="0x401da0")
+                    elif mutation == "empty-jmprel":
+                        entry = next(row for row in report["dynamicInventory"]["dynamicEntries"] if row["tag"] == "0x2")
+                        entry["value"] = "0x0"
+                    else:
+                        if mutation == "false-canonical":
+                            site = report["sites"][40]
+                            self.assertEqual(("0x3cc9", "0x403360", "unresolved-target-outside-canonical-population"),
+                                (site["instructionRva"], site["physicalTargetAddress"], site["sourceDisposition"]))
+                        else:
+                            site = next(row for row in report["sites"] if row["physicalClassification"] == "indirect-call" and
+                                        row["compositionDisposition"] == "unresolved-memory-transfer")
+                        previous = site["compositionDisposition"]
+                        site.update(compositionDisposition="retained-canonical-target", targetBindingDisposition="retained-canonical-target",
+                            memoryProbe=None, memoryTransfer=None, relocationBinding=None, externalTargetId=None)
+                        report["counts"]["dispositions"][previous] -= 1
+                        report["counts"]["dispositions"]["retained-canonical-target"] += 1
+                    raw = VERIFY.canonical_bytes(report)
+                    stored = gzip.compress(raw, mtime=0)
+                    evidence["payloads"]["report"].update(bytes=len(raw), sha256=sha256(raw).hexdigest(),
+                        storedBytes=len(stored), storedSha256=sha256(stored).hexdigest())
+                    evidence["counts"] = copy.deepcopy(report["counts"])
+                    (output / "driver-report.json.gz").write_bytes(stored)
+                    manifest = output / "evidence.json"
+                    manifest.write_bytes(VERIFY.canonical_bytes(evidence))
+                    with self.assertRaisesRegex(VERIFY.VerificationError, error):
+                        VERIFY.verify_evidence(manifest)
 
 
 if __name__ == "__main__":

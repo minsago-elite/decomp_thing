@@ -489,6 +489,103 @@ def verify_external_inventory(inventory: dict, namespace: dict, checksum: str, i
     return symbols, relocations, imports
 
 
+def retained_relocation_tables(inventory: dict, sections: dict) -> tuple[bool, dict]:
+    """Reconstruct runtime membership/uncertainty, never trusting derived annotations.
+
+    Mirrors BoundedElfDynamicBindingsV1's closed tag policy and REL/RELA/JMPREL
+    section coverage. This checks retained metadata consistency, not original ELF bytes.
+    """
+    known = set(range(35)) | {0x6ffffef5, 0x6ffffff0, 0x6ffffff9, 0x6ffffffa, 0x6ffffffb,
+                              0x6ffffffc, 0x6ffffffd, 0x6ffffffe, 0x6fffffff}
+    singletons = {2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 17, 18, 19, 20, 23, 35, 36, 37,
+                  0x6ffffef5, 0x6ffffff0, 0x6ffffff9, 0x6ffffffa, 0x6ffffffc, 0x6ffffffd, 0x6ffffffe, 0x6fffffff}
+    reasons = {"runtime-provider-and-interposition-unresolved", "dynamic-hash-population-not-reconciled"}
+    tags = {}
+    terminated = False
+    for entry in inventory["dynamicEntries"]:
+        tag, value = address(entry["tag"]), address(entry["value"])
+        require(not terminated or tag == value == 0, "non-null retained entries after DT_NULL")
+        terminated |= tag == 0
+        if tag in singletons:
+            require(tag not in tags, "duplicate retained dynamic singleton tag")
+            tags[tag] = value
+        if tag in {35, 36, 37}:
+            reasons.add("packed-relr-relocations-not-expanded")
+        elif tag in {0x6000000f, 0x60000010, 0x60000011, 0x60000012, 0x6fffe000, 0x6fffe001, 0x6fffe003}:
+            reasons.add("android-packed-relocations-not-expanded")
+        elif tag in {0x7ffffffd, 0x7fffffff}:
+            reasons.add("dynamic-filter-provider-selection-unresolved")
+        elif tag not in known:
+            reasons.add("unclassified-dynamic-tag")
+    require(terminated, "unterminated retained dynamic entries")
+    active = [section for section in sections.values() if section["type"] == 11 and address(section["address"]) == tags.get(6)]
+    require(len(active) == 1 and active[0]["index"] == inventory["activeSymbolTableSectionIndex"] and
+            address(active[0]["entrySize"]) == tags.get(11) == 24, "retained active symbol table differs from raw tags")
+    if any(section["type"] == 11 and section["index"] != inventory["activeSymbolTableSectionIndex"] for section in sections.values()):
+        reasons.add("inactive-dynsym-table-retained")
+    require(inventory["unsupportedReasons"] == sorted(reasons), "retained unsupported reasons differ from dynamic metadata")
+    ranges = []
+
+    def add_range(name: str, start: int, size: int, kind: int, width: int) -> None:
+        end = start + size
+        require(end <= (1 << 64) - 1 and size % width == 0, "invalid retained dynamic relocation range")
+        pieces = []
+        for section in sections.values():
+            if section["type"] != kind:
+                continue
+            begin, length = address(section["address"]), address(section["size"])
+            require(begin + length <= (1 << 64) - 1, "retained relocation section address overflow")
+            if size and length and begin < end and begin + length > start:
+                pieces.append((begin, section["index"], begin + length))
+        covered = start
+        for begin, index, section_end in sorted(pieces):
+            section = sections[index]
+            require(address(section["entrySize"]) == width and section["link"] == inventory["activeSymbolTableSectionIndex"] and
+                    address(section["flags"]) & 2 and not address(section["flags"]) & 0x800,
+                    "retained dynamic relocation section metadata differs")
+            piece_start, piece_end = max(start, begin), min(end, section_end)
+            require(piece_start == covered and (piece_start - begin) % width == (piece_end - begin) % width == 0,
+                    "retained dynamic relocation range has gaps, overlap or split entries")
+            covered = piece_end
+        require(covered == end, "retained dynamic relocation range lacks section coverage")
+        ranges.append((name, start, end, kind))
+
+    for name, pointer, size, entry_size, kind, width in (("rela", 7, 8, 9, 4, 24), ("rel", 17, 18, 19, 9, 16)):
+        if any(tag in tags for tag in (pointer, size, entry_size)):
+            require(pointer in tags and size in tags and tags.get(entry_size) == width,
+                    "incomplete or inconsistent retained dynamic relocation tags")
+            add_range(name, tags[pointer], tags[size], kind, width)
+    if any(tag in tags for tag in (23, 2, 20)):
+        require(all(tag in tags for tag in (23, 2, 20)) and tags[20] in {7, 17}, "invalid retained JMPREL tags")
+        add_range("jmprel", tags[23], tags[2], 4 if tags[20] == 7 else 9, 24 if tags[20] == 7 else 16)
+    memberships, identities, counts = {}, set(), {}
+    for row in inventory["relocations"]:
+        section = sections.get(row["sectionIndex"])
+        require(section is not None and section["type"] in {4, 9}, "missing retained relocation section")
+        width = 24 if section["type"] == 4 else 16
+        identity = (row["sectionIndex"], row["relocationIndex"])
+        size = address(section["size"])
+        require(identity not in identities and address(section["entrySize"]) == width and size % width == 0 and
+                row["relocationIndex"] < size // width and row["fileOffset"] == section["offset"] + row["relocationIndex"] * width and
+                row["symbolTableSectionIndex"] == section["link"], "retained relocation section/entry identity differs")
+        identities.add(identity)
+        counts[section["index"]] = counts.get(section["index"], 0) + 1
+        location = address(section["address"]) + row["relocationIndex"] * width
+        require(location <= (1 << 64) - 1, "retained relocation entry address overflow")
+        tables = [name for name, start, end, kind in ranges if kind == section["type"] and start <= location < end]
+        require(row["dynamicTables"] == tables, "retained dynamic relocation membership differs from raw tags")
+        memberships[row["locator"]] = tables
+    for section in sections.values():
+        linked = sections.get(section["link"])
+        if section["type"] in {4, 9} and linked is not None and linked["type"] == 11:
+            width = 24 if section["type"] == 4 else 16
+            require(address(section["entrySize"]) == width and address(section["size"]) % width == 0 and
+                    counts.get(section["index"], 0) == address(section["size"]) // width,
+                    "retained relocation section population differs")
+    uncertain = bool(reasons & {"packed-relr-relocations-not-expanded", "android-packed-relocations-not-expanded", "unclassified-dynamic-tag"})
+    return uncertain, memberships
+
+
 class RetainedRelocationIndex:
     """Recheck positive metadata claims; no ELF reads or instruction decoding occur here.
 
@@ -497,10 +594,9 @@ class RetainedRelocationIndex:
     """
     def __init__(self, inventory: dict, symbols: dict, input_bytes: int):
         self.inventory = inventory
-        self.mechanism_uncertain = any(reason in {"packed-relr-relocations-not-expanded", "android-packed-relocations-not-expanded", "unclassified-dynamic-tag"}
-                                       for reason in inventory["unsupportedReasons"])
         self.sections = {row["index"]: row for row in inventory["sections"]}
         require(len(self.sections) == len(inventory["sections"]), "duplicate retained section index")
+        self.mechanism_uncertain, self.memberships = retained_relocation_tables(inventory, self.sections)
         self.requirements = {}
         for row in inventory["versionRequirements"]:
             self.requirements.setdefault((row["stringSectionIndex"], row["index"]), []).append(row)
@@ -526,10 +622,8 @@ class RetainedRelocationIndex:
         for row in inventory["relocations"]:
             slot = address(row["offset"])
             self.slot_counts[slot] = self.slot_counts.get(slot, 0) + 1
-            if not row["dynamicTables"] or row["symbolTableSectionIndex"] != inventory["activeSymbolTableSectionIndex"]:
+            if not self.memberships[row["locator"]] or row["symbolTableSectionIndex"] != inventory["activeSymbolTableSectionIndex"]:
                 continue
-            require(len(row["dynamicTables"]) <= 3 and all(name in {"rela", "rel", "jmprel"} for name in row["dynamicTables"]),
-                    "invalid active dynamic relocation membership")
             identity = (row["sectionIndex"], row["relocationIndex"])
             require(identity not in identities, "duplicate active relocation identity")
             identities.add(identity)
@@ -592,7 +686,7 @@ class RetainedRelocationIndex:
                 requirements[0]["providerRequest"] == version["providerRequest"] and requirements[0]["rawIndex"] & 0x7fff == index)
 
     def static_import(self, relocation: dict, symbol: dict, slot: int) -> bool:
-        return (not self.mechanism_uncertain and self.slot_counts[slot] == 1 and len(relocation["dynamicTables"]) == 1 and
+        return (not self.mechanism_uncertain and self.slot_counts[slot] == 1 and len(self.memberships[relocation["locator"]]) == 1 and
                 self.owned_slot(relocation, slot) and relocation["symbolTableSectionIndex"] == self.inventory["activeSymbolTableSectionIndex"] and
                 relocation["type"] in {6, 7} and relocation["symbolIndex"] != 0 and self.safe_slot(relocation["locator"], slot) and
                 symbol["sectionKind"] == "undefined" and symbol["rawSectionIndex"] == 0 and symbol["resolvedSectionIndex"] == 0 and
@@ -687,6 +781,8 @@ def verify_external_bindings(evidence: dict, request: dict, report: dict, source
                     all(site[key] is None for key in ("memoryProbe", "memoryTransfer", "relocationBinding", "externalTargetId")),
                     "canonical/source-boundary site gained external evidence")
         else:
+            require(site["targetBindingDisposition"] not in {"retained-canonical-target", "unresolved-source-instruction-boundary"},
+                    "noncanonical physical destination has canonical/source-boundary binding")
             probe_location = target if classification == "direct-call" else location
             require(site["viaForwarder"] is (probe_location != location), "forwarding mode differs from physical call destination")
         counts[status] = counts.get(status, 0) + 1
@@ -703,6 +799,10 @@ def verify_external_site(site: dict, location: int, symbols: dict, relocations: 
         require(binding is not None and site["externalTargetId"] is not None, "static import disposition has no binding")
     if probe is None:
         require(transfer is None and binding is None and site["externalTargetId"] is None, "proof without byte probe")
+        if site["targetBindingDisposition"] not in {"retained-canonical-target", "unresolved-source-instruction-boundary"}:
+            probe_location = address(site["physicalTargetAddress"]) if site["physicalClassification"] == "direct-call" else location
+            expected = "unresolved-null-physical-target" if probe_location == 0 else "unresolved-forwarder-byte-ownership"
+            require(site["targetBindingDisposition"] == expected, "absent byte probe disposition differs")
         return
     fields(probe, {"address", "availableBytes", "refusal"}, "memory probe")
     probe_address = address(probe["address"])
@@ -711,7 +811,8 @@ def verify_external_site(site: dict, location: int, symbols: dict, relocations: 
     require(probe_address == expected_address and re.fullmatch(r"(?:[0-9a-f]{2}){1,15}", probe["availableBytes"]) is not None, "memory probe coordinates differ")
     if probe["refusal"] is not None:
         require(re.fullmatch(r"[a-z0-9-]{1,128}", text(probe["refusal"], 128)) is not None and transfer is None and binding is None and
-                site["externalTargetId"] is None, "decoder refusal contains proof")
+                site["externalTargetId"] is None and site["targetBindingDisposition"] == "unresolved-memory-decoder-refusal",
+                "decoder refusal contains proof or inconsistent disposition")
         return
     fields(transfer, TRANSFER_KEYS, "memory transfer")
     require(transfer["classification"] in TRANSFER_CLASSIFICATIONS and transfer["contextStatus"] in TRANSFER_CONTEXTS, "unknown transfer classification/context")
@@ -733,6 +834,9 @@ def verify_external_site(site: dict, location: int, symbols: dict, relocations: 
         integer(transfer_index, 0, 4095)
     slot = address(transfer["pointerSlotAddress"], nullable=True)
     if slot is None:
+        desired = "indirect-jump" if site["viaForwarder"] else "indirect-call"
+        expected = "unresolved-memory-transfer" if transfer["classification"] == desired else "unresolved-forwarder-sequence"
+        require(site["targetBindingDisposition"] == expected, "unresolved transfer disposition differs")
         require(transfer["relationship"] == "unresolved" and transfer["pointerWidthBytes"] is None and transfer["unresolvedReason"] in TRANSFER_REFUSALS and
                 transfer["rawReadOpcode"] is None and transfer["rawReadOpIndex"] is None and not transfer["rawCopyOpIndices"] and
                 binding is None and site["externalTargetId"] is None, "unresolved transfer contains slot proof")
