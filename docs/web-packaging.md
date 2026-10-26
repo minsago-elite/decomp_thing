@@ -3,12 +3,14 @@
 For one clean-checkout tool and cache setup, use
 [repository-local frontend setup](#repository-local-frontend-setup-and-rebuilds).
 
-The D1 frontend is an opt-in packaged preview. It currently provides the public
-shell and runtime view, local browser sessions, and authenticated v1 bootstrap
-and single-job metadata reads. Persistent job management and workflow actions
-remain on the default legacy UI until the D-series parity and access-control gates
-permit migration. The preview can upload ELF binaries and list and inspect jobs, but it cannot start a workflow;
-see the [workbench user guide](workbench-user-guide.md) for what it does today.
+The embedded frontend (`--ui spa`) is an opt-in packaged preview; the legacy UI
+remains the default. The preview provides the public shell and Runtime view, local
+browser sessions, ELF upload, the job library, job and attempt reads and read-only
+views of recorded results. Workflow actions remain on the default legacy UI until
+the D-series parity and access-control gates permit migration: the preview cannot
+start a workflow. See the [workbench user guide](workbench-user-guide.md) for what
+it does today and the [HTTP route matrix](web-api.md#http-route-matrix) for the
+implemented routes.
 
 Build with the pinned Node/npm versions in [.node-version](../.node-version) and
 [the frontend workspace](../frontend/README.md). Node is a build dependency only.
@@ -71,8 +73,9 @@ path. CSRF stays in memory and is restored by an authenticated no-store bootstra
 read after reload. Logout is an explicit CSRF-protected request. No job or
 workflow action follows session creation, navigation or refresh.
 
-`POST /api/v1/session`, `DELETE /api/v1/session`, `GET /api/v1/bootstrap` and
-`GET /api/v1/jobs/{jobId}` are implemented relative to the base path. Job DTOs
+The session routes (`POST`/`DELETE /api/v1/session`), `GET /api/v1/bootstrap` and
+the job/attempt reads in the [route matrix](web-api.md#http-route-matrix) are
+implemented relative to the base path. Job DTOs
 omit internal paths and raw status diagnostics, preserve unsigned ELF addresses,
 and leave unknown run/acceptance identity null. Their ETag binds the current
 metadata; it does not prove a reconstruction revision or acceptance. Bootstrap
@@ -80,8 +83,9 @@ identifies the actual application JAR by SHA-256, or reports `development` for
 exploded classes. Workflow capabilities remain unavailable in this preview.
 
 Host/Origin checks precede API dispatch, including namespace misses; private
-responses require the same cookie boundary. The legacy UI has not yet migrated
-to this session boundary and remains separate pending #161/#230. Explicit Vite
+responses require the same cookie boundary. The legacy UI uses the same local
+session boundary through its `/login#bootstrap=…` handoff; see
+[legacy session migration](web-api.md#legacy-session-migration). Explicit Vite
 development uses `--dev-frontend-origin http://127.0.0.1:5173`, documented in
 [frontend development](../frontend/README.md); normal SPA serving accepts only
 its configured origin. A non-loopback proxy profile is not enabled by this flag.
@@ -114,6 +118,8 @@ replace browser-rendered checks.
 For deterministic fixture generation, choosing a test layer, investigating a
 packaged-browser failure and retrieving its exact Actions artifacts, use the
 [fixture and failure investigation guide](web-workflow-fixtures.md#generating-and-selecting-development-fixtures).
+The [clean-checkout contributor replay](web-contributor-replay.md) records one
+literal execution of these instructions, with its results and deviations.
 
 The dependency-free [browser driver](../scripts/check-packaged-web-browser.mjs)
 uses the pinned Node as a test process, Python 3.11+ for ZIP inspection, a JDK and
@@ -196,6 +202,11 @@ The driver prints an ignored `build/packaged-browser-*` evidence directory with
 `report.json` and screenshots. Requests in the report omit fragments and query
 strings; no bootstrap token, cookie value or CSRF credential is recorded. Browser
 profiles stay on the repository filesystem, with short `build/ct-*` socket paths.
+Chrome's singleton socket is created at
+`<checkout>/build/ct-XXXXXX/org.chromium.Chromium.XXXXXX/SingletonSocket`, and Linux
+limits socket paths to 107 bytes. Run the driver from a checkout whose absolute path
+has at most about 46 characters; a deeper checkout fails at browser start with
+`Socket path too long`. The archive and tools may live elsewhere.
 The separate unique installation directory uses `--work-parent` (default
 `build/`). Before extraction the [stdlib helper](../scripts/packaged-browser-install.py)
 requires the ZIP's expanded bytes plus 64 MiB and its distinct paths/implicit
@@ -409,6 +420,12 @@ tasks to regenerate them from the final build outputs, then verify the installat
   verifyLlvmBehaviorHelperDistribution \
   verifyKotlinBootClasspathDistribution verifyPackagedWeb
 ```
+
+Every Gradle invocation that reaches `jar`, including a focused `test` run, currently
+rebuilds the native helpers and rewrites the application JAR and distribution
+archives with new digests even when the source is unchanged
+([#1790](https://github.com/minsago-elite/decomp_thing/issues/1790)). Record JAR/ZIP
+identities after the final invocation and run browser checks against that archive.
 
 These checks cover their distribution/HTTP contracts. The
 [fixture investigation guide](web-workflow-fixtures.md#investigating-a-packaged-browser-failure)
