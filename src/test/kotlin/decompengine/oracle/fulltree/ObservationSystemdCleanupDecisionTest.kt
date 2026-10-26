@@ -114,4 +114,52 @@ class ObservationSystemdCleanupDecisionTest {
             assertEquals(if (priorCommand) listOf(commandFailure) else emptyList(), failures)
         }
     }
+
+    /**
+     * #1566: the first SIGKILL empties the scope, and systemd prunes its cgroup asynchronously
+     * (scope_enter_dead -> unit_notify -> unit_prune_cgroup). An atomic pre-prune snapshot can still
+     * name the cgroup while the descriptor-pinned reselection then observes ENOENT. That interleaving
+     * must stop name commands without a replacement refusal; genuine replacements still refuse.
+     */
+    @Test
+    fun `an asynchronous cgroup prune between snapshot and reselection stops commands without a replacement refusal`() {
+        val unit = "inert.scope"
+        val invocation = "a".repeat(32)
+        val cgroup = java.nio.file.Path.of("/sys/fs/cgroup/user.slice/$unit")
+        val snapshot = mapOf("LoadState" to "loaded", "ActiveState" to "active", "Id" to unit, "Transient" to "yes",
+            "InvocationID" to invocation, "ControlGroup" to "/user.slice/$unit")
+        val pruned = FullTreeFunctionObservationIsolationException("cannot reselect the descriptor-pinned isolated cgroup",
+            LinuxSyscallException("inert selection", LinuxFilesystemSyscalls.ENOENT))
+        val observedFailures = mutableListOf<Throwable>()
+        fun decide(properties: Map<String, String>, absent: Boolean = false, failure: Throwable? = null) =
+            decideObservationUnitMutationTarget(properties, unit, invocation, cgroup,
+                pathAbsent = { absent }, reselect = { failure?.let { throw it } }, onSelectionFailure = { observedFailures += it })
+
+        assertEquals(ObservationUnitMutationTargetState.SAME, decide(snapshot))
+        assertEquals(ObservationUnitMutationTargetState.UNRESOLVED, decide(snapshot, failure = pruned))
+        assertEquals(listOf<Throwable>(pruned), observedFailures)
+        // After the prune completes the manager snapshot releases ControlGroup, or the path is gone.
+        assertEquals(ObservationUnitMutationTargetState.ABSENT, decide(snapshot + ("ControlGroup" to "")))
+        assertEquals(ObservationUnitMutationTargetState.ABSENT, decide(snapshot, absent = true))
+        assertEquals(ObservationUnitMutationTargetState.ABSENT, decide(mapOf("LoadState" to "not-found")))
+        // Genuine replacement and every other selection failure keep the strict refusal.
+        for (replaced in listOf(
+            decide(snapshot + ("InvocationID" to "b".repeat(32))),
+            decide(snapshot + ("InvocationID" to "0".repeat(32)), failure = pruned),
+            decide(snapshot + ("Transient" to "no")),
+            decide(snapshot + ("ControlGroup" to "/user.slice/other.scope")),
+            decide(snapshot, failure = FullTreeFunctionObservationIsolationException("isolated cgroup path selected a replacement directory")),
+            decide(snapshot, failure = FullTreeFunctionObservationIsolationException("cannot reselect the descriptor-pinned isolated cgroup",
+                LinuxSyscallException("inert selection", LinuxFilesystemSyscalls.ENOENT + 1))),
+        )) assertEquals(ObservationUnitMutationTargetState.REPLACED, replaced)
+
+        // The fallback sees SAME before the first kill and the race state before the second command.
+        val states = ArrayDeque(listOf(decide(snapshot), decide(snapshot, failure = pruned)))
+        val commands = mutableListOf<List<String>>()
+        runGuardedObservationSystemdCleanupFallback(unit,
+            beforeCommand = { observationSystemdCleanupMutationPermitted(states.removeFirst()) },
+            command = { arguments, _ -> commands += arguments })
+        assertEquals(listOf(listOf("kill", "--kill-whom=all", "--signal=SIGKILL", unit)), commands)
+        assertTrue(states.isEmpty())
+    }
 }
