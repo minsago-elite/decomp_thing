@@ -798,13 +798,11 @@ class ManagedGitRepositories(
         return refusing {
             val entry = GitIntegrations.conflicts(runner, located.gitDir, located.workTree).singleOrNull { it.path.fileId(located.worktreeId) == fileId }
                 ?: GitWorkspaceMutations.refuse("NOT_FOUND", "The file is not an unresolved conflict in this work tree.")
-            val file = entry.path.exact?.let(located.workTree::resolve)
-            val bytes = file?.takeIf { Files.isRegularFile(it, NOFOLLOW_LINKS) }
-                ?.let { Files.newInputStream(it, NOFOLLOW_LINKS).use { input -> input.readNBytes(GitIntegrations.MAX_TEXT_BYTES + 1) } }
+            val path = entry.path.exact ?: GitWorkspaceMutations.refuse("UNSUPPORTED_CONFLICT", "This file name is not valid UTF-8.")
+            val current = GitConflictFiles.observe(located.workTree, path)
             fun stage(objectId: String?) = objectId?.let { GitIntegrations.blobText(runner, located.commonDir, it) }
             GitConflictFileView(located.worktreeId, entry, stage(entry.baseObjectId), stage(entry.oursObjectId), stage(entry.theirsObjectId),
-                bytes?.let(GitIntegrations::utf8), file?.let(GitIntegrations::contentDigest) ?: "absent",
-                file?.takeIf { Files.isRegularFile(it, NOFOLLOW_LINKS) }?.let(Files::size))
+                current.text, current.sha256, current.size)
         }
     }
 
@@ -873,9 +871,10 @@ class ManagedGitRepositories(
                 if (!merging) GitWorkspaceMutations.refuse("NO_MERGE", "No merge is in progress in this work tree.")
             }
             GitOperationAction.CONFLICT_SAVE -> {
+                requireNoLease(located)
                 if (!merging) GitWorkspaceMutations.refuse("NO_MERGE", "No merge is in progress in this work tree.")
                 val entry = conflictFor(runner, located, request.parameters["fileId"])
-                val file = conflictPath(runner, located, entry)
+                conflictPath(runner, located, entry)
                 when (request.parameters["resolution"]) {
                     "text" -> {
                         val text = request.content ?: GitWorkspaceMutations.refuse("VALIDATION_FAILED", "A text resolution needs its content.")
@@ -890,16 +889,19 @@ class ManagedGitRepositories(
                     }
                     else -> GitWorkspaceMutations.refuse("VALIDATION_FAILED", "The resolution is ours, theirs, base or text.")
                 }
-                if (GitIntegrations.contentDigest(file) != request.parameters["expectedSha256"]) GitWorkspaceMutations.refuse("CONTENT_CHANGED",
+                if (GitConflictFiles.observe(located.workTree, checkNotNull(entry.path.exact)).sha256 != request.parameters["expectedSha256"]) GitWorkspaceMutations.refuse("CONTENT_CHANGED",
                     "The file changed since it was reviewed (another tab or a worker wrote it). Read it again; nothing was overwritten.")
             }
             GitOperationAction.CONFLICT_COMPLETE -> {
+                requireNoLease(located)
                 if (!merging) GitWorkspaceMutations.refuse("NO_MERGE", "No merge is in progress in this work tree.")
                 for ((fileId, sha256) in completionList(request)) {
-                    val file = conflictPath(runner, located, conflictFor(runner, located, fileId))
-                    if (GitIntegrations.contentDigest(file) != sha256) GitWorkspaceMutations.refuse("CONTENT_CHANGED",
+                    val entry = conflictFor(runner, located, fileId)
+                    conflictPath(runner, located, entry)
+                    val current = GitConflictFiles.observe(located.workTree, checkNotNull(entry.path.exact))
+                    if (current.sha256 != sha256) GitWorkspaceMutations.refuse("CONTENT_CHANGED",
                         "A file changed since it was reviewed. Read it again before marking it resolved.")
-                    val text = GitIntegrations.fileText(file)
+                    val text = current.text
                     if (text == null) GitWorkspaceMutations.refuse("UNSUPPORTED_CONFLICT", "A reviewed file is binary or too large to resolve in the workbench.")
                     val size = GitIntegrations.markerSize(runner, located.gitDir, located.workTree, checkNotNull(conflictFor(runner, located, fileId).path.exact))
                     if (GitIntegrations.hasMarkers(text, size)) GitWorkspaceMutations.refuse("UNRESOLVED_MARKERS",
@@ -950,7 +952,7 @@ class ManagedGitRepositories(
             }
             GitOperationAction.CONFLICT_SAVE -> {
                 val entry = conflictFor(runner, located, request.parameters["fileId"])
-                val file = conflictPath(runner, located, entry)
+                conflictPath(runner, located, entry)
                 val bytes = when (request.parameters["resolution"]) {
                     "text" -> checkNotNull(request.content).toByteArray()
                     else -> {
@@ -958,12 +960,16 @@ class ManagedGitRepositories(
                         checkNotNull(GitIntegrations.blobText(runner, located.commonDir, objectId)).toByteArray()
                     }
                 }
-                Files.createDirectories(file.parent)
-                // Keep the file's mode: resolving text never makes a script or build helper non-executable.
-                val permissions = if (Files.isRegularFile(file, NOFOLLOW_LINKS)) try {
-                    Files.getPosixFilePermissions(file, NOFOLLOW_LINKS)
-                } catch (_: UnsupportedOperationException) { null } else null
-                GitStorage.replaceAtomically(file, bytes, permissions)
+                crash(GitOperationCrashPoint.AFTER_STAGING)
+                // Workflow admission and final digest/publication share the activity owner's lock.
+                activity.withStableRuns(located.record.jobId) { runs ->
+                    requireNoLease(located, runs)
+                    GitConflictFiles.replace(located.workTree, checkNotNull(entry.path.exact),
+                        checkNotNull(request.parameters["expectedSha256"]), bytes) {
+                        crash(GitOperationCrashPoint.BEFORE_PUBLISH)
+                        requireNoLease(located)
+                    }
+                }
                 null to "Saved the resolution of ${entry.path.display}. It is not staged; mark it resolved when the review is complete."
             }
             GitOperationAction.CONFLICT_COMPLETE -> {
@@ -1203,8 +1209,7 @@ class ManagedGitRepositories(
      * the job, and a linked one to the attempt that owns it. Checkout or removal never replaces
      * files under a running worker.
      */
-    private fun requireNoLease(located: Located) {
-        val runs = activity.runs(located.record.jobId)
+    private fun requireNoLease(located: Located, runs: Map<String, Boolean> = activity.runs(located.record.jobId)) {
         val held = if (located.primary) runs.any { it.value } else located.ownerRunId?.let { runs[it] } == true
         if (held) GitRefOperations.refuse("ACTIVE_RUN", "A workflow attempt is running against this work tree. Wait for it to finish; nothing was changed.")
     }

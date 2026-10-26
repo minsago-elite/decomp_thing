@@ -341,6 +341,75 @@ class GitIntegrationTest {
         assertFalse(GitIntegrations.hasMarkers("short line", Int.MAX_VALUE))
     }
 
+    @Test fun `conflict detail refuses an ancestor symlink outside the worktree`(): Unit = Fixture().use { f ->
+        Files.createDirectories(f.seed.resolve("src"))
+        Files.writeString(f.seed.resolve("src/a.c"), "line one\nline two\n"); f.remoteCommit("nested source")
+        f.cloned()
+        val fileId = f.conflictOn("src/a.c")
+        val original = f.repositories.root.resolve("original-src")
+        Files.move(f.workTree().resolve("src"), original)
+        val outside = Files.createDirectory(f.repositories.root.resolve("outside"))
+        Files.writeString(outside.resolve("a.c"), "OUTSIDE_WORKTREE_MARKER")
+        Files.createSymbolicLink(f.workTree().resolve("src"), outside)
+        assertEquals("UNSUPPORTED_CONFLICT", assertFailsWith<ManagedGitException> {
+            service.conflictFile(jobId, repositoryId, null, fileId)
+        }.code)
+    }
+
+    @Test fun `contained observations retain the directory and reject file replacement races`(): Unit = Fixture().use { f ->
+        val tree = Files.createDirectory(f.repositories.root.resolve("tree"))
+        val source = Files.createDirectory(tree.resolve("src"))
+        val file = source.resolve("a.c")
+        Files.writeString(file, "reviewed bytes\n")
+        val outside = Files.createDirectory(f.repositories.root.resolve("outside"))
+        Files.writeString(outside.resolve("a.c"), "OUTSIDE_WORKTREE_MARKER")
+        val retained = f.repositories.root.resolve("retained")
+        GitConflictFiles.withParent(tree, "src/a.c") { directory, name ->
+            Files.move(source, retained)
+            Files.createSymbolicLink(source, outside)
+            val observed = GitConflictFiles.observe(directory, name)
+            assertEquals("reviewed bytes\n", observed.text)
+            assertEquals(GitStorage.sha256(checkNotNull(observed.text).toByteArray()), observed.sha256)
+            assertEquals(15L, observed.size)
+            assertEquals("CONTENT_CHANGED", assertFailsWith<GitOperationRefusal> {
+                GitConflictFiles.observe(directory, name) {
+                    val replacement = retained.resolve("replacement")
+                    Files.writeString(replacement, "new unreviewed bytes\n")
+                    Files.move(replacement, retained.resolve("a.c"), java.nio.file.StandardCopyOption.REPLACE_EXISTING)
+                }
+            }.code)
+        }
+    }
+
+    @Test fun `conflict saves respect leases at admission execution and publication`(): Unit = Fixture().use { f ->
+        f.cloned()
+        val fileId = f.conflictOn("README.md")
+        val detail = service.conflictFile(jobId, repositoryId, null, fileId)
+        val parameters = mapOf("fileId" to fileId, "expectedSha256" to detail.currentSha256, "resolution" to "text")
+        f.runs["run_1"] = true
+        refused("ACTIVE_RUN", GitOperationAction.CONFLICT_SAVE, parameters, "resolution\n")
+        f.runs["run_1"] = false
+        f.hook = { if (it == GitOperationCrashPoint.AFTER_RUNNING) f.runs["run_1"] = true }
+        assertEquals("ACTIVE_RUN", sync(GitOperationAction.CONFLICT_SAVE, parameters, "resolution\n").failureCode)
+        f.runs["run_1"] = false
+        f.hook = { if (it == GitOperationCrashPoint.BEFORE_PUBLISH) f.runs["run_1"] = true }
+        assertEquals("ACTIVE_RUN", sync(GitOperationAction.CONFLICT_SAVE, parameters, "resolution\n").failureCode)
+        f.runs["run_1"] = false; f.hook = {}
+        assertEquals(detail.current, Files.readString(f.workTree().resolve("README.md")))
+    }
+
+    @Test fun `a worker edit after validation is never overwritten at publication`(): Unit = Fixture().use { f ->
+        f.cloned()
+        val fileId = f.conflictOn("README.md")
+        val detail = service.conflictFile(jobId, repositoryId, null, fileId)
+        f.hook = { if (it == GitOperationCrashPoint.BEFORE_PUBLISH) Files.writeString(f.workTree().resolve("README.md"), "newer worker bytes\n") }
+        val result = sync(GitOperationAction.CONFLICT_SAVE, mapOf("fileId" to fileId, "expectedSha256" to detail.currentSha256,
+            "resolution" to "text"), "unpublished resolution\n")
+        assertEquals("CONTENT_CHANGED", result.failureCode)
+        assertEquals("newer worker bytes\n", Files.readString(f.workTree().resolve("README.md")))
+        assertTrue(Files.list(f.workTree()).use { paths -> paths.noneMatch { it.fileName.toString().startsWith(".conflict-") } })
+    }
+
     @Test fun `the content digest is streamed and matches the file bytes`(): Unit = Fixture().use { f ->
         val file = f.repositories.root.resolve("large.bin")
         val bytes = ByteArray(3 * 1024 * 1024 + 17) { (it % 251).toByte() }
