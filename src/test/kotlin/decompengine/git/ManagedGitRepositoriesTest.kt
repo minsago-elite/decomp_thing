@@ -300,6 +300,54 @@ class ManagedGitRepositoriesTest {
         }
     }
 
+    @Test fun `import resolves symbolic branches and tags before dropping their target namespaces`() {
+        for (format in listOf("sha1", "sha256")) {
+            val (f, importRoot) = importFixture()
+            f.use {
+                val g = f.repositories
+                val source = importRoot.resolve("symbolic")
+                g.git("init", "-q", "--initial-branch=main", "--object-format=$format", source.toString())
+                Files.writeString(source.resolve("file.c"), "int value;\n")
+                g.git("add", "-A", cwd = source); g.git("commit", "-q", "-m", "baseline", cwd = source)
+                val head = g.git("rev-parse", "HEAD", cwd = source).trim()
+                g.git("update-ref", "refs/remotes/origin/main", head, cwd = source)
+                g.git("pack-refs", "--all", cwd = source)
+                g.git("symbolic-ref", "refs/heads/main", "refs/remotes/origin/main", cwd = source)
+                g.git("symbolic-ref", "refs/tags/alias", "refs/heads/main", cwd = source)
+                g.git("fsck", "--full", "--no-dangling", cwd = source)
+                val before = f.tree(source)
+                val service = f.open()
+                val completed = service.settle(service.request(jobId, GitRepositoryRequest.Attach("symbolic"), "import_symbolic_key_01"))
+                assertEquals(GitOperationState.COMPLETED, completed.state, completed.message)
+                val view = service.workspace(jobId, completed.repositoryId)
+                assertEquals(GitHeadObservation(GitHeadState.ATTACHED, "refs/heads/main", head), view.observation.head)
+                assertEquals(setOf("refs/heads/main", "refs/tags/alias"), view.observation.refs.map { it.name }.toSet())
+                val gitDir = f.repositoryDirectory(completed.repositoryId).resolve("repository.git")
+                for (ref in listOf("refs/heads/main", "refs/tags/alias")) assertEquals("$head\n", Files.readString(gitDir.resolve(ref)))
+                assertEquals(before, f.tree(source))
+            }
+        }
+    }
+
+    @Test fun `import refuses cyclic and excessive symbolic reference chains without publishing`() {
+        for (cyclic in listOf(true, false)) {
+            val (f, importRoot) = importFixture()
+            f.use {
+                val source = importRoot.resolve("chain")
+                f.repositories.git("init", "-q", "--initial-branch=main", source.toString())
+                Files.writeString(source.resolve(".git/refs/heads/main"), "ref: refs/remotes/link0\n")
+                val remotes = Files.createDirectories(source.resolve(".git/refs/remotes"))
+                repeat(20) { i -> Files.writeString(remotes.resolve("link$i"), "ref: refs/remotes/link${if (cyclic) 0 else i + 1}\n") }
+                val before = f.tree(source)
+                val service = f.open()
+                val failed = service.settle(service.request(jobId, GitRepositoryRequest.Attach("chain"), "import_ref_chain_key1"))
+                assertEquals("REPOSITORY_UNSUPPORTED", failed.failureCode)
+                assertTrue(service.listing(jobId).repositories.isEmpty())
+                assertEquals(before, f.tree(source))
+            }
+        }
+    }
+
     @Test fun `import keeps every valid tag, refuses unimportable refs, altered objects and oversized checkouts`() {
         val (f, importRoot) = importFixture()
         f.use {

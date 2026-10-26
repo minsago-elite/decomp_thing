@@ -170,6 +170,14 @@ internal object GitRepositoryImport {
     /** Copy objects, branch/tag refs and HEAD into an already initialized managed Git directory. */
     fun copyHistory(layout: ImportedRepositoryLayout, managedGitDir: Path) {
         copyObjects(layout.gitDir.resolve("objects"), managedGitDir.resolve("objects"))
+        val packed = layout.gitDir.resolve("packed-refs")
+        val packedBytes = if (Files.exists(packed, NOFOLLOW_LINKS)) GitStorage.read(packed, MAX_PACKED_REFS_BYTES) else byteArrayOf()
+        val retainedPacked = filterPackedRefs(packedBytes, layout.objectFormat)
+        // Resolve using all source namespaces, but publish only branches/tags. In particular a
+        // symbolic branch may point at a packed remote-tracking ref which is not itself imported.
+        val packedIds = packedBytes.toString(Charsets.UTF_8).lineSequence()
+            .filter { it.isNotEmpty() && !it.startsWith("#") && !it.startsWith("^") }
+            .associate { it.substringAfter(' ') to it.substringBefore(' ') }
         var refs = 0
         for (namespace in listOf("heads", "tags")) {
             val root = layout.gitDir.resolve("refs").resolve(namespace)
@@ -189,17 +197,14 @@ internal object GitRepositoryImport {
                     if (name.endsWith(".lock")) return FileVisitResult.CONTINUE
                     if (!validRefName(name)) unsupported("A repository reference has an unsupported name.")
                     val content = GitStorage.read(file, 4096).toString(Charsets.UTF_8)
-                    if (!validRefContent(content, layout.objectFormat)) corrupt("A repository reference does not contain a full object ID.")
-                    Files.writeString(managedGitDir.resolve(name), content, CREATE_NEW, WRITE)
+                    val objectId = resolveRef(layout, name, content, packedIds)
+                    Files.writeString(managedGitDir.resolve(name), "$objectId\n", CREATE_NEW, WRITE)
                     return FileVisitResult.CONTINUE
                 }
                 override fun visitFileFailed(file: Path, failure: IOException): FileVisitResult = unsupported("The repository references could not be read.")
             })
         }
-        val packed = layout.gitDir.resolve("packed-refs")
-        if (Files.exists(packed, NOFOLLOW_LINKS)) {
-            Files.write(managedGitDir.resolve("packed-refs"), filterPackedRefs(GitStorage.read(packed, MAX_PACKED_REFS_BYTES), layout.objectFormat))
-        }
+        if (packedBytes.isNotEmpty()) Files.write(managedGitDir.resolve("packed-refs"), retainedPacked)
         val head = GitStorage.read(layout.gitDir.resolve("HEAD"), 4096).toString(Charsets.UTF_8)
         val symbolic = head.removePrefix("ref: ").removeSuffix("\n").takeIf { head.startsWith("ref: ") }
         if (symbolic != null) {
@@ -268,10 +273,21 @@ internal object GitRepositoryImport {
         !name.endsWith("/") && !name.endsWith(".") &&
         name.split('/').all { it.isNotEmpty() && !it.startsWith(".") && !it.endsWith(".lock") }
 
-    private fun validRefContent(content: String, format: GitObjectFormat): Boolean {
-        val value = content.removeSuffix("\n")
-        if (value.contains('\n')) return false
-        return format.objectIdOrNull(value) != null || (value.startsWith("ref: refs/") && validRefName(value.removePrefix("ref: ")))
+    /** Bounded data-only symref resolution, including targets in intentionally omitted namespaces. */
+    private fun resolveRef(layout: ImportedRepositoryLayout, name: String, content: String, packedIds: Map<String, String>): String {
+        val seen = mutableSetOf(name)
+        var value = content.removeSuffix("\n")
+        repeat(16) {
+            GitStorage.checkInterrupted()
+            layout.objectFormat.objectIdOrNull(value)?.let { return it }
+            val target = value.removePrefix("ref: ")
+            if (!value.startsWith("ref: ") || !validRefName(target)) corrupt("A repository reference does not contain a full object ID.")
+            if (!seen.add(target)) unsupported("The repository contains cyclic symbolic references.")
+            val file = layout.gitDir.resolve(target)
+            value = if (Files.exists(file, NOFOLLOW_LINKS)) GitStorage.read(file, 4096).toString(Charsets.UTF_8).removeSuffix("\n")
+                else packedIds[target] ?: corrupt("A symbolic repository reference has no target.")
+        }
+        unsupported("The repository's symbolic references exceed the import depth limit.")
     }
 
     /**
