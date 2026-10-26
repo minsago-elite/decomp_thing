@@ -109,6 +109,24 @@ class WebRunLogsTest {
         assertEquals("oversized", logs.range(jobId, run, null, true, logs.parseQuery(null), now).getValue("state").jsonPrimitive.content)
     }
 
+    @Test fun `whole log search includes text beyond display truncation after redaction and escaping`() {
+        val (jobId, run) = attempt()
+        val prefix = "x".repeat(WebRunLogs.MAXIMUM_LINE_CHARACTERS)
+        val capture = assertNotNull(logs.capture(("${prefix}fatal-error $root/a.c\u001b[31m\n" +
+            "$prefix$root/fatal-error\n").toByteArray(), sha))
+        assertTrue(capture.allLines().all { it.truncated && it.text == prefix })
+        fun search(query: String): JsonObject = logs.range(jobId, run, capture, false,
+            WebRunLogs.Query(1, false, 1, query), Instant.EPOCH).getValue("search").jsonObject
+        val suffix = search("fatal-error")
+        assertEquals("whole-log", suffix.getValue("scope").jsonPrimitive.content)
+        assertEquals("2", suffix.getValue("matchCount").jsonPrimitive.content)
+        assertEquals(listOf("1", "2"), suffix.getValue("matches").jsonArray.map { it.jsonPrimitive.content })
+        assertFalse(suffix.getValue("matchesTruncated").jsonPrimitive.boolean)
+        assertEquals("2", search("[job-store]").getValue("matchCount").jsonPrimitive.content)
+        assertEquals("1", search("\\e[31m").getValue("matchCount").jsonPrimitive.content)
+        assertEquals("0", search(root.toString()).getValue("matchCount").jsonPrimitive.content)
+    }
+
     @Test fun `downloads share the live redaction and carry provenance`() {
         val (jobId, run) = attempt()
         val capture = assertNotNull(logs.capture("first $root/a.c\n\u001b[1mbold\n".toByteArray(), sha))

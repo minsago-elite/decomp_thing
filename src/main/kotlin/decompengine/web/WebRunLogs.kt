@@ -20,9 +20,11 @@ internal class WebRunLogs(private val redaction: WebLogRedaction) {
     /** [beforeLine] selects a byte-bounded range ending just before that line, so backward pages stay adjacent. */
     data class Query(val fromLine: Long?, val tail: Boolean, val limit: Int, val search: String?, val beforeLine: Long? = null)
 
-    data class Line(val number: Long, val text: String, val truncated: Boolean, val replaced: Boolean, val redacted: Boolean)
+    data class Line(val number: Long, val text: String, val truncated: Boolean, val replaced: Boolean, val redacted: Boolean,
+        // Search the complete bounded, redacted visible text, not just its display prefix.
+        val searchText: String = text)
 
-    /** One parsed, redacted capture; lines are produced lazily to keep the byte budget per response. */
+    /** One parsed, redacted capture of the bounded source; range serialization has its own byte budget. */
     class Capture(val sha256: String, val totalBytes: Long, private val lines: List<Line>) {
         val totalLines: Long get() = lines.size.toLong()
         fun line(index: Int): Line = lines[index]
@@ -86,7 +88,7 @@ internal class WebRunLogs(private val redaction: WebLogRedaction) {
             // Never cut a surrogate pair in half.
             var cut = if (truncated) MAXIMUM_LINE_CHARACTERS else visible.length
             if (truncated && Character.isHighSurrogate(visible[cut - 1])) cut -= 1
-            lines += Line(number++, visible.substring(0, cut), truncated, replaced, changed)
+            lines += Line(number++, visible.substring(0, cut), truncated, replaced, changed, visible)
         }
         for (index in bytes.indices) if (bytes[index] == '\n'.code.toByte()) { add(index); start = index + 1 }
         if (start < bytes.size) add(bytes.size)
@@ -166,7 +168,7 @@ internal class WebRunLogs(private val redaction: WebLogRedaction) {
     private fun search(capture: Capture, query: String): JsonObject {
         val matches = mutableListOf<Long>()
         var count = 0L
-        for (line in capture.allLines()) if (line.text.contains(query)) {
+        for (line in capture.allLines()) if (line.searchText.contains(query)) {
             count += 1
             if (matches.size < MAXIMUM_SEARCH_MATCHES) matches += line.number
         }

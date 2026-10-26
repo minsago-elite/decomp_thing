@@ -698,8 +698,10 @@ escapes (`\e`, `\uXXXX`), so terminal sequences and markup reach the browser onl
 
 Redaction policy `web-log-v1` replaces the job store, home, temporary and working directories with
 fixed labels and flags each changed line. The optional `search` is a literal substring of at most 128
-characters, never a pattern; it scans the bounded log and returns the match count and the first 200
-line numbers. `GET .../logs/build/content` returns every line exactly as the ranges present them,
+characters, never a pattern; it scans the complete redacted, visibly escaped text of the bounded log
+before the 4,096-character display cut and returns the match count and the first 200 line numbers.
+A match beyond that cut is counted even though its text is not displayed in the range or download.
+`GET .../logs/build/content` returns every line exactly as the ranges present them,
 after a provenance header naming the job, attempt, attempt times, source digest, policy, redacted
 line count and export time.
 
@@ -707,8 +709,11 @@ The attempt's Build log view keeps at most 2,000 lines, released from the far en
 and renders only rows near its viewport. Following polls for new lines every 3 s only after an
 explicit Follow, stops as soon as the reader scrolls away or filters, and resumes only on request; it
 is suspended while the tab is hidden or offline and ends with the attempt. Client filtering states
-the loaded line range it covered. Leaving the view aborts reads, clears the follow timer and drops
-the buffer.
+the loaded line range it covered. Whole-log search results and jumps are bound to the recording's
+digest and invalidated on replacement. A replacement observed while following loads its bounded tail,
+not the old recording's append cursor. Deliberate navigation supersedes pending reads; pausing or
+scrolling away also invalidates in-flight follow reads so they cannot evict the paused window.
+Leaving the view aborts reads, clears the follow timer and drops the buffer.
 
 ## Current source catalog metadata
 

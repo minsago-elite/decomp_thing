@@ -36,7 +36,7 @@ export const logCopy = {
   findScope: '{count} matching lines among loaded lines {first}–{last}. Lines that are not loaded were not searched.',
   findEmpty: 'Type to filter the loaded lines.',
   search: 'Search the whole log',
-  searchScope: 'Whole-log literal search for “{query}”: {count} matching lines{truncated}.',
+  searchScope: 'Whole-log literal search for “{query}”: {count} matching lines{truncated}. Matching text beyond a displayed line cut is still searched but is not shown.',
   searchTruncated: ' (first 200 listed)',
   searchNone: 'No line in the whole log contains “{query}”.',
   goTo: 'Go to line {line}',
