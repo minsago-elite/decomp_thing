@@ -51,6 +51,14 @@ replacement control verifies that stale release refuses and preserves both the
 original lease record and the replacement canary. These controls are distinct
 from the existing canonical-JSON mutation tests.
 
+The exclusive-acquisition control first holds an independent descriptor's lock
+on the empty mount and requires the production lock-conflict diagnostic without
+mutation. After unlocking, successful acquisition must retain a lock that an
+independent descriptor cannot acquire. The second API acquisition also requires
+the lock-conflict diagnostic. The nested-mount control requires the specific
+nested-mount diagnostic. Neither control can receive credit from the later
+nonempty-filesystem recovery refusal if its intended predicate is bypassed.
+
 The `live-fulltree` CI shard provisions two separate 64 MiB / 4096-inode ext4
 images using
 [`ci-oracle-ext4-admission.py`](../scripts/ci-oracle-ext4-admission.py).

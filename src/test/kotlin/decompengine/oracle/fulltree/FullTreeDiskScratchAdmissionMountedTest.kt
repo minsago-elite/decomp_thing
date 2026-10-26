@@ -28,6 +28,14 @@ class FullTreeDiskScratchAdmissionMountedTest {
             assertTrue(capacity.totalBytes in 1..MAXIMUM_BYTES)
             assertTrue(capacity.totalInodes in 4..MAXIMUM_INODES)
             assertTrue(!capacity.readOnly)
+            // Refuse on the lock itself while the mount is still empty: recovery-required
+            // residue must not be able to mask a missing acquisition lock check.
+            assertTrue(LinuxFilesystemSyscalls.tryExclusiveLock(pinned))
+            try {
+                refuseWithoutMutation(fixture.scratch, expectedMessage = ALREADY_LEASED)
+            } finally {
+                LinuxFilesystemSyscalls.unlock(pinned)
+            }
             val lease = acquire(fixture.scratch)
             try {
                 lease.requireCurrent(FullTreeDiskScratchStage.AUTHORIZED)
@@ -38,7 +46,15 @@ class FullTreeDiskScratchAdmissionMountedTest {
                 assertEquals(capacity.totalInodes, lease.evidence.totalInodes)
                 assertEquals(capacity.availableBytes, lease.evidence.initialAvailableBytes)
                 assertEquals(capacity.availableInodes, lease.evidence.initialAvailableInodes)
-                assertFailsWith<FullTreeDiskScratchException> { acquire(fixture.scratch) }
+                // An independent open file description must conflict with the live lease,
+                // even though its lease directory would also prevent another acquisition.
+                val acquired = LinuxFilesystemSyscalls.tryExclusiveLock(pinned)
+                try {
+                    assertTrue(!acquired, "production lease did not retain its exclusive mount lock")
+                } finally {
+                    if (acquired) LinuxFilesystemSyscalls.unlock(pinned)
+                }
+                refuseWithoutMutation(fixture.scratch, expectedMessage = ALREADY_LEASED)
                 assertSameObject(pinned.identity, LinuxFilesystemSyscalls.identity(pinned.fd))
             } finally {
                 lease.requireCleanAndRelease()
@@ -216,13 +232,23 @@ class FullTreeDiskScratchAdmissionMountedTest {
             })
             else -> error("unexpected mounted control $action")
         }
-        refuseWithoutMutation(fixture.scratch)
+        refuseWithoutMutation(
+            fixture.scratch,
+            // A nested mount necessarily introduces a directory. Do not credit the later
+            // nonempty-filesystem recovery refusal if nested-mount validation is bypassed.
+            expectedMessage = if (action == "nested") CONTAINS_NESTED_MOUNT else null,
+        )
     }
 
-    private fun refuseWithoutMutation(path: Path, policy: FullTreeDiskScratchPolicy = POLICY) {
+    private fun refuseWithoutMutation(
+        path: Path,
+        policy: FullTreeDiskScratchPolicy = POLICY,
+        expectedMessage: String? = null,
+    ) {
         val beforeIdentity = identity(path)
         val beforeNames = entryNames(path)
-        assertFailsWith<FullTreeDiskScratchException> { acquire(path, policy) }
+        val failure = assertFailsWith<FullTreeDiskScratchException> { acquire(path, policy) }
+        expectedMessage?.let { assertEquals(it, failure.message, "wrong admission predicate refused the control") }
         assertEquals(beforeIdentity, identity(path))
         assertEquals(beforeNames, entryNames(path))
     }
@@ -309,6 +335,8 @@ class FullTreeDiskScratchAdmissionMountedTest {
     companion object {
         private const val MAXIMUM_BYTES = 64L * 1024 * 1024
         private const val MAXIMUM_INODES = 4096L
+        private const val ALREADY_LEASED = "dedicated disk-scratch filesystem is already leased"
+        private const val CONTAINS_NESTED_MOUNT = "dedicated disk-scratch filesystem contains a nested mount"
         private val POLICY = FullTreeDiskScratchPolicy(1, MAXIMUM_BYTES, 4, MAXIMUM_INODES)
         private val OPERATION = FullTreeDiskScratchOperation("9".repeat(64), "2".repeat(64), "clang-lib-driver", "3".repeat(64))
         private val REQUIRED_FLAGS = setOf("rw", "nodev", "nosuid", "noexec", "noatime")
