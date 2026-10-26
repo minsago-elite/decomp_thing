@@ -542,7 +542,7 @@ class JobStore internal constructor(
         }
     }
 
-    private companion object {
+    internal companion object {
         const val MAX_STATUS_MESSAGE_CHARACTERS = 500
         const val MAX_INPUT_BYTES = 32 * 1024 * 1024
         const val MAX_METADATA_BYTES = 256 * 1024
