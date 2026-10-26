@@ -423,16 +423,15 @@ Reconstruction and repair record a candidate whenever a canonical source digest
 exists: the schema-3 build contract's `sourceRevisionSha256`, or the repair
 graph's published head. The revision identifier is derived from the digest, so
 one identifier can never name different sources. A candidate is never
-acceptance. After a repair attempt completes, and while the service still owns
-it, a read-only attestation reads the canonical repair graph: only a fully
-accepted head bound to a fully accepted run that began within this attempt, and
-published for release (test-only publication is refused), yields an acceptance. An
-input that already validates is accepted as the graph root without a repair
-iteration; its source digest and proof assurance come from the graph's recorded
-acceptance proof, and only a strictly contained proof is release-eligible. The result is an acceptance
-reference (`graphNodeId` = head, `artifactId` = `repair-graph`,
-`artifactSha256` = graph digest). The service records it once, rechecking the
-persisted candidate, versions and that the attempt is still the latest.
+acceptance. Production repair acceptance publication is **disabled** pending a
+qualified workflow-owned, bounded, read-only attestation of installed canonical
+sources, retained blobs and receipt bodies, including binary/profile/corpus and
+invocation bindings (#478). The recorded repair-history reader is diagnostic
+metadata only and must never authorize acceptance, even for a recorded accepted
+head or baseline. The explicit test-only publication seam exercises service/store
+integration with inert graphs; it is not production acceptance evidence. The
+service publication infrastructure rechecks the persisted candidate, versions and
+that the attempt is still the latest before recording any trusted reference.
 
 Production options declare no checkpoint policy yet, so `POST R/recover` and
 `GET R/controls` report resume as `RESUME_UNSUPPORTED`; an explicit retry starts a
@@ -447,10 +446,14 @@ retained, retry is refused with `INPUT_UNVERIFIED`.
 Startup recovery keeps its existing transitions and then reconciles. Queued
 attempts become `interrupted` with no `startedAt`: they never executed. Active
 attempts become `interrupted` with their `startedAt` and partial evidence. Neither
-is resumed or re-executed. A completed candidate whose attestation now verifies
-(for example after a crash between completion and acceptance) is published once;
-an existing acceptance is never repeated or replaced. Reconciliation reads
-retained evidence only and never executes a binary, model or adapter body.
+is resumed or re-executed. Completed production repair candidates remain
+unpublished until qualified attestation exists; existing acceptances are never
+repeated or replaced. Registered trusted publication adapters (currently inert
+test controls) share the recovery operation's admitted inventory, aggregate read
+and retention allowances, and cancellation checkpoints, including final mutation
+rechecks. A limit or cancellation after recovery changes began retains outcome
+uncertainty; an earlier durable acceptance is not rolled back or repeated.
+Reconciliation never executes a binary, model or adapter body.
 
 ### Admission and overload
 

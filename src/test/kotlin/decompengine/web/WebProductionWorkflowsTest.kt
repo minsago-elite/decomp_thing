@@ -139,6 +139,8 @@ class WebProductionWorkflowsTest {
     @Test
     fun `repair stays unavailable until the production repair validator is qualified`() = withRoot { root ->
         assertFalse(decompengine.project.LinuxGeneratedCRepairValidationBoundary.productionQualified())
+        assertNull(RepairWorkflowAdapter(FakeEngines(), FAST, "agent-acp").publication,
+            "production registered an unqualified acceptance publisher")
         val ready = WebPrerequisite.AVAILABLE
         val prerequisites = WebWorkflowPrerequisites(ready, ready, ready, WebHarnessReadinessProjector.probeEnvironment(emptyMap(),
             root.resolve("bwrap"), root.resolve("timeout"), { true }, { true }).prerequisites!!.repairValidator)
@@ -420,6 +422,36 @@ class WebProductionWorkflowsTest {
     }
 
     @Test
+    fun `retry never substitutes the sole remaining option for a recorded missing harness`() = withRoot { root ->
+        val store = JobStore(root)
+        val job = store.createFromUpload("retry.elf", elfFixture())
+        var executions = 0
+        val original = object : DurableWebWorkflowAdapter {
+            override val workflow = WorkflowKind.RECONSTRUCT
+            override val harnessCapabilityId = "recorded-harness"
+            override val limits = WebWorkflowDefaults.RECONSTRUCT_AGENT
+            override fun execute(context: DurableWebWorkflowContext): DurableWebWorkflowOutcome {
+                executions++; return DurableWebWorkflowOutcome.Failed()
+            }
+        }
+        lateinit var failed: WorkflowAttempt
+        service(store, listOf(original)).use { service ->
+            service.initializeExistingStorage()
+            failed = service.requestDurableStart(job.id, version(service, job.id), NewWorkflowAttempt(original.workflow,
+                original.limits, harnessCapabilityId = original.harnessCapabilityId), "recorded_harness_start").attempt
+        }
+        val replacement = object : DurableWebWorkflowAdapter by original { override val harnessCapabilityId = "different-harness" }
+        service(store, listOf(replacement)).use { service ->
+            service.initializeExistingStorage()
+            assertEquals("WORKFLOW_UNAVAILABLE", service.attemptControls(job.id, failed.runId).retryReason)
+            assertCode("WORKFLOW_UNAVAILABLE") {
+                service.requestDurableRecovery(job.id, failed.runId, failed.version, WorkflowRecoveryMode.RETRY, null, "no_harness_fallback")
+            }
+        }
+        assertEquals(1, executions)
+    }
+
+    @Test
     fun `a failed agent inspection blocks agent options even when sandbox helpers are missing`() = withRoot { root ->
         val environment = mapOf("ACP_HARNESS" to "legacy-openai", "BASE_URL" to "https://example.invalid/v1",
             "API_KEY" to "legacy-key", "MODEL" to "legacy-model")
@@ -546,6 +578,120 @@ class WebProductionWorkflowsTest {
         }
         states.forEach { (jobId, bytes) -> assertContentEquals(bytes, root.resolve(jobId).resolve("workflow-state.json").readBytes(), jobId) }
         assertEquals(0, engines.calls.get(), "restart executed an adapter engine")
+    }
+
+    @Test
+    fun `production restart never promotes metadata after source or blob evidence is lost`() = withRoot { root ->
+        for (damage in listOf("changed-source", "missing-source", "corrupt-blob", "missing-blob")) {
+            val storage = root.resolve(damage)
+            val store = JobStore(storage)
+            val job = store.createFromUpload("pending.elf", elfFixture())
+            lateinit var completed: WorkflowAttempt
+            WorkflowAttemptStore.open(storage).use { owner ->
+                val snapshot = (owner.inspect(job.id) as WorkflowJobInspection.Available).snapshot
+                val queued = owner.create(job.id, snapshot.version, NewWorkflowAttempt(WorkflowKind.REPAIR,
+                    WebWorkflowDefaults.REPAIR, "source_input", "agent-acp")).attempt
+                val started = owner.transition(job.id, queued.runId, queued.version, WorkflowTransition.Start).attempt
+                val project = store.runReportsDirectory(job.id, started.runId, create = true).resolve("source-tree")
+                writeSourceTree(project, "base"); acceptRepairGraph(project)
+                completed = owner.transition(job.id, started.runId, started.version, WorkflowTransition.Finish(
+                    WorkflowRunState.COMPLETED, WorkflowTerminalReason.COMPLETED, acceptedHeadCandidate(project))).attempt
+                val source = project.resolve("code.c")
+                val blob = project.resolve("reports/repair-revisions/blobs/${sha256("repaired".toByteArray())}")
+                assertTrue(Files.isRegularFile(blob), "the accepted-head blob fixture is missing")
+                when (damage) {
+                    "changed-source" -> source.writeText("unvalidated edit")
+                    "missing-source" -> Files.delete(source)
+                    "corrupt-blob" -> blob.writeText("corrupt")
+                    "missing-blob" -> Files.delete(blob)
+                }
+                // This diagnostic view deliberately survives damaged authoritative evidence.
+                assertEquals(RepairHistoryReadStatus.RECORDED, readProjectRecordedRepairHistory(project).status)
+                assertNull(verifyRepairAcceptance(DurableWebWorkflowPublicationContext(job, completed, project.parent)))
+            }
+            val before = storage.resolve(job.id).resolve("workflow-state.json").readBytes()
+            val engines = FakeEngines()
+            service(store, adapters(engines)).use { service ->
+                service.initializeExistingStorage()
+                assertNull(service.getAttempt(job.id, completed.runId).acceptedRevision)
+            }
+            assertContentEquals(before, storage.resolve(job.id).resolve("workflow-state.json").readBytes())
+            assertEquals(0, engines.calls.get())
+        }
+    }
+
+    @Test
+    fun `startup graph captures share the recovery budget and preserve partial publication uncertainty`() = withRoot { root ->
+        val store = JobStore(root)
+        val jobs = List(2) { store.createFromUpload("pending.elf", elfFixture()) }.sortedBy { it.id }
+        val attempts = jobs.associate { it.id to completedRepairFixture(store, it) }
+        fun metadataBytes(job: Job) = Files.size(root.resolve("${job.id}/job.json")) + Files.size(root.resolve("${job.id}/workflow-state.json"))
+        var firstCaptureBytes = 0L
+        val first = jobs.first()
+        assertNotNull(verifyRepairAcceptance(DurableWebWorkflowPublicationContext(first, attempts.getValue(first.id),
+            store.runReportsDirectory(first.id, attempts.getValue(first.id).runId), reserveCapture = { firstCaptureBytes += it }), allowTestOnly = true))
+        val second = jobs.last()
+        val secondGraph = store.runReportsDirectory(second.id, attempts.getValue(second.id).runId).resolve("source-tree/reports/repair-revisions/graph.json")
+        // Admit both metadata passes, the first attestation and its two publication rechecks, but
+        // refuse the next graph BEFORE reading its body. The first publication is already durable.
+        val allowance = jobs.sumOf(::metadataBytes) + 3 * metadataBytes(first) + metadataBytes(second) + firstCaptureBytes + Files.size(secondGraph) - 1
+        val engines = FakeEngines()
+        service(store, adapters(engines, acceptTestOnly = true)).use { service ->
+            val failure = assertFailsWith<WorkflowStoreException> {
+                service.initializeExistingStorage(WorkflowStartupRecoveryLimits(maximumReadBytes = allowance)) { false }
+            }
+            assertEquals("STORE_LIMIT", failure.code); assertTrue(failure.outcomeUnknown)
+        }
+        WorkflowAttemptStore.open(root).use { owner ->
+            fun latest(job: Job) = (owner.inspect(job.id) as WorkflowJobInspection.Available).snapshot.latestRun!!
+            assertNotNull(latest(first).acceptedRevision)
+            assertNull(latest(second).acceptedRevision)
+        }
+        assertEquals(0, engines.calls.get())
+    }
+
+    @Test
+    fun `startup cancellation reaches graph capture units even when the reader withholds its failure`() = withRoot { root ->
+        val store = JobStore(root)
+        val job = store.createFromUpload("pending.elf", elfFixture())
+        val completed = completedRepairFixture(store, job)
+        var cancelled = false
+        var captures = 0
+        val engines = FakeEngines()
+        val repair = RepairWorkflowAdapter(engines, FAST, "agent-acp", true)
+        val observed = object : DurableWebWorkflowAdapter by repair {
+            override val publication = DurableWebWorkflowPublication { context ->
+                assertNotNull(repair.publication).verify(context.copy(reserveCapture = { bytes ->
+                    context.reserveCapture(bytes)
+                    captures++
+                    cancelled = true
+                }))
+            }
+        }
+        val before = root.resolve("${job.id}/workflow-state.json").readBytes()
+        service(store, listOf(observed)).use { service ->
+            val failure = assertFailsWith<WorkflowStoreException> {
+                service.initializeExistingStorage(WorkflowStartupRecoveryLimits()) { cancelled }
+            }
+            assertEquals("RECOVERY_CANCELLED", failure.code); assertTrue(failure.outcomeUnknown)
+        }
+        assertEquals(1, captures, "a read unit followed the cancellation latch")
+        assertContentEquals(before, root.resolve("${job.id}/workflow-state.json").readBytes())
+        WorkflowAttemptStore.open(root).use { owner ->
+            assertNull((owner.inspect(job.id) as WorkflowJobInspection.Available).snapshot.attempts.single { it.runId == completed.runId }.acceptedRevision)
+        }
+        assertEquals(0, engines.calls.get())
+    }
+
+    private fun completedRepairFixture(store: JobStore, job: Job): WorkflowAttempt = WorkflowAttemptStore.open(store.storageRoot).use { owner ->
+        val snapshot = (owner.inspect(job.id) as WorkflowJobInspection.Available).snapshot
+        val queued = owner.create(job.id, snapshot.version, NewWorkflowAttempt(WorkflowKind.REPAIR,
+            WebWorkflowDefaults.REPAIR, "source_input", "agent-acp")).attempt
+        val started = owner.transition(job.id, queued.runId, queued.version, WorkflowTransition.Start).attempt
+        val project = store.runReportsDirectory(job.id, started.runId, create = true).resolve("source-tree")
+        writeSourceTree(project, "base"); acceptRepairGraph(project)
+        owner.transition(job.id, started.runId, started.version, WorkflowTransition.Finish(
+            WorkflowRunState.COMPLETED, WorkflowTerminalReason.COMPLETED, acceptedHeadCandidate(project))).attempt
     }
 
     @Test

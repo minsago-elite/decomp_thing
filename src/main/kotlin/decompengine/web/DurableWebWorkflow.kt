@@ -98,7 +98,12 @@ fun interface DurableWebWorkflowPublication {
     fun verify(context: DurableWebWorkflowPublicationContext): WorkflowAcceptanceReference?
 }
 
-data class DurableWebWorkflowPublicationContext(val job: Job, val attempt: WorkflowAttempt, val reportsDirectory: Path)
+/** Verifiers must reserve each capture before reading and checkpoint between bounded read units. */
+data class DurableWebWorkflowPublicationContext(
+    val job: Job, val attempt: WorkflowAttempt, val reportsDirectory: Path,
+    val checkpoint: () -> Unit = { if (Thread.currentThread().isInterrupted) throw InterruptedException("Publication interrupted") },
+    val reserveCapture: (Long) -> Unit = {},
+)
 
 /**
  * Internal execution context. Paths are never transport DTO fields. A recovery attempt records its
