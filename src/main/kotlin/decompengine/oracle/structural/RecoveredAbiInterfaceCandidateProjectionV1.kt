@@ -75,6 +75,9 @@ class RecoveredAbiInterfaceCandidateProjectionV1 private constructor(private val
             checkpoint: () -> Unit = {},
         ): RecoveredAbiInterfaceCandidateProjectionV1 {
             checkpoint()
+            require(snapshot.capturedBytes <= MAXIMUM_CAPTURE_CANDIDATE_BYTES) {
+                "authenticated interface capture exceeds bounded candidate materialization bytes"
+            }
             val modelBytes = snapshot.programModelBytes
             val listingManifest = snapshot.listingManifestBytes
             val listingBytes = snapshot.listingObservationsBytes
