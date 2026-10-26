@@ -353,6 +353,43 @@ it('reviews fetched divergence and offers only reviewed fast-forward or merge, n
     guards: { repositoryVersion: 'repo_v1', worktreeVersion: 'tree_v1', expectedHeadObjectId: head, expectedRefId: null, expectedRefObjectId: null } }]);
 });
 
+it.each([false, true])('keeps a refused resolution across refresh failure=%s and retries with the refreshed token', async refreshFails => {
+  conflictState = { repositoryId, worktreeId, mergeInProgress: true, integration: null,
+    files: [{ fileId: 'file_conflict', path: 'src/a.c' }] };
+  let refuseRefresh = refreshFails;
+  transport.get.mockImplementation((kind, path) => {
+    if (kind === 'gitConflictFile' && conflictReads === 1 && refuseRefresh) {
+      refuseRefresh = false;
+      return Promise.reject(new ApiClientError('http_error', { status: 503 }));
+    }
+    return serve(kind, path);
+  });
+  transport.post.mockRejectedValueOnce(new ApiClientError('http_error', { status: 409 }));
+  transport.post.mockResolvedValueOnce(operation('completed', 'git.conflict.save'));
+  mount();
+  fireEvent.click(await screen.findByRole('button', { name: 'Review src/a.c' }));
+  fireEvent.input(await screen.findByLabelText('Resolved text'), { target: { value: 'int a = 3;\n' } });
+  fireEvent.click(screen.getByRole('checkbox', { name: 'Mark src/a.c reviewed' }));
+  fireEvent.click(screen.getByRole('button', { name: 'Save resolution' }));
+  if (refreshFails) {
+    await waitFor(() => expect(refuseRefresh).toBe(false));
+    await waitFor(() => expect(screen.queryByLabelText('Resolved text')).toBeNull());
+    expect(screen.getByRole('checkbox', { name: 'Mark src/a.c reviewed' })).toHaveProperty('disabled', true);
+    fireEvent.click(screen.getByRole('button', { name: 'Review src/a.c' }));
+  }
+  await waitFor(() => expect(conflictReads).toBe(2));
+  expect(await screen.findByLabelText('Resolved text')).toHaveProperty('value', 'int a = 3;\n');
+  expect(screen.getByRole('checkbox', { name: 'Mark src/a.c reviewed' })).toHaveProperty('checked', false);
+  expect(screen.getByRole('button', { name: 'Stage reviewed resolutions' })).toHaveProperty('disabled', true);
+  fireEvent.click(screen.getByRole('button', { name: 'Save resolution' }));
+  await waitFor(() => expect(transport.post).toHaveBeenCalledTimes(2));
+  expect(transport.post.mock.calls[1]?.[3]).toMatchObject({ action: 'git.conflict.save', expectedSha256: 'd'.repeat(64),
+    resolution: 'text', content: 'int a = 3;\n' });
+  // A successful save clears the retained failed draft and shows the authoritative content.
+  await waitFor(() => expect(conflictReads).toBe(3));
+  await waitFor(() => expect(screen.getByLabelText('Resolved text')).toHaveProperty('value', expect.stringContaining('<<<<<<< ours')));
+});
+
 it('resolves a conflict with a concurrency token, stages only reviewed files and can abort', async () => {
   conflictState = { repositoryId, worktreeId, mergeInProgress: true, integration: { operationId: 'operation_7', strategy: 'merge',
     branch: 'refs/heads/main', headBeforeObjectId: head, targetObjectId: other, trackingRefName: 'refs/remotes/origin/main', startedAt: '2026-10-25T00:00:00Z' },

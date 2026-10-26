@@ -1,4 +1,4 @@
-import { useState } from 'preact/hooks';
+import { useRef, useState } from 'preact/hooks';
 import { gitIntegrationCopy as copy } from '../copy/git';
 import { textMessage } from '../shared/messages';
 import { StateMark } from '../shared/StateMark';
@@ -29,11 +29,14 @@ export function GitIntegrationPanel({ remotes, conflicts, writable, readDivergen
   const [detail, setDetail] = useState<GitConflictFile | null>(null);
   const [draft, setDraft] = useState('');
   const [reviewed, setReviewed] = useState<Record<string, string>>({});
+  // A resolution whose save failed stays the draft until a save succeeds.
+  const unsaved = useRef<{ fileId: string; text: string } | null>(null);
   const selected = chosen || tracking[0]?.refId || '';
 
   async function open(fileId: string) {
     const file = await readConflict(fileId);
-    setDetail(file); setDraft(file?.current ?? '');
+    setDetail(file);
+    if (file) setDraft(unsaved.current?.fileId === fileId ? unsaved.current.text : file.current ?? '');
   }
 
   async function save(resolution: 'ours' | 'theirs' | 'base' | 'text') {
@@ -43,8 +46,11 @@ export function GitIntegrationPanel({ remotes, conflicts, writable, readDivergen
     // old digest, and the file is read again (on failure too) before it can be.
     setDetail(null);
     setReviewed(previous => { const next = { ...previous }; delete next[reviewed.file.fileId]; return next; });
-    await onAction({ kind: 'gitConflictSaveRequest', fileId: reviewed.file.fileId, expectedSha256: reviewed.currentSha256,
-      resolution, content: resolution === 'text' ? draft : null });
+    const submitted = draft;
+    const saved = await onAction({ kind: 'gitConflictSaveRequest', fileId: reviewed.file.fileId, expectedSha256: reviewed.currentSha256,
+      resolution, content: resolution === 'text' ? submitted : null });
+    // On failure the draft survives the re-read, which only refreshes the concurrency token.
+    unsaved.current = saved ? null : { fileId: reviewed.file.fileId, text: submitted };
     await open(reviewed.file.fileId);
   }
 
