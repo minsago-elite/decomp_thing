@@ -316,17 +316,200 @@ class AuthenticatedDebPayloadTests(unittest.TestCase):
                 self.assertTrue(next(x for x in result["files"] if x["path"]=="/etc/clang.conf")["entry"]["conffile"])
 
     def test_generated_source_list_does_not_acquire_package_authority_by_path_or_recipe_bytes(self):
-        # Known qualification blocker: package-only authority cannot attest the
-        # provisioner's construction outputs. Do not "fix" it with a whitelist.
+        # Construction input is removed only after its exact inode and content
+        # identity are rechecked by the fixed descriptor-relative helper.
         (self.root / "etc/apt").mkdir(parents=True)
         entries = [self.entry(name, kind=tarfile.DIRTYPE, mode=0o755)
                    for name in (".", "etc", "etc/apt")]
         row, _ = self.package_bytes(entries)
-        provision.verify_installed_package_payloads(self.root, self.payloads, [row], self.contract)
-        (self.root / "etc/apt/sources.list").write_bytes(provision.apt_source_list(self.contract))
+        package_manifest = provision.verify_installed_package_payloads(self.root, self.payloads, [row], self.contract)
+
+        file_collision = json.loads(json.dumps(package_manifest))
+        file_collision["files"].append({
+            "path": provision.PROBE_SOURCE_IN_ROOT,
+            "entry": {"kind": "file", "bytes": 1, "sha256": "a" * 64,
+                      "mode": 0o444, "uid": os.getuid(), "gid": os.getgid()},
+        })
+        with self.assertRaisesRegex(provision.ProvisionError, "collides with signed package ownership"):
+            provision.require_generated_probe_paths_absent(self.root, file_collision)
+        parent_collision = json.loads(json.dumps(package_manifest))
+        parent_collision["files"].append({
+            "path": "/usr/local/libexec",
+            "entry": {"kind": "file", "bytes": 1, "sha256": "b" * 64,
+                      "mode": 0o644, "uid": os.getuid(), "gid": os.getgid()},
+        })
+        with self.assertRaisesRegex(provision.ProvisionError, "non-directory package ownership"):
+            provision.require_generated_probe_paths_absent(self.root, parent_collision)
+        sources = provision.apt_source_list(self.contract)
+        path = self.root / provision.GENERATED_APT_SOURCE_LIST_IN_ROOT.lstrip("/")
+        path.write_bytes(sources)
+        identity = provision.generated_rootfs_file_identity(
+            self.root, provision.GENERATED_APT_SOURCE_LIST_IN_ROOT, provision.sha256(sources),
+            expected_mode=0o644, expected_owner=(os.getuid(), os.getgid()), max_bytes=len(sources),
+        )
         with self.assertRaisesRegex(provision.ProvisionError,
                 "unapproved generated or omitted-package installed path: etc/apt/sources.list$"):
             provision.verify_installed_package_payloads(self.root, self.payloads, [row], self.contract)
+        with mock.patch.object(provision, "run_checked", side_effect=self.simulate_generated_rootfs_removal):
+            provision.remove_generated_rootfs_files(self.root, [identity])
+        self.assertFalse(path.exists())
+        package_manifest = provision.verify_installed_package_payloads(self.root, self.payloads, [row], self.contract)
+
+    def simulate_generated_rootfs_removal(self, command, timeout=None):
+        self.assertEqual(command[:6], [
+            "sudo", "-n", "/usr/bin/python3", "-I", "-B", "-c",
+        ])
+        self.assertEqual(command[6], provision.GENERATED_ROOTFS_FILE_REMOVE_PROGRAM)
+        result = subprocess.run(
+            [sys.executable, "-I", "-B", "-c", *command[6:]], check=False,
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=timeout,
+        )
+        if result.returncode:
+            raise provision.ProvisionError(result.stderr.strip() or "generated removal helper refused")
+        return mock.Mock(stdout=result.stdout)
+
+    def test_generated_probe_artifacts_compose_with_package_manifest_without_weakening_it(self):
+        (self.root / "usr/local").mkdir(parents=True)
+        (self.root / "etc/apt").mkdir(parents=True)
+        (self.root / "tmp").mkdir()
+        entries = [self.entry(name, kind=tarfile.DIRTYPE, mode=0o755)
+                   for name in (".", "usr", "usr/local", "etc", "etc/apt", "tmp")]
+        row, _ = self.package_bytes(entries)
+        package_manifest = provision.verify_installed_package_payloads(self.root, self.payloads, [row], self.contract)
+
+        def local_install(command, timeout=None):
+            if command[:1] == ["sudo"]:
+                command = command[1:]
+            return subprocess.run(command, check=False, stdout=subprocess.PIPE,
+                                  stderr=subprocess.STDOUT, text=True, timeout=timeout)
+
+        with mock.patch.object(provision, "run_checked", side_effect=local_install):
+            source_path, fixture_path = provision.stage_probe_inputs(self.root, package_manifest=package_manifest)
+        binary_path = self.root / provision.PROBE_BINARY_IN_ROOT.lstrip("/")
+        binary_path.write_bytes(b"authored inert compiler output\n")
+        binary_path.chmod(0o755)
+        record = ProvisioningNegativeTests.valid_build_record(self)
+        record["probe"]["sourceSha256"] = provision.recipe_identity()["probeSha256"]
+        record["probe"]["fixtureSha256"] = provision.recipe_identity()["fixtureSha256"]
+        record["probe"]["binarySha256"] = provision.sha256_file(binary_path)
+        artifacts = provision.probe_construction_artifact_manifest(
+            self.root, record, self.contract, package_manifest=package_manifest,
+            expected_owner=(os.getuid(), os.getgid()),
+        )
+        package_collision = json.loads(json.dumps(package_manifest))
+        package_collision["files"].append({
+            "path": provision.PROBE_SOURCE_IN_ROOT,
+            "entry": {"kind": "file", "bytes": len(source_path.read_bytes()),
+                      "sha256": provision.sha256_file(source_path), "mode": 0o444,
+                      "uid": os.getuid(), "gid": os.getgid()},
+        })
+        with self.assertRaisesRegex(provision.ProvisionError, "collides with signed package ownership"):
+            provision.probe_construction_artifact_manifest(
+                self.root, record, self.contract, package_manifest=package_collision,
+                expected_owner=(os.getuid(), os.getgid()),
+            )
+        for mutation in ("missing", "duplicate", "extra"):
+            changed = json.loads(json.dumps(artifacts))
+            if mutation == "missing":
+                changed["files"].pop()
+            elif mutation == "duplicate":
+                changed["files"].append(json.loads(json.dumps(changed["files"][0])))
+            else:
+                extra_row = json.loads(json.dumps(changed["files"][-1]))
+                extra_row["path"] = "/usr/local/libexec/decomp-thing/clang-18.1.3/unreviewed"
+                changed["files"].append(extra_row)
+            with self.subTest(manifest_mutation=mutation), self.assertRaises(provision.ProvisionError):
+                provision.validate_probe_construction_artifact_manifest(
+                    changed, self.contract, package_manifest=package_manifest,
+                    expected_owner=(os.getuid(), os.getgid()),
+                )
+        with self.assertRaisesRegex(provision.ProvisionError, "unapproved generated or omitted-package"):
+            provision.verify_installed_package_payloads(self.root, self.payloads, [row], self.contract)
+
+        evidence = provision.verify_provisioned_rootfs_payloads(
+            self.root, self.payloads, [row], record, self.contract,
+            expected_owner=(os.getuid(), os.getgid()),
+        )
+        self.assertEqual(sum(row["entry"]["kind"] == "file"
+                             for row in evidence["constructionManifest"]["files"]), 3)
+        self.assertEqual(
+            {row["path"] for row in evidence["constructionManifest"]["files"]
+             if row["entry"]["kind"] == "directory"},
+            {"/usr/local/libexec", "/usr/local/libexec/decomp-thing",
+             "/usr/local/libexec/decomp-thing/clang-18.1.3"},
+        )
+        self.assertEqual(evidence["constructionManifest"],
+                         provision.portable_probe_construction_artifact_manifest(artifacts))
+        self.assertTrue(all("fileIdentity" not in row for row in evidence["constructionManifest"]["files"]))
+        self.assertTrue(all("fileIdentity" not in row for row in evidence["fullManifest"]["files"]))
+        self.assertEqual(evidence["fullManifest"]["scope"],
+                         "authenticated-package-payload-paths-plus-fixed-clang-probe-construction-v1")
+        self.assertEqual(len(evidence["fullManifest"]["files"]), len(evidence["packageManifest"]["files"]) + 6)
+        self.assertEqual(source_path.read_bytes(), (ROOT / "oracle/clang/18.1.3/libtooling-probe.cpp").read_bytes())
+        self.assertEqual(fixture_path.read_bytes(),
+                         (ROOT / "oracle/clang/18.1.3/fixtures/libtooling-positive.cpp").read_bytes())
+
+        original_source = source_path.read_bytes()
+        source_path.chmod(0o644)
+        source_path.write_bytes(original_source + b"tampered")
+        source_path.chmod(0o444)
+        with self.assertRaisesRegex(provision.ProvisionError, "generated rootfs file content or identity changed"):
+            provision.verify_provisioned_rootfs_payloads(
+                self.root, self.payloads, [row], record, self.contract,
+                expected_owner=(os.getuid(), os.getgid()),
+            )
+        source_path.chmod(0o644)
+        source_path.write_bytes(original_source)
+        source_path.chmod(0o444)
+        canary = self.base / "generated-source-canary"
+        canary.write_bytes(b"outside target remains unchanged")
+        source_path.unlink()
+        source_path.symlink_to(canary)
+        with self.assertRaises(provision.ProvisionError):
+            provision.verify_provisioned_rootfs_payloads(
+                self.root, self.payloads, [row], record, self.contract,
+                expected_owner=(os.getuid(), os.getgid()),
+            )
+        self.assertEqual(canary.read_bytes(), b"outside target remains unchanged")
+        source_path.unlink()
+        source_path.write_bytes(original_source)
+        source_path.chmod(0o444)
+
+        extra = self.root / provision.PROBE_RETAIN_DIRECTORY.lstrip("/") / "unmanifested-output"
+        extra.write_bytes(b"unaccounted")
+        with self.assertRaisesRegex(provision.ProvisionError, "unapproved generated or omitted-package"):
+            provision.verify_provisioned_rootfs_payloads(
+                self.root, self.payloads, [row], record, self.contract,
+                expected_owner=(os.getuid(), os.getgid()),
+            )
+
+    def test_generated_file_removal_refuses_substitution_and_symlink_canary(self):
+        (self.root / "etc/apt").mkdir(parents=True)
+        payload = provision.apt_source_list(self.contract)
+        path = self.root / provision.GENERATED_APT_SOURCE_LIST_IN_ROOT.lstrip("/")
+        path.write_bytes(payload)
+        expected = provision.generated_rootfs_file_identity(
+            self.root, provision.GENERATED_APT_SOURCE_LIST_IN_ROOT, provision.sha256(payload),
+            expected_mode=0o644, expected_owner=(os.getuid(), os.getgid()), max_bytes=len(payload),
+        )
+        path.write_bytes(payload + b"tampered")
+        with mock.patch.object(provision, "run_checked", side_effect=self.simulate_generated_rootfs_removal):
+            with self.assertRaisesRegex(provision.ProvisionError, "identity or type changed|content or identity changed"):
+                provision.remove_generated_rootfs_files(self.root, [expected])
+        self.assertEqual(path.read_bytes(), payload + b"tampered")
+
+        path.unlink()
+        canary = self.base / "outside-canary"
+        canary.write_bytes(b"preserve this target")
+        path.symlink_to(canary)
+        with mock.patch.object(provision, "run_checked", side_effect=self.simulate_generated_rootfs_removal):
+            with self.assertRaisesRegex(provision.ProvisionError, "type, mode, owner|unsafe"):
+                provision.generated_rootfs_file_identity(
+                    self.root, provision.GENERATED_APT_SOURCE_LIST_IN_ROOT, provision.sha256(payload),
+                    expected_mode=0o644, expected_owner=(os.getuid(), os.getgid()), max_bytes=len(payload),
+                )
+        self.assertTrue(path.is_symlink())
+        self.assertEqual(canary.read_bytes(), b"preserve this target")
 
     def test_implicit_parents_have_recorded_signed_root_derivation_and_exact_metadata(self):
         row,_=self.fixture()
@@ -499,8 +682,9 @@ class AuthenticatedDebPayloadTests(unittest.TestCase):
         record={"reproducibility":{"cleanBuilds":2,"matchingRootfsSha256":True,"matchingImageDigest":True},"packages":[row],"downloadedPackages":[]}
         args=provision.argparse.Namespace(contract=provision.CONTRACT_PATH,record=self.base/"record.json",package_payloads=self.base/"package-payloads",acquisition=acquisition,rootfs=self.root,oci_archive=image,probe_report=self.base/"probe.json",loader_report=self.base/"loader.json",negative_report=self.base/"negative.json",negative_compiler=self.base/"negative",keyring=self.base/"keyring",output=self.base/"must-not-exist.tar")
         key=(row["name"],row["version"],row["architecture"])
-        # Authored upstream signed metadata/image gates only; actual new payload gate is not mocked out.
-        with mock.patch.object(provision,"pin_retained_rootfs_directory",side_effect=authored_retained_root_binding),mock.patch.object(provision,"read_provenance_report",return_value=record),mock.patch.object(provision,"validate_build_record"),mock.patch.object(provision,"preflight_provenance_output",return_value=args.output),mock.patch.object(provision,"validate_locked_comparator_manifest",return_value=(None,self.base/"manifest",None,None)),mock.patch.object(provision,"load_candidate",return_value=({},[])),mock.patch.object(provision,"verify_retained_rootfs_and_image"),mock.patch.object(provision,"package_metadata_map",return_value={key:row}),mock.patch.object(provision,"installed_package_keys",return_value={key}),mock.patch.object(provision,"verify_installed_package_payloads",wraps=provision.verify_installed_package_payloads) as gate,mock.patch.object(provision,"verify_recorded_driver_identities",side_effect=AssertionError("must not replay native tools")) as native:
+        # Authored upstream signed metadata/image gates only; actual composite
+        # package-plus-construction closure gate is not mocked out.
+        with mock.patch.object(provision,"pin_retained_rootfs_directory",side_effect=authored_retained_root_binding),mock.patch.object(provision,"read_provenance_report",return_value=record),mock.patch.object(provision,"validate_build_record"),mock.patch.object(provision,"preflight_provenance_output",return_value=args.output),mock.patch.object(provision,"validate_locked_comparator_manifest",return_value=(None,self.base/"manifest",None,None)),mock.patch.object(provision,"load_candidate",return_value=({},[])),mock.patch.object(provision,"verify_retained_rootfs_and_image"),mock.patch.object(provision,"package_metadata_map",return_value={key:row}),mock.patch.object(provision,"installed_package_keys",return_value={key}),mock.patch.object(provision,"verify_provisioned_rootfs_payloads",wraps=provision.verify_provisioned_rootfs_payloads) as gate,mock.patch.object(provision,"verify_recorded_driver_identities",side_effect=AssertionError("must not replay native tools")) as native:
             with self.assertRaisesRegex(provision.ProvisionError,"regular evidence input"):
                 provision._package_provenance_unqualified(args)
             gate.assert_called_once();native.assert_not_called()
@@ -569,15 +753,16 @@ class AuthenticatedDebPayloadTests(unittest.TestCase):
                 stack.enter_context(mock.patch.object(provision, "verify_retained_rootfs_and_image"))
                 stack.enter_context(mock.patch.object(provision, "package_metadata_map", return_value={key: row}))
                 stack.enter_context(mock.patch.object(provision, "installed_package_keys", return_value={key}))
-                gate = stack.enter_context(mock.patch.object(provision, "verify_installed_package_payloads",
-                                                             wraps=provision.verify_installed_package_payloads))
+                gate = stack.enter_context(mock.patch.object(provision, "verify_provisioned_rootfs_payloads",
+                                                             wraps=provision.verify_provisioned_rootfs_payloads))
                 native = stack.enter_context(mock.patch.object(provision, "verify_recorded_driver_identities",
                     side_effect=provision.ProvisionError("authored stop before native replay")))
                 with self.assertRaises(provision.ProvisionError) as raised:
                     provision._package_provenance_unqualified(args)
                 if accepted:
-                    self.assertEqual(str(raised.exception), "authored stop before native replay")
-                    native.assert_called_once()
+                    self.assertEqual(str(raised.exception),
+                                     "generated probe construction lacks its authenticated C++ driver")
+                    native.assert_not_called()
                     gate.assert_called_once()
                 else:
                     self.assertNotEqual(str(raised.exception), "authored stop before native replay")
@@ -587,8 +772,9 @@ class AuthenticatedDebPayloadTests(unittest.TestCase):
                 if gate.called:
                     self.assertEqual(gate.call_args.args[1], selected)
                 self.assertFalse(args.output.exists())
-        # Identical authenticated bytes have no independently distinguishable run
-        # origin. Directory names do not grant or remove signed payload authority.
+        # This intentionally skeletal record cannot authorize construction
+        # artifacts, even when the selected .deb bytes are valid. Path selection
+        # must not let an incomplete provenance record reach native replay.
         self.assertEqual((identical / filename).read_bytes(), (run2 / filename).read_bytes())
 
     def test_package_provenance_parser_requires_explicit_payload_root(self):
@@ -1554,8 +1740,15 @@ class ProvisioningNegativeTests(unittest.TestCase):
             candidate = {"trustedKeyring": {"sha256": provision.sha256_file(keyring)}}
             packages = {("ca-certificates", "synthetic", "all")}
             args.acquisition.mkdir()
+            actual_generated_identity = provision.generated_rootfs_file_identity
+            def generated_file_identity_for_fixture(root, path, digest, **kwargs):
+                return actual_generated_identity(
+                    root, path, digest, expected_owner=(os.getuid(), os.getgid()), **kwargs,
+                )
             with mock.patch.object(provision, "load_candidate", return_value=(candidate, [])), \
                     mock.patch.object(provision, "check_runner_bounds"), \
+                    mock.patch.object(provision, "generated_rootfs_file_identity",
+                                      side_effect=generated_file_identity_for_fixture), \
                     mock.patch.object(provision, "run_checked", side_effect=run_checked), \
                     mock.patch.object(provision, "installed_package_keys", return_value=packages), \
                     mock.patch.object(provision, "package_metadata_for_keys", return_value={}), \
@@ -5460,7 +5653,16 @@ class RecipeAndCandidateBindingTests(unittest.TestCase):
                                       stderr=subprocess.STDOUT if stdout_file is None else subprocess.PIPE,
                                       text=True, timeout=timeout)
 
+            actual_rootfs_payload_verifier = provision.verify_provisioned_rootfs_payloads
+            def verify_fixture_rootfs_payloads(rootfs, payloads, packages, record, contract, **kwargs):
+                return actual_rootfs_payload_verifier(
+                    rootfs, payloads, packages, record, contract,
+                    expected_owner=(os.getuid(), os.getgid()), **kwargs,
+                )
+
             with mock.patch.object(provision, "pin_retained_rootfs_directory", side_effect=authored_retained_root_binding), \
+                    mock.patch.object(provision, "verify_provisioned_rootfs_payloads",
+                                      side_effect=verify_fixture_rootfs_payloads), \
                     mock.patch.object(provision, "load_candidate", return_value=(candidate, signed_rows)) as load, \
                     mock.patch.object(provision, "installed_package_keys", return_value=installed_keys), \
                     mock.patch.object(provision, "runtime_dependencies",
@@ -5480,9 +5682,17 @@ class RecipeAndCandidateBindingTests(unittest.TestCase):
         """Authored signed-index stand-in: archive actual inert fixture bytes, not a real package claim."""
         destination.mkdir()
         entries=[];inodes={}
+        generated_probe_paths = {
+            provision.PROBE_SOURCE_IN_ROOT.lstrip("/"),
+            provision.PROBE_FIXTURE_IN_ROOT.lstrip("/"),
+            provision.PROBE_BINARY_IN_ROOT.lstrip("/"),
+        }
         for count,path in enumerate(sorted(rootfs.rglob("*"))):
             if count>=4096:raise AssertionError("authored fixture inventory bound")
-            metadata=path.lstat();name=path.relative_to(rootfs).as_posix();info=tarfile.TarInfo(name)
+            metadata=path.lstat();name=path.relative_to(rootfs).as_posix()
+            if name in generated_probe_paths:
+                continue
+            info=tarfile.TarInfo(name)
             info.mode=stat.S_IMODE(metadata.st_mode);info.uid=metadata.st_uid;info.gid=metadata.st_gid;data=b""
             if stat.S_ISLNK(metadata.st_mode):info.type=tarfile.SYMTYPE;info.linkname=os.readlink(path)
             elif stat.S_ISDIR(metadata.st_mode):info.type=tarfile.DIRTYPE
@@ -5556,7 +5766,16 @@ class RecipeAndCandidateBindingTests(unittest.TestCase):
                 stderr=subprocess.STDOUT if stdout_file is None else subprocess.PIPE,
                 text=True, timeout=timeout)
 
+        actual_rootfs_payload_verifier = provision.verify_provisioned_rootfs_payloads
+        def verify_fixture_rootfs_payloads(rootfs, payloads, packages, record, contract, **kwargs):
+            return actual_rootfs_payload_verifier(
+                rootfs, payloads, packages, record, contract,
+                expected_owner=(os.getuid(), os.getgid()), **kwargs,
+            )
+
         with mock.patch.object(provision, "pin_retained_rootfs_directory", side_effect=authored_retained_root_binding), \
+                mock.patch.object(provision, "verify_provisioned_rootfs_payloads",
+                                  side_effect=verify_fixture_rootfs_payloads), \
                 mock.patch.object(provision, "verify_candidate_data", return_value=rows), \
                 mock.patch.object(provision, "audit_fresh_source_payloads", return_value=audit), \
                 mock.patch.object(provision, "installed_package_keys", return_value=installed), \

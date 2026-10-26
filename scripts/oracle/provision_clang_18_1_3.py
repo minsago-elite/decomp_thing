@@ -45,6 +45,7 @@ PROBE_RETAIN_DIRECTORY = "/usr/local/libexec/decomp-thing/clang-18.1.3"
 PROBE_SOURCE_IN_ROOT = PROBE_RETAIN_DIRECTORY + "/libtooling-probe.cpp"
 PROBE_BINARY_IN_ROOT = PROBE_RETAIN_DIRECTORY + "/libtooling-probe"
 PROBE_FIXTURE_IN_ROOT = PROBE_RETAIN_DIRECTORY + "/libtooling-positive.cpp"
+GENERATED_APT_SOURCE_LIST_IN_ROOT = "/etc/apt/sources.list"
 PROBE_SANDBOX_BLOCK_REASON = (
     "Clang probe execution is disabled: this provisioning CLI has no reviewed unprivileged "
     "bubblewrap/cgroup-v2 adapter with capability dropping, CPU/RSS/process/disk/output/wall-time "
@@ -2935,16 +2936,8 @@ def retain_signed_package_payloads(rootfs: Path, destination: Path, packages: li
             raise ProvisionError("missing or changed authenticated bootstrap/installed package payload")
 
 
-def verify_installed_package_payloads(rootfs: Path, payload_directory: Path,
-                                      packages: list[dict], contract: dict) -> dict:
-    """Derive authority from signed archives, not rootfs status/md5sums/record hashes.
-
-    Exception registry is deliberately empty. Maintainer/normalization changes to
-    a package-owned path refuse until a package/version/path rule is reviewed.
-    Unowned generated files also refuse: a falsified installed-package database
-    cannot hide an omitted package's files. Only the closed implicit-parent rule
-    below is supported; unrelated generated databases/probe outputs still refuse.
-    """
+def derive_installed_package_manifest(payload_directory: Path, packages: list[dict], contract: dict) -> dict:
+    """Derive the closed installed-path manifest from authenticated package bytes."""
     limits = contract["profile"]["bounds"]
     if not packages or len(packages) > limits["maxPackageCount"]:
         raise ProvisionError("installed authenticated payload package count bound")
@@ -2998,6 +2991,19 @@ def verify_installed_package_payloads(rootfs: Path, payload_directory: Path,
                 "derivation": {"rule": "implicit-parent-from-authenticated-root-v1", "sourcePath": "/",
                                "extendedMetadata": "none"},
             }
+    package_manifest = {
+        "schemaVersion": 1,
+        "scope": "all-authenticated-installed-package-payload-paths-and-closed-derived-parents; no transformation exceptions",
+        "payloads": payload_rows,
+        "files": [{"path": "/" if path == "." else "/" + path, **manifest[path]} for path in sorted(manifest)],
+    }
+    return package_manifest
+
+
+def verify_rootfs_manifest(rootfs: Path, manifest: dict, contract: dict) -> None:
+    """Verify one explicitly composed closed manifest against a retained rootfs."""
+    manifest = {("." if row["path"] == "/" else row["path"].lstrip("/")): row
+                for row in manifest["files"]}
     canonical_root = rootfs.resolve(strict=True)
     root_fd = os.open(canonical_root, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC)
     identities = {}
@@ -3043,6 +3049,14 @@ def verify_installed_package_payloads(rootfs: Path, payload_directory: Path,
                     parent_fd = next_fd
                 name = components[-1]
                 metadata = os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
+                generated_identity = manifest[path].get("fileIdentity")
+                if generated_identity is not None and (
+                        metadata.st_dev != generated_identity["device"] or
+                        metadata.st_ino != generated_identity["inode"] or
+                        metadata.st_nlink != generated_identity["links"] or
+                        metadata.st_mtime_ns != generated_identity["mtimeNs"] or
+                        metadata.st_ctime_ns != generated_identity["ctimeNs"]):
+                    raise ProvisionError("generated probe artifact inode identity changed: " + path)
                 # The supported tar dialect carries no ACL/capability/xattr
                 # authority. Do not silently accept installed security metadata.
                 if os.listxattr(f"/proc/self/fd/{parent_fd}/{name}", follow_symlinks=False):
@@ -3101,8 +3115,268 @@ def verify_installed_package_payloads(rootfs: Path, payload_directory: Path,
         raise ProvisionError("installed authenticated package path is missing or unsafe: " + str(error)) from error
     finally:
         os.close(root_fd)
-    return {"schemaVersion": 1, "scope": "all-authenticated-installed-package-payload-paths-and-closed-derived-parents; no transformation exceptions",
-            "payloads": payload_rows, "files": [{"path": "/" if path == "." else "/" + path, **manifest[path]} for path in sorted(manifest)]}
+
+
+def verify_installed_package_payloads(rootfs: Path, payload_directory: Path,
+                                      packages: list[dict], contract: dict) -> dict:
+    """Verify only paths owned by authenticated signed package payloads."""
+    package_manifest = derive_installed_package_manifest(payload_directory, packages, contract)
+    verify_rootfs_manifest(rootfs, package_manifest, contract)
+    return package_manifest
+
+
+def validate_probe_construction_artifact_manifest(value: object, contract: dict, *, package_manifest: dict,
+                                                  expected_owner: tuple[int, int] = (0, 0)) -> None:
+    """Validate the one fixed compiler-probe derivation; this is not a path exception table."""
+    package_paths = {row["path"]: row["entry"] for row in package_manifest.get("files", [])}
+    expected_file_paths = {PROBE_SOURCE_IN_ROOT, PROBE_FIXTURE_IN_ROOT, PROBE_BINARY_IN_ROOT}
+    if expected_file_paths & set(package_paths):
+        raise ProvisionError("probe construction file collides with signed package ownership")
+    expected_directory_paths = set()
+    for file_path in expected_file_paths:
+        parent = PurePosixPath(file_path).parent
+        while str(parent) != "/":
+            absolute = str(parent)
+            if absolute not in package_paths:
+                expected_directory_paths.add(absolute)
+            elif package_paths[absolute].get("kind") != "directory":
+                raise ProvisionError("probe construction parent collides with non-directory package ownership: " + absolute)
+            parent = parent.parent
+    expected_paths = expected_file_paths | expected_directory_paths
+    if (not isinstance(value, dict) or set(value) != {"schemaVersion", "scope", "inputs", "files"} or
+            value.get("schemaVersion") != 1 or
+            value.get("scope") != "fixed-clang-libtooling-probe-construction-artifacts-v1" or
+            not isinstance(value.get("inputs"), dict) or
+            set(value["inputs"]) != {"compiler", "compileArgvSha256", "sourceSha256", "fixtureSha256"} or
+            not isinstance(value.get("files"), list) or len(value["files"]) != len(expected_paths)):
+        raise ProvisionError("generated probe construction manifest has an unknown or incomplete shape")
+    if {row.get("path") for row in value["files"] if isinstance(row, dict)} != expected_paths:
+        raise ProvisionError("generated probe construction manifest has a missing, duplicate or extra path")
+    if (not isinstance(value["inputs"]["compileArgvSha256"], str) or
+            re.fullmatch(r"[0-9a-f]{64}", value["inputs"]["compileArgvSha256"]) is None or
+            any(not isinstance(value["inputs"][field], str) or
+                re.fullmatch(r"[0-9a-f]{64}", value["inputs"][field]) is None
+                for field in ("sourceSha256", "fixtureSha256"))):
+        raise ProvisionError("generated probe construction input digest is malformed")
+    compiler = value["inputs"]["compiler"]
+    if (not isinstance(compiler, dict) or set(compiler) != {"path", "sha256", "bytes", "mode", "symlinkChainSha256"} or
+            compiler.get("path") != "toolchain/usr/bin/clang++-18" or
+            type(compiler.get("bytes")) is not int or compiler["bytes"] < 1 or
+            not isinstance(compiler.get("mode"), str) or re.fullmatch(r"[0-7]{4}", compiler["mode"]) is None or
+            any(not isinstance(compiler.get(field), str) or re.fullmatch(r"[0-9a-f]{64}", compiler[field]) is None
+                for field in ("sha256", "symlinkChainSha256"))):
+        raise ProvisionError("generated probe construction compiler identity is malformed")
+    total = 0
+    by_path = {}
+    expected_derivations = {
+        PROBE_SOURCE_IN_ROOT: "authenticated-repository-probe-source-v1",
+        PROBE_FIXTURE_IN_ROOT: "authenticated-repository-probe-fixture-v1",
+        PROBE_BINARY_IN_ROOT: "clang-frontend-probe-compile-output-v1",
+    }
+    for row in value["files"]:
+        if (not isinstance(row, dict) or set(row) != {"path", "entry", "fileIdentity", "construction"} or
+                row["path"] not in expected_paths or row["path"] in by_path):
+            raise ProvisionError("generated probe construction file row is malformed or duplicated")
+        entry = row["entry"]
+        if row["path"] in expected_directory_paths:
+            if (not isinstance(entry, dict) or set(entry) != {"kind", "mode", "uid", "gid"} or
+                    entry.get("kind") != "directory" or
+                    (entry.get("mode"), entry.get("uid"), entry.get("gid")) != (0o755, *expected_owner) or
+                    row["construction"] != {"rule": "install-D-parent-for-fixed-probe-artifact-v1"}):
+                raise ProvisionError("generated probe parent directory derivation or metadata is invalid")
+        else:
+            if (not isinstance(entry, dict) or set(entry) != {"kind", "bytes", "sha256", "mode", "uid", "gid"} or
+                    entry.get("kind") != "file" or type(entry.get("bytes")) is not int or entry["bytes"] < 1 or
+                    entry["bytes"] > contract["profile"]["bounds"]["maxArtifactBytes"] or
+                    not isinstance(entry.get("sha256"), str) or re.fullmatch(r"[0-9a-f]{64}", entry["sha256"]) is None or
+                    type(entry.get("mode")) is not int or type(entry.get("uid")) is not int or type(entry.get("gid")) is not int):
+                raise ProvisionError("generated probe construction file identity is malformed or over budget")
+            expected_mode = 0o755 if row["path"] == PROBE_BINARY_IN_ROOT else 0o444
+            if (entry["mode"], entry["uid"], entry["gid"]) != (expected_mode, *expected_owner):
+                raise ProvisionError("generated probe construction mode or ownership differs from its fixed rule")
+            if row["path"] == PROBE_SOURCE_IN_ROOT and entry["sha256"] != value["inputs"]["sourceSha256"]:
+                raise ProvisionError("generated probe source digest differs from the checked input")
+            if row["path"] == PROBE_FIXTURE_IN_ROOT and entry["sha256"] != value["inputs"]["fixtureSha256"]:
+                raise ProvisionError("generated probe fixture digest differs from the checked input")
+        identity = row["fileIdentity"]
+        if (not isinstance(identity, dict) or set(identity) != {"device", "inode", "links", "mtimeNs", "ctimeNs"} or
+                any(type(identity.get(field)) is not int for field in identity) or
+                identity.get("links", 0) < 1 or
+                (row["path"] not in expected_directory_paths and identity.get("links") != 1)):
+            raise ProvisionError("generated probe construction inode identity is malformed")
+        if row["path"] not in expected_directory_paths:
+            total += entry["bytes"]
+        if total > contract["profile"]["bounds"]["maxArtifactBytes"]:
+            raise ProvisionError("generated probe construction aggregate exceeds its artifact bound")
+        construction = row["construction"]
+        if row["path"] in expected_directory_paths:
+            expected_construction = {"rule": "install-D-parent-for-fixed-probe-artifact-v1"}
+        elif row["path"] == PROBE_SOURCE_IN_ROOT:
+            expected_construction = {
+                "rule": expected_derivations[row["path"]], "recipeField": "probeSha256",
+                "inputSha256": value["inputs"]["sourceSha256"],
+            }
+        elif row["path"] == PROBE_FIXTURE_IN_ROOT:
+            expected_construction = {
+                "rule": expected_derivations[row["path"]], "recipeField": "fixtureSha256",
+                "inputSha256": value["inputs"]["fixtureSha256"],
+            }
+        else:
+            expected_construction = {
+                "rule": expected_derivations[row["path"]], "compiler": compiler,
+                "compileArgvSha256": value["inputs"]["compileArgvSha256"],
+                "sourceSha256": value["inputs"]["sourceSha256"],
+                "fixtureSha256": value["inputs"]["fixtureSha256"],
+            }
+        if construction != expected_construction:
+            raise ProvisionError("generated probe construction derivation does not match its authenticated inputs")
+        by_path[row["path"]] = row
+    if set(by_path) != expected_paths:
+        raise ProvisionError("generated probe construction manifest is incomplete")
+
+
+def probe_construction_artifact_manifest(rootfs: Path, record: dict, contract: dict, *, package_manifest: dict,
+                                         expected_owner: tuple[int, int] = (0, 0)) -> dict:
+    """Derive the exact three retained probe artifacts from authenticated recipe/report/tool inputs."""
+    probe = record.get("probe", {})
+    recipe = record.get("recipe", {})
+    commands = record.get("commands", {})
+    cxx = next((row for row in record.get("tools", []) if row.get("role") == "cxx-driver"), None)
+    if not isinstance(cxx, dict):
+        raise ProvisionError("generated probe construction lacks its authenticated C++ driver")
+    expected_source = recipe.get("probeSha256")
+    expected_fixture = recipe.get("fixtureSha256")
+    if (expected_source != probe.get("sourceSha256") or expected_fixture != probe.get("fixtureSha256") or
+            expected_source != recipe_identity().get("probeSha256") or
+            expected_fixture != recipe_identity().get("fixtureSha256")):
+        raise ProvisionError("generated probe source/fixture digests differ from the checked recipe inputs")
+    compile_argv = commands.get("probeCompile")
+    if not isinstance(compile_argv, list) or compile_argv != canonical_commands(contract, "0" * 64)["probeCompile"]:
+        raise ProvisionError("generated probe construction compile command differs from the canonical command")
+    compiler = {
+        "path": "toolchain" + cxx.get("path", ""),
+        "sha256": cxx.get("sha256"), "bytes": cxx.get("bytes"), "mode": cxx.get("mode"),
+        "symlinkChainSha256": sha256(canonical_json(cxx.get("symlinkChain"))),
+    }
+    if compiler["path"] != "toolchain/usr/bin/clang++-18":
+        raise ProvisionError("generated probe construction C++ driver path differs from the pinned profile")
+    compile_argv_sha256 = sha256(canonical_json(compile_argv))
+    entries = []
+    package_paths = {row["path"]: row["entry"] for row in package_manifest.get("files", [])}
+    file_paths = {PROBE_SOURCE_IN_ROOT, PROBE_FIXTURE_IN_ROOT, PROBE_BINARY_IN_ROOT}
+    if file_paths & set(package_paths):
+        raise ProvisionError("generated probe artifact path collides with signed package ownership")
+    generated_directories = set()
+    for file_path in file_paths:
+        parent = PurePosixPath(file_path).parent
+        while str(parent) != "/":
+            absolute = str(parent)
+            package_entry = package_paths.get(absolute)
+            if package_entry is None:
+                generated_directories.add(absolute)
+            elif package_entry.get("kind") != "directory":
+                raise ProvisionError("generated probe parent collides with non-directory package ownership: " + absolute)
+            parent = parent.parent
+    for path in sorted(generated_directories):
+        identity = generated_rootfs_directory_identity(rootfs, path, expected_owner=expected_owner)
+        entries.append({
+            "path": path,
+            "entry": {"kind": "directory", "mode": identity["mode"],
+                      "uid": identity["uid"], "gid": identity["gid"]},
+            "fileIdentity": {"device": identity["device"], "inode": identity["inode"],
+                             "links": identity["links"], "mtimeNs": identity["mtimeNs"],
+                             "ctimeNs": identity["ctimeNs"]},
+            "construction": {"rule": "install-D-parent-for-fixed-probe-artifact-v1"},
+        })
+    specifications = (
+        (PROBE_SOURCE_IN_ROOT, expected_source, "authenticated-repository-probe-source-v1", 0o444),
+        (PROBE_FIXTURE_IN_ROOT, expected_fixture, "authenticated-repository-probe-fixture-v1", 0o444),
+        (PROBE_BINARY_IN_ROOT, probe.get("binarySha256"), "clang-frontend-probe-compile-output-v1", 0o755),
+    )
+    for path, expected_digest, rule, expected_mode in specifications:
+        identity = generated_rootfs_file_identity(
+            rootfs, path, expected_digest, expected_mode=expected_mode, expected_owner=expected_owner,
+            max_bytes=contract["profile"]["bounds"]["maxArtifactBytes"],
+        )
+        if identity["bytes"] < 1:
+            raise ProvisionError("generated probe artifact is empty: " + path)
+        if path == PROBE_SOURCE_IN_ROOT and identity["bytes"] != len(RECIPE_FILES["probeSha256"].read_bytes()):
+            raise ProvisionError("generated probe source size differs from the checked repository input")
+        if path == PROBE_FIXTURE_IN_ROOT and identity["bytes"] != len(RECIPE_FILES["fixtureSha256"].read_bytes()):
+            raise ProvisionError("generated probe fixture size differs from the checked repository input")
+        if path == PROBE_BINARY_IN_ROOT:
+            construction = {
+                "rule": rule, "compiler": compiler, "compileArgvSha256": compile_argv_sha256,
+                "sourceSha256": expected_source, "fixtureSha256": expected_fixture,
+            }
+        else:
+            construction = {"rule": rule, "recipeField": "probeSha256" if path == PROBE_SOURCE_IN_ROOT else "fixtureSha256",
+                            "inputSha256": expected_digest}
+        entries.append({
+            "path": path,
+            "entry": {"kind": "file", "bytes": identity["bytes"], "sha256": identity["sha256"],
+                      "mode": identity["mode"], "uid": identity["uid"], "gid": identity["gid"]},
+            "fileIdentity": {"device": identity["device"], "inode": identity["inode"], "links": identity["links"],
+                             "mtimeNs": identity["mtimeNs"], "ctimeNs": identity["ctimeNs"]},
+            "construction": construction,
+        })
+    value = {
+        "schemaVersion": 1,
+        "scope": "fixed-clang-libtooling-probe-construction-artifacts-v1",
+        "inputs": {"compiler": compiler, "compileArgvSha256": compile_argv_sha256,
+                   "sourceSha256": expected_source, "fixtureSha256": expected_fixture},
+        "files": entries,
+    }
+    validate_probe_construction_artifact_manifest(
+        value, contract, package_manifest=package_manifest, expected_owner=expected_owner,
+    )
+    return value
+
+
+def verify_provisioned_rootfs_payloads(rootfs: Path, payload_directory: Path, packages: list[dict],
+                                       record: dict, contract: dict, *,
+                                       expected_owner: tuple[int, int] = (0, 0)) -> dict:
+    """Verify packages plus exactly the replayable Clang probe construction outputs."""
+    package_manifest = derive_installed_package_manifest(payload_directory, packages, contract)
+    construction = probe_construction_artifact_manifest(
+        rootfs, record, contract, package_manifest=package_manifest,
+        expected_owner=expected_owner,
+    )
+    validate_probe_construction_artifact_manifest(
+        construction, contract, package_manifest=package_manifest, expected_owner=expected_owner,
+    )
+    portable_construction = portable_probe_construction_artifact_manifest(construction)
+    live_full_manifest = {
+        "schemaVersion": 1,
+        "scope": "authenticated-package-payload-paths-plus-fixed-clang-probe-construction-v1",
+        "payloads": package_manifest["payloads"],
+        "files": sorted(
+            [*package_manifest["files"], *construction["files"]],
+            key=lambda row: row["path"],
+        ),
+    }
+    # Construction rows may augment the verified package closure only at paths
+    # the package manifest does not own. The constructor already checked all
+    # fixed file leaves and parent-directory collisions against that manifest.
+    verify_rootfs_manifest(rootfs, live_full_manifest, contract)
+    full_manifest = {
+        **live_full_manifest,
+        "files": sorted(
+            [*package_manifest["files"], *portable_construction["files"]],
+            key=lambda row: row["path"],
+        ),
+    }
+    return {"packageManifest": package_manifest, "constructionManifest": portable_construction,
+            "fullManifest": full_manifest}
+
+
+def portable_probe_construction_artifact_manifest(value: dict) -> dict:
+    """Drop live inode/clock observations while retaining replayable content derivation."""
+    return {
+        "schemaVersion": value["schemaVersion"], "scope": value["scope"], "inputs": value["inputs"],
+        "files": [{"path": row["path"], "entry": row["entry"], "construction": row["construction"]}
+                  for row in value["files"]],
+    }
 
 
 def installed_package_keys(rootfs: Path, contract: dict) -> set[tuple[str, str, str]]:
@@ -4307,6 +4581,336 @@ def apt_source_list(contract: dict) -> bytes:
     return ("\n".join(lines) + "\n").encode("utf-8")
 
 
+GENERATED_ROOTFS_FILE_REMOVE_PROGRAM = r'''import hashlib
+import json
+import os
+import stat
+import sys
+
+root_path = sys.argv[1]
+root_identity = (int(sys.argv[2]), int(sys.argv[3]))
+rows_bytes = sys.argv[4].encode("utf-8", errors="strict")
+if len(rows_bytes) > 16 * 1024:
+    raise SystemExit("generated rootfs removal manifest exceeds its bound")
+rows = json.loads(rows_bytes)
+allowed = {
+    "/etc/apt/sources.list",
+    "/usr/local/libexec/decomp-thing/clang-18.1.3/libtooling-probe.cpp",
+    "/usr/local/libexec/decomp-thing/clang-18.1.3/libtooling-positive.cpp",
+    "/usr/local/libexec/decomp-thing/clang-18.1.3/libtooling-probe",
+}
+if not isinstance(rows, list) or not 1 <= len(rows) <= len(allowed):
+    raise SystemExit("generated rootfs removal list is malformed")
+root_fd = os.open(root_path, os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC)
+parents = []
+try:
+    root = os.fstat(root_fd)
+    if (root.st_dev, root.st_ino) != root_identity or not stat.S_ISDIR(root.st_mode):
+        raise SystemExit("generated rootfs removal root identity changed")
+    seen = set()
+    total = 0
+    for row in rows:
+        if not isinstance(row, dict) or set(row) != {
+            "path", "device", "inode", "bytes", "sha256", "mode", "uid", "gid", "links", "mtimeNs", "ctimeNs",
+            "rootDevice", "rootInode",
+        }:
+            raise SystemExit("generated rootfs removal identity is malformed")
+        path = row["path"]
+        if path not in allowed or path in seen:
+            raise SystemExit("generated rootfs removal path is not uniquely allowlisted")
+        if (row.get("rootDevice"), row.get("rootInode")) != root_identity:
+            raise SystemExit("generated rootfs removal record belongs to a different rootfs")
+        seen.add(path)
+        if (type(row["bytes"]) is not int or row["bytes"] < 0 or row["bytes"] > 64 * 1024 * 1024 or
+                type(row["mode"]) is not int or type(row["uid"]) is not int or type(row["gid"]) is not int or
+                type(row["links"]) is not int or row["links"] != 1 or
+                not isinstance(row["sha256"], str) or len(row["sha256"]) != 64 or
+                any(ch not in "0123456789abcdef" for ch in row["sha256"])):
+            raise SystemExit("generated rootfs removal identity is outside its bounds")
+        components = path.split("/")[1:]
+        if not components or any(not part or part in (".", "..") for part in components):
+            raise SystemExit("generated rootfs removal path is malformed")
+        parent_fd = os.dup(root_fd)
+        for component in components[:-1]:
+            next_fd = os.open(component, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC,
+                               dir_fd=parent_fd)
+            os.close(parent_fd)
+            parent_fd = next_fd
+        parents.append((parent_fd, components[-1], row))
+
+    # Validate the entire bounded set before unlinking any leaf.
+    for parent_fd, name, row in parents:
+        metadata = os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
+        expected = (row["device"], row["inode"], stat.S_IFREG | row["mode"], row["uid"], row["gid"],
+                    row["bytes"], row["links"], row["mtimeNs"], row["ctimeNs"])
+        actual = (metadata.st_dev, metadata.st_ino, metadata.st_mode, metadata.st_uid, metadata.st_gid,
+                  metadata.st_size, metadata.st_nlink, metadata.st_mtime_ns, metadata.st_ctime_ns)
+        if not stat.S_ISREG(metadata.st_mode) or actual != expected:
+            raise SystemExit("generated rootfs file identity or type changed before removal")
+        descriptor = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC,
+                             dir_fd=parent_fd)
+        try:
+            before = os.fstat(descriptor)
+            if (before.st_dev, before.st_ino, before.st_mode, before.st_uid, before.st_gid,
+                    before.st_size, before.st_nlink, before.st_mtime_ns, before.st_ctime_ns) != actual:
+                raise SystemExit("generated rootfs file changed while opening for removal")
+            if os.listxattr(descriptor):
+                raise SystemExit("generated rootfs file has unsupported extended metadata")
+            digest = hashlib.sha256()
+            remaining = row["bytes"]
+            while remaining:
+                block = os.read(descriptor, min(65536, remaining))
+                if not block:
+                    break
+                remaining -= len(block)
+                total += len(block)
+                if total > 64 * 1024 * 1024:
+                    raise SystemExit("generated rootfs removal aggregate byte bound")
+                digest.update(block)
+            after = os.fstat(descriptor)
+            current = os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
+            if (remaining or os.read(descriptor, 1) or digest.hexdigest() != row["sha256"] or
+                    any(getattr(before, key) != getattr(after, key) or
+                        getattr(before, key) != getattr(current, key)
+                        for key in ("st_dev", "st_ino", "st_mode", "st_uid", "st_gid", "st_size",
+                                    "st_nlink", "st_mtime_ns", "st_ctime_ns"))):
+                raise SystemExit("generated rootfs file content or identity changed before removal")
+        finally:
+            os.close(descriptor)
+
+    for parent_fd, name, row in parents:
+        current = os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
+        if ((current.st_dev, current.st_ino, current.st_uid, current.st_gid, current.st_size,
+             current.st_mtime_ns, current.st_ctime_ns) !=
+                (row["device"], row["inode"], row["uid"], row["gid"], row["bytes"],
+                 row["mtimeNs"], row["ctimeNs"])):
+            raise SystemExit("generated rootfs file was substituted at removal")
+        os.unlink(name, dir_fd=parent_fd)
+        try:
+            os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
+        except FileNotFoundError:
+            pass
+        else:
+            raise SystemExit("generated rootfs file remains after removal")
+finally:
+    for parent_fd, _, _ in parents:
+        os.close(parent_fd)
+    os.close(root_fd)
+'''
+
+
+def generated_rootfs_file_identity(rootfs: Path, absolute_path: str, expected_sha256: str, *,
+                                   expected_mode: int, expected_owner: tuple[int, int] = (0, 0),
+                                   max_bytes: int = 64 * 1024 * 1024) -> dict:
+    """Capture exact bounded identity for one known generated regular file."""
+    allowed = {
+        GENERATED_APT_SOURCE_LIST_IN_ROOT, PROBE_SOURCE_IN_ROOT, PROBE_FIXTURE_IN_ROOT, PROBE_BINARY_IN_ROOT,
+    }
+    if (absolute_path not in allowed or not isinstance(expected_sha256, str) or
+            re.fullmatch(r"[0-9a-f]{64}", expected_sha256) is None or
+            type(expected_mode) is not int or type(max_bytes) is not int or max_bytes < 0):
+        raise ProvisionError("generated rootfs file identity request is outside its closed policy")
+    components = PurePosixPath(absolute_path).parts[1:]
+    if not components:
+        raise ProvisionError("generated rootfs file identity path is malformed")
+    root_fd = os.open(rootfs, os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC)
+    parent_fd = -1
+    descriptor = -1
+    try:
+        root = os.fstat(root_fd)
+        parent_fd = os.dup(root_fd)
+        for component in components[:-1]:
+            next_fd = os.open(component, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC,
+                              dir_fd=parent_fd)
+            os.close(parent_fd)
+            parent_fd = next_fd
+        name = components[-1]
+        metadata = os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
+        if (not stat.S_ISREG(metadata.st_mode) or stat.S_IMODE(metadata.st_mode) != expected_mode or
+                (metadata.st_uid, metadata.st_gid) != expected_owner or metadata.st_nlink != 1 or
+                metadata.st_size < 0 or metadata.st_size > max_bytes):
+            raise ProvisionError("generated rootfs file type, mode, owner, links or size is invalid")
+        descriptor = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC,
+                             dir_fd=parent_fd)
+        before = os.fstat(descriptor)
+        fields = ("st_dev", "st_ino", "st_mode", "st_uid", "st_gid", "st_size", "st_nlink",
+                  "st_mtime_ns", "st_ctime_ns")
+        if any(getattr(before, field) != getattr(metadata, field) for field in fields):
+            raise ProvisionError("generated rootfs file changed while opening")
+        if os.listxattr(descriptor):
+            raise ProvisionError("generated rootfs file has unsupported extended metadata")
+        digest = hashlib.sha256()
+        remaining = metadata.st_size
+        while remaining:
+            block = os.read(descriptor, min(65536, remaining))
+            if not block:
+                break
+            remaining -= len(block)
+            digest.update(block)
+        after = os.fstat(descriptor)
+        current = os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
+        if (remaining or os.read(descriptor, 1) or digest.hexdigest() != expected_sha256 or
+                any(getattr(before, field) != getattr(after, field) or
+                    getattr(before, field) != getattr(current, field) for field in fields)):
+            raise ProvisionError("generated rootfs file content or identity changed during capture")
+        return {
+            "path": absolute_path, "device": before.st_dev, "inode": before.st_ino,
+            "bytes": before.st_size, "sha256": digest.hexdigest(),
+            "mode": stat.S_IMODE(before.st_mode), "uid": before.st_uid, "gid": before.st_gid,
+            "links": before.st_nlink, "mtimeNs": before.st_mtime_ns, "ctimeNs": before.st_ctime_ns,
+            "rootDevice": root.st_dev, "rootInode": root.st_ino,
+        }
+    except OSError as error:
+        raise ProvisionError("generated rootfs file identity is unavailable or unsafe") from error
+    finally:
+        for fd in (descriptor, parent_fd, root_fd):
+            if fd >= 0:
+                os.close(fd)
+
+
+def generated_rootfs_directory_identity(rootfs: Path, absolute_path: str, *,
+                                        expected_owner: tuple[int, int] = (0, 0)) -> dict:
+    """Capture exact identity for a missing-from-package install -D parent directory."""
+    components = PurePosixPath(absolute_path).parts[1:]
+    if not PurePosixPath(absolute_path).is_absolute() or not components:
+        raise ProvisionError("generated rootfs directory path is malformed")
+    root_fd = os.open(rootfs, os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC)
+    descriptor = -1
+    try:
+        root = os.fstat(root_fd)
+        descriptor = os.dup(root_fd)
+        for component in components:
+            next_descriptor = os.open(component, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC,
+                                      dir_fd=descriptor)
+            os.close(descriptor)
+            descriptor = next_descriptor
+        before = os.fstat(descriptor)
+        if (not stat.S_ISDIR(before.st_mode) or stat.S_IMODE(before.st_mode) != 0o755 or
+                (before.st_uid, before.st_gid) != expected_owner or os.listxattr(descriptor)):
+            raise ProvisionError("generated probe parent directory type, mode, owner or metadata is invalid")
+        parent_fd = os.dup(root_fd)
+        try:
+            for component in components[:-1]:
+                next_descriptor = os.open(component, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC,
+                                           dir_fd=parent_fd)
+                os.close(parent_fd)
+                parent_fd = next_descriptor
+            current = os.stat(components[-1], dir_fd=parent_fd, follow_symlinks=False)
+        finally:
+            os.close(parent_fd)
+        after = os.fstat(descriptor)
+        fields = ("st_dev", "st_ino", "st_mode", "st_uid", "st_gid", "st_nlink", "st_mtime_ns", "st_ctime_ns")
+        if any(getattr(before, field) != getattr(after, field) or
+               getattr(before, field) != getattr(current, field) for field in fields):
+            raise ProvisionError("generated probe parent directory identity changed during capture")
+        return {"path": absolute_path, "device": before.st_dev, "inode": before.st_ino,
+                "links": before.st_nlink, "mtimeNs": before.st_mtime_ns, "ctimeNs": before.st_ctime_ns,
+                "mode": stat.S_IMODE(before.st_mode), "uid": before.st_uid, "gid": before.st_gid,
+                "rootDevice": root.st_dev, "rootInode": root.st_ino}
+    except OSError as error:
+        raise ProvisionError("generated probe parent directory is unavailable or unsafe") from error
+    finally:
+        for fd in (descriptor, root_fd):
+            if fd >= 0:
+                os.close(fd)
+
+
+def remove_generated_rootfs_files(rootfs: Path, identities: list[dict]) -> None:
+    """Unlink only the exact fixed generated files captured from this rootfs."""
+    allowed = {
+        GENERATED_APT_SOURCE_LIST_IN_ROOT, PROBE_SOURCE_IN_ROOT, PROBE_FIXTURE_IN_ROOT, PROBE_BINARY_IN_ROOT,
+    }
+    if (not isinstance(identities, list) or not 1 <= len(identities) <= len(allowed) or
+            any(not isinstance(row, dict) or row.get("path") not in allowed for row in identities) or
+            len({row["path"] for row in identities}) != len(identities)):
+        raise ProvisionError("generated rootfs removal request is outside its closed policy")
+    root_fd = os.open(rootfs, os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC)
+    try:
+        root = os.fstat(root_fd)
+        rows = [{key: row[key] for key in (
+            "path", "device", "inode", "bytes", "sha256", "mode", "uid", "gid", "links", "mtimeNs", "ctimeNs",
+            "rootDevice", "rootInode",
+        )} for row in identities]
+        run_checked([
+            "sudo", "-n", "/usr/bin/python3", "-I", "-B", "-c", GENERATED_ROOTFS_FILE_REMOVE_PROGRAM,
+            f"/proc/{os.getpid()}/fd/{root_fd}", str(root.st_dev), str(root.st_ino), canonical_json(rows).decode("utf-8"),
+        ], timeout=30)
+    finally:
+        os.close(root_fd)
+
+
+def require_generated_probe_paths_absent(rootfs: Path, package_manifest: dict | None = None) -> None:
+    """Reject signed-package collisions before `install` or the compiler can replace a leaf."""
+    package_paths = {} if package_manifest is None else {
+        row["path"]: row["entry"] for row in package_manifest.get("files", [])
+    }
+    root_fd = os.open(rootfs, os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC)
+    try:
+        for absolute_path in (PROBE_SOURCE_IN_ROOT, PROBE_FIXTURE_IN_ROOT, PROBE_BINARY_IN_ROOT):
+            components = PurePosixPath(absolute_path).parts[1:]
+            if absolute_path in package_paths:
+                raise ProvisionError("probe construction path collides with signed package ownership: " + absolute_path)
+            parent_fd = os.dup(root_fd)
+            missing_parent = False
+            try:
+                for index, component in enumerate(components[:-1]):
+                    parent_path = "/" + "/".join(components[:index + 1])
+                    package_parent = package_paths.get(parent_path)
+                    if package_parent is not None and package_parent.get("kind") != "directory":
+                        raise ProvisionError("probe construction parent collides with non-directory package ownership: " + parent_path)
+                    if missing_parent:
+                        continue
+                    try:
+                        next_fd = os.open(component, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC,
+                                          dir_fd=parent_fd)
+                    except FileNotFoundError:
+                        missing_parent = True
+                        continue
+                    os.close(parent_fd)
+                    parent_fd = next_fd
+                if not missing_parent:
+                    try:
+                        os.stat(components[-1], dir_fd=parent_fd, follow_symlinks=False)
+                    except FileNotFoundError:
+                        continue
+                    raise ProvisionError("probe construction path collides with an existing package/rootfs entry")
+            finally:
+                os.close(parent_fd)
+    finally:
+        os.close(root_fd)
+
+
+def require_generated_rootfs_file_absent(rootfs: Path, absolute_path: str) -> None:
+    """Refuse to overwrite a package-owned or substituted fixed construction path."""
+    allowed = {GENERATED_APT_SOURCE_LIST_IN_ROOT}
+    if absolute_path not in allowed:
+        raise ProvisionError("generated rootfs preflight path is outside its fixed policy")
+    components = PurePosixPath(absolute_path).parts[1:]
+    root_fd = os.open(rootfs, os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC)
+    parent_fd = -1
+    try:
+        parent_fd = os.dup(root_fd)
+        for component in components[:-1]:
+            try:
+                next_fd = os.open(component, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC,
+                                  dir_fd=parent_fd)
+            except FileNotFoundError:
+                return
+            os.close(parent_fd)
+            parent_fd = next_fd
+        try:
+            os.stat(components[-1], dir_fd=parent_fd, follow_symlinks=False)
+        except FileNotFoundError:
+            return
+        raise ProvisionError("generated APT source path collides with an existing package/rootfs entry")
+    except OSError as error:
+        raise ProvisionError("generated APT source path has an unsafe parent") from error
+    finally:
+        for fd in (parent_fd, root_fd):
+            if fd >= 0:
+                os.close(fd)
+
+
 def install_selected_archive_keyring(rootfs: Path, keyring: Path, expected_sha256: str) -> Path:
     if keyring.is_symlink() or not keyring.is_file() or sha256_file(keyring) != expected_sha256:
         raise ProvisionError("selected Ubuntu archive keyring bytes differ from the authenticated candidate")
@@ -4328,10 +4932,12 @@ def probe_compile_command() -> list[str]:
             "-Wl,-rpath,/usr/lib/llvm-18/lib", "-lclang-cpp", "-lLLVM-18", "-o", PROBE_BINARY_IN_ROOT]
 
 
-def stage_probe_inputs(rootfs: Path, *, held_rootfs_descriptor: bool = False) -> tuple[Path, Path]:
-    """Install immutable probe inputs under /usr/local so /tmp normalization cannot erase them."""
+def stage_probe_inputs(rootfs: Path, *, held_rootfs_descriptor: bool = False,
+                       package_manifest: dict | None = None) -> tuple[Path, Path]:
+    """Install immutable probe inputs after exact package-path collision checks."""
     if (rootfs.is_symlink() and not held_rootfs_descriptor) or not rootfs.is_dir():
         raise ProvisionError("probe staging requires the fresh non-symlink rootfs")
+    require_generated_probe_paths_absent(rootfs, package_manifest)
     source = RECIPE_FILES["probeSha256"]
     fixture = RECIPE_FILES["fixtureSha256"]
     source_target = rootfs.joinpath(*PurePosixPath(PROBE_SOURCE_IN_ROOT).parts[1:])
@@ -4703,8 +5309,13 @@ def _provision_rootfs_unqualified(args: argparse.Namespace) -> int:
     sources = apt_source_list(contract)
     sources_path = args.workdir / f"clang-source-list-{args.label}.list"
     atomic_write(sources_path, sources)
+    bound_call(require_generated_rootfs_file_absent, profile_root, GENERATED_APT_SOURCE_LIST_IN_ROOT)
     bound_call(run_checked, ["sudo", "install", "-m", "0644", str(sources_path),
-                             str(profile_root / "etc/apt/sources.list")])
+                             str(profile_root / GENERATED_APT_SOURCE_LIST_IN_ROOT.lstrip("/"))])
+    apt_source_identity = bound_call(
+        generated_rootfs_file_identity, profile_root, GENERATED_APT_SOURCE_LIST_IN_ROOT,
+        sha256(sources), expected_mode=0o644, max_bytes=len(sources),
+    )
     apt_prefix = apt_command_prefix()
     bound_call(rootfs_run, profile_root, [*apt_prefix, "update"], contract, timeout=600,
                environment={"DEBIAN_FRONTEND": "noninteractive"})
@@ -4744,11 +5355,17 @@ def _provision_rootfs_unqualified(args: argparse.Namespace) -> int:
     bound_call(rootfs_run, profile_root, [*apt_prefix, "check"], contract, timeout=300,
                environment={"DEBIAN_FRONTEND": "noninteractive"})
 
+    # APT has consumed the exact signed-source-list bytes. It is construction
+    # input, not part of the retained toolchain image or package payload closure.
+    bound_call(remove_generated_rootfs_files, profile_root, [apt_source_identity])
+
     package_rows = installed_packages(profile_root, metadata, expected_final_keys, contract)
     package_total = sum(row["bytes"] for row in package_rows)
     if package_total > profile["bounds"]["maxAcquisitionBytes"]:
         raise ProvisionError("installed package closure exceeds cumulative package-byte budget")
-    bound_call(verify_installed_package_payloads, profile_root, retained_payloads, package_rows, contract)
+    package_manifest = bound_call(
+        verify_installed_package_payloads, profile_root, retained_payloads, package_rows, contract,
+    )
     c_version = bound_call(rootfs_run, profile_root, ["/usr/bin/clang-18", "--version"], contract).strip()
     cxx_version = bound_call(rootfs_run, profile_root, ["/usr/bin/clang++-18", "--version"], contract).strip()
     tools = [
@@ -4772,7 +5389,7 @@ def _provision_rootfs_unqualified(args: argparse.Namespace) -> int:
     fixture = RECIPE_FILES["fixtureSha256"]
     expected_probe_source_sha256 = recipe_identity(args.contract, captured)["probeSha256"]
     probe_in_root, fixture_in_root = bound_call(
-        stage_probe_inputs, profile_root, held_rootfs_descriptor=True,
+        stage_probe_inputs, profile_root, held_rootfs_descriptor=True, package_manifest=package_manifest,
     )
     staged_probe_source_sha256 = verify_staged_probe_source(profile_root, expected_probe_source_sha256)
     libdir = bound_call(rootfs_run, profile_root, ["/usr/bin/llvm-config-18", "--libdir"], contract).strip()
@@ -4802,6 +5419,19 @@ def _provision_rootfs_unqualified(args: argparse.Namespace) -> int:
     probe_checked["apiChecks"] = runtime_json["apiChecks"]
     probe_checked["fixtureSha256"] = sha256(fixture.read_bytes())
 
+    record_inputs = {
+        "probe": probe_checked,
+        "recipe": recipe_identity(args.contract, captured),
+        "tools": tools,
+        "commands": canonical_commands(contract, candidate["trustedKeyring"]["sha256"]),
+    }
+    rootfs_payload_evidence = bound_call(
+        verify_provisioned_rootfs_payloads, profile_root, retained_payloads, package_rows,
+        record_inputs, contract,
+    )
+    if rootfs_payload_evidence["packageManifest"] != package_manifest:
+        raise ProvisionError("authenticated package manifest changed during probe construction")
+
     runtime_files = runtime_dependencies(profile_root, list(FRONTEND_RUNTIME_ROOTS), contract)
     runtime_manifest = manifest(runtime_files)
     epoch = int(contract["environment"]["SOURCE_DATE_EPOCH"])
@@ -4810,7 +5440,6 @@ def _provision_rootfs_unqualified(args: argparse.Namespace) -> int:
         deterministic_rootfs_tar, profile_root, rootfs_tar_path, epoch,
         max_bytes=profile["bounds"]["maxArtifactBytes"], held_rootfs_descriptor=True,
     )
-    bound_call(verify_installed_package_payloads, profile_root, retained_payloads, package_rows, contract)
     if rootfs_identity["bytes"] > profile["bounds"]["maxArtifactBytes"]:
         raise ProvisionError("canonical rootfs tar exceeds the artifact byte budget")
     args.output.mkdir(parents=True, exist_ok=False)
@@ -4845,9 +5474,9 @@ def _provision_rootfs_unqualified(args: argparse.Namespace) -> int:
         "resources": resource_files,
         "resourceDirectory": resource_dir,
         "probe": probe_checked,
-        "recipe": recipe_identity(args.contract, captured),
+        "recipe": record_inputs["recipe"],
         "environment": contract["environment"],
-        "commands": canonical_commands(contract, candidate["trustedKeyring"]["sha256"]),
+        "commands": record_inputs["commands"],
         "rootfs": rootfs_identity,
         "image": {"format": image_record["format"], "manifestSha256": image_record["manifestSha256"], "imageDigest": image_record["imageDigest"]},
         "imageArtifact": image_artifact_identity,
@@ -6048,9 +6677,10 @@ def _package_provenance_pinned(args, contract, record, captured, candidate, patc
         record, signed_package_metadata, bound(installed_package_keys, rootfs, contract),
     )
     payload_directory = args.package_payloads
-    package_manifest = bound(verify_installed_package_payloads,
-        rootfs, payload_directory, record["packages"], contract,
+    rootfs_payload_evidence = bound(verify_provisioned_rootfs_payloads,
+        rootfs, payload_directory, record["packages"], record, contract,
     )
+    package_manifest = rootfs_payload_evidence["packageManifest"]
     bound(verify_recorded_driver_identities, rootfs, record, contract)
     bound(verify_recorded_runtime_closure, rootfs, record, contract)
     record_sha256 = sha256(captured[args.record])
@@ -6155,12 +6785,25 @@ def _package_provenance_pinned(args, contract, record, captured, candidate, patc
                 package_manifest_bytes = canonical_json(package_manifest)
                 _add_provenance_file(archive, args.record, "package-installed-file-manifest.json", epoch,
                                      expected_sha256=sha256(package_manifest_bytes), payload=package_manifest_bytes)
+                construction_manifest_bytes = canonical_json(rootfs_payload_evidence["constructionManifest"])
+                _add_provenance_file(
+                    archive, args.record, "probe-construction-artifact-manifest.json", epoch,
+                    expected_sha256=sha256(construction_manifest_bytes), payload=construction_manifest_bytes,
+                )
+                full_manifest_bytes = canonical_json(rootfs_payload_evidence["fullManifest"])
+                _add_provenance_file(
+                    archive, args.record, "rootfs-installed-path-manifest.json", epoch,
+                    expected_sha256=sha256(full_manifest_bytes), payload=full_manifest_bytes,
+                )
                 for package in record["packages"]:
                     source = payload_directory / (package["sha256"] + ".deb")
                     _add_provenance_file(archive, source, "package-payloads/" + source.name, epoch,
                                          expected_sha256=package["sha256"], expected_bytes=package["bytes"])
-                if bound(verify_installed_package_payloads, rootfs, payload_directory, record["packages"], contract) != package_manifest:
-                    raise ProvisionError("installed package payload manifest changed while packaging")
+                current_rootfs_evidence = bound(
+                    verify_provisioned_rootfs_payloads, rootfs, payload_directory, record["packages"], record, contract,
+                )
+                if current_rootfs_evidence != rootfs_payload_evidence:
+                    raise ProvisionError("installed package/probe construction manifest changed while packaging")
                 current_probe_binary, current_probe_mode = bound(rootfs_regular_file,
                     rootfs, PROBE_BINARY_IN_ROOT, executable=True,
                 )
