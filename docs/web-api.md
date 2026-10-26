@@ -163,6 +163,8 @@ internal storage optimization and must not merge identity, permissions or histor
 | `GET R/controls` | `200 attemptControls`, strong run ETag | Read-only cancel/retry/resume eligibility with closed reasons; reserves nothing; #528/#529 |
 | `GET R/snapshot` | `200 snapshot`, ETag | Run state and consistent event watermark; #174 |
 | `GET R/queue-position` | `200 queuePosition` | Approximate sampled position of one queued attempt; no query, counts only; #530 |
+| `GET R/logs/build` | `200 logRange` | Bounded redacted line range of the attempt's build log; `tail`/`fromLine`, `limit` ≤ 500, literal `search`; #523 |
+| `GET R/logs/build/content` | `200 text/plain` attachment | The same redacted lines with a provenance header; no Range/conditional headers; #523 |
 | `GET R/events` | `200 text/event-stream` | Resume with `Last-Event-ID` or `after`, never both; #174 |
 | `GET R/events?transport=poll` | `200 events` | Same retention/cursor semantics, bounded page; #174 |
 | `GET R/reports/{reportId}` | `200 report` | State may be missing/partial/unsupported/unknown; #165 |
@@ -1081,6 +1083,38 @@ the receipt time (`endedAt`); the provider's own measurement time is not reporte
 `createdAt`. Live context-usage observations are coalesced for display only (one pending snapshot
 per 100 ms window) and never change the acknowledged cursor or persisted evidence.
 
+### Attempt build log ranges
+
+`GET jobs/J/runs/R/logs/build` reads `reports/runs/R/source-tree/reports/build.log` (at most
+8 MiB; larger logs report `oversized`, absent logs `missing`) and returns one contiguous range:
+`tail=true` for the newest lines, `beforeLine=N` for the lines ending just before line N (both fill
+their byte budget backward, so the range always ends at the final or requested line), or
+`fromLine=N` (a position just past the end returns an empty, current range for following), `limit` 1–500 lines (default 200) and at most 256 KiB of text. The
+range states `firstLine`, `lineCount`, `truncatedBefore`/`truncatedAfter` and `byteLimited`, with
+`totalLines`, `totalBytes`, the recording's `sourceSha256`, the attempt state with its start/end
+times and the server `readAt` time. Lines are decoded as UTF-8 with replacement (flagged), cut at
+4,096 characters (flagged) and have C0/C1 controls and bidirectional overrides rewritten as visible
+escapes (`\e`, `\uXXXX`), so terminal sequences and markup reach the browser only as text.
+
+Redaction policy `web-log-v1` replaces the job store, home, temporary and working directories with
+fixed labels and flags each changed line. The optional `search` is a literal substring of at most 128
+characters, never a pattern; it scans the complete redacted, visibly escaped text of the bounded log
+before the 4,096-character display cut and returns the match count and the first 200 line numbers.
+A match beyond that cut is counted even though its text is not displayed in the range or download.
+`GET .../logs/build/content` returns every line exactly as the ranges present them,
+after a provenance header naming the job, attempt, attempt times, source digest, policy, redacted
+line count and export time.
+
+The attempt's Build log view keeps at most 2,000 lines, released from the far end as pages load,
+and renders only rows near its viewport. Following polls for new lines every 3 s only after an
+explicit Follow, stops as soon as the reader scrolls away or filters, and resumes only on request; it
+is suspended while the tab is hidden or offline and ends with the attempt. Client filtering states
+the loaded line range it covered. Whole-log search results and jumps are bound to the recording's
+digest and invalidated on replacement. A replacement observed while following loads its bounded tail,
+not the old recording's append cursor. Deliberate navigation supersedes pending reads; pausing or
+scrolling away also invalidates in-flight follow reads so they cannot evict the paused window.
+Leaving the view aborts reads, clears the follow timer and drops the buffer.
+
 ## Current source catalog metadata
 
 `GET /api/v1/jobs/{jobId}/runs/{runId}/source-catalog` requires the existing private
@@ -1774,6 +1808,7 @@ Provider reasoning (`agent_thought_chunk`, role `thought`) is private. The journ
 its position, role, completion and `textOmitted: true`; it never buffers, stores, measures or
 commits to its text. Public projection also withholds `contentSha256`/`chunkCharacters` from
 older thought records. The ACP client never requests reasoning and no workflow depends on it.
+
 ## Shared redaction, audit and support export
 
 **Redaction (`web-redaction-v1`).** One policy (`WebRedactionPolicy`) is installed on the listener and applied
@@ -1833,6 +1868,7 @@ read; its state is unknown), or the sections never exported (`input-binary`, `so
 `progress-events` as `job-content`; `environment`, `host-paths` as `private-configuration`; `credentials`,
 `session-material` as `secret`; `agent-reasoning` as `not-recorded`). The Runtime view previews the document only on
 an explicit request and downloads exactly the previewed bytes; it never issues a second request for the download.
+
 ## Artifact identity normalization and snapshot containment
 
 Versioned routes accept only opaque, closed-syntax identities (`jobId`, `runId`, `artifactId`, `fileId`,

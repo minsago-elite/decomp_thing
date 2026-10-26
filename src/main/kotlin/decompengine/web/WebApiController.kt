@@ -19,7 +19,7 @@ internal class WebApiController(
     private val jobs: WebJobService,
     private val jobMutations: WebJobMutationBoundary,
     streamResources: WebStreamResources,
-    clock: Clock = Clock.systemUTC(),
+    private val clock: Clock = Clock.systemUTC(),
     private val harnessReadiness: WebHarnessReadinessProjector = WebHarnessReadinessProjector(),
     private val agentPreflight: WebAgentPreflight = WebAgentPreflight { error("No agent preflight is configured.") },
     private val git: WebGitCapability = WebGitCapability.detect(),
@@ -41,6 +41,7 @@ internal class WebApiController(
         webAdmissionPrerequisites(jobs.durableRegistrations(), request, readiness().prerequisites, harnessReadiness::inspectSandbox)
     }
     private val cancellations = WebCancellationController(jobMutations, assets.basePath)
+    private val runLogs = WebRunLogs(WebLogRedaction.forHost(jobs.redactionStorageRoot))
     private val recoveries = WebRecoveryController(jobs, jobMutations, assets.basePath) { workflow, harness ->
         webAdmissionPrerequisites(jobs.durableRegistrations(), workflow, harness, readiness().prerequisites, harnessReadiness::inspectSandbox)
     }
@@ -111,6 +112,7 @@ internal class WebApiController(
         "jobs/[^/]+/runs/[^/]+/revisions/[^/]+/modules(?:/[^/]+)?",
         "jobs/[^/]+/runs/[^/]+/revisions/[^/]+/globals/[^/]+",
         "jobs/[^/]+/runs/[^/]+/revisions/[^/]+/types/[^/]+",
+        "jobs/[^/]+/runs/[^/]+/logs/build(?:/content)?",
     ).map(::Regex)
 
     fun route(exchange: HttpExchange): Boolean {
@@ -452,6 +454,38 @@ internal class WebApiController(
                     requireNoWebApiQuery(exchange); requireJsonAccept(exchange)
                     val parts = resource.split('/')
                     sendWebApiResponse(exchange, 200, "queuePosition", webQueuePosition(parts[1], parts[3], jobs.queuePosition(parts[1], parts[3])))
+                }
+                resource.matches(Regex("jobs/[^/]+/runs/[^/]+/logs/build")) -> {
+                    access.authorize(exchange, WebEndpointPolicy.privateRead())
+                    requireJsonAccept(exchange)
+                    val parts = resource.split('/')
+                    val query = runLogs.parseQuery(exchange.requestURI.rawQuery)
+                    val (attempt, file, oversized) = jobs.readRunBuildLog(parts[1], parts[3], WebRunLogs.MAXIMUM_LOG_BYTES.toLong())
+                    val capture = file?.let { runLogs.capture(it.bytes, it.sha256) }
+                    sendWebApiResponse(exchange, 200, "logRange", runLogs.range(parts[1], attempt, capture,
+                        oversized || (file != null && capture == null), query, clock.instant()))
+                }
+                resource.matches(Regex("jobs/[^/]+/runs/[^/]+/logs/build/content")) -> {
+                    access.authorize(exchange, WebEndpointPolicy.privateRead())
+                    requireNoWebApiQuery(exchange)
+                    if (!acceptsWebMediaType(exchange, "text/plain")) throw WebAccessDenied(406, "NOT_ACCEPTABLE", "This endpoint returns text/plain.")
+                    if (exchange.requestHeaders.keys.any { it.equals("Range", true) || it.startsWith("If-", true) }) {
+                        throw WebAccessDenied(400, "UNSUPPORTED_HEADER", "This bounded log download does not support Range or conditional requests.")
+                    }
+                    val parts = resource.split('/')
+                    val (attempt, file, _) = jobs.readRunBuildLog(parts[1], parts[3], WebRunLogs.MAXIMUM_LOG_BYTES.toLong())
+                    if (file == null) throw WebAccessDenied(404, "NOT_FOUND", "This attempt has no downloadable build log.")
+                    val capture = runLogs.capture(file.bytes, file.sha256)
+                        ?: throw WebAccessDenied(413, "LOG_TOO_LARGE", "The build log exceeds its line budget and cannot be downloaded here.")
+                    val bytes = runLogs.download(parts[1], attempt, capture, clock.instant())
+                    webApiHeaders(exchange, UUID.randomUUID().toString())
+                    exchange.responseHeaders.set("Content-Type", "text/plain; charset=utf-8")
+                    exchange.responseHeaders.set("Content-Disposition", "attachment; filename=\"build-${attempt.runId}.log\"")
+                    exchange.responseHeaders.set("Content-Length", bytes.size.toString())
+                    try {
+                        exchange.sendResponseHeaders(200, bytes.size.toLong())
+                        exchange.responseBody.use { it.write(bytes) }
+                    } finally { exchange.close() }
                 }
                 resource.matches(Regex("jobs/[^/]+/runs/[^/]+")) -> {
                     access.authorize(exchange, WebEndpointPolicy.privateRead())

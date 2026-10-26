@@ -61,7 +61,7 @@ internal fun canonicalSpaDocumentPath(base: String, path: String): String? {
         "${base}runtime/" -> "${base}runtime"
         "${base}upload/" -> "${base}upload"
         else -> path.takeIf { it.startsWith("${base}jobs/") &&
-            it.removePrefix("${base}jobs/").matches(Regex("[0-9a-f]{32}(?:/runs(?:/$id(?:/(?:activity|evidence)|/revisions/$id/(?:(?:sources|source-files|globals|types)/$id|source-search|source-diff(?:/file)?|(?:functions|modules)(?:/$id)?))?)?)?/?")) }?.removeSuffix("/")
+            it.removePrefix("${base}jobs/").matches(Regex("[0-9a-f]{32}(?:/runs(?:/$id(?:/(?:activity|evidence|logs)|/revisions/$id/(?:(?:sources|source-files|globals|types)/$id|source-search|source-diff(?:/file)?|(?:functions|modules)(?:/$id)?))?)?)?/?")) }?.removeSuffix("/")
     }
 }
 
