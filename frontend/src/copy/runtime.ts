@@ -38,7 +38,7 @@ export const schedulerSummaryCopy = {
   "workerLimitCount": "Worker limit (count)",
   "queuedTasksCount": "Queued tasks (count)",
   "queueCapacityTasks": "Queue capacity (tasks)",
-  "aTaskSQueuePositionAndStartTimeAreNot": "A task's queue position and start time are not reported. Free capacity does not establish workflow availability or authorize admission. These counts exclude host-wide resource diagnostics."
+  "aTaskSQueuePositionAndStartTimeAreNot": "These are aggregate counts; an attempt's own approximate queue position is shown on its attempt page. Free capacity does not establish workflow availability or authorize admission. These counts exclude host-wide resource diagnostics."
 } as const;
 
 export const progressRetentionSummaryCopy = {

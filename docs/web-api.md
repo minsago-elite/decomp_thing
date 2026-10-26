@@ -156,6 +156,7 @@ internal storage optimization and must not merge identity, permissions or histor
 | `POST R/recover` | `202 run`, `Location` of a new attempt | Closed `recover` request; explicit `retry` or capability-gated `resume`; run If-Match and idempotency; #486 |
 | `GET R/controls` | `200 attemptControls`, strong run ETag | Read-only cancel/retry/resume eligibility with closed reasons; reserves nothing; #528/#529 |
 | `GET R/snapshot` | `200 snapshot`, ETag | Run state and consistent event watermark; #174 |
+| `GET R/queue-position` | `200 queuePosition` | Approximate sampled position of one queued attempt; no query, counts only; #530 |
 | `GET R/events` | `200 text/event-stream` | Resume with `Last-Event-ID` or `after`, never both; #174 |
 | `GET R/events?transport=poll` | `200 events` | Same retention/cursor semantics, bounded page; #174 |
 | `GET R/reports/{reportId}` | `200 report` | State may be missing/partial/unsupported/unknown; #165 |
@@ -680,6 +681,30 @@ configured limits, lifecycle, source and server sample time. Borrowed executors
 report unavailable metrics without zero values. Runtime uses the session-time
 snapshot; it neither polls these counts nor infers workflow availability from
 capacity. See [scheduler summary and verification](web-scheduler-summary.md).
+
+### Attempt queue position and stop reasons
+
+`GET jobs/J/runs/R/queue-position` samples one attempt's place in this process's executor queue.
+A queued attempt reports `position`/`ahead`, the total `queuedTasks` and busy/limit workers, always
+with `approximate: true`: queued work can be cancelled or stopped, two workers start tasks
+independently, and the queue is read separately from the attempt record. Other tasks are counted,
+never identified. A started or terminal attempt reports `not-queued` with its state; a borrowed
+executor or an attempt not found in the local queue reports `unavailable` with
+`EXTERNAL_EXECUTOR`/`NOT_IN_LOCAL_QUEUE`. The sample is display-only, never admission authority.
+The attempt view reads it on demand only while the attempt is queued.
+
+Terminal reasons keep stop outcomes separate. `LIMIT_EXHAUSTED` is a used-up budget (tool calls,
+output, tokens), `TIMED_OUT` a wall-clock or idle deadline, `CANCELLED` a recorded user request,
+`FAILED` a workflow-reported failure, `INFRASTRUCTURE_FAILED` an adapter or executor submission that
+could not produce any outcome, and `PROCESS_INTERRUPTED` a service stop or restart. Adapters may
+report `FAILED`, `REFUSED`, `LIMIT_EXHAUSTED` or `TIMED_OUT`; only the service records
+cancellation, infrastructure failure and interruption.
+
+Reported attempt usage comes from the terminal receipt. The view gives its units, its source and
+the receipt time (`endedAt`); the provider's own measurement time is not reported and stays
+"Not reported", as does every missing counter. Limits name the configuration persisted at
+`createdAt`. Live context-usage observations are coalesced for display only (one pending snapshot
+per 100 ms window) and never change the acknowledged cursor or persisted evidence.
 
 ## Current source catalog metadata
 
