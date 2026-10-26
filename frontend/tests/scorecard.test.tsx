@@ -215,6 +215,54 @@ it.each(['response-generation', 'current-generation', 'server-changed'])('requir
   } finally { auth.dispose(); }
 });
 
+it.each([
+  { pagedCard: false, expired: false },
+  { pagedCard: false, expired: true },
+  { pagedCard: true, expired: false },
+  { pagedCard: true, expired: true },
+])('refreshes both first pages after comparison pagination (paged card: $pagedCard, expired: $expired)', async ({ pagedCard, expired }) => {
+  const auth = await session();
+  const latestVersion = 'e'.repeat(64);
+  const oldCursor = `${card.structureVersion}_1_${'b'.repeat(32)}`;
+  let cardReads = 0;
+  let changed = expired;
+  transport.get.mockImplementation((kind, path) => {
+    if (kind === 'structureScorecard') return Promise.resolve({ data: {
+      ...card, structureVersion: ++cardReads === 1 ? card.structureVersion : latestVersion,
+    } });
+    if (kind === 'scorecardComparison') {
+      const values = new URLSearchParams(path.split('?')[1]);
+      if (changed && values.has('cursor')) return Promise.reject(new ApiClientError('http_error', { status: 410, serverCode: 'CURSOR_EXPIRED' }));
+      const version = changed ? latestVersion : card.structureVersion;
+      return Promise.resolve({ data: { ...comparison, structureVersion: version, current: { ...comparison.current, structureVersion: version } } });
+    }
+    return Promise.resolve({ data: kind === 'run' ? run : runs });
+  });
+  const paging = pagedCard ? `&cursor=${oldCursor}&structureVersion=${card.structureVersion}` : '';
+  history.replaceState(null, '', `${revision}/scorecard?sort=score&order=desc&baselineRunId=run_1&baselineRevisionId=revision_1&compareCursor=${oldCursor}${paging}`);
+  try {
+    render(<App basePath="/nested" session={auth} />);
+    if (expired) expect((await screen.findByRole('alert')).textContent).toContain(structureCopy.expired);
+    else await screen.findByText(copy.compatibility.compatible);
+    changed = true;
+    fireEvent.click(screen.getByRole('button', { name: structureCopy.refresh }));
+    await waitFor(() => expect(new URLSearchParams(location.search).has('compareCursor')).toBe(false), { timeout: 1000 });
+    await waitFor(() => expect(cardReads).toBe(2));
+    await screen.findByText(copy.compatibility.compatible);
+    expect(screen.queryByRole('alert')).toBeNull();
+    expect(location.search).toBe('?sort=score&order=desc&baselineRunId=run_1&baselineRevisionId=revision_1');
+    expect(screen.getByRole('combobox', { name: copy.baseline })).toHaveProperty('value', 'run_1/revision_1');
+    expect(transport.get.mock.calls.filter(([kind]) => kind === 'structureScorecard').at(-1)?.[1])
+      .toBe(`${api}/scorecard?limit=50&sort=score&order=desc`);
+    const comparisonCalls = transport.get.mock.calls.filter(([kind]) => kind === 'scorecardComparison');
+    expect(comparisonCalls).toHaveLength(2);
+    expect(comparisonCalls[0]?.[1]).toContain(`cursor=${oldCursor}`);
+    expect(comparisonCalls[1]?.[1])
+      .toBe(`${api}/scorecard-comparison?baselineRunId=run_1&baselineRevisionId=revision_1&limit=50&structureVersion=${latestVersion}`);
+    expect(screen.getByRole('link', { name: copy.download }).getAttribute('href')).toContain(latestVersion);
+  } finally { auth.dispose(); }
+});
+
 it.each(['?sort=value', '?baselineRunId=run_1', '?compareCursor=x', '?unknown=1', '?sort=score&sort=module'])(
   'recovers malformed scorecard locations inside the structure view (%s)', async search => {
     const auth = await session();
