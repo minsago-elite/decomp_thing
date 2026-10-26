@@ -3,10 +3,10 @@
 
 The oracle edges are unique (caller, callee) function-start pairs derived from
 the DWARF call-site entries of the authenticated full twin.  A direct call site
-names its callee definition; a cross-unit call site names a declaration, which
-is resolved through the oracle alias table only when exactly one oracle
-function carries that name.  Indirect, virtual, ambiguous and unresolved sites
-contribute no edge and are counted.  Both endpoints of an oracle edge must be
+names its callee definition; a cross-unit declaration is resolved only by
+external linkage identity backed by a unique defined global ELF function symbol.
+Unqualified source aliases alone never establish target identity. Indirect,
+virtual, ambiguous and unresolved sites contribute no edge and are counted.  Both endpoints of an oracle edge must be
 scoreable oracle functions; tail calls are retained and marked.
 
 Recovered edges come from the ``calls`` lists of the bound stripped program
@@ -29,6 +29,7 @@ import hashlib
 import io
 import json
 from pathlib import Path
+import re
 import sys
 from typing import Any
 
@@ -115,18 +116,50 @@ def _complete_call_coverage(die: Any) -> tuple[str, ...]:
     ) if name in die.attributes and bool(die.attributes[name].value))
 
 
+def _external_linkage_name(site: Any) -> str | None:
+    origin_key = ("DW_AT_abstract_origin" if site.tag == "DW_TAG_GNU_call_site"
+                  else "DW_AT_call_origin")
+    origin = site.get_DIE_from_attribute(origin_key)
+    chain = _attribute_chain(origin)
+    external = next((source.attributes["DW_AT_external"].value for source in chain
+                     if "DW_AT_external" in source.attributes), False)
+    if not external:
+        return None
+    # Mangled linkage names take precedence over source basenames. Without a
+    # linkage name, only a CU-level declaration can name a global C symbol;
+    # member/namespace/local declarations require explicit linkage identity.
+    for key in ("DW_AT_linkage_name", "DW_AT_MIPS_linkage_name"):
+        values = {source.attributes[key].value for source in chain if key in source.attributes}
+        if values:
+            return next(iter(values)).decode("utf-8", errors="strict") if len(values) == 1 else None
+    names = set()
+    for source in chain:
+        if "DW_AT_name" not in source.attributes:
+            continue
+        parent = source.get_parent()
+        if parent is None or parent.tag != "DW_TAG_compile_unit":
+            return None
+        names.add(source.attributes["DW_AT_name"].value)
+    return next(iter(names)).decode("utf-8", errors="strict") if len(names) == 1 else None
+
+
+def _defined_external_functions(elf: Any, image_base: int) -> dict[str, set[int]]:
+    symbols: dict[str, set[int]] = {}
+    for section_name in (".symtab", ".dynsym"):
+        section = elf.get_section_by_name(section_name)
+        if section is None:
+            continue
+        for symbol in section.iter_symbols():
+            if (symbol["st_info"]["type"] == "STT_FUNC"
+                    and symbol["st_info"]["bind"] in ("STB_GLOBAL", "STB_WEAK")
+                    and isinstance(symbol["st_shndx"], int)):
+                symbols.setdefault(symbol.name, set()).add(int(symbol["st_value"]) - image_base)
+    return symbols
+
+
 def _oracle_edges(
     full_payload: bytes, oracle: Any, scoreable: set[int], excluded: set[int]
 ) -> OracleCallPopulation:
-    candidates: dict[str, set[int]] = {}
-    for function in oracle.functions:
-        if function.rva is None:
-            continue
-        for alias in function.aliases:
-            candidates.setdefault(alias.name, set()).add(function.rva)
-    unique_alias = {
-        name: next(iter(rvas)) for name, rvas in candidates.items() if len(rvas) == 1
-    }
     # The oracle population depends on the DWARF decoder, so it is pinned to the
     # version the retained report was produced with.
     if getattr(elftools, "__version__", None) != PYELFTOOLS_VERSION:
@@ -148,6 +181,7 @@ def _oracle_edges(
             if segment["p_type"] == "PT_LOAD" and int(segment["p_memsz"]) > 0
         ]
         image_base = min(int(segment["p_vaddr"]) for segment in loads)
+        external_functions = _defined_external_functions(elf, image_base)
         executable = tuple(
             sorted(
                 (
@@ -209,19 +243,16 @@ def _oracle_edges(
                 target = _target(die, dwarf, image_base, executable, helpers)
                 kind = target["kind"]
                 if kind == "external-unresolved":
-                    hits = {
-                        unique_alias[name]
-                        for name in target["aliases"]
-                        if name in unique_alias
-                    }
+                    identity = _external_linkage_name(die)
+                    hits = external_functions.get(identity, set()) if identity is not None else set()
                     if len(hits) == 1:
-                        kind = "external-resolved-by-name"
+                        kind = "external-resolved-by-linkage"
                         target = {
                             "kind": "direct-internal",
-                            "functionId": f"{FUNCTION_ID_PREFIX}{hits.pop():#x}",
+                            "functionId": f"{FUNCTION_ID_PREFIX}{next(iter(hits)):#x}",
                         }
                     elif hits:
-                        kind = "external-ambiguous-name"
+                        kind = "external-ambiguous-linkage"
                 kinds[kind] += 1
                 if target["kind"] != "direct-internal":
                     if caller in scoreable:
@@ -296,8 +327,12 @@ def _recovered_edges(
                 # through an assumed address embedded in the identifier.
                 target = rvas.get(callee)
                 if target is None:
-                    if not callee.startswith(MODEL_ID_PREFIX):
-                        raise ValueError("unresolved callee has no address identifier")
+                    # Validate before int(): loader-admitted IDs can contain
+                    # thousands of characters, but target VAs are unsigned u64.
+                    # Exporter IDs use lowercase hexadecimal without a 0x prefix
+                    # and may be zero-padded to the target's 16-digit width.
+                    if re.fullmatch(r"fn_[0-9a-f]{1,16}", callee) is None:
+                        raise ValueError("unresolved callee has no unsigned-64-bit address identifier")
                     target = int(callee[len(MODEL_ID_PREFIX):], 16) - bound.model.image_base
                 edges.add((caller, target))
     except (AttributeError, KeyError, TypeError, ValueError) as error:
@@ -373,7 +408,8 @@ def score_report(
         + 32 * len(callers_with_sites)
         + sum(len(json.dumps(value, ensure_ascii=True, indent=2).encode("ascii")) + 256
               for value in population.caller_coverage.values())
-        + 256 * len(excluded_recovered)
+        + sum(256 + len(hex(caller)) + len(hex(callee))
+              for caller, callee in excluded_recovered)
         + 256 * len(unknown)
     )
     name_bytes = {
@@ -402,7 +438,8 @@ def score_report(
         "twin": TWIN,
         "populationDefinition": (
             "unique caller/callee function-start pairs from full-twin DWARF call "
-            "sites whose callee is a definition or a uniquely named oracle alias, "
+            "sites whose callee is a definition or an external declaration with "
+            "unique defined global ELF function linkage identity, "
             "with both endpoints scoreable; every recovered edge with scoreable "
             "endpoints remains in the precision denominator; unmatched edges are "
             "fabricated only with complete emitted-call and target coverage, otherwise unknown"

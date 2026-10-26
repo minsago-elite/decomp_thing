@@ -65,7 +65,7 @@ def call_site(caller, target=None, *, pc=None):
 
 
 class CallFixture:
-    def __init__(self, dies, *, excluded=()):
+    def __init__(self, dies, *, excluded=(), symbols=()):
         self.dies = dies
         self.excluded = set(excluded)
         named = {
@@ -88,6 +88,8 @@ class CallFixture:
         )
         self.elf = SimpleNamespace(
             get_dwarf_info=lambda **kwargs: self.dwarf,
+            get_section_by_name=lambda name: (SimpleNamespace(iter_symbols=lambda: iter(symbols))
+                                               if name == ".symtab" else None),
             iter_segments=lambda: iter([
                 {"p_type": "PT_LOAD", "p_vaddr": BASE, "p_memsz": 0x2000, "p_flags": 1}
             ]),
@@ -169,6 +171,119 @@ int main(int argc, char **argv) { return direct(argc) + tail(argc) + indirect(ca
                     unknown = population.caller_coverage[names["indirect"]]
                     self.assertEqual(unknown["unresolvedSiteKinds"], {"indirect-unresolved": 1})
                     self.assertFalse(unknown["negativeEvidenceComplete"])
+
+
+    def test_cross_unit_weak_import_does_not_bind_unrelated_static_definition(self):
+        root = Path(__file__).resolve().parents[2]
+        scratch = root / "build/python-test-tmp"
+        scratch.mkdir(parents=True, exist_ok=True)
+        with tempfile.TemporaryDirectory(prefix="gcc-linkage-collision-", dir=scratch) as directory:
+            caller_source = Path(directory) / "caller.c"
+            local_source = Path(directory) / "local.c"
+            caller_source.write_text('''
+extern int clash(int) __attribute__((weak));
+extern int global_target(int);
+__attribute__((noinline)) int caller(int x) {
+    int y = clash ? clash(x) : x;
+    __asm__ volatile("" : "+r"(y)); return y;
+}
+__attribute__((noinline)) int global_caller(int x) {
+    int y = global_target(x); __asm__ volatile("" : "+r"(y)); return y;
+}
+int main(int argc, char **argv) { return caller(argc) + global_caller(argc); }
+''', encoding="utf-8")
+            local_source.write_text('''
+__attribute__((noinline)) static int clash(int x) {
+    __asm__ volatile("" : "+r"(x)); return x + 7;
+}
+int local_user(int x) { return clash(x); }
+__attribute__((noinline)) int global_target(int x) {
+    __asm__ volatile("" : "+r"(x)); return x + 3;
+}
+''', encoding="utf-8")
+            binary = Path(directory) / "collision"
+            subprocess.run(["gcc", "-O2", "-gdwarf-5", "-fno-pie", "-no-pie",
+                            str(caller_source), str(local_source), "-o", str(binary)],
+                           check=True, capture_output=True, timeout=30,
+                           env={**os.environ, "TMPDIR": directory})
+            with binary.open("rb") as stream:
+                elf = calls.ELFFile(stream)
+                names = {symbol.name: int(symbol["st_value"]) - BASE
+                         for symbol in elf.get_section_by_name(".symtab").iter_symbols()
+                         if symbol.name in {"caller", "clash", "global_caller", "global_target", "local_user"}}
+            self.assertEqual(len(names), 5)
+            oracle = SimpleNamespace(functions=tuple(
+                SimpleNamespace(rva=rva, aliases=(SimpleNamespace(name=name),))
+                for name, rva in names.items()))
+            population = calls._oracle_edges(binary.read_bytes(), oracle, set(names.values()), set())
+            self.assertNotIn((names["caller"], names["clash"]), population.edges)
+            self.assertFalse(population.caller_coverage[names["caller"]]["negativeEvidenceComplete"])
+            self.assertEqual(population.caller_coverage[names["caller"]]["unresolvedSiteKinds"],
+                             {"external-unresolved": 1})
+            self.assertIn((names["global_caller"], names["global_target"]), population.edges)
+            self.assertIn((names["local_user"], names["clash"]), population.edges)
+            disassembly = subprocess.run(["objdump", "-d", str(binary)], check=True,
+                                         capture_output=True, text=True, timeout=30).stdout
+            caller_body = disassembly.split("<caller>:", 1)[1].split("\n\n", 1)[0]
+            self.assertRegex(caller_body, r"call\s+0\s")
+
+
+class CrossUnitLinkageIdentityTest(unittest.TestCase):
+    def fixture(self, *, source_name="strcmp", linkage=None, parent_tag="DW_TAG_compile_unit",
+                external=True, symbols=()):
+        caller = function(0x100, "caller", flags={"DW_AT_call_all_calls": True})
+        member = function(0x200, source_name)
+        declaration = function(None, source_name, flags={"DW_AT_external": external})
+        declaration.parent = Die(parent_tag)
+        if linkage is not None:
+            declaration.attributes["DW_AT_linkage_name"] = attribute(linkage.encode(), "DW_FORM_string")
+        return CallFixture([caller, call_site(caller, declaration, pc=0x110), member], symbols=symbols)
+
+    @staticmethod
+    def symbol(name, rva=0x200, binding="STB_GLOBAL", section=1):
+        class Symbol(dict):
+            pass
+        result = Symbol(st_info={"type": "STT_FUNC", "bind": binding},
+                        st_shndx=section, st_value=BASE + rva)
+        result.name = name
+        return result
+
+    def test_imported_globals_do_not_join_same_named_members(self):
+        for name, mangled in (("strcmp", "_ZN12string_slice6strcmpES_S_"),
+                              ("connect", "_ZN14jobserver_info7connectEv")):
+            with self.subTest(name=name):
+                fixture = self.fixture(source_name=name, symbols=[self.symbol(mangled)])
+                population = fixture.population()
+                self.assertEqual(population.edges, {})
+                self.assertFalse(population.caller_coverage[0x100]["negativeEvidenceComplete"])
+                self.assertEqual(population.kinds["external-unresolved"], 1)
+
+    def test_linkage_precedes_basename_and_requires_matching_defined_global_symbol(self):
+        mangled = "_ZN12string_slice6strcmpES_S_"
+        for symbols, expected in (([self.symbol(mangled)], True),
+                                  ([self.symbol("strcmp")], False),
+                                  ([self.symbol(mangled, binding="STB_LOCAL")], False),
+                                  ([self.symbol(mangled, section="SHN_UNDEF")], False),
+                                  ([self.symbol(mangled), self.symbol(mangled, rva=0x300)], False)):
+            with self.subTest(symbols=symbols):
+                fixture = self.fixture(linkage=mangled, parent_tag="DW_TAG_structure_type", symbols=symbols)
+                population = fixture.population()
+                self.assertEqual(set(population.edges), {(0x100, 0x200)} if expected else set())
+                self.assertEqual(population.caller_coverage[0x100]["negativeEvidenceComplete"], expected)
+
+    def test_source_only_join_requires_external_cu_scope_and_nonlocal_symbol(self):
+        for parent, external, binding, expected in (
+            ("DW_TAG_compile_unit", True, "STB_GLOBAL", True),
+            ("DW_TAG_compile_unit", True, "STB_LOCAL", False),
+            ("DW_TAG_compile_unit", False, "STB_GLOBAL", False),
+            ("DW_TAG_namespace", True, "STB_GLOBAL", False),
+            ("DW_TAG_structure_type", True, "STB_GLOBAL", False),
+        ):
+            with self.subTest(parent=parent, external=external, binding=binding):
+                population = self.fixture(parent_tag=parent, external=external,
+                                          symbols=[self.symbol("strcmp", binding=binding)]).population()
+                self.assertEqual(set(population.edges), {(0x100, 0x200)} if expected else set())
+                self.assertEqual(population.caller_coverage[0x100]["negativeEvidenceComplete"], expected)
 
 
 class CallEdgeNegativeAuthorityTest(unittest.TestCase):

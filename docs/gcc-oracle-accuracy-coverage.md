@@ -85,8 +85,12 @@ or GCC's pre-DWARF5 `DW_TAG_GNU_call_site` extension in `gcc-driver.full`.
 GNU sites resolve their `DW_AT_abstract_origin` reference and preserve the
 GNU target, clobbered-target and tail-call attributes; ordinary DWARF5 sites
 use their standard attributes. A call site's caller is the latest emitted start of its
-enclosing subprogram at or below the return address. A cross-unit callee is
-resolved only through an oracle alias name that maps to exactly one function.
+enclosing subprogram at or below the return address. A cross-unit declaration
+requires external linkage and a unique defined global/weak ELF function symbol
+with the same linkage identity. Explicit linkage names take precedence; a
+source-only name is usable only for a compilation-unit-level declaration, never
+a member, namespace or local declaration. Local symbols and undefined imports
+cannot supply this identity, and a unique oracle source alias is insufficient.
 Both endpoints must be scoreable oracle functions. Tail calls are kept and
 counted. Every recovered edge with scoreable endpoints remains in the
 precision population. A caller without complete negative call evidence cannot
@@ -94,12 +98,18 @@ turn an unmatched recovered edge into a proven fabrication.
 
 The v2 report retains all 8,905 recovered edges: 6,894 have scoreable oracle
 endpoints, and 2,011 are explicitly listed with endpoint exclusion reasons.
-The eligible population partitions into 5,780 known matches, zero proven
-fabricated edges, and 1,114 unknown edges. All 5,860 known oracle edges stay in
+The eligible population partitions into 5,536 known matches, zero proven
+fabricated edges, and 1,358 unknown edges. All 5,536 known oracle edges stay in
 the recall population, including positive observations from partial callers;
-recall is 5,780/5,860 (0.986348), with 80 missing edges retained.
+known-positive recall is 5,536/5,536 (1.000000), with zero missing edges.
+This does not prove complete call recall: unresolved observations remain outside
+the known-positive reference population. The former 80 missing edges were false
+joins of libc `strcmp`/`connect` imports to unrelated C++ members and are no
+longer oracle positives. Another 244 formerly matched pairs lack the stricter
+linkage proof (including constructor/destructor aliases); their recovered edges
+remain visible as unknown, not silently removed from precision.
 
-Precision is **not established**. Its lower bound is 5,780/6,894 (0.838410)
+Precision is **not established**. Its lower bound is 5,536/6,894 (0.803017)
 and its upper bound is 6,894/6,894 (1.000000). The exact `precision` field is
 null while unknowns remain, and the unchanged 90% precision requirement is
 `unproven`. Unknown edges are neither confirmed false positives nor accepted
@@ -117,8 +127,11 @@ See [DWARF 5 section 3.3.1.3](https://dwarfstd.org/doc/DWARF5.pdf).
 The coverage generator rescores the retained binding-verified recovered model
 against full-artifact DWARF and requires exact report equality, including the
 complete partition, provenance and bounds. It records the bounded report
-snapshot and the validated model, binding and qualification snapshots. Both
-metrics remain `measured-not-release-eligible`; production admission under
+snapshot and the validated model, binding and qualification snapshots.
+Unresolved address-form model IDs are limited to unsigned-64-bit hexadecimal
+coordinates before conversion, excluded-edge projection charges coordinate
+lengths, and the final JSON writer independently enforces the report byte cap.
+Both metrics remain `measured-not-release-eligible`; production admission under
 #679 and an established precision threshold remain outstanding.
 
 ```bash

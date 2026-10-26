@@ -736,9 +736,17 @@ def build_report(profile_directory: Path) -> dict[str, Any]:
 
 
 def _write_json(path: Path, report: dict[str, Any]) -> None:
-    _write_payload(
-        path, (json.dumps(report, indent=2, sort_keys=True) + "\n").encode("utf-8")
-    )
+    # Independently enforce the cap even if a producer's conservative projection
+    # misses a field. Do not touch an existing output on rejection, or allocate
+    # an unbounded serialized report before checking its size.
+    payload = bytearray()
+    for chunk in json.JSONEncoder(indent=2, sort_keys=True).iterencode(report):
+        encoded = chunk.encode("utf-8")
+        if len(payload) + len(encoded) + 1 > MAX_REPORT_BYTES:
+            raise CoverageError("generated report exceeds its output byte limit")
+        payload.extend(encoded)
+    payload.extend(b"\n")
+    _write_payload(path, bytes(payload))
 
 
 def _write_payload(path: Path, payload: bytes) -> None:

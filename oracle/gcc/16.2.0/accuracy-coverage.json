@@ -8,7 +8,7 @@
             "path": "surviving-symbol-identity-binding.json",
             "sha256": "3293afb3fd547fafb0f84c423b8a971a18bb0a7568f230db3383d7c84b7dd90d"
           },
-          "bytes": 3714700,
+          "bytes": 3700364,
           "path": "call-edge-score.json",
           "programModel": {
             "bytes": 7634939,
@@ -21,14 +21,14 @@
             "path": "surviving-symbol-identity-qualification.json",
             "sha256": "bead696e9755375578e8adbaa67cc432789954acee96b20cf9f621308227552b"
           },
-          "sha256": "99fd8d463a72a0d207f380162b6883c00fe8edd93ff1d2a11f2ac054f58cecdf"
+          "sha256": "35ea0fb20d45b8ec6e08e5044144d4f2df844e310baf2172d2946a0c4eec2785"
         },
         "precision": null,
         "precisionBounds": {
           "lower": {
             "denominator": 6894,
-            "numerator": 5780,
-            "value": 0.83841
+            "numerator": 5536,
+            "value": 0.803017
           },
           "upper": {
             "denominator": 6894,
@@ -40,9 +40,9 @@
         "productionVerified": false,
         "reasonCode": "recovered-model-not-release-eligible",
         "recall": {
-          "denominator": 5860,
-          "numerator": 5780,
-          "value": 0.986348
+          "denominator": 5536,
+          "numerator": 5536,
+          "value": 1.0
         },
         "releaseEligible": false,
         "status": "measured",
@@ -53,27 +53,27 @@
           "recallAtLeast": 0.9,
           "releaseEligible": false
         },
-        "unknownRecoveredCount": 1114
+        "unknownRecoveredCount": 1358
       },
       "oracle": {
         "callSiteKinds": {
           "call-site-no-address": 14,
-          "caller-excluded": 10,
+          "caller-excluded": 9,
           "caller-no-emitted-range": 28,
           "direct-internal": 3735,
-          "external-resolved-by-name": 7771,
-          "external-unresolved": 2871,
+          "external-resolved-by-linkage": 7166,
+          "external-unresolved": 3476,
           "indirect-unresolved": 1031,
           "virtual-unresolved": 141
         },
         "callersWithCallSites": 2032,
-        "callersWithCompleteNegativeEvidence": 1424,
-        "edgeCount": 5860,
+        "callersWithCompleteNegativeEvidence": 1373,
+        "edgeCount": 5536,
         "negativeEvidencePolicy": "dwarf5-all-emitted-calls-and-resolved-targets-v1",
-        "populationDefinition": "unique caller/callee function-start pairs from full-twin DWARF call sites whose callee is a definition or a uniquely named oracle alias, with both endpoints scoreable; every recovered edge with scoreable endpoints remains in the precision denominator; unmatched edges are fabricated only with complete emitted-call and target coverage, otherwise unknown",
+        "populationDefinition": "unique caller/callee function-start pairs from full-twin DWARF call sites whose callee is a definition or an external declaration with unique defined global ELF function linkage identity, with both endpoints scoreable; every recovered edge with scoreable endpoints remains in the precision denominator; unmatched edges are fabricated only with complete emitted-call and target coverage, otherwise unknown",
         "productionVerified": false,
         "status": "available",
-        "tailCallEdgeCount": 12
+        "tailCallEdgeCount": 10
       },
       "productionReplay": {
         "evidence": "src/main/kotlin/decompengine/oracle/structural/StructuralReplayAdapterRegistry.kt",
