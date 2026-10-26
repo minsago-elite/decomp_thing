@@ -658,6 +658,51 @@ class GitIntegrationTest {
         assertEquals(GitOperationState.COMPLETED, sync(GitOperationAction.MERGE_ABORT).state)
     }
 
+    @Test fun `every published resolution choice recovers and replays as completed`() {
+        for (side in listOf("ours", "theirs", "base", "text")) Fixture().use { f ->
+            f.cloned()
+            val fileId = f.conflictOn("README.md")
+            val detail = service.conflictFile(jobId, repositoryId, null, fileId)
+            val (view, guard) = guards()
+            val request = GitSyncRequest(GitOperationAction.CONFLICT_SAVE, view.worktreeId, guard,
+                mapOf("fileId" to fileId, "expectedSha256" to detail.currentSha256, "resolution" to side),
+                if (side == "text") "custom resolution\n" else null)
+            val expected = when (side) { "ours" -> detail.ours; "theirs" -> detail.theirs; "base" -> detail.base; else -> "custom resolution\n" }
+            f.hook = { if (it == GitOperationCrashPoint.BEFORE_TERMINAL_PERSIST) throw SimulatedGitCrash() }
+            val idempotencyKey = key()
+            val admission = service.requestWorkspace(jobId, repositoryId, request, idempotencyKey)
+            assertTrue(service.awaitIdle(60_000))
+            assertEquals(expected, Files.readString(f.workTree().resolve("README.md")), side)
+            service.close(); f.hook = {}; service = f.open()
+            val recovered = service.operation(jobId, repositoryId, admission.operation.operationId)
+            assertEquals(GitOperationState.COMPLETED, recovered.state, "$side: ${recovered.message}")
+            val replay = service.requestWorkspace(jobId, repositoryId, request, idempotencyKey)
+            assertTrue(replay.replayed)
+            assertEquals(GitOperationState.COMPLETED, replay.operation.state, side)
+            assertEquals(admission.operation.operationId, replay.operation.operationId)
+        }
+    }
+
+    @Test fun `restart never completes a side save whose bytes were not published or were replaced`() {
+        for (changed in listOf(false, true)) Fixture().use { f ->
+            f.cloned()
+            val fileId = f.conflictOn("README.md")
+            val detail = service.conflictFile(jobId, repositoryId, null, fileId)
+            val (view, guard) = guards()
+            val request = GitSyncRequest(GitOperationAction.CONFLICT_SAVE, view.worktreeId, guard,
+                mapOf("fileId" to fileId, "expectedSha256" to detail.currentSha256, "resolution" to "ours"))
+            val point = if (changed) GitOperationCrashPoint.BEFORE_TERMINAL_PERSIST else GitOperationCrashPoint.AFTER_STAGING
+            f.hook = { if (it == point) throw SimulatedGitCrash() }
+            val admission = service.requestWorkspace(jobId, repositoryId, request, key())
+            assertTrue(service.awaitIdle(60_000))
+            if (changed) Files.writeString(f.workTree().resolve("README.md"), "newer unreviewed bytes\n")
+            val expected = Files.readString(f.workTree().resolve("README.md"))
+            service.close(); f.hook = {}; service = f.open()
+            assertEquals(GitOperationState.INTERRUPTED, service.operation(jobId, repositoryId, admission.operation.operationId).state)
+            assertEquals(expected, Files.readString(f.workTree().resolve("README.md")))
+        }
+    }
+
     @Test fun `the content digest is streamed and matches the file bytes`(): Unit = Fixture().use { f ->
         val file = f.repositories.root.resolve("large.bin")
         val bytes = ByteArray(3 * 1024 * 1024 + 17) { (it % 251).toByte() }

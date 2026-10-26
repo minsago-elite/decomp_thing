@@ -1718,9 +1718,24 @@ class ManagedGitRepositories(
                 "Interrupted by a server restart before the merge was aborted; it is still in progress.")
                 else finish(operation, GitOperationState.COMPLETED, null, "The merge was aborted before the server restarted.", head)
             GitOperationAction.CONFLICT_SAVE -> {
-                val saved = GitIntegrations.conflicts(runner, gitDir, workTree).singleOrNull { it.path.fileId(operation.worktreeId) == request.parameters["fileId"] }
-                    ?.path?.exact?.let { GitIntegrations.contentDigest(workTree.resolve(it)) }
-                if (saved != null && saved == request.contentSha256) finish(operation, GitOperationState.COMPLETED, null, "The resolution was saved before the server restarted.")
+                val entry = GitIntegrations.conflicts(runner, gitDir, workTree)
+                    .singleOrNull { it.path.fileId(operation.worktreeId) == request.parameters["fileId"] }
+                val saved = entry?.path?.exact?.let { GitConflictFiles.observe(workTree, it).sha256 }
+                // Side choices have no request content digest. Their unchanged conflict stages
+                // retain the immutable blob selected for publication, without changing replay identity.
+                val expected = when (request.parameters["resolution"]) {
+                    "text" -> request.contentSha256
+                    else -> {
+                        val objectId = when (request.parameters["resolution"]) {
+                            "ours" -> entry?.oursObjectId
+                            "theirs" -> entry?.theirsObjectId
+                            "base" -> entry?.baseObjectId
+                            else -> null
+                        }
+                        objectId?.let { GitIntegrations.blobText(runner, commonDir, it) }?.let(GitStorage::sha256)
+                    }
+                }
+                if (saved != null && saved == expected) finish(operation, GitOperationState.COMPLETED, null, "The resolution was saved before the server restarted.")
                 else finish(operation, GitOperationState.INTERRUPTED, "INTERRUPTED", "Interrupted by a server restart; read the file again before saving.")
             }
             else -> finish(operation, GitOperationState.INTERRUPTED, "INTERRUPTED",
