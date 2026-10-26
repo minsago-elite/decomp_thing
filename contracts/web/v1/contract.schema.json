@@ -236,8 +236,7 @@
         "contactsAgent",
         "requiredTools",
         "input",
-        "limitsAdjustable",
-        "harness"
+        "limitsAdjustable"
       ],
       "additionalProperties": false,
       "allOf": [
@@ -1221,8 +1220,7 @@
         "harnessCapabilityId",
         "terminalReason",
         "usage",
-        "limits",
-        "configuration"
+        "limits"
       ],
       "additionalProperties": false,
       "allOf": [

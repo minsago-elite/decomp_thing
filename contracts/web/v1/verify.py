@@ -410,7 +410,7 @@ def check_semantics(document: dict) -> None:
             # An agent contract version is reported exactly for launch options that contact an agent.
             if launch is not None and launch["contactsAgent"] != (item["agentContractVersion"] is not None):
                 raise ValueError("launch agent contact and agent contract version disagree")
-            harness = launch["harness"] if launch is not None else None
+            harness = launch.get("harness") if launch is not None else None
             if harness is not None and launch["harnessCapabilityId"] != "agent-" + harness["kind"]:
                 raise ValueError("launch harness facts and submitted harness disagree")
             # The built-in harness is reported but never selectable until a workflow runs it.

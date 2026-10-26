@@ -2,6 +2,22 @@
   "schema": "contract.schema.json",
   "fixtures": [
     {
+      "file": "fixtures/legacy-run-before-configuration.json",
+      "valid": true
+    },
+    {
+      "file": "fixtures/legacy-runs-before-configuration.json",
+      "valid": true
+    },
+    {
+      "file": "fixtures/legacy-snapshot-before-configuration.json",
+      "valid": true
+    },
+    {
+      "file": "fixtures/legacy-bootstrap-before-configuration.json",
+      "valid": true
+    },
+    {
       "file": "fixtures/session.json",
       "valid": true
     },

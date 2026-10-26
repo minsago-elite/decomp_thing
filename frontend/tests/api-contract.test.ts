@@ -28,6 +28,16 @@ function mismatchContract(page = 1) {
 }
 
 describe('generated v1 contract pipeline', () => {
+  it.each(['run', 'runs', 'snapshot', 'bootstrap'])('accepts the pre-configuration v1 %s response unchanged', kind => {
+    const text = fixture(`legacy-${kind}-before-configuration`);
+    // Frozen older-server wire bytes, not a new producer fixture with fields deleted at runtime.
+    expect(decodeContract(text, { mode: 'response' })).toEqual(JSON.parse(text));
+  });
+  it.each(['invalid-run-configuration-harness-mismatch',
+    'invalid-launch-agent-without-harness', 'invalid-launch-builtin-selectable'])(
+    'still validates present provenance in consumer mode: %s', name => {
+      expect(() => decodeContract(fixture(name), { mode: 'response' })).toThrow(ApiClientError);
+    });
   it('accepts only coherent preflight status identity and fixed reason combinations', () => {
     const allowed = new Set(['idle:null:null', 'inspecting:inspection_fixture:null', 'ready:inspection_fixture:null',
       'cancelled:inspection_fixture:null', 'failed:inspection_fixture:AGENT_PREFLIGHT_FAILED']);

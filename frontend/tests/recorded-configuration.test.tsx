@@ -33,6 +33,14 @@ it('keeps an attempt without a record distinct from one that never contacts an a
   expect(screen.getByText('No agent harness: this attempt never contacts an agent.')).toBeTruthy();
 });
 
+it('labels omitted older-server configuration as not recorded rather than inventing one', () => {
+  const older = (decodeContract(fixture('legacy-run-before-configuration'), { mode: 'response' }) as { data: Run }).data;
+  expect(older.configuration).toBeUndefined();
+  render(<RecordedConfiguration run={older} />);
+  expect(screen.getByText(/recorded before admission configuration was retained/)).toBeTruthy();
+  expect(screen.queryByText('No agent harness: this attempt never contacts an agent.')).toBeNull();
+});
+
 it('refuses a recorded harness that disagrees with the harness the attempt submitted', () => {
   expect(() => decodeContract(fixture('invalid-run-configuration-harness-mismatch'), { mode: 'producer' })).toThrow();
   expect(() => decodeContract(fixture('invalid-run-configuration-secret-field'), { mode: 'producer' })).toThrow();

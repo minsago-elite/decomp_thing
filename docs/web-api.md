@@ -461,8 +461,10 @@ request, preflight, provider selection or workflow action.
 
 ### Harness options
 
-Each agent option names exactly one harness in `launch.harness` (null for
-non-agent options): its `kind`, the `implementationId` and `protocolVersion` the
+New servers name exactly one harness for each agent option in `launch.harness`
+(null for non-agent options). This additive v1 response field is optional on the
+wire; omission by an older server means provenance was not reported, not that
+another harness may be inferred. When present, it describes its `kind`, the `implementationId` and `protocolVersion` the
 harness factory resolved from the operator's configuration (null when that
 configuration did not resolve), whether it is `deprecated`, and the `operations`
 (workflows) this server registers for it. Harnesses are probed independently with
@@ -498,7 +500,10 @@ later configuration change is recorded only on a new attempt, and a keyed replay
 returns the original record. It is not part of the caller's start intent. When work
 begins, the adapter resolves the harness again and refuses the attempt (`failed`,
 `REFUSED`) before any agent work if the resolution differs from the record.
-Attempts recorded before this field existed report `configuration: null`.
+Attempts recorded before this field existed report `configuration: null` from new
+servers. This additive v1 response field may also be omitted by older servers;
+consumers treat both cases as not recorded, never as an evidence-only configuration.
+Present records retain the full schema and harness-identity validation.
 
 Runtime information uses allowlisted implementation/version/platform names and effective limit
 values. It excludes absolute installations/worktrees, environment values, credential-bearing
