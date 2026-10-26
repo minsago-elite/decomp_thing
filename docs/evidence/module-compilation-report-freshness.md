@@ -15,12 +15,12 @@ Artifacts from the attempt are retained locally under `.omo/a-series-20261026/qu
 
 The initialization script now registers a no-output `moduleCompilationLiveQualificationFreshness` prerequisite. It checks the exact report path with `NOFOLLOW_LINKS`, so stale directories, files, and symlinks refuse before the Test task prepares its output directory. The live Test task depends on that prerequisite and no longer repeats the check in `doFirst` after output preparation.
 
-The qualifier shell preflight remains in place. It now treats a symlink at either guarded report/index path as existing state, including a dangling symlink, and refuses before Gradle starts.
+The qualifier shell preflight remains in place. Follow-up commit `2ae6b9dbb994b38b294112ee8ea5a84fa81a9a58` covers the compiled inventory node as well as report paths. It now treats a symlink at either guarded report/index path as existing state, including a dangling symlink, and refuses before Gradle starts.
 
 ## Local verification
 
 - `python3 scripts/test-module-compilation-qualification-freshness.py`: 3 Python controls passed. They preserve stale XML bytes on refusal, reject a symlinked report path, statically verify production task wiring, and run a real one-test Gradle `Test` task after the prerequisite to prove fresh report output is not rejected.
-- `python3 scripts/test-module-compilation-qualification-routing.py`: 13 routing controls passed.
+- `python3 scripts/test-module-compilation-qualification-routing.py`: 14 routing controls passed. The added control rejects a dangling `compiled-live-tests.json` symlink before any Gradle or operator command, leaves the symlink intact, and proves its target was not created.
 - `bash -n scripts/qualify-contained-module-compilation.sh` and `git diff --check` passed.
 
 Raw logs and source hashes are under `.omo/a-series-20261026/module-deployment-report-freshness/`.
