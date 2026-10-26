@@ -493,8 +493,10 @@ class ProfileLimits(unittest.TestCase):
             with self.subTest(provisioning=provisioning):
                 result=self.simulate(provisioning=provisioning)
                 self.assertIsNone(self.last_receipt['fd'])
-                self.assertEqual('removed',result['_receiptCleanup']['status'])
-                self.assertFalse(self.last_receipt['directory'].exists())
+                self.assertEqual('retained',result['_receiptCleanup']['status'])
+                self.assertEqual('exclusive-deletion-authority-unavailable',result['_receiptCleanup']['reason'])
+                self.assertEqual([],result['_receiptCleanup']['removedEntries'])
+                self.assertTrue(self.last_receipt['directory'].is_dir())
                 self.assertEqual(not provisioning,runtime.worker_execution_complete(result))
                 self.assertEqual(not provisioning,bool(result['workerProofRaw']))
                 self.assertNotIn('_receiptCleanup',runtime.public_result(result))

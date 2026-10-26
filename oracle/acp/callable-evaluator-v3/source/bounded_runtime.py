@@ -878,11 +878,13 @@ def _create_worker_receipt(*, deadline=None, initialization=None) -> dict:
 
 
 def _reclaim_worker_receipt(receipt, result, *, provisioning=False):
-    """Delete only the stopped, consumed, closed attempt's fixed receipt layout.
+    """Validate the stopped, consumed, closed receipt, but retain its diagnostics.
 
-    Unknown ownership/absence or unconsumed proof retains all diagnostics. No
-    recursive removal, symlink traversal, arbitrary cache tree, or PID authority.
-    All deletions are relative to held, independently revalidated directories.
+    Held directory descriptors and matching metadata do not authorize unlinking
+    a mutable child name: a same-UID writer can replace it after the last stat.
+    There is no exclusive namespace or atomic compare-and-delete authority here.
+    Even a fully validated receipt must therefore remain retained, not removed.
+    Unknown ownership/absence and unconsumed proof also retain all diagnostics.
     """
     facts = {'status': 'retained', 'reason': 'absence-proof-or-close-unverified'}
     if receipt is None or receipt.get('fd') is not None:
@@ -976,22 +978,12 @@ def _reclaim_worker_receipt(receipt, result, *, provisioning=False):
         with os.scandir(cache_fd) as entries:
             if next(entries, None) is not None:
                 raise ValueError('receipt Python cache is not empty')
-        for name, expected_identity in inventory.items():
-            directories_unchanged()
-            if identity(os.stat(name, dir_fd=directory_fd, follow_symlinks=False)) != expected_identity:
-                raise ValueError('receipt entry changed before deletion')
-            os.unlink(name, dir_fd=directory_fd)
-            removed.append(name)
-        directories_unchanged()
-        owned_directory(os.stat('python-cache', dir_fd=directory_fd, follow_symlinks=False), cache_expected)
-        os.close(cache_fd); cache_fd = None
-        os.rmdir('python-cache', dir_fd=directory_fd)
-        removed.append('python-cache')
-        directories_unchanged()
-        os.close(directory_fd); directory_fd = None
-        owned_directory(os.stat(directory.name, dir_fd=root_fd, follow_symlinks=False), directory_expected)
-        os.rmdir(directory.name, dir_fd=root_fd)
-        facts = {'status': 'removed', 'reason': 'owned-absence-consumption-and-close-verified',
+        # Do not turn this inventory into deletion authority. Neither unlinkat
+        # nor rmdir can compare the final entry with the admitted inode. Another
+        # stat, a held dir_fd, or a rename into another same-UID-writable directory
+        # only moves that race. Retain the entire attempt until an independently
+        # protected cleanup owner is available; never report reclamation credit.
+        facts = {'status': 'retained', 'reason': 'exclusive-deletion-authority-unavailable',
                  'removedEntries': removed}
     except Exception as failure:
         facts = {'status': 'refused', 'reason': 'receipt-directory-reclamation-failed',

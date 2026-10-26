@@ -1555,8 +1555,12 @@ class RuntimeWorkerProof(unittest.TestCase):
     def test_consumed_closed_receipt_is_reclaimed_without_losing_result_bytes(self):
         import copy
         base,receipt,result=self.receipt_fixture();before=copy.deepcopy(result)
+        files={p.name:p.read_bytes() for p in receipt['directory'].iterdir() if p.is_file()}
         with patch.object(runtime,'BASE',base):facts=runtime._reclaim_worker_receipt(receipt,result)
-        self.assertEqual('removed',facts['status']);self.assertFalse(receipt['directory'].exists())
+        self.assertEqual('retained',facts['status']);self.assertTrue(receipt['directory'].is_dir())
+        self.assertEqual('exclusive-deletion-authority-unavailable',facts['reason'])
+        self.assertEqual([],facts['removedEntries'])
+        self.assertEqual(files,{p.name:p.read_bytes() for p in receipt['directory'].iterdir() if p.is_file()})
         self.assertEqual(before,result);self.assertTrue((base/'exec-proof-receipts').is_dir())
         self.assertEqual(before['workerProofRaw'],result['workerProofRaw'])
 
@@ -1567,8 +1571,10 @@ class RuntimeWorkerProof(unittest.TestCase):
                           workerExecVerified=False,workerTerminationVerified=False,captureComplete=complete)
             with patch.object(runtime,'BASE',base):
                 facts=runtime._reclaim_worker_receipt(receipt,result,provisioning=True)
-            self.assertEqual('removed' if complete else 'retained',facts['status'])
-            self.assertEqual(not complete,receipt['directory'].exists())
+            self.assertEqual('retained',facts['status'])
+            self.assertTrue(receipt['directory'].is_dir())
+            self.assertEqual('exclusive-deletion-authority-unavailable' if complete else
+                             'receipt-not-fully-consumed',facts['reason'])
             self.assertFalse(result['workerExecVerified']);self.assertEqual(b'',result['workerProofRaw'])
 
     def test_unknown_absence_unconsumed_proof_or_open_report_retains_receipt(self):
@@ -1604,10 +1610,74 @@ class RuntimeWorkerProof(unittest.TestCase):
 
     def test_receipt_deletion_error_preserves_primary_proof_and_directory(self):
         base,receipt,result=self.receipt_fixture();raw=result['workerProofRaw']
-        with patch.object(runtime,'BASE',base),patch.object(runtime.os,'unlink',side_effect=OSError('authored deletion error')):
+        with patch.object(runtime,'BASE',base),patch.object(runtime.os,'unlink',side_effect=OSError('authored deletion error')) as unlink:
             facts=runtime._reclaim_worker_receipt(receipt,result)
-        self.assertEqual('refused',facts['status']);self.assertIn('OSError',facts['secondaryError'])
+        unlink.assert_not_called()
+        self.assertEqual('retained',facts['status'])
+        self.assertEqual('exclusive-deletion-authority-unavailable',facts['reason'])
+        self.assertEqual([],facts['removedEntries'])
         self.assertTrue(receipt['directory'].exists());self.assertEqual(raw,result['workerProofRaw'])
+
+    def test_receipt_final_unlink_substitution_boundary_is_unreachable(self):
+        # Interpose exactly where the old check-then-unlink could delete a new
+        # inode. Retention must never enter this boundary, even for valid proof.
+        for name in ('launch.json','gate.json','worker-proof.jsonl'):
+            with self.subTest(name=name):
+                base,receipt,result=self.receipt_fixture()
+                directory=receipt['directory'];original=(directory/name).read_bytes()
+                real_unlink=os.unlink;replaced=[]
+                def replace_then_unlink(child,*args,**kwargs):
+                    if child==name:
+                        (directory/name).rename(base/'admitted-entry')
+                        (directory/name).write_bytes(b'foreign replacement canary')
+                        replaced.append(name)
+                    return real_unlink(child,*args,**kwargs)
+                with patch.object(runtime,'BASE',base),patch.object(runtime.os,'unlink',side_effect=replace_then_unlink) as unlink:
+                    facts=runtime._reclaim_worker_receipt(receipt,result)
+                self.assertEqual([],replaced)
+                unlink.assert_not_called()
+                self.assertEqual('retained',facts['status'])
+                self.assertEqual([],facts['removedEntries'])
+                self.assertEqual(original,(directory/name).read_bytes())
+                self.assertFalse((base/'admitted-entry').exists())
+
+    def test_receipt_final_rmdir_substitution_boundaries_are_unreachable(self):
+        for target in ('python-cache','attempt'):
+            with self.subTest(target=target):
+                base,receipt,result=self.receipt_fixture();directory=receipt['directory']
+                name='python-cache' if target=='python-cache' else directory.name
+                owned=directory/'python-cache' if target=='python-cache' else directory
+                # Old rmdir would also remove an empty foreign replacement. A
+                # retained descriptor does not make this namespace entry owned.
+                real_rmdir=os.rmdir;replaced=[]
+                def replace_then_rmdir(child,*args,**kwargs):
+                    if child==name:
+                        owned.rename(base/'admitted-directory')
+                        owned.mkdir(mode=0o700)
+                        replaced.append(name)
+                    return real_rmdir(child,*args,**kwargs)
+                with patch.object(runtime,'BASE',base),patch.object(runtime.os,'rmdir',side_effect=replace_then_rmdir) as rmdir:
+                    facts=runtime._reclaim_worker_receipt(receipt,result)
+                self.assertEqual([],replaced)
+                rmdir.assert_not_called()
+                self.assertEqual('retained',facts['status'])
+                self.assertEqual([],facts['removedEntries'])
+                self.assertTrue(owned.is_dir())
+                self.assertTrue(receipt['path'].is_file())
+                self.assertFalse((base/'admitted-directory').exists())
+
+    def test_receipt_retention_closes_all_validation_descriptors(self):
+        base,receipt,result=self.receipt_fixture();real_open=os.open;real_close=os.close
+        opened=[];closed=[]
+        def opening(*args,**kwargs):
+            fd=real_open(*args,**kwargs);opened.append(fd);return fd
+        def closing(fd):
+            closed.append(fd);return real_close(fd)
+        with patch.object(runtime,'BASE',base),patch.object(runtime.os,'open',side_effect=opening),patch.object(runtime.os,'close',side_effect=closing):
+            facts=runtime._reclaim_worker_receipt(receipt,result)
+        self.assertEqual('retained',facts['status'])
+        self.assertCountEqual(opened,closed)
+        self.assertGreaterEqual(len(opened),4)
 
     def test_runner_consumes_proof_and_closes_report_before_reclaim_with_failure_retention(self):
         # Actual runner/final-proof/reclaim functions, authored bytes and mocked
@@ -1691,8 +1761,10 @@ class RuntimeWorkerProof(unittest.TestCase):
                     self.assertTrue(result['scopeVerified']);self.assertFalse(result['scopeAdmitted'])
                     self.assertEqual('OSError',result['failureClass'])
                 if mutation is None:
-                    self.assertEqual('removed',result['_receiptCleanup']['status'])
-                    self.assertFalse(receipt['directory'].exists())
+                    self.assertEqual('retained',result['_receiptCleanup']['status'])
+                    self.assertEqual('exclusive-deletion-authority-unavailable',result['_receiptCleanup']['reason'])
+                    self.assertEqual([],result['_receiptCleanup']['removedEntries'])
+                    self.assertTrue(receipt['directory'].is_dir())
                     with patch.object(runtime,'BASE',base):
                         self.assertTrue(runtime.worker_execution_complete(result))
                 else:
