@@ -313,13 +313,14 @@ internal object AnalysisNativeIoHelper {
         require(arguments.size == 13 && arguments.take(prefix.size) == prefix && arguments[11] == "-o") {
             "analysis helper build record differs from its fixed static recipe"
         }
-        val source = Path.of(arguments[10])
-        val output = Path.of(arguments[12])
-        require(source.isAbsolute && output.isAbsolute && source.parent == output.parent &&
-            source.fileName.toString() == "decomp_analysis_io_helper.c" && output.fileName.toString() == BINARY_NAME)
+        // Build-tree paths are recorded relative to the fixed build-root token, never as host paths.
+        require(arguments == analysisRecordedArguments(Path.of(compilerPath))) {
+            "analysis helper build record names build-host paths instead of its recorded build root"
+        }
         val environment = compilation.obj("environment")
         environment.keysExactly("HOME", "TMPDIR", "PATH", "LC_ALL", "LANG", "TZ", "SOURCE_DATE_EPOCH")
-        require(Path.of(environment.string("HOME")).isAbsolute && Path.of(environment.string("TMPDIR")).isAbsolute &&
+        require(environment.string("HOME") == "$ANALYSIS_IO_RECORDED_BUILD_ROOT/home" &&
+            environment.string("TMPDIR") == "$ANALYSIS_IO_RECORDED_BUILD_ROOT/tmp" &&
             environment.string("PATH") == "/usr/bin:/bin" && environment.string("LC_ALL") == "C" &&
             environment.string("LANG") == "C" && environment.string("TZ") == "UTC" &&
             environment.string("SOURCE_DATE_EPOCH") == "1779182222")

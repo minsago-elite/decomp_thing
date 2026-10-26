@@ -30,6 +30,14 @@ class LlvmBehaviorNativeHelperBuildV2Test {
         assertEquals(Files.readAllBytes(nativeHelperTestSource()).toList(), source.toList())
         val record = OracleJson.parseCanonical(build) as JsonObject
         assertEquals(helperStrings(NATIVE_HELPER_ARGUMENT_TEMPLATE), record["argumentTemplate"])
+        // The shipped reference names the private build directory by a fixed token, never by host path.
+        val referenceText = reference.decodeToString()
+        assertTrue(root.toString() !in referenceText && "native-helper-build-" !in referenceText, referenceText)
+        val rebuilt = Files.createDirectory(root.resolve("rebuilt"))
+        LlvmBehaviorNativeHelperBuildV2.build(nativeHelperTestCompiler(), nativeHelperTestSource(), rebuilt)
+        for (name in listOf(NATIVE_HELPER_SOURCE_NAME, NATIVE_HELPER_BUILD_NAME, NATIVE_HELPER_REFERENCE_NAME)) {
+            assertTrue(Files.readAllBytes(output.resolve(name)).contentEquals(Files.readAllBytes(rebuilt.resolve(name))), name)
+        }
         assertFalse(artifact.digestPinnedByReference)
         assertFalse(artifact.startAuthorized)
         val schema = OracleJson.parse(Files.readAllBytes(Path.of("oracle/llvm-behavior-native-sandbox-policy-v2.schema.json").toAbsolutePath())) as JsonObject
