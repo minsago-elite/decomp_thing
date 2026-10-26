@@ -388,8 +388,9 @@ it never silently launches execution or duplicates accepted publication.
 
 ### Production workflow adapters and restart reconciliation
 
-Each adapter reuses the CLI implementation: `explore` runs the existing
-automatic explorer against the uploaded binary in the sandbox; `reconstruct`
+Each adapter reuses the CLI implementation: `explore` is wired to the existing
+automatic explorer but production dispatch is disabled pending helper ownership
+and cancellation qualification (#71); `reconstruct`
 runs archival reconstruction with the bundled Ghidra analyzer and either the
 configured agent harness (ACP or the deprecated legacy adapter selected by
 `ACP_HARNESS`) or the explicit agent-free evidence-only profile, with no
@@ -403,9 +404,13 @@ the byte total of the attempt's own report directory and, where metered, agent
 tool calls (identities are distinct within each agent invocation and summed across
 invocations; a returned receipt reporting more calls raises the count). Limits are
 checked again when a body finishes between samples. A breach or cancellation
-interrupts the child, which kills and awaits its helper process trees (including
-exploration's angr and strings helpers), and the adapter does not return while the
-child is alive. Breaches record
+interrupts the child, and the adapter does not return while that child thread is
+alive. Exploration's angr and strings helpers still have an ownership gap: a
+leader can fork a pipe-holding child and exit between descendant samples, leaving
+cancellation blocked on an unobserved writer. Observed-descendant cleanup does
+not fix this race. Production exploration is therefore refused at admission and
+at direct adapter execution; the explicit inert test seam qualifies only executor
+and service controls, not process cleanup. Breaches in enabled adapters record
 `LIMIT_EXHAUSTED`; cancellation and shutdown keep their existing `CANCELLED` and
 `PROCESS_INTERRUPTED` outcomes. Repair's tool-call ceiling is structural (five
 iterations, each one agent invocation bounded at 256 tool calls), so its limits
@@ -491,21 +496,28 @@ policy (`none`, `accepted-optional` or `recorded-required`) and whether its
 defaults and, when adjustable, per-field ceilings. `agentContractVersion` is
 reported exactly for options that contact an agent. `supported` means every
 declared prerequisite (sandbox helpers, bundled Ghidra, a configured agent
-harness and, for repair, a production-qualified contained repair validator) was
+harness, qualified exploration helper ownership and, for repair, a
+production-qualified contained repair validator) was
 established by the current readiness observation. Workflow prerequisites follow the
 same passive rule as harness readiness: a page load reads configuration and file
 metadata only (helper executability, bundled Ghidra presence) and launches no
-helper. Options that execute the binary therefore report `unknown` with
+helper. Otherwise-qualified options that execute the binary report `unknown` with
 `SANDBOX_HELPER_UNCHECKED` ("checked when this workflow starts") unless a recent
 explicit agent preflight already checked the helpers. Starting a workflow is itself
 an explicit operator action: when the selected option needs the sandbox, its other
 prerequisites hold and the helpers are unchecked, `POST J/runs` runs the same
 bounded helper check (at most five seconds) before admission; a keyed replay still
 returns its recorded run whatever the check reports. It needs no configured agent and no prior
-preflight. Only a failed or timed-out check refuses the start, with
+preflight. A failed or timed-out check refuses the start, with
 `503 CAPABILITY_UNAVAILABLE` and its fixed reason message; nothing is recorded.
-Evidence-only reconstruction needs only Ghidra presence. Until the secure repair
-runtime's validator qualification gate opens, repair reports
+Evidence-only reconstruction needs only Ghidra presence. Production exploration
+reports `unavailable` / `EXPLORATION_HELPERS_UNQUALIFIED` when readiness facts are
+present, even if sandbox inspection succeeded. It refuses fresh starts and retries
+without recording a new attempt, skips the unnecessary helper probe, and refuses
+direct execution before starting an engine or worker. No environment flag opens
+this qualification gate. A missing readiness snapshot remains `unknown` and also
+cannot authorize execution. Until the secure repair runtime's validator
+qualification gate opens, repair reports
 `REPAIR_VALIDATOR_UNQUALIFIED` and is refused at admission. A missing prerequisite
 is `unavailable` with its fixed reason code, and a probe that did not finish makes
 the option `unknown`. Workflows without a production adapter (`build`,
