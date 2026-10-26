@@ -410,6 +410,25 @@ class GitIntegrationTest {
         assertTrue(Files.list(f.workTree()).use { paths -> paths.noneMatch { it.fileName.toString().startsWith(".conflict-") } })
     }
 
+    @Test fun `completion stages captured reviewed bytes even if the live file changes`(): Unit = Fixture().use { f ->
+        f.cloned()
+        val fileId = f.conflictOn("README.md")
+        val detail = service.conflictFile(jobId, repositoryId, null, fileId)
+        val resolution = "reviewed resolution\n"
+        assertEquals(GitOperationState.COMPLETED, sync(GitOperationAction.CONFLICT_SAVE, mapOf("fileId" to fileId,
+            "expectedSha256" to detail.currentSha256, "resolution" to "text"), resolution).state)
+        val reviewed = service.conflictFile(jobId, repositoryId, null, fileId)
+        val unreviewed = "<<<<<<< newer writer\nunreviewed\n=======\n>>>>>>> incoming\n"
+        f.hook = { if (it == GitOperationCrashPoint.BEFORE_PUBLISH) Files.writeString(f.workTree().resolve("README.md"), unreviewed) }
+        val result = sync(GitOperationAction.CONFLICT_COMPLETE, content = "$fileId ${reviewed.currentSha256}\n")
+        assertEquals(GitOperationState.COMPLETED, result.state, result.message)
+        val staged = f.repositories.git("--git-dir=${f.store.resolve("$jobId/git/repositories/$repositoryId/repository.git")}", "show", ":README.md")
+        assertEquals(resolution, staged)
+        assertEquals(unreviewed, Files.readString(f.workTree().resolve("README.md")))
+        assertTrue(service.conflicts(jobId, repositoryId, null).files.isEmpty())
+        assertTrue(service.workspace(jobId, repositoryId).observation.status.entries.any { it.unstaged != GitIndexChange.NONE })
+    }
+
     @Test fun `the content digest is streamed and matches the file bytes`(): Unit = Fixture().use { f ->
         val file = f.repositories.root.resolve("large.bin")
         val bytes = ByteArray(3 * 1024 * 1024 + 17) { (it % 251).toByte() }

@@ -133,6 +133,27 @@ internal object GitIntegrations {
         return utf8(bytes)
     }
 
+    /** Publish only captured reviewed bytes, never ask Git to reopen mutable work-tree paths. */
+    fun stageReviewed(runner: GitCommandRunner, gitDir: Path, workTree: Path, format: GitObjectFormat,
+        files: List<Pair<GitPath, GitConflictFiles.Observation>>) {
+        val zero = "0".repeat(checkNotNull(format.hexLength))
+        val indexInfo = buildString {
+            for ((path, current) in files) {
+                val name = checkNotNull(path.exact)
+                // Remove every unmerged stage, then add the captured stage-zero blob (or keep deleted).
+                append("0 $zero\t$name\u0000")
+                if (current.size != null) {
+                    val blob = runner.run(GitInvocation("hash-object", listOf("-w", "--stdin"), gitDir = gitDir,
+                        input = checkNotNull(current.text).toByteArray(Charsets.UTF_8), limits = LIMITS)).text.trim()
+                    format.requireObjectId(blob)
+                    append("${current.mode} $blob\t$name\u0000")
+                }
+            }
+        }.toByteArray(Charsets.UTF_8)
+        runner.run(GitInvocation("update-index", listOf("-z", "--index-info"), gitDir = gitDir, workTree = workTree,
+            input = indexInfo, limits = LIMITS))
+    }
+
     fun utf8(bytes: ByteArray): String? = if (bytes.size > MAX_TEXT_BYTES || bytes.any { it == 0.toByte() }) null else try {
         Charsets.UTF_8.newDecoder().onMalformedInput(CodingErrorAction.REPORT).onUnmappableCharacter(CodingErrorAction.REPORT)
             .decode(ByteBuffer.wrap(bytes)).toString()

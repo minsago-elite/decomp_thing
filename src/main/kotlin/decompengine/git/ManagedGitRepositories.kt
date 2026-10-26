@@ -973,12 +973,27 @@ class ManagedGitRepositories(
                 null to "Saved the resolution of ${entry.path.display}. It is not staged; mark it resolved when the review is complete."
             }
             GitOperationAction.CONFLICT_COMPLETE -> {
-                val ids = completionList(request).map { it.first }.toSet()
-                val entries = observation.status.entries.filter { it.conflict != null && it.path.fileId(located.worktreeId) in ids }
-                if (entries.size != ids.size) GitWorkspaceMutations.refuse("SELECTION_CHANGED", "A reviewed file is no longer conflicted. Read the conflicts again.")
-                GitWorkspaceMutations.stage(runner, located.gitDir, located.workTree, entries)
+                val count = activity.withStableRuns(located.record.jobId) { runs ->
+                    requireNoLease(located, runs)
+                    val reviewed = completionList(request).map { (fileId, sha256) ->
+                        val entry = conflictFor(runner, located, fileId)
+                        conflictPath(runner, located, entry)
+                        val path = checkNotNull(entry.path.exact)
+                        val current = GitConflictFiles.observe(located.workTree, path)
+                        if (current.sha256 != sha256) GitWorkspaceMutations.refuse("CONTENT_CHANGED", "A file changed since review. Nothing was staged.")
+                        val text = current.text ?: GitWorkspaceMutations.refuse("UNSUPPORTED_CONFLICT", "A reviewed file is binary or too large.")
+                        if (GitIntegrations.hasMarkers(text, GitIntegrations.markerSize(runner, located.gitDir, located.workTree, path))) {
+                            GitWorkspaceMutations.refuse("UNRESOLVED_MARKERS", "A reviewed file still contains conflict markers. Nothing was staged.")
+                        }
+                        entry.path to current
+                    }
+                    crash(GitOperationCrashPoint.BEFORE_PUBLISH)
+                    requireNoLease(located)
+                    GitIntegrations.stageReviewed(runner, located.gitDir, located.workTree, located.record.objectFormat, reviewed)
+                    reviewed.size
+                }
                 val remaining = GitIntegrations.conflicts(runner, located.gitDir, located.workTree).size
-                null to "Staged ${entries.size} resolved file(s); $remaining conflict(s) remain. Commit explicitly when the review is complete."
+                null to "Staged $count resolved file(s); $remaining conflict(s) remain. Commit explicitly when the review is complete."
             }
             else -> error("not an integration request")
         }

@@ -17,7 +17,7 @@ import java.util.UUID
 
 /** Descriptor-relative conflict access. No pathname is reopened after checking containment. */
 internal object GitConflictFiles {
-    data class Observation(val text: String?, val sha256: String, val size: Long?)
+    data class Observation(val text: String?, val sha256: String, val size: Long?, val mode: String = "100644")
 
     private fun unsupported(): Nothing = GitWorkspaceMutations.refuse("UNSUPPORTED_CONFLICT",
         "This conflicted path cannot be opened as a contained plain file on this filesystem.")
@@ -76,8 +76,11 @@ internal object GitConflictFiles {
                 size += count
             }
         }
+        val executable = directory.getFileAttributeView(name, PosixFileAttributeView::class.java, NOFOLLOW_LINKS)
+            ?.readAttributes()?.permissions()?.contains(java.nio.file.attribute.PosixFilePermission.OWNER_EXECUTE) == true
         if (size != before.size() || !same(before, attributes(directory, name))) changed()
-        return Observation(GitIntegrations.utf8(text.toByteArray()), digest.digest().joinToString("") { "%02x".format(it) }, size)
+        return Observation(GitIntegrations.utf8(text.toByteArray()), digest.digest().joinToString("") { "%02x".format(it) }, size,
+            if (executable) "100755" else "100644")
     }
 
     /** Prepare privately, then recheck the digest under the workflow lease boundary before publishing. */
