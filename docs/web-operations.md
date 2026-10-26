@@ -29,25 +29,32 @@ requires a value"); use `llm_bin_patch --help` instead. These are the ways to id
 | Identity | Where to read it |
 |---|---|
 | Application version | The application JAR name, `lib/llm-bin-patch-<version>.jar`, and the **Runtime** page. |
-| Server build (`applicationBuildId`) | The SHA-256 of the application JAR: `sha256sum lib/llm-bin-patch-*.jar`. The Runtime page shows it as **Server build**, and the session reply includes it. |
+| Server build (`applicationBuildId`) | The SHA-256 of the application JAR: `sha256sum lib/llm-bin-patch-*.jar`. The Runtime page shows it as **Server build**, and the bootstrap reply includes it. |
 | UI build (`uiBuildId`) | The `buildId` of `decompengine/web/ui/asset-manifest.json` inside the application JAR. The Runtime page shows it as **UI build** and warns when the page and the server differ. |
 | Release | `release-record.json` and `SHA256SUMS` from [release assembly](web-release.md#assemble-and-verify-a-release-directory). `applicationBuildId` there must equal the running server's. |
 
-To capture the server's own reply without the browser, exchange a fresh launcher link once.
-The token is the part after `#bootstrap=`:
+To capture the server's own reply without the browser, exchange a fresh launcher link for a
+session once, then read the authenticated bootstrap reply. The token is the part after
+`#bootstrap=`. The session exchange itself returns only a CSRF token and its expiry. The build IDs,
+readiness, capabilities and runtime facts come from `GET /api/v1/bootstrap`:
 
 ```sh
-curl -s -H 'Accept: application/json' -H 'Content-Type: application/json' \
-  -H 'Origin: http://127.0.0.1:8000' -d '{"token":"<token>"}' \
-  http://127.0.0.1:8000/api/v1/session > session.json
+curl -s -c session.cookies -o /dev/null -H 'Accept: application/json' \
+  -H 'Content-Type: application/json' -H 'Origin: http://127.0.0.1:8000' \
+  -d '{"token":"<token>"}' http://127.0.0.1:8000/api/v1/session
+curl -s -b session.cookies -H 'Accept: application/json' \
+  http://127.0.0.1:8000/api/v1/bootstrap > bootstrap.json
+rm session.cookies
 ```
 
-`session.json` contains a CSRF token. Treat it as a secret. Pass it to the support-bundle collector,
-which keeps only allowlisted fields, rather than sharing it.
+`session.cookies` holds the session cookie, and `bootstrap.json` contains a CSRF token. Treat both
+as secrets. Pass `bootstrap.json` to the support-bundle collector, which keeps only allowlisted
+fields, rather than sharing it. The collector refuses a session reply, because it has no runtime
+facts.
 
 ## Readiness
 
-- **Runtime page / session reply.** `readiness` is `degraded` on `master`, because the `workflows`
+- **Runtime page / bootstrap reply.** `readiness` is `degraded` on `master`, because the `workflows`
   capability is `unavailable` ("Workflow actions are unavailable in this preview."). This is
   expected. The `harness` capability reports whether an agent harness is configured. `runtime`
   reports the Java version, OS, architecture, `gitVersion` (`null` on `master`), the workflow
@@ -100,7 +107,7 @@ python3 scripts/collect-support-bundle.py \
   --install /opt/llm_bin_patch \
   --data-dir /srv/decomp/jobs \
   --server-log server.err \
-  --runtime-json session.json
+  --runtime-json bootstrap.json
 ```
 
 | File | Contents |
@@ -108,9 +115,9 @@ python3 scripts/collect-support-bundle.py \
 | `distribution.json` | Version, `applicationBuildId` and `uiBuildId`, computed from the installed JAR. |
 | `java.txt` | The version lines of `java -version` for `JAVA_HOME` or `PATH`. The probe runs without `JAVA_TOOL_OPTIONS`, `JDK_JAVA_OPTIONS` and `_JAVA_OPTIONS`, and any other output line is dropped, so echoed JVM options never appear. |
 | `doctor.txt` | `doctor --tools-only` status and summary lines only. Host paths and secret-looking environment values are replaced. Pass `--no-doctor` to skip it. |
-| `storage.json` | Job-directory, file, directory and byte counts, pending records, which of the two owner locks (`.web-owner.lock`, `.workflow-owner.lock`) exist, and a count of `workflow-state.json` schema versions. No names, job IDs or contents. |
+| `storage.json` | Job-directory, file, directory and byte counts, pending records, which of the two owner locks (`.web-owner.lock`, `.workflow-owner.lock`) exist, and a count of `workflow-state.json` schema versions (integers, or `invalid`/`unreadable` for damaged records). No names, job IDs or contents. |
 | `requests.txt` | The last 1,000 `web-http-failure` lines of the given log. Every other line, including the session link and stack traces, is dropped. |
-| `runtime.json` | From a saved session or bootstrap reply: build IDs, readiness, capability IDs, states and reason codes, limits and runtime facts. The CSRF token, session expiry and server instance ID are dropped. |
+| `runtime.json` | From a saved `GET /api/v1/bootstrap` reply: build IDs, readiness, capability IDs, states and reason codes, limits and runtime facts. The CSRF token, session expiry and server instance ID are dropped. |
 | `README.txt` | What was included and what was excluded. |
 
 The collector never reads binaries, `job.json`, reports, sources or archives, and never copies

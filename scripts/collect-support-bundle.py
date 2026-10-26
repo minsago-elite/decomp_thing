@@ -8,7 +8,7 @@ The bundle is built from allowlisted facts only:
   doctor.txt         `llm_bin_patch doctor --tools-only` status lines, host paths replaced
   storage.json       counts and byte totals under --data-dir; no names, job IDs or contents
   requests.txt       `web-http-failure request_id=... status=... code=...` lines from a server log
-  runtime.json       an allowlisted projection of a saved /api/v1/session or /api/v1/bootstrap reply
+  runtime.json       an allowlisted projection of a saved authenticated /api/v1/bootstrap reply
 
 It never copies binaries, job directories, reports, source, the launcher's session link, cookies,
 CSRF tokens or environment values. Before it reports success it rescans every written file for the
@@ -137,16 +137,23 @@ def storage(data_dir: Path) -> dict:
             if "pending" in name:
                 pending += 1
             if name == "workflow-state.json" and here.parent == data_dir and path.lstat().st_size <= 4 * 1024 * 1024:
-                try:
-                    version = json.loads(path.read_bytes()).get("schemaVersion")
-                except (ValueError, AttributeError, OSError):
-                    version = "unreadable"
-                schemas[str(version)] = schemas.get(str(version), 0) + 1
+                schemas[schema_label(path)] = schemas.get(schema_label(path), 0) + 1
         if entries > MAX_STORAGE_ENTRIES:
             return {"present": True, "complete": False, "reason": "entry limit reached"}
     return {"present": True, "complete": True, "jobDirectories": jobs, "otherTopLevelDirectories": staging,
             "regularFiles": files, "directories": directories, "symlinks": symlinks, "logicalBytes": total,
             "pendingRecords": pending, "ownerLocks": sorted(locks), "workflowStateSchemaVersions": schemas}
+
+
+def schema_label(path: Path) -> str:
+    """A bounded integer version, or a fixed label; a damaged record's own text is never copied."""
+    try:
+        version = json.loads(path.read_bytes()).get("schemaVersion")
+    except (ValueError, AttributeError, OSError):
+        return "unreadable"
+    if type(version) is int and 0 <= version <= 1_000_000:
+        return str(version)
+    return "invalid"
 
 
 def request_lines(log: Path) -> str:
@@ -162,7 +169,10 @@ def request_lines(log: Path) -> str:
 
 def runtime(reply: Path) -> dict:
     document = json.loads(reply.read_text())
-    data = document.get("data", document)
+    data = document.get("data", document) if isinstance(document, dict) else None
+    # POST /api/v1/session returns only the CSRF token and expiry; the facts are in /api/v1/bootstrap.
+    if not isinstance(data, dict) or not isinstance(data.get("applicationBuildId"), str) or "runtime" not in data:
+        raise BundleError("--runtime-json must be a saved GET /api/v1/bootstrap reply; a session reply has no runtime facts")
     capabilities = [{key: capability.get(key) for key in ("id", "state", "reasonCode")}
                     for capability in data.get("capabilities", []) if isinstance(capability, dict)]
     source = data.get("runtime") or {}
@@ -237,7 +247,7 @@ def main(argv: list[str]) -> int:
     parser.add_argument("--output", type=Path, default=REPOSITORY / "build/support")
     parser.add_argument("--data-dir", type=Path, help="the server's --data-dir; only counts are collected")
     parser.add_argument("--server-log", type=Path, help="captured server stderr; only request-failure lines are kept")
-    parser.add_argument("--runtime-json", type=Path, help="a saved /api/v1/session or /api/v1/bootstrap reply")
+    parser.add_argument("--runtime-json", type=Path, help="a saved authenticated GET /api/v1/bootstrap reply")
     parser.add_argument("--no-doctor", action="store_true", help="skip `doctor --tools-only`")
     arguments = parser.parse_args(argv)
     try:

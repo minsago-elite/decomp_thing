@@ -51,6 +51,9 @@ class SupportBundleTest(unittest.TestCase):
         (job / "input.elf").write_bytes(b"\x7fELF private binary")
         (job / "job.json").write_text(json.dumps({"filename": "customer-secret.elf", "binary_path": str(job / "input.elf")}))
         (job / "workflow-state.json").write_text(json.dumps({"schemaVersion": 1}))
+        damaged = self.data / ("f" * 32)
+        damaged.mkdir()
+        (damaged / "workflow-state.json").write_text(json.dumps({"schemaVersion": "customer-confidential-schema"}))
         (job / "reports/exploration.json").write_text("{\"stdout\": \"private output\"}")
         (self.data / ".web-owner.lock").write_bytes(b"")
         (self.data / "customer-confidential-project.lock").write_bytes(b"")
@@ -60,7 +63,7 @@ class SupportBundleTest(unittest.TestCase):
             "Open local browser session (expires 2026-10-22T01:01:19Z): http://127.0.0.1:8000/#bootstrap=abcdefghijklmnopqrstuvwxyz012345\n"
             f"{REQUEST}\n"
             f"Exception in thread main: failed at {job}/job.json\n")
-        self.reply = self.root / "session.json"
+        self.reply = self.root / "bootstrap.json"
         self.reply.write_text(json.dumps({"requestId": "r", "data": {
             "applicationBuildId": "a" * 64, "uiBuildId": "b" * 64, "readiness": "degraded", "basePath": "/",
             "csrfToken": "csrf-secret-value-0123456789", "serverInstanceId": "instance", "sessionExpiresAt": "2026",
@@ -100,8 +103,8 @@ class SupportBundleTest(unittest.TestCase):
         self.assertEqual(hashlib.sha256(self.jar).hexdigest(), distribution["applicationBuildId"])
         self.assertEqual("b" * 64, distribution["uiBuildId"])
         storage = json.loads((bundle / "storage.json").read_text())
-        self.assertEqual(1, storage["jobDirectories"])
-        self.assertEqual({"1": 1}, storage["workflowStateSchemaVersions"])
+        self.assertEqual(2, storage["jobDirectories"])
+        self.assertEqual({"1": 1, "invalid": 1}, storage["workflowStateSchemaVersions"])
         self.assertEqual([".web-owner.lock"], storage["ownerLocks"])
         self.assertEqual(3, len((bundle / "java.txt").read_text().splitlines()))
         self.assertIn('openjdk version "21.0.12.1"', (bundle / "java.txt").read_text())
@@ -112,6 +115,12 @@ class SupportBundleTest(unittest.TestCase):
         runtime = json.loads((bundle / "runtime.json").read_text())
         self.assertEqual("/", runtime["basePath"])
         self.assertEqual([{"id": "workflows", "state": "unavailable", "reasonCode": "PREVIEW_UNAVAILABLE"}], runtime["capabilities"])
+
+    def test_a_session_reply_is_refused_because_it_lacks_runtime_facts(self) -> None:
+        self.reply.write_text(json.dumps({"requestId": "r", "data": {"csrfToken": "csrf-secret-value-0123456789", "expiresAt": "2026"}}))
+        with self.assertRaisesRegex(bundle_module.BundleError, "bootstrap"):
+            self.collect()
+        self.assertEqual([], list((self.root / "out").iterdir()))
 
     def test_a_leak_that_survives_redaction_deletes_the_bundle(self) -> None:
         original = bundle_module.runtime
