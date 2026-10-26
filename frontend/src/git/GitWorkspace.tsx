@@ -68,6 +68,8 @@ export function GitWorkspace({ jobId, basePath, session, capabilities, pollInter
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const [diff, setDiff] = useState<GitDiff | null>(null);
   const [commit, setCommit] = useState<{ objectId: string; diff: GitDiff; provenance: GitProvenance | null; provenanceError: string } | null>(null);
+  // Refreshing guards unmounts the detail, but a refused tag must remain retryable for the same immutable target.
+  const [tagDraft, setTagDraft] = useState<{ target: string; name: string } | null>(null);
   const olderPending = useRef(false);
   const refsPending = useRef(false);
   const commitRequest = useRef(0);
@@ -215,6 +217,8 @@ export function GitWorkspace({ jobId, basePath, session, capabilities, pollInter
       }
       const provenance = await provenanceRead;
       if (!current()) return;
+      const target = `${base}:${objectId}`;
+      setTagDraft(previous => previous?.target === target ? previous : { target, name: '' });
       setCommit({ objectId, diff: { ...page, files, complete: page.complete && page.nextCursor === null }, provenance: provenance.data,
         provenanceError: provenance.error });
     } catch (failure: unknown) { if (current()) setStatus(withApiFailureReference(copy.readFailed, failure)); }
@@ -269,6 +273,7 @@ export function GitWorkspace({ jobId, basePath, session, capabilities, pollInter
   const selectedIn = (...names: ('staged' | 'unstaged' | 'untracked')[]) =>
     [...new Set(names.flatMap(name => groups[name].filter(entry => selected.has(`${name}:${entry.fileId}`)).map(entry => entry.fileId)))];
   const worktreeId = statusData?.worktreeId ?? repository?.worktreeId ?? '';
+  const tagTarget = commit ? `${base}:${commit.objectId}` : '';
 
   return <section aria-labelledby="git-title" class="git-workspace">
     <h2 id="git-title">{copy.title}</h2>
@@ -395,7 +400,10 @@ export function GitWorkspace({ jobId, basePath, session, capabilities, pollInter
             {commit.provenance.refNames.length > 0 && <p>{textMessage(copy.refNames, { names: commit.provenance.refNames.join(', ') })}</p>}
             <a href={apiPath(basePath, `${base}/exports/${commit.objectId}`)} download="">{copy.downloadExport}</a>
           </> : <p role="alert">{commit.provenanceError}</p>}
-          <NameForm key={commit.objectId} label={copy.tagName} action={copy.tagAction} disabled={!writable} onSubmit={name => act('gitTagRequest', copy.tagAction, guarded =>
+          <NameForm key={tagTarget} label={copy.tagName} action={copy.tagAction} disabled={!writable}
+            draft={{ value: tagDraft?.target === tagTarget ? tagDraft.name : '',
+              onChange: name => { setTagDraft(previous => previous?.target === tagTarget ? { ...previous, name } : previous); } }}
+            onSubmit={name => act('gitTagRequest', copy.tagAction, guarded =>
             ({ action: 'git.tag', worktreeId, guards: guarded, name, targetObjectId: commit.objectId }))} />
         </section>}
       </section>
@@ -436,8 +444,13 @@ function ImportForm({ disabled, onImport }: { disabled: boolean; onImport: (name
   </form>;
 }
 
-function NameForm({ label, action, disabled, onSubmit }: { label: string; action: string; disabled: boolean; onSubmit: (name: string) => Promise<boolean> }) {
-  const [name, setName] = useState('');
+function NameForm({ label, action, disabled, onSubmit, draft }: {
+  label: string; action: string; disabled: boolean; onSubmit: (name: string) => Promise<boolean>;
+  draft?: { value: string; onChange: (value: string) => void };
+}) {
+  const [localName, setLocalName] = useState('');
+  const name = draft?.value ?? localName;
+  const setName = draft?.onChange ?? setLocalName;
   return <form onSubmit={event => { event.preventDefault(); if (name.trim()) void onSubmit(name.trim()).then(done => { if (done) setName(''); }); }}>
     <label>{label} <input value={name} maxLength={200} onInput={event => { setName(event.currentTarget.value); }} required /></label>
     <button type="submit" disabled={disabled}>{action}</button>

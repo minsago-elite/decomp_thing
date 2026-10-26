@@ -181,6 +181,96 @@ it('ignores an obsolete inspection failure and resets a tag draft on a deliberat
   expect(screen.getByLabelText('Tag name')).toHaveProperty('value', '');
 });
 
+it.each(['refused request', 'failed operation'])('keeps a tag draft after a %s, refreshes guards and clears only after a successful retry', async failure => {
+  if (failure === 'refused request') transport.post.mockRejectedValueOnce(new ApiClientError('http_error', { status: 409 }));
+  else transport.post.mockResolvedValueOnce(operation('failed', 'git.tag'));
+  transport.post.mockResolvedValueOnce(operation('completed', 'git.tag'));
+  mount();
+  const inspect = async () => {
+    fireEvent.click(await screen.findByRole('button', { name: 'Older commits' }));
+    fireEvent.click(await screen.findByRole('button', { name: `Inspect ${older.slice(0, 12)}` }));
+    return screen.findByLabelText('Tag name');
+  };
+  fireEvent.input(await inspect(), { target: { value: 'keep-my-tag-draft' } });
+  // The refusal still refreshes the reviewed guards; it must not discard the draft with the detail.
+  transport.get.mockImplementation(async (kind, path) => {
+    const result = await serve(kind, path);
+    return kind === 'gitStatus' ? { data: { ...status(true), repositoryVersion: 'repo_v2', worktreeVersion: 'tree_v2' } } : result;
+  });
+  fireEvent.click(screen.getByRole('button', { name: 'Tag this commit' }));
+  await screen.findByText(failure === 'refused request' ? /The server refused Tag this commit/ : /Tag this commit did not complete/);
+  await waitFor(() => expect(transport.get.mock.calls.filter(call => call[0] === 'gitRepositories')).toHaveLength(2));
+  await waitFor(() => expect(screen.queryByLabelText('Tag name')).toBeNull());
+  expect(transport.post).toHaveBeenCalledOnce();
+  expect(await inspect()).toHaveProperty('value', 'keep-my-tag-draft');
+  fireEvent.click(screen.getByRole('button', { name: 'Tag this commit' }));
+  await screen.findByText('Tag this commit: Done.');
+  expect(transport.post).toHaveBeenCalledTimes(2);
+  expect(transport.post.mock.calls[1]?.[3]).toMatchObject({ name: 'keep-my-tag-draft', targetObjectId: older,
+    guards: { repositoryVersion: 'repo_v2', worktreeVersion: 'tree_v2' } });
+  expect(transport.post.mock.calls[1]?.[4]).toMatchObject({ ifMatch: '"tree_v2"' });
+  await waitFor(() => expect(transport.get.mock.calls.filter(call => call[0] === 'gitRepositories')).toHaveLength(3));
+  await waitFor(() => expect(screen.queryByLabelText('Tag name')).toBeNull());
+  expect(await inspect()).toHaveProperty('value', '');
+});
+
+it('retains a tag draft through a manual refresh but discards it after inspecting another target', async () => {
+  historyPages.first = { entries: [commitSummary(head, 'Newest', false), commitSummary(older, 'Previous', true)], nextCursor: null };
+  mount();
+  fireEvent.click(await screen.findByRole('button', { name: `Inspect ${older.slice(0, 12)}` }));
+  fireEvent.input(await screen.findByLabelText('Tag name'), { target: { value: 'same-target-draft' } });
+  fireEvent.click(screen.getByRole('button', { name: 'Refresh repository' }));
+  await waitFor(() => expect(screen.queryByLabelText('Tag name')).toBeNull());
+  fireEvent.click(screen.getByRole('button', { name: `Inspect ${older.slice(0, 12)}` }));
+  expect(await screen.findByLabelText('Tag name')).toHaveProperty('value', 'same-target-draft');
+  fireEvent.click(screen.getByRole('button', { name: `Inspect ${head.slice(0, 12)}` }));
+  await screen.findByRole('heading', { name: `Commit ${head.slice(0, 12)}` });
+  expect(screen.getByLabelText('Tag name')).toHaveProperty('value', '');
+  fireEvent.click(screen.getByRole('button', { name: `Inspect ${older.slice(0, 12)}` }));
+  await screen.findByRole('heading', { name: `Commit ${older.slice(0, 12)}` });
+  expect(screen.getByLabelText('Tag name')).toHaveProperty('value', '');
+});
+
+it('does not reuse a tag draft for the same object in a different repository', async () => {
+  historyPages.first = { entries: [commitSummary(older, 'Previous', true)], nextCursor: null };
+  mount();
+  fireEvent.click(await screen.findByRole('button', { name: `Inspect ${older.slice(0, 12)}` }));
+  fireEvent.input(await screen.findByLabelText('Tag name'), { target: { value: 'old-repository-draft' } });
+  const replacementId = 'repository_' + '4'.repeat(32);
+  listing = [{ ...repository, repositoryId: replacementId }];
+  transport.get.mockImplementation(async (kind, path) => {
+    const result = await serve(kind, path.replace(replacementId, repositoryId)) as { data: Record<string, unknown> };
+    return kind === 'gitRepositories' ? result : { data: { ...result.data, repositoryId: replacementId } };
+  });
+  fireEvent.click(screen.getByRole('button', { name: 'Refresh repository' }));
+  await screen.findByText(replacementId);
+  fireEvent.click(screen.getByRole('button', { name: `Inspect ${older.slice(0, 12)}` }));
+  expect(await screen.findByLabelText('Tag name')).toHaveProperty('value', '');
+  expect(transport.post).not.toHaveBeenCalled();
+});
+
+it('does not clear another target draft when an earlier tag completes', async () => {
+  const gate = deferred();
+  historyPages.first = { entries: [commitSummary(head, 'Newest', false), commitSummary(older, 'Previous', true)], nextCursor: null };
+  transport.get.mockImplementation((kind, path) => serve(kind, path === `${base}/provenance/${head}` ? `${base}/provenance/${older}` : path));
+  transport.post.mockImplementationOnce(async () => { await gate.promise; return operation('completed', 'git.tag'); });
+  mount();
+  fireEvent.click(await screen.findByRole('button', { name: `Inspect ${older.slice(0, 12)}` }));
+  fireEvent.input(await screen.findByLabelText('Tag name'), { target: { value: 'submitted-for-previous' } });
+  fireEvent.click(screen.getByRole('button', { name: 'Tag this commit' }));
+  await waitFor(() => expect(transport.post).toHaveBeenCalledOnce());
+  fireEvent.click(screen.getByRole('button', { name: `Inspect ${head.slice(0, 12)}` }));
+  await screen.findByRole('heading', { name: `Commit ${head.slice(0, 12)}` });
+  fireEvent.input(screen.getByLabelText('Tag name'), { target: { value: 'new-target-draft' } });
+  gate.resolve();
+  await screen.findByText('Tag this commit: Done.');
+  await waitFor(() => expect(transport.get.mock.calls.filter(call => call[0] === 'gitRepositories')).toHaveLength(2));
+  await waitFor(() => expect(screen.queryByLabelText('Tag name')).toBeNull());
+  fireEvent.click(screen.getByRole('button', { name: `Inspect ${head.slice(0, 12)}` }));
+  expect(await screen.findByLabelText('Tag name')).toHaveProperty('value', 'new-target-draft');
+  expect(transport.post.mock.calls[0]?.[3]).toMatchObject({ name: 'submitted-for-previous', targetObjectId: older });
+});
+
 it('explains active worker refusals using fixed local copy without retrying', async () => {
   entries = [];
   transport.post.mockRejectedValueOnce(new ApiClientError('http_error', { status: 409, serverCode: 'ACTIVE_RUN' }));
