@@ -3,11 +3,18 @@ package decompengine.project
 import decompengine.oracle.core.OracleJson
 import decompengine.oracle.core.StrictJsonLimits
 import decompengine.oracle.fulltree.ContainedCommandTerminalResourceEvidence
+import decompengine.oracle.fulltree.ContainedCommandFileDescriptorPolicy
+import decompengine.oracle.fulltree.ContainedCommandFileDescriptorLimits
+import decompengine.oracle.fulltree.ContainedCommandFileDescriptorObservation
+import decompengine.oracle.fulltree.containedCommandFileDescriptorAdmission
 import decompengine.oracle.fulltree.FullTreeDiskScratchEvidence
+import decompengine.oracle.fulltree.KotlinContainedCommandKeeper
+import decompengine.oracle.fulltree.KotlinContainedCommandProtocol
 import decompengine.oracle.fulltree.KotlinContainedCommandRequest
 import decompengine.oracle.fulltree.isolatedObservationServiceRuntimeSeconds
 import decompengine.oracle.fulltree.runDirectoryName
 import java.nio.file.Path
+import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
 
@@ -38,8 +45,10 @@ internal object ContainedModuleCompilationProof {
     fun verify(record: JsonObject): Verified {
         // Callers can supply constructed JSON, so charge the same aggregate bounds as serialized evidence.
         val proof = OracleJson.parseCanonical(OracleJson.canonicalBytes(record, LIMITS), LIMITS) as JsonObject
-        proof.exact(PROOF_FIELDS, "proof")
-        require(proof["schemaVersion"] == JsonPrimitive(1) && proof.text("provider") == "contained-module-compilation-v1" &&
+        val version = proof.number("schemaVersion")
+        require(version == 1L || version == 2L) { "unsupported contained module compilation proof" }
+        proof.exact(PROOF_FIELDS + if (version == 2L) setOf("runtimeClosure") else emptySet(), "proof")
+        require(proof.text("provider") == "contained-module-compilation-v$version" &&
             proof.text("scope") == "module-object" && proof.text("policyId") == ContainedModuleCompilationPolicy.POLICY_ID) {
             "unsupported contained module compilation proof"
         }
@@ -76,6 +85,14 @@ internal object ContainedModuleCompilationProof {
             command.terminalResourcePolicySha256 == ContainedCommandTerminalResourceEvidence.policySha256) {
             "module compiler command differs from its exact control and terminal policy"
         }
+        if (version == 2L) {
+            require(command.fileDescriptorPolicy == ContainedCommandFileDescriptorPolicy.MODULE_COMPILATION &&
+                command.retainedInputVisibilitySha256 == null) {
+                "module compiler command lacks the fixed file-descriptor policy or substitutes selected visibility"
+            }
+        } else {
+            require(command.fileDescriptorPolicy == null) { "historical module proof cannot declare the new file-descriptor policy" }
+        }
         require(command.command.size >= 2)
         val requestText = command.command[command.command.lastIndex - 1]
         val requestPath = Path.of(requestText)
@@ -95,8 +112,15 @@ internal object ContainedModuleCompilationProof {
         }
         val attachment = proof.objectField("attachment")
         val execution = proof.objectField("execution")
-        attachment.exact(ATTACHMENT_FIELDS, "attachment")
+        attachment.exact(ATTACHMENT_FIELDS + if (version == 2L) setOf("fileDescriptorLimits") else emptySet(), "attachment")
         execution.exact(EXECUTION_FIELDS, "execution")
+        val executionVersion = if (version == 2L) 5 else 3
+        require(attachment["schemaVersion"] == JsonPrimitive(executionVersion) &&
+            attachment.text("provider") == "kotlin-lease-contained-command-attachment-v$executionVersion" &&
+            execution["schemaVersion"] == JsonPrimitive(executionVersion) &&
+            execution.text("provider") == "kotlin-lease-contained-command-execution-v$executionVersion") {
+            "module compiler proof uses a different contained execution mode"
+        }
         require(attachment.text("requestSha256") == command.sha256 && execution.text("requestSha256") == command.sha256 &&
             attachment.text("nonce") == request.nonce && attachment.text("deploymentClosureSha256") == runtime.configurationSha256 &&
             execution.text("deploymentClosureSha256") == runtime.configurationSha256) {
@@ -117,7 +141,9 @@ internal object ContainedModuleCompilationProof {
             identity.number("mode") == 448L && identity.number("linkCount") >= 2L) {
             "module compiler control identity differs from its disk lease"
         }
-        verifyResources(command, attachment, execution, request)
+        verifyResources(command, attachment, execution, request, version == 2L)
+        if (version == 2L) verifyRuntimeClosure(proof.objectField("runtimeClosure"), runtime, request, command,
+            requestPath, run, control, lease, attachment, execution)
         ContainedCommandTerminalResourceEvidence.verifyExecution(bytes(execution), bytes(attachment))
         val outcome = execution.objectField("outcome")
         outcome.exact(setOf("schemaVersion", "provider", "event", "nonce", "requestSha256", "keeperPid", "childPid", "exitCode",
@@ -139,10 +165,19 @@ internal object ContainedModuleCompilationProof {
     ))))
 
     private fun verifyResources(command: KotlinContainedCommandRequest, attachment: JsonObject, execution: JsonObject,
-        request: ContainedModuleCompilerRequest) {
+        request: ContainedModuleCompilerRequest, descriptorPolicy: Boolean) {
         val resources = attachment.objectField("resources")
         resources.exact(setOf("wallClockMillis", "maximumResidentBytes", "pidsMax", "maximumFileBytes",
-            "maximumAddressSpaceBytes", "cpuSeconds", "serviceRuntimeSeconds"), "resources")
+            "maximumAddressSpaceBytes", "cpuSeconds", "serviceRuntimeSeconds") +
+            if (descriptorPolicy) setOf("processorCount", "fileDescriptorPolicySha256", "maximumOpenFiles") else emptySet(), "resources")
+        if (descriptorPolicy) {
+            val policy = ContainedCommandFileDescriptorPolicy.MODULE_COMPILATION
+            require(resources.number("processorCount") == 1L && resources.text("fileDescriptorPolicySha256") == policy.sha256 &&
+                resources.number("maximumOpenFiles") == policy.maximumOpenFiles &&
+                command.fileDescriptorPolicySha256 == policy.sha256 && command.maximumOpenFiles == policy.maximumOpenFiles) {
+                "module compiler resources differ from the fixed file-descriptor policy"
+            }
+        }
         val wall = resources.number("wallClockMillis")
         require(wall in 1_000L..minOf(60_000L, moduleCompilerOperationWallMillis(request.profile)) && wall % 1000L == 0L) {
             "module compiler service wall budget is invalid"
@@ -178,10 +213,99 @@ internal object ContainedModuleCompilationProof {
         deadline.number("startedMonotonicNanos") // Monotonic origins may be negative; they are never live clock authority.
     }
 
+    /** Recompute declarations and joins only; archived observations do not become live authority. */
+    private fun verifyRuntimeClosure(closure: JsonObject, runtime: ContainedModuleCompilationRuntimeConfiguration.Declaration,
+        request: ContainedModuleCompilerRequest, command: KotlinContainedCommandRequest, requestPath: Path, run: Path,
+        control: Path, lease: FullTreeDiskScratchEvidence, attachment: JsonObject, execution: JsonObject) {
+        closure.exact(RUNTIME_FIELDS, "runtime closure")
+        require(sha256(bytes(closure)) == attachment.text("runtimeClosureSha256")) {
+            "module compiler runtime closure digest differs from its attachment"
+        }
+        require(closure.text("provider") == "kotlin-lease-contained-command-runtime-v5" &&
+            closure.text("configurationSha256") == runtime.isolation.canonicalSha256 &&
+            closure.text("deploymentClosureSha256") == runtime.configurationSha256 &&
+            closure.text("keeperEntryPoint") == KotlinContainedCommandKeeper::class.java.name &&
+            closure.text("requestVersion") == KotlinContainedCommandProtocol.VERSION &&
+            closure.text("commandRequestProvider") == "kotlin-contained-command-request-v5" &&
+            closure.text("commandRequestSha256") == command.sha256 &&
+            closure.text("terminalResourcePolicySha256") == ContainedCommandTerminalResourceEvidence.policySha256) {
+            "module compiler runtime closure differs from its configured command or runtime"
+        }
+        val mounts = JsonArray(runtime.compilerRuntimeMounts.map { mount -> JsonObject(mapOf(
+            "source" to JsonPrimitive(mount.source.toString()), "destination" to JsonPrimitive(mount.destination.toString()),
+            "expectedManifestSha256" to JsonPrimitive(mount.expectedManifestSha256),
+        )) })
+        require(closure["runtimeMounts"] == mounts) { "module compiler runtime mounts differ from their ordered configuration" }
+        val inputs = closure.arrayField("readOnlyInputs")
+        require(inputs.size == 2) { "module compiler runtime requires exactly its private request and configured compiler" }
+        val requestInput = inputs[0] as? JsonObject ?: throw IllegalArgumentException("module compiler request input must be an object")
+        val compilerInput = inputs[1] as? JsonObject ?: throw IllegalArgumentException("module compiler executable input must be an object")
+        fun input(path: Path, size: Long, digest: String) = JsonObject(mapOf("path" to JsonPrimitive(path.toString()),
+            "bytes" to JsonPrimitive(size), "sha256" to JsonPrimitive(digest)))
+        require(requestInput == input(requestPath, request.canonicalBytes.size.toLong(), request.sha256)) {
+            "module compiler retained worker request differs from its canonical bytes"
+        }
+        // The archive preserves the live-observed compiler size; the configured digest is its content identity.
+        val compilerBytes = compilerInput.number("bytes")
+        require(compilerBytes in 1..512L * 1024 * 1024 &&
+            compilerInput == input(runtime.compilerExecutable, compilerBytes, runtime.compilerSha256)) {
+            "module compiler retained executable differs from its configured identity or size bound"
+        }
+        require(closure.text("controlDirectory") == control.toString() && closure.text("writableRoot") == run.toString()) {
+            "module compiler runtime paths differ from the disk lease"
+        }
+        val state = closure.objectField("readOnlyStateDirectory")
+        state.exact(setOf("name", "device", "inode", "mountId", "uid", "gid", "mode", "linkCount"), "retained state identity")
+        val controlIdentity = execution.objectField("controlDirectoryIdentity")
+        require(state.text("name") == "state" && state.number("device") == lease.leaseRootDevice &&
+            state.number("inode") > 0 && state.number("inode") != controlIdentity.number("inode") &&
+            state.number("mountId") == lease.mountId && state.number("uid") == lease.ownerUid.toLong() &&
+            state.number("gid") == controlIdentity.number("gid") && state.number("mode") == 448L && state.number("linkCount") >= 2L) {
+            "module compiler retained state identity differs from its complete private lease directory"
+        }
+        val deadline = execution.objectField("operationWallTime")
+        require(closure.objectField("operationWallDeadline") == JsonObject(deadline - setOf("elapsedNanos", "remainingNanos"))) {
+            "module compiler runtime deadline differs from the completed operation"
+        }
+        val attachedResources = attachment.objectField("resources")
+        require(closure.objectField("resources") == JsonObject(attachedResources -
+            setOf("maximumAddressSpaceBytes", "cpuSeconds", "serviceRuntimeSeconds"))) {
+            "module compiler runtime resources differ from its attachment"
+        }
+        val policy = ContainedCommandFileDescriptorPolicy.MODULE_COMPILATION
+        val admission = closure.objectField("fileDescriptorAdmission")
+        admission.exact(setOf("policySha256", "trustedHostMaximumOpenFiles", "launcherProcess"), "file-descriptor admission")
+        val launcher = admission.objectField("launcherProcess")
+        launcher.exact(setOf("hostPid", "startTimeTicks", "inheritedSoftLimit", "inheritedHardLimit"), "launcher process")
+        val launcherObservation = ContainedCommandFileDescriptorObservation(launcher.number("hostPid"), launcher.number("startTimeTicks"),
+            ContainedCommandFileDescriptorLimits(launcher.number("inheritedSoftLimit"), launcher.number("inheritedHardLimit")))
+        require(admission == containedCommandFileDescriptorAdmission(policy, launcherObservation)) {
+            "module compiler file-descriptor admission differs from the independent host ceiling"
+        }
+        val limits = attachment.objectField("fileDescriptorLimits")
+        limits.exact(setOf("provider", "hostPid", "startTimeTicks", "softLimit", "hardLimit"), "actual file-descriptor limits")
+        val observed = ContainedCommandFileDescriptorObservation(limits.number("hostPid"), limits.number("startTimeTicks"),
+            ContainedCommandFileDescriptorLimits(limits.number("softLimit"), limits.number("hardLimit")))
+        require(limits == observed.json()) { "module compiler actual file-descriptor observation provider differs" }
+        observed.requireSelected(policy)
+        val processes = attachment.arrayField("processes").map { value ->
+            val process = value as? JsonObject ?: throw IllegalArgumentException("module compiler keeper process must be an object")
+            process.exact(setOf("role", "hostPid", "startTimeTicks", "parentRole", "namespacePids", "executableDevice",
+                "executableInode", "executableMountId"), "keeper process")
+            process
+        }
+        val keeper = requireNotNull(processes.singleOrNull { it.text("role") == "supervisor-jvm" }) {
+            "module compiler actual file-descriptor observation lacks its unique keeper"
+        }
+        observed.requireIdentity(keeper.number("hostPid"), keeper.number("startTimeTicks"))
+    }
+
     private fun bytes(value: JsonObject): ByteArray = OracleJson.canonicalBytes(value, LIMITS)
     private fun JsonObject.exact(fields: Set<String>, label: String) { require(keys == fields) { "module compiler $label fields differ" } }
     private fun JsonObject.objectField(field: String): JsonObject = this[field] as? JsonObject
         ?: throw IllegalArgumentException("module compiler $field must be an object")
+    private fun JsonObject.arrayField(field: String): JsonArray = this[field] as? JsonArray
+        ?: throw IllegalArgumentException("module compiler $field must be an array")
     private fun JsonObject.text(field: String): String = (this[field] as? JsonPrimitive)?.takeIf { it.isString }?.content
         ?: throw IllegalArgumentException("module compiler $field must be a string")
     private fun JsonObject.number(field: String): Long {
@@ -200,6 +324,9 @@ internal object ContainedModuleCompilationProof {
     private val EXECUTION_FIELDS = setOf("schemaVersion", "provider", "attachmentSha256", "requestSha256", "deploymentClosureSha256",
         "outcomeSha256", "outcome", "childExitCode", "derivationWallNanos", "unitAbsent", "cgroupAbsent", "processesAbsent", "releaseEligible",
         "cgroup", "terminalResourceEvidence", "controlDirectory", "controlDirectoryIdentity", "operationWallTime", "executionSha256")
+    private val RUNTIME_FIELDS = setOf("provider", "configurationSha256", "deploymentClosureSha256", "runtimeMounts", "readOnlyInputs",
+        "keeperEntryPoint", "requestVersion", "commandRequestProvider", "commandRequestSha256", "resources", "terminalResourcePolicySha256",
+        "fileDescriptorAdmission", "controlDirectory", "writableRoot", "readOnlyStateDirectory", "operationWallDeadline")
     private val LIMITS = StrictJsonLimits(maximumInputBytes = 4 * 1024 * 1024, maximumCanonicalBytes = 4 * 1024 * 1024,
         maximumDepth = 16, maximumNodes = 65536, maximumStringBytes = 65536, maximumTotalStringBytes = 4 * 1024 * 1024,
         maximumNumberCharacters = 32)
