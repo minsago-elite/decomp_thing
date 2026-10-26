@@ -126,15 +126,8 @@ internal class WebGitReads(private val repositories: () -> ManagedGitRepositorie
         }
         try {
             val view = repositories().conflictFile(jobId, repositoryId, worktree, fileId)
-            val supported = view.ours != null && view.theirs != null && (view.current != null || view.currentSize == null)
-            sendWebApiResponse(exchange, 200, "gitConflictFile", buildJsonObject {
-                put("repositoryId", repositoryId); put("worktreeId", view.worktreeId); put("file", conflictFile(view.entry, view.worktreeId))
-                put("base", view.base?.let(::JsonPrimitive) ?: JsonNull); put("ours", view.ours?.let(::JsonPrimitive) ?: JsonNull)
-                put("theirs", view.theirs?.let(::JsonPrimitive) ?: JsonNull); put("current", view.current?.let(::JsonPrimitive) ?: JsonNull)
-                put("currentSha256", view.currentSha256); put("currentSizeBytes", view.currentSize?.toString()?.let(::JsonPrimitive) ?: JsonNull)
-                put("supported", supported)
-                put("reason", if (supported) JsonNull else JsonPrimitive("A side is binary, deleted or larger than 256 KiB; resolve this file outside the workbench."))
-            })
+            sendWebApiResponse(exchange, 200, "gitConflictFile",
+                webGitConflictDetail(repositoryId, view, conflictFile(view.entry, view.worktreeId)))
         } catch (failure: ManagedGitException) { throw webGitDenied(failure) }
     }
 
