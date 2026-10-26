@@ -229,7 +229,12 @@ internal class WebAuditLog(
             fun entry(sequence: Long) = WebAuditEntry(sequence, clock.instant(), requestId?.takeIf(REQUEST_ID::matches), actor, action,
                 target.sanitized(), outcome, status.takeIf { it in 100..599 } ?: 500, reasonCode?.takeIf(REASON_CODE::matches))
             if (!opened && !Files.isDirectory(storeRoot, NOFOLLOW_LINKS)) {
-                if (pending.size >= MAXIMUM_PENDING_ENTRIES) { unrecorded++; return null }
+                if (pending.size >= MAXIMUM_PENDING_ENTRIES) {
+                    unrecorded++
+                    // The first storage-backed flush must retain this loss across restart too.
+                    knownLoss = true
+                    return null
+                }
                 return entry((pending.lastOrNull()?.sequence ?: 0L) + 1).also(pending::addLast)
             }
             withDirectory(create = true) { dir ->

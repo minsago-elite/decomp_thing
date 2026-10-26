@@ -171,6 +171,48 @@ class WebAuditLogTest {
         } finally { parent.toFile().deleteRecursively() }
     }
 
+    @Test fun `pending overflow remains known after a record flush and restart`() {
+        assertPendingOverflowSurvivesRestart(flushOnRead = false)
+    }
+
+    @Test fun `pending overflow remains known after a read flush and restart`() {
+        assertPendingOverflowSurvivesRestart(flushOnRead = true)
+    }
+
+    private fun assertPendingOverflowSurvivesRestart(flushOnRead: Boolean) {
+        val parent = root("pending-overflow")
+        val store = parent.resolve("jobs")
+        try {
+            val log = WebAuditLog(store, clock)
+            repeat(WebAuditLog.MAXIMUM_PENDING_ENTRIES) { assertEquals((it + 1).toLong(), log.cancel()?.sequence) }
+            assertNull(log.cancel(), "overflow must be dropped rather than grow the buffer")
+            assertEquals(1, log.read().unrecordedEntries)
+            assertFalse(Files.exists(store), "even overflow must not create job storage")
+            Files.createDirectory(store)
+            val retained = WebAuditLog.MAXIMUM_PENDING_ENTRIES + if (flushOnRead) 0 else 1
+            if (flushOnRead) log.read(limit = WebAuditLog.MAXIMUM_READ_ENTRIES)
+            else assertEquals(retained.toLong(), log.cancel()?.sequence)
+            for (reader in listOf(log, WebAuditLog(store, clock))) {
+                val page = reader.read(limit = WebAuditLog.MAXIMUM_READ_ENTRIES)
+                assertEquals((1L..retained.toLong()).toList(), page.entries.map { it.sequence })
+                assertEquals(0, page.omittedBefore)
+                assertEquals(1, page.unrecordedEntries, "flush and restart must preserve known overflow")
+                assertFalse(page.complete, "an uncapped history must remain incomplete after loss")
+                val exported = reader.read(limit = 100)
+                assertEquals(100, exported.entries.size)
+                assertEquals((retained - 100).toLong(), exported.omittedBefore)
+                assertEquals("1", exported.toJson().getValue("unrecordedEntries").toString().trim('"'))
+                assertFalse(exported.complete)
+            }
+            assertEquals("1", Files.readString(store.resolve(".web-audit/incomplete")))
+            val reopened = WebAuditLog(store, clock)
+            assertEquals(retained.toLong() + 1, reopened.cancel()?.sequence)
+            assertEquals(1, WebAuditLog(store, clock).read().unrecordedEntries,
+                "later successful records must not clear the loss marker")
+            assertFalse(WebAuditLog(store, clock).read(limit = WebAuditLog.MAXIMUM_READ_ENTRIES).complete)
+        } finally { parent.toFile().deleteRecursively() }
+    }
+
     @Test fun `new audit directories and segments are made durable before a record is reported`() {
         val root = root("dirsync")
         try {
