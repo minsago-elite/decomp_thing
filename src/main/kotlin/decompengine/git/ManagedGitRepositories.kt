@@ -856,7 +856,7 @@ class ManagedGitRepositories(
                 if (observation.head.state != GitHeadState.ATTACHED) GitWorkspaceMutations.refuse("DETACHED",
                     "The work tree is not on a branch. Switch to the branch you want to integrate into first.")
                 val entries = relevant(observation)
-                if (entries.any { it.conflict != null || it.staged != GitIndexChange.NONE || it.unstaged != GitIndexChange.NONE }) {
+                if (!observation.status.complete || entries.any { it.untracked || it.conflict != null || it.staged != GitIndexChange.NONE || it.unstaged != GitIndexChange.NONE }) {
                     GitWorkspaceMutations.refuse("WORKTREE_DIRTY", "The work tree has uncommitted changes. Commit them, or unstage and keep them, before integrating.")
                 }
                 val tracking = trackingRef(runner, located, request.parameters["trackingRefId"])

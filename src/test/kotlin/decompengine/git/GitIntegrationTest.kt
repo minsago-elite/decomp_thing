@@ -114,6 +114,9 @@ class GitIntegrationTest {
         assertEquals(1L, fetched.divergence.behind); assertEquals(0L, fetched.divergence.ahead)
         refused("STRATEGY_UNSUPPORTED", GitOperationAction.MERGE, merge("rebase"))
         refused("REF_CHANGED", GitOperationAction.MERGE, merge("fast-forward", target = "1".repeat(40)))
+        Files.writeString(f.workTree().resolve("unreviewed.c"), "int unreviewed;\n")
+        refused("WORKTREE_DIRTY", GitOperationAction.MERGE, merge("fast-forward"))
+        Files.delete(f.workTree().resolve("unreviewed.c"))
         Files.writeString(f.workTree().resolve("README.md"), "dirty\n")
         refused("WORKTREE_DIRTY", GitOperationAction.MERGE, merge("fast-forward"))
         Files.writeString(f.workTree().resolve("README.md"), "line one\nline two\n")
@@ -324,6 +327,18 @@ class GitIntegrationTest {
         refused("UNRESOLVED_MARKERS", GitOperationAction.CONFLICT_COMPLETE, content = "$fileId ${detail.currentSha256}\n")
         assertTrue(GitIntegrations.hasMarkers("a\n" + ">".repeat(32) + " theirs\n", 32))
         assertFalse(GitIntegrations.hasMarkers("a\n" + "<".repeat(40) + "\n", 32))
+    }
+
+    @Test fun `marker widths above 1024 cannot bypass completion`(): Unit = Fixture().use { f ->
+        f.cloned()
+        Files.writeString(f.seed.resolve(".gitattributes"), "README.md conflict-marker-size=2048\n"); f.remoteCommit("very wide markers")
+        forward()
+        val fileId = f.conflictOn("README.md")
+        val detail = service.conflictFile(jobId, repositoryId, null, fileId)
+        assertTrue(checkNotNull(detail.current).startsWith("line one\n" + "<".repeat(2048) + " "))
+        refused("UNRESOLVED_MARKERS", GitOperationAction.CONFLICT_COMPLETE, content = "$fileId ${detail.currentSha256}\n")
+        assertEquals(1, service.conflicts(jobId, repositoryId, null).files.size)
+        assertFalse(GitIntegrations.hasMarkers("short line", Int.MAX_VALUE))
     }
 
     @Test fun `the content digest is streamed and matches the file bytes`(): Unit = Fixture().use { f ->

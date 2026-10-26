@@ -159,7 +159,7 @@ internal object GitIntegrations {
         val result = runner.run(GitInvocation("check-attr", listOf("-z", "conflict-marker-size", "--", path), gitDir = gitDir,
             workTree = workTree, limits = LIMITS))
         val value = result.stdout.toString(Charsets.UTF_8).split('\u0000').getOrNull(2)
-        return value?.toIntOrNull()?.takeIf { it in 1..1024 } ?: DEFAULT_MARKER_SIZE
+        return value?.toIntOrNull()?.takeIf { it > 0 } ?: DEFAULT_MARKER_SIZE
     }
 
     /**
@@ -168,8 +168,11 @@ internal object GitIntegrations {
      */
     fun hasMarkers(text: String, size: Int = DEFAULT_MARKER_SIZE): Boolean = text.lineSequence().any { line ->
         setOf(size, DEFAULT_MARKER_SIZE).any { width ->
-            listOf('<', '>', '|').any { marker -> line.startsWith(marker.toString().repeat(width)) && (line.length == width || line[width] == ' ') } ||
-                line == "=".repeat(width)
+            // Compare against the bounded line, never allocate an attribute-controlled marker string.
+            width > 0 && line.length >= width && (
+                listOf('<', '>', '|').any { marker ->
+                    (line.length == width || line[width] == ' ') && (0 until width).all { line[it] == marker }
+                } || (line.length == width && line.all { it == '=' }))
         }
     }
 }
