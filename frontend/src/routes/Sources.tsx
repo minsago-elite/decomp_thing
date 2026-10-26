@@ -15,6 +15,11 @@ import type { DirectorySelection, FileSelection, SourceHistoryEntry, SourceReadS
 import { SourcePreview } from '../sources/SourcePreview';
 import { SourceDigestCheck } from '../sources/SourceDigestCheck';
 import { sourcePosition } from '../sources/viewer';
+import { SourceSearch } from '../sources/SourceSearch';
+import { sourceSearchPath } from '../sources/search';
+import { SourceDiff, SourceFileDiff } from '../sources/SourceDiff';
+import { SourceArchive } from '../sources/SourceArchive';
+import { sourceDiffPath, sourceDiffSelection, sourceFileDiffSelection } from '../sources/diff';
 
 import { acceptReceipt, receiptOf } from '../shared/receiptTime';
 import { MetadataReceipt } from '../shared/MetadataReceipt';
@@ -35,7 +40,7 @@ function Context({ selected, sourceSha256 }: { selected: SourceSelection; source
   </dl>;
 }
 
-function Directory({ selected, basePath, pin, search, historyEntry }: { selected: DirectorySelection; basePath: string; pin: SourceSnapshotPin | null; search: string; historyEntry: SourceHistoryEntry }) {
+function Directory({ selected, basePath, pin, search, historyEntry, session }: { selected: DirectorySelection; basePath: string; pin: SourceSnapshotPin | null; search: string; historyEntry: SourceHistoryEntry; session: Pick<BrowserSession, 'csrf'> }) {
   const location = useLocation();
   const { client } = usePrivateTransport(basePath);
   const heading = useRef<HTMLHeadingElement>(null);
@@ -82,6 +87,8 @@ function Directory({ selected, basePath, pin, search, historyEntry }: { selected
     <Context selected={selected} {...(data ? { sourceSha256: data.sourceSha256 } : {})} />
     <p>{copy.metadataNotice}</p><p>{copy.browseLimitation}</p><p>{copy.emptyDirectories}</p>
     {effectivePin && <p>{copy.pinnedSnapshot}</p>}
+    <p><a href={sourceSearchPath(basePath, selected, selected.directoryId)}>{copy.searchDirectory}</a></p>
+    <p><a href={sourceDiffPath(basePath, selected)}>{copy.compareRevisions}</a></p>
     <button type="button" disabled={loading} onClick={first}>{copy.refresh}</button>
     {loading && <p role="status">{copy.loading}</p>}
     {current.state === 'failed' && <p role="alert">{sourceReadMessage(current.failure)}</p>}
@@ -103,7 +110,8 @@ function Directory({ selected, basePath, pin, search, historyEntry }: { selected
             : sourceFilePath(basePath, selected, item.fileId, effectivePin ?? undefined)}><bdi>{item.displayName}</bdi></a>
           <p>{item.kind === 'directory' ? copy.directory : copy.file}</p>
           {item.kind === 'directory' ? <p>{message(copy.descendants, { count: item.sourceFileCount })}</p>
-            : <><p>{formatExactBytes(item.sizeBytes)}</p><p>{item.declaredUtf8Text ? copy.declaredText : copy.declaredBinary}</p>
+            : <><p>{item.sizeBytes === null ? copy.sizeNotRecorded : formatExactBytes(item.sizeBytes)}</p>
+              <p>{copy.commitmentShort[item.commitment]}</p><p>{item.declaredUtf8Text ? copy.declaredText : copy.declaredBinary}</p>
               <p>{item.declaredViewable ? copy.declaredViewable : copy.notViewable}</p></>}
         </li>)}
       </ul>
@@ -117,6 +125,7 @@ function Directory({ selected, basePath, pin, search, historyEntry }: { selected
         }
       }}>{copy.next}</button>
     </nav>
+    {selected.directoryId === 'root' && <SourceArchive selected={selected} basePath={basePath} session={session} />}
   </>;
 }
 
@@ -170,12 +179,15 @@ function File({ selected, basePath, runtime, search, pin, historyEntry }: { sele
     {effectivePin && <p>{copy.pinnedSnapshot}</p>}
     <button type="button" disabled={loading} onClick={() => setRefresh(value => value + 1)}>{copy.refreshFile}</button>
     {loading && <p role="status">{copy.readingFile}</p>}
-    {current.state === 'failed' && <p role="alert">{sourceReadMessage(current.failure)}</p>}
+    {current.state === 'failed' && <p role="alert">{removedFile(current.failure) ? copy.removedFile : sourceReadMessage(current.failure)}</p>}
+    {current.state === 'failed' && removedFile(current.failure) && <p>
+      <a href={sourceDirectoryPath(basePath, selected)}>{copy.returnDirectory}</a> <a href={sourceDiffPath(basePath, selected)}>{copy.compareRevisions}</a></p>}
     {data && policy && <>
       <MetadataReceipt kind="file" receipt={receiptOf(data)} />
       <p><a href={sourceDirectoryPath(basePath, selected, data.parentDirectoryId, undefined, effectivePin ?? undefined)}>{copy.returnDirectory}</a></p>
       <h2><bdi>{data.item.displayName}</bdi></h2>
-      <dl class="job-facts"><dt>{copy.size}</dt><dd>{formatExactBytes(data.item.sizeBytes)}</dd>
+      <dl class="job-facts"><dt>{copy.size}</dt><dd>{data.item.sizeBytes === null ? copy.sizeNotRecorded : formatExactBytes(data.item.sizeBytes)}</dd>
+        <dt>{copy.commitment}</dt><dd>{copy.commitments[data.item.commitment]}</dd>
         <dt>{copy.fileDigest}</dt><dd><code>{data.item.sha256}</code></dd>
         <dt>{copy.implementationDeclaration}</dt><dd>{copy.implementationDeclarations[data.implementationDeclaration ?? 'not-classified']}</dd>
       </dl>
@@ -217,9 +229,14 @@ function File({ selected, basePath, runtime, search, pin, historyEntry }: { sele
   </>;
 }
 
+/** A file identity from another revision (or a removed file) is not registered in this one. */
+function removedFile(failure: unknown): boolean {
+  return failure instanceof ApiClientError && failure.status === 404 && failure.serverCode === 'SOURCE_FILE_NOT_FOUND';
+}
+
 export default function Sources({ jobId, runId, revisionId, directoryId, fileId, resource, basePath, session }: {
   jobId: string; runId: string; revisionId: string; directoryId?: string; fileId?: string;
-  resource: 'directory' | 'file'; basePath: string; session: BrowserSession | null;
+  resource: 'directory' | 'file' | 'search' | 'diff' | 'file-diff'; basePath: string; session: BrowserSession | null;
 }) {
   const state = useSession(session);
   const location = useLocation();
@@ -242,10 +259,16 @@ export default function Sources({ jobId, runId, revisionId, directoryId, fileId,
   let search = ''; let pin: SourceSnapshotPin | null = null;
   let valid = true;
   try {
-    sourceReadRoute(selected, resource, (resource === 'directory' ? directoryId : fileId) ?? '');
-    const query = sourceSnapshotSelection(rawSearch); search = query.search; pin = query.pin;
-    if (resource === 'directory') sourceCursor(search);
-    if (resource === 'file') sourcePosition(search);
+    // The search view validates its own closed query and reports an invalid address in place.
+    if (resource === 'search') sourceSearchPath(basePath, selected);
+    else if (resource === 'diff') { sourceDiffPath(basePath, selected); sourceDiffSelection(rawSearch); }
+    else if (resource === 'file-diff') { sourceDiffPath(basePath, selected); sourceFileDiffSelection(rawSearch); }
+    else {
+      sourceReadRoute(selected, resource, (resource === 'directory' ? directoryId : fileId) ?? '');
+      const query = sourceSnapshotSelection(rawSearch); search = query.search; pin = query.pin;
+      if (resource === 'directory') sourceCursor(search);
+      if (resource === 'file') sourcePosition(search);
+    }
   } catch { valid = false; }
   // Native fragment navigation keeps the installed public pin even while the
   // router still carries the original unpinned search. Each fragment owns its read.
@@ -254,13 +277,20 @@ export default function Sources({ jobId, runId, revisionId, directoryId, fileId,
   const historyEntry = useMemo<SourceHistoryEntry>(() => ({ pathname: uri.pathname, search: rawSearch, hash, snapshot }),
     [snapshot, hash]);
   return <section class="source-navigation" aria-labelledby="source-title">
-    <h1 id="source-title">{resource === 'directory' ? copy.title : copy.fileTitle}</h1>
+    <h1 id="source-title">{resource === 'directory' ? copy.title : resource === 'search' ? copy.searchTitle
+      : resource === 'diff' ? copy.diffTitle : resource === 'file-diff' ? copy.fileDiffTitle : copy.fileTitle}</h1>
     {valid ? <>
       <p><a href={runPath(basePath, jobId, runId)}>{copy.returnAttempt}</a></p>
       {session && state?.status === 'authenticated'
-        ? resource === 'directory'
+        ? resource === 'diff'
+          ? <SourceDiff key={`${state.generation}/${jobId}/${runId}/${revisionId}`} selected={selected} basePath={basePath} search={rawSearch} />
+          : resource === 'file-diff'
+          ? <SourceFileDiff key={`${state.generation}/${jobId}/${runId}/${revisionId}`} selected={selected} basePath={basePath} search={rawSearch} />
+          : resource === 'search'
+          ? <SourceSearch key={`${state.generation}/${jobId}/${runId}/${revisionId}/${rawSearch}`} selected={selected} basePath={basePath} search={rawSearch} />
+          : resource === 'directory'
           ? <Directory key={`${state.generation}/${jobId}/${runId}/${revisionId}/${directoryId ?? ''}/${pin?.sourceSha256}/${pin?.metadataVersion}`}
-              selected={{ ...selected, directoryId: directoryId ?? '' }} basePath={basePath} pin={pin} search={search} historyEntry={historyEntry} />
+              selected={{ ...selected, directoryId: directoryId ?? '' }} basePath={basePath} pin={pin} search={search} historyEntry={historyEntry} session={session} />
           : <File key={`${state.generation}/${jobId}/${runId}/${revisionId}/${fileId ?? ''}`}
               selected={{ ...selected, fileId: fileId ?? '' }} basePath={basePath} runtime={state.runtime} search={search} pin={pin} historyEntry={historyEntry} />
         : <p>{copy.connect}</p>}

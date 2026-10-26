@@ -62,7 +62,7 @@ internal fun canonicalSpaDocumentPath(base: String, path: String): String? {
         "${base}runtime/" -> "${base}runtime"
         "${base}upload/" -> "${base}upload"
         else -> path.takeIf { it.startsWith("${base}jobs/") &&
-            it.removePrefix("${base}jobs/").matches(Regex("[0-9a-f]{32}(?:/runs(?:/$id(?:/(?:activity|evidence)|/revisions/$id/(?:sources|source-files)/$id)?)?)?/?")) }?.removeSuffix("/")
+            it.removePrefix("${base}jobs/").matches(Regex("[0-9a-f]{32}(?:/runs(?:/$id(?:/(?:activity|evidence)|/revisions/$id/(?:(?:sources|source-files)/$id|source-search|source-diff(?:/file)?))?)?)?/?")) }?.removeSuffix("/")
     }
 }
 
@@ -301,8 +301,10 @@ class UploadServer(
     private val gitRepositories = decompengine.git.ManagedGitRepositories(store.storageRoot, gitAvailability,
         jobs::gitSourceSnapshot, gitImportRoot)
     private val api = spaAssets?.let { WebApiController(access, it, jobs, jobMutations, streamResources,
-        harnessReadiness = harnessReadiness, agentPreflight = agentPreflight,
+        harnessReadiness = harnessReadiness, agentPreflight = agentPreflight, archiveEvidence = archiveEvidence,
         git = WebGitCapability(gitAvailability, gitRepositories)) }
+    /** Admitted artifact downloads that have not yet released their stream; test evidence helper. */
+    internal fun activeArtifactDownloads(): Int = api?.artifactDownloads?.activeCount() ?: 0
     // A request that finds every worker and queue slot taken is answered by this tiny pool with a stable 429
     // instead of a reset connection. It has no queue, so overload still never buffers more than the main pool does;
     // when it too is busy the rejection propagates and the dispatcher closes the connection, as before.
@@ -379,8 +381,10 @@ class UploadServer(
             }
             val upload = exchange.requestMethod == "POST" &&
                 exchange.requestHeaders.getFirst("Content-Type")?.startsWith("multipart/form-data", true) == true
-            val deadline = requestDeadlines.schedule({ exchange.close() }, if (upload) 120 else 30, TimeUnit.SECONDS)
-            try { route(exchange) } finally { deadline.cancel(false) }
+            val deadline = WebRequestDeadline(requestDeadlines, exchange, if (upload) 120_000 else 30_000)
+            // Exchange attributes live in the shared HttpContext; keep the deadline keyed by this exchange instead.
+            WebRequestDeadline.register(exchange, deadline)
+            try { route(exchange) } finally { WebRequestDeadline.release(exchange); deadline.cancel() }
         }
     }
 
@@ -460,31 +464,37 @@ class UploadServer(
         harnessReadiness.close()
         agentPreflight.close()
         access.close()
-        gitRepositories.close()
-        jobs.close()
-        var inspectionWaitInterrupted = false
+        var restoreInterrupt = callerWasInterrupted
         try {
-            check(inspection === null || inspection !== Thread.currentThread()) { "Inspection cannot await its own shutdown" }
-            // The provider owns its cleanup deadlines. Do not truncate them with a web timeout,
-            // including when the shutdown caller is interrupted while cleanup is still running.
-            while (inspection?.isAlive == true) {
-                try { inspection.join() } catch (_: InterruptedException) { inspectionWaitInterrupted = true }
+            // Archive verification reads job storage; an unfinished verifier keeps ownership by failing shutdown here.
+            // Its standalone close restores interruption; defer that flag until the job service and ownership cleanup finish.
+            try { api?.close() }
+            finally { restoreInterrupt = Thread.interrupted() || restoreInterrupt }
+            gitRepositories.close()
+            jobs.close()
+            try {
+                check(inspection === null || inspection !== Thread.currentThread()) { "Inspection cannot await its own shutdown" }
+                // The provider owns its cleanup deadlines. Do not truncate them with a web timeout,
+                // including when the shutdown caller is interrupted while cleanup is still running.
+                while (inspection?.isAlive == true) {
+                    try { inspection.join() } catch (_: InterruptedException) { restoreInterrupt = true }
+                }
+            } catch (exception: Exception) {
+                if (exception is InterruptedException) restoreInterrupt = true
             }
-        } catch (exception: Exception) {
-            if (exception is InterruptedException) Thread.currentThread().interrupt()
+            // Interrupting the executor does not mean admitted handlers have finished their finally blocks.
+            // Admission is closed, so reaching zero here is permanent. Never hold lifecycleLock while waiting.
+            val requestDeadline = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(requestShutdownTimeoutMs)
+            while (requestsDrained.count != 0L) {
+                val remaining = requestDeadline - System.nanoTime()
+                if (remaining <= 0) break
+                try { requestsDrained.await(remaining, TimeUnit.NANOSECONDS) }
+                catch (_: InterruptedException) { restoreInterrupt = true }
+            }
+            if (!releaseOwnershipIfIdle()) throw IllegalStateException("HTTP requests remain active after server stop")
+        } finally {
+            if (restoreInterrupt) Thread.currentThread().interrupt()
         }
-        // Interrupting the executor does not mean admitted handlers have finished their finally blocks.
-        // Admission is closed, so reaching zero here is permanent. Never hold lifecycleLock while waiting.
-        var requestWaitInterrupted = false
-        val requestDeadline = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(requestShutdownTimeoutMs)
-        while (requestsDrained.count != 0L) {
-            val remaining = requestDeadline - System.nanoTime()
-            if (remaining <= 0) break
-            try { requestsDrained.await(remaining, TimeUnit.NANOSECONDS) }
-            catch (_: InterruptedException) { requestWaitInterrupted = true }
-        }
-        if (callerWasInterrupted || inspectionWaitInterrupted || requestWaitInterrupted) Thread.currentThread().interrupt()
-        if (!releaseOwnershipIfIdle()) throw IllegalStateException("HTTP requests remain active after server stop")
     }
 
     /** Admission covers the whole handler, including upload publication and error handling. */

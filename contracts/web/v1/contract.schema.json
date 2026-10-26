@@ -164,97 +164,6 @@
       ],
       "additionalProperties": false
     },
-    "workflowLaunch": {
-      "type": "object",
-      "description": "Server-reported launch facts for one registered workflow option. They describe the adapter; admission rechecks capability, limits and readiness.",
-      "properties": {
-        "harnessCapabilityId": {
-          "anyOf": [
-            {
-              "$ref": "#/definitions/id"
-            },
-            {
-              "type": "null"
-            }
-          ]
-        },
-        "mode": {
-          "type": "string",
-          "enum": [
-            "tools",
-            "agent",
-            "evidence-only"
-          ]
-        },
-        "executesBinary": {
-          "type": "boolean"
-        },
-        "contactsAgent": {
-          "type": "boolean"
-        },
-        "requiredTools": {
-          "type": "array",
-          "items": {
-            "type": "string",
-            "enum": [
-              "sandbox",
-              "ghidra",
-              "agent-harness",
-              "c-toolchain",
-              "angr"
-            ]
-          },
-          "maxItems": 8,
-          "uniqueItems": true
-        },
-        "input": {
-          "type": "string",
-          "enum": [
-            "none",
-            "accepted-optional",
-            "recorded-required"
-          ]
-        },
-        "limitsAdjustable": {
-          "type": "boolean"
-        }
-      },
-      "required": [
-        "harnessCapabilityId",
-        "mode",
-        "executesBinary",
-        "contactsAgent",
-        "requiredTools",
-        "input",
-        "limitsAdjustable"
-      ],
-      "additionalProperties": false,
-      "allOf": [
-        {
-          "if": {
-            "properties": {
-              "mode": {
-                "const": "agent"
-              }
-            }
-          },
-          "then": {
-            "properties": {
-              "contactsAgent": {
-                "const": true
-              }
-            }
-          },
-          "else": {
-            "properties": {
-              "contactsAgent": {
-                "const": false
-              }
-            }
-          }
-        }
-      ]
-    },
     "capability": {
       "type": "object",
       "properties": {
@@ -1014,6 +923,21 @@
             {
               "type": "null"
             }
+          ]
+        },
+        "family": {
+          "enum": [
+            "exploration-report",
+            "progress-journal",
+            "source-manifest",
+            "build-contract",
+            "source-archive"
+          ]
+        },
+        "verification": {
+          "enum": [
+            "not-verified",
+            "source-inventory-checked"
           ]
         }
       },
@@ -3317,7 +3241,15 @@
           "pattern": "^(?!/)[^\\\\\\u0000-\\u001f\\u007f:]+$"
         },
         "sizeBytes": {
-          "$ref": "#/definitions/uint64"
+          "anyOf": [
+            {
+              "$ref": "#/definitions/uint64"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Committed size of a canonical source input; manifest-only entries record no size."
         },
         "sha256": {
           "$ref": "#/definitions/sha256"
@@ -3327,6 +3259,14 @@
         },
         "declaredViewable": {
           "type": "boolean"
+        },
+        "commitment": {
+          "type": "string",
+          "enum": [
+            "source-input",
+            "manifest-digest"
+          ],
+          "description": "source-input entries belong to the revision source digest; manifest-digest entries are bound only by the manifest digest."
         }
       },
       "required": [
@@ -3335,9 +3275,35 @@
         "sizeBytes",
         "sha256",
         "declaredUtf8Text",
-        "declaredViewable"
+        "declaredViewable",
+        "commitment"
       ],
-      "additionalProperties": false
+      "additionalProperties": false,
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "commitment": {
+                "const": "source-input"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "sizeBytes": {
+                "$ref": "#/definitions/uint64"
+              }
+            }
+          },
+          "else": {
+            "properties": {
+              "sizeBytes": {
+                "type": "null"
+              }
+            }
+          }
+        }
+      ]
     },
     "revisionSources": {
       "type": "object",
@@ -3426,7 +3392,15 @@
           "$ref": "#/definitions/revisionDirectoryLabel"
         },
         "sizeBytes": {
-          "$ref": "#/definitions/uint64"
+          "anyOf": [
+            {
+              "$ref": "#/definitions/uint64"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Committed size of a canonical source input; manifest-only entries record no size."
         },
         "sha256": {
           "$ref": "#/definitions/sha256"
@@ -3436,6 +3410,14 @@
         },
         "declaredViewable": {
           "type": "boolean"
+        },
+        "commitment": {
+          "type": "string",
+          "enum": [
+            "source-input",
+            "manifest-digest"
+          ],
+          "description": "source-input entries belong to the revision source digest; manifest-digest entries are bound only by the manifest digest."
         }
       },
       "required": [
@@ -3445,9 +3427,35 @@
         "sizeBytes",
         "sha256",
         "declaredUtf8Text",
-        "declaredViewable"
+        "declaredViewable",
+        "commitment"
       ],
-      "additionalProperties": false
+      "additionalProperties": false,
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "commitment": {
+                "const": "source-input"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "sizeBytes": {
+                "$ref": "#/definitions/uint64"
+              }
+            }
+          },
+          "else": {
+            "properties": {
+              "sizeBytes": {
+                "type": "null"
+              }
+            }
+          }
+        }
+      ]
     },
     "revisionDirectoryChild": {
       "type": "object",
@@ -3778,7 +3786,15 @@
           "pattern": "^(?!/)[^\\\\\\u0000-\\u001f\\u007f:]+$"
         },
         "sizeBytes": {
-          "$ref": "#/definitions/uint64"
+          "anyOf": [
+            {
+              "$ref": "#/definitions/uint64"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Committed size of a canonical source input; manifest-only entries record no size."
         },
         "sha256": {
           "$ref": "#/definitions/sha256"
@@ -3791,6 +3807,14 @@
         },
         "declaredArchivable": {
           "type": "boolean"
+        },
+        "commitment": {
+          "type": "string",
+          "enum": [
+            "source-input",
+            "manifest-digest"
+          ],
+          "description": "source-input entries belong to the revision source digest; manifest-digest entries are bound only by the manifest digest."
         }
       },
       "required": [
@@ -3800,9 +3824,35 @@
         "sha256",
         "declaredUtf8Text",
         "declaredViewable",
-        "declaredArchivable"
+        "declaredArchivable",
+        "commitment"
       ],
-      "additionalProperties": false
+      "additionalProperties": false,
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "commitment": {
+                "const": "source-input"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "sizeBytes": {
+                "$ref": "#/definitions/uint64"
+              }
+            }
+          },
+          "else": {
+            "properties": {
+              "sizeBytes": {
+                "type": "null"
+              }
+            }
+          }
+        }
+      ]
     },
     "revisionFile": {
       "type": "object",
@@ -5074,6 +5124,1861 @@
             "SESSION_QUARANTINED",
             "CLEANUP_UNVERIFIED"
           ]
+        }
+      ]
+    },
+    "artifacts": {
+      "type": "object",
+      "properties": {
+        "binding": {
+          "$ref": "#/definitions/binding"
+        },
+        "catalogedFamilies": {
+          "type": "array",
+          "items": {
+            "enum": [
+              "exploration-report",
+              "progress-journal",
+              "source-manifest",
+              "build-contract",
+              "source-archive"
+            ]
+          },
+          "minItems": 1,
+          "maxItems": 5,
+          "uniqueItems": true
+        },
+        "unavailableFiles": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 200
+        },
+        "items": {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/artifact"
+          },
+          "maxItems": 200
+        },
+        "page": {
+          "$ref": "#/definitions/page"
+        }
+      },
+      "required": [
+        "binding",
+        "catalogedFamilies",
+        "unavailableFiles",
+        "items",
+        "page"
+      ],
+      "additionalProperties": false
+    },
+    "sourceSearchMatch": {
+      "type": "object",
+      "properties": {
+        "fileId": {
+          "$ref": "#/definitions/id"
+        },
+        "displayName": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 4096,
+          "pattern": "^(?!/)[^\\\\\\u0000-\\u001f\\u007f:]+$"
+        },
+        "sha256": {
+          "$ref": "#/definitions/sha256"
+        },
+        "line": {
+          "$ref": "#/definitions/uint64"
+        },
+        "column": {
+          "$ref": "#/definitions/uint64"
+        },
+        "offsetBytes": {
+          "$ref": "#/definitions/uint64"
+        },
+        "lineOffsetBytes": {
+          "$ref": "#/definitions/uint64"
+        },
+        "before": {
+          "type": "string",
+          "maxLength": 160
+        },
+        "match": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256
+        },
+        "after": {
+          "type": "string",
+          "maxLength": 160
+        },
+        "truncatedBefore": {
+          "type": "boolean"
+        },
+        "truncatedAfter": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "fileId",
+        "displayName",
+        "sha256",
+        "line",
+        "column",
+        "offsetBytes",
+        "lineOffsetBytes",
+        "before",
+        "match",
+        "after",
+        "truncatedBefore",
+        "truncatedAfter"
+      ],
+      "additionalProperties": false
+    },
+    "sourceSearch": {
+      "type": "object",
+      "properties": {
+        "binding": {
+          "type": "object",
+          "properties": {
+            "jobId": {
+              "$ref": "#/definitions/id"
+            },
+            "runId": {
+              "$ref": "#/definitions/id"
+            },
+            "revisionId": {
+              "$ref": "#/definitions/id"
+            }
+          },
+          "required": [
+            "jobId",
+            "runId",
+            "revisionId"
+          ],
+          "additionalProperties": false
+        },
+        "authority": {
+          "const": "source-input-commitments"
+        },
+        "sourceSha256": {
+          "$ref": "#/definitions/sha256"
+        },
+        "metadataVersion": {
+          "$ref": "#/definitions/sha256"
+        },
+        "query": {
+          "type": "object",
+          "properties": {
+            "text": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 256
+            },
+            "match": {
+              "enum": [
+                "text",
+                "symbol"
+              ]
+            },
+            "caseSensitive": {
+              "type": "boolean"
+            },
+            "directoryId": {
+              "$ref": "#/definitions/id"
+            },
+            "path": {
+              "anyOf": [
+                {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 512
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            }
+          },
+          "required": [
+            "text",
+            "match",
+            "caseSensitive",
+            "directoryId",
+            "path"
+          ],
+          "additionalProperties": false
+        },
+        "index": {
+          "const": "none"
+        },
+        "status": {
+          "enum": [
+            "complete",
+            "partial"
+          ]
+        },
+        "stopReason": {
+          "anyOf": [
+            {
+              "enum": [
+                "result-limit",
+                "byte-limit",
+                "deadline"
+              ]
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "scope": {
+          "type": "object",
+          "properties": {
+            "filesInScope": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 25000
+            },
+            "searchableFiles": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 25000
+            },
+            "notViewable": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 25000
+            },
+            "declaredBinary": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 25000
+            },
+            "tooLarge": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 25000
+            }
+          },
+          "required": [
+            "filesInScope",
+            "searchableFiles",
+            "notViewable",
+            "declaredBinary",
+            "tooLarge"
+          ],
+          "additionalProperties": false
+        },
+        "progress": {
+          "type": "object",
+          "properties": {
+            "scannedFiles": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 25000
+            },
+            "scannedBytes": {
+              "$ref": "#/definitions/uint64"
+            },
+            "unsearchableText": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 25000
+            },
+            "unavailableFiles": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 25000
+            },
+            "remainingFiles": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 25000
+            }
+          },
+          "required": [
+            "scannedFiles",
+            "scannedBytes",
+            "unsearchableText",
+            "unavailableFiles",
+            "remainingFiles"
+          ],
+          "additionalProperties": false
+        },
+        "coverageGaps": {
+          "type": "object",
+          "properties": {
+            "unsearchableText": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 25000
+            },
+            "unavailableFiles": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 25000
+            }
+          },
+          "required": [
+            "unsearchableText",
+            "unavailableFiles"
+          ],
+          "additionalProperties": false
+        },
+        "limits": {
+          "type": "object",
+          "properties": {
+            "maxResults": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 100
+            },
+            "maxScannedBytes": {
+              "$ref": "#/definitions/uint64"
+            },
+            "deadlineMs": {
+              "$ref": "#/definitions/uint64"
+            }
+          },
+          "required": [
+            "maxResults",
+            "maxScannedBytes",
+            "deadlineMs"
+          ],
+          "additionalProperties": false
+        },
+        "items": {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/sourceSearchMatch"
+          },
+          "maxItems": 100
+        },
+        "page": {
+          "$ref": "#/definitions/page"
+        }
+      },
+      "required": [
+        "binding",
+        "authority",
+        "sourceSha256",
+        "metadataVersion",
+        "query",
+        "index",
+        "status",
+        "stopReason",
+        "scope",
+        "progress",
+        "coverageGaps",
+        "limits",
+        "items",
+        "page"
+      ],
+      "additionalProperties": false
+    },
+    "sourceDiffFile": {
+      "type": "object",
+      "description": "One side of a compared entry: the same opaque identity and recorded facts as the revision file list.",
+      "properties": {
+        "fileId": {
+          "$ref": "#/definitions/id"
+        },
+        "displayName": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 4096,
+          "pattern": "^(?!/)[^\\\\\\u0000-\\u001f\\u007f:]+$"
+        },
+        "sizeBytes": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/uint64"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Committed size of a canonical source input; manifest-only entries record no size."
+        },
+        "sha256": {
+          "$ref": "#/definitions/sha256"
+        },
+        "declaredUtf8Text": {
+          "type": "boolean"
+        },
+        "declaredViewable": {
+          "type": "boolean"
+        },
+        "commitment": {
+          "type": "string",
+          "enum": [
+            "source-input",
+            "manifest-digest"
+          ],
+          "description": "source-input entries belong to the revision source digest; manifest-digest entries are bound only by the manifest digest."
+        }
+      },
+      "required": [
+        "fileId",
+        "displayName",
+        "sizeBytes",
+        "sha256",
+        "declaredUtf8Text",
+        "declaredViewable",
+        "commitment"
+      ],
+      "additionalProperties": false,
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "commitment": {
+                "const": "source-input"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "sizeBytes": {
+                "$ref": "#/definitions/uint64"
+              }
+            }
+          },
+          "else": {
+            "properties": {
+              "sizeBytes": {
+                "type": "null"
+              }
+            }
+          }
+        }
+      ]
+    },
+    "sourceDiffEntry": {
+      "type": "object",
+      "properties": {
+        "status": {
+          "type": "string",
+          "enum": [
+            "added",
+            "removed",
+            "modified",
+            "renamed"
+          ]
+        },
+        "baseFile": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/sourceDiffFile"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "headFile": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/sourceDiffFile"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "status",
+        "baseFile",
+        "headFile"
+      ],
+      "additionalProperties": false,
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "status": {
+                "const": "added"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "baseFile": {
+                "type": "null"
+              },
+              "headFile": {
+                "$ref": "#/definitions/sourceDiffFile"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "status": {
+                "const": "removed"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "baseFile": {
+                "$ref": "#/definitions/sourceDiffFile"
+              },
+              "headFile": {
+                "type": "null"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "status": {
+                "enum": [
+                  "modified",
+                  "renamed",
+                  "unchanged"
+                ]
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "baseFile": {
+                "$ref": "#/definitions/sourceDiffFile"
+              },
+              "headFile": {
+                "$ref": "#/definitions/sourceDiffFile"
+              }
+            }
+          }
+        }
+      ]
+    },
+    "sourceDiff": {
+      "type": "object",
+      "description": "Paged changed entries between two exact persisted candidates of one job. Unchanged entries are counted, not listed.",
+      "properties": {
+        "binding": {
+          "type": "object",
+          "properties": {
+            "jobId": {
+              "$ref": "#/definitions/id"
+            },
+            "runId": {
+              "$ref": "#/definitions/id"
+            },
+            "revisionId": {
+              "$ref": "#/definitions/id"
+            }
+          },
+          "required": [
+            "jobId",
+            "runId",
+            "revisionId"
+          ],
+          "additionalProperties": false
+        },
+        "base": {
+          "type": "object",
+          "properties": {
+            "runId": {
+              "$ref": "#/definitions/id"
+            },
+            "revisionId": {
+              "$ref": "#/definitions/id"
+            }
+          },
+          "required": [
+            "runId",
+            "revisionId"
+          ],
+          "additionalProperties": false
+        },
+        "authority": {
+          "const": "recorded-digests",
+          "description": "Status comes from recorded paths and digests; it is not compilation, behavior or acceptance evidence."
+        },
+        "sourceSha256": {
+          "$ref": "#/definitions/sha256"
+        },
+        "metadataVersion": {
+          "$ref": "#/definitions/sha256"
+        },
+        "baseSourceSha256": {
+          "$ref": "#/definitions/sha256"
+        },
+        "baseMetadataVersion": {
+          "$ref": "#/definitions/sha256"
+        },
+        "renameDetection": {
+          "const": "identical-digest"
+        },
+        "counts": {
+          "type": "object",
+          "properties": {
+            "added": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 25000
+            },
+            "removed": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 25000
+            },
+            "modified": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 25000
+            },
+            "renamed": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 25000
+            },
+            "unchanged": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 25000
+            }
+          },
+          "required": [
+            "added",
+            "removed",
+            "modified",
+            "renamed",
+            "unchanged"
+          ],
+          "additionalProperties": false
+        },
+        "totalChanged": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 50000
+        },
+        "items": {
+          "type": "array",
+          "maxItems": 200,
+          "items": {
+            "$ref": "#/definitions/sourceDiffEntry"
+          }
+        },
+        "page": {
+          "$ref": "#/definitions/page"
+        }
+      },
+      "required": [
+        "binding",
+        "base",
+        "authority",
+        "sourceSha256",
+        "metadataVersion",
+        "baseSourceSha256",
+        "baseMetadataVersion",
+        "renameDetection",
+        "counts",
+        "totalChanged",
+        "items",
+        "page"
+      ],
+      "additionalProperties": false
+    },
+    "sourceDiffLine": {
+      "type": "object",
+      "properties": {
+        "kind": {
+          "type": "string",
+          "enum": [
+            "context",
+            "added",
+            "removed"
+          ]
+        },
+        "baseLine": {
+          "anyOf": [
+            {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 50000
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "headLine": {
+          "anyOf": [
+            {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 50000
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "text": {
+          "type": "string",
+          "maxLength": 1000
+        },
+        "truncated": {
+          "type": "boolean"
+        },
+        "characters": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 1048576
+        },
+        "missingFinalNewline": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "kind",
+        "baseLine",
+        "headLine",
+        "text",
+        "truncated",
+        "characters",
+        "missingFinalNewline"
+      ],
+      "additionalProperties": false,
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "kind": {
+                "const": "context"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "baseLine": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 50000
+              },
+              "headLine": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 50000
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "kind": {
+                "const": "added"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "baseLine": {
+                "type": "null"
+              },
+              "headLine": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 50000
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "kind": {
+                "const": "removed"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "baseLine": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 50000
+              },
+              "headLine": {
+                "type": "null"
+              }
+            }
+          }
+        }
+      ]
+    },
+    "sourceDiffHunk": {
+      "type": "object",
+      "properties": {
+        "baseStart": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 50001
+        },
+        "baseCount": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 400
+        },
+        "headStart": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 50001
+        },
+        "headCount": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 400
+        },
+        "unchangedBefore": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 50000
+        },
+        "lines": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 400,
+          "items": {
+            "$ref": "#/definitions/sourceDiffLine"
+          }
+        }
+      },
+      "required": [
+        "baseStart",
+        "baseCount",
+        "headStart",
+        "headCount",
+        "unchangedBefore",
+        "lines"
+      ],
+      "additionalProperties": false
+    },
+    "sourceFileDiff": {
+      "type": "object",
+      "description": "One bounded comparison. Hunks are paged; omitted unchanged lines are counted, and the complete patch or both files are separate downloads.",
+      "properties": {
+        "binding": {
+          "type": "object",
+          "properties": {
+            "jobId": {
+              "$ref": "#/definitions/id"
+            },
+            "runId": {
+              "$ref": "#/definitions/id"
+            },
+            "revisionId": {
+              "$ref": "#/definitions/id"
+            }
+          },
+          "required": [
+            "jobId",
+            "runId",
+            "revisionId"
+          ],
+          "additionalProperties": false
+        },
+        "base": {
+          "type": "object",
+          "properties": {
+            "runId": {
+              "$ref": "#/definitions/id"
+            },
+            "revisionId": {
+              "$ref": "#/definitions/id"
+            }
+          },
+          "required": [
+            "runId",
+            "revisionId"
+          ],
+          "additionalProperties": false
+        },
+        "authority": {
+          "const": "recorded-digests",
+          "description": "Status comes from recorded paths and digests; it is not compilation, behavior or acceptance evidence."
+        },
+        "sourceSha256": {
+          "$ref": "#/definitions/sha256"
+        },
+        "metadataVersion": {
+          "$ref": "#/definitions/sha256"
+        },
+        "baseSourceSha256": {
+          "$ref": "#/definitions/sha256"
+        },
+        "baseMetadataVersion": {
+          "$ref": "#/definitions/sha256"
+        },
+        "status": {
+          "type": "string",
+          "enum": [
+            "added",
+            "removed",
+            "modified",
+            "renamed",
+            "unchanged"
+          ]
+        },
+        "baseFile": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/sourceDiffFile"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "headFile": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/sourceDiffFile"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "representation": {
+          "type": "string",
+          "enum": [
+            "text",
+            "identical",
+            "binary",
+            "not-viewable",
+            "too-large",
+            "budget-exceeded"
+          ]
+        },
+        "fallbackReason": {
+          "anyOf": [
+            {
+              "type": "string",
+              "enum": [
+                "declared-binary",
+                "invalid-utf8",
+                "line-too-long"
+              ]
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "baseLines": {
+          "anyOf": [
+            {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 50000
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "headLines": {
+          "anyOf": [
+            {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 50000
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "totalHunks": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 100000
+        },
+        "hunkOffset": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 100000
+        },
+        "nextHunk": {
+          "anyOf": [
+            {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 100000
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "unchangedAfter": {
+          "anyOf": [
+            {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 50000
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "hunks": {
+          "type": "array",
+          "maxItems": 20,
+          "items": {
+            "$ref": "#/definitions/sourceDiffHunk"
+          }
+        },
+        "patchAvailable": {
+          "type": "boolean"
+        },
+        "limits": {
+          "type": "object",
+          "properties": {
+            "maximumFileBytes": {
+              "$ref": "#/definitions/uint64"
+            },
+            "maximumLines": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 1000000
+            },
+            "maximumEdits": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 1000000
+            },
+            "contextLines": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 100
+            },
+            "hunksPerPage": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 100
+            },
+            "rowsPerPage": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 100000
+            },
+            "lineCharacters": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 100000
+            }
+          },
+          "required": [
+            "maximumFileBytes",
+            "maximumLines",
+            "maximumEdits",
+            "contextLines",
+            "hunksPerPage",
+            "rowsPerPage",
+            "lineCharacters"
+          ],
+          "additionalProperties": false
+        }
+      },
+      "required": [
+        "binding",
+        "base",
+        "authority",
+        "sourceSha256",
+        "metadataVersion",
+        "baseSourceSha256",
+        "baseMetadataVersion",
+        "status",
+        "baseFile",
+        "headFile",
+        "representation",
+        "fallbackReason",
+        "baseLines",
+        "headLines",
+        "totalHunks",
+        "hunkOffset",
+        "nextHunk",
+        "unchangedAfter",
+        "hunks",
+        "patchAvailable",
+        "limits"
+      ],
+      "additionalProperties": false,
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "status": {
+                "const": "added"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "baseFile": {
+                "type": "null"
+              },
+              "headFile": {
+                "$ref": "#/definitions/sourceDiffFile"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "status": {
+                "const": "removed"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "baseFile": {
+                "$ref": "#/definitions/sourceDiffFile"
+              },
+              "headFile": {
+                "type": "null"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "status": {
+                "enum": [
+                  "modified",
+                  "renamed",
+                  "unchanged"
+                ]
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "baseFile": {
+                "$ref": "#/definitions/sourceDiffFile"
+              },
+              "headFile": {
+                "$ref": "#/definitions/sourceDiffFile"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "representation": {
+                "const": "text"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "baseLines": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 50000
+              },
+              "headLines": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 50000
+              },
+              "unchangedAfter": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 50000
+              },
+              "patchAvailable": {
+                "type": "boolean"
+              }
+            }
+          },
+          "else": {
+            "properties": {
+              "baseLines": {
+                "type": "null"
+              },
+              "headLines": {
+                "type": "null"
+              },
+              "unchangedAfter": {
+                "type": "null"
+              },
+              "patchAvailable": {
+                "const": false
+              },
+              "totalHunks": {
+                "const": 0
+              },
+              "hunks": {
+                "maxItems": 0
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "representation": {
+                "const": "binary"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "fallbackReason": {
+                "enum": [
+                  "declared-binary",
+                  "invalid-utf8",
+                  "line-too-long"
+                ]
+              }
+            }
+          },
+          "else": {
+            "properties": {
+              "fallbackReason": {
+                "type": "null"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "status": {
+                "enum": [
+                  "renamed",
+                  "unchanged"
+                ]
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "representation": {
+                "const": "identical"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "patchAvailable": {
+                "const": true
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "totalHunks": {
+                "type": "integer",
+                "minimum": 1
+              }
+            }
+          }
+        }
+      ]
+    },
+    "sourceArchive": {
+      "type": "object",
+      "description": "Revision-bound source archive status. A verified label never implies compilation, behavior or acceptance.",
+      "properties": {
+        "binding": {
+          "type": "object",
+          "properties": {
+            "jobId": {
+              "$ref": "#/definitions/id"
+            },
+            "runId": {
+              "$ref": "#/definitions/id"
+            },
+            "revisionId": {
+              "$ref": "#/definitions/id"
+            }
+          },
+          "required": [
+            "jobId",
+            "runId",
+            "revisionId"
+          ],
+          "additionalProperties": false
+        },
+        "sourceSha256": {
+          "$ref": "#/definitions/sha256"
+        },
+        "metadataVersion": {
+          "$ref": "#/definitions/sha256"
+        },
+        "archive": {
+          "type": "object",
+          "properties": {
+            "state": {
+              "type": "string",
+              "enum": [
+                "present",
+                "missing",
+                "too-large"
+              ]
+            },
+            "artifactId": {
+              "anyOf": [
+                {
+                  "$ref": "#/definitions/id"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "sha256": {
+              "anyOf": [
+                {
+                  "$ref": "#/definitions/sha256"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "sizeBytes": {
+              "anyOf": [
+                {
+                  "$ref": "#/definitions/uint64"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "contentHref": {
+              "anyOf": [
+                {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 2048
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "mediaType": {
+              "const": "application/zip"
+            }
+          },
+          "required": [
+            "state",
+            "artifactId",
+            "sha256",
+            "sizeBytes",
+            "contentHref",
+            "mediaType"
+          ],
+          "additionalProperties": false,
+          "allOf": [
+            {
+              "if": {
+                "properties": {
+                  "state": {
+                    "const": "present"
+                  }
+                }
+              },
+              "then": {
+                "properties": {
+                  "artifactId": {
+                    "$ref": "#/definitions/id"
+                  },
+                  "sha256": {
+                    "$ref": "#/definitions/sha256"
+                  },
+                  "sizeBytes": {
+                    "$ref": "#/definitions/uint64"
+                  },
+                  "contentHref": {
+                    "type": "string"
+                  }
+                }
+              },
+              "else": {
+                "properties": {
+                  "artifactId": {
+                    "type": "null"
+                  },
+                  "sha256": {
+                    "type": "null"
+                  },
+                  "sizeBytes": {
+                    "type": "null"
+                  },
+                  "contentHref": {
+                    "type": "null"
+                  }
+                }
+              }
+            }
+          ]
+        },
+        "verification": {
+          "type": "object",
+          "description": "Derived only from a completed archive-verifier operation for this exact digest and revision metadata.",
+          "properties": {
+            "authority": {
+              "const": "archive-verifier"
+            },
+            "state": {
+              "type": "string",
+              "enum": [
+                "not-verified",
+                "running",
+                "verified",
+                "failed",
+                "stale",
+                "missing",
+                "too-large"
+              ]
+            },
+            "operationId": {
+              "anyOf": [
+                {
+                  "$ref": "#/definitions/id"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "verifiedAt": {
+              "anyOf": [
+                {
+                  "$ref": "#/definitions/instant"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "failureCode": {
+              "anyOf": [
+                {
+                  "type": "string",
+                  "enum": [
+                    "ARCHIVE_INVALID",
+                    "ARCHIVE_CHANGED",
+                    "REVISION_MISMATCH",
+                    "REVISION_UNAVAILABLE",
+                    "ARCHIVE_UNAVAILABLE",
+                    "SERVER_STOPPING"
+                  ]
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "previousVerifiedSha256": {
+              "anyOf": [
+                {
+                  "$ref": "#/definitions/sha256"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            }
+          },
+          "required": [
+            "authority",
+            "state",
+            "operationId",
+            "verifiedAt",
+            "failureCode",
+            "previousVerifiedSha256"
+          ],
+          "additionalProperties": false,
+          "allOf": [
+            {
+              "if": {
+                "properties": {
+                  "state": {
+                    "const": "verified"
+                  }
+                }
+              },
+              "then": {
+                "properties": {
+                  "operationId": {
+                    "$ref": "#/definitions/id"
+                  },
+                  "verifiedAt": {
+                    "$ref": "#/definitions/instant"
+                  },
+                  "failureCode": {
+                    "type": "null"
+                  }
+                }
+              },
+              "else": {
+                "properties": {
+                  "verifiedAt": {
+                    "type": "null"
+                  }
+                }
+              }
+            },
+            {
+              "if": {
+                "properties": {
+                  "state": {
+                    "const": "failed"
+                  }
+                }
+              },
+              "then": {
+                "properties": {
+                  "operationId": {
+                    "$ref": "#/definitions/id"
+                  },
+                  "failureCode": {
+                    "enum": [
+                      "ARCHIVE_INVALID",
+                      "ARCHIVE_CHANGED",
+                      "REVISION_MISMATCH",
+                      "REVISION_UNAVAILABLE",
+                      "ARCHIVE_UNAVAILABLE",
+                      "SERVER_STOPPING"
+                    ]
+                  }
+                }
+              },
+              "else": {
+                "properties": {
+                  "failureCode": {
+                    "type": "null"
+                  }
+                }
+              }
+            },
+            {
+              "if": {
+                "properties": {
+                  "state": {
+                    "const": "stale"
+                  }
+                }
+              },
+              "then": {
+                "properties": {
+                  "previousVerifiedSha256": {
+                    "$ref": "#/definitions/sha256"
+                  }
+                }
+              },
+              "else": {
+                "properties": {
+                  "previousVerifiedSha256": {
+                    "type": "null"
+                  }
+                }
+              }
+            },
+            {
+              "if": {
+                "properties": {
+                  "state": {
+                    "enum": [
+                      "not-verified",
+                      "missing",
+                      "too-large",
+                      "stale"
+                    ]
+                  }
+                }
+              },
+              "then": {
+                "properties": {
+                  "operationId": {
+                    "type": "null"
+                  }
+                }
+              }
+            }
+          ]
+        },
+        "build": {
+          "type": "object",
+          "description": "The reconstruction's recorded build contract; never a build performed by this read.",
+          "properties": {
+            "state": {
+              "type": "string",
+              "enum": [
+                "recorded",
+                "not-recorded"
+              ]
+            },
+            "contractSha256": {
+              "anyOf": [
+                {
+                  "$ref": "#/definitions/sha256"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "executableSha256": {
+              "anyOf": [
+                {
+                  "$ref": "#/definitions/sha256"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "executableBytes": {
+              "anyOf": [
+                {
+                  "$ref": "#/definitions/uint64"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            }
+          },
+          "required": [
+            "state",
+            "contractSha256",
+            "executableSha256",
+            "executableBytes"
+          ],
+          "additionalProperties": false,
+          "allOf": [
+            {
+              "if": {
+                "properties": {
+                  "state": {
+                    "const": "recorded"
+                  }
+                }
+              },
+              "then": {
+                "properties": {
+                  "contractSha256": {
+                    "$ref": "#/definitions/sha256"
+                  },
+                  "executableSha256": {
+                    "$ref": "#/definitions/sha256"
+                  },
+                  "executableBytes": {
+                    "$ref": "#/definitions/uint64"
+                  }
+                }
+              },
+              "else": {
+                "properties": {
+                  "executableSha256": {
+                    "type": "null"
+                  },
+                  "executableBytes": {
+                    "type": "null"
+                  }
+                }
+              }
+            }
+          ]
+        },
+        "acceptance": {
+          "type": "string",
+          "enum": [
+            "accepted",
+            "not-evaluated"
+          ]
+        },
+        "git": {
+          "anyOf": [
+            {
+              "type": "object",
+              "properties": {
+                "state": {
+                  "const": "unavailable"
+                },
+                "reason": {
+                  "type": "string",
+                  "enum": [
+                    "not-recorded",
+                    "not-configured"
+                  ]
+                }
+              },
+              "required": [
+                "state",
+                "reason"
+              ],
+              "additionalProperties": false
+            },
+            {
+              "type": "object",
+              "properties": {
+                "state": {
+                  "const": "mapped"
+                },
+                "mapping": {
+                  "$ref": "#/definitions/gitMapping"
+                },
+                "dirty": {
+                  "anyOf": [
+                    {
+                      "type": "boolean"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                }
+              },
+              "required": [
+                "state",
+                "mapping",
+                "dirty"
+              ],
+              "additionalProperties": false
+            }
+          ]
+        }
+      },
+      "required": [
+        "binding",
+        "sourceSha256",
+        "metadataVersion",
+        "archive",
+        "verification",
+        "build",
+        "acceptance",
+        "git"
+      ],
+      "additionalProperties": false
+    },
+    "archiveVerificationRequest": {
+      "type": "object",
+      "description": "The exact archive digest the caller displayed; a different current archive is refused.",
+      "properties": {
+        "archiveSha256": {
+          "$ref": "#/definitions/sha256"
+        }
+      },
+      "required": [
+        "archiveSha256"
+      ],
+      "additionalProperties": false
+    },
+    "workflowLaunch": {
+      "type": "object",
+      "description": "Server-reported launch facts for one registered workflow option. They describe the adapter; admission rechecks capability, limits and readiness.",
+      "properties": {
+        "harnessCapabilityId": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/id"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "mode": {
+          "type": "string",
+          "enum": [
+            "tools",
+            "agent",
+            "evidence-only"
+          ]
+        },
+        "executesBinary": {
+          "type": "boolean"
+        },
+        "contactsAgent": {
+          "type": "boolean"
+        },
+        "requiredTools": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "enum": [
+              "sandbox",
+              "ghidra",
+              "agent-harness",
+              "c-toolchain",
+              "angr"
+            ]
+          },
+          "maxItems": 8,
+          "uniqueItems": true
+        },
+        "input": {
+          "type": "string",
+          "enum": [
+            "none",
+            "accepted-optional",
+            "recorded-required"
+          ]
+        },
+        "limitsAdjustable": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "harnessCapabilityId",
+        "mode",
+        "executesBinary",
+        "contactsAgent",
+        "requiredTools",
+        "input",
+        "limitsAdjustable"
+      ],
+      "additionalProperties": false,
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "mode": {
+                "const": "agent"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "contactsAgent": {
+                "const": true
+              }
+            }
+          },
+          "else": {
+            "properties": {
+              "contactsAgent": {
+                "const": false
+              }
+            }
+          }
         }
       ]
     },
@@ -6568,6 +8473,146 @@
         "apiVersion",
         "kind",
         "requestId",
+        "data"
+      ],
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "properties": {
+        "apiVersion": {
+          "const": 1
+        },
+        "kind": {
+          "const": "artifacts"
+        },
+        "requestId": {
+          "$ref": "#/definitions/requestId"
+        },
+        "data": {
+          "$ref": "#/definitions/artifacts"
+        }
+      },
+      "required": [
+        "apiVersion",
+        "kind",
+        "requestId",
+        "data"
+      ],
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "properties": {
+        "apiVersion": {
+          "const": 1
+        },
+        "kind": {
+          "const": "sourceSearch"
+        },
+        "requestId": {
+          "$ref": "#/definitions/requestId"
+        },
+        "data": {
+          "$ref": "#/definitions/sourceSearch"
+        }
+      },
+      "required": [
+        "apiVersion",
+        "kind",
+        "requestId",
+        "data"
+      ],
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "properties": {
+        "apiVersion": {
+          "const": 1
+        },
+        "kind": {
+          "const": "sourceDiff"
+        },
+        "requestId": {
+          "$ref": "#/definitions/requestId"
+        },
+        "data": {
+          "$ref": "#/definitions/sourceDiff"
+        }
+      },
+      "required": [
+        "apiVersion",
+        "kind",
+        "requestId",
+        "data"
+      ],
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "properties": {
+        "apiVersion": {
+          "const": 1
+        },
+        "kind": {
+          "const": "sourceFileDiff"
+        },
+        "requestId": {
+          "$ref": "#/definitions/requestId"
+        },
+        "data": {
+          "$ref": "#/definitions/sourceFileDiff"
+        }
+      },
+      "required": [
+        "apiVersion",
+        "kind",
+        "requestId",
+        "data"
+      ],
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "properties": {
+        "apiVersion": {
+          "const": 1
+        },
+        "kind": {
+          "const": "sourceArchive"
+        },
+        "requestId": {
+          "$ref": "#/definitions/requestId"
+        },
+        "data": {
+          "$ref": "#/definitions/sourceArchive"
+        }
+      },
+      "required": [
+        "apiVersion",
+        "kind",
+        "requestId",
+        "data"
+      ],
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "properties": {
+        "apiVersion": {
+          "const": 1
+        },
+        "kind": {
+          "const": "archiveVerificationRequest"
+        },
+        "data": {
+          "$ref": "#/definitions/archiveVerificationRequest"
+        }
+      },
+      "required": [
+        "apiVersion",
+        "kind",
         "data"
       ],
       "additionalProperties": false

@@ -37,11 +37,30 @@ internal fun selectWebRevisionSource(
     return WebRevisionSourceReference(jobId, runId, revisionId, candidate.sourceSha256, attempt.version)
 }
 
-internal class WebRevisionSourceFile(val evidence: GeneratedFileEvidence, val sizeBytes: Long) {
-    init { require(sizeBytes >= 0 && ProjectFileRole.BUILD_INPUT in evidence.roles) }
+/**
+ * One recorded file of the selected candidate. Canonical build inputs carry the descriptor's committed size and
+ * belong to the source revision digest. Other manifest entries (reports, notes) are bound only by the manifest
+ * digest; their size is not recorded, so it stays null rather than being observed from the filesystem.
+ */
+internal class WebRevisionSourceFile(val evidence: GeneratedFileEvidence, val sizeBytes: Long?) {
+    val committedInput: Boolean get() = ProjectFileRole.BUILD_INPUT in evidence.roles
+
+    init { require((sizeBytes != null) == committedInput && (sizeBytes == null || sizeBytes >= 0)) }
+
+    /** Wire name of the commitment that binds this entry's digest. */
+    val commitment: String get() = if (committedInput) "source-input" else "manifest-digest"
 }
 
-/** Canonical source input commitments. Source bodies, compiler results and acceptance remain separate. */
+/** Shared item projection; size is a decimal string for committed inputs and null for manifest-only entries. */
+internal fun JsonObjectBuilder.putRevisionSourceFileFacts(file: WebRevisionSourceFile) {
+    put("sizeBytes", file.sizeBytes?.let { JsonPrimitive(it.toString()) } ?: JsonNull)
+    put("sha256", file.evidence.sha256)
+    put("declaredUtf8Text", file.evidence.contentKind == ProjectContentKind.UTF8_TEXT)
+    put("declaredViewable", ProjectFileRole.VIEWABLE in file.evidence.roles)
+    put("commitment", file.commitment)
+}
+
+/** Canonical source input commitments plus the other manifest entries. Bodies, compiler results and acceptance remain separate. */
 internal class WebRevisionSourceSnapshot(
     val reference: WebRevisionSourceReference,
     val manifestSha256: String,
@@ -53,7 +72,7 @@ internal class WebRevisionSourceSnapshot(
 
     init {
         require(manifestSha256.matches(SHA256) && descriptorSha256.matches(SHA256) && reference.sourceSha256.matches(SHA256))
-        require(files.size in 1..WebSourceCatalogSnapshot.MAXIMUM_FILES)
+        require(files.size in 1..WebSourceCatalogSnapshot.MAXIMUM_FILES && files.any { it.committedInput })
         require(files.map { it.evidence.path }.distinct().size == files.size)
         this.files = Collections.unmodifiableList(files.sortedBy { it.evidence.path })
         metadataVersion = revisionSourceDigest("revision-source-metadata-v1\n$manifestSha256\n$descriptorSha256\n${reference.sourceSha256}\n")
@@ -99,7 +118,9 @@ internal fun parseWebRevisionSourceInputs(
     // Identical to the existing build/repair source preimage, including UTF-16 path length and exact decimal sizes.
     val canonical = files.joinToString("") { "${it.evidence.path.length}:${it.evidence.path}:${it.sizeBytes}:${it.evidence.sha256}\n" }
     if (revisionSourceDigest(canonical) != reference.sourceSha256) revisionSourceChanged()
-    return WebRevisionSourceSnapshot(reference, manifestSha256, descriptorSha256, files)
+    // Remaining manifest entries are reachable for inspection; they never enter the source revision digest.
+    val recorded = manifest.files.filter { ProjectFileRole.BUILD_INPUT !in it.roles }.map { WebRevisionSourceFile(it, null) }
+    return WebRevisionSourceSnapshot(reference, manifestSha256, descriptorSha256, files + recorded)
 }
 
 internal fun revisionSourceChanged(): Nothing = throw WebAccessDenied(409, "SOURCE_REVISION_CHANGED",
@@ -153,9 +174,7 @@ internal class WebRevisionSourcePages(private val source: (String, String, Strin
             val fileId = revisionSourceFileId(ref, index, entry.path)
             val item = buildJsonObject {
                 put("fileId", fileId); put("displayName", entry.path)
-                put("sizeBytes", file.sizeBytes.toString()); put("sha256", entry.sha256)
-                put("declaredUtf8Text", entry.contentKind == ProjectContentKind.UTF8_TEXT)
-                put("declaredViewable", ProjectFileRole.VIEWABLE in entry.roles)
+                putRevisionSourceFileFacts(file)
             }
             val itemBytes = item.toString().toByteArray(Charsets.UTF_8).size + 1
             if (bytes + itemBytes > 1_000_000) break

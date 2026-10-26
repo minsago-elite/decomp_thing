@@ -37,6 +37,25 @@ describe('bounded v1 fetch client', () => {
     expect(headers.get('X-CSRF-Token')).toBe(csrfToken);
     expect(headers.has('If-Match')).toBe(false); expect(headers.has('Idempotency-Key')).toBe(false);
   });
+  it('submits a digest-bound archive verification with CSRF and a key but never a fabricated version', async () => {
+    const csrf = 'c'.repeat(32); const key = 'k'.repeat(16);
+    const path = `/jobs/${'a'.repeat(32)}/runs/run_1/revisions/revision_1/archive-verifications`;
+    const fetcher = vi.fn<typeof fetch>().mockImplementation(() => Promise.resolve(response('operation-archive-verify-failed', 202,
+      { 'X-Request-ID': 'request_archive_5' })));
+    const client = createApiClient({ basePath: '/nested', fetch: fetcher });
+    const body = { archiveSha256: 'a'.repeat(64) };
+    await expect(client.post('operation', path, 'archiveVerificationRequest', body, { csrfToken: csrf, idempotencyKey: key }))
+      .resolves.toHaveProperty('kind', 'operation');
+    const sent = fetcher.mock.calls[0]?.[1]; const headers = new Headers(sent?.headers);
+    expect(headers.get('X-CSRF-Token')).toBe(csrf); expect(headers.get('Idempotency-Key')).toBe(key); expect(headers.has('If-Match')).toBe(false);
+    expect(sent?.body).toBe(JSON.stringify(body));
+    for (const settings of [{ csrfToken: csrf }, { idempotencyKey: key }, { csrfToken: csrf, idempotencyKey: key, ifMatch: '"version_1"' }]) {
+      await expect(client.post('operation', path, 'archiveVerificationRequest', body, settings)).rejects.toMatchObject({ code: 'invalid_request' });
+    }
+    await expect(client.post('operation', `${path}/extra`, 'archiveVerificationRequest', body, { csrfToken: csrf, idempotencyKey: key }))
+      .rejects.toMatchObject({ code: 'invalid_request' });
+    expect(fetcher).toHaveBeenCalledOnce();
+  });
   it('does not replay an ambiguous explicit preflight POST', async () => {
     const fetcher = vi.fn<typeof fetch>().mockRejectedValue(Error('private transport diagnostic'));
     const client = createApiClient({ basePath: '/', fetch: fetcher });
@@ -68,7 +87,7 @@ describe('bounded v1 fetch client', () => {
     const metadata = (JSON.parse(fixture('revision-file-root')) as { data: RevisionFile }).data;
     metadata.binding.jobId = 'a'.repeat(32);
     const fetcher = vi.fn<typeof fetch>().mockResolvedValue(new Response(null, { status: 200, headers: {
-      'Content-Type': 'application/octet-stream', 'Content-Length': metadata.item.sizeBytes, 'X-Content-Type-Options': 'nosniff',
+      'Content-Type': 'application/octet-stream', 'Content-Length': metadata.item.sizeBytes!, 'X-Content-Type-Options': 'nosniff',
       'X-Request-ID': 'request_source_head_1', 'X-Decomp-Content-Verification': 'committed-digest',
       'X-Decomp-File-ID': metadata.item.fileId, 'X-Decomp-Source-SHA256': metadata.sourceSha256,
       'X-Decomp-Metadata-Version': metadata.metadataVersion, 'X-Decomp-Content-SHA256': metadata.item.sha256,

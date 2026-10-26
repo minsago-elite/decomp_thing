@@ -1,6 +1,5 @@
 package decompengine.web
 
-import decompengine.project.ProjectContentKind
 import decompengine.project.ProjectFileRole
 import kotlinx.serialization.json.*
 
@@ -33,9 +32,7 @@ internal class WebRevisionFileMetadata(
             })
             put("recordedModule", captured.recordedModule ?: JsonNull)
             put("item", buildJsonObject {
-                put("fileId", fileId); put("displayName", entry.path); put("sizeBytes", file.sizeBytes.toString())
-                put("sha256", entry.sha256); put("declaredUtf8Text", entry.contentKind == ProjectContentKind.UTF8_TEXT)
-                put("declaredViewable", ProjectFileRole.VIEWABLE in entry.roles)
+                put("fileId", fileId); put("displayName", entry.path); putRevisionSourceFileFacts(file)
                 put("declaredArchivable", ProjectFileRole.ARCHIVE_PAYLOAD in entry.roles)
             })
         }

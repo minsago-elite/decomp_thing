@@ -284,6 +284,34 @@ class JobStore internal constructor(
         }
     }
 
+    /**
+     * Hash or stream one canonical report artifact through pinned descriptors without retaining its body.
+     * [consume] sees bytes before the final identity/metadata revalidation; only a normal return confirms them.
+     */
+    internal fun streamArtifact(
+        jobId: String,
+        relativePath: String,
+        declaredSize: (Long) -> Unit,
+        consume: (ByteArray, Int) -> Unit,
+        cancellationCheck: () -> Unit,
+    ): decompengine.repair.StableFileDigest {
+        jobDirectory(jobId)
+        require(relativePath.startsWith("reports/") && relativePath.length <= 4096 &&
+            relativePath.none { it == '\\' || it.code < 32 || it.code == 127 } &&
+            relativePath.split('/').let { parts -> parts.size <= 32 && parts.none { it.isBlank() || it == "." || it == ".." } }
+        ) { "artifact path must be a canonical report path" }
+        var authorized = -1L
+        return try {
+            // Refuse growth before a chunk past the initially authorized size is hashed or consumed, so byte ceilings
+            // and page budgets cannot be exceeded while waiting for the final size revalidation.
+            decompengine.repair.hashStableRegularFile(root, "$jobId/$relativePath", { size -> authorized = size; declaredSize(size) },
+                { _, total -> require(total <= authorized) { "artifact grew while it was read" } },
+                cancellationCheck, consumeBytes = consume)
+        } catch (_: IOException) {
+            throw JobStoreException("artifact is unavailable or its path changed")
+        }
+    }
+
     internal fun readInput(jobId: String): StableRegularFile {
         jobDirectory(jobId)
         return try {

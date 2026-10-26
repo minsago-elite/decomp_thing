@@ -71,14 +71,12 @@ const typesText = header + '// String bounds and cross-field/conditional constra
   `export type RequestData<K extends RequestKind> = Extract<ContractDocument, { kind: K }>['data'];\n`;
 const runtimeSchema = structuredClone(schema);
 delete runtimeSchema.$schema; delete runtimeSchema.title;
-// Annotations never affect validation; keep them out of the initial browser bundle.
-function stripAnnotations(node) {
-  if (typeof node.description === 'string') delete node.description;
-  for (const key of ['definitions', 'properties']) for (const child of Object.values(node[key] ?? {})) stripAnnotations(child);
-  for (const key of ['anyOf', 'oneOf', 'allOf']) for (const child of node[key] ?? []) stripAnnotations(child);
-  for (const key of ['items', 'if', 'then', 'else']) if (node[key]) stripAnnotations(node[key]);
-}
-stripAnnotations(runtimeSchema);
+// Annotations never affect validation; keep them out of the browser bundles.
+(function stripDescriptions(node) {
+  if (!node || typeof node !== 'object') return;
+  if (!Array.isArray(node) && typeof node.description === 'string') delete node.description;
+  for (const child of Object.values(node)) stripDescriptions(child);
+})(runtimeSchema);
 // Kinds decoded only by lazily loaded routes. Definitions reachable from them alone are emitted to a
 // separate module those routes register at load, so the initial bundle carries only core contracts.
 const lazyKinds = new Set(['jobDeletionPreview', 'storageSummary', 'maintenancePreview', 'jobOrganizationRequest', 'jobDeletionRequest']);
