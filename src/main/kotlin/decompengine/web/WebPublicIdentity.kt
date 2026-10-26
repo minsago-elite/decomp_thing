@@ -78,7 +78,7 @@ internal object WebPublicIdentity {
     private fun requireCanonicalSegment(segment: String) {
         if (segment.isEmpty() || segment == "." || segment == ".." || segment.toByteArray().size > MAXIMUM_SEGMENT_BYTES) refuse()
         if (segment.any { it == '/' || it == '\\' || it == ':' || it == '%' || it.code < 0x20 || it.code == 0x7f }) refuse()
-        if (segment.any { Character.getType(it) == Character.FORMAT.toInt() || Character.isISOControl(it) }) refuse()
+        if (segment.codePoints().anyMatch { Character.getType(it) == Character.FORMAT.toInt() || Character.isISOControl(it) }) refuse()
         if (!Normalizer.isNormalized(segment, Normalizer.Form.NFC)) refuse()
         if (segment.endsWith('.') || segment.endsWith(' ') || segment.startsWith(' ')) refuse()
         if (reservedDeviceNames.matches(segment.substringBefore('.').trimEnd())) refuse()

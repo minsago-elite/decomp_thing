@@ -50,7 +50,7 @@ internal data class ContainedFileReceipt(
     val verification: String get() = "observed-digest"
 }
 
-/** Receipts for one complete, unchanged source-tree inventory, or an explicit conflict. */
+/** Matching observed content receipts over one complete revalidated source-tree inventory. */
 internal data class SourceArchiveReceipts(
     val inventory: Map<String, LinuxFileIdentity>,
     val files: Map<String, ContainedFileReceipt>,
@@ -342,9 +342,11 @@ class JobStore internal constructor(
     }
 
     /**
-     * Size/digest receipts for every regular file of one source-tree inventory. Each receipt must be
-     * for the inventoried identity, and the inventory must be unchanged afterwards; otherwise the
-     * snapshot is an explicit [ArtifactChangedException], never a mix of old and new files.
+     * Size/digest receipts for every regular file of one source-tree inventory. Two complete bounded
+     * passes must agree on content and identity, and the inventory must be unchanged afterwards.
+     * This detects in-place writes to already-receipted files as well as publication/deletion. Like
+     * each observed digest, this is an observation, not an atomic filesystem snapshot or a committed
+     * revision; detected changes produce an explicit [ArtifactChangedException].
      */
     internal fun sourceArchiveReceipts(
         jobId: String,
@@ -356,21 +358,27 @@ class JobStore internal constructor(
     ): SourceArchiveReceipts {
         require(maximumTotalBytes in 1..4L * 1024 * 1024 * 1024 && maximumFileBytes in 1..maximumTotalBytes)
         val inventory = sourceArchiveInventory(jobId, layout, reportPrefix)
-        var total = 0L
-        val files = inventory.filterValues { it.isRegularFile }.mapValues { (relative, identity) ->
-            cancellationCheck()
-            val receipt = try {
-                artifactReceipt(jobId, "$reportPrefix/source-tree/$relative",
-                    minOf(maximumFileBytes, maximumTotalBytes - total).coerceAtLeast(1), cancellationCheck)
-            } catch (failure: ArtifactChangedException) { throw failure } catch (_: JobStoreException) {
-                // It was inventoried a moment ago: its absence now is concurrent deletion, not a missing artifact.
-                throw ArtifactChangedException("source tree changed while it was inventoried")
+        fun collectFiles(): Map<String, ContainedFileReceipt> {
+            var total = 0L
+            return inventory.filterValues { it.isRegularFile }.mapValues { (relative, identity) ->
+                cancellationCheck()
+                val receipt = try {
+                    artifactReceipt(jobId, "$reportPrefix/source-tree/$relative",
+                        minOf(maximumFileBytes, maximumTotalBytes - total).coerceAtLeast(1), cancellationCheck)
+                } catch (failure: ArtifactChangedException) { throw failure } catch (_: JobStoreException) {
+                    // It was inventoried a moment ago: its absence now is concurrent deletion, not a missing artifact.
+                    throw ArtifactChangedException("source tree changed while it was inventoried")
+                }
+                if (receipt.identity != identity) throw ArtifactChangedException("source tree changed while it was inventoried")
+                total = Math.addExact(total, receipt.sizeBytes)
+                if (total > maximumTotalBytes) throw decompengine.repair.RepairBudgetExceededException("source tree exceeds its receipt budget")
+                receipt
             }
-            if (receipt.identity != identity) throw ArtifactChangedException("source tree changed while it was inventoried")
-            total = Math.addExact(total, receipt.sizeBytes)
-            if (total > maximumTotalBytes) throw decompengine.repair.RepairBudgetExceededException("source tree exceeds its receipt budget")
-            receipt
         }
+        val files = collectFiles()
+        // Inode identities alone cannot detect an in-place overwrite after a file's descriptor closes.
+        // Revalidate every size and digest inside this shared producer, not only in an archive consumer.
+        if (collectFiles() != files) throw ArtifactChangedException("source tree changed while its receipts were collected")
         // The tree was admitted by the first pass: if it can no longer be inventoried (deleted, replaced by a link,
         // or grown past a bound), that is a concurrent change to this snapshot, not a missing artifact.
         val after = try { sourceArchiveInventory(jobId, layout, reportPrefix) } catch (failure: ArtifactChangedException) {
@@ -381,7 +389,7 @@ class JobStore internal constructor(
             throw ArtifactChangedException("source tree changed while it was inventoried")
         }
         if (after != inventory) throw ArtifactChangedException("source tree changed while it was inventoried")
-        return SourceArchiveReceipts(inventory, files, total)
+        return SourceArchiveReceipts(inventory, files, files.values.sumOf { it.sizeBytes })
     }
 
     private fun requireCanonicalReportPath(relativePath: String) {
