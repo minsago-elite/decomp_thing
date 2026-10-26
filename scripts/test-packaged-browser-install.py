@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Small lifecycle regressions; no browser, JVM, native runtime or downloaded data."""
 
+import hashlib
 import importlib.util
 import io
 import json
@@ -51,6 +52,8 @@ class InstallationTest(unittest.TestCase):
         self.assertEqual((app / "bin/non-executable").stat().st_mode & 0o777, 0o444)
         self.assertTrue(all(path.stat().st_mode & 0o222 == 0 for path in app.rglob("*")))
         self.assertEqual(result["jarSha256"], install.digest(app / "lib/llm-bin-patch-test.jar"))
+        manifest = json.dumps({"buildId": "test"}).encode()
+        self.assertEqual(result["jarAssets"], {"asset-manifest.json": hashlib.sha256(manifest).hexdigest()})
 
     def test_cleanup_checks_owner_and_does_not_follow_external_symlink(self):
         install.prepare(self.archive, self.work, "test-owner")

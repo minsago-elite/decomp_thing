@@ -213,6 +213,9 @@ class UploadServer(
     // Test-owned clocks exercise expiry through the real HTTP/browser path; production uses the system clock.
     webAccessClock: WebAccessClock? = null,
     private val startupCancellation: () -> Boolean = { false },
+    // Test-owned packaged fixture lanes register inert adapters and storage observations; production passes neither.
+    durableAdapters: List<DurableWebWorkflowAdapter> = emptyList(),
+    uploadAvailableBytes: (() -> Long)? = null,
 ) {
     init {
         require(listenBacklog in 1..4096) { "HTTP listen backlog must be between 1 and 4096" }
@@ -261,6 +264,7 @@ class UploadServer(
     private val store = JobStore(dataDir)
     private val admittedSourceProfiles = sourceProfiles.toList()
     private val jobs = WebJobService(store, analyzer, reconstructor, executor,
+        durableAdapters = durableAdapters,
         attemptStoreFactory = { root ->
             // Storage creation is the upgrade point: claim the cross-JVM web lock as the root appears.
             ownership.ensureLockFile()
@@ -268,7 +272,7 @@ class UploadServer(
         },
         progressRetentionIntervalMs = if (uiMode == WebUiMode.SPA) 1000 else null,
         shutdownTimeoutMs = 5000, failureDiagnostic = { diagnostic(it, "Background operation failed") },
-        sourceProfiles = admittedSourceProfiles)
+        sourceProfiles = admittedSourceProfiles, uploadAvailableBytes = uploadAvailableBytes)
     private val sourceEvidence = WebSourceEvidence(store, admittedSourceProfiles, jobs::readArtifact)
     private val archiveEvidence = WebArchiveEvidence(store, sourceEvidence, jobs::readArtifact)
     private val access = LocalWebAccess(LocalWebAccessConfiguration(webOrigin(host, server.address.port), basePath,

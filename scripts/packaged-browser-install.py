@@ -93,10 +93,15 @@ def prepare(archive_path, work, token):
     jars = list((app / "lib").glob("llm-bin-patch-*.jar"))
     if len(jars) != 1:
         raise ValueError("Expected one application JAR")
+    prefix = "decompengine/web/ui/"
     with zipfile.ZipFile(jars[0]) as jar:
-        manifest = json.loads(jar.read("decompengine/web/ui/asset-manifest.json"))
+        manifest = json.loads(jar.read(prefix + "asset-manifest.json"))
+        # Digests of the archived bytes let the driver compare every served asset with the archive itself.
+        jar_assets = {info.filename[len(prefix):]: hashlib.sha256(jar.read(info)).hexdigest()
+                      for info in jar.infolist()
+                      if info.filename.startswith(prefix) and not info.is_dir()}
     return {"app": str(app), "manifest": manifest, "jar": jars[0].name,
-            "jarSha256": digest(jars[0]), "resourceBudget": budget}
+            "jarSha256": digest(jars[0]), "jarAssets": jar_assets, "resourceBudget": budget}
 
 
 def cleanup(work, token):

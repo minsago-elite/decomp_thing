@@ -57,6 +57,7 @@ export async function qualifyScale({ fixture, makeTarget, cdp, evaluate, ready, 
   const rows = `Array.from(document.querySelectorAll('ul[aria-label="Uploaded jobs"] li h4 a')).map(a => a.getAttribute('href'))`;
   const timings = [];
   let peakBrowserHeapBytes = 0;
+  let peakDomNodes = 0;
   await cdp.call('Performance.enable', {}, tab.sessionId);
   let start = performance.now();
   await cdp.call('Page.navigate', { url: browserOrigin + '/nested/?limit=200' }, tab.sessionId);
@@ -68,6 +69,7 @@ export async function qualifyScale({ fixture, makeTarget, cdp, evaluate, ready, 
     if (page) assert.equal(await evaluate(tab, 'document.activeElement.textContent'), 'Job results');
     const metrics = (await cdp.call('Performance.getMetrics', {}, tab.sessionId)).metrics;
     peakBrowserHeapBytes = Math.max(peakBrowserHeapBytes, metrics.find(m => m.name === 'JSHeapUsedSize').value);
+    peakDomNodes = Math.max(peakDomNodes, await evaluate(tab, `document.getElementsByTagName('*').length`));
     if (page < 49) {
       // Exercise the native keyboard activation path, including focus handoff after rendering.
       await evaluate(tab, `[...document.querySelectorAll('button')].find(b => b.textContent === 'Next page').focus()`);
@@ -177,6 +179,12 @@ export async function qualifyScale({ fixture, makeTarget, cdp, evaluate, ready, 
   await evaluate(tab, `[...document.querySelectorAll('button')].find(b => b.textContent === 'Reset filters').click()`);
   await ready(tab, `!document.querySelector('#job-filter-error') && document.activeElement.textContent === 'Job results'`, 'invalid date reset recovery');
   const filterContrast = await qualifyFilterContrast({ tab, cdp, evaluate });
+  // Comparable #648 measurements for the named dashboard-10000-jobs budget.
+  const listing = tab.loaded.filter((entry) => entry.url?.endsWith('/api/v1/jobs'));
+  const measurements = { peakBrowserHeapBytes: Math.round(peakBrowserHeapBytes), maxPageLatencyMs: Math.round(Math.max(...timings)),
+    listingPayloadBytesPerPage: Math.max(...listing.map((entry) => entry.bytes)),
+    listingPayloadBytesTotal: listing.reduce((sum, entry) => sum + entry.bytes, 0),
+    peakDomNodes };
   assert.deepEqual(tab.exceptions, []);
   assert.ok(tab.requests.every(request => ['GET', 'HEAD'].includes(request.method)));
   return { persistedJobs: fixture.count, pages: 50, rowsPerPage: 200, reachableJobs: 10000,
@@ -184,5 +192,5 @@ export async function qualifyScale({ fixture, makeTarget, cdp, evaluate, ready, 
     explicitContinuationRecovery: true, searchReload: true, combinedNanosecondFiltersReload: true,
     oldestFirstPagesReloadReset: true, previousFirstPageRetained: true, narrowReflow: reflow,
     accessibleFilterNames: true, invalidDateDescriptionFocusRecovery: true, filterContrast, mutationRequests: 0,
-    peakBrowserHeapBytes, pageLatencyMs: timings.map(ms => Math.round(ms)), executionStarted: false };
+    peakBrowserHeapBytes, pageLatencyMs: timings.map(ms => Math.round(ms)), measurements, executionStarted: false };
 }

@@ -187,6 +187,93 @@ not establish an actual two-version replacement. Pair-gate regressions reject
 unchanged build identities, retained lazy paths and missing/ambiguous Runtime
 inventories without generating application archives.
 
+### Archive assets, failure artifacts and cleanup (#644)
+
+Every journey that renders the public home also fetches each manifest path from
+the packaged server. Public assets must return the manifest media type, size and
+SHA-256. The archived JAR entry must have the same digest, and private manifest
+entries must return 404. A UI file in the JAR that is not in the manifest fails
+the run. Every run writes these files next to `report.json`:
+
+- `console.json`: per-page console calls, browser log entries and exceptions.
+- `server.log`: stdout and stderr of every application launch, with bootstrap
+  tokens and other registered credentials redacted.
+- `trace.json`: the timeline of awaited steps and their outcomes.
+
+On failure the driver also saves up to eight page screenshots, each with a text
+dump. It does this only after checking that no credential is visible. After
+shutdown it requires every owned process to be gone. It then scans `/proc` for
+any process still referencing an owned extraction, profile or evidence
+directory.
+
+`--mode failure` is the negative control. It launches the archive, puts a
+console probe and a live bootstrap credential in play, then fails on purpose.
+It passes only if the screenshot, console capture, sanitized server log, final
+trace step, removal of the extraction and profile, and absence of residual
+processes are all proven.
+
+### Fake-engine workflow lane (#645, #649, #650)
+
+`--mode workflow --fixture-jar build/packaged-web-fixture/packaged-web-fixture.jar`
+runs the unmodified application JAR from the extracted archive. The JAR comes
+from `./gradlew packagedWebFixtureJar` and holds the test-owned launcher
+[`PackagedFakeEngine.kt`](../src/test/kotlin/decompengine/web/packaged/PackagedFakeEngine.kt),
+which is never part of a distribution. The launcher registers one reconstruction
+adapter. It hashes the uploaded file but never analyzes or executes it. Each
+phase waits on a test-owned control file. It then writes a fixed program model
+through the production generator, Make build and archive packager. The
+application `PATH` gains only `make`, the C toolchain, `find`, `mkdir` and `rm`;
+Node is still absent.
+
+The journey covers:
+
+- a disk-full upload refusal that publishes no job (the launcher reports zero
+  free bytes to the real upload reservation);
+- an upload whose filename contains markup and a bidirectional override, which
+  must render as inert text;
+- an explicit keyed start, where a repeated identical request is a replay and a
+  second key is refused with `ACTIVE_RUN`;
+- live activity over a throttled stream, a browser-reported offline state, and
+  reconnection with no duplicate observations;
+- a JVM restart mid-attempt, after which the attempt reads as interrupted and
+  offers no sources;
+- a retry through the accessible attempt controls, its completed sources, the
+  server digest check, and an exact download digest;
+- a genuine `ENOSPC` (from `/dev/full`) that fails the next attempt without a
+  candidate.
+
+The retained `source-tree.zip` is checked by the independent stdlib
+[verifier](../scripts/verify-source-archive.py), and the downloaded file must be
+one of its manifest-covered payloads. A random server secret is placed in the
+JVM environment and in the private failure text. It must be absent from every
+page's HTML, storage and console, from the server log, and from every retained
+job file.
+
+Limits of this lane:
+
+- Master has no launch form yet, so the first start uses the authenticated page's
+  own CSRF token against `POST J/runs`.
+- No verified-archive download exists in the SPA yet (#1712).
+- The packaged runtime reports `maxSourceChunkBytes=0`, so the source text
+  preview and its highlight worker cannot be reached.
+
+### Named scale budgets (#648)
+
+[`contracts/web/scale-budgets-v1.json`](../contracts/web/scale-budgets-v1.json) names
+two fixtures, `dashboard-10000-jobs` (`--mode scale`) and `fake-engine-workflow`
+(`--mode workflow`). Each has ceilings for payload bytes, browser heap, render
+latency and DOM size, and for server peak RSS, threads and descriptors. Both
+modes run the JVM with a 512 MiB maximum heap, so memory reflects the application
+rather than host ergonomics.
+
+[`web-scale-budgets.mjs`](../scripts/web-scale-budgets.mjs) fails a run with a
+table of measured value, ceiling and unit. A missing measurement also fails.
+`--budget-baseline /absolute/previous/report.json` compares each metric with the
+same fixture's earlier report. A run fails if a metric grew beyond
+`regressionTolerance` and is above half its ceiling. An exemption must give its
+fixture, metric, scope, a linked follow-up issue and a bounded higher ceiling. It
+is reported only for the run it excuses.
+
 `--python /absolute/python3` overrides `/usr/bin/python3`. Only if the test
 environment requires it, add `--no-sandbox`; the report records this browser-only
 choice. Application PATH contains only required launcher utilities and has no

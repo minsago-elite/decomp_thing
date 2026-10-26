@@ -1,0 +1,32 @@
+{
+  "schemaVersion": 1,
+  "regressionTolerance": 1.5,
+  "fixtures": {
+    "dashboard-10000-jobs": {
+      "mode": "scale",
+      "description": "10,000 persisted inert jobs paged 200 at a time through all 50 dashboard pages in the packaged application with a 512 MiB maximum heap. Local reference (2026-10-26, Chrome 149, JDK 21): 93,492 bytes per page, 5.0 MB total, 30 MB browser heap, 1.7 s slowest page, 4,328 DOM nodes, 906 MB server RSS, 53 threads, 50 descriptors.",
+      "budgets": {
+        "listingPayloadBytesPerPage": { "max": 131072, "unit": "bytes" },
+        "listingPayloadBytesTotal": { "max": 7340032, "unit": "bytes" },
+        "peakBrowserHeapBytes": { "max": 67108864, "unit": "bytes" },
+        "maxPageLatencyMs": { "max": 8000, "unit": "milliseconds" },
+        "peakDomNodes": { "max": 6000, "unit": "count" },
+        "serverPeakRssBytes": { "max": 1342177280, "unit": "bytes" },
+        "serverThreads": { "max": 128, "unit": "count" },
+        "serverOpenFiles": { "max": 256, "unit": "count" }
+      }
+    },
+    "fake-engine-workflow": {
+      "mode": "workflow",
+      "description": "Upload, explicit start, restart, retry, source inspection and a failed disk-full attempt of fake-engine reconstructions in the packaged application with a 512 MiB maximum heap. Local reference (2026-10-26): 35-42 KB API payload, 9 MB browser heap, 194 MB server RSS, 58 threads, 53 descriptors.",
+      "budgets": {
+        "apiPayloadBytesTotal": { "max": 131072, "unit": "bytes" },
+        "peakBrowserHeapBytes": { "max": 33554432, "unit": "bytes" },
+        "serverPeakRssBytes": { "max": 805306368, "unit": "bytes" },
+        "serverThreads": { "max": 128, "unit": "count" },
+        "serverOpenFiles": { "max": 256, "unit": "count" }
+      }
+    }
+  },
+  "exemptions": []
+}
