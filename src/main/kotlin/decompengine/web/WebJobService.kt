@@ -822,7 +822,9 @@ class WebJobService(
         // Canonical build-input commitments, cross-checked with the manifest and build contract digest.
         val sources = try { readRevisionSources(jobId, runId, revisionId) } catch (_: Exception) { unavailable() }
         if (sources.reference.sourceSha256 != candidate.sourceSha256) unavailable()
-        val commitments = sources.files.associate { it.evidence.path to decompengine.git.GitSourceCommitment(it.evidence.sha256, it.sizeBytes) }
+        // Manifest-only entries (reports, notes) are not build inputs and carry no committed size.
+        val commitments = sources.files.filter { it.committedInput }
+            .associate { it.evidence.path to decompengine.git.GitSourceCommitment(it.evidence.sha256, checkNotNull(it.sizeBytes)) }
         return decompengine.git.GitSourceSnapshot(directory, runId, revisionId, candidate.sourceSha256, commitments)
     }
 
