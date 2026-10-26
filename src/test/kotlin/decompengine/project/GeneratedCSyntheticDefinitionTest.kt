@@ -134,9 +134,13 @@ class GeneratedCSyntheticDefinitionTest {
                 static int callback(struct Foo *value) { return value->value; }
                 Fn choose(void) { return callback; }
             """.trimIndent() + "\n"
-            for ((variant, introduction) in listOf(
-                "forward" to "struct Foo;",
-                "typedef" to "typedef struct Foo FooAlias;",
+            for ((variant, introduction, compatible) in listOf(
+                Triple("forward", "struct Foo;", true),
+                Triple("typedef", "typedef struct Foo FooAlias;", true),
+                Triple("aggregate-member", "struct Holder { struct Foo *p; };", true),
+                Triple("nested-member", "struct Holder { struct Nested { struct Foo *p; } nested; };", true),
+                // A function-pointer parameter introduces only a prototype-local tag.
+                Triple("prototype-member", "struct Holder { int (*cb)(struct Foo *); };", false),
             )) {
                 val types = listOf(
                     RecoveredType("a00_intro", introduction),
@@ -156,9 +160,14 @@ class GeneratedCSyntheticDefinitionTest {
                 ).sharedInterface()
                 for (compiler in compilers) {
                     val full = compile(compiler, variant, "full", fullHeader + implementation)
-                    assertEquals(0, full.first, "$compiler $variant full header:\n${full.second}")
                     val selected = compile(compiler, variant, "selected", selectedHeader + implementation)
-                    assertEquals(0, selected.first, "$compiler $variant selected interface:\n${selected.second}")
+                    for ((label, result) in listOf("full" to full, "selected" to selected)) {
+                        if (compatible) assertEquals(0, result.first, "$compiler $variant $label interface:\n${result.second}")
+                        else {
+                            assertTrue(result.first != 0, "$compiler $variant $label must retain prototype-local incompatibility")
+                            assertTrue(result.second.contains("callback lost file-scope tag identity"), result.second)
+                        }
+                    }
                     val removed = compile(compiler, variant, "removed", withoutIntroduction + implementation)
                     assertTrue(removed.first != 0, "$compiler $variant removed introduction must fail:\n${removed.second}")
                     assertTrue(removed.second.contains("callback lost file-scope tag identity"), removed.second)

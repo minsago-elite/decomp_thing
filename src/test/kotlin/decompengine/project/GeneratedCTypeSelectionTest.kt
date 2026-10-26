@@ -108,6 +108,82 @@ class GeneratedCTypeSelectionTest {
     }
 
     @Test
+    fun `aggregate member introductions retain the complete earlier record and its dependencies`() {
+        for (tag in listOf("Foo", "decomp_context_tag")) {
+            for (introduction in listOf(
+                "struct Holder { struct $tag *p; };",
+                "union Holder { const struct $tag *p, **q; };",
+                "struct Holder { struct Nested { struct $tag *p; } nested; };",
+                "typedef struct { struct $tag *p; } Holder;",
+                "struct Holder { _Atomic(struct $tag *) p; };",
+                "struct Holder { _Alignas(8) struct $tag *p; };",
+                "struct Holder { _Alignas(struct $tag *) int value; };",
+                "struct Holder { struct $tag *values[2]; };",
+                "struct Holder { struct $tag *p; } holder = {0};",
+            )) {
+                val dependency = RecoveredType("a05_dependency", "typedef long ExtraDependency;")
+                val holder = RecoveredType("a10_holder", "$introduction\ntypedef ExtraDependency ExtraAlias;")
+                val callback = RecoveredType("a20_callback", "typedef int (*Fn)(struct $tag *);")
+                val complete = RecoveredType("a30_definition", "struct $tag { int value; };")
+                val types = listOf(
+                    // These are selector-only distractors, not a claimed valid complete header.
+                    RecoveredType("a00_prototype", "typedef struct Prefix { int x; } (*Other)(struct $tag *);"),
+                    RecoveredType("a01_member_prototype", "struct OtherHolder { int (*cb)(struct $tag *); };"),
+                    RecoveredType("a02_atomic_prototype", "struct AtomicHolder { _Atomic(int (*)(struct $tag *)) cb; };"),
+                    RecoveredType("a03_wrong_kind", "union $tag;"),
+                    RecoveredType("a04_aligned_prototype", "struct AlignedHolder { _Alignas(8) int (*cb)(struct $tag { long other; } *); };"),
+                    dependency, holder,
+                    RecoveredType("a15_duplicate", "struct $tag;"), callback, complete,
+                    RecoveredType("a40_late", "struct $tag;"),
+                )
+                val expected = listOf(dependency, holder, callback, complete)
+                assertEquals(expected, selectRequiredGeneratedCTypes(types, listOf("Fn choose(void)")), introduction)
+                assertEquals(expected, selectRequiredGeneratedCTypes(types.reversed(), listOf("Fn choose(void)")), introduction)
+            }
+        }
+    }
+
+    @Test
+    fun `prototype local aggregate definitions and enumerators do not become file scope exports`() {
+        val prototype = RecoveredType("a00_prototype", """
+            typedef struct Prefix { int first; } (*Other)(struct Hidden {
+                enum HiddenMode { PROTOTYPE_VALUE = 1 } mode;
+                struct Foo *pointer;
+            } *);
+        """.trimIndent())
+        val memberPrototype = RecoveredType("a01_member_prototype", """
+            struct OtherHolder {
+                struct Prefix2 { int first; } value, (*callback)(struct Foo *);
+            };
+        """.trimIndent())
+        val holder = RecoveredType("a10_holder", "struct Holder { enum VisibleMode { FILE_VALUE = 2 } mode; struct Foo *p; };")
+        val callback = RecoveredType("a20_callback", "typedef int (*Fn)(struct Foo *);")
+        val complete = RecoveredType("a30_definition", "struct Foo { int value; };")
+        val types = listOf(prototype, memberPrototype, holder, callback, complete)
+        assertEquals(listOf(holder, callback, complete), selectRequiredGeneratedCTypes(types, listOf("Fn choose(void)")))
+        assertEquals(emptyList(), selectRequiredGeneratedCTypes(types, listOf("int get(void) { return PROTOTYPE_VALUE; }")))
+        assertEquals(emptyList(), selectRequiredGeneratedCTypes(types, listOf("struct Hidden *get(void)")))
+        assertEquals(listOf(holder, complete), selectRequiredGeneratedCTypes(types, listOf("int get(void) { return FILE_VALUE; }")))
+    }
+
+    @Test
+    fun `additional scope analysis does not impose declarator parsing on unrelated recovered records`() {
+        val extended = RecoveredType("a00_extended", "struct Packed { unsigned bits : 3; int value; } __attribute__((packed));")
+        val safe = RecoveredType("a10_safe", "struct Safe { int value; };")
+        assertEquals(listOf(safe), selectRequiredGeneratedCTypes(listOf(extended, safe), listOf("struct Safe *get(void)")))
+        assertEquals(listOf(extended), selectRequiredGeneratedCTypes(listOf(extended, safe), listOf("struct Packed *get(void)")))
+    }
+
+    @Test
+    fun `previously admitted bodyless enum typedef introductions keep their selection behavior`() {
+        val introduction = RecoveredType("a10_enum", "typedef enum Mode ModeAlias;")
+        val callback = RecoveredType("a20_callback", "typedef enum Mode (*Fn)(void);")
+        val complete = RecoveredType("a30_definition", "enum Mode { MODE_FIRST = 1 };")
+        assertEquals(listOf(introduction, callback, complete), selectRequiredGeneratedCTypes(
+            listOf(introduction, callback, complete), listOf("Fn choose(void)")))
+    }
+
+    @Test
     fun `needed conflicts fail without rejecting an unrelated ambiguity`() {
         val types = listOf(
             RecoveredType("first", "typedef int Value;"),
