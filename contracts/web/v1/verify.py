@@ -519,6 +519,22 @@ def check_semantics(document: dict) -> None:
                 raise ValueError("Git mapping cannot invent acceptance without evidence")
         if length is not None and any(len(oid) != length for oid in object_ids if oid is not None):
             raise ValueError("Git object ID is not full length for its repository format")
+        state, head_ref = data["headState"], data["headRefId"]
+        expected_head = {
+            "attached": (True, True, True),
+            "unborn": (True, False, False),
+            "detached": (False, True, False),
+        }[state]
+        observed_head = (data["headRefName"] is not None, data["headObjectId"] is not None, head_ref is not None)
+        if observed_head != expected_head:
+            raise ValueError("Git HEAD state disagrees with its branch, object and ref fields")
+        if head_ref is not None and not any(
+            ref["refId"] == head_ref and ref["objectId"] == data["headObjectId"] and ref["displayName"] == data["headRefName"]
+            for ref in data["refs"]
+        ):
+            raise ValueError("an attached HEAD must name a listed ref at the observed object")
+        if len({ref["refId"] for ref in data["refs"]}) != len(data["refs"]):
+            raise ValueError("Git refs must be unique")
 
 
 def check_run_lifecycle_controls(validate) -> int:
