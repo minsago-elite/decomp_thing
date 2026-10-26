@@ -831,10 +831,21 @@ class ManagedGitRepositories(
         audit("started")
         crash(GitOperationCrashPoint.AFTER_STAGING)
         val result = try { GitPushes.push(runner, located.commonDir, location, remotePolicy, local, branch, expected) } catch (failure: GitCommandException) {
-            // The remote may or may not have accepted the update: never claim either outcome.
+            val (code, message) = GitTransports.classify(failure, failure.diagnostic, location.transport)
+            if (failure.kind == GitCommandException.Kind.FAILED && code in PUSH_CONNECTION_REFUSALS) {
+                // Authentication/host verification failed before publication, even when anonymous
+                // ls-remote succeeded. Persist the refusal before dropping its recovery evidence.
+                audit(code.lowercase())
+                throw GitOperationRefusal(code, message)
+            }
+            // Other transfer failures may follow an accepted update: never claim either outcome.
             audit("unconfirmed")
             throw GitOperationRefusal("PUSH_UNCONFIRMED", "The push did not report its outcome. Reconcile it against the remote before any retry; " +
                 "publication is not claimed.")
+        } catch (failure: GitOperationRefusal) {
+            // A configured credential can become unreadable between ls-remote and push context creation.
+            if (failure.code in PUSH_CONNECTION_REFUSALS) audit(failure.code.lowercase())
+            throw failure
         }
         crash(GitOperationCrashPoint.AFTER_PUBLISH)
         return when (result) {
@@ -851,7 +862,7 @@ class ManagedGitRepositories(
                     "before any retry; publication is not claimed.")
             }
             else -> {
-                GitPushes.delete(directory, operation.operationId)
+                // Keep the intent until both this audit and the failed operation are durable.
                 audit(when (result) { GitPushResult.REJECTED_NON_FAST_FORWARD -> "rejected_non_fast_forward"; GitPushResult.REJECTED_REMOTE_CHANGED -> "rejected_remote_changed"; else -> "rejected" })
                 if (result == GitPushResult.REJECTED_REMOTE_CHANGED) GitWorkspaceMutations.refuse("REMOTE_CHANGED",
                     "The remote branch changed while pushing, so the reviewed expectation no longer held. Fetch and review again; nothing was published.")
@@ -884,10 +895,12 @@ class ManagedGitRepositories(
         if (state == GitOperationState.COMPLETED) {
             runner.run(GitInvocation("update-ref", listOf("${remote.trackingPrefix}${intent.branch}", intent.pushedObjectId), gitDir = located.commonDir))
         }
-        GitPushes.delete(directory, intent.operationId)
+        crash(GitOperationCrashPoint.AFTER_STAGING)
         GitRemoteStore.audit(directory, GitRemoteStore.auditEntry("push.reconcile", operation.operationId,
             when (code) { null -> "confirmed"; "PUSH_NOT_PUBLISHED" -> "not_published"; else -> "superseded" }, remote, clock.instant(),
             ref = "refs/heads/${intent.branch}", oldObjectId = intent.expectedObjectId, newObjectId = current, detail = "push ${intent.operationId}"))
+        // executeWorkspace removes the intent only after this reconciliation result is durable too.
+        crash(GitOperationCrashPoint.AFTER_PUBLISH)
         return current to message
     }
 
@@ -1269,7 +1282,10 @@ class ManagedGitRepositories(
             if (operations.any { !it.state.terminal }) {
                 throw ManagedGitException("WORKTREE_BUSY", "Another repository operation is still running for this job.")
             }
-            if (retireTerminalWorkspace(jobId, operations).size >= MAX_OPERATIONS || executor.queue.remainingCapacity() == 0) {
+            // One bounded overflow slot is reserved for settling existing push evidence. Ordinary
+            // work cannot consume it; failed reconciliation records can be retired on the next try.
+            val limit = MAX_OPERATIONS + if (request.action == GitOperationAction.PUSH_RECONCILE) 1 else 0
+            if (retireTerminalWorkspace(jobId, operations).size >= limit || executor.queue.remainingCapacity() == 0) {
                 throw ManagedGitException("QUOTA_EXCEEDED", "Repository operation capacity is exhausted. Review existing operations first.")
             }
             refusing { validate(runner, located, request) }
@@ -1514,10 +1530,16 @@ class ManagedGitRepositories(
                 else -> error("not a workspace request")
             }
             synchronized(lock) { current = finish(current, GitOperationState.COMPLETED, null, message, result); persist(directory, current) }
-            if (queued.action == GitOperationAction.PUSH) {
-                // Only now is publication durably recorded; the intent can go.
+            val settledIntent = when (queued.action) {
+                GitOperationAction.PUSH -> queued.operationId
+                GitOperationAction.PUSH_RECONCILE -> (queued.request as GitSyncRequest).parameters["pushOperationId"]
+                else -> null
+            }
+            if (settledIntent != null) {
+                // The audit and operation outcome are now durable. Leftovers are safe to reconcile again.
                 crash(GitOperationCrashPoint.BEFORE_PUBLISH)
-                GitPushes.delete(repositoryDirectory(queued.jobId, queued.repositoryId), queued.operationId)
+                try { GitPushes.delete(repositoryDirectory(queued.jobId, queued.repositoryId), settledIntent) }
+                catch (_: IOException) { /* completed outcome stays durable; cleanup can be retried */ }
             }
         } catch (_: SimulatedGitCrash) {
             synchronized(lock) { active -= queued.operationId }
@@ -1543,7 +1565,12 @@ class ManagedGitRepositories(
                     else -> GitOperationState.FAILED
                 }
                 current = finish(current, state, code, message.take(500))
-                try { persist(directory, current) } catch (_: Exception) { /* reconciled after restart */ }
+                try {
+                    persist(directory, current)
+                    if (queued.action == GitOperationAction.PUSH && code in PUSH_DEFINITE_REFUSALS) {
+                        GitPushes.delete(repositoryDirectory(queued.jobId, queued.repositoryId), queued.operationId)
+                    }
+                } catch (_: Exception) { /* intent retained for reconciliation after restart */ }
             }
         } finally {
             try { GitStorage.deleteTree(staging) } catch (_: Exception) { /* removed by reconciliation */ }
@@ -1875,6 +1902,12 @@ class ManagedGitRepositories(
         if (Files.isDirectory(directory, NOFOLLOW_LINKS)) {
             val published = repositories(jobId).associateBy { it.operationId }
             for (operation in operations(jobId)) {
+                if (operation.action == GitOperationAction.PUSH_RECONCILE && operation.state == GitOperationState.COMPLETED) {
+                    // Completion implies its audit was written too. Finish cleanup idempotently,
+                    // without another remote observation or changing either durable outcome.
+                    val pushId = (operation.request as GitSyncRequest).parameters.getValue("pushOperationId")!!
+                    GitPushes.delete(repositoryDirectory(jobId, operation.repositoryId), pushId)
+                }
                 if (operation.state.terminal || operation.operationId in active) continue
                 val staging = directory.resolve("staging").resolve(operation.operationId)
                 if (operation.action.workspace) {
@@ -1954,8 +1987,12 @@ class ManagedGitRepositories(
         val excess = operations.size - (MAX_OPERATIONS - 1)
         if (excess <= 0) return operations
         val directory = root.resolve(jobId).resolve("git").resolve("operations")
-        // A recovery-required record awaits an operator and keeps its staging tree; it is never retired.
-        val retired = operations.filter { it.action.workspace && it.state.terminal && it.state != GitOperationState.RECOVERY_REQUIRED }
+        // Recovery evidence must survive even if its original operation was settled before an audit
+        // failure/crash. Do not retire that original until reconciliation has removed its intent.
+        val pushIntents = repositories(jobId).flatMap { GitPushes.list(repositoryDirectory(jobId, it.repositoryId)) }
+            .map { it.operationId }.toSet()
+        val retired = operations.filter { it.action.workspace && it.state.terminal && it.state != GitOperationState.RECOVERY_REQUIRED &&
+            it.operationId !in pushIntents }
             .sortedBy { it.createdAt }.take(excess)
         retired.forEach { Files.deleteIfExists(directory.resolve("${it.operationId}.json")) }
         return operations - retired.toSet()
@@ -2130,6 +2167,8 @@ class ManagedGitRepositories(
         const val WORKTREE_RECORDS = "worktree-records"
         const val FETCH_STATE = "fetch-state"
         const val RECORD = "repository.json"
+        private val PUSH_CONNECTION_REFUSALS = setOf("AUTHENTICATION_REQUIRED", "CREDENTIAL_UNAVAILABLE", "HOST_KEY_UNVERIFIED", "CERTIFICATE_INVALID")
+        private val PUSH_DEFINITE_REFUSALS = PUSH_CONNECTION_REFUSALS + setOf("REMOTE_CHANGED", "NON_FAST_FORWARD", "PUSH_REJECTED")
         const val MAX_OPERATIONS = 64
         const val MAX_LISTED_OPERATIONS = 20
         const val MAX_QUEUED = 8

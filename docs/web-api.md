@@ -1136,16 +1136,27 @@ A push whose outcome is unknown never claims publication (#601). This happens wh
 - Git reports a `[remote failure]` (the remote did not report the update), a missing status or an
   unrecognized status.
 
-Only an explicit `[rejected]` or `[remote rejected]` is a definite refusal. An unknown outcome makes
-the operation `recovery-required` with `PUSH_UNCONFIRMED`, and its intent blocks retries and removal
-of that remote. The intent is removed only after the completed operation is durable, so a crash or
-storage failure in between still leaves a reconcilable record. `git.push.reconcile` with
+An explicit `[rejected]` or `[remote rejected]`, or a known authentication/credential or host
+verification failure before publication, is a definite refusal. Write authentication failures keep
+the fixed transport guidance even when anonymous reads succeed. Other transfer failures remain
+unconfirmed. An unknown outcome makes the operation `recovery-required` with `PUSH_UNCONFIRMED`,
+and its intent blocks retries and removal of that remote. For a known outcome, the intent is
+removed only after both its audit and operation result are durable, so a crash or storage failure
+in between still leaves a reconcilable record. `git.push.reconcile` with
 `pushOperationId` reads the remote and settles the original operation:
 
 - `completed` when the remote branch names the pushed commit (an operation already recorded as
   completed keeps its record);
 - `failed` with `PUSH_NOT_PUBLISHED` when it still names the expected object;
 - `failed` with `PUSH_SUPERSEDED` when it names something else.
+
+Reconciliation retains the original intent until its audit and its own completed operation are
+durable. A restart after completion finishes leftover cleanup without re-observing the remote or
+changing either recorded outcome. If auditing failed, reconciliation remains available. Original
+push records with retained intents cannot be retired, even if already settled. One bounded recovery
+slot beyond the ordinary 64-operation quota keeps reconciliation available when unresolved pushes
+fill that quota; other actions cannot consume it, and failed reconciliation attempts can be retired
+before retry without discarding unresolved evidence.
 
 The repository audit records the destination, ref, old and new objects and outcome of every push
 start, publication, rejection, unconfirmed state and reconciliation. It never accepts or rejects a

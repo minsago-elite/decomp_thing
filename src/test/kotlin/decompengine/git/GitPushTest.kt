@@ -32,9 +32,9 @@ class GitPushTest {
         }
         fun remoteTip(branch: String = "main"): String? =
             repositories.git("--git-dir=$bare", "for-each-ref", "--format=%(objectname)", "refs/heads/$branch").trim().ifEmpty { null }
-        fun open() = ManagedGitRepositories(store, GitRuntime.detect(), { _, _, _ -> error("no snapshots") },
-            policy = GitRepositoryPolicy(defaultBranch = "main"), crash = { hook(it) },
-            remotePolicy = GitRemotePolicy(admittedRoot = admitted)).also(opened::add)
+        fun open(remotePolicy: GitRemotePolicy = GitRemotePolicy(admittedRoot = admitted)) =
+            ManagedGitRepositories(store, GitRuntime.detect(), { _, _, _ -> error("no snapshots") },
+                policy = GitRepositoryPolicy(defaultBranch = "main"), crash = { hook(it) }, remotePolicy = remotePolicy).also(opened::add)
         override fun close() { opened.forEach { it.close() }; repositories.close() }
     }
 
@@ -43,9 +43,9 @@ class GitPushTest {
     private var keys = 0
     private fun key() = "push_key_${(++keys).toString().padStart(8, '0')}"
 
-    private fun Fixture.cloned() {
-        service = open()
-        val admission = service.request(jobId, GitCloneRequest("admitted:upstream.git", "origin", null), "clone_key_0000001")
+    private fun Fixture.cloned(url: String = "admitted:upstream.git", policy: GitRemotePolicy = GitRemotePolicy(admittedRoot = admitted)) {
+        service = open(policy)
+        val admission = service.request(jobId, GitCloneRequest(url, "origin", null), "clone_key_0000001")
         assertTrue(service.awaitIdle(60_000)); repositoryId = admission.operation.repositoryId
     }
 
@@ -206,6 +206,131 @@ class GitPushTest {
         f.localCommit("more.txt", "more\n")
         assertEquals(GitOperationState.COMPLETED, run(pushRequest(service.pushPreview(jobId, repositoryId, null, remoteId(), null))).state)
         assertTrue(service.unconfirmedPushes(jobId, repositoryId).isEmpty())
+    }
+
+    @Test fun `public read access does not hide write authentication refusals`(): Unit = Fixture().use { f ->
+        GitHttpsFixture(f.admitted, f.repositories.root.resolve("push https"), "bot", "canary-write-secret",
+            authenticateWritesOnly = true).use { server ->
+            val token = f.repositories.root.resolve("write-token").also { Files.writeString(it, "wrong-canary-secret") }
+            val policy = GitRemotePolicy(allowedHosts = setOf("localhost"), credentials = GitCredentialStore(
+                listOf(GitCredential.Https("localhost", "bot", token, server.certificate))))
+            f.cloned(server.url("upstream.git"), policy)
+            f.localCommit("notes.txt", "local work\n")
+            val before = f.remoteTip()
+            val preview = service.pushPreview(jobId, repositoryId, null, remoteId(), null)
+            val denied = run(pushRequest(preview))
+            assertEquals(GitOperationState.FAILED, denied.state, denied.message)
+            assertEquals("AUTHENTICATION_REQUIRED", denied.failureCode)
+            assertFalse(denied.message.contains("canary"))
+            assertEquals(before, f.remoteTip())
+            assertTrue(service.unconfirmedPushes(jobId, repositoryId).isEmpty())
+            assertEquals("\"authentication_required\"", service.auditLog(jobId, repositoryId, 1).single().getValue("outcome").toString())
+            Files.writeString(token, "canary-write-secret")
+            assertEquals(GitOperationState.COMPLETED, run(pushRequest(preview)).state)
+            assertEquals(preview.localObjectId, f.remoteTip())
+        }
+    }
+
+    @Test fun `reconciliation retains evidence through each crash boundary and cleans durable completion once`() {
+        for (point in listOf(GitOperationCrashPoint.AFTER_STAGING, GitOperationCrashPoint.AFTER_PUBLISH, GitOperationCrashPoint.BEFORE_PUBLISH)) {
+            Fixture().use { f ->
+                f.cloned(); f.localCommit("notes.txt", "local work\n")
+                f.hook = { if (it == GitOperationCrashPoint.AFTER_STAGING) throw SimulatedGitCrash() }
+                val push = run(pushRequest(service.pushPreview(jobId, repositoryId, null, remoteId(), null)))
+                service.close(); f.hook = {}; service = f.open()
+                assertEquals(GitOperationState.RECOVERY_REQUIRED, service.operation(jobId, repositoryId, push.operationId).state)
+                val request = GitSyncRequest(GitOperationAction.PUSH_RECONCILE, guards().first.worktreeId, guards().second,
+                    mapOf("pushOperationId" to push.operationId))
+                f.hook = { if (it == point) throw SimulatedGitCrash() }
+                val requestKey = key()
+                val reconciliation = service.requestWorkspace(jobId, repositoryId, request, requestKey)
+                assertTrue(service.awaitIdle(60_000))
+                service.close(); f.hook = {}; service = f.open()
+                val recovered = service.operation(jobId, repositoryId, reconciliation.operation.operationId)
+                if (point == GitOperationCrashPoint.BEFORE_PUBLISH) {
+                    assertEquals(GitOperationState.COMPLETED, recovered.state)
+                    assertTrue(service.unconfirmedPushes(jobId, repositoryId).isEmpty())
+                    assertEquals(recovered, service.requestWorkspace(jobId, repositoryId, request, requestKey).operation)
+                    assertEquals(1, service.auditLog(jobId, repositoryId, 50).count { it.getValue("action").toString() == "\"push.reconcile\"" })
+                } else {
+                    assertEquals(GitOperationState.INTERRUPTED, recovered.state)
+                    assertEquals(1, service.unconfirmedPushes(jobId, repositoryId).size)
+                    assertEquals(GitOperationState.COMPLETED, run(request).state)
+                    assertTrue(service.unconfirmedPushes(jobId, repositoryId).isEmpty())
+                }
+                assertEquals("PUSH_NOT_PUBLISHED", service.operation(jobId, repositoryId, push.operationId).failureCode)
+                assertEquals("\"not_published\"", service.auditLog(jobId, repositoryId, 1).single().getValue("outcome").toString())
+            }
+        }
+    }
+
+    @Test fun `audit write failure keeps reconciliation and rejection recoverable`(): Unit = Fixture().use { f ->
+        f.cloned(); f.localCommit("notes.txt", "local work\n")
+        val directory = f.store.resolve("$jobId/git/repositories/$repositoryId")
+        val audit = directory.resolve(GitRemoteStore.AUDIT)
+        val saved = directory.resolve("audit.saved")
+        fun breakAudit() { Files.move(audit, saved); Files.createDirectory(audit) }
+        fun restoreAudit() { Files.delete(audit); Files.move(saved, audit) }
+        f.hook = { if (it == GitOperationCrashPoint.AFTER_STAGING) throw SimulatedGitCrash() }
+        val push = run(pushRequest(service.pushPreview(jobId, repositoryId, null, remoteId(), null)))
+        service.close(); f.hook = {}; service = f.open()
+        val request = GitSyncRequest(GitOperationAction.PUSH_RECONCILE, guards().first.worktreeId, guards().second,
+            mapOf("pushOperationId" to push.operationId))
+        f.hook = { if (it == GitOperationCrashPoint.AFTER_STAGING) breakAudit() }
+        assertEquals("STORAGE_FAILED", run(request).failureCode)
+        assertEquals(1, service.unconfirmedPushes(jobId, repositoryId).size)
+        restoreAudit(); f.hook = {}; service.close(); service = f.open()
+        assertEquals(GitOperationState.COMPLETED, run(request).state)
+        assertTrue(service.unconfirmedPushes(jobId, repositoryId).isEmpty())
+        // A definite remote refusal must also keep its evidence if recording its audit fails.
+        f.hook = { if (it == GitOperationCrashPoint.AFTER_STAGING) {
+            f.repositories.git("--git-dir=${f.bare}", "update-ref", "-d", "refs/heads/main")
+            breakAudit()
+        } }
+        val rejected = run(pushRequest(service.pushPreview(jobId, repositoryId, null, remoteId(), null)))
+        assertEquals("STORAGE_FAILED", rejected.failureCode)
+        assertEquals(1, service.unconfirmedPushes(jobId, repositoryId).size)
+        restoreAudit(); f.hook = {}; service.close(); service = f.open()
+        assertEquals(GitOperationState.COMPLETED, run(request.copy(parameters = mapOf("pushOperationId" to rejected.operationId))).state)
+        assertTrue(service.unconfirmedPushes(jobId, repositoryId).isEmpty())
+    }
+
+    @Test fun `a full operation quota reserves bounded capacity for push recovery`(): Unit = Fixture().use { f ->
+        f.cloned(); f.localCommit("notes.txt", "local work\n")
+        f.hook = { if (it == GitOperationCrashPoint.AFTER_STAGING) throw SimulatedGitCrash() }
+        val push = run(pushRequest(service.pushPreview(jobId, repositoryId, null, remoteId(), null)))
+        service.close(); f.hook = {}; service = f.open()
+        assertEquals(GitOperationState.RECOVERY_REQUIRED, service.operation(jobId, repositoryId, push.operationId).state)
+        service.close()
+        val directory = f.store.resolve("$jobId/git/repositories/$repositoryId")
+        val operations = f.store.resolve("$jobId/git/operations")
+        val template = Files.readString(operations.resolve("${push.operationId}.json"))
+        val intent = GitPushes.list(directory).single()
+        // Model the persisted boundary without 63 network transfers. Keep clone + 63 unresolved pushes.
+        Files.newDirectoryStream(operations).use { files -> files.forEach { file ->
+            val text = Files.readString(file)
+            if (file.fileName.toString() != "${push.operationId}.json" && !text.contains("git.clone")) Files.delete(file)
+        } }
+        for (index in 1..62) {
+            val id = "operation_" + index.toString(16).padStart(32, '0')
+            Files.writeString(operations.resolve("$id.json"), template.replace(push.operationId, id)
+                .replace("\"remoteBranch\":\"main\"", "\"remoteBranch\":\"blocked-$index\""))
+            GitPushes.write(directory, intent.copy(operationId = id, branch = "blocked-$index"))
+        }
+        service = f.open()
+        assertEquals(64L, Files.list(operations).use { it.count() })
+        assertEquals(63, service.unconfirmedPushes(jobId, repositoryId).size)
+        val request = GitSyncRequest(GitOperationAction.PUSH_RECONCILE, guards().first.worktreeId, guards().second,
+            mapOf("pushOperationId" to push.operationId))
+        // Even a failed recovery attempt at saturation must leave room to try again after restart.
+        f.hook = { if (it == GitOperationCrashPoint.AFTER_STAGING) throw java.io.IOException("audit unavailable") }
+        assertEquals("STORAGE_FAILED", run(request).failureCode)
+        assertEquals(65L, Files.list(operations).use { it.count() })
+        assertEquals(63, service.unconfirmedPushes(jobId, repositoryId).size)
+        f.hook = {}; service.close(); service = f.open()
+        assertEquals(GitOperationState.COMPLETED, run(request).state)
+        assertEquals("PUSH_NOT_PUBLISHED", service.operation(jobId, repositoryId, push.operationId).failureCode)
+        assertEquals(62, service.unconfirmedPushes(jobId, repositoryId).size)
     }
 
     @Test fun `the reviewed remote expectation is enforced by the push itself`(): Unit = Fixture().use { f ->
