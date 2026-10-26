@@ -601,11 +601,16 @@ class WebJobService(
                     checkpoint()
                     when (inspection) {
                         is WebJobInspection.Available -> webJob(inspection.presentation)
-                        is WebJobInspection.Unavailable -> throw WebJobServiceException(inspection.diagnostic.code, inspection.diagnostic.message)
+                        is WebJobInspection.Unavailable -> {
+                            // IDs were captured before this per-record lock. A guarded deletion may
+                            // have detached this job meanwhile; only its journal proves that absence.
+                            if (inspection.diagnostic.code == "JOB_NOT_FOUND" && deletedJob(id) != null) null
+                            else throw WebJobServiceException(inspection.diagnostic.code, inspection.diagnostic.message)
+                        }
                     }
                 }
                 checkpoint()
-                yield(record)
+                if (record != null) yield(record)
             }
             checkpoint()
         }

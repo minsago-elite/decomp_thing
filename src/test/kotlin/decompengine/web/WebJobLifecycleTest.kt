@@ -14,6 +14,7 @@ import java.time.Clock
 import java.time.Duration
 import java.time.Instant
 import java.time.ZoneOffset
+import java.util.concurrent.CountDownLatch
 import java.util.concurrent.Executors
 import java.util.concurrent.TimeUnit
 import kotlin.io.path.readBytes
@@ -142,6 +143,46 @@ class WebJobLifecycleTest {
             f.mutation(applied.getValue("version").jsonPrimitive.content, "organize_key_0003")), "job")
         assertEquals(JsonNull, cleared["label"]); assertEquals(version, cleared.getValue("version").jsonPrimitive.content)
         assertEquals(before, evidenceDigest(f.root.resolve(job.id)))
+    }
+
+    @Test fun `a captured uninspected deletion does not break the production collection source`() = Fixture().start().use { f ->
+        val removed = f.store.createFromUpload("removed.elf", elfFixture())
+        val retained = f.store.createFromUpload("retained.elf", elfFixture())
+        val version = f.version(removed.id)
+        val captured = CountDownLatch(1)
+        val resume = CountDownLatch(1)
+        val reader = Executors.newSingleThreadExecutor()
+        // Pause after the real source captures IDs but before any per-record inspection.
+        val pages = WebJobPages({
+            val records = f.service.collectionRecords()
+            captured.countDown()
+            check(resume.await(5, TimeUnit.SECONDS))
+            records
+        })
+        val listing = reader.submit<JsonObject> { pages.page("owner", WebJobQuery(), null) }
+        try {
+            assertTrue(captured.await(5, TimeUnit.SECONDS))
+            data(f.delete(removed.id, "captured_delete_0001", version), "operation", 202)
+            pages.invalidate()
+            resume.countDown()
+            val page = listing.get(5, TimeUnit.SECONDS)
+            assertEquals(listOf(retained.id), page.getValue("items").jsonArray.map { it.jsonObject.getValue("jobId").jsonPrimitive.content })
+            assertEquals(1, data(f.read("/jobs"), "jobs").getValue("items").jsonArray.size)
+        } finally {
+            resume.countDown(); reader.shutdownNow()
+            assertTrue(reader.awaitTermination(5, TimeUnit.SECONDS))
+        }
+    }
+
+    @Test fun `collection still refuses an unjournaled missing or corrupt captured job`() = Fixture().start().use { f ->
+        val missing = f.store.createFromUpload("missing.elf", elfFixture())
+        val captured = f.service.collectionRecords()
+        f.root.resolve(missing.id).toFile().deleteRecursively()
+        assertEquals("JOB_NOT_FOUND", assertFailsWith<WebJobServiceException> { captured.toList() }.code)
+        val corrupt = f.store.createFromUpload("corrupt.elf", elfFixture())
+        val capturedCorrupt = f.service.collectionRecords()
+        f.root.resolve("${corrupt.id}/job.json").writeBytes("{}".toByteArray())
+        assertFailsWith<WebJobServiceException> { capturedCorrupt.toList() }
     }
 
     @Test fun `organization requests are authorized strict and bounded before any write`() = Fixture().start().use { f ->
