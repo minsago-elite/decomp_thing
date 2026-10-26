@@ -89,11 +89,14 @@ internal object GitTransfers {
     /**
      * Receive objects and refs in operation-owned storage. The sole alternate is the managed
      * object store (read-only); neither a stopped process nor a rejected final pack can grow it.
-     * Only after admission do immutable objects move into the live store and a single CAS ref
-     * transaction publishes the tracking changes. Restart reconciliation removes the quarantine.
+     * Only after admission do immutable objects move into the live store and CAS ref transactions
+     * publish the tracking changes. Files-backend namespace transitions first prune obsolete
+     * conflicting refs; a stopped publication can be completed by an explicit fetch retry.
+     * Restart reconciliation removes the quarantine.
      */
     fun fetchQuarantined(runner: GitCommandRunner, live: Path, quarantine: Path, format: GitObjectFormat,
-        location: GitRemoteLocation, name: String, policy: GitRemotePolicy, remainingBytes: Long, control: GitProcessControl): Int {
+        location: GitRemoteLocation, name: String, policy: GitRemotePolicy, remainingBytes: Long, control: GitProcessControl,
+        afterNamespacePrune: () -> Unit = {}): Int {
         val before = allTrackingRefs(runner, live, format, name).associate { it.name to it.objectId }
         runner.run(GitInvocation("init", listOf("--quiet", "--bare", "--object-format=${format.wireName}", quarantine.toString())))
         Files.writeString(quarantine.resolve("objects/info/alternates"), live.resolve("objects").toString() + "\n")
@@ -110,20 +113,18 @@ internal object GitTransfers {
         }
         control.stop()?.let { reason -> throw GitCommandException(GitCommandException.Kind.STOPPED, "The fetch was stopped.", stopReason = reason) }
         val changed = (before.keys + after.keys).filter { before[it] != after[it] }
-        val transaction = buildString {
-            append("start\n")
-            for (ref in changed) {
-                val old = before[ref]
-                val next = after[ref]
-                when {
-                    next == null -> append("delete $ref $old\n")
-                    old == null -> append("create $ref $next\n")
-                    else -> append("update $ref $next $old\n")
-                }
-            }
-            append("prepare\ncommit\n")
-        }.toByteArray()
-        if (transaction.size > 4 * 1024 * 1024) throw GitOperationRefusal("TRANSFER_LIMIT", "The fetch changed more refs than one bounded transaction can publish.")
+        // Git's files backend cannot prepare a create of a/b while a exists (or vice versa),
+        // even if the same transaction deletes a. Prune only obsolete namespace blockers first.
+        // Both phases use CAS; no surviving ref, local branch or checkout is removed. A crash
+        // between phases leaves a safely pruned tracking namespace that the next fetch refreshes.
+        val creates = java.util.TreeSet(after.keys - before.keys)
+        val blockers = before.keys.filter { ref ->
+            ref !in after && (creates.ceiling("$ref/")?.startsWith("$ref/") == true ||
+                generateSequence(ref.substringBeforeLast('/', "")) { it.substringBeforeLast('/', "") }
+                    .takeWhile { it.isNotEmpty() }.any { it in creates })
+        }.toSet()
+        val prune = refTransaction(before.filterKeys { it in blockers }, emptyMap())
+        val transaction = refTransaction(before - blockers, after)
         val promoted = mutableListOf<Path>()
         var publishingRefs = false
         try {
@@ -141,6 +142,10 @@ internal object GitTransfers {
                 }
             }
             publishingRefs = true
+            if (blockers.isNotEmpty()) {
+                runner.run(GitInvocation("update-ref", listOf("--stdin"), gitDir = live, input = prune))
+                afterNamespacePrune()
+            }
             runner.run(GitInvocation("update-ref", listOf("--stdin"), gitDir = live, input = transaction))
         } catch (failure: Exception) {
             // Never remove objects after an uncertain ref publication. They were already admitted
@@ -149,6 +154,25 @@ internal object GitTransfers {
             throw failure
         }
         return changed.size
+    }
+
+    private fun refTransaction(before: Map<String, String>, after: Map<String, String>): ByteArray {
+        val transaction = buildString {
+            append("start\n")
+            for (ref in before.keys + after.keys) {
+                val old = before[ref]
+                val next = after[ref]
+                if (old == next) continue
+                when {
+                    next == null -> append("delete $ref $old\n")
+                    old == null -> append("create $ref $next\n")
+                    else -> append("update $ref $next $old\n")
+                }
+            }
+            append("prepare\ncommit\n")
+        }.toByteArray()
+        if (transaction.size > 4 * 1024 * 1024) throw GitOperationRefusal("TRANSFER_LIMIT", "The fetch changed more refs than one bounded transaction can publish.")
+        return transaction
     }
 
     data class Advertisement(val branch: String?, val format: GitObjectFormat)

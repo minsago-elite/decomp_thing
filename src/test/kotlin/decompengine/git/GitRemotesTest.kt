@@ -229,6 +229,68 @@ class GitRemotesTest {
         assertTrue(service.workspace(jobId, repositoryId).observation.refs.none { it.name.startsWith("refs/remotes/") })
     }
 
+    @Test fun `fetch publishes both directions of tracking ref namespace transitions`() {
+        for (reverse in listOf(false, true)) Fixture().use { f ->
+            val remote = f.remote()
+            val old = if (reverse) "topic/sub" else "topic"
+            val next = if (reverse) "topic" else "topic/sub"
+            if (reverse) {
+                f.repositories.git("-C", remote.toString(), "branch", "-m", "topic", old)
+            }
+            f.initialized()
+            assertEquals(GitOperationState.COMPLETED, sync(GitOperationAction.REMOTE_ADD, "name" to "origin", "url" to "admitted:upstream.git").state)
+            val remoteId = service.remotes(jobId, repositoryId).single().record.remoteId
+            assertEquals(GitOperationState.COMPLETED, sync(GitOperationAction.FETCH, "remoteId" to remoteId).state)
+            val before = service.workspace(jobId, repositoryId).observation
+            f.repositories.git("-C", remote.toString(), "branch", "-m", old, next)
+            repeat(2) {
+                val operation = sync(GitOperationAction.FETCH, "remoteId" to remoteId)
+                assertEquals(GitOperationState.COMPLETED, operation.state, operation.message)
+                assertEquals(setOf("refs/remotes/origin/main", "refs/remotes/origin/$next"),
+                    service.remotes(jobId, repositoryId).single().tracking.map { it.name }.toSet())
+                val after = service.workspace(jobId, repositoryId).observation
+                assertEquals(before.head, after.head)
+                assertEquals(GitWorkspaceVersions.worktreeVersion(before), GitWorkspaceVersions.worktreeVersion(after))
+                assertEquals(before.refs.filter { !it.name.startsWith("refs/remotes/") }, after.refs.filter { !it.name.startsWith("refs/remotes/") })
+            }
+        }
+    }
+
+    @Test fun `fetch retries safely after interruption between namespace prune and publication`() {
+        for (reverse in listOf(false, true)) Fixture().use { f ->
+            val remote = f.remote()
+            val old = if (reverse) "topic/sub" else "topic"
+            val next = if (reverse) "topic" else "topic/sub"
+            if (reverse) f.repositories.git("-C", remote.toString(), "branch", "-m", "topic", old)
+            f.initialized()
+            assertEquals(GitOperationState.COMPLETED, sync(GitOperationAction.REMOTE_ADD, "name" to "origin", "url" to "admitted:upstream.git").state)
+            val remoteId = service.remotes(jobId, repositoryId).single().record.remoteId
+            assertEquals(GitOperationState.COMPLETED, sync(GitOperationAction.FETCH, "remoteId" to remoteId).state)
+            val before = service.workspace(jobId, repositoryId).observation
+            f.repositories.git("-C", remote.toString(), "branch", "-m", old, next)
+            val live = f.store.resolve("$jobId/git/repositories/$repositoryId/repository.git")
+            val quarantine = f.repositories.root.resolve("interrupted-quarantine.git")
+            val policy = GitRemotePolicy(admittedRoot = f.admitted)
+            assertFailsWith<IllegalStateException> {
+                GitTransfers.fetchQuarantined(f.repositories.runner, live, quarantine, GitObjectFormat.SHA1,
+                    parse("admitted:upstream.git", policy), "origin", policy, 1024 * 1024, GitProcessControl()) {
+                    throw IllegalStateException("Simulated process loss after namespace prune")
+                }
+            }
+            assertEquals(listOf("refs/remotes/origin/main"), service.remotes(jobId, repositoryId).single().tracking.map { it.name })
+            service.close()
+            service = f.open()
+            val operation = sync(GitOperationAction.FETCH, "remoteId" to remoteId)
+            assertEquals(GitOperationState.COMPLETED, operation.state, operation.message)
+            assertEquals(setOf("refs/remotes/origin/main", "refs/remotes/origin/$next"),
+                service.remotes(jobId, repositoryId).single().tracking.map { it.name }.toSet())
+            val after = service.workspace(jobId, repositoryId).observation
+            assertEquals(before.head, after.head)
+            assertEquals(GitWorkspaceVersions.worktreeVersion(before), GitWorkspaceVersions.worktreeVersion(after))
+            assertEquals(before.refs.filter { !it.name.startsWith("refs/remotes/") }, after.refs.filter { !it.name.startsWith("refs/remotes/") })
+        }
+    }
+
     @Test fun `clone publishes a complete managed repository from an admitted remote`(): Unit = Fixture().use { f ->
         f.remote()
         service = f.open()

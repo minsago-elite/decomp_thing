@@ -1389,9 +1389,10 @@ class ManagedGitRepositories(
     }
 
     /**
-     * A remote intent after a restart (#594). A fetch updates each remote-tracking ref only after
-     * its pack is complete, so refs are unchanged or fully updated; partial packs are removed and
-     * the fetch becomes `interrupted`. Registration changes complete when their record is present
+     * A remote intent after a restart (#594). A fetch updates remote-tracking refs only after
+     * admission. A namespace transition may have pruned obsolete conflicting refs before the
+     * remaining CAS publication; an explicit retry refreshes that state. Partial packs are removed
+     * and the fetch becomes `interrupted`. Registration changes complete when their record is present
      * (add) or absent (remove).
      */
     private fun reconcileSync(jobId: String, operation: GitOperationRecord, request: GitSyncRequest): GitOperationRecord {
@@ -1401,7 +1402,7 @@ class ManagedGitRepositories(
             GitOperationAction.FETCH -> {
                 try { GitTransfers.removePartialPacks(directory.resolve(GIT_DIR)) } catch (_: Exception) { }
                 finish(operation, GitOperationState.INTERRUPTED, "INTERRUPTED",
-                    "Interrupted by a server restart. Remote-tracking refs are unchanged or fully updated; fetch again to refresh them.")
+                    "Interrupted by a server restart. Remote-tracking refs may have been updated or obsolete refs pruned; fetch again to refresh them.")
             }
             GitOperationAction.REMOTE_ADD -> if (remotes.any { it.name == request.parameters["name"] })
                 finish(operation, GitOperationState.COMPLETED, null, "The remote was registered before the server restarted.")

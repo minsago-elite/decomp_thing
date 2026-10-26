@@ -982,18 +982,20 @@ LFS stay inert, and objects are verified with `fsck`.
 Every transfer is bounded:
 
 - by elapsed time, at most ten minutes;
-- by repository bytes, checked while Git runs and unconditionally at admission, so an overrun stops with `TRANSFER_LIMIT`. Clone budgets checkout expansion against the remaining bytes and checks the complete staging tree immediately before publication. Fetch receives into operation-owned quarantine with a read-only alternate to existing managed objects, budgeting existing plus quarantined bytes; rejected objects and refs never enter the live store. Admitted immutable objects are promoted without replacing local objects, then tracking refs publish in one compare-and-swap transaction;
+- by repository bytes, checked while Git runs and unconditionally at admission, so an overrun stops with `TRANSFER_LIMIT`. Clone budgets checkout expansion against the remaining bytes and checks the complete staging tree immediately before publication. Fetch receives into operation-owned quarantine with a read-only alternate to existing managed objects, budgeting existing plus quarantined bytes; rejected objects and refs never enter the live store. Admitted immutable objects are promoted without replacing local objects, then tracking refs publish with bounded compare-and-swap transactions; a branch namespace transition (for example `topic` to `topic/sub`) first prunes only obsolete conflicting tracking refs because Git's files backend cannot delete and recreate those names in one transaction;
 - by output.
 
 The operation's `progress` reports Git's own phase and percent while it runs (#594).
 `POST G/operations/{id}/cancel` with `{"action": "git.cancel"}` and the operation version in
 `If-Match` stops a queued or running fetch or clone. The operation shows `cancelling` and then ends
 `cancelled`. Transfer staging (including complete but unadmitted packs) is removed, and local
-branches, the work tree and accepted snapshots are never touched. The atomic tracking-ref
-transaction runs only after object admission, so a fetch interrupted by a restart leaves refs
-unchanged or fully updated. A restart between object promotion and ref publication may retain
-already-admitted objects within the byte cap; it never promotes an oversized quarantine. It becomes `interrupted` and is
-never repeated. Progress is exposed through the durable operation resource. It is not yet published
+branches, the work tree and accepted snapshots are never touched. Tracking-ref publication runs
+only after object admission. Ordinarily refs are unchanged or fully updated; a namespace transition
+interrupted between its prune and publication transactions can also leave obsolete conflicting refs
+pruned without their replacements. A fresh explicit fetch safely refreshes that tracking state,
+including after restart; no automatic retry runs. A restart between object promotion and ref publication
+may retain already-admitted objects within the byte cap; it never promotes an oversized quarantine.
+The operation becomes `interrupted` and is never repeated automatically. Progress is exposed through the durable operation resource. It is not yet published
 on the shared job event stream, which is still run-scoped.
 
 `GET G/remotes` lists each remote with:
