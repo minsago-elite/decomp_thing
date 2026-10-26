@@ -379,6 +379,56 @@ class WebProgramStructureTest {
         assertTrue(pages > 1, "a 200-row owned page must split by bytes")
     }
 
+    @Test fun `owned pages charge escaped module metadata and the complete response envelope`() {
+        val functions = (0 until 25).map { index ->
+            RecoveredFunction("\u0001".repeat(4090) + "id_$index", "\u0001".repeat(4096), index.toULong(), "void f(void)")
+        }
+        val moduleId = "m".repeat(128)
+        val ids = functions.map { it.id } + listOf("\u0002".repeat(4096), "fn_missing")
+        val module = PlannedModule(moduleId, "\u0800".repeat(4096), "\u0801".repeat(4096),
+            ids, emptyList(), emptyList(), List(20) { "\u0001".repeat(256) + it })
+        val revision = Revision(model(functions), plan(module), emptyList())
+        for (limit in listOf(20, 200)) {
+            var cursor: String? = null
+            var pages = 0
+            val seen = mutableListOf<String>()
+            do {
+                val data = revision.pages.module("owner", jobId, runId, revisionId, moduleId,
+                    "kind=functions&limit=$limit" + (cursor?.let { "&cursor=$it" } ?: ""))
+                assertContract("moduleDetail", data)
+                assertEquals("available", data.text("state"))
+                assertEquals("available", data.getValue("plan").jsonObject.text("state"))
+                val metadata = data.getValue("module").jsonObject
+                assertEquals(module.sourcePath, metadata.text("implementationPath"))
+                assertEquals(module.headerPath, metadata.text("interfacePath"))
+                assertEquals(20, metadata.getValue("boundaryEvidence").jsonObject.items().size)
+                val envelope = buildJsonObject {
+                    put("apiVersion", 1); put("kind", "moduleDetail")
+                    put("requestId", "00000000-0000-0000-0000-000000000000"); put("data", data)
+                }
+                val bytes = envelope.toString().toByteArray(Charsets.UTF_8).size
+                assertTrue(bytes <= 1_048_576, "complete module response bytes $bytes")
+                val owned = data.getValue("owned").jsonObject
+                assertEquals(ids.size, owned.getValue("total").jsonPrimitive.int)
+                assertTrue(owned.items().size in 1..limit)
+                for (item in owned.items()) {
+                    assertEquals(item.text("entityId") in functions.map { it.id }, item.getValue("recorded").jsonPrimitive.boolean)
+                }
+                seen += owned.items().map { it.text("entityId")!! }
+                cursor = next(owned)
+                if (cursor != null) assertEquals(seen.size, cursor.split('_')[1].toInt())
+                pages++
+                assertTrue(pages < 10, "owned pagination must make progress")
+            } while (cursor != null)
+            assertEquals(ids, seen)
+            assertTrue(pages > 1, "owned pages split by bytes, not just the requested row limit")
+        }
+        val empty = revision.pages.module("owner", jobId, runId, revisionId, moduleId, "kind=types&limit=200")
+        assertContract("moduleDetail", empty)
+        assertTrue(empty.getValue("owned").jsonObject.items().isEmpty())
+        assertNull(next(empty.getValue("owned").jsonObject))
+    }
+
     @Test fun `retained projections stay readable after an attempt version change with identical commitments`() {
         val revision = standard()
         assertEquals("available", revision.pages.functions("owner", jobId, runId, revisionId, null).text("state"))
