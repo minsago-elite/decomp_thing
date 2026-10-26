@@ -97,7 +97,7 @@ export function auditFixtures(repo, buildId) {
     { name: 'source file', path: `${base}/revisions/${revisionId}/source-files/${file.data.item.fileId}?byte=0`, rendered: 'embedded_table_with_a_long_identifier' },
   ];
   return {
-    pages, controls, csrfToken: bootstrap.data.csrfToken, sourceBytes: bytes, sourceName: file.data.item.displayName, runId, retriedRunId: retried.data.runId,
+    pages, controls, csrfToken: bootstrap.data.csrfToken, sourceBytes: bytes, sourceName: file.data.item.displayName, runId, runVersion: run.data.version, retriedRunId: retried.data.runId,
     respond(method, pathname, accept) {
       const route = routes.find(([pattern, , verb = 'GET']) => pattern.test(pathname) && (verb === method || (verb === 'GET' && method === 'HEAD')));
       return route ? route[1](accept) : error(404, 'NOT_FOUND');
@@ -384,7 +384,7 @@ export async function qualifyAudit({ origin, repo, manifest, evidenceDirectory, 
     await ready(tab, `document.body.innerText.includes(${JSON.stringify(done)})`, `${command} by keyboard`);
     const sent = mutations().slice(before);
     assert.equal(sent.length, 1, `${command} must send exactly one command`);
-    assert.ok(sent[0].idempotencyKey && sent[0].ifMatch === `"${'run_version_2'}"` && sent[0].csrf, `${command} lost its identity-bound headers`);
+    assert.ok(sent[0].idempotencyKey && sent[0].ifMatch === `"${fixtures.runVersion}"` && sent[0].csrf, `${command} lost its identity-bound headers`);
     keyboard.steps.push({ result: done, request: { path: sent[0].path, ifMatch: sent[0].ifMatch, idempotencyKey: true, csrf: true } });
   }
   await cdp.call('Browser.setDownloadBehavior', { behavior: 'allowAndName', downloadPath: evidenceDirectory, eventsEnabled: true });

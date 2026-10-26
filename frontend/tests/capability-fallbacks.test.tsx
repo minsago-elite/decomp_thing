@@ -135,6 +135,18 @@ describe('offline and sensitive-data policy (#632)', () => {
     expect(fetch.mock.calls[0]![1]).toMatchObject({ cache: 'no-store', credentials: 'same-origin', mode: 'same-origin', redirect: 'error' });
   });
 
+  // Under the document's no-referrer policy, Firefox and WebKit serialize a POST's Origin as "null"
+  // and the server refuses the mutation (found by the Firefox packaged run, #631). The request-level
+  // origin policy restores the exact Origin while sending no page path.
+  it('sends every mutation with an origin-only referrer policy', async () => {
+    const fetch = vi.fn<typeof globalThis.fetch>(() => Promise.reject(new TypeError('offline')));
+    const client = createApiClient({ basePath: '/nested', fetch });
+    await expect(client.post('session', '/session', 'sessionStartRequest', { token: 'a'.repeat(43) })).rejects.toMatchObject({ code: 'network_error' });
+    await expect(client.upload(new File(['x'], 'x.elf'), { csrfToken: 'a'.repeat(43), idempotencyKey: 'b'.repeat(32) })).rejects.toMatchObject({ code: 'network_error' });
+    for (const call of fetch.mock.calls) expect(call[1]).toMatchObject({ method: 'POST', referrerPolicy: 'origin', mode: 'same-origin' });
+    expect(fetch).toHaveBeenCalledTimes(2);
+  });
+
   it('queues no command while offline and sends nothing when the connection returns', async () => {
     const run = fixture<{ data: Run }>('run-failed').data;
     const controls = fixture<{ data: Controls }>('attempt-controls-retry').data;

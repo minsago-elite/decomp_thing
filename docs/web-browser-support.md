@@ -10,14 +10,30 @@ GitHub issues own live status.
 | Engine | Build | How it is exercised | Status |
 | --- | --- | --- | --- |
 | Chromium | Chrome for Testing 149.0.7827.55, linux64, pinned with its SHA-256 in `scripts/web-test-browser.json` | Every CI `web-packaged` run drives the packaged JVM in this build through DevTools: session, metadata, live dashboard, 10,000-job scale, Vite proxy and (with #1782) the route audit, which covers reflow, contrast, focus, keyboard commands/download, assets under CSP and timing. `upgrade` and `legacy` modes exist for explicit runs. Each run records `Browser.getVersion` and the binary SHA-256 in `report.json`. | Qualified for the journeys listed, per CI run |
-| Firefox | none pinned | Not run. | **Not qualified.** Tracked in #1791 |
-| WebKit / Safari | none pinned | Not run. | **Not qualified.** Tracked in #1791 |
+| Firefox | Playwright 1.58.2 Firefox 146.0.1 (browser revision 1509) | `scripts/packaged-browser-engines.mjs --engine firefox` against the packaged JVM at `/nested/` with its enforced CSP. The smoke journey uses the real server: bootstrap link sign-in with fragment removal, cookie restore across reload, runtime build identity, heading focus on route change, sign-out, and no browser storage left behind. It then runs the same route audit as Chromium: reflow at all five sizes in light and dark, text and focus contrast, Tab and Shift+Tab stops, 24 px targets, reduced motion, attempt retry/cancel and the source download by keyboard, every packaged asset plus the highlight worker under CSP, and timing budgets. | **Qualified locally** on 2026-10-26 (Linux x86-64): every check passed. Cold dashboard p95 219 ms, route feedback p95 16 ms, first data p95 49 ms. CI re-runs it by dispatching *Browser engine qualification* |
+| WebKit | Playwright 1.58.2 WebKit (browser revision 2248) | The same runner with `--engine webkit`. | **Not yet qualified.** The local host lacks WebKit's system libraries. It needs one dispatch of the *Browser engine qualification* workflow, which installs WebKit with `--with-deps` on ubuntu-24.04. Tracked in #1791 |
+| Safari (macOS) | — | Not run; release-time manual check per `docs/web-delivery.md`. | Not qualified |
 
 The delivery budgets name Playwright Chromium, Firefox and WebKit for CI plus current
-stable browsers at release (`docs/web-delivery.md`). Until #1791 lands, nothing on this page
-claims Firefox or WebKit support. A passing Chromium run is not evidence for other engines.
-Engine-specific defects found later each get their own issue linked here, along with the
-fallback used in the meantime.
+stable browsers at release (`docs/web-delivery.md`). The Chromium DevTools checks run on every
+pull request. The Playwright engine runner is dispatch-only (`.github/workflows/browser-engines.yml`)
+because it builds a distribution and installs browser host dependencies; each run uploads
+`build/packaged-engines-*/report.json` with the engine and Playwright versions, plus screenshots.
+A passing Chromium run is not evidence for other engines.
+
+### Engine-specific findings
+
+- **Mutations from Firefox (and per the Fetch standard, WebKit) were refused.** The document's
+  `Referrer-Policy: no-referrer` makes these engines send `Origin: null` on a same-origin POST, and
+  the server requires the exact origin, so sign-in, uploads and commands failed with
+  "The browser address and application configuration do not match". Chromium still sends the real
+  origin, so the Chromium-only checks never saw it. API requests now set
+  `referrerPolicy: 'origin'`, which restores the exact `Origin` and sends only scheme, host and
+  port as `Referer`, never the page path. The Firefox smoke journey and
+  `capability-fallbacks.test.tsx` cover it.
+- **Firefox does not wrap Tab back into the page** after the last stop (focus moves to browser
+  chrome). This is browser behaviour, not an application defect; keyboard walks start from the
+  route heading.
 
 ## Capability detection and fallbacks
 
