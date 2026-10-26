@@ -224,7 +224,7 @@ internal class GccBundledOperationInputs private constructor(
                 val inputs = GccBundledOperationInputs(
                     reference, bundle, Collections.unmodifiableList(opened.toList()), classPath, plannerProfile, intent.cliInvocation,
                     intent.bundledRuntime.invocationVersion == 8,
-                    intent.bundledRuntime.invocationVersion == 9,
+                    intent.bundledRuntime.invocationVersion in setOf(9, 10),
                 )
                 inputs.verify("after prepared operation input authentication")
                 return inputs

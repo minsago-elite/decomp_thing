@@ -24,6 +24,27 @@ class GccBundledInterfaceRouteTest {
     }
 
     @Test
+    fun `global type command selects runtime10 paired with interface observations`() {
+        val selected = GccBundledCliOptions.parse(arguments(), nativeInterfaceObservations = true,
+            nativeGlobalTypeObservations = true)
+        assertEquals("gcc-engine-global-type-observations", selected.commandName)
+        assertEquals("driver", selected.engineId)
+        assertTrue(selected.nativeInterfaceObservations)
+        assertTrue(selected.nativeGlobalTypeObservations)
+        assertFalse(selected.fullRecoveryExport)
+        assertFalse(selected.runtimeDiagnostics)
+        assertEquals("driver", GccBundledCliOptions.engineUsage(false,
+            nativeInterfaceObservations = true, nativeGlobalTypeObservations = true))
+        assertFailsWith<IllegalArgumentException> {
+            GccBundledCliOptions.parse(arguments(), nativeGlobalTypeObservations = true)
+        }
+        assertFailsWith<IllegalArgumentException> {
+            GccBundledCliOptions.parse(arguments() + listOf("--resume-after-checkpoint", "512"),
+                nativeInterfaceObservations = true, nativeGlobalTypeObservations = true)
+        }
+    }
+
+    @Test
     fun `interface command refuses wrong engines mixed modes and resume before filesystem access`() {
         for (engine in listOf("cc1", "lto1")) {
             assertFailsWith<IllegalArgumentException> { GccBundledCliOptions.parse(arguments(engine), nativeInterfaceObservations = true) }

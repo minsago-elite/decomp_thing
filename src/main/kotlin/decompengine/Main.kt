@@ -58,6 +58,8 @@ fun main(args: Array<String>) {
         "gcc-engine-runtime-diagnostic" -> runGccEngineCommand(args.drop(1), fullRecoveryExport = true, runtimeDiagnostics = true)
         "gcc-engine-native-calls" -> runGccEngineCommand(args.drop(1), fullRecoveryExport = false, nativeCallObservations = true)
         "gcc-engine-interface-observations" -> runGccEngineCommand(args.drop(1), fullRecoveryExport = false, nativeInterfaceObservations = true)
+        "gcc-engine-global-type-observations" -> runGccEngineCommand(args.drop(1), fullRecoveryExport = false,
+            nativeInterfaceObservations = true, nativeGlobalTypeObservations = true)
         "llvm-native-runtime-measurement" -> runLlvmNativeRuntimeMeasurement(args.drop(1))
         "web" -> runWeb(args.drop(1))
         null, "help", "--help", "-h" -> printHelp()
@@ -134,21 +136,23 @@ private fun runGccEngineFullExport(args: List<String>) {
 
 private fun runGccEngineCommand(args: List<String>, fullRecoveryExport: Boolean,
     runtimeDiagnostics: Boolean = false, nativeCallObservations: Boolean = false,
-    nativeInterfaceObservations: Boolean = false) {
+    nativeInterfaceObservations: Boolean = false, nativeGlobalTypeObservations: Boolean = false) {
     val options = try {
         decompengine.oracle.gcc.GccBundledCliOptions.parse(args, fullRecoveryExport = fullRecoveryExport,
             runtimeDiagnostics = runtimeDiagnostics, nativeCallObservations = nativeCallObservations,
-            nativeInterfaceObservations = nativeInterfaceObservations)
+            nativeInterfaceObservations = nativeInterfaceObservations,
+            nativeGlobalTypeObservations = nativeGlobalTypeObservations)
     } catch (failure: IllegalArgumentException) {
         System.err.println(failure.message)
         val command = when {
+            nativeGlobalTypeObservations -> "gcc-engine-global-type-observations"
             nativeInterfaceObservations -> "gcc-engine-interface-observations"
             nativeCallObservations -> "gcc-engine-native-calls"
             runtimeDiagnostics -> "gcc-engine-runtime-diagnostic"
             fullRecoveryExport -> "gcc-engine-full-export"
             else -> "gcc-engine-plan"
         }
-        val resumeOption = if (fullRecoveryExport || nativeCallObservations || nativeInterfaceObservations) "" else " [--resume-after-checkpoint <multiple-of-512>]"
+        val resumeOption = if (fullRecoveryExport || nativeCallObservations || nativeInterfaceObservations || nativeGlobalTypeObservations) "" else " [--resume-after-checkpoint <multiple-of-512>]"
         val engines = decompengine.oracle.gcc.GccBundledCliOptions.engineUsage(fullRecoveryExport = fullRecoveryExport,
             runtimeDiagnostics = runtimeDiagnostics, nativeCallObservations = nativeCallObservations,
             nativeInterfaceObservations = nativeInterfaceObservations)

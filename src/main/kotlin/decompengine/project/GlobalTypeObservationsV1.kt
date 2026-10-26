@@ -78,12 +78,17 @@ object GlobalTypeObservationsV1 {
         expectedBindings: GlobalTypeObservationBindingsV1,
         expectedBytes: Long,
         expectedSha256: String,
+        expectedFunctionIds: Set<String>,
         limits: GlobalTypeObservationLimitsV1 = GlobalTypeObservationLimitsV1(),
         checkpoint: () -> Unit,
         openObservations: () -> InputStream,
         consume: (JsonObject) -> Unit = {},
     ): GlobalTypeObservationSummaryV1 {
         require(expectedBytes in 1..limits.maximumBytes && DIGEST.matches(expectedSha256))
+        require(expectedFunctionIds.size <= limits.maximumFunctions && expectedFunctionIds.all(FUNCTION_ID::matches)) {
+            "global/type function identities exceed their independently supplied bound"
+        }
+        val functionIds = expectedFunctionIds.toSet()
         listOf(expectedBindings.inputSha256, expectedBindings.exporterSha256, expectedBindings.archiveSha256,
             expectedBindings.programModelSha256).forEach { require(DIGEST.matches(it)) }
         require(expectedBindings.programModelBytes in 1..512L * 1024 * 1024)
@@ -221,7 +226,7 @@ object GlobalTypeObservationsV1 {
                     "function-global-reference" -> {
                         referenceSection = true
                         row.fields("dataCaptureKey", "functionId", "operandIndex", "recordKind", "referenceAddress", "targetAddress")
-                        require(FUNCTION_ID.matches(row.string("functionId")))
+                        require(row.string("functionId") in functionIds)
                         validateAddress(row.string("dataCaptureKey"), captureSpace(row.string("dataCaptureKey")), spaces)
                         validateAddress(row.string("referenceAddress"), captureSpace(row.string("referenceAddress")), spaces)
                         validateAddress(row.string("targetAddress"), captureSpace(row.string("targetAddress")), spaces)
@@ -233,7 +238,7 @@ object GlobalTypeObservationsV1 {
                     "function-global-reference-unresolved" -> {
                         referenceSection = true
                         row.fields("functionId", "operandIndex", "reason", "recordKind", "referenceAddress", "targetAddress")
-                        require(FUNCTION_ID.matches(row.string("functionId")))
+                        require(row.string("functionId") in functionIds)
                         require(row.string("reason") in setOf("non-memory-target", "no-defined-data-containing-target"))
                         validateAddress(row.string("referenceAddress"), captureSpace(row.string("referenceAddress")), spaces)
                         validateAddress(row.string("targetAddress"), captureSpace(row.string("targetAddress")), spaces)
@@ -254,7 +259,7 @@ object GlobalTypeObservationsV1 {
         require(roots.all { (ordinal, root) -> (ordinal to root) in nodeIds } &&
             edgeTargets.all { (ordinal, source, target) -> (ordinal to source) in nodeIds &&
                 (target == null || (ordinal to target) in nodeIds) }) { "type graph contains a dangling node reference" }
-        require(spaces.size == expectedSpaces && expectedFunctions in 0..limits.maximumFunctions.toLong())
+        require(spaces.size == expectedSpaces && expectedFunctions == functionIds.size.toLong())
         return GlobalTypeObservationSummaryV1(totalBytes, expectedSha256, dataCount, expectedFunctions,
             typeNodes, typeEdges, enumMembers, references, unresolved)
     }

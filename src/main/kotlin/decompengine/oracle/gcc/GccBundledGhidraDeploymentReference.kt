@@ -33,6 +33,7 @@ internal class GccBundledGhidraReference private constructor(
     val exporterSha256: String,
     val nativeCallCollector: GccBundledNativeCallCollectorIdentityV1?,
     val interfaceCollector: GccBundledInterfaceRuntimeIdentityV1?,
+    val globalTypeCollector: GccBundledGlobalTypeRuntimeIdentityV1?,
 ) {
     val entries: Map<String, GccBundledGhidraReferenceEntry> = Collections.unmodifiableMap(LinkedHashMap(entries))
     val classPath: List<String> = Collections.unmodifiableList(ArrayList(classPath))
@@ -65,7 +66,7 @@ internal class GccBundledGhidraReference private constructor(
         require(exporter.path.fileName.toString() == "ExportProgramModel.java" &&
             exporter.bytes == exporterBytes && exporter.sha256 == exporterSha256
         ) { "bundled candidate exporter differs from the independent application resource" }
-        if (runtime.invocationVersion == 9) {
+        if (runtime.invocationVersion in setOf(9, 10)) {
             require(interfaceCollector != null && runtime.interfaceCollector == interfaceCollector) {
                 "bundled interface collector differs from the independent deployment reference"
             }
@@ -73,6 +74,12 @@ internal class GccBundledGhidraReference private constructor(
         if (runtime.invocationVersion == 8) {
             require(nativeCallCollector != null && runtime.nativeCallCollector == nativeCallCollector) {
                 "bundled native call collector differs from the independent deployment reference"
+            }
+        }
+        if (runtime.invocationVersion == 10) {
+            require(globalTypeCollector != null && runtime.globalTypeCollector == globalTypeCollector &&
+                interfaceCollector != null && runtime.interfaceCollector == interfaceCollector) {
+                "bundled global/type collector differs from the independent deployment reference"
             }
         }
     }
@@ -85,7 +92,8 @@ internal class GccBundledGhidraReference private constructor(
                 "schemaVersion", "provider", "ghidraVersion", "ghidraRelease", "archive", "rootMode", "entries",
                 "classPath", "bridgePath", "exportGuardPath", "exporter", "closureSha256",
             ) + (if ("nativeCallCollector" in root) setOf("nativeCallCollector") else emptySet()) +
-                (if ("interfaceCollector" in root) setOf("interfaceCollector") else emptySet()))
+                (if ("interfaceCollector" in root) setOf("interfaceCollector") else emptySet()) +
+                (if ("globalTypeCollector" in root) setOf("globalTypeCollector") else emptySet()))
             require(root.number("schemaVersion") == 1L && root.string("provider") == REFERENCE_PROVIDER) {
                 "bundled Ghidra deployment reference version is invalid"
             }
@@ -164,6 +172,8 @@ internal class GccBundledGhidraReference private constructor(
                 root.objectValue("interfaceCollector")).also {
                     it.requireReference(entries, exporter.number("bytes"), exporter.string("sha256"))
                 } else null
+            val globalTypes = if ("globalTypeCollector" in root) GccBundledGlobalTypeRuntimeIdentityV1.parse(
+                root.objectValue("globalTypeCollector")).also { it.requireNoLooseCollectorClass(entries) } else null
             val declaredClassPath = root.arrayValue("classPath").map { value ->
                 (value as? JsonPrimitive)?.takeIf { it.isString }?.content
                     ?: throw IllegalArgumentException("bundled Ghidra reference classpath must contain strings")
@@ -180,7 +190,7 @@ internal class GccBundledGhidraReference private constructor(
             require(digest == OracleArtifacts.sha256(OracleJson.canonicalBytes(JsonObject(root - "closureSha256"), REFERENCE_LIMITS))) {
                 "bundled Ghidra deployment reference commitment is invalid"
             }
-            return GccBundledGhidraReference(digest, entries, declaredClassPath, exporter.number("bytes"), exporter.string("sha256"), collector, interfaces)
+            return GccBundledGhidraReference(digest, entries, declaredClassPath, exporter.number("bytes"), exporter.string("sha256"), collector, interfaces, globalTypes)
         }
     }
 }
@@ -298,6 +308,29 @@ internal class GccBundledGhidraDeploymentReference private constructor(
                         checkNotNull(applicationGuard).verifyUnchanged("after reading interface source resources")
                     }
                     identity.requireExecutedClasses(bundleRoot, parsed.classPath, parsed.entries)
+                }
+                parsed.globalTypeCollector?.let { identity ->
+                    val sourcePath = GccBundledGlobalTypeRuntimeIdentityV1.SOURCE_RESOURCE.removePrefix("/")
+                    val source = if (development) {
+                        val resources = GccBundledGhidraDeploymentReference::class.java.classLoader
+                            .getResources(sourcePath).asSequence().take(2).toList()
+                        require(resources.size == 1) { "global/type collector source is missing or shadowed" }
+                        resources.single().openStream().use { it.readNBytes(MAXIMUM_EXPORTER_BYTES + 1) }
+                    } else {
+                        JarFile(codeSource.toFile(), false).use { jar ->
+                            val entries = jar.entries().asSequence().take(200_001).toList()
+                            require(entries.size <= 200_000) { "application JAR exceeds its entry bound" }
+                            val entry = entries.singleOrNull { it.name == sourcePath }
+                            require(entry != null && !entry.isDirectory && entry.size == identity.sourceBytes) {
+                                "application JAR has no exact unique global/type source resource"
+                            }
+                            jar.getInputStream(entry).use { it.readNBytes(MAXIMUM_EXPORTER_BYTES + 1) }
+                        }.also { checkNotNull(applicationGuard).verifyUnchanged("after reading global/type source resource") }
+                    }
+                    require(source.size.toLong() == identity.sourceBytes && OracleArtifacts.sha256(source) == identity.sourceSha256) {
+                        "global/type source differs from its independent application resource"
+                    }
+                    JarFile(bundleRoot.resolve(BRIDGE_PATH).toFile(), false).use(identity::requireBridgeClass)
                 }
                 return GccBundledGhidraDeploymentReference(parsed, bundleRoot, guard, captured, applicationGuard).also { it.verify("after opening") }
             } catch (failure: Throwable) {

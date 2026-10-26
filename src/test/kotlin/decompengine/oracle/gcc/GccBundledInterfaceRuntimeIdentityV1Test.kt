@@ -128,6 +128,23 @@ class GccBundledInterfaceRuntimeIdentityV1Test {
     }
 
     @Test
+    fun `runtime ten reaches bounded global type postscript without changing the v9 scripts`() {
+        val identity = GccBundledInterfaceRuntimeIdentityV1.parse(fixture())
+        val globalIdentity = GccBundledGlobalTypeRuntimeIdentityV1(32, SHA_B, 64, SHA_A)
+        val runtime = GccBundledGhidraRuntime(runtime(identity).root, runtime(identity).classPath, 10,
+            interfaceCollector = identity, globalTypeCollector = globalIdentity)
+        val command = command(runtime)
+        val arguments = command.drop(command.indexOf("decompengine.ghidra.BundledGhidraWorker") + 1)
+        assertEquals(40, arguments.size)
+        assertEquals("ExportNativeInterfacesV1.class", arguments[12])
+        assertEquals("ExportInferredInterfacesV1.class", arguments[20])
+        assertEquals(listOf("ExportGlobalTypeObservationsV1.class", "5", arguments[11],
+            "/scratch/run/reports/native-global-type-observations-v1.json", SHA_B, SHA_A, BundledGhidra.ARCHIVE_SHA256),
+            arguments.subList(33, 40))
+        assertEquals(runtime.toJson(), GccBundledGhidraRuntime.parse(runtime.toJson()).toJson())
+    }
+
+    @Test
     fun `new installed reference links each source class and native identity while legacy absent field remains readable`() {
         GccBundledGhidraDeploymentReference.open().use { deployment ->
             val identity = assertNotNull(deployment.reference.interfaceCollector)

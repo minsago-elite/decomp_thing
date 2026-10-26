@@ -16,8 +16,10 @@ internal data class GccBundledCliOptions(
     val runtimeDiagnostics: Boolean = false,
     val nativeCallObservations: Boolean = false,
     val nativeInterfaceObservations: Boolean = false,
+    val nativeGlobalTypeObservations: Boolean = false,
 ) {
     val commandName: String get() = when {
+        nativeGlobalTypeObservations -> "gcc-engine-global-type-observations"
         nativeInterfaceObservations -> "gcc-engine-interface-observations"
         nativeCallObservations -> "gcc-engine-native-calls"
         runtimeDiagnostics -> "gcc-engine-runtime-diagnostic"
@@ -27,7 +29,9 @@ internal data class GccBundledCliOptions(
 
     companion object {
         fun engineUsage(fullRecoveryExport: Boolean, runtimeDiagnostics: Boolean = false,
-            nativeCallObservations: Boolean = false, nativeInterfaceObservations: Boolean = false): String = when {
+            nativeCallObservations: Boolean = false, nativeInterfaceObservations: Boolean = false,
+            nativeGlobalTypeObservations: Boolean = false): String = when {
+            nativeGlobalTypeObservations -> "driver"
             nativeInterfaceObservations -> "driver"
             runtimeDiagnostics -> "cc1"
             fullRecoveryExport || nativeCallObservations -> "<cc1|driver>"
@@ -35,20 +39,24 @@ internal data class GccBundledCliOptions(
         }
 
         fun engineArgumentUsage(fullRecoveryExport: Boolean, nativeCallObservations: Boolean = false,
-            nativeInterfaceObservations: Boolean = false): String =
+            nativeInterfaceObservations: Boolean = false, nativeGlobalTypeObservations: Boolean = false): String =
             engineUsage(fullRecoveryExport = fullRecoveryExport, nativeCallObservations = nativeCallObservations,
-                nativeInterfaceObservations = nativeInterfaceObservations)
+                nativeInterfaceObservations = nativeInterfaceObservations,
+                nativeGlobalTypeObservations = nativeGlobalTypeObservations)
                 .removeSurrounding("<", ">")
 
         fun parse(arguments: List<String>, fullRecoveryExport: Boolean = false,
             runtimeDiagnostics: Boolean = false, nativeCallObservations: Boolean = false,
-            nativeInterfaceObservations: Boolean = false): GccBundledCliOptions {
+            nativeInterfaceObservations: Boolean = false, nativeGlobalTypeObservations: Boolean = false): GccBundledCliOptions {
             require(!runtimeDiagnostics || fullRecoveryExport) { "runtime diagnostics require full recovery" }
             require(!nativeCallObservations || (!fullRecoveryExport && !runtimeDiagnostics)) {
                 "distinct export commands cannot be combined"
             }
             require(!nativeInterfaceObservations || (!fullRecoveryExport && !runtimeDiagnostics && !nativeCallObservations)) {
                 "interface observations require their distinct command"
+            }
+            require(!nativeGlobalTypeObservations || (nativeInterfaceObservations && !fullRecoveryExport && !runtimeDiagnostics && !nativeCallObservations)) {
+                "global/type observations require the separate typed interface capture route"
             }
             require(arguments.size in 2..32 && arguments.sumOf { it.toByteArray().size.toLong() + 1 } <= 65536)
             val positionals = mutableListOf<String>()
@@ -97,7 +105,8 @@ internal data class GccBundledCliOptions(
                     number("--scratch-max-bytes", 64L * 1024 * 1024 * 1024)!!,
                     number("--scratch-min-inodes", 32768)!!, number("--scratch-max-inodes", 1_000_000)!!), threshold,
                 fullRecoveryExport = fullRecoveryExport, runtimeDiagnostics = runtimeDiagnostics,
-                nativeCallObservations = nativeCallObservations, nativeInterfaceObservations = nativeInterfaceObservations).also {
+                nativeCallObservations = nativeCallObservations, nativeInterfaceObservations = nativeInterfaceObservations,
+                nativeGlobalTypeObservations = nativeGlobalTypeObservations).also {
                 require(it.diskPolicy.maximumFilesystemBytes <= 1024L * 1024 * 1024 * 1024 &&
                     it.diskPolicy.maximumFilesystemInodes <= 2_000_000)
                 require(!nativeInterfaceObservations || (it.diskPolicy.maximumFilesystemBytes <= 64L * 1024 * 1024 * 1024 &&
@@ -119,8 +128,8 @@ internal class GccBundledCliInvocation(val options: GccBundledCliOptions, argume
     private val directories = java.util.Map.copyOf(identities)
     val path: Path = options.output.resolve("invocation.json")
     private val encoded = OracleJson.canonicalBytes(JsonObject(mapOf(
-        "provider" to JsonPrimitive(if (options.nativeInterfaceObservations) "gcc-bundled-cli-invocation-v3" else "gcc-bundled-cli-invocation-v1"),
-        "schemaVersion" to JsonPrimitive(if (options.nativeInterfaceObservations) 3 else 1),
+        "provider" to JsonPrimitive(if (options.nativeGlobalTypeObservations) "gcc-bundled-cli-invocation-v4" else if (options.nativeInterfaceObservations) "gcc-bundled-cli-invocation-v3" else "gcc-bundled-cli-invocation-v1"),
+        "schemaVersion" to JsonPrimitive(if (options.nativeGlobalTypeObservations) 4 else if (options.nativeInterfaceObservations) 3 else 1),
         "argv" to JsonArray((listOf(options.commandName) + arguments)
             .map(::JsonPrimitive)),
         "engineId" to JsonPrimitive(options.engineId), "binary" to JsonPrimitive(options.binary.toString()),
@@ -140,7 +149,8 @@ internal class GccBundledCliInvocation(val options: GccBundledCliOptions, argume
         require(directories.keys == setOf(options.output, options.output.resolve("inputs"), options.output.resolve("journal")))
         require(GccBundledCliOptions.parse(arguments, fullRecoveryExport = options.fullRecoveryExport,
             runtimeDiagnostics = options.runtimeDiagnostics, nativeCallObservations = options.nativeCallObservations,
-            nativeInterfaceObservations = options.nativeInterfaceObservations) == options) {
+            nativeInterfaceObservations = options.nativeInterfaceObservations,
+            nativeGlobalTypeObservations = options.nativeGlobalTypeObservations) == options) {
             "CLI argv differs from its selected options"
         }
     }

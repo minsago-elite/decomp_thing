@@ -173,7 +173,15 @@ internal object GccBundledFullExportCapture {
         checkpoint: () -> Unit = {},
     ): GccBundledFullExportSnapshot = captureExact(run, expectedReports, artifacts, limits, SiblingInventory.INTERFACES, 1, checkpoint)
 
-    private enum class SiblingInventory { NONE, NATIVE_CALLS, INTERFACES }
+    internal fun captureWithGlobalTypeSiblings(
+        run: LinuxDescriptor,
+        expectedReports: LinuxFileIdentity,
+        artifacts: List<GccCompilerEngineContainmentArtifactIdentity>,
+        limits: GccResumeByteValidationLimits = GccResumeByteValidationLimits(),
+        checkpoint: () -> Unit = {},
+    ): GccBundledFullExportSnapshot = captureExact(run, expectedReports, artifacts, limits, SiblingInventory.GLOBAL_TYPES, 1, checkpoint)
+
+    private enum class SiblingInventory { NONE, NATIVE_CALLS, INTERFACES, GLOBAL_TYPES }
 
     private fun captureExact(
         run: LinuxDescriptor,
@@ -207,6 +215,7 @@ internal object GccBundledFullExportCapture {
                 SiblingInventory.NONE -> emptySet()
                 SiblingInventory.NATIVE_CALLS -> setOf("native-calls-v1")
                 SiblingInventory.INTERFACES -> setOf("native-interfaces-v1", "native-inferred-interfaces-v1")
+                SiblingInventory.GLOBAL_TYPES -> setOf("native-interfaces-v1", "native-inferred-interfaces-v1", "native-global-type-observations-v1.json")
             }
             require(LinuxFilesystemSyscalls.directoryEntryNames(reports, expectedReportNames.size + 1).toSet() ==
                 expectedReportNames

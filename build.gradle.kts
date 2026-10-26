@@ -234,6 +234,7 @@ listOf("compileKotlin", "compileTestKotlin").forEach { taskName ->
 tasks.processResources {
     duplicatesStrategy = DuplicatesStrategy.FAIL
     from(listOf("ExportNativeCallsV1.java", "ExportNativeInterfacesV1.java", "ExportInferredInterfacesV1.java",
+        "ExportGlobalTypeObservationsV1.java",
         "NativeInterfaceTypeGraphV1.java", "RunBundledExports.java").map {
         layout.projectDirectory.file("ghidra-bridge/src/main/java/$it")
     }) { into("ghidra_scripts") }
@@ -778,6 +779,7 @@ val generateGccBundledGhidraReference = tasks.register("generateGccBundledGhidra
     inputs.dir(gccBundledGhidraDirectory)
     inputs.file(tasks.named<Jar>("jar").flatMap { it.archiveFile })
     inputs.files(listOf("ExportNativeCallsV1.java", "ExportNativeInterfacesV1.java", "ExportInferredInterfacesV1.java",
+        "ExportGlobalTypeObservationsV1.java", "BundledExportPhaseRoute.java",
         "NativeInterfaceTypeGraphV1.java", "RunBundledExports.java").map {
         layout.projectDirectory.file("ghidra-bridge/src/main/java/$it")
     })
@@ -897,6 +899,34 @@ val generateGccBundledGhidraReference = tasks.register("generateGccBundledGhidra
                 input.readNBytes(4 * 1024 * 1024 + 1).also { content ->
                     require(content.size.toLong() == resources.single().size && content.size <= 4 * 1024 * 1024) {
                         "Application JAR native call collector resource changed length"
+                    }
+                }
+            }
+        }
+        val globalTypeCollectorResourcePath = "ghidra_scripts/ExportGlobalTypeObservationsV1.java"
+        val globalTypeCollectorClassPath = "ExportGlobalTypeObservationsV1.class"
+        val globalTypeCollectorBytes = JarFile(applicationJar, false).use { jar ->
+            val resources = jar.entries().asSequence().filter { it.name == globalTypeCollectorResourcePath }.take(2).toList()
+            require(resources.size == 1 && !resources.single().isDirectory &&
+                resources.single().size in 1L..(4L * 1024 * 1024)
+            ) { "Application JAR has a missing, duplicate or excessive global/type collector source" }
+            jar.getInputStream(resources.single()).use { input ->
+                input.readNBytes(4 * 1024 * 1024 + 1).also { content ->
+                    require(content.size.toLong() == resources.single().size && content.size <= 4 * 1024 * 1024) {
+                        "Application JAR global/type collector source changed length"
+                    }
+                }
+            }
+        }
+        val globalTypeCollectorClass = JarFile(root.resolve(bridge).toFile(), false).use { jar ->
+            val entry = jar.getJarEntry(globalTypeCollectorClassPath)
+            require(entry != null && !entry.isDirectory && entry.size in 1L..(4L * 1024 * 1024)) {
+                "Bundled bridge JAR omits the compiled global/type collector"
+            }
+            jar.getInputStream(entry).use { input ->
+                input.readNBytes(4 * 1024 * 1024 + 1).also { content ->
+                    require(content.size.toLong() == entry.size && content.size <= 4 * 1024 * 1024) {
+                        "Bundled global/type collector class changed length"
                     }
                 }
             }
@@ -1042,6 +1072,11 @@ val generateGccBundledGhidraReference = tasks.register("generateGccBundledGhidra
             "classes" to interfaceClasses.sortedBy { it.getValue("path") as String },
             "configurationSha256" to digest(canonicalBytes(interfaceConfiguration)))
         val interfaceIdentity = interfaceUnsigned + ("closureSha256" to digest(canonicalBytes(interfaceUnsigned)))
+        val globalTypeUnsigned = mapOf<String, Any>("schemaVersion" to 1,
+            "provider" to "gcc-bundled-global-type-runtime-identity-v1",
+            "sourceBytes" to globalTypeCollectorBytes.size.toLong(), "sourceSha256" to digest(globalTypeCollectorBytes),
+            "classBytes" to globalTypeCollectorClass.size.toLong(), "classSha256" to digest(globalTypeCollectorClass))
+        val globalTypeIdentity = globalTypeUnsigned + ("closureSha256" to digest(canonicalBytes(globalTypeUnsigned)))
         val unsigned = mapOf<String, Any>(
             "archive" to mapOf(
                 "bytes" to 569445154L,
@@ -1056,6 +1091,7 @@ val generateGccBundledGhidraReference = tasks.register("generateGccBundledGhidra
                 "resourcePath" to "/$resourcePath",
                 "sha256" to digest(exporterBytes),
             ),
+            "globalTypeCollector" to globalTypeIdentity,
             "interfaceCollector" to interfaceIdentity,
             "ghidraRelease" to "PUBLIC",
             "ghidraVersion" to "12.1.3",

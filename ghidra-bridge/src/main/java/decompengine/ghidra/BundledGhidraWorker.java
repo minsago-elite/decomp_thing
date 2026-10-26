@@ -147,7 +147,8 @@ public final class BundledGhidraWorker {
     private static boolean interfaceInvocationRequested(String[] arguments) {
         return Arrays.stream(arguments).anyMatch(value ->
             value.equals("ExportNativeInterfacesV1.class") || value.equals("ExportNativeInterfacesV1.java") ||
-            value.equals("ExportInferredInterfacesV1.class") || value.equals("ExportInferredInterfacesV1.java"));
+            value.equals("ExportInferredInterfacesV1.class") || value.equals("ExportInferredInterfacesV1.java") ||
+            value.equals("ExportGlobalTypeObservationsV1.class") || value.equals("ExportGlobalTypeObservationsV1.java"));
     }
 
     // Fixed recovery-only probe: no paths, bypass flags, callbacks or policy arrive from the CLI.
@@ -234,7 +235,8 @@ public final class BundledGhidraWorker {
 
     private static void validateInterfaceInvocation(String[] arguments) {
         if (!interfaceInvocationRequested(arguments)) return;
-        if (arguments.length != 33 || !arguments[1].equals("analyze") ||
+        boolean globalType = Arrays.stream(arguments).anyMatch(value -> value.equals("ExportGlobalTypeObservationsV1.class") || value.equals("ExportGlobalTypeObservationsV1.java"));
+        if (arguments.length != (globalType ? 40 : 33) || !arguments[1].equals("analyze") ||
             !arguments[6].equals("ExportProgramModel.java") || !arguments[7].equals("4") ||
             !arguments[10].equals("full") || !arguments[12].equals("ExportNativeInterfacesV1.class") ||
             !arguments[13].equals("6") || !arguments[20].equals("ExportInferredInterfacesV1.class") ||
@@ -256,6 +258,14 @@ public final class BundledGhidraWorker {
             !Path.of(arguments[19]).equals(model.getParent().resolve("native-interfaces-v1")) ||
             !Path.of(arguments[32]).equals(model.getParent().resolve("native-inferred-interfaces-v1"))) {
             throw new IllegalArgumentException("Interface observation outputs differ from the paired report layout");
+        }
+        if (globalType) {
+            if (!arguments[33].equals("ExportGlobalTypeObservationsV1.class") || !arguments[34].equals("5") ||
+                !arguments[35].equals(arguments[30]) || !arguments[37].equals(arguments[22]) ||
+                !arguments[38].matches("[a-f0-9]{64}") || !arguments[39].equals(arguments[24]) ||
+                !Path.of(arguments[36]).equals(model.getParent().resolve("native-global-type-observations-v1.json"))) {
+                throw new IllegalArgumentException("Global/type observations require the exact paired invocation10 sidecar");
+            }
         }
     }
 

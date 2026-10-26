@@ -14,7 +14,7 @@ internal object GccBundledCliIntentBuilder {
         binary: Path, profilePath: Path, archive: Path, controls: Path, journalRoot: Path, scratch: Path,
         diskPolicy: FullTreeDiskScratchPolicy, cliInvocation: GccBundledCliInvocation? = null,
         fullRecoveryExport: Boolean = false, runtimeDiagnostics: Boolean = false, nativeCallObservations: Boolean = false,
-        nativeInterfaceObservations: Boolean = false): GccBundledOperationIntent {
+        nativeInterfaceObservations: Boolean = false, nativeGlobalTypeObservations: Boolean = false): GccBundledOperationIntent {
         require(!runtimeDiagnostics || (fullRecoveryExport && engineId == "cc1")) {
             "runtime diagnostics require a fresh cc1 full-recovery operation"
         }
@@ -24,6 +24,10 @@ internal object GccBundledCliIntentBuilder {
         require(!nativeInterfaceObservations || (!fullRecoveryExport && !runtimeDiagnostics && !nativeCallObservations &&
             engineId == "driver" && runKind == GccCompilerEngineContainmentRunKind.FRESH_CONTROL && cliInvocation != null)) {
             "interface observations require their distinct fresh driver CLI operation"
+        }
+        require(!nativeGlobalTypeObservations || (nativeInterfaceObservations && !fullRecoveryExport && !runtimeDiagnostics &&
+            engineId == "driver" && runKind == GccCompilerEngineContainmentRunKind.FRESH_CONTROL && cliInvocation?.options?.nativeGlobalTypeObservations == true)) {
+            "global/type observations require their distinct fresh driver CLI operation"
         }
         require(operationId.matches(Regex("[a-f0-9]{64}")))
         require(engineId in setOf("cc1", "lto1", "driver") && runKind in setOf(
@@ -107,13 +111,16 @@ internal object GccBundledCliIntentBuilder {
                             val runtime = GccBundledGhidraRuntime(bundle, reference.classPath.map { relative ->
                                 val entry = reference.entries.getValue(relative)
                                 GccBundledGhidraClassPathEntry(bundle.resolve(relative), checkNotNull(entry.bytes), checkNotNull(entry.sha256))
-                            }, invocationVersion = if (nativeInterfaceObservations) 9 else if (nativeCallObservations) 8 else
+                            }, invocationVersion = if (nativeGlobalTypeObservations) 10 else if (nativeInterfaceObservations) 9 else if (nativeCallObservations) 8 else
                                 profile.invocationVersion(engineId, fullRecovery = fullRecoveryExport, runtimeDiagnostics = runtimeDiagnostics),
                                 nativeCallCollector = if (nativeCallObservations) requireNotNull(reference.nativeCallCollector) {
                                     "bundled deployment does not contain the independently pinned native call collector"
                                 } else null,
                                 interfaceCollector = if (nativeInterfaceObservations) requireNotNull(reference.interfaceCollector) {
                                     "bundled deployment does not contain the independently pinned interface collector closure"
+                                } else null,
+                                globalTypeCollector = if (nativeGlobalTypeObservations) requireNotNull(reference.globalTypeCollector) {
+                                    "bundled deployment does not contain the independently pinned global/type collector"
                                 } else null)
                             val manifest = boot.invocationManifestBytes()
                             val exporter = checkNotNull(javaClass.getResourceAsStream("/ghidra_scripts/ExportProgramModel.java"))

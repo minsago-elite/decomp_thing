@@ -14,11 +14,12 @@ public final class RunBundledExports extends GhidraScript {
         BundledGhidraWorker.diagnosticsGuard();
         String[] arguments = getScriptArgs();
         if (arguments.length == 0) throw new IllegalArgumentException("No bundled exporters requested");
-        // At most six fixed phase records for the prevalidated interface route. This does
+        // At most eight fixed phase records for the prevalidated interface route. This does
         // not replace or reset the collector's own lifetime, which starts before hashing.
-        boolean interfacePhases = arguments.length == 27 &&
-            arguments[14].equals("ExportInferredInterfacesV1.class");
-        Set<String> exporters = Set.of("ExportProgramModel.java", "ExportRecoveredCallSites.java", "ExportDecompiledC.java", "ExportNativeCallsV1.class", "ExportNativeInterfacesV1.class", "ExportInferredInterfacesV1.class");
+        String phaseRoute = BundledExportPhaseRoute.route(arguments);
+        boolean interfacePhases = "invocation9".equals(phaseRoute);
+        boolean globalTypePhases = "invocation10".equals(phaseRoute);
+        Set<String> exporters = Set.of("ExportProgramModel.java", "ExportRecoveredCallSites.java", "ExportDecompiledC.java", "ExportNativeCallsV1.class", "ExportNativeInterfacesV1.class", "ExportInferredInterfacesV1.class", "ExportGlobalTypeObservationsV1.class");
         for (int index = 0; index < arguments.length;) {
             String name = arguments[index++];
             if (!exporters.contains(name) || index == arguments.length) {
@@ -31,19 +32,19 @@ public final class RunBundledExports extends GhidraScript {
             BundledGhidraWorker.diagnosticsExporter(name);
             long phaseStarted = System.nanoTime();
             boolean phaseComplete = false;
-            if (interfacePhases) interfacePhase(name, "started", 0L);
+            if (interfacePhases || globalTypePhases) interfacePhase(name, "started", 0L);
             try {
                 String[] exporterArguments = Arrays.copyOfRange(arguments, index, index + count);
                 if (name.equals("ExportNativeCallsV1.class")) {
                     // The nested source-script loader cannot load the pinned compiled collector.
                     ExportNativeCallsV1.collect(currentProgram, monitor, exporterArguments);
                 } else if (name.equals("ExportNativeInterfacesV1.class")) {
-                    if (interfacePhases) {
+                    if (interfacePhases || globalTypePhases) {
                         long allowance = interfaceByteLimit(Path.of(exporterArguments[4]).getParent(), 0L, monitor);
                         ExportNativeInterfacesV1.collectWithStagingBudget(currentProgram, monitor, exporterArguments, allowance);
                     } else ExportNativeInterfacesV1.collect(currentProgram, monitor, exporterArguments);
                 } else if (name.equals("ExportInferredInterfacesV1.class")) {
-                    if (interfacePhases) {
+                    if (interfacePhases || globalTypePhases) {
                         Path model = Path.of(exporterArguments[8]);
                         Path listing = Path.of(exporterArguments[9]);
                         // The inferred API already charges these three files. Subtract all other
@@ -53,12 +54,22 @@ public final class RunBundledExports extends GhidraScript {
                         long limit = interfaceByteLimit(model.getParent(), included, monitor);
                         ExportInferredInterfacesV1.collectWithByteLimit(currentProgram, monitor, exporterArguments, limit);
                     } else ExportInferredInterfacesV1.collect(currentProgram, monitor, exporterArguments);
+                } else if (name.equals("ExportGlobalTypeObservationsV1.class")) {
+                    if (!globalTypePhases || exporterArguments.length != 5) throw new IllegalArgumentException("global/type collector requires invocation10");
+                    Path model = Path.of(exporterArguments[0]);
+                    long included = Math.addExact(Files.size(model), Math.addExact(
+                        Files.size(model.getParent().resolve("native-interfaces-v1/native-interfaces.json")),
+                        Math.addExact(Files.size(model.getParent().resolve("native-interfaces-v1/manifest.json")),
+                            Math.addExact(Files.size(model.getParent().resolve("native-inferred-interfaces-v1/native-inferred-interfaces.json")),
+                                Files.size(model.getParent().resolve("native-inferred-interfaces-v1/manifest.json"))))));
+                    long aggregateAllowance = interfaceByteLimit(model.getParent(), included, monitor) - included;
+                    ExportGlobalTypeObservationsV1.collectWithByteLimit(currentProgram, monitor, exporterArguments, aggregateAllowance);
                 } else {
                     runScript(name, exporterArguments);
                 }
                 phaseComplete = true;
             } finally {
-                if (interfacePhases) interfacePhase(name, phaseComplete ? "completed" : "failed",
+                if (interfacePhases || globalTypePhases) interfacePhase(name, phaseComplete ? "completed" : "failed",
                     Math.max(0L, (System.nanoTime() - phaseStarted) / 1000000L));
                 BundledGhidraWorker.diagnosticsGuard();
             }
@@ -67,7 +78,8 @@ public final class RunBundledExports extends GhidraScript {
         BundledGhidraWorker.exportsCompleted();
         BundledGhidraWorker.diagnosticsFinalization();
     }
-    /** Invocation9 only: retained reports + live streams + collector staging share one GiB. */
+
+    /** Invocations 9 and 10: retained reports + live streams + collector staging share one GiB. */
     private static long interfaceByteLimit(Path reports, long includedBytes, TaskMonitor monitor) throws Exception {
         final long maximum = 1024L * 1024 * 1024;
         // The contained-command protocol bounds each stream at 64 MiB. Their current sizes
@@ -109,6 +121,7 @@ public final class RunBundledExports extends GhidraScript {
             case "ExportProgramModel.java" -> "full-model";
             case "ExportNativeInterfacesV1.class" -> "listing";
             case "ExportInferredInterfacesV1.class" -> "inferred";
+            case "ExportGlobalTypeObservationsV1.class" -> "global-type";
             default -> throw new IllegalArgumentException("Unexpected interface phase");
         };
         System.err.println("DECOMP_INTERFACE_PHASE_V1 phase=" + phase + " state=" + state +

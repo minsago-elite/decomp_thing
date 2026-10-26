@@ -17,6 +17,7 @@ class GlobalTypeObservationsV1Test {
     fun retainsCompleteTypedListingCensusAndFunctionOwnedReferencesWithoutOracleAuthority() {
         val bytes = fixture(typeRoot = true)
         val summary = GlobalTypeObservationsV1.validate(bindings, bytes.size.toLong(), OracleArtifacts.sha256(bytes),
+            expectedFunctionIds = setOf("fn_0000000000000001"),
             checkpoint = {}, openObservations = { ByteArrayInputStream(bytes) })
 
         assertEquals(1, summary.definedDataEntities)
@@ -33,6 +34,7 @@ class GlobalTypeObservationsV1Test {
         val bytes = fixture(typeRoot = false)
         assertFailsWith<IllegalArgumentException> {
             GlobalTypeObservationsV1.validate(bindings, bytes.size.toLong(), OracleArtifacts.sha256(bytes),
+                expectedFunctionIds = setOf("fn_0000000000000001"),
                 checkpoint = {}, openObservations = { ByteArrayInputStream(bytes) })
         }
     }
@@ -42,6 +44,17 @@ class GlobalTypeObservationsV1Test {
         val bytes = fixture(typeRoot = true, danglingReference = true)
         assertFailsWith<IllegalArgumentException> {
             GlobalTypeObservationsV1.validate(bindings, bytes.size.toLong(), OracleArtifacts.sha256(bytes),
+                expectedFunctionIds = setOf("fn_0000000000000001"),
+                checkpoint = {}, openObservations = { ByteArrayInputStream(bytes) })
+        }
+    }
+
+    @Test
+    fun refusesAFunctionReferenceOwnerOutsideTheIndependentlyValidatedFunctionMap() {
+        val bytes = fixture(typeRoot = true)
+        assertFailsWith<IllegalArgumentException> {
+            GlobalTypeObservationsV1.validate(bindings, bytes.size.toLong(), OracleArtifacts.sha256(bytes),
+                expectedFunctionIds = setOf("fn_0000000000000002"),
                 checkpoint = {}, openObservations = { ByteArrayInputStream(bytes) })
         }
     }

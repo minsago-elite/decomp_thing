@@ -188,7 +188,7 @@ internal class GccCompilerEngineContainmentRequest(
 
     init {
         require(engineId in setOf("cc1", "lto1", "driver"))
-        require(engineId != "driver" || (bundledRuntime?.invocationVersion in setOf(5, 8, 9) &&
+        require(engineId != "driver" || (bundledRuntime?.invocationVersion in setOf(5, 8, 9, 10) &&
             runKind == GccCompilerEngineContainmentRunKind.FRESH_CONTROL)) {
             "GCC driver containment requires bundled full-recovery or native-call export with fresh control state"
         }
@@ -227,7 +227,7 @@ internal class GccCompilerEngineContainmentRequest(
             require(bundledRuntime.invocationVersion != 8 || engineId in setOf("cc1", "driver")) {
                 "native call observations require the pinned cc1 or driver engine"
             }
-            require(bundledRuntime.invocationVersion != 9 || (engineId == "driver" &&
+            require(bundledRuntime.invocationVersion !in setOf(9, 10) || (engineId == "driver" &&
                 runKind == GccCompilerEngineContainmentRunKind.FRESH_CONTROL)) {
                 "interface observations require the pinned fresh driver operation"
             }
@@ -711,12 +711,14 @@ private fun renderDefinition(request: GccCompilerEngineContainmentRequest): Defi
     val unitName = "decomp-gcc-${request.engineId}-${requestSha256.take(32)}.scope"
     val unsigned = JsonObject(
         linkedMapOf(
-            "schemaVersion" to JsonPrimitive(if (request.bundledRuntime?.invocationVersion == 9) 6
+            "schemaVersion" to JsonPrimitive(if (request.bundledRuntime?.invocationVersion == 10) 7
+                else if (request.bundledRuntime?.invocationVersion == 9) 6
                 else if (request.bundledRuntime?.invocationVersion == 8) 5
                 else if (request.bundledRuntime?.runtimeDiagnostics == true) 4
                 else if (request.bundledRuntime?.invocationVersion == 6) 3
                 else if (request.bundledRuntime == null) 1 else 2),
-            "provider" to JsonPrimitive(if (request.bundledRuntime?.invocationVersion == 9) "gcc-compiler-engine-containment-definition-v6"
+            "provider" to JsonPrimitive(if (request.bundledRuntime?.invocationVersion == 10) "gcc-compiler-engine-containment-definition-v7"
+                else if (request.bundledRuntime?.invocationVersion == 9) "gcc-compiler-engine-containment-definition-v6"
                 else if (request.bundledRuntime?.invocationVersion == 8) "gcc-compiler-engine-containment-definition-v5"
                 else if (request.bundledRuntime?.runtimeDiagnostics == true) DIAGNOSTIC_DEFINITION_PROVIDER
                 else if (request.bundledRuntime?.invocationVersion == 6) PARALLEL_DEFINITION_PROVIDER
@@ -755,14 +757,15 @@ private fun parseDefinition(bytes: ByteArray): DefinitionFacts {
     val root = parseCanonicalObject(bytes, "containment definition")
     root.requireKeys(DEFINITION_FIELDS, "containment definition")
     val version = root.intField("schemaVersion", "containment definition")
-    require(version in 1..6) { "containment definition schema version is unsupported" }
+    require(version in 1..7) { "containment definition schema version is unsupported" }
     root.requireString("provider", when (version) {
         1 -> DEFINITION_PROVIDER
         2 -> BUNDLED_DEFINITION_PROVIDER
         3 -> PARALLEL_DEFINITION_PROVIDER
         4 -> DIAGNOSTIC_DEFINITION_PROVIDER
         5 -> "gcc-compiler-engine-containment-definition-v5"
-        else -> "gcc-compiler-engine-containment-definition-v6"
+        6 -> "gcc-compiler-engine-containment-definition-v6"
+        else -> "gcc-compiler-engine-containment-definition-v7"
     }, "containment definition")
     root.requireString("authority", ASSESSMENT_AUTHORITY, "containment definition")
     root.requireBoolean("releaseEligible", false, "containment definition")

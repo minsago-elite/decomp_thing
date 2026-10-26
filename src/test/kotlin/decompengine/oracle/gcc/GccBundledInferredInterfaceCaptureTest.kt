@@ -21,6 +21,29 @@ import kotlinx.serialization.json.*
 /** Filesystem controls use authored bytes; they cannot issue the coordinator's live operation. */
 class GccBundledInferredInterfaceCaptureTest {
     @Test
+    fun `global type invocation routes its typed sidecar through strict reader and shared pinned census`() {
+        fixture { f ->
+            val runtime = RUNTIME.copy(globalTypeCollectorSha256 = GLOBAL_TYPE_COLLECTOR,
+                globalTypeRuntimeIdentitySha256 = GLOBAL_TYPE_IDENTITY)
+            val sourceListing = f.listingObject()
+            val functionRows = sourceListing.getValue("records").jsonArray.mapIndexed { index, value ->
+                if (index == 9) value.jsonObject.with("entry", address(3, 0x400090uL)) else value
+            }
+            f.write(listing = sourceListing.with("records", JsonArray(functionRows)))
+            val bytes = f.writeGlobalTypeObservations(runtime)
+            val captured = f.capture(runtime = runtime)
+            assertEquals(1L, assertNotNull(captured.globalTypeSummary).definedDataEntities)
+            assertEquals(1L, captured.globalTypeSummary!!.typeNodes)
+            assertContentEquals(bytes, assertNotNull(captured.globalTypeObservationsBytes))
+            assertTrue(captured.files.containsKey("reports/native-global-type-observations-v1.json"))
+            assertTrue(captured.capturedBytes > captured.model.capturedBytes)
+            f.requireUnchanged(captured)
+            Files.writeString(f.reportsPath.resolve("extra"), "unauthorized sibling")
+            assertFails { f.capture(runtime = runtime) }
+        }
+    }
+
+    @Test
     fun `complete owned bytes retain all nine dispositions both populations and ambiguous mapping`() {
         fixture { f ->
             val captured = f.capture()
@@ -388,11 +411,13 @@ class GccBundledInferredInterfaceCaptureTest {
                 "listingBytes" to listingBytes.size,"listingSha256" to OracleArtifacts.sha256(listingBytes),"listingManifestSha256" to OracleArtifacts.sha256(listingManifest),
                 "configurationSha256" to NativeInferredInterfaceObservationsV1.configurationSha256)
             val records=mutableListOf<JsonObject>()
-            for(index in 0..9) {
+            for((index, nativeFunction) in listing.getValue("records").jsonArray.withIndex()) {
+                val listingFunction = nativeFunction.jsonObject
                 val state=STATES[index]
                 if(index==1) records += obj("recordKind" to "type-root","channel" to "inferred","functionOrdinal" to 1,"role" to "inferred-return","slot" to -1,"listingTypeOrdinal" to null,"node" to null)
                 val attempted=!state.startsWith("not-attempted-")
-                records += obj("recordKind" to "function","functionOrdinal" to index,"entry" to entry(index),"isExternal" to (index==0),"isThunk" to (index==2),
+                records += obj("recordKind" to "function","functionOrdinal" to index,"entry" to listingFunction.getValue("entry"),
+                    "isExternal" to listingFunction.getValue("isExternal"),"isThunk" to listingFunction.getValue("isThunk"),
                     "disposition" to state,"attempt" to if(attempted) 1 else 0,"result" to if(attempted) result(state) else null,"prototype" to if(index==1) prototype() else null,"parameters" to emptyList<Any>())
             }
             val inferredObject=transformInferred(obj("addressSpaces" to SPACES,"bindings" to binding,"configuration" to NativeInferredInterfaceObservationsV1.configurationJson,
@@ -407,6 +432,35 @@ class GccBundledInferredInterfaceCaptureTest {
                 "kind" to "ghidra-native-inferred-interface-observation-manifest-v1","listingSha256" to OracleArtifacts.sha256(listingBytes),"programModelSha256" to OracleArtifacts.sha256(model),"schemaVersion" to 1,"sha256" to OracleArtifacts.sha256(inferredBytes)))
             mapOf(this.listing.resolve("manifest.json") to listingManifest,this.listing.resolve("native-interfaces.json") to listingBytes,
                 inferred.resolve("manifest.json") to inferredManifest,inferred.resolve("native-inferred-interfaces.json") to inferredBytes).forEach {(path,bytes)->Files.write(path,bytes);privateFile(path)}
+        }
+        fun writeGlobalTypeObservations(runtime: GccBundledInterfaceCaptureBindingsV1): ByteArray {
+            val captureKey = "as1@0000000000400010"
+            val imageBase = "as1@0000000000400000"
+            val model = model
+            val rows = listOf(
+                obj("recordKind" to "header", "policy" to "ghidra-global-type-observations-v1",
+                    "definedDataCount" to 1, "functionCount" to 10, "addressSpaces" to SPACES,
+                    "bindings" to obj("inputSha256" to INPUT, "exporterSha256" to EXPORTER, "archiveSha256" to ARCHIVE,
+                        "programModelBytes" to model.size, "programModelSha256" to OracleArtifacts.sha256(model),
+                        "languageId" to target.languageId, "compilerSpecId" to target.compilerSpecId, "imageBase" to imageBase)),
+                obj("recordKind" to "defined-data", "dataOrdinal" to 0, "captureKey" to captureKey,
+                    "addressSpaceIndex" to 1, "addressSpace" to "ram", "length" to 4, "linkageState" to "no-primary-symbol",
+                    "symbolName" to null, "symbolSource" to null, "symbolType" to null, "symbolGlobal" to null,
+                    "symbolExternal" to null, "typePathCaptureKey" to captureKey),
+                obj("recordKind" to "type-node", "scopeKind" to "defined-data", "dataOrdinal" to 0, "id" to 0,
+                    "kind" to "integer", "nativeClass" to "ghidra.program.model.data.IntegerDataType", "childCount" to 0,
+                    "alignment" to 4, "alignedLength" to 4, "length" to 4, "notYetDefined" to false,
+                    "undefined" to false, "zeroLength" to false, "expansion" to "captured", "details" to obj()),
+                obj("recordKind" to "type-root", "dataOrdinal" to 0, "rootNode" to 0),
+            )
+            val bytes = rows.joinToString("\n", postfix = "\n") {
+                it.toString()
+            }.toByteArray(Charsets.UTF_8)
+            check(bytes.first() == '{'.code.toByte())
+            val path = reportsPath.resolve("native-global-type-observations-v1.json")
+            Files.write(path, bytes)
+            privateFile(path)
+            return bytes
         }
     }
 
@@ -441,6 +495,8 @@ class GccBundledInferredInterfaceCaptureTest {
         private val INPUT=OracleArtifacts.sha256("interface-input".toByteArray())
         private val EXPORTER=OracleArtifacts.sha256("exporter".toByteArray())
         private val ARCHIVE=OracleArtifacts.sha256("ghidra-archive".toByteArray())
+        private val GLOBAL_TYPE_COLLECTOR=OracleArtifacts.sha256("global-type-collector".toByteArray())
+        private val GLOBAL_TYPE_IDENTITY=OracleArtifacts.sha256("global-type-runtime-identity".toByteArray())
         private val OTHER="0".repeat(64)
         private val CONTROL="control-${"a".repeat(64)}"
         private val RUNTIME=GccBundledInterfaceCaptureBindingsV1("1".repeat(64),"2".repeat(64),"3".repeat(64),"4".repeat(64),"5".repeat(64),"6".repeat(64),"7".repeat(64),"8".repeat(64))

@@ -493,10 +493,12 @@ internal class GccBundledPreparedOperation internal constructor(
             val deadline = checkNotNull(operationDeadline)
             val target = inputs.interfaceTargetEvidence { deadline.requireCurrent() }
             val component = checkNotNull(intent.bundledRuntime.interfaceCollector)
+            val globalTypes = intent.bundledRuntime.globalTypeCollector
             val runtime = GccBundledInterfaceCaptureBindingsV1(component.listingCollectorSha256,
                 component.inferredCollectorSha256, component.typeGraphSha256, component.wrapperSha256,
                 component.nativeDecompilerSha256, inputs.deploymentClosureSha256,
-                inputs.ghidraRuntimeIdentitySha256, component.closureSha256)
+                inputs.ghidraRuntimeIdentitySha256, component.closureSha256,
+                globalTypes?.sourceSha256, globalTypes?.toJson()?.getValue("closureSha256")?.let { (it as JsonPrimitive).content })
             val captured = borrowed.withPinnedDescriptor { descriptor ->
                 GccBundledInferredInterfaceCapture.capture(descriptor, directories.getValue("reports"),
                     checkNotNull(intent.bundledRuntime.freshControlDirectoryName(borrowed.path)),
@@ -557,7 +559,7 @@ internal class GccBundledPreparedOperation internal constructor(
 
     @Synchronized
     fun executeUntilCheckpoint(minimumCompletedFunctions: Long): GccBundledInterruptedOperation {
-        check(intent.bundledRuntime.invocationVersion !in setOf(8, 9)) { "native observation collection does not support checkpoint or resume" }
+        check(intent.bundledRuntime.invocationVersion !in setOf(8, 9, 10)) { "native observation collection does not support checkpoint or resume" }
         intent.cliInvocation?.requireCheckpointSelection(minimumCompletedFunctions)
         val trigger = GccBundledCheckpointTrigger(minimumCompletedFunctions)
         var stoppedExport: GccBundledInterruptedExportSnapshot? = null
@@ -1663,7 +1665,7 @@ internal class GccBundledPreparedOperation internal constructor(
     ): T {
         requireCurrent()
         require(intent.runKind == kind) { "GCC bundled execution kind differs from the prepared intent" }
-        require(intent.bundledRuntime.invocationVersion in 2..3 || intent.bundledRuntime.invocationVersion in 5..9) {
+        require(intent.bundledRuntime.invocationVersion in 2..3 || intent.bundledRuntime.invocationVersion in 5..10) {
             "GCC contained execution requires an explicitly bound fresh JVM runtime"
         }
         executionAttempted = true
@@ -1743,7 +1745,7 @@ internal class GccBundledPreparedOperation internal constructor(
     }
 
     private fun requireFreshNativeReports(borrowed: FullTreeDiskScratchBorrowedRunRoot) {
-        if (intent.bundledRuntime.invocationVersion !in setOf(8, 9)) return
+        if (intent.bundledRuntime.invocationVersion !in setOf(8, 9, 10)) return
         borrowed.withPinnedDescriptor { run ->
             LinuxFilesystemSyscalls.openDirectoryAt(run.fd, "reports").use { reports ->
                 require(reports.identity == directories.getValue("reports") &&
@@ -1782,7 +1784,7 @@ internal class GccBundledPreparedOperation internal constructor(
         closed = true
         pendingInterfaceToken = null
         pendingInterfaceIssuance = null
-        if (intent.bundledRuntime.invocationVersion == 9) GccBundledOperationCoordinator.revokeClosedInterfaceOwner(this)
+        if (intent.bundledRuntime.invocationVersion in setOf(9, 10)) GccBundledOperationCoordinator.revokeClosedInterfaceOwner(this)
         var failure: Throwable? = null
         fun record(next: Throwable) {
             val first = failure
@@ -1914,7 +1916,7 @@ internal object GccBundledOperationCoordinator {
                 java.util.Map.copyOf(directories), definition, GCC_BUNDLED_PREPARED_OPERATION_PERMIT,
             )
             prepared.requireCurrent()
-            if (intent.bundledRuntime.invocationVersion == 9) {
+            if (intent.bundledRuntime.invocationVersion in setOf(9, 10)) {
                 intent.requireInterfaceExecution()
                 synchronized(interfaceMembershipLock) {
                     check(!interfaceOwners.containsKey(prepared))

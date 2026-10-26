@@ -19,26 +19,35 @@ internal object GccBundledInterfaceCliResultV1 {
         val model = snapshot.model
         val intentBytes = operation.intentBytes
         val intent = OracleJson.parseCanonical(intentBytes).jsonObject
-        require(intent.text("provider") == "gcc-bundled-operation-intent-v6" && intent.number("schemaVersion") == 6L &&
+        val globalTypes = operation.snapshot.runtime.globalTypeCollectorSha256 != null
+        require(intent.text("provider") == (if (globalTypes) "gcc-bundled-operation-intent-v7" else "gcc-bundled-operation-intent-v6") &&
+            intent.number("schemaVersion") == (if (globalTypes) 7L else 6L) &&
             intent.text("engineId") == "driver" && intent.text("runKind") == "fresh-control")
         val runtime = intent.getValue("bundledRuntime").jsonObject
-        require(runtime.text("provider") == "bundled-ghidra-java-api-runtime-v9")
+        require(runtime.text("provider") == if (globalTypes) "bundled-ghidra-java-api-runtime-v10" else "bundled-ghidra-java-api-runtime-v9")
         val component = GccBundledInterfaceRuntimeIdentityV1.parse(runtime.getValue("interfaceCollector").jsonObject)
         require(component.closureSha256 == snapshot.runtime.componentClosureSha256 &&
             component.listingCollectorSha256 == snapshot.runtime.listingCollectorSha256 &&
             component.inferredCollectorSha256 == snapshot.runtime.inferredCollectorSha256 &&
             component.typeGraphSha256 == snapshot.runtime.typeGraphSha256 && component.wrapperSha256 == snapshot.runtime.wrapperSha256 &&
             component.nativeDecompilerSha256 == snapshot.runtime.nativeDecompilerSha256)
+        val globalTypeComponent = if (globalTypes) GccBundledGlobalTypeRuntimeIdentityV1.parse(
+            runtime.getValue("globalTypeCollector").jsonObject).also {
+            require(it.sourceSha256 == snapshot.runtime.globalTypeCollectorSha256 &&
+                (it.toJson().getValue("closureSha256") as JsonPrimitive).content == snapshot.runtime.globalTypeRuntimeIdentitySha256)
+        } else null
         val profile = intent.getValue("plannerProfile").jsonObject
         require(profile.digest("profileSha256") == snapshot.target.profileSha256)
         val cli = intent.getValue("cliInvocation").jsonObject
-        require(cli.text("provider") == "gcc-bundled-cli-invocation-v3" && cli.number("schemaVersion") == 3L &&
+        require(cli.text("provider") == (if (globalTypes) "gcc-bundled-cli-invocation-v4" else "gcc-bundled-cli-invocation-v3") &&
+            cli.number("schemaVersion") == (if (globalTypes) 4L else 3L) &&
             cli.text("engineId") == "driver")
         val argv = cli.getValue("argv").jsonArray
-        require(argv.size in 3..33 && argv.first() == JsonPrimitive("gcc-engine-interface-observations"))
+        require(argv.size in 3..33 && argv.first() == JsonPrimitive(
+            if (globalTypes) "gcc-engine-global-type-observations" else "gcc-engine-interface-observations"))
         require(GccBundledCliOptions.parse(argv.drop(1).map { it.jsonPrimitive.let { item ->
             require(item.isString); item.content
-        } }, nativeInterfaceObservations = true).engineId == "driver")
+        } }, nativeInterfaceObservations = true, nativeGlobalTypeObservations = globalTypes).engineId == "driver")
         val artifacts = intent.getValue("artifacts").jsonArray.map { it.jsonObject }
         fun artifact(role: String, bytes: Long, sha256: String) {
             val selected = artifacts.single { it.text("role") == role }
@@ -81,8 +90,22 @@ internal object GccBundledInterfaceCliResultV1 {
             "assessmentReceiptSha256" to JsonPrimitive(OracleArtifacts.sha256(assessmentBytes)),
             "assessmentSha256" to JsonPrimitive(assessed.digest("assessmentSha256")),
         ))
+        val globalTypeSummary = operation.snapshot.globalTypeSummary
+        require((globalTypes == (globalTypeSummary != null)) && (globalTypes == (operation.snapshot.globalTypeObservationsBytes != null)))
+        val globalTypeBindingFields = if (globalTypes) mapOf(
+            "globalTypeComponent" to checkNotNull(globalTypeComponent).toJson(),
+            "globalTypeObservationsSha256" to JsonPrimitive(OracleArtifacts.sha256(checkNotNull(operation.snapshot.globalTypeObservationsBytes))),
+            "globalTypeObservationCounts" to JsonObject(mapOf(
+                "definedDataEntities" to JsonPrimitive(checkNotNull(globalTypeSummary).definedDataEntities), "typeNodes" to JsonPrimitive(globalTypeSummary.typeNodes),
+                "typeEdges" to JsonPrimitive(globalTypeSummary.typeEdges), "enumMembers" to JsonPrimitive(globalTypeSummary.enumMembers),
+                "functionGlobalReferences" to JsonPrimitive(globalTypeSummary.functionGlobalReferences),
+                "unresolvedFunctionGlobalReferences" to JsonPrimitive(globalTypeSummary.unresolvedFunctionGlobalReferences),
+                "authorityBoundary" to JsonPrimitive(globalTypeSummary.authorityBoundary), "populationBoundary" to JsonPrimitive(globalTypeSummary.populationBoundary),
+                "suppliedListingCensusState" to JsonPrimitive(globalTypeSummary.suppliedListingCensusState),
+            )),
+        ) else emptyMap()
         val binding = OracleJson.canonicalBytes(JsonObject(mapOf(
-            "provider" to JsonPrimitive("gcc-bundled-interface-observation-binding-v1"), "schemaVersion" to JsonPrimitive(1),
+            "provider" to JsonPrimitive(if (globalTypes) "gcc-bundled-global-type-observation-binding-v1" else "gcc-bundled-interface-observation-binding-v1"), "schemaVersion" to JsonPrimitive(1),
             "complete" to JsonPrimitive(false), "authoritativeOracleEvidence" to JsonPrimitive(false),
             "productionInterfacesAdmitted" to JsonPrimitive(false), "scored" to JsonPrimitive(false), "releaseEligible" to JsonPrimitive(false),
             "completeObservedNativeCensus" to JsonPrimitive(true),
@@ -91,7 +114,7 @@ internal object GccBundledInterfaceCliResultV1 {
             "fullExportTreeManifestSha256" to JsonPrimitive(OracleArtifacts.sha256(model.sidecarManifest)),
             "receiptLineage" to lineage,
             "receiptLineageSha256" to JsonPrimitive(OracleArtifacts.sha256(OracleJson.canonicalBytes(lineage))),
-        )))
+        ) + globalTypeBindingFields))
         require(binding.size <= MAXIMUM_BINDING_BYTES)
         operation.requireCurrent()
         return binding
@@ -104,8 +127,9 @@ internal object GccBundledInterfaceCliResultV1 {
         listOf(journal, run, output).forEach { require(it.isAbsolute && it.normalize() == it) }
         val snapshot = operation.snapshot
         val intent = OracleJson.parseCanonical(operation.intentBytes).jsonObject
-        return OracleJson.canonicalBytes(JsonObject(mapOf(
-            "provider" to JsonPrimitive("gcc-bundled-cli-interface-observation-result-v1"), "schemaVersion" to JsonPrimitive(1),
+        val globalTypes = snapshot.globalTypeObservationsBytes != null
+        val resultFields = mapOf(
+            "provider" to JsonPrimitive(if (globalTypes) "gcc-bundled-cli-global-type-observation-result-v1" else "gcc-bundled-cli-interface-observation-result-v1"), "schemaVersion" to JsonPrimitive(1),
             "complete" to JsonPrimitive(false), "authoritativeOracleEvidence" to JsonPrimitive(false),
             "productionInterfacesAdmitted" to JsonPrimitive(false), "scored" to JsonPrimitive(false), "releaseEligible" to JsonPrimitive(false),
             "completeObservedNativeCensus" to JsonPrimitive(true),
@@ -128,17 +152,20 @@ internal object GccBundledInterfaceCliResultV1 {
             "interfaceBinding" to JsonPrimitive(output.resolve(BINDING_NAME).toString()),
             "interfaceBindingSha256" to JsonPrimitive(OracleArtifacts.sha256(binding)),
             "executionReceiptSha256" to JsonPrimitive(OracleArtifacts.sha256(operation.executionReceiptBytes)),
-            "assessmentReceiptSha256" to JsonPrimitive(OracleArtifacts.sha256(operation.assessmentReceiptBytes)),
             "capturedBytes" to JsonPrimitive(snapshot.capturedBytes), "operationWallTime" to operationWallTime,
             "scratchDisposition" to JsonPrimitive("retained; complete raw observed census; ABI scoring and cold recovery unavailable"),
-        )))
+        ) + (if (globalTypes) mapOf(
+            "globalTypeObservations" to JsonPrimitive(run.resolve("reports/native-global-type-observations-v1.json").toString()),
+            "globalTypeObservationsSha256" to JsonPrimitive(OracleArtifacts.sha256(checkNotNull(snapshot.globalTypeObservationsBytes))),
+        ) else emptyMap())
+        return OracleJson.canonicalBytes(JsonObject(resultFields))
     }
 
     fun publishResultMarker(output: LinuxDescriptor, result: ByteArray, beforeCommit: () -> Unit,
         faultInjector: DescriptorBoundStateFaultInjector? = null) {
         val bytes = result.copyOf()
         val document = OracleJson.parseCanonical(bytes).jsonObject
-        require(document.text("provider") == "gcc-bundled-cli-interface-observation-result-v1" &&
+        require(document.text("provider") in setOf("gcc-bundled-cli-interface-observation-result-v1", "gcc-bundled-cli-global-type-observation-result-v1") &&
             document.number("schemaVersion") == 1L && !document.boolean("complete") &&
             !document.boolean("productionInterfacesAdmitted") && !document.boolean("scored") &&
             !document.boolean("authoritativeOracleEvidence") && !document.boolean("releaseEligible"))

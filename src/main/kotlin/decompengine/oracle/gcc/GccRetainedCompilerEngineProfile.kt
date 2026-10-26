@@ -160,12 +160,12 @@ internal class GccRetainedCompilerEngineProfile private constructor(
             require((runtime.invocationVersion == 8) == nativeCallObservations) {
                 "native call observations require their distinct runtime invocation"
             }
-            require((runtime.invocationVersion == 9) == nativeInterfaceObservations) {
+            require((runtime.invocationVersion in setOf(9, 10)) == nativeInterfaceObservations) {
                 "interface observations require their distinct runtime invocation"
             }
         }
         require(!nativeInterfaceObservations || (engineId == "driver" && !fullRecoveryExport &&
-            !nativeCallObservations && bundledRuntime?.invocationVersion == 9 && budgets.pidsMax <= 128)) {
+            !nativeCallObservations && bundledRuntime?.invocationVersion in setOf(9, 10) && budgets.pidsMax <= 128)) {
             "interface observations require the fresh serial driver runtime and existing resource limits"
         }
         if (nativeInterfaceObservations) require(requireInterfaceObservationProfile().engineId == engineId) {

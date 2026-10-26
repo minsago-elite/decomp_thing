@@ -193,9 +193,10 @@ public final class ExportGlobalTypeObservationsV1 {
                         ReferenceIterator refs = program.getReferenceManager().getReferenceIterator(instruction.getAddress());
                         ArrayList<Reference> instructionReferences = new ArrayList<>();
                         while (refs.hasNext()) {
+                            monitor.checkCancelled();
+                            chargeWork(work, graphBudget[0].steps(), monitor);
                             Reference reference = refs.next();
                             if (!reference.getFromAddress().equals(instruction.getAddress())) break;
-                            chargeWork(work, graphBudget[0].steps(), monitor);
                             if (++references > MAXIMUM_REFERENCES) throw new IllegalStateException("global reference observation bound exceeded");
                             if (instructionReferences.size() >= 4096) throw new IllegalStateException("references per instruction exceed their bound");
                             instructionReferences.add(reference);
