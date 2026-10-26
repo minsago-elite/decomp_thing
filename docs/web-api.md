@@ -153,7 +153,8 @@ internal storage optimization and must not merge identity, permissions or histor
 | `POST /agent/preflight` | `202 agentPreflight`, `409` while one runs | Strict `agentPreflightRequest` (`{"action":"inspect"}`), session/Origin/CSRF; starts one single-flight `preflight(WEB)`; #493 |
 | `POST J/runs` | `202 run`, `Location: R` | `workflowStart` request, capability/limits/input checks, job If-Match; #163 |
 | `POST R/cancel` | `202 run` or `200 run` if already terminal | Closed `workflowCancel` request, idempotent recorded intent, run If-Match; #163 |
-| `POST R/recover` | `202 run`, `Location` of a new attempt | Explicit `retry` or capability-gated `resume`; If-Match; #163 |
+| `POST R/recover` | `202 run`, `Location` of a new attempt | Closed `recover` request; explicit `retry` or capability-gated `resume`; run If-Match and idempotency; #486 |
+| `GET R/controls` | `200 attemptControls`, strong run ETag | Read-only cancel/retry/resume eligibility with closed reasons; reserves nothing; #528/#529 |
 | `GET R/snapshot` | `200 snapshot`, ETag | Run state and consistent event watermark; #174 |
 | `GET R/events` | `200 text/event-stream` | Resume with `Last-Event-ID` or `after`, never both; #174 |
 | `GET R/events?transport=poll` | `200 events` | Same retention/cursor semantics, bounded page; #174 |
@@ -264,6 +265,52 @@ a new session after a full listener restart. These authored methods await their
 own Actions qualification; browser and production-adapter/runtime qualification
 remain unfinished. Bootstrap continues to report workflows unavailable, and
 fresh starts without registrations or retained start receipts retain 405.
+
+The recovery transport accepts only the closed `recover` data object (not its
+fixture wrapper), bounded to 1024 bytes: `mode` is `retry` or `resume`, and
+`expectedInputRevisionId` is the predecessor's recorded input revision or null for
+the original upload. It uses the same shared session/Origin/JSON/CSRF boundary
+before any body or service read, one strong run `If-Match`, one 16–128 character
+`Idempotency-Key` and no query or other conditional header. Workflow, limits,
+harness, checkpoint and paths are never caller fields; they come from the
+trusted registration and the predecessor attempt.
+
+Only the latest unsuccessful (failed, cancelled or interrupted) attempt can be
+recovered, and only while its recorded input is the original upload or the
+job's current accepted revision. A different expected input is 409
+`INPUT_REVISION_CONFLICT`; an input that is no longer trusted evidence is 409
+`INPUT_UNVERIFIED`, so recovery never silently starts from an unverified
+workspace. `retry` always publishes a new queued attempt linked through
+`previousRunId`, with `recovery.mode: retry` and no restored state. `resume`
+requires the registered adapter's trusted checkpoint policy, the exact recorded
+harness identity and a verified checkpoint; the new attempt records
+`recovery.restores` (`agent-session` or `project-evidence`) and the checkpoint
+digest, and the adapter receives the predecessor's workflow-owned report
+directory. Unsupported or unsafe resume is 409 with a specific code
+(`RESUME_UNSUPPORTED`, `HARNESS_CHANGED`, `CHECKPOINT_MISSING`,
+`CHECKPOINT_MISMATCH`, `CHECKPOINT_UNVERIFIED`, `WORKSPACE_UNVERIFIED`,
+`SESSION_QUARANTINED`, `CLEANUP_UNVERIFIED`). A newer attempt is 409
+`ATTEMPT_SUPERSEDED`, unfinished or completed predecessors 409
+`ATTEMPT_ACTIVE`/`ATTEMPT_COMPLETED`, a stale run guard 412, a key reused for
+different intent 409, admission capacity 429 and an unavailable workflow 503.
+
+Success is `202 run` for the new attempt with its `Location` and ETag. The
+recovery receipt shares the atomic attempt publication; its replay identity is
+the predecessor, its version, the mode and the expected input, so a keyed replay
+returns the same new attempt with `Idempotency-Replayed: true` before any
+eligibility, capacity or capability check, and never schedules again. Without
+registered workflows or retained keyed receipts the route answers 503
+`CAPABILITY_UNAVAILABLE` without reading the body. Production adapters remain
+unregistered and none declares a checkpoint policy yet, so packaged builds
+report retry and resume unavailable; ACP session continuation through the
+shared `AgentSessionJournal` policy still needs a registered adapter (#68).
+
+`GET R/controls` returns `attemptControls`: the run version and state, the
+recorded input revision, `cancel`, `retry` and `resume` each with `available`
+and a closed `reason`, the scope a resume would restore and any linked
+`successorRunId`. It is computed from durable state and current owned work, is
+private and read-only, and is not a reservation; each command re-checks its
+guards. Browsers read it explicitly and never send a command on load or reload.
 
 Errors carry `code`, safe `message`, `retryable`, optional field-level `details` and
 `retryAfterMs`; the correlation ID connects to redacted server logs. A detail contains a JSON
@@ -671,12 +718,32 @@ and `HEAD`/`objects`/`refs` at the top level is a bare one. A `.git` file or lin
 --no-includes`. A fresh managed repository then receives the object store (without
 `objects/info`), the branch and tag refs (loose and packed) and HEAD. Every branch or tag must be
 a valid full ref name, such as `refs/tags/HEAD`; one that cannot be imported fails the import
-instead of being dropped. Configuration, hooks, `info/`, the index, reflogs, remotes, notes,
-replace refs, worktrees, submodule repositories and uncommitted working-tree changes are not
-copied. A full `git fsck` must succeed, which re-hashes every object against its ID (otherwise
-`REPOSITORY_CORRUPT`). Before checkout, `ls-tree -r -l` of the HEAD tree must fit the work-tree
-quota (20,000 entries and 512 MiB of declared blob bytes), because a few compressed objects can
-expand without bound. The HEAD commit is then checked out with `read-tree --reset -u` under the server configuration and
+instead of being dropped. Selected symbolic refs are resolved as bounded inert data (at most 16
+steps), including targets in omitted namespaces, and stored as full object IDs; HEAD retains its
+branch name. Cyclic or excessive symbolic chains give `REPOSITORY_UNSUPPORTED`.
+Object copying pins every source ancestor with descriptor-relative no-follow directory opens.
+The shared Linux filesystem boundary opens leaves with `O_PATH`, authenticates regular-file type
+on the pinned descriptor, then reopens that exact inode with `O_NONBLOCK` for reading. A raced-in
+FIFO cannot block an import waiting for a writer, and links cannot redirect reads. Copies stream
+at most 512 MiB into newly created regular files (at most 100,000 object-store files and directories
+combined). Unsupported native/default-filesystem/procfs boundaries fail closed as
+`REPOSITORY_UNSUPPORTED`; there is no pathname-copy fallback. Imported HEAD, packed refs and
+loose refs (including symbolic-ref targets) use the same pinned-ancestor, regular-type-authenticated
+nonblocking read boundary, with their existing 4 KiB/4 MiB metadata limits and cancellation checks.
+A metadata entry replaced by a link or special file is refused rather than blocking the worker.
+Configuration, hooks, `info/`, the index, reflogs, remotes, notes, replace refs, worktrees, submodule repositories and
+uncommitted working-tree changes are not copied. A full `git fsck` must succeed, which re-hashes
+every object against its ID (integrity errors give `REPOSITORY_CORRUPT`). Verification runs with
+a hard and soft 512 MiB process address-space ceiling, including mappings and inflation of
+packed, dangling and historical objects, before checkout quotas run. This requires the server's
+fixed `/usr/bin/prlimit` or `/bin/prlimit` utility; missing/unstartable containment fails closed as
+`REPOSITORY_UNAVAILABLE`, never an unbounded retry. Fatal/resource exits give
+`REPOSITORY_UNSUPPORTED` rather than claiming proven corruption. No core dump is allowed.
+Before checkout, `ls-tree -r -t -l` of the HEAD tree must fit the work-tree quotas: 20,000 leaf
+entries, 20,000 directories and 512 MiB of declared blob bytes. Tree paths count once per prefix;
+inert gitlinks also count as directories. This bounds directory expansion as well as repeated or
+highly compressed blobs before `read-tree` creates anything.
+The HEAD commit is then checked out with `read-tree --reset -u` under the server configuration and
 the neutral `info/attributes`. No hook, filter, fsmonitor or submodule recursion can run, and no
 attribute conversion can rewrite bytes. Attached, detached and unborn HEADs
 are preserved and reported as such, and SHA-256 repositories keep their format. Failed
@@ -693,6 +760,11 @@ job, non-terminal records are reconciled. A published repository makes its opera
 `recoveryRequired: false`. If removal fails, it becomes `recovery-required` and the tree is kept
 for inspection. Reconciliation never repeats work. Replaying the original key reports the
 interrupted operation, and a new key starts a fresh, explicit initialization.
+
+Shutdown interrupts the Git worker. Copy and cleanup loops stop at their next step, and Git
+processes are killed. The listener releases store ownership only after the worker has actually
+stopped. A worker that outlives the bounded wait keeps the store owned, so a replacement listener
+cannot reconcile staging that is still being written.
 
 `GET J/repositories` returns `gitRepositories`: the job's repository summary (at most one) and
 its latest 20 operations. `GET G` returns `gitWorkspace` from a fresh bounded inspection. Its
