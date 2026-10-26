@@ -636,6 +636,12 @@ class ManagedGitRepositories(
         if (request.branch == null && advertisement.branch == null && advertisement.headObjectId != null) {
             throw GitOperationFailure("REPOSITORY_UNSUPPORTED", "The remote HEAD is detached. Select a branch explicitly to clone it.")
         }
+        // An advertised branch that exceeds our naming policy is not an absent branch. Refuse
+        // it instead of substituting a default that could be unborn or point to different source.
+        val branch = request.branch ?: advertisement.branch ?: policy.defaultBranch
+        try { GitRefNames.requireBranchName(runner, branch) } catch (_: IllegalArgumentException) {
+            throw GitOperationFailure("VALIDATION_FAILED", "The remote's default branch name cannot be used by the workbench. Select a supported branch explicitly to clone it.")
+        }
         runner.run(GitInvocation("init", listOf("--quiet", "--bare", "--initial-branch=${policy.defaultBranch}",
             "--object-format=${advertisement.format.wireName}", gitDir.toString())))
         configureManaged(runner, gitDir)
@@ -644,10 +650,6 @@ class ManagedGitRepositories(
         GitConfigurationAudit.requireManaged(runner, gitDir)
         GitRepositoryImport.verify(runner, gitDir)
         val format = GitRepositoryInspector.objectFormat(runner, gitDir)
-        val branch = request.branch ?: advertisement.branch?.takeIf { GitRefNames.isPlausibleBranchName(it) } ?: policy.defaultBranch
-        try { GitRefNames.requireBranchName(runner, branch) } catch (_: IllegalArgumentException) {
-            throw GitOperationFailure("VALIDATION_FAILED", "The remote's default branch name cannot be used by the workbench.")
-        }
         val tip = GitRefOperations.refObject(runner, gitDir, format, "refs/remotes/${request.remoteName}/$branch")
         if (tip == null && request.branch != null) throw GitOperationFailure("REMOTE_REF_NOT_FOUND", "The remote has no branch named ${request.branch}.")
         runner.run(GitInvocation("symbolic-ref", listOf("HEAD", "refs/heads/$branch"), gitDir = gitDir))

@@ -976,8 +976,11 @@ initialization, including empty SHA-256 repositories, rather than imposing the n
 default. Format discovery uses bounded, server-only protocol capability diagnostics; those never
 enter records, operation progress or client responses. A detached advertised remote HEAD is refused
 with `REPOSITORY_UNSUPPORTED` unless the request explicitly selects a branch; it is never treated as
-an empty repository or silently replaced with an unborn default branch. Then the server creates the
-default or named branch, checks it out within the checkout bound and registers the remote. The repository is published only when it
+an empty repository or silently replaced with an unborn default branch. An advertised default branch
+outside the workbench's naming policy is refused with `VALIDATION_FAILED` before initialization or
+fetch, with guidance to select a supported branch explicitly; it is never replaced by the configured
+default. Then the server creates the default or named branch, checks it out within the checkout bound
+and registers the remote. The repository is published only when it
 is complete; a failure or cancellation removes the staging tree. Hooks, filters, submodules and
 LFS stay inert, and objects are verified with `fsck`.
 

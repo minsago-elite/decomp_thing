@@ -340,6 +340,48 @@ class GitRemotesTest {
         }
     }
 
+    @Test fun `clone refuses an unsupported advertised branch instead of substituting the configured default`() {
+        for (format in listOf("sha1", "sha256")) for (fallbackExists in listOf(false, true)) Fixture().use { f ->
+            val remote = f.remote(format = format)
+            val branch = "b".repeat(201) // Valid Git ref, but beyond the workbench's branch-name bound.
+            f.repositories.git("check-ref-format", "refs/heads/$branch")
+            assertFalse(GitRefNames.isPlausibleBranchName(branch))
+            val expected = f.repositories.git("-C", remote.toString(), "rev-parse", "refs/heads/topic").trim()
+            f.repositories.git("-C", remote.toString(), "branch", branch, expected)
+            f.repositories.git("-C", remote.toString(), "symbolic-ref", "HEAD", "refs/heads/$branch")
+            if (fallbackExists) {
+                val fallback = f.repositories.git("-C", remote.toString(), "rev-parse", "$expected^").trim()
+                assertFalse(expected == fallback)
+                f.repositories.git("-C", remote.toString(), "update-ref", "refs/heads/main", fallback)
+            } else f.repositories.git("-C", remote.toString(), "branch", "-D", "main")
+            service = f.open()
+            val clone = service.request(jobId, GitCloneRequest("admitted:upstream.git", "origin", null), key())
+            assertTrue(service.awaitIdle(60_000))
+            val result = service.operation(jobId, clone.operation.repositoryId, clone.operation.operationId)
+            assertEquals(GitOperationState.FAILED, result.state, "$format fallbackExists=$fallbackExists: ${result.message}")
+            assertEquals("VALIDATION_FAILED", result.failureCode)
+            assertTrue(result.message.contains("branch"))
+            assertTrue(result.message.contains("explicitly"))
+            assertTrue(service.listing(jobId).repositories.isEmpty())
+            assertFalse(Files.exists(f.store.resolve("$jobId/git/repositories/${result.repositoryId}")))
+            assertEquals(0L, Files.list(f.store.resolve("$jobId/git/staging")).use { it.count() })
+            // Reopen does not turn the refusal into success; an explicit supported branch recovers.
+            service.close()
+            service = f.open()
+            assertEquals(GitOperationState.FAILED, service.operation(jobId, result.repositoryId, result.operationId).state)
+            val explicit = service.request(jobId, GitCloneRequest("admitted:upstream.git", "origin", "topic"), key())
+            assertTrue(service.awaitIdle(60_000))
+            val completed = service.operation(jobId, explicit.operation.repositoryId, explicit.operation.operationId)
+            assertEquals(GitOperationState.COMPLETED, completed.state, completed.message)
+            val view = service.workspace(jobId, completed.repositoryId)
+            assertEquals("refs/heads/topic", view.observation.head.refName)
+            assertEquals(expected, view.observation.head.objectId)
+            assertEquals(expected, completed.resultObjectId)
+            assertEquals("int util;\n", Files.readString(f.store.resolve("$jobId/git/repositories/${completed.repositoryId}/worktree/util.c")))
+            assertEquals(0L, Files.list(f.store.resolve("$jobId/git/staging")).use { it.count() })
+        }
+    }
+
     @Test fun `clone discovers SHA256 rather than imposing the default including empty remotes`() {
         for (empty in listOf(false, true)) Fixture().use { f ->
             if (empty) f.repositories.git("init", "-q", "--bare", "--initial-branch=main", "--object-format=sha256", f.admitted.resolve("upstream.git").toString())
