@@ -227,7 +227,7 @@ def _admit_files(paths, budget=None, root=None, *, predicate_capture=None):
 _PREDICATE_MODULES = (
     ('prepare_v3.py',7056,'d7f0f5fc14295a1ce38871b4fd393c83f756662041913f3b1d76c9406e99f6a2'),
     ('generate_controls_v3.py',8873,'e2cdd7593a0e23b5bbd2cbf0d8a0ea5aec2ff1113be710be114e4852f22b4b30'),
-    ('evaluate_candidate_v3.py',49702,'ee9a700de49d811c3774e08b82df0b835c01077c6f17fd84b166e6d089fe741f'),
+    ('evaluate_candidate_v3.py',48323,'852f1a868eceb1932255499a4de4f8e9dcb893da4a7ecb1611f151131ff4612d'),
 )
 
 
@@ -300,7 +300,7 @@ _FREEZE_DEPENDENCY_SOURCES = (
     ('build_contract',26463,'a54fb8b508ebf85a2f576972f5809095b50763c7ef3ef265ce1864a456ffeb6c'),
     ('bounded_runtime',136314,'1095decb5115e513bcf30973c0543d45e2d5a4aef2ee4e757d14bfe4d33c67a5'),
     ('interface_gate_v3',35287,'caefa9fa3859715dab6a9202f1b0e75280730e8b2bd20b2c8745645336ec8e2e'),
-    ('evaluate_candidate_v3',49702,'ee9a700de49d811c3774e08b82df0b835c01077c6f17fd84b166e6d089fe741f'),
+    ('evaluate_candidate_v3',48323,'852f1a868eceb1932255499a4de4f8e9dcb893da4a7ecb1611f151131ff4612d'),
 )
 _FREEZE_IMPORT_EDGES = {
     'build_contract': {},

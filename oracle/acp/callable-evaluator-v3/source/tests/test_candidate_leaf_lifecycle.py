@@ -1,4 +1,8 @@
-"""Pure evaluator snapshot and exact-owned leaf lifecycle controls; no processes."""
+"""Pure snapshot/leaf controls; legacy reclaim test IDs now require retention.
+
+Worker absence facts remain independently asserted; they cannot authorize deleting
+mutable names. No processes are executed by these controls.
+"""
 import ast
 import io
 import hashlib
@@ -88,7 +92,9 @@ class CandidateLeafLifecycle(unittest.TestCase):
             self.assertIsNone(result['rootPid']);self.assertIsNone(result['kernelScope'])
             self.assertFalse(runtime.worker_execution_complete(result))
             self.assertEqual('retained',result['_receiptCleanup']['status'])
-            scope.close();self.assertFalse(leaf.exists())
+            self.assertTrue(scope.leaves[leaf]['safe'])
+            scope.close();self.assertTrue(leaf.exists())
+            self.assertEqual(b'consumed controller input',(leaf/'copied-input').read_bytes())
 
     def test_actual_popen_attempt_without_handle_retains_leaf_and_primary(self):
         scope=e.WorkerLeaves();leaf=self.leaf(scope,'attempted-no-handle')
@@ -119,7 +125,8 @@ class CandidateLeafLifecycle(unittest.TestCase):
                     else:result[field]=replacement
                     scope=e.WorkerLeaves();leaf=self.leaf(scope,'bad-fact-'+str(vector));vector+=1
                     self.assertFalse(e._cleanup_proven(result))
-                    scope.call(leaf,lambda: ({},result));scope.close();self.assertTrue(leaf.exists())
+                    scope.call(leaf,lambda: ({},result));self.assertFalse(scope.leaves[leaf]['safe'])
+                    scope.close();self.assertTrue(leaf.exists())
         for result in (None,{},False,0):
             self.assertFalse(e._cleanup_proven(result))
 
@@ -131,8 +138,10 @@ class CandidateLeafLifecycle(unittest.TestCase):
             with self.runner_refusal(work) as (operation,primary,popen):
                 with self.assertRaises(ValueError):scope.call(work,operation,mounted=(library,))
                 popen.assert_not_called()
-            scope.close();self.assertFalse(work.exists());self.assertEqual(unsafe,peer.exists())
-            if unsafe:self.assertEqual(b'owned mounted input',library.read_bytes())
+            self.assertTrue(scope.leaves[work]['safe'])
+            self.assertEqual(not unsafe,scope.leaves[peer]['safe'])
+            scope.close();self.assertTrue(work.exists());self.assertTrue(peer.exists())
+            self.assertEqual(b'owned mounted input',library.read_bytes())
         with self.runner_refusal(self.root) as (operation,primary,popen):
             with self.assertRaises(ValueError):operation()
             popen.assert_not_called()
@@ -140,7 +149,8 @@ class CandidateLeafLifecycle(unittest.TestCase):
                                      (clean(),primary.bounded_result))):
             scope=e.WorkerLeaves();leaf=self.leaf(scope,'inspection-'+str(index))
             scope.call(leaf,lambda: {'execution':rows[0],'sectionsExecution':rows[1]})
-            scope.close();self.assertEqual(index!=2,leaf.exists())
+            self.assertEqual(index==2,scope.leaves[leaf]['safe'])
+            scope.close();self.assertTrue(leaf.exists())
         scope=e.WorkerLeaves();leaf=self.leaf(scope,'sticky-work')
         scope.call(leaf,lambda: ({},None))
         with self.runner_refusal(leaf) as (operation,primary,popen):
@@ -169,18 +179,21 @@ class CandidateLeafLifecycle(unittest.TestCase):
         (leaf/'output').write_bytes(b'consumed');(leaf/'link').symlink_to(canary)
         scope.call(leaf,lambda: ({},clean()))
         scope.close()
-        self.assertFalse(leaf.exists());self.assertEqual(canary.read_bytes(),b'untouched')
+        self.assertTrue(scope.leaves[leaf]['safe']);self.assertTrue(leaf.exists())
+        self.assertEqual(b'consumed',(leaf/'output').read_bytes());self.assertTrue((leaf/'link').is_symlink())
+        self.assertEqual(canary.read_bytes(),b'untouched')
 
     def test_unknown_or_partial_cleanup_retains_leaf(self):
         for field in ('cleanupVerified','finalAbsenceVerified','rootReaped','scopeVerified','scopeAdmitted','kernelScope'):
             scope=e.WorkerLeaves();leaf=self.leaf(scope,field)
             result=clean();result[field]=False
-            scope.call(leaf,lambda: ({},result));scope.close()
-            self.assertTrue(leaf.exists())
+            scope.call(leaf,lambda: ({},result));self.assertFalse(scope.leaves[leaf]['safe'])
+            scope.close();self.assertTrue(leaf.exists())
 
     def test_later_unknown_cannot_be_overwritten_by_success(self):
         scope=e.WorkerLeaves();leaf=self.leaf(scope)
         scope.call(leaf,lambda: ({},None));scope.call(leaf,lambda: ({},clean()))
+        self.assertFalse(scope.leaves[leaf]['safe'])
         scope.close();self.assertTrue(leaf.exists())
 
     def test_exception_unknown_retains_and_primary_preserved(self):
@@ -188,6 +201,7 @@ class CandidateLeafLifecycle(unittest.TestCase):
         error=ValueError('primary')
         def fail(): raise error
         with self.assertRaises(ValueError) as caught:scope.call(leaf,fail)
+        self.assertFalse(scope.leaves[leaf]['safe'])
         scope.close();self.assertIs(caught.exception,error);self.assertTrue(leaf.exists())
 
     def test_exception_with_verified_cleanup_can_reclaim(self):
@@ -195,7 +209,8 @@ class CandidateLeafLifecycle(unittest.TestCase):
         error=ValueError('consumed');error.bounded_result=clean()
         def fail():raise error
         with self.assertRaises(ValueError):scope.call(leaf,fail)
-        scope.close();self.assertFalse(leaf.exists())
+        self.assertTrue(scope.leaves[leaf]['safe'])
+        scope.close();self.assertTrue(leaf.exists())
 
     def test_unknown_subtree_and_replaced_leaf_preserved(self):
         scope=e.WorkerLeaves();leaf=self.leaf(scope);(leaf/'unexpected').mkdir()
@@ -207,6 +222,7 @@ class CandidateLeafLifecycle(unittest.TestCase):
     def test_all_inspection_producers_must_have_verified_cleanup(self):
         scope=e.WorkerLeaves();leaf=self.leaf(scope)
         scope.call(leaf,lambda:{'execution':clean(),'sectionsExecution':{}})
+        self.assertFalse(scope.leaves[leaf]['safe'])
         scope.close();self.assertTrue(leaf.exists())
 
     def runtime_inputs(self, scope):
@@ -231,7 +247,10 @@ class CandidateLeafLifecycle(unittest.TestCase):
         finally:e._LEAF_SCOPE.reset(token);scope.close()
         self.assertEqual(library.read_bytes(),b'owned library')
         self.assertTrue(caller_leaf.exists());self.assertTrue(runtime.exists())
-        self.assertFalse(later.exists());self.assertFalse(unrelated.exists())
+        self.assertFalse(scope.leaves[runtime]['safe']);self.assertFalse(scope.leaves[link]['safe'])
+        self.assertFalse(scope.leaves[caller_leaf]['safe'])
+        self.assertTrue(scope.leaves[later]['safe']);self.assertTrue(scope.leaves[unrelated]['safe'])
+        self.assertTrue(later.exists());self.assertTrue(unrelated.exists())
 
     def test_runtime_exception_preserves_every_mounted_owned_leaf_and_primary(self):
         scope=e.WorkerLeaves();link,library,caller_leaf,runtime,command=self.runtime_inputs(scope)
@@ -241,6 +260,7 @@ class CandidateLeafLifecycle(unittest.TestCase):
                 e.run(command,runtime,phase='runtime')
             self.assertIs(caught.exception,error)
         finally:e._LEAF_SCOPE.reset(token);scope.close()
+        self.assertTrue(all(not scope.leaves[path]['safe'] for path in (link,caller_leaf,runtime)))
         self.assertEqual(library.read_bytes(),b'owned library')
         self.assertTrue(caller_leaf.exists());self.assertTrue(runtime.exists())
 
@@ -251,7 +271,84 @@ class CandidateLeafLifecycle(unittest.TestCase):
             with patch.object(e,'_run',return_value=({},clean())):
                 e.run(command,runtime,phase='runtime')
         finally:e._LEAF_SCOPE.reset(token);scope.close()
-        self.assertFalse(link.exists());self.assertFalse(caller_leaf.exists());self.assertFalse(runtime.exists())
+        self.assertTrue(all(scope.leaves[path]['safe'] for path in (link,caller_leaf,runtime)))
+        self.assertTrue(link.exists());self.assertTrue(caller_leaf.exists());self.assertTrue(runtime.exists())
+        self.assertEqual(b'owned library',library.read_bytes())
+
+    def test_candidate_final_child_stat_unlink_substitution_is_unreachable(self):
+        for kind in ('file','symlink'):
+            with self.subTest(kind=kind):
+                scope=e.WorkerLeaves();leaf=self.leaf(scope,'child-boundary-'+kind)
+                output=leaf/'candidate.o';output.write_bytes(b'owned output')
+                held=self.root/('held-output-'+kind);canary=self.root/('canary-'+kind)
+                canary.write_bytes(b'foreign bytes');fd=scope.leaves[leaf]['fd']
+                original_stat=os.stat;checks=[]
+                def substitute(name,*args,**kwargs):
+                    metadata=original_stat(name,*args,**kwargs)
+                    if name=='candidate.o' and kwargs.get('dir_fd')==fd:
+                        checks.append(metadata.st_ino)
+                        if len(checks)==2:
+                            output.rename(held)
+                            if kind=='file':output.write_bytes(b'foreign replacement')
+                            else:output.symlink_to(canary)
+                    return metadata
+                with patch.object(e.os,'stat',side_effect=substitute) as inspected,patch.object(e.os,'unlink',wraps=os.unlink) as deleted:
+                    scope.close()
+                # No final-name check/use boundary remains to interpose upon.
+                inspected.assert_not_called();deleted.assert_not_called()
+                self.assertEqual(b'owned output',output.read_bytes())
+                self.assertFalse(held.exists());self.assertEqual(b'foreign bytes',canary.read_bytes())
+                with self.assertRaises(OSError):os.fstat(fd)
+
+    def test_candidate_final_leaf_lstat_rmdir_substitution_is_unreachable(self):
+        for kind in ('directory','file','symlink'):
+            with self.subTest(kind=kind):
+                scope=e.WorkerLeaves();leaf=self.leaf(scope,'leaf-boundary-'+kind)
+                held=self.root/('held-leaf-'+kind);canary=self.root/('target-'+kind);canary.mkdir()
+                original_lstat=Path.lstat;checks=[]
+                def substitute(path,*args,**kwargs):
+                    metadata=original_lstat(path,*args,**kwargs)
+                    if path==leaf:
+                        checks.append(metadata.st_ino)
+                        if len(checks)==2:
+                            path.rename(held)
+                            if kind=='directory':path.mkdir()
+                            elif kind=='file':path.write_bytes(b'foreign replacement')
+                            else:path.symlink_to(canary,target_is_directory=True)
+                    return metadata
+                with patch.object(Path,'lstat',substitute),patch.object(e.os,'rmdir',wraps=os.rmdir) as deleted:
+                    scope.close()
+                self.assertEqual([],checks);deleted.assert_not_called()
+                self.assertTrue(leaf.is_dir());self.assertFalse(held.exists());self.assertTrue(canary.is_dir())
+
+    def test_candidate_retention_never_deletes_and_preserves_absence_facts(self):
+        for state in ('prelaunch','verified','unknown'):
+            with self.subTest(state=state):
+                scope=e.WorkerLeaves();leaf=self.leaf(scope,'retention-'+state)
+                output=leaf/'output';output.write_bytes(b'retained diagnostic')
+                if state!='prelaunch':scope.call(leaf,lambda: ({},clean() if state=='verified' else None))
+                safe=scope.leaves[leaf]['safe'];self.assertEqual(state!='unknown',safe)
+                with patch.object(e.os,'unlink') as unlink,patch.object(e.os,'rmdir') as rmdir,patch('shutil.rmtree') as rmtree:
+                    scope.close()
+                unlink.assert_not_called();rmdir.assert_not_called();rmtree.assert_not_called()
+                self.assertIs(safe,scope.leaves[leaf]['safe'])
+                self.assertEqual({'status':'retained','deletionAttempted':False,
+                    'reason':'exclusive-deletion-authority-unavailable'},scope.leaves[leaf]['cleanup'])
+                self.assertEqual(b'retained diagnostic',output.read_bytes())
+
+    def test_candidate_retention_closes_all_descriptors_once_despite_close_error(self):
+        scope=e.WorkerLeaves();leaves=[self.leaf(scope,'close-'+str(i)) for i in range(2)]
+        descriptors=[scope.leaves[leaf]['fd'] for leaf in leaves];original_close=os.close
+        def close(fd):
+            original_close(fd)
+            if fd==descriptors[0]:raise OSError('authored close uncertainty after close')
+        with patch.object(e.os,'close',side_effect=close) as closed:
+            scope.close();scope.close()
+        self.assertEqual(descriptors,[call.args[0] for call in closed.call_args_list])
+        self.assertTrue(all(scope.leaves[leaf]['fd'] is None for leaf in leaves))
+        for fd in descriptors:
+            with self.assertRaises(OSError):os.fstat(fd)
+        self.assertTrue(all(leaf.is_dir() for leaf in leaves))
 
     def test_report_hashes_consumed_snapshot_not_reopened_candidate(self):
         candidate=self.root/'candidate.c';original=b'int snapshot;\n';candidate.write_bytes(original)

@@ -289,8 +289,8 @@ def _run(argv, work, timeout=None, phase='compiler', runtime_library=None, *, ph
         return {'status':'unknown','reason':type(e).__name__+':'+str(e)[:300], 'execution':public_result(r) if r else None},r
 
 
-# Invocation-local authority: no pathname discovered from a previous run grants
-# reclamation rights. Held directory descriptors survive pathname replacement.
+# Invocation-local worker tracking. Held descriptors survive replacement, but
+# neither they nor verified worker absence grant mutable-name deletion rights.
 _LEAF_SCOPE = ContextVar('candidate_worker_leaves', default=None)
 
 
@@ -340,47 +340,23 @@ class WorkerLeaves:
         return value
 
     def close(self):
-        # Outputs have been consumed before this invocation-final cleanup. Only
-        # bounded flat leaves are reclaimed; unexpected trees remain for audit.
-        for path, row in self.leaves.items():
+        # Worker absence is not exclusive authority over directory entries. A
+        # same-UID writer can replace either a child or the leaf after any last
+        # stat, even with the original directory held open. Retain diagnostics
+        # until an independently protected cleanup owner/namespace is available.
+        # No current-path identity or reclamation credit follows from retention.
+        for row in self.leaves.values():
+            row['cleanup'] = {'status': 'retained', 'deletionAttempted': False,
+                              'reason': 'exclusive-deletion-authority-unavailable'}
             fd = row['fd']
+            if fd is None:
+                continue
             try:
-                if not row['safe']:
-                    continue
-                held = row['identity']; current = path.lstat()
-                if (current.st_dev, current.st_ino) != (held.st_dev, held.st_ino):
-                    continue
-                # Reopen the held directory itself for a fresh enumeration
-                # (some filesystems snapshot entries when the FD is opened).
-                scan_fd = os.open('.', os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC, dir_fd=fd)
-                names = []
-                try:
-                    with os.scandir(scan_fd) as scan:
-                        for entry in scan:
-                            names.append(entry.name)
-                            if len(names) > 256: break
-                finally:
-                    os.close(scan_fd)
-                if len(names) > 256:
-                    continue
-                entries = {name: os.stat(name, dir_fd=fd, follow_symlinks=False) for name in names}
-                if any(not (stat.S_ISREG(v.st_mode) or stat.S_ISLNK(v.st_mode)) for v in entries.values()):
-                    continue
-                for name, before in entries.items():
-                    after = os.stat(name, dir_fd=fd, follow_symlinks=False)
-                    if (before.st_dev, before.st_ino, before.st_mode) != (after.st_dev, after.st_ino, after.st_mode):
-                        raise ValueError('worker leaf entry changed during cleanup')
-                    os.unlink(name, dir_fd=fd)
-                # rmdir never follows a replacement symlink; identity is checked
-                # again immediately before removing this exact owned leaf.
-                current = path.lstat()
-                if (current.st_dev, current.st_ino) == (held.st_dev, held.st_ino):
-                    os.rmdir(path)
-            except (OSError, ValueError):
-                pass  # Reclamation cannot replace the evaluation's primary result.
+                os.close(fd)
+            except OSError:
+                pass  # Descriptor cleanup cannot replace the primary result.
             finally:
-                try: os.close(fd)
-                except OSError: pass
+                row['fd'] = None
 
 
 def _leaf_call(path, operation, mounted=()):
