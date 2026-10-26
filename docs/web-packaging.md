@@ -428,8 +428,13 @@ replace that directory with the fixed token `${BUILD_ROOT}`. The recorded staged
 source, output and `HOME`/`TMPDIR` are therefore `${BUILD_ROOT}/<name>`, `${BUILD_ROOT}/home`
 and `${BUILD_ROOT}/tmp`. The installed verifiers require exactly those spellings, and
 the checksum and deployment-reference bindings still tie the helper bytes to the record.
-The compiler executable path and its SHA-256 stay as the toolchain identity. They depend
-on the build host's toolchain, not on the checkout location or the build.
+The records do keep the compiler's absolute executable path next to its SHA-256. That is
+intentional: the path identifies the build host's toolchain, not the checkout, the user or
+a per-build temporary directory. It is the same on every rebuild with that toolchain. Both
+verifiers require the recorded compile command's argv[0] and the `--version` command to be
+that path, so dropping it would weaken the binding between the measured compiler and the
+recorded recipe. A different toolchain is a different input, and the JAR is expected to
+change with it.
 
 ```sh
 python3 scripts/check-reproducible-jar.py --gradle-arg=--offline
