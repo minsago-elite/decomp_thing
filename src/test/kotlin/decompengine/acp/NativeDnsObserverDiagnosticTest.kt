@@ -47,6 +47,22 @@ class NativeDnsObserverDiagnosticTest {
         assertSame(cleanup, assertFailsWith<IllegalArgumentException> { nativeKeepPrimaryFailure(null, cleanup) })
     }
     @Test
+    fun `cleanup-only diagnostic classifies selected primary without replacing pre-cleanup liveness`() {
+        val before = linkedMapOf("primaryFailure" to "NONE", "rootAliveAtFailure" to "true", "hostPhase" to "PAYLOAD_RELEASE_FLUSHED")
+        val cleanup = java.io.IOException("private cleanup detail")
+        val diagnostic = nativeFinalFailureDiagnostic(before, cleanup)
+        assertEquals("IO_FAILURE", diagnostic["primaryFailure"])
+        assertEquals("true", diagnostic["rootAliveAtFailure"])
+        assertEquals(before["hostPhase"], diagnostic["hostPhase"])
+        assertEquals("NONE", before["primaryFailure"])
+        assertFalse(diagnostic.values.any { it.contains("private") })
+        val primary = IllegalStateException("private original")
+        nativeKeepPrimaryFailure(primary, cleanup)
+        assertEquals("STATE_FAILURE", nativeFinalFailureDiagnostic(before, primary)["primaryFailure"])
+        assertSame(cleanup, primary.suppressed.single())
+    }
+
+    @Test
     fun `denial diagnostics deduplicate retained observations and fail on ordinary detail overflow`() {
         // This test owns its accumulator; no global deadline, sink, /proc lookup or reflection.
         val records = mutableListOf<String>()

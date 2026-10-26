@@ -940,6 +940,10 @@ internal fun nativeFailureCategory(failure: Throwable?): String = when (failure)
     else -> "OTHER_FAILURE"
 }
 
+/** Preserve pre-cleanup observations, but classify only the finally selected primary. */
+internal fun nativeFinalFailureDiagnostic(snapshot: Map<String, String>, primary: Throwable): Map<String, String> =
+    snapshot + ("primaryFailure" to nativeFailureCategory(primary))
+
 internal fun nativeKeepPrimaryFailure(primary: Throwable?, cleanup: Throwable) {
     if (primary == null) throw cleanup
     primary.addSuppressed(cleanup)
@@ -1573,7 +1577,7 @@ private class NativeDnsOwnedDomainOwner(private val bwrap: Path, private val jav
         }
         primary?.let { failure ->
             try {
-                val diagnostic = (primaryDiagnostic ?: failureSnapshot(failure)).toMutableMap()
+                val diagnostic = nativeFinalFailureDiagnostic(primaryDiagnostic ?: failureSnapshot(failure), failure).toMutableMap()
                 // Existing cleanup observations only; a diagnostic never upgrades an unknown outcome.
                 for (key in listOf("rootReaped", "scopeAbsent", "streamsJoinedClosed", "referencesClosed",
                     "hostStateUnchanged", "observationTimely", "scopeKillAttempted", "scopeKillRemovedDuringSignal")) {
