@@ -372,3 +372,12 @@ main a + button, main button + button, main button + a { margin-inline-start: 0.
 :root[data-motion="reduce"], :root[data-motion="reduce"] *, :root[data-motion="reduce"] *::before, :root[data-motion="reduce"] *::after {
   scroll-behavior: auto !important; animation-duration: 0.01ms !important; animation-iteration-count: 1 !important; transition-duration: 0.01ms !important;
 }
+
+.structure-view { max-width: 72rem; }
+.structure-table { max-width: 100%; overflow: auto; margin-block: 1rem; }
+.structure-table table { border-collapse: collapse; width: 100%; }
+.structure-table th, .structure-table td { padding: 0.5rem; text-align: start; vertical-align: top; border-bottom: 1px solid var(--line); overflow-wrap: anywhere; }
+.structure-table caption { text-align: start; font-weight: 600; }
+.structure-flag { display: inline-block; font-size: 0.8rem; color: var(--muted); }
+.structure-preview { max-width: 100%; max-height: 24rem; overflow: auto; padding: 0.75rem; border: 1px solid var(--line); background: var(--surface); white-space: pre-wrap; overflow-wrap: anywhere; unicode-bidi: isolate; }
+ul.job-actions { list-style: none; padding: 0; }

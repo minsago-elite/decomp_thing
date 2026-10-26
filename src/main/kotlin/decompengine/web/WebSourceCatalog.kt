@@ -128,6 +128,64 @@ internal class WebSourceCatalogEvidence(
         } finally { searching.set(false) }
     }
 
+    /**
+     * Program-structure projection of the selected candidate. A retained projection is reused only for the
+     * same input, manifest and descriptor digests; every read still recaptures those three commitments.
+     */
+    fun <T> readStructure(reference: WebRevisionSourceReference, cache: WebProgramStructureCache,
+        project: (WebProgramStructureIndex, () -> ByteArray) -> T): T {
+        if (!capturing.compareAndSet(false, true)) {
+            throw WebAccessDenied(429, "SOURCE_CATALOG_BUSY", "Another source metadata capture is in progress. Try this read again later.")
+        }
+        try {
+            val root = "reports/runs/${reference.runId}/source-tree"
+            val manifestPath = "$root/source_tree_manifest.json"
+            val descriptorPath = "$root/reports/build_contract.json"
+            canonicalReportSegments(manifestPath)
+            val input = readInput(reference.jobId)
+            val captured = readArtifact(reference.jobId, manifestPath, MAXIMUM_MANIFEST_BYTES)
+            val descriptor = readArtifact(reference.jobId, descriptorPath, MAXIMUM_MANIFEST_BYTES)
+            require(captured.bytes.size.toLong() <= MAXIMUM_MANIFEST_BYTES && descriptor.bytes.size.toLong() <= MAXIMUM_MANIFEST_BYTES)
+            fun evidence(entry: GeneratedFileEvidence, maximum: Int): ByteArray? {
+                val record = try { readArtifact(reference.jobId, "$root/${entry.path}", maximum.toLong()) }
+                    catch (_: RepairBudgetExceededException) { return null }
+                if (record.bytes.size > maximum) return null
+                if (record.sha256 != entry.sha256 || WebExplorationArtifact.sha256(record.bytes) != entry.sha256) revisionSourceChanged()
+                return record.bytes
+            }
+            val key = WebProgramStructureCache.Key(reference.jobId, reference.runId, reference.revisionId,
+                reference.sourceSha256, captured.sha256, descriptor.sha256, input.sha256)
+            val index = cache.get(key) ?: run {
+                val document = OracleJson.parse(captured.bytes, JSON_LIMITS) as? JsonObject
+                    ?: throw IllegalArgumentException("Source catalog manifest is invalid.")
+                val profileId = (document["profileId"] as? JsonPrimitive)?.takeIf { it.isString }?.content
+                val profileSha256 = (document["profileSha256"] as? JsonPrimitive)?.takeIf { it.isString }?.content
+                val profile = profiles[profileId to profileSha256]
+                    ?: throw IllegalArgumentException("Source catalog profile is unavailable.")
+                require(((document["files"] as? JsonArray)?.size ?: Int.MAX_VALUE) <= WebSourceCatalogSnapshot.MAXIMUM_FILES)
+                val manifest = SourceTreeManifestReader.parse(document.toString(), profile)
+                require(manifest.inputSha256 == input.sha256)
+                val descriptorDocument = OracleJson.parse(descriptor.bytes, JSON_LIMITS) as? JsonObject
+                    ?: throw IllegalArgumentException("Source input descriptor is invalid.")
+                val snapshot = parseWebRevisionSourceInputs(reference, manifest, captured.sha256, descriptorDocument, descriptor.sha256)
+                WebProgramStructureBuilder.build(snapshot, profile, manifest, ::evidence).also { cache.put(key, it) }
+            }
+            // Retention pins change the attempt version without changing the candidate; the projection depends
+            // only on the keyed commitments, so it stays valid for the current reference.
+            check(index.reference.copy(attemptVersion = reference.attemptVersion) == reference && index.manifestSha256 == captured.sha256 && index.descriptorSha256 == descriptor.sha256)
+            val result = project(index) {
+                val model = checkNotNull(index.model)
+                val record = readArtifact(reference.jobId, "$root/${model.path}", WebProgramStructureBuilder.MAXIMUM_MODEL_BYTES.toLong())
+                if (record.sha256 != model.sha256 || WebExplorationArtifact.sha256(record.bytes) != model.sha256) revisionSourceChanged()
+                record.bytes
+            }
+            requireSame(descriptor, readArtifact(reference.jobId, descriptorPath, MAXIMUM_MANIFEST_BYTES))
+            requireSame(captured, readArtifact(reference.jobId, manifestPath, MAXIMUM_MANIFEST_BYTES))
+            requireSame(input, readInput(reference.jobId))
+            return result
+        } finally { capturing.set(false) }
+    }
+
     private fun <T> revision(reference: WebRevisionSourceReference, manifest: decompengine.project.SourceTreeManifest,
         captured: StableRegularFile, project: (WebRevisionSourceSnapshot) -> T): T {
         val path = "reports/runs/${reference.runId}/source-tree/reports/build_contract.json"

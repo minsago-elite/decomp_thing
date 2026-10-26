@@ -173,6 +173,9 @@ internal storage optimization and must not merge identity, permissions or histor
 | `GET`, `HEAD R/revisions/{revisionId}/source-files/{fileId}` | `200 revisionFile` | Recorded file metadata and opaque parent directory, without requesting its body; #188 |
 | `GET`, `HEAD R/revisions/{revisionId}/source-files/{fileId}/chunk` | `200 sourceChunk` | Digest-verified bounded UTF-8 or hex ranges of a committed input; #490, #545 |
 | `GET`, `HEAD R/revisions/{revisionId}/source-files/{fileId}/content` | `200 application/octet-stream` | Complete authorized input download, at most 8 MiB; #491, #545 |
+| `GET`, `HEAD R/revisions/{revisionId}/functions` | `200 functionInventory` | Bounded, signed, filtered/sorted pages of the manifest-committed program model; explicit model/plan states; [program structure](web-program-structure.md); #534, #536 |
+| `GET`, `HEAD R/revisions/{revisionId}/modules`, `R/revisions/{revisionId}/modules/{moduleId}` | `200 moduleInventory`, `200 moduleDetail` | Recorded totals/diagnostics and module pages; owned-entity pages with revision source links; #535 |
+| `GET`, `HEAD R/revisions/{revisionId}/{functions,globals,types}/{entityId}` | `200 entityDetail` | Bounded entity facts, cross-links and unrecorded fact families; optional `structureVersion` pin; #539, #540 |
 | `GET J/revisions`, `GET V` | `200 revisions`, `200 revision` | Immutable source/acceptance bindings; #165/#199 |
 | `GET V/sources`, `GET V/sources/{fileId}` | `200 files`, `200 file` | Bounded tree/page/read; #165/#188/#189 |
 | `GET`, `HEAD R/revisions/{revisionId}/source-diff` | `200 sourceDiff` | Changed files against an explicit `baseRunId`/`baseRevisionId` of the same job, from recorded digests; #550 |

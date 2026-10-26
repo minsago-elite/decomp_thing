@@ -74,14 +74,13 @@ internal class WebApiController(
     private val artifactContent = WebArtifactContent(artifactStore)
     internal val artifactDownloads = WebArtifactDownloads()
     private val revisionValidationReports = WebRevisionValidationReports(jobs::readRecordedValidationReport)
+    private val programStructure = WebProgramStructurePages { job, run, revision, project -> jobs.readProgramStructure(job, run, revision, project) }
     private val eventStream = WebEventStream(access, streamResources, progressPages, read = { jobId, runId ->
         readWebProgress(jobs, jobId, runId).second
     }, clock = clock, deleted = { jobId -> jobs.deletedJob(jobId) != null })
     private val jobPages = WebJobPages(jobs::collectionRecords, checkpointedSource = jobs::collectionRecordsWithProgress)
     private val lifecycle = WebJobLifecycleController(access, jobs, jobMutations, assets.basePath, jobPages::invalidate)
 
-    // One private resource pattern per line, so independent route additions merge cleanly.
-    // One private resource pattern per line, so independent route additions merge cleanly.
     // One private resource pattern per line, so independent route additions merge cleanly.
     private val privateResources = listOf(
         "(?:jobs|uploads)/[^/]+",
@@ -108,6 +107,10 @@ internal class WebApiController(
         "jobs/[^/]+/runs/[^/]+/revisions/[^/]+/source-archive",
         "jobs/[^/]+/runs/[^/]+/revisions/[^/]+/archive-verifications(?:/[^/]+)?",
         "jobs/[^/]+/artifacts(?:/[^/]+)?",
+        "jobs/[^/]+/runs/[^/]+/revisions/[^/]+/functions(?:/[^/]+)?",
+        "jobs/[^/]+/runs/[^/]+/revisions/[^/]+/modules(?:/[^/]+)?",
+        "jobs/[^/]+/runs/[^/]+/revisions/[^/]+/globals/[^/]+",
+        "jobs/[^/]+/runs/[^/]+/revisions/[^/]+/types/[^/]+",
     ).map(::Regex)
 
     fun route(exchange: HttpExchange): Boolean {
@@ -309,6 +312,24 @@ internal class WebApiController(
                         val content = jobs.readRevisionSourceFile(parts[1], parts[3], parts[5], parts[7], WebSourceReadPurpose.DOWNLOAD, metadataVersion)
                         sendWebAttachment(exchange, content.download(), content.downloadName, content.verifiedDownloadHeaders())
                     }
+                }
+                resource.matches(Regex("jobs/[^/]+/runs/[^/]+/revisions/[^/]+/(?:functions|modules)(?:/[^/]+)?|jobs/[^/]+/runs/[^/]+/revisions/[^/]+/(?:globals|types)/[^/]+")) -> {
+                    val session = checkNotNull(access.authorize(exchange, WebEndpointPolicy.privateRead(allowHead = true)))
+                    requireJsonAccept(exchange)
+                    val parts = resource.split('/')
+                    val query = exchange.requestURI.rawQuery
+                    if (parts.size == 8 && !WebProgramStructurePages.addressable(parts[7])) {
+                        throw WebAccessDenied(404, if (parts[6] == "modules") "MODULE_NOT_FOUND" else "ENTITY_NOT_FOUND",
+                            "The requested structure record is not addressable in this revision.")
+                    }
+                    val (kind, value) = when {
+                        parts.size == 7 && parts[6] == "functions" -> "functionInventory" to programStructure.functions(session.sessionId, parts[1], parts[3], parts[5], query)
+                        parts.size == 7 -> "moduleInventory" to programStructure.modules(session.sessionId, parts[1], parts[3], parts[5], query)
+                        parts[6] == "modules" -> "moduleDetail" to programStructure.module(session.sessionId, parts[1], parts[3], parts[5], parts[7], query)
+                        else -> "entityDetail" to programStructure.entity(WebStructureKind.entries.single { it.route == parts[6] },
+                            parts[1], parts[3], parts[5], parts[7], query)
+                    }
+                    sendWebApiResponse(exchange, 200, kind, value)
                 }
                 resource.matches(Regex("jobs/[^/]+/runs/[^/]+/revisions/[^/]+/source-directories/[^/]+")) -> {
                     val session = checkNotNull(access.authorize(exchange, WebEndpointPolicy.privateRead(allowHead = true)))

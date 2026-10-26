@@ -3,6 +3,7 @@ import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { decodeContract, decodeResponse, encodeRequest } from '../src/api/decode';
+import '../src/structure/contract';
 import { ApiClientError } from '../src/api/errors';
 import { parseBoundedJson } from '../src/api/json';
 import type { ResponseOf, Run } from '../src/api/generated';

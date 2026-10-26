@@ -50,6 +50,10 @@ const responses: Record<string, () => unknown> = {
   validationHistory: () => bound('validation-history', { jobId, runId, revisionId: null }),
   recovery: () => fixture('recovery-empty'),
   progressPin: () => fixture('progress-pin'),
+  functionInventory: () => bound('function-inventory', selected),
+  moduleInventory: () => bound('module-inventory', selected),
+  moduleDetail: () => bound('module-detail', selected),
+  entityDetail: () => bound('entity-detail-function-references', selected),
 };
 
 beforeEach(() => {
@@ -110,6 +114,10 @@ const privateRoutes: [name: string, path: string, rendered: string | RegExp][] =
   ['source comparison chooser', `/nested/jobs/${jobId}/runs/${runId}/revisions/${revisionId}/source-diff`, 'Choose a base revision'],
   ['source comparison list', `/nested/jobs/${jobId}/runs/${runId}/revisions/${revisionId}/source-diff?${diffBase}`, /4 changed files/],
   ['source file comparison', `/nested/jobs/${jobId}/runs/${runId}/revisions/${revisionId}/source-diff/file?${diffBase}&baseFileId=${diffFile.baseFile.fileId}&headFileId=${diffFile.headFile.fileId}`, '@@ -4,4 +4,5 @@'],
+  ['function inventory', `/nested/jobs/${jobId}/runs/${runId}/revisions/${revisionId}/functions`, 'Showing 1–3 of 5 matching functions (5 recorded).'],
+  ['module inventory', `/nested/jobs/${jobId}/runs/${runId}/revisions/${revisionId}/modules`, 'Recorded totals'],
+  ['module detail', `/nested/jobs/${jobId}/runs/${runId}/revisions/${revisionId}/modules/extra`, 'src/modules/extra.c'],
+  ['function detail', `/nested/jobs/${jobId}/runs/${runId}/revisions/${revisionId}/functions/fn_0000000000401000`, 'Recorded prototype'],
   ['unknown page', '/nested/not-a-route', 'Page unavailable'],
 ];
 
@@ -150,6 +158,17 @@ it('has no automated WCAG A/AA violations with display preferences open', async 
   render(<App basePath="/nested" session={auth} />);
   await screen.findByRole('heading', { level: 1 });
   fireEvent.click(screen.getByRole('button', { name: 'Display preferences' }));
+  await settle();
+  expect(await violations()).toEqual([]);
+});
+
+it('has no automated WCAG A/AA violations when a revision records an unsupported program model', async () => {
+  transport.get.mockImplementation(kind => Promise.resolve(kind === 'functionInventory'
+    ? bound('function-inventory-unsupported', selected) : Promise.reject(new ApiClientError('http_error', { serverCode: 'NOT_FOUND' }))));
+  const auth = await session();
+  history.replaceState(null, '', `/nested/jobs/${jobId}/runs/${runId}/revisions/${revisionId}/functions`);
+  render(<App basePath="/nested" session={auth} />);
+  await screen.findByRole('alert');
   await settle();
   expect(await violations()).toEqual([]);
 });

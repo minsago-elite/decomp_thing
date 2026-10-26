@@ -815,6 +815,98 @@
       "valid": true
     },
     {
+      "file": "fixtures/function-inventory.json",
+      "valid": true
+    },
+    {
+      "file": "fixtures/function-inventory-filtered-empty.json",
+      "valid": true
+    },
+    {
+      "file": "fixtures/function-inventory-unsupported.json",
+      "valid": true
+    },
+    {
+      "file": "fixtures/function-inventory-limit-exceeded.json",
+      "valid": true
+    },
+    {
+      "file": "fixtures/invalid-function-inventory-unavailable-rows.json",
+      "valid": false
+    },
+    {
+      "file": "fixtures/invalid-function-inventory-unavailable-empty-success.json",
+      "valid": false
+    },
+    {
+      "file": "fixtures/invalid-function-inventory-verified-label.json",
+      "valid": false
+    },
+    {
+      "file": "fixtures/invalid-function-inventory-excluded-owner.json",
+      "valid": false
+    },
+    {
+      "file": "fixtures/invalid-function-inventory-selector.json",
+      "valid": false
+    },
+    {
+      "file": "fixtures/invalid-function-inventory-version.json",
+      "valid": false
+    },
+    {
+      "file": "fixtures/invalid-function-inventory-address.json",
+      "valid": false
+    },
+    {
+      "file": "fixtures/module-inventory.json",
+      "valid": true
+    },
+    {
+      "file": "fixtures/module-inventory-plan-not-recorded.json",
+      "valid": true
+    },
+    {
+      "file": "fixtures/invalid-module-inventory-unavailable-summary.json",
+      "valid": false
+    },
+    {
+      "file": "fixtures/module-detail.json",
+      "valid": true
+    },
+    {
+      "file": "fixtures/invalid-module-detail-missing-owned.json",
+      "valid": false
+    },
+    {
+      "file": "fixtures/entity-detail-function.json",
+      "valid": true
+    },
+    {
+      "file": "fixtures/entity-detail-function-references.json",
+      "valid": true
+    },
+    {
+      "file": "fixtures/entity-detail-global.json",
+      "valid": true
+    },
+    {
+      "file": "fixtures/entity-detail-not-recorded.json",
+      "valid": true
+    },
+    {
+      "file": "fixtures/invalid-entity-detail-unrecorded-link.json",
+      "valid": false
+    },
+    {
+      "file": "fixtures/invalid-entity-detail-unbounded-preview.json",
+      "valid": false
+    },
+    {
+      "file": "fixtures/invalid-entity-detail-unavailable-entity.json",
+      "valid": false
+    },
+    {
       "file": "fixtures/support-export-server.json",
       "valid": true
     },
