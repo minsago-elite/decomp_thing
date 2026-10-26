@@ -136,12 +136,20 @@ class ContainedModuleCompilerWorkerTest {
             val compiled = parent.resolve("compiled")
             val restored = parent.resolve("restored")
             val shim = script(realCompiler.parent.resolve("shim"), """
+                wait_for() {
+                    tries=0
+                    while [ ! -e "${'$'}1" ]; do
+                        tries=${'$'}((tries + 1))
+                        [ "${'$'}tries" -le 1000 ] || exit 125
+                        /usr/bin/sleep 0.01
+                    done
+                }
                 printf ready > '$ready'
-                while [ ! -e '$proceed' ]; do /usr/bin/sleep 0.01; done
+                wait_for '$proceed'
                 '$realCompiler' "${'$'}@"
                 status=${'$'}?
                 printf compiled > '$compiled'
-                while [ ! -e '$restored' ]; do /usr/bin/sleep 0.01; done
+                wait_for '$restored'
                 exit "${'$'}status"
             """.trimIndent())
             val source = """
@@ -164,15 +172,21 @@ class ContainedModuleCompilerWorkerTest {
             }
             val transient = fixture.request.snapshotRoot.resolve(relative)
             val execution = launch(fixture) {
-                await(ready)
-                // A pragma message is a note (not a -Werror diagnostic). Require its retained
-                // marker below to prove each transient compiler-search input was consumed.
-                if (sidecar != null) Files.copy(sidecar, transient)
-                else Files.writeString(transient, "#pragma message(\"transient-$kind-consumed\")\nint alpha(void);\n")
-                Files.writeString(proceed, "go")
-                await(compiled)
-                Files.delete(transient)
-                Files.writeString(restored, "restored")
+                try {
+                    await(ready)
+                    // A pragma message is a note (not a -Werror diagnostic). Require its retained
+                    // marker below to prove each transient compiler-search input was consumed.
+                    if (sidecar != null) Files.copy(sidecar, transient)
+                    else Files.writeString(transient, "#pragma message(\"transient-$kind-consumed\")\nint alpha(void);\n")
+                    Files.writeString(proceed, "go")
+                    await(compiled)
+                    Files.delete(transient)
+                } finally {
+                    // A failed assertion/setup must not strand a gated native child when the
+                    // worker is torn down. The shim also has its own finite wait ceiling.
+                    Files.writeString(proceed, "go")
+                    Files.writeString(restored, "restored")
+                }
             }
             assertEquals(0, execution.exitCode, execution.stderr)
             val result = ContainedModuleCompilerResult.parse(execution.stdout)
@@ -258,8 +272,12 @@ class ContainedModuleCompilerWorkerTest {
         }.start()
         process.outputStream.close()
         try {
-            duringExecution()
+            var callbackFailure: Throwable? = null
+            try { duringExecution() } catch (failure: Throwable) { callbackFailure = failure }
+            // Give the worker's bounded native command its normal cleanup opportunity even
+            // when a synchronization callback failed, before deleting the fixture tree.
             assertTrue(process.waitFor(40, TimeUnit.SECONDS), "module compiler test worker timed out")
+            callbackFailure?.let { throw it }
             assertTrue(Files.size(stdout) <= ContainedModuleCompilerResult.MAXIMUM_RESULT_BYTES)
             assertTrue(Files.size(stderr) <= 64 * 1024)
             return Execution(process.exitValue(), Files.readAllBytes(stdout), Files.readString(stderr))
