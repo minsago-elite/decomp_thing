@@ -267,12 +267,19 @@ internal object GitRepositoryImport {
     /**
      * Full object verification: every object is re-hashed against its ID and everything reachable
      * from the copied refs must be present. `--connectivity-only` would not detect altered blobs.
+     * Compressed file size and HEAD checkout quotas do not bound inflation of dangling, historical
+     * or packed objects. The child therefore has a hard address-space budget before it reads any.
      */
-    fun verify(runner: GitCommandRunner, managedGitDir: Path) {
+    fun verify(runner: GitCommandRunner, managedGitDir: Path, maxAddressSpaceBytes: Long = 512L * 1024 * 1024) {
         try {
             runner.run(GitInvocation("fsck", listOf("--full", "--no-dangling", "--no-progress"), gitDir = managedGitDir,
-                limits = GitExecutionLimits(Duration.ofMinutes(2), 1024 * 1024, 64 * 1024)))
+                limits = GitExecutionLimits(Duration.ofMinutes(2), 1024 * 1024, 64 * 1024, maxAddressSpaceBytes)))
         } catch (failure: GitCommandException) {
+            // Git's fatal allocation failure is 128; a resource-related signal can also end it.
+            // These exits cannot establish corruption, and must never trigger an unbounded retry.
+            if (failure.kind == GitCommandException.Kind.FAILED && failure.exitCode in setOf(128, 137, 139)) {
+                unsupported("The repository could not be verified within the import memory budget.")
+            }
             if (failure.kind == GitCommandException.Kind.FAILED) corrupt("The repository is missing objects or contains invalid objects.")
             throw GitOperationFailure("REPOSITORY_UNAVAILABLE", "The repository could not be verified within its bounds.")
         }

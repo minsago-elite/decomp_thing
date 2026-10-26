@@ -300,6 +300,38 @@ class ManagedGitRepositoriesTest {
         }
     }
 
+    @Test fun `full integrity verification bounds inflation even for a compressed dangling object`() {
+        GitTestRepositories().use { g ->
+            val (gitDir, _) = g.managed("expansion")
+            // Stream a valid 64 MiB loose blob without allocating its expanded contents in the JVM.
+            // HEAD is unborn, so a HEAD-tree quota alone would never account for this object.
+            val temporary = g.root.resolve("compressed blob")
+            val digest = java.security.MessageDigest.getInstance("SHA-1")
+            java.util.zip.DeflaterOutputStream(Files.newOutputStream(temporary)).use { compressed ->
+                java.security.DigestOutputStream(compressed, digest).use { output ->
+                    output.write("blob 67108864\u0000".toByteArray())
+                    val zeros = ByteArray(64 * 1024)
+                    repeat(1024) { output.write(zeros) }
+                }
+            }
+            assertTrue(Files.size(temporary) < 100_000)
+            val id = with(GitStorage) { digest.digest().hex() }
+            val loose = GitStorage.directories(gitDir.resolve("objects"), id.take(2)).resolve(id.drop(2))
+            Files.move(temporary, loose)
+            val before = GitSourceCopy.digestOf(loose)
+            // Test with a smaller real OS budget; never run the oversized fsck without a ceiling.
+            val failure = assertFailsWith<GitOperationFailure> {
+                GitRepositoryImport.verify(g.runner, gitDir, maxAddressSpaceBytes = 48L * 1024 * 1024)
+            }
+            assertEquals("REPOSITORY_UNSUPPORTED", failure.code)
+            assertTrue(failure.message!!.contains("memory budget"))
+            assertEquals(before, GitSourceCopy.digestOf(loose))
+            assertEquals("REPOSITORY_UNAVAILABLE", assertFailsWith<GitOperationFailure> {
+                GitRepositoryImport.verify(GitCommandRunner(g.runner.executable, g.environment, memoryLimiter = null), gitDir)
+            }.code)
+        }
+    }
+
     @Test fun `object copy rejects a link substituted after stat and pins renamed parent directories`() {
         GitTestRepositories().use { g ->
             val source = Files.createDirectories(g.root.resolve("objects/ab"))
