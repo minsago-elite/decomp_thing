@@ -120,8 +120,6 @@ internal data class ImportedRepositoryLayout(val gitDir: Path, val bare: Boolean
  */
 internal object GitRepositoryImport {
     private val NAME = Regex("[A-Za-z0-9][A-Za-z0-9._-]{0,127}")
-    private const val MAX_OBJECT_FILES = 100_000
-    private const val MAX_OBJECT_BYTES = 512L * 1024 * 1024
     private const val MAX_REFS = 10_000
     private const val MAX_PACKED_REFS_BYTES = 4 * 1024 * 1024
     private val ALLOWED_EXTENSIONS = setOf("objectformat", "worktreeconfig", "noop", "preciousobjects")
@@ -169,7 +167,7 @@ internal object GitRepositoryImport {
 
     /** Copy objects, branch/tag refs and HEAD into an already initialized managed Git directory. */
     fun copyHistory(layout: ImportedRepositoryLayout, managedGitDir: Path) {
-        copyObjects(layout.gitDir.resolve("objects"), managedGitDir.resolve("objects"))
+        GitImportObjectCopy.copy(layout.gitDir.resolve("objects"), managedGitDir.resolve("objects"))
         val packed = layout.gitDir.resolve("packed-refs")
         val packedBytes = if (Files.exists(packed, NOFOLLOW_LINKS)) GitStorage.read(packed, MAX_PACKED_REFS_BYTES) else byteArrayOf()
         val retainedPacked = filterPackedRefs(packedBytes, layout.objectFormat)
@@ -211,30 +209,6 @@ internal object GitRepositoryImport {
             if (!symbolic.startsWith("refs/heads/") || !validRefName(symbolic)) unsupported("HEAD names an unsupported reference.")
         } else if (layout.objectFormat.objectIdOrNull(head.removeSuffix("\n")) == null) corrupt("HEAD is neither a branch nor a full object ID.")
         GitStorage.replaceAtomically(managedGitDir.resolve("HEAD"), head.toByteArray(Charsets.UTF_8))
-    }
-
-    private fun copyObjects(source: Path, target: Path) {
-        var files = 0; var bytes = 0L
-        Files.walkFileTree(source, emptySet(), 4, object : SimpleFileVisitor<Path>() {
-            override fun preVisitDirectory(directory: Path, attributes: BasicFileAttributes): FileVisitResult {
-                if (attributes.isSymbolicLink) unsupported("The repository object store contains links.")
-                val relative = source.relativize(directory)
-                if (relative.toString() == "info") return FileVisitResult.SKIP_SUBTREE
-                if (relative.nameCount > 0) GitStorage.directories(target, *relative.map { it.toString() }.toTypedArray())
-                return FileVisitResult.CONTINUE
-            }
-            override fun visitFile(file: Path, attributes: BasicFileAttributes): FileVisitResult {
-                GitStorage.checkInterrupted()
-                if (!attributes.isRegularFile || attributes.isSymbolicLink) unsupported("The repository object store contains links or special files.")
-                if (++files > MAX_OBJECT_FILES || attributes.size() > MAX_OBJECT_BYTES - bytes) unsupported("The repository exceeds the import size limits.")
-                bytes += attributes.size()
-                val name = file.fileName.toString()
-                if (name.startsWith("tmp_") || name.endsWith(".lock")) return FileVisitResult.CONTINUE
-                Files.copy(file, target.resolve(source.relativize(file).toString()), NOFOLLOW_LINKS)
-                return FileVisitResult.CONTINUE
-            }
-            override fun visitFileFailed(file: Path, failure: IOException): FileVisitResult = unsupported("The repository object store could not be read.")
-        })
     }
 
     /** Keep the header, branch and tag records and their peeled lines; drop every other namespace. */

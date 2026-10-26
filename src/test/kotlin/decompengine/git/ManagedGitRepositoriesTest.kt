@@ -300,6 +300,44 @@ class ManagedGitRepositoriesTest {
         }
     }
 
+    @Test fun `object copy rejects a link substituted after stat and pins renamed parent directories`() {
+        GitTestRepositories().use { g ->
+            val source = Files.createDirectories(g.root.resolve("objects/ab"))
+            val external = Files.createDirectories(g.root.resolve("external objects"))
+            Files.writeString(external.resolve("blob"), "outside marker")
+            val objectFile = Files.writeString(source.resolve("blob"), "original bytes")
+            val rejected = Files.createDirectory(g.root.resolve("rejected objects"))
+            val failure = assertFailsWith<GitOperationFailure> {
+                GitImportObjectCopy.copy(source.parent, rejected) { relative ->
+                    if (relative.toString() == "ab/blob") {
+                        Files.delete(objectFile)
+                        Files.createSymbolicLink(objectFile, external.resolve("blob"))
+                    }
+                }
+            }
+            assertEquals("REPOSITORY_UNSUPPORTED", failure.code)
+            assertFalse(Files.exists(rejected.resolve("ab/blob"), NOFOLLOW_LINKS))
+            Files.delete(objectFile)
+            Files.writeString(objectFile, "original bytes")
+            val copied = Files.createDirectory(g.root.resolve("copied objects"))
+            GitImportObjectCopy.copy(source.parent, copied) { relative ->
+                if (relative.toString() == "ab/blob") {
+                    Files.move(source, source.resolveSibling("old"))
+                    Files.createSymbolicLink(source, external)
+                }
+            }
+            val destination = copied.resolve("ab/blob")
+            assertFalse(Files.isSymbolicLink(destination))
+            assertEquals("original bytes", Files.readString(destination))
+            Files.writeString(external.resolve("blob"), "changed outside")
+            assertEquals("original bytes", Files.readString(destination))
+            // Root/ancestor links are refused too; a final-component no-follow open alone is insufficient.
+            assertEquals("REPOSITORY_UNSUPPORTED", assertFailsWith<GitOperationFailure> {
+                GitImportObjectCopy.copy(source, Files.createDirectory(g.root.resolve("linked root target")))
+            }.code)
+        }
+    }
+
     @Test fun `import resolves symbolic branches and tags before dropping their target namespaces`() {
         for (format in listOf("sha1", "sha256")) {
             val (f, importRoot) = importFixture()
