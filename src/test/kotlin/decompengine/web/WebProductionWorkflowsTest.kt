@@ -422,14 +422,17 @@ class WebProductionWorkflowsTest {
     }
 
     @Test
-    fun `retry never substitutes the sole remaining option for a recorded missing harness`() = withRoot { root ->
+    fun `retry never substitutes a different agent for a recorded missing agent harness`() = withRoot { root ->
         val store = JobStore(root)
         val job = store.createFromUpload("retry.elf", elfFixture())
         var executions = 0
+        // An agent-contacting option: its harness choice decides which agent receives the job's evidence.
         val original = object : DurableWebWorkflowAdapter {
             override val workflow = WorkflowKind.RECONSTRUCT
             override val harnessCapabilityId = "recorded-harness"
             override val limits = WebWorkflowDefaults.RECONSTRUCT_AGENT
+            override val launch = DurableWebWorkflowLaunch(DurableWebWorkflowMode.AGENT, executesBinary = false,
+                contactsAgent = true, requiredTools = listOf("agent-harness"))
             override fun execute(context: DurableWebWorkflowContext): DurableWebWorkflowOutcome {
                 executions++; return DurableWebWorkflowOutcome.Failed()
             }
