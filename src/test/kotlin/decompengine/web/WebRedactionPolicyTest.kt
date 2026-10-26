@@ -1,0 +1,207 @@
+package decompengine.web
+
+import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.JsonPrimitive
+import kotlinx.serialization.json.buildJsonArray
+import kotlinx.serialization.json.buildJsonObject
+import kotlinx.serialization.json.jsonObject
+import kotlinx.serialization.json.jsonPrimitive
+import kotlinx.serialization.json.put
+import java.nio.file.Path
+import kotlin.test.Test
+import kotlin.test.assertContentEquals
+import kotlin.test.assertEquals
+import kotlin.test.assertFalse
+import kotlin.test.assertFailsWith
+import kotlin.test.assertSame
+import kotlin.test.assertTrue
+
+class WebRedactionPolicyTest {
+    private val canary = "CANARYtoken0123456789abcdef"
+    private val policy = WebRedactionPolicy.create(
+        environment = mapOf(
+            "DECOMP_TEST_API_TOKEN" to canary,
+            "AWS_SECRET_ACCESS_KEY" to "shortish9",
+            "NODE_ENV" to "development",
+            "SHLVL" to "1",
+            "LANG" to "en_US.UTF-8",
+        ),
+        sensitiveValues = listOf(canary, "development", "1", "en_US.UTF-8", "LongOpaqueValue0123456789XYZ"),
+        privateRoots = listOf(Path.of("/srv/decomp-private-store")),
+    )
+
+    @Test fun `credential literals, syntax and private paths are replaced while public vocabulary is untouched`() {
+        assertEquals("key [redacted] end", policy.text("key $canary end"))
+        assertEquals("[redacted]", policy.text("shortish9"))
+        assertEquals("[redacted]", policy.text("LongOpaqueValue0123456789XYZ"))
+        // Short generic environment values must never corrupt DTO vocabulary.
+        assertEquals("development", policy.text("development"))
+        assertEquals("1 of 1 en_US.UTF-8", policy.text("1 of 1 en_US.UTF-8"))
+        assertEquals("Authorization: [redacted]", policy.text("Authorization: Bearer abcdefghijkl"))
+        assertEquals("password=[redacted]&next", policy.text("password=hunter2&next"))
+        assertEquals("password=[redacted] next", policy.text("password=\"hunter2 two\" next"))
+        assertEquals("token=[redacted]", policy.text("token='abcdefghijk'"))
+        assertEquals("{\"secret\": [redacted]}", policy.text("{\"secret\": \"s3cr3t value\"}"))
+        assertEquals("api_key: [redacted], ok", policy.text("api_key: 'k-123', ok"))
+        assertEquals("use [redacted] now", policy.text("use sk-abcdefghijklmnopqrstuvwx now"))
+        assertEquals("https://[redacted]@example.test/x", policy.text("https://user:pa55@example.test/x"))
+        assertEquals("open [private-path] failed", policy.text("open /srv/decomp-private-store/abc/input.elf failed"))
+        assertEquals("[private-path]", policy.text("/home/someone/.config/agent.json"))
+        assertEquals("see file://[private-path]", policy.text("see file:///home/someone/x.txt"))
+        assertEquals("https://example.test/home/page", policy.text("https://example.test/home/page"))
+        assertEquals("at [private-path]: denied", policy.text("at /tmp/decomp-123/work: denied"))
+        assertEquals("[private-path]", policy.text("C:\\Users\\someone\\AppData\\token.txt"))
+        // Relative and API paths are public.
+        assertEquals("src/home/main.c", policy.text("src/home/main.c"))
+        assertEquals("/workbench/api/v1/jobs/abc/runs", policy.text("/workbench/api/v1/jobs/abc/runs"))
+        assertEquals("/rootkit/notes", policy.text("/rootkit/notes"))
+        assertEquals("Context tokens: 5", policy.text("Context tokens: 5"))
+    }
+
+    @Test fun `redaction is stable when reapplied and never leaves a configured literal`() {
+        val inputs = listOf("Authorization: Bearer $canary", "x${canary}y /home/a/b token=$canary", "[redacted]X")
+        for (input in inputs) {
+            val once = policy.text(input)
+            assertEquals(once, policy.text(once), input)
+            assertFalse(once.contains(canary))
+            assertFalse(policy.leaks(once), once)
+        }
+    }
+
+    @Test fun `opaque protocol fields keep exact bytes unless they carry a configured literal`() {
+        val document = buildJsonObject {
+            put("nextCursor", "sk-abcdefghijklmnopqrstuvwxyz012345")
+            put("csrfToken", "token=abcdef")
+            put("writerId", "writer_$canary")
+            put("sha256", "a".repeat(64))
+            put("message", "failed at /home/a/b with sk-abcdefghijklmnopqrstuvwxyz012345")
+            put("items", buildJsonArray { add(JsonPrimitive("/tmp/x")); add(JsonPrimitive(3)) })
+            put("nested", buildJsonObject { put("runId", "/home/escape") })
+        }
+        val safe = policy.json(document).jsonObject
+        assertEquals("sk-abcdefghijklmnopqrstuvwxyz012345", safe.getValue("nextCursor").jsonPrimitive.content)
+        assertEquals("token=abcdef", safe.getValue("csrfToken").jsonPrimitive.content)
+        assertEquals("[redacted]", safe.getValue("writerId").jsonPrimitive.content)
+        assertEquals("a".repeat(64), safe.getValue("sha256").jsonPrimitive.content)
+        assertEquals("failed at [private-path] with [redacted]", safe.getValue("message").jsonPrimitive.content)
+        assertEquals("[\"[private-path]\",3]", safe.getValue("items").toString())
+        // An opaque key does not exempt a value outside closed token syntax.
+        assertEquals("[private-path]", safe.getValue("nested").jsonObject.getValue("runId").jsonPrimitive.content)
+        assertFalse(safe.toString().contains(canary))
+    }
+
+    @Test fun `downloads keep identical bytes when clean and are rewritten structurally otherwise`() {
+        val clean = "{\n  \"candidateCount\": 3,\n  \"note\": \"ok\"\n}\n".toByteArray()
+        assertSame(clean, policy.document(clean))
+        val dirty = "{\"note\": \"read /home/a/x\", \"count\": 18446744073709551615}".toByteArray()
+        val rewritten = Json.parseToJsonElement(policy.document(dirty).decodeToString()).jsonObject
+        assertEquals("read [private-path]", rewritten.getValue("note").jsonPrimitive.content)
+        assertEquals("18446744073709551615", rewritten.getValue("count").toString())
+        assertEquals("line [redacted]\n", policy.document("line $canary\n".toByteArray()).decodeToString())
+        val binary = byteArrayOf(0xff.toByte(), 0xfe.toByte(), 1)
+        assertContentEquals(binary, policy.document(binary))
+    }
+
+    @Test fun `escaped JSON values are judged after decoding, never by their serialized spelling`() {
+        val quoted = WebRedactionPolicy.create(mapOf("DECOMP_TEST_TOKEN" to "ab\"cd\\ef0123"), emptyList(), emptyList())
+        val document = buildJsonObject {
+            put("note", "token ab\"cd\\ef0123 here")
+            put("location", "C:\\Users\\someone\\report.json")
+        }.toString().toByteArray()
+        val safe = Json.parseToJsonElement(quoted.document(document).decodeToString()).jsonObject
+        assertEquals("token [redacted] here", safe.getValue("note").jsonPrimitive.content)
+        assertEquals("[private-path]", safe.getValue("location").jsonPrimitive.content)
+    }
+
+    @Test fun `public routing fields under a private-looking base path are preserved`() {
+        val bootstrap = buildJsonObject {
+            put("basePath", "/home/")
+            put("snapshotHref", "/home/api/v1/jobs/abc/runs/r/snapshot")
+            put("contentHref", "/tmp/api/v1/jobs/abc/artifacts/x/content?limit=1")
+            put("message", "failed at /home/someone/private.txt")
+            put("nextHref", "/home/someone/private.txt token=abcdef")
+        }
+        val safe = policy.json(bootstrap).jsonObject
+        assertEquals("/home/", safe.getValue("basePath").jsonPrimitive.content)
+        assertEquals("/home/api/v1/jobs/abc/runs/r/snapshot", safe.getValue("snapshotHref").jsonPrimitive.content)
+        assertEquals("/tmp/api/v1/jobs/abc/artifacts/x/content?limit=1", safe.getValue("contentHref").jsonPrimitive.content)
+        assertEquals("failed at [private-path]", safe.getValue("message").jsonPrimitive.content)
+        // Text outside URL-route syntax is not exempt, even under a routing key.
+        assertEquals("[private-path] token=[redacted]", safe.getValue("nextHref").jsonPrimitive.content)
+        // Credential literals are never exempt.
+        assertFalse(policy.json(buildJsonObject { put("basePath", "/w/$canary/") }).toString().contains(canary))
+    }
+
+    @Test fun `exact-byte validation previews keep their text consistent with their recorded bytes`() {
+        val preview = buildJsonObject {
+            put("totalBytes", "12"); put("prefixBytes", 12)
+            put("hex", "2f 74 6d 70 2f 65 78 61 6d 70 6c 65"); put("text", "/tmp/example")
+            put("textBytes", 12); put("truncated", false)
+        }
+        val report = buildJsonObject { put("message", "see /tmp/example"); put("expected", preview) }
+        val safe = policy.json(report).jsonObject
+        assertEquals(preview, safe.getValue("expected"))
+        assertEquals("see [private-path]", safe.getValue("message").jsonPrimitive.content)
+    }
+
+    @Test fun `committed source tree names keep their exact unique ordered spellings`() {
+        val directory = buildJsonObject {
+            put("entries", buildJsonArray {
+                add(buildJsonObject { put("displayName", "token=one.c") })
+                add(buildJsonObject { put("displayName", "token=two.c") })
+            })
+        }
+        assertEquals(directory, publicWebApiData("revisionDirectory", directory, policy))
+        assertEquals(directory, publicWebApiData("revisionSources", directory, policy))
+        // Server-produced documents still pass through the policy.
+        assertEquals("token=[redacted]", publicWebApiData("report", directory, policy).jsonObject.getValue("entries")
+            .let { (it as kotlinx.serialization.json.JsonArray)[0].jsonObject.getValue("displayName").jsonPrimitive.content })
+    }
+
+    @Test fun `redacted near-limit names remain bounded without truncating secret replacements`() {
+        val filename = "shortish9".repeat(28) + ".c"
+        assertEquals(254, filename.length)
+        for (key in listOf("displayFilename", "displayName", "filename")) {
+            val safe = policy.json(buildJsonObject { put(key, filename) }).jsonObject
+            assertEquals("[redacted]", safe.getValue(key).jsonPrimitive.content)
+            assertEquals(safe, policy.json(safe))
+            val download = Json.parseToJsonElement(policy.document(buildJsonObject { put(key, filename) }.toString().toByteArray()).decodeToString())
+            assertEquals(safe, download)
+        }
+        val clean = buildJsonObject { put("displayName", "x".repeat(1024)) }
+        assertEquals(clean, policy.json(clean), "clean longer Git ref names are unchanged")
+    }
+
+    @Test fun `an accepted filename of repeated credential assignments stays within its contract bound`() {
+        val filename = "token=x;".repeat(30) + ".elf"
+        assertEquals(244, filename.length)
+        val safe = policy.json(buildJsonObject { put("displayFilename", filename) }).jsonObject
+            .getValue("displayFilename").jsonPrimitive.content
+        assertTrue(safe.length <= 255, "${safe.length}")
+        assertFalse(safe.contains("token=x"))
+    }
+
+    @Test fun `unsupported short named credentials are refused instead of silently excluded`() {
+        for (length in 1..7) {
+            val secret = "s".repeat(length)
+            val failure = assertFailsWith<IllegalArgumentException> {
+                WebRedactionPolicy.create(mapOf("DB_PASSWORD" to secret), listOf(secret), emptyList())
+            }
+            assertEquals("nonempty credential-named environment values must contain 8 to 4096 characters", failure.message)
+        }
+        for (secret in listOf("hunter2", "s3cr3t!")) {
+            assertFailsWith<IllegalArgumentException> {
+                WebRedactionPolicy.create(mapOf("DECOMP_TEST_API_TOKEN" to secret), listOf(secret), emptyList())
+            }
+        }
+        // Empty optional credentials and short generic environment values are not credentials.
+        val generic = WebRedactionPolicy.create(mapOf("DB_PASSWORD" to "", "SHLVL" to "1"), emptyList(), emptyList())
+        assertEquals("1", generic.text("1"))
+    }
+
+    @Test fun `persisted diagnostics also redact short configured values before storage`() {
+        val diagnostic = WebRedactionPolicy.create(emptyMap(), listOf("s3cr"), emptyList())
+        assertEquals("value [redacted] at [private-path]", diagnostic.diagnostic("value s3cr at /home/x/y"))
+        assertTrue(diagnostic.diagnostic("x".repeat(1000)).length < 600)
+    }
+}

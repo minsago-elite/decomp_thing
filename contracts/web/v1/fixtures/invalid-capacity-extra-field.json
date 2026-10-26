@@ -1,0 +1,56 @@
+{
+  "apiVersion": 1,
+  "kind": "capacity",
+  "requestId": "request_example_1",
+  "data": {
+    "schemaVersion": 1,
+    "sampledAt": "2026-09-05T00:00:05Z",
+    "since": "2026-09-05T00:00:00Z",
+    "http": {
+      "workerLimit": 16,
+      "activeWorkers": 16,
+      "queueCapacity": 64,
+      "queuedRequests": 64,
+      "responderLimit": 2,
+      "activeResponders": 1,
+      "listenBacklog": 64,
+      "headerDeadlineMs": "10000",
+      "requestDeadlineMs": "30000",
+      "uploadDeadlineMs": "120000",
+      "maxHeaderCount": 100,
+      "maxHeaderBytes": 32768,
+      "maxJsonResponseBytes": "1048576",
+      "maxUploadBytes": "33554432",
+      "activeJobPaths": [
+        "/srv/jobs/a"
+      ]
+    },
+    "streams": {
+      "limit": 16,
+      "perSessionLimit": 2,
+      "active": 3,
+      "lifetimeMs": "30000"
+    },
+    "outcomes": {
+      "successful": "120",
+      "clientErrors": "7",
+      "serverErrors": "0",
+      "closedWithoutResponse": "0",
+      "overloadResponses": "3",
+      "overloadConnectionsClosed": "1",
+      "headerDeadlineClosures": "2",
+      "requestDeadlineClosures": "1",
+      "headerLimitRejections": "0"
+    },
+    "failureReasons": [
+      {
+        "code": "SERVER_BUSY",
+        "count": "3"
+      },
+      {
+        "code": "SESSION_REQUIRED",
+        "count": "4"
+      }
+    ]
+  }
+}
