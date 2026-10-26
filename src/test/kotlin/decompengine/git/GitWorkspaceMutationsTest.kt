@@ -520,6 +520,112 @@ class GitWorkspaceMutationsTest {
         assertTrue(after.observation.status.entries.none { it.staged != GitIndexChange.NONE })
     }
 
+    @Test fun `commit locks retain inode witnesses and preserve replacements on exceptional cleanup`(): Unit {
+        for (replacement in listOf(null, "index.lock", "HEAD.lock")) GitTestRepositories().use { repositories ->
+            val (gitDir, _) = repositories.managed("lock-witness")
+            val staging = Files.createDirectory(repositories.root.resolve("staging"))
+            val marker = "decomp-operation:operation_1\n"
+            assertFailsWith<IllegalStateException> {
+                GitWorkspaceMutations.withCommitLocks(gitDir, staging, "operation_1") {
+                    for (name in listOf("index.lock", "HEAD.lock")) {
+                        assertTrue(Files.isSameFile(gitDir.resolve(name), staging.resolve(name)))
+                        assertEquals(marker, Files.readString(staging.resolve(name)))
+                    }
+                    if (replacement != null) {
+                        Files.delete(gitDir.resolve(replacement))
+                        // Identical bytes do not prove ownership of a replacement inode.
+                        Files.writeString(gitDir.resolve(replacement), marker)
+                    }
+                    error("fail before publication")
+                }
+            }
+            for (name in listOf("index.lock", "HEAD.lock")) {
+                if (name == replacement) assertEquals(marker, Files.readString(gitDir.resolve(name)))
+                else assertTrue(Files.notExists(gitDir.resolve(name)))
+            }
+        }
+    }
+
+    @Test fun `restart reclaims empty partial and complete owned commit locks and permits explicit retry`(): Unit {
+        for (name in listOf("index.lock", "HEAD.lock")) {
+            for (contents in listOf("", "decomp-operation:", "complete")) Fixture().use { f ->
+                val service = f.open()
+                val repositoryId = service.initialized()
+                val gitDir = f.store.resolve("$jobId/git/repositories/$repositoryId/repository.git")
+                val (view, guards) = service.guards(repositoryId)
+                service.run(repositoryId, GitStageRequest(view.record.worktreeId, guards, view.ids { it.untracked }, true), "stage_recovery_01")
+                val (staged, stagedGuards) = service.guards(repositoryId)
+                val request = GitCommitRequest(staged.record.worktreeId, stagedGuards,
+                    staged.ids { it.staged != GitIndexChange.NONE }, "Explicit retry after restart")
+                f.hook = { if (it == GitOperationCrashPoint.AFTER_STAGING) {
+                    val stagingRoot = f.store.resolve("$jobId/git/staging")
+                    val operationStaging = Files.list(stagingRoot).use { it.toList().single() }
+                    for (lock in listOf("index.lock", "HEAD.lock")) {
+                        assertTrue(Files.isSameFile(gitDir.resolve(lock), operationStaging.resolve(lock)))
+                    }
+                    throw SimulatedGitCrash()
+                } }
+                val admission = service.requestWorkspace(jobId, repositoryId, request, "crash_recovery_01")
+                assertTrue(service.awaitIdle(60_000)); service.close(); f.hook = {}
+                // SimulatedGitCrash unwinds finally blocks. Restore persisted states reachable
+                // immediately after either lock is linked, or while its contents are incomplete.
+                // These are deterministic filesystem injections, not an OS process-kill test.
+                val operationId = admission.operation.operationId
+                val staging = Files.createDirectories(f.store.resolve("$jobId/git/staging/$operationId"))
+                val marker = "decomp-operation:$operationId\n"
+                for (lock in if (name == "index.lock") listOf(name) else listOf("index.lock", name)) {
+                    val witness = Files.writeString(staging.resolve(lock), marker)
+                    Files.createLink(gitDir.resolve(lock), witness)
+                }
+                Files.writeString(gitDir.resolve(name), if (contents == "complete") marker else contents)
+                val restarted = f.open()
+                val recovered = restarted.operation(jobId, repositoryId, operationId)
+                assertEquals(GitOperationState.INTERRUPTED, recovered.state, "$name / $contents")
+                for (lock in listOf("index.lock", "HEAD.lock")) assertTrue(Files.notExists(gitDir.resolve(lock)))
+                assertTrue(Files.notExists(staging))
+                val retried = restarted.run(repositoryId, request, "retry_recovery_01")
+                assertEquals(GitOperationState.COMPLETED, retried.state, retried.message)
+                assertNotNull(retried.resultObjectId)
+            }
+        }
+    }
+
+    @Test fun `restart preserves external replacement commit locks even with identical markers`(): Unit {
+        for (replacement in listOf("index.lock", "HEAD.lock")) Fixture().use { f ->
+            val service = f.open()
+            val repositoryId = service.initialized()
+            val gitDir = f.store.resolve("$jobId/git/repositories/$repositoryId/repository.git")
+            val (view, guards) = service.guards(repositoryId)
+            service.run(repositoryId, GitStageRequest(view.record.worktreeId, guards, view.ids { it.untracked }, true), "stage_external_01")
+            val (staged, stagedGuards) = service.guards(repositoryId)
+            val request = GitCommitRequest(staged.record.worktreeId, stagedGuards,
+                staged.ids { it.staged != GitIndexChange.NONE }, "Explicit retry after external unlock")
+            f.hook = { if (it == GitOperationCrashPoint.AFTER_STAGING) throw SimulatedGitCrash() }
+            val admission = service.requestWorkspace(jobId, repositoryId, request, "crash_external_01")
+            assertTrue(service.awaitIdle(60_000)); service.close(); f.hook = {}
+            val operationId = admission.operation.operationId
+            val staging = Files.createDirectories(f.store.resolve("$jobId/git/staging/$operationId"))
+            val marker = "decomp-operation:$operationId\n"
+            for (name in listOf("index.lock", "HEAD.lock")) {
+                val witness = Files.writeString(staging.resolve(name), marker)
+                if (name == replacement) Files.writeString(gitDir.resolve(name), marker)
+                else Files.createLink(gitDir.resolve(name), witness)
+            }
+            val restarted = f.open()
+            assertEquals(GitOperationState.INTERRUPTED, restarted.operation(jobId, repositoryId, operationId).state)
+            assertEquals(marker, Files.readString(gitDir.resolve(replacement)))
+            val owned = if (replacement == "index.lock") "HEAD.lock" else "index.lock"
+            assertTrue(Files.notExists(gitDir.resolve(owned)))
+            assertTrue(Files.notExists(staging))
+            val blocked = restarted.run(repositoryId, request, "busy_external_001")
+            assertEquals("WORKTREE_BUSY", blocked.failureCode)
+            assertEquals(marker, Files.readString(gitDir.resolve(replacement)))
+            Files.delete(gitDir.resolve(replacement)) // Release this test-owned external writer's lock explicitly.
+            val retried = restarted.run(repositoryId, request, "retry_external_01")
+            assertEquals(GitOperationState.COMPLETED, retried.state, retried.message)
+        }
+    }
+
     @Test fun `restart never repeats a commit and reports whether HEAD moved`(): Unit {
         for ((point, state) in listOf(GitOperationCrashPoint.AFTER_STAGING to GitOperationState.INTERRUPTED,
             GitOperationCrashPoint.AFTER_PUBLISH to GitOperationState.RECOVERY_REQUIRED)) Fixture().use { f ->

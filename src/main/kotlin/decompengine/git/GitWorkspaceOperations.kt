@@ -191,24 +191,36 @@ internal object GitWorkspaceMutations {
     }
 
     /** Git-compatible exclusive locks cover final validation, index capture and ref publication. */
-    fun <T> withCommitLocks(gitDir: Path, operationId: String, block: () -> T): T {
-        val acquired = mutableListOf<Path>()
+    fun <T> withCommitLocks(gitDir: Path, staging: Path, operationId: String, block: () -> T): T {
+        val acquired = mutableListOf<Pair<Path, Path>>()
         try {
             for (name in listOf("index.lock", "HEAD.lock")) {
                 val file = gitDir.resolve(name)
-                try { Files.createFile(file) } catch (_: FileAlreadyExistsException) {
+                val witness = staging.resolve(name)
+                Files.createFile(witness)
+                FileChannel.open(witness, WRITE, NOFOLLOW_LINKS).use { channel ->
+                    val bytes = ByteBuffer.wrap("decomp-operation:$operationId\n".toByteArray(Charsets.US_ASCII))
+                    while (bytes.hasRemaining()) channel.write(bytes)
+                    channel.force(true)
+                }
+                // Persist the private inode witness before making the lock visible. Recovery
+                // must not depend on lock contents being fully written at process death.
+                GitStorage.forceDirectory(staging)
+                acquired.add(file to witness)
+                try { Files.createLink(file, witness) } catch (_: FileAlreadyExistsException) {
                     refuse("WORKTREE_BUSY", "Another Git writer holds the index or HEAD lock. Read the current status before trying again.")
                 }
-                acquired.add(file)
-                Files.writeString(file, "decomp-operation:$operationId\n")
+                GitStorage.forceDirectory(gitDir)
             }
             return block()
         } finally {
-            acquired.asReversed().forEach { Files.deleteIfExists(it) }
+            acquired.asReversed().forEach { (file, witness) ->
+                if (Files.isRegularFile(file, NOFOLLOW_LINKS) && Files.isSameFile(file, witness)) Files.delete(file)
+            }
         }
     }
 
-    /** Only a restarted operation's own lock markers may be reclaimed, never an external lock. */
+    /** Reclaim proven owned inodes, never a different writer's replacement at the same name. */
     fun reclaimCommitLocks(gitDir: Path, staging: Path, operationId: String) {
         val refNameFile = staging.resolve("ref-name")
         val privateLock = staging.resolve("ref-lock")
@@ -222,8 +234,14 @@ internal object GitWorkspaceMutations {
         }
         for (name in listOf("index.lock", "HEAD.lock")) {
             val file = gitDir.resolve(name)
-            if (Files.isRegularFile(file, NOFOLLOW_LINKS) && Files.size(file) < 256 &&
-                Files.readString(file) == "decomp-operation:$operationId\n") Files.delete(file)
+            if (!Files.isRegularFile(file, NOFOLLOW_LINKS)) continue
+            val witness = staging.resolve(name)
+            if (Files.isRegularFile(witness, NOFOLLOW_LINKS)) {
+                if (Files.isSameFile(file, witness)) Files.delete(file)
+            } else if (Files.size(file) < 256 && Files.readString(file) == "decomp-operation:$operationId\n") {
+                // Compatibility with complete markers left by versions predating inode witnesses.
+                Files.delete(file)
+            }
         }
     }
 

@@ -651,7 +651,10 @@ class ManagedGitRepositories(
                 is GitCommitRequest -> {
                     GitStorage.deleteTree(staging)
                     GitStorage.directories(directory, "staging", queued.operationId)
-                    GitWorkspaceMutations.withCommitLocks(located.gitDir, queued.operationId) {
+                    // Retain the operation directory itself before publishing witnessed lock names.
+                    GitStorage.forceDirectory(staging.parent)
+                    GitStorage.forceDirectory(directory)
+                    GitWorkspaceMutations.withCommitLocks(located.gitDir, staging, queued.operationId) {
                         val reviewed = synchronized(lock) { validate(runner, located, request) }
                         val messageFile = staging.resolve("message")
                         Files.writeString(messageFile, request.message)
