@@ -57,9 +57,10 @@ object ContainedModuleCompilerWorker {
         require(request.compilerPath.toRealPath() == request.compilerPath && Files.isExecutable(request.compilerPath)) {
             "module compiler executable is not canonical and executable"
         }
-        verifySnapshotInventory(request)
         val pinned = mutableListOf<PinnedCompilerInput>()
+        val namespace = CompilerSnapshotNamespaceGuard.open(request.snapshotRoot)
         try {
+            verifySnapshotInventory(request)
             request.inputs.forEach { input -> pinned += PinnedCompilerInput.open(request.snapshotRoot, input, currentUid) }
             StableControlFile.open(request.compilerPath, MAXIMUM_COMPILER_BYTES, "pinned module compiler").use { compiler ->
                 compiler.requireSingleLink("pinned module compiler")
@@ -69,6 +70,7 @@ object ContainedModuleCompilerWorker {
                 val environment = mapOf("LANG" to "C", "LC_ALL" to "C", "TZ" to "UTC", "PATH" to request.compilerPath.parent.toString(),
                     "TMPDIR" to scratch.toString(), "HOME" to scratch.toString(), "SOURCE_DATE_EPOCH" to "0")
                 CompilerWorkerProtection.requireNotDumpable()
+                namespace.requireUnchanged()
                 var terminal: LinuxBoundedSessionResult? = null
                 var outcome = try {
                     terminal = LinuxBoundedSessionProcess.execute(LinuxBoundedSessionCommand(request.command, environment,
@@ -95,6 +97,7 @@ object ContainedModuleCompilerWorker {
                 try {
                     pinned.forEach { it.verifyUnchanged() }
                     verifySnapshotInventory(request)
+                    namespace.requireUnchanged()
                     compiler.verifyUnchanged("pinned module compiler after execution")
                 } catch (_: Exception) {
                     outcome = "input-changed"
@@ -123,12 +126,21 @@ object ContainedModuleCompilerWorker {
                 requireOwnedDirectory(request.outputDirectory, currentUid)
                 writeCompilerLog(request.outputDirectory.resolve(ContainedModuleCompilerRequest.STDOUT_FILE), stdout)
                 writeCompilerLog(request.outputDirectory.resolve(ContainedModuleCompilerRequest.STDERR_FILE), stderr)
+                // Keep the entire namespace history alive through result artifact capture, not
+                // merely through compiler exit or the first member-by-member verification pass.
+                try {
+                    namespace.requireUnchanged()
+                } catch (_: Exception) {
+                    outcome = "input-changed"
+                    objectSha256 = null
+                    objectBytes = null
+                }
                 return ContainedModuleCompilerResult(request.sha256, request.nonce, request.profileId, request.profileSha256,
                     request.snapshotSha256, request.sourceSha256, request.compilerSha256, outcome, terminal?.exitCode, terminal?.signal,
                     sha256(stdout), stdout.size.toLong(), sha256(stderr), stderr.size.toLong(), objectSha256, objectBytes)
             }
         } finally {
-            pinned.asReversed().forEach { it.close() }
+            try { pinned.asReversed().forEach { it.close() } } finally { namespace.close() }
         }
     }
 }

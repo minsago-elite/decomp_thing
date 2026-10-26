@@ -81,15 +81,23 @@ worker tests are useful implementation evidence; they do not replace that hosted
 
 ## Outstanding acceptance blockers
 
-Issue #738 remains open. Endpoint inventories do not authenticate the complete compiler
-search namespace throughout compilation: a same-UID host peer can add and remove an
-undeclared sibling between inventories without modifying a pinned manifest member.
-The read-only sandbox bind does not exclude host-side writes. Whole-namespace interval
-protection (including transient headers, shadow headers and sidecars), empty-header
-protection and the complete-set terminal-validation cutoff remain unfinished. Existing
-file leases must not be replaced with endpoint hashes or inotify-only byte protection.
-Configured synchronized mutation negatives and successful hosted qualification are
-required before claiming the intended complete-closure acceptance guarantee.
+Issue #738 remains open. The worker now supplements its retained per-input kernel leases
+with a fail-closed namespace mutation history, installed before inventory/pinning and held
+through object/log capture. It watches every snapshot directory and the selected path in
+every ancestor, not only declared filenames. Transient headers, shadow headers, precompiled
+sidecars, ancestor replacement, lost/overflowed event history and depth-truncated trees
+refuse admission even when endpoint inventories match. The monitor uses one close-on-exec
+descriptor, synchronous bounded kernel-queue drains and directory identity revalidation;
+it never replaces byte authentication or existing file leases.
+
+Local filesystem controls exercise actual Linux events and refusal/descriptor ownership.
+Synchronized worker fixtures add, consume and remove an undeclared header, a shadow header
+and a valid precompiled sidecar around successful compiler execution. These diagnostics
+have no keeper receipt or acceptance authority. The namespace implementation and those
+worker fixtures still require qualification through the actual configured Make/Ninja
+routes; local success is not a hosted complete-closure guarantee. Empty headers still
+lack a retained kernel lease, and complete-set terminal-validation cutoff qualification
+remains separate. The read-only sandbox bind alone does not exclude host-side writes.
 
 The current shared NOFILE 512 policy also cannot retain every nonempty input in an
 otherwise admitted large snapshot. Issue #1786 and PR #1800 own the separately versioned,
