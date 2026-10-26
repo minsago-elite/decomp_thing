@@ -67,6 +67,67 @@ class PackageIdentityTests(unittest.TestCase):
                 install.parse_apt_metadata(raw, package())
 
 
+class PackageVerificationTests(unittest.TestCase):
+    def query(self, name):
+        version = install.FORMATTER_VERSIONS[-1]
+        source = 'e2fsprogs' if name in ('e2fsprogs', 'libext2fs2t64') else name
+        return '\t'.join((name, version, source, version, 'amd64',
+                          'install ok installed\n')).encode()
+
+    def test_modified_package_refuses_before_metadata_with_exact_diagnostics(self):
+        output = b'??5?????? c /etc/modified-config\n'
+        for name in install.PACKAGES:
+            with self.subTest(name=name), \
+                    patch.object(install, 'PACKAGES', (name,)), \
+                    patch.object(install, 'trusted_executable'), \
+                    patch.object(install, '_run', side_effect=(self.query(name), output)) as run, \
+                    self.assertRaises(install.InstallError) as refused:
+                install.capture_package_provenance(None, {}, deadline=123)
+            message = str(refused.exception)
+            self.assertIn('reports modifications: ' + name, message)
+            self.assertIn('verifyOutputSha256=' + hashlib.sha256(output).hexdigest(), message)
+            self.assertIn('outputPrefix=' + repr(output), message)
+            self.assertEqual(2, run.call_count)
+            self.assertEqual(['/usr/bin/dpkg', '--verify', name], run.call_args.args[1])
+
+    def test_modification_diagnostic_is_bounded_and_escapes_control_bytes(self):
+        output = b'\x1b[31m\n\x00' + b'x' * (install.MAX_CAPTURE - 10) + b'END'
+        with patch.object(install, 'trusted_executable'), \
+                patch.object(install, '_run', side_effect=(self.query('e2fsprogs'), output)), \
+                self.assertRaises(install.InstallError) as refused:
+            install.capture_package_provenance(None, {}, deadline=123)
+        message = str(refused.exception)
+        self.assertIn(repr(output[:1024]), message)
+        self.assertIn(hashlib.sha256(output).hexdigest(), message)
+        self.assertNotIn('END', message)
+        self.assertNotIn('\x1b', message)
+        self.assertNotIn('\n', message)
+        self.assertNotIn('\x00', message)
+        self.assertLess(len(message), 5000)
+
+    def test_clean_verification_still_retains_empty_output_digest(self):
+        def run(core, argv, **kwargs):
+            if argv[0] == '/usr/bin/dpkg-query':
+                return self.query(argv[-1])
+            if argv[0] == '/usr/bin/dpkg':
+                return b''
+            if argv[:2] == ['/usr/bin/apt-cache', 'show']:
+                return apt_stanza(package(name=argv[-1].split('=')[0]))
+            if argv[:2] == ['/usr/bin/apt-cache', 'policy']:
+                return b'retained policy\n'
+            return {('/systemctl', '--version'): b'systemd 255 (255)\n',
+                    ('/python', '--version'): b'Python 3.12.3\n'}[tuple(argv)]
+
+        with patch.object(install, 'trusted_executable'), \
+                patch.object(install, '_run', side_effect=run), \
+                patch.object(install.platform, 'machine', return_value='x86_64'):
+            result = install.capture_package_provenance(
+                None, {'systemctl': '/systemctl', 'python': '/python'}, deadline=123)
+        self.assertEqual(set(install.PACKAGES), set(result['packages']))
+        for value in result['packages'].values():
+            self.assertEqual(hashlib.sha256(b'').hexdigest(), value['verifyOutputSha256'])
+
+
 class ClosureTests(unittest.TestCase):
     def test_root_library_aliases_are_deduplicated(self):
         raw = (b'linux-vdso.so.1 (0x00007fff)\n'

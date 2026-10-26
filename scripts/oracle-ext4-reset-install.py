@@ -237,7 +237,11 @@ def capture_package_provenance(core, tools, *, deadline):
         value = parse_package_query(query, name)
         verified = _run(core, ['/usr/bin/dpkg', '--verify', name], deadline=deadline)
         if verified:
-            fail('installed package verification reports modifications')
+            # Preserve refusal, but identify the host drift without emitting
+            # unbounded output or terminal control bytes into the CI log.
+            fail('installed package verification reports modifications: ' + name +
+                 ' verifyOutputSha256=' + digest(verified) +
+                 ' outputPrefix=' + repr(verified[:1024]))
         metadata = _run(core, ['/usr/bin/apt-cache', 'show', name + '=' + value['version']], deadline=deadline)
         metadata_text, archive_sha = parse_apt_metadata(metadata, value)
         policy = _run(core, ['/usr/bin/apt-cache', 'policy', name], deadline=deadline)
