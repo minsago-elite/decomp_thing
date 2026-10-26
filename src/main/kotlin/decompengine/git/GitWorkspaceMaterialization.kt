@@ -182,11 +182,13 @@ internal object GitRepositoryImport {
     /**
      * Copy objects, branch/tag refs and HEAD into an already initialized managed Git directory.
      * [maxRefEntries] bounds reference files and directories together and is lowered only by tests.
+     * [beforeMetadataOpen] is an internal deterministic metadata replacement-race test seam.
      */
-    fun copyHistory(layout: ImportedRepositoryLayout, managedGitDir: Path, maxRefEntries: Int = MAX_REFS) {
+    fun copyHistory(layout: ImportedRepositoryLayout, managedGitDir: Path, maxRefEntries: Int = MAX_REFS,
+        beforeMetadataOpen: (Path) -> Unit = {}) {
         GitImportObjectCopy.copy(layout.gitDir.resolve("objects"), managedGitDir.resolve("objects"))
         val packed = layout.gitDir.resolve("packed-refs")
-        val packedBytes = if (Files.exists(packed, NOFOLLOW_LINKS)) GitStorage.read(packed, MAX_PACKED_REFS_BYTES) else byteArrayOf()
+        val packedBytes = if (Files.exists(packed, NOFOLLOW_LINKS)) GitImportMetadata.read(packed, MAX_PACKED_REFS_BYTES, beforeMetadataOpen) else byteArrayOf()
         val retainedPacked = filterPackedRefs(packedBytes, layout.objectFormat)
         // Resolve using all source namespaces, but publish only branches/tags. In particular a
         // symbolic branch may point at a packed remote-tracking ref which is not itself imported.
@@ -215,8 +217,8 @@ internal object GitRepositoryImport {
                     val name = "refs/$namespace/" + root.relativize(file).joinToString("/")
                     if (name.endsWith(".lock")) return FileVisitResult.CONTINUE
                     if (!validRefName(name)) unsupported("A repository reference has an unsupported name.")
-                    val content = GitStorage.read(file, 4096).toString(Charsets.UTF_8)
-                    val objectId = resolveRef(layout, name, content, packedIds)
+                    val content = GitImportMetadata.read(file, 4096, beforeMetadataOpen).toString(Charsets.UTF_8)
+                    val objectId = resolveRef(layout, name, content, packedIds, beforeMetadataOpen)
                     Files.writeString(managedGitDir.resolve(name), "$objectId\n", CREATE_NEW, WRITE)
                     return FileVisitResult.CONTINUE
                 }
@@ -224,7 +226,7 @@ internal object GitRepositoryImport {
             })
         }
         if (packedBytes.isNotEmpty()) Files.write(managedGitDir.resolve("packed-refs"), retainedPacked)
-        val head = GitStorage.read(layout.gitDir.resolve("HEAD"), 4096).toString(Charsets.UTF_8)
+        val head = GitImportMetadata.read(layout.gitDir.resolve("HEAD"), 4096, beforeMetadataOpen).toString(Charsets.UTF_8)
         val symbolic = head.removePrefix("ref: ").removeSuffix("\n").takeIf { head.startsWith("ref: ") }
         if (symbolic != null) {
             if (!symbolic.startsWith("refs/heads/") || !validRefName(symbolic)) unsupported("HEAD names an unsupported reference.")
@@ -269,7 +271,8 @@ internal object GitRepositoryImport {
         name.split('/').all { it.isNotEmpty() && !it.startsWith(".") && !it.endsWith(".lock") }
 
     /** Bounded data-only symref resolution, including targets in intentionally omitted namespaces. */
-    private fun resolveRef(layout: ImportedRepositoryLayout, name: String, content: String, packedIds: Map<String, String>): String {
+    private fun resolveRef(layout: ImportedRepositoryLayout, name: String, content: String, packedIds: Map<String, String>,
+        beforeMetadataOpen: (Path) -> Unit): String {
         val seen = mutableSetOf(name)
         var value = content.removeSuffix("\n")
         repeat(16) {
@@ -279,7 +282,7 @@ internal object GitRepositoryImport {
             if (!value.startsWith("ref: ") || !validRefName(target)) corrupt("A repository reference does not contain a full object ID.")
             if (!seen.add(target)) unsupported("The repository contains cyclic symbolic references.")
             val file = layout.gitDir.resolve(target)
-            value = if (Files.exists(file, NOFOLLOW_LINKS)) GitStorage.read(file, 4096).toString(Charsets.UTF_8).removeSuffix("\n")
+            value = if (Files.exists(file, NOFOLLOW_LINKS)) GitImportMetadata.read(file, 4096, beforeMetadataOpen).toString(Charsets.UTF_8).removeSuffix("\n")
                 else packedIds[target] ?: corrupt("A symbolic repository reference has no target.")
         }
         unsupported("The repository's symbolic references exceed the import depth limit.")

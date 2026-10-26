@@ -726,7 +726,10 @@ on the pinned descriptor, then reopens that exact inode with `O_NONBLOCK` for re
 FIFO cannot block an import waiting for a writer, and links cannot redirect reads. Copies stream
 at most 512 MiB into newly created regular files (at most 100,000 object-store files and directories
 combined). Unsupported native/default-filesystem/procfs boundaries fail closed as
-`REPOSITORY_UNSUPPORTED`; there is no pathname-copy fallback.
+`REPOSITORY_UNSUPPORTED`; there is no pathname-copy fallback. Imported HEAD, packed refs and
+loose refs (including symbolic-ref targets) use the same pinned-ancestor, regular-type-authenticated
+nonblocking read boundary, with their existing 4 KiB/4 MiB metadata limits and cancellation checks.
+A metadata entry replaced by a link or special file is refused rather than blocking the worker.
 Configuration, hooks, `info/`, the index, reflogs, remotes, notes, replace refs, worktrees, submodule repositories and
 uncommitted working-tree changes are not copied. A full `git fsck` must succeed, which re-hashes
 every object against its ID (integrity errors give `REPOSITORY_CORRUPT`). Verification runs with
