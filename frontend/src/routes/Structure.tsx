@@ -21,6 +21,7 @@ import { DEFAULT_FUNCTION_QUERY, EVIDENCE_CLASSES, EXTRACTION_LABELS, MODULE_PAG
 import type { FunctionQuery } from '../structure/navigation';
 import { Frame, useStructureRead } from '../structure/Frame';
 import { graphLocation, graphPath } from '../graph/query';
+import { scorecardLocation } from '../structure/scorecardQuery';
 
 // Relationship drawing and scorecards load only when opened, after the structure route itself.
 const Graph = lazy(() => import('../graph/GraphRoute'));
@@ -388,7 +389,8 @@ export default function Structure({ jobId, runId, revisionId, section, selector,
   try {
     if (view === 'functions') functionLocation(search);
     else if (view === 'graph') graphLocation(search);
-    else if (view !== 'scorecard') listLocation(search, view === 'module' ? ['kind'] : []);
+    else if (view === 'scorecard') scorecardLocation(search);
+    else listLocation(search, view === 'module' ? ['kind'] : []);
     if (view !== 'functions' && view !== 'modules' && view !== 'module' && view !== 'graph' && view !== 'scorecard'
       && search.includes('cursor=')) valid = false;
   } catch { valid = false; }

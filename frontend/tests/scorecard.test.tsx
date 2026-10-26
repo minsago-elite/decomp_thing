@@ -9,7 +9,7 @@ import { App } from '../src/app/App';
 import { createBrowserSession } from '../src/session/session';
 import { ApiClientError } from '../src/api/errors';
 import { structureCopy } from '../src/copy/structure';
-import { scorecardLocation, scorecardSearch } from '../src/structure/Scorecard';
+import { scorecardLocation, scorecardSearch } from '../src/structure/scorecardQuery';
 
 const transport = vi.hoisted(() => ({ get: vi.fn<(kind: string, path: string, options: { signal: AbortSignal }) => Promise<unknown>>() }));
 vi.mock('../src/api/client', async load => ({ ...await load<typeof ClientModule>(), createApiClient: () => transport }));
@@ -37,8 +37,11 @@ async function session() {
 }
 
 function serve(compare: ScorecardComparison = comparison) {
-  transport.get.mockImplementation((kind, path) => Promise.resolve({ data: kind === 'structureScorecard' ? card
-    : kind === 'run' ? run : kind === 'runs' ? runs : path.includes('run_5') ? incompatible : compare }));
+  transport.get.mockImplementation((kind, path) => {
+    const result = path.includes('run_5') ? incompatible : compare;
+    return Promise.resolve({ data: kind === 'structureScorecard' ? card : kind === 'run' ? run : kind === 'runs' ? runs
+      : { ...result, structureVersion: card.structureVersion, current: { ...result.current, structureVersion: card.structureVersion } } });
+  });
 }
 
 it('states every measure with its state, recorded value, fraction and source, and never presents unmeasured as zero', async () => {
@@ -88,13 +91,15 @@ it('compares only compatible attempts with exact deltas and withholds deltas for
     await waitFor(() => expect(location.search).toBe('?baselineRunId=run_1&baselineRevisionId=revision_1'));
     await screen.findByText(copy.compatibility.compatible);
     expect(transport.get).toHaveBeenCalledWith('scorecardComparison',
-      `${api}/scorecard-comparison?baselineRunId=run_1&baselineRevisionId=revision_1&limit=50`, expect.anything());
+      `${api}/scorecard-comparison?baselineRunId=run_1&baselineRevisionId=revision_1&limit=50&structureVersion=${card.structureVersion}`, expect.anything());
     const measures = screen.getAllByRole('table', { name: copy.measuresTitle })[1]!;
     const score = within(measures).getByRole('row', { name: new RegExp(copy.metrics['structural-recovery-score'].replace(/[()]/g, '\\$&')) });
     expect(score.textContent).toContain('0.3500 (numerator 1.4, denominator 0)');
     const calibrated = within(measures).getByRole('row', { name: new RegExp(copy.metrics['calibrated-confidence']) });
     expect(calibrated.textContent).toContain(`${copy.deltaStates['not-comparable']}: CURRENT_UNMEASURED`);
-    expect(screen.getByRole('table', { name: copy.moduleComparisonTitle })).toBeTruthy();
+    const modules = screen.getByRole('table', { name: copy.moduleComparisonTitle });
+    expect(within(modules).getByRole('link', { name: 'core' }).getAttribute('href'))
+      .toBe(`${revision}/modules/core?structureVersion=${card.structureVersion}`);
 
     fireEvent.change(screen.getByRole('combobox', { name: copy.baseline }), { target: { value: 'run_5/revision_5' } });
     fireEvent.click(screen.getByRole('button', { name: copy.compare }));
@@ -143,6 +148,54 @@ it('keeps inventory navigation after a changed pinned scorecard and refreshes to
     expect(location.search).toBe('?sort=score');
   } finally { auth.dispose(); }
 });
+
+it.each(['response-generation', 'current-generation', 'server-changed'])('requires explicit refresh when a comparison finds changed records (%s)', async failure => {
+  const auth = await session();
+  let refreshed = false;
+  const latest = { ...card, structureVersion: comparison.structureVersion };
+  transport.get.mockImplementation((kind) => {
+    if (kind === 'scorecardComparison' && !refreshed) {
+      if (failure === 'server-changed') return Promise.reject(new ApiClientError('http_error', { status: 409, serverCode: 'STRUCTURE_CHANGED' }));
+      return Promise.resolve({ data: failure === 'current-generation' ? { ...comparison, structureVersion: card.structureVersion } : comparison });
+    }
+    return Promise.resolve({ data: kind === 'structureScorecard' ? (refreshed ? latest : card)
+      : kind === 'run' ? run : kind === 'runs' ? runs : comparison });
+  });
+  history.replaceState(null, '', `${revision}/scorecard`);
+  try {
+    render(<App basePath="/nested" session={auth} />);
+    const select = await screen.findByRole('combobox', { name: copy.baseline });
+    fireEvent.change(select, { target: { value: 'run_1/revision_1' } });
+    fireEvent.click(screen.getByRole('button', { name: copy.compare }));
+    expect((await screen.findByRole('alert')).textContent).toContain(structureCopy.expired);
+    expect(screen.queryByText(copy.compatibility.compatible)).toBeNull();
+    expect(screen.getAllByRole('table', { name: copy.measuresTitle })).toHaveLength(1);
+    expect(screen.getByRole('link', { name: copy.download }).getAttribute('href')).toContain(card.structureVersion);
+    expect(transport.get.mock.calls.filter(([kind]) => kind === 'structureScorecard')).toHaveLength(1);
+    expect(transport.get).toHaveBeenCalledWith('scorecardComparison',
+      `${api}/scorecard-comparison?baselineRunId=run_1&baselineRevisionId=revision_1&limit=50&structureVersion=${card.structureVersion}`, expect.anything());
+    refreshed = true;
+    fireEvent.click(screen.getByRole('button', { name: structureCopy.refresh }));
+    await screen.findByText(copy.compatibility.compatible);
+    expect(transport.get.mock.calls.filter(([kind]) => kind === 'structureScorecard')).toHaveLength(2);
+    expect(transport.get).toHaveBeenCalledWith('scorecardComparison',
+      `${api}/scorecard-comparison?baselineRunId=run_1&baselineRevisionId=revision_1&limit=50&structureVersion=${latest.structureVersion}`, expect.anything());
+    expect(screen.getByRole('link', { name: copy.download }).getAttribute('href')).toContain(latest.structureVersion);
+  } finally { auth.dispose(); }
+});
+
+it.each(['?sort=value', '?baselineRunId=run_1', '?compareCursor=x', '?unknown=1', '?sort=score&sort=module'])(
+  'recovers malformed scorecard locations inside the structure view (%s)', async search => {
+    const auth = await session();
+    history.replaceState(null, '', `${revision}/scorecard${search}`);
+    try {
+      render(<App basePath="/nested" session={auth} />);
+      expect((await screen.findByRole('alert')).textContent).toBe(structureCopy.invalid);
+      expect(screen.getByRole('heading', { name: structureCopy.scorecardTitle })).toBeTruthy();
+      expect(screen.getByRole('link', { name: structureCopy.returnJobs }).getAttribute('href')).toBe('/nested/');
+      expect(transport.get).not.toHaveBeenCalled();
+    } finally { auth.dispose(); }
+  });
 
 it('keeps scorecard state in a strict URL', () => {
   const query = scorecardLocation('?sort=score&order=desc&baselineRunId=run_1&baselineRevisionId=revision_1');

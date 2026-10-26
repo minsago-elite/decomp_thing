@@ -12,59 +12,10 @@ import { structureItemPath, structureListPath } from './paths';
 import { bindStructure, revisionReadRoute, structureReadMessage, structureRecordRoute } from './navigation';
 import { Frame, useStructureRead } from './Frame';
 
-export const SCORECARD_PAGE_LIMIT = 50;
+import { SCORECARD_PAGE_LIMIT, scorecardLocation, scorecardSearch } from './scorecardQuery';
+import type { ScorecardQuery } from './scorecardQuery';
+
 const RUN_PAGE_LIMIT = 50;
-const ID = /^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/;
-const CURSOR = /^[a-f0-9]{64}_(0|[1-9][0-9]{0,6})_[a-f0-9]{32}$/;
-const VERSION = /^[a-f0-9]{64}$/;
-const KEYS = ['sort', 'order', 'cursor', 'structureVersion', 'baselineRunId', 'baselineRevisionId', 'compareCursor'];
-
-export interface ScorecardQuery {
-  sort: 'module' | 'score'; order: 'asc' | 'desc'; cursor?: string; version?: string;
-  baseline?: { runId: string; revisionId: string }; compareCursor?: string;
-}
-
-/** The scorecard URL holds module sorting, both page cursors, an optional pin and the selected baseline attempt. */
-export function scorecardLocation(search: string): ScorecardQuery {
-  const invalid = (): never => { throw new ApiClientError('invalid_request'); };
-  const values = new Map<string, string>();
-  if (search !== '') {
-    if (search.length > 2048 || !search.startsWith('?')) invalid();
-    for (const [key, value] of new URLSearchParams(search)) {
-      if (!KEYS.includes(key) || values.has(key) || value === '') invalid();
-      values.set(key, value);
-    }
-  }
-  const sort = values.get('sort') ?? 'module', order = values.get('order') ?? 'asc';
-  if ((sort !== 'module' && sort !== 'score') || (order !== 'asc' && order !== 'desc')) invalid();
-  const query: ScorecardQuery = { sort: sort as ScorecardQuery['sort'], order: order as ScorecardQuery['order'] };
-  for (const [key, pattern] of [['cursor', CURSOR], ['compareCursor', CURSOR], ['structureVersion', VERSION]] as const) {
-    const value = values.get(key);
-    if (value === undefined) continue;
-    if (!pattern.test(value)) invalid();
-    if (key === 'structureVersion') query.version = value; else query[key] = value;
-  }
-  const runId = values.get('baselineRunId'), revisionId = values.get('baselineRevisionId');
-  if ((runId === undefined) !== (revisionId === undefined)) invalid();
-  if (runId !== undefined && revisionId !== undefined) {
-    if (!ID.test(runId) || !ID.test(revisionId)) invalid();
-    query.baseline = { runId, revisionId };
-  }
-  if (query.compareCursor !== undefined && query.baseline === undefined) invalid();
-  return query;
-}
-
-export function scorecardSearch(query: ScorecardQuery): string {
-  const values = new URLSearchParams();
-  if (query.sort !== 'module') values.set('sort', query.sort);
-  if (query.order !== 'asc') values.set('order', query.order);
-  if (query.cursor) values.set('cursor', query.cursor);
-  if (query.version) values.set('structureVersion', query.version);
-  if (query.baseline) { values.set('baselineRunId', query.baseline.runId); values.set('baselineRevisionId', query.baseline.revisionId); }
-  if (query.compareCursor) values.set('compareCursor', query.compareCursor);
-  const text = values.toString();
-  return text ? `?${text}` : '';
-}
 
 type Measure = Pick<ScorecardMetric, 'state' | 'reason' | 'value' | 'numerator' | 'denominator'>;
 
@@ -145,8 +96,8 @@ function Chart({ items }: { items: ModuleScores }) {
   </figure>;
 }
 
-function Comparison({ selected, basePath, query, onRoute }: {
-  selected: SourceSelection; basePath: string; query: ScorecardQuery; onRoute: (query: ScorecardQuery) => void;
+function Comparison({ selected, basePath, query, version, onRoute }: {
+  selected: SourceSelection; basePath: string; query: ScorecardQuery; version: string; onRoute: (query: ScorecardQuery) => void;
 }) {
   const { client } = usePrivateTransport(basePath);
   // Attempts are listed newest first, one bounded page at a time; older pages load on request, so an older
@@ -169,18 +120,21 @@ function Comparison({ selected, basePath, query, onRoute }: {
     return () => controller.abort();
   }, [selected.jobId, cursor]);
   const key = query.baseline ? [selected.jobId, selected.runId, selected.revisionId, query.baseline.runId, query.baseline.revisionId,
-    query.compareCursor ?? '', query.version ?? ''].join('/') : '';
+    query.compareCursor ?? '', version].join('/') : '';
   const [read] = useStructureRead<ScorecardComparison | null>(key, async signal => {
     if (!query.baseline) return null;
     const values = new URLSearchParams({ baselineRunId: query.baseline.runId, baselineRevisionId: query.baseline.revisionId,
       limit: String(SCORECARD_PAGE_LIMIT) });
     if (query.compareCursor) values.set('cursor', query.compareCursor);
-    if (query.version) values.set('structureVersion', query.version);
+    values.set('structureVersion', version);
     const data = (await client.get('scorecardComparison', `${revisionReadRoute(selected)}/scorecard-comparison?${values}`, { signal })).data;
     const binding = data.binding, base = data.baseline.binding;
     if (binding.jobId !== selected.jobId || binding.runId !== selected.runId || binding.revisionId !== selected.revisionId
       || base.jobId !== selected.jobId || base.runId !== query.baseline.runId || base.revisionId !== query.baseline.revisionId) {
       throw new ApiClientError('invalid_response');
+    }
+    if (data.structureVersion !== version || data.current.structureVersion !== version) {
+      throw new ApiClientError('http_error', { serverCode: 'STRUCTURE_CHANGED' });
     }
     return data;
   });
@@ -251,7 +205,7 @@ function Comparison({ selected, basePath, query, onRoute }: {
           <caption>{copy.moduleComparisonTitle}</caption>
           <thead><tr>{Object.values(copy.moduleComparisonColumns).map(label => <th scope="col" key={label}>{label}</th>)}</tr></thead>
           <tbody>{data.modules.items.map(item => <tr key={item.moduleId}>
-            <th scope="row">{item.selector ? <a href={structureItemPath(basePath, selected, 'modules', item.selector)}><bdi>{item.moduleId}</bdi></a>
+            <th scope="row">{item.selector ? <a href={structureItemPath(basePath, selected, 'modules', item.selector, version)}><bdi>{item.moduleId}</bdi></a>
               : <bdi>{item.moduleId}</bdi>}</th>
             <td>{copy.presence[item.presence]}</td><td>{side(item.current)}</td><td>{side(item.baseline)}</td><td>{delta(item.delta, 'ratio')}</td>
           </tr>)}</tbody>
@@ -382,7 +336,7 @@ export default function Scorecard({ selected, basePath, search }: { selected: So
           </nav>
         </>}
       </>}
-      <Comparison selected={selected} basePath={basePath} query={query} onRoute={next => route(next)} />
+      <Comparison selected={selected} basePath={basePath} query={query} version={data.structureVersion} onRoute={next => route(next)} />
     </>}
   </Frame>;
 }
