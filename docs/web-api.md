@@ -1051,8 +1051,12 @@ validation.
 
 A merge that stops with conflicts leaves Git's merge state in place (#597):
 
-- `GET G/conflicts` names the integration (branch, pre-merge HEAD, target and tracking ref) and every
-  unresolved path with its base, ours and theirs blob IDs.
+- `GET G/conflicts?offset=0` names the integration (branch, pre-merge HEAD, target and tracking ref)
+  and returns up to 200 unresolved paths with their base, ours and theirs blob IDs. `offset`,
+  `totalCount` and nullable `nextOffset` expose all live pages without silently omitting paths.
+  Offsets are navigation, not snapshot cursors: the index may change between reads; every save
+  and completion independently revalidates the file identity and digest. Mutations return the UI
+  to the first page. Conflict-list failures do not hide the explicit merge-abort action.
 - `GET G/conflicts/{fileId}` returns each side and the current file as text, with the current
   file's SHA-256 (or `absent`) as its concurrency token. A side that is binary, deleted or larger
   than 256 KiB is reported with `supported: false` and a reason, never as an editable file. The

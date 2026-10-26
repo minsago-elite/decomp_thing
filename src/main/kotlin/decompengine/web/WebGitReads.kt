@@ -29,7 +29,7 @@ internal class WebGitReads(private val repositories: () -> ManagedGitRepositorie
             "refs" -> setOf("cursor", "limit")
             "remotes" -> emptySet()
             "divergence" -> setOf("worktree", "tracking")
-            "conflicts" -> setOf("worktree")
+            "conflicts" -> setOf("worktree", "offset")
             "audit" -> setOf("limit")
             "history" -> setOf("worktree", "start", "cursor", "limit")
             else -> setOf("worktree", "scope", "commit", "file", "cursor", "limit")
@@ -50,7 +50,11 @@ internal class WebGitReads(private val repositories: () -> ManagedGitRepositorie
                 "divergence" -> sendWebApiResponse(exchange, 200, "gitDivergence", divergence(jobId, repositoryId, worktree,
                     query["tracking"]?.takeIf { it.matches(Regex("[A-Za-z0-9][A-Za-z0-9_-]{0,127}")) }
                         ?: throw WebAccessDenied(422, "VALIDATION_FAILED", "tracking must name one remote-tracking ref identity.")))
-                "conflicts" -> sendWebApiResponse(exchange, 200, "gitConflicts", conflicts(jobId, repositoryId, worktree))
+                "conflicts" -> sendWebApiResponse(exchange, 200, "gitConflicts", conflicts(jobId, repositoryId, worktree,
+                    query["offset"]?.let { value ->
+                        value.takeIf { it.matches(Regex("0|[1-9][0-9]{0,5}")) }?.toInt()?.takeIf { it <= 200_000 }
+                            ?: throw WebAccessDenied(422, "VALIDATION_FAILED", "offset must be an integer from 0 to 200000.")
+                    } ?: 0))
                 "audit" -> sendWebApiResponse(exchange, 200, "gitAudit", buildJsonObject {
                     put("repositoryId", repositoryId)
                     put("entries", JsonArray(repositories().auditLog(jobId, repositoryId, limit)))
@@ -102,9 +106,9 @@ internal class WebGitReads(private val repositories: () -> ManagedGitRepositorie
         put("theirsObjectId", entry.theirsObjectId?.let(::JsonPrimitive) ?: JsonNull)
     }
 
-    /** `G/conflicts` (#597): the integration and every unresolved path. */
-    private fun conflicts(jobId: String, repositoryId: String, worktree: String?): JsonObject {
-        val view = repositories().conflicts(jobId, repositoryId, worktree)
+    /** `G/conflicts` (#597): bounded live pages covering every unresolved path. */
+    private fun conflicts(jobId: String, repositoryId: String, worktree: String?, offset: Int): JsonObject {
+        val view = repositories().conflicts(jobId, repositoryId, worktree, offset)
         return buildJsonObject {
             put("repositoryId", repositoryId); put("worktreeId", view.worktreeId); put("mergeInProgress", view.mergeInProgress)
             put("integration", view.integration?.let { record ->
@@ -115,6 +119,8 @@ internal class WebGitReads(private val repositories: () -> ManagedGitRepositorie
                 }
             } ?: JsonNull)
             put("files", JsonArray(view.files.map { conflictFile(it, view.worktreeId) }))
+            put("offset", view.offset); put("totalCount", view.totalCount)
+            put("nextOffset", view.nextOffset?.let(::JsonPrimitive) ?: JsonNull)
         }
     }
 

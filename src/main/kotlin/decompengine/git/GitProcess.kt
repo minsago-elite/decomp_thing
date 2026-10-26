@@ -274,7 +274,18 @@ class GitCommandRunner internal constructor(val executable: Path, val environmen
         addAll(invocation.arguments)
     }
 
-    fun run(invocation: GitInvocation): GitCommandResult {
+    fun run(invocation: GitInvocation): GitCommandResult = execute(invocation)
+
+    /** Drain large structured listings without retaining their complete stdout in memory. The
+     * consumer runs serially on the stdout reader, and its failures terminate the child. */
+    internal fun stream(invocation: GitInvocation, maxBytes: Long, consume: (ByteArray, Int) -> Unit) {
+        require(!invocation.truncateStdout && maxBytes in 1..256L * 1024 * 1024)
+        execute(invocation, StreamOutput(maxBytes, consume))
+    }
+
+    private class StreamOutput(val maxBytes: Long, val consume: (ByteArray, Int) -> Unit)
+
+    private fun execute(invocation: GitInvocation, stream: StreamOutput? = null): GitCommandResult {
         val builder = ProcessBuilder(argv(invocation))
             .directory((invocation.workTree ?: invocation.gitDir ?: environment.root).toFile())
             .redirectInput(ProcessBuilder.Redirect.PIPE)
@@ -291,11 +302,12 @@ class GitCommandRunner internal constructor(val executable: Path, val environmen
             else Thread.ofVirtual().start {
                 try { process.outputStream.use { it.write(input) } } catch (_: IOException) { /* child exited early */ }
             }
-            val stdout = BoundedCapture(process.inputStream, invocation.limits.maxStdoutBytes)
+            val stdout = BoundedCapture(process.inputStream, invocation.limits.maxStdoutBytes, stream = stream)
             val stderr = BoundedCapture(process.errorStream, invocation.limits.maxStderrBytes, invocation.control?.progress)
             val readers = listOf(Thread.ofVirtual().start(stdout), Thread.ofVirtual().start(stderr))
             val deadline = System.nanoTime() + invocation.limits.timeout.toNanos()
             while (process.isAlive) {
+                stdout.failure?.let { terminate(process); throw it }
                 if (stdout.overflowed && invocation.truncateStdout) break
                 if (stdout.overflowed || stderr.overflowed) {
                     terminate(process)
@@ -318,6 +330,7 @@ class GitCommandRunner internal constructor(val executable: Path, val environmen
                 terminate(process)
                 throw GitCommandException(GitCommandException.Kind.TIMED_OUT, "Git output did not close within its time bound.")
             }
+            stdout.failure?.let { throw it }
             // The readers can still be draining when the process exits, so only their final state
             // decides truncation. Stderr keeps its own limit either way.
             val truncated = stdout.overflowed && invocation.truncateStdout
@@ -350,9 +363,12 @@ class GitCommandRunner internal constructor(val executable: Path, val environmen
      * With a [progress] listener it keeps only the tail instead and reports each progress line.
      */
     private class BoundedCapture(private val input: InputStream, private val limit: Int,
-        private val progress: ((String) -> Unit)? = null) : Runnable {
+        private val progress: ((String) -> Unit)? = null, private val stream: StreamOutput? = null) : Runnable {
         private val buffer = java.io.ByteArrayOutputStream()
         private val line = StringBuilder()
+        private var streamedBytes = 0L
+        @Volatile var failure: Exception? = null
+            private set
         @Volatile var overflowed = false
             private set
 
@@ -363,6 +379,14 @@ class GitCommandRunner internal constructor(val executable: Path, val environmen
                     while (true) {
                         val count = stream.read(chunk)
                         if (count < 0) break
+                        if (this.stream != null) {
+                            streamedBytes += count
+                            if (streamedBytes > this.stream.maxBytes) overflowed = true
+                            if (!overflowed && failure == null) {
+                                try { this.stream.consume(chunk, count) } catch (error: Exception) { failure = error }
+                            }
+                            continue
+                        }
                         synchronized(buffer) {
                             if (progress != null) {
                                 buffer.write(chunk, 0, count)

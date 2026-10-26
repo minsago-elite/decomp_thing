@@ -17,12 +17,13 @@ const states = { current: 'settled', stale: 'pending', unknown: 'unknown' } as c
  * fast-forward or merge (rebase is never offered), and conflict review with concurrency-checked
  * resolutions, explicit staging and abort. The final commit stays in the commit review.
  */
-export function GitIntegrationPanel({ remotes, conflicts, destination, writable, readDivergence, readConflict, onAction }: {
+export function GitIntegrationPanel({ remotes, conflicts, destination, writable, readDivergence, readConflict, onConflictPage, onAction }: {
   remotes: GitRemotes | null; conflicts: GitConflicts | null; writable: boolean;
   /** The work tree, branch and HEAD integration would change; a review of any other one is never shown. */
   destination: { worktreeId: string; headRefName: string | null; headObjectId: string | null };
   readDivergence: (trackingRefId: string) => Promise<GitDivergence | null>;
   readConflict: (fileId: string) => Promise<GitConflictFile | null>;
+  onConflictPage: (offset: number) => void;
   onAction: (action: IntegrationAction) => Promise<boolean>;
 }) {
   const tracking = remotes?.remotes.flatMap(remote => remote.trackingRefs) ?? [];
@@ -94,11 +95,16 @@ export function GitIntegrationPanel({ remotes, conflicts, destination, writable,
           }}>{copy.strategyNames[item.strategy]}</button>}
       </li>)}</ul>
     </div>}
+    {!conflicts && <div role="alert">
+      <p>{copy.conflictsUnavailable}</p>
+      <button type="button" disabled={!writable} onClick={() => { void onAction({ kind: 'gitMergeAbortRequest' }); }}>{copy.abort}</button>
+    </div>}
     {conflicts?.mergeInProgress && <section aria-labelledby="git-conflicts-title">
       <h4 id="git-conflicts-title">{copy.conflicts}</h4>
       {conflicts.integration && <p>{textMessage(copy.merging, { branch: conflicts.integration.branch, target: conflicts.integration.trackingRefName,
         ours: conflicts.integration.headBeforeObjectId.slice(0, 12), theirs: conflicts.integration.targetObjectId.slice(0, 12) })}</p>}
-      {conflicts.files.length === 0 ? <p>{copy.allResolved}</p> : <ul aria-label={copy.conflicts}>{conflicts.files.map(file => <li key={file.fileId}>
+      <p>{textMessage(copy.conflictPage, { shown: conflicts.files.length, total: conflicts.totalCount })}</p>
+      {conflicts.totalCount === 0 ? <p>{copy.allResolved}</p> : <ul aria-label={copy.conflicts}>{conflicts.files.map(file => <li key={file.fileId}>
         <input type="checkbox" checked={file.fileId in reviewed} disabled={!(file.fileId in reviewed) && detail?.file.fileId !== file.fileId}
           aria-label={textMessage(copy.markReviewed, { path: file.path })} onChange={() => {
             setReviewed(previous => {
@@ -110,6 +116,14 @@ export function GitIntegrationPanel({ remotes, conflicts, destination, writable,
         <code>{file.path}</code> {' '}
         <button type="button" onClick={() => { void open(file.fileId); }}>{textMessage(copy.open, { path: file.path })}</button>
       </li>)}</ul>}
+      {(conflicts.offset > 0 || conflicts.nextOffset !== null) && <nav aria-label={copy.conflictPages}>
+        <button type="button" disabled={conflicts.offset === 0 || !writable} onClick={() => {
+          setReviewed({}); setDetail(null); onConflictPage(Math.max(0, conflicts.offset - 200));
+        }}>{copy.previousConflicts}</button>
+        {' '}<button type="button" disabled={conflicts.nextOffset === null || !writable} onClick={() => {
+          setReviewed({}); setDetail(null); if (conflicts.nextOffset !== null) onConflictPage(conflicts.nextOffset);
+        }}>{copy.nextConflicts}</button>
+      </nav>}
       {detail && <div aria-label={textMessage(copy.detail, { path: detail.file.path })} role="group">
         <h5>{textMessage(copy.detail, { path: detail.file.path })}</h5>
         {!detail.supported && <p role="alert">{detail.reason}</p>}

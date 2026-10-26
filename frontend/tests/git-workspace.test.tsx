@@ -93,7 +93,7 @@ function serve(kind: string, path: string): Promise<unknown> {
       subject: 'Record candidate', refNames: ['refs/tags/v1'], mapping, worktreeDirtyAtCommit: false,
       export: { sha256: 'e'.repeat(64), sizeBytes: 512, files: 1, skippedEntries: 0, verification: 'tree-blob-ids-match' } };
     if (route === `${base}/remotes`) return { repositoryId, configured: true, remotes: remoteList };
-    if (route === `${base}/conflicts`) return conflictState;
+    if (route === `${base}/conflicts`) return { offset: 0, totalCount: conflictState.files.length, nextOffset: null, ...conflictState };
     if (route === `${base}/conflicts/file_conflict`) return { repositoryId, worktreeId, file: conflictState.files[0],
       base: 'int a;\n', ours: 'int a = 1;\n', theirs: 'int a = 2;\n', current: '<<<<<<< ours\nint a = 1;\n=======\nint a = 2;\n>>>>>>> theirs\n',
       currentSha256: (conflictReads++ === 0 ? 'c' : 'd').repeat(64), currentSizeBytes: '60', supported: true, reason: null };
@@ -381,6 +381,46 @@ it('commits a pending merge whose resolution matches the current commit', async 
   fireEvent.click(screen.getByRole('button', { name: 'Commit staged files' }));
   await waitFor(() => expect(transport.post).toHaveBeenCalledOnce());
   expect(transport.post.mock.calls[0]?.[3]).toMatchObject({ action: 'git.commit', selectedFileIds: [], message: 'Merge keeping ours' });
+});
+
+it('navigates live conflict pages without carrying a reviewed selection to another page', async () => {
+  conflictState = { repositoryId, worktreeId, mergeInProgress: true, integration: null,
+    files: [{ fileId: 'file_conflict', path: 'src/a.c' }] };
+  transport.get.mockImplementation((kind, path) => {
+    const [route, query] = path.split('?');
+    if (route === `${base}/conflicts`) {
+      const offset = Number(new URLSearchParams(query).get('offset') ?? 0);
+      return Promise.resolve({ data: { ...conflictState, offset, totalCount: 201, nextOffset: offset === 0 ? 200 : null,
+        files: offset === 0 ? conflictState.files : [{ fileId: 'file_last', path: 'src/z.c' }] } });
+    }
+    return serve(kind, path);
+  });
+  render(<GitWorkspace jobId={jobId} basePath="/workbench" session={session} capabilities={supported} pollIntervalMs={1} />);
+  await screen.findByText('Showing 1 of 201 unresolved paths. Pages reflect the live index; staging a batch refreshes the first page.');
+  fireEvent.click(screen.getByRole('button', { name: 'Review src/a.c' }));
+  await screen.findByRole('group', { name: 'Conflict in src/a.c' });
+  fireEvent.click(screen.getByRole('checkbox', { name: 'Mark src/a.c reviewed' }));
+  fireEvent.click(screen.getByRole('button', { name: 'Next conflicts' }));
+  await screen.findByRole('button', { name: 'Review src/z.c' });
+  expect(transport.get.mock.calls.some(call => call[1] === `${base}/conflicts?offset=200`)).toBe(true);
+  expect(screen.getByRole<HTMLButtonElement>('button', { name: 'Stage reviewed resolutions' }).disabled).toBe(true);
+  expect(screen.queryByRole('group', { name: 'Conflict in src/a.c' })).toBeNull();
+  fireEvent.click(screen.getByRole('button', { name: 'Previous conflicts' }));
+  await screen.findByRole('button', { name: 'Review src/a.c' });
+});
+
+it('retains status and explicit abort when conflict enumeration fails', async () => {
+  transport.get.mockImplementation((kind, path) => kind === 'gitConflicts'
+    ? Promise.reject(new ApiClientError('http_error', { status: 503 })) : serve(kind, path));
+  transport.post.mockResolvedValue(operation('completed', 'git.merge.abort'));
+  render(<GitWorkspace jobId={jobId} basePath="/workbench" session={session} capabilities={supported} pollIntervalMs={1} />);
+  await screen.findByText('The conflict list could not be read. Refresh to retry, or explicitly abort an in-progress merge. No conflicts are assumed resolved.');
+  expect(screen.getByRole('heading', { name: 'Source repository' })).toBeTruthy();
+  fireEvent.click(screen.getByRole('button', { name: 'Abort merge' }));
+  await waitFor(() => expect(transport.post).toHaveBeenCalledOnce());
+  expect(transport.post.mock.calls[0]?.[2]).toBe('gitMergeAbortRequest');
+  expect(transport.post.mock.calls[0]?.[3]).toMatchObject({ action: 'git.merge.abort',
+    guards: { repositoryVersion: 'repo_v1', worktreeVersion: 'tree_v1' } });
 });
 
 it('resolves a conflict with a concurrency token, stages only reviewed files and can abort', async () => {

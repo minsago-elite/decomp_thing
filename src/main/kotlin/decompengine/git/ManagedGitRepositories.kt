@@ -775,19 +775,22 @@ class ManagedGitRepositories(
     }
 
     data class GitConflictView(val worktreeId: String, val integration: GitIntegrationRecord?, val mergeInProgress: Boolean,
-        val files: List<GitConflictEntry>)
+        val files: List<GitConflictEntry>, val offset: Int, val totalCount: Int, val nextOffset: Int?)
 
     data class GitConflictFileView(val worktreeId: String, val entry: GitConflictEntry, val base: String?, val ours: String?,
         val theirs: String?, val current: String?, val currentSha256: String, val currentSize: Long?)
 
-    /** The work tree's unresolved paths and the integration that produced them (#597). */
-    fun conflicts(jobId: String, repositoryId: String, worktreeId: String?): GitConflictView {
+    /** A bounded live page of unresolved paths (#597). Mutations always revalidate file identities
+     * and digests; page offsets are navigation, not a claim of a stable index snapshot. */
+    fun conflicts(jobId: String, repositoryId: String, worktreeId: String?, offset: Int = 0): GitConflictView {
+        require(offset in 0..200_000)
         val runner = requireRunner()
         val located = locate(jobId, repositoryId, worktreeId)
         return refusing {
             val merging = GitIntegrations.mergeInProgress(located.gitDir)
+            val files = GitIntegrations.conflicts(runner, located.gitDir, located.workTree)
             GitConflictView(located.worktreeId, if (merging) GitIntegrations.record(repositoryDirectory(jobId, repositoryId), located.worktreeId) else null,
-                merging, GitIntegrations.conflicts(runner, located.gitDir, located.workTree).take(200))
+                merging, files.drop(offset).take(200), offset, files.size, (offset + 200).takeIf { it < files.size })
         }
     }
 

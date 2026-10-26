@@ -74,6 +74,7 @@ export function GitWorkspace({ jobId, basePath, session, capabilities, pollInter
   const [status, setStatus] = useState('');
   const [busy, setBusy] = useState(false);
   const [worktree, setWorktree] = useState<string | null>(null);
+  const [conflictOffset, setConflictOffset] = useState(0);
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const [diff, setDiff] = useState<GitDiff | null>(null);
   const [commit, setCommit] = useState<{ diff: GitDiff; provenance: GitProvenance } | null>(null);
@@ -104,12 +105,14 @@ export function GitWorkspace({ jobId, basePath, session, capabilities, pollInter
           client.get('gitHistory', `${prefix}/history${suffix ? `${suffix}&limit=20` : '?limit=20'}`, { signal: controller.signal }),
           client.get('gitRemotes', `${prefix}/remotes`, { signal: controller.signal }),
           client.get('gitAudit', `${prefix}/audit?limit=50`, { signal: controller.signal }),
-          client.get('gitConflicts', `${prefix}/conflicts${suffix}`, { signal: controller.signal }),
+          // Keep status/guards and abort available even if conflict enumeration fails.
+          client.get('gitConflicts', `${prefix}/conflicts${suffix}${conflictOffset ? `${suffix ? '&' : '?'}offset=${conflictOffset}` : ''}`,
+            { signal: controller.signal }).catch(() => null),
         ]);
         if (controller.signal.aborted) return;
         diffGeneration.current++;
         setDiff(null);
-        setLoaded({ listing, status, worktrees: worktrees.data, refs, history: history.data, remotes: remotes.data, audit: audit.data, conflicts: conflicts.data });
+        setLoaded({ listing, status, worktrees: worktrees.data, refs, history: history.data, remotes: remotes.data, audit: audit.data, conflicts: conflicts?.data ?? null });
         // A selection survives a refresh only while the same file identity is still listed.
         setSelected(previous => new Set([...previous].filter(key => status.entries.some(entry => key.endsWith(`:${entry.fileId}`)))));
       } catch (failure: unknown) {
@@ -117,7 +120,7 @@ export function GitWorkspace({ jobId, basePath, session, capabilities, pollInter
       }
     })();
     return () => { controller.abort(); };
-  }, [client, jobId, supported, worktree, refresh]);
+  }, [client, jobId, supported, worktree, refresh, conflictOffset]);
 
   useEffect(() => () => { active.current?.abort(); }, []);
 
@@ -192,7 +195,7 @@ export function GitWorkspace({ jobId, basePath, session, capabilities, pollInter
       return false;
     } finally {
       setRunning(null);
-      if (active.current === controller) { active.current = null; setBusy(false); setRefresh(value => value + 1); }
+      if (active.current === controller) { active.current = null; setBusy(false); setConflictOffset(0); setRefresh(value => value + 1); }
     }
   }
 
@@ -430,7 +433,7 @@ export function GitWorkspace({ jobId, basePath, session, capabilities, pollInter
             ({ action: 'git.tag', worktreeId, guards: guarded, name, targetObjectId: commit.provenance.objectId }))} />
         </section>}
       </section>
-      <GitIntegrationPanel remotes={loaded.remotes} conflicts={loaded.conflicts} writable={writable}
+      <GitIntegrationPanel remotes={loaded.remotes} conflicts={loaded.conflicts} writable={writable} onConflictPage={setConflictOffset}
         destination={{ worktreeId: statusData.worktreeId, headRefName: statusData.headRefName, headObjectId: statusData.headObjectId }}
         readDivergence={readDivergence} readConflict={readConflict} onAction={integrationAction} />
       <GitRemotesPanel capability={remoting} remotes={loaded.remotes} audit={loaded.audit} writable={writable} running={running}

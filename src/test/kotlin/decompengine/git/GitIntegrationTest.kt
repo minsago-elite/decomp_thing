@@ -438,6 +438,55 @@ class GitIntegrationTest {
         assertTrue(service.workspace(jobId, repositoryId).observation.status.entries.any { it.unstaged != GitIndexChange.NONE })
     }
 
+    @Test fun `large conflict indexes stream all stages and expose usable live pages and abort`(): Unit = Fixture().use { f ->
+        f.cloned()
+        f.conflictOn("README.md")
+        val gitDir = f.store.resolve("$jobId/git/repositories/$repositoryId/repository.git")
+        val blob = f.repositories.git("--git-dir=$gitDir", "rev-parse", "HEAD:README.md").trim()
+        val paths = (0 until 6000).map { "conflict${it.toString().padStart(5, '0')}.c" } + "conflict\t\n ü.c"
+        val index = buildString { for (path in paths) for (stage in 1..3) append("100644 $blob $stage\t$path\u0000") }.toByteArray()
+        f.repositories.runner.run(GitInvocation("update-index", listOf("-z", "--index-info"), gitDir = gitDir, workTree = f.workTree(), input = index))
+        val raw = f.repositories.git("--git-dir=$gitDir", "--work-tree=${f.workTree()}", "ls-files", "-u", "-z")
+        assertTrue(raw.toByteArray().size > 1024 * 1024, "the fixture exceeds the former complete-output ceiling")
+        val all = GitIntegrations.conflicts(f.repositories.runner, gitDir, f.workTree())
+        assertEquals(6002, all.size)
+        for (entry in all.filter { it.path.exact in paths }) {
+            assertEquals(blob, entry.baseObjectId); assertEquals(blob, entry.oursObjectId); assertEquals(blob, entry.theirsObjectId)
+            assertEquals(setOf("100644"), entry.modes)
+        }
+        val listed = mutableListOf<String>()
+        var offset = 0
+        do {
+            val page = service.conflicts(jobId, repositoryId, null, offset)
+            assertTrue(page.mergeInProgress)
+            assertEquals(6002, page.totalCount); assertEquals(offset, page.offset)
+            assertTrue(page.files.size in 1..200)
+            listed += page.files.map { checkNotNull(it.path.exact) }
+            offset = page.nextOffset ?: break
+        } while (true)
+        assertEquals(all.map { it.path.exact }, listed)
+        assertEquals(listed.size, listed.toSet().size)
+        val last = all.last()
+        val worktreeId = service.workspace(jobId, repositoryId).worktreeId
+        val detail = service.conflictFile(jobId, repositoryId, null, last.path.fileId(worktreeId))
+        assertEquals(blob, detail.entry.theirsObjectId)
+        assertEquals("absent", detail.currentSha256)
+        assertEquals(GitOperationState.COMPLETED, sync(GitOperationAction.MERGE_ABORT).state)
+        assertEquals(0, service.conflicts(jobId, repositoryId, null).totalCount)
+    }
+
+    @Test fun `streamed Git output retains byte bounds and propagates consumer failures`(): Unit = Fixture().use { f ->
+        f.cloned()
+        val gitDir = f.store.resolve("$jobId/git/repositories/$repositoryId/repository.git")
+        val invocation = GitInvocation("ls-files", listOf("-s", "-z"), gitDir = gitDir, workTree = f.workTree())
+        assertEquals(GitCommandException.Kind.OUTPUT_LIMIT, assertFailsWith<GitCommandException> {
+            f.repositories.runner.stream(invocation, 16) { _, _ -> }
+        }.kind)
+        assertEquals("CONSUMER_TEST", assertFailsWith<GitOperationRefusal> {
+            f.repositories.runner.stream(invocation, 1024 * 1024) { _, _ -> throw GitOperationRefusal("CONSUMER_TEST", "stop") }
+        }.code)
+    }
+
     @Test fun `merge evidence survives publication and a second crash during reconciliation`(): Unit = Fixture().use { f ->
         f.cloned()
         Files.writeString(f.seed.resolve("util.c"), "int incoming = 8;\n"); f.remoteCommit("incoming")
