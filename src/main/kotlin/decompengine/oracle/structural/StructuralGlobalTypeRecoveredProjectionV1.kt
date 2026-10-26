@@ -9,7 +9,7 @@ import kotlinx.serialization.json.JsonNull
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
 
-/** A source value already typed by a trusted capture adapter; display text is not accepted here. */
+/** A source value supplied by a capture adapter; this projection treats the DTO as untrusted. */
 sealed interface StructuralRecoveredSourceV1 {
     data class Text(val value: String) : StructuralRecoveredSourceV1
     data class Integer(val value: BigInteger) : StructuralRecoveredSourceV1
