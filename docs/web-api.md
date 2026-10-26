@@ -526,17 +526,23 @@ evidence-only). The agent reconstructor runs with that recorded budget.
 
 `GET R/reports/module-progress` returns `moduleProgress` for one attempt, read from that
 attempt's own `reconstruction_progress.json`, `reconstruction.json` and source-tree
-`reports/module_plan.json` and `reports/confidence.json` (the last only after generation),
-captured between two reads of the same attempt version (`409 REPORT_CHANGED` otherwise). An
-absent or partially rewritten report is unrecorded, never an outcome. Non-reconstruction
+`reports/module_plan.json`, `reports/confidence.json` (only after generation) and the bounded
+`reports/build_contract.json`, captured between two reads of the same attempt version
+(`409 REPORT_CHANGED` otherwise). An absent or partially rewritten report is unrecorded,
+never an outcome. Non-reconstruction
 attempts report `state: "not-applicable"` with no stages.
 
 `stages` always lists `analysis`, `planning`, `generation` (completed/total modules),
 `validation` (the profile build, `build-passed` or `build-failed`) and `publication` (the
 recorded candidate revision or acceptance), each `pending`, `active`, `completed`, `stopped`
 (active when the attempt ended) or `not-reached`. A later stage never completes before an
-earlier one; a candidate retained after an unfinished build is `stopped` with
-`candidate-recorded`. Reconstruction records generation start (`modules`, 0 of N) before the first module, so a long first module shows generation active. `lastGeneratedModuleId` names the most recently finished module while others are still generating (the progress record names a module only after it finishes); `plan` carries the recorded plan digest and module count;
+earlier one. Validation completion is independent of archive publication: a recorded build
+contract matching the attempt's configured profile and carrying a consistent source-revision
+digest reports `build-failed` for a nonzero exit, unstable inputs or a missing output artifact,
+and `build-passed` otherwise. A missing, unsupported or malformed contract does not invent an
+outcome. These are reported build facts, not current-source verification or acceptance. A
+candidate retained after an unfinished build or failed packaging is `stopped` with
+`candidate-recorded`; a completed build alone never completes publication. Reconstruction records generation start (`modules`, 0 of N) before the first module, so a long first module shows generation active. `lastGeneratedModuleId` names the most recently finished module while others are still generating (the progress record names a module only after it finishes); `plan` carries the recorded plan digest and module count;
 `unresolved` lists up to 100 planned modules the generation record reports as unresolved,
 with the total and the archive's unresolved entity count.
 

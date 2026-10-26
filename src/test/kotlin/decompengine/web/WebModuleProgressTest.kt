@@ -1,8 +1,14 @@
 package decompengine.web
 
 import decompengine.jobs.*
+import decompengine.project.ArchivalPackager
+import decompengine.project.BuildException
+import decompengine.project.GeneratedCBuildInvocation
+import decompengine.project.GeneratedCProjectBuilder
 import decompengine.project.ModulePlan
 import decompengine.project.PlannedModule
+import decompengine.project.ProjectBuildConfiguration
+import decompengine.project.ReconstructionProfiles
 import decompengine.testing.RecoveryMatrixEvidence
 import decompengine.testing.recoveryMatrixTempDirectory as createTempDirectory
 import org.junit.jupiter.api.extension.ExtendWith
@@ -20,7 +26,7 @@ import kotlin.io.path.createDirectories
 import kotlin.io.path.writeText
 import kotlin.test.*
 
-/** Retained-report fixtures only: nothing here plans, generates, builds or runs a model. */
+/** Retained reports and scripted build-result fixtures; no native compiler, model or analyzer is run. */
 @ExtendWith(RecoveryMatrixEvidence::class)
 class WebModuleProgressTest {
     @Test
@@ -77,10 +83,17 @@ class WebModuleProgressTest {
         val partial = stages(attempt(WorkflowRunState.COMPLETED, candidate = candidate), progress = """{"phase":"complete","completed":3,"total":3}""",
             summary = SUMMARY, plan = true, generation = GENERATION.replace(""",{"moduleId":"module_c","outcome":"accepted"}""", ""))
         assertEquals(JsonNull, partial.getValue("unresolved").jsonObject.getValue("moduleCount"))
-        // A failed build leaves a retained candidate recorded but its publication incomplete.
+        // Without retained build-result evidence, an interrupted/unknown build has no outcome.
         val failedBuild = stages(attempt(WorkflowRunState.FAILED, candidate = candidate, reason = WorkflowTerminalReason.FAILED),
             progress = """{"phase":"modules","completed":3,"total":3}""", plan = true)
         assertEquals("stopped", states(failedBuild)["validation"]); assertEquals("stopped", states(failedBuild)["publication"])
+        assertEquals(JsonNull, failedBuild.getValue("stages").jsonArray[3].jsonObject.getValue("outcome"))
+        val mixed = stages(attempt(WorkflowRunState.RUNNING),
+            progress = """{"phase":"modules","completed":1,"total":3,"module":"module_a"}""", summary = SUMMARY)
+        assertEquals("completed", states(mixed)["generation"])
+        assertEquals("3", mixed.getValue("stages").jsonArray[2].jsonObject.getValue("completedUnits").jsonPrimitive.content)
+        assertEquals("3", mixed.getValue("stages").jsonArray[2].jsonObject.getValue("totalUnits").jsonPrimitive.content)
+        assertEquals(JsonNull, mixed.getValue("lastGeneratedModuleId"))
         // Reports captured separately still yield one ordered sequence: a later stage's evidence establishes its predecessors.
         for ((name, value) in listOf(
             "summary only" to stages(attempt(WorkflowRunState.COMPLETED, candidate = candidate), summary = SUMMARY),
@@ -95,6 +108,74 @@ class WebModuleProgressTest {
             null, null, null, null), adapters, null)
         assertEquals("not-applicable", explore.getValue("state").jsonPrimitive.content)
         assertEquals(0, explore.getValue("stages").jsonArray.size); assertEquals(JsonNull, explore.getValue("recovery"))
+    }
+
+    @Test
+    fun `build completion survives build errors and later packaging failure without a reconstruction summary`() {
+        val root = createTempDirectory("module-build-results-")
+        try {
+            val candidate = WorkflowCandidate("source_${"e".repeat(64)}", "e".repeat(64))
+            val failed = attempt(WorkflowRunState.FAILED, candidate = candidate, reason = WorkflowTerminalReason.FAILED,
+                configuration = buildConfiguration())
+            val scripts = listOf(
+                // Exercise the real contract writer and its throw-after-recording path with inert compiler diagnostics.
+                "compile-failure" to ("printf 'src/main.c:1: error: fixture compilation failed\\n'; exit 2" to "build-failed"),
+                "packaging-failure" to ("printf fixture-artifact > build/reconstructed" to "build-passed"),
+                "missing-artifact" to ("exit 0" to "build-failed"),
+                "changed-source" to ("printf changed >> src/main.c; printf fixture-artifact > build/reconstructed" to "build-failed"),
+            )
+            for ((name, fixture) in scripts) {
+                val project = root.resolve(name)
+                val build = scriptedBuild(project, fixture.first, expectFailure = fixture.second != "build-passed")
+                if (name == "packaging-failure") {
+                    // The real packager refuses incomplete provenance after the build has already succeeded.
+                    val failure = assertFailsWith<IllegalArgumentException> { ArchivalPackager.create(project, root.resolve("candidate.zip")) }
+                    assertTrue(failure.message.orEmpty().contains("missing source_tree_manifest.json"))
+                    assertFalse(Files.exists(root.resolve("candidate.zip")))
+                }
+                val value = webModuleProgress(JOB, WebModuleProgressCapture(failed,
+                    """{"phase":"modules","completed":3,"total":3}""".toByteArray(), null, PLAN.toByteArray(), GENERATION.toByteArray(), build), adapters(), null)
+                val stages = value.getValue("stages").jsonArray.map { it.jsonObject }
+                assertTrue(stages.take(4).all { it.getValue("state").jsonPrimitive.content == "completed" }, name)
+                assertEquals(fixture.second, stages[3].getValue("outcome").jsonPrimitive.content, name)
+                assertEquals("stopped", stages[4].getValue("state").jsonPrimitive.content, name)
+                assertEquals("candidate-recorded", stages[4].getValue("outcome").jsonPrimitive.content, name)
+                assertEquals("1", value.getValue("unresolved").jsonObject.getValue("moduleCount").jsonPrimitive.content, name)
+                assertEquals(JsonNull, value.getValue("unresolved").jsonObject.getValue("entityCount"), name)
+                if (fixture.second == "build-passed") {
+                    val packaging = webModuleProgress(JOB, WebModuleProgressCapture(failed.copy(state = WorkflowRunState.RUNNING, endedAt = null,
+                        terminalReason = null), """{"phase":"modules","completed":1,"total":3,"module":"module_a"}""".toByteArray(),
+                        null, PLAN.toByteArray(), null, build), adapters(), null)
+                    assertEquals("completed", packaging.getValue("stages").jsonArray[3].jsonObject.getValue("state").jsonPrimitive.content)
+                    assertEquals("active", packaging.getValue("stages").jsonArray[4].jsonObject.getValue("state").jsonPrimitive.content)
+                    assertEquals(JsonNull, packaging.getValue("lastGeneratedModuleId"))
+                }
+            }
+            val build = scriptedBuild(root.resolve("bounded-record"), "exit 2")
+            val text = build.toString(Charsets.UTF_8)
+            for (invalid in listOf(
+                null,
+                """{"schemaVersion":3,"returnCode":2}""".toByteArray(),
+                build.copyOf(build.size / 2),
+                text.replace("\"returnCode\": 2", "\"returnCode\": \"2\"").toByteArray(),
+                text.replace(ReconstructionProfiles.default.sha256, "f".repeat(64)).toByteArray(),
+                text.replace(Regex("\"sourceRevisionSha256\": \"[0-9a-f]{64}\""), "\"sourceRevisionSha256\": \"${"f".repeat(64)}\"").toByteArray(),
+                text.replace("\"schemaVersion\": 3", "\"schemaVersion\": 2").toByteArray(),
+            )) {
+                val value = webModuleProgress(JOB, WebModuleProgressCapture(failed,
+                    """{"phase":"modules","completed":3,"total":3}""".toByteArray(), null, null, null, invalid), adapters(), null)
+                val validation = value.getValue("stages").jsonArray[3].jsonObject
+                assertEquals("stopped", validation.getValue("state").jsonPrimitive.content)
+                assertEquals(JsonNull, validation.getValue("outcome"))
+            }
+            // A build result alone still reconciles earlier stages; it does not invent module counts or publication.
+            val buildOnly = webModuleProgress(JOB, WebModuleProgressCapture(failed, null, null, null, null, build), adapters(), null)
+            assertEquals("recorded", buildOnly.getValue("state").jsonPrimitive.content)
+            assertTrue(buildOnly.getValue("stages").jsonArray.take(4).all { it.jsonObject.getValue("state").jsonPrimitive.content == "completed" })
+            assertEquals(JsonNull, buildOnly.getValue("stages").jsonArray[2].jsonObject.getValue("totalUnits"))
+            val legacy = webModuleProgress(JOB, WebModuleProgressCapture(failed.copy(configuration = null), null, null, null, null, build), adapters(), null)
+            assertEquals("not-recorded", legacy.getValue("state").jsonPrimitive.content)
+        } finally { root.toFile().deleteRecursively() }
     }
 
     @Test
@@ -152,12 +233,13 @@ class WebModuleProgressTest {
             val run = WorkflowAttemptStore.open(root, Clock.systemUTC()).use { owner ->
                 val snapshot = (owner.inspect(job.id) as WorkflowJobInspection.Available).snapshot
                 val queued = owner.create(job.id, snapshot.version, NewWorkflowAttempt(WorkflowKind.RECONSTRUCT, WebWorkflowDefaults.RECONSTRUCT_EVIDENCE,
-                    harnessCapabilityId = EVIDENCE_ONLY_CAPABILITY)).attempt
+                    harnessCapabilityId = EVIDENCE_ONLY_CAPABILITY, configuration = buildConfiguration())).attempt
                 owner.transition(job.id, queued.runId, queued.version, WorkflowTransition.Start).attempt
             }
             val reports = store.runReportsDirectory(job.id, run.runId, create = true)
             reports.resolve("reconstruction_progress.json").writeText("""{"phase":"modules","completed":1,"total":3,"module":"module_a"}""")
-            reports.resolve("source-tree/reports").createDirectories().resolve("module_plan.json").writeText(PLAN)
+            val build = scriptedBuild(reports.resolve("source-tree"), "exit 2")
+            reports.resolve("source-tree/reports/module_plan.json").writeText(PLAN)
             // Generation outcomes are retained even though the attempt never reached a successful build.
             reports.resolve("source-tree/reports/confidence.json").writeText(GENERATION)
             // A sibling attempt's directory is never read for this attempt.
@@ -169,12 +251,46 @@ class WebModuleProgressTest {
                 // Startup recovery interrupted the running attempt; its reports remain readable as retained evidence.
                 assertEquals(WorkflowRunState.INTERRUPTED, capture.attempt.state)
                 assertNotNull(capture.progress); assertNotNull(capture.plan); assertNull(capture.summary); assertNotNull(capture.generation)
+                assertContentEquals(build, capture.build)
                 val value = webModuleProgress(job.id, capture, service.durableRegistrations(), null)
-                assertEquals("stopped", value.getValue("stages").jsonArray[2].jsonObject.getValue("state").jsonPrimitive.content)
+                assertEquals("completed", value.getValue("stages").jsonArray[2].jsonObject.getValue("state").jsonPrimitive.content)
+                assertEquals("3", value.getValue("stages").jsonArray[2].jsonObject.getValue("completedUnits").jsonPrimitive.content)
+                assertEquals("build-failed", value.getValue("stages").jsonArray[3].jsonObject.getValue("outcome").jsonPrimitive.content)
+                // Descriptor-safe reads reject indirect and oversized build evidence without losing the view.
+                val contract = reports.resolve("source-tree/reports/build_contract.json")
+                Files.delete(contract)
+                Files.createSymbolicLink(contract, store.runReportsDirectory(job.id, "run_other", create = false).resolve("reconstruction.json"))
+                assertNull(service.readModuleProgress(job.id, run.runId).build)
+                Files.delete(contract)
+                Files.newByteChannel(contract, java.nio.file.StandardOpenOption.CREATE_NEW, java.nio.file.StandardOpenOption.WRITE).use {
+                    it.position(MODULE_PROGRESS_EVIDENCE_BYTES)
+                    it.write(java.nio.ByteBuffer.wrap(byteArrayOf(0)))
+                }
+                assertNull(service.readModuleProgress(job.id, run.runId).build)
                 assertFailsWith<WebJobServiceException> { service.readModuleProgress(job.id, "run_missing") }
             }
             assertFalse(Files.readString(root.resolve(job.id).resolve("workflow-state.json")).contains("module_a"))
         } finally { root.toFile().deleteRecursively() }
+    }
+
+    private fun buildConfiguration(): WorkflowAttemptConfiguration {
+        val profile = ReconstructionProfiles.default
+        return WorkflowAttemptConfiguration("workflow-reconstruct-evidence-only", "evidence-only", false, false,
+            listOf("ghidra", "c-toolchain"), "none", false, null,
+            WorkflowAttemptReconstruction(profile.id, profile.sha256, null))
+    }
+
+    /** Real builder bookkeeping around a tiny authored shell command, never a native build. */
+    private fun scriptedBuild(project: Path, script: String, expectFailure: Boolean = true): ByteArray {
+        project.resolve("src").createDirectories().resolve("main.c").writeText("int main(void) { return 0; }\n")
+        project.resolve("Makefile").writeText("# scripted build-result fixture\n")
+        val invocation = GeneratedCBuildInvocation(listOf("/bin/sh", "-c", "mkdir -p build; $script"), listOf("POSIX shell", "POSIX mkdir"), "Scripted result fixture.")
+        val build = {
+            GeneratedCProjectBuilder.build(project, ProjectBuildConfiguration(wallClockTimeoutMillis = 5_000, maximumOutputBytes = 4_096),
+                ReconstructionProfiles.default, invocation)
+        }
+        if (expectFailure) assertFailsWith<BuildException> { build() } else assertEquals(0, build().returnCode)
+        return Files.readAllBytes(project.resolve("reports/build_contract.json"))
     }
 
     private fun adapters(): List<DurableWebWorkflowAdapter> {
