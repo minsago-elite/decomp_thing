@@ -141,6 +141,16 @@ class DeploymentFixture(unittest.TestCase):
         self.assertEqual(stage_before, {path.name: path.read_bytes() for path in self.stage.iterdir()})
         self.assertFalse(self.manifest.exists())
 
+    def test_symlinked_output_ancestor_is_refused_without_writing_through_it(self) -> None:
+        redirected = self.root / "redirected-output"
+        redirected.mkdir()
+        saved_output = self.root / "original-output"
+        self.output_root.rename(saved_output)
+        self.output_root.symlink_to(redirected, target_is_directory=True)
+        with self.assertRaises((DEPLOYMENT.DeploymentError, OSError)):
+            self.prepare()
+        self.assertEqual([], list(redirected.iterdir()))
+
 
 class GradleTaskReentryTest(DeploymentFixture):
     def test_real_gradle_task_revalidates_unchanged_then_rejects_changed_inputs(self) -> None:
@@ -211,6 +221,12 @@ class GradleTaskReentryTest(DeploymentFixture):
         self.assertIn("scripts/module_compiler_deployment.py", task)
         self.assertIn("moduleCompilerDeploymentManifest'),", source)
         self.assertIn("moduleCompilerHostedCompiledEvidence", source)
+        reproducibility = (ROOT / "scripts/check-reproducible-jar.py").read_text(encoding="utf-8")
+        self.assertEqual(2, reproducibility.count('["moduleCompilerDeploymentManifest"]'))
+        self.assertLess(reproducibility.index('["moduleCompilerDeploymentManifest"]'),
+                        reproducibility.index('["processResources", "--rerun", "jar", "--rerun"]'))
+        self.assertGreater(reproducibility.rindex('["moduleCompilerDeploymentManifest"]'),
+                           reproducibility.index('["processResources", "--rerun", "jar", "--rerun"]'))
 
 
 if __name__ == "__main__":

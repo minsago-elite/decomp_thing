@@ -33,21 +33,50 @@ def _version(info: os.stat_result) -> tuple[int, int, int, int, int, int, int]:
             info.st_mtime_ns, info.st_ctime_ns)
 
 
-def _open_regular(path: Path, expected_size: int | None = None) -> tuple[int, os.stat_result]:
+def _open_directory(path: Path) -> int:
+    """Open an absolute directory by walking each component without following links."""
+    if not path.is_absolute() or ".." in path.parts:
+        _fail(f"deployment directory path is not a normalized absolute path: {path}")
+    descriptor = os.open("/", os.O_RDONLY | os.O_CLOEXEC | os.O_DIRECTORY)
     try:
-        descriptor = os.open(path, os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW | os.O_NONBLOCK)
+        for component in path.parts[1:]:
+            child = os.open(component, os.O_RDONLY | os.O_CLOEXEC | os.O_DIRECTORY | os.O_NOFOLLOW,
+                            dir_fd=descriptor)
+            os.close(descriptor)
+            descriptor = child
+        return descriptor
+    except BaseException:
+        os.close(descriptor)
+        raise
+
+
+def _stat_path(path: Path) -> os.stat_result:
+    parent_fd = _open_directory(path.parent)
+    try:
+        return os.stat(path.name, dir_fd=parent_fd, follow_symlinks=False)
+    finally:
+        os.close(parent_fd)
+
+
+def _open_regular(path: Path, expected_size: int | None = None) -> tuple[int, os.stat_result]:
+    parent_fd = _open_directory(path.parent)
+    try:
+        descriptor = os.open(path.name, os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW | os.O_NONBLOCK,
+                             dir_fd=parent_fd)
         info = os.fstat(descriptor)
         if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1 or info.st_size <= 0:
             _fail(f"deployment input is not a private regular file: {path}")
         if expected_size is not None and info.st_size != expected_size:
             _fail(f"deployment input size changed: {path}")
-        if _version(path.lstat()) != _version(info):
+        if _version(os.stat(path.name, dir_fd=parent_fd, follow_symlinks=False)) != _version(info):
             _fail(f"deployment input name changed while opening: {path}")
         return descriptor, info
     except BaseException:
         if "descriptor" in locals():
             os.close(descriptor)
         raise
+    finally:
+        os.close(parent_fd)
 
 
 def _hash_descriptor(descriptor: int, expected_size: int | None = None) -> tuple[int, str, os.stat_result]:
@@ -88,7 +117,7 @@ def _source_pins(sources: list[Path]) -> list[dict[str, object]]:
             if before.st_size > MAXIMUM_MEMBER_BYTES:
                 _fail("module worker deployment member exceeds its fixed byte bound")
             size, digest, after = _hash_descriptor(descriptor, before.st_size)
-            if _version(source.lstat()) != _version(after):
+            if _version(_stat_path(source)) != _version(after):
                 _fail("module worker deployment source name changed while hashing")
         finally:
             os.close(descriptor)
@@ -134,9 +163,14 @@ def _strict_manifest_bytes(value: bytes) -> dict[str, object]:
     return document
 
 
-def _read_manifest(path: Path) -> tuple[bytes, dict[str, object]]:
-    descriptor, before = _open_regular(path)
+def _read_manifest(parent_fd: int, name: str, display_path: Path) -> tuple[bytes, dict[str, object]]:
+    descriptor = os.open(name, os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=parent_fd)
     try:
+        before = os.fstat(descriptor)
+        named = os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
+        if (not stat.S_ISREG(before.st_mode) or before.st_nlink != 1 or before.st_size <= 0 or
+                _version(named) != _version(before)):
+            _fail(f"deployment input is not a private regular file: {display_path}")
         if before.st_size > MAXIMUM_MANIFEST_BYTES:
             _fail("worker classpath manifest exceeds its fixed byte bound")
         if stat.S_IMODE(before.st_mode) != 0o444:
@@ -152,7 +186,8 @@ def _read_manifest(path: Path) -> tuple[bytes, dict[str, object]]:
                 _fail("worker classpath manifest exceeds its fixed byte bound")
             chunks.append(chunk)
         after = os.fstat(descriptor)
-        if _version(after) != _version(before) or total != before.st_size or _version(path.lstat()) != _version(after):
+        if (_version(after) != _version(before) or total != before.st_size or
+                _version(os.stat(name, dir_fd=parent_fd, follow_symlinks=False)) != _version(after)):
             _fail("worker classpath manifest changed while reading")
         raw = b"".join(chunks)
     finally:
@@ -164,17 +199,19 @@ def _read_manifest(path: Path) -> tuple[bytes, dict[str, object]]:
     return raw, document
 
 
-def _stage_directory(stage: Path) -> tuple[int, os.stat_result]:
-    descriptor = os.open(stage, os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW | os.O_DIRECTORY)
+def _stage_directory(parent_fd: int, name: str, display_path: Path) -> tuple[int, os.stat_result]:
+    descriptor = os.open(name, os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW | os.O_DIRECTORY, dir_fd=parent_fd)
     info = os.fstat(descriptor)
-    if not stat.S_ISDIR(info.st_mode) or _version(stage.lstat()) != _version(info):
+    if (not stat.S_ISDIR(info.st_mode) or
+            _version(os.stat(name, dir_fd=parent_fd, follow_symlinks=False)) != _version(info)):
         os.close(descriptor)
-        _fail("worker deployment stage is not the expected real directory")
+        _fail(f"worker deployment stage is not the expected real directory: {display_path}")
     return descriptor, info
 
 
-def _verify_staged(stage: Path, pins: list[dict[str, object]], manifest: dict[str, object]) -> None:
-    stage_fd, stage_before = _stage_directory(stage)
+def _verify_staged(parent_fd: int, stage_name: str, stage: Path, pins: list[dict[str, object]],
+                   manifest: dict[str, object]) -> None:
+    stage_fd, stage_before = _stage_directory(parent_fd, stage_name, stage)
     try:
         expected = []
         expected_manifest_entries = []
@@ -209,12 +246,13 @@ def _verify_staged(stage: Path, pins: list[dict[str, object]], manifest: dict[st
         os.close(stage_fd)
 
 
-def _publish_manifest(path: Path, document: dict[str, object]) -> None:
+def _publish_manifest(parent_fd: int, name: str, document: dict[str, object]) -> None:
     raw = json.dumps(document, separators=(",", ":"), ensure_ascii=True).encode("utf-8") + b"\n"
     if len(raw) > MAXIMUM_MANIFEST_BYTES:
         _fail("worker classpath manifest exceeds its fixed byte bound")
-    temporary = path.parent / f".{path.name}.{uuid.uuid4().hex}.tmp"
-    descriptor = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_CLOEXEC | os.O_NOFOLLOW, 0o600)
+    temporary = f".{name}.{uuid.uuid4().hex}.tmp"
+    descriptor = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_CLOEXEC | os.O_NOFOLLOW,
+                         0o600, dir_fd=parent_fd)
     try:
         view = memoryview(raw)
         while view:
@@ -226,94 +264,101 @@ def _publish_manifest(path: Path, document: dict[str, object]) -> None:
     finally:
         os.close(descriptor)
     try:
-        os.link(temporary, path, follow_symlinks=False)
-        os.chmod(path, 0o444, follow_symlinks=False)
-        directory_fd = os.open(path.parent, os.O_RDONLY | os.O_CLOEXEC | os.O_DIRECTORY)
-        try:
-            os.fsync(directory_fd)
-        finally:
-            os.close(directory_fd)
+        os.link(temporary, name, src_dir_fd=parent_fd, dst_dir_fd=parent_fd, follow_symlinks=False)
+        os.chmod(name, 0o444, dir_fd=parent_fd, follow_symlinks=False)
+        os.fsync(parent_fd)
     except BaseException:
         try:
-            temporary.unlink()
+            os.unlink(temporary, dir_fd=parent_fd)
         except FileNotFoundError:
             pass
         raise
-    temporary.unlink()
+    os.unlink(temporary, dir_fd=parent_fd)
 
 
 def materialize(manifest_path: Path, stage: Path, sources: list[Path]) -> bytes:
     manifest_path = manifest_path.absolute()
     stage = stage.absolute()
+    if manifest_path.parent != stage.parent:
+        _fail("worker deployment manifest and stage must share one exact output directory")
     pins = _source_pins(sources)
-    manifest_exists = os.path.lexists(manifest_path)
-    stage_exists = os.path.lexists(stage)
-    if manifest_exists:
-        if not stage_exists:
-            _fail("prepared worker deployment is incomplete; preserving existing state")
-        manifest_bytes, manifest = _read_manifest(manifest_path)
-        _verify_staged(stage, pins, manifest)
-        return manifest_bytes
-    if stage_exists:
-        empty_fd, _ = _stage_directory(stage)
-        try:
-            if os.listdir(empty_fd):
-                _fail("unpublished worker deployment stage is not empty; preserving existing state")
-        finally:
-            os.close(empty_fd)
-    else:
-        os.mkdir(stage, 0o700)
-    stage_fd, _ = _stage_directory(stage)
+    parent_fd = _open_directory(manifest_path.parent)
     try:
-        manifest_entries = []
-        for pin in pins:
-            source = Path(str(pin["source"]))
-            source_fd, source_before = _open_regular(source, int(pin["bytes"]))
-            name = str(pin["name"])
-            target_fd = os.open(name, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_CLOEXEC | os.O_NOFOLLOW,
-                                0o600, dir_fd=stage_fd)
-            digest = hashlib.sha256()
-            count = 0
+        manifest_exists = _exists_at(parent_fd, manifest_path.name)
+        stage_exists = _exists_at(parent_fd, stage.name)
+        if manifest_exists:
+            if not stage_exists:
+                _fail("prepared worker deployment is incomplete; preserving existing state")
+            manifest_bytes, manifest = _read_manifest(parent_fd, manifest_path.name, manifest_path)
+            _verify_staged(parent_fd, stage.name, stage, pins, manifest)
+            return manifest_bytes
+        if stage_exists:
+            empty_fd, _ = _stage_directory(parent_fd, stage.name, stage)
             try:
-                while True:
-                    chunk = os.read(source_fd, CHUNK_BYTES)
-                    if not chunk:
-                        break
-                    count += len(chunk)
-                    if count > pin["bytes"]:
-                        _fail("worker deployment source grew during copy")
-                    digest.update(chunk)
-                    view = memoryview(chunk)
-                    while view:
-                        written = os.write(target_fd, view)
-                        if written <= 0:
-                            _fail("worker deployment copy made no progress")
-                        view = view[written:]
-                source_after = os.fstat(source_fd)
-                source_named = os.stat(source, follow_symlinks=False)
-                if (count != pin["bytes"] or digest.hexdigest() != pin["sha256"] or
-                        _version(source_after) != _version(source_before) or
-                        _version(source_named) != _version(source_after)):
-                    _fail("worker deployment source changed after preparation")
-                os.fsync(target_fd)
-                os.fchmod(target_fd, 0o444)
+                if os.listdir(empty_fd):
+                    _fail("unpublished worker deployment stage is not empty; preserving existing state")
             finally:
-                os.close(target_fd)
-                os.close(source_fd)
-            manifest_entries.append({"path": str(stage / name), "bytes": pin["bytes"], "sha256": pin["sha256"]})
-        os.fsync(stage_fd)
-    except BaseException:
-        os.close(stage_fd)
-        raise
-    else:
-        os.close(stage_fd)
+                os.close(empty_fd)
+        else:
+            os.mkdir(stage.name, 0o700, dir_fd=parent_fd)
+        stage_fd, _ = _stage_directory(parent_fd, stage.name, stage)
+        manifest_entries = []
+        try:
+            for pin in pins:
+                source = Path(str(pin["source"]))
+                source_fd, source_before = _open_regular(source, int(pin["bytes"]))
+                name = str(pin["name"])
+                target_fd = os.open(name, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_CLOEXEC | os.O_NOFOLLOW,
+                                    0o600, dir_fd=stage_fd)
+                digest = hashlib.sha256()
+                count = 0
+                try:
+                    while True:
+                        chunk = os.read(source_fd, CHUNK_BYTES)
+                        if not chunk:
+                            break
+                        count += len(chunk)
+                        if count > pin["bytes"]:
+                            _fail("worker deployment source grew during copy")
+                        digest.update(chunk)
+                        view = memoryview(chunk)
+                        while view:
+                            written = os.write(target_fd, view)
+                            if written <= 0:
+                                _fail("worker deployment copy made no progress")
+                            view = view[written:]
+                    source_after = os.fstat(source_fd)
+                    source_named = _stat_path(source)
+                    if (count != pin["bytes"] or digest.hexdigest() != pin["sha256"] or
+                            _version(source_after) != _version(source_before) or
+                            _version(source_named) != _version(source_after)):
+                        _fail("worker deployment source changed after preparation")
+                    os.fsync(target_fd)
+                    os.fchmod(target_fd, 0o444)
+                finally:
+                    os.close(target_fd)
+                    os.close(source_fd)
+                manifest_entries.append({"path": str(stage / name), "bytes": pin["bytes"], "sha256": pin["sha256"]})
+            os.fsync(stage_fd)
+        finally:
+            os.close(stage_fd)
 
-    document = {"schemaVersion": 1, "entries": manifest_entries}
-    manifest_bytes = json.dumps(document, separators=(",", ":"), ensure_ascii=True).encode("utf-8") + b"\n"
-    parsed = _strict_manifest_bytes(manifest_bytes)
-    _verify_staged(stage, pins, parsed)
-    _publish_manifest(manifest_path, document)
-    return manifest_bytes
+        document = {"schemaVersion": 1, "entries": manifest_entries}
+        manifest_bytes = json.dumps(document, separators=(",", ":"), ensure_ascii=True).encode("utf-8") + b"\n"
+        parsed = _strict_manifest_bytes(manifest_bytes)
+        _verify_staged(parent_fd, stage.name, stage, pins, parsed)
+        _publish_manifest(parent_fd, manifest_path.name, document)
+        return manifest_bytes
+    finally:
+        os.close(parent_fd)
+
+
+def _exists_at(parent_fd: int, name: str) -> bool:
+    try:
+        os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
+        return True
+    except FileNotFoundError:
+        return False
 
 
 def main(argv: list[str] | None = None) -> int:
