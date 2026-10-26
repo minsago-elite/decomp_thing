@@ -219,7 +219,7 @@ static void trace_abort(pid_t child, int *owned, size_t count) {
 static int trace_guardian(pid_t child, int *status, int mode) {
     int owned[16];
     size_t owned_count = 0;
-    unsigned fork_count = 0, plain_pipes = 0, gate_release_writes = 0;
+    unsigned fork_count = 0, plain_pipes = 0, gate_release_writes = 0, cleanup_signals = 0;
     int held = 0, exec_read_fd = -1, gate_write_fd = -1, interrupt_forwarded = 0;
     int critical_mask_entered = 0, mask_restored = 0;
     pid_t direct_child_pid = -1;
@@ -230,11 +230,12 @@ static int trace_guardian(pid_t child, int *status, int mode) {
                                        (UINT64_C(1) << (SIGINT - 1));
     uint64_t syscall_nr = 0, syscall_args[6] = {0};
     int syscall_pending = 0;
-    int interrupt_signal = mode >= 3 ? ((mode <= 5 || (mode >= 9 && mode <= 10)) ? SIGTERM : SIGINT) : 0;
-    int target = mode >= 9 ? (mode % 2 ? 4 : 5) :
+    int interrupt_signal = mode >= 3 && mode <= 12 ? ((mode <= 5 || (mode >= 9 && mode <= 10)) ? SIGTERM : SIGINT) : 0;
+    int target = mode == 13 ? 6 : mode >= 9 ? (mode % 2 ? 4 : 5) :
                  mode >= 3 ? (mode - 3) % 3 + 1 : (mode == 1 ? 1 : 3);
     const char *point = target == 1 ? "state-mkdir" : target == 2 ? "child-pidfd" :
-                        target == 3 ? "exec-read" : target == 4 ? "pending" : "post-admission";
+                        target == 3 ? "exec-read" : target == 4 ? "pending" :
+                        target == 5 ? "post-admission" : "cleanup-adoption";
     long long began = monotonic_ms();
     if (began < 0)
         goto fail;
@@ -255,7 +256,7 @@ static int trace_guardian(pid_t child, int *status, int mode) {
             goto fail;
         if (WIFEXITED(*status) || WIFSIGNALED(*status)) {
             trace_close_pidfds(owned, owned_count);
-            if (!held || (interrupt_signal && !interrupt_forwarded))
+            if (!held || (interrupt_signal && !interrupt_forwarded) || (mode == 13 && cleanup_signals < 3))
                 return -1;
             char message[256];
             int n = interrupt_signal
@@ -371,6 +372,16 @@ static int trace_guardian(pid_t child, int *status, int mode) {
                     syscall_args[0] == (uint64_t)exec_read_fd && syscall_args[2] == 1 &&
                     !info.exit.is_error && info.exit.rval == 0)
                     delay = 1;
+                if (mode == 13 && syscall_nr == SYS_pidfd_send_signal && !info.exit.is_error && info.exit.rval == 0) {
+                    /* Root TERM succeeds, then hold beyond the old global grace while it
+                     * exits/reparents. The newly adopted identity must get TERM, then KILL. */
+                    unsigned expected = cleanup_signals < 2 ? SIGTERM : SIGKILL;
+                    if (syscall_args[1] != expected)
+                        goto fail;
+                    cleanup_signals++;
+                    if (cleanup_signals == 1)
+                        delay = 1;
+                }
                 syscall_pending = 0;
             }
         } else if (sig == SIGTRAP && (unsigned)*status >> 16 == PTRACE_EVENT_EXEC) {
@@ -403,6 +414,14 @@ static int trace_guardian(pid_t child, int *status, int mode) {
                     if (current - start < 200)
                         pause_ms((int)(200 - (current - start)));
                 } while (current - start < 200);
+                if (mode == 13) {
+                    if (owned_count != 1)
+                        goto fail;
+                    struct pollfd root = {.fd = owned[0], .events = POLLIN};
+                    if (poll(&root, 1, 0) != 1 || !(root.revents & POLLIN))
+                        goto fail;
+                    allwrite(2, "TRACE_ADOPTION rootExitedDuringHold=1\n", sizeof "TRACE_ADOPTION rootExitedDuringHold=1\n" - 1);
+                }
                 held = 1;
                 char message[160];
                 int n = snprintf(message, sizeof message,
@@ -543,6 +562,8 @@ int main(int argc, char **argv) {
         return supervise(argc, argv, 1);
     if (argc >= 2 && !strcmp(argv[1], "supervise-delay-exec-read"))
         return supervise(argc, argv, 2);
+    if (argc >= 2 && !strcmp(argv[1], "supervise-delay-cleanup-adoption"))
+        return supervise(argc, argv, 13);
     const char *interrupt_modes[] = {
         "supervise-interrupt-term-state", "supervise-interrupt-term-pidfd",
         "supervise-interrupt-term-exec-read", "supervise-interrupt-int-state",
@@ -599,7 +620,8 @@ int main(int argc, char **argv) {
         marker("STATE_NONEMPTY\n");
         return 0;
     }
-    if (!strcmp(mode, "descendant")) {
+    if (!strcmp(mode, "descendant") || !strcmp(mode, "descendant-exit") || !strcmp(mode, "late-adoption")) {
+        int late_adoption = !strcmp(mode, "late-adoption");
         int sync[2];
         if (pipe(sync))
             return 70;
@@ -610,11 +632,13 @@ int main(int argc, char **argv) {
             close(sync[0]);
             if (setsid() < 0)
                 _exit(72);
-            pid_t q = fork();
-            if (q < 0)
-                _exit(73);
-            if (q)
-                _exit(0);
+            if (!late_adoption) {
+                pid_t q = fork();
+                if (q < 0)
+                    _exit(73);
+                if (q)
+                    _exit(0);
+            }
             signal(SIGTERM, SIG_IGN);
             signal(SIGHUP, SIG_IGN);
             close(0);
@@ -630,9 +654,11 @@ int main(int argc, char **argv) {
         if (read(sync[0], &b, 1) != 1)
             return 74;
         close(sync[0]);
-        if (waitpid(p, NULL, 0) != p)
+        if (!late_adoption && waitpid(p, NULL, 0) != p)
             return 75;
         marker("DESCENDANT_READY\n");
+        if (!strcmp(mode, "descendant-exit"))
+            return 0;
         for (;;)
             pause();
     }

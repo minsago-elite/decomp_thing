@@ -274,6 +274,9 @@ class Case:
                             assert count == 0xffffffff or count in range(33)
                             assert bool(flags & 64) == (count == 0)
                             assert mask & ~0x3f == 0 and bool(flags & 16) == (mask == 0x3f)
+                            # Same signal/cause invariants as the strict Kotlin receipt decoder.
+                            assert not flags & 8 or flags & 4
+                            assert cause != 0 or (present and not flags & 12)
                             assert elapsed <= self.times[2] + 1
                             assert bool(flags & 128) == (elapsed == self.times[2] + 1)
                             self.receipt = {'cause': cause, 'outcome': outcome, 'flags': flags, 'rawWaitStatus': status, 'remainingDescendants': count, 'closedDescriptorMask': mask, 'elapsedMillis': elapsed}
@@ -527,6 +530,21 @@ try:
         c.finish({124}, b'DESCENDANT_READY')
         complete_receipt(c, 3, 2)
         assert c.receipt['flags'] & 12 == 12
+
+        c = Case('v2-natural-root-live-descendant', 'descendant-exit', version=2)
+        c.finish({0}, b'DESCENDANT_READY')
+        complete_receipt(c, 4, 1)
+        assert c.receipt['rawWaitStatus'] == 0 and c.receipt['flags'] & 12 == 12
+
+        c = Case('v2-delayed-adoption-term-before-kill', 'late-adoption', version=2,
+                 times=(1000, 100, 500), supervisor='supervise-delay-cleanup-adoption')
+        c.finish({124}, b'DESCENDANT_READY')
+        complete_receipt(c, 3, 2)
+        assert c.receipt['flags'] & 12 == 12
+        traces = V2_RESULTS[-1].get('trustedSupervisorTrace', [])
+        assert 'TRACE_ADOPTION rootExitedDuringHold=1' in traces
+        assert any(line.startswith('TRACE_HOLD point=cleanup-adoption elapsedMillis=') for line in traces)
+        assert any(line.startswith('TRACE_SUMMARY point=cleanup-adoption held=1') for line in traces)
 
         for name, initial in (
             ('missing-feature', frame(7, payload=setup(version=2, features=0), version=2)),
@@ -876,7 +894,7 @@ finally:
             'cgroupAdmissionQualified': False,
         },
         'completed': (failure_type is None and not cleanup_failures and len(RESULTS) == 42
-                      and (not args.include_v2 or len(V2_RESULTS) == 21)
+                      and (not args.include_v2 or len(V2_RESULTS) == 23)
                       and (not args.include_v2 or len(REVIEW_RESULTS) == 18)
                       and (not args.compare_prior_guardian or len(PRIOR_RESULTS) == 2)
                       and inputs_unchanged and tools_unchanged and binaries_unchanged),
@@ -885,7 +903,7 @@ finally:
         'cleanupFailures': cleanup_failures,
         'passed': len(RESULTS),
         'results': RESULTS,
-        'v2ExpectedControlCount': 21 if args.include_v2 else 0,
+        'v2ExpectedControlCount': 23 if args.include_v2 else 0,
         'v2Passed': len(V2_RESULTS),
         'v2Results': V2_RESULTS,
         'reviewRegressionExpectedCount': 18 if args.include_v2 else 0,
