@@ -359,6 +359,42 @@ class GitBranchesWorktreesTest {
         assertEquals(moved, GitRefOperations.refObject(f.repositories.runner, f.gitDir(), GitObjectFormat.SHA1, "refs/heads/reviewed"))
     }
 
+    @Test fun `work-tree command failure rolls back partial creation and permits retry after restart`(): Unit = Fixture().use { f ->
+        val base = f.prepare()
+        val primary = service.workspace(jobId, repositoryId).worktreeId
+        // A historical object can fit the checkout bounds but contain a filename that the host
+        // cannot materialize. Git creates -b's branch before checkout fails inside worktree add.
+        val blob = f.raw("rev-parse", "$base:src/main.c").trim()
+        f.raw("update-index", "--add", "--cacheinfo", "100644,$blob,${"x".repeat(256)}")
+        val tree = f.raw("write-tree").trim()
+        val historical = f.raw("commit-tree", "-p", base, "-m", "uncheckoutable history", tree).trim()
+        f.raw("read-tree", base)
+        GitRepositoryImport.requireCheckoutBounds(f.repositories.runner, f.gitDir(), historical, GitCheckoutLimits())
+        for (name in listOf("failed-checkout", null)) {
+            val failed = run(GitRefRequest(GitOperationAction.WORKTREE_ADD, primary, guards().second,
+                name = name, objectId = historical))
+            assertEquals(GitOperationState.FAILED, failed.state, failed.message)
+            assertEquals("REPOSITORY_UNAVAILABLE", failed.failureCode)
+            assertFalse(f.gitDir().parent.resolve("worktrees/${failed.worktreeId}").exists())
+            assertFalse(f.gitDir().resolve("worktrees/${failed.worktreeId}").exists())
+            assertFalse(f.raw("worktree", "list", "--porcelain").contains(failed.worktreeId))
+            assertNull(GitRefOperations.refObject(f.repositories.runner, f.gitDir(), GitObjectFormat.SHA1, "refs/heads/failed-checkout"))
+            service.close(); service = f.open()
+            assertEquals(GitOperationState.FAILED, service.operation(jobId, repositoryId, failed.operationId).state)
+            assertEquals(listOf(primary), service.worktrees(jobId, repositoryId).map { it.worktreeId })
+            assertNull(GitRefOperations.refObject(f.repositories.runner, f.gitDir(), GitObjectFormat.SHA1, "refs/heads/failed-checkout"))
+            val retried = run(GitRefRequest(GitOperationAction.WORKTREE_ADD, primary, guards().second, name = name, objectId = base))
+            assertEquals(GitOperationState.COMPLETED, retried.state, retried.message)
+            assertEquals(GitOperationState.COMPLETED, run(GitRefRequest(GitOperationAction.WORKTREE_REMOVE,
+                retried.worktreeId, guards(retried.worktreeId).second)).state)
+            if (name != null) assertEquals(GitOperationState.COMPLETED, run(GitRefRequest(GitOperationAction.BRANCH_DELETE,
+                primary, guards().second, refId = refId("refs/heads/$name"), objectId = base)).state)
+        }
+        assertEquals(base, service.workspace(jobId, repositoryId).observation.head.objectId)
+        assertTrue(service.workspace(jobId, repositoryId).observation.status.entries.isEmpty())
+        assertEquals("int main(void) { return 0; }\n", Files.readString(f.snapshot.resolve("src/main.c")))
+    }
+
     @Test fun `ordinary work-tree registration failure rolls back allocation and branch across restart`(): Unit = Fixture().use { f ->
         val base = f.prepare()
         val primary = service.workspace(jobId, repositoryId).worktreeId

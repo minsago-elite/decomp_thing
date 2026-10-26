@@ -849,7 +849,7 @@ class ManagedGitRepositories(
         val directory = root.resolve(queued.jobId).resolve("git")
         val staging = directory.resolve("staging").resolve(queued.operationId)
         var current = queued
-        var worktreeAddApplied = false
+        var worktreeAddAttempted = false
         var lease: AutoCloseable? = null
         try {
             if (queued.action == GitOperationAction.SWITCH || queued.action == GitOperationAction.WORKTREE_REMOVE) {
@@ -885,7 +885,7 @@ class ManagedGitRepositories(
                         message += " The commit tree differs from the recorded candidate snapshot, so it is not mapped to a reconstruction revision."
                     }
                 }
-                is GitRefRequest -> result = executeRef(runner, located, queued, request) { worktreeAddApplied = true }
+                is GitRefRequest -> result = executeRef(runner, located, queued, request) { worktreeAddAttempted = true }
                 else -> error("not a workspace request")
             }
             synchronized(lock) { current = finish(current, GitOperationState.COMPLETED, null, message, result); persist(directory, current) }
@@ -902,9 +902,10 @@ class ManagedGitRepositories(
                 else -> "STORAGE_FAILED" to "Repository storage could not be written. Read the current status before trying again."
             }
             synchronized(lock) {
-                current = if (worktreeAddApplied) {
-                    // An ordinary storage error can happen after Git published the checkout. Classify
-                    // and roll back that partial intent just like restart recovery, never strand it as FAILED.
+                current = if (worktreeAddAttempted) {
+                    // Git can create -b's branch before checkout fails inside the command, and storage
+                    // can fail after checkout. Reconcile either partial intent just like restart recovery;
+                    // never record terminal failure while leaving an unowned branch or checkout.
                     val recovered = reconcileRef(queued.jobId, current, queued.request as GitRefRequest)
                     if (recovered.state == GitOperationState.INTERRUPTED) finish(current, GitOperationState.FAILED, code,
                         "Work-tree creation failed. The unpublished checkout and its unchanged new branch were rolled back; nothing remains.")
@@ -922,7 +923,7 @@ class ManagedGitRepositories(
 
     /** Apply one validated branch, tag or work-tree intent. Returns the resulting object, if any. */
     private fun executeRef(runner: GitCommandRunner, located: Located, operation: GitOperationRecord, request: GitRefRequest,
-        worktreeAdded: () -> Unit): String? {
+        worktreeAddStarting: () -> Unit): String? {
         val format = located.record.objectFormat
         return when (request.action) {
             GitOperationAction.BRANCH_CREATE, GitOperationAction.TAG -> {
@@ -951,8 +952,9 @@ class ManagedGitRepositories(
                 val path = GitStorage.directories(directory, LINKED_WORK_TREES).resolve(operation.worktreeId)
                 if (Files.exists(path, NOFOLLOW_LINKS)) GitRefOperations.refuse("STORAGE_FAILED", "The work-tree location is already occupied.")
                 val objectId = checkNotNull(request.objectId)
+                // From this point even a command exception may have published part of the intent.
+                worktreeAddStarting()
                 GitRefOperations.addWorktree(runner, located.commonDir, path, objectId, request.name)
-                worktreeAdded()
                 crash(GitOperationCrashPoint.AFTER_STAGING)
                 val records = GitStorage.directories(directory, WORKTREE_RECORDS)
                 GitStorage.replaceAtomically(records.resolve("${operation.worktreeId}.json"), GitRefOperations.encodeWorktree(
