@@ -934,6 +934,10 @@ class ManagedGitRepositories(
                     requireNoLease(located, runs)
                     crash(GitOperationCrashPoint.BEFORE_PUBLISH)
                     requireNoLease(located)
+                    // A workflow can have written and finished before exclusion was acquired.
+                    // Recheck the reviewed guards and all integration prerequisites under it.
+                    validateIntegration(runner, located,
+                        GitRepositoryInspector.inspect(runner, located.gitDir, located.workTree, located.commonDir), request)
                     GitIntegrations.merge(runner, located.gitDir, located.workTree, tracking.objectId, strategy, message, policy)
                 }
                 crash(GitOperationCrashPoint.AFTER_PUBLISH)
@@ -957,6 +961,9 @@ class ManagedGitRepositories(
                     requireNoLease(located, runs)
                     crash(GitOperationCrashPoint.BEFORE_PUBLISH)
                     requireNoLease(located)
+                    // Abort must not discard a newer resolution from a now-finished workflow.
+                    validateIntegration(runner, located,
+                        GitRepositoryInspector.inspect(runner, located.gitDir, located.workTree, located.commonDir), request)
                     GitIntegrations.abort(runner, located.gitDir, located.workTree)
                 }
                 crash(GitOperationCrashPoint.AFTER_PUBLISH)

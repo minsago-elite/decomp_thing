@@ -621,6 +621,43 @@ class GitIntegrationTest {
         assertEquals(GitOperationState.COMPLETED, sync(GitOperationAction.MERGE_ABORT).state)
     }
 
+    @Test fun `a workflow that writes and finishes before exclusion blocks merge`(): Unit = Fixture().use { f ->
+        f.cloned()
+        Files.writeString(f.seed.resolve("util.c"), "int incoming = 21;\n"); f.remoteCommit("incoming")
+        fetch()
+        val before = service.workspace(jobId, repositoryId).observation.head.objectId
+        f.hook = { if (it == GitOperationCrashPoint.AFTER_STAGING) {
+            assertFalse(f.stable)
+            f.runs["run_1"] = true
+            Files.writeString(f.workTree().resolve("README.md"), "workflow finished dirty edit\n")
+            f.runs["run_1"] = false
+        } }
+        val result = sync(GitOperationAction.MERGE, merge("fast-forward"))
+        assertEquals("WORKTREE_CHANGED", result.failureCode, result.message)
+        assertEquals(before, service.workspace(jobId, repositoryId).observation.head.objectId)
+        assertEquals("workflow finished dirty edit\n", Files.readString(f.workTree().resolve("README.md")))
+        assertEquals("int util;\n", Files.readString(f.workTree().resolve("util.c")))
+    }
+
+    @Test fun `abort preserves a newer resolution from a workflow finished before exclusion`(): Unit = Fixture().use { f ->
+        f.cloned()
+        f.conflictOn("README.md")
+        val updated = "new workflow resolution not reviewed by the abort request\n"
+        val (review, guard) = guards()
+        f.hook = { if (it == GitOperationCrashPoint.AFTER_STAGING) {
+            assertFalse(f.stable)
+            f.runs["run_1"] = true
+            Files.writeString(f.workTree().resolve("README.md"), updated)
+            f.runs["run_1"] = false
+        } }
+        val result = run(GitSyncRequest(GitOperationAction.MERGE_ABORT, review.worktreeId, guard))
+        assertEquals("WORKTREE_CHANGED", result.failureCode, result.message)
+        assertEquals(updated, Files.readString(f.workTree().resolve("README.md")))
+        assertTrue(service.conflicts(jobId, repositoryId, null).mergeInProgress)
+        f.hook = {}
+        assertEquals(GitOperationState.COMPLETED, sync(GitOperationAction.MERGE_ABORT).state)
+    }
+
     @Test fun `the content digest is streamed and matches the file bytes`(): Unit = Fixture().use { f ->
         val file = f.repositories.root.resolve("large.bin")
         val bytes = ByteArray(3 * 1024 * 1024 + 17) { (it % 251).toByte() }
