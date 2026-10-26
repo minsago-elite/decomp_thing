@@ -262,9 +262,12 @@ data class ArchivalAudit(
     val requiredCorpusSha256: List<String> = emptyList(),
     val observedPortableCorpusSha256: List<String> = emptyList(),
     val recoveryAssessment: JsonObject? = null,
+    val recordedRecoverySummary: RecordedRecoverySummaryV1? = null,
+    val recoveryAssessmentVerificationDisposition: String = "no-structural-evidence",
     val moduleCompilationEvidence: Map<String, JsonObject> = emptyMap(),
     val archivePublication: ArchivePublicationEvidence? = null,
     internal val behaviorReportSha256: Map<String, String> = emptyMap(),
+    internal val sourceManifestSha256: String? = null,
 ) {
     val provenanceComplete: Boolean get() = missingModelProvenance.isEmpty() && missingSourceProvenance.isEmpty()
     val equivalence: EquivalenceAssessment
@@ -283,6 +286,7 @@ data class ArchivalAudit(
         {
           "entityCount": $entityCount,
           "recoveryAssessment": ${recoveryAssessment ?: "null"},
+          "recoveryReporting": {"schemaVersion":1,"recordedRecoverySummary":${recordedRecoverySummary?.toJson() ?: "null"},"verificationDisposition":${JsonPrimitive(recoveryAssessmentVerificationDisposition)}},
           "provenanceComplete": $provenanceComplete,
           "missingModelProvenance": [${missingModelProvenance.sorted().joinToString(",") { JsonPrimitive(it).toString() }}],
           "missingSourceProvenance": [${missingSourceProvenance.sorted().joinToString(",") { JsonPrimitive(it).toString() }}],
@@ -329,6 +333,7 @@ object ArchivalProjectAuditor {
         publication: ArchivePublicationEvidence? = null,
         limits: ArchivalBundleLimits = ArchivalBundleLimits(),
         publish: Boolean = true,
+        analysisResult: ProgramAnalysisResult? = null,
     ): ArchivalAudit {
         hostSafetyLimits.requireAllows(profile.budgets)
         val effectiveLimits = limits.constrainedTo(profile)
@@ -359,6 +364,14 @@ object ArchivalProjectAuditor {
         val modelPath = profile.layout.declaration("program-model-evidence").materialize()
         val planPath = profile.layout.declaration("module-plan-evidence").materialize()
         val confidencePath = profile.layout.declaration("confidence-evidence").materialize()
+        val unresolvedPath = profile.layout.declaration("unresolved-evidence").materialize()
+        fun inputByteCeiling(path: String): Long = when (path) {
+            modelPath -> minOf(maximumFileBytes, ProgramAnalysisResult.MAXIMUM_MODEL_BYTES.toLong())
+            planPath -> minOf(maximumFileBytes, RecoveryAssessmentProjectionV1.MAXIMUM_BYTES.toLong())
+            confidencePath, unresolvedPath -> if (manifest.schemaVersion == 4)
+                minOf(maximumFileBytes, assessmentReportMaximumBytes(profile).toLong()) else maximumFileBytes
+            else -> maximumFileBytes
+        }
         val files = manifest.files.associateBy { it.path }
         val agentFallbackPaths = linkedSetOf<String>()
         val fallbackCheckpointSources = linkedMapOf<String, String>()
@@ -382,10 +395,14 @@ object ArchivalProjectAuditor {
         require(totalBytes <= effectiveLimits.maximumTotalBytes) { "audit manifest exceeds the aggregate byte bound" }
         require(totalEntries <= effectiveLimits.maximumEntries) { "audit manifest and payload exceed the entry bound" }
         var modelText: String? = null
+        var modelBytes: ByteArray? = null
         var planText: String? = null
         var confidenceText: String? = null
+        var unresolvedText: String? = null
         for (file in manifest.files) {
-            val snapshot = readStableRegularFile(projectDir, file.path, maximumFileBytes)
+            val remainingBytes = effectiveLimits.maximumTotalBytes - totalBytes
+            require(remainingBytes > 0) { "audit input exceeds the aggregate byte bound" }
+            val snapshot = readStableRegularFile(projectDir, file.path, minOf(inputByteCeiling(file.path), remainingBytes))
             totalBytes = Math.addExact(totalBytes, snapshot.bytes.size.toLong())
             require(totalBytes <= effectiveLimits.maximumTotalBytes) { "audit input exceeds the aggregate byte bound" }
             require(snapshot.sha256 == file.sha256) { "audit manifest hash differs from current file: ${file.path}" }
@@ -400,9 +417,14 @@ object ArchivalProjectAuditor {
                     agentFallbackPaths += sourcePath
                 }
             }
-            if (file.path == modelPath) modelText = snapshot.bytes.decodeToString(throwOnInvalidSequence = true)
+            if (file.path == modelPath) {
+                modelBytes = snapshot.bytes
+                modelText = snapshot.bytes.decodeToString(throwOnInvalidSequence = true)
+            }
             if (file.path == planPath) planText = snapshot.bytes.decodeToString(throwOnInvalidSequence = true)
             if (file.path == confidencePath) confidenceText = snapshot.bytes.decodeToString(throwOnInvalidSequence = true)
+            if (manifest.schemaVersion == 4 && file.path == unresolvedPath)
+                unresolvedText = snapshot.bytes.decodeToString(throwOnInvalidSequence = true)
         }
         if (unresolvedOutput) {
             ReconstructionAcpEvidenceArchiveVerifier.verify(projectDir, hashes, manifestSizes, manifest, profile)
@@ -417,6 +439,81 @@ object ArchivalProjectAuditor {
             !planJson.getValue("schemaVersion").jsonPrimitive.isString &&
             planJson.getValue("schemaVersion").jsonPrimitive.intOrNull == 2
         ) { "audit requires a closed schema-2 module plan" }
+        // New report integrity is mandatory even when implementation diagnostics are
+        // deliberately retained as unresolved. It never inherits that legacy tolerance.
+        val assessmentCheckpoint = assessmentReportCheckpoint(profile)
+        assessmentCheckpoint("before validating retained recovery assessment")
+        val capturedModel = requireNotNull(modelBytes)
+        analysisResult?.let {
+            require(it.canonicalModelBytes.contentEquals(capturedModel)) {
+                "audit analysis snapshot differs from the exact manifest-bound model bytes"
+            }
+        }
+        val confidenceReport = confidenceText?.let { text ->
+            if (manifest.schemaVersion == 4) require(text.toByteArray(Charsets.UTF_8).size <= assessmentReportMaximumBytes(profile)) {
+                "confidence report exceeds its byte bound"
+            }
+            UniqueJsonObjectKeyValidator(text).validate()
+            Json.parseToJsonElement(text).jsonObject
+        }
+        val assessmentProjection = when (manifest.schemaVersion) {
+            4 -> {
+                val report = requireNotNull(confidenceReport) { "manifest 4 requires confidence 3 evidence" }
+                require(report.getValue("schemaVersion") == JsonPrimitive(3)) {
+                    "source manifest 4 must be paired with confidence 3"
+                }
+                require(report.keys == setOf("schemaVersion", "basis", "scoreMeaning", "scoreInterpretation",
+                    "recoveryAssessment", "recoveryAssessmentSha256", "projectScore", "modules",
+                    "unresolvedRecoveryEntityIds", "unresolvedImplementationIds", "unresolvedEntityIds",
+                    "semanticPlanningBudgetEvidence", "sourceGenerationBudgetEvidence")) {
+                    "confidence 3 fields do not match its closed schema"
+                }
+                val passiveAnalysis = ProgramAnalysisResult(capturedModel, checkpoint = assessmentCheckpoint)
+                val plan = ModulePlanJson.readCanonical(planText.toByteArray(Charsets.UTF_8),
+                    minOf(maximumFileBytes, 512L * 1024 * 1024).toInt(), assessmentCheckpoint)
+                val encodedProjection = report.getValue("recoveryAssessment").toString().toByteArray(Charsets.UTF_8)
+                val projection = RecoveryAssessmentProjectionV1.parsePassive(encodedProjection, passiveAnalysis, plan,
+                    assessmentReportMaximumBytes(profile), assessmentCheckpoint)
+                require(report.getValue("recoveryAssessmentSha256") == JsonPrimitive(projection.sha256)) {
+                    "confidence recovery assessment digest differs from its exact projection"
+                }
+                val expectedSummary = projection.publicSummary(hashes.getValue(confidencePath))
+                require(requireNotNull(manifest.recordedRecoverySummary).canonicalBytes.contentEquals(expectedSummary.canonicalBytes)) {
+                    "manifest recovery summary differs from the complete confidence projection"
+                }
+                val markdown = requireNotNull(unresolvedText) {
+                    "manifest 4 requires a manifest-bound recovery Markdown report"
+                }
+                val marker = RECOVERY_MARKDOWN_IMPLEMENTATION_MARKER
+                val markerOffset = markdown.indexOf(marker)
+                require(markerOffset >= 0 && markerOffset == markdown.lastIndexOf(marker)) {
+                    "recovery Markdown requires one implementation section after its complete assessment prefix"
+                }
+                val expectedPrefix = renderRecoveryAssessmentMarkdownPrefix(model, projection, unresolvedOutput,
+                    minOf(inputByteCeiling(unresolvedPath), assessmentReportMaximumBytes(profile).toLong()).toInt(),
+                    assessmentCheckpoint)
+                require(markdown.substring(0, markerOffset) == expectedPrefix) {
+                    "recovery Markdown prefix differs from the complete confidence assessment and extraction census"
+                }
+                projection to plan
+            }
+            else -> {
+                val report = requireNotNull(confidenceReport) { "manifest 3 requires confidence 2 evidence" }
+                require(report["schemaVersion"] == JsonPrimitive(2)) {
+                    "source manifest 3 must be paired with confidence 2"
+                }
+                require("recoveryAssessmentSha256" !in report) {
+                    "historical confidence cannot carry a current assessment commitment"
+                }
+                null
+            }
+        }
+        val assessmentDisposition = assessmentProjection?.let { (projection, plan) ->
+            if (analysisResult != null) projection.verificationDisposition(analysisResult, plan, assessmentCheckpoint)
+            else if (projection.document.getValue("measurements") is JsonNull) "no-structural-evidence"
+            else "recorded-origin-unverified"
+        } ?: "no-structural-evidence"
+        assessmentCheckpoint("after validating retained recovery assessment")
         val entities = model.functions.map { it.id } + model.globals.map { it.id } + model.types.map { it.id }
         val entitySet = entities.toSet()
         val functionIds = model.functions.mapTo(hashSetOf()) { it.id }
@@ -593,7 +690,9 @@ object ArchivalProjectAuditor {
                 val text = requireNotNull(confidenceText) { "accepted modules require manifest-bound confidence evidence" }
                 UniqueJsonObjectKeyValidator(text).validate()
                 val report = Json.parseToJsonElement(text).jsonObject
-                require(report.getValue("schemaVersion") == JsonPrimitive(2)) { "confidence evidence has an unsupported schema" }
+                require(report.getValue("schemaVersion") == JsonPrimitive(if (manifest.schemaVersion == 4) 3 else 2)) {
+                    "confidence evidence has an unsupported schema pair"
+                }
                 require(report.string("basis") == "recovery evidence only; behavioral equivalence is not implied" &&
                     report.string("scoreMeaning") ==
                     "structural recovery heuristic; not implementation acceptance or measured behavioral confidence") {
@@ -880,15 +979,19 @@ object ArchivalProjectAuditor {
             moduleCompilationEvidence = compilationEvidence,
             requiredCorpusSha256 = requiredCorpora.sorted(),
             observedPortableCorpusSha256 = observedCorpora.toList(),
-            recoveryAssessment = model.unassessedRecoveryAssessment(sha256(modelText.toByteArray(Charsets.UTF_8))),
+            recoveryAssessment = assessmentProjection?.first?.document
+                ?: model.unassessedRecoveryAssessment(sha256(capturedModel)),
+            recordedRecoverySummary = manifest.recordedRecoverySummary,
+            recoveryAssessmentVerificationDisposition = assessmentDisposition,
             archivePublication = publicationEvidence,
             behaviorReportSha256 = behaviorHashes.toMap(),
+            sourceManifestSha256 = manifestSnapshot.sha256,
         )
         require(readStableRegularFile(projectDir, "source_tree_manifest.json", maximumFileBytes).sha256 == manifestSnapshot.sha256) {
             "audit manifest changed during verification"
         }
         for ((relative, expectedHash) in hashes) {
-            require(readStableRegularFile(projectDir, relative, maximumFileBytes).sha256 == expectedHash) {
+            require(readStableRegularFile(projectDir, relative, inputByteCeiling(relative)).sha256 == expectedHash) {
                 "audit input changed before publication: $relative"
             }
         }
@@ -922,7 +1025,14 @@ object ArchivalProjectAuditor {
         currentProjectRecord?.let { BehaviorEvidence.requireProjectCurrent(it, BehaviorProjectContext(projectDir, profile)) }
         if (unresolvedOutput) adapter.verifyArchivePurpose(projectDir, profile, manifest, hashes.keys)
         if (repairState.isInitialized()) rejectProfileProjectionPreimages(projectDir, profile)
-        if (publish) writeProjectEvidenceAtomically(projectDir.resolve("reports/archival_audit.json"), audit.toJson())
+        if (publish) {
+            val publicationCheckpoint = assessmentReportCheckpoint(profile)
+            publicationCheckpoint("before archival audit encoding")
+            val auditBytes = audit.toJson().toByteArray(Charsets.UTF_8)
+            require(auditBytes.size.toLong() <= maximumFileBytes) { "archival audit exceeds its file byte bound" }
+            publicationCheckpoint("before archival audit publication")
+            writeProjectEvidenceAtomically(projectDir.resolve("reports/archival_audit.json"), auditBytes)
+        }
         return audit
     }
 }

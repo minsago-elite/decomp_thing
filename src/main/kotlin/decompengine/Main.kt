@@ -24,6 +24,10 @@ import decompengine.project.ReconstructionAdapters
 import decompengine.project.ReconstructionProfile
 import decompengine.project.GhidraHeadlessProgramModelAnalyzer
 import decompengine.project.ModuleReconstructor
+import decompengine.project.RecordedRecoverySummaryV1
+import kotlinx.serialization.json.JsonNull
+import kotlinx.serialization.json.jsonObject
+import kotlinx.serialization.json.jsonPrimitive
 import decompengine.agent.AgentHarness
 import decompengine.agent.AgentWorkflowProgress
 import decompengine.agent.AgentWorkflowPhase
@@ -55,6 +59,7 @@ fun main(args: Array<String>) {
         "reconstruct" -> runReconstruct(args.drop(1))
         "gcc-engine-plan" -> runGccEnginePlan(args.drop(1))
         "gcc-engine-full-export" -> runGccEngineFullExport(args.drop(1))
+        "gcc-driver-reconstruct" -> runGccDriverReconstruct(args.drop(1))
         "gcc-engine-runtime-diagnostic" -> runGccEngineCommand(args.drop(1), fullRecoveryExport = true, runtimeDiagnostics = true)
         "gcc-engine-native-calls" -> runGccEngineCommand(args.drop(1), fullRecoveryExport = false, nativeCallObservations = true)
         "llvm-native-runtime-measurement" -> runLlvmNativeRuntimeMeasurement(args.drop(1))
@@ -129,6 +134,19 @@ private fun runGccEnginePlan(args: List<String>) {
 
 private fun runGccEngineFullExport(args: List<String>) {
     runGccEngineCommand(args, fullRecoveryExport = true)
+}
+
+private fun runGccDriverReconstruct(args: List<String>) {
+    val environment = System.getenv()
+    val exitCode = runReconstructionCliAction(environment.values) {
+        val options = decompengine.oracle.gcc.GccStructuralReconstructionOptions.parse(args)
+        val result = decompengine.oracle.gcc.GccStructuralReconstructionCli.run(options, args)
+        renderReconstructionSuccess(result.projectDir.toString(), result.bundle.archivePath.toString(),
+            result.bundle.archiveSha256, environment.values,
+            recordedRecoverySummary = result.recordedRecoverySummary,
+            recoveryVerificationDisposition = result.recoveryAssessmentVerificationDisposition)
+    }
+    if (exitCode != 0) kotlin.system.exitProcess(exitCode)
 }
 
 private fun runGccEngineCommand(args: List<String>, fullRecoveryExport: Boolean,
@@ -227,7 +245,9 @@ private fun runReconstruct(args: List<String>) {
                 throw failure
             }
             renderReconstructionSuccess(result.projectDir.toString(), result.bundle.archivePath.toString(),
-                result.bundle.archiveSha256, environment.values)
+                result.bundle.archiveSha256, environment.values,
+                recordedRecoverySummary = result.recordedRecoverySummary,
+                recoveryVerificationDisposition = result.recoveryAssessmentVerificationDisposition)
         }
     }
     if (exitCode != 0) kotlin.system.exitProcess(exitCode)
@@ -240,12 +260,44 @@ internal fun renderReconstructionSuccess(
     archiveSha256: String,
     sensitiveValues: Collection<String>,
     output: PrintStream = System.out,
+    recordedRecoverySummary: RecordedRecoverySummaryV1? = null,
+    recoveryVerificationDisposition: String = "no-structural-evidence",
 ) {
+    require(recoveryVerificationDisposition in setOf("no-structural-evidence", "recorded-origin-unverified",
+        "same-process-owned-selected-evidence")) { "unsupported recovery reporting verification disposition" }
     val text = MvpArtifactRedactor(sensitiveValues, 16_384L).projectTerminated {
         append("source tree: ").append(projectDirectory).append("\n")
         append("archive: ").append(archivePath).append("\n")
         append("archive sha256: ").appendSha256(archiveSha256).append("\n")
         append("recovery accuracy: unassessed; see the source tree's confidence and unresolved reports\n")
+        recordedRecoverySummary?.let { summary ->
+            val document = summary.document
+            val population = document.getValue("population").jsonObject
+            append("model entities: ").append(population.getValue("modelEntityCount").jsonPrimitive.content)
+                .append("; overall unassessed: ").append(population.getValue("unassessedEntityCount").jsonPrimitive.content).append("\n")
+            append("assessment projection sha256: ").appendSha256(document.getValue("projectionSha256").jsonPrimitive.content).append("\n")
+            append("selected measurements: ").append(if (document["measurements"] == JsonNull) "unavailable" else "recorded; selected function starts and surviving names only").append("\n")
+            document["measurements"]?.takeUnless { it == JsonNull }?.jsonObject?.let { measurements ->
+                val starts = measurements.getValue("functionStarts").jsonObject
+                for ((label, ratio) in listOf(
+                    "selected exact-start precision" to starts.getValue("precision").jsonObject,
+                    "selected exact-start recall" to starts.getValue("recall").jsonObject,
+                    "selected surviving-alias identity" to measurements.getValue("survivingSymbolIdentity").jsonObject
+                        .getValue("identityRecovery").jsonObject,
+                )) {
+                    append(label).append(": ").append(ratio.getValue("numerator").jsonPrimitive.content)
+                        .append("/").append(ratio.getValue("denominator").jsonPrimitive.content)
+                    if (ratio["value"] == JsonNull) append("; ratio unavailable")
+                    append("\n")
+                }
+            }
+            append("assessment origin: ").append(when (recoveryVerificationDisposition) {
+                "same-process-owned-selected-evidence" -> "compared with owned selected evidence in this process"
+                "recorded-origin-unverified" -> "recorded; origin unverified"
+                else -> "no structural evidence"
+            }).append("\n")
+            append("extraction labels, implementation acceptance, and uncalibrated confidence remain separate\n")
+        }
     }
     if (!admitCliEncoding(text, output)) throw MvpPatchException("reconstruction display encoding is not admitted")
     output.print(text)
@@ -961,6 +1013,7 @@ private fun printHelp() {
           llm_bin_patch gcc-engine-plan <cc1|lto1> <stripped-binary> --profile <file> --ghidra-archive <file> --output <empty-private-directory> --scratch <provisioned-mount>
           llm_bin_patch gcc-engine-runtime-diagnostic cc1 <stripped-binary> --profile <file> --ghidra-archive <file> --output <empty-private-directory> --scratch <provisioned-mount>
           llm_bin_patch gcc-engine-full-export <cc1|driver> <stripped-binary> --profile <file> --ghidra-archive <file> --output <empty-private-directory> --scratch <provisioned-mount>
+          llm_bin_patch gcc-driver-reconstruct <stripped-binary> --profile <file> --ghidra-archive <file> --output <empty-private-directory> --scratch <provisioned-mount> [--reconstruction-profile generated-c-make-v1|generated-c-ninja-v1]
           llm_bin_patch gcc-engine-native-calls <cc1> <stripped-binary> --profile <file> --ghidra-archive <file> --output <empty-private-directory> --scratch <provisioned-mount>
           llm_bin_patch llvm-native-runtime-measurement [--listener-continuity] <oci-layout> <fixed-client> <empty-config> <private-socket> <fresh-output>
           llm_bin_patch web [--host 127.0.0.1] [--port 8000] [--listen-backlog 64] [--data-dir .decomp_engine/jobs] [--ui legacy|spa] [--base-path /] [--dev-frontend-origin http://127.0.0.1:5173]
@@ -975,6 +1028,7 @@ private fun printHelp() {
           gcc-engine-plan requires contained execution and retains scratch plus linked evidence; results remain incomplete and release-ineligible.
           gcc-engine-runtime-diagnostic retains a diagnostic execution journal without qualification, scoring, or release authority.
           gcc-engine-full-export runs a fresh contained full-recovery export and emits an authenticated structural profile binding; it does not score or certify structural truth.
+          gcc-driver-reconstruct carries owned selected function measurements into evidence-only reconstruction reports; overall recovery and implementation acceptance remain unassessed.
           gcc-engine-native-calls retains native call observations alongside an unchanged full model; results remain unscored and release-ineligible.
           --resume-after-checkpoint <multiple-of-512> interrupts and resumes within this process; it is not cold recovery.
           Scratch defaults: 8 GiB available / 64 GiB maximum filesystem, 32768 available / 1000000 maximum inodes.

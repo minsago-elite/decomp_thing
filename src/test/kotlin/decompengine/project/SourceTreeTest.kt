@@ -42,6 +42,141 @@ import kotlinx.serialization.json.jsonPrimitive
 
 class SourceTreeTest {
     @Test
+    fun `ordinary generation rejects profile and stricter planner counts before model strings are encoded`() {
+        val root = Path.of("build/test-tmp").toAbsolutePath().normalize().createDirectories()
+        val strings = object : AbstractSet<String>() {
+            override val size: Int = 1
+            override fun iterator(): Iterator<String> = throw AssertionError("model strings traversed before planner admission")
+        }
+        val model = oneModuleModel().let { original -> original.copy(functions = listOf(
+            original.functions.single().copy(calls = setOf("unresolved_one", "unresolved_two"), strings = strings),
+        )) }
+        val base = GeneratedCMakeReconstructionProfile.descriptor
+        fun profile(budgets: ReconstructionBudgets) = ReconstructionProfile(
+            base.schemaVersion, base.id, base.layout, budgets, base.adapterConfiguration,
+        )
+        data class Case(val profile: ReconstructionProfile, val planner: DeterministicModulePlanner?, val reason: String)
+        val cases = listOf(
+            Case(profile(base.budgets.copy(plannerMaximumEntities = 1)), null, "entities; limit=1"),
+            Case(base, DeterministicModulePlanner(maximumEntities = 1), "entities; limit=1"),
+            Case(profile(base.budgets.copy(plannerMaximumDependencyEdges = 1)), null, "dependency edges; limit=1"),
+            Case(base, DeterministicModulePlanner(maximumDependencyEdges = 1), "dependency edges; limit=1"),
+            Case(profile(base.budgets.copy(plannerMaximumWorkUnits = 1)), null, "entity work units; limit=1"),
+            Case(base, DeterministicModulePlanner(maximumWorkUnits = 1), "entity work units; limit=1"),
+        )
+        for ((index, case) in cases.withIndex()) {
+            val project = createTempDirectory(root, "source-tree-early-planner-$index-").resolve("project")
+            val failure = assertFailsWith<IllegalArgumentException> {
+                SourceTreeGenerator.generate(model, project, planner = case.planner, profile = case.profile)
+            }
+            assertTrue(failure.message.orEmpty().contains(case.reason), failure.message)
+            assertFalse(project.exists())
+        }
+    }
+
+    @Test
+    fun `confidence preflight counts exact UTF8 across chunk and surrogate boundaries`() {
+        val chunks = listOf("plain-", "é한", "\uD83D", "\uDE80", "\uD800", "-", "\uDC00")
+        val expected = chunks.joinToString("")
+        val bytes = expected.toByteArray(Charsets.UTF_8).size
+        var passes = 0
+        val result = boundedUtf8AssessmentReport(bytes, {}) {
+            passes++
+            chunks.forEach { append(it) }
+        }
+        assertEquals(expected, result)
+        assertEquals(bytes, result.toByteArray(Charsets.UTF_8).size)
+        assertEquals(2, passes)
+
+        passes = 0
+        assertFailsWith<IllegalArgumentException> {
+            boundedUtf8AssessmentReport(bytes - 1, {}) {
+                passes++
+                chunks.forEach { append(it) }
+            }
+        }
+        assertEquals(1, passes, "an oversized report must fail before its rendering pass")
+    }
+
+    @Test
+    fun `confidence preflight counts JSON expansion and canonical byte payload exactly`() {
+        val value = "quoted \"\\\n\t\u0001 é한🚀"
+        val canonical = "{\"count\":3}".toByteArray(Charsets.UTF_8)
+        val expected = "[${JsonPrimitive(value)},${canonical.decodeToString()}]"
+        val result = boundedUtf8AssessmentReport(expected.toByteArray(Charsets.UTF_8).size, {}) {
+            append('[')
+            appendJsonString(value)
+            append(',')
+            appendUtf8(canonical)
+            append(']')
+        }
+        assertEquals(expected, result)
+    }
+
+    @Test
+    fun `analysis result generation retains exact frozen model bytes for every readable schema`() {
+        val root = Path.of("build/test-tmp").toAbsolutePath().normalize().createDirectories()
+        for (version in 1..4) {
+            val project = createTempDirectory(root, "source-tree-snapshot-$version-")
+            val input = oneModuleModel().copy(schemaVersion = version)
+            val submitted = input.toJson().toByteArray(Charsets.UTF_8)
+            val expected = submitted.copyOf()
+            val analysis = ProgramAnalysisResult(submitted)
+            submitted.fill(' '.code.toByte())
+            analysis.canonicalModelBytes.fill(' '.code.toByte())
+
+            val manifest = SourceTreeGenerator.generate(analysis, project)
+
+            assertTrue(expected.contentEquals(project.resolve("reports/program_model.json").readBytes()))
+            assertEquals(sha256(expected), manifest.files.single { it.path == "reports/program_model.json" }.sha256)
+            val confidence = Json.parseToJsonElement(project.resolve("reports/confidence.json").readText()).jsonObject
+            assertEquals(JsonPrimitive(3), confidence.getValue("schemaVersion"))
+            val assessment = confidence.getValue("recoveryAssessment").jsonObject
+            assertEquals(JsonPrimitive(version), assessment.getValue("bindings").jsonObject.getValue("modelSchemaVersion"))
+            assertEquals(JsonPrimitive(sha256(expected)), assessment.getValue("bindings").jsonObject.getValue("modelSha256"))
+            assertEquals(JsonNull, assessment.getValue("measurements"))
+            val summary = requireNotNull(manifest.recordedRecoverySummary).toJsonObject()
+            assertEquals(confidence.getValue("recoveryAssessmentSha256"), summary.getValue("projectionSha256"))
+            assertEquals(JsonPrimitive(sha256(project.resolve("reports/confidence.json").readBytes())), summary.getValue("confidenceSha256"))
+        }
+    }
+
+    @Test
+    fun `source generation rejects cross-kind identity ambiguity before creating output`() {
+        val root = Path.of("build/test-tmp").toAbsolutePath().normalize().createDirectories()
+        val project = createTempDirectory(root, "source-tree-typed-collision-").resolve("project")
+        val input = oneModuleModel().let { model ->
+            model.copy(globals = listOf(RecoveredGlobal(model.functions.single().id, "counter", 0x5000UL, "int")))
+        }
+        val failure = assertFailsWith<IllegalArgumentException> {
+            SourceTreeGenerator.generate(ProgramAnalysisResult.fromModel(input), project)
+        }
+        assertTrue(failure.message.orEmpty().contains("distinct entity IDs across kinds"))
+        assertFalse(project.exists())
+    }
+
+    @Test
+    fun `manifest four requires the bounded summary and exact file commitments`() {
+        val root = Path.of("build/test-tmp").toAbsolutePath().normalize().createDirectories()
+        val project = createTempDirectory(root, "source-tree-summary-binding-")
+        SourceTreeGenerator.generate(oneModuleModel(), project)
+        val manifest = Json.parseToJsonElement(project.resolve("source_tree_manifest.json").readText()).jsonObject
+        val profile = GeneratedCMakeReconstructionProfile.descriptor
+        assertFailsWith<IllegalArgumentException> {
+            SourceTreeManifestReader.parse(JsonObject(manifest - "recordedRecoverySummary").toString(), profile)
+        }
+        val summary = manifest.getValue("recordedRecoverySummary").jsonObject
+        for (change in listOf(
+            JsonObject(summary + ("confidenceSha256" to JsonPrimitive("b".repeat(64)))),
+            JsonObject(summary + ("productionVerified" to JsonPrimitive(true))),
+        )) {
+            assertFailsWith<IllegalArgumentException> {
+                SourceTreeManifestReader.parse(JsonObject(manifest + ("recordedRecoverySummary" to change)).toString(), profile)
+            }
+        }
+    }
+
+    @Test
     fun `reconstruction cannot claim the reserved repair generator`() {
         val project = createTempDirectory("source-tree-reserved-repair-generator-")
         val model = oneModuleModel()
@@ -497,7 +632,10 @@ class SourceTreeTest {
                     JsonObject(file + ("sha256" to JsonPrimitive(sha256(bytes))))
                 } else file
             }
-            manifestPath.writeText(JsonObject(manifest + ("files" to JsonArray(files))).toString())
+            val summary = RecordedRecoverySummaryV1.parse(manifest.getValue("recordedRecoverySummary").jsonObject)
+                .rebindConfidenceSha256(sha256(bytes)).toJsonObject()
+            manifestPath.writeText(JsonObject(manifest + ("files" to JsonArray(files)) +
+                ("recordedRecoverySummary" to summary)).toString())
         }
 
         val swapped = modules.toMutableList()
@@ -587,7 +725,7 @@ class SourceTreeTest {
         val manifest = SourceTreeGenerator.generate(recovered, project)
         assertTrue(manifest.unresolvedImplementationIds.isNotEmpty())
         val report = Json.parseToJsonElement(project.resolve("reports/confidence.json").readText()).jsonObject
-        assertEquals("2", report.getValue("schemaVersion").jsonPrimitive.content)
+        assertEquals("3", report.getValue("schemaVersion").jsonPrimitive.content)
         assertEquals("1.0000", report.getValue("projectScore").jsonPrimitive.content)
         val interpretation = report.getValue("scoreInterpretation").jsonObject
         assertEquals("structural-recovery", interpretation.getValue("kind").jsonPrimitive.content)
@@ -657,7 +795,7 @@ class SourceTreeTest {
         assertTrue(project.resolve("include/decomp_types.h").readText().contains("struct recovered_state"))
         assertEquals(0, MakeProjectBuilder.build(project).returnCode)
         assertEquals(manifest.editablePaths, SourceTreeManifestReader.editablePaths(project))
-        assertEquals(3, manifest.schemaVersion)
+        assertEquals(4, manifest.schemaVersion)
         assertEquals(GeneratedCMakeReconstructionProfile.PROFILE_ID, manifest.profileId)
         assertEquals(GeneratedCMakeReconstructionProfile.descriptor.sha256, manifest.profileSha256)
         val moduleSource = manifest.files.single { it.path == "src/modules/parse.c" }
@@ -687,12 +825,12 @@ class SourceTreeTest {
         }
         assertFailsWith<IllegalArgumentException> {
             SourceTreeManifestReader.parse(
-                text.replaceFirst("\"schemaVersion\": 3,", "\"schemaVersion\": 3, \"\\u0073chemaVersion\": 3,"),
+                text.replaceFirst("\"schemaVersion\": 4,", "\"schemaVersion\": 4, \"\\u0073chemaVersion\": 4,"),
                 expected,
             )
         }
         assertFailsWith<IllegalArgumentException> {
-            SourceTreeManifestReader.parse(text.replaceFirst("\"schemaVersion\": 3", "\"schemaVersion\": \"3\""), expected)
+            SourceTreeManifestReader.parse(text.replaceFirst("\"schemaVersion\": 4", "\"schemaVersion\": \"4\""), expected)
         }
         assertFailsWith<IllegalArgumentException> {
             SourceTreeManifestReader.parse(

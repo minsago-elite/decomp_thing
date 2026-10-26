@@ -27,6 +27,13 @@ fun interface ProgramModelAnalyzer {
     fun analyze(binaryPath: Path, workDir: Path): RecoveredProgramModel
 }
 
+/** A direct analysis handoff; a transport value cannot create structural admission. */
+interface AssessedProgramModelAnalyzer : ProgramModelAnalyzer {
+    fun analyzeWithAssessment(binaryPath: Path, workDir: Path): ProgramAnalysisResult
+    override fun analyze(binaryPath: Path, workDir: Path): RecoveredProgramModel =
+        analyzeWithAssessment(binaryPath, workDir).model
+}
+
 /** Binds requested export budgets without starting analysis or raising existing limits. */
 interface ExportBudgetedProgramModelAnalyzer : ProgramModelAnalyzer {
     fun withExportBudgets(budgets: ReconstructionBudgets): ProgramModelAnalyzer
@@ -504,6 +511,8 @@ data class ArchivalReconstructionResult(
     val projectDir: Path,
     val build: BuildReport,
     val bundle: ArchivalBundle,
+    val recordedRecoverySummary: RecordedRecoverySummaryV1? = null,
+    val recoveryAssessmentVerificationDisposition: String = "no-structural-evidence",
 )
 
 class ArchivalReconstructionService(
@@ -531,14 +540,23 @@ class ArchivalReconstructionService(
             ?: analyzer
         adapter.diagnostics.prepare(profile)
         progress.phase(AgentWorkflowPhase.ANALYZING)
-        val model = selectedAnalyzer.analyze(binaryPath, outputDir.resolve("analysis"))
+        val analysis = if (selectedAnalyzer is AssessedProgramModelAnalyzer) {
+            selectedAnalyzer.analyzeWithAssessment(binaryPath, outputDir.resolve("analysis"))
+        } else {
+            val extracted = selectedAnalyzer.analyze(binaryPath, outputDir.resolve("analysis"))
+            requirePlannerSnapshotAdmission(extracted, DeterministicModulePlanner.forProfile(profile))
+            ProgramAnalysisResult.fromModel(extracted, minOf(ProgramAnalysisResult.MAXIMUM_MODEL_BYTES.toLong(),
+                profile.budgets.archiveMaximumFileBytes, profile.budgets.archiveMaximumTotalBytes).toInt(),
+                assessmentReportCheckpoint(profile))
+        }
+        val model = analysis.model
         val project = outputDir.resolve("source-tree")
         val progressPath = outputDir.resolve("reconstruction_progress.json")
         progressPath.writeText("{\"phase\":\"planning\",\"completed\":0,\"total\":0}\n")
         progress.phase(AgentWorkflowPhase.PLANNING)
         var moduleTotal = 0
         SourceTreeGenerator.generate(
-            model,
+            analysis,
             project,
             hostSafetyLimits = hostSafetyLimits,
             reconstructor = reconstructor,
@@ -561,6 +579,7 @@ class ArchivalReconstructionService(
             ),
             profile = profile,
             hostSafetyLimits = hostSafetyLimits,
+            analysisResult = analysis,
         )
         val unresolvedEntities = requireNotNull(bundle.audit).unresolvedEntityIds
         val completeImplementation = !adapter.requiresUnresolvedOutput(profile) && unresolvedEntities.isEmpty()
@@ -586,11 +605,13 @@ class ArchivalReconstructionService(
               "typeCount": ${model.types.size},
               "buildExitCode": ${build.returnCode},
               "implementationStatus": "$implementationStatus",
-              "unresolvedEntityCount": ${unresolvedEntities.size}
+              "unresolvedEntityCount": ${unresolvedEntities.size},
+              "recoveryReporting": {"schemaVersion":1,"recordedRecoverySummary":${bundle.audit?.recordedRecoverySummary?.toJson() ?: "null"},"verificationDisposition":${kotlinx.serialization.json.JsonPrimitive(bundle.audit?.recoveryAssessmentVerificationDisposition ?: "no-structural-evidence")}}
             }
             """.trimIndent() + "\n",
         )
-        return ArchivalReconstructionResult(project, build, bundle)
+        return ArchivalReconstructionResult(project, build, bundle, bundle.audit?.recordedRecoverySummary,
+            bundle.audit?.recoveryAssessmentVerificationDisposition ?: "no-structural-evidence")
     }
 }
 

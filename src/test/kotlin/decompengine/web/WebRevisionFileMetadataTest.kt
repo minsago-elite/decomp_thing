@@ -25,6 +25,11 @@ class WebRevisionFileMetadataTest {
         assertEquals(1, captures)
         assertEquals("source-input-commitments", metadata.getValue("authority").jsonPrimitive.content)
         assertEquals("not-performed", metadata.getValue("contentVerification").jsonPrimitive.content)
+        val recovery = metadata.getValue("recordedRecovery").jsonObject
+        assertEquals("unavailable", recovery.getValue("state").jsonPrimitive.content)
+        assertEquals("legacy-manifest", recovery.getValue("reason").jsonPrimitive.content)
+        assertEquals("recorded-origin-unverified", recovery.getValue("origin").jsonPrimitive.content)
+        assertEquals(JsonNull, recovery["summary"])
         assertEquals("root", metadata.getValue("parentDirectoryId").jsonPrimitive.content)
         assertEquals(revisionId, metadata.getValue("binding").jsonObject.getValue("revisionId").jsonPrimitive.content)
         val item = metadata.getValue("item").jsonObject

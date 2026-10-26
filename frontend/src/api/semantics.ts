@@ -1,4 +1,4 @@
-import type { ContractDocument, Page, RevisionDirectory, Run, SourceChunk, ValidationBytePreview, ValidationCases, ValidationFailure, ValidationHistory, ValidationSummary } from './generated';
+import type { ContractDocument, Page, RecordedRecovery, RecoveryRatio, RevisionDirectory, Run, SourceChunk, ValidationBytePreview, ValidationCases, ValidationFailure, ValidationHistory, ValidationSummary } from './generated';
 import { ApiClientError } from './errors';
 import { normalizeBasePath, validateResourceHref } from '../app/paths';
 import type { ApiResource } from '../app/paths';
@@ -6,6 +6,52 @@ import type { ApiResource } from '../app/paths';
 const requireValue = (condition: boolean): void => {
   if (!condition) throw new ApiClientError('invalid_response');
 };
+
+function checkRecoveryRatio(ratio: RecoveryRatio, unit: RecoveryRatio['unit'], numerator: number, denominator: number): void {
+  requireValue(ratio.unit === unit && ratio.numerator === numerator && ratio.denominator === denominator && numerator <= denominator);
+  requireValue(denominator === 0 ? ratio.value === null : ratio.value === numerator / denominator);
+}
+
+/** Passive population arithmetic only; these commitments cannot establish producer origin. */
+function checkRecordedRecovery(recorded: RecordedRecovery): void {
+  requireValue(new TextEncoder().encode(JSON.stringify(recorded)).length <= 65536);
+  if (recorded.state === 'unavailable') {
+    requireValue(recorded.reason === 'legacy-manifest' && recorded.summary === null);
+    return;
+  }
+  requireValue(recorded.reason === null && recorded.summary !== null);
+  const summary = recorded.summary;
+  if (!summary) throw new ApiClientError('invalid_response');
+  const p = summary.population, e = summary.extraction;
+  const sum = (...values: number[]) => values.reduce((total, value) => total + BigInt(value), 0n);
+  requireValue(sum(p.functionCount, p.globalCount, p.typeCount) === BigInt(p.modelEntityCount) && p.unassessedEntityCount === p.modelEntityCount);
+  requireValue(sum(e.recovered, e.partial, e.failed, e.synthetic) === BigInt(p.modelEntityCount));
+  requireValue(new Set(summary.dimensions.map(dimension => dimension.id)).size === 20);
+  for (const dimension of summary.dimensions) {
+    const kind = dimension.id.startsWith('function.') || dimension.id.startsWith('call.') || dimension.id === 'global.reference'
+      ? 'function' : dimension.id.startsWith('global.') ? 'global' : 'type';
+    requireValue(dimension.entityKind === kind && dimension.applicableEntityCount === p[`${kind}Count`]);
+  }
+  const m = summary.measurements, unassigned = summary.unassigned;
+  requireValue((m === null) === (summary.bindings.sourceOverlay === null) && (m === null) === (unassigned === null));
+  if (m && unassigned) {
+    requireValue(summary.bindings.inputSha256 !== null);
+    const f = m.functionStarts, a = m.survivingSymbolIdentity;
+    requireValue(f.rawRecoveredCount === p.functionCount && sum(f.scoredRecoveredCount, f.ignoredExcludedCount) === BigInt(f.rawRecoveredCount));
+    requireValue(sum(f.exactMatches, f.falsePositives) === BigInt(f.scoredRecoveredCount) &&
+      sum(f.exactMatches, f.falseNegatives) === BigInt(f.scoreableOracleFunctionCount));
+    requireValue(f.nearMisses <= f.falsePositives && f.nearMisses <= f.falseNegatives &&
+      f.ignoredExcludedCount <= f.excludedOracleFunctionCount &&
+      sum(f.scoreableOracleFunctionCount, f.excludedOracleFunctionCount) === BigInt(f.oracleFunctionCount) &&
+      sum(f.oracleOnlyFunctionCount, f.nearMisses) === BigInt(f.falseNegatives));
+    checkRecoveryRatio(f.precision, 'recovered-function-starts', f.exactMatches, f.scoredRecoveredCount);
+    checkRecoveryRatio(f.recall, 'oracle-function-starts', f.exactMatches, f.scoreableOracleFunctionCount);
+    requireValue(sum(a.exact, a.nameMismatch, a.missing) === BigInt(a.population));
+    checkRecoveryRatio(a.identityRecovery, 'surviving-oracle-aliases', a.exact, a.population);
+    requireValue(unassigned.oracleFunctionCount === f.oracleFunctionCount && unassigned.oracleOnlyFunctionCount === f.oracleOnlyFunctionCount &&
+      unassigned.excludedOracleFunctionCount === f.excludedOracleFunctionCount && unassigned.survivingAliasCount === a.missing);
+  }
+}
 
 function checkValidationHistory(value: ValidationHistory): void {
   if (value.state !== 'recorded') {
@@ -293,6 +339,14 @@ export function checkSemantics(document: ContractDocument, basePath = '/'): void
       requireValue(item.displayName.split('/').every(part => part.length <= 255 && isDirectoryLabel(part)));
       requireValue((parentDirectoryId === 'root') === !item.displayName.includes('/'));
       const recorded = document.data.recordedModule;
+      const recovery = document.data.recordedRecovery;
+      const unavailable = document.data.recordedModuleUnavailableReason;
+      if (unavailable !== undefined) requireValue(recorded ? unavailable === null : unavailable !== null);
+      if (recovery) {
+        checkRecordedRecovery(recovery);
+        if (recorded && recovery.summary) requireValue(recorded.planSha256 === recovery.summary.bindings.planSha256 &&
+          recorded.generationEvidenceSha256 === recovery.summary.confidenceSha256);
+      }
       if (recorded) {
         requireValue(item.declaredUtf8Text && recorded.implementationSha256 === item.sha256);
         const used = recorded.promptCharacters; const maximum = recorded.promptBudgetCharacters;
@@ -303,6 +357,24 @@ export function checkSemantics(document: ContractDocument, basePath = '/'): void
           requireValue(compilation.sourceSha256 === recorded.implementationSha256);
           requireValue(compilation.outcome !== 'passed' || compilation.returnCode === 0);
           requireValue(compilation.outcome !== 'failed-to-start' || compilation.returnCode === null);
+        }
+        const module = recorded.recoveryAssessment;
+        if (module) {
+          const summary = recovery?.summary;
+          if (!summary) throw new ApiClientError('invalid_response');
+          const p = module.population, c = module.candidateMeasurements, m = summary.measurements;
+          requireValue(module.projectionSha256 === summary.projectionSha256 && p.modelEntityCount === p.unassessedEntityCount &&
+            p.functionCount + p.globalCount + p.typeCount === p.modelEntityCount);
+          for (const field of ['modelEntityCount', 'functionCount', 'globalCount', 'typeCount'] as const) requireValue(p[field] <= summary.population[field]);
+          requireValue((c === null) === (m === null));
+          if (c && m) {
+            const f = m.functionStarts, a = m.survivingSymbolIdentity;
+            requireValue(c.rawRecoveredCount === p.functionCount && c.scoredRecoveredCount + c.ignoredExcludedCount === c.rawRecoveredCount &&
+              c.exactMatches + c.nearMisses + c.unmatchedCount === c.scoredRecoveredCount &&
+              c.exactSurvivingAliasCount + c.mismatchedSurvivingAliasCount === c.survivingAliasCount);
+            for (const field of ['rawRecoveredCount', 'scoredRecoveredCount', 'ignoredExcludedCount', 'exactMatches', 'nearMisses'] as const) requireValue(c[field] <= f[field]);
+            requireValue(c.unmatchedCount <= f.falsePositives - f.nearMisses && c.exactSurvivingAliasCount <= a.exact && c.mismatchedSurvivingAliasCount <= a.nameMismatch);
+          }
         }
       }
       break;

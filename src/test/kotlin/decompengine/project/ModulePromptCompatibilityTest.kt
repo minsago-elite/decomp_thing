@@ -383,7 +383,12 @@ class ModulePromptCompatibilityTest {
                             })
                         }))
                     })
-                    project.resolve("source_tree_manifest.json").writeText(changedManifest.toString() + "\n")
+                    val reboundSummary = RecordedRecoverySummaryV1.parse(
+                        originalManifest.getValue("recordedRecoverySummary").jsonObject,
+                    ).rebindConfidenceSha256(sha256(changedConfidence.toByteArray())).toJsonObject()
+                    project.resolve("source_tree_manifest.json").writeText(
+                        JsonObject(changedManifest + ("recordedRecoverySummary" to reboundSummary)).toString() + "\n",
+                    )
                     val current = SourceTreeManifestReader.read(project, profile)
                     assertTrue(current.files.all { it.sha256 == sha256(project.resolve(it.path).readBytes()) }, change)
                     val failure = assertFailsWith<Exception>(change) { ArchivalProjectAuditor.audit(project, profile) }
@@ -440,10 +445,12 @@ class ModulePromptCompatibilityTest {
             val extraCheckpoint = GeneratedFileEvidence(extraCheckpointPath, sha256(checkpoint.toByteArray()),
                 checkpointEvidence.generator, roles = checkpointEvidence.roles, contentKind = checkpointEvidence.contentKind)
             project.resolve("source_tree_manifest.json").writeText(SourceTreeManifest(
+                schemaVersion = manifest.schemaVersion,
                 profileId = manifest.profileId, profileSha256 = manifest.profileSha256,
                 inputSha256 = manifest.inputSha256, files = manifest.files + extraSource + extraCheckpoint,
                 unresolvedEntityIds = manifest.unresolvedEntityIds,
-                unresolvedImplementationIds = manifest.unresolvedImplementationIds).toJson())
+                unresolvedImplementationIds = manifest.unresolvedImplementationIds,
+                recordedRecoverySummary = manifest.recordedRecoverySummary).toJson())
             val failure = assertFailsWith<IllegalArgumentException> { ArchivalProjectAuditor.audit(project, profile) }
             assertTrue(failure.message.orEmpty().contains("agent-generated module is not accepted"), failure.message)
             assertEquals(priorAudit, project.resolve("reports/archival_audit.json").readText())
@@ -470,10 +477,12 @@ class ModulePromptCompatibilityTest {
             val extra = GeneratedFileEvidence(extraPath, source.sha256, "unresolved:agent:unplanned",
                 acceptedImplementation = false, roles = source.roles, contentKind = source.contentKind)
             project.resolve("source_tree_manifest.json").writeText(SourceTreeManifest(
+                schemaVersion = manifest.schemaVersion,
                 profileId = manifest.profileId, profileSha256 = manifest.profileSha256,
                 inputSha256 = manifest.inputSha256, files = manifest.files + extra,
                 unresolvedEntityIds = manifest.unresolvedEntityIds,
-                unresolvedImplementationIds = manifest.unresolvedImplementationIds).toJson())
+                unresolvedImplementationIds = manifest.unresolvedImplementationIds,
+                recordedRecoverySummary = manifest.recordedRecoverySummary).toJson())
             val failure = assertFailsWith<IllegalArgumentException> { ArchivalProjectAuditor.audit(project, profile) }
             assertTrue(failure.message.orEmpty().contains("checkpoint is absent from the source manifest"))
             assertFalse(Files.exists(project.resolve("reports/archival_audit.json")))
@@ -639,6 +648,9 @@ class ModulePromptCompatibilityTest {
             }
             manifestPath.writeText((JsonObject(LinkedHashMap(manifest).apply {
                 put("files", JsonArray(files))
+                put("recordedRecoverySummary", RecordedRecoverySummaryV1.parse(
+                    manifest.getValue("recordedRecoverySummary").jsonObject,
+                ).rebindConfidenceSha256(sha256(changedBytes)).toJsonObject())
             }).toString()) + "\n")
 
             val failure = assertFailsWith<IllegalArgumentException> {
@@ -745,13 +757,16 @@ class ModulePromptCompatibilityTest {
             roles = source.roles,
             contentKind = source.contentKind,
         )
+        val currentManifest = SourceTreeManifestReader.read(project, profile)
         val repairedManifest = SourceTreeManifest(
-            profileId = manifest.profileId,
-            profileSha256 = manifest.profileSha256,
-            inputSha256 = manifest.inputSha256,
-            files = manifest.files.map { if (it.path == source.path) repairedSource else it },
+            schemaVersion = currentManifest.schemaVersion,
+            profileId = currentManifest.profileId,
+            profileSha256 = currentManifest.profileSha256,
+            inputSha256 = currentManifest.inputSha256,
+            files = currentManifest.files.map { if (it.path == source.path) repairedSource else it },
             unresolvedEntityIds = emptyList(),
             unresolvedImplementationIds = emptyList(),
+            recordedRecoverySummary = currentManifest.recordedRecoverySummary,
         )
         val lineage = ArchivedRepairReleaseLineage.of(
             sources = listOf(ArchivedRepairSourceLineage(

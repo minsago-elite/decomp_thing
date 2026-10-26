@@ -3,7 +3,7 @@ import { useLocation } from 'preact-iso/router';
 import { sourceCopy as copy } from '../copy/sources';
 import { message } from '../shared/messages';
 import { ApiClientError } from '../api/errors';
-import type { RevisionDirectory, RevisionFile } from '../api/generated';
+import type { RecordedModuleRecovery, RecordedRecovery, RecoveryCandidates, RecoveryRatio, RevisionDirectory, RevisionFile } from '../api/generated';
 import { apiPath, appPath, runPath, sourceDirectoryPath, sourceDownloadRoute, sourceFilePath, sourceReadRoute } from '../app/paths';
 import type { SourceSelection, SourceSnapshotPin } from '../app/paths';
 import { usePrivateTransport } from '../session/PrivateTransport';
@@ -26,6 +26,84 @@ function Context({ selected, sourceSha256 }: { selected: SourceSelection; source
     <dt>{copy.revision}</dt><dd><code>{selected.revisionId}</code></dd>
     {sourceSha256 && <><dt>{copy.sourceDigest}</dt><dd><code>{sourceSha256}</code></dd></>}
   </dl>;
+}
+
+function ReportedRatio({ value }: { value: RecoveryRatio }) {
+  return <>{value.numerator} / {value.denominator} — {value.value === null ? copy.ratioUnavailable : value.value.toLocaleString('en-US', { maximumFractionDigits: 6 })}</>;
+}
+
+function RecordedRecoveryAssessment({ value }: { value: RecordedRecovery | undefined }) {
+  const summary = value?.summary;
+  return <section aria-label={copy.recovery}>
+    <h3>{copy.recovery}</h3><p>{copy.recoveryNotice}</p>
+    {!summary ? <p>{copy.recoveryUnavailable}</p> : <>
+      <p>{copy.recoveryOverall}</p>
+      <dl class="job-facts">
+        <dt>{copy.population}</dt><dd>{summary.population.modelEntityCount}</dd>
+        <dt>{copy.functions}</dt><dd>{summary.population.functionCount}</dd>
+        <dt>{copy.globals}</dt><dd>{summary.population.globalCount}</dd>
+        <dt>{copy.types}</dt><dd>{summary.population.typeCount}</dd>
+        <dt>{copy.projectionDigest}</dt><dd><code>{summary.projectionSha256}</code></dd>
+        <dt>{copy.censusDigest}</dt><dd><code>{summary.bindings.censusSha256}</code></dd>
+      </dl>
+      <section aria-label={copy.extraction}><h4>{copy.extraction}</h4><p>{copy.extractionNotice}</p>
+        <dl class="job-facts">{(['recovered', 'partial', 'failed', 'synthetic'] as const).map(state => <>
+          <dt>{copy[state]}</dt><dd>{summary.extraction[state]}</dd>
+        </>)}</dl>
+      </section>
+      <section aria-label={copy.selectedMeasurements}><h4>{copy.selectedMeasurements}</h4><p>{copy.selectedNotice}</p>
+        {summary.measurements ? <>
+          <dl class="job-facts">
+            <dt>{copy.precision}</dt><dd><ReportedRatio value={summary.measurements.functionStarts.precision} /></dd>
+            <dt>{copy.recall}</dt><dd><ReportedRatio value={summary.measurements.functionStarts.recall} /></dd>
+            <dt>{copy.aliases}</dt><dd><ReportedRatio value={summary.measurements.survivingSymbolIdentity.identityRecovery} /></dd>
+            <dt>{copy.rawStarts}</dt><dd>{summary.measurements.functionStarts.rawRecoveredCount}</dd>
+            <dt>{copy.scoredStarts}</dt><dd>{summary.measurements.functionStarts.scoredRecoveredCount}</dd>
+            <dt>{copy.excludedStarts}</dt><dd>{summary.measurements.functionStarts.ignoredExcludedCount}</dd>
+            <dt>{copy.nearStarts}</dt><dd>{summary.measurements.functionStarts.nearMisses}</dd>
+            <dt>{copy.falsePositiveStarts}</dt><dd>{summary.measurements.functionStarts.falsePositives}</dd>
+            <dt>{copy.falseNegativeStarts}</dt><dd>{summary.measurements.functionStarts.falseNegatives}</dd>
+          </dl>
+          {summary.unassigned && <section aria-label={copy.unassigned}><h5>{copy.unassigned}</h5><p>{copy.unassignedNotice}</p>
+            <dl class="job-facts">
+              <dt>{copy.oracleFunctions}</dt><dd>{summary.unassigned.oracleFunctionCount}</dd>
+              <dt>{copy.oracleOnly}</dt><dd>{summary.unassigned.oracleOnlyFunctionCount}</dd>
+              <dt>{copy.excludedOracle}</dt><dd>{summary.unassigned.excludedOracleFunctionCount}</dd>
+              <dt>{copy.missingAliases}</dt><dd>{summary.unassigned.survivingAliasCount}</dd>
+            </dl>
+          </section>}
+        </> : <p>{copy.selectedUnavailable}</p>}
+      </section>
+      <table aria-label={copy.dimensions}><caption>{copy.dimensions}</caption>
+        <thead><tr><th scope="col">{copy.dimension}</th><th scope="col">{copy.applicableEntities}</th>
+          <th scope="col">{copy.assessmentState}</th><th scope="col">{copy.factDenominator}</th></tr></thead>
+        <tbody>{summary.dimensions.map(dimension => <tr key={dimension.id}><th scope="row">{dimension.id}</th>
+          <td>{dimension.applicableEntityCount} {copy[`${dimension.entityKind}s`]}</td><td>{copy.unassessed}</td><td>{copy.unknown}</td></tr>)}</tbody>
+      </table>
+    </>}
+  </section>;
+}
+
+
+function ModuleRecoveryAssessment({ value }: { value: RecordedModuleRecovery }) {
+  const candidates = value.candidateMeasurements;
+  const fields: [keyof RecoveryCandidates, string][] = [
+    ['rawRecoveredCount', copy.rawStarts], ['scoredRecoveredCount', copy.scoredStarts],
+    ['ignoredExcludedCount', copy.excludedStarts], ['exactMatches', copy.exactStarts], ['nearMisses', copy.nearStarts],
+    ['unmatchedCount', copy.moduleUnmatched], ['survivingAliasCount', copy.moduleAliases],
+    ['exactSurvivingAliasCount', copy.moduleExactAliases], ['mismatchedSurvivingAliasCount', copy.moduleMismatchedAliases],
+  ];
+  return <section aria-label={copy.moduleRecovery}>
+    <h4>{copy.moduleRecovery}</h4><p>{copy.moduleRecoveryNotice}</p>
+    <dl class="job-facts">
+      <dt>{copy.modulePopulation}</dt><dd>{value.population.modelEntityCount}</dd>
+      <dt>{copy.functions}</dt><dd>{value.population.functionCount}</dd>
+      <dt>{copy.globals}</dt><dd>{value.population.globalCount}</dd>
+      <dt>{copy.types}</dt><dd>{value.population.typeCount}</dd>
+    </dl>
+    {candidates ? <dl class="job-facts">{fields.map(([field, label]) => <><dt>{label}</dt><dd>{candidates[field]}</dd></>)}</dl>
+      : <p>{copy.moduleRecoveryUnavailable}</p>}
+  </section>;
 }
 
 function Directory({ selected, basePath, pin, search, historyEntry }: { selected: DirectorySelection; basePath: string; pin: SourceSnapshotPin | null; search: string; historyEntry: SourceHistoryEntry }) {
@@ -168,9 +246,11 @@ function File({ selected, basePath, runtime, search, pin, historyEntry }: { sele
         <dt>{copy.fileDigest}</dt><dd><code>{data.item.sha256}</code></dd>
         <dt>{copy.implementationDeclaration}</dt><dd>{copy.implementationDeclarations[data.implementationDeclaration ?? 'not-classified']}</dd>
       </dl>
+      <RecordedRecoveryAssessment value={data.recordedRecovery} />
       {data.recordedModule ? <section aria-label={copy.moduleGeneration}>
         <h3>{copy.moduleGeneration}</h3>
         <p>{copy.moduleGenerationNotice}</p>
+        {data.recordedModule.recoveryAssessment && <ModuleRecoveryAssessment value={data.recordedModule.recoveryAssessment} />}
         <dl class="job-facts">
           <dt>{copy.module}</dt><dd><bdi>{data.recordedModule.moduleId}</bdi></dd>
           <dt>{copy.promptCharacters}</dt><dd>{data.recordedModule.promptCharacters ?? copy.notReported}</dd>
@@ -191,7 +271,7 @@ function File({ selected, basePath, runtime, search, pin, historyEntry }: { sele
             <dt>{copy.diagnosticsSize}</dt><dd>{formatExactBytes(data.recordedModule.validation.compilation.diagnosticsBytes)}</dd>
           </dl> : <p>{copy.compilationUnavailable}</p>}
         </section> : <p>{copy.validationUnavailable}</p>}
-      </section> : <p>{copy.moduleUnavailable}</p>}
+      </section> : <p>{data.recordedModuleUnavailableReason === 'metadata-byte-limit' ? copy.moduleByteLimit : copy.moduleUnavailable}</p>}
       <p>{data.item.declaredUtf8Text ? copy.declaredText : copy.declaredBinary}</p>
       <p>{previewNotice[policy.preview]}</p>
       {policy.preview === 'available' && ((previewOpened !== null && previewOpened.sourceSha256 === data.sourceSha256 && previewOpened.metadataVersion === data.metadataVersion) || search !== ''

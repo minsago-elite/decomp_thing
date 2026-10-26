@@ -12,6 +12,12 @@ import decompengine.project.verifyAcpExecutionReceiptDocument
 import decompengine.project.UniqueJsonObjectKeyValidator
 import decompengine.project.ReconstructionProfile
 import decompengine.project.ProjectFileRole
+import decompengine.project.ModulePlanJson
+import decompengine.project.ProgramAnalysisResult
+import decompengine.project.RecordedRecoverySummaryV1
+import decompengine.project.RecoveryAssessmentProjectionV1
+import decompengine.project.assessmentReportCheckpoint
+import decompengine.project.assessmentReportMaximumBytes
 import decompengine.project.moduleIdForPath
 import decompengine.project.sha256
 import decompengine.agent.receiptCommitmentBytes
@@ -3058,7 +3064,7 @@ internal class ModuleRevisionGraph private constructor(
         // never turn a durably committed attempt into an ambiguous API failure.
         try {
             faultInjector?.hit(ModuleRevisionFaultPoint.BeforeSourceManifestSync)
-            synchronizeSourceManifest()
+            synchronizeSourceManifest(cancellationCheck)
         } catch (crash: Error) {
             throw crash
         } catch (_: Exception) {
@@ -4116,7 +4122,8 @@ internal class ModuleRevisionGraph private constructor(
         state = prepared.state
     }
 
-    private fun synchronizeSourceManifest() {
+    private fun synchronizeSourceManifest(cancellationCheck: () -> Unit = {}) {
+        cancellationCheck()
         stateStore.cleanupRootTemporary("source_tree_manifest.json")
         if (!stateStore.rootFileExists("source_tree_manifest.json")) return
         val manifestBytes = readStableRegularFile(
@@ -4198,6 +4205,13 @@ internal class ModuleRevisionGraph private constructor(
         if (remaining != null && remaining.size != unresolved.size) changed = true
         if (changed || repairedModules.isNotEmpty()) {
             val updatedRoot = LinkedHashMap(root)
+            val assessmentDeadline = reconstructionProfile?.takeIf { root["schemaVersion"] == JsonPrimitive(4) }
+                ?.let(::assessmentReportCheckpoint)
+            val assessmentCheckpoint: (String) -> Unit = { stage ->
+                cancellationCheck()
+                assessmentDeadline?.invoke(stage)
+            }
+            assessmentCheckpoint("before repair report projection")
             // Custom index profiles still own accepted source publication, but only a declared
             // reconstruction contract identifies the derived reports and their projection rules.
             val projectedFiles = if (reconstructionProfile != null && remaining != null &&
@@ -4211,12 +4225,15 @@ internal class ModuleRevisionGraph private constructor(
                     item.jsonObject["path"]?.jsonPrimitive?.contentOrNull == confidencePath
                 }.jsonObject
                 val priorSha256 = confidenceEntry.getValue("sha256").jsonPrimitive.content
+                val confidenceByteLimit = if (root["schemaVersion"] == JsonPrimitive(4))
+                    minOf(state.budget.maximumIndexEvidenceBytes, assessmentReportMaximumBytes(reconstructionProfile).toLong())
+                    else state.budget.maximumIndexEvidenceBytes
                 val reportBytes = readStableRegularFile(projectRoot, confidencePath,
-                    state.budget.maximumIndexEvidenceBytes).bytes
+                    confidenceByteLimit, cancellationCheck = { assessmentCheckpoint("reading repair confidence report") }).bytes
                 val currentSha256 = sha256(reportBytes)
                 val trustedReportBytes = if (currentSha256 == priorSha256) reportBytes else {
                     requireNotNull(stateStore.readProjectedEvidencePreimage(confidencePath,
-                        state.budget.maximumIndexEvidenceBytes)) {
+                        confidenceByteLimit)) {
                         "repair confidence projection has no manifest-bound recovery preimage"
                     }.also { preimage ->
                         require(sha256(preimage) == priorSha256) {
@@ -4227,7 +4244,11 @@ internal class ModuleRevisionGraph private constructor(
                 val reportText = decodeUtf8Strict(trustedReportBytes, confidencePath)
                 UniqueJsonObjectKeyValidator(reportText).validate()
                 val report = Json.parseToJsonElement(reportText).jsonObject
-                require(report["schemaVersion"] == JsonPrimitive(2)) { "repair confidence projection has an unsupported schema" }
+                val hasRecordedAssessment = when {
+                    root["schemaVersion"] == JsonPrimitive(3) && report["schemaVersion"] == JsonPrimitive(2) -> false
+                    root["schemaVersion"] == JsonPrimitive(4) && report["schemaVersion"] == JsonPrimitive(3) -> true
+                    else -> throw IllegalArgumentException("repair confidence and source manifest schemas are unsupported or mixed")
+                }
                 val projectedImplementations = report.getValue("unresolvedImplementationIds").jsonArray.filterNot {
                     it.jsonPrimitive.content in resolvedImplementationIds
                 }
@@ -4248,7 +4269,7 @@ internal class ModuleRevisionGraph private constructor(
                 )
                 projectedReport["modules"] = JsonArray(projectedModules)
                 val projectedBytes = (JsonObject(projectedReport).toString() + "\n").toByteArray(Charsets.UTF_8)
-                require(projectedBytes.size.toLong() <= state.budget.maximumIndexEvidenceBytes) {
+                require(projectedBytes.size.toLong() <= confidenceByteLimit) {
                     "repair confidence projection exceeds its byte bound"
                 }
                 val projectedSha256 = sha256(projectedBytes)
@@ -4284,7 +4305,7 @@ internal class ModuleRevisionGraph private constructor(
                 }
                 val planPath = reconstructionProfile.layout.declaration("module-plan-evidence").materialize()
                 val planSnapshot = readStableRegularFile(projectRoot, planPath,
-                    state.budget.maximumIndexEvidenceBytes)
+                    state.budget.maximumIndexEvidenceBytes, cancellationCheck = cancellationCheck)
                 val planEntry = files.single { item ->
                     item.jsonObject["path"]?.jsonPrimitive?.contentOrNull == planPath
                 }.jsonObject
@@ -4294,6 +4315,41 @@ internal class ModuleRevisionGraph private constructor(
                 val planText = decodeUtf8Strict(planSnapshot.bytes, planPath)
                 UniqueJsonObjectKeyValidator(planText).validate()
                 val plan = Json.parseToJsonElement(planText).jsonObject
+                if (hasRecordedAssessment) {
+                    val modelPath = reconstructionProfile.layout.declaration("program-model-evidence").materialize()
+                    assessmentCheckpoint("before repair assessment model read")
+                    val modelSnapshot = readStableRegularFile(projectRoot, modelPath,
+                        minOf(state.budget.maximumIndexEvidenceBytes, 512L * 1024 * 1024),
+                        cancellationCheck = { assessmentCheckpoint("reading repair assessment model") })
+                    val modelEntry = files.single { item ->
+                        item.jsonObject["path"]?.jsonPrimitive?.contentOrNull == modelPath
+                    }.jsonObject
+                    require(modelSnapshot.sha256 == modelEntry.getValue("sha256").jsonPrimitive.content) {
+                        "repair program model differs from the checked source manifest"
+                    }
+                    // This parser validates recorded commitments only. No repair outcome or
+                    // successful compilation can recreate the invocation's structural authority.
+                    val projection = RecoveryAssessmentProjectionV1.parsePassive(
+                        report.getValue("recoveryAssessment").toString().toByteArray(Charsets.UTF_8),
+                        ProgramAnalysisResult(modelSnapshot.bytes, checkpoint = assessmentCheckpoint),
+                        ModulePlanJson.readCanonical(planSnapshot.bytes,
+                            minOf(state.budget.maximumIndexEvidenceBytes, 512L * 1024 * 1024).toInt(),
+                            checkpoint = assessmentCheckpoint),
+                        maximumBytes = confidenceByteLimit.toInt(),
+                        checkpoint = assessmentCheckpoint,
+                    )
+                    require(report["recoveryAssessmentSha256"] == JsonPrimitive(projection.sha256)) {
+                        "repair recovery assessment digest differs from its projection"
+                    }
+                    val summary = RecordedRecoverySummaryV1.parse(root.getValue("recordedRecoverySummary").jsonObject)
+                    require(summary.canonicalBytes.contentEquals(projection.publicSummary(priorSha256).canonicalBytes)) {
+                        "repair recorded recovery summary differs from its manifest-bound confidence preimage"
+                    }
+                    // P and its digest stay exactly as recorded in the confidence object above;
+                    // only the outer confidence-file commitment changes after implementation repair.
+                    updatedRoot["recordedRecoverySummary"] = summary.rebindConfidenceSha256(projectedSha256).toJsonObject()
+                    assessmentCheckpoint("after repair assessment rebinding")
+                }
                 val owners = plan.getValue("modules").jsonArray.flatMap { module ->
                     val fields = module.jsonObject
                     val moduleId = fields.getValue("id").jsonPrimitive.content
@@ -4327,7 +4383,9 @@ internal class ModuleRevisionGraph private constructor(
                     currentUnresolvedSha256 == unresolvedSha256) {
                     "repair unresolved projection differs from the checked source manifest"
                 }
+                assessmentCheckpoint("before repair confidence publication")
                 if (currentSha256 != projectedSha256) stateStore.writeProjectedEvidence(confidencePath, projectedBytes)
+                assessmentCheckpoint("before repair unresolved publication")
                 if (currentUnresolvedSha256 != unresolvedSha256) {
                     stateStore.writeProjectedEvidence(unresolvedPath, projectedUnresolvedBytes)
                 }
@@ -4342,6 +4400,7 @@ internal class ModuleRevisionGraph private constructor(
             } else updatedFiles
             updatedRoot["files"] = JsonArray(projectedFiles)
             if (remaining != null) updatedRoot["unresolvedImplementationIds"] = JsonArray(remaining)
+            assessmentCheckpoint("before repair source manifest publication")
             stateStore.writeRoot(
                 "source_tree_manifest.json",
                 (JsonObject(updatedRoot).toString() + "\n").toByteArray(Charsets.UTF_8),

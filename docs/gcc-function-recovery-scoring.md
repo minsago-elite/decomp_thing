@@ -338,3 +338,30 @@ surviving aliases match at their exact oracle RVAs. Its bounded offline verifier
 checks the original byte commitments and independently rederives these selected
 measurements. Retained bytes do not recreate a live admission; full structural
 scoring, completion and release eligibility remain unavailable.
+
+
+### Installed selected-assessment reconstruction route
+
+`gcc-driver-reconstruct <stripped-binary> --profile <engine-profile> --ghidra-archive
+<archive> --output <empty-private-directory> --scratch <provisioned-mount>
+[--reconstruction-profile generated-c-make-v1|generated-c-ninja-v1]` selects the fixed
+fresh driver analysis and an evidence-only reconstruction profile. It accepts no
+provider or arbitrary compiler command. The ordinary controller owns separate
+`analysis` and `reconstruction` children. Its closed reconstruction invocation is
+bound into the new CLI invocation2; existing engine invocations retain invocation1.
+The same contained export/replay and original result4 publication supply exact
+model bytes and the existing selected capability directly to reconstruction.
+
+The route emits confidence3/manifest4, the source archive and bounded CLI accounting.
+It does not accept implementations or infer complete structural recovery. The raw
+oracle overlay and execution receipts stay in host analysis evidence and are not
+added to module prompts, provider filesystem authority or public metadata.
+
+The `qualify:selected-assessment-consumers` label selects the existing driver
+qualification infrastructure with `DECOMP_REQUIRE_GCC_ASSESSMENT_CONSUMERS=true`.
+It runs this installed command once, retains all existing full-export checks, then
+checks model byte identity, complete population/measurement commitments, archived
+same-process disposition, cold origin-unverified audit, bounded CLI output and the
+active metadata reader's closed read inventory. Existing full-export labels keep
+their original mode. These are qualification requirements; source/component tests
+and historical retained captures are not a fresh successful consumer qualification.

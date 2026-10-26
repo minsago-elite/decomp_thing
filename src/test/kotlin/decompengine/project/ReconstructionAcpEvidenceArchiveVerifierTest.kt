@@ -772,7 +772,15 @@ class ReconstructionAcpEvidenceArchiveVerifierTest {
                 else -> file
             }
         }
-        manifestPath.writeText(JsonObject(manifest + ("files" to JsonArray(files))).toString() + "\n")
+        // These semantic tamper cases intentionally reach the archive/audit checks;
+        // keep the independent summary-binding negatives in SourceTreeTest unchanged.
+        val reboundSummary = RecordedRecoverySummaryV1.parse(
+            manifest.getValue("recordedRecoverySummary").jsonObject,
+        ).rebindConfidenceSha256(sha256(confidenceBytes)).toJsonObject()
+        manifestPath.writeText(JsonObject(manifest + mapOf(
+            "files" to JsonArray(files),
+            "recordedRecoverySummary" to reboundSummary,
+        )).toString() + "\n")
         if (removeExecutionEvidence) Files.delete(project.resolve(EVIDENCE_PATH))
     }
 

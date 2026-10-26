@@ -373,3 +373,42 @@ accuracy derivation and structural observation rendering do not provide an
 internal deadline callback. Cancellation within those codecs remains a tracked
 resource requirement under #40, with regeneration dependency context in #683;
 the stage checks do not establish codec preemption or hard host resource limits.
+
+
+## Selected assessment consumers
+
+A genuine selected-domain admission can travel with an immutable exact canonical
+model snapshot through the host reconstruction service. The transport value is not
+an authority token: the report projection checks the existing capability's exact
+input/model hash and byte count, and obtains the selected overlay from that
+capability. Ordinary analysis remains unassessed. Imported reports cannot recreate
+this capability from matching hashes or recorded production flags.
+
+Fresh confidence report schema3 and source manifest schema4 share a passive typed
+assessment projection. It binds the complete canonical model census and module
+plan, selected raw/scored/excluded populations, and a complete list of unavailable
+structural dimensions. All entity-level overall recovery remains unassessed;
+unknown fact denominators and empty-population ratios remain null. Module views
+show attributable recovered candidates only. Missing oracle ownership stays
+project-level and cannot become an inferred module recall denominator.
+
+The projection digest excludes enclosing files. Confidence contains the projection
+and its digest; the manifest contains a bounded scalar summary, projection digest
+and confidence-file digest. Repairs may update implementation evidence and rebind
+the confidence-file digest while retaining the assessment identity. Historical
+manifest3/confidence2 reports use their explicit unassessed fallback; mixed version
+pairs do not silently adopt the new contract.
+
+Current-process archival audit may compare the projection with genuine owned
+selected evidence. Cold archive and API readers report recorded, origin-unverified
+measurements. They validate consistency, not the execution origin of an imported
+archive. The active metadata endpoint reads the compact manifest summary without
+reading model/overlay payloads, source bodies or private execution receipts.
+Compilation, behavior, extraction labels and uncalibrated confidence remain
+separate. No overall recovery, full structural score, calibration or release
+eligibility follows from these reports.
+
+Report encodings are bounded before publication; oversized populations are rejected,
+not sampled or truncated. Existing shared codec operations still have their stated
+boundary-level cancellation limits. The new consumers do not establish internal
+codec preemption or authenticated completed-archive adoption.

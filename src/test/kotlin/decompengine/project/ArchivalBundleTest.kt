@@ -8,6 +8,7 @@ import kotlinx.serialization.json.jsonPrimitive
 import java.io.InputStream
 import java.lang.reflect.Modifier
 import java.nio.file.Files
+import java.nio.file.Path
 import java.nio.file.StandardOpenOption
 import java.util.zip.CRC32
 import java.util.zip.ZipEntry
@@ -24,6 +25,33 @@ import kotlin.test.assertNotNull
 import kotlin.test.assertTrue
 
 class ArchivalBundleTest {
+    @Test
+    fun `archive preserves frozen assessment bytes and cold audit keeps evidence unavailable`() {
+        val scratch = Path.of("build/test-tmp").toAbsolutePath().normalize()
+        Files.createDirectories(scratch)
+        val temp = createTempDirectory(scratch, "archive-assessment-")
+        val project = temp.resolve("project")
+        val analysis = ProgramAnalysisResult.fromModel(model(4))
+        val manifest = SourceTreeGenerator.generate(analysis, project)
+        assertEquals(0, MakeProjectBuilder.build(project).returnCode)
+
+        val bundle = ArchivalPackager.create(project, temp.resolve("assessment.zip"), analysisResult = analysis)
+        val extracted = temp.resolve("extracted")
+        ArchivalBundleVerifier.extractAndVerify(bundle.archivePath, extracted)
+        val imported = ArchivalProjectAuditor.audit(extracted)
+
+        assertTrue(analysis.canonicalModelBytes.contentEquals(extracted.resolve("reports/program_model.json").readBytes()))
+        assertTrue(requireNotNull(manifest.recordedRecoverySummary).canonicalBytes.contentEquals(
+            requireNotNull(imported.recordedRecoverySummary).canonicalBytes,
+        ))
+        assertEquals("no-structural-evidence", requireNotNull(bundle.audit).recoveryAssessmentVerificationDisposition)
+        assertEquals("no-structural-evidence", imported.recoveryAssessmentVerificationDisposition)
+        assertEquals(requireNotNull(bundle.audit).recoveryAssessment, imported.recoveryAssessment)
+        val report = Json.parseToJsonElement(imported.toJson()).jsonObject
+        assertEquals("no-structural-evidence", report.getValue("recoveryReporting").jsonObject
+            .getValue("verificationDisposition").jsonPrimitive.content)
+    }
+
     @Test
     fun `candidate lineage extraction exposes no arbitrary stream source`() {
         val methods = ArchivalBundleVerifier::class.java.declaredMethods

@@ -53,6 +53,9 @@ import decompengine.project.GeneratedFileEvidence
 import decompengine.project.ProjectContentKind
 import decompengine.project.ProjectFileRole
 import decompengine.project.SourceTreeManifest
+import decompengine.project.RecordedRecoverySummaryV1
+import decompengine.project.ProgramModelJson
+import decompengine.project.unassessedRecoveryAssessment
 import decompengine.project.captureBuildSourceRevision
 import decompengine.project.MakeProjectBuilder
 import decompengine.project.GeneratedCRepairIndexProfile
@@ -2952,7 +2955,10 @@ class ModuleRevisionGraphTest {
 
     @Test
     fun `accepted ACP repair of undispatched fallback clears unresolved manifest ownership`() {
-        val fixture = releaseRepairFixture(undispatchedFallback = true)
+        val fixture = releaseRepairFixture(undispatchedFallback = true, recordedSelectedAssessment = true)
+        assertRecordedAssessmentPreserved(fixture.beforeManifest, fixture.beforeConfidence, fixture.beforeUnresolved,
+            fixture.project)
+        assertFalse(fixture.beforeConfidence.contentEquals(fixture.project.resolve("reports/confidence.json").readBytes()))
         val manifest = SourceTreeManifestReader.read(fixture.project, GeneratedCMakeReconstructionProfile.descriptor)
         assertFalse("fn_alpha" in manifest.unresolvedImplementationIds)
         assertEquals(manifest.unresolvedImplementationIds,
@@ -2969,7 +2975,9 @@ class ModuleRevisionGraphTest {
         assertEquals(alphaCheckpoint.getValue("sourceSha256"), alphaRevision.getValue("sourceSha256"))
         assertEquals(alphaCheckpoint.getValue("accepted"), alphaRevision.getValue("acceptedImplementation"))
         assertEquals(JsonPrimitive(false), alphaRevision.getValue("acceptedImplementation"))
-        assertFalse("fn_alpha" in ArchivalProjectAuditor.audit(fixture.project).unresolvedEntityIds)
+        val repairedAudit = ArchivalProjectAuditor.audit(fixture.project)
+        assertFalse("fn_alpha" in repairedAudit.unresolvedEntityIds)
+        assertEquals("recorded-origin-unverified", repairedAudit.recoveryAssessmentVerificationDisposition)
         val unresolved = fixture.project.resolve("UNRESOLVED.md").readText()
         assertFalse("| `fn_alpha` |" in unresolved)
         assertTrue("| `fn_beta` |" in unresolved)
@@ -3095,12 +3103,14 @@ class ModuleRevisionGraphTest {
             )
         }
         val manifest = SourceTreeManifest(
+            schemaVersion = original.schemaVersion,
             profileId = original.profileId,
             profileSha256 = original.profileSha256,
             inputSha256 = original.inputSha256,
             files = original.files + manifestBoundReports,
             unresolvedEntityIds = original.unresolvedEntityIds,
             unresolvedImplementationIds = original.unresolvedImplementationIds,
+            recordedRecoverySummary = original.recordedRecoverySummary,
         )
         fixture.project.resolve("source_tree_manifest.json").writeText(manifest.toJson())
         val manifestPaths = manifest.files.mapTo(hashSetOf()) { it.path }
@@ -3270,6 +3280,8 @@ class ModuleRevisionGraphTest {
             assertFalse(before.contentEquals(after))
             confidencePath.writeBytes(after)
             manifestPath.writeText(JsonObject(LinkedHashMap(manifest).apply {
+                put("recordedRecoverySummary", RecordedRecoverySummaryV1.parse(
+                    manifest.getValue("recordedRecoverySummary").jsonObject).rebindConfidenceSha256(sha256(after)).toJsonObject())
                 put("files", JsonArray(manifest.getValue("files").jsonArray.map { element ->
                     val file = element.jsonObject
                     if (file.getValue("path").jsonPrimitive.content != "reports/confidence.json") element else {
@@ -3323,6 +3335,8 @@ class ModuleRevisionGraphTest {
             val changedBytes = (changed.toString() + "\n").toByteArray(Charsets.UTF_8)
             confidencePath.writeBytes(changedBytes)
             val changedManifest = JsonObject(LinkedHashMap(manifest).apply {
+                put("recordedRecoverySummary", RecordedRecoverySummaryV1.parse(
+                    manifest.getValue("recordedRecoverySummary").jsonObject).rebindConfidenceSha256(sha256(changedBytes)).toJsonObject())
                 put("files", JsonArray(manifest.getValue("files").jsonArray.map { item ->
                     val file = item.jsonObject
                     if (file.getValue("path").jsonPrimitive.content != "reports/confidence.json") item else {
@@ -3356,7 +3370,7 @@ class ModuleRevisionGraphTest {
 
     @Test
     fun `repair projection recovers a durable report exchange from manifest preimages`() {
-        val fixture = releaseRepairFixture(undispatchedFallback = true)
+        val fixture = releaseRepairFixture(undispatchedFallback = true, recordedSelectedAssessment = true)
         val finalManifest = fixture.project.resolve("source_tree_manifest.json").readBytes()
         val finalConfidence = fixture.project.resolve("reports/confidence.json").readBytes()
         val finalUnresolved = fixture.project.resolve("UNRESOLVED.md").readBytes()
@@ -3371,8 +3385,176 @@ class ModuleRevisionGraphTest {
         assertContentEquals(finalManifest, fixture.project.resolve("source_tree_manifest.json").readBytes())
         assertContentEquals(finalConfidence, fixture.project.resolve("reports/confidence.json").readBytes())
         assertContentEquals(finalUnresolved, fixture.project.resolve("UNRESOLVED.md").readBytes())
+        assertRecordedAssessmentPreserved(fixture.beforeManifest, fixture.beforeConfidence, fixture.beforeUnresolved,
+            fixture.project)
         assertFalse(confidenceTemporary.exists())
         assertFalse(unresolvedTemporary.exists())
+    }
+
+    @Test
+    fun `rejected cancelled and interrupted repair preserve recorded assessment without promotion`() {
+        val parent = Path.of("build", "recorded-assessment-repair-fixtures").toAbsolutePath().createDirectories()
+        for (outcome in listOf("rejected", "cancelled", "interrupted")) {
+            val project = generatedProject(undispatchedFallback = true, temporaryParent = parent)
+            installRecordedSelectedRepairAssessment(project, GeneratedCMakeReconstructionProfile.descriptor)
+            val manifest = project.resolve("source_tree_manifest.json").readBytes()
+            val confidence = project.resolve("reports/confidence.json").readBytes()
+            val unresolved = project.resolve("UNRESOLVED.md").readBytes()
+            val relative = "src/modules/alpha.c"
+            val before = project.resolve(relative).readBytes()
+            ModuleRevisionGraph.open(project, GeneratedCRepairIndexProfile).use { graph ->
+                val attempt = graph.beginAttempt(listOf(relative))
+                graph.installCandidate(attempt, mapOf(relative to before + "\n/* unaccepted repair */\n".toByteArray()))
+                if (outcome == "cancelled") {
+                    var cancellationChecks = 0
+                    assertFailsWith<java.util.concurrent.CancellationException> {
+                        graph.accept(attempt, RepairEvidence("valid", "cancelled before commit"), cancellationCheck = {
+                            if (++cancellationChecks == 2) throw java.util.concurrent.CancellationException("test cancellation")
+                        })
+                    }
+                    assertEquals(2, cancellationChecks)
+                }
+                if (outcome != "interrupted") graph.reject(attempt, RepairEvidence(outcome, "unaccepted candidate"))
+            }
+            ModuleRevisionGraph.open(project, GeneratedCRepairIndexProfile).use { graph ->
+                assertNull(graph.snapshot.pendingAttemptId)
+                assertEquals(ModuleRevisionStatus.REJECTED, graph.snapshot.nodes.last().status)
+                assertEquals(outcome == "interrupted", graph.snapshot.nodes.last().recoveredAfterCrash)
+            }
+            assertContentEquals(before, project.resolve(relative).readBytes())
+            assertContentEquals(manifest, project.resolve("source_tree_manifest.json").readBytes())
+            assertContentEquals(confidence, project.resolve("reports/confidence.json").readBytes())
+            assertContentEquals(unresolved, project.resolve("UNRESOLVED.md").readBytes())
+            assertRecordedAssessmentPreserved(manifest, confidence, unresolved, project)
+        }
+    }
+
+    @Test
+    fun `historical confidence two and manifest three repair keeps its recorded unassessed evidence`() {
+        val parent = Path.of("build", "recorded-assessment-repair-fixtures").toAbsolutePath().createDirectories()
+        val project = generatedProject(undispatchedFallback = true, temporaryParent = parent)
+        val confidencePath = project.resolve("reports/confidence.json")
+        val manifestPath = project.resolve("source_tree_manifest.json")
+        val model = ProgramModelJson.read(project.resolve("reports/program_model.json").readText())
+        val historicalAssessment = model.unassessedRecoveryAssessment()
+        val confidence = JsonObject(LinkedHashMap(Json.parseToJsonElement(confidencePath.readText()).jsonObject).apply {
+            put("schemaVersion", JsonPrimitive(2))
+            put("recoveryAssessment", historicalAssessment)
+            remove("recoveryAssessmentSha256")
+        }).toString().toByteArray()
+        confidencePath.writeBytes(confidence)
+        val manifest = Json.parseToJsonElement(manifestPath.readText()).jsonObject
+        manifestPath.writeText(JsonObject(LinkedHashMap(manifest).apply {
+            put("schemaVersion", JsonPrimitive(3))
+            remove("recordedRecoverySummary")
+            put("files", JsonArray(manifest.getValue("files").jsonArray.map { item ->
+                if (item.jsonObject.getValue("path") != JsonPrimitive("reports/confidence.json")) item else
+                    JsonObject(item.jsonObject + ("sha256" to JsonPrimitive(sha256(confidence))))
+            }))
+        }).toString())
+        val relative = "src/modules/alpha.c"
+        ModuleRevisionGraph.open(project, GeneratedCRepairIndexProfile).use { graph ->
+            val attempt = graph.beginAttempt(listOf(relative))
+            graph.installCandidate(attempt, mapOf(relative to project.resolve(relative).readBytes() + "\n/* legacy repair */\n".toByteArray()))
+            graph.accept(attempt, RepairEvidence("valid", "historical non-release repair fixture"))
+        }
+        val repaired = Json.parseToJsonElement(confidencePath.readText()).jsonObject
+        val repairedManifest = SourceTreeManifestReader.read(project, GeneratedCMakeReconstructionProfile.descriptor)
+        assertEquals(JsonPrimitive(2), repaired.getValue("schemaVersion"))
+        assertEquals(historicalAssessment, repaired.getValue("recoveryAssessment"))
+        assertFalse("recoveryAssessmentSha256" in repaired)
+        assertEquals(3, repairedManifest.schemaVersion)
+        assertNull(repairedManifest.recordedRecoverySummary)
+        assertFalse("fn_alpha" in repairedManifest.unresolvedImplementationIds)
+    }
+
+    @Test
+    fun `repair refuses malformed current assessment and mixed report pair before publishing derived files`() {
+        val parent = Path.of("build", "recorded-assessment-repair-fixtures").toAbsolutePath().createDirectories()
+        val project = generatedProject(undispatchedFallback = true, temporaryParent = parent)
+        val manifestPath = project.resolve("source_tree_manifest.json")
+        val confidencePath = project.resolve("reports/confidence.json")
+        val unresolvedPath = project.resolve("UNRESOLVED.md")
+        val beforeManifestBytes = manifestPath.readBytes()
+        val beforeConfidenceBytes = confidencePath.readBytes()
+        val beforeUnresolved = unresolvedPath.readBytes()
+        val beforeManifest = Json.parseToJsonElement(beforeManifestBytes.decodeToString()).jsonObject
+        val beforeConfidence = Json.parseToJsonElement(beforeConfidenceBytes.decodeToString()).jsonObject
+        val relative = "src/modules/alpha.c"
+        ModuleRevisionGraph.open(project, GeneratedCRepairIndexProfile).use { graph ->
+            val attempt = graph.beginAttempt(listOf(relative))
+            graph.installCandidate(attempt, mapOf(relative to project.resolve(relative).readBytes() + "\n/* committed repair */\n".toByteArray()))
+            graph.accept(attempt, RepairEvidence("valid", "non-release publication recovery fixture"))
+        }
+        val finalManifest = manifestPath.readBytes()
+        val finalConfidence = confidencePath.readBytes()
+        assertFalse(beforeConfidenceBytes.contentEquals(finalConfidence))
+        val mutations = listOf(
+            beforeConfidence + ("schemaVersion" to JsonPrimitive(2)),
+            beforeConfidence + ("recoveryAssessmentSha256" to JsonPrimitive("0".repeat(64))),
+            beforeConfidence + ("recoveryAssessment" to JsonObject(beforeConfidence.getValue("recoveryAssessment").jsonObject +
+                ("productionVerified" to JsonPrimitive(true)))),
+        )
+        for (mutation in mutations) {
+            val malformed = JsonObject(mutation).toString().toByteArray()
+            val malformedSha256 = sha256(malformed)
+            val manifest = JsonObject(LinkedHashMap(beforeManifest).apply {
+                put("recordedRecoverySummary", RecordedRecoverySummaryV1.parse(
+                    beforeManifest.getValue("recordedRecoverySummary").jsonObject)
+                    .rebindConfidenceSha256(malformedSha256).toJsonObject())
+                put("files", JsonArray(beforeManifest.getValue("files").jsonArray.map { item ->
+                    if (item.jsonObject.getValue("path") != JsonPrimitive("reports/confidence.json")) item else
+                        JsonObject(item.jsonObject + ("sha256" to JsonPrimitive(malformedSha256)))
+                }))
+            }).toString().toByteArray()
+            confidencePath.writeBytes(malformed)
+            manifestPath.writeBytes(manifest)
+            unresolvedPath.writeBytes(beforeUnresolved)
+            ModuleRevisionGraph.open(project, GeneratedCRepairIndexProfile).use { }
+            assertContentEquals(malformed, confidencePath.readBytes())
+            assertContentEquals(manifest, manifestPath.readBytes())
+            assertContentEquals(beforeUnresolved, unresolvedPath.readBytes())
+        }
+        confidencePath.writeBytes(beforeConfidenceBytes)
+        manifestPath.writeBytes(beforeManifestBytes)
+        unresolvedPath.writeBytes(beforeUnresolved)
+        ModuleRevisionGraph.open(project, GeneratedCRepairIndexProfile).use { }
+        assertContentEquals(finalManifest, manifestPath.readBytes())
+        assertContentEquals(finalConfidence, confidencePath.readBytes())
+    }
+
+    private fun assertRecordedAssessmentPreserved(
+        beforeManifestBytes: ByteArray,
+        beforeConfidenceBytes: ByteArray,
+        beforeUnresolvedBytes: ByteArray,
+        project: Path,
+    ) {
+        val beforeManifest = Json.parseToJsonElement(beforeManifestBytes.decodeToString()).jsonObject
+        val afterManifest = Json.parseToJsonElement(project.resolve("source_tree_manifest.json").readText()).jsonObject
+        val beforeConfidence = Json.parseToJsonElement(beforeConfidenceBytes.decodeToString()).jsonObject
+        val afterConfidenceBytes = project.resolve("reports/confidence.json").readBytes()
+        val afterConfidence = Json.parseToJsonElement(afterConfidenceBytes.decodeToString()).jsonObject
+        assertEquals(JsonPrimitive(4), beforeManifest.getValue("schemaVersion"))
+        assertEquals(JsonPrimitive(4), afterManifest.getValue("schemaVersion"))
+        assertEquals(JsonPrimitive(3), beforeConfidence.getValue("schemaVersion"))
+        assertEquals(JsonPrimitive(3), afterConfidence.getValue("schemaVersion"))
+        assertEquals(beforeConfidence.getValue("recoveryAssessment"), afterConfidence.getValue("recoveryAssessment"))
+        assertEquals(beforeConfidence.getValue("recoveryAssessmentSha256"), afterConfidence.getValue("recoveryAssessmentSha256"))
+        val assessment = afterConfidence.getValue("recoveryAssessment").jsonObject
+        assertEquals(JsonPrimitive("reported-assessment"), assessment.getValue("authority"))
+        assertNotEquals(JsonNull, assessment.getValue("bindings").jsonObject.getValue("sourceOverlay"))
+        assertEquals(JsonPrimitive(0), assessment.getValue("population").jsonObject.getValue("assessedEntityCount"))
+        val afterConfidenceSha256 = sha256(afterConfidenceBytes)
+        assertEquals(afterConfidenceSha256, afterManifest.getValue("files").jsonArray.single {
+            it.jsonObject.getValue("path") == JsonPrimitive("reports/confidence.json")
+        }.jsonObject.getValue("sha256").jsonPrimitive.content)
+        val beforeSummary = RecordedRecoverySummaryV1.parse(beforeManifest.getValue("recordedRecoverySummary").jsonObject)
+        val afterSummary = RecordedRecoverySummaryV1.parse(afterManifest.getValue("recordedRecoverySummary").jsonObject)
+        assertContentEquals(beforeSummary.rebindConfidenceSha256(afterConfidenceSha256).canonicalBytes,
+            afterSummary.canonicalBytes)
+        val marker = "## Implementation generation\n\n"
+        assertEquals(beforeUnresolvedBytes.decodeToString().substringBefore(marker),
+            project.resolve("UNRESOLVED.md").readText().substringBefore(marker))
     }
 
     @Test
@@ -6679,9 +6861,11 @@ class ModuleRevisionGraphTest {
         budget: RepairResourceBudget = RepairResourceBudget(),
         legacyRejectedPrefix: Boolean = false,
         legacyPrefixHasChanges: Boolean = true,
+        recordedSelectedAssessment: Boolean = false,
     ): ReleaseRepairFixture {
         require(!abandonProvisional || includeProvisional)
         val project = generatedProject(undispatchedFallback, profile, temporaryParent)
+        if (recordedSelectedAssessment) installRecordedSelectedRepairAssessment(project, profile)
         val beforeManifest = project.resolve("source_tree_manifest.json").readBytes()
         val beforeConfidence = project.resolve(profile.layout.declaration("confidence-evidence").materialize()).readBytes()
         val beforeUnresolved = project.resolve(profile.layout.declaration("unresolved-evidence").materialize()).readBytes()
