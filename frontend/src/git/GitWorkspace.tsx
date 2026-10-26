@@ -473,8 +473,10 @@ export function GitWorkspace({ jobId, basePath, session, capabilities, pollInter
       </section>
       <GitIntegrationPanel remotes={loaded.remotes} conflicts={loaded.conflicts} writable={writable}
         readDivergence={readDivergence} readConflict={readConflict} onAction={integrationAction} />
-      <GitPushPanel remotes={loaded.remotes} branch={statusData.headState === 'attached' ? statusData.headRefName : null} writable={writable}
-        readPreview={readPushPreview} onPush={push} onReconcile={reconcilePush} />
+      {loaded.listing.jobId === jobId && statusData.worktreeId === (worktree ?? repository.worktreeId) &&
+        <GitPushPanel key={`${jobId}:${statusData.repositoryId}:${statusData.worktreeId}:${statusData.headRefName ?? ''}`}
+          remotes={loaded.remotes} branch={statusData.headState === 'attached' ? statusData.headRefName : null} writable={writable}
+          readPreview={readPushPreview} onPush={push} onReconcile={reconcilePush} />}
       <GitHubPanel capability={hosting} remotes={loaded.remotes} branch={statusData.headState === 'attached' ? statusData.headRefName : null}
         writable={writable} readStatus={readGitHub} onCreate={createPull} onReconcile={reconcilePull} />
       <GitRemotesPanel capability={remoting} remotes={loaded.remotes} audit={loaded.audit} writable={writable} running={running}

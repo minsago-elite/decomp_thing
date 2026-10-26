@@ -389,6 +389,20 @@ it('previews exactly what a push publishes and submits it only on explicit reque
     guards: { repositoryVersion: 'repo_v1', worktreeVersion: 'tree_v1', expectedHeadObjectId: head, expectedRefId: null, expectedRefObjectId: null } }]);
 });
 
+it('drops a pending push preview as soon as the selected worktree changes', async () => {
+  let resolve!: (value: unknown) => void;
+  const pending = new Promise(done => { resolve = done; });
+  transport.get.mockImplementation((kind, path) => kind === 'gitPushPreview' ? pending : serve(kind, path));
+  mount();
+  fireEvent.click(await screen.findByRole('button', { name: 'Preview push' }));
+  fireEvent.click(screen.getByRole('button', { name: `Show ${linkedId}` }));
+  await waitFor(() => expect(screen.queryByRole('button', { name: 'Preview push' })).toBeNull());
+  resolve(await serve('gitPushPreview', `${base}/push-preview?remote=remote_1&branch=main`));
+  await pending;
+  expect(screen.queryByRole('button', { name: /^Push / })).toBeNull();
+  expect(transport.post).not.toHaveBeenCalled();
+});
+
 it('refuses to offer a non-fast-forward push and asks to reconcile an unconfirmed one', async () => {
   pushState = { fastForward: false, unconfirmed: null };
   const view = mount();
