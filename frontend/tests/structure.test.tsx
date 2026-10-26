@@ -3,7 +3,7 @@ import { resolve } from 'node:path';
 import { fireEvent, render, screen, waitFor, within } from '@testing-library/preact';
 import { beforeEach, expect, it, vi } from 'vitest';
 import type * as ClientModule from '../src/api/client';
-import type { Bootstrap, EntityDetail, FunctionInventory, ModuleDetail, ModuleInventory } from '../src/api/generated';
+import type { Bootstrap, EntityDetail, FunctionInventory, ModuleDetail, ModuleInventory, RevisionFile } from '../src/api/generated';
 import { structureCopy as copy } from '../src/copy/structure';
 import { App } from '../src/app/App';
 import { createBrowserSession } from '../src/session/session';
@@ -11,6 +11,7 @@ import { functionLocation, functionReadRoute, functionSearch, structureReadRoute
 import { structureListPath } from '../src/structure/paths';
 import { apiPath } from '../src/app/paths';
 import { ApiClientError } from '../src/api/errors';
+import { sourceCopy } from '../src/copy/sources';
 
 const transport = vi.hoisted(() => ({ get: vi.fn<(kind: string, path: string, options: { signal: AbortSignal }) => Promise<unknown>>() }));
 vi.mock('../src/api/client', async load => ({ ...await load<typeof ClientModule>(), createApiClient: () => transport }));
@@ -107,8 +108,12 @@ it('shows entity facts with bounded previews, revision-scoped cross links and un
     const helper = screen.getByRole('link', { name: 'helper' });
     expect(helper.getAttribute('href')).toBe(`${revision}/functions/fn_0000000000401100?structureVersion=${detail.structureVersion}`);
     expect(screen.getAllByText(/no record in this program model/, { selector: 'li' }).map(item => item.textContent?.split(':')[0])).toEqual(['fn_00000000deadbeef', 'global_missing']);
-    expect(screen.getByRole('link', { name: 'src/modules/core.c' }).getAttribute('href')).toBe(`${revision}/source-files/${detail.entity!.sources.implementationFileId}`);
-    expect(screen.getByRole('link', { name: 'include/decomp_types.h' })).toBeTruthy();
+    const pin = `?sourceSha256=${detail.sourceSha256}&metadataVersion=${detail.metadataVersion}`;
+    for (const [path, fileId] of [
+      ['src/modules/core.c', detail.entity!.sources.implementationFileId],
+      ['include/modules/core.h', detail.entity!.sources.interfaceFileId],
+      ['include/decomp_types.h', detail.entity!.sources.sharedInterfaceFileId],
+    ]) expect(screen.getByRole('link', { name: path! }).getAttribute('href')).toBe(`${revision}/source-files/${fileId}${pin}`);
     expect(screen.getByText(copy.textNotRecorded)).toBeTruthy();
     fireEvent.click(screen.getByText(copy.capabilitiesTitle));
     const families = screen.getByText(copy.capabilitiesTitle).closest('details')!.textContent;
@@ -176,10 +181,34 @@ it('shows module ownership, progress, source links and owned entities without re
     expect(within(table).getByText(copy.unrecordedEntity)).toBeTruthy();
     expect(within(table).getByText(copy.ownership.ambiguous)).toBeTruthy();
     expect(screen.getByText(copy.declarations.unaccepted)).toBeTruthy();
-    expect(screen.getByRole('link', { name: 'src/modules/extra.c' }).getAttribute('href')).toBe(`${revision}/source-files/${detail.module!.implementationFileId}`);
+    const pin = `?sourceSha256=${detail.sourceSha256}&metadataVersion=${detail.metadataVersion}`;
+    expect(screen.getByRole('link', { name: 'src/modules/extra.c' }).getAttribute('href')).toBe(`${revision}/source-files/${detail.module!.implementationFileId}${pin}`);
+    expect(screen.getByRole('link', { name: 'include/modules/extra.h' }).getAttribute('href')).toBe(`${revision}/source-files/${detail.module!.interfaceFileId}${pin}`);
     expect(screen.getByRole('link', { name: copy.showInInventory }).getAttribute('href')).toBe(`${revision}/functions?module=extra`);
     expect(screen.getByRole('link', { name: copy.ownedKinds.globals }).getAttribute('href')).toBe(`${revision}/modules/extra?kind=globals`);
     expect(transport.get).toHaveBeenCalledOnce();
+  } finally { auth.dispose(); }
+});
+
+it('refuses a newer manifest generation after following an entity generated-source link', async () => {
+  const auth = await session();
+  const detail = fixture<EntityDetail>('entity-detail-function-references');
+  const source = fixture<RevisionFile>('revision-file-root');
+  const fileId = detail.entity!.sources.implementationFileId!;
+  const newer = { ...source, binding: selected, sourceSha256: detail.sourceSha256, metadataVersion: '9'.repeat(64),
+    item: { ...source.item, fileId } };
+  transport.get.mockImplementation(kind => Promise.resolve({ data: kind === 'entityDetail' ? detail : newer }));
+  history.replaceState(null, '', `${revision}/functions/fn_0000000000401000`);
+  try {
+    render(<App basePath="/nested" session={auth} />);
+    const link = await screen.findByRole('link', { name: 'src/modules/core.c' });
+    fireEvent.click(link);
+    await waitFor(() => expect(location.pathname).toBe(`${revision}/source-files/${fileId}`));
+    const alert = await screen.findByRole('alert');
+    expect(alert.textContent).toContain(sourceCopy.expired);
+    expect(location.search).toBe(`?sourceSha256=${detail.sourceSha256}&metadataVersion=${detail.metadataVersion}`);
+    expect(transport.get.mock.calls.some(([kind]) => kind === 'revisionFile')).toBe(true);
+    expect(transport.get.mock.calls.every(([kind]) => ['entityDetail', 'revisionFile'].includes(kind))).toBe(true);
   } finally { auth.dispose(); }
 });
 
