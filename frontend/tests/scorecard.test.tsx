@@ -113,6 +113,37 @@ it('compares only compatible attempts with exact deltas and withholds deltas for
   } finally { auth.dispose(); }
 });
 
+it('synchronizes the baseline selector on Back and Forward without discarding unsubmitted selections', async () => {
+  const auth = await session();
+  serve();
+  history.replaceState(null, '', `${revision}/scorecard`);
+  try {
+    render(<App basePath="/nested" session={auth} />);
+    const select = await screen.findByRole('combobox', { name: copy.baseline });
+    fireEvent.change(select, { target: { value: 'run_1/revision_1' } });
+    fireEvent.click(screen.getByRole('button', { name: copy.compare }));
+    await screen.findByText(copy.compatibility.compatible);
+    fireEvent.change(select, { target: { value: 'run_5/revision_5' } });
+    // A local choice is not submitted until Compare, even if another read rerenders the view.
+    await waitFor(() => expect(select).toHaveProperty('value', 'run_5/revision_5'));
+    expect(new URLSearchParams(location.search).get('baselineRunId')).toBe('run_1');
+    fireEvent.click(screen.getByRole('button', { name: copy.compare }));
+    await screen.findByText(copy.compatibility.incompatible);
+    history.back();
+    await waitFor(() => expect(new URLSearchParams(location.search).get('baselineRunId')).toBe('run_1'));
+    await screen.findByText(copy.compatibility.compatible);
+    await waitFor(() => expect(select).toHaveProperty('value', 'run_1/revision_1'));
+    history.forward();
+    await screen.findByText(copy.compatibility.incompatible);
+    await waitFor(() => expect(select).toHaveProperty('value', 'run_5/revision_5'));
+    fireEvent.click(screen.getByRole('button', { name: copy.clearComparison }));
+    await waitFor(() => expect(select).toHaveProperty('value', ''));
+    history.back();
+    await screen.findByText(copy.compatibility.incompatible);
+    await waitFor(() => expect(select).toHaveProperty('value', 'run_5/revision_5'));
+  } finally { auth.dispose(); }
+});
+
 it('lists older attempts on request instead of treating the newest page as every baseline', async () => {
   const auth = await session();
   const cursor = `${'a'.repeat(64)}_50_${'b'.repeat(32)}`;

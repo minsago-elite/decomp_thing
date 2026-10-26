@@ -104,7 +104,11 @@ function Comparison({ selected, basePath, query, version, onRoute }: {
   // baseline stays selectable and "no baselines" is said only once every page has been listed.
   const [runs, setRuns] = useState<{ items: Run[]; nextCursor: string | null } | 'failed' | null>(null);
   const [cursor, setCursor] = useState<string | undefined>(undefined);
-  const [choice, setChoice] = useState(query.baseline ? `${query.baseline.runId}/${query.baseline.revisionId}` : '');
+  const baselineChoice = query.baseline ? `${query.baseline.runId}/${query.baseline.revisionId}` : '';
+  const [choice, setChoice] = useState(baselineChoice);
+  // Back/Forward changes the submitted baseline without remounting this view. Keep draft selections
+  // until that URL value changes, rather than resetting them on unrelated renders or page reads.
+  useEffect(() => { setChoice(baselineChoice); }, [baselineChoice]);
   useEffect(() => {
     const controller = new AbortController();
     const values = new URLSearchParams({ limit: String(RUN_PAGE_LIMIT) });
