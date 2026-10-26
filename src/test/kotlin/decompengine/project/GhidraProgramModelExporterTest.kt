@@ -336,9 +336,9 @@ class GhidraProgramModelExporterTest {
         assertTrue(progress.contains("\"reused\":${first.functions.size}"), progress)
         val statePath = modelPath.resolveSibling("program_model.json.export/state.json")
         val priorState = statePath.readText()
-        assertTrue("\"exporterVersion\":17" in priorState)
-        for (historicalVersion in listOf(16, 13, 12, 11)) {
-            val historicalState = priorState.replace("\"exporterVersion\":17", "\"exporterVersion\":$historicalVersion")
+        assertTrue("\"exporterVersion\":18" in priorState)
+        for (historicalVersion in listOf(17, 16, 13, 12, 11)) {
+            val historicalState = priorState.replace("\"exporterVersion\":18", "\"exporterVersion\":$historicalVersion")
             statePath.writeText(historicalState)
             assertFailsWith<IllegalArgumentException> { analyzer.analyze(binary, work) }
             assertEquals(historicalState, statePath.readText())
@@ -637,12 +637,13 @@ class GhidraProgramModelExporterTest {
         beforeSidecars.forEach { (name, bytes) -> assertTrue(bytes.contentEquals(afterSidecars.getValue(name)), "native sidecar $name") }
         val beforeState = beforePath.resolveSibling("program_model.json.export/state.json").readText()
         val afterState = afterPath.resolveSibling("program_model.json.export/state.json").readText()
-        assertTrue("\"exporterVersion\":17" in beforeState)
-        assertTrue("\"exporterVersion\":17" in afterState)
+        assertTrue("\"exporterVersion\":18" in beforeState)
+        assertTrue("\"exporterVersion\":18" in afterState)
         assertTrue("\"decompilationWorkers\":4" in beforeState && "\"decompilationWorkers\":4" in afterState)
         val sourceIdentity = Regex("\"exporterSha256\":\"[0-9a-f]{64}\"")
-        assertEquals(beforeState.replace(sourceIdentity, "\"exporterSha256\":\"SOURCE\"").replace("\"exporterVersion\":15", "\"exporterVersion\":16"),
-            afterState.replace(sourceIdentity, "\"exporterSha256\":\"SOURCE\""), "checkpoint state differs only by exporter version/source")
+        assertEquals(beforeState.replace(sourceIdentity, "\"exporterSha256\":\"SOURCE\""),
+            afterState.replace(sourceIdentity, "\"exporterSha256\":\"SOURCE\""),
+            "worker-parity state must match at the owned exporter version after source-hash normalization")
         assertTrue(beforePath.resolveSibling("program_model.json.progress.json").readBytes()
             .contentEquals(afterPath.resolveSibling("program_model.json.progress.json").readBytes()), "exact native final progress/status bytes")
         val named = after.functions.associateBy { it.name }
