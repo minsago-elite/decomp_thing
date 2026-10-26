@@ -13,8 +13,10 @@ import { StateMark, capabilityTone } from '../shared/StateMark';
 
 function sleep(milliseconds: number, signal: AbortSignal) {
   return new Promise<void>((resolve, reject) => {
-    const timer = setTimeout(resolve, milliseconds);
-    signal.addEventListener('abort', () => { clearTimeout(timer); reject(new ApiClientError('aborted')); }, { once: true });
+    if (signal.aborted) { reject(new ApiClientError('aborted')); return; }
+    const abort = () => { clearTimeout(timer); reject(new ApiClientError('aborted')); };
+    const timer = setTimeout(() => { signal.removeEventListener('abort', abort); resolve(); }, milliseconds);
+    signal.addEventListener('abort', abort, { once: true });
   });
 }
 
@@ -67,6 +69,8 @@ export function GitWorkspace({ jobId, basePath, session, capabilities, pollInter
   const [diff, setDiff] = useState<GitDiff | null>(null);
   const [commit, setCommit] = useState<{ objectId: string; diff: GitDiff; provenance: GitProvenance | null; provenanceError: string } | null>(null);
   const olderPending = useRef(false);
+  const refsPending = useRef(false);
+  const commitRequest = useRef(0);
   const [refresh, setRefresh] = useState(0);
   const active = useRef<AbortController | null>(null);
   // Each status read or work-tree change starts a new diff generation; late diff responses are dropped.
@@ -79,6 +83,8 @@ export function GitWorkspace({ jobId, basePath, session, capabilities, pollInter
   useEffect(() => {
     if (!supported) return;
     const controller = new AbortController();
+    diffGeneration.current++;
+    setDiff(null); setCommit(null);
     setError('');
     void (async () => {
       try {
@@ -104,17 +110,12 @@ export function GitWorkspace({ jobId, basePath, session, capabilities, pollInter
         if (!controller.signal.aborted) setError(withApiFailureReference(copy.readFailed, failure));
       }
     })();
-    return () => { controller.abort(); };
+    return () => { controller.abort(); diffGeneration.current++; };
   }, [client, jobId, supported, worktree, refresh]);
 
-  useEffect(() => () => { active.current?.abort(); }, []);
+  useEffect(() => () => { active.current?.abort(); active.current = null; }, []);
 
-  /**
-   * Every status page under its anchored cursor, so review and selection always see the whole
-   * staged set. A status that needs more than the page budget is presented as incomplete, which
-   * disables selection and committing instead of reviewing a partial set.
-   */
-  /** Every ref page under its anchored cursor, so each branch stays reachable for switch and delete. */
+  /** Bounded automatic ref loading; any remaining anchored cursor is offered as explicit continuation. */
   async function readRefs(prefix: string, signal: AbortSignal): Promise<GitRefs> {
     let page = (await client.get('gitRefs', `${prefix}/refs?limit=200`, { signal })).data;
     const refs = [...page.refs];
@@ -125,6 +126,7 @@ export function GitWorkspace({ jobId, basePath, session, capabilities, pollInter
     return { ...page, refs };
   }
 
+  /** Read the staged set under its anchored cursor; a listing past the budget is incomplete. */
   async function readStatus(prefix: string, signal: AbortSignal): Promise<GitStatus> {
     const scope = worktree ? `worktree=${worktree}&` : '';
     let page = (await client.get('gitStatus', `${prefix}/status?${scope}limit=200`, { signal })).data;
@@ -174,7 +176,8 @@ export function GitWorkspace({ jobId, basePath, session, capabilities, pollInter
       if (operation.state === 'completed') { setSelected(new Set()); setDiff(null); return true; }
       return false;
     } catch (failure: unknown) {
-      if (!controller.signal.aborted) setStatus(withApiFailureReference(textMessage(copy.refused, { action: label }), failure));
+      if (!controller.signal.aborted) setStatus(withApiFailureReference(
+        failure instanceof ApiClientError && failure.serverCode === 'ACTIVE_RUN' ? copy.activeWorker : textMessage(copy.refused, { action: label }), failure));
       return false;
     } finally {
       if (active.current === controller) { active.current = null; setBusy(false); setRefresh(value => value + 1); }
@@ -196,6 +199,8 @@ export function GitWorkspace({ jobId, basePath, session, capabilities, pollInter
   async function showCommit(objectId: string) {
     if (!base) return;
     const generation = diffGeneration.current;
+    const request = ++commitRequest.current;
+    const current = () => generation === diffGeneration.current && request === commitRequest.current;
     try {
       const path = `${base}/diff?scope=commit&commit=${objectId}&limit=200`;
       // Provenance builds the export, which has its own bound; a failure there must not hide the changed files.
@@ -209,10 +214,24 @@ export function GitWorkspace({ jobId, basePath, session, capabilities, pollInter
         files.push(...page.files);
       }
       const provenance = await provenanceRead;
-      if (generation !== diffGeneration.current) return;
+      if (!current()) return;
       setCommit({ objectId, diff: { ...page, files, complete: page.complete && page.nextCursor === null }, provenance: provenance.data,
         provenanceError: provenance.error });
-    } catch (failure: unknown) { setStatus(withApiFailureReference(copy.readFailed, failure)); }
+    } catch (failure: unknown) { if (current()) setStatus(withApiFailureReference(copy.readFailed, failure)); }
+  }
+
+  async function moreRefs(cursor: string) {
+    if (!base || refsPending.current) return;
+    refsPending.current = true;
+    const generation = diffGeneration.current;
+    try {
+      const page = (await client.get('gitRefs', `${base}/refs?limit=200&cursor=${cursor}`)).data;
+      if (generation !== diffGeneration.current) return;
+      setLoaded(previous => previous?.refs?.nextCursor === cursor
+        ? { ...previous, refs: { ...page, refs: [...previous.refs.refs, ...page.refs] } } : previous);
+    } catch (failure: unknown) {
+      if (generation === diffGeneration.current) setStatus(withApiFailureReference(copy.refsChanged, failure));
+    } finally { refsPending.current = false; }
   }
 
   /** Older history pages belong to the history they continue; a response for an earlier read is dropped. */
@@ -262,21 +281,28 @@ export function GitWorkspace({ jobId, basePath, session, capabilities, pollInter
       <p>{copy.noRepository} {copy.initHelp}</p>
       <h3 id="git-import-title">{copy.importTitle}</h3>
       {importing?.state === 'supported' ? <ImportForm disabled={busy} onImport={async name => {
+        if (active.current) return;
         const csrfToken = session.csrf();
         if (!csrfToken) { setStatus(copy.reconnect); return; }
+        const controller = new AbortController(); active.current = controller;
         setBusy(true);
         try {
-          const job = (await client.get('job', `/jobs/${jobId}`)).data;
+          const job = (await client.get('job', `/jobs/${jobId}`, { signal: controller.signal })).data;
+          if (controller.signal.aborted) return;
           let operation = (await client.post('operation', `/jobs/${jobId}/repositories`, 'gitRepositoryAttachRequest',
-            { action: 'git.attach', sourceName: name }, { csrfToken, ifMatch: `"${job.version}"`, idempotencyKey: crypto.randomUUID() })).data;
+            { action: 'git.attach', sourceName: name }, { csrfToken, ifMatch: `"${job.version}"`, idempotencyKey: crypto.randomUUID(), signal: controller.signal })).data;
           for (let poll = 0; !terminal.has(operation.state) && poll < 600; poll++) {
-            await sleep(pollIntervalMs, new AbortController().signal);
-            operation = (await client.get('operation', `/jobs/${jobId}/repositories/${operation.repositoryId}/operations/${operation.operationId}`)).data;
+            await sleep(pollIntervalMs, controller.signal);
+            operation = (await client.get('operation', `/jobs/${jobId}/repositories/${operation.repositoryId}/operations/${operation.operationId}`, { signal: controller.signal })).data;
           }
-          setStatus(textMessage(operation.state === 'completed' ? copy.completed : copy.failed, { action: copy.importAction, message: operation.message ?? operation.state }));
+          if (!controller.signal.aborted) setStatus(textMessage(operation.state === 'completed' ? copy.completed : copy.failed,
+            { action: copy.importAction, message: operation.message ?? operation.state }));
         } catch (failure: unknown) {
-          setStatus(withApiFailureReference(textMessage(copy.refused, { action: copy.importAction }), failure));
-        } finally { setBusy(false); setRefresh(value => value + 1); }
+          if (!controller.signal.aborted) setStatus(withApiFailureReference(textMessage(copy.refused, { action: copy.importAction }), failure));
+        } finally {
+          // Leaving stops client observation, not a durable operation already admitted by the server.
+          if (active.current === controller) { active.current = null; setBusy(false); setRefresh(value => value + 1); }
+        }
       }} /> : <p>{importing?.message ?? copy.importUnavailable}</p>}
       <p>{copy.importHelp}</p>
     </section>}
@@ -369,13 +395,14 @@ export function GitWorkspace({ jobId, basePath, session, capabilities, pollInter
             {commit.provenance.refNames.length > 0 && <p>{textMessage(copy.refNames, { names: commit.provenance.refNames.join(', ') })}</p>}
             <a href={apiPath(basePath, `${base}/exports/${commit.objectId}`)} download="">{copy.downloadExport}</a>
           </> : <p role="alert">{commit.provenanceError}</p>}
-          <NameForm label={copy.tagName} action={copy.tagAction} disabled={!writable} onSubmit={name => act('gitTagRequest', copy.tagAction, guarded =>
+          <NameForm key={commit.objectId} label={copy.tagName} action={copy.tagAction} disabled={!writable} onSubmit={name => act('gitTagRequest', copy.tagAction, guarded =>
             ({ action: 'git.tag', worktreeId, guards: guarded, name, targetObjectId: commit.objectId }))} />
         </section>}
       </section>
       <section aria-labelledby="git-branches-title">
         <h3 id="git-branches-title">{copy.branches}</h3>
         {dirty && <p>{copy.dirtySwitch}</p>}
+        {loaded.refs?.nextCursor && <p>{copy.refsIncomplete}</p>}
         <ul>{loaded.refs?.refs.map(ref => <li key={ref.refId}>
           <code>{ref.displayName}</code> <code title={ref.objectId}>{short(ref.objectId)}</code>{ref.current && <> <StateMark tone="settled">{copy.current}</StateMark></>}
           {ref.kind === 'branch' && !ref.current && <>
@@ -387,6 +414,8 @@ export function GitWorkspace({ jobId, basePath, session, capabilities, pollInter
               {textMessage(copy.deleteAction, { name: branch(ref.displayName) })}</button>
           </>}
         </li>)}</ul>
+        {loaded.refs?.nextCursor && <button type="button" disabled={busy}
+          onClick={() => { void moreRefs(loaded.refs?.nextCursor ?? ''); }}>{copy.moreRefs}</button>}
         {statusData.headObjectId && <>
           <NameForm label={copy.branchName} action={copy.branchAction} disabled={!writable} onSubmit={name => act('gitBranchCreateRequest', copy.branchAction,
             guarded => ({ action: 'git.branch.create', worktreeId, guards: guarded, name, startObjectId: statusData.headObjectId ?? '' }))} />
