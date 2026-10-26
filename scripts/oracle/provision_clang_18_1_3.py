@@ -4595,6 +4595,7 @@ if len(rows_bytes) > 16 * 1024:
 rows = json.loads(rows_bytes)
 allowed = {
     "/etc/apt/sources.list",
+    "/usr/share/keyrings/decomp-thing-ubuntu-archive-keyring.gpg",
     "/usr/local/libexec/decomp-thing/clang-18.1.3/libtooling-probe.cpp",
     "/usr/local/libexec/decomp-thing/clang-18.1.3/libtooling-positive.cpp",
     "/usr/local/libexec/decomp-thing/clang-18.1.3/libtooling-probe",
@@ -4704,7 +4705,8 @@ def generated_rootfs_file_identity(rootfs: Path, absolute_path: str, expected_sh
                                    max_bytes: int = 64 * 1024 * 1024) -> dict:
     """Capture exact bounded identity for one known generated regular file."""
     allowed = {
-        GENERATED_APT_SOURCE_LIST_IN_ROOT, PROBE_SOURCE_IN_ROOT, PROBE_FIXTURE_IN_ROOT, PROBE_BINARY_IN_ROOT,
+        GENERATED_APT_SOURCE_LIST_IN_ROOT, APT_KEYRING_IN_ROOT,
+        PROBE_SOURCE_IN_ROOT, PROBE_FIXTURE_IN_ROOT, PROBE_BINARY_IN_ROOT,
     }
     if (absolute_path not in allowed or not isinstance(expected_sha256, str) or
             re.fullmatch(r"[0-9a-f]{64}", expected_sha256) is None or
@@ -4818,7 +4820,8 @@ def generated_rootfs_directory_identity(rootfs: Path, absolute_path: str, *,
 def remove_generated_rootfs_files(rootfs: Path, identities: list[dict]) -> None:
     """Unlink only the exact fixed generated files captured from this rootfs."""
     allowed = {
-        GENERATED_APT_SOURCE_LIST_IN_ROOT, PROBE_SOURCE_IN_ROOT, PROBE_FIXTURE_IN_ROOT, PROBE_BINARY_IN_ROOT,
+        GENERATED_APT_SOURCE_LIST_IN_ROOT, APT_KEYRING_IN_ROOT,
+        PROBE_SOURCE_IN_ROOT, PROBE_FIXTURE_IN_ROOT, PROBE_BINARY_IN_ROOT,
     }
     if (not isinstance(identities, list) or not 1 <= len(identities) <= len(allowed) or
             any(not isinstance(row, dict) or row.get("path") not in allowed for row in identities) or
@@ -5305,6 +5308,10 @@ def _provision_rootfs_unqualified(args: argparse.Namespace) -> int:
                list(bootstrap_metadata.values()), contract)
     selected_keyring_sha256 = candidate["trustedKeyring"]["sha256"]
     bound_call(install_selected_archive_keyring, profile_root, args.keyring, selected_keyring_sha256)
+    apt_keyring_identity = bound_call(
+        generated_rootfs_file_identity, profile_root, APT_KEYRING_IN_ROOT,
+        selected_keyring_sha256, expected_mode=0o644, max_bytes=1024 * 1024,
+    )
 
     sources = apt_source_list(contract)
     sources_path = args.workdir / f"clang-source-list-{args.label}.list"
@@ -5355,9 +5362,10 @@ def _provision_rootfs_unqualified(args: argparse.Namespace) -> int:
     bound_call(rootfs_run, profile_root, [*apt_prefix, "check"], contract, timeout=300,
                environment={"DEBIAN_FRONTEND": "noninteractive"})
 
-    # APT has consumed the exact signed-source-list bytes. It is construction
-    # input, not part of the retained toolchain image or package payload closure.
-    bound_call(remove_generated_rootfs_files, profile_root, [apt_source_identity])
+    # APT has consumed the exact source-list and candidate-authenticated keyring
+    # bytes. Both are construction inputs, not retained signed-package payloads.
+    # Recheck their captured inode/content identities before removing either.
+    bound_call(remove_generated_rootfs_files, profile_root, [apt_source_identity, apt_keyring_identity])
 
     package_rows = installed_packages(profile_root, metadata, expected_final_keys, contract)
     package_total = sum(row["bytes"] for row in package_rows)

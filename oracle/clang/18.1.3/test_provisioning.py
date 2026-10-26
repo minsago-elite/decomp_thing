@@ -355,6 +355,169 @@ class AuthenticatedDebPayloadTests(unittest.TestCase):
         self.assertFalse(path.exists())
         package_manifest = provision.verify_installed_package_payloads(self.root, self.payloads, [row], self.contract)
 
+    def test_selected_keyring_cleanup_restores_exact_package_closure(self):
+        (self.root / "usr/share/keyrings").mkdir(parents=True)
+        entries = [self.entry(name, kind=tarfile.DIRTYPE, mode=0o755)
+                   for name in (".", "usr", "usr/share", "usr/share/keyrings")]
+        row, _ = self.package_bytes(entries)
+        before = provision.verify_installed_package_payloads(self.root, self.payloads, [row], self.contract)
+        keyring = self.base / "selected.gpg"
+        payload = b"authored inert archive keyring; not signature evidence"
+        keyring.write_bytes(payload)
+
+        def install(command, timeout=None):
+            self.assertEqual(command[:4], ["sudo", "install", "-m", "0644"])
+            shutil.copyfile(command[-2], command[-1])
+            Path(command[-1]).chmod(0o644)
+            return mock.Mock(stdout="")
+
+        with mock.patch.object(provision, "run_checked", side_effect=install):
+            installed = provision.install_selected_archive_keyring(self.root, keyring, provision.sha256(payload))
+        identity = provision.generated_rootfs_file_identity(
+            self.root, provision.APT_KEYRING_IN_ROOT, provision.sha256(payload),
+            expected_mode=0o644, expected_owner=(os.getuid(), os.getgid()), max_bytes=1024 * 1024,
+        )
+        with self.assertRaisesRegex(provision.ProvisionError, "unapproved generated or omitted-package"):
+            provision.verify_installed_package_payloads(self.root, self.payloads, [row], self.contract)
+        with mock.patch.object(provision, "run_checked", side_effect=self.simulate_generated_rootfs_removal):
+            provision.remove_generated_rootfs_files(self.root, [identity])
+        self.assertFalse(installed.exists())
+        self.assertEqual(provision.verify_installed_package_payloads(
+            self.root, self.payloads, [row], self.contract), before)
+        (installed.parent / "unaccounted.gpg").write_bytes(payload)
+        with self.assertRaisesRegex(provision.ProvisionError, "unapproved generated or omitted-package"):
+            provision.verify_installed_package_payloads(self.root, self.payloads, [row], self.contract)
+
+    def test_provisioning_removes_both_apt_inputs_after_check_before_first_package_verification(self):
+        # Inert orchestration only: no bootstrap, APT, package install or privilege.
+        (self.root / "usr/share/keyrings").mkdir(parents=True)
+        (self.root / "etc/apt").mkdir(parents=True)
+        cache = self.root / "var/cache/apt/archives"
+        cache.mkdir(parents=True)
+        deb = cache / "authored.deb"
+        deb.write_bytes(b"inert downloaded package")
+        row = {**self.package, "bytes": deb.stat().st_size, "sha256": provision.sha256_file(deb)}
+        key = tuple(row[field] for field in ("name", "version", "architecture"))
+        contract = json.loads(json.dumps(self.contract))
+        contract["profile"]["binaryRoots"] = [{"name": row["name"], "version": row["version"]}]
+        keyring = self.base / "selected.gpg"
+        keyring.write_bytes(b"authored selected keyring")
+        args = provision.argparse.Namespace(
+            contract=provision.CONTRACT_PATH, workdir=self.base, rootfs=self.base / "fresh-root",
+            output=self.base / "output", acquisition=self.base / "acquisition", keyring=keyring, label="fixture",
+        )
+        binding = mock.Mock(descriptor_path=self.root)
+        events = []
+        actual_identity = provision.generated_rootfs_file_identity
+
+        def identity(root, path, digest, **kwargs):
+            events.append("capture:" + path)
+            return actual_identity(root, path, digest, expected_owner=(os.getuid(), os.getgid()), **kwargs)
+
+        def run(command, timeout=None):
+            if provision.GENERATED_ROOTFS_FILE_REMOVE_PROGRAM in command:
+                events.append("remove-inputs")
+                return self.simulate_generated_rootfs_removal(command, timeout)
+            self.assertEqual(command[:4], ["sudo", "install", "-m", "0644"])
+            shutil.copyfile(command[-2], command[-1])
+            Path(command[-1]).chmod(0o644)
+            return mock.Mock(stdout="")
+
+        def apt(root, command, contract, **kwargs):
+            events.append("apt-check" if command[-1] == "check" else "apt")
+            for path in (provision.APT_KEYRING_IN_ROOT, provision.GENERATED_APT_SOURCE_LIST_IN_ROOT):
+                self.assertTrue((root / path.lstrip("/")).is_file())
+            return ""
+
+        def verify(root, *args):
+            events.append("first-package-verification")
+            for path in (provision.APT_KEYRING_IN_ROOT, provision.GENERATED_APT_SOURCE_LIST_IN_ROOT):
+                self.assertFalse((root / path.lstrip("/")).exists())
+            self.assertEqual(events[-3:], ["apt-check", "remove-inputs", "first-package-verification"])
+            raise provision.ProvisionError("stopped at first package verification")
+
+        with contextlib.ExitStack() as stack:
+            patches = {
+                "read_contract": {"return_value": contract},
+                "load_candidate": {"return_value": ({"trustedKeyring": {"sha256": provision.sha256_file(keyring)}}, [])},
+                "remove_optional_source_caches": {}, "check_runner_bounds": {},
+                "create_pinned_rootfs_directory": {"return_value": binding},
+                "debootstrap_command": {"return_value": ["bootstrap-stand-in"]},
+                "installed_package_keys": {"return_value": {key}}, "require_bootstrap_ca_certificates": {},
+                "retain_signed_package_payloads": {}, "package_metadata_for_keys": {"return_value": {key: row}},
+                "downloaded_package_key": {"return_value": key}, "installed_packages": {"return_value": [row]},
+                "generated_rootfs_file_identity": {"side_effect": identity},
+                "rootfs_run": {"side_effect": apt}, "verify_installed_package_payloads": {"side_effect": verify},
+                "run_checked": {"side_effect": lambda command, **kwargs: mock.Mock(stdout="")
+                                if command == ["bootstrap-stand-in"] else run(command, **kwargs)},
+            }
+            for name, options in patches.items():
+                stack.enter_context(mock.patch.object(provision, name, **options))
+            with self.assertRaisesRegex(provision.ProvisionError, "stopped at first package verification"):
+                provision._provision_rootfs_unqualified(args)
+        self.assertLess(events.index("capture:" + provision.APT_KEYRING_IN_ROOT), events.index("apt"))
+
+    def test_selected_keyring_cleanup_refuses_changed_identity_content_and_unsafe_paths(self):
+        (self.root / "usr/share/keyrings").mkdir(parents=True)
+        path = self.root / provision.APT_KEYRING_IN_ROOT.lstrip("/")
+        payload = b"authored inert keyring"
+        canary = self.base / "keyring-canary"
+        canary.write_bytes(b"preserve this target")
+        (self.root / "etc/apt").mkdir(parents=True)
+        source_path = self.root / provision.GENERATED_APT_SOURCE_LIST_IN_ROOT.lstrip("/")
+        source_path.write_bytes(provision.apt_source_list(self.contract))
+        source_identity = provision.generated_rootfs_file_identity(
+            self.root, provision.GENERATED_APT_SOURCE_LIST_IN_ROOT, provision.sha256(source_path.read_bytes()),
+            expected_mode=0o644, expected_owner=(os.getuid(), os.getgid()), max_bytes=source_path.stat().st_size,
+        )
+        for mutation in ("content", "inode", "symlink", "hardlink", "mode", "parent"):
+            with self.subTest(mutation=mutation):
+                path.write_bytes(payload)
+                path.chmod(0o644)
+                identity = provision.generated_rootfs_file_identity(
+                    self.root, provision.APT_KEYRING_IN_ROOT, provision.sha256(payload),
+                    expected_mode=0o644, expected_owner=(os.getuid(), os.getgid()), max_bytes=len(payload),
+                )
+                if mutation == "content":
+                    path.write_bytes(b"X" * len(payload))
+                elif mutation == "inode":
+                    replacement = self.base / "replacement.gpg"
+                    replacement.write_bytes(payload)
+                    replacement.replace(path)
+                elif mutation == "symlink":
+                    path.unlink()
+                    path.symlink_to(canary)
+                elif mutation == "hardlink":
+                    os.link(path, self.base / "keyring-alias")
+                elif mutation == "mode":
+                    path.chmod(0o600)
+                else:
+                    path.parent.rename(self.root / "usr/share/held-keyrings")
+                    path.parent.symlink_to(self.root / "usr/share/held-keyrings", target_is_directory=True)
+                with mock.patch.object(provision, "run_checked", side_effect=self.simulate_generated_rootfs_removal):
+                    with self.assertRaises(provision.ProvisionError):
+                        provision.remove_generated_rootfs_files(self.root, [source_identity, identity])
+                self.assertTrue(path.exists())
+                self.assertEqual(source_path.read_bytes(), provision.apt_source_list(self.contract))
+                self.assertEqual(canary.read_bytes(), b"preserve this target")
+                if mutation == "parent":
+                    path.parent.unlink()
+                    (self.root / "usr/share/held-keyrings").rename(path.parent)
+                path.unlink()
+                if mutation == "hardlink":
+                    (self.base / "keyring-alias").unlink()
+        path.write_bytes(payload)
+        with self.assertRaisesRegex(provision.ProvisionError, "size is invalid"):
+            provision.generated_rootfs_file_identity(
+                self.root, provision.APT_KEYRING_IN_ROOT, provision.sha256(payload),
+                expected_mode=0o644, expected_owner=(os.getuid(), os.getgid()), max_bytes=len(payload) - 1,
+            )
+        with self.assertRaisesRegex(provision.ProvisionError, "content or identity changed"):
+            provision.generated_rootfs_file_identity(
+                self.root, provision.APT_KEYRING_IN_ROOT, "f" * 64,
+                expected_mode=0o644, expected_owner=(os.getuid(), os.getgid()), max_bytes=len(payload),
+            )
+
     def simulate_generated_rootfs_removal(self, command, timeout=None):
         self.assertEqual(command[:6], [
             "sudo", "-n", "/usr/bin/python3", "-I", "-B", "-c",
