@@ -169,9 +169,11 @@ class NativeInferredInterfaceCollectorRealTest {
         assertEquals(number("staleFrozenInputBytes") + number("staleComparisonAvailableBytes"), number("staleCombinedLimitBytes"))
         assertTrue(number("staleCombinedLimitBytes") < 4L * 1024 * 1024)
         for (field in listOf("belowRejectedWithOutputAndSpoolLive", "belowOutputRemoved", "boundedOutputMatchesOrdinaryBytes",
-            "staleRejectedDuringBoundedWrites", "staleInferredAndComparisonRemoved", "frozenInputsUnchanged", "boundedFailureDiagnosticRetained")) {
+            "staleRejectedDuringBoundedWrites", "staleInferredAndComparisonRemoved", "frozenInputsUnchanged", "boundedFailureDiagnosticRetained",
+            "ownedComparisonExactPeakReachedContentCheck", "ownedComparisonOneOverRejectedBeforeWrite", "ownedComparisonFinalBytesFitBothLimits")) {
             assertTrue(receipt.getValue(field).jsonPrimitive.boolean, "staging control missing: $field")
         }
+        assertEquals(2L * 64 * 1024 * 1024, number("ownedStreamReservationBytes"))
         assertTrue(receipt.getValue("belowFailure").jsonPrimitive.content.contains("while output and type spool are live"))
         assertTrue(receipt.getValue("staleFailure").jsonPrimitive.content.contains("while output and type spool are live"))
         assertFalse(Files.exists(evidence.resolve("one-below-peak-listing")))

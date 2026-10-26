@@ -1,5 +1,10 @@
 import decompengine.ghidra.BundledGhidraWorker;
 import ghidra.app.script.GhidraScript;
+import ghidra.util.task.TaskMonitor;
+import java.nio.file.Files;
+import java.nio.file.LinkOption;
+import java.nio.file.Path;
+import java.nio.file.attribute.BasicFileAttributes;
 import java.util.Arrays;
 import java.util.Set;
 
@@ -33,9 +38,21 @@ public final class RunBundledExports extends GhidraScript {
                     // The nested source-script loader cannot load the pinned compiled collector.
                     ExportNativeCallsV1.collect(currentProgram, monitor, exporterArguments);
                 } else if (name.equals("ExportNativeInterfacesV1.class")) {
-                    ExportNativeInterfacesV1.collect(currentProgram, monitor, exporterArguments);
+                    if (interfacePhases) {
+                        long allowance = interfaceByteLimit(Path.of(exporterArguments[4]).getParent(), 0L, monitor);
+                        ExportNativeInterfacesV1.collectWithStagingBudget(currentProgram, monitor, exporterArguments, allowance);
+                    } else ExportNativeInterfacesV1.collect(currentProgram, monitor, exporterArguments);
                 } else if (name.equals("ExportInferredInterfacesV1.class")) {
-                    ExportInferredInterfacesV1.collect(currentProgram, monitor, exporterArguments);
+                    if (interfacePhases) {
+                        Path model = Path.of(exporterArguments[8]);
+                        Path listing = Path.of(exporterArguments[9]);
+                        // The inferred API already charges these three files. Subtract all other
+                        // retained reports and reserve both growing streams, without double charging.
+                        long included = Math.addExact(Files.size(model), Math.addExact(
+                            Files.size(listing.resolve("native-interfaces.json")), Files.size(listing.resolve("manifest.json"))));
+                        long limit = interfaceByteLimit(model.getParent(), included, monitor);
+                        ExportInferredInterfacesV1.collectWithByteLimit(currentProgram, monitor, exporterArguments, limit);
+                    } else ExportInferredInterfacesV1.collect(currentProgram, monitor, exporterArguments);
                 } else {
                     runScript(name, exporterArguments);
                 }
@@ -49,6 +66,43 @@ public final class RunBundledExports extends GhidraScript {
         }
         BundledGhidraWorker.exportsCompleted();
         BundledGhidraWorker.diagnosticsFinalization();
+    }
+    /** Invocation9 only: retained reports + live streams + collector staging share one GiB. */
+    private static long interfaceByteLimit(Path reports, long includedBytes, TaskMonitor monitor) throws Exception {
+        final long maximum = 1024L * 1024 * 1024;
+        // The contained-command protocol bounds each stream at 64 MiB. Their current sizes
+        // are not enough: either can grow while output, comparison and type spool coexist.
+        final long streamReservation = 2L * 64 * 1024 * 1024;
+        long retained = 0L;
+        int entries = 0;
+        // Finite traversal of the complete tree, including progress/state/planning/data files.
+        // No symbolic links are followed; unexpected file kinds or excessive nesting fail closed.
+        try (var paths = Files.walk(reports, 8)) {
+            var iterator = paths.iterator();
+            while (iterator.hasNext()) {
+                monitor.checkCancelled();
+                Path path = iterator.next();
+                if (++entries > 300025) throw new IllegalStateException("interface report inventory count bound exceeded");
+                BasicFileAttributes attributes = Files.readAttributes(path, BasicFileAttributes.class, LinkOption.NOFOLLOW_LINKS);
+                if (attributes.isDirectory()) {
+                    if (!path.equals(reports) && reports.relativize(path).getNameCount() >= 8)
+                        throw new IllegalStateException("interface report inventory depth bound exceeded");
+                } else if (attributes.isRegularFile()) {
+                    long bytes = attributes.size();
+                    if (bytes < 0 || bytes > maximum - streamReservation - retained)
+                        throw new IllegalStateException("interface retained reports and stream reservation exceed aggregate bound");
+                    retained += bytes;
+                } else throw new IllegalStateException("interface reports contain a nonregular entry");
+            }
+        }
+        if (includedBytes < 0 || includedBytes > retained)
+            throw new IllegalArgumentException("interface collector input accounting differs from retained reports");
+        long available = maximum - streamReservation - retained;
+        if (available == 0) throw new IllegalStateException("interface aggregate has no staging allowance");
+        // Both collector APIs are lower-only. Listing charges output + live type spool +
+        // manifest reservation; inferred charges its inputs + comparison staging or output
+        // + manifest reservation, releasing comparison storage only after deletion.
+        return available + includedBytes;
     }
     private static void interfacePhase(String name, String state, long elapsedMillis) {
         String phase = switch (name) {

@@ -838,10 +838,68 @@ public final class NativeInferredInterfaceControls {
             receipt.addProperty("staleInferredAndComparisonRemoved", true);
             receipt.addProperty("frozenInputsUnchanged", true);
             receipt.addProperty("boundedFailureDiagnosticRetained", true);
+            ownedComparisonStagingControls(program, largerPeak, largerFinalBytes, receipt);
         } finally { program.endTransaction(transaction, false); }
         require(function.getParameterCount() == originalParameterCount && function.getSignatureSource() == originalSignatureSource,
             "stale listing control did not restore original native signature");
         Files.writeString(evidence.resolve("verified-staging-controls.json"), receipt.toString() + "\n");
+    }
+
+    /** Compose the real enclosing reports accounting with the real comparison/spool writer. */
+    private static void ownedComparisonStagingControls(ProgramDB program, long peak, long finalBytes, JsonObject receipt) throws Exception {
+        Path reports = model.getParent();
+        Path ownedListing = Files.createDirectory(reports.resolve("native-interfaces-v1"));
+        Path padding = reports.resolve("program_model.json.export/owned-staging-control.pad");
+        Path destination = reports.resolve("native-inferred-interfaces-v1");
+        var byteLimit = RunBundledExports.class.getDeclaredMethod("interfaceByteLimit", Path.class, long.class, TaskMonitor.class);
+        byteLimit.setAccessible(true);
+        try {
+            for (String name : List.of("native-interfaces.json", "manifest.json"))
+                Files.copy(listing.resolve(name), ownedListing.resolve(name));
+            long included = Math.addExact(Files.size(model), Math.addExact(
+                Files.size(ownedListing.resolve("native-interfaces.json")), Files.size(ownedListing.resolve("manifest.json"))));
+            long beforePadding = (long)byteLimit.invoke(null, reports, 0L, MONITOR);
+            long paddingBytes = beforePadding - peak;
+            require(paddingBytes > 0 && finalBytes + 65536 + 1 < peak,
+                "owned staging control must fit final bytes but distinguish its transient peak");
+            // Sparse logical bytes exercise the unchanged global limit without allocating a
+            // near-GiB buffer or writing a near-GiB fixture. The pad is removed before snapshots.
+            try (var pad = new java.io.RandomAccessFile(padding.toFile(), "rw")) {
+                pad.setLength(paddingBytes);
+                for (int over = 0; over <= 1; over++) {
+                    pad.setLength(paddingBytes + over);
+                    long combined = (long)byteLimit.invoke(null, reports, included, MONITOR);
+                    equal(combined, included + peak - over, "owned inferred lower-only limit");
+                    String[] arguments = collectorArguments(destination);
+                    arguments[9] = ownedListing.toString();
+                    CapturedRun capture = captureStderr(() ->
+                        ExportInferredInterfacesV1.collectWithByteLimit(program, MONITOR, arguments, combined));
+                    if (over == 0) {
+                        // Exact peak must finish the comparison before the deliberately stale
+                        // listing is refused. Neither case can reach a native decompiler call.
+                        require(capture.failure() instanceof IllegalStateException &&
+                            "listing snapshot does not match current native Program".equals(capture.failure().getMessage()),
+                            "exact owned comparison peak did not reach the stale-content check");
+                    } else {
+                        require(capture.failure() instanceof java.io.IOException && capture.failure().getMessage() != null &&
+                            capture.failure().getMessage().contains("while output and type spool are live"),
+                            "one-over owned comparison did not refuse simultaneous output and spool");
+                    }
+                    require(!Files.exists(destination, LinkOption.NOFOLLOW_LINKS), "owned comparison left partial output");
+                    equal(onlyFailureFrame(capture).getAsJsonObject("counts").get("nativeCallsStarted").getAsLong(),
+                        0L, "owned staging controls must not start native calls");
+                }
+            }
+            receipt.addProperty("ownedComparisonExactPeakReachedContentCheck", true);
+            receipt.addProperty("ownedComparisonOneOverRejectedBeforeWrite", true);
+            receipt.addProperty("ownedComparisonFinalBytesFitBothLimits", true);
+            receipt.addProperty("ownedStreamReservationBytes", 2L * 64 * 1024 * 1024);
+        } finally {
+            Files.deleteIfExists(padding);
+            Files.deleteIfExists(ownedListing.resolve("native-interfaces.json"));
+            Files.deleteIfExists(ownedListing.resolve("manifest.json"));
+            Files.deleteIfExists(ownedListing);
+        }
     }
 
     private static String[] listingArguments(Path destination) throws Exception {
