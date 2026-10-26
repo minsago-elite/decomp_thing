@@ -3,12 +3,14 @@ package decompengine.oracle.fulltree
 import decompengine.acp.LinuxFilesystemSyscalls
 import decompengine.oracle.core.OracleArtifacts
 import decompengine.oracle.core.OracleJson
+import decompengine.project.ContainedModuleHostedCase
 import java.nio.file.Files
 import java.nio.file.Path
 import java.nio.file.StandardCopyOption
 import java.nio.file.attribute.PosixFilePermissions
 import java.util.concurrent.TimeUnit
 import org.junit.jupiter.api.Assumptions.assumeTrue
+import org.junit.jupiter.api.Tag
 import kotlin.test.*
 import kotlinx.serialization.json.*
 
@@ -117,41 +119,77 @@ class ContainedCommandRetainedInputVisibilityTest {
         }
     }
 
-    @Test fun `actual generated strict namespaces hide every forbidden sibling and preserve only bounded active writes`() = fixture { root ->
-        val bwrap = Path.of("/usr/bin/bwrap")
-        assumeTrue(Files.isExecutable(bwrap), "bubblewrap is unavailable")
-        val prefix = listOf(bwrap.toString(), "--unshare-all", "--die-with-parent", "--cap-drop", "ALL", "--ro-bind", "/", "/", "--proc", "/proc", "--dev", "/dev")
-        assumeTrue(run(prefix + listOf("/bin/true"), root.resolve("probe-log")) == 0, "local namespaces are unavailable")
-        val files = linkedMapOf("reports/program_model.json" to "forbidden-model", "reports/native-calls-v1/manifest.json" to "manifest",
-            "reports/native-calls-v1/native-calls.json" to "native", "state/oracle" to "forbidden-state",
-            "$PRIOR/reports/machine.json" to "independent", "$OTHER/reports/external.json" to "forbidden-external",
-            "untracked-sibling/unknown" to "forbidden-untracked")
-        files.forEach { (relative, value) -> write(root, relative, value) }
-        privateDirectory(root.resolve(ACTIVE))
-        val choices = listOf(emptyList(), listOf("$PRIOR/reports/machine.json"),
-            listOf("reports/native-calls-v1/manifest.json", "reports/native-calls-v1/native-calls.json"))
-        val evidence = arrayListOf<JsonElement>()
-        for ((index, visible) in choices.withIndex()) {
-            val inputs = visible.map { relative -> KotlinContainedCommandRetainedInput(relative, files.getValue(relative).toByteArray().size.toLong(),
-                OracleArtifacts.sha256(files.getValue(relative).toByteArray())) }
-            val view = ContainedCommandRetainedInputVisibility(ACTIVE, setOf(PRIOR, OTHER, "state", "reports"), inputs)
-            LinuxFilesystemSyscalls.openRoot(root).use { view.verifySources(it) }
-            val command = prefix + view.mountArguments(root) + listOf("--chdir", root.resolve(ACTIVE).toString(), "--", "/usr/bin/python3", "-B", "-c", CANARY,
-                root.toString(), OracleJson.canonicalBytes(JsonArray(visible.map(::JsonPrimitive))).decodeToString(),
-                OracleJson.canonicalBytes(JsonObject(files.mapValues { JsonPrimitive(it.value) })).decodeToString(), ACTIVE)
-            val log = root.resolve("canary-$index.log")
-            assertEquals(0, run(command, log), Files.readString(log))
-            files.forEach { (relative, expected) -> assertEquals(expected, Files.readString(root.resolve(relative))) }
-            assertEquals("owned-write", Files.readString(root.resolve("$ACTIVE/owned-result")))
-            evidence += JsonObject(mapOf("policy" to view.canonicalIdentity(), "exitCode" to JsonPrimitive(0),
-                "childOutput" to JsonPrimitive(Files.readString(log)), "hostSourcesUnchanged" to JsonPrimitive(true)))
+    @Tag("ci-live")
+    @Test fun `actual generated strict namespaces hide every forbidden sibling and preserve only bounded active writes`() {
+        ContainedModuleHostedCase.run("generated-visibility-canaries", javaClass.name,
+            "actual generated strict namespaces hide every forbidden sibling and preserve only bounded active writes", null) { record ->
+            fixture { root ->
+                record.stage("namespace-probe")
+                val required = System.getenv("GENERATED_C_MODULE_COMPILE_REQUIRE") == "true" ||
+                    System.getenv("DECOMP_REQUIRE_ORACLE_EXT4_SCRATCH") == "true"
+                val bwrap = Path.of("/usr/bin/bwrap")
+                val executable = Files.isExecutable(bwrap)
+                if (required) assertTrue(executable, "required hosted bubblewrap is unavailable")
+                else assumeTrue(executable, "bubblewrap is unavailable")
+                val prefix = listOf(bwrap.toString(), "--unshare-all", "--die-with-parent", "--cap-drop", "ALL", "--ro-bind", "/", "/", "--proc", "/proc", "--dev", "/dev")
+                val probeLog = root.resolve("probe-log")
+                val probeExit = try { run(prefix + listOf("/bin/true"), probeLog) }
+                    finally { if (Files.exists(probeLog)) record.retain("namespace-probe.log", boundedCanaryBytes(probeLog)) }
+                record.retain("namespace-probe-exit.txt", "$probeExit\n".toByteArray())
+                if (required) assertEquals(0, probeExit, "required hosted namespaces are unavailable")
+                else assumeTrue(probeExit == 0, "local namespaces are unavailable")
+                val files = linkedMapOf("reports/program_model.json" to "forbidden-model", "reports/native-calls-v1/manifest.json" to "manifest",
+                    "reports/native-calls-v1/native-calls.json" to "native", "state/oracle" to "forbidden-state",
+                    "$PRIOR/reports/machine.json" to "independent", "$OTHER/reports/external.json" to "forbidden-external",
+                    "untracked-sibling/unknown" to "forbidden-untracked")
+                files.forEach { (relative, value) -> write(root, relative, value) }
+                files.keys.forEach { relative -> record.retain("host-before/$relative", boundedCanaryBytes(root.resolve(relative))) }
+                record.retain("canary.py", CANARY.toByteArray())
+                privateDirectory(root.resolve(ACTIVE))
+                val choices = listOf(emptyList(), listOf("$PRIOR/reports/machine.json"),
+                    listOf("reports/native-calls-v1/manifest.json", "reports/native-calls-v1/native-calls.json"))
+                val evidence = arrayListOf<JsonElement>()
+                for ((index, visible) in choices.withIndex()) {
+                    record.stage("view-$index")
+                    val inputs = visible.map { relative -> KotlinContainedCommandRetainedInput(relative, files.getValue(relative).toByteArray().size.toLong(),
+                        OracleArtifacts.sha256(files.getValue(relative).toByteArray())) }
+                    val view = ContainedCommandRetainedInputVisibility(ACTIVE, setOf(PRIOR, OTHER, "state", "reports"), inputs)
+                    record.retain("view-$index/policy.json", OracleJson.canonicalBytes(view.canonicalIdentity()))
+                    LinuxFilesystemSyscalls.openRoot(root).use { view.verifySources(it) }
+                    val command = prefix + view.mountArguments(root) + listOf("--chdir", root.resolve(ACTIVE).toString(), "--", "/usr/bin/python3", "-B", "-c", CANARY,
+                        root.toString(), OracleJson.canonicalBytes(JsonArray(visible.map(::JsonPrimitive))).decodeToString(),
+                        OracleJson.canonicalBytes(JsonObject(files.mapValues { JsonPrimitive(it.value) })).decodeToString(), ACTIVE)
+                    val log = root.resolve("canary-$index.log")
+                    record.retain("view-$index/command.json", OracleJson.canonicalBytes(JsonArray(command.map(::JsonPrimitive))))
+                    val exit = try { run(command, log) }
+                        finally { if (Files.exists(log)) record.retain("view-$index/child-output.bin", boundedCanaryBytes(log)) }
+                    record.retain("view-$index/exit-code.txt", "$exit\n".toByteArray())
+                    assertEquals(0, exit, boundedCanaryBytes(log).decodeToString())
+                    files.forEach { (relative, expected) ->
+                        val actual = boundedCanaryBytes(root.resolve(relative))
+                        record.retain("view-$index/host-after/$relative", actual)
+                        assertEquals(expected, actual.decodeToString())
+                    }
+                    val owned = boundedCanaryBytes(root.resolve("$ACTIVE/owned-result"))
+                    record.retain("view-$index/owned-result.bin", owned)
+                    assertEquals("owned-write", owned.decodeToString())
+                    evidence += JsonObject(mapOf("policy" to view.canonicalIdentity(), "exitCode" to JsonPrimitive(0),
+                        "childOutput" to JsonPrimitive(boundedCanaryBytes(log).decodeToString()), "hostSourcesUnchanged" to JsonPrimitive(true)))
+                }
+                val output = Files.createDirectories(Path.of("build/verification")).resolve("visibility-kotlin-generated-canaries.json")
+                Files.write(output, OracleJson.canonicalBytes(JsonObject(mapOf("scope" to JsonPrimitive("actual-generated-bubblewrap-view-controls"),
+                    "containedLifecycleQualified" to JsonPrimitive(false), "views" to JsonArray(evidence)))))
+                record.retain("generated-canaries.json", boundedCanaryBytes(output, 4 * 1024 * 1024))
+                record.stage("remove-fixture")
+            }
         }
-        val output = Files.createDirectories(Path.of("build/verification")).resolve("visibility-kotlin-generated-canaries.json")
-        Files.write(output, OracleJson.canonicalBytes(JsonObject(mapOf("scope" to JsonPrimitive("actual-generated-bubblewrap-view-controls"),
-            "containedLifecycleQualified" to JsonPrimitive(false), "views" to JsonArray(evidence)))))
     }
 
     private fun input(path: String, bytes: Long = 1) = KotlinContainedCommandRetainedInput(path, bytes, "a".repeat(64))
+    private fun boundedCanaryBytes(path: Path, maximumBytes: Int = 64 * 1024): ByteArray =
+        Files.newInputStream(path, java.nio.file.LinkOption.NOFOLLOW_LINKS).use { input ->
+            input.readNBytes(maximumBytes + 1).also { require(it.size <= maximumBytes) { "canary evidence exceeds its bound" } }
+        }
     private fun write(root: Path, relative: String, value: String): Path {
         val path = root.resolve(relative)
         var current = root

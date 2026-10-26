@@ -25,14 +25,14 @@ jobs:
       GRADLE_USER_HOME: ${{ github.workspace }}/build/gradle-user-home
       TMPDIR: ${{ github.workspace }}/build/module-compilation-qualification/tmp
       XDG_CACHE_HOME: ${{ github.workspace }}/build/module-compilation-qualification/cache
-      JAVA_TOOL_OPTIONS: -XX:-UsePerfData -Djava.io.tmpdir=${{ github.workspace }}/build/module-compilation-qualification/tmp -Djna.tmpdir=${{ github.workspace }}/build/module-compilation-qualification/tmp
+      JAVA_TOOL_OPTIONS: -XX:-UsePerfData -Djava.io.tmpdir=${{ github.workspace }}/build/module-compilation-qualification/tmp -Djna.tmpdir=${{ github.workspace }}/build/module-compilation-qualification/tmp -Duser.home=${{ github.workspace }}/build/module-compilation-qualification/home
     steps:
       - uses: actions/checkout@v7
         with:
           submodules: recursive
           fetch-depth: 2
       - name: Prepare repository-owned temporary and cache paths
-        run: mkdir -p "$TMPDIR" "$XDG_CACHE_HOME" "$GITHUB_WORKSPACE/build/module-compilation-qualification/runner-tmp"
+        run: mkdir -p "$TMPDIR" "$XDG_CACHE_HOME" "$GITHUB_WORKSPACE/build/module-compilation-qualification/runner-tmp" "$GITHUB_WORKSPACE/build/module-compilation-qualification/home"
       - uses: actions/setup-java@v6
         with:
           distribution: temurin
@@ -59,8 +59,8 @@ jobs:
         env:
           RUNNER_TEMP: ${{ github.workspace }}/build/module-compilation-qualification/runner-tmp
         run: |
-          bash scripts/ci-prepare-oracle-ext4-scratch.sh --module-compile
-          bash scripts/ci-prepare-oracle-ext4-scratch.sh
+          env RUNNER_TEMP="$GITHUB_WORKSPACE/build/module-compilation-qualification/runner-tmp" bash scripts/ci-prepare-oracle-ext4-scratch.sh --module-compile
+          env RUNNER_TEMP="$GITHUB_WORKSPACE/build/module-compilation-qualification/runner-tmp" bash scripts/ci-prepare-oracle-ext4-scratch.sh
       - name: Qualify exact modules and failure rollback through actual containment
         id: qualify
         run: |
@@ -75,10 +75,28 @@ jobs:
         env:
           RUNNER_TEMP: ${{ github.workspace }}/build/module-compilation-qualification/runner-tmp
         run: |
-          first=0
-          bash scripts/ci-release-oracle-ext4-scratch.sh --module-compile || first=$?
-          bash scripts/ci-release-oracle-ext4-scratch.sh || first=$?
-          exit "$first"
+          module_status=0
+          terminal_status=0
+          env RUNNER_TEMP="$GITHUB_WORKSPACE/build/module-compilation-qualification/runner-tmp" bash scripts/ci-release-oracle-ext4-scratch.sh --module-compile || module_status=$?
+          env RUNNER_TEMP="$GITHUB_WORKSPACE/build/module-compilation-qualification/runner-tmp" bash scripts/ci-release-oracle-ext4-scratch.sh || terminal_status=$?
+          python3 - "$module_status" "$terminal_status" <<'PYTHON'
+          import json
+          from pathlib import Path
+          import sys
+          output = Path('build/module-compilation-qualification/scratch-release.json')
+          output.parent.mkdir(parents=True, exist_ok=True)
+          module, terminal = map(int, sys.argv[1:])
+          with output.open('x', encoding='utf-8') as stream:
+              json.dump({'schemaVersion': 1, 'moduleReleaseExitCode': module,
+                         'terminalReleaseExitCode': terminal,
+                         'bothReleaseCommandsSucceeded': module == terminal == 0}, stream, sort_keys=True)
+              stream.write('\n')
+          PYTHON
+          if [[ "$module_status" != 0 || "$terminal_status" != 0 ]]; then
+            echo 'At least one owned scratch release failed; retained release evidence does not establish complete cleanup.' >&2
+            if [[ "$module_status" != 0 ]]; then exit "$module_status"; fi
+            exit "$terminal_status"
+          fi
       - name: Retain exact compiler and lifecycle evidence
         if: always()
         uses: actions/upload-artifact@v7
@@ -92,6 +110,15 @@ jobs:
             build/module-compilation-qualification/config
             build/module-compilation-qualification/test-summary.json
             build/module-compilation-qualification/compiled-live-tests.json
+            build/module-compilation-qualification/child-classpath.json
+            build/module-compilation-qualification/compiled-class-inventory.json
+            build/module-compilation-qualification/checkout-provenance.json
+            build/module-compilation-qualification/qualification-exit.json
+            build/module-compilation-qualification/scratch-release.json
+            build/module-compilation-qualification/live-gradle.log
+            build/module-compilation-qualification/case-reconciliation.*
+            build/module-compilation-qualification/operator-cleanup.*
             build/reports/contained-module-compilation-live
+            build/verification/visibility-kotlin-generated-canaries.json
             build/test-results/moduleCompilationLiveQualification
             build/reports/tests/moduleCompilationLiveQualification
