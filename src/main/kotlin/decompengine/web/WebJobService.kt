@@ -662,7 +662,7 @@ class WebJobService(
     }
 
     @Synchronized
-    private fun revisionSourceReference(jobId: String, runId: String, revisionId: String): WebRevisionSourceReference =
+    internal fun revisionSourceReference(jobId: String, runId: String, revisionId: String): WebRevisionSourceReference =
         when (val inspected = inspectDurableJob(jobId)) {
             is WorkflowJobInspection.Available -> selectWebRevisionSource(inspected.snapshot, jobId, runId, revisionId)
             is WorkflowJobInspection.Unavailable -> throw WebJobServiceException(inspected.diagnostic.code, inspected.diagnostic.message)

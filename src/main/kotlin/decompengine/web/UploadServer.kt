@@ -453,32 +453,36 @@ class UploadServer(
         harnessReadiness.close()
         agentPreflight.close()
         access.close()
-        // Archive verification reads job storage; an unfinished verifier keeps ownership by failing shutdown here.
-        api?.close()
-        jobs.close()
-        var inspectionWaitInterrupted = false
+        var restoreInterrupt = callerWasInterrupted
         try {
-            check(inspection === null || inspection !== Thread.currentThread()) { "Inspection cannot await its own shutdown" }
-            // The provider owns its cleanup deadlines. Do not truncate them with a web timeout,
-            // including when the shutdown caller is interrupted while cleanup is still running.
-            while (inspection?.isAlive == true) {
-                try { inspection.join() } catch (_: InterruptedException) { inspectionWaitInterrupted = true }
+            // Archive verification reads job storage; an unfinished verifier keeps ownership by failing shutdown here.
+            // Its standalone close restores interruption; defer that flag until the job service and ownership cleanup finish.
+            try { api?.close() }
+            finally { restoreInterrupt = Thread.interrupted() || restoreInterrupt }
+            jobs.close()
+            try {
+                check(inspection === null || inspection !== Thread.currentThread()) { "Inspection cannot await its own shutdown" }
+                // The provider owns its cleanup deadlines. Do not truncate them with a web timeout,
+                // including when the shutdown caller is interrupted while cleanup is still running.
+                while (inspection?.isAlive == true) {
+                    try { inspection.join() } catch (_: InterruptedException) { restoreInterrupt = true }
+                }
+            } catch (exception: Exception) {
+                if (exception is InterruptedException) restoreInterrupt = true
             }
-        } catch (exception: Exception) {
-            if (exception is InterruptedException) Thread.currentThread().interrupt()
+            // Interrupting the executor does not mean admitted handlers have finished their finally blocks.
+            // Admission is closed, so reaching zero here is permanent. Never hold lifecycleLock while waiting.
+            val requestDeadline = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(requestShutdownTimeoutMs)
+            while (requestsDrained.count != 0L) {
+                val remaining = requestDeadline - System.nanoTime()
+                if (remaining <= 0) break
+                try { requestsDrained.await(remaining, TimeUnit.NANOSECONDS) }
+                catch (_: InterruptedException) { restoreInterrupt = true }
+            }
+            if (!releaseOwnershipIfIdle()) throw IllegalStateException("HTTP requests remain active after server stop")
+        } finally {
+            if (restoreInterrupt) Thread.currentThread().interrupt()
         }
-        // Interrupting the executor does not mean admitted handlers have finished their finally blocks.
-        // Admission is closed, so reaching zero here is permanent. Never hold lifecycleLock while waiting.
-        var requestWaitInterrupted = false
-        val requestDeadline = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(requestShutdownTimeoutMs)
-        while (requestsDrained.count != 0L) {
-            val remaining = requestDeadline - System.nanoTime()
-            if (remaining <= 0) break
-            try { requestsDrained.await(remaining, TimeUnit.NANOSECONDS) }
-            catch (_: InterruptedException) { requestWaitInterrupted = true }
-        }
-        if (callerWasInterrupted || inspectionWaitInterrupted || requestWaitInterrupted) Thread.currentThread().interrupt()
-        if (!releaseOwnershipIfIdle()) throw IllegalStateException("HTTP requests remain active after server stop")
     }
 
     /** Admission covers the whole handler, including upload publication and error handling. */

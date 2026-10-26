@@ -44,6 +44,7 @@ internal class WebSourceArchives(
     private val readContract: (String, String) -> ByteArray?,
     private val verify: (String, String, String) -> WebArchiveSnapshot,
     private val executor: ExecutorService,
+    private val reference: (String, String, String) -> WebRevisionSourceReference,
     private val clock: Clock = Clock.systemUTC(),
     private val shutdownTimeoutMs: Long = 60_000,
 ) : AutoCloseable {
@@ -132,9 +133,12 @@ internal class WebSourceArchives(
      * archive and revision metadata is returned instead of starting a second one.
      */
     fun start(jobId: String, runId: String, revisionId: String, archiveSha256: String, key: String): Started {
-        val snapshot = revision(jobId, runId, revisionId)
+        // Existing operations require durable candidate authorization, not another read of their verification inputs.
+        val selected = reference(jobId, runId, revisionId)
         val intent = listOf(jobId, runId, revisionId, archiveSha256).joinToString("\u0000")
-        synchronized(this) { replay(key, intent)?.let { return it } }
+        synchronized(this) { replay(key, intent, selected)?.let { return it } }
+        val snapshot = revision(jobId, runId, revisionId)
+        if (snapshot.reference != selected) revisionSourceChanged()
         val current = try { observe(jobId, runId) } catch (_: WebArtifactTooLarge) {
             throw WebAccessDenied(413, "ARCHIVE_TOO_LARGE", "The retained source archive exceeds the verifier's 64 MiB limit.")
         } ?: throw WebAccessDenied(404, "ARCHIVE_NOT_FOUND", "No source archive is retained for this attempt.")
@@ -142,7 +146,7 @@ internal class WebSourceArchives(
             "The retained archive differs from the displayed digest. Refresh the archive status before verifying.")
         synchronized(this) {
             // Recheck under the admission lock: a concurrent request with this key may have been admitted meanwhile.
-            replay(key, intent)?.let { return it }
+            replay(key, intent, selected)?.let { return it }
             records.values.lastOrNull { !it.terminal && it.jobId == jobId && it.runId == runId && it.revisionId == revisionId &&
                 it.archiveSha256 == archiveSha256 && it.metadataVersion == snapshot.metadataVersion }?.let { running ->
                 keys[key] = running.operationId // A deduplicated request still binds its key to the returned operation.
@@ -168,11 +172,12 @@ internal class WebSourceArchives(
     }
 
     /** Caller holds the monitor. A bound key replays its operation; another intent under that key conflicts. */
-    private fun replay(key: String, intent: String): Started? {
+    private fun replay(key: String, intent: String, selected: WebRevisionSourceReference): Started? {
         val prior = keys[key]?.let(records::getValue) ?: return null
         if (listOf(prior.jobId, prior.runId, prior.revisionId, prior.archiveSha256).joinToString("\u0000") != intent) {
             throw WebAccessDenied(409, "IDEMPOTENCY_CONFLICT", "The request key was used for a different archive verification.")
         }
+        if (prior.sourceSha256 != selected.sourceSha256) revisionSourceChanged()
         return Started(prior, true)
     }
 
@@ -184,7 +189,8 @@ internal class WebSourceArchives(
             when {
                 verified.sha256 != record.archiveSha256 -> "ARCHIVE_CHANGED"
                 // The archive's own build contract must be the descriptor that binds this revision's source digest.
-                verified.contractSha256 != now.descriptorSha256 || now.metadataVersion != record.metadataVersion -> "REVISION_MISMATCH"
+                verified.contractSha256 != now.descriptorSha256 || verified.manifestSha256 != now.manifestSha256 ||
+                    now.metadataVersion != record.metadataVersion -> "REVISION_MISMATCH"
                 else -> null
             }
         } catch (interrupted: InterruptedException) {
@@ -211,9 +217,11 @@ internal class WebSourceArchives(
     }
 
     fun operation(jobId: String, runId: String, revisionId: String, operationId: String): WebArchiveVerification {
-        revision(jobId, runId, revisionId)
-        return synchronized(this) { records[operationId]?.takeIf { it.jobId == jobId && it.runId == runId && it.revisionId == revisionId } }
+        val selected = reference(jobId, runId, revisionId)
+        val record = synchronized(this) { records[operationId]?.takeIf { it.jobId == jobId && it.runId == runId && it.revisionId == revisionId } }
             ?: throw WebAccessDenied(404, "OPERATION_NOT_FOUND", "The archive verification is unavailable. After a restart, request a new verification.")
+        if (record.sourceSha256 != selected.sourceSha256) revisionSourceChanged()
+        return record
     }
 
     /**
@@ -223,10 +231,20 @@ internal class WebSourceArchives(
      */
     override fun close() {
         executor.shutdownNow()
-        val stopped = try { executor.awaitTermination(shutdownTimeoutMs, java.util.concurrent.TimeUnit.MILLISECONDS) }
-            catch (_: InterruptedException) { Thread.currentThread().interrupt(); false }
-        synchronized(this) { records.values.filter { !it.terminal }.forEach { finish(it, "interrupted", "SERVER_STOPPING") } }
-        if (!stopped) throw WebJobServiceException("SHUTDOWN_INCOMPLETE", "Archive verification did not stop; job storage remains owned.")
+        var interrupted = Thread.interrupted()
+        val deadline = System.nanoTime() + java.util.concurrent.TimeUnit.MILLISECONDS.toNanos(shutdownTimeoutMs)
+        try {
+            while (!executor.isTerminated) {
+                val remaining = deadline - System.nanoTime()
+                if (remaining <= 0) break
+                try { executor.awaitTermination(remaining, java.util.concurrent.TimeUnit.NANOSECONDS) }
+                catch (_: InterruptedException) { interrupted = true }
+            }
+            synchronized(this) { records.values.filter { !it.terminal }.forEach { finish(it, "interrupted", "SERVER_STOPPING") } }
+            if (!executor.isTerminated) throw WebJobServiceException("SHUTDOWN_INCOMPLETE", "Archive verification did not stop; job storage remains owned.")
+        } finally {
+            if (interrupted) Thread.currentThread().interrupt()
+        }
     }
 
     companion object {
@@ -260,7 +278,7 @@ internal fun webArchiveOperation(record: WebArchiveVerification): JsonObject = b
 internal val ARCHIVE_FAILURE_MESSAGES = mapOf(
     "ARCHIVE_INVALID" to "The archive is incomplete, malformed, or its payload differs from the current source tree or build contract.",
     "ARCHIVE_CHANGED" to "The archive bytes changed during verification.",
-    "REVISION_MISMATCH" to "The archive's build contract does not bind this revision's recorded source.",
+    "REVISION_MISMATCH" to "The archive's manifest or build contract does not match this revision's recorded metadata.",
     "REVISION_UNAVAILABLE" to "The revision metadata could not be captured consistently.",
     "ARCHIVE_UNAVAILABLE" to "The archive could not be read within its limits.",
     "SERVER_STOPPING" to "The server stopped before verification finished.",
