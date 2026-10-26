@@ -177,6 +177,20 @@ object StructuralGlobalTypeRecoveredProjectionV1 {
         var estimatedOutputBytes = 0L
         fun addText(value: String, maximum: Int, label: String) {
             if (value.length > maximum) structuralFail("$label exceeds configured character limit")
+            var index = 0
+            while (index < value.length) {
+                val character = value[index]
+                when {
+                    Character.isHighSurrogate(character) -> {
+                        if (index + 1 >= value.length || !Character.isLowSurrogate(value[index + 1])) {
+                            structuralFail("$label contains malformed UTF-16")
+                        }
+                        index += 2
+                    }
+                    Character.isLowSurrogate(character) -> structuralFail("$label contains malformed UTF-16")
+                    else -> index += 1
+                }
+            }
             val bytes = value.toByteArray(StandardCharsets.UTF_8).size.toLong()
             textBytes = Math.addExact(textBytes, bytes)
             // JSON escaping expands a control character to six ASCII bytes; applying that

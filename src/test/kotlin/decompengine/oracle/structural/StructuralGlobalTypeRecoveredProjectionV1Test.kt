@@ -89,6 +89,14 @@ class StructuralGlobalTypeRecoveredProjectionV1Test {
                     StructuralRecoveryV1Limits(maximumJsonNumberCharacters = 16),
                 )
             }
+            assertFailsWith<IllegalArgumentException> {
+                StructuralGlobalTypeRecoveredProjectionV1.project(
+                    listOf(StructuralRecoveredEntityObservationV1("global", "g:bad-utf16", listOf(
+                        observation("global.storage", "storage", StructuralRecoveredSourceV1.Text("\uD800")),
+                    ))),
+                    target,
+                )
+            }
         }
     }
 
