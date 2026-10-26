@@ -91,7 +91,8 @@ class WebArtifactContainmentTest {
                     Files.writeString(reports.resolve("a${String(Character.toChars(codePoint))}.txt"), "INVISIBLE_NAME_MARKER")
                     val response = get("reports/a$encoded.txt")
                     assertEquals(400, response.statusCode(), encoded)
-                    assertTrue(response.body().contains("INVALID_REQUEST"))
+                    // Legacy artifact routes answer with an HTML error page carrying the fixed refusal text.
+                    assertTrue(response.body().contains("not a canonical contained name"), response.body())
                     assertFalse(response.body().contains("INVISIBLE_NAME_MARKER"))
                 }
                 val attempts = listOf("reports/link.txt", "reports/linked-dir/secret.txt", "reports/fifo",
