@@ -152,3 +152,17 @@ by reviewed code/spec changes. A weaker machine is not an automatic exemption;
 record a new profile and rerun the required baseline. Do not mark a criterion
 passed because a limit was silently raised, rows were hidden, a fixture was
 shrunk, a capability was relabeled, or an acceptance check was removed.
+
+## Retained listeners, timers and stream buffers
+
+`frontend/tests/retention-leaks.test.tsx` (#624) instruments the test page and counts what can
+outlive a view: listeners on `window`, `document`, media queries and still-live abort signals,
+pending timers and intervals, and open broadcast channels. Element listeners are excluded because
+they die with their nodes. It navigates through every SPA route four times with a live session.
+After the first cycle, which loads each lazy route, every later cycle must end with exactly the
+same retained set, and unmounting the shell and disposing the session must return to the
+pre-render baseline. A second case subscribes to and cancels the event stream 60 times
+under one long-lived page signal. Every response body must be cancelled, and no reader, deadline
+timer or abort listener may remain. A control case proves the harness reports an injected
+listener, interval and channel. This is a structural retention check in jsdom; the Chromium heap
+budgets above still need a heap trace on the reference profile.

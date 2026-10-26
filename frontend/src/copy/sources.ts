@@ -101,6 +101,7 @@ export const sourceCopy = {
   clipboardNotice: 'The clipboard may change text encoding or line endings. Download the complete input to preserve original bytes.',
   copied: 'Copied only the displayed text range. Use the complete download to preserve original bytes.',
   copyFailed: 'The text could not be copied. Check clipboard access, then try again.',
+  clipboardUnavailable: 'Copying is unavailable in this browser context. Select the displayed text, or download the complete input to preserve original bytes.',
   rangeNavigation: 'Source byte ranges', firstRange: 'First byte range', nextRange: 'Next byte range',
   hexFallback: {
     'declared-binary': 'This input is declared binary. Hexadecimal byte values are shown.',

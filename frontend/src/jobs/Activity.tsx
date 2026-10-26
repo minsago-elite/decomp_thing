@@ -9,6 +9,7 @@ import type { ActivityReceiptTime } from './ActivityReceiptAge';
 import { ActivityRow, matchesActivity } from './ActivityRow';
 import type { ActivityGroup } from './ActivityRow';
 import { useBrowserAvailability } from '../session/useBrowserAvailability';
+import { browserCapabilities } from '../shared/browserCapabilities';
 import { createUsageDisplay, isContextUsageUpdate } from './usageDisplay';
 
 import { ActivityHistory } from './ActivityHistory';
@@ -38,9 +39,11 @@ export function Activity({ jobId, runId, basePath, navigation }: {
 
 function LiveActivity({ jobId, runId, basePath, windowLinks }: { jobId: string; runId: string; basePath: string; windowLinks: boolean }) {
   const { client, stream } = usePrivateTransport(basePath);
-  const fallback = useRef(false);
+  // Without a readable fetch body the live stream cannot work; poll from the start (#631).
+  const [streamingUnavailable] = useState(() => !browserCapabilities().fetchStreaming);
+  const fallback = useRef(streamingUnavailable);
   const streamFailures = useRef(0);
-  const [periodic, setPeriodic] = useState(false);
+  const [periodic, setPeriodic] = useState(streamingUnavailable);
   const availability = useBrowserAvailability();
   const [retry, setRetry] = useState(0);
   const failures = useRef(0);
