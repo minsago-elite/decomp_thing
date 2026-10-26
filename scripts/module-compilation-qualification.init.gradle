@@ -63,13 +63,18 @@ allprojects {
                     file('build/module-compilation-qualification/compiled-live-tests.json').absolutePath
             }
         }
-        tasks.register('moduleCompilationLiveQualification', Test) {
-            dependsOn tasks.named('testClasses'), tasks.named('generateAcpGateHelperChecksum'), tasks.named('stageOracleNativeLibraries'), tasks.named('moduleCompilerLiveInventory')
-            outputs.upToDateWhen { false }
-            outputs.doNotCacheIf('hosted compiler authority must execute in this attempt') { true }
-            doFirst {
+        tasks.register('moduleCompilerLivePreflight') {
+            // Test.doFirst is too late: Gradle has already prepared the Test outputs.
+            // A separate prerequisite runs before output preparation, including for direct
+            // Gradle invocations that do not use the shell's earlier freshness admission.
+            doLast {
                 assert !file('build/test-results/moduleCompilationLiveQualification').exists(): 'refusing existing hosted compiler test reports'
             }
+        }
+        tasks.register('moduleCompilationLiveQualification', Test) {
+            dependsOn tasks.named('testClasses'), tasks.named('generateAcpGateHelperChecksum'), tasks.named('stageOracleNativeLibraries'), tasks.named('moduleCompilerLiveInventory'), tasks.named('moduleCompilerLivePreflight')
+            outputs.upToDateWhen { false }
+            outputs.doNotCacheIf('hosted compiler authority must execute in this attempt') { true }
             testClassesDirs = sourceSets.test.output.classesDirs
             classpath = sourceSets.test.runtimeClasspath
             useJUnitPlatform { includeTags 'ci-live' }

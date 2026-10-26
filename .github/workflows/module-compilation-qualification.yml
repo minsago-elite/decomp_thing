@@ -40,6 +40,8 @@ jobs:
       - uses: ./.github/actions/setup-gradle-compiler-cache
         with:
           cache-read-only: true
+      - name: Verify qualification freshness before Gradle prepares test outputs
+        run: bash scripts/test-module-compilation-qualification-preflight.sh
       - name: Install pinned frontend build toolchain
         run: |
           bash scripts/install-frontend-node.sh "$GITHUB_WORKSPACE/build/module-compilation-qualification/node"
