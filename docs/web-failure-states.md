@@ -59,7 +59,8 @@ filter draft now survives the dashboard remounting for a new session generation,
 after expiry and reconnect (`jobs/filterDraft.ts`). It is held in page memory only, bound to
 the browser-session object and the applied filters it was typed against, and dropped when the
 session identity is invalidated (sign-out, another tab, a new server instance, an incompatible
-server). It is never written to storage or the URL.
+server), including while another route is open: the first retained draft subscribes to the
+session's invalidation for the session's lifetime. It is never written to storage or the URL.
 
 ## Converging session and version recovery (#630)
 

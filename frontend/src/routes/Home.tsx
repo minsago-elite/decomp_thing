@@ -4,12 +4,8 @@ import type { BrowserSession } from '../session/session';
 import { useSession } from '../session/useSession';
 import { Upload } from '../jobs/Upload';
 import { Dashboard } from '../jobs/Dashboard';
-import { forgetFilterDraft } from '../jobs/filterDraft';
-import { useEffect } from 'preact/hooks';
 export default function Home({ basePath = '', session = null }: { basePath?: string; session?: BrowserSession | null }) {
   const state = useSession(session);
-  // Retained filter drafts belong to the session identity that typed them.
-  useEffect(() => session?.onInvalidated(() => { forgetFilterDraft(session); }), [session]);
   return (
     <section aria-labelledby="workspace-title">
       <p class="eyebrow">{copy.reconstructionWorkspace}</p>

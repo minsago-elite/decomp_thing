@@ -162,6 +162,22 @@ describe('form context across reconnect (#629)', () => {
     await settle();
     expect((await screen.findByRole<HTMLInputElement>('textbox', { name: 'Filename search' })).value).toBe('');
   });
+
+  it('drops a retained draft when the session is invalidated while another route is open', async () => {
+    const auth = await session();
+    history.replaceState(null, '', '/nested/');
+    render(<App basePath="/nested" session={auth} />);
+    fireEvent.input(await screen.findByRole<HTMLInputElement>('textbox', { name: 'Filename search' }), { target: { value: 'firmware' } });
+    await settle();
+    fireEvent.click(screen.getByRole('link', { name: 'Runtime status' }));
+    await screen.findByRole('heading', { level: 1, name: 'Runtime status' });
+    // The dashboard is unmounted; signing out here must still forget its draft.
+    await act(async () => { await auth.logout(); });
+    await act(async () => { await auth.refresh(); });
+    fireEvent.click(screen.getByRole('link', { name: 'Workspace' }));
+    await settle();
+    expect((await screen.findByRole<HTMLInputElement>('textbox', { name: 'Filename search' })).value).toBe('');
+  });
 });
 
 describe('convergent version and session recovery (#630)', () => {
