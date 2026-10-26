@@ -61,6 +61,8 @@ class MachineCallComponentEvidenceTest(unittest.TestCase):
         for name in ("rich", "canonicalOracle", "artifactManifest"):
             path = f"fixtures/{name}.bin"
             data = f"authored committed {name} input\n".encode()
+            if name == "rich":
+                data = data.ljust(4096, b"\0")  # Space for authored file-backed code/version witnesses.
             destination = self.root / path
             destination.parent.mkdir(parents=True, exist_ok=True)
             destination.write_bytes(data)
@@ -840,10 +842,14 @@ class ExternalCallComponentEvidenceTest(unittest.TestCase):
             "size": "0x0", "link": link, "info": 0, "alignment": "0x1", "entrySize": "0x0"}
             for index, name, kind, link in ((6, ".gnu.version", 0x6fffffff, 1), (7, ".gnu.version_r", 0x6ffffffe, 3)))
         inventory["sections"][4].update(entrySize="0x2", size="0x4")
-        inventory["dynamicEntries"].insert(-1, {"index": 8, "fileOffset": 128, "tag": "0x6ffffff0", "value": "0x0"})
+        inventory["sections"][5].update(address="0x6000", offset=64, size="0x20", info=1)
+        inventory["programHeaders"].append({"index": 1, "type": 1, "flags": 4, "offset": "0x40",
+            "virtualAddress": "0x6000", "physicalAddress": "0x6000", "fileSize": "0x20", "memorySize": "0x20", "alignment": "0x1"})
+        inventory["dynamicEntries"][-1:-1] = [{"index": index + 8, "fileOffset": (index + 8) * 16, "tag": hex(tag), "value": hex(value)}
+            for index, (tag, value) in enumerate(((0x6ffffffe, 0x6000), (0x6fffffff, 1), (0x6ffffff0, 0)))]
         inventory["dynamicSymbols"][0]["version"] = {"sectionIndex": 6, "fileOffset": 2, "raw": 2, "index": 2, "hidden": False,
             "kind": "required-version", "name": "VER_1", "providerRequest": "libexample.so"}
-        inventory["versionRequirements"] = [{"sectionIndex": 7, "stringSectionIndex": 3, "recordOffset": 0, "auxiliaryOffset": 16,
+        inventory["versionRequirements"] = [{"sectionIndex": 7, "stringSectionIndex": 3, "recordOffset": 64, "auxiliaryOffset": 80,
             "providerRequest": "libexample.so", "name": "VER_1", "rawIndex": 2, "index": 2, "flags": 0, "hash": 0x5aa821}]
 
         def rehash_identity() -> None:
@@ -873,7 +879,17 @@ class ExternalCallComponentEvidenceTest(unittest.TestCase):
             lambda inv: inv["versionRequirements"].append(copy.deepcopy(inv["versionRequirements"][0])),
             lambda inv: inv["versionRequirements"][0].update(providerRequest="other.so"),
             lambda inv: inv["versionRequirements"][0].update(rawIndex=3),
-            lambda inv: inv["sections"][0].update(link=9), lambda inv: inv["sections"][4].update(link=9)]
+            lambda inv: inv["sections"][0].update(link=9), lambda inv: inv["sections"][4].update(link=9),
+            lambda inv: inv["sections"][5].update(type=1), lambda inv: inv["sections"][5].update(link=1),
+            lambda inv: inv["sections"][5].update(info=2), lambda inv: inv["sections"][5].update(flags="0x802"),
+            lambda inv: inv["sections"][5].update(offset=4090), lambda inv: inv["sections"][5].update(address="0x6001"),
+            lambda inv: inv["versionRequirements"][0].update(recordOffset=4096),
+            lambda inv: inv["versionRequirements"][0].update(auxiliaryOffset=79),
+            lambda inv: inv["versionRequirements"][0].update(auxiliaryOffset=81),
+            lambda inv: inv["versionRequirements"][0].update(hash=0),
+            lambda inv: inv["versionRequirements"][0].update(index=1, rawIndex=1),
+            lambda inv: inv["dynamicEntries"][-3].update(value="0x0"),
+            lambda inv: inv["dynamicEntries"].pop(-4)]
         for index, change in enumerate(changes):
             with self.subTest(version=index):
                 self.report = copy.deepcopy(original)
@@ -896,6 +912,47 @@ class ExternalCallComponentEvidenceTest(unittest.TestCase):
                     self.verify()
                 version[field] = previous
 
+    def test_version_definition_provenance_tags_population_and_verdaux_are_checked(self) -> None:
+        inventory = self.report["dynamicInventory"]
+        inventory["sections"].append({"index": 8, "name": ".gnu.version_d", "type": 0x6ffffffd, "flags": "0x2",
+            "address": "0x6080", "offset": 128, "size": "0x24", "link": 3, "info": 1, "alignment": "0x4", "entrySize": "0x0"})
+        inventory["programHeaders"].append({"index": 1, "type": 1, "flags": 4, "offset": "0x80",
+            "virtualAddress": "0x6080", "physicalAddress": "0x6080", "fileSize": "0x24", "memorySize": "0x24", "alignment": "0x1"})
+        inventory["versionDefinitions"] = [{"sectionIndex": 8, "stringSectionIndex": 3, "recordOffset": 128,
+            "rawIndex": 1, "index": 1, "flags": 1, "hash": 0x5aa821, "name": "VER_1",
+            "parentNames": ["PARENT"], "auxiliaryOffsets": [148, 156]}]
+        inventory["dynamicEntries"][-1:-1] = [{"index": index + 8, "fileOffset": (index + 8) * 16, "tag": hex(tag), "value": hex(value)}
+            for index, (tag, value) in enumerate(((0x6ffffffc, 0x6080), (0x6ffffffd, 1)))]
+        self.write_payloads()
+        self.verify()  # A retained base definition does not turn an unversioned import into a runtime provider.
+        original = copy.deepcopy(self.report)
+        changes = [lambda inv: inv["sections"][-1].update(type=1), lambda inv: inv["sections"][-1].update(link=1),
+            lambda inv: inv["sections"][-1].update(info=2), lambda inv: inv["sections"][-1].update(entrySize="0x14"),
+            lambda inv: inv["sections"][-1].update(flags="0x0"), lambda inv: inv["sections"][-1].update(offset=4090),
+            lambda inv: inv["sections"][-1].update(address="0xfffffffffffffff0"),
+            lambda inv: inv["dynamicEntries"][-3].update(value="0x1"),
+            lambda inv: inv["dynamicEntries"][-2].update(value="0x0"),
+            lambda inv: inv["dynamicEntries"].pop(-2), lambda inv: inv["dynamicEntries"].__delitem__(slice(-3, -1)),
+            lambda inv: inv["versionDefinitions"].clear(),
+            lambda inv: inv["versionDefinitions"].append(copy.deepcopy(inv["versionDefinitions"][0])),
+            lambda inv: inv["versionDefinitions"][0].update(recordOffset=4096),
+            lambda inv: inv["versionDefinitions"][0].update(rawIndex=2),
+            lambda inv: inv["versionDefinitions"][0].update(hash=0),
+            lambda inv: inv["versionDefinitions"][0].update(parentNames=[""]),
+            lambda inv: inv["versionDefinitions"][0].update(auxiliaryOffsets=[]),
+            lambda inv: inv["versionDefinitions"][0].update(auxiliaryOffsets=[148, 148]),
+            lambda inv: inv["versionDefinitions"][0].update(auxiliaryOffsets=[148, 155]),
+            lambda inv: inv["versionDefinitions"][0].update(auxiliaryOffsets=[156, 148]),
+            lambda inv: inv["versionDefinitions"][0].update(auxiliaryOffsets=[147, 156]),
+            lambda inv: inv["versionDefinitions"][0].update(auxiliaryOffsets=[148, 157])]
+        for ordinal, change in enumerate(changes):
+            with self.subTest(mutation=ordinal):
+                self.report = copy.deepcopy(original)
+                change(self.report["dynamicInventory"])
+                self.write_payloads()
+                with self.assertRaises(VERIFY.VerificationError):
+                    self.verify()
+
 
 class RetainedExternalEvidenceRegressionTest(unittest.TestCase):
     def test_real_driver_rehashed_metadata_and_canonical_bypasses_are_rejected(self) -> None:
@@ -914,7 +971,10 @@ class RetainedExternalEvidenceRegressionTest(unittest.TestCase):
                                     ("stripped-strlen-version", "version presence differs"),
                                     ("relacount-nonrelative-prefix", "relative relocation prefix"),
                                     ("relacount-exceeds-population", "relative relocation prefix"),
-                                    ("relcount-without-table", "relative relocation prefix")):
+                                    ("relcount-without-table", "relative relocation prefix"),
+                                    ("verneed-zero-count", "GNU version tag"), ("verneed-invalid-pointer", "GNU version tag"),
+                                    ("verneed-tags-absent", "GNU version tag"), ("verneed-wrong-section-type", "GNU version"),
+                                    ("verneed-out-of-file-records", "GNU version record bounds")):
                 with self.subTest(mutation=mutation):
                     report, evidence = copy.deepcopy(original_report), copy.deepcopy(original_evidence)
                     if mutation == "packed-relr":
@@ -941,6 +1001,20 @@ class RetainedExternalEvidenceRegressionTest(unittest.TestCase):
                             "relacount-exceeds-population": (0x6ffffff9, 9), "relcount-without-table": (0x6ffffffa, 1)}[mutation]
                         entry = next(row for row in report["dynamicInventory"]["dynamicEntries"] if row["tag"] == "0x15")
                         entry.update(tag=hex(tag), value=hex(value))
+                    elif mutation.startswith("verneed-"):
+                        inventory = report["dynamicInventory"]
+                        if mutation in {"verneed-zero-count", "verneed-invalid-pointer"}:
+                            tag, value = (0x6fffffff, "0x0") if mutation == "verneed-zero-count" else (0x6ffffffe, "0x1")
+                            next(row for row in inventory["dynamicEntries"] if int(row["tag"], 16) == tag)["value"] = value
+                        elif mutation == "verneed-tags-absent":
+                            for row in inventory["dynamicEntries"]:
+                                if int(row["tag"], 16) in {0x6ffffffe, 0x6fffffff}:
+                                    row.update(tag="0x15", value="0x0")
+                        elif mutation == "verneed-wrong-section-type":
+                            next(row for row in inventory["sections"] if row["type"] == 0x6ffffffe)["type"] = 1
+                        else:
+                            for row in inventory["versionRequirements"]:
+                                row.update(recordOffset=report["inputBytes"] + 100, auxiliaryOffset=report["inputBytes"] + 116)
                     elif mutation == "empty-jmprel":
                         entry = next(row for row in report["dynamicInventory"]["dynamicEntries"] if row["tag"] == "0x2")
                         entry["value"] = "0x0"

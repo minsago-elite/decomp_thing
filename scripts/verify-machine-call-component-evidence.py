@@ -526,6 +526,11 @@ def retained_relocation_tables(inventory: dict, sections: dict) -> tuple[bool, d
     require((0x6ffffff0 in tags) == bool(active_versions) and
             (not active_versions or len(active_versions) == 1 and address(active_versions[0]["address"]) == tags[0x6ffffff0]),
             "retained DT_VERSYM presence/pointer differs from version sections")
+    for pointer, count, kind in ((0x6ffffffe, 0x6fffffff, 0x6ffffffe), (0x6ffffffc, 0x6ffffffd, 0x6ffffffd)):
+        owners = [section for section in sections.values() if section["type"] == kind and section["link"] == active[0]["link"]]
+        require((pointer in tags) == (count in tags) and (pointer in tags) == bool(owners) and
+                (not owners or len(owners) == 1 and address(owners[0]["address"]) == tags[pointer] and owners[0]["info"] == tags[count]),
+                "retained GNU version tag presence/pointer/count differs from sections")
     if any(section["type"] == 11 and section["index"] != inventory["activeSymbolTableSectionIndex"] for section in sections.values()):
         reasons.add("inactive-dynsym-table-retained")
     require(inventory["unsupportedReasons"] == sorted(reasons), "retained unsupported reasons differ from dynamic metadata")
@@ -603,6 +608,77 @@ def retained_relocation_tables(inventory: dict, sections: dict) -> tuple[bool, d
     return uncertain, memberships
 
 
+def retained_version_records(inventory: dict, sections: dict, input_bytes: int) -> dict:
+    """Validate retained Verneed/Verdef provenance, not the original ELF strings/bytes."""
+    requirements, keys, owners, populations = {}, set(), {}, {}
+
+    def elf_hash(name: str) -> int:
+        result = 0
+        for byte in name.encode("utf-8"):
+            result = (result << 4) + byte
+            high = result & 0xf0000000
+            result = (result ^ (high >> 24)) & ~high
+        return result
+
+    def owner_for(row: dict, kind: int) -> dict:
+        owner = sections.get(row["sectionIndex"])
+        strings = sections.get(row["stringSectionIndex"])
+        require(owner is not None and owner["type"] == kind and owner["link"] == row["stringSectionIndex"] and
+                strings is not None and strings["type"] == 3, "retained GNU version record ownership differs")
+        if owner["index"] not in owners:
+            start, size, flags = (address(owner[key]) for key in ("address", "size", "flags"))
+            require(flags & 2 and not flags & 0x800 and start + size <= (1 << 64) - 1 and
+                    owner["offset"] + size <= input_bytes and address(owner["entrySize"]) == 0 and owner["info"] > 0,
+                    "retained GNU version section bounds/metadata differs")
+            loads = [load for load in inventory["programHeaders"] if load["type"] == 1 and
+                     address(load["virtualAddress"]) < start + size and start < address(load["virtualAddress"]) + address(load["memorySize"])]
+            require(len(loads) == 1, "retained GNU version section lacks unique LOAD ownership")
+            load = loads[0]
+            begin = address(load["virtualAddress"])
+            require(begin <= start and start + size <= begin + address(load["fileSize"]) and
+                    address(load["offset"]) + start - begin == owner["offset"], "retained GNU version section mapping differs")
+            owners[owner["index"]] = owner
+        return owner
+
+    def within(owner: dict, offset: int, width: int) -> bool:
+        return owner["offset"] <= offset and offset + width <= owner["offset"] + address(owner["size"])
+
+    for group, kind, width in (("versionRequirements", 0x6ffffffe, 16), ("versionDefinitions", 0x6ffffffd, 20)):
+        rows = inventory[group]
+        order = [(row["sectionIndex"], row["recordOffset"], *([row["auxiliaryOffset"]] if group == "versionRequirements" else [])) for row in rows]
+        require(order == sorted(order), "retained GNU version record order differs")
+        auxiliary_offsets = set()
+        for row in rows:
+            owner = owner_for(row, kind)
+            index, raw = row["index"], row["rawIndex"]
+            key = (row["stringSectionIndex"], index)
+            require(0 <= raw <= 65535 and (2 if group == "versionRequirements" else 1) <= index <= 32767 and
+                    index == raw & 0x7fff and key not in keys and 0 <= row["flags"] <= 65535 and
+                    bool(row["name"]) and row["hash"] == elf_hash(row["name"]), "retained GNU version identity/hash differs")
+            keys.add(key)
+            require(within(owner, row["recordOffset"], width), "retained GNU version record bounds differ")
+            records = populations.setdefault(owner["index"], set())
+            require(group == "versionRequirements" or row["recordOffset"] not in records, "duplicate retained Verdef record")
+            records.add(row["recordOffset"])
+            if group == "versionRequirements":
+                offsets, auxiliary_width = [row["auxiliaryOffset"]], 16
+                requirements.setdefault(key, []).append(row)
+            else:
+                offsets, auxiliary_width = row["auxiliaryOffsets"], 8
+                require(len(offsets) == len(row["parentNames"]) + 1 and all(row["parentNames"]) and
+                        offsets == sorted(set(offsets)) and all(b - a >= 8 for a, b in zip(offsets, offsets[1:])),
+                        "retained Verdaux population/order differs")
+            for offset in offsets:
+                require(offset not in auxiliary_offsets and offset >= row["recordOffset"] + width and within(owner, offset, auxiliary_width),
+                        "retained GNU version auxiliary bounds/uniqueness differs")
+                auxiliary_offsets.add(offset)
+    for owner in sections.values():
+        if owner["type"] in {0x6ffffffe, 0x6ffffffd}:
+            require(owner["index"] in owners and owner["info"] == len(populations.get(owner["index"], set())),
+                    "retained GNU version section record population differs")
+    return requirements
+
+
 class RetainedRelocationIndex:
     """Recheck positive metadata claims; no ELF reads or instruction decoding occur here.
 
@@ -624,9 +700,7 @@ class RetainedRelocationIndex:
         for symbol in symbols.values():
             require((symbol["version"] is not None) == (symbol["tableSectionIndex"] in self.version_sections),
                     "retained symbol version presence differs from VERSYM metadata")
-        self.requirements = {}
-        for row in inventory["versionRequirements"]:
-            self.requirements.setdefault((row["stringSectionIndex"], row["index"]), []).append(row)
+        self.requirements = retained_version_records(inventory, self.sections, input_bytes)
         self.supported_versions = {key for key, symbol in symbols.items() if self.import_version(symbol)}
         self.loads, self.load_positions, self.load_prefix_ends = [], {}, []
         for row in inventory["programHeaders"]:
