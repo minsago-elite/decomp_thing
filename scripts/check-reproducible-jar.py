@@ -69,8 +69,10 @@ def main() -> int:
         changed = sorted(name for name in before.keys() | after.keys() if before.get(name) != after.get(name))
         failures.append("application JAR differs between invocations; changed entries: " +
                         (", ".join(changed) if changed else "(metadata only: timestamps or order)"))
-    markers = [str(ROOT).encode(), *(marker.encode() for marker in HOST_MARKERS)]
-    leaking = sorted(name for name, data in entries(second).items() if any(marker in data for marker in markers))
+    root = str(ROOT).encode()
+    # Producer classes legitimately hold the temporary-directory prefixes as string constants.
+    leaking = sorted(name for name, data in entries(second).items() if root in data or (
+        not name.endswith(".class") and any(marker.encode() in data for marker in HOST_MARKERS)))
     if leaking:
         failures.append("application JAR embeds build-host paths in: " + ", ".join(leaking))
     for failure in failures:

@@ -437,7 +437,7 @@ python3 scripts/check-reproducible-jar.py --gradle-arg=--offline
 
 The script builds the JAR, then reruns resource generation and the JAR task. It fails
 if the digests differ, naming the changed entries. It also fails if any entry embeds the
-repository's absolute path or a producer's private build-directory name. CI runs it in
+repository's absolute path, or a resource names a producer's private build directory. CI runs it in
 the packaged web job.
 
 ### Updating dependencies and release metadata
