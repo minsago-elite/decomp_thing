@@ -17,7 +17,7 @@ concurrency:
 
 jobs:
   select-captures:
-    if: (github.event_name == 'workflow_dispatch' && contains(fromJSON('["cc1-runtime-diagnostics","cc1-full-export","cc1-native-calls","cc1-engine-cli","driver-native-calls"]'), inputs.capture-mode)) || (github.event_name == 'pull_request' && inputs.capture-mode == '' && (github.event.action != 'labeled' || contains(fromJSON('["qualify:cc1-full-export","qualify:driver-full-export","qualify:driver-native-calls"]'), github.event.label.name)) && (contains(github.event.pull_request.labels.*.name, 'qualify:cc1-full-export') || contains(github.event.pull_request.labels.*.name, 'qualify:driver-full-export') || contains(github.event.pull_request.labels.*.name, 'qualify:driver-native-calls')))
+    if: (github.event_name == 'workflow_dispatch' && contains(fromJSON('["cc1-runtime-diagnostics","cc1-full-export","cc1-native-calls","cc1-engine-cli","driver-native-calls","driver-interface-observations"]'), inputs.capture-mode)) || (github.event_name == 'pull_request' && inputs.capture-mode == '' && (github.event.action != 'labeled' || contains(fromJSON('["qualify:cc1-full-export","qualify:driver-full-export","qualify:driver-native-calls"]'), github.event.label.name)) && (contains(github.event.pull_request.labels.*.name, 'qualify:cc1-full-export') || contains(github.event.pull_request.labels.*.name, 'qualify:driver-full-export') || contains(github.event.pull_request.labels.*.name, 'qualify:driver-native-calls')))
     runs-on: ubuntu-24.04
     permissions:
       contents: read
@@ -38,12 +38,12 @@ jobs:
           labels = json.loads(os.environ.get("PR_LABELS") or "[]") or []
           if not isinstance(labels, list) or not all(isinstance(label, str) for label in labels):
               raise ValueError("capture labels must be a list of strings")
-          manual_modes = {"cc1-runtime-diagnostics", "cc1-full-export", "cc1-native-calls", "cc1-engine-cli", "driver-native-calls"}
+          manual_modes = {"cc1-runtime-diagnostics", "cc1-full-export", "cc1-native-calls", "cc1-engine-cli", "driver-native-calls", "driver-interface-observations"}
           selected = []
           if mode:
               if mode not in manual_modes:
                   raise ValueError("unsupported capture mode")
-              selected.append(("driver" if mode == "driver-native-calls" else "cc1",
+              selected.append(("driver" if mode in {"driver-native-calls", "driver-interface-observations"} else "cc1",
                                "qualification" if mode == "cc1-full-export" else mode))
           else:
               for label, target, capture in (
@@ -65,7 +65,7 @@ jobs:
   cc1-live-full-export:
     needs: select-captures
     if: needs.select-captures.result == 'success'
-    name: ${{ matrix.target }} ${{ matrix.capture_mode == 'cc1-runtime-diagnostics' && 'runtime diagnostics' || contains(fromJSON('["cc1-native-calls","driver-native-calls"]'), matrix.capture_mode) && 'native calls' || matrix.capture_mode == 'cc1-engine-cli' && 'engine CLI fresh/resume' || 'live full export' }}
+    name: ${{ matrix.target }} ${{ matrix.capture_mode == 'cc1-runtime-diagnostics' && 'runtime diagnostics' || contains(fromJSON('["cc1-native-calls","driver-native-calls"]'), matrix.capture_mode) && 'native calls' || matrix.capture_mode == 'driver-interface-observations' && 'raw interface observations' || matrix.capture_mode == 'cc1-engine-cli' && 'engine CLI fresh/resume' || 'live full export' }}
     strategy:
       fail-fast: false
       matrix: ${{ fromJSON(needs.select-captures.outputs.matrix) }}
@@ -230,7 +230,7 @@ jobs:
       - name: Run the selected contained capture
         env:
           # Full cc1 qualifications retain the explicit parallel runtime-6 profile. Driver captures and
-          # native-call/diagnostic lanes retain the checked serial exporter-17 profile.
+          # native-call/interface/diagnostic lanes retain the checked serial exporter-17 profile.
           DECOMP_GCC_CLI_PROFILE: ${{ github.workspace }}/oracle/gcc/16.2.0/${{ matrix.profile }}
           DECOMP_GCC_CLI_EXPORT_BINARY: ${{ matrix.target == 'driver' && format('{0}/oracle/gcc/16.2.0/artifacts/gcc-driver.stripped', github.workspace) || format('{0}/gcc-cc1-engine/artifacts/gcc-cc1.stripped', runner.temp) }}
           DECOMP_GCC_CLI_CC1_BINARY: ${{ format('{0}/gcc-cc1-engine/artifacts/gcc-cc1.stripped', runner.temp) }}

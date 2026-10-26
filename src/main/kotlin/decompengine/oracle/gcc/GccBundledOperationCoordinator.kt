@@ -370,6 +370,9 @@ internal class GccBundledPreparedOperation internal constructor(
     private var completedExport: GccBundledExecutedOperation? = null
     private var completedFullExport: GccBundledFullExportOperation? = null
     private var completedNativeCalls: GccBundledNativeCallOperation? = null
+    private var completedInterfaces: GccBundledInterfaceOperation? = null
+    private var pendingInterfaceToken: Any? = null
+    private var pendingInterfaceIssuance: GccBundledInterfaceIssuanceV1? = null
     private val completedControls = linkedMapOf<String, LinuxFileIdentity>()
     private var plannerAttempted = false
     private var completedPlan: GccBundledPlannedOperation? = null
@@ -482,9 +485,81 @@ internal class GccBundledPreparedOperation internal constructor(
         }.also { completedNativeCalls = it }
     }
 
+    /** This route freezes only recovered observations; it opens no structural or interface oracle. */
+    @Synchronized
+    fun executeInterfaceObservations(): GccBundledInterfaceOperation {
+        intent.requireInterfaceExecution()
+        GccBundledOperationCoordinator.requireFactoryInterfaceOwner(this)
+        return executeRun(GccCompilerEngineContainmentRunKind.FRESH_CONTROL, null) { borrowed, execution ->
+            val receipt = journal.recordExecution(execution.canonicalBytes)
+            val deadline = checkNotNull(operationDeadline)
+            val target = inputs.interfaceTargetEvidence { deadline.requireCurrent() }
+            val component = checkNotNull(intent.bundledRuntime.interfaceCollector)
+            val runtime = GccBundledInterfaceCaptureBindingsV1(component.listingCollectorSha256,
+                component.inferredCollectorSha256, component.typeGraphSha256, component.wrapperSha256,
+                component.nativeDecompilerSha256, inputs.deploymentClosureSha256,
+                inputs.ghidraRuntimeIdentitySha256, component.closureSha256)
+            val captured = borrowed.withPinnedDescriptor { descriptor ->
+                GccBundledInferredInterfaceCapture.capture(descriptor, directories.getValue("reports"),
+                    checkNotNull(intent.bundledRuntime.freshControlDirectoryName(borrowed.path)),
+                    checkNotNull(execution.controlDirectoryIdentity), intent.artifacts, target, runtime,
+                    checkpoint = { deadline.requireCurrent() })
+            }
+            inputs.verify("after complete interface capture")
+            lease.requireCurrentOperationRunRootAfterCgroupAbsence(runRoot)
+            val assessment = journal.recordExportAssessment(bindWallTime(captured.assessmentBytes))
+            journal.verify("before interface operation issuance")
+            inputs.verify("before interface operation issuance")
+            lease.requireCurrentOperationRunRootAfterCgroupAbsence(runRoot)
+            borrowed.withPinnedDescriptor { descriptor ->
+                GccBundledInferredInterfaceCapture.requireUnchanged(descriptor, captured, intent.artifacts) {
+                    deadline.requireCurrent()
+                }
+            }
+            // No mutable callback follows the complete capture sweep. The unobservable token
+            // exists only while this synchronized owner transitions the exact capture once.
+            val token = Any()
+            check(pendingInterfaceToken == null && pendingInterfaceIssuance == null && completedInterfaces == null)
+            pendingInterfaceToken = token
+            pendingInterfaceIssuance = GccBundledInterfaceIssuanceV1(captured, intent.canonicalBytes, receipt, assessment)
+            try {
+                GccBundledOperationCoordinator.issueInterfaceOperation(this, token)
+            } finally {
+                pendingInterfaceToken = null
+                pendingInterfaceIssuance = null
+            }
+        }.also { completedInterfaces = it }
+    }
+
+    /** Called only after factory membership checks; a guessed or reused token cannot claim data. */
+    @Synchronized
+    internal fun takeInterfaceIssuance(token: Any): GccBundledInterfaceIssuanceV1 {
+        check(!closed && !poisoned && executionAttempted && completedInterfaces == null)
+        intent.requireInterfaceExecution()
+        check(pendingInterfaceToken != null && pendingInterfaceToken === token) { "interface capture was not issued by this live owner" }
+        val pending = checkNotNull(pendingInterfaceIssuance)
+        pendingInterfaceToken = null
+        pendingInterfaceIssuance = null
+        return pending
+    }
+
+    @Synchronized
+    internal fun requireCompletedInterfaceOperation(operation: GccBundledInterfaceOperation) {
+        check(!closed && !poisoned && completedInterfaces === operation && pendingInterfaceToken == null &&
+            pendingInterfaceIssuance == null) { "interface operation is not the live owner's completed capture" }
+        intent.requireInterfaceExecution()
+    }
+
+    @Synchronized
+    internal fun requireInterfaceOwnerClosed() {
+        check(closed && pendingInterfaceToken == null && pendingInterfaceIssuance == null) {
+            "interface owner membership may be revoked only after closure"
+        }
+    }
+
     @Synchronized
     fun executeUntilCheckpoint(minimumCompletedFunctions: Long): GccBundledInterruptedOperation {
-        check(intent.bundledRuntime.invocationVersion != 8) { "native call collection does not support checkpoint or resume" }
+        check(intent.bundledRuntime.invocationVersion !in setOf(8, 9)) { "native observation collection does not support checkpoint or resume" }
         intent.cliInvocation?.requireCheckpointSelection(minimumCompletedFunctions)
         val trigger = GccBundledCheckpointTrigger(minimumCompletedFunctions)
         var stoppedExport: GccBundledInterruptedExportSnapshot? = null
@@ -925,7 +1000,7 @@ internal class GccBundledPreparedOperation internal constructor(
     @Synchronized
     fun publishFullExportCliResult(authenticatedExport: GccDriverStructuralAuthenticatedFullExportV1): Path {
         check(!closed && !poisoned && !cliPublicationAttempted)
-        check(intent.bundledRuntime.recoveryMode == "full" && intent.bundledRuntime.invocationVersion != 8) {
+        check(intent.bundledRuntime.recoveryMode == "full" && intent.bundledRuntime.invocationVersion in setOf(5, 6)) {
             "structural binding publication requires a full-recovery operation"
         }
         val cli = checkNotNull(intent.cliInvocation) { "operation has no bound CLI output" }
@@ -1386,6 +1461,58 @@ internal class GccBundledPreparedOperation internal constructor(
         }
     }
 
+    /** Publishes immutable raw commitments; no source/boundary/interface oracle is opened. */
+    @Synchronized
+    fun publishInterfaceCliResult(): Path {
+        check(!closed && !poisoned && !cliPublicationAttempted)
+        intent.requireInterfaceExecution()
+        val cli = checkNotNull(intent.cliInvocation)
+        val operation = checkNotNull(completedInterfaces) { "operation has no completed interface capture" }
+        operation.requireCurrent()
+        cliPublicationAttempted = true
+        try {
+            val deadline = checkNotNull(operationDeadline)
+            val snapshot = operation.snapshot
+            fun requireCapturedOutputs() {
+                deadline.requireCurrent()
+                operation.requireCurrent()
+                inputs.verify("before interface result publication")
+                journal.verify("before interface result publication")
+                cli.requireCurrent()
+                lease.requireCurrentOperationRunRootAfterCgroupAbsence(runRoot)
+                lease.withCurrentOperationRunRootBeforeLaunch(runRoot) { borrowed ->
+                    borrowed.withPinnedDescriptor { descriptor ->
+                        GccBundledInferredInterfaceCapture.requireUnchanged(descriptor, snapshot, intent.artifacts) {
+                            deadline.requireCurrent()
+                        }
+                    }
+                }
+            }
+            requireCapturedOutputs()
+            val binding = GccBundledInterfaceCliResultV1.binding(operation)
+            val treeManifest = snapshot.model.sidecarManifest
+            val original = GccCompilerEngineContainmentContract.parseDefinitionForLiveController(definition)
+            val result = GccBundledInterfaceCliResultV1.result(operation, binding, journal.path, original.outputLease.path,
+                cli.options.output, deadline.snapshot())
+            val metadataBytes = treeManifest.size.toLong() + binding.size + result.size
+            require(snapshot.capturedBytes <= 1024L * 1024 * 1024 - metadataBytes) {
+                "interface capture and published commitments exceed their shared byte allowance"
+            }
+            LinuxFilesystemSyscalls.openRoot(cli.options.output).use { output ->
+                cli.requireCurrent()
+                DescriptorBoundAtomicStateFile.publishNoReplace(output, GccBundledInterfaceCliResultV1.BINDING_NAME,
+                    binding, GccBundledInterfaceCliResultV1.MAXIMUM_BINDING_BYTES)
+                DescriptorBoundAtomicStateFile.publishManifestNoReplace(output, GccBundledFullExportCliResultV2.TREE_MANIFEST_NAME,
+                    treeManifest, GccBundledFullExportCliResultV2.MAXIMUM_TREE_MANIFEST_BYTES)
+                GccBundledInterfaceCliResultV1.publishResultMarker(output, result, beforeCommit = ::requireCapturedOutputs)
+            }
+            return cli.options.output.resolve("result.json")
+        } catch (failure: Throwable) {
+            poisoned = true
+            throw failure
+        }
+    }
+
     /** Result pointers bind the unchanged model tree and native bytes under this same owner. */
     @Synchronized
     fun publishNativeCallCliResult(): Path {
@@ -1540,7 +1667,7 @@ internal class GccBundledPreparedOperation internal constructor(
     ): T {
         requireCurrent()
         require(intent.runKind == kind) { "GCC bundled execution kind differs from the prepared intent" }
-        require(intent.bundledRuntime.invocationVersion in 2..3 || intent.bundledRuntime.invocationVersion in 5..8) {
+        require(intent.bundledRuntime.invocationVersion in 2..3 || intent.bundledRuntime.invocationVersion in 5..9) {
             "GCC contained execution requires an explicitly bound fresh JVM runtime"
         }
         executionAttempted = true
@@ -1620,7 +1747,7 @@ internal class GccBundledPreparedOperation internal constructor(
     }
 
     private fun requireFreshNativeReports(borrowed: FullTreeDiskScratchBorrowedRunRoot) {
-        if (intent.bundledRuntime.invocationVersion != 8) return
+        if (intent.bundledRuntime.invocationVersion !in setOf(8, 9)) return
         borrowed.withPinnedDescriptor { run ->
             LinuxFilesystemSyscalls.openDirectoryAt(run.fd, "reports").use { reports ->
                 require(reports.identity == directories.getValue("reports") &&
@@ -1657,6 +1784,9 @@ internal class GccBundledPreparedOperation internal constructor(
             pendingCleanup = null
         }
         closed = true
+        pendingInterfaceToken = null
+        pendingInterfaceIssuance = null
+        if (intent.bundledRuntime.invocationVersion == 9) GccBundledOperationCoordinator.revokeClosedInterfaceOwner(this)
         var failure: Throwable? = null
         fun record(next: Throwable) {
             val first = failure
@@ -1670,6 +1800,49 @@ internal class GccBundledPreparedOperation internal constructor(
 }
 
 internal object GccBundledOperationCoordinator {
+    private val interfaceMembershipLock = Any()
+    private val interfaceOwners = java.util.IdentityHashMap<GccBundledPreparedOperation, Boolean>()
+    private val interfaceOperations = java.util.IdentityHashMap<GccBundledInterfaceOperation, GccBundledPreparedOperation>()
+
+    internal fun requireFactoryInterfaceOwner(owner: GccBundledPreparedOperation) {
+        synchronized(interfaceMembershipLock) {
+            check(interfaceOwners.containsKey(owner)) { "interface operation requires a factory-owned live prepared owner" }
+        }
+    }
+
+    internal fun issueInterfaceOperation(owner: GccBundledPreparedOperation, token: Any): GccBundledInterfaceOperation {
+        requireFactoryInterfaceOwner(owner)
+        val pending = owner.takeInterfaceIssuance(token)
+        val operation = GccBundledInterfaceOperation(pending.snapshot, pending.intent, pending.execution, pending.assessment)
+        synchronized(interfaceMembershipLock) {
+            check(interfaceOwners.containsKey(owner)) { "interface owner was revoked during issuance" }
+            check(interfaceOperations.values.none { it === owner }) { "interface owner already issued a capture" }
+            interfaceOperations[operation] = owner
+        }
+        return operation
+    }
+
+    internal fun requireOwnedInterfaceOperation(operation: GccBundledInterfaceOperation) {
+        val owner = synchronized(interfaceMembershipLock) {
+            checkNotNull(interfaceOperations[operation]) { "interface result lacks factory-owned identity" }
+        }
+        // Never hold the membership lock while acquiring the owner's monitor.
+        owner.requireCompletedInterfaceOperation(operation)
+        synchronized(interfaceMembershipLock) {
+            check(interfaceOwners.containsKey(owner) && interfaceOperations[operation] === owner) {
+                "interface result membership has been revoked"
+            }
+        }
+    }
+
+    internal fun revokeClosedInterfaceOwner(owner: GccBundledPreparedOperation) {
+        owner.requireInterfaceOwnerClosed()
+        synchronized(interfaceMembershipLock) {
+            interfaceOwners.remove(owner)
+            interfaceOperations.entries.removeIf { it.value === owner }
+        }
+    }
+
     fun prepareNew(
         intent: GccBundledOperationIntent,
         journalRoot: Path,
@@ -1745,6 +1918,13 @@ internal object GccBundledOperationCoordinator {
                 java.util.Map.copyOf(directories), definition, GCC_BUNDLED_PREPARED_OPERATION_PERMIT,
             )
             prepared.requireCurrent()
+            if (intent.bundledRuntime.invocationVersion == 9) {
+                intent.requireInterfaceExecution()
+                synchronized(interfaceMembershipLock) {
+                    check(!interfaceOwners.containsKey(prepared))
+                    interfaceOwners[prepared] = true
+                }
+            }
             inputs = null
             journal = null
             lease = null

@@ -94,16 +94,20 @@ internal class GccRetainedCompilerEngineProfile private constructor(
         fullRecovery: Boolean,
         runtimeDiagnostics: Boolean = false,
         nativeCallObservations: Boolean = false,
+        nativeInterfaceObservations: Boolean = false,
     ): Long {
         target(targetId)
         if (runtimeDiagnostics) {
-            require(!nativeCallObservations) { "native call observations have no diagnostic budget" }
+            require(!nativeCallObservations && !nativeInterfaceObservations) { "native observations have no diagnostic budget" }
             return Math.multiplyExact(requireDiagnosticPolicy(targetId, fullRecovery).wallClockSeconds, 1_000L)
         }
         require(!nativeCallObservations || (targetId in setOf("cc1", "driver") && !fullRecovery)) {
             "native call observations require a distinct pinned cc1 or driver profile"
         }
-        require(targetId != "driver" || fullRecovery || nativeCallObservations) { "GCC driver requires full-recovery export" }
+        require(!nativeInterfaceObservations || (targetId == "driver" && !fullRecovery && !nativeCallObservations)) {
+            "interface observations require their distinct driver profile"
+        }
+        require(targetId != "driver" || fullRecovery || nativeCallObservations || nativeInterfaceObservations) { "GCC driver requires full-recovery export" }
         require(!fullRecovery || targetId != "lto1") { "full-recovery export is unsupported for lto1" }
         // Native cc1 observations run full auto-analysis, retaining that engine's longer budget.
         return if ((fullRecovery || nativeCallObservations) && targetId == "cc1") suite.budgets.fullRecoveryCc1ExportWallClockMillis
@@ -136,6 +140,7 @@ internal class GccRetainedCompilerEngineProfile private constructor(
         fullRecoveryExport: Boolean = false,
         bundledRuntime: GccBundledGhidraRuntime? = null,
         nativeCallObservations: Boolean = false,
+        nativeInterfaceObservations: Boolean = false,
     ): ByteArray {
         requireCurrent()
         target(engineId)
@@ -155,6 +160,16 @@ internal class GccRetainedCompilerEngineProfile private constructor(
             require((runtime.invocationVersion == 8) == nativeCallObservations) {
                 "native call observations require their distinct runtime invocation"
             }
+            require((runtime.invocationVersion == 9) == nativeInterfaceObservations) {
+                "interface observations require their distinct runtime invocation"
+            }
+        }
+        require(!nativeInterfaceObservations || (engineId == "driver" && !fullRecoveryExport &&
+            !nativeCallObservations && bundledRuntime?.invocationVersion == 9 && budgets.pidsMax <= 128)) {
+            "interface observations require the fresh serial driver runtime and existing resource limits"
+        }
+        if (nativeInterfaceObservations) require(requireInterfaceObservationProfile().engineId == engineId) {
+            "interface target differs from its retained driver selection"
         }
         val throughput = suite.fullRecoveryCc1Throughput?.takeIf { engineId == "cc1" && fullRecoveryExport }
         if (throughput != null) {
@@ -169,13 +184,14 @@ internal class GccRetainedCompilerEngineProfile private constructor(
             }
         }
         bundledRuntime?.let { runtime ->
-            require((runtime.recoveryMode == "full") == (fullRecoveryExport || nativeCallObservations)) {
+            require((runtime.recoveryMode == "full") == (fullRecoveryExport || nativeCallObservations || nativeInterfaceObservations)) {
                 "GCC operation runtime differs from its retained recovery mode"
             }
         }
         requireInvocationArtifacts(engineId, artifacts)
         require(budgets.wallClockMillis <=
-            exportWallClockMillis(engineId, fullRecoveryExport, nativeCallObservations = nativeCallObservations) &&
+            exportWallClockMillis(engineId, fullRecoveryExport, nativeCallObservations = nativeCallObservations,
+                nativeInterfaceObservations = nativeInterfaceObservations) &&
             budgets.maximumResidentBytes <= suite.budgets.exportMaximumResidentBytes
         ) { "GCC operation exceeds its retained profile resource ceilings" }
         requireCurrent()
@@ -261,6 +277,20 @@ internal class GccRetainedCompilerEngineProfile private constructor(
         requireCurrent()
         val targetId = selectedTargetId ?: driverTarget?.id ?: "cc1"
         require(targetId in setOf("cc1", "driver")) { "native call observations are unsupported for $targetId" }
+        return requirePinnedObservationProfile(targetId, "native call observations")
+    }
+
+    @Synchronized
+    fun requireInterfaceObservationProfile(): GccDriverStructuralInputsV1 {
+        requireCurrent()
+        require(selectedTargetId == "driver" && driverTarget?.id == "driver") {
+            "interface observations require an independently selected driver profile"
+        }
+        return requirePinnedObservationProfile("driver", "native interface observations")
+    }
+
+    /** Shared artifact metadata checks beneath separate positively selected operation guards. */
+    private fun requirePinnedObservationProfile(targetId: String, label: String): GccDriverStructuralInputsV1 {
         val selected = target(targetId)
         val pinned = GccDriverStructuralInputsV1.load(suite.profilePath.parent, targetId)
         require(pinned.compilerEngineProfileSha256 == suite.profileSha256 &&
@@ -269,7 +299,7 @@ internal class GccRetainedCompilerEngineProfile private constructor(
             selected.oracleManifestSha256 == pinned.artifactManifestSha256 &&
             selected.fullArtifact.let { it.sha256 == pinned.fullBinary.sha256 && it.bytes == pinned.fullBinary.bytes } &&
             selected.strippedArtifact.let { it.sha256 == pinned.strippedBinary.sha256 && it.bytes == pinned.strippedBinary.bytes }) {
-            "native call observations require the independently pinned production $targetId profile"
+            "$label require the independently pinned production $targetId profile"
         }
         requireCurrent()
         return pinned

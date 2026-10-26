@@ -1,0 +1,598 @@
+{
+  "apiSources": [
+    {
+      "archive": "Ghidra/Features/Decompiler/lib/Decompiler-src.zip",
+      "archiveSha256": "c33a0ea114a425131c45ffc7ddd6172142c403813cc271ddece9b324fc78382b",
+      "bytes": 37105,
+      "entry": "ghidra/app/decompiler/DecompInterface.java",
+      "entrySha256": "296eb7147ab65f6caed59b97518679659093d925a44819127aa5ae8dcbda878c",
+      "reviewedPublicDeclarations": [
+        {
+          "declaration": "public synchronized DecompileResults decompileFunction(Function func, int timeoutSecs,",
+          "line": 776
+        }
+      ]
+    },
+    {
+      "archive": "Ghidra/Features/Decompiler/lib/Decompiler-src.zip",
+      "archiveSha256": "c33a0ea114a425131c45ffc7ddd6172142c403813cc271ddece9b324fc78382b",
+      "bytes": 69008,
+      "entry": "ghidra/app/decompiler/DecompileOptions.java",
+      "entrySha256": "33deafbcb16ef9187637acc6dd877083886916688159a97e698deda951765ef4"
+    },
+    {
+      "archive": "Ghidra/Features/Decompiler/lib/Decompiler-src.zip",
+      "archiveSha256": "c33a0ea114a425131c45ffc7ddd6172142c403813cc271ddece9b324fc78382b",
+      "bytes": 8156,
+      "entry": "ghidra/app/decompiler/DecompileResults.java",
+      "entrySha256": "89c47001065a1a9be4945cfadb469c3de37b0d69306d1400476ad6e20e4ff8c9",
+      "reviewedPublicDeclarations": [
+        {
+          "declaration": "public HighFunction getHighFunction() {",
+          "line": 175
+        }
+      ]
+    },
+    {
+      "archive": "Ghidra/Framework/SoftwareModeling/lib/SoftwareModeling-src.zip",
+      "archiveSha256": "fed5e47f0578b04597ead75fef77e2316a0458b9dbeeb1eb2cfa3d01472411b3",
+      "bytes": 20550,
+      "entry": "ghidra/program/model/address/AddressSpace.java",
+      "entrySha256": "1c009f935de164af991749e384089557464f877c8b4c383ce0668ec90e24fe4f"
+    },
+    {
+      "archive": "Ghidra/Framework/SoftwareModeling/lib/SoftwareModeling-src.zip",
+      "archiveSha256": "fed5e47f0578b04597ead75fef77e2316a0458b9dbeeb1eb2cfa3d01472411b3",
+      "bytes": 10444,
+      "entry": "ghidra/program/model/data/AbstractFloatDataType.java",
+      "entrySha256": "735fd19ac0cd90eaebf522e62be515df2fd2dda300b9f775ecdb29b4ba7fca1a",
+      "reviewedPublicDeclarations": [
+        {
+          "declaration": "public final int getLength() {",
+          "line": 104
+        }
+      ]
+    },
+    {
+      "archive": "Ghidra/Framework/SoftwareModeling/lib/SoftwareModeling-src.zip",
+      "archiveSha256": "fed5e47f0578b04597ead75fef77e2316a0458b9dbeeb1eb2cfa3d01472411b3",
+      "bytes": 21170,
+      "entry": "ghidra/program/model/data/AbstractIntegerDataType.java",
+      "entrySha256": "6fd1336d687ddc24acecf613ea20dbab6eb1751903087a4b5c12331c74179827"
+    },
+    {
+      "archive": "Ghidra/Framework/SoftwareModeling/lib/SoftwareModeling-src.zip",
+      "archiveSha256": "fed5e47f0578b04597ead75fef77e2316a0458b9dbeeb1eb2cfa3d01472411b3",
+      "bytes": 6830,
+      "entry": "ghidra/program/model/data/Array.java",
+      "entrySha256": "261fd3dce1faba80fb2803538cb9f11f15de2cdc7f546211301bbf113b86fd5d"
+    },
+    {
+      "archive": "Ghidra/Framework/SoftwareModeling/lib/SoftwareModeling-src.zip",
+      "archiveSha256": "fed5e47f0578b04597ead75fef77e2316a0458b9dbeeb1eb2cfa3d01472411b3",
+      "bytes": 10905,
+      "entry": "ghidra/program/model/data/ArrayDataType.java",
+      "entrySha256": "ffdbd2aeeb91773ebeb13d93814246f03764a97c74f57a849452cc8089c20571",
+      "reviewedPublicDeclarations": [
+        {
+          "declaration": "public boolean isZeroLength() {",
+          "line": 196
+        },
+        {
+          "declaration": "public int getLength() {",
+          "line": 201
+        },
+        {
+          "declaration": "public int getAlignedLength() {",
+          "line": 209
+        }
+      ]
+    },
+    {
+      "archive": "Ghidra/Framework/SoftwareModeling/lib/SoftwareModeling-src.zip",
+      "archiveSha256": "fed5e47f0578b04597ead75fef77e2316a0458b9dbeeb1eb2cfa3d01472411b3",
+      "bytes": 15580,
+      "entry": "ghidra/program/model/data/BitFieldDataType.java",
+      "entrySha256": "fb38d4fa3571ff0dc5124666f559a7a1570b555db346e506045510104486eeb8",
+      "reviewedPublicDeclarations": [
+        {
+          "declaration": "public boolean isZeroLength() {",
+          "line": 98
+        },
+        {
+          "declaration": "public int getLength() {",
+          "line": 343
+        },
+        {
+          "declaration": "public int getAlignedLength() {",
+          "line": 348
+        }
+      ]
+    },
+    {
+      "archive": "Ghidra/Framework/SoftwareModeling/lib/SoftwareModeling-src.zip",
+      "archiveSha256": "fed5e47f0578b04597ead75fef77e2316a0458b9dbeeb1eb2cfa3d01472411b3",
+      "bytes": 2316,
+      "entry": "ghidra/program/model/data/BitFieldPacking.java",
+      "entrySha256": "7f0f3b9335ec9cd712714010212f094546e43ae73cead90b8d6928fdf05b1788"
+    },
+    {
+      "archive": "Ghidra/Framework/SoftwareModeling/lib/SoftwareModeling-src.zip",
+      "archiveSha256": "fed5e47f0578b04597ead75fef77e2316a0458b9dbeeb1eb2cfa3d01472411b3",
+      "bytes": 21993,
+      "entry": "ghidra/program/model/data/Composite.java",
+      "entrySha256": "2f7fb9e3231260767d537dc5e64346bd935941570544f2495bd69e0acac9667c",
+      "reviewedPublicDeclarations": [
+        {
+          "declaration": "public abstract int getNumComponents();",
+          "line": 38
+        },
+        {
+          "declaration": "public abstract DataTypeComponent getComponent(int ordinal) throws IndexOutOfBoundsException;",
+          "line": 56
+        }
+      ]
+    },
+    {
+      "archive": "Ghidra/Framework/SoftwareModeling/lib/SoftwareModeling-src.zip",
+      "archiveSha256": "fed5e47f0578b04597ead75fef77e2316a0458b9dbeeb1eb2cfa3d01472411b3",
+      "bytes": 6715,
+      "entry": "ghidra/program/model/data/DataOrganization.java",
+      "entrySha256": "dac79425b65f916fdbb87b67b0cab19f72a078baa17383c8588e465136b1fdca"
+    },
+    {
+      "archive": "Ghidra/Framework/SoftwareModeling/lib/SoftwareModeling-src.zip",
+      "archiveSha256": "fed5e47f0578b04597ead75fef77e2316a0458b9dbeeb1eb2cfa3d01472411b3",
+      "bytes": 24905,
+      "entry": "ghidra/program/model/data/DataType.java",
+      "entrySha256": "81630a754bacada4808721259625802e34ea333a4c21523504529075d72a2dd1",
+      "reviewedPublicDeclarations": [
+        {
+          "declaration": "public int getLength();",
+          "line": 253
+        },
+        {
+          "declaration": "public int getAlignedLength();",
+          "line": 275
+        },
+        {
+          "declaration": "public boolean isZeroLength();",
+          "line": 290
+        }
+      ]
+    },
+    {
+      "archive": "Ghidra/Framework/SoftwareModeling/lib/SoftwareModeling-src.zip",
+      "archiveSha256": "fed5e47f0578b04597ead75fef77e2316a0458b9dbeeb1eb2cfa3d01472411b3",
+      "bytes": 7494,
+      "entry": "ghidra/program/model/data/DataTypeComponent.java",
+      "entrySha256": "12d0644a1e2b6b4adf85d65b3d0e4235db89bf50d3b73b7183cdb62a384729bc",
+      "reviewedPublicDeclarations": [
+        {
+          "declaration": "public int getLength();",
+          "line": 84
+        },
+        {
+          "declaration": "public boolean isUndefined();",
+          "line": 209
+        }
+      ]
+    },
+    {
+      "archive": "Ghidra/Framework/SoftwareModeling/lib/SoftwareModeling-src.zip",
+      "archiveSha256": "fed5e47f0578b04597ead75fef77e2316a0458b9dbeeb1eb2cfa3d01472411b3",
+      "bytes": 28718,
+      "entry": "ghidra/program/model/data/DataTypeManager.java",
+      "entrySha256": "4f3b888c816e6fc986e86575605c0a9196cd58b258fc4356bc523807bd6813ec"
+    },
+    {
+      "archive": "Ghidra/Framework/SoftwareModeling/lib/SoftwareModeling-src.zip",
+      "archiveSha256": "fed5e47f0578b04597ead75fef77e2316a0458b9dbeeb1eb2cfa3d01472411b3",
+      "bytes": 2853,
+      "entry": "ghidra/program/model/data/DefaultDataType.java",
+      "entrySha256": "279bbda5f836e46e9a71540373243d912eedf743333e110b8bfbaa9a818888d1",
+      "reviewedPublicDeclarations": [
+        {
+          "declaration": "public int getLength() {",
+          "line": 42
+        }
+      ]
+    },
+    {
+      "archive": "Ghidra/Framework/SoftwareModeling/lib/SoftwareModeling-src.zip",
+      "archiveSha256": "fed5e47f0578b04597ead75fef77e2316a0458b9dbeeb1eb2cfa3d01472411b3",
+      "bytes": 5295,
+      "entry": "ghidra/program/model/data/Enum.java",
+      "entrySha256": "084475ba6aa8eec1eae376eb19508b059493b2f8615a840a62e580c9575e3d4d"
+    },
+    {
+      "archive": "Ghidra/Framework/SoftwareModeling/lib/SoftwareModeling-src.zip",
+      "archiveSha256": "fed5e47f0578b04597ead75fef77e2316a0458b9dbeeb1eb2cfa3d01472411b3",
+      "bytes": 4221,
+      "entry": "ghidra/program/model/data/FunctionDefinition.java",
+      "entrySha256": "4dc175d00276cc05cb799a178d393728204ea2b13e43c01f4b548e1cf6be97e8"
+    },
+    {
+      "archive": "Ghidra/Framework/SoftwareModeling/lib/SoftwareModeling-src.zip",
+      "archiveSha256": "fed5e47f0578b04597ead75fef77e2316a0458b9dbeeb1eb2cfa3d01472411b3",
+      "bytes": 12936,
+      "entry": "ghidra/program/model/data/FunctionDefinitionDataType.java",
+      "entrySha256": "d0a89244f5e35c63ddafd7843116470b66f5e6f3f7f0ab92528f2126d8d0b718",
+      "note": "Native metadata traversal terminates at pointer/function-definition representation; referenced source type closure remains separate.",
+      "reviewedPublicDeclarations": [
+        {
+          "declaration": "public int getLength() {",
+          "line": 235
+        }
+      ]
+    },
+    {
+      "archive": "Ghidra/Framework/SoftwareModeling/lib/SoftwareModeling-src.zip",
+      "archiveSha256": "fed5e47f0578b04597ead75fef77e2316a0458b9dbeeb1eb2cfa3d01472411b3",
+      "bytes": 2963,
+      "entry": "ghidra/program/model/data/ParameterDefinition.java",
+      "entrySha256": "92b00c6286263763dd98ca40c4f46adb7a3e674a73437fd6d5b8ef4f3b07fcfb",
+      "reviewedPublicDeclarations": [
+        {
+          "declaration": "public int getLength();",
+          "line": 60
+        }
+      ]
+    },
+    {
+      "archive": "Ghidra/Framework/SoftwareModeling/lib/SoftwareModeling-src.zip",
+      "archiveSha256": "fed5e47f0578b04597ead75fef77e2316a0458b9dbeeb1eb2cfa3d01472411b3",
+      "bytes": 1786,
+      "entry": "ghidra/program/model/data/Pointer.java",
+      "entrySha256": "73354a86910d8fc16ae7bb6870a5d3600bd85f0f20f345f8738c1721f9120c88"
+    },
+    {
+      "archive": "Ghidra/Framework/SoftwareModeling/lib/SoftwareModeling-src.zip",
+      "archiveSha256": "fed5e47f0578b04597ead75fef77e2316a0458b9dbeeb1eb2cfa3d01472411b3",
+      "bytes": 26714,
+      "entry": "ghidra/program/model/data/PointerDataType.java",
+      "entrySha256": "56e6d7f4897bb4083237964323cf6d3750da353a12df8e66a3bbddb133383b1c",
+      "note": "Native metadata traversal terminates at pointer/function-definition representation; referenced source type closure remains separate.",
+      "reviewedPublicDeclarations": [
+        {
+          "declaration": "public int getLength() {",
+          "line": 172
+        },
+        {
+          "declaration": "public int getAlignedLength() {",
+          "line": 177
+        }
+      ]
+    },
+    {
+      "archive": "Ghidra/Framework/SoftwareModeling/lib/SoftwareModeling-src.zip",
+      "archiveSha256": "fed5e47f0578b04597ead75fef77e2316a0458b9dbeeb1eb2cfa3d01472411b3",
+      "bytes": 30975,
+      "entry": "ghidra/program/model/data/Structure.java",
+      "entrySha256": "05faee3903071a4ee5ff17136abe7f8daa3f501b1963ea13500717838617cb42",
+      "reviewedPublicDeclarations": [
+        {
+          "declaration": "public DataTypeComponent getComponent(int ordinal) throws IndexOutOfBoundsException;",
+          "line": 44
+        }
+      ]
+    },
+    {
+      "archive": "Ghidra/Framework/SoftwareModeling/lib/SoftwareModeling-src.zip",
+      "archiveSha256": "fed5e47f0578b04597ead75fef77e2316a0458b9dbeeb1eb2cfa3d01472411b3",
+      "bytes": 63344,
+      "entry": "ghidra/program/model/data/StructureDataType.java",
+      "entrySha256": "0f21429fb706e5361eec485bd5b0b4055879adf5b31d3d7a31125158593eac4c",
+      "reviewedPublicDeclarations": [
+        {
+          "declaration": "public boolean isZeroLength() {",
+          "line": 267
+        },
+        {
+          "declaration": "public int getLength() {",
+          "line": 272
+        },
+        {
+          "declaration": "public DataTypeComponentImpl getComponent(int ordinal) {",
+          "line": 452
+        },
+        {
+          "declaration": "public int getNumComponents() {",
+          "line": 479
+        }
+      ]
+    },
+    {
+      "archive": "Ghidra/Framework/SoftwareModeling/lib/SoftwareModeling-src.zip",
+      "archiveSha256": "fed5e47f0578b04597ead75fef77e2316a0458b9dbeeb1eb2cfa3d01472411b3",
+      "bytes": 3251,
+      "entry": "ghidra/program/model/data/TypeDef.java",
+      "entrySha256": "2b1c0f93ee4fbf47c1407ae9806b92f90d367f68e652925a077611355a6a76fe"
+    },
+    {
+      "archive": "Ghidra/Framework/SoftwareModeling/lib/SoftwareModeling-src.zip",
+      "archiveSha256": "fed5e47f0578b04597ead75fef77e2316a0458b9dbeeb1eb2cfa3d01472411b3",
+      "bytes": 13945,
+      "entry": "ghidra/program/model/data/TypedefDataType.java",
+      "entrySha256": "f4dc381b68fa9b9c7df5a0981520d77910336b8a18596517e962a60689d8adbf",
+      "reviewedPublicDeclarations": [
+        {
+          "declaration": "public boolean isZeroLength() {",
+          "line": 218
+        },
+        {
+          "declaration": "public int getLength() {",
+          "line": 223
+        },
+        {
+          "declaration": "public int getAlignedLength() {",
+          "line": 228
+        }
+      ]
+    },
+    {
+      "archive": "Ghidra/Framework/SoftwareModeling/lib/SoftwareModeling-src.zip",
+      "archiveSha256": "fed5e47f0578b04597ead75fef77e2316a0458b9dbeeb1eb2cfa3d01472411b3",
+      "bytes": 2930,
+      "entry": "ghidra/program/model/data/Undefined.java",
+      "entrySha256": "b10627f00bc0d02acb721211ed24267d24b3f938523cccd483e5302951ceb0a5",
+      "reviewedPublicDeclarations": [
+        {
+          "declaration": "public static boolean isUndefined(DataType dataType) {",
+          "line": 68
+        }
+      ]
+    },
+    {
+      "archive": "Ghidra/Framework/SoftwareModeling/lib/SoftwareModeling-src.zip",
+      "archiveSha256": "fed5e47f0578b04597ead75fef77e2316a0458b9dbeeb1eb2cfa3d01472411b3",
+      "bytes": 2523,
+      "entry": "ghidra/program/model/data/Union.java",
+      "entrySha256": "f3a4252d8686cbbdd8f5299a6f6d1200ca50f8e834e30e2eeb57bee097599e76"
+    },
+    {
+      "archive": "Ghidra/Framework/SoftwareModeling/lib/SoftwareModeling-src.zip",
+      "archiveSha256": "fed5e47f0578b04597ead75fef77e2316a0458b9dbeeb1eb2cfa3d01472411b3",
+      "bytes": 18012,
+      "entry": "ghidra/program/model/data/UnionDataType.java",
+      "entrySha256": "a33cae12e16b4dccf7bfd9fe98aa825a9ad809b5dddbfd2abdb14fb5187ed9bb",
+      "reviewedPublicDeclarations": [
+        {
+          "declaration": "public DataTypeComponent getComponent(int ordinal) {",
+          "line": 107
+        },
+        {
+          "declaration": "public int getNumComponents() {",
+          "line": 127
+        },
+        {
+          "declaration": "public boolean isZeroLength() {",
+          "line": 249
+        },
+        {
+          "declaration": "public int getLength() {",
+          "line": 254
+        }
+      ]
+    },
+    {
+      "archive": "Ghidra/Framework/SoftwareModeling/lib/SoftwareModeling-src.zip",
+      "archiveSha256": "fed5e47f0578b04597ead75fef77e2316a0458b9dbeeb1eb2cfa3d01472411b3",
+      "bytes": 5904,
+      "entry": "ghidra/program/model/lang/DynamicVariableStorage.java",
+      "entrySha256": "c6b22116ff983ad076daca1f11305e0463b4b95c0d35bba1c58693aa175531d2"
+    },
+    {
+      "archive": "Ghidra/Framework/SoftwareModeling/lib/SoftwareModeling-src.zip",
+      "archiveSha256": "fed5e47f0578b04597ead75fef77e2316a0458b9dbeeb1eb2cfa3d01472411b3",
+      "bytes": 4082,
+      "entry": "ghidra/program/model/lang/ParamList.java",
+      "entrySha256": "c3cb65a60a7cca9a72dc60b17cff27379bbd5054bcc52bcbcaa527c16bf784be"
+    },
+    {
+      "archive": "Ghidra/Framework/SoftwareModeling/lib/SoftwareModeling-src.zip",
+      "archiveSha256": "fed5e47f0578b04597ead75fef77e2316a0458b9dbeeb1eb2cfa3d01472411b3",
+      "bytes": 17136,
+      "entry": "ghidra/program/model/lang/ParamListStandard.java",
+      "entrySha256": "dc9ec71d6e6a82159358cbaf4b1ce31f4c7c145069288e1ffed33c038876fe99"
+    },
+    {
+      "archive": "Ghidra/Framework/SoftwareModeling/lib/SoftwareModeling-src.zip",
+      "archiveSha256": "fed5e47f0578b04597ead75fef77e2316a0458b9dbeeb1eb2cfa3d01472411b3",
+      "bytes": 3365,
+      "entry": "ghidra/program/model/lang/ParamListStandardOut.java",
+      "entrySha256": "28011a719b64da698dc57cbcf42d835aa10a945e96824073ddce2f56638587b8"
+    },
+    {
+      "archive": "Ghidra/Framework/SoftwareModeling/lib/SoftwareModeling-src.zip",
+      "archiveSha256": "fed5e47f0578b04597ead75fef77e2316a0458b9dbeeb1eb2cfa3d01472411b3",
+      "bytes": 6501,
+      "entry": "ghidra/program/model/lang/ParameterPieces.java",
+      "entrySha256": "95176995266e0d600c1a8adff5016d5c0bd9f7a5d13b02902f982ba86e14bb8c"
+    },
+    {
+      "archive": "Ghidra/Framework/SoftwareModeling/lib/SoftwareModeling-src.zip",
+      "archiveSha256": "fed5e47f0578b04597ead75fef77e2316a0458b9dbeeb1eb2cfa3d01472411b3",
+      "bytes": 30147,
+      "entry": "ghidra/program/model/lang/PrototypeModel.java",
+      "entrySha256": "6f0eef5b0884f84f46d2aef981ad2c3374a23c7cabce6c9883a77d717c37a92a"
+    },
+    {
+      "archive": "Ghidra/Framework/SoftwareModeling/lib/SoftwareModeling-src.zip",
+      "archiveSha256": "fed5e47f0578b04597ead75fef77e2316a0458b9dbeeb1eb2cfa3d01472411b3",
+      "bytes": 2182,
+      "entry": "ghidra/program/model/lang/PrototypePieces.java",
+      "entrySha256": "f3b76057a9e8ac49f1915bba3814f19db517c8799dc3ea60c35d54a7f3c9732b"
+    },
+    {
+      "archive": "Ghidra/Framework/SoftwareModeling/lib/SoftwareModeling-src.zip",
+      "archiveSha256": "fed5e47f0578b04597ead75fef77e2316a0458b9dbeeb1eb2cfa3d01472411b3",
+      "bytes": 3798,
+      "entry": "ghidra/program/model/listing/FunctionSignature.java",
+      "entrySha256": "f5161a79c9c21ff03fe4d7e912840009b4ec44bdf69dc28a310fc5596e98c77c",
+      "reviewedPublicDeclarations": [
+        {
+          "declaration": "public ParameterDefinition[] getArguments();",
+          "line": 56
+        }
+      ]
+    },
+    {
+      "archive": "Ghidra/Framework/SoftwareModeling/lib/SoftwareModeling-src.zip",
+      "archiveSha256": "fed5e47f0578b04597ead75fef77e2316a0458b9dbeeb1eb2cfa3d01472411b3",
+      "bytes": 20892,
+      "entry": "ghidra/program/model/listing/Program.java",
+      "entrySha256": "c9e61d2d6dd133162594dab0b53f2982524f6c4f44ac93b253a49143eb8c8b08"
+    },
+    {
+      "archive": "Ghidra/Framework/SoftwareModeling/lib/SoftwareModeling-src.zip",
+      "archiveSha256": "fed5e47f0578b04597ead75fef77e2316a0458b9dbeeb1eb2cfa3d01472411b3",
+      "bytes": 31728,
+      "entry": "ghidra/program/model/listing/VariableStorage.java",
+      "entrySha256": "3a02bd80a45cfee177827e25634d08208bdbdd4bf91fd17e09132bc6431c4d45"
+    },
+    {
+      "archive": "Ghidra/Framework/SoftwareModeling/lib/SoftwareModeling-src.zip",
+      "archiveSha256": "fed5e47f0578b04597ead75fef77e2316a0458b9dbeeb1eb2cfa3d01472411b3",
+      "bytes": 21478,
+      "entry": "ghidra/program/model/pcode/AddressXML.java",
+      "entrySha256": "ec1ba0f2c83f38a16d212d7fb489013d1eb0768421bfd24e9605b258064adb94"
+    },
+    {
+      "archive": "Ghidra/Framework/SoftwareModeling/lib/SoftwareModeling-src.zip",
+      "archiveSha256": "fed5e47f0578b04597ead75fef77e2316a0458b9dbeeb1eb2cfa3d01472411b3",
+      "bytes": 15255,
+      "entry": "ghidra/program/model/pcode/FunctionPrototype.java",
+      "entrySha256": "d69ec238b8e24857f011d9398b5e66d8e2d3cb2565e77c4b3d64fde32dfb964f",
+      "reviewedPublicDeclarations": [
+        {
+          "declaration": "public int getNumParams() {",
+          "line": 204
+        },
+        {
+          "declaration": "public boolean isBackedByLocalSymbolMap() {",
+          "line": 236
+        }
+      ]
+    },
+    {
+      "archive": "Ghidra/Framework/SoftwareModeling/lib/SoftwareModeling-src.zip",
+      "archiveSha256": "fed5e47f0578b04597ead75fef77e2316a0458b9dbeeb1eb2cfa3d01472411b3",
+      "bytes": 21458,
+      "entry": "ghidra/program/model/pcode/HighFunction.java",
+      "entrySha256": "6066c1830e01e3acc50b0fdc3a70374530fb6c71c43b352287c79cda5cded25f",
+      "reviewedPublicDeclarations": [
+        {
+          "declaration": "protected Address getPCAddress(Varnode rep) {",
+          "line": 317
+        }
+      ]
+    },
+    {
+      "archive": "Ghidra/Framework/SoftwareModeling/lib/SoftwareModeling-src.zip",
+      "archiveSha256": "fed5e47f0578b04597ead75fef77e2316a0458b9dbeeb1eb2cfa3d01472411b3",
+      "bytes": 33082,
+      "entry": "ghidra/program/model/pcode/HighFunctionDBUtil.java",
+      "entrySha256": "59baf7fb6aeb9f31b1021c90b1297a9c0fa729a50e1adbd6cb137a00454002ba"
+    },
+    {
+      "archive": "Ghidra/Framework/SoftwareModeling/lib/SoftwareModeling-src.zip",
+      "archiveSha256": "fed5e47f0578b04597ead75fef77e2316a0458b9dbeeb1eb2cfa3d01472411b3",
+      "bytes": 1651,
+      "entry": "ghidra/program/model/pcode/HighParam.java",
+      "entrySha256": "367bf9e49e7b0e34e47e027d710df7a806b854fa05bc8c9d08f1a3aa5473efdc"
+    },
+    {
+      "archive": "Ghidra/Framework/SoftwareModeling/lib/SoftwareModeling-src.zip",
+      "archiveSha256": "fed5e47f0578b04597ead75fef77e2316a0458b9dbeeb1eb2cfa3d01472411b3",
+      "bytes": 17597,
+      "entry": "ghidra/program/model/pcode/HighSymbol.java",
+      "entrySha256": "f26a105cdde0f99fc11fd25dfc080048c5b1fd1d581eac04bc27865e5aac0744",
+      "reviewedPublicDeclarations": [
+        {
+          "declaration": "public Address getPCAddress() {",
+          "line": 231
+        },
+        {
+          "declaration": "public HighFunction getHighFunction() {",
+          "line": 254
+        },
+        {
+          "declaration": "public VariableStorage getStorage() {",
+          "line": 376
+        }
+      ]
+    },
+    {
+      "archive": "Ghidra/Framework/SoftwareModeling/lib/SoftwareModeling-src.zip",
+      "archiveSha256": "fed5e47f0578b04597ead75fef77e2316a0458b9dbeeb1eb2cfa3d01472411b3",
+      "bytes": 5187,
+      "entry": "ghidra/program/model/pcode/HighVariable.java",
+      "entrySha256": "ad3d2dcf5f4b518b00e09a0d582f9a0f695693628f3e58d9ed1ff03ffaca5867",
+      "reviewedPublicDeclarations": [
+        {
+          "declaration": "public HighFunction getHighFunction() {",
+          "line": 66
+        }
+      ]
+    },
+    {
+      "archive": "Ghidra/Framework/SoftwareModeling/lib/SoftwareModeling-src.zip",
+      "archiveSha256": "fed5e47f0578b04597ead75fef77e2316a0458b9dbeeb1eb2cfa3d01472411b3",
+      "bytes": 20076,
+      "entry": "ghidra/program/model/pcode/LocalSymbolMap.java",
+      "entrySha256": "bdfd1cd9ce8b723f4f25081f68655f1d1edf1209e2063af5161463c8940c4e3a",
+      "reviewedPublicDeclarations": [
+        {
+          "declaration": "public HighFunction getHighFunction() {",
+          "line": 65
+        },
+        {
+          "declaration": "public int getNumParams() {",
+          "line": 422
+        },
+        {
+          "declaration": "public HighSymbol getParamSymbol(int i) {",
+          "line": 430
+        }
+      ]
+    },
+    {
+      "archive": "Ghidra/Framework/SoftwareModeling/lib/SoftwareModeling-src.zip",
+      "archiveSha256": "fed5e47f0578b04597ead75fef77e2316a0458b9dbeeb1eb2cfa3d01472411b3",
+      "bytes": 4060,
+      "entry": "ghidra/program/model/pcode/MappedEntry.java",
+      "entrySha256": "e98421309810b545f758cb06e84628d26d86a442957a112bf9d35e69eb2e07c2",
+      "reviewedPublicDeclarations": [
+        {
+          "declaration": "public VariableStorage getStorage() {",
+          "line": 81
+        }
+      ]
+    },
+    {
+      "archive": "Ghidra/Framework/SoftwareModeling/lib/SoftwareModeling-src.zip",
+      "archiveSha256": "fed5e47f0578b04597ead75fef77e2316a0458b9dbeeb1eb2cfa3d01472411b3",
+      "bytes": 3796,
+      "entry": "ghidra/program/model/pcode/SymbolEntry.java",
+      "entrySha256": "cf49163daa5611da20d31029acb56015d5d98802ba4bfc5bed386e3c41940b87",
+      "reviewedPublicDeclarations": [
+        {
+          "declaration": "public abstract VariableStorage getStorage();",
+          "line": 61
+        }
+      ]
+    }
+  ],
+  "authority": "source-locators-only-no-production-authority",
+  "ghidraVersion": "12.1.3",
+  "kind": "native-inferred-interface-api-source-census-v1",
+  "limitations": [
+    "HighSymbol public storage is first mapping only",
+    "No inferred public formal/effective type pair",
+    "FunctionDefinition arguments have no bounded count accessor",
+    "Typedef settings not captured",
+    "Enum contents not captured",
+    "No source nominal identity or whole-call allocation"
+  ]
+}
