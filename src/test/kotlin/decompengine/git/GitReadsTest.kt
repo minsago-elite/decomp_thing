@@ -63,6 +63,52 @@ class GitReadsTest {
         assertEquals(stable, GitRepositoryInspector.inspect(f.runner, gitDir, workTree).statusDigest)
     }
 
+    @Test fun `directory to file replacements keep deleted descendants observable before and after staging`(): Unit = GitTestRepositories().use { f ->
+        val (gitDir, workTree) = f.managed("directory-replacement")
+        f.write(workTree, "component.c/sub/child.c", "int original_child;\n")
+        f.commitAll(gitDir, workTree, "base")
+        Files.delete(workTree.resolve("component.c/sub/child.c"))
+        Files.delete(workTree.resolve("component.c/sub"))
+        Files.delete(workTree.resolve("component.c"))
+        f.write(workTree, "component.c", "int replacement;\n")
+        for (scope in listOf(GitDiffScope.UNSTAGED, GitDiffScope.STAGED)) {
+            if (scope == GitDiffScope.STAGED) f.raw(gitDir, workTree, "add", "-A")
+            val before = GitRepositoryInspector.inspect(f.runner, gitDir, workTree)
+            assertTrue(before.dirty); assertTrue(before.status.complete)
+            val entries = before.status.entries.associateBy { it.path.exact }
+            val child = entries.getValue("component.c/sub/child.c")
+            if (scope == GitDiffScope.UNSTAGED) {
+                assertEquals(GitIndexChange.DELETED, child.unstaged)
+                assertTrue(entries.getValue("component.c").untracked)
+            } else {
+                assertEquals(GitIndexChange.DELETED, child.staged)
+                assertEquals(GitIndexChange.ADDED, entries.getValue("component.c").staged)
+            }
+            val diff = GitReads.diff(f.runner, gitDir, workTree, GitObjectFormat.SHA1, scope, null, null)
+            assertTrue(diff.complete)
+            val deleted = diff.files.single { it.path.exact == "component.c/sub/child.c" }
+            assertEquals(GitIndexChange.DELETED, deleted.change)
+            val patch = GitReads.patch(f.runner, gitDir, workTree, scope, null, null, deleted)
+            assertTrue(patch.text.contains("-int original_child;"), patch.text)
+            assertFalse(patch.truncated)
+            f.write(workTree, "component.c", "int replacement_with_a_longer_name_for_${scope.name};\n")
+            assertNotEquals(before.statusDigest, GitRepositoryInspector.inspect(f.runner, gitDir, workTree).statusDigest)
+        }
+    }
+
+    @Test fun `unobservable descendant errors are not treated as absent files`(): Unit = GitTestRepositories().use { f ->
+        val (gitDir, workTree) = f.managed("unobservable-descendant")
+        f.write(workTree, "component.c/child.c", "int child;\n")
+        f.commitAll(gitDir, workTree, "base")
+        Files.delete(workTree.resolve("component.c/child.c"))
+        Files.delete(workTree.resolve("component.c"))
+        Files.createSymbolicLink(workTree.resolve("component.c"), Path.of("component.c"))
+        // Git may omit paths it cannot lstat, so exercise the observation boundary directly.
+        kotlin.test.assertFailsWith<java.nio.file.FileSystemException> {
+            GitRepositoryInspector.worktreeStat(workTree, workTree.resolve("component.c/child.c"))
+        }
+    }
+
     @Test fun `conflicts are reported per path from a real merge`(): Unit = GitTestRepositories().use { f ->
         val (gitDir, workTree) = f.managed("conflict")
         f.write(workTree, "shared.c", "int base;\n"); f.commitAll(gitDir, workTree, "base")

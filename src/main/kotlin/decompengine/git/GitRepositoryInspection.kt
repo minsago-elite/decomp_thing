@@ -2,9 +2,11 @@ package decompengine.git
 
 import java.net.URI
 import java.nio.file.Files
+import java.nio.file.FileSystemException
 import java.nio.file.NoSuchFileException
 import java.nio.file.LinkOption.NOFOLLOW_LINKS
 import java.nio.file.Path
+import java.nio.file.attribute.BasicFileAttributes
 import java.security.MessageDigest
 import java.time.Duration
 
@@ -176,6 +178,27 @@ object GitRepositoryInspector {
         return refs.take(MAX_REFS) to (refs.size > MAX_REFS)
     }
 
+    internal fun worktreeStat(root: Path, file: Path): BasicFileAttributes? {
+        return try {
+            Files.readAttributes(file, BasicFileAttributes::class.java, NOFOLLOW_LINKS)
+        } catch (_: NoSuchFileException) {
+            null
+        } catch (failure: FileSystemException) {
+            // A tracked directory replaced by a file makes its deleted descendants fail with
+            // ENOTDIR on Unix, not NoSuchFileException. Prove the absence via exact ancestor
+            // paths, without relying on localized error text or hiding permission/I/O failures.
+            var ancestor = root
+            for (component in root.relativize(file.parent)) {
+                ancestor = ancestor.resolve(component)
+                // Ancestors follow links just as the original leaf lookup does; the leaf does not.
+                val stat = try { Files.readAttributes(ancestor, BasicFileAttributes::class.java) }
+                    catch (_: NoSuchFileException) { return null }
+                if (!stat.isDirectory) return null
+            }
+            throw failure
+        }
+    }
+
     /** Status never fetches, refreshes optional locks, descends into submodules or runs hooks. */
     fun inspect(runner: GitCommandRunner, gitDir: Path, workTree: Path): GitWorkspaceObservation {
         GitConfigurationAudit.requireManaged(runner, gitDir)
@@ -202,8 +225,8 @@ object GitRepositoryInspector {
                                 if (it == '/'.code.toByte()) "/" else "%%%02X".format(it.toInt() and 0xff)
                             }))
                         if (!file.normalize().startsWith(root) || file.normalize() == root) throw IllegalArgumentException()
-                        Files.readAttributes(file, java.nio.file.attribute.BasicFileAttributes::class.java, NOFOLLOW_LINKS)
-                    } catch (_: NoSuchFileException) { null } catch (_: Exception) {
+                        worktreeStat(root, file)
+                    } catch (_: Exception) {
                         throw GitRepositoryException("REPOSITORY_UNAVAILABLE", "A work-tree file could not be observed exactly.")
                     }
                     update("${stat?.size() ?: -1}\u0000${stat?.lastModifiedTime()?.toInstant() ?: ""}\n".toByteArray())
