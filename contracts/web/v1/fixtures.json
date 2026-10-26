@@ -150,6 +150,10 @@
       "valid": true
     },
     {
+      "file": "fixtures/git-history-many-parents.json",
+      "valid": true
+    },
+    {
       "file": "fixtures/git-diff.json",
       "valid": true
     },

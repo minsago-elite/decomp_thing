@@ -5109,7 +5109,7 @@
           "items": {
             "$ref": "#/definitions/objectId"
           },
-          "maxItems": 64
+          "maxItems": 3200
         },
         "authorName": {
           "type": "string",

@@ -731,10 +731,17 @@ textconv, external diff tool or submodule command, and no read refreshes the ind
   `worktreeVersion`; once anything observable changes, a later page answers `409 REF_CHANGED`.
 - `worktreeVersion` now digests HEAD plus every non-ignored status entry. That includes the
   entry's index blob and the work-tree file's size and modification time, so re-editing an
-  already modified file or re-staging different content changes it. Ignored files never do.
+  already modified file or re-staging different content changes it. Native invalid-UTF-8 names
+  are observed using their exact filesystem bytes, not their escaped display names. Observation
+  errors other than a missing file fail explicitly rather than supplying a stable placeholder.
+  Ignored files never change this version.
 - `history` (`gitHistory`) lists commits from an exact `start` object (default HEAD; an unborn
   branch has none). The output is NUL-delimited `git log` with full object IDs, all parents (merges
   included), author, timestamps and a 200-character subject with an explicit truncation flag.
+  Parent arrays are never silently shortened. The raw history read (including its lookahead
+  commit) is capped at 128 KiB; this also bounds any one parent list below the schema's 3200
+  entries. Output above that bound returns `REPOSITORY_UNAVAILABLE`, not a partial parent list;
+  a smaller page limit can help when multiple commits exhaust the bound.
   The cursor embeds the start object and offset, so a branch that moves after the first page
   cannot shift later pages. A history entry's `mapping` is non-null only for an explicitly
   recorded, validated commit-to-revision binding. A commit alone is never treated as a
@@ -746,7 +753,11 @@ textconv, external diff tool or submodule command, and no read refreshes the ind
   modes, line counts and a binary flag (`-` counts mean binary). The new blob's size comes from
   `cat-file --batch-check` without reading the content. `file=<fileId>` returns that file alone
   with a unified patch of at most 128 KiB, flagged `truncated` when cut. Binary files never
-  render content. Abbreviated object IDs are rejected with 422.
+  render content. Managed `info/attributes` restores automatic binary detection with `!diff`,
+  overriding source-controlled forced-text/binary/driver attributes. The exact previous managed
+  attributes layout is atomically upgraded on audit; unrecognized layouts are rejected without
+  rewriting them. No source or index bytes change during that upgrade. Abbreviated object IDs
+  are rejected with 422.
 - `refs` (`gitRefs`) pages through branches and tags with exact and peeled object IDs, stable
   `refId`s and the branch HEAD currently names. Its cursor carries a digest of every ref listed
   before it. If a branch or tag is created, deleted or moved ahead of the offset, the page answers
@@ -761,6 +772,10 @@ belongs to its record:
 - an unresolved conflict returns Git's combined `diff --cc` section;
 - a metadata-only rename or mode change is matched by its header, quoted as Git quotes unusual
   names.
+
+If the bounded capture ends before the selected section (for example, an unrelated subtree
+under a rename's former path fills the capture), the response reports `truncated: true`, even
+if its selected text is empty. An incomplete source capture is never presented as complete.
 
 Paths are display strings. Backslashes, control characters (newline, tab, escape and the like)
 and invalid UTF-8 bytes are escaped, and `pathEscaped` marks any name whose display differs from
