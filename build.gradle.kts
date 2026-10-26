@@ -248,6 +248,12 @@ tasks.withType<AbstractArchiveTask>().configureEach {
     isPreserveFileTimestamps = false
     isReproducibleFileOrder = true
 }
+tasks.named<Jar>("jar") {
+    // `llm_bin_patch --version` reads this; it is fixed by the source tree, not by the build host.
+    val applicationVersion = project.version.toString()
+    inputs.property("applicationVersion", applicationVersion)
+    manifest { attributes("Implementation-Title" to "llm_bin_patch", "Implementation-Version" to applicationVersion) }
+}
 
 val testFrontendAssetManifest = tasks.register<Exec>("testFrontendAssetManifest") {
     group = "verification"
