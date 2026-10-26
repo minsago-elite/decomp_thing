@@ -4,6 +4,7 @@ import decompengine.agent.AgentHarness
 import decompengine.agent.AgentExecutionResult
 import decompengine.agent.AgentStopReason
 import decompengine.oracle.behavior.LlvmBehaviorCandidateAcpLineageIndexV2Publisher
+import decompengine.oracle.core.OracleJson
 import java.nio.file.Path
 import java.nio.file.Files
 import java.nio.file.attribute.PosixFilePermission
@@ -176,8 +177,8 @@ class ModulePromptCompatibilityTest {
                     error("oversized observation must not dispatch")
                 }, maximumContextCharacters = 4_096)
                 val observations = listOf(
-                    retainedObservation(MAXIMUM_RETAINED_MODULE_OBSERVATION_BYTES + 1, multibyte = false),
-                    retainedObservation(MAXIMUM_RETAINED_MODULE_OBSERVATION_BYTES + 1, multibyte = true),
+                    oversizedSelectedObservation(multibyte = false),
+                    oversizedSelectedObservation(multibyte = true),
                 )
                 for ((index, observed) in observations.withIndex()) {
                     for (target in listOf(project, temp.resolve("${profile.id}-fresh-$index"))) {
@@ -229,6 +230,121 @@ class ModulePromptCompatibilityTest {
             Files.walk(temp).use { paths ->
                 paths.sorted(java.util.Comparator.reverseOrder()).forEach { Files.deleteIfExists(it) }
             }
+        }
+    }
+
+    @Test
+    fun `large observation corpus retains module selected fallback and replays both profile archives`() {
+        val scratch = Path.of("build/test-tmp").toAbsolutePath().normalize()
+        Files.createDirectories(scratch)
+        val temp = Files.createTempDirectory(scratch, "selected-observation-fallback-")
+        try {
+            val model = model().let { original -> original.copy(functions = original.functions + listOf(
+                RecoveredFunction("fn_beta", "beta_run", 0x2000UL, "int beta_run(void)", "int beta_run(void) { return 8; }"),
+                RecoveredFunction("fn_gamma", "gamma_run", 0x3000UL, "int gamma_run(void)", "int gamma_run(void) { return 9; }"),
+            )) }
+            val cases = listOf(ModuleObservedCase("alpha-case", ModuleObservationAttribution(listOf("fn_alpha"), "b".repeat(64)),
+                List(8) { "x".repeat(1024) }, "", 0, "", "")) + List(20) { index ->
+                ModuleObservedCase("other-$index", ModuleObservationAttribution(listOf(if (index % 2 == 0) "fn_beta" else "fn_gamma"),
+                    "b".repeat(64)), emptyList(), "", 0, "ab".repeat(16384), "")
+            }
+            val observationsDirectory = temp.resolve("observations")
+            ModuleObservedBehavior.write(observationsDirectory, model.inputSha256, cases)
+            val observed = requireNotNull(ReconstructionExplorationInput.read(observationsDirectory, maximumCharacters = 4096))
+            assertTrue(observed.toByteArray().size in (MAXIMUM_RETAINED_MODULE_OBSERVATION_BYTES + 1)..ModuleObservedBehavior.MAXIMUM_BYTES)
+            for (profile in ReconstructionProfiles.builtIn) {
+                val project = temp.resolve(profile.id)
+                var dispatches = 0
+                val reconstructor = BoundedLlmModuleReconstructor(AgentHarness { _, _ ->
+                    dispatches++
+                    error("module budget fallback must not dispatch")
+                }, maximumContextCharacters = 4096)
+                val manifest = SourceTreeGenerator.generate(model, project, profile = profile,
+                    reconstructor = reconstructor, observedBehavior = observed)
+                assertEquals(model.functions.map { it.id }.sorted(), manifest.unresolvedImplementationIds.sorted())
+                assertEquals(0, dispatches)
+                val plan = DeterministicModulePlanner(layout = profile.layout).plan(model)
+                assertEquals(setOf("alpha", "beta", "gamma"), plan.modules.map { it.id }.toSet())
+                val promptInputs = ProfileModulePromptInputs(model, plan, profile)
+                for (module in plan.modules) {
+                    val path = profile.layout.declaration("module-evidence").materialize(mapOf("module" to module.id))
+                    val checkpoint = Json.parseToJsonElement(project.resolve(path).readText()).jsonObject
+                    assertEquals(JsonPrimitive("pre-dispatch-context-budget-fallback"), checkpoint["workflowOrigin"])
+                    val retained = checkpoint.getValue("preDispatchObservedBehavior").jsonPrimitive.content
+                    assertTrue(retained.toByteArray().size <= MAXIMUM_RETAINED_MODULE_OBSERVATION_BYTES)
+                    val wrapper = Json.parseToJsonElement(retained).jsonObject
+                    assertEquals(JsonPrimitive(ModuleObservationRetention.KIND), wrapper["kind"])
+                    assertEquals(JsonPrimitive("module-selected"), wrapper["scope"])
+                    assertEquals(JsonPrimitive(false), wrapper["originalCorpusRetained"])
+                    val sourceCorpus = wrapper.getValue("sourceCorpus").jsonObject
+                    assertEquals(JsonPrimitive(sha256(observed.toByteArray())), sourceCorpus["sha256"])
+                    assertEquals(JsonPrimitive(observed.toByteArray().size), sourceCorpus["bytes"])
+                    assertEquals(JsonPrimitive(cases.size), sourceCorpus["caseCount"])
+                    val expectedCases = cases.filter { candidate -> candidate.attribution.functionIds.any { it in module.functionIds } }
+                    assertEquals(ModuleObservedBehavior.envelope(model.inputSha256, expectedCases), wrapper["selected"])
+                    val original = promptInputs.request(module.id, project, null).copy(observedBehavior = observed)
+                    val replayed = promptInputs.requestFromRetainedObservation(module.id, project, retained, legacy = false)
+                    assertEquals(modulePromptEvidence(original).text, modulePromptEvidence(replayed).text)
+                    assertEquals(selectedModuleInputFingerprint(original), selectedModuleInputFingerprint(replayed))
+                    assertEquals(JsonPrimitive(modulePromptEvidence(original).text.length), checkpoint["promptCharacters"])
+                    assertEquals(JsonPrimitive(sha256(modulePromptEvidence(original).text.toByteArray())), checkpoint["promptSha256"])
+                    assertEquals(JsonPrimitive(selectedModuleInputFingerprint(original)), checkpoint["fingerprint"])
+                    assertFailsWith<IllegalArgumentException> {
+                        promptInputs.requestFromRetainedObservation(module.id, project, retained, legacy = true)
+                    }
+                    if (module.id == "alpha") {
+                        assertFalse(retained.contains("other-"))
+                        val escaped = retained.replace(ModuleObservationRetention.KIND, "module-observed-behavior-selectio\\u006e")
+                            .replace("module-observation-retention-v1", "module-observation-retention-v\\u0031")
+                        assertEquals(wrapper, Json.parseToJsonElement(escaped).jsonObject)
+                        assertFalse(ModuleObservationRetention.KIND in escaped || "module-observation-retention-v1" in escaped)
+                        for ((name, rawWrapper) in listOf("canonical" to retained, "escaped" to escaped)) {
+                            val rawMisuse = temp.resolve("${profile.id}-raw-wrapper-$name")
+                            assertFailsWith<IllegalArgumentException> {
+                                SourceTreeGenerator.generate(model, rawMisuse, profile = profile,
+                                    reconstructor = reconstructor, observedBehavior = rawWrapper)
+                            }
+                            assertFalse(Files.exists(rawMisuse))
+                        }
+                    }
+                }
+                val actualManifest = SourceTreeManifestReader.read(project, profile)
+                assertTrue(ReconstructionAcpEvidenceArchiveVerifier.verify(project,
+                    actualManifest.files.associate { it.path to sha256(project.resolve(it.path).readBytes()) },
+                    actualManifest.files.associate { it.path to Files.size(project.resolve(it.path)) }, actualManifest, profile).isEmpty())
+                assertTrue(ArchivalProjectAuditor.audit(project, profile, publish = false).moduleConfidenceEvidenceProblems.isEmpty())
+                assertEquals(0, dispatches)
+            }
+        } finally {
+            Files.walk(temp).use { paths -> paths.sorted(java.util.Comparator.reverseOrder()).forEach { Files.deleteIfExists(it) } }
+        }
+    }
+
+    @Test
+    fun `padded oversized scoped observation projects while its exact raw boundary stays historical`() {
+        val scratch = Path.of("build/test-tmp").toAbsolutePath().normalize()
+        Files.createDirectories(scratch)
+        val temp = Files.createTempDirectory(scratch, "padded-observation-fallback-")
+        try {
+            for (profile in ReconstructionProfiles.builtIn) {
+                val observed = retainedObservation(MAXIMUM_RETAINED_MODULE_OBSERVATION_BYTES + 1, multibyte = true)
+                val project = temp.resolve(profile.id)
+                val manifest = SourceTreeGenerator.generate(model(), project, profile = profile,
+                    reconstructor = BoundedLlmModuleReconstructor(AgentHarness { _, _ -> error("must not dispatch") },
+                        maximumContextCharacters = 4096), observedBehavior = observed)
+                assertEquals(listOf("fn_alpha"), manifest.unresolvedImplementationIds)
+                val checkpoint = Json.parseToJsonElement(project.resolve(profile.layout.declaration("module-evidence")
+                    .materialize(mapOf("module" to "alpha"))).readText()).jsonObject
+                val retained = checkpoint.getValue("preDispatchObservedBehavior").jsonPrimitive.content
+                assertTrue(retained.toByteArray().size < MAXIMUM_RETAINED_MODULE_OBSERVATION_BYTES)
+                val wrapper = Json.parseToJsonElement(retained).jsonObject
+                assertEquals(JsonPrimitive(MAXIMUM_RETAINED_MODULE_OBSERVATION_BYTES + 1),
+                    wrapper.getValue("sourceCorpus").jsonObject["bytes"])
+                assertEquals(JsonPrimitive(sha256(observed.toByteArray())), wrapper.getValue("sourceCorpus").jsonObject["sha256"])
+                assertTrue(ArchivalProjectAuditor.audit(project, profile, publish = false).moduleConfidenceEvidenceProblems.isEmpty())
+            }
+        } finally {
+            Files.walk(temp).use { paths -> paths.sorted(java.util.Comparator.reverseOrder()).forEach { Files.deleteIfExists(it) } }
         }
     }
 
@@ -820,6 +936,14 @@ class ModulePromptCompatibilityTest {
         val observation = observation(8192, multibyte)
         return observation + " ".repeat(bytes - observation.toByteArray(Charsets.UTF_8).size)
     }
+
+    private fun oversizedSelectedObservation(multibyte: Boolean): String = OracleJson.canonicalBytes(
+        ModuleObservedBehavior.envelope(model().inputSha256, List(6) { index -> ModuleObservedCase(
+            "large-owned-$index", ModuleObservationAttribution(listOf("fn_alpha"), "b".repeat(64)),
+            if (multibyte) listOf("é".repeat(1024)) else emptyList(), "00".repeat(16384), 0,
+            "11".repeat(16384), "22".repeat(16384),
+        ) }), ModuleObservedBehavior.limits,
+    ).decodeToString()
 
     private fun withBudget(base: ReconstructionProfile, budget: Int) = ReconstructionProfile(
         schemaVersion = base.schemaVersion,
