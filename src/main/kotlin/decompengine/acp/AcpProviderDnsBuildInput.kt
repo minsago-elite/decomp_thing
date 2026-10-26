@@ -307,7 +307,11 @@ internal object AcpProviderDnsBuildInputs {
         val laneCeilings = Collections.unmodifiableMap(laneCeilings.toMap())
     }
 
-    /** A proposed complete identity lock, never an authenticated/usable approval. */
+    /**
+     * A proposed identity lock, never an authenticated/usable approval. Parsing checks declarations
+     * only; requireInspectionMatches must establish the complete image inventory before any claim
+     * of input completeness. No implementation-specific reduced tool closure is supported yet.
+     */
     fun parseLockCandidate(bytes: ByteArray): InputLock {
         val doc = dnsObject(bytes)
         doc.dnsKeys("schema", "family", "index", "manifest", "config", "indexChildren", "layers", "payloads", "toolInputs", "recipe", "toolClosureSha256", "jmodsSha256", "sourceRelationshipSha256", "recipeSha256", "authenticationReceiptSha256")
@@ -375,6 +379,17 @@ internal object AcpProviderDnsBuildInputs {
             } else { require(obj["linkTarget"] == JsonNull); null }
             LockedObject(path, kind, layer, diff, offset, size, hash, target, mode, uid, gid)
         }
+        // The conservative inventory is the entire image namespace, not a guessed JDK minimum.
+        // Every parent must have its own authenticated directory record; implicit tar parents have
+        // no source metadata and cannot establish a complete proposed inventory.
+        val toolsByPath = tools.associateBy { it.path }
+        tools.forEach { tool ->
+            var parent = tool.path.substringBeforeLast('/', "")
+            while (parent.isNotEmpty()) {
+                require(toolsByPath[parent]?.kind == Kind.DIRECTORY) { "tool inventory omits a directory" }
+                parent = parent.substringBeforeLast('/', "")
+            }
+        }
         val recipe = doc.getValue("recipe").jsonObject
         recipe.dnsKeys("jlinkPath", "engineIdentitySha256", "engineImageBindingSha256", "reservationPolicySha256", "argv", "workingDirectory", "environment", "network", "laneCeilings")
         val jlink = dnsRelativePath(recipe.dnsText("jlinkPath"))
@@ -404,6 +419,14 @@ internal object AcpProviderDnsBuildInputs {
     fun requireInspectionMatches(lock: InputLock, inspection: Inspection) {
         require(lock.index.digest == inspection.indexDigest && lock.index.size == inspection.indexBytes && lock.manifest == inspection.manifest && lock.config == inspection.config)
         require(lock.indexChildren == inspection.indexChildren && lock.layers == inspection.layers.zip(inspection.diffIds))
+        // Derive the inventory from the independently inspected final image, not the caller's list.
+        // Whole-image coverage deliberately includes launcher/JVM libraries, configuration, modules,
+        // plugins, loader inputs and unrelated objects: selecting a smaller semantic closure requires
+        // a future reviewed implementation/recipe contract. Keep existing entry/JSON budgets; an
+        // image that cannot be completely recorded within them is unsupported, never truncated.
+        require(inspection.members.values.all { it.explicitMetadata }) { "image has unauthenticated implicit directories" }
+        require(lock.toolInputs.size == inspection.members.size &&
+            lock.toolInputs.map { it.path }.toSet() == inspection.members.keys) { "tool inventory must cover the complete image" }
         lock.toolInputs.forEach { tool ->
             val member = inspection.members.getValue(tool.path)
             require(member.explicitMetadata && member.kind == tool.kind && member.layer in inspection.layers.indices &&

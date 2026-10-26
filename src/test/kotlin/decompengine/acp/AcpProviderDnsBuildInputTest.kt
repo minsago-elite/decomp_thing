@@ -353,11 +353,7 @@ class AcpProviderDnsBuildInputTest {
             put("contentOffset", 512); put("size", 10); put("sha256", "5".repeat(64)); put("destination", "jdk/bin/java")
             put("mode", 493); put("uid", 0); put("gid", 0)
         }) }
-        val tools = JsonArray(listOf("opt/jdk/bin/jlink", "opt/jdk/jmods/java.base.jmod").map { path -> buildJsonObject {
-            put("path", path); put("kind", "REGULAR"); put("layerDigest", "sha256:" + "3".repeat(64)); put("diffId", "sha256:" + "4".repeat(64))
-            put("contentOffset", 512); put("size", 10); put("sha256", "5".repeat(64)); put("linkTarget", JsonNull)
-            put("mode", if (path.endsWith("jlink")) 493 else 420); put("uid", 0); put("gid", 0)
-        } })
+        val tools = proposedTools("opt/jdk/bin/jlink", "opt/jdk/jmods/java.base.jmod")
         put("toolInputs", tools)
         val recipe = buildJsonObject {
             put("jlinkPath", "opt/jdk/bin/jlink"); put("engineIdentitySha256", "6".repeat(64)); put("engineImageBindingSha256", "6".repeat(64)); put("reservationPolicySha256", "6".repeat(64))
@@ -372,27 +368,46 @@ class AcpProviderDnsBuildInputTest {
         put("recipeSha256", dnsDomainHash("provider-dns-build-recipe-v1", recipe))
         put("sourceRelationshipSha256", "6".repeat(64)); put("authenticationReceiptSha256", "6".repeat(64))
     }
+    private fun proposedTools(jlink: String, jmod: String): JsonArray {
+        val files = setOf(jlink, jmod)
+        val paths = sortedSetOf<String>()
+        files.forEach { file ->
+            var path = file
+            while (path.isNotEmpty()) { paths.add(path); path = path.substringBeforeLast('/', "") }
+        }
+        return JsonArray(paths.map { path -> buildJsonObject {
+            val regular = path in files
+            put("path", path); put("kind", if (regular) "REGULAR" else "DIRECTORY")
+            put("layerDigest", "sha256:" + "3".repeat(64)); put("diffId", "sha256:" + "4".repeat(64))
+            put("contentOffset", 512); put("size", if (regular) 10 else 0)
+            put("sha256", if (regular) JsonPrimitive("5".repeat(64)) else JsonNull); put("linkTarget", JsonNull)
+            put("mode", if (!regular || path == jlink) 493 else 420); put("uid", 0); put("gid", 0)
+        } })
+    }
+    private fun rehashTools(doc: JsonObject, tools: JsonArray): JsonObject {
+        val jmod = doc.getValue("recipe").jsonObject.dnsText("jlinkPath").removeSuffix("bin/jlink") + "jmods/java.base.jmod"
+        return JsonObject(doc + mapOf(
+            "toolInputs" to tools,
+            "toolClosureSha256" to JsonPrimitive(dnsDomainHash("provider-dns-tool-inputs-v1", buildJsonObject { put("inputs", tools) })),
+            "jmodsSha256" to JsonPrimitive(dnsDomainHash("provider-dns-jmods-v1", buildJsonObject {
+                put("inputs", JsonArray(tools.filter { it.jsonObject.dnsText("path") == jmod })) })),
+        ))
+    }
     private fun lockWithToolPaths(jlink: String, jmod: String): JsonObject {
         val original = lockDocument()
-        val tools = JsonArray(original.getValue("toolInputs").jsonArray.mapIndexed { index, raw ->
-            JsonObject(raw.jsonObject + ("path" to JsonPrimitive(if (index == 0) jlink else jmod)))
-        })
+        val tools = proposedTools(jlink, jmod)
         val oldRecipe = original.getValue("recipe").jsonObject
         val recipe = JsonObject(oldRecipe + mapOf("jlinkPath" to JsonPrimitive(jlink),
             "argv" to JsonArray(listOf(JsonPrimitive("/$jlink")) + oldRecipe.getValue("argv").jsonArray.drop(1))))
-        return JsonObject(original + mapOf(
-            "toolInputs" to tools, "recipe" to recipe,
-            "toolClosureSha256" to JsonPrimitive(dnsDomainHash("provider-dns-tool-inputs-v1", buildJsonObject { put("inputs", tools) })),
-            "jmodsSha256" to JsonPrimitive(dnsDomainHash("provider-dns-jmods-v1", buildJsonObject { put("inputs", JsonArray(listOf(tools[1]))) })),
-            "recipeSha256" to JsonPrimitive(dnsDomainHash("provider-dns-build-recipe-v1", recipe)),
-        ))
+        return rehashTools(JsonObject(original + mapOf("recipe" to recipe,
+            "recipeSha256" to JsonPrimitive(dnsDomainHash("provider-dns-build-recipe-v1", recipe)))), tools)
     }
     @Test fun `candidate java base jmod must belong to the selected jlink installation`() {
         for ((jlink, jmod) in listOf("opt/jdk/bin/jlink" to "opt/jdk/jmods/java.base.jmod",
             "vendor/java/bin/jlink" to "vendor/java/jmods/java.base.jmod", "bin/jlink" to "jmods/java.base.jmod")) {
             val lock = AcpProviderDnsBuildInputs.parseLockCandidate(bytes(lockWithToolPaths(jlink, jmod)))
             assertEquals(jlink, lock.recipe.jlinkPath)
-            assertEquals(jmod, lock.toolInputs.single { it.path != jlink }.path)
+            assertEquals(jmod, lock.toolInputs.single { it.kind == AcpProviderDnsBuildInputs.Kind.REGULAR && it.path != jlink }.path)
         }
         for ((jlink, jmod) in listOf("opt/jdk/bin/jlink" to "decoy/jmods/java.base.jmod",
             "vendor/java/bin/jlink" to "opt/jdk/jmods/java.base.jmod", "opt/jdk/jlink" to "opt/jdk/jmods/java.base.jmod")) {
@@ -400,6 +415,108 @@ class AcpProviderDnsBuildInputTest {
         }
         val correct = lockWithToolPaths("opt/jdk/bin/jlink", "opt/jdk/jmods/java.base.jmod")
         assertFails { AcpProviderDnsBuildInputs.parseLockCandidate(bytes(JsonObject(correct + ("jmodsSha256" to JsonPrimitive("0".repeat(64)))))) }
+    }
+    private fun completeToolImage(): AcpProviderDnsBuildInputs.Inspection = graph(tar(
+        Entry("opt", type = '5'), Entry("opt/jdk", type = '5'), Entry("opt/jdk/bin", type = '5'),
+        Entry("opt/jdk/bin/jlink", "inert launcher".toByteArray(), mode = 493),
+        Entry("opt/jdk/jmods", type = '5'), Entry("opt/jdk/jmods/java.base.jmod", byteArrayOf(1)),
+        Entry("opt/jdk/lib", type = '5'), Entry("opt/jdk/lib/server", type = '5'),
+        Entry("opt/jdk/lib/server/libjvm.so", byteArrayOf(2)), Entry("opt/jdk/lib/libjli.so", byteArrayOf(3)),
+        Entry("opt/jdk/lib/modules", byteArrayOf(4)), Entry("opt/jdk/conf", type = '5'),
+        Entry("opt/jdk/conf/security", type = '5'), Entry("opt/jdk/conf/security/java.security", byteArrayOf(5)),
+        Entry("opt/jdk/lib/plugins", type = '5'), Entry("opt/jdk/lib/plugins/implementation.dat", byteArrayOf(6)),
+        Entry("lib", type = '5'), Entry("lib/loader.so", byteArrayOf(7)),
+        Entry("etc", type = '5'), Entry("etc/ld.so.cache", byteArrayOf(8)),
+        Entry("unrelated", byteArrayOf(9)),
+    )).inspect()
+
+    private fun inspectedLockDocument(inspection: AcpProviderDnsBuildInputs.Inspection): JsonObject {
+        fun d(value: AcpProviderDnsBuildInputs.Descriptor) = buildJsonObject {
+            put("mediaType", value.mediaType); put("digest", value.digest); put("size", value.size)
+        }
+        val tools = JsonArray(inspection.members.values.filter { it.explicitMetadata }.map { member -> buildJsonObject {
+            put("path", member.path); put("kind", member.kind.name)
+            put("layerDigest", inspection.layers[member.layer].digest); put("diffId", inspection.diffIds[member.layer])
+            put("contentOffset", member.contentOffset); put("size", member.size)
+            put("sha256", member.sha256?.let(::JsonPrimitive) ?: JsonNull)
+            put("linkTarget", member.linkTarget?.let(::JsonPrimitive) ?: JsonNull)
+            put("mode", member.mode); put("uid", member.uid); put("gid", member.gid)
+        } })
+        val coordinate = inspection.selectRegular("opt/jdk/bin/jlink", "jdk/bin/java")
+        val member = inspection.members.getValue(coordinate.path)
+        val doc = JsonObject(lockDocument() + mapOf(
+            // Inert graph has no preimage for the policy's pinned index. The test-only binding
+            // below substitutes ONLY that descriptor after parsing; all image bytes are inspected.
+            "index" to d(AcpProviderDnsBuildInputs.Descriptor(AcpProviderDnsBuildInputs.INDEX,
+                AcpProviderDnsBuildInputs.FAMILY.substringAfter('@'), inspection.indexBytes)),
+            "manifest" to d(inspection.manifest), "config" to d(inspection.config),
+            "indexChildren" to JsonArray(inspection.indexChildren.map(::d)),
+            "layers" to JsonArray(inspection.layers.mapIndexed { index, layer -> buildJsonObject {
+                put("descriptor", d(layer)); put("diffId", inspection.diffIds[index]) } }),
+            "payloads" to JsonArray(listOf(buildJsonObject {
+                put("path", coordinate.path); put("layerDigest", coordinate.layerDigest); put("diffId", coordinate.diffId)
+                put("contentOffset", coordinate.contentOffset); put("size", coordinate.size); put("sha256", coordinate.sha256)
+                put("destination", coordinate.destination); put("mode", member.mode); put("uid", member.uid); put("gid", member.gid)
+            })),
+        ))
+        return rehashTools(doc, tools)
+    }
+    private fun bindInertIndex(doc: JsonObject, inspection: AcpProviderDnsBuildInputs.Inspection): AcpProviderDnsBuildInputs.InputLock {
+        val lock = AcpProviderDnsBuildInputs.parseLockCandidate(bytes(doc))
+        return AcpProviderDnsBuildInputs.InputLock(lock.sha256,
+            AcpProviderDnsBuildInputs.Descriptor(AcpProviderDnsBuildInputs.INDEX, inspection.indexDigest, inspection.indexBytes),
+            lock.manifest, lock.config, lock.indexChildren, lock.layers, lock.payloads, lock.toolInputs, lock.recipe,
+            lock.toolClosureSha256, lock.jmodsSha256, lock.sourceRelationshipSha256, lock.recipeSha256, lock.authenticationReceiptSha256)
+    }
+    @Test fun `complete independently inspected image inventory matches without claiming semantic or execution approval`() {
+        val inspection = completeToolImage()
+        val lock = bindInertIndex(inspectedLockDocument(inspection), inspection)
+        assertEquals(21, inspection.members.size)
+        assertEquals(inspection.members.keys, lock.toolInputs.map { it.path }.toSet())
+        AcpProviderDnsBuildInputs.requireInspectionMatches(lock, inspection)
+        assertFailsWith<AcpProviderDnsRuntimeUnavailableException> {
+            AcpProviderDnsRuntimeProfiles.requireApproved("linux-x86_64-jdk21-dns-v2", lock.sha256, "0".repeat(64))
+        }
+    }
+    @Test fun `rehashing an inventory that omits any image object cannot establish completeness`() {
+        val inspection = completeToolImage()
+        val doc = inspectedLockDocument(inspection)
+        val tools = doc.getValue("toolInputs").jsonArray
+        for (omitted in inspection.members.keys) {
+            val partial = rehashTools(doc, JsonArray(tools.filter { it.jsonObject.dnsText("path") != omitted }))
+            assertFails("omitted $omitted") {
+                AcpProviderDnsBuildInputs.requireInspectionMatches(bindInertIndex(partial, inspection), inspection)
+            }
+        }
+        // Even with every parent retained, jlink + java.base.jmod is not an image inventory.
+        val minimum = rehashTools(doc, JsonArray(tools.filter {
+            val obj = it.jsonObject
+            obj.dnsText("kind") == "DIRECTORY" || obj.dnsText("path") in setOf("opt/jdk/bin/jlink", "opt/jdk/jmods/java.base.jmod")
+        }))
+        val proposed = bindInertIndex(minimum, inspection) // declaration syntax is deliberately not approval
+        assertFailsWith<IllegalArgumentException> { AcpProviderDnsBuildInputs.requireInspectionMatches(proposed, inspection) }
+    }
+    @Test fun `two file declarations and implicit source parents cannot claim complete tool inventory`() {
+        val original = lockDocument()
+        val twoFiles = rehashTools(original, JsonArray(original.getValue("toolInputs").jsonArray.filter {
+            it.jsonObject.dnsText("kind") == "REGULAR"
+        }))
+        assertFailsWith<IllegalArgumentException> { AcpProviderDnsBuildInputs.parseLockCandidate(bytes(twoFiles)) }
+        val implicit = graph(tar(Entry("opt/jdk/bin/jlink", byteArrayOf(1), mode = 493),
+            Entry("opt/jdk/jmods/java.base.jmod", byteArrayOf(2)))).inspect()
+        assertTrue(implicit.members.values.any { !it.explicitMetadata })
+        assertFails { bindInertIndex(inspectedLockDocument(implicit), implicit) }
+    }
+    @Test fun `complete path inventory still requires every inspected object identity`() {
+        val inspection = completeToolImage()
+        val doc = inspectedLockDocument(inspection)
+        val changed = JsonArray(doc.getValue("toolInputs").jsonArray.map { raw ->
+            val obj = raw.jsonObject
+            if (obj.dnsText("path") != "opt/jdk/lib/server/libjvm.so") raw
+            else JsonObject(obj + ("sha256" to JsonPrimitive("0".repeat(64))))
+        })
+        val lock = bindInertIndex(rehashTools(doc, changed), inspection)
+        assertFails { AcpProviderDnsBuildInputs.requireInspectionMatches(lock, inspection) }
     }
     @Test fun `typed proposed locks retain direct regular coordinates without authenticating observations`() {
         val lock = AcpProviderDnsBuildInputs.parseLockCandidate(bytes(lockDocument()))
