@@ -146,6 +146,66 @@ describe('panel isolation and retry safety (#628 #629)', () => {
 });
 
 describe('form context across reconnect (#629)', () => {
+  it('keeps submitted invalid input, feedback and field association together across reconnect', async () => {
+    const auth = await session();
+    history.replaceState(null, '', '/nested/');
+    render(<App basePath="/nested" session={auth} />);
+    const input = await screen.findByRole<HTMLInputElement>('textbox', { name: 'Created at or after' });
+    fireEvent.input(input, { target: { value: 'not-a-date' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Apply filters' }));
+    const feedback = await screen.findByRole('alert');
+    const message = feedback.textContent;
+    expect(input.getAttribute('aria-invalid')).toBe('true');
+    expect(input.getAttribute('aria-describedby')).toBe(feedback.id);
+    await act(async () => { await auth.refresh(); });
+    await settle();
+    const restored = await screen.findByRole<HTMLInputElement>('textbox', { name: 'Created at or after' });
+    expect(restored.value).toBe('not-a-date');
+    expect(restored.getAttribute('aria-invalid')).toBe('true');
+    const restoredFeedback = screen.getByRole('alert');
+    expect(restoredFeedback.textContent).toBe(message);
+    expect(restored.getAttribute('aria-describedby')).toBe(restoredFeedback.id);
+    expect(document.activeElement).toBe(restored);
+    expect(location.search).toBe('');
+    fireEvent.input(restored, { target: { value: '2026-09-05T00:00:00Z' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Apply filters' }));
+    await waitFor(() => expect(screen.queryByRole('alert')).toBeNull());
+    await act(async () => { await auth.refresh(); });
+    await settle();
+    const corrected = await screen.findByRole<HTMLInputElement>('textbox', { name: 'Created at or after' });
+    expect(corrected.getAttribute('aria-invalid')).toBeNull();
+    expect(screen.queryByRole('alert')).toBeNull();
+    fireEvent.input(corrected, { target: { value: 'still-not-a-date' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Apply filters' }));
+    await screen.findByRole('alert');
+    await act(async () => { await auth.logout(); });
+    await act(async () => { await auth.refresh(); });
+    await settle();
+    const afterLogout = await screen.findByRole<HTMLInputElement>('textbox', { name: 'Created at or after' });
+    expect(afterLogout.value).toBe('2026-09-05T00:00:00Z'); // Only the applied URL filter remains.
+    expect(afterLogout.getAttribute('aria-invalid')).toBeNull();
+    expect(afterLogout.getAttribute('aria-describedby')).toBeNull();
+    expect(screen.queryByRole('alert')).toBeNull();
+  });
+
+  it('retains an unsubmitted invalid draft after expiry without prematurely validating it', async () => {
+    const auth = await session();
+    history.replaceState(null, '', '/nested/');
+    render(<App basePath="/nested" session={auth} />);
+    fireEvent.input(await screen.findByRole('textbox', { name: 'Created at or after' }), { target: { value: 'not-a-date' } });
+    await settle();
+    const observe = auth.observeRequestFailure();
+    await act(() => { observe(new ApiClientError('http_error', { status: 401, serverCode: 'SESSION_EXPIRED' })); });
+    expect(auth.snapshot()).toEqual({ status: 'required', reason: 'expired' });
+    await act(async () => { await auth.refresh(); });
+    await settle();
+    const restored = await screen.findByRole<HTMLInputElement>('textbox', { name: 'Created at or after' });
+    expect(restored.value).toBe('not-a-date');
+    expect(restored.getAttribute('aria-invalid')).toBeNull();
+    expect(restored.getAttribute('aria-describedby')).toBeNull();
+    expect(screen.queryByRole('alert')).toBeNull();
+  });
+
   it('keeps an unsubmitted filter draft across a session remount and drops it on sign-out', async () => {
     const auth = await session();
     history.replaceState(null, '', '/nested/');

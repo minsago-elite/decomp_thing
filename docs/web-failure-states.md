@@ -5,18 +5,26 @@ This page covers [#628](https://github.com/minsago-elite/decomp_thing/issues/628
 [#630](https://github.com/minsago-elite/decomp_thing/issues/630) under the D11 resilience
 tracker #221. GitHub issues own live status.
 
-## One vocabulary for read failures
+## Shared vocabulary and verified scope
 
-Every private read classifies its failure with `metadataFailureKind`
-(`frontend/src/shared/retainMetadata.ts`) and shows a fixed catalog sentence for that class,
-never server text. Source reads use the same classes after their source-specific outcomes
-(invalid address, busy, invalid range, expired continuation).
+Job metadata, attempt metadata and attempt-history reads classify failures with
+`metadataFailureKind` (`frontend/src/shared/retainMetadata.ts`) and show fixed catalog
+sentences, never server text. Source reads use the same classes after their source-specific
+outcomes (invalid address, busy, invalid range, expired continuation).
+
+The table describes those metadata views' vocabulary, not a universal contract for every
+private read. The dashboard still uses listing-specific handling: unsupported-contract,
+malformed-response and network failures can share generic guidance, and some hard failures
+retain previous rows. Source views use latest-only read state rather than the metadata views'
+stale-data retention. The four-route matrix below does not qualify the dashboard or all other
+panels. Full route-by-state acceptance remains open in #628; this PR is not closure evidence
+for that issue.
 
 | State | Trigger | What the view shows |
 | --- | --- | --- |
-| Loading | Read in flight | A local `role="status"` line; previous verified data stays and is labelled as being refreshed. |
+| Loading | Read in flight | A local `role="status"` line; metadata views retain same-binding verified data and label it as being refreshed. |
 | No data | Successful empty page | An explicit empty-state sentence (for example "No uploaded jobs yet"), never an alert. |
-| Stale data | Transient failure (network, timeout, 408, 429, 5xx) after a verified read | The retained data with a "may be outdated" line beside the failure. Other classes clear retained data. |
+| Stale data | Transient failure (network, timeout, 408, 429, 5xx) after a verified metadata read | The retained metadata with a "may be outdated" line beside the failure. Other classes clear retained metadata. |
 | Session | 401 | Reconnect guidance; the shared session notice takes over. |
 | Denied | 403 | Access-denied guidance for the local session or declaration. |
 | Missing | 404/410 | The record is unavailable or was not retained. |
@@ -54,17 +62,22 @@ siblings, axe, and that retry sends no command.
 | Upload retry | The same retained file and intent under the server's upload identity | `mutation-reconnect.test.tsx`, `upload-recovery.test.ts` |
 
 Validation errors stay attached to their field (`aria-invalid`, `aria-describedby`, focus) and
-keep the typed value (`dashboard-*.test.tsx`, `upload.test.tsx`). An unsubmitted dashboard
-filter draft now survives the dashboard remounting for a new session generation, for example
-after expiry and reconnect (`jobs/filterDraft.ts`). It is held in page memory only, bound to
+keep the typed value (`dashboard-*.test.tsx`, `upload.test.tsx`). A dashboard filter draft and
+its submitted validation feedback survive remounting for a new session generation, for example
+after expiry and reconnect (`jobs/filterDraft.ts`, `resilience.test.tsx`). Unsubmitted edits
+remain unvalidated. The draft and feedback are held in page memory only, bound to
 the browser-session object and the applied filters it was typed against, and dropped when the
 session identity is invalidated (sign-out, another tab, a new server instance, an incompatible
 server), including while another route is open: the first retained draft subscribes to the
-session's invalidation for the session's lifetime. It is never written to storage or the URL.
+session's invalidation for the session's lifetime. Peer logout also clears retained context
+while this tab is already expired or unavailable, without changing its authorization state or
+making requests (`session-tabs.test.ts`). Neither draft nor feedback is written to storage or
+the URL.
 
 ## Converging session and version recovery (#630)
 
-Nothing in the client reloads, re-authenticates or retries on a timer.
+Recovery controls never reload, re-authenticate or retry failed requests on a timer. Existing
+bounded live reads and the local session-expiry timer are separate from recovery.
 
 - **Session expiry:** a session generation transitions to "required" once, however many
   in-flight reads report 401; later stale failures are ignored, one notice is shown, and only

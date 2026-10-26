@@ -32,8 +32,8 @@ function snapshotPagination(page: Jobs['page'] | undefined): page is Jobs['page'
 
 export function Dashboard({ basePath, draftOwner = null }: { basePath: string; draftOwner?: DraftOwner | null }) {
   const [selection, setSelection] = useState(currentFilters);
-  const [draft, setDraft] = useState(() => restoreFilterDraft(draftOwner, basePath, filterSearch(selection.filters)) ?? selection.filters);
-  useEffect(() => { rememberFilterDraft(draftOwner, basePath, filterSearch(selection.filters), draft); }, [draftOwner, basePath, selection, draft]);
+  const [retainedDraft] = useState(() => restoreFilterDraft(draftOwner, basePath, filterSearch(selection.filters)));
+  const [draft, setDraft] = useState(retainedDraft?.draft ?? selection.filters);
   const [cursors, setCursors] = useState<(string | null)[]>([null]);
   const [pageIndex, setPageIndex] = useState(0);
   const [displayedPageIndex, setDisplayedPageIndex] = useState<number | null>(null);
@@ -42,7 +42,10 @@ export function Dashboard({ basePath, draftOwner = null }: { basePath: string; d
   const data = observation?.value;
   const [phase, setPhase] = useState<'loading' | 'ready' | 'error'>('loading');
   const [error, setError] = useState('');
-  const [validationError, setValidationError] = useState<JobFilterError | null>(null);
+  const [validationError, setValidationError] = useState<JobFilterError | null>(retainedDraft?.validationError ?? null);
+  useEffect(() => {
+    rememberFilterDraft(draftOwner, basePath, filterSearch(selection.filters), draft, validationError);
+  }, [draftOwner, basePath, selection, draft, validationError]);
   const [pageNotice, setPageNotice] = useState('');
   const [livePaused, setLivePaused] = useState(false);
   const [liveDeferred, setLiveDeferred] = useState(false);
