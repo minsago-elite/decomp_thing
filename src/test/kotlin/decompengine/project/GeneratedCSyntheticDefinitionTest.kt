@@ -176,6 +176,37 @@ class GeneratedCSyntheticDefinitionTest {
         }
     }
 
+    @Test
+    fun `selected repeated typedef interfaces compile without sibling alias ambiguity`() = fixture { root ->
+        val compilers = listOf("gcc", "clang")
+        compilers.forEach(::requireCompiler)
+        for ((multiple, single, implementation) in listOf(
+            Triple("typedef int Value, Other;", "typedef int Value;",
+                "Value choose(void) { return 7; }"),
+            Triple("typedef int Other, Value;", "typedef int Value;",
+                "Value choose(void) { return 7; }"),
+            Triple("typedef int Other, *Value;", "typedef int *Value;",
+                "Value choose(void) { static int result = 7; return &result; }"),
+        )) {
+            val types = listOf(RecoveredType("a00_aliases", multiple), RecoveredType("a10_repeat", single))
+            val program = model(RecoveredFunction("fn_choose", "choose", 200UL, "Value choose(void)"))
+                .copy(types = types)
+            val contextRequest = request(program, root)
+            val plan = ModulePlan(modules = listOf(contextRequest.module))
+            val fullHeader = GeneratedCProjectRendering(program, plan).sharedInterface()
+            val selectedHeader = GeneratedCModuleContext.select(contextRequest).interfaces.getValue(
+                contextRequest.profile.layout.declaration("shared-interface").materialize(),
+            )
+            assertTrue(selectedHeader.contains(multiple), selectedHeader)
+            for (compiler in compilers) {
+                for (header in listOf(fullHeader, selectedHeader)) {
+                    val result = syntax(compiler, header + "\n" + implementation + "\n", root)
+                    assertEquals(0, result.first, "$compiler $multiple:\n${result.second}")
+                }
+            }
+        }
+    }
+
     private fun supportedBuild(compiler: String) = fixture { root ->
         requireCompiler(compiler)
         val functions = listOf(

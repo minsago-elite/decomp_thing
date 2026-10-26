@@ -332,20 +332,26 @@ internal fun selectRequiredGeneratedCTypes(types: List<RecoveredType>, evidence:
                 export("tag:$tag", type, listOf(kind, tag), definition = false)
             }
             if (statementTokens.any { it.text == "typedef" }) {
-                val parsingView = aliasParsingView(statement)
-                val parts = splitCTypeSource(parsingView, ",")
-                val first = CDeclarationParser(parts.first()).parse()
+                val parsingView = aliasParsingSourceView(statement)
+                val parts = splitCTypeSourceParts(parsingView.source, ",")
+                val first = CDeclarationParser(parts.first().source).parse()
                 // Preserve previously admitted bodyless enum typedef introductions. The
                 // strict compiler, not this additional scope inventory, owns their validity.
-                if (parsingView == statement) first.specifiers.zipWithNext().firstOrNull { (kind, tag) ->
+                if (parsingView.source == statement) first.specifiers.zipWithNext().firstOrNull { (kind, tag) ->
                     kind == "enum" && tag.matches(identifier)
                 }?.let { (kind, tag) -> export("tag:$tag", type, listOf(kind, tag), definition = false) }
                 val prefix = first.source.substring(0, first.declaratorOffset)
-                for (declaration in listOf(first) + parts.drop(1).map { CDeclarationParser(prefix + it).parse() }) {
+                val originalPrefix = statement.substring(0, parsingView.originalOffset(first.declaratorOffset))
+                for ((index, part) in parts.withIndex()) {
+                    val declaration = if (index == 0) first else CDeclarationParser(prefix + part.source).parse()
                     val name = requireNotNull(declaration.name) { "typedef has no alias name" }.text
-                    // Preserve the aggregate body in the identity: the parser's temporary tag
-                    // replacement must never make two different anonymous structs equivalent.
-                    export("name:$name", type, statementTokens.map { it.text })
+                    // Identity belongs to this alias, not its sibling declarators. Restore
+                    // original aggregate bodies rather than comparing synthetic parsing tags.
+                    // Selection still retains the entire recovered record as evidence.
+                    val originalPart = statement.substring(parsingView.originalOffset(part.start),
+                        parsingView.originalOffset(part.start + part.source.length))
+                    val aliasSource = if (index == 0) originalPart else originalPrefix + originalPart
+                    export("name:$name", type, cDeclarationTokens(aliasSource).map { it.text })
                 }
             }
             statementTokens.forEachIndexed { index, token ->

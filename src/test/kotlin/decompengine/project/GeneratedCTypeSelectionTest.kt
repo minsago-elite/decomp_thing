@@ -202,6 +202,51 @@ class GeneratedCTypeSelectionTest {
     }
 
     @Test
+    fun `equivalent repeated aliases ignore sibling declarators and retain whole records`() {
+        for ((multiple, single) in listOf(
+            "typedef int Value, Other;" to "typedef int Value;",
+            "typedef int Other, Value;" to "typedef int Value;",
+            "const typedef unsigned long Other, *Value;" to "const typedef unsigned long *Value;",
+            "typedef int (*Other)(long), (*Value)(int);" to "typedef int (*Value)(int);",
+            "typedef int Other[3], Value[2];" to "typedef int Value[2];",
+            "typedef int Value /* comma , in comment */, Other;" to "typedef int Value;",
+        )) {
+            for ((earlier, later) in listOf(multiple to single, single to multiple)) {
+                val first = RecoveredType("a00_first", earlier)
+                val second = RecoveredType("a10_repeat", later)
+                val types = listOf(first, second)
+                assertEquals(listOf(first), selectRequiredGeneratedCTypes(types, listOf("Value choose(void)")), earlier)
+                assertEquals(listOf(first), selectRequiredGeneratedCTypes(types.reversed(), listOf("Value choose(void)")), earlier)
+            }
+        }
+    }
+
+    @Test
+    fun `per-alias identities still reject conflicting shapes and original aggregate bodies`() {
+        for ((multiple, single) in listOf(
+            "typedef int Value, Other;" to "typedef long Value;",
+            "typedef int Other, *Value;" to "typedef int Value;",
+            "typedef int Other[3], Value[2];" to "typedef int Value[3];",
+            "typedef int (*Other)(long), (*Value)(int);" to "typedef int (*Value)(long);",
+            "typedef struct { int value; } Other, Value;" to "typedef struct { long value; } Value;",
+            "typedef int Other, (*Value)(struct { int value; } *);" to
+                "typedef int (*Value)(struct { long value; } *);",
+            "typedef _Atomic(struct { int value; }) Other, Value;" to
+                "typedef _Atomic(struct { long value; }) Value;",
+        )) {
+            val first = RecoveredType("a00_first", multiple)
+            val second = RecoveredType("a10_conflict", single)
+            val safe = RecoveredType("a20_safe", "typedef unsigned Safe;")
+            val types = listOf(first, second, safe)
+            assertEquals(listOf(safe), selectRequiredGeneratedCTypes(types, listOf("Safe choose(void)")))
+            val failure = assertFailsWith<IllegalArgumentException>(multiple) {
+                selectRequiredGeneratedCTypes(types, listOf("Value choose(void)"))
+            }
+            assertTrue(failure.message.orEmpty().contains("ambiguous recovered type dependency name:Value"), failure.message)
+        }
+    }
+
+    @Test
     fun `multiple declarators preserve the selected recovered record as one evidence unit`() {
         val type = RecoveredType("aliases", "typedef int Value, *ValuePointer, Values[2];")
         assertEquals(listOf(type), selectRequiredGeneratedCTypes(listOf(type), listOf("ValuePointer get(void)")))
