@@ -747,6 +747,21 @@ try {
     assert.equal(presentation.layout, 'grid');
     report.archiveAssets = compareArchiveAssets(manifest, installation.jarAssets,
       await fetchArchiveAssets(manifest, `${origin}/nested/assets/ui/`));
+    // The packaged runtime disables source previews, so start the archived highlight worker directly
+    // under the document's real CSP and require one bounded highlighting exchange.
+    const workerAsset = manifest.files.find((entry) => /^assets\/highlight\.worker-.+\.js$/.test(entry.path));
+    assert.ok(workerAsset, 'Expected the source highlight worker in the packaged manifest');
+    const workerUrl = `${origin}/nested/assets/ui/${workerAsset.path}`;
+    const workerReply = await evaluate(home, `new Promise((resolve, reject) => {
+      const worker = new Worker(${JSON.stringify(workerUrl)}, { type: 'module', name: 'packaged-worker-probe' });
+      const timer = setTimeout(() => { worker.terminate(); reject(new Error('Packaged worker deadline')); }, 5000);
+      worker.onmessage = (event) => { clearTimeout(timer); worker.terminate(); resolve(event.data?.type); };
+      worker.onerror = () => { clearTimeout(timer); worker.terminate(); reject(new Error('Packaged worker failed')); };
+      worker.postMessage({ type: 'source-highlight', id: 1, language: 'c', rows: ['int value = 1; /* <img src=x> */'] });
+    })`);
+    assert.equal(workerReply, 'source-highlighted', 'The archived highlight worker did not answer');
+    // Its served bytes were already compared with the archive above; worker requests belong to the worker target.
+    report.archiveWorker = { path: workerAsset.path, moduleWorker: true, response: workerReply, bytesMatchedArchive: true };
     await capture(home, 'home.png');
     await evaluate(home, `document.querySelector('a[href="/nested/upload"]').focus()`);
     await cdp.call('Input.dispatchKeyEvent', { type: 'keyDown', text: '\r', key: 'Enter', code: 'Enter', windowsVirtualKeyCode: 13 }, home.sessionId);

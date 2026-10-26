@@ -193,7 +193,10 @@ Every journey that renders the public home also fetches each manifest path from
 the packaged server. Public assets must return the manifest media type, size and
 SHA-256. The archived JAR entry must have the same digest, and private manifest
 entries must return 404. A UI file in the JAR that is not in the manifest fails
-the run. Every run writes these files next to `report.json`:
+the run. The packaged runtime disables source text previews, so the driver
+starts the archived highlight worker directly. It runs as a module worker under
+the document's real CSP and must answer one highlighting request. Every run
+writes these files next to `report.json`:
 
 - `console.json`: per-page console calls, browser log entries and exceptions.
 - `server.log`: stdout and stderr of every application launch, with bootstrap
