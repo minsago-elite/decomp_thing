@@ -463,8 +463,8 @@ class AcpProviderResponseStreamTest {
                 completedResponse("""{${field}"status":"completed","usage":{"input_tokens":1,"output_tokens":2,"total_tokens":3}}"""))
         }
         for (field in listOf("input_tokens", "output_tokens", "total_tokens")) {
-            val invalidValues = listOf(null, "null", "\"0\"", "true", "1.0", "1e0", "9223372036854775808") +
-                if (field == "total_tokens") emptyList() else listOf("-1", "2147483648")
+            val invalidValues = listOf(null, "null", "\"0\"", "true", "1.0", "1e0", "-1", "-9223372036854775808", "9223372036854775808") +
+                if (field == "total_tokens") emptyList() else listOf("2147483648")
             for (invalid in invalidValues) {
                 val fields = linkedMapOf("input_tokens" to "1", "output_tokens" to "2", "total_tokens" to "3")
                 if (invalid == null) fields.remove(field) else fields[field] = invalid
@@ -509,6 +509,32 @@ class AcpProviderResponseStreamTest {
         assertTrue(stream.accept(terminal).isEmpty())
         stream.finish()
         assertContentEquals(terminal, stream.drainFinished().single())
+    }
+
+    @Test
+    fun `auxiliary token counters admit zero and Long max but reject negative and overflow before completion`() {
+        for (field in listOf("total_tokens", "cached_tokens", "cache_write_tokens", "reasoning_tokens")) {
+            fun terminal(value: String): ByteArray {
+                val total = if (field == "total_tokens") value else "3"
+                val cached = if (field == "cached_tokens") value else "0"
+                val written = if (field == "cache_write_tokens") value else "0"
+                val reasoning = if (field == "reasoning_tokens") value else "0"
+                return completedResponse("""{"id":"resp_native","status":"completed","usage":{"input_tokens":1,"output_tokens":2,"total_tokens":$total,"input_tokens_details":{"cached_tokens":$cached,"cache_write_tokens":$written},"output_tokens_details":{"reasoning_tokens":$reasoning}}}""")
+            }
+            for (valid in listOf("0", Long.MAX_VALUE.toString())) {
+                val event = terminal(valid)
+                val accepted = stream()
+                assertTrue(accepted.accept(event).isEmpty())
+                assertEquals(2, accepted.finish().outputTokens)
+                assertContentEquals(event, accepted.drainFinished().single())
+            }
+            for (invalid in listOf("-1", Long.MIN_VALUE.toString(), "9223372036854775808", "-9223372036854775809")) {
+                val rejected = stream()
+                assertFailure(AcpProviderTerminalKind.MALFORMED_RESPONSE) { rejected.accept(terminal(invalid)) }
+                assertFailure(AcpProviderTerminalKind.MALFORMED_RESPONSE) { rejected.finish() }
+                assertFailure(AcpProviderTerminalKind.MALFORMED_RESPONSE) { rejected.drainFinished() }
+            }
+        }
     }
 
     @Test
