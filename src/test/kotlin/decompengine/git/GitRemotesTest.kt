@@ -306,6 +306,37 @@ class GitRemotesTest {
         refused("NOT_FOUND", GitOperationAction.REMOTE_REMOVE, "remoteId" to first)
     }
 
+    @Test fun `clone budgets compressible checkout expansion and all publication metadata`(): Unit = Fixture().use { f ->
+        val bare = f.remote()
+        val seed = f.repositories.root.resolve("upstream seed")
+        Files.writeString(seed.resolve("large.c"), "x".repeat(512 * 1024))
+        f.repositories.git("-C", seed.toString(), "add", "-A")
+        f.repositories.git("-C", seed.toString(), "commit", "-q", "-m", "compressible source")
+        f.repositories.git("-C", seed.toString(), "push", "-q", bare.toString(), "main")
+        service = f.open(GitRemotePolicy(admittedRoot = f.admitted, limits = GitTransferLimits(maxRepositoryBytes = 128 * 1024)))
+        val clone = service.request(jobId, GitCloneRequest("admitted:upstream.git", "origin", null), "clone_expansion_0001")
+        assertTrue(service.awaitIdle(60_000))
+        val result = service.operation(jobId, clone.operation.repositoryId, clone.operation.operationId)
+        assertEquals("TRANSFER_LIMIT", result.failureCode, result.message)
+        assertTrue(service.listing(jobId).repositories.isEmpty())
+        assertEquals(0L, Files.list(f.store.resolve("$jobId/git/staging")).use { it.count() })
+
+        // A successful tiny checkout can still cross the cap when its registration is written.
+        // Inject extra bytes at the publication crash point to exercise the unconditional gate.
+        service.close()
+        f.hook = { point -> if (point == GitOperationCrashPoint.BEFORE_PUBLISH) {
+            val staging = f.store.resolve("$jobId/git/staging")
+            val operationDir = Files.list(staging).use { it.findFirst().orElseThrow() }
+            Files.write(operationDir.resolve("publication-padding"), ByteArray(128 * 1024))
+        } }
+        service = f.open(GitRemotePolicy(admittedRoot = f.admitted, limits = GitTransferLimits(maxRepositoryBytes = 128 * 1024)))
+        val finalGate = service.request(jobId, GitCloneRequest("admitted:upstream.git", "origin", "topic"), "clone_metadata_00001")
+        assertTrue(service.awaitIdle(60_000))
+        assertEquals("TRANSFER_LIMIT", service.operation(jobId, finalGate.operation.repositoryId, finalGate.operation.operationId).failureCode)
+        assertTrue(service.listing(jobId).repositories.isEmpty())
+        assertEquals(0L, Files.list(f.store.resolve("$jobId/git/staging")).use { it.count() })
+    }
+
     @Test fun `the size bound is enforced after a transfer that finishes between checks`(): Unit = Fixture().use { f ->
         f.remote()
         service = f.open(GitRemotePolicy(admittedRoot = f.admitted, limits = GitTransferLimits(maxRepositoryBytes = 2048)))

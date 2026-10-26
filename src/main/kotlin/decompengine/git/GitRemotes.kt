@@ -401,19 +401,21 @@ internal class GitDiskWatch(private val directory: Path, private val maxBytes: L
         return measure()
     }
 
-    /** Unthrottled check after the transfer ends: a bound crossed in the last interval is still enforced. */
-    fun exceeded(): Boolean = measure() == "DISK_LIMIT"
+    /** Unthrottled checks fail closed on unreadable storage at an admission boundary. */
+    fun exceeded(): Boolean = bytes(directory) > maxBytes
+    fun remaining(): Long = (maxBytes - bytes(directory)).coerceAtLeast(0)
 
-    private fun measure(): String? {
-        var total = 0L
-        try {
-            Files.walk(directory).use { paths ->
-                for (path in paths) {
-                    if (Files.isRegularFile(path, NOFOLLOW_LINKS)) total += Files.size(path)
-                    if (total > maxBytes) return "DISK_LIMIT"
-                }
+    private fun measure(): String? = try {
+        if (exceeded()) "DISK_LIMIT" else null
+    } catch (_: IOException) { "DISK_LIMIT" } catch (_: java.io.UncheckedIOException) { "DISK_LIMIT" }
+
+    companion object {
+        fun bytes(directory: Path): Long = Files.walk(directory).use { paths ->
+            var total = 0L
+            for (path in paths) {
+                if (Files.isRegularFile(path, NOFOLLOW_LINKS)) total = Math.addExact(total, Files.size(path))
             }
-        } catch (_: IOException) { /* a file vanished mid-walk; checked again next time */ } catch (_: java.io.UncheckedIOException) { }
-        return null
+            total
+        }
     }
 }

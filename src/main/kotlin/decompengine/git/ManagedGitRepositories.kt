@@ -559,6 +559,13 @@ class ManagedGitRepositories(
                 if (Files.exists(target, NOFOLLOW_LINKS) || repositories(queued.jobId).isNotEmpty()) {
                     throw GitOperationFailure("PUBLICATION_CONFLICT", "A repository already occupies this job's publication location; nothing was overwritten.")
                 }
+                // Include checkout, index, registration and audit bytes, not just transferred objects.
+                if (queued.request is GitCloneRequest) {
+                    if (cancelledBeforeStart(queued.operationId)) throw GitOperationFailure("CANCELLED", "The clone was cancelled before publication.")
+                    if (GitDiskWatch(staging, remotePolicy.limits.maxRepositoryBytes) { false }.exceeded()) {
+                        throw GitOperationFailure("TRANSFER_LIMIT", "The clone exceeded the repository size bound. Nothing was published.")
+                    }
+                }
                 // rename(2) of a directory onto a missing name; an existing target was refused above.
                 Files.move(staging, target, ATOMIC_MOVE)
                 published = true
@@ -642,10 +649,11 @@ class ManagedGitRepositories(
         val workTree = GitStorage.directories(staging, WORK_TREE)
         tip?.let { objectId ->
             GitRefOperations.createRef(runner, gitDir, "refs/heads/$branch", objectId, "BRANCH_EXISTS")
-            GitRepositoryImport.requireCheckoutBounds(runner, gitDir, objectId, importLimits)
+            GitRepositoryImport.requireCheckoutBounds(runner, gitDir, objectId, importLimits, repositoryBudget = watch.remaining())
             runner.run(GitInvocation("read-tree", listOf("--reset", "-u", objectId), gitDir = gitDir, workTree = workTree,
-                limits = GitExecutionLimits(java.time.Duration.ofMinutes(2), 1024 * 1024, 64 * 1024)))
+                limits = GitExecutionLimits(java.time.Duration.ofMinutes(2), 1024 * 1024, 64 * 1024), control = control))
         }
+        if (watch.exceeded()) throw GitOperationFailure("TRANSFER_LIMIT", "The clone exceeded the repository size bound. Nothing was published.")
         val observation = GitRepositoryInspector.inspect(runner, gitDir, workTree)
         val remote = GitRemoteRecord(GitRemoteStore.remoteId(operation.repositoryId, request.remoteName, operation.operationId), operation.repositoryId,
             request.remoteName, location, clock.instant(), operation.operationId)
