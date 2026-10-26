@@ -133,6 +133,30 @@ class IndependentMachineCallWorkerV1Test {
         assertFalse(Files.exists(root.resolve("output.json")))
     }
 
+    @Test fun `runtime library verification consumes the authenticated manifest snapshot`() = fixture { root ->
+        val bundle = Files.createDirectory(root.resolve("bundle"))
+        val bridge = Files.write(bundle.resolve("decomp-ghidra-bridge.jar"), byteArrayOf(1, 2, 3))
+        val application = Files.createDirectories(bundle.resolve("ghidra_${BundledGhidra.VERSION}_PUBLIC/Ghidra"))
+            .resolve("application.properties")
+        Files.writeString(application,
+            "application.version=${BundledGhidra.VERSION}\napplication.release.name=PUBLIC\n")
+        val library = Files.createDirectories(application.parent.resolve("Framework/Test/lib"))
+            .resolve("runtime.jar").also { Files.write(it, byteArrayOf(4, 5, 6)) }
+        fun record(path: Path): String = "${OracleArtifacts.sha256(Files.readAllBytes(path))}  ${bundle.relativize(path).joinToString("/")}\n"
+        val manifestBytes = (record(bridge) + record(application) + record(library)).toByteArray()
+        Files.write(bundle.resolve("bundle.sha256"), manifestBytes)
+        val expected = listOf(library)
+        assertEquals(expected, BundledGhidra.at(bundle)
+            .verifiedLibraryPathsFromManifestSnapshot(manifestBytes) {})
+
+        // The worker's selected inventory remains bound to the snapshot even if the source-side
+        // manifest path changes; a source manifest is not allowed to silently replace it.
+        Files.writeString(bundle.resolve("bundle.sha256"), "malformed source manifest\n")
+        assertEquals(expected, BundledGhidra.at(bundle)
+            .verifiedLibraryPathsFromManifestSnapshot(manifestBytes) {})
+        assertFailsWith<IllegalArgumentException> { BundledGhidra.at(bundle).verifiedLibraryPaths {} }
+    }
+
     @Test fun `loaded bridge must have the committed jar source and bytes`() = fixture { root ->
         fakeBridge(root) { type, jar ->
             val digest = OracleArtifacts.sha256(Files.readAllBytes(jar))
