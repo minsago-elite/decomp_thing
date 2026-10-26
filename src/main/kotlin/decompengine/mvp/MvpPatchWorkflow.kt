@@ -620,7 +620,7 @@ class GhidraDecompiler internal constructor(
         javaClass.getResourceAsStream("/ghidra_scripts/ExportDecompiledC.java")?.use {
             Files.copy(it, scripts.resolve("ExportDecompiledC.java"), StandardCopyOption.REPLACE_EXISTING)
         } ?: throw MvpPatchException("bundled Ghidra script is missing")
-        val projectDir = work.resolve("ghidra_project").createDirectories()
+        val projectDir = decompengine.analysis.GhidraProjectLocation.forWorker(work.resolve("ghidra_project").createDirectories(), work)
         logger.command(
             commandFactory(decompengine.analysis.GhidraInvocation(
                 projectDir, "mvp", input, scripts,

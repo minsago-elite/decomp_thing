@@ -9,6 +9,7 @@ import decompengine.analysis.BoundedProgramModelAcquisitionProcess
 import decompengine.analysis.GhidraAnalysisException
 import decompengine.analysis.GhidraInvocation
 import decompengine.analysis.GhidraPostScript
+import decompengine.analysis.GhidraProjectLocation
 import java.nio.file.Files
 import java.nio.file.LinkOption
 import java.nio.file.Path
@@ -161,7 +162,7 @@ class GhidraHeadlessProgramModelAnalyzer private constructor(
             deadline.checkpoint("after preparing call-site script")
             callScriptBytes?.let { scripts.resolve("ExportRecoveredCallSites.java").writeBytes(it) }
             deadline.checkpoint("before creating export project")
-            val project = workDir.resolve("ghidra_project").createDirectories()
+            val project = GhidraProjectLocation.forWorker(workDir.resolve("ghidra_project").createDirectories(), workDir)
             val postScripts = listOf(GhidraPostScript("ExportProgramModel.java", listOf(
                 exporterSha256, analysisToolSha256, recoveryMode.wireName, output.toAbsolutePath().normalize().pathString,
             ))) + if (callScriptBytes == null) emptyList() else listOf(
