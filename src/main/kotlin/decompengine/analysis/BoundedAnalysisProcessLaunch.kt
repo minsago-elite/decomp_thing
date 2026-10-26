@@ -7,6 +7,7 @@ import java.util.concurrent.RejectedExecutionException
 import java.util.concurrent.SynchronousQueue
 import java.util.concurrent.ThreadPoolExecutor
 import java.util.concurrent.TimeUnit
+import java.util.IdentityHashMap
 import java.util.concurrent.atomic.AtomicReference
 
 /** Native process creation may ignore interruption. All analysis launchers share this fixed cap. */
@@ -20,16 +21,38 @@ internal val ANALYSIS_PROCESS_LAUNCH_EXECUTOR: Executor = ThreadPoolExecutor(
 internal class BoundedAnalysisProcessLaunch(
     private val executor: Executor = ANALYSIS_PROCESS_LAUNCH_EXECUTOR,
 ) {
-    private data class QuarantinedOwner(val failure: Throwable, val retainedOwner: Any)
+    private data class QuarantinedOwner(
+        val retainedReferences: MutableList<Any> = ArrayList(),
+        val failures: MutableList<Throwable> = ArrayList(),
+    )
 
-    private val quarantinedOwner = AtomicReference<QuarantinedOwner?>()
+    /** Also serializes the admission decision with quarantine publication. */
+    private val quarantineLock = Any()
+    private val quarantineFailure = AtomicReference<Throwable?>()
+    private val quarantinedOwners = IdentityHashMap<Process, QuarantinedOwner>()
 
-    /** Retains known process/capture ownership and refuses later launches after uncertain cleanup. */
-    internal fun quarantineUnconfirmedCleanup(failure: Throwable, retainedOwner: Any) {
-        quarantinedOwner.compareAndSet(null, QuarantinedOwner(failure, retainedOwner))
+    /** Retains every uncertain process owner; repeated reports coalesce by process/reference identity. */
+    internal fun quarantineUnconfirmedCleanup(failure: Throwable, process: Process, retainedOwner: Any) {
+        synchronized(quarantineLock) {
+            quarantineFailure.compareAndSet(null, failure)
+            val owner = quarantinedOwners.getOrPut(process) { QuarantinedOwner() }
+            if (owner.retainedReferences.none { it === process }) owner.retainedReferences.add(process)
+            if (owner.retainedReferences.none { it === retainedOwner }) owner.retainedReferences.add(retainedOwner)
+            if (owner.failures.none { it === failure }) owner.failures.add(failure)
+        }
     }
 
-    internal fun hasQuarantinedOwner(): Boolean = quarantinedOwner.get() != null
+    internal fun hasQuarantinedOwner(): Boolean = quarantineFailure.get() != null
+    internal fun quarantinedProcessCount(): Int = synchronized(quarantineLock) { quarantinedOwners.size }
+    internal fun hasQuarantinedProcess(process: Process): Boolean = synchronized(quarantineLock) {
+        quarantinedOwners.containsKey(process)
+    }
+    internal fun retainedQuarantineReferenceCount(process: Process): Int = synchronized(quarantineLock) {
+        quarantinedOwners[process]?.retainedReferences?.size ?: 0
+    }
+    internal fun quarantinedFailureCount(process: Process): Int = synchronized(quarantineLock) {
+        quarantinedOwners[process]?.failures?.size ?: 0
+    }
 
     fun start(
         checkpoint: (String) -> Unit,
@@ -52,13 +75,20 @@ internal class BoundedAnalysisProcessLaunch(
             throw failure
         }
         try {
-            quarantinedOwner.get()?.let {
-                throw GhidraAnalysisException("analysis launch is unavailable after an unconfirmed worker cleanup", it.failure)
+            quarantineFailure.get()?.let {
+                throw GhidraAnalysisException("analysis launch is unavailable after an unconfirmed worker cleanup", it)
             }
             checkpoint("before admitting export process launch")
         } catch (failure: Throwable) { refused(failure) }
         val launched = try {
-            CompletableFuture.supplyAsync(processStarter, executor)
+            synchronized(quarantineLock) {
+                quarantineFailure.get()?.let {
+                    throw GhidraAnalysisException("analysis launch is unavailable after an unconfirmed worker cleanup", it)
+                }
+                CompletableFuture.supplyAsync(processStarter, executor)
+            }
+        } catch (failure: GhidraAnalysisException) {
+            refused(failure)
         } catch (failure: RejectedExecutionException) {
             refused(GhidraAnalysisException("analysis process launch capacity is exhausted", failure))
         }
@@ -85,7 +115,7 @@ internal class BoundedAnalysisProcessLaunch(
                     try {
                         stopLateProcess(process)
                     } catch (cleanupFailure: Throwable) {
-                        quarantineUnconfirmedCleanup(cleanupFailure, process)
+                        quarantineUnconfirmedCleanup(cleanupFailure, process, process)
                         if (cleanupFailure !== failure) failure.addSuppressed(cleanupFailure)
                     }
                 }

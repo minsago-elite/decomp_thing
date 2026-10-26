@@ -168,6 +168,83 @@ class GhidraExportLaunchTest {
     }
 
     @Test
+    fun `concurrent unconfirmed owners are all retained and repeated reports coalesce`() = inControlTemporaryDirectory { root ->
+        val processes = listOf(
+            FixtureOwnedProcess(fixtureHandle(5001L, initialAlive = true, refusesTermination = false)),
+            FixtureOwnedProcess(fixtureHandle(5002L, initialAlive = true, refusesTermination = false)),
+        )
+        val children = listOf(
+            fixtureHandle(5011L, initialAlive = true, refusesTermination = true),
+            fixtureHandle(5012L, initialAlive = true, refusesTermination = true),
+        )
+        val processIndex = AtomicInteger()
+        val launches = AtomicInteger()
+        val bothLaunchesEntered = CountDownLatch(processes.size)
+        val clock = AtomicLong()
+        val controller = BoundedAnalysisProcessLaunch()
+        val childrenByProcess = java.util.IdentityHashMap<Process, ProcessHandle>().apply {
+            processes.forEachIndexed { index, process -> put(process, children[index]) }
+        }
+        val analyzer = GhidraHeadlessProgramModelAnalyzer(
+            commandFactory = { listOf("fixture-owned-export") },
+            limits = GhidraProgramModelExportLimits(wallClockTimeout = Duration.ofSeconds(5), terminationGrace = Duration.ZERO),
+            processStarter = { _, _ ->
+                launches.incrementAndGet()
+                val index = processIndex.getAndIncrement()
+                bothLaunchesEntered.countDown()
+                check(bothLaunchesEntered.await(5, TimeUnit.SECONDS)) { "both owned workers did not enter the launch gate" }
+                processes[index]
+            },
+        ).withProcessLifecycleForTests(controller) { owned, grace ->
+            ExportProcessTree(
+                owned, grace,
+                nanoTime = clock::get,
+                sleepNanos = { nanos -> clock.addAndGet(nanos) },
+                descendantObservation = { _, retain -> retain(checkNotNull(childrenByProcess[owned])) },
+            )
+        }
+        val outcomes = arrayOfNulls<Throwable>(processes.size)
+        val callers = processes.indices.map { index ->
+            Thread {
+                try { analyzer.analyze(root.resolve("unused-$index"), root.resolve("analysis-$index")) }
+                catch (failure: Throwable) { outcomes[index] = failure }
+            }
+        }
+        callers.forEach(Thread::start)
+        callers.forEach { it.join(5_000) }
+
+        assertTrue(callers.none(Thread::isAlive), "both cleanup paths must finish within their fake original windows")
+        outcomes.forEach { assertIs<GhidraAnalysisException>(it) }
+        assertEquals(processes.size, controller.quarantinedProcessCount())
+        processes.forEach { process ->
+            assertTrue(controller.hasQuarantinedProcess(process))
+            assertTrue(controller.retainedQuarantineReferenceCount(process) >= 2,
+                "each process and its cleanup owner must remain retained")
+        }
+        assertEquals(processes.size, launches.get())
+
+        val existingProcess = processes.first()
+        val duplicateOwner = Any()
+        val additionalOwner = Any()
+        val firstReport = IllegalStateException("duplicate cleanup report")
+        val secondReport = IllegalStateException("second cleanup report")
+        controller.quarantineUnconfirmedCleanup(firstReport, existingProcess, duplicateOwner)
+        val afterFirstReport = controller.retainedQuarantineReferenceCount(existingProcess)
+        controller.quarantineUnconfirmedCleanup(firstReport, existingProcess, duplicateOwner)
+        assertEquals(afterFirstReport, controller.retainedQuarantineReferenceCount(existingProcess),
+            "re-reporting the same process owner must coalesce by identity")
+        controller.quarantineUnconfirmedCleanup(secondReport, existingProcess, duplicateOwner)
+        controller.quarantineUnconfirmedCleanup(secondReport, existingProcess, additionalOwner)
+        assertEquals(afterFirstReport + 1, controller.retainedQuarantineReferenceCount(existingProcess))
+        assertTrue(controller.quarantinedFailureCount(existingProcess) >= 3)
+
+        assertFailsWith<GhidraAnalysisException> {
+            analyzer.analyze(root.resolve("unused-third"), root.resolve("analysis-third"))
+        }
+        assertEquals(processes.size, launches.get(), "quarantine must refuse before a third process starter runs")
+    }
+
+    @Test
     fun `shared deadline refuses blocked process launch before it returns and preserves prior evidence`(): Unit =
         inControlTemporaryDirectory { root ->
             val reports = root.resolve("analysis/reports")

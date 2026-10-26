@@ -498,7 +498,7 @@ class GhidraHeadlessProgramModelAnalyzer private constructor(
                     streams = listOf(process.inputStream, process.errorStream, process.outputStream),
                     outputCandidates = outputCandidates,
                 )
-                processLaunch.quarantineUnconfirmedCleanup(checkNotNull(cleanupProblem), retained)
+                processLaunch.quarantineUnconfirmedCleanup(checkNotNull(cleanupProblem), process, retained)
             }
             if (treeResult.confirmedAbsent && allSettlementsConfirmed && primaryFailure != null && !diagnosticsPublished) {
                 val stdoutTask = stdout
@@ -901,6 +901,7 @@ private fun stopLateExportProcess(
         failure?.let {
             processLaunch.quarantineUnconfirmedCleanup(
                 it,
+                process,
                 ExportProcessCleanupOwner(
                     processTree = processTree,
                     process = process,
