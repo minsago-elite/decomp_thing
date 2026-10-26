@@ -38,6 +38,15 @@ describe('generated v1 contract pipeline', () => {
     'still validates present provenance in consumer mode: %s', name => {
       expect(() => decodeContract(fixture(name), { mode: 'response' })).toThrow(ApiClientError);
     });
+  it('accepts current and historical legacy configuration identities without granting ACP metadata', () => {
+    for (const mode of ['producer', 'response'] as const) {
+      for (const name of ['run-configured-legacy', 'run-legacy-without-digest']) {
+        const text = fixture(name);
+        expect(decodeContract(text, { mode })).toEqual(JSON.parse(text));
+      }
+      expect(() => decodeContract(fixture('invalid-run-legacy-protocol'), { mode })).toThrow(ApiClientError);
+    }
+  });
   it('accepts only coherent preflight status identity and fixed reason combinations', () => {
     const allowed = new Set(['idle:null:null', 'inspecting:inspection_fixture:null', 'ready:inspection_fixture:null',
       'cancelled:inspection_fixture:null', 'failed:inspection_fixture:AGENT_PREFLIGHT_FAILED']);

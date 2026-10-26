@@ -4,7 +4,12 @@ import decompengine.agent.AGENT_EXECUTION_CONTRACT_VERSION
 import decompengine.agent.AgentHarness
 import decompengine.repair.HttpOpenAiCompatibleRepairClient
 import decompengine.repair.RepairClientAgentHarness
+import kotlinx.serialization.json.buildJsonObject
+import kotlinx.serialization.json.put
+import java.net.URI
+import java.security.MessageDigest
 import java.util.Collections
+import java.util.HexFormat
 
 enum class AcpHarnessKind { ACP, LEGACY_OPENAI }
 
@@ -47,9 +52,8 @@ data class AcpHarnessProvenance(
             LEGACY_OPENAI_HARNESS_NAME -> require(
                 deprecated &&
                     acpProtocolVersion == null &&
-                    acpSdkVersion == null &&
-                    configurationSha256 == null
-            ) { "legacy OpenAI harness provenance must be deprecated and must not claim ACP metadata" }
+                    acpSdkVersion == null
+            ) { "legacy OpenAI harness provenance must be deprecated and must not claim ACP protocol or SDK metadata" }
         }
     }
 
@@ -152,7 +156,7 @@ object AcpHarnessFactory {
             agentExecutionContractVersion = AGENT_EXECUTION_CONTRACT_VERSION,
             acpProtocolVersion = null,
             acpSdkVersion = null,
-            configurationSha256 = null,
+            configurationSha256 = legacyConfigurationSha256(frozenEnvironment),
             deprecated = true,
         )
         return AcpHarnessSelection(AcpHarnessKind.LEGACY_OPENAI, null, provenance,
@@ -160,6 +164,28 @@ object AcpHarnessFactory {
         ) {
             RepairClientAgentHarness(HttpOpenAiCompatibleRepairClient.fromEnvironment(frozenEnvironment))
         }
+    }
+
+    /**
+     * Commits only public routing/model settings, never the credential or a plain hash of it.
+     * URL credentials are refused rather than silently dropped from the execution identity.
+     * Null digests remain readable on historical provenance, but every fresh selection binds settings.
+     */
+    private fun legacyConfigurationSha256(environment: Map<String, String>): String {
+        HttpOpenAiCompatibleRepairClient.validateEnvironment(environment)
+        val baseUrl = URI.create(environment.getValue("BASE_URL"))
+        require(baseUrl.rawUserInfo == null && baseUrl.rawQuery == null && baseUrl.rawFragment == null) {
+            "legacy BASE_URL must not contain user-info, query or fragment; supply credentials only through API_KEY"
+        }
+        // Match the client's effective endpoint and reasoning normalization exactly.
+        val canonical = buildJsonObject {
+            put("schemaVersion", 1)
+            put("kind", "legacy-openai-public-settings")
+            put("endpoint", baseUrl.toString().trimEnd('/') + "/chat/completions")
+            put("model", environment.getValue("MODEL"))
+            put("reasoningEffort", environment["REASONING_EFFORT"]?.trim()?.takeIf { it.isNotEmpty() })
+        }
+        return HexFormat.of().formatHex(MessageDigest.getInstance("SHA-256").digest(canonical.toString().toByteArray(Charsets.UTF_8)))
     }
 }
 

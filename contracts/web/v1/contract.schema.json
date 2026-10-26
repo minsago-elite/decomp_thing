@@ -948,9 +948,6 @@
               },
               "sdkVersion": {
                 "type": "null"
-              },
-              "configurationSha256": {
-                "type": "null"
               }
             }
           },

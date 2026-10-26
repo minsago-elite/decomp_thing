@@ -85,7 +85,7 @@ class SourceTreeJobReconstructorTest {
         assertTrue(provenance.deprecated)
         assertEquals(
             "agent-harness-v1:legacy-openai:contract-1:acp-none:sdk-none:" +
-                "implementation-legacy-openai-compatible:configuration-none:deprecated",
+                "implementation-legacy-openai-compatible:configuration-e64b5d550f80dbc059dae755de0c0383f6da7c6b0a45adf516fc32c1e090f7c9:deprecated",
             provenance.stableDescriptor,
         )
 
