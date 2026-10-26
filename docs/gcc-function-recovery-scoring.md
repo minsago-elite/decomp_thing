@@ -257,7 +257,7 @@ generation:
 python3 -m unittest discover -s tests/oracle -t . -v
 ```
 
-## Live model provenance and selected boundary admission
+## Live selected-boundary and surviving-name admission
 
 The installed `gcc-engine-full-export driver` path now extends the same
 `StructuralProductionReplayContract` with a scoped live admission. After the
@@ -274,7 +274,8 @@ and compares the observation with the independent host replay.
 
 Only this live coordinator can construct the operation accepted by the fixed
 registry. It yields an opaque `VerifiedStructuralInputsV1` for model provenance
-and function boundaries. `scoreSelectedBoundary` accepts that capability without
+and function boundaries, including the complete independently replayed surviving-symbol
+population. `scoreSelectedBoundary` accepts that capability without
 a replacement model argument. Interface, call, global and type requests refuse;
 full structural assessment and calibrated confidence remain unavailable until
 their independent truth and identity relations are admitted. Fixture transcripts,
@@ -285,8 +286,28 @@ size and digest, and is committed only after the evidence files. The score keeps
 the complete observation and exporter/replay provenance. Its `productionVerified`
 and `scored` fields apply only to the explicit admitted domains; full-result
 `scored`, `complete` and `releaseEligible` remain false. Existing cc1 results keep
-schema v2. The new scope does not replace the original full structural replay,
-accuracy thresholds, ABI population, calibration or release requirements.
+schema v2. Authenticated scored-model provenance is the focused outcome in #679;
+interface, call, global and type scoring are separate outcomes, not prerequisites
+for that provenance criterion. Full structural replay, ABI population, calibration
+and release requirements remain separate.
+
+The same opaque capability feeds `scoreFunctionAccuracy`. Its program-neutral
+projection uses exact matches only for function-start precision and recall;
+near matches count as both an exact-start false positive and false negative.
+It enumerates every surviving alias from scoreable and excluded oracle functions,
+then joins recovered names only at the exact oracle RVA. Multiple aliases remain
+separate population members. A missing or renamed excluded survivor remains a
+failure, and an empty population cannot satisfy the benchmark.
+
+The GCC consumer applies the 95% exact-start precision and recall thresholds and
+100% surviving-symbol identity threshold using integer comparisons. Result v3
+binds `gcc-driver-production-function-accuracy.json` by path, length and digest.
+That sidecar retains complete denominators and per-alias outcomes, references the
+complete source partitions and exclusions in the bound boundary observation, and
+reports acceptance only for these two outcomes. Its full `complete` and
+`releaseEligible` fields remain false. It accepts only the live capability;
+persisted JSON reports and matching hashes cannot reconstruct admission. The
+recovery worker receives no oracle feedback.
 
 The installed-driver qualification is selected by the existing
 `qualify:driver-full-export` Actions label. It retains the score, frozen model,
@@ -294,3 +315,11 @@ original export lineage, second-worker request, attachment, execution, capture
 and metadata, verifies the measured bounds and all digest joins, and independently
 replays the boundary observation. Ordinary component tests use explicit authored
 operation fixtures and do not establish that live qualification.
+
+The [retained selected production replay](../oracle/gcc/16.2.0/production-function-replay/README.md)
+preserves the successful run at source `202de6b2` and its byte-identical Actions
+checkout. Exact-start precision is 3,269/3,273, recall is 3,269/3,284, and all six
+surviving aliases match at their exact oracle RVAs. Its bounded offline verifier
+checks the original byte commitments and independently rederives these selected
+measurements. Retained bytes do not recreate a live admission; full structural
+scoring, completion and release eligibility remain unavailable.

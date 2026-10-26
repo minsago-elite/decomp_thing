@@ -9,6 +9,7 @@ import java.nio.file.Path
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.JsonPrimitive
 
 class StructuralProductionReplayException(message: String, cause: Throwable? = null) :
@@ -377,7 +378,7 @@ class AuthenticatedStructuralReplayReceiptsV1 internal constructor(
 )
 
 enum class StructuralReplayDomainV1 {
-    MODEL_PROVENANCE, FUNCTION_BOUNDARIES, INTERFACES, CALLS, GLOBALS, TYPES,
+    MODEL_PROVENANCE, FUNCTION_BOUNDARIES, SURVIVING_SYMBOL_IDENTITIES, INTERFACES, CALLS, GLOBALS, TYPES,
 }
 
 /**
@@ -395,7 +396,8 @@ class VerifiedStructuralInputsV1 private constructor(
     private val binding = admission.fullExportBindingBytes
     private val report = admission.reportBytes
     val admittedDomains: Set<StructuralReplayDomainV1> = java.util.Collections.unmodifiableSet(
-        setOf(StructuralReplayDomainV1.MODEL_PROVENANCE, StructuralReplayDomainV1.FUNCTION_BOUNDARIES),
+        setOf(StructuralReplayDomainV1.MODEL_PROVENANCE, StructuralReplayDomainV1.FUNCTION_BOUNDARIES,
+            StructuralReplayDomainV1.SURVIVING_SYMBOL_IDENTITIES),
     )
 
     fun requireDomain(domain: StructuralReplayDomainV1) {
@@ -422,6 +424,41 @@ object StructuralProductionReplayContract {
         inputs.requireDomain(StructuralReplayDomainV1.FUNCTION_BOUNDARIES)
         return inputs.selectedBoundaryReportBytes
     }
+
+    /** Derives exact-address and complete surviving-alias measurements from the admitted snapshot. */
+    fun scoreFunctionAccuracy(inputs: VerifiedStructuralInputsV1): ByteArray {
+        inputs.requireDomain(StructuralReplayDomainV1.MODEL_PROVENANCE)
+        inputs.requireDomain(StructuralReplayDomainV1.FUNCTION_BOUNDARIES)
+        inputs.requireDomain(StructuralReplayDomainV1.SURVIVING_SYMBOL_IDENTITIES)
+        val boundaryBytes = inputs.selectedBoundaryReportBytes
+        val boundary = OracleJson.parseCanonical(boundaryBytes, FUNCTION_ACCURACY_LIMITS).jsonObject
+        val observation = boundary.getValue("boundaryObservation").jsonObject
+        val measurements = StructuralFunctionAccuracyV1.derive(observation)
+        return OracleJson.canonicalBytes(JsonObject(mapOf(
+            "provider" to JsonPrimitive("structural-selected-function-accuracy-score-v1"),
+            "schemaVersion" to JsonPrimitive(1),
+            "scope" to JsonPrimitive("selected-function-starts-and-surviving-symbol-identities"),
+            "profileId" to JsonPrimitive(inputs.profileId),
+            "inputSha256" to JsonPrimitive(inputs.inputSha256),
+            "programModelSha256" to JsonPrimitive(inputs.programModelSha256),
+            "programModelBytes" to JsonPrimitive(inputs.programModelBytes),
+            "fullExportBindingSha256" to boundary.getValue("fullExportBindingSha256"),
+            "functionOracleSha256" to boundary.getValue("functionOracleSha256"),
+            "boundaryScoreSha256" to JsonPrimitive(OracleArtifacts.sha256(boundaryBytes)),
+            "boundaryObservationSha256" to boundary.getValue("boundaryObservationSha256"),
+            "measurements" to measurements,
+            "productionVerified" to JsonPrimitive(true),
+            "scored" to JsonPrimitive(true),
+            "complete" to JsonPrimitive(false),
+            "releaseEligible" to JsonPrimitive(false),
+        )), FUNCTION_ACCURACY_LIMITS)
+    }
+
+    internal val FUNCTION_ACCURACY_LIMITS = StrictJsonLimits(
+        maximumInputBytes = 64 * 1024 * 1024, maximumCanonicalBytes = 64 * 1024 * 1024,
+        maximumNodes = 1_000_000, maximumStringBytes = 16 * 1024 * 1024,
+        maximumTotalStringBytes = 48 * 1024 * 1024,
+    )
 
     fun requestSha256(
         request: StructuralReplayRequestV1,

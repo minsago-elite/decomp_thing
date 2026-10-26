@@ -202,10 +202,15 @@ internal object GccBundledFullExportCliResultV2 {
                 "production boundary score belongs to another captured model or binding"
             }
             val score = StructuralProductionReplayContract.scoreSelectedBoundary(verified)
+            val accuracy = GccDriverProductionFunctionAccuracyV1.create(verified)
             mapOf("boundaryScore" to JsonObject(mapOf(
                 "path" to JsonPrimitive(structuralBindingPath.parent.resolve(PRODUCTION_BOUNDARY_SCORE_NAME).toString()),
                 "sha256" to JsonPrimitive(OracleArtifacts.sha256(score)), "bytes" to JsonPrimitive(score.size),
                 "scope" to JsonPrimitive("model-provenance-and-selected-function-boundaries"),
+            )), "functionAccuracy" to JsonObject(mapOf(
+                "path" to JsonPrimitive(structuralBindingPath.parent.resolve(GccDriverProductionFunctionAccuracyV1.SCORE_NAME).toString()),
+                "sha256" to JsonPrimitive(OracleArtifacts.sha256(accuracy)), "bytes" to JsonPrimitive(accuracy.size),
+                "scope" to JsonPrimitive(GccDriverProductionFunctionAccuracyV1.SCOPE),
             )))
         }.orEmpty()
         return OracleJson.canonicalBytes(JsonObject(mapOf(
@@ -229,7 +234,7 @@ internal object GccBundledFullExportCliResultV2 {
             "structuralBinding" to JsonPrimitive(structuralBindingPath.toString()),
             "structuralBindingSha256" to JsonPrimitive(OracleArtifacts.sha256(structuralBindingBytes)),
             "operationWallTime" to operationWallTime,
-            "scratchDisposition" to JsonPrimitive("retained; structural replay and release eligibility unqualified"),
+            "scratchDisposition" to JsonPrimitive("retained; full structural scoring and release eligibility unqualified"),
         ) + boundaryFields))
     }
 

@@ -240,16 +240,20 @@ introduced only after recovery finishes. Admission binds the exact model,
 input, exporter, runtime, loader, target and operation receipts; it also requires
 independently verified worker absence and descriptor-captured replay outputs.
 
-The resulting opaque `VerifiedStructuralInputsV1` admits only model provenance
-and function boundaries. `scoreSelectedBoundary` consumes that capability
-without replacement model or report arguments.
+The resulting opaque `VerifiedStructuralInputsV1` admits only model provenance,
+function boundaries and the independently replayed surviving-symbol population.
+`scoreSelectedBoundary` and `scoreFunctionAccuracy` consume that capability
+without replacement model or report arguments. Exact-start precision and recall
+count near matches as misses. Name measurements retain every surviving alias,
+including aliases on excluded functions, and join only at the exact oracle RVA.
+Zero denominators remain unavailable.
 
 Interface, call, global and type requests refuse until their independent truth
 and identity relations are admitted. Whole-result scoring, calibrated confidence,
 completeness and release eligibility remain unavailable. Fixture transcripts,
 stored JSON receipts and recomputed hashes cannot create the live capability.
-Adapter commands, result bindings and hosted qualification belong in the
-corresponding adapter documentation.
+Adapter commands, thresholds, result bindings and hosted qualification belong in
+the corresponding adapter documentation.
 
 ## Determinism and resource limits
 
@@ -326,8 +330,8 @@ outcomes. The slice has zero global/type `oracle-unobservable` facts; the
 denominator field remains explicit rather than treating absence as success.
 
 This is fixture evidence with `productionVerified: false` and
-`adapterReplayVerified: false`. The production gate is unavailable: #679 has no
-registered host-owned adapter (`StructuralReplayAdapterRegistry.production` is
-empty), and the repository has no checked benchmark production global/type oracle,
-recovered model, identity-map replay, or score. Consequently this slice does
+`adapterReplayVerified: false`. The global/type production gate is unavailable:
+the selected function admission does not authorize global or type scoring, and
+the repository has no checked benchmark production global/type oracle,
+identity-map replay, or score. Consequently this slice does
 not establish the #682 production outcome or downstream #45/#46 qualification.

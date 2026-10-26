@@ -846,6 +846,11 @@ internal class GccBundledPreparedOperation internal constructor(
                         GccBundledFullExportCliResultV2.PRODUCTION_BOUNDARY_SCORE_NAME,
                         StructuralProductionReplayContract.scoreSelectedBoundary(verified),
                         GccBundledStructuralReplayOutputCapture.MAXIMUM_OBSERVATION_BYTES)
+                    cli.requireCurrent()
+                    DescriptorBoundAtomicStateFile.publishManifestNoReplace(output,
+                        GccDriverProductionFunctionAccuracyV1.SCORE_NAME,
+                        GccDriverProductionFunctionAccuracyV1.create(verified),
+                        GccBundledStructuralReplayOutputCapture.MAXIMUM_OBSERVATION_BYTES)
                 }
                 inputs.verify("after full-export binding publication")
                 journal.verify("after full-export binding publication")
