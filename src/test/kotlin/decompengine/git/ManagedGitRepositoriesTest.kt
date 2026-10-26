@@ -459,6 +459,58 @@ class ManagedGitRepositoriesTest {
         }
     }
 
+    @Test fun `import bounds directory expansion before checkout and counts shared prefixes only once`() {
+        for (format in listOf("sha1", "sha256")) for (maxDirectories in listOf(5, 6)) {
+            val (f, importRoot) = importFixture()
+            f.use {
+                val g = f.repositories
+                val source = importRoot.resolve("directories")
+                g.git("init", "-q", "--initial-branch=main", "--object-format=$format", source.toString())
+                // Four empty files share six directories; neither the file nor byte quota is exceeded.
+                for (prefix in listOf("a/b/c", "d/e/f")) {
+                    val directory = Files.createDirectories(source.resolve(prefix))
+                    repeat(2) { Files.writeString(directory.resolve("file$it.c"), "") }
+                }
+                g.git("add", "-A", cwd = source); g.git("commit", "-q", "-m", "deep prefixes", cwd = source)
+                val before = f.tree(source)
+                val service = f.open(limits = GitCheckoutLimits(maxFiles = 4, maxBytes = 1, maxDirectories = maxDirectories))
+                val operation = service.settle(service.request(jobId, GitRepositoryRequest.Attach("directories"), "import_directories_key1"))
+                if (maxDirectories == 5) {
+                    assertEquals(GitOperationState.FAILED, operation.state, "$format must refuse excess directories")
+                    assertEquals("REPOSITORY_UNSUPPORTED", operation.failureCode)
+                    assertTrue(service.listing(jobId).repositories.isEmpty())
+                    assertFalse(f.repositoryDirectory(operation.repositoryId).exists())
+                } else {
+                    assertEquals(GitOperationState.COMPLETED, operation.state, operation.message)
+                    val workTree = f.repositoryDirectory(operation.repositoryId).resolve("worktree")
+                    assertEquals(6L, Files.walk(workTree).use { paths -> paths.filter { it != workTree && Files.isDirectory(it) }.count() })
+                    assertEquals(4, f.tree(workTree).size)
+                }
+                assertFalse(f.store.resolve(jobId).resolve("git/staging/${operation.operationId}").exists())
+                assertEquals(before, f.tree(source))
+            }
+        }
+    }
+
+    @Test fun `checkout directory quota includes inert gitlinks`() {
+        GitTestRepositories().use { g ->
+            val (gitDir, workTree) = g.managed("gitlink-directories")
+            Files.writeString(workTree.resolve("file.c"), "")
+            val commit = g.commitAll(gitDir, workTree, "baseline")
+            for (path in listOf("vendor1", "vendor2")) {
+                g.git("--git-dir=$gitDir", "--work-tree=$workTree", "update-index", "--add", "--cacheinfo", "160000,$commit,$path")
+            }
+            g.git("--git-dir=$gitDir", "--work-tree=$workTree", "commit", "-q", "-m", "inert gitlinks")
+            val head = g.git("--git-dir=$gitDir", "rev-parse", "HEAD").trim()
+            assertEquals("REPOSITORY_UNSUPPORTED", assertFailsWith<GitOperationFailure> {
+                GitRepositoryImport.requireCheckoutBounds(g.runner, gitDir, head, GitCheckoutLimits(maxDirectories = 1))
+            }.code)
+            GitRepositoryImport.requireCheckoutBounds(g.runner, gitDir, head, GitCheckoutLimits(maxDirectories = 2))
+            // Preflight only reads: the submodule directories have not yet been materialized.
+            assertFalse(workTree.resolve("vendor1").exists()); assertFalse(workTree.resolve("vendor2").exists())
+        }
+    }
+
     @Test fun `import keeps every valid tag, refuses unimportable refs, altered objects and oversized checkouts`() {
         val (f, importRoot) = importFixture()
         f.use {

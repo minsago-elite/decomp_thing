@@ -721,9 +721,9 @@ instead of being dropped. Selected symbolic refs are resolved as bounded inert d
 steps), including targets in omitted namespaces, and stored as full object IDs; HEAD retains its
 branch name. Cyclic or excessive symbolic chains give `REPOSITORY_UNSUPPORTED`.
 Object copying pins source directories with secure directory streams, refuses links at actual
-opens, and streams at most 512 MiB into newly created regular files (at most 100,000 object
-files). A provider without secure directory streams is unsupported. Configuration, hooks,
-`info/`, the index, reflogs, remotes, notes, replace refs, worktrees, submodule repositories and
+opens, and streams at most 512 MiB into newly created regular files (at most 100,000 object-store
+files and directories combined). A provider without secure directory streams is unsupported.
+Configuration, hooks, `info/`, the index, reflogs, remotes, notes, replace refs, worktrees, submodule repositories and
 uncommitted working-tree changes are not copied. A full `git fsck` must succeed, which re-hashes
 every object against its ID (integrity errors give `REPOSITORY_CORRUPT`). Verification runs with
 a hard and soft 512 MiB process address-space ceiling, including mappings and inflation of
@@ -731,8 +731,10 @@ packed, dangling and historical objects, before checkout quotas run. This requir
 fixed `/usr/bin/prlimit` or `/bin/prlimit` utility; missing/unstartable containment fails closed as
 `REPOSITORY_UNAVAILABLE`, never an unbounded retry. Fatal/resource exits give
 `REPOSITORY_UNSUPPORTED` rather than claiming proven corruption. No core dump is allowed.
-Before checkout, `ls-tree -r -l` of the HEAD tree must fit the work-tree quota (20,000 entries and
-512 MiB of declared blob bytes), because a few compressed objects can expand without bound.
+Before checkout, `ls-tree -r -t -l` of the HEAD tree must fit the work-tree quotas: 20,000 leaf
+entries, 20,000 directories and 512 MiB of declared blob bytes. Tree paths count once per prefix;
+inert gitlinks also count as directories. This bounds directory expansion as well as repeated or
+highly compressed blobs before `read-tree` creates anything.
 The HEAD commit is then checked out with `read-tree --reset -u` under the server configuration and
 the neutral `info/attributes`. No hook, filter, fsmonitor or submodule recursion can run, and no
 attribute conversion can rewrite bytes. Attached, detached and unborn HEADs
