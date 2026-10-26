@@ -31,7 +31,7 @@ class PackagedFakeEngineTest {
             val job = store.createFromUpload("fixture.elf", elfFixture())
             val control = Files.createDirectories(root.resolve("control"))
             val adapter = PackagedFakeReconstruction(control, emptyList())
-            Files.writeString(control.resolve("run_fixture.step"), "2")
+            Files.writeString(control.resolve("run_fixture.step"), "3")
             val reports = store.runReportsDirectory(job.id, "run_fixture", create = true)
             val outcome = assertIs<DurableWebWorkflowOutcome.Completed>(adapter.execute(DurableWebWorkflowContext(job, attempt(job.id, "run_fixture"), reports)))
             val candidate = outcome.candidate!!
@@ -42,7 +42,7 @@ class PackagedFakeEngineTest {
                 java.security.MessageDigest.getInstance("SHA-256").digest(bytes).joinToString("") { "%02x".format(it) } })
             assertTrue(Files.exists(control.resolve("run_fixture.completed")))
 
-            Files.writeString(control.resolve("run_full.step"), "2")
+            Files.writeString(control.resolve("run_full.step"), "3")
             Files.writeString(control.resolve("run_full.enospc"), "")
             val full = store.runReportsDirectory(job.id, "run_full", create = true)
             assertFailsWith<java.io.IOException> { adapter.execute(DurableWebWorkflowContext(job, attempt(job.id, "run_full"), full)) }

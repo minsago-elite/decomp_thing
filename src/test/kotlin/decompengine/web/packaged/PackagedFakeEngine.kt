@@ -57,6 +57,10 @@ internal class PackagedFakeReconstruction(private val control: Path, private val
             observe(AgentWorkflowPhase.PLANNING)
             marker(runId, "planning")
             await(runId, 2)
+            // Released while the browser is offline, so a reconnect must deliver an observation it never saw.
+            observe(AgentWorkflowPhase.AGENT_RUNNING)
+            marker(runId, "agent-running")
+            await(runId, 3)
             observe(AgentWorkflowPhase.BUILD_VALIDATING)
             if (Files.exists(control.resolve("$runId.enospc"))) {
                 // A genuine ENOSPC from the kernel, without filling a shared filesystem.

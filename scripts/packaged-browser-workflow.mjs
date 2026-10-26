@@ -121,12 +121,22 @@ export async function qualifyWorkflow(context) {
   await evaluate(activity, `dispatchEvent(new Event('offline'))`);
   await ready(activity, `document.body.innerText.includes('Browser reports offline. Activity reads are suspended.')`, 'truthful offline activity');
   assert.equal(await evaluate(activity, `document.body.innerText.includes('completed')`), false, 'Offline activity claimed completion');
+  const observed = `[...document.querySelectorAll('ol[aria-label="Activity observations"] li')].map(item => item.textContent.match(/Sequence (\\d+)/)?.[1]).filter(Boolean).map(Number)`;
+  const beforeReconnect = await evaluate(activity, observed);
+  // The engine emits its next observation while the browser is offline; only a real post-reconnect
+  // read can deliver it, and the earlier rows must not be delivered again.
+  await step(runId, 2);
+  await marker(runId, 'agent-running');
+  assert.equal(await evaluate(activity, `/agent_running/i.test(document.querySelector('ol[aria-label="Activity observations"]')?.innerText ?? '')`), false,
+    'An offline page displayed an observation emitted after the disconnect');
   await cdp.call('Network.emulateNetworkConditions', { offline: false, latency: 0, downloadThroughput: -1, uploadThroughput: -1 }, activity.sessionId);
   await evaluate(activity, `dispatchEvent(new Event('online'))`);
-  await ready(activity, `!document.body.innerText.includes('Browser reports offline.') && document.body.innerText.includes('planning')`, 'activity after reconnect');
-  const sequences = await evaluate(activity, `[...document.querySelectorAll('ol[aria-label="Activity observations"] li')].map(item => item.textContent.match(/Sequence (\\d+)/)?.[1]).filter(Boolean)`);
+  await ready(activity, `!document.body.innerText.includes('Browser reports offline.') && /agent_running/i.test(document.querySelector('ol[aria-label="Activity observations"]')?.innerText ?? '')`, 'new observation delivered after reconnect');
+  const sequences = await evaluate(activity, observed);
   assert.equal(new Set(sequences).size, sequences.length, `Reconnect duplicated observations: ${sequences}`);
-  result.liveActivity = { slowStream: true, offlineExplained: true, reconnected: true, duplicateObservations: 0, observations: sequences.length };
+  assert.ok(Math.max(...sequences) > Math.max(...beforeReconnect), `Reconnect delivered no newer observation: ${beforeReconnect} -> ${sequences}`);
+  result.liveActivity = { slowStream: true, offlineExplained: true, reconnected: true, newObservationsAfterReconnect: sequences.length - beforeReconnect.length,
+    duplicateObservations: 0, observations: sequences.length };
   await capture(activity, 'workflow-live-activity.png');
 
   // 4. Restart the server mid-attempt. The retained attempt must not claim to still run or to have completed.
@@ -150,7 +160,7 @@ export async function qualifyWorkflow(context) {
   const retryRun = retryHref.split('/').at(-1);
   assert.notEqual(retryRun, runId);
   await marker(retryRun, 'started');
-  await step(retryRun, 2);
+  await step(retryRun, 3);
   await marker(retryRun, 'completed');
   await settled(retryRun, 'completed');
   await cdp.call('Page.navigate', { url: `${origin}${retryHref}` }, main.sessionId);
@@ -174,7 +184,7 @@ export async function qualifyWorkflow(context) {
   assert.equal(third.status, 202);
   await fs.writeFile(join(control, `${third.runId}.enospc`), '');
   await marker(third.runId, 'started');
-  await step(third.runId, 2);
+  await step(third.runId, 3);
   await marker(third.runId, 'enospc');
   await settled(third.runId, 'failed');
   await cdp.call('Page.navigate', { url: `${origin}/nested/jobs/${jobId}/runs/${third.runId}` }, main.sessionId);
