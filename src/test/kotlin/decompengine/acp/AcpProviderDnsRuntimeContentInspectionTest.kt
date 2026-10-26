@@ -212,6 +212,62 @@ class AcpProviderDnsRuntimeContentInspectionTest {
             AcpProviderDnsRuntimeProfiles.requireApproved(AcpProviderDnsRuntimeProfiles.PROFILE_ID, checked.manifestSha256, "b".repeat(64))
         }
     }
+    @Test fun `composed ingress accepts an unshadowed later provider for needed and dlopen edges`() {
+        val provider = "jdk/lib/server/libextra.so"
+        for (needed in listOf(false, true)) {
+            val p = manifestPayloads().apply {
+                put(provider, remove("jdk/lib/libextra.so")!!)
+                if (needed) put("jdk/bin/java", elf(interpreter = true, needed = "libextra.so"))
+            }
+            val edges = if (needed) listOf(AcpProviderDnsRuntimeEdge("jdk/bin/java", "DT_NEEDED", "libextra.so", provider)) else emptyList()
+            val checked = AcpProviderDnsRuntimeProfiles.validateCandidate(manifest(p, extraEdges = edges)) {
+                ByteArrayInputStream(p.getValue(it.path))
+            }
+            assertEquals("libextra.so", checked.objects().getValue(provider).soname)
+            assertTrue(checked.edges().contains(AcpProviderDnsRuntimeEdge("jdk/bin/java", "DLOPEN", "libextra.so", provider)))
+            assertTrue(checked.edges().containsAll(edges))
+        }
+    }
+
+    @Test fun `composed ingress refuses non ELF file collisions throughout the provider search namespace`() {
+        for (provider in listOf("jdk/lib/server/libextra.so", "jdk/lib/libextra.so")) {
+            val shadow = if (provider.startsWith("jdk/lib/server/")) "jdk/lib/libextra.so" else "jdk/lib/server/libextra.so"
+            for (needed in listOf(true, false)) {
+                val p = manifestPayloads().apply {
+                    put(provider, remove("jdk/lib/libextra.so")!!)
+                    put(shadow, "ordinary non ELF shadow".toByteArray())
+                    if (needed) put("jdk/bin/java", elf(interpreter = true, needed = "libextra.so"))
+                }
+                val edges = if (needed) listOf(AcpProviderDnsRuntimeEdge("jdk/bin/java", "DT_NEEDED", "libextra.so", provider)) else emptyList()
+                val bytes = manifest(p, extraEdges = edges)
+                // Correct manifest structure, hashes and edges do not make a colliding resource ignorable.
+                assertEquals("file", AcpProviderDnsRuntimeProfiles.parseCandidate(bytes).entries().single { it.path == shadow }.kind)
+                assertFails("$provider $shadow needed=$needed") {
+                    AcpProviderDnsRuntimeProfiles.validateCandidate(bytes) { ByteArrayInputStream(p.getValue(it.path)) }
+                }
+            }
+        }
+    }
+
+    @Test fun `composed ingress refuses directory collisions throughout the provider search namespace`() {
+        for (provider in listOf("jdk/lib/server/libextra.so", "jdk/lib/libextra.so")) {
+            val shadow = if (provider.startsWith("jdk/lib/server/")) "jdk/lib/libextra.so" else "jdk/lib/server/libextra.so"
+            for (needed in listOf(true, false)) {
+                val p = manifestPayloads().apply {
+                    put(provider, remove("jdk/lib/libextra.so")!!)
+                    put("$shadow/resource", "inert directory child".toByteArray())
+                    if (needed) put("jdk/bin/java", elf(interpreter = true, needed = "libextra.so"))
+                }
+                val edges = if (needed) listOf(AcpProviderDnsRuntimeEdge("jdk/bin/java", "DT_NEEDED", "libextra.so", provider)) else emptyList()
+                val bytes = manifest(p, extraEdges = edges)
+                assertEquals("directory", AcpProviderDnsRuntimeProfiles.parseCandidate(bytes).entries().single { it.path == shadow }.kind)
+                assertFails("$provider $shadow needed=$needed") {
+                    AcpProviderDnsRuntimeProfiles.validateCandidate(bytes) { ByteArrayInputStream(p.getValue(it.path)) }
+                }
+            }
+        }
+    }
+
     @Test fun `composed ingress refuses hidden extensionless ELF omitted from declared closure`() {
         val p = manifestPayloads(); p["jdk/lib/hidden"] = elf("hidden")
         val bytes = manifest(p, omit = setOf("jdk/lib/hidden"))

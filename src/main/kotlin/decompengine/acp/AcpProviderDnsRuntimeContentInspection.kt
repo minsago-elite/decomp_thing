@@ -73,10 +73,13 @@ internal object AcpProviderDnsRuntimeContentInspection {
         require(edges.size.toLong() in 1..edgeLimit)
         require(edges.distinctBy { Triple(it.from, it.kind, it.name) }.size == edges.size)
         val search = listOf("native", "jdk/lib", "jdk/lib/server")
+        val entryPaths = entries.map { it.path }.toSet()
         fun provider(name: String): String {
-            val matches = search.map { "$it/$name" }.filter { it in objects }
+            // A non-ELF file or directory can block loader lookup too. Preserve the unique-path
+            // policy across the entire manifest namespace, not just the inspected ELF subset.
+            val matches = search.map { "$it/$name" }.filter { it in entryPaths }
             require(matches.size == 1)
-            return matches.single().also { require(objects.getValue(it).soname == name) }
+            return matches.single().also { require(objects[it]?.soname == name) }
         }
         val expected = mutableSetOf<AcpProviderDnsRuntimeEdge>()
         objects.forEach { (path, metadata) ->
