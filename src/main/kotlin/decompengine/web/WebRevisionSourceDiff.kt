@@ -243,7 +243,7 @@ internal class WebRevisionSourceDiffs(
     private fun fileReference(snapshot: WebRevisionSourceSnapshot, index: Int?): JsonElement = index?.let {
         val file = snapshot.files[it]
         buildJsonObject {
-            put("fileId", revisionSourceFileId(snapshot.reference, it, file.evidence.path))
+            put("fileId", snapshot.fileId(file))
             put("displayName", file.evidence.path); putRevisionSourceFileFacts(file)
         }
     } ?: JsonNull
@@ -302,12 +302,10 @@ internal class WebRevisionSourceDiffs(
     /** The classified entry named by both file identities; a pair outside the classification is unavailable. */
     private fun select(pair: RevisionPair, query: WebSourceDiffQuery): WebSourceDiffEntry {
         val base = query.baseFileId?.let { id -> pair.base.files.indices.firstOrNull {
-            revisionSourceFileIndex(id) == it && MessageDigest.isEqual(
-                revisionSourceFileId(pair.base.reference, it, pair.base.files[it].evidence.path).toByteArray(), id.toByteArray())
+            MessageDigest.isEqual(pair.base.fileId(pair.base.files[it]).toByteArray(), id.toByteArray())
         } ?: entryNotFound() }
         val head = query.headFileId?.let { id -> pair.head.files.indices.firstOrNull {
-            revisionSourceFileIndex(id) == it && MessageDigest.isEqual(
-                revisionSourceFileId(pair.head.reference, it, pair.head.files[it].evidence.path).toByteArray(), id.toByteArray())
+            MessageDigest.isEqual(pair.head.fileId(pair.head.files[it]).toByteArray(), id.toByteArray())
         } ?: entryNotFound() }
         return classifyRevisionSourceDiff(pair.base, pair.head).singleOrNull { it.base == base && it.head == head } ?: entryNotFound()
     }
@@ -333,7 +331,7 @@ internal class WebRevisionSourceDiffs(
             fun read(snapshot: WebRevisionSourceSnapshot, index: Int?): ByteArray? = index?.let {
                 val ref = snapshot.reference
                 // A changed manifest between capture and read is refused rather than mixing two observations.
-                val captured = content(ref.jobId, ref.runId, ref.revisionId, revisionSourceFileId(ref, it, snapshot.files[it].evidence.path),
+                val captured = content(ref.jobId, ref.runId, ref.revisionId, snapshot.fileId(snapshot.files[it]),
                     snapshot.metadataVersion)
                 captured.fallbackReason?.let { reason -> throw Fallback(reason) }
                 captured.previewBytes()

@@ -22,7 +22,7 @@ internal fun revisionSourceFileIndex(fileId: String): Int {
 
 internal fun resolveRevisionSourceFile(snapshot: WebRevisionSourceSnapshot, fileId: String): WebRevisionSourceFile {
     val index = revisionSourceFileIndex(fileId)
-    val file = snapshot.files.getOrNull(index) ?: sourceFileNotFound()
+    val file = snapshot.identityFiles.getOrNull(index) ?: sourceFileNotFound()
     if (!MessageDigest.isEqual(revisionSourceFileId(snapshot.reference, index, file.evidence.path).toByteArray(), fileId.toByteArray())) sourceFileNotFound()
     return file
 }
@@ -90,8 +90,7 @@ internal class WebRevisionSourceContent(snapshot: WebRevisionSourceSnapshot, val
     private val fallback: String?
 
     init {
-        val index = revisionSourceFileIndex(fileId)
-        check(snapshot.files.getOrNull(index) === file && revisionSourceFileId(reference, index, file.evidence.path) == fileId)
+        check(resolveRevisionSourceFile(snapshot, fileId) === file)
         if (captured.sha256 != sha256 || WebExplorationArtifact.sha256(bytes) != sha256) revisionSourceChanged()
         fallback = if (file.evidence.contentKind != ProjectContentKind.UTF8_TEXT) "declared-binary" else textFallback(bytes)
     }

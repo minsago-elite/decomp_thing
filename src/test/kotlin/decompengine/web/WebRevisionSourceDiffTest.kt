@@ -106,6 +106,23 @@ class WebRevisionSourceDiffTest {
         assertEquals(0, fixture.reads)
     }
 
+    @Test fun `mixed inventory summaries and comparisons use stable input selectors rather than display indices`() {
+        val reportRoles = setOf(ProjectFileRole.VIEWABLE, ProjectFileRole.ARCHIVE_PAYLOAD)
+        val fixture = fixture(listOf(side("Makefile", "all:\n"), side("A/report.json", "old report\n", reportRoles), side("src/a.c", "old source\n")),
+            listOf(side("Makefile", "all:\n"), side("A/report.json", "new report\n", reportRoles), side("src/a.c", "new source\n")))
+        val engine = diffs(fixture)
+        val entries = items(engine.summary("owner", jobId, "run_2", "revision_2", base))
+        for (entry in entries) {
+            val path = entry.getValue("headFile").jsonObject.getValue("displayName").jsonPrimitive.content
+            val index = if (path == "src/a.c") 1 else 2
+            assertTrue(id(entry, "headFile")!!.startsWith("file_${index}_"))
+            val snapshot = fixture.snapshots.getValue("run_2" to "revision_2")
+            assertEquals(path, resolveRevisionSourceFile(snapshot, id(entry, "headFile")!!).evidence.path)
+            assertEquals("text", engine.file(jobId, "run_2", "revision_2", fileQuery(entry)).getValue("representation").jsonPrimitive.content)
+            assertTrue(engine.patch(jobId, "run_2", "revision_2", fileQuery(entry)).bytes.isNotEmpty())
+        }
+    }
+
     @Test fun `text hunks carry exact line numbers context and honest omitted ranges with a complete patch`() {
         val before = (1..40).joinToString("") { "line $it\n" }
         val after = before.replace("line 5\n", "line five\n").replace("line 37\n", "<script>alert(1)</script>\n") + "tail"

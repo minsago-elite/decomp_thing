@@ -68,6 +68,10 @@ internal class WebRevisionSourceSnapshot(
     files: List<WebRevisionSourceFile>,
 ) {
     val files: List<WebRevisionSourceFile>
+    /** Selector order preserves the original canonical-input indices, independently of display ordering. */
+    val identityFiles: List<WebRevisionSourceFile>
+    val inputFiles: List<WebRevisionSourceFile>
+    private val identityIndices: Map<String, Int>
     val metadataVersion: String
 
     init {
@@ -75,8 +79,19 @@ internal class WebRevisionSourceSnapshot(
         require(files.size in 1..WebSourceCatalogSnapshot.MAXIMUM_FILES && files.any { it.committedInput })
         require(files.map { it.evidence.path }.distinct().size == files.size)
         this.files = Collections.unmodifiableList(files.sortedBy { it.evidence.path })
+        inputFiles = Collections.unmodifiableList(this.files.filter { it.committedInput })
+        identityFiles = Collections.unmodifiableList(inputFiles + this.files.filterNot { it.committedInput })
+        identityIndices = identityFiles.withIndex().associate { it.value.evidence.path to it.index }
         metadataVersion = revisionSourceDigest("revision-source-metadata-v1\n$manifestSha256\n$descriptorSha256\n${reference.sourceSha256}\n")
     }
+
+    /** Unnegotiated v1 responses retain the original canonical-input inventory and non-null size type. */
+    fun inventory(includeManifest: Boolean): WebRevisionSourceSnapshot =
+        if (includeManifest || files.size == inputFiles.size) this
+        else WebRevisionSourceSnapshot(reference, manifestSha256, descriptorSha256, inputFiles)
+
+    fun identityIndex(file: WebRevisionSourceFile): Int = identityIndices.getValue(file.evidence.path)
+    fun fileId(file: WebRevisionSourceFile): String = revisionSourceFileId(reference, identityIndex(file), file.evidence.path)
 
     private companion object { val SHA256 = Regex("[a-f0-9]{64}") }
 }
@@ -141,11 +156,19 @@ internal fun revisionSourceFileId(reference: WebRevisionSourceReference, index: 
     "file_${index}_${revisionSourceDigest(listOf("revision-source-file-v1", reference.jobId, reference.runId,
         reference.revisionId, reference.sourceSha256, path).joinToString("\u0000"))}"
 
+/** Explicit opt-in; older clients and servers retain the original v1 inventory. */
+internal fun sourceInventoryIncludesManifest(values: List<String>?): Boolean {
+    if (values == null) return false
+    if (values != listOf("manifest")) throw WebAccessDenied(422, "VALIDATION_FAILED",
+        "X-Decomp-Source-Inventory accepts only one manifest value.")
+    return true
+}
+
 /** Bounded pages over the canonical input set of one actual persisted candidate. */
 internal class WebRevisionSourcePages(private val source: (String, String, String) -> WebRevisionSourceSnapshot) {
     private val secret = ByteArray(32).also(SecureRandom()::nextBytes)
 
-    fun page(owner: String, jobId: String, runId: String, revisionId: String, rawQuery: String?): JsonObject {
+    fun page(owner: String, jobId: String, runId: String, revisionId: String, rawQuery: String?, includeManifest: Boolean = false): JsonObject {
         if (rawQuery != null && rawQuery.split('&').any { it.substringBefore('=') !in setOf("limit", "cursor") }) {
             throw WebAccessDenied(422, "VALIDATION_FAILED", "Revision source pages accept only limit and cursor.")
         }
@@ -153,10 +176,10 @@ internal class WebRevisionSourcePages(private val source: (String, String, Strin
         val continuation = cursor?.split('_')?.also { parts ->
             if (parts.size != 3 || !parts[0].matches(Regex("[a-f0-9]{64}")) ||
                 !parts[1].matches(Regex("[1-9][0-9]{0,4}")) || !parts[2].matches(Regex("[a-f0-9]{32}")) ||
-                !MessageDigest.isEqual(signature(owner, jobId, runId, revisionId, query.limit, parts[0], parts[1]).toByteArray(),
+                !MessageDigest.isEqual(signature(owner, jobId, runId, revisionId, includeManifest, query.limit, parts[0], parts[1]).toByteArray(),
                     parts[2].toByteArray())) invalidCursor()
         }
-        val snapshot = source(jobId, runId, revisionId)
+        val snapshot = source(jobId, runId, revisionId).inventory(includeManifest)
         val ref = snapshot.reference
         check(ref.jobId == jobId && ref.runId == runId && ref.revisionId == revisionId)
         val offset = continuation?.let { parts ->
@@ -171,7 +194,7 @@ internal class WebRevisionSourcePages(private val source: (String, String, Strin
             val file = snapshot.files[index]
             val entry = file.evidence
             // Stable across sessions/restarts. Authentication remains separate; the index is never a path selector.
-            val fileId = revisionSourceFileId(ref, index, entry.path)
+            val fileId = snapshot.fileId(file)
             val item = buildJsonObject {
                 put("fileId", fileId); put("displayName", entry.path)
                 putRevisionSourceFileFacts(file)
@@ -191,7 +214,7 @@ internal class WebRevisionSourcePages(private val source: (String, String, Strin
             put("page", buildJsonObject {
                 put("limit", query.limit); put("snapshotVersion", snapshot.metadataVersion)
                 put("nextCursor", if (next < snapshot.files.size) JsonPrimitive(
-                    "${snapshot.metadataVersion}_${next}_${signature(owner, jobId, runId, revisionId, query.limit, snapshot.metadataVersion, next)}"
+                    "${snapshot.metadataVersion}_${next}_${signature(owner, jobId, runId, revisionId, includeManifest, query.limit, snapshot.metadataVersion, next)}"
                 ) else JsonNull)
             })
         }

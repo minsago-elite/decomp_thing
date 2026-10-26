@@ -101,7 +101,7 @@ function Directory({ selected, basePath, pin, search, historyEntry }: { selected
           <p>{item.kind === 'directory' ? copy.directory : copy.file}</p>
           {item.kind === 'directory' ? <p>{message(copy.descendants, { count: item.sourceFileCount })}</p>
             : <><p>{item.sizeBytes === null ? copy.sizeNotRecorded : formatExactBytes(item.sizeBytes)}</p>
-              <p>{copy.commitmentShort[item.commitment]}</p><p>{item.declaredUtf8Text ? copy.declaredText : copy.declaredBinary}</p>
+              <p>{copy.commitmentShort[item.commitment ?? 'source-input']}</p><p>{item.declaredUtf8Text ? copy.declaredText : copy.declaredBinary}</p>
               <p>{item.declaredViewable ? copy.declaredViewable : copy.notViewable}</p></>}
         </li>)}
       </ul>
@@ -174,7 +174,7 @@ function File({ selected, basePath, runtime, search, pin, historyEntry }: { sele
       <p><a href={sourceDirectoryPath(basePath, selected, data.parentDirectoryId, undefined, effectivePin ?? undefined)}>{copy.returnDirectory}</a></p>
       <h2><bdi>{data.item.displayName}</bdi></h2>
       <dl class="job-facts"><dt>{copy.size}</dt><dd>{data.item.sizeBytes === null ? copy.sizeNotRecorded : formatExactBytes(data.item.sizeBytes)}</dd>
-        <dt>{copy.commitment}</dt><dd>{copy.commitments[data.item.commitment]}</dd>
+        <dt>{copy.commitment}</dt><dd>{copy.commitments[data.item.commitment ?? 'source-input']}</dd>
         <dt>{copy.fileDigest}</dt><dd><code>{data.item.sha256}</code></dd>
         <dt>{copy.implementationDeclaration}</dt><dd>{copy.implementationDeclarations[data.implementationDeclaration ?? 'not-classified']}</dd>
       </dl>

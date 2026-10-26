@@ -14,11 +14,19 @@ internal fun revisionSourceDirectoryId(snapshot: WebRevisionSourceSnapshot, path
         if (snapshot.files[middle].evidence.path < prefix) low = middle + 1 else high = middle
     }
     check(low < snapshot.files.size && snapshot.files[low].evidence.path.startsWith(prefix))
+    // Prefer the first canonical input below this prefix, exactly as older v1 servers did.
+    var inputLow = 0; var inputHigh = snapshot.inputFiles.size
+    while (inputLow < inputHigh) {
+        val middle = (inputLow + inputHigh) ushr 1
+        if (snapshot.inputFiles[middle].evidence.path < prefix) inputLow = middle + 1 else inputHigh = middle
+    }
+    val input = snapshot.inputFiles.getOrNull(inputLow)?.takeIf { it.evidence.path.startsWith(prefix) }
+    val identityIndex = snapshot.identityIndex(input ?: snapshot.files[low])
     val depth = path.count { it == '/' } + 1
     val ref = snapshot.reference
     val hash = revisionSourceDigest(listOf("revision-source-directory-v1", ref.jobId, ref.runId, ref.revisionId,
-        ref.sourceSha256, path, low.toString(), depth.toString()).joinToString("\u0000"))
-    return "dir_${low}_${depth}_$hash"
+        ref.sourceSha256, path, identityIndex.toString(), depth.toString()).joinToString("\u0000"))
+    return "dir_${identityIndex}_${depth}_$hash"
 }
 
 private val REVISION_DIRECTORY_ID = Regex("dir_(0|[1-9][0-9]{0,4})_([1-9][0-9]{0,3})_([a-f0-9]{64})")
@@ -39,14 +47,14 @@ internal fun resolveRevisionSourceDirectory(snapshot: WebRevisionSourceSnapshot,
         val parsedId = REVISION_DIRECTORY_ID.matchEntire(directoryId)!!
         val index = parsedId.groupValues[1].toInt()
         val depth = parsedId.groupValues[2].toInt()
-        if (index !in snapshot.files.indices) revisionDirectoryNotFound()
-        val parts = snapshot.files[index].evidence.path.split('/')
+        val file = snapshot.identityFiles.getOrNull(index) ?: revisionDirectoryNotFound()
+        val parts = file.evidence.path.split('/')
         if (depth >= parts.size) revisionDirectoryNotFound()
         val path = parts.take(depth).joinToString("/")
-        if (index > 0 && snapshot.files[index - 1].evidence.path.startsWith("$path/")) revisionDirectoryNotFound()
         val canonical = revisionSourceDirectoryId(snapshot, path)
         if (!MessageDigest.isEqual(canonical.toByteArray(), directoryId.toByteArray())) revisionDirectoryNotFound()
-        WebRevisionSourceDirectory(path, index, depth)
+        val first = snapshot.files.binarySearchBy("$path/") { it.evidence.path }.let { if (it < 0) -it - 1 else it }
+        WebRevisionSourceDirectory(path, first, depth)
     }
     // A forged selector must not bypass a file/directory collision by skipping its parent page.
     selected.path?.let { path ->
@@ -63,7 +71,7 @@ internal class WebRevisionDirectoryPages(private val source: (String, String, St
     private val secret = ByteArray(32).also(SecureRandom()::nextBytes)
     private class Child(val name: String, val first: Int, val directoryPath: String?, var files: Int = 1)
 
-    fun page(owner: String, jobId: String, runId: String, revisionId: String, directoryId: String, rawQuery: String?): JsonObject {
+    fun page(owner: String, jobId: String, runId: String, revisionId: String, directoryId: String, rawQuery: String?, includeManifest: Boolean = false): JsonObject {
         requireRevisionSourceDirectoryId(directoryId)
         if (rawQuery != null && rawQuery.split('&').any { it.substringBefore('=') !in setOf("limit", "cursor") }) {
             throw WebAccessDenied(422, "VALIDATION_FAILED", "Directory pages accept only limit and cursor.")
@@ -72,10 +80,10 @@ internal class WebRevisionDirectoryPages(private val source: (String, String, St
         val continuation = cursor?.split('_')?.also { parts ->
             if (parts.size != 3 || !parts[0].matches(Regex("[a-f0-9]{64}")) ||
                 !parts[1].matches(Regex("[1-9][0-9]{0,4}")) || !parts[2].matches(Regex("[a-f0-9]{32}")) ||
-                !MessageDigest.isEqual(signature(owner, jobId, runId, revisionId, directoryId, query.limit, parts[0], parts[1]).toByteArray(),
+                !MessageDigest.isEqual(signature(owner, jobId, runId, revisionId, directoryId, includeManifest, query.limit, parts[0], parts[1]).toByteArray(),
                     parts[2].toByteArray())) invalidCursor()
         }
-        val snapshot = source(jobId, runId, revisionId)
+        val snapshot = source(jobId, runId, revisionId).inventory(includeManifest)
         val ref = snapshot.reference
         check(ref.jobId == jobId && ref.runId == runId && ref.revisionId == revisionId)
         val selected = resolveRevisionSourceDirectory(snapshot, directoryId)
@@ -115,7 +123,7 @@ internal class WebRevisionDirectoryPages(private val source: (String, String, St
             } else {
                 val file = snapshot.files[child.first]
                 buildJsonObject {
-                    put("kind", "file"); put("fileId", revisionSourceFileId(ref, child.first, file.evidence.path))
+                    put("kind", "file"); put("fileId", snapshot.fileId(file))
                     put("displayName", child.name); putRevisionSourceFileFacts(file)
                 }
             }
@@ -151,7 +159,7 @@ internal class WebRevisionDirectoryPages(private val source: (String, String, St
             put("page", buildJsonObject {
                 put("limit", query.limit); put("snapshotVersion", snapshot.metadataVersion)
                 put("nextCursor", if (next < ordered.size) JsonPrimitive(
-                    "${snapshot.metadataVersion}_${next}_${signature(owner, jobId, runId, revisionId, directoryId, query.limit, snapshot.metadataVersion, next)}"
+                    "${snapshot.metadataVersion}_${next}_${signature(owner, jobId, runId, revisionId, directoryId, includeManifest, query.limit, snapshot.metadataVersion, next)}"
                 ) else JsonNull)
             })
         }
