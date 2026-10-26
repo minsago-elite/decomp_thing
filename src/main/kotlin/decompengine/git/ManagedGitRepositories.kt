@@ -773,7 +773,9 @@ class ManagedGitRepositories(
                 val remote = remoteFor(located, request.parameters["remoteId"])
                 val location = allowedLocation(remote)
                 val staging = GitStorage.directories(root.resolve(operation.jobId).resolve("git"), "staging", operation.operationId)
-                val remaining = (remotePolicy.limits.maxRepositoryBytes - GitDiskWatch.bytes(located.commonDir)).coerceAtLeast(0)
+                // The cap covers the entire managed repository, including primary/linked
+                // checkouts and records. Reserve space for the success audit/fetch-state writes.
+                val remaining = (remotePolicy.limits.maxRepositoryBytes - GitDiskWatch.bytes(directory) - 4096).coerceAtLeast(0)
                 val changed = try {
                     GitTransfers.fetchQuarantined(runner, located.commonDir, staging.resolve(GIT_DIR), located.record.objectFormat,
                         location, remote.name, remotePolicy, remaining, transferControl(operation.operationId, staging, remaining))

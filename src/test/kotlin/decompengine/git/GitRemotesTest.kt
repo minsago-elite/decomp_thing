@@ -429,6 +429,36 @@ class GitRemotesTest {
         assertFalse(Files.exists(gitDir.resolve("objects/info/alternates")))
     }
 
+    @Test fun `fetch budgets the existing checkout and repository metadata not just Git objects`(): Unit = Fixture().use { f ->
+        val bare = f.remote()
+        val seed = f.repositories.root.resolve("upstream seed")
+        Files.writeString(seed.resolve("large.c"), "x".repeat(64 * 1024))
+        f.repositories.git("-C", seed.toString(), "add", "-A")
+        f.repositories.git("-C", seed.toString(), "commit", "-q", "-m", "compressible checkout")
+        f.repositories.git("-C", seed.toString(), "push", "-q", bare.toString(), "main")
+        val cap = 128L * 1024
+        service = f.open(GitRemotePolicy(admittedRoot = f.admitted, limits = GitTransferLimits(maxRepositoryBytes = cap)))
+        val clone = service.request(jobId, GitCloneRequest("admitted:upstream.git", "origin", null), key())
+        assertTrue(service.awaitIdle(60_000))
+        val cloned = service.operation(jobId, clone.operation.repositoryId, clone.operation.operationId)
+        assertEquals(GitOperationState.COMPLETED, cloned.state, cloned.message)
+        repositoryId = cloned.repositoryId
+        val directory = f.store.resolve("$jobId/git/repositories/$repositoryId")
+        val gitDir = directory.resolve("repository.git")
+        val originalBytes = GitDiskWatch.bytes(gitDir)
+        val originalRefs = service.remotes(jobId, repositoryId).single().tracking
+        Files.write(seed.resolve("new.c"), ByteArray(72 * 1024).also { java.util.Random(593).nextBytes(it) })
+        f.repositories.git("-C", seed.toString(), "add", "-A")
+        f.repositories.git("-C", seed.toString(), "commit", "-q", "-m", "fits objects but not entire repository")
+        f.repositories.git("-C", seed.toString(), "push", "-q", bare.toString(), "main")
+        val result = sync(GitOperationAction.FETCH, "remoteId" to service.remotes(jobId, repositoryId).single().record.remoteId)
+        assertEquals("TRANSFER_LIMIT", result.failureCode, result.message)
+        assertEquals(originalBytes, GitDiskWatch.bytes(gitDir))
+        assertEquals(originalRefs, service.remotes(jobId, repositoryId).single().tracking)
+        assertTrue(GitDiskWatch.bytes(directory) <= cap)
+        assertEquals("x".repeat(64 * 1024), Files.readString(directory.resolve("worktree/large.c")))
+    }
+
     @Test fun `quarantine final admission rejects a completed pack without touching live objects or refs`(): Unit = Fixture().use { f ->
         val bare = f.remote()
         val seed = f.repositories.root.resolve("upstream seed")
