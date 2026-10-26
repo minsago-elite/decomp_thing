@@ -9,7 +9,7 @@ project_root="$(pwd -P)"
 qualification_root="$project_root/build/module-compilation-qualification"
 qualification_identity="${GITHUB_RUN_ID}.${GITHUB_RUN_ATTEMPT}.module"
 case_directory="$project_root/build/reports/contained-module-compilation-live/cases"
-if [[ -e "$project_root/build/test-results/moduleCompilationLiveQualification" || -L "$project_root/build/test-results/moduleCompilationLiveQualification" || -e "$qualification_root/compiled-live-tests.json" || -e "$case_directory" || -L "$case_directory" ]]; then
+if [[ -e "$project_root/build/test-results/moduleCompilationLiveQualification" || -L "$project_root/build/test-results/moduleCompilationLiveQualification" || -e "$qualification_root/compiled-live-tests.json" || -L "$qualification_root/compiled-live-tests.json" || -e "$case_directory" || -L "$case_directory" ]]; then
   echo "refusing to reuse compiler qualification inventory or reports" >&2; exit 1
 fi
 mkdir -p "$qualification_root/tmp" "$qualification_root/cache" "$qualification_root/home"
