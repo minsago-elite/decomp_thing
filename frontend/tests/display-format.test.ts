@@ -1,5 +1,13 @@
 import { expect, it } from 'vitest';
 import { formatExactBytes, formatExactTimestamp, formatJobStatus } from '../src/copy/format';
+import * as metadataFormat from '../src/jobs/metadataFormat';
+
+it('keeps the legacy metadata import path linked to the single format implementation', () => {
+  // Current-base queue views still use this path; no duplicate formatter may drift behind it.
+  expect(metadataFormat.formatExactBytes).toBe(formatExactBytes);
+  expect(metadataFormat.formatExactTimestamp).toBe(formatExactTimestamp);
+  expect(metadataFormat.formatJobStatus).toBe(formatJobStatus);
+});
 
 it('preserves every uint64 byte digit and original timestamp offset and precision', () => {
   expect(formatExactBytes('18446744073709551615')).toBe('18446744073709551615 bytes');

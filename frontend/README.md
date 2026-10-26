@@ -276,7 +276,9 @@ locale, selects plural forms with `Intl.PluralRules`, and owns every formatter t
 a value into text (`formatExactCount`, `formatExactBytes`, `formatExactTimestamp`,
 `formatJobStatus`). Adding digit grouping or translated units for another locale changes
 only this module and the catalogs; exact digits must survive (format `BigInt`, never
-`Number`).
+`Number`). The former `src/jobs/metadataFormat.ts` path remains a compatibility
+re-export for consumers introduced on the base branch during migration; it owns no
+formatting logic. New consumers should import `src/copy/format.ts` directly.
 
 Use `formatExactTimestamp` for reported timestamps and retain the original string
 in both `dateTime` and `title`. It preserves fractional digits and the source
