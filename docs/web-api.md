@@ -544,6 +544,11 @@ Status/diff snapshots carry repository/worktree versions plus observed HEAD/ref 
 Commit, stage, branch changes, integration and push require those versions and expected object
 IDs under the same repository/worktree lock as execution. A changed ref or dirty source snapshot
 requires `409 REF_CHANGED`/`WORKTREE_BUSY`, with a fresh review; no implicit overwrite/stash/reset.
+The adapter's `statusDigest` is only a display-status fingerprint of bounded porcelain output and
+HEAD, not either version, a content digest or an optimistic-concurrency/provenance guard. Further
+edits to an already-untracked or modified file, non-HEAD ref changes and edits beyond the output
+bound may leave it unchanged. Mutation services must separately bind a content-sensitive snapshot
+and revalidate it under their execution lock; truncated display status cannot establish that guard.
 Push names the remote/ref registration, exact local object and reviewed expected remote object
 (`null` means expected absent). The server rechecks remote state and enforces the expected value
 at the remote ref-update boundary; no unchecked force update. Automatic fetch, background push,
@@ -652,6 +657,14 @@ Git is unusable. The executable path never leaves the server.
   contain only server-written keys (`core.repositoryformatversion`, `core.filemode`,
   `core.bare=true`, `core.ignorecase`, `core.precomposeunicode`, `core.logallrefupdates`,
   `extensions.objectformat`, `user.*`). Otherwise the read fails with `REPOSITORY_CONFIG_UNTRUSTED`.
+  Before config is read, the repository root and its ancestors must be non-linked directories;
+  a no-follow metadata walk rejects links and special files, including linked `info`, nested refs
+  and loose object storage. The walk is bounded to 100,000 entries and 20 seconds (exhaustion is
+  `REPOSITORY_UNAVAILABLE`). The registered worktree root/ancestors must also be non-linked.
+  These checks do not replace admission: D8.2 must select registered storage under a trusted
+  managed root, isolate imported content (including shared writable inodes), validate the object
+  graph and enforce ownership/locking against concurrent filesystem replacement. Inspection is
+  not an arbitrary-host-path admission API or a race-safe source snapshot.
   Alternates, `commondir` and shallow files are `REPOSITORY_UNSUPPORTED`. Hooks never run because
   of the empty `core.hooksPath`. Attribute files can name a filter, but no driver exists. Built-in
   conversions need no driver (`text`/`eol` line endings, `ident`, `working-tree-encoding`), so
@@ -661,7 +674,10 @@ Git is unusable. The executable path never leaves the server.
   or contacts a remote. No exceptions exist yet. Any future hook, filter, submodule or helper
   support needs its own reviewed design and capability.
 - **States.** A read reports `unborn`, `attached`, `detached`, `dirty` and the object format,
-  without assuming a branch name. A missing or linked repository is `REPOSITORY_UNSUPPORTED`. A ref
+  without assuming a branch name. Symbolic HEAD must name a valid `refs/heads/...` branch;
+  other namespaces are `REPOSITORY_UNSUPPORTED`, not attached or unborn branches. Ref display is
+  bounded to 200 entries with explicit truncation; attached HEAD's matching ref is retained within
+  that bound even if it sorts after the other refs. A missing or linked repository is `REPOSITORY_UNSUPPORTED`. A ref
   that does not resolve, or a non-commit HEAD, is `REPOSITORY_CORRUPT`. Bounded failures are
   `REPOSITORY_UNAVAILABLE`.
 
