@@ -3,27 +3,32 @@ package decompengine.oracle.structural
 import decompengine.oracle.core.OracleArtifacts
 import decompengine.oracle.core.OracleJson
 import decompengine.oracle.core.StrictJsonLimits
+import decompengine.oracle.gcc.GccBundledInferredInterfaceSnapshot
 import decompengine.project.NativeInferredInterfaceFunctionV1
 import decompengine.project.NativeInferredInterfaceRecordV1
 import decompengine.project.NativeInferredInterfaceSummaryV1
 import decompengine.project.NativeInferredInterfaceObservationsV1
+import decompengine.project.NativeInferredInterfaceObservationLimitsV1
 import decompengine.project.NativeInterfaceFunctionV1
 import decompengine.project.NativeInterfaceModelFunctionV1
 import decompengine.project.NativeInterfaceObservedFunctionV1
 import decompengine.project.NativeInterfaceRecordV1
 import decompengine.project.NativeInterfaceObservationSummaryV1
+import decompengine.project.NativeInterfaceObservationsV1
 import decompengine.project.NativeInterfaceTypeV1
 import decompengine.project.NativeInterfaceStorageV1
 import decompengine.project.NativeInterfaceTypeEdgeV1
 import decompengine.project.NativeInterfaceTypeNodeV1
 import decompengine.project.NativeInterfaceTypeRootV1
 import java.nio.charset.StandardCharsets
+import java.io.ByteArrayInputStream
 import java.security.MessageDigest
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.JsonNull
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
+import kotlinx.serialization.json.booleanOrNull
 
 /**
  * Deterministic structural-fact candidates projected from the separately validated native listing
@@ -44,6 +49,7 @@ class RecoveredAbiInterfaceCandidateProjectionV1 private constructor(private val
         private const val MAXIMUM_MAPPING_REFERENCES = 1_000_000L
         private const val MAXIMUM_OUTPUT_BYTES = 64 * 1024 * 1024
         private const val MAXIMUM_NODES = 1_000_000
+        private const val MAXIMUM_CAPTURE_CANDIDATE_BYTES = 128L * 1024 * 1024
         private const val CALLING_CONVENTION = "function.calling-convention"
         private const val PROTOTYPE = "function.prototype"
         private const val VARIADIC = "function.variadic"
@@ -57,6 +63,65 @@ class RecoveredAbiInterfaceCandidateProjectionV1 private constructor(private val
             maximumStringBytes = 4096,
             maximumTotalStringBytes = maximumBytes,
         )
+
+        /**
+         * Revalidates the exact immutable capture bytes before constructing typed candidate rows.
+         * The returned projection remains untrusted and carries no oracle or scoring authority.
+         */
+        internal fun projectCapturedSnapshot(
+            snapshot: GccBundledInferredInterfaceSnapshot,
+            target: StructuralTargetAbiV1,
+            limits: RecoveredAbiInterfaceCandidateProjectionLimitsV1 = RecoveredAbiInterfaceCandidateProjectionLimitsV1(),
+            checkpoint: () -> Unit = {},
+        ): RecoveredAbiInterfaceCandidateProjectionV1 {
+            checkpoint()
+            val modelBytes = snapshot.programModelBytes
+            val listingManifest = snapshot.listingManifestBytes
+            val listingBytes = snapshot.listingObservationsBytes
+            val inferredManifest = snapshot.inferredManifestBytes
+            val inferredBytes = snapshot.inferredObservationsBytes
+            val totalBytes = listOf(modelBytes.size, listingManifest.size, listingBytes.size, inferredManifest.size, inferredBytes.size)
+                .fold(0L) { total, size -> Math.addExact(total, size.toLong()) }
+            require(totalBytes <= MAXIMUM_CAPTURE_CANDIDATE_BYTES) {
+                "authenticated interface snapshot exceeds bounded candidate materialization bytes"
+            }
+            val rawLimits = NativeInferredInterfaceObservationLimitsV1(
+                maximumCombinedBytes = MAXIMUM_CAPTURE_CANDIDATE_BYTES,
+                maximumModelBytes = MAXIMUM_CAPTURE_CANDIDATE_BYTES.toInt(),
+                maximumFunctions = limits.maximumNativeFunctions,
+                maximumParameters = limits.maximumParameters.toInt(),
+                maximumGraphNodes = RecoveredAbiTypeGraphClassifierV1.maximumNodes,
+                maximumGraphEdges = RecoveredAbiTypeGraphClassifierV1.maximumEdges,
+                maximumGraphWork = RecoveredAbiTypeGraphClassifierV1.maximumWork.toLong(),
+            )
+            val listingRecords = ArrayList<NativeInterfaceRecordV1>()
+            val listingSummary = NativeInterfaceObservationsV1.validate(
+                listingManifest, snapshot.summary.listing.bindings, modelBytes, rawLimits.listingLimits(), checkpoint,
+                { ByteArrayInputStream(listingBytes) },
+            ) { record ->
+                checkpoint()
+                require(listingRecords.size.toLong() < limits.maximumNativeFunctions.toLong() + 524_288L) {
+                    "authenticated listing candidate record retention exceeds its bound"
+                }
+                listingRecords += record
+            }
+            require(listingSummary == snapshot.summary.listing) { "captured listing bytes differ from their authenticated summary" }
+            val inferredRecords = ArrayList<NativeInferredInterfaceRecordV1>()
+            val inferredSummary = NativeInferredInterfaceObservationsV1.validate(
+                inferredManifest, snapshot.summary.bindings, modelBytes, listingManifest, rawLimits, checkpoint,
+                { ByteArrayInputStream(listingBytes) }, { ByteArrayInputStream(inferredBytes) },
+            ) { record ->
+                checkpoint()
+                require(inferredRecords.size.toLong() < limits.maximumNativeFunctions.toLong() +
+                    RecoveredAbiTypeGraphClassifierV1.maximumNodes + RecoveredAbiTypeGraphClassifierV1.maximumEdges +
+                    RecoveredAbiTypeGraphClassifierV1.maximumRoots) {
+                    "authenticated inference candidate record retention exceeds its bound"
+                }
+                inferredRecords += record
+            }
+            require(inferredSummary == snapshot.summary) { "captured inferred bytes differ from their authenticated summary" }
+            return project(listingSummary, listingRecords, inferredSummary, inferredRecords, target, limits, checkpoint)
+        }
 
         fun project(
             listing: NativeInterfaceObservationSummaryV1,
@@ -275,8 +340,17 @@ class RecoveredAbiInterfaceCandidateProjectionV1 private constructor(private val
                 "candidate projection cannot fit its conservative serialized output bound"
             }
 
+            val listingTypesByOrdinal = uniqueBy(
+                listingRecords.filterIsInstance<NativeInterfaceTypeV1>(), NativeInterfaceTypeV1::ordinal, "listing type ordinal",
+            )
             val listingByEntry = uniqueBy(listingFunctions, NativeInterfaceFunctionV1::entry, "listing function entry")
             val inferredByEntry = uniqueBy(inferredFunctions, NativeInferredInterfaceFunctionV1::entry, "inferred function entry")
+            val classifiedRoots = RecoveredAbiTypeGraphClassifierV1.classify(
+                inferredRecords, target, inferred.dataOrganization,
+                minOf(limits.maximumParameters.toLong() * 4L + limits.maximumNativeFunctions.toLong() * 2L,
+                    3_393_216L).coerceAtLeast(1L).toInt(), checkpoint,
+            )
+            val listingFunctionOrdinals = listingFunctions.withIndex().associate { it.value.entry to it.index }
             val observedByEntry = uniqueBy(listing.observedFunctions, NativeInterfaceObservedFunctionV1::entry, "observed function entry")
             val modelById = uniqueBy(listing.modelFunctions, NativeInterfaceModelFunctionV1::id, "model function ID")
             require(listingByEntry.keys == observedByEntry.keys && inferredByEntry.keys == observedByEntry.keys) {
@@ -369,14 +443,44 @@ class RecoveredAbiInterfaceCandidateProjectionV1 private constructor(private val
                     addFact(VARIADIC, "variadic", "recovered-unknown", null, reason, "inferred+listing")
                 }
 
-                addFact(RETURN_CLASS, "return", "recovered-unknown", null,
-                    if (entry == null) "native-function-not-uniquely-mapped" else "recovered-native-type-abi-classifier-is-not-available",
-                    "listing+inferred")
+                val functionOrdinal = listingFunction?.let { listingFunctionOrdinals[it.entry] }
+                val returnCandidate = listingFunction?.returned?.let { returned ->
+                    if (functionOrdinal == null || listingFunction.customStorage || returned.forcedIndirect || returned.autoParameterType != null) null
+                    else classifiedFormalRoot(classifiedRoots, functionOrdinal, "return-formal", -1, returned.formalType, listingTypesByOrdinal, target)
+                }
+                if (returnCandidate?.value != null) {
+                    addFact(RETURN_CLASS, "return", "recovered", returnCandidate.value,
+                        returnCandidate.reason, "listing-formal-type-graph")
+                } else {
+                    val reason = when {
+                        entry == null -> "native-function-not-uniquely-mapped"
+                        listingFunction?.customStorage == true -> "custom-function-storage-can-override-target-abi-passing"
+                        listingFunction?.returned?.forcedIndirect == true -> "return-forced-indirect-role-is-not-normalized"
+                        listingFunction?.returned?.autoParameterType != null -> "return-auto-role-is-not-a-source-return-value"
+                        listingFunction?.returned == null -> "listing-return-formal-type-is-absent"
+                        else -> returnCandidate?.reason ?: "listing-return-formal-type-graph-is-unavailable-or-unsupported"
+                    }
+                    addFact(RETURN_CLASS, "return", "recovered-unknown", null, reason, "listing-formal-type-graph")
+                }
                 listingFunction?.parameters.orEmpty().sortedBy { it.ordinal }.forEach { parameter ->
                     checkpoint()
-                    addFact(PARAMETER_CLASS, "parameter:${parameter.ordinal}", "recovered-unknown", null,
-                        if (entry == null) "native-function-not-uniquely-mapped" else "listing-parameter-order-is-retained-but-recovered-native-type-abi-classifier-is-not-available",
-                        "listing")
+                    val parameterCandidate = if (functionOrdinal == null || listingFunction.customStorage || parameter.autoParameter ||
+                        parameter.forcedIndirect || parameter.autoParameterType != null) null else classifiedFormalRoot(
+                        classifiedRoots, functionOrdinal, "parameter-formal", parameter.ordinal, parameter.formalType, listingTypesByOrdinal, target,
+                    )
+                    if (parameterCandidate?.value != null) {
+                        addFact(PARAMETER_CLASS, "parameter:${parameter.ordinal}", "recovered", parameterCandidate.value,
+                            parameterCandidate.reason, "listing-formal-type-graph")
+                    } else {
+                        val reason = when {
+                            entry == null -> "native-function-not-uniquely-mapped"
+                            listingFunction?.customStorage == true -> "custom-function-storage-can-override-target-abi-passing"
+                            parameter.autoParameter || parameter.autoParameterType != null -> "automatic-this-or-hidden-role-is-not-a-source-formal-parameter"
+                            parameter.forcedIndirect -> "parameter-forced-indirect-role-is-not-normalized"
+                            else -> parameterCandidate?.reason ?: "listing-formal-type-graph-is-unavailable-or-unsupported"
+                        }
+                        addFact(PARAMETER_CLASS, "parameter:${parameter.ordinal}", "recovered-unknown", null, reason, "listing-formal-type-graph")
+                    }
                 }
 
                 val rawListing = listingFunction?.let { function -> obj(
@@ -476,6 +580,69 @@ class RecoveredAbiInterfaceCandidateProjectionV1 private constructor(private val
         }
 
         private data class NormalizationResult(val value: JsonObject?, val reason: String)
+
+        private data class TypeCandidateResult(val value: JsonObject?, val reason: String)
+
+        /** Promote only exact listing formal roots; inferred graph roots have no cross-channel join. */
+        private fun classifiedFormalRoot(
+            classified: Map<RecoveredAbiTypeGraphClassifierV1.RootKey, RecoveredAbiTypeGraphClassifierV1.Result>,
+            functionOrdinal: Int,
+            role: String,
+            slot: Int,
+            typeOrdinal: Int?,
+            listingTypesByOrdinal: Map<Int, NativeInterfaceTypeV1>,
+            target: StructuralTargetAbiV1,
+        ): TypeCandidateResult {
+            if (typeOrdinal == null) return TypeCandidateResult(null, "listing-formal-type-reference-is-absent")
+            val exactType = listingTypesByOrdinal[typeOrdinal]
+                ?: return TypeCandidateResult(null, "listing-formal-type-ordinal-is-not-unique")
+            val key = RecoveredAbiTypeGraphClassifierV1.RootKey(
+                RecoveredAbiTypeGraphClassifierV1.ScopeKey("listing", functionOrdinal), role, slot,
+            )
+            val result = classified[key] ?: return TypeCandidateResult(null, "exact-listing-formal-graph-root-is-absent-or-ambiguous")
+            if (result.root.listingTypeOrdinal != typeOrdinal || result.root.node == null) {
+                return TypeCandidateResult(null, "formal-root-does-not-bind-the-exact-listing-type-occurrence")
+            }
+            val nativeNode = result.nativeNode ?: return TypeCandidateResult(null, "formal-root-native-node-is-absent")
+            val expectedKinds = if (exactType.kind == "other") setOf("bitfield", "unsupported") else setOf(exactType.kind)
+            if (nativeNode.kind !in expectedKinds || nativeNode.nativeClass != exactType.nativeClass ||
+                nativeNode.length != exactType.length || nativeNode.alignedLength != exactType.alignedLength ||
+                nativeNode.alignment != exactType.alignment || nativeNode.notYetDefined != exactType.notYetDefined ||
+                nativeNode.undefined != exactType.undefined) {
+                return TypeCandidateResult(null, "formal-root-typed-layout-disagrees-with-exact-listing-occurrence")
+            }
+            if (exactType.kind == "integer") {
+                val graphSigned = (nativeNode.details["signed"] as? JsonPrimitive)?.booleanOrNull
+                val listingSigned = when (exactType.signedness) { "signed" -> true; "unsigned" -> false; else -> null }
+                if (listingSigned == null || graphSigned != listingSigned) {
+                    return TypeCandidateResult(null, "integer-formal-signedness-is-not-proved-by-both-listing-channels")
+                }
+            }
+            if (result.shape == null || result.classification?.known != true) {
+                return TypeCandidateResult(null, result.reason)
+            }
+            // Graph metadata was already checked by the authenticated raw validator. Keep a local
+            // consistency guard for caller-constructed candidate DTOs, without treating it as auth.
+            if (result.shape.byteSize != exactType.length.toLong() || result.shape.alignmentBytes != exactType.alignment.toLong()) {
+                return TypeCandidateResult(null, "formal-root-layout-disagrees-with-its-listing-occurrence")
+            }
+            val bits = result.classification.classes.map { it.name }
+            if (bits.isEmpty()) return TypeCandidateResult(null, "target-classifier-produced-no-ABI-classes")
+            val value = obj(
+                "source" to str("type-token:${result.typeTokenSha256}"),
+                "abi" to obj(
+                    "callingConvention" to JsonNull,
+                    "classes" to JsonArray(bits.map(::str)),
+                    "sizeBits" to JsonPrimitive(Math.multiplyExact(result.shape.byteSize, 8L)),
+                    "alignmentBits" to JsonPrimitive(Math.multiplyExact(result.shape.alignmentBytes, 8L)),
+                    "variadic" to JsonNull,
+                ),
+            )
+            validateStructuralValue(value, "candidate $role ABI class", if (role == "return-formal") RETURN_CLASS else PARAMETER_CLASS,
+                target, StructuralRecoveryV1Limits())
+            return TypeCandidateResult(value,
+                "exact-listing-formal-type-root-classified-from-complete-capture-local-layout-under-explicit-sysv-amd64-target")
+        }
 
         private fun normalizedConvention(function: NativeInterfaceFunctionV1, target: StructuralTargetAbiV1): NormalizationResult {
             val convention = function.convention

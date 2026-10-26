@@ -12,8 +12,75 @@ import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
+import kotlinx.serialization.json.JsonPrimitive
+import kotlinx.serialization.json.JsonNull
 
 class RecoveredAbiInterfaceCandidateProjectionV1Test {
+    @Test
+    fun `complete listing formal graph root yields a capture local ABI candidate without HighFunction slot joins`() {
+        val base = fixture()
+        val parameter = NativeInterfaceParameterV1(0, "x", "USER_DEFINED", false, null, false, 0, 0,
+            NativeInterfaceStorageV1("none", null, null, null, null, emptyList()))
+        val function = base.listingFunction.copy(parameterCount = 1, parameters = listOf(parameter))
+        val listing = base.listing.copy(scan = base.listing.scan.copy(parameters = 1, types = 1))
+        val inferred = base.inferred.copy(
+            listing = listing,
+            dataOrganization = JsonObject(mapOf(
+                "bigEndian" to JsonPrimitive(false), "pointerSize" to JsonPrimitive(8), "pointerShift" to JsonPrimitive(0),
+                "charSize" to JsonPrimitive(1), "shortSize" to JsonPrimitive(2), "integerSize" to JsonPrimitive(4),
+                "longSize" to JsonPrimitive(8), "longLongSize" to JsonPrimitive(8), "floatSize" to JsonPrimitive(4),
+                "doubleSize" to JsonPrimitive(8), "sizeAlignments" to JsonArray(emptyList()),
+            )),
+            scan = base.inferred.scan.copy(roots = 1, graphNodes = 1, graphEdges = 0, graphWork = 5),
+        )
+        val type = NativeInterfaceTypeV1(0, "integer", "ghidra.program.model.data.IntegerDataType", "int", "/int",
+            4, 4, 4, false, false, "signed")
+        val node = NativeInterfaceTypeNodeV1(NativeInterfaceGraphScopeV1("listing", 0), 0,
+            type.nativeClass, "integer", 4, 4, 4, false, false, false, "terminal", 0,
+            JsonObject(mapOf("signed" to JsonPrimitive(true))))
+        val root = NativeInterfaceTypeRootV1(node.scope, "parameter-formal", 0, 0, 0)
+        val document = RecoveredAbiInterfaceCandidateProjectionV1.project(
+            listing, listOf(function, type), inferred, listOf(base.inferredFunction, node, root), base.target,
+        ).document
+        val entity = document.getValue("candidateEntities").jsonArray.single().jsonObject
+        val fact = entity.getValue("facts").jsonArray.map { it.jsonObject }
+            .single { it.getValue("dimension").jsonPrimitive.content == "function.parameter-abi-class" }
+        assertEquals("recovered", fact.getValue("state").jsonPrimitive.content)
+        val value = fact.getValue("value").jsonObject
+        assertTrue(value.getValue("source").jsonPrimitive.content.startsWith("type-token:"))
+        assertEquals(listOf("INTEGER"), value.getValue("abi").jsonObject.getValue("classes").jsonArray.map { it.jsonPrimitive.content })
+        assertEquals("32", value.getValue("abi").jsonObject.getValue("sizeBits").jsonPrimitive.content)
+        assertEquals("untrusted-component-candidate", document.getValue("scope").jsonPrimitive.content)
+    }
+
+    @Test
+    fun `automatic or unsupported formal roots remain explicit unknown candidates`() {
+        val base = fixture()
+        val parameter = NativeInterfaceParameterV1(0, "this", "USER_DEFINED", true, "THIS", false, 0, 0,
+            NativeInterfaceStorageV1("none", null, null, "THIS", null, emptyList()))
+        val function = base.listingFunction.copy(parameterCount = 1, autoParameterCount = 1, parameters = listOf(parameter))
+        val listing = base.listing.copy(scan = base.listing.scan.copy(parameters = 1, autoParameters = 1, types = 1))
+        val inferred = base.inferred.copy(listing = listing,
+            dataOrganization = JsonObject(mapOf(
+                "bigEndian" to JsonPrimitive(false), "pointerSize" to JsonPrimitive(8), "pointerShift" to JsonPrimitive(0),
+                "charSize" to JsonPrimitive(1), "shortSize" to JsonPrimitive(2), "integerSize" to JsonPrimitive(4),
+                "longSize" to JsonPrimitive(8), "longLongSize" to JsonPrimitive(8), "floatSize" to JsonPrimitive(4),
+                "doubleSize" to JsonPrimitive(8), "sizeAlignments" to JsonArray(emptyList()),
+            )),
+            scan = base.inferred.scan.copy(roots = 1, graphNodes = 1, graphWork = 5))
+        val type = NativeInterfaceTypeV1(0, "unsupported", "unsupported", "unknown", "/unknown", 4, 4, 4, false, false, null)
+        val node = NativeInterfaceTypeNodeV1(NativeInterfaceGraphScopeV1("listing", 0), 0,
+            "unsupported", "unsupported", 4, 4, 4, false, false, false, "terminal", 0, JsonObject(emptyMap()))
+        val root = NativeInterfaceTypeRootV1(node.scope, "parameter-formal", 0, 0, 0)
+        val document = RecoveredAbiInterfaceCandidateProjectionV1.project(
+            listing, listOf(function, type), inferred, listOf(base.inferredFunction, node, root), base.target,
+        ).document
+        val fact = document.getValue("candidateEntities").jsonArray.single().jsonObject.getValue("facts").jsonArray
+            .map { it.jsonObject }.single { it.getValue("dimension").jsonPrimitive.content == "function.parameter-abi-class" }
+        assertEquals("recovered-unknown", fact.getValue("state").jsonPrimitive.content)
+        assertEquals(JsonNull, fact.getValue("value"))
+    }
+
     @Test
     fun `projection preserves matched census and only emits exact convention and paired varargs candidates`() {
         val fixture = fixture()
