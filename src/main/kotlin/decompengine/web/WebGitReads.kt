@@ -99,30 +99,9 @@ internal class WebGitReads(private val repositories: () -> ManagedGitRepositorie
         }
     }
 
-    private fun conflictFile(entry: decompengine.git.GitConflictEntry, worktreeId: String) = buildJsonObject {
-        put("fileId", entry.path.fileId(worktreeId)); put("path", entry.path.display); put("pathEscaped", entry.path.exact == null)
-        put("baseObjectId", entry.baseObjectId?.let(::JsonPrimitive) ?: JsonNull)
-        put("oursObjectId", entry.oursObjectId?.let(::JsonPrimitive) ?: JsonNull)
-        put("theirsObjectId", entry.theirsObjectId?.let(::JsonPrimitive) ?: JsonNull)
-    }
-
-    /** `G/conflicts` (#597): bounded live pages covering every unresolved path. */
-    private fun conflicts(jobId: String, repositoryId: String, worktree: String?, offset: Int): JsonObject {
-        val view = repositories().conflicts(jobId, repositoryId, worktree, offset)
-        return buildJsonObject {
-            put("repositoryId", repositoryId); put("worktreeId", view.worktreeId); put("mergeInProgress", view.mergeInProgress)
-            put("integration", view.integration?.let { record ->
-                buildJsonObject {
-                    put("operationId", record.operationId); put("strategy", record.strategy.wireName); put("branch", record.branch)
-                    put("headBeforeObjectId", record.headBefore); put("targetObjectId", record.target)
-                    put("trackingRefName", record.trackingRef); put("startedAt", record.startedAt.toString())
-                }
-            } ?: JsonNull)
-            put("files", JsonArray(view.files.map { conflictFile(it, view.worktreeId) }))
-            put("offset", view.offset); put("totalCount", view.totalCount)
-            put("nextOffset", view.nextOffset?.let(::JsonPrimitive) ?: JsonNull)
-        }
-    }
+    /** `G/conflicts` (#597): count- and encoded-byte-bounded live pages covering every path. */
+    private fun conflicts(jobId: String, repositoryId: String, worktree: String?, offset: Int): JsonObject =
+        webGitConflicts(repositoryId, repositories().conflicts(jobId, repositoryId, worktree, offset))
 
     /** `G/conflicts/{fileId}` (#597): bounded text of each side; binary or large content is honestly unsupported. */
     fun conflictDetail(exchange: HttpExchange, jobId: String, repositoryId: String, fileId: String) {
@@ -133,7 +112,7 @@ internal class WebGitReads(private val repositories: () -> ManagedGitRepositorie
         try {
             val view = repositories().conflictFile(jobId, repositoryId, worktree, fileId)
             sendWebApiResponse(exchange, 200, "gitConflictFile",
-                webGitConflictDetail(repositoryId, view, conflictFile(view.entry, view.worktreeId)))
+                webGitConflictDetail(repositoryId, view, webGitConflictEntry(view.entry, view.worktreeId)))
         } catch (failure: ManagedGitException) { throw webGitDenied(failure) }
     }
 

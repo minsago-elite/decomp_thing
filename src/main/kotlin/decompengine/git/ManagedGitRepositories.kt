@@ -992,7 +992,7 @@ class ManagedGitRepositories(
                         requireNoLease(located)
                     }
                 }
-                null to "Saved the resolution of ${entry.path.display}. It is not staged; mark it resolved when the review is complete."
+                null to "Saved the resolution of ${entry.path.fileId(located.worktreeId)}. It is not staged; mark it resolved when the review is complete."
             }
             GitOperationAction.CONFLICT_COMPLETE -> {
                 val count = activity.withStableRuns(located.record.jobId) { runs ->

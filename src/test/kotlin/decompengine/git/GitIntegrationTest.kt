@@ -703,6 +703,30 @@ class GitIntegrationTest {
         }
     }
 
+    @Test fun `long escaped conflict paths stay selectable and keep operation records readable`(): Unit = Fixture().use { f ->
+        val path = ("p" + "\u0001".repeat(99) + "/").repeat(15) + "conflict.c"
+        val source = f.seed.resolve(path)
+        Files.createDirectories(source.parent)
+        Files.writeString(source, "line one\nline two\n")
+        f.remoteCommit("admitted long path")
+        f.cloned()
+        val fileId = f.conflictOn(path)
+        val detail = service.conflictFile(jobId, repositoryId, null, fileId)
+        assertTrue(detail.entry.path.display.length > 8000)
+        val saved = sync(GitOperationAction.CONFLICT_SAVE,
+            mapOf("fileId" to fileId, "expectedSha256" to detail.currentSha256, "resolution" to "ours"))
+        assertEquals(GitOperationState.COMPLETED, saved.state)
+        assertTrue(saved.message.length <= 500)
+        service.close(); service = f.open()
+        assertEquals(GitOperationState.COMPLETED, service.operation(jobId, repositoryId, saved.operationId).state)
+        val current = service.conflictFile(jobId, repositoryId, null, fileId)
+        assertEquals(detail.ours, current.current)
+        assertEquals(GitOperationState.COMPLETED, sync(GitOperationAction.CONFLICT_COMPLETE, content = "$fileId ${current.currentSha256}\n").state)
+        assertTrue(service.conflicts(jobId, repositoryId, null).files.isEmpty())
+        assertEquals(GitOperationState.COMPLETED, sync(GitOperationAction.MERGE_ABORT).state)
+        assertEquals(detail.ours, Files.readString(f.workTree().resolve(path)))
+    }
+
     @Test fun `the content digest is streamed and matches the file bytes`(): Unit = Fixture().use { f ->
         val file = f.repositories.root.resolve("large.bin")
         val bytes = ByteArray(3 * 1024 * 1024 + 17) { (it % 251).toByte() }

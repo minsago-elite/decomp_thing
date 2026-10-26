@@ -7,6 +7,7 @@ import com.sun.net.httpserver.HttpPrincipal
 import decompengine.git.GitConflictEntry
 import decompengine.git.GitPath
 import decompengine.git.ManagedGitRepositories.GitConflictFileView
+import decompengine.git.ManagedGitRepositories.GitConflictView
 import kotlinx.serialization.json.*
 import java.io.ByteArrayOutputStream
 import java.io.InputStream
@@ -39,6 +40,69 @@ class WebGitConflictDetailTest {
         assertTrue(data.getValue("supported").jsonPrimitive.boolean)
         for (side in listOf("base", "ours", "theirs", "current")) assertEquals(source, data.getValue(side).jsonPrimitive.content)
     }
+
+    @Test fun `admitted long escaped paths produce bounded distinct wire labels`() {
+        val parent = ("p" + "\u0001".repeat(99) + "/").repeat(15)
+        val entries = (0 until 200).map { conflictEntry(parent + "conflict$it.c") }
+        assertTrue(entries.first().path.display.length > 8000)
+        val view = GitConflictView(worktreeId, null, true, entries, 0, entries.size, null)
+        val exchange = ConflictMemoryExchange()
+        val page = webGitConflicts(repositoryId, view)
+        sendWebApiResponse(exchange, 200, "gitConflicts", page)
+        assertTrue(exchange.output.size() < 1024 * 1024)
+        val files = page.getValue("files").jsonArray
+        assertEquals(200, files.size)
+        assertEquals(JsonNull, page["nextOffset"])
+        assertEquals(200, files.map { it.jsonObject.getValue("path").jsonPrimitive.content }.toSet().size)
+        for ((index, file) in files.withIndex()) {
+            val data = file.jsonObject
+            val path = data.getValue("path").jsonPrimitive.content
+            assertTrue(path.length <= 1024)
+            assertTrue(path.contains("[truncated; file_"))
+            assertTrue(data.getValue("pathEscaped").jsonPrimitive.boolean)
+            assertEquals(entries[index].path.fileId(worktreeId), data.getValue("fileId").jsonPrimitive.content)
+        }
+    }
+
+    @Test fun `encoded byte pages advance by exactly the returned entries without omissions`() {
+        val entries = (0 until 19).map { conflictEntry("\u20ac".repeat(1800) + "/file$it.c") }
+        val found = mutableListOf<String>()
+        var offset = 0
+        do {
+            val view = GitConflictView(worktreeId, null, true, entries.drop(offset), offset, entries.size, null)
+            val page = webGitConflicts(repositoryId, view, byteLimit = 7000)
+            assertTrue(page.toString().toByteArray(Charsets.UTF_8).size <= 7000)
+            val files = page.getValue("files").jsonArray
+            assertTrue(files.size in 1..2, "the byte budget, not the item count, must end this page")
+            assertEquals(offset, page.getValue("offset").jsonPrimitive.int)
+            found += files.map { it.jsonObject.getValue("fileId").jsonPrimitive.content }
+            offset += files.size
+            assertEquals(if (offset < entries.size) JsonPrimitive(offset) else JsonNull, page["nextOffset"])
+        } while (offset < entries.size)
+        assertEquals(entries.map { it.path.fileId(worktreeId) }, found)
+    }
+
+    @Test fun `bounded path labels also apply to details and never split surrogate pairs`() {
+        val entry = conflictEntry("\uD83D\uDE00".repeat(1000) + "/a.c")
+        val file = webGitConflictEntry(entry, worktreeId)
+        val path = file.getValue("path").jsonPrimitive.content
+        assertTrue(path.length <= 1024)
+        assertTrue(path.contains("[truncated;"))
+        assertTrue(path.codePoints().noneMatch { it in 0xD800..0xDFFF })
+        val view = GitConflictFileView(worktreeId, entry, "base", "ours", "theirs", "current", "ef".repeat(32), 7)
+        val detail = webGitConflictDetail(repositoryId, view, file)
+        assertEquals(file, detail["file"])
+        assertTrue(detail.getValue("supported").jsonPrimitive.boolean)
+        assertEquals("ours", detail.getValue("ours").jsonPrimitive.content)
+        val ordinary = webGitConflictEntry(conflictEntry("src/main.c"), worktreeId)
+        assertEquals("src/main.c", ordinary.getValue("path").jsonPrimitive.content)
+        assertFalse(ordinary.getValue("pathEscaped").jsonPrimitive.boolean)
+        assertTrue(webGitConflictEntry(conflictEntry("src/a\tb.c"), worktreeId).getValue("pathEscaped").jsonPrimitive.boolean)
+    }
+
+    private val repositoryId = "repo_" + "12".repeat(16)
+    private val worktreeId = "worktree_" + "34".repeat(16)
+    private fun conflictEntry(path: String) = GitConflictEntry(GitPath.of(path.toByteArray()), "a".repeat(40), "b".repeat(40), "c".repeat(40))
 
     @Test fun `the shared response encoder still refuses oversized responses`() {
         assertFailsWith<IllegalStateException> {
