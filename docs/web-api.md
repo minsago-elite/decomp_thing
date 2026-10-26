@@ -1779,7 +1779,12 @@ and polling page (so live and replayed events are identical), legacy JSON, the s
 download and support exports. Persisted failure prose is passed through the same policy before it is stored. It
 replaces values of credential-named environment variables and long opaque configured values with `[redacted]`
 (short generic environment values such as `1` or `development` are deliberately not treated as secrets, because
-substituting them would corrupt public vocabulary), credential syntax (authorization headers, bearer tokens,
+substituting them would corrupt public vocabulary). Nonempty credential-named environment values outside
+8–4096 characters are an unsupported configuration: listener policy construction fails with a fixed, secret-free
+error rather than silently excluding a known credential. This includes short passwords/tokens (1–7 characters);
+empty optional values remain allowed. Redacted names and common bounded prose fields that expand beyond their
+public field bound are withheld as a whole (`[redacted]`), never returned as over-limit DTO values.
+The policy also replaces credential syntax (authorization headers, bearer tokens,
 `password=`/`token=`-style assignments, URL user information and well-known token prefixes) and private host
 paths (the storage root, home, temporary, working and Java directories plus the generic per-user and temporary
 directory families) with `[private-path]`. Closed-syntax protocol fields (`*Id`, `*Cursor`, `*Token`, `*Sha256`,
@@ -1795,12 +1800,25 @@ finishes, including refused and failed requests: `session.start`, `session.end`,
 `job.delete`, `run.start`, `run.cancel`, `run.recover`, `run.progress-pin`, `agent.preflight`,
 `operator.auth-inspection` and `operator.auth-inspection-cancel` (legacy) and `support.export`. An entry records a sequence, time, the response request
 ID, the actor (`browser_session` with a domain-separated SHA-256 digest of the authorization-owned session
-identity, or `unauthenticated`), the action, the target job/run, the client's strong `If-Match` version and the
-version the response reported, the outcome (`accepted`, `replayed`, `rejected` for 4xx, `failed` for 5xx) with its
-status and public error code. Every stored field is closed syntax, so no credential, cookie, CSRF token, filename,
-request body or host path can be recorded. Retention is two fsync'd segments of 2048 entries; rotation advances an
-exact omitted-entry count, a torn final append is discarded on reopen and a write that cannot be made durable is
-counted as unrecorded (never thrown into the request). Auditing never creates job storage: entries made before the store root exists (session exchanges and refused requests) are held in a bounded 256-entry buffer and written first, in order, once storage appears. Entries are sequenced in recording order, as each handler exits just after its response, so a client that reads the audit immediately after a response may not see that entry yet. New mutation routes are audited by adding their method and
+identity, or `unauthenticated`), the action, the target job/run, an `ifmatch_`-prefixed, domain-separated SHA-256
+commitment to a bounded strong `If-Match` value (never the caller's header bytes), and the server version the
+response reported, the outcome (`accepted`, `replayed`, `rejected` for 4xx, `failed` for 5xx) with its
+status and public error code. Canonical server run IDs (`run_` plus 32 lowercase hexadecimal digits) keep their
+identity; other requested run IDs become `requested_run_`-prefixed domain-separated commitments. Configured-sensitive
+job IDs and result versions are omitted, and configured-sensitive run IDs are committed before append. Closed syntax
+is not treated as proof that caller input is credential-free; raw cookies, CSRF tokens, filenames, request bodies
+and host paths are never intentionally collected. Retention is two fsync'd segments of 2048 entries. Server-wide
+`omittedEntries` counts the rotated prefix plus the returned-window omissions; for a job scope it counts only
+known matching window omissions (rotated job membership is unknown). Rotation or window truncation sets
+`complete:false`, including an empty job scope whose earlier membership is unknown. A torn final append is
+discarded on reopen. Each append is preceded by an fsync'd intent flag; failed/interrupted appends leave sticky
+loss evidence, so restart and later successful appends cannot strengthen the history to complete. The live
+`unrecordedEntries` count is exact for observed failures; after reopening, sticky loss/uncertainty reports a
+lower bound of one, not an invented exact count. This state file remains alongside the segments. Failures before
+even the intent can be made durable (e.g. storage inaccessible) can only be reported by the live process.
+Segment, recovery, rotation and intent operations use no-follow secure directory handles and reject parent
+replacement; filesystem providers without secure handles report incomplete auditing instead of falling back to
+unsafe path opens. Recording failures never throw into the request. Auditing never creates job storage: entries made before the store root exists (session exchanges and refused requests) are held in a bounded 256-entry buffer and written first, in order, once storage appears. Entries are sequenced in recording order, as each handler exits just after its response, so a client that reads the audit immediately after a response may not see that entry yet. New mutation routes are audited by adding their method and
 route to `WebAuditRecorder.versionedAction`.
 
 **Support export.** `GET /api/v1/support-export` requires an explicit scope: `scope=server` (runtime, limits,

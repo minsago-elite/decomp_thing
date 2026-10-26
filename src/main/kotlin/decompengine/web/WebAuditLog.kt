@@ -14,7 +14,10 @@ import java.nio.channels.FileChannel
 import java.nio.file.Files
 import java.nio.file.LinkOption.NOFOLLOW_LINKS
 import java.nio.file.Path
-import java.nio.file.StandardCopyOption
+import java.nio.file.SecureDirectoryStream
+import java.nio.file.NoSuchFileException
+import java.nio.file.attribute.BasicFileAttributeView
+import java.nio.file.attribute.BasicFileAttributes
 import java.nio.file.StandardOpenOption.CREATE
 import java.nio.file.StandardOpenOption.READ
 import java.nio.file.StandardOpenOption.WRITE
@@ -88,8 +91,8 @@ internal data class WebAuditActor(val kind: String, val sessionDigest: String?) 
 }
 
 /**
- * Target identities are closed-syntax public IDs. `expectedVersion` is the client precondition
- * (If-Match) and `resultVersion` the version the response reported; both are opaque versions.
+ * Target identities are closed-syntax public IDs (or commitments to unrecognized requested runs).
+ * The HTTP recorder commits client preconditions in `expectedVersion`; `resultVersion` is server-owned.
  */
 internal data class WebAuditTarget(
     val jobId: String? = null,
@@ -161,7 +164,7 @@ internal data class WebAuditEntry(
     }
 }
 
-/** A bounded read; omitted counts are exact for rotated prefixes and explicit for unreadable segments. */
+/** A bounded read; counts cover known omissions, while unknown scoped retention/loss makes it incomplete. */
 internal data class WebAuditPage(
     val entries: List<WebAuditEntry>,
     val omittedBefore: Long,
@@ -183,8 +186,9 @@ internal data class WebAuditPage(
  * path: a write that cannot be made durable is counted and reported by [read] instead.
  *
  * Every stored field is closed syntax (enumerated action/outcome/actor kind, hexadecimal digests,
- * public IDs, numeric status and an upper-case reason code), so no request text, credential,
- * filename or host path can be persisted here.
+ * public IDs, numeric status and an upper-case reason code). Callers must supply server-owned
+ * metadata or commitments: syntax alone does not make arbitrary request bytes credential-free.
+ * [WebAuditRecorder] owns that projection for HTTP requests.
  */
 internal class WebAuditLog(
     root: Path,
@@ -194,7 +198,7 @@ internal class WebAuditLog(
     // Test seam for append faults; production writes the whole buffer.
     private val append: (FileChannel, ByteBuffer) -> Unit = { channel, buffer -> while (buffer.hasRemaining()) channel.write(buffer) },
     // Test seam observing directory syncs; production forces the directory to stable storage.
-    private val syncDirectory: (Path) -> Unit = { path -> FileChannel.open(path, READ).use { it.force(true) } },
+    private val syncDirectory: ((Path) -> Unit)? = null,
 ) {
     init { require(segmentEntries in 1..65_536) }
     private val storeRoot = root.toAbsolutePath().normalize()
@@ -209,6 +213,8 @@ internal class WebAuditLog(
     private var nextSequence = 1L
     private var currentEntries = 0
     private var unrecorded = 0L
+    private var directoryIdentity: Any? = null
+    private var knownLoss = false
 
     fun record(
         actor: WebAuditActor,
@@ -226,25 +232,31 @@ internal class WebAuditLog(
                 if (pending.size >= MAXIMUM_PENDING_ENTRIES) { unrecorded++; return null }
                 return entry((pending.lastOrNull()?.sequence ?: 0L) + 1).also(pending::addLast)
             }
-            open()
-            flushPending()
-            entry(nextSequence).also(::appendEntry)
+            withDirectory(create = true) { dir ->
+                open(dir)
+                flushPending(dir)
+                entry(nextSequence).also { appendEntry(dir, it) }
+            }
         } catch (failure: Exception) {
             if (failure is InterruptedException) Thread.currentThread().interrupt()
             unrecorded++
+            knownLoss = true
             // Reopen before the next write: open() discards any torn tail a failed truncation left behind.
             opened = false
             null
         }
     }
 
-    private fun appendEntry(entry: WebAuditEntry) {
-        if (currentEntries >= segmentEntries) rotate()
+    private fun appendEntry(dir: SecureDirectoryStream<Path>, entry: WebAuditEntry) {
+        // Durable intent precedes append/rotation. If anything fails or the process dies, this
+        // sticky marker keeps exports incomplete after restart, even without a sequence gap.
+        writeLossState(dir, true)
+        if (currentEntries >= segmentEntries) rotate(dir)
         val line = (buildJsonObject { put("schemaVersion", 1); put("entry", entry.toJson()) }.toString() + "\n")
             .toByteArray(Charsets.UTF_8)
         check(line.size <= MAXIMUM_LINE_BYTES)
-        val created = Files.notExists(current, NOFOLLOW_LINKS)
-        FileChannel.open(current, CREATE, WRITE, NOFOLLOW_LINKS).use { channel ->
+        val created = !exists(dir, current.fileName)
+        channel(dir, current.fileName, setOf(CREATE, WRITE, NOFOLLOW_LINKS)).use { channel ->
             val boundary = channel.size()
             try {
                 channel.position(boundary)
@@ -257,15 +269,16 @@ internal class WebAuditLog(
             }
         }
         // A newly created segment (first append, or after rotation) is durable only once its directory entry is.
-        if (created) syncDirectory(directory)
+        if (created) sync(dir, directory)
         nextSequence++
         currentEntries++
+        if (!knownLoss) writeLossState(dir, false)
     }
 
     /** Write held pre-storage entries in order, renumbered after any entries already on disk. */
-    private fun flushPending() {
+    private fun flushPending(dir: SecureDirectoryStream<Path>) {
         while (pending.isNotEmpty()) {
-            appendEntry(pending.first().copy(sequence = nextSequence))
+            appendEntry(dir, pending.first().copy(sequence = nextSequence))
             pending.removeFirst()
         }
     }
@@ -273,42 +286,48 @@ internal class WebAuditLog(
     /** Newest-last entries, optionally scoped to one job, at most [limit] of them. */
     fun read(jobId: String? = null, limit: Int = 200): WebAuditPage = synchronized(lock) {
         require(limit in 1..MAXIMUM_READ_ENTRIES)
-        if (pending.isNotEmpty() && Files.isDirectory(storeRoot, NOFOLLOW_LINKS)) {
-            try { open(); flushPending() } catch (_: Exception) { opened = false }
-        }
         var complete = true
-        val segments = listOf(previous, current).map { path ->
-            try { readSegment(path) } catch (_: Exception) { complete = false; emptyList() }
-        }
-        val all = segments.flatten() + if (segments.flatten().isEmpty()) pending.toList() else emptyList()
+        val persisted = try {
+            if (directoryIdentity == null &&
+                (!Files.isDirectory(storeRoot, NOFOLLOW_LINKS) ||
+                    (Files.notExists(directory, NOFOLLOW_LINKS) && pending.isEmpty()))) emptyList()
+            else withDirectory(create = pending.isNotEmpty()) { dir ->
+                if (pending.isNotEmpty()) { open(dir); flushPending(dir) }
+                if (hasLoss(dir)) knownLoss = true
+                listOf(previous, current).flatMap { path ->
+                    try { readSegment(dir, path.fileName) } catch (_: Exception) { complete = false; emptyList() }
+                }
+            }
+        } catch (_: Exception) { complete = false; opened = false; emptyList() }
+        val all = persisted + if (persisted.isEmpty()) pending.toList() else emptyList()
         val first = all.firstOrNull()?.sequence ?: if (opened) nextSequence else 1L
         val scoped = if (jobId == null) all else all.filter { it.target.jobId == jobId }
         val selected = scoped.takeLast(limit)
-        if (selected.size < scoped.size) complete = false
-        WebAuditPage(selected, first - 1, unrecorded, complete && unrecorded == 0L)
+        val windowOmitted = (scoped.size - selected.size).toLong()
+        // Rotated entries have no retained job identity: never count the global prefix as
+        // job-specific omissions, nor claim a scoped history is complete when it is unknown.
+        val rotated = first - 1
+        if (windowOmitted > 0 || rotated > 0) complete = false
+        val losses = maxOf(unrecorded, if (knownLoss) 1L else 0L)
+        WebAuditPage(selected, (if (jobId == null) rotated else 0L) + windowOmitted,
+            losses, complete && losses == 0L)
     }
 
-    private fun open() {
+    private fun open(dir: SecureDirectoryStream<Path>) {
         if (opened) return
-        prepareStorage()
-        if (Files.notExists(directory, NOFOLLOW_LINKS)) {
-            Files.createDirectories(directory)
-            // The new audit directory entry must itself be durable before any record is reported recorded.
-            syncDirectory(storeRoot)
-        }
-        require(Files.isDirectory(directory, NOFOLLOW_LINKS)) { "audit storage is not a directory" }
-        discardTornTail()
-        val existing = readSegment(current)
-        val older = if (existing.isEmpty()) readSegment(previous) else emptyList()
+        if (hasLoss(dir)) knownLoss = true
+        discardTornTail(dir)
+        val existing = readSegment(dir, current.fileName)
+        val older = if (existing.isEmpty()) readSegment(dir, previous.fileName) else emptyList()
         nextSequence = ((existing.lastOrNull() ?: older.lastOrNull())?.sequence ?: 0L) + 1
         currentEntries = existing.size
         opened = true
     }
 
     /** An append interrupted before its newline must not merge with the next record. */
-    private fun discardTornTail() {
-        if (Files.notExists(current, NOFOLLOW_LINKS)) return
-        FileChannel.open(current, READ, WRITE, NOFOLLOW_LINKS).use { channel ->
+    private fun discardTornTail(dir: SecureDirectoryStream<Path>) {
+        if (!exists(dir, current.fileName)) return
+        channel(dir, current.fileName, setOf(READ, WRITE, NOFOLLOW_LINKS)).use { channel ->
             var end = channel.size()
             val one = ByteBuffer.allocate(1)
             while (end > 0) {
@@ -321,17 +340,80 @@ internal class WebAuditLog(
         }
     }
 
-    private fun rotate() {
-        Files.move(current, previous, StandardCopyOption.REPLACE_EXISTING, StandardCopyOption.ATOMIC_MOVE)
-        syncDirectory(directory)
+    private fun rotate(dir: SecureDirectoryStream<Path>) {
+        dir.move(current.fileName, dir, previous.fileName)
+        sync(dir, directory)
         currentEntries = 0
     }
 
-    private fun readSegment(path: Path): List<WebAuditEntry> {
-        if (Files.notExists(path, NOFOLLOW_LINKS)) return emptyList()
-        require(Files.isRegularFile(path, NOFOLLOW_LINKS)) { "audit segment is not a regular file" }
+    /** All segment/marker operations are relative to a no-follow directory handle. The identity
+     * check rejects replacement between requests; the handle prevents rebinding during a request.
+     * Providers without secure directory handles fail closed (read reports incomplete auditing).
+     */
+    private fun <T> withDirectory(create: Boolean, block: (SecureDirectoryStream<Path>) -> T): T {
+        if (create && !opened) prepareStorage()
+        require(Files.isDirectory(storeRoot, NOFOLLOW_LINKS)) { "audit root is not a directory" }
+        Files.newDirectoryStream(storeRoot).use { rootStream ->
+            val root = rootStream as? SecureDirectoryStream<Path> ?: error("secure audit storage is unavailable")
+            if (create && Files.notExists(directory, NOFOLLOW_LINKS) && directoryIdentity == null) {
+                Files.createDirectory(directory)
+                sync(root, storeRoot)
+            }
+            root.newDirectoryStream(Path.of(DIRECTORY), NOFOLLOW_LINKS).use { dir ->
+                val identity = dir.getFileAttributeView(BasicFileAttributeView::class.java).readAttributes().fileKey()
+                require(identity != null && (directoryIdentity == null || identity == directoryIdentity)) {
+                    "audit directory was replaced"
+                }
+                directoryIdentity = identity
+                val result = block(dir)
+                require(attributes(root, Path.of(DIRECTORY)).fileKey() == identity) { "audit directory was replaced" }
+                return result
+            }
+        }
+    }
+
+    private fun attributes(dir: SecureDirectoryStream<Path>, path: Path): BasicFileAttributes =
+        dir.getFileAttributeView(path, BasicFileAttributeView::class.java, NOFOLLOW_LINKS).readAttributes()
+
+    private fun exists(dir: SecureDirectoryStream<Path>, path: Path): Boolean = try {
+        attributes(dir, path)
+        true
+    } catch (_: NoSuchFileException) { false }
+
+    private fun channel(dir: SecureDirectoryStream<Path>, path: Path, options: Set<java.nio.file.OpenOption>): FileChannel {
+        val opened = dir.newByteChannel(path, options)
+        return opened as? FileChannel ?: run { opened.close(); error("durable audit channels are unavailable") }
+    }
+
+    private fun hasLoss(dir: SecureDirectoryStream<Path>): Boolean {
+        if (!exists(dir, LOSS_MARKER)) return false
+        return channel(dir, LOSS_MARKER, setOf(READ, NOFOLLOW_LINKS)).use { channel ->
+            val state = ByteBuffer.allocate(1)
+            channel.size() != 1L || channel.read(state) != 1 || state.get(0) != '0'.code.toByte()
+        }
+    }
+
+    private fun writeLossState(dir: SecureDirectoryStream<Path>, incomplete: Boolean) {
+        val created = !exists(dir, LOSS_MARKER)
+        channel(dir, LOSS_MARKER, setOf(CREATE, WRITE, NOFOLLOW_LINKS)).use { channel ->
+            val state = ByteBuffer.wrap(byteArrayOf((if (incomplete) '1' else '0').code.toByte()))
+            while (state.hasRemaining()) channel.write(state)
+            channel.truncate(1)
+            channel.force(true)
+        }
+        if (created) sync(dir, directory)
+    }
+
+    private fun sync(dir: SecureDirectoryStream<Path>, path: Path) {
+        if (syncDirectory != null) syncDirectory.invoke(path)
+        else channel(dir, Path.of("."), setOf(READ, NOFOLLOW_LINKS)).use { it.force(true) }
+    }
+
+    private fun readSegment(dir: SecureDirectoryStream<Path>, path: Path): List<WebAuditEntry> {
+        if (!exists(dir, path)) return emptyList()
+        require(attributes(dir, path).isRegularFile) { "audit segment is not a regular file" }
         val limit = segmentEntries.toLong() * MAXIMUM_LINE_BYTES
-        val bytes = FileChannel.open(path, READ, NOFOLLOW_LINKS).use { channel ->
+        val bytes = channel(dir, path, setOf(READ, NOFOLLOW_LINKS)).use { channel ->
             require(channel.size() <= limit) { "audit segment exceeds its bound" }
             val buffer = ByteBuffer.allocate(channel.size().toInt())
             while (buffer.hasRemaining() && channel.read(buffer) >= 0) Unit
@@ -350,6 +432,7 @@ internal class WebAuditLog(
         const val MAXIMUM_READ_ENTRIES = 500
         const val MAXIMUM_PENDING_ENTRIES = 256
         private const val MAXIMUM_LINE_BYTES = 1024
+        private val LOSS_MARKER = Path.of("incomplete")
     }
 }
 
