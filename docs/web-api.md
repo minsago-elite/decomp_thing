@@ -830,12 +830,23 @@ and `HEAD`/`objects`/`refs` at the top level is a bare one. A `.git` file or lin
 --no-includes`. A fresh managed repository then receives the object store (without
 `objects/info`), the branch and tag refs (loose and packed) and HEAD. Every branch or tag must be
 a valid full ref name, such as `refs/tags/HEAD`; one that cannot be imported fails the import
-instead of being dropped. Configuration, hooks, `info/`, the index, reflogs, remotes, notes,
-replace refs, worktrees, submodule repositories and uncommitted working-tree changes are not
-copied. A full `git fsck` must succeed, which re-hashes every object against its ID (otherwise
-`REPOSITORY_CORRUPT`). Before checkout, `ls-tree -r -l` of the HEAD tree must fit the work-tree
-quota (20,000 entries and 512 MiB of declared blob bytes), because a few compressed objects can
-expand without bound. The HEAD commit is then checked out with `read-tree --reset -u` under the server configuration and
+instead of being dropped. Selected symbolic refs are resolved as bounded inert data (at most 16
+steps), including targets in omitted namespaces, and stored as full object IDs; HEAD retains its
+branch name. Cyclic or excessive symbolic chains give `REPOSITORY_UNSUPPORTED`.
+Object copying pins source directories with secure directory streams, refuses links at actual
+opens, and streams at most 512 MiB into newly created regular files (at most 100,000 object
+files). A provider without secure directory streams is unsupported. Configuration, hooks,
+`info/`, the index, reflogs, remotes, notes, replace refs, worktrees, submodule repositories and
+uncommitted working-tree changes are not copied. A full `git fsck` must succeed, which re-hashes
+every object against its ID (integrity errors give `REPOSITORY_CORRUPT`). Verification runs with
+a hard and soft 512 MiB process address-space ceiling, including mappings and inflation of
+packed, dangling and historical objects, before checkout quotas run. This requires the server's
+fixed `/usr/bin/prlimit` or `/bin/prlimit` utility; missing/unstartable containment fails closed as
+`REPOSITORY_UNAVAILABLE`, never an unbounded retry. Fatal/resource exits give
+`REPOSITORY_UNSUPPORTED` rather than claiming proven corruption. No core dump is allowed.
+Before checkout, `ls-tree -r -l` of the HEAD tree must fit the work-tree quota (20,000 entries and
+512 MiB of declared blob bytes), because a few compressed objects can expand without bound.
+The HEAD commit is then checked out with `read-tree --reset -u` under the server configuration and
 the neutral `info/attributes`. No hook, filter, fsmonitor or submodule recursion can run, and no
 attribute conversion can rewrite bytes. Attached, detached and unborn HEADs
 are preserved and reported as such, and SHA-256 repositories keep their format. Failed

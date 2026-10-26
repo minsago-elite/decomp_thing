@@ -157,10 +157,13 @@ data class GitExecutionLimits(
     val timeout: Duration = Duration.ofSeconds(30),
     val maxStdoutBytes: Int = 1024 * 1024,
     val maxStderrBytes: Int = 64 * 1024,
+    /** Hard and soft RLIMIT_AS, including mappings; null only for calls not requiring this bound. */
+    val maxAddressSpaceBytes: Long? = null,
 ) {
     init {
         require(!timeout.isNegative && !timeout.isZero && timeout <= Duration.ofMinutes(10))
         require(maxStdoutBytes in 1..64 * 1024 * 1024 && maxStderrBytes in 1..1024 * 1024)
+        require(maxAddressSpaceBytes == null || maxAddressSpaceBytes in 16L * 1024 * 1024..4L * 1024 * 1024 * 1024)
     }
 }
 
@@ -209,7 +212,12 @@ data class GitInvocation(
 }
 
 /** Runs the one trusted executable without a shell, a TTY, inherited environment or inherited config. */
-class GitCommandRunner internal constructor(val executable: Path, val environment: GitEnvironment) {
+class GitCommandRunner internal constructor(
+    val executable: Path,
+    val environment: GitEnvironment,
+    private val memoryLimiter: Path? = listOf(Path.of("/usr/bin/prlimit"), Path.of("/bin/prlimit"))
+        .firstOrNull { Files.isRegularFile(it) && Files.isExecutable(it) }?.toRealPath(),
+) {
     fun argv(invocation: GitInvocation): List<String> = buildList {
         add(executable.toString())
         add("--no-pager"); add("--no-replace-objects")
@@ -223,7 +231,15 @@ class GitCommandRunner internal constructor(val executable: Path, val environmen
     }
 
     fun run(invocation: GitInvocation): GitCommandResult {
-        val builder = ProcessBuilder(argv(invocation))
+        val command = argv(invocation)
+        val boundedCommand = invocation.limits.maxAddressSpaceBytes?.let { bytes ->
+            // Use only the fixed server utility, never repository data or request/PATH lookup.
+            // prlimit applies both limits before exec, and failure never falls back to unbounded Git.
+            val launcher = memoryLimiter ?: throw GitCommandException(GitCommandException.Kind.START_FAILED,
+                "The server cannot enforce the required Git memory bound.")
+            listOf(launcher.toString(), "--as=$bytes:$bytes", "--core=0:0", "--") + command
+        } ?: command
+        val builder = ProcessBuilder(boundedCommand)
             .directory((invocation.workTree ?: invocation.gitDir ?: environment.root).toFile())
             .redirectInput(ProcessBuilder.Redirect.PIPE)
         builder.environment().clear()

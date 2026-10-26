@@ -300,6 +300,165 @@ class ManagedGitRepositoriesTest {
         }
     }
 
+    @Test fun `full integrity verification bounds inflation even for a compressed dangling object`() {
+        GitTestRepositories().use { g ->
+            val (gitDir, _) = g.managed("expansion")
+            // Stream a valid 64 MiB loose blob without allocating its expanded contents in the JVM.
+            // HEAD is unborn, so a HEAD-tree quota alone would never account for this object.
+            val temporary = g.root.resolve("compressed blob")
+            val digest = java.security.MessageDigest.getInstance("SHA-1")
+            java.util.zip.DeflaterOutputStream(Files.newOutputStream(temporary)).use { compressed ->
+                java.security.DigestOutputStream(compressed, digest).use { output ->
+                    output.write("blob 67108864\u0000".toByteArray())
+                    val zeros = ByteArray(64 * 1024)
+                    repeat(1024) { output.write(zeros) }
+                }
+            }
+            assertTrue(Files.size(temporary) < 100_000)
+            val id = with(GitStorage) { digest.digest().hex() }
+            val loose = GitStorage.directories(gitDir.resolve("objects"), id.take(2)).resolve(id.drop(2))
+            Files.move(temporary, loose)
+            val before = GitSourceCopy.digestOf(loose)
+            // Test with a smaller real OS budget; never run the oversized fsck without a ceiling.
+            val failure = assertFailsWith<GitOperationFailure> {
+                GitRepositoryImport.verify(g.runner, gitDir, maxAddressSpaceBytes = 48L * 1024 * 1024)
+            }
+            assertEquals("REPOSITORY_UNSUPPORTED", failure.code)
+            assertTrue(failure.message!!.contains("memory budget"))
+            assertEquals(before, GitSourceCopy.digestOf(loose))
+            assertEquals("REPOSITORY_UNAVAILABLE", assertFailsWith<GitOperationFailure> {
+                GitRepositoryImport.verify(GitCommandRunner(g.runner.executable, g.environment, memoryLimiter = null), gitDir)
+            }.code)
+        }
+    }
+
+    @Test fun `object copy rejects a link substituted after stat and pins renamed parent directories`() {
+        GitTestRepositories().use { g ->
+            val source = Files.createDirectories(g.root.resolve("objects/ab"))
+            val external = Files.createDirectories(g.root.resolve("external objects"))
+            Files.writeString(external.resolve("blob"), "outside marker")
+            val objectFile = Files.writeString(source.resolve("blob"), "original bytes")
+            val rejected = Files.createDirectory(g.root.resolve("rejected objects"))
+            val failure = assertFailsWith<GitOperationFailure> {
+                GitImportObjectCopy.copy(source.parent, rejected) { relative: java.nio.file.Path ->
+                    if (relative.toString() == "ab/blob") {
+                        Files.delete(objectFile)
+                        Files.createSymbolicLink(objectFile, external.resolve("blob"))
+                    }
+                }
+            }
+            assertEquals("REPOSITORY_UNSUPPORTED", failure.code)
+            assertFalse(Files.exists(rejected.resolve("ab/blob"), NOFOLLOW_LINKS))
+            Files.delete(objectFile)
+            Files.writeString(objectFile, "original bytes")
+            val copied = Files.createDirectory(g.root.resolve("copied objects"))
+            GitImportObjectCopy.copy(source.parent, copied) { relative: java.nio.file.Path ->
+                if (relative.toString() == "ab/blob") {
+                    Files.move(source, source.resolveSibling("old"))
+                    Files.createSymbolicLink(source, external)
+                }
+            }
+            val destination = copied.resolve("ab/blob")
+            assertFalse(Files.isSymbolicLink(destination))
+            assertEquals("original bytes", Files.readString(destination))
+            Files.writeString(external.resolve("blob"), "changed outside")
+            assertEquals("original bytes", Files.readString(destination))
+            // Root/ancestor links are refused too; a final-component no-follow open alone is insufficient.
+            assertEquals("REPOSITORY_UNSUPPORTED", assertFailsWith<GitOperationFailure> {
+                GitImportObjectCopy.copy(source, Files.createDirectory(g.root.resolve("linked root target")))
+            }.code)
+        }
+    }
+
+    @Test fun `object-store imports charge empty directories against the entry quota before creating them`() {
+        GitTestRepositories().use { g ->
+            val source = Files.createDirectories(g.root.resolve("wide/objects"))
+            repeat(20) { Files.createDirectory(source.resolve("%02x".format(it))) }
+            val target = Files.createDirectory(g.root.resolve("wide target"))
+            assertEquals("REPOSITORY_UNSUPPORTED", assertFailsWith<GitOperationFailure> {
+                GitImportObjectCopy.copy(source, target, maxEntries = 10)
+            }.code)
+            val created = Files.list(target).use { it.count() }
+            assertTrue(created <= 10, "only charged directories may be created, found $created")
+            // Within the quota the same layout copies.
+            GitImportObjectCopy.copy(source, Files.createDirectory(g.root.resolve("narrow target")), maxEntries = 20)
+        }
+    }
+
+    @Test fun `reference and work-tree copies charge empty directories before creating them`() {
+        GitTestRepositories().use { g ->
+            val source = g.root.resolve("wide-refs")
+            g.git("init", "-q", "--initial-branch=main", source.toString())
+            val heads = source.resolve(".git/refs/heads")
+            repeat(20) { Files.createDirectory(heads.resolve("empty$it")) }
+            val managed = g.root.resolve("managed.git")
+            g.git("init", "-q", "--bare", "--initial-branch=main", managed.toString())
+            val layout = ImportedRepositoryLayout(source.resolve(".git"), false, GitObjectFormat.SHA1)
+            assertEquals("REPOSITORY_UNSUPPORTED", assertFailsWith<GitOperationFailure> {
+                GitRepositoryImport.copyHistory(layout, managed, maxRefEntries = 10)
+            }.code)
+            val created = Files.list(managed.resolve("refs/heads")).use { it.count() }
+            assertTrue(created <= 10, "only charged reference directories may be created, found $created")
+            // Snapshot copies into a work tree are bounded the same way.
+            val snapshot = Files.createDirectories(g.root.resolve("wide-snapshot"))
+            repeat(20) { Files.createDirectory(snapshot.resolve("d$it")) }
+            val workTree = Files.createDirectory(g.root.resolve("wide-worktree"))
+            assertEquals("SOURCE_UNSUPPORTED", assertFailsWith<GitOperationFailure> {
+                GitSourceCopy.copy(snapshot, workTree, emptySet(), maxDirectories = 10)
+            }.code)
+            assertTrue(Files.list(workTree).use { it.count() } <= 10)
+            GitSourceCopy.copy(snapshot, Files.createDirectory(g.root.resolve("narrow-worktree")), emptySet(), maxDirectories = 20)
+        }
+    }
+
+    @Test fun `import resolves symbolic branches and tags before dropping their target namespaces`() {
+        for (format in listOf("sha1", "sha256")) {
+            val (f, importRoot) = importFixture()
+            f.use {
+                val g = f.repositories
+                val source = importRoot.resolve("symbolic")
+                g.git("init", "-q", "--initial-branch=main", "--object-format=$format", source.toString())
+                Files.writeString(source.resolve("file.c"), "int value;\n")
+                g.git("add", "-A", cwd = source); g.git("commit", "-q", "-m", "baseline", cwd = source)
+                val head = g.git("rev-parse", "HEAD", cwd = source).trim()
+                g.git("update-ref", "refs/remotes/origin/main", head, cwd = source)
+                g.git("pack-refs", "--all", cwd = source)
+                g.git("symbolic-ref", "refs/heads/main", "refs/remotes/origin/main", cwd = source)
+                g.git("symbolic-ref", "refs/tags/alias", "refs/heads/main", cwd = source)
+                g.git("fsck", "--full", "--no-dangling", cwd = source)
+                val before = f.tree(source)
+                val service = f.open()
+                val completed = service.settle(service.request(jobId, GitRepositoryRequest.Attach("symbolic"), "import_symbolic_key_01"))
+                assertEquals(GitOperationState.COMPLETED, completed.state, completed.message)
+                val view = service.workspace(jobId, completed.repositoryId)
+                assertEquals(GitHeadObservation(GitHeadState.ATTACHED, "refs/heads/main", head), view.observation.head)
+                assertEquals(setOf("refs/heads/main", "refs/tags/alias"), view.observation.refs.map { it.name }.toSet())
+                val gitDir = f.repositoryDirectory(completed.repositoryId).resolve("repository.git")
+                for (ref in listOf("refs/heads/main", "refs/tags/alias")) assertEquals("$head\n", Files.readString(gitDir.resolve(ref)))
+                assertEquals(before, f.tree(source))
+            }
+        }
+    }
+
+    @Test fun `import refuses cyclic and excessive symbolic reference chains without publishing`() {
+        for (cyclic in listOf(true, false)) {
+            val (f, importRoot) = importFixture()
+            f.use {
+                val source = importRoot.resolve("chain")
+                f.repositories.git("init", "-q", "--initial-branch=main", source.toString())
+                Files.writeString(source.resolve(".git/refs/heads/main"), "ref: refs/remotes/link0\n")
+                val remotes = Files.createDirectories(source.resolve(".git/refs/remotes"))
+                repeat(20) { i -> Files.writeString(remotes.resolve("link$i"), "ref: refs/remotes/link${if (cyclic) 0 else i + 1}\n") }
+                val before = f.tree(source)
+                val service = f.open()
+                val failed = service.settle(service.request(jobId, GitRepositoryRequest.Attach("chain"), "import_ref_chain_key1"))
+                assertEquals("REPOSITORY_UNSUPPORTED", failed.failureCode)
+                assertTrue(service.listing(jobId).repositories.isEmpty())
+                assertEquals(before, f.tree(source))
+            }
+        }
+    }
+
     @Test fun `import keeps every valid tag, refuses unimportable refs, altered objects and oversized checkouts`() {
         val (f, importRoot) = importFixture()
         f.use {
