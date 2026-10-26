@@ -659,12 +659,21 @@ class WebJobServiceTest {
         }
     }
 
-    @Test fun `stalled dashboard and API record reads leave unrelated status reads and uploads responsive`() = withStore { store, _ ->
-        // Distinct attempt-store stripes: only the stalled record's own lock may be held.
+    @Test fun `stalled listings cannot convoy same-job or colliding-stripe contenders onto unrelated requests`() = withStore { _, root ->
         fun stripe(id: String) = (id.hashCode() and Int.MAX_VALUE) % 64
+        val ids = (1..1024).map { it.toString(16).padStart(32, '0') }
+        val stalledId = ids.first()
+        val collidingId = ids.drop(1).first { stripe(it) == stripe(stalledId) }
+        val otherId = ids.first { stripe(it) != stripe(stalledId) }
+        val nextIds = (listOf(stalledId, collidingId, otherId) + ids.filter {
+            it !in setOf(stalledId, collidingId, otherId)
+        }).iterator()
+        val store = JobStore(root, AtomicUploadPublisher, newJobId = { nextIds.next() })
         val stalled = store.createFromUpload("stalled.elf", elfFixture())
-        var other = store.createFromUpload("other.elf", elfFixture())
-        while (stripe(other.id) == stripe(stalled.id)) other = store.createFromUpload("other.elf", elfFixture())
+        val colliding = store.createFromUpload("colliding.elf", elfFixture())
+        val other = store.createFromUpload("other.elf", elfFixture())
+        assertEquals(stripe(stalled.id), stripe(colliding.id))
+        assertTrue(stripe(stalled.id) != stripe(other.id))
         WebJobService(store, JobAnalyzer { _, _ -> error("Unexpected execution") }, inertReconstructor).use { service ->
             service.initializeExistingStorage()
             val listings = listOf<(WebJobService) -> List<String>>(
@@ -676,8 +685,10 @@ class WebJobServiceTest {
             service.listingReadObserver = { relative -> if (relative.startsWith("${stalled.id}/")) recordReads += relative }
             service.dashboardRows()
             assertTrue(recordReads.size >= 2, "Expected separate workflow and presentation reads: $recordReads")
-            val scenarios = listings.flatMap { listing -> listOf(1, recordReads.size).map { listing to it } }
-            for ((listing, stalledRead) in scenarios) {
+            val scenarios = listings.flatMap { listing -> listOf(1, recordReads.size).flatMap { readNumber ->
+                listOf(null, stalled.id, colliding.id).map { contender -> Triple(listing, readNumber, contender) }
+            } }
+            for ((listing, stalledRead, contender) in scenarios) {
                 val expected = store.jobIds().sorted()
                 val entered = CountDownLatch(1)
                 val release = CountDownLatch(1)
@@ -692,6 +703,14 @@ class WebJobServiceTest {
                 try {
                     val pending = callers.submit<List<String>> { listing(service) }
                     assertTrue(entered.await(5, TimeUnit.SECONDS), "The listing did not reach its stalled record read")
+                    // Exercise the monitor-to-stripe path before the third job's requests. These
+                    // detail and command-admission reads must finish while the listing stays parked.
+                    // The old listing-held stripe deterministically times out here for both contenders.
+                    if (contender != null) callers.submit<Unit> {
+                        assertEquals(contender, service.get(contender).id)
+                        assertIs<decompengine.jobs.WorkflowJobInspection.Available>(service.inspectDurableJob(contender))
+                        assertFalse(service.durableStartRouteAvailable(contender))
+                    }.get(5, TimeUnit.SECONDS)
                     // The listing is parked inside a physical record read; unrelated work must not wait for it.
                     val status = callers.submit<Pair<String, String>> {
                         service.get(other.id).id to (service.inspect(other.id) as WebJobInspection.Available).presentation.job.id
@@ -710,6 +729,46 @@ class WebJobServiceTest {
                     callers.shutdownNow()
                     assertTrue(callers.awaitTermination(5, TimeUnit.SECONDS))
                 }
+            }
+        }
+    }
+
+    @Test fun `listings refuse durable commands crossing either workflow or presentation metadata capture`() {
+        for (api in listOf(false, true)) for (lastRead in listOf(false, true)) withStore { store, _ ->
+            val job = store.createFromUpload("durable.elf", elfFixture())
+            lateinit var owner: WorkflowAttemptStore
+            WebJobService(store, JobAnalyzer { _, _ -> error("Unexpected execution") }, inertReconstructor,
+                attemptStoreFactory = { path -> WorkflowAttemptStore.open(path).also { owner = it } }).use { service ->
+                service.initializeExistingStorage()
+                val version = (service.inspectDurableJob(job.id) as decompengine.jobs.WorkflowJobInspection.Available).snapshot.version
+                var physicalReads = 0
+                service.listingReadObserver = { relative -> if (relative.startsWith("${job.id}/")) physicalReads++ }
+                service.dashboardRows()
+                val crossedRead = if (lastRead) physicalReads else 1
+                assertTrue(physicalReads >= 2)
+                physicalReads = 0
+                service.listingReadObserver = { relative ->
+                    if (relative.startsWith("${job.id}/") && ++physicalReads == crossedRead) {
+                        owner.create(job.id, version, decompengine.jobs.NewWorkflowAttempt(
+                            decompengine.jobs.WorkflowKind.EXPLORE,
+                            decompengine.jobs.WorkflowExecutionLimits(60000u, 15000u, 1048576u, 16u)))
+                    }
+                }
+                if (api) {
+                    assertEquals("JOB_RECORD_UNAVAILABLE", assertFailsWith<WebJobServiceException> {
+                        service.collectionRecords().toList()
+                    }.code)
+                } else {
+                    val rows = service.dashboardRows()
+                    assertTrue(rows.jobs.isEmpty())
+                    assertEquals(listOf(job.id), rows.unavailable.map { it.jobId })
+                    assertEquals(listOf("JOB_RECORD_UNAVAILABLE"), rows.unavailable.map { it.code })
+                }
+                service.listingReadObserver = {}
+                assertEquals(listOf("queued"), service.dashboardRows().jobs.map { it.status })
+                assertEquals(listOf("queued"), service.collectionRecords().map {
+                    it.getValue("status").toString().trim('"')
+                }.toList())
             }
         }
     }

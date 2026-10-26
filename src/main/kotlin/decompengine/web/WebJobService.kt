@@ -467,9 +467,9 @@ class WebJobService(
     }
 
     /**
-     * One listing row (#162). Metadata I/O does not directly retain the service monitor.
-     * Detail/command callers can still convoy on a listing-held attempt-store stripe; this is
-     * not a guarantee of unrelated-request responsiveness under blocked I/O.
+     * One listing row (#162). Metadata I/O holds neither the service monitor nor a store stripe.
+     * The store validates its command epoch after the complete row capture; service ownership
+     * and legacy admission are separately rechecked before publication.
      */
     private fun inspectListedJob(jobId: String, read: (String, Int) -> ByteArray): WebJobInspection {
         val (state, epoch) = synchronized(this) {
@@ -494,8 +494,7 @@ class WebJobService(
         failure?.let { return WebJobInspection.Unavailable(it) }
         if (!jobId.matches(Regex("[0-9a-f]{32}")) || owner == null) return WebJobInspection.Unavailable(
             WebJobDiagnostic(jobId, "JOB_NOT_FOUND", "The requested job is unavailable."))
-        return try {
-            val inspected = if (read == null) owner.inspect(jobId) else owner.inspectForListing(jobId, read)
+        fun present(inspected: WorkflowJobInspection): WebJobInspection {
             if (inspected is WorkflowJobInspection.Unavailable) return WebJobInspection.Unavailable(
                 publicWebDiagnostic(jobId, inspected.diagnostic.code))
             val snapshot = (inspected as? WorkflowJobInspection.Available)?.snapshot
@@ -517,9 +516,12 @@ class WebJobService(
             }
             val reports = latest?.let { context(jobId, it.runId) }
                 ?: WebReportContext(store.storageRoot.resolve(jobId).resolve("reports"))
-            WebJobInspection.Available(WebJobPresentation(job, snapshot, reports,
+            return WebJobInspection.Available(WebJobPresentation(job, snapshot, reports,
                 (inspected as? WorkflowJobInspection.Available)?.diagnostics.orEmpty()
                     .map { publicWorkflowDiagnostic(it.code) }, legacyInterrupted))
+        }
+        return try {
+            if (read == null) present(owner.inspect(jobId)) else owner.inspectForListing(jobId, read, ::present)
         } catch (failure: WorkflowStoreException) {
             WebJobInspection.Unavailable(publicWebDiagnostic(jobId, failure.code))
         } catch (_: Exception) {
