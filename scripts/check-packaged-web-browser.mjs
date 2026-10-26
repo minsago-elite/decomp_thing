@@ -14,7 +14,7 @@ import { seedLegacy, qualifyLegacy } from './packaged-browser-legacy.mjs';
 import { qualifyUpgrade, qualifyUpgradeCache } from './packaged-browser-upgrade.mjs';
 import { compareArchiveAssets, fetchArchiveAssets } from './packaged-browser-assets.mjs';
 import { qualifyWorkflow } from './packaged-browser-workflow.mjs';
-import { assertBudgets, createPeakTracker, evaluateBudgets, processResources, readBaseline } from './web-scale-budgets.mjs';
+import { assertBudgets, createPeakTracker, createTransferLedger, evaluateBudgets, processResources, readBaseline } from './web-scale-budgets.mjs';
 
 // Test driver only: the application is launched with a separate Node-free PATH.
 const repo = resolve(dirname(fileURLToPath(import.meta.url)), '..');
@@ -269,7 +269,7 @@ async function makeTarget({ cspProbe = false, cacheEnabled = false } = {}) {
   const state = { targetId, sessionId, cspProbe, cacheEnabled, requests: [], responses: [], exceptions: [], requestUrls: new Map(),
     cacheRequests: [], cacheResponses: [], cacheRequestIds: new Set(),
     documentRequests: [], pendingDocumentRequests: new Map(), orphanDocumentResponses: [],
-    cspViolations: [], cspLogEntries: [], cspBlockedRequests: [], cspIssues: [], console: [], log: [], loaded: [] };
+    cspViolations: [], cspLogEntries: [], cspBlockedRequests: [], cspIssues: [], console: [], log: [], transfers: createTransferLedger() };
   targets.push(state);
   if (!cspProbe) lastTarget = state;
   cdp.on('Network.requestWillBeSent', (event) => {
@@ -303,9 +303,13 @@ async function makeTarget({ cspProbe = false, cacheEnabled = false } = {}) {
     }
     state.responses.push(response);
   }, sessionId);
-  // Encoded transfer sizes give payload budgets the bytes actually received by this page.
+  // Encoded transfer sizes give payload budgets the bytes actually received by this page, including
+  // streams that fail, are cancelled or remain open when budgets are evaluated.
+  cdp.on('Network.dataReceived', (event) => {
+    state.transfers.received(event.requestId, state.requestUrls.get(event.requestId), event.encodedDataLength);
+  }, sessionId);
   cdp.on('Network.loadingFinished', (event) => {
-    if (state.loaded.length < 20000) state.loaded.push({ url: state.requestUrls.get(event.requestId) ?? null, bytes: event.encodedDataLength });
+    state.transfers.finished(event.requestId, state.requestUrls.get(event.requestId), event.encodedDataLength);
   }, sessionId);
   cdp.on('Network.loadingFailed', (event) => {
     if (event.type === 'Document') {
@@ -590,7 +594,7 @@ try {
     const pages = targets.filter((target) => !target.cspProbe);
     report.budgetSamples = peakTracker.samples();
     await qualifyBudgets({ ...peakTracker.peaks(),
-      apiPayloadBytesTotal: pages.flatMap((target) => target.loaded).filter((entry) => entry.url?.includes('/api/v1/')).reduce((sum, entry) => sum + entry.bytes, 0) });
+      apiPayloadBytesTotal: pages.reduce((sum, target) => sum + target.transfers.total((url) => url.includes('/api/v1/')), 0) });
   }
   if (legacyFixture) {
     const tab = await makeTarget();

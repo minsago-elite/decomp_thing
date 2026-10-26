@@ -102,6 +102,35 @@ export function createPeakTracker() {
   };
 }
 
+/**
+ * Per-request received bytes. Chunks are counted as they arrive, so failed, cancelled and still-open
+ * streams contribute what they delivered; a finished request's reported total replaces its chunk sum
+ * only when larger, so completed requests are never counted twice.
+ */
+export function createTransferLedger(maximumRequests = 20000) {
+  const requests = new Map();
+  const entry = (requestId, url) => {
+    let item = requests.get(requestId);
+    if (!item && requests.size < maximumRequests) requests.set(requestId, item = { url: url ?? null, bytes: 0, finished: false });
+    if (item && item.url === null && url) item.url = url;
+    return item;
+  };
+  return {
+    received(requestId, url, bytes) {
+      const item = entry(requestId, url);
+      if (item && Number.isFinite(bytes) && bytes > 0) item.bytes += bytes;
+    },
+    finished(requestId, url, totalBytes) {
+      const item = entry(requestId, url);
+      if (!item) return;
+      item.finished = true;
+      if (Number.isFinite(totalBytes)) item.bytes = Math.max(item.bytes, totalBytes);
+    },
+    entries: () => [...requests.values()].map((item) => ({ ...item })),
+    total: (matches) => [...requests.values()].filter((item) => item.url !== null && matches(item.url)).reduce((sum, item) => sum + item.bytes, 0),
+  };
+}
+
 /** Linux /proc resource observation of one owned process; unavailable values stay absent. */
 export async function processResources(pid) {
   const status = await fs.readFile(`/proc/${pid}/status`, 'utf8').catch(() => '');

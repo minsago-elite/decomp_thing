@@ -180,7 +180,7 @@ export async function qualifyScale({ fixture, makeTarget, cdp, evaluate, ready, 
   await ready(tab, `!document.querySelector('#job-filter-error') && document.activeElement.textContent === 'Job results'`, 'invalid date reset recovery');
   const filterContrast = await qualifyFilterContrast({ tab, cdp, evaluate });
   // Comparable #648 measurements for the named dashboard-10000-jobs budget.
-  const listing = tab.loaded.filter((entry) => entry.url?.endsWith('/api/v1/jobs'));
+  const listing = tab.transfers.entries().filter((entry) => entry.url?.endsWith('/api/v1/jobs'));
   const measurements = { peakBrowserHeapBytes: Math.round(peakBrowserHeapBytes), maxPageLatencyMs: Math.round(Math.max(...timings)),
     listingPayloadBytesPerPage: Math.max(...listing.map((entry) => entry.bytes)),
     listingPayloadBytesTotal: listing.reduce((sum, entry) => sum + entry.bytes, 0),
