@@ -1813,8 +1813,8 @@ older thought records. The ACP client never requests reasoning and no workflow d
 
 **Redaction (`web-redaction-v1`).** One policy (`WebRedactionPolicy`) is installed on the listener and applied
 where bytes leave the server: every versioned JSON document (success and error envelopes), each live SSE frame
-and polling page (so live and replayed events are identical), legacy JSON, the server-generated exploration
-download and support exports. Persisted failure prose is passed through the same policy before it is stored. It
+and polling page (so live and replayed events are identical), legacy JSON, the legacy exploration report download
+and support exports. Persisted failure prose is passed through the same policy before it is stored. It
 replaces values of credential-named environment variables and long opaque configured values with `[redacted]`
 (short generic environment values such as `1` or `development` are deliberately not treated as secrets, because
 substituting them would corrupt public vocabulary). Nonempty credential-named environment values outside
@@ -1827,8 +1827,9 @@ The policy also replaces credential syntax (authorization headers, bearer tokens
 paths (the storage root, home, temporary, working and Java directories plus the generic per-user and temporary
 directory families) with `[private-path]`. Closed-syntax protocol fields (`*Id`, `*Cursor`, `*Token`, `*Sha256`,
 `version` and similar) keep their exact bytes unless they contain a configured literal, so cursors and ETags stay
-valid. A download is byte-identical when nothing needs redaction, and the exploration artifact digest is computed
-over the same projection the download serves. Committed job content (`sourceChunk`, the committed source-tree names in `revisionDirectory`, `revisionSources`, `revisionFile` and `sourceCatalog`, source-file downloads and the exact-byte
+valid. A download is byte-identical when nothing needs redaction. Versioned artifact content
+(`GET J/artifacts/{artifactId}/content`, including the exploration report) is a digest-bound stream of the stored
+bytes the catalog and report descriptors name; it is not rewritten by this policy (integration follow-up). Committed job content (`sourceChunk`, the committed source-tree names in `revisionDirectory`, `revisionSources`, `revisionFile` and `sourceCatalog`, source-file downloads and the exact-byte
 validation output previews in reports) is digest-bound user data, not server configuration, and is served verbatim under job authorization. Progress events
 remain allowlisted projections: journal prose, paths, usage that was not reported and any agent reasoning are never
 requested or displayed (the activity view shows "Not reported").
