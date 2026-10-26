@@ -188,18 +188,151 @@ describe('log viewer', () => {
 
   it('keeps the reader position when they scroll away while a follow read is in flight', async () => {
     vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
-    transport.get.mockResolvedValueOnce({ data: range(1, 500, 500, { attempt: running }) });
+    transport.get.mockResolvedValueOnce({ data: range(1, 500, 2500, { attempt: running }) });
+    mount(); await flush();
+    for (const first of [501, 1001, 1501]) {
+      transport.get.mockResolvedValueOnce({ data: range(first, 500, 2500, { attempt: running }) });
+      fireEvent.click(screen.getByRole('button', { name: 'Load later lines' })); await flush();
+    }
+    fireEvent.click(screen.getByRole('button', { name: 'Follow new lines' }));
+    let finish: (value: unknown) => void = () => undefined;
+    transport.get.mockImplementationOnce(() => new Promise(resolve => { finish = resolve; }));
+    await act(async () => { await vi.advanceTimersByTimeAsync(3000); });
+    const signal = transport.get.mock.calls.at(-1)![2].signal;
+    const viewport = screen.getByRole('region', { name: 'Build log lines' });
+    viewport.scrollTop = 0; fireEvent.scroll(viewport);
+    expect(signal.aborted).toBe(true);
+    finish({ data: range(2001, 500, 2500, { attempt: running }) }); await flush();
+    expect(screen.getByText(/Showing lines 1–2000 of 2500/)).toBeTruthy();
+    expect(screen.getByText('line 1')).toBeTruthy();
+    expect(viewport.scrollTop).toBe(0);
+    expect(screen.getByText('Following paused because you scrolled away. Resume to continue.')).toBeTruthy();
+  });
+
+  it.each([20, 100])('retrieves the tail of a terminal replacement with %i lines before ending follow', async total => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+    transport.get.mockResolvedValueOnce({ data: range(1, 100, 100, { attempt: running }) });
+    mount(); await flush();
+    fireEvent.click(screen.getByRole('button', { name: 'Follow new lines' }));
+    const replacement = { sourceSha256: 'b'.repeat(64), attempt: { ...running, state: 'failed' as const, endedAt: fixture.readAt } };
+    // The server clamps the old append cursor to just past the new recording's end.
+    transport.get.mockResolvedValueOnce({ data: range(total + 1, 0, total, replacement) })
+      .mockResolvedValueOnce({ data: range(1, total, total, replacement) });
+    await act(async () => { await vi.advanceTimersByTimeAsync(3000); }); await flush();
+    expect(transport.get.mock.calls[1]![1]).toContain('fromLine=101');
+    expect(transport.get.mock.calls[2]![1]).toContain('tail=true&limit=200');
+    expect(screen.getByText(new RegExp(`Showing lines 1–${total} of ${total}`))).toBeTruthy();
+    expect(screen.getByText(`line ${total}`)).toBeTruthy();
+    expect(screen.getByText('The attempt has ended; no new lines are expected.')).toBeTruthy();
+    await act(async () => { await vi.advanceTimersByTimeAsync(6000); });
+    expect(transport.get).toHaveBeenCalledTimes(3);
+  });
+
+  it.each(['pause', 'filter'])('invalidates an in-flight follow read on deliberate %s', async action => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+    transport.get.mockResolvedValueOnce({ data: range(1, 100, 100, { attempt: running }) });
     mount(); await flush();
     fireEvent.click(screen.getByRole('button', { name: 'Follow new lines' }));
     let finish: (value: unknown) => void = () => undefined;
     transport.get.mockImplementationOnce(() => new Promise(resolve => { finish = resolve; }));
     await act(async () => { await vi.advanceTimersByTimeAsync(3000); });
-    const viewport = screen.getByRole('region', { name: 'Build log lines' });
-    viewport.scrollTop = 0; fireEvent.scroll(viewport);
-    finish({ data: range(501, 2, 502, { attempt: running }) }); await flush();
-    expect(screen.getByText(/Showing lines 1–502 of 502/)).toBeTruthy();
-    expect(viewport.scrollTop).toBe(0);
-    expect(screen.getByText('Following paused because you scrolled away. Resume to continue.')).toBeTruthy();
+    const signal = transport.get.mock.calls[1]![2].signal;
+    if (action === 'pause') fireEvent.click(screen.getByRole('button', { name: 'Pause following' }));
+    else fireEvent.input(screen.getByLabelText('Find in loaded lines'), { target: { value: 'line 1' } });
+    finish({ data: range(101, 100, 200, { attempt: running }) }); await flush();
+    expect(signal.aborted).toBe(true);
+    expect(screen.getByText(/Showing lines 1–100 of 100/)).toBeTruthy();
+  });
+
+  it('keeps the last selected jump when two responses finish out of order', async () => {
+    transport.get.mockResolvedValueOnce({ data: range(901, 100, 1000) });
+    mount(); await flush();
+    transport.get.mockResolvedValueOnce({ data: range(901, 1, 1000, { search: {
+      query: 'line', scope: 'whole-log', matchCount: '2', matches: ['42', '800'], matchesTruncated: false,
+    } }) });
+    fireEvent.input(screen.getByLabelText('Search the whole log'), { target: { value: 'line' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Search the whole log' })); await flush();
+    let finish: (value: unknown) => void = () => undefined;
+    transport.get.mockImplementationOnce(() => new Promise(resolve => { finish = resolve; }));
+    fireEvent.click(screen.getByRole('button', { name: 'Go to line 42' }));
+    const signal = transport.get.mock.calls[2]![2].signal;
+    transport.get.mockResolvedValueOnce({ data: range(790, 211, 1000) });
+    fireEvent.click(screen.getByRole('button', { name: 'Go to line 800' })); await flush();
+    expect(screen.getByText('line 800')).toBeTruthy();
+    finish({ data: range(32, 500, 1000) }); await flush();
+    expect(signal.aborted).toBe(true);
+    expect(screen.getByText(/Showing lines 790–1000 of 1000/)).toBeTruthy();
+    expect(screen.getByText('line 800')).toBeTruthy();
+  });
+
+  it.each(['follow', 'search'])('rejects a delayed %s response after a newer terminal recording', async action => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+    transport.get.mockResolvedValueOnce({ data: range(1, 20, 20, { attempt: running }) });
+    mount(); await flush();
+    let finish: (value: unknown) => void = () => undefined;
+    transport.get.mockImplementationOnce(() => new Promise(resolve => { finish = resolve; }));
+    if (action === 'follow') {
+      fireEvent.click(screen.getByRole('button', { name: 'Follow new lines' }));
+      await act(async () => { await vi.advanceTimersByTimeAsync(3000); });
+    } else {
+      fireEvent.input(screen.getByLabelText('Search the whole log'), { target: { value: 'old-error' } });
+      fireEvent.click(screen.getByRole('button', { name: 'Search the whole log' }));
+    }
+    transport.get.mockResolvedValueOnce({ data: range(1, 20, 20, { sourceSha256: 'b'.repeat(64) }) });
+    fireEvent.click(screen.getByRole('button', { name: 'Go to the newest lines' })); await flush();
+    finish({ data: range(1, 20, 20, { attempt: running, search: {
+      query: 'old-error', scope: 'whole-log', matchCount: '1', matches: ['10'], matchesTruncated: false,
+    } }) }); await flush();
+    expect(screen.getByText('b'.repeat(64))).toBeTruthy();
+    expect(screen.queryByText('a'.repeat(64))).toBeNull();
+    expect(screen.getByText('The attempt has ended; no new lines are expected.')).toBeTruthy();
+    expect(screen.queryByRole('button', { name: 'Go to line 10' })).toBeNull();
+  });
+
+  it.each(['refresh', 'jump', 'search', 'missing'])('invalidates search provenance when a replacement is observed by %s', async action => {
+    transport.get.mockResolvedValueOnce({ data: range(1, 20, 20, { attempt: running }) });
+    mount(); await flush();
+    const oldSearch = { query: 'old-error', scope: 'whole-log' as const, matchCount: '1', matches: ['10'], matchesTruncated: false };
+    transport.get.mockResolvedValueOnce({ data: range(1, 1, 20, { attempt: running, search: oldSearch }) });
+    fireEvent.input(screen.getByLabelText('Search the whole log'), { target: { value: 'old-error' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Search the whole log' })); await flush();
+    expect(screen.getByRole('button', { name: 'Go to line 10' })).toBeTruthy();
+    if (action === 'missing') {
+      transport.get.mockResolvedValueOnce({ data: { ...fixture, state: 'missing', maximumBytes: '8388608' } });
+    } else {
+      transport.get.mockResolvedValueOnce({ data: range(1, 20, 20, { sourceSha256: 'b'.repeat(64), search: action === 'search' ? oldSearch : null }) });
+      if (action === 'jump' || action === 'search') {
+        transport.get.mockResolvedValueOnce({ data: range(1, 20, 20, { sourceSha256: 'b'.repeat(64) }) });
+      }
+    }
+    if (action === 'jump') fireEvent.click(screen.getByRole('button', { name: 'Go to line 10' }));
+    else if (action === 'search') fireEvent.click(screen.getByRole('button', { name: 'Search the whole log' }));
+    else fireEvent.click(screen.getByRole('button', { name: 'Go to the newest lines' }));
+    await flush();
+    expect(screen.queryByRole('button', { name: 'Go to line 10' })).toBeNull();
+    expect(screen.queryByText(/Whole-log literal search/)).toBeNull();
+    if (action !== 'missing') {
+      expect(screen.getByText('b'.repeat(64))).toBeTruthy();
+      expect(screen.getByText(/Showing lines 1–20 of 20/)).toBeTruthy();
+    }
+    if (action === 'jump' || action === 'search') expect(transport.get.mock.calls.at(-1)![1]).toContain('tail=true&limit=200');
+  });
+
+  it('does not let a follow timer supersede a pending deliberate read', async () => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+    transport.get.mockResolvedValueOnce({ data: range(1, 100, 100, { attempt: running }) });
+    mount(); await flush();
+    fireEvent.click(screen.getByRole('button', { name: 'Follow new lines' }));
+    let finish: (value: unknown) => void = () => undefined;
+    transport.get.mockImplementationOnce(() => new Promise(resolve => { finish = resolve; }));
+    fireEvent.click(screen.getByRole('button', { name: 'Go to the newest lines' }));
+    await act(async () => { await vi.advanceTimersByTimeAsync(6000); });
+    expect(transport.get).toHaveBeenCalledTimes(2);
+    finish({ data: range(1, 100, 100, { attempt: running }) }); await flush();
+    transport.get.mockResolvedValueOnce({ data: range(101, 0, 100, { attempt: running }) });
+    await act(async () => { await vi.advanceTimersByTimeAsync(3000); });
+    expect(transport.get).toHaveBeenCalledTimes(3);
+    expect(transport.get.mock.calls[2]![1]).toContain('fromLine=101');
   });
 
   it('explains a missing or oversized log instead of rendering lines', async () => {

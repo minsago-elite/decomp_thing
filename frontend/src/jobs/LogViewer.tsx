@@ -37,9 +37,10 @@ export function LogViewer({ jobId, runId, basePath }: { jobId: string; runId: st
   const [scrollTop, setScrollTop] = useState(0);
   const [find, setFind] = useState('');
   const [query, setQuery] = useState('');
-  const [search, setSearch] = useState<AvailableLog['search']>(null);
+  const [searchObservation, setSearchObservation] = useState<{ sourceSha256: string; result: AvailableLog['search'] } | null>(null);
   const viewport = useRef<HTMLDivElement>(null);
   const requests = useRef(new Set<AbortController>());
+  const generation = useRef(0);
   const bufferRef = useRef<LogBuffer | null>(null);
   const pendingScroll = useRef<'end' | bigint | null>(null);
   const mounted = useRef(true);
@@ -49,37 +50,72 @@ export function LogViewer({ jobId, runId, basePath }: { jobId: string; runId: st
   const followRef = useRef<Follow>('off');
   followRef.current = follow;
 
-  /** `scroll` is decided when the response arrives, so a reader who paused meanwhile keeps their position. */
+  // Every read belongs to one user intent. Aborting alone is insufficient if a transport has
+  // already completed: the generation also guards every state/scroll publication.
+  const cancelReads = useCallback(() => {
+    generation.current += 1;
+    for (const controller of requests.current) controller.abort();
+    requests.current.clear();
+    pendingScroll.current = null;
+  }, []);
+  const pause = (value: Follow = 'off') => {
+    cancelReads();
+    followRef.current = value;
+    setFollow(value);
+  };
+
   const read = useCallback(async (parameters: Record<string, string>, keep: 'start' | 'end' | 'replace',
-    scroll?: () => 'end' | bigint | null): Promise<AvailableLog | null> => {
+    scroll?: () => 'end' | bigint | null, intent: { follow?: boolean; sourceSha256?: string } = {}): Promise<AvailableLog | null> => {
+    cancelReads();
+    const ownGeneration = generation.current;
+    const previousSource = bufferRef.current?.sourceSha256;
     const controller = new AbortController();
     requests.current.add(controller);
-    try {
-      const { data } = await client.get('logRange', `/jobs/${jobId}/runs/${runId}/logs/build?${new URLSearchParams(parameters)}`, { signal: controller.signal });
-      if (controller.signal.aborted || !mounted.current) return null;
+    const current = () => !controller.signal.aborted && mounted.current && generation.current === ownGeneration;
+    const fetchRange = async (selection: Record<string, string>) => {
+      const { data } = await client.get('logRange', `/jobs/${jobId}/runs/${runId}/logs/build?${new URLSearchParams(selection)}`, { signal: controller.signal });
+      if (!current()) return null;
       if (data.jobId !== jobId || data.runId !== runId) throw new ApiClientError('invalid_response');
+      return data;
+    };
+    try {
+      let data = await fetchRange(parameters);
+      if (!data || !current()) return null;
+      const changedSelection = data.state === 'available' && (
+        (intent.follow && previousSource !== undefined && data.sourceSha256 !== previousSource) ||
+        (intent.sourceSha256 !== undefined && data.sourceSha256 !== intent.sourceSha256));
+      if (changedSelection) {
+        // An append cursor (or a searched line number) belongs to the old recording. Even an
+        // empty/terminal replacement must load its diagnostics before ending the follow loop.
+        data = await fetchRange({ tail: 'true', limit: '200' });
+        if (!data || !current()) return null;
+      }
       setError('');
       setAttemptState(data.attempt.state);
       if (data.state !== 'available') {
+        setSearchObservation(null);
         bufferRef.current = null; setBuffer(null);
         setStatus(data.state === 'oversized' ? { state: 'oversized', limit: data.maximumBytes } : { state: 'missing' });
         return null;
       }
+      if (previousSource !== data.sourceSha256) setSearchObservation(null);
+      if (parameters.search && !changedSelection) setSearchObservation({ sourceSha256: data.sourceSha256, result: data.search });
       // An explicit jump replaces the window, so eviction can never discard its target.
       const merged = mergeLogRange(keep === 'replace' ? null : bufferRef.current, data, keep === 'replace' ? 'start' : keep);
-      if (scroll) pendingScroll.current = scroll();
+      if (changedSelection) pendingScroll.current = 'end';
+      else if (scroll) pendingScroll.current = scroll();
       bufferRef.current = merged.buffer; setBuffer(merged.buffer);
       setNotice(merged.replaced ? copy.replaced : merged.released > 0 ? textMessage(copy.released, { count: merged.released }) : '');
       setStatus({ state: 'ready' });
       return data;
     } catch (failure: unknown) {
-      if (controller.signal.aborted || !mounted.current) return null;
+      if (!current()) return null;
       setError(withApiFailureReference(failure instanceof ApiClientError && failure.status === 401 ? copy.session : copy.failed, failure));
-      setFollow('off');
+      followRef.current = 'off'; setFollow('off');
       if (!bufferRef.current) setStatus({ state: 'error' });
       return null;
     } finally { requests.current.delete(controller); }
-  }, [client, jobId, runId]);
+  }, [client, jobId, runId, cancelReads]);
 
   useEffect(() => {
     mounted.current = true;
@@ -100,9 +136,11 @@ export function LogViewer({ jobId, runId, basePath }: { jobId: string; runId: st
     if (follow !== 'on' || !availability.visible || !availability.online || (status.state !== 'ready' && status.state !== 'missing') || ended) return;
     let timer: ReturnType<typeof setTimeout> | undefined = setTimeout(() => {
       timer = undefined;
+      // Background following must never supersede an in-flight deliberate navigation/search.
+      if (requests.current.size > 0) { setFollowTick(value => value + 1); return; }
       const current = bufferRef.current;
       void read(current ? { fromLine: String(lastLine(current) + 1n), limit: String(LOG_PAGE_LINES) } : { tail: 'true', limit: '200' }, 'end',
-        () => followRef.current === 'on' ? 'end' : null).then(() => { if (mounted.current) setFollowTick(value => value + 1); });
+        () => followRef.current === 'on' ? 'end' : null, { follow: true }).then(() => { if (mounted.current) setFollowTick(value => value + 1); });
     }, FOLLOW_INTERVAL_MS);
     return () => { if (timer !== undefined) clearTimeout(timer); };
   }, [follow, availability.visible, availability.online, status.state, ended, followTick, read]);
@@ -126,19 +164,18 @@ export function LogViewer({ jobId, runId, basePath }: { jobId: string; runId: st
     // Auto-follow stops as soon as the reader moves away from the newest lines.
     const fromEnd = displayed.length * LOG_ROW_PX - (element.scrollTop + LOG_VIEWPORT_PX);
     if (follow === 'on' && fromEnd > LOG_ROW_PX) {
-      pendingScroll.current = null;
-      followRef.current = 'scrolled';
-      setFollow('scrolled');
+      pause('scrolled');
     }
   };
   const goToLine = (line: bigint) => {
-    setFollow('off'); setFind('');
-    followRef.current = 'off';
+    if (!searchObservation || searchObservation.sourceSha256 !== bufferRef.current?.sourceSha256) return;
+    pause(); setFind('');
     // Little leading context: even maximal lines keep the target inside one byte-budgeted response.
     const from = line > 10n ? line - 10n : 1n;
-    void read({ fromLine: String(from), limit: String(LOG_PAGE_LINES) }, 'replace', () => line);
+    void read({ fromLine: String(from), limit: String(LOG_PAGE_LINES) }, 'replace', () => line, { sourceSha256: searchObservation.sourceSha256 });
   };
 
+  const search = searchObservation?.sourceSha256 === buffer?.sourceSha256 ? searchObservation?.result : null;
   const rows = visibleWindow(scrollTop, LOG_VIEWPORT_PX, LOG_ROW_PX, displayed.length);
   const meta = buffer?.meta;
   return <section aria-labelledby="log-title" aria-busy={status.state === 'loading'}>
@@ -149,7 +186,7 @@ export function LogViewer({ jobId, runId, basePath }: { jobId: string; runId: st
       <p role="status">{copy.missing}</p>
       <div class="job-actions">
         <button type="button" onClick={() => { void read({ tail: 'true', limit: '200' }, 'end', () => 'end'); }}>{copy.checkAgain}</button>
-        {!ended && <button type="button" onClick={() => setFollow(value => value === 'on' ? 'off' : 'on')}>{follow === 'on' ? copy.pause : copy.follow}</button>}
+        {!ended && <button type="button" onClick={() => { pause(follow === 'on' ? 'off' : 'on'); }}>{follow === 'on' ? copy.pause : copy.follow}</button>}
       </div>
       {follow === 'on' && !ended && <p>{copy.waitingForLog}</p>}
     </>}
@@ -165,7 +202,7 @@ export function LogViewer({ jobId, runId, basePath }: { jobId: string; runId: st
       {notice && <p role="status">{notice}</p>}
       <div class="job-actions">
         <button type="button" disabled={buffer.firstLine <= 1n} onClick={() => {
-          setFollow('off');
+          pause();
           // The server fills this page backward from the line before the window, so it is always adjacent.
           void read({ beforeLine: String(buffer.firstLine), limit: String(LOG_PAGE_LINES) }, 'start');
         }}>{copy.loadEarlier}</button>
@@ -174,20 +211,20 @@ export function LogViewer({ jobId, runId, basePath }: { jobId: string; runId: st
         }}>{copy.loadLater}</button>
         <button type="button" onClick={() => { void read({ tail: 'true', limit: '200' }, 'end', () => 'end'); }}>{copy.newest}</button>
         {!ended && <button type="button" onClick={() => {
-          if (follow === 'on') { setFollow('off'); return; }
-          pendingScroll.current = 'end'; setFind(''); setFollow('on');
+          if (follow === 'on') { pause(); return; }
+          pause('on'); pendingScroll.current = 'end'; setFind('');
         }}>{follow === 'on' ? copy.pause : follow === 'scrolled' ? copy.resume : copy.follow}</button>}
         <a class="button-link" href={apiPath(basePath, `/jobs/${jobId}/runs/${runId}/logs/build/content`)} download={`build-${runId}.log`}>{copy.download}</a>
       </div>
       <p role="status">{ended ? copy.ended : follow === 'scrolled' ? copy.pausedScrolled : follow === 'off' ? copy.paused
         : !availability.visible || !availability.online ? copy.hidden : copy.following}</p>
       <div class="log-search">
-        <label>{copy.find}<input value={find} maxLength={128} onInput={event => { setFind(event.currentTarget.value); setFollow(value => value === 'on' ? 'scrolled' : value); }} /></label>
+        <label>{copy.find}<input value={find} maxLength={128} onInput={event => { setFind(event.currentTarget.value); pause(follow === 'on' ? 'scrolled' : follow); }} /></label>
         <p>{find ? displayMessage(copy.findScope, { count: displayed.length, first: buffer.firstLine.toString(), last: lastLine(buffer).toString() }) : copy.findEmpty}</p>
         <form onSubmit={event => {
           event.preventDefault();
           if (!query) return;
-          void read({ fromLine: String(buffer.firstLine), limit: '1', search: query }, 'start').then(result => { if (result) setSearch(result.search); });
+          void read({ fromLine: String(buffer.firstLine), limit: '1', search: query }, 'start', undefined, { sourceSha256: buffer.sourceSha256 });
         }}>
           <label>{copy.search}<input value={query} maxLength={128} onInput={event => setQuery(event.currentTarget.value)} /></label>{' '}
           <button type="submit" disabled={!query}>{copy.search}</button>
