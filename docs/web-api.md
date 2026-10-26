@@ -678,12 +678,16 @@ up to three times before reporting `503 PROGRESS_UNAVAILABLE`; budget refusals a
 interruption are not retried. Activity treats `503 PROGRESS_UNAVAILABLE` as transient: it
 reconciles a fresh snapshot and reconnects within its existing four-retry, ±20% jittered
 budget, keeps SSE rather than falling back to polling, and shows the unavailable alert only
-when that budget is exhausted. This was the cause of the intermittent packaged
-appended-SSE timeout (#514): the browser journey publishes its appended observation as the
-stream opens, and a pre-header read that overlapped the rename returned 503, which Activity
-previously treated as final.
+when that budget is exhausted. Deterministic stable-reader and mocked-transport tests reproduce
+this failure mechanism: an overlapping rename can produce a pre-header 503, which Activity
+previously treated as final. This is a possible cause of the intermittent packaged appended-SSE
+timeout (#514), not a confirmed diagnosis of the historical failure: the retained failed report
+records a timeout without the response needed to establish that cause. Hosted packaged verification
+now includes `--mode history`, which exercises the Sequence 205 append without polling and the
+graceful restart journey. Exact-head packaged qualification remains required; adding the CI step
+or obtaining a passing retry alone does not close the retained #514 limitation.
 
-A dropped SSE peer (navigation, tab close, network loss) holds no worker: its reservation is
+A dropped SSE peer (navigation, tab close, network loss) holds no workflow worker: its reservation is
 released when the next heartbeat or event write fails, and at the latest by the 30-second
 lease. Server stream shutdown closes observers only; it never cancels, completes or otherwise
 changes the observed attempt. Background tabs stop Activity reads and streams, first-page
