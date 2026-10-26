@@ -12,6 +12,7 @@ import kotlin.test.Test
 import kotlin.test.assertContentEquals
 import kotlin.test.assertEquals
 import kotlin.test.assertFalse
+import kotlin.test.assertFailsWith
 import kotlin.test.assertSame
 import kotlin.test.assertTrue
 
@@ -155,6 +156,38 @@ class WebRedactionPolicyTest {
         // Server-produced documents still pass through the policy.
         assertEquals("token=[redacted]", publicWebApiData("report", directory, policy).jsonObject.getValue("entries")
             .let { (it as kotlinx.serialization.json.JsonArray)[0].jsonObject.getValue("displayName").jsonPrimitive.content })
+    }
+
+    @Test fun `redacted near-limit names remain bounded without truncating secret replacements`() {
+        val filename = "shortish9".repeat(28) + ".c"
+        assertEquals(254, filename.length)
+        for (key in listOf("displayFilename", "displayName", "filename")) {
+            val safe = policy.json(buildJsonObject { put(key, filename) }).jsonObject
+            assertEquals("[redacted]", safe.getValue(key).jsonPrimitive.content)
+            assertEquals(safe, policy.json(safe))
+            val download = Json.parseToJsonElement(policy.document(buildJsonObject { put(key, filename) }.toString().toByteArray()).decodeToString())
+            assertEquals(safe, download)
+        }
+        val clean = buildJsonObject { put("displayName", "x".repeat(1024)) }
+        assertEquals(clean, policy.json(clean), "clean longer Git ref names are unchanged")
+    }
+
+    @Test fun `unsupported short named credentials are refused instead of silently excluded`() {
+        for (length in 1..7) {
+            val secret = "s".repeat(length)
+            val failure = assertFailsWith<IllegalArgumentException> {
+                WebRedactionPolicy.create(mapOf("DB_PASSWORD" to secret), listOf(secret), emptyList())
+            }
+            assertEquals("nonempty credential-named environment values must contain 8 to 4096 characters", failure.message)
+        }
+        for (secret in listOf("hunter2", "s3cr3t!")) {
+            assertFailsWith<IllegalArgumentException> {
+                WebRedactionPolicy.create(mapOf("DECOMP_TEST_API_TOKEN" to secret), listOf(secret), emptyList())
+            }
+        }
+        // Empty optional credentials and short generic environment values are not credentials.
+        val generic = WebRedactionPolicy.create(mapOf("DB_PASSWORD" to "", "SHLVL" to "1"), emptyList(), emptyList())
+        assertEquals("1", generic.text("1"))
     }
 
     @Test fun `persisted diagnostics also redact short configured values before storage`() {

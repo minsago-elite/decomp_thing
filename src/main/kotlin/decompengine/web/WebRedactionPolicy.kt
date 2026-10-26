@@ -96,7 +96,14 @@ internal class WebRedactionPolicy private constructor(
         // Exact-byte previews of recorded program output are digest-bound job content: their text is checked
         // against the hexadecimal bytes, so a substitution would corrupt the record without hiding the bytes.
         is JsonObject -> if (value.keys == BYTE_PREVIEW_KEYS) value
-            else JsonObject(value.mapValues { (key, child) -> json(child, opaqueKey(key), routingKey(key)) })
+            else JsonObject(value.mapValues { (key, child) ->
+                val safe = json(child, opaqueKey(key), routingKey(key))
+                // Redaction may expand a valid near-limit name/prose field. Withhold the whole
+                // field rather than truncate a replacement (or return an undecodable document).
+                val maximum = PUBLIC_TEXT_BOUNDS[key]
+                if (safe != child && maximum != null && safe is JsonPrimitive && safe.isString && safe.content.length > maximum)
+                    JsonPrimitive(SECRET_MARK) else safe
+            })
         is JsonArray -> JsonArray(value.map { json(it, opaque, routing) })
         is JsonNull -> value
         is JsonPrimitive -> if (!value.isString) value else {
@@ -141,6 +148,9 @@ internal class WebRedactionPolicy private constructor(
                 "COOKIE|PRIVATE|KEY|PAT|DSN|WEBHOOK|SIGNING|BEARER)(?:_|$)|(?i)(?:APIKEY|ACCESSKEY|SECRETKEY)")
         private val OPAQUE_SYNTAX = Regex("[A-Za-z0-9_.:+=-]{1,512}")
         private val BYTE_PREVIEW_KEYS = setOf("totalBytes", "prefixBytes", "hex", "text", "textBytes", "truncated")
+        // Conservative common bounds when a name is shared by several public DTOs.
+        private val PUBLIC_TEXT_BOUNDS = mapOf("displayFilename" to 255, "filename" to 255,
+            "displayName" to 255, "message" to 500, "javaVersion" to 64, "gitVersion" to 64)
         /** A same-origin URL path (optionally with a query): what basePath and *Href fields carry. */
         private val ROUTE_SYNTAX = Regex("/(?:[A-Za-z0-9._~!$&'()*+,;=:@%-]+/?)*(?:\\?[A-Za-z0-9._~!$&'()*+,;=:@%/?-]*)?")
         private const val CREDENTIAL_KEYS = "api[_-]?key|access[_-]?key|secret[_-]?key|access[_-]?token|refresh[_-]?token|" +
@@ -172,8 +182,13 @@ internal class WebRedactionPolicy private constructor(
             privateRoots: Collection<Path>,
         ): WebRedactionPolicy {
             val named = environment.entries.filter { (name, value) ->
-                value.length >= 8 && CREDENTIAL_NAME.containsMatchIn(name)
+                value.isNotEmpty() && CREDENTIAL_NAME.containsMatchIn(name)
             }.map { it.value }
+            // Very short literals can collide with fixed DTO vocabulary and even the redaction
+            // markers. Refuse that configuration instead of silently serving a known secret.
+            require(named.all { it.length in 8..4096 }) {
+                "nonempty credential-named environment values must contain 8 to 4096 characters"
+            }
             // Long opaque configured values are secret-shaped regardless of their name. Path lists and
             // prose are left to the path rules; short generic values would corrupt public vocabulary.
             val opaque = sensitiveValues.filter { value ->
