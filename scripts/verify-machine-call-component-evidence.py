@@ -4,6 +4,8 @@
 from __future__ import annotations
 
 import argparse
+from collections.abc import Iterator
+from contextlib import contextmanager, ExitStack
 from hashlib import sha256
 import json
 import os
@@ -98,18 +100,34 @@ def repository_path(path: Path, *, existing: bool) -> Path:
     return absolute
 
 
+@contextmanager
+def open_repository_parent(path: Path, *, existing: bool) -> Iterator[tuple[int, str]]:
+    # Pathname preflight is diagnostic only. Every subsequent filesystem operation is
+    # anchored to retained nonsymlink directory descriptors, including leaf cleanup.
+    selected = repository_path(path, existing=existing)
+    root = REPOSITORY_ROOT.resolve()
+    parts = selected.relative_to(root).parts
+    with ExitStack() as descriptors:
+        parent = os.open(root, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+        descriptors.callback(os.close, parent)
+        for part in parts[:-1]:
+            parent = os.open(part, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=parent)
+            descriptors.callback(os.close, parent)
+        yield parent, parts[-1]
+
+
 def read_file(path: Path, maximum: int) -> bytes:
-    path = repository_path(path, existing=True)
-    descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
-    with os.fdopen(descriptor, "rb") as stream:
-        before = os.fstat(stream.fileno())
-        require(stat.S_ISREG(before.st_mode) and before.st_size <= maximum, "input file exceeds byte bound")
-        result = stream.read(maximum + 1)
-        after = os.fstat(stream.fileno())
-        require(len(result) <= maximum and len(result) == before.st_size and
-                (before.st_dev, before.st_ino, before.st_size, before.st_mtime_ns, before.st_ctime_ns) ==
-                (after.st_dev, after.st_ino, after.st_size, after.st_mtime_ns, after.st_ctime_ns), "input changed while reading")
-        return result
+    with open_repository_parent(path, existing=True) as (parent, leaf):
+        descriptor = os.open(leaf, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=parent)
+        with os.fdopen(descriptor, "rb") as stream:
+            before = os.fstat(stream.fileno())
+            require(stat.S_ISREG(before.st_mode) and before.st_size <= maximum, "input file exceeds byte bound")
+            result = stream.read(maximum + 1)
+            after = os.fstat(stream.fileno())
+            require(len(result) <= maximum and len(result) == before.st_size and
+                    (before.st_dev, before.st_ino, before.st_size, before.st_mtime_ns, before.st_ctime_ns) ==
+                    (after.st_dev, after.st_ino, after.st_size, after.st_mtime_ns, after.st_ctime_ns), "input changed while reading")
+            return result
 
 
 def canonical_bytes(value: object) -> bytes:
@@ -382,16 +400,16 @@ def verify_evidence(evidence_path: Path) -> tuple[bytes, dict]:
 
 
 def extract_report(destination: Path, report_bytes: bytes) -> None:
-    destination = repository_path(destination, existing=False)
-    descriptor = os.open(destination, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
-    try:
-        with os.fdopen(descriptor, "wb") as stream:
-            stream.write(report_bytes)
-            stream.flush()
-            os.fsync(stream.fileno())
-    except BaseException:
-        destination.unlink()
-        raise
+    with open_repository_parent(destination, existing=False) as (parent, leaf):
+        descriptor = os.open(leaf, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600, dir_fd=parent)
+        try:
+            with os.fdopen(descriptor, "wb") as stream:
+                stream.write(report_bytes)
+                stream.flush()
+                os.fsync(stream.fileno())
+        except BaseException:
+            os.unlink(leaf, dir_fd=parent)
+            raise
 
 
 def main(argv: list[str] | None = None) -> int:

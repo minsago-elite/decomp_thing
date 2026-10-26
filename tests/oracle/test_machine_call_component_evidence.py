@@ -243,6 +243,96 @@ else:
             stderr=subprocess.PIPE, timeout=5, check=True)
         self.assertIn(b"real FIFO substitution refused", result.stdout)
 
+    def parent_substitution_control(self, operation: str, stage: str) -> None:
+        fixture = self.root / f"{operation}-{stage}"
+        repository = fixture / "repository"
+        parent = repository / "selected"
+        moved = repository / "original"
+        outside = fixture / "outside-repository"
+        for directory in (parent / "nested", outside / "nested"):
+            directory.mkdir(parents=True)
+        victim = parent / "nested/report.json"
+        outside_victim = outside / "nested/report.json"
+        if operation == "read":
+            victim.write_bytes(b"original repository bytes")
+            outside_victim.write_bytes(b"outside repository bytes")
+        original_path = VERIFY.repository_path
+        original_open = os.open
+        replaced = False
+
+        def substitute() -> None:
+            nonlocal replaced
+            self.assertFalse(replaced)
+            parent.rename(moved)
+            parent.symlink_to(outside, target_is_directory=True)
+            replaced = True
+
+        def after_validation(path, *, existing):
+            selected = original_path(path, existing=existing)
+            if stage == "after-validation":
+                substitute()
+            return selected
+
+        def before_leaf(path, flags, *args, **kwargs):
+            if stage == "before-leaf" and path == "report.json":
+                self.assertIn("dir_fd", kwargs)
+                substitute()
+            return original_open(path, flags, *args, **kwargs)
+
+        with mock.patch.object(VERIFY, "REPOSITORY_ROOT", repository), \
+                mock.patch.object(VERIFY, "repository_path", side_effect=after_validation), \
+                mock.patch.object(VERIFY.os, "open", side_effect=before_leaf):
+            def perform():
+                if operation == "read":
+                    return VERIFY.read_file(victim, 1024)
+                VERIFY.extract_report(victim, b"verified report")
+
+            if stage == "after-validation":
+                # A substituted parent cannot be opened as a nonsymlink directory.
+                with self.assertRaises((VERIFY.VerificationError, OSError)):
+                    perform()
+            elif operation == "read":
+                self.assertEqual(b"original repository bytes", perform())
+            else:
+                perform()
+                self.assertEqual(b"verified report", (moved / "nested/report.json").read_bytes())
+        self.assertTrue(replaced)
+        if operation == "read":
+            self.assertEqual(b"outside repository bytes", outside_victim.read_bytes())
+        else:
+            self.assertFalse(outside_victim.exists())
+
+    def test_parent_substitution_cannot_redirect_reads(self) -> None:
+        for stage in ("after-validation", "before-leaf"):
+            with self.subTest(stage=stage):
+                self.parent_substitution_control("read", stage)
+
+    def test_parent_substitution_cannot_redirect_extraction(self) -> None:
+        for stage in ("after-validation", "before-leaf"):
+            with self.subTest(stage=stage):
+                self.parent_substitution_control("extract", stage)
+
+    def test_failed_extraction_cleans_up_using_retained_parent_not_substituted_path(self) -> None:
+        repository = self.root / "cleanup-repository"
+        parent = repository / "selected"
+        moved = repository / "original"
+        outside = self.root / "cleanup-outside"
+        parent.mkdir(parents=True)
+        outside.mkdir()
+        outside_victim = outside / "report.json"
+        outside_victim.write_bytes(b"outside file must survive")
+
+        def fail_sync(descriptor):
+            parent.rename(moved)
+            parent.symlink_to(outside, target_is_directory=True)
+            raise OSError("authored sync failure after parent substitution")
+
+        with mock.patch.object(VERIFY, "REPOSITORY_ROOT", repository), mock.patch.object(VERIFY.os, "fsync", side_effect=fail_sync):
+            with self.assertRaisesRegex(OSError, "authored sync failure"):
+                VERIFY.extract_report(parent / "report.json", b"verified report")
+        self.assertFalse((moved / "report.json").exists())
+        self.assertEqual(b"outside file must survive", outside_victim.read_bytes())
+
     def test_extraction_refuses_overwrite_symlinks_missing_parent_and_repository_escape(self) -> None:
         recovered, _ = self.verify()
         output = self.root / "output.json"
