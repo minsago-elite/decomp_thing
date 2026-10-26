@@ -1,8 +1,8 @@
 # A-series issue #918 — Freeze stable C++ names and resolve owner-scoped collisions — evidence boundary
 
 - Milestone: A14: Reconstruct a Buildable Clang/LLVM Full Source Tree
-- Worktree: `/home/june/a-series-wt/issue-918` (branch `a-series-issue-918`, based on `origin/master`)
-- Status: NOT YET QUALIFIED — this file records the current evidence boundary only; it does not claim production qualification.
+- Worktree: `.claude/worktrees/a-series-cpp-name-table-918` (branch `a-series/cpp-name-table-918`, based on `origin/master`)
+- Status: CANDIDATE IMPLEMENTATION ONLY — this file records an inert naming slice; it does not claim production qualification.
 
 ## Outcome (from issue)
 Freeze stable C++ names and resolve owner-scoped collisions
@@ -10,14 +10,21 @@ Freeze stable C++ names and resolve owner-scoped collisions
 ## Acceptance criteria (from issue)
 See `gh issue view 918` for the authoritative checklist. This PR does not close #918; it retains the gap for follow-up qualification.
 
-## Method
-- Read issue #918 outcome, acceptance criteria, dependencies and parent checkpoints.
-- Inspected the `origin/master` worktree for existing implementation, tests and retained checkpoints.
-- Recorded only what is currently evidenced; unresolved behavior remains explicitly unclaimed.
+## Implemented candidate slice
+- Added `StableCppNameCandidateTable` as a pure deterministic function over typed source-anchor identity candidates, lexical scopes, linkage classes, owners, module IDs and canonical source paths.
+- Generated identifiers use a legal fixed prefix, sanitized bounded stem, and full SHA-256 digest. Scope and explicit owner participate in the digest; module owner participates for internal linkage. Canonical report rows bind module and path so placement changes remain visible.
+- The table freezes all entries before lookup, rejects duplicate/unknown identity candidates and duplicate generated names, records sanitized-stem collision groups, and emits a canonical report marked `authority: none` and `status: candidate-only`.
+- Inputs and outputs have hard entity, UTF-8, scope-depth, canonical-byte and JSON-node bounds. Scope lists are copied through a bounded iterator before any scan; oversized scope/name inputs fail before unbounded traversal or encoding allocation.
+- No production adapter or emission path consumes this candidate table. The supplied identity candidates are not authenticated semantic identities.
+
+## Verification evidence
+- Command: `./gradlew test --tests decompengine.project.StableCppNameCandidateTableTest`
+- Result: `BUILD SUCCESSFUL`; all 9 focused tests passed, including order permutation, sanitization collisions, owner/scope requirements, scope and module moves, duplicate/unknown identities, output and Unicode limits, adversarial unbounded scope iterator, and authored multi-translation-unit fixtures.
+- The command also passed the frontend toolchain/build/resource checks and compiled JUnit signature guard (1,728 classes; 4,481 annotated methods).
 
 ## Current boundary (truthful, no fabrication)
-- No new production behavior is claimed by this file.
-- Qualification evidence (contained runs, deterministic repetitions, independent archive verification, authority boundaries) is still required before #918 can close.
+- This is a pure candidate-only implementation slice; no authenticated semantic-identity input, production integration, generated source, contained run, deterministic production repetition, or independent archive verification is claimed.
+- All five issue acceptance criteria remain open. Qualification and upstream producer/ownership dependencies are still required before #918 can close.
 - Parent checkpoints and dependency contracts referenced by the issue retain their own scope and verification requirements.
 
 ## Source excerpt (authoritative issue body, truncated)
@@ -47,6 +54,6 @@ Reuse the implementation and retained checkpoints in #131; complete or verify on
 ```
 
 ## Limitations / next steps
-- Attach focused execution evidence (exact commands, commits, artifacts, budgets) in a follow-up before claiming #918.
-- Keep implementation slices minimal and file-scoped (`docs/evidence/a-series-issue-918.md` only) so parallel A-series PRs do not conflict.
+- Attach production qualification evidence (exact commands, commits, artifacts, budgets) before claiming #918.
+- Keep this candidate slice isolated from #919/#920 and upstream semantic-identity authority work.
 - Distinguish draft implementation, merged behavior and production qualification per the issue's evidence requirements.
