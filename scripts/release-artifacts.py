@@ -9,7 +9,7 @@ archives to ship identical bytes and modes, and writes build/release/llm_bin_pat
   ui-manifest.json                     the embedded UI manifest read from the application JAR
   frontend-dependencies.json           non-development packages pinned in frontend/package-lock.json
   frontend-THIRD_PARTY_NOTICES.txt     the notices file shipped in the distribution
-  release-record.json                  source revision, application/UI build IDs, archive digests
+  release-record.json                  source binding, application/UI build IDs, archive digests
   SHA256SUMS                           sha256sum(1) lines for every file above
 
 `verify` recomputes everything from the copied archives' actual bytes: every SHA256SUMS line,
@@ -26,7 +26,6 @@ import json
 from pathlib import Path
 import re
 import shutil
-import subprocess
 import sys
 import tarfile
 import zipfile
@@ -245,17 +244,38 @@ def check_notices(notices: bytes, dependencies: dict) -> None:
             raise ReleaseError(f"shipped notices omit {package['name']} {package['version']}")
 
 
-def source_revision() -> dict:
-    def git(*arguments: str) -> str:
-        return subprocess.run(["git", "-C", str(REPOSITORY), *arguments], check=True,
-                              capture_output=True, text=True).stdout.strip()
-    try:
-        return {"commit": git("rev-parse", "HEAD"), "dirty": bool(git("status", "--porcelain", "--untracked-files=no"))}
-    except (OSError, subprocess.CalledProcessError):
-        return {"commit": None, "dirty": None}
+def source_record(revision: str | None) -> dict:
+    """The distribution carries no source identity, so the assembler's checkout proves nothing about it.
+
+    Without an explicit revision from whoever built the archives the source is recorded as unknown.
+    A supplied revision is labeled as the assembler's assertion; it is not verified against the bytes.
+    """
+    if revision is None:
+        return {"revision": None, "binding": "unknown",
+                "reason": "The distribution does not record its source revision and none was supplied."}
+    if not re.fullmatch(r"[0-9a-f]{40}", revision):
+        raise ReleaseError("--source-revision must be a full lowercase 40-character commit ID")
+    return {"revision": revision, "binding": "asserted-by-assembler",
+            "reason": "Supplied by the assembler; the distribution bytes do not record or confirm it."}
 
 
-def assemble(distributions: Path, output: Path, lockfile: Path, composition: Path | None) -> Path:
+def check_source(source: object) -> None:
+    if not isinstance(source, dict) or set(source) != {"revision", "binding", "reason"}:
+        raise ReleaseError("the release record has an unrecognized source block")
+    if source["binding"] == "unknown" and source["revision"] is None:
+        return
+    if source["binding"] == "asserted-by-assembler" and isinstance(source["revision"], str) \
+            and re.fullmatch(r"[0-9a-f]{40}", source["revision"]):
+        return
+    raise ReleaseError("the release record claims an unsupported source binding")
+
+
+def assemble(distributions: Path, output: Path, lockfile: Path, composition: Path,
+             revision: str | None = None) -> Path:
+    if not composition.is_file():
+        raise ReleaseError(f"the bundle composition {composition} is missing; build the frontend first "
+                           "(browser-module owners and notice coverage cannot be checked without it)")
+    source = source_record(revision)
     zip_path, tar_path, version = distribution_pair(distributions)
     zip_members = read_zip(zip_path)
     compare_archives(zip_members, read_tar(tar_path))
@@ -283,7 +303,7 @@ def assemble(distributions: Path, output: Path, lockfile: Path, composition: Pat
         "schemaVersion": 1,
         "application": NAME,
         "version": version,
-        "source": source_revision(),
+        "source": source,
         # The server reports the SHA-256 of its own application JAR as applicationBuildId.
         "applicationBuildId": members[application_jar].digest,
         "uiBuildId": manifest["buildId"],
@@ -348,7 +368,10 @@ def verify(release: Path, lockfile: Path | None) -> dict:
             raise ReleaseError("the embedded UI manifest differs from the release record")
         if members[NOTICES].data != (release / "frontend-THIRD_PARTY_NOTICES.txt").read_bytes():
             raise ReleaseError("the shipped notices differ from the release copy")
+    check_source(record["source"])
     dependencies = json.loads((release / "frontend-dependencies.json").read_text())
+    if not isinstance(dependencies.get("browserModuleOwners"), list):
+        raise ReleaseError("the release was assembled without browser-module owners; notice coverage is unchecked")
     check_notices((release / "frontend-THIRD_PARTY_NOTICES.txt").read_bytes(), dependencies)
     if lockfile is not None:
         if file_sha256(lockfile) != dependencies["lockfileSha256"]:
@@ -371,14 +394,15 @@ def main(argv: list[str]) -> int:
     build.add_argument("--output", type=Path, default=REPOSITORY / "build/release")
     build.add_argument("--lockfile", type=Path, default=REPOSITORY / "frontend/package-lock.json")
     build.add_argument("--bundle-composition", type=Path, default=REPOSITORY / "build/frontend/bundle-composition.json")
+    build.add_argument("--source-revision", help="commit the archives were built from, recorded as the assembler's assertion")
     check = commands.add_parser("verify")
     check.add_argument("release", type=Path)
     check.add_argument("--lockfile", type=Path)
     arguments = parser.parse_args(argv)
     try:
         if arguments.command == "assemble":
-            composition = arguments.bundle_composition if arguments.bundle_composition.is_file() else None
-            release = assemble(arguments.distributions, arguments.output, arguments.lockfile, composition)
+            release = assemble(arguments.distributions, arguments.output, arguments.lockfile,
+                               arguments.bundle_composition, arguments.source_revision)
             print(release)
         else:
             print(json.dumps(verify(arguments.release, arguments.lockfile), sort_keys=True))

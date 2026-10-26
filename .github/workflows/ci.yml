@@ -187,7 +187,8 @@ jobs:
       - name: Assemble and verify release records against the shipped archive bytes
         run: |
           python3 -B -m unittest tests.test_release_artifacts tests.test_support_bundle -v
-          release_dir="$(python3 scripts/release-artifacts.py assemble)"
+          # This job checked out and built this commit, so it asserts it as the archives' source.
+          release_dir="$(python3 scripts/release-artifacts.py assemble --source-revision "$(git rev-parse HEAD)")"
           python3 scripts/release-artifacts.py verify "$release_dir" --lockfile frontend/package-lock.json \
             | tee build/packaged-web-ci/release-verification.json
           # Retain only the small records; the archives are this job's existing build outputs.

@@ -28,13 +28,16 @@ def application_jar(asset: bytes = b"console.log('ui')\n", tamper: bool = False,
                "entryStyles": [], "files": files}
     build_id = hashlib.sha256((json.dumps(payload, separators=(",", ":")) + "\n").encode()).hexdigest()
     manifest = json.dumps({**payload, "buildId": build_id}, indent=2).encode()
+    entries = [("decompengine/Main.class", b"\xca\xfe\xba\xbe"),
+               ("decompengine/web/ui/asset-manifest.json", manifest),
+               ("decompengine/web/ui/assets/index-A.js", asset + (b"//changed" if tamper else b""))]
+    if extra:
+        entries.append(("decompengine/web/ui/assets/stale.js", b"old"))
     buffer = io.BytesIO()
     with zipfile.ZipFile(buffer, "w") as jar:
-        jar.writestr("decompengine/Main.class", b"\xca\xfe\xba\xbe")
-        jar.writestr("decompengine/web/ui/asset-manifest.json", manifest)
-        jar.writestr("decompengine/web/ui/assets/index-A.js", asset + (b"//changed" if tamper else b""))
-        if extra:
-            jar.writestr("decompengine/web/ui/assets/stale.js", b"old")
+        for name, data in entries:
+            # Fixed timestamps keep the JAR bytes, and so its digest, identical across calls.
+            jar.writestr(zipfile.ZipInfo(name, date_time=(1980, 1, 1, 0, 0, 0)), data)
     return buffer.getvalue()
 
 
@@ -79,11 +82,11 @@ class ReleaseArtifactsTest(unittest.TestCase):
         self.composition = self.root / "bundle-composition.json"
         self.composition.write_text(json.dumps([{"chunk": "a.js", "owner": "application"}, {"chunk": "a.js", "owner": "preact"}]))
 
-    def assemble(self, zip_members: dict, tar_members: dict | None = None) -> Path:
+    def assemble(self, zip_members: dict, tar_members: dict | None = None, revision: str | None = None) -> Path:
         self.assembled = getattr(self, "assembled", 0) + 1
         distributions = self.root / f"distributions-{self.assembled}"
         write_distributions(distributions, zip_members, tar_members)
-        return release.assemble(distributions, self.root / "release", self.lockfile, self.composition)
+        return release.assemble(distributions, self.root / "release", self.lockfile, self.composition, revision)
 
     def test_assembled_release_verifies_against_archive_bytes(self) -> None:
         output = self.assemble(members())
@@ -155,6 +158,41 @@ class ReleaseArtifactsTest(unittest.TestCase):
         self.composition.write_text(json.dumps([{"chunk": "a.js", "owner": "left-pad"}]))
         with self.assertRaisesRegex(release.ReleaseError, "outside the locked runtime set"):
             release.frontend_dependencies(self.lockfile, self.composition)
+
+    def test_missing_bundle_composition_refuses_assembly_and_unowned_records_fail_verification(self) -> None:
+        unnoticed = members()
+        unnoticed["docs/frontend-THIRD_PARTY_NOTICES.txt"] = (b"Notices\n", 0o644)
+        self.composition.unlink()
+        with self.assertRaisesRegex(release.ReleaseError, "bundle composition"):
+            self.assemble(unnoticed)
+        self.composition.write_text(json.dumps([{"chunk": "a.js", "owner": "preact"}]))
+        output = self.assemble(members())
+        dependencies = json.loads((output / "frontend-dependencies.json").read_text())
+        dependencies["browserModuleOwners"] = None
+        for package in dependencies["packages"]:
+            package["browserModules"] = None
+        (output / "frontend-dependencies.json").write_text(json.dumps(dependencies))
+        release.write_checksums(output)
+        with self.assertRaisesRegex(release.ReleaseError, "browser-module owners"):
+            release.verify(output, None)
+
+    def test_source_is_unknown_unless_explicitly_asserted(self) -> None:
+        output = self.assemble(members())
+        source = json.loads((output / "release-record.json").read_text())["source"]
+        self.assertEqual({"revision": None, "binding": "unknown"}, {key: source[key] for key in ("revision", "binding")})
+        self.assertEqual(source, release.verify(output, None)["source"])
+        output = self.assemble(members(), revision="a" * 40)
+        source = json.loads((output / "release-record.json").read_text())["source"]
+        self.assertEqual({"revision": "a" * 40, "binding": "asserted-by-assembler"},
+                         {key: source[key] for key in ("revision", "binding")})
+        with self.assertRaisesRegex(release.ReleaseError, "40-character"):
+            self.assemble(members(), revision="HEAD")
+        record = json.loads((output / "release-record.json").read_text())
+        record["source"] = {"commit": "b" * 40, "dirty": False}
+        (output / "release-record.json").write_text(json.dumps(record))
+        release.write_checksums(output)
+        with self.assertRaisesRegex(release.ReleaseError, "source block"):
+            release.verify(output, None)
 
 
 if __name__ == "__main__":
