@@ -23,7 +23,11 @@ import ghidra.program.util.DefaultLanguageService;
 import ghidra.util.task.TaskMonitor;
 import ghidra.util.task.TaskMonitorAdapter;
 import java.io.ByteArrayInputStream;
+import java.io.ByteArrayOutputStream;
+import java.io.OutputStream;
+import java.io.PrintStream;
 import java.io.PrintWriter;
+import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.LinkOption;
 import java.nio.file.Path;
@@ -50,6 +54,7 @@ public final class NativeInferredInterfaceControls {
         Application.initializeApplication(new GhidraApplicationLayout(Path.of(arguments[0]).toFile()),
             new HeadlessGhidraApplicationConfiguration());
         require("12.1.3".equals(Application.getApplicationVersion()), "unexpected bundled Ghidra version");
+        NativeInferredFailureDiagnosticsControls.run(root.resolve("failure-diagnostics-controls"));
         NativeInterfaceTypeGraphControls.run(root.resolve("graph-controls"));
         var language = DefaultLanguageService.getLanguageService().getLanguage(new LanguageID("x86:LE:64:default"));
         Object consumer = new Object();
@@ -77,8 +82,8 @@ public final class NativeInferredInterfaceControls {
             Map<Path, String> listingBefore = snapshots(listing);
             long modification = program.getModificationNumber();
             Path first = root.resolve("first-inferred"), second = root.resolve("second-inferred");
-            ExportInferredInterfacesV1.collect(program, MONITOR, collectorArguments(first));
-            ExportInferredInterfacesV1.collect(program, MONITOR, collectorArguments(second));
+            collectSilently(program, first);
+            collectSilently(program, second);
             for (String file : List.of("manifest.json", "native-inferred-interfaces.json")) {
                 require(Arrays.equals(Files.readAllBytes(first.resolve(file)), Files.readAllBytes(second.resolve(file))),
                     "nondeterministic Windows inference bytes: " + file);
@@ -89,6 +94,7 @@ public final class NativeInferredInterfaceControls {
             require(modelBefore.equals(snapshots(root.resolve("reports"))) && listingBefore.equals(snapshots(listing)),
                 "Windows inference changed frozen inputs");
             receipt.addProperty("byteIdenticalRepeatedCapture", true);
+            receipt.addProperty("successfulInferenceDiagnosticSilence", true);
             receipt.addProperty("nativeProgramUnchangedByInference", true);
             receipt.addProperty("modelAndListingUnchanged", true);
             receipt.addProperty("observationsSha256", sha256(first.resolve("native-inferred-interfaces.json")));
@@ -348,11 +354,11 @@ public final class NativeInferredInterfaceControls {
         long modification = program.getModificationNumber();
         Path first = root.resolve("first-inferred");
         Path second = root.resolve("second-inferred");
-        ExportInferredInterfacesV1.collect(program, MONITOR, collectorArguments(first));
+        collectSilently(program, first);
         require(program.getModificationNumber() == modification, "inference wrote back to native Program");
         require(originalModel.equals(snapshots(root.resolve("reports"))), "inference changed model artifacts");
         require(originalListing.equals(snapshots(listing)), "inference changed listing snapshot");
-        ExportInferredInterfacesV1.collect(program, MONITOR, collectorArguments(second));
+        collectSilently(program, second);
         require(program.getModificationNumber() == modification, "repeated inference wrote back to native Program");
         require(originalModel.equals(snapshots(root.resolve("reports"))), "repeated inference changed model artifacts");
         require(originalListing.equals(snapshots(listing)), "repeated inference changed listing snapshot");
@@ -368,6 +374,7 @@ public final class NativeInferredInterfaceControls {
         catch (Exception expected) { refused = true; }
         require(refused && originalOutput.equals(snapshots(first)), "existing inference output accepted or altered");
         cancelledCollection(program);
+        listingCancelledCollection(program);
         changingProgramCollection(program, functions.get("integer_add"));
         changedListingCollection(program);
         stagingBudgetControls(program, functions.get("integer_add"));
@@ -378,7 +385,8 @@ public final class NativeInferredInterfaceControls {
             "complete-function-dispositions external thunk unsupported-body typed-first-mapping separate-listing-inferred " +
             "recursive-type-graph union packed array typedef bitfield deterministic model-unchanged listing-unchanged " +
             "program-unchanged cancellation stale-output-rejected same-census-mutation-rejected changed-listing-rejected " +
-            "actual-staging-exact-peak actual-staging-one-byte-below-peak actual-stale-listing-larger-rerender-bounded\n");
+            "actual-staging-exact-peak actual-staging-one-byte-below-peak actual-stale-listing-larger-rerender-bounded " +
+            "successful-inference-diagnostic-silence actual-listing-cancellation-first-owner-freeze bounded-failure-diagnostics\n");
     }
 
     private static void assertObserved(Program program, Map<String, Function> functions, JsonObject document) {
@@ -536,10 +544,135 @@ public final class NativeInferredInterfaceControls {
         TaskMonitorAdapter monitor = new TaskMonitorAdapter(true);
         monitor.cancel();
         Path destination = root.resolve("cancelled-inferred");
-        boolean rejected = false;
-        try { ExportInferredInterfacesV1.collect(program, monitor, collectorArguments(destination)); }
-        catch (ghidra.util.exception.CancelledException expected) { rejected = true; }
-        require(rejected && !Files.exists(destination), "cancelled inference left successful or partial output");
+        CapturedRun capture = captureStderr(() -> ExportInferredInterfacesV1.collect(program, monitor, collectorArguments(destination)));
+        require(capture.failure() instanceof ghidra.util.exception.CancelledException && !Files.exists(destination),
+            "cancelled inference left successful or partial output");
+        JsonObject frame = onlyFailureFrame(capture);
+        equal(text(frame, "failureKind"), "cancellation-observed", "direct cancellation classification");
+        require(frame.getAsJsonObject("census").get("reportedFunctions").isJsonNull(), "pre-census cancellation invented census");
+        Files.write(root.resolve("failure-diagnostics-controls/direct-cancellation.stderr"), capture.stderr());
+    }
+
+    private static void listingCancelledCollection(Program program) throws Exception {
+        Path destination = root.resolve("listing-cancelled-inferred");
+        Map<Path, String> modelBefore = snapshots(root.resolve("reports")), listingBefore = snapshots(listing);
+        long modification = program.getModificationNumber();
+        ghidra.util.exception.CancelledException original = new ghidra.util.exception.CancelledException("authored listing cancellation");
+        boolean[] comparisonObserved = {false};
+        boolean[] emittedBeforeCleanup = {false};
+        TaskMonitorAdapter monitor = new TaskMonitorAdapter(true) {
+            @Override public void checkCancelled() throws ghidra.util.exception.CancelledException {
+                super.checkCancelled();
+                // This authored monitor uses the real collector's existing callback. No
+                // production observer or time override is introduced to force this boundary.
+                if (Files.isDirectory(destination.resolve("listing-comparison"), LinkOption.NOFOLLOW_LINKS)) {
+                    comparisonObserved[0] = true;
+                    throw original;
+                }
+            }
+        };
+        CapturedRun capture = captureStderr(() -> ExportInferredInterfacesV1.collect(program, monitor, collectorArguments(destination)), () -> {
+            Path comparison = destination.resolve("listing-comparison");
+            // Observe at the first stderr prefix, before the throwing monitor returns to
+            // the listing collector's finally block. This is only a fixture stream sink.
+            if (Files.isDirectory(comparison, LinkOption.NOFOLLOW_LINKS)) {
+                try (var files = Files.list(comparison)) {
+                    Set<String> names = new HashSet<>(files.map(path -> path.getFileName().toString()).toList());
+                    emittedBeforeCleanup[0] = names.stream().anyMatch(name -> name.startsWith(".native-interfaces-")) &&
+                        names.stream().anyMatch(name -> name.startsWith(".native-interface-types-"));
+                } catch (java.io.IOException ignored) { emittedBeforeCleanup[0] = false; }
+            }
+        });
+        require(comparisonObserved[0] && capture.failure() == original, "listing cancellation exception/order changed");
+        require(emittedBeforeCleanup[0], "listing cancellation diagnostic was emitted only after listing cleanup");
+        JsonObject frame = onlyFailureFrame(capture);
+        equal(text(frame, "stage"), "listing-comparison", "first listing owner stage");
+        equal(text(frame, "failureKind"), "cancellation-observed", "listing monitor cancellation classification");
+        require(frame.getAsJsonObject("census").get("validated").getAsBoolean(), "listing cancellation lost validated census");
+        equal(frame.getAsJsonObject("counts").get("nativeCallsStarted").getAsLong(), 0L, "listing cancellation started native work");
+        require(!Files.exists(destination, LinkOption.NOFOLLOW_LINKS), "listing cancellation left comparison/inferred/manifest output");
+        require(program.getModificationNumber() == modification && modelBefore.equals(snapshots(root.resolve("reports"))) &&
+            listingBefore.equals(snapshots(listing)), "listing cancellation changed frozen observations");
+        Files.write(root.resolve("failure-diagnostics-controls/listing-cancellation.stderr"), capture.stderr());
+        JsonObject receipt = new JsonObject();
+        receipt.addProperty("kind", "authored-inferred-listing-cancellation-control-v1");
+        receipt.addProperty("fixtureOnly", true);
+        receipt.addProperty("actualListingBridgeObserved", comparisonObserved[0]);
+        receipt.addProperty("emittedBeforeListingCleanup", emittedBeforeCleanup[0]);
+        receipt.addProperty("originalExceptionPreserved", capture.failure() == original);
+        receipt.addProperty("completeFrozenCensusRetained", true);
+        receipt.addProperty("outputAndComparisonAbsent", true);
+        receipt.addProperty("frozenInputsAndProgramUnchanged", true);
+        receipt.addProperty("productionInterfacesAdmitted", false);
+        Files.writeString(root.resolve("failure-diagnostics-controls/listing-cancellation.json"), receipt + "\n");
+    }
+
+    @FunctionalInterface private interface CheckedAction { void run() throws Exception; }
+    private record CapturedRun(Throwable failure, byte[] stderr) {}
+
+    private static CapturedRun captureStderr(CheckedAction action) throws Exception {
+        return captureStderr(action, () -> {});
+    }
+
+    private static CapturedRun captureStderr(CheckedAction action, Runnable firstDiagnostic) throws Exception {
+        PrintStream previous = System.err;
+        ByteArrayOutputStream retained = new ByteArrayOutputStream();
+        boolean[] overflow = {false};
+        boolean[] observed = {false};
+        OutputStream tee = new OutputStream() {
+            private void observe() {
+                if (!observed[0] && retained.toString(StandardCharsets.UTF_8).contains("DECOMP_INFERRED_FAILURE_V1 ")) {
+                    observed[0] = true;
+                    firstDiagnostic.run();
+                }
+            }
+            @Override public void write(int value) {
+                previous.write(value);
+                if (retained.size() < 1024 * 1024) retained.write(value); else overflow[0] = true;
+                observe();
+            }
+            @Override public void write(byte[] bytes, int offset, int length) {
+                previous.write(bytes, offset, length);
+                int count = Math.min(length, 1024 * 1024 - retained.size());
+                retained.write(bytes, offset, count);
+                if (count != length) overflow[0] = true;
+                observe();
+            }
+            @Override public void flush() { previous.flush(); }
+        };
+        Throwable failure = null;
+        PrintStream capture = new PrintStream(tee, true, StandardCharsets.UTF_8);
+        try {
+            System.setErr(capture);
+            try { action.run(); } catch (Throwable problem) { failure = problem; }
+        } finally {
+            capture.flush();
+            System.setErr(previous);
+        }
+        require(!overflow[0], "authored complete stderr fixture exceeded finite capture bound");
+        return new CapturedRun(failure, retained.toByteArray());
+    }
+
+    private static void collectSilently(Program program, Path destination) throws Exception {
+        CapturedRun capture = captureStderr(() -> ExportInferredInterfacesV1.collect(program, MONITOR, collectorArguments(destination)));
+        if (capture.failure() instanceof Exception problem) throw problem;
+        if (capture.failure() instanceof Error problem) throw problem;
+        require(capture.failure() == null && !new String(capture.stderr(), StandardCharsets.UTF_8).contains("DECOMP_INFERRED_FAILURE_V1 "),
+            "successful inference emitted a failure diagnostic");
+    }
+
+    private static JsonObject onlyFailureFrame(CapturedRun capture) {
+        String prefix = "DECOMP_INFERRED_FAILURE_V1 ";
+        String stderr = new String(capture.stderr(), StandardCharsets.UTF_8);
+        List<String> frames = stderr.lines().filter(line -> line.startsWith(prefix)).toList();
+        require(frames.size() == 1 && stderr.endsWith("\n"), "authored whole-stream capture must contain one complete diagnostic");
+        String frame = frames.get(0);
+        require((frame + "\n").getBytes(StandardCharsets.UTF_8).length <= 4096, "failure frame exceeded byte ceiling");
+        JsonObject result = JsonParser.parseString(frame.substring(prefix.length())).getAsJsonObject();
+        equal(text(result, "authority"), "diagnostic-only", "failure diagnostic authority");
+        require(!result.get("complete").getAsBoolean() && !result.get("productionInterfacesAdmitted").getAsBoolean() &&
+            !result.get("releaseEligible").getAsBoolean(), "failure diagnostic invented success authority");
+        return result;
     }
 
     private static void changingProgramCollection(ProgramDB program, Function function) throws Exception {
@@ -680,14 +813,19 @@ public final class NativeInferredInterfaceControls {
             long combinedLimit = Math.addExact(frozenInputBytes, available);
             require(combinedLimit < generousBudget, "authored inferred control is not a small budget");
             Path destination = evidence.resolve("stale-smaller-inferred");
-            java.io.IOException staleFailure = null;
-            try { ExportInferredInterfacesV1.collectWithByteLimit(program, MONITOR, collectorArguments(destination), combinedLimit); }
-            catch (java.io.IOException expected) { staleFailure = expected; }
+            CapturedRun staleCapture = captureStderr(() ->
+                ExportInferredInterfacesV1.collectWithByteLimit(program, MONITOR, collectorArguments(destination), combinedLimit));
+            java.io.IOException staleFailure = staleCapture.failure() instanceof java.io.IOException failure ? failure : null;
             require(staleFailure != null && staleFailure.getMessage() != null &&
                 staleFailure.getMessage().contains("while output and type spool are live"),
                 "larger actual rerender was not refused during bounded staging writes before equality");
             require(!Files.exists(destination, LinkOption.NOFOLLOW_LINKS),
                 "stale smaller listing left inferred output, comparison output or success manifest");
+            JsonObject failureFrame = onlyFailureFrame(staleCapture);
+            equal(text(failureFrame, "stage"), "listing-comparison", "staging failure stage");
+            equal(failureFrame.getAsJsonObject("counts").get("nativeCallsStarted").getAsLong(), 0L,
+                "staging refusal invented native call");
+            Files.write(root.resolve("failure-diagnostics-controls/staging-refusal.stderr"), staleCapture.stderr());
             require(originalModel.equals(snapshots(root.resolve("reports"))) && originalListing.equals(snapshots(listing)),
                 "stale listing control changed frozen inputs");
             receipt.addProperty("staleFrozenInputBytes", frozenInputBytes);
@@ -699,6 +837,7 @@ public final class NativeInferredInterfaceControls {
             receipt.addProperty("staleRejectedDuringBoundedWrites", true);
             receipt.addProperty("staleInferredAndComparisonRemoved", true);
             receipt.addProperty("frozenInputsUnchanged", true);
+            receipt.addProperty("boundedFailureDiagnosticRetained", true);
         } finally { program.endTransaction(transaction, false); }
         require(function.getParameterCount() == originalParameterCount && function.getSignatureSource() == originalSignatureSource,
             "stale listing control did not restore original native signature");

@@ -36,6 +36,7 @@ public final class ExportInferredInterfacesV1 extends GhidraScript {
     private final TaskMonitor task;
     private final long maximumCombinedBytes;
     private final long started = System.nanoTime();
+    private final FailureDiagnostics diagnostics = new FailureDiagnostics(started);
     private final List<AddressSpace> spaces = new ArrayList<>();
     private final Map<AddressSpace, Integer> spaceIndices = new HashMap<>();
     private final TreeMap<String, Long> dispositions = new TreeMap<>();
@@ -66,23 +67,81 @@ public final class ExportInferredInterfacesV1 extends GhidraScript {
         new ExportInferredInterfacesV1(program, monitor, maximumCombinedBytes).export(arguments);
     }
     private void checkpoint() throws Exception {
-        task.checkCancelled();
-        if (System.nanoTime() - started >= MAXIMUM_OPERATION_MILLIS * 1000000L)
+        try { task.checkCancelled(); }
+        catch (Exception | Error failure) {
+            diagnostics.freeze(failure instanceof CancelledException ? FailureDiagnostics.FailureKind.CANCELLATION_OBSERVED :
+                FailureDiagnostics.FailureKind.VALIDATION_OR_OUTPUT, System.nanoTime());
+            throw failure;
+        }
+        long now = System.nanoTime();
+        if (now - started >= MAXIMUM_OPERATION_MILLIS * 1000000L) {
+            diagnostics.freeze(FailureDiagnostics.FailureKind.OPERATION_DEADLINE, now);
             throw new IllegalStateException("inferred-interface operation deadline exhausted");
+        }
     }
     private TaskMonitor listingMonitor() {
+        return diagnosticListingMonitor(task, diagnostics, started);
+    }
+    /** The existing monitor bridge, with first-observation diagnostics and the real owner clock. */
+    static TaskMonitor diagnosticListingMonitor(TaskMonitor task, FailureDiagnostics diagnostics, long started) {
         return new TaskMonitorAdapter() {
             @Override public void checkCancelled() throws CancelledException {
-                task.checkCancelled();
-                if (System.nanoTime() - started >= MAXIMUM_OPERATION_MILLIS * 1000000L)
+                try { task.checkCancelled(); }
+                catch (CancelledException | RuntimeException | Error failure) {
+                    diagnostics.freeze(failure instanceof CancelledException ? FailureDiagnostics.FailureKind.CANCELLATION_OBSERVED :
+                        FailureDiagnostics.FailureKind.VALIDATION_OR_OUTPUT, System.nanoTime());
+                    diagnostics.emitOnce(System.err);
+                    throw failure;
+                }
+                long now = System.nanoTime();
+                if (now - started >= MAXIMUM_OPERATION_MILLIS * 1000000L) {
+                    diagnostics.freeze(FailureDiagnostics.FailureKind.OPERATION_DEADLINE, now);
+                    diagnostics.emitOnce(System.err);
                     throw new CancelledException("inferred-interface operation deadline exhausted");
+                }
             }
             @Override public boolean isCancelled() {
-                return task.isCancelled() || System.nanoTime() - started >= MAXIMUM_OPERATION_MILLIS * 1000000L;
+                final boolean cancelled;
+                try { cancelled = task.isCancelled(); }
+                catch (RuntimeException | Error failure) {
+                    diagnostics.freeze(FailureDiagnostics.FailureKind.VALIDATION_OR_OUTPUT, System.nanoTime());
+                    throw failure;
+                }
+                if (cancelled) {
+                    diagnostics.freeze(FailureDiagnostics.FailureKind.CANCELLATION_OBSERVED, System.nanoTime());
+                    return true;
+                }
+                long now = System.nanoTime();
+                boolean expired = now - started >= MAXIMUM_OPERATION_MILLIS * 1000000L;
+                if (expired) diagnostics.freeze(FailureDiagnostics.FailureKind.OPERATION_DEADLINE, now);
+                return expired;
             }
         };
     }
     private void export(String[] arguments) throws Exception {
+        try { exportObserved(arguments); }
+        catch (Exception | Error failure) {
+            reportFailure(failure, FailureDiagnostics.FailureKind.VALIDATION_OR_OUTPUT);
+            throw failure;
+        }
+    }
+    private void reportFailure(Throwable failure, FailureDiagnostics.FailureKind kind) {
+        diagnostics.freeze(failure instanceof CancelledException || failure instanceof InterruptedException ?
+            FailureDiagnostics.FailureKind.CANCELLATION_OBSERVED : kind, System.nanoTime());
+        diagnostics.emitOnce(System.err);
+    }
+    private static void suppressCleanup(Throwable primary, Throwable cleanup) {
+        if (primary != cleanup) try { primary.addSuppressed(cleanup); } catch (Throwable ignored) { }
+    }
+    private void diagnosticFunction(int ordinal, Address entry) {
+        // The census already owns this address; no Function/native-result getter is needed here.
+        try {
+            Integer space = spaceIndices.get(entry.getAddressSpace());
+            if (space == null) diagnostics.omit();
+            else diagnostics.function(ordinal, space, entry.getOffset());
+        } catch (Throwable diagnosticFailure) { diagnostics.omit(); }
+    }
+    private void exportObserved(String[] arguments) throws Exception {
         if (arguments.length != 11) throw new IllegalArgumentException("expected eight digest bindings, model, listing directory and output directory");
         String input = digest(arguments[0]), exporter = digest(arguments[1]), archive = digest(arguments[2]);
         String listingCollector = digest(arguments[3]), collector = digest(arguments[4]), typeGraph = digest(arguments[5]);
@@ -104,13 +163,17 @@ public final class ExportInferredInterfacesV1 extends GhidraScript {
         long inputsBytes = Math.addExact(modelBefore.bytes, Math.addExact(listingBefore.bytes, manifestBefore.bytes));
         if (inputsBytes >= maximumCombinedBytes)
             throw new IllegalArgumentException("combined retained input inventory bound exceeded");
+        diagnostics.stage(FailureDiagnostics.Stage.CENSUS, System.nanoTime());
         inventorySpaces();
         FunctionManager manager = program.getFunctionManager();
         int count = manager.getFunctionCount();
+        diagnostics.censusReported(count);
         if (count < 0 || count > MAXIMUM_FUNCTIONS) throw new IllegalStateException("function census bound exceeded");
         TreeMap<Address, Function> functions = new TreeMap<>(this::compare);
+        diagnostics.censusInventoried(0);
         inventory(manager.getFunctions(true), false, functions); inventory(manager.getExternalFunctions(), true, functions);
         if (functions.size() != count || manager.getFunctionCount() != count) throw new IllegalStateException("inconsistent function census");
+        diagnostics.censusValidated();
         Map<String,Object> configuration = object("simplificationStyle", "decompile", "syntaxTree", true, "cCode", false,
             "maximumInstructions", 500000, "maximumPayloadMBytes", 50, "maximumJumpTableEntries", 1024,
             "maximumSecondsPerFunction", 60, "maximumOperationMillis", MAXIMUM_OPERATION_MILLIS, "attemptsPerFunction", 1);
@@ -126,11 +189,13 @@ public final class ExportInferredInterfacesV1 extends GhidraScript {
         Path comparison = directory.resolve("listing-comparison");
         Path observations = directory.resolve("native-inferred-interfaces.json"), manifestPath = directory.resolve("manifest.json");
         boolean complete = false;
+        Throwable exportFailure = null;
         Files.createDirectory(directory, PosixFilePermissions.asFileAttribute(PosixFilePermissions.fromString("rwx------")));
         try {
             // Prove graph roots refer to this exact pre-inference listing, not same-input stale bytes.
             // The re-render may be larger than the frozen listing. Charge actual comparison
             // output and simultaneous type-spool writes, never a multiple of stale input size.
+            diagnostics.stage(FailureDiagnostics.Stage.LISTING_COMPARISON, System.nanoTime());
             ExportNativeInterfacesV1.collectWithStagingBudget(program, listingMonitor(),
                 new String[]{input, exporter, archive, listingCollector, model.toString(), comparison.toString()},
                 maximumCombinedBytes - inputsBytes);
@@ -141,6 +206,8 @@ public final class ExportInferredInterfacesV1 extends GhidraScript {
             MessageDigest outputDigest = MessageDigest.getInstance("SHA-256"); long bytes;
             try (BoundedOutput target = new BoundedOutput(new BufferedOutputStream(Files.newOutputStream(stage)), outputDigest,
                     maximumCombinedBytes - inputsBytes - 65536, task)) {
+              try {
+                diagnostics.stage(FailureDiagnostics.Stage.LISTING_ROOTS, System.nanoTime());
                 output = target;
                 graphBudget = new NativeInterfaceTypeGraphV1.Budget(NativeInterfaceTypeGraphV1.Limits.defaults(), this::checkpoint);
                 graph = new NativeInterfaceTypeGraphV1(program.getDataTypeManager().getDataOrganization(), graphBudget, this::record);
@@ -150,9 +217,14 @@ public final class ExportInferredInterfacesV1 extends GhidraScript {
                 target.writeUtf8(",\n  \"dataOrganization\": "); target.value(graph.dataOrganization(), 2, false);
                 target.writeUtf8(",\n  \"policy\": \"" + POLICY + "\",\n  \"records\": ");
                 int ordinal = 0;
-                for (Function function : functions.values()) listingRoots(function, ordinal++);
+                for (var entry : functions.entrySet()) {
+                    diagnosticFunction(ordinal, entry.getKey());
+                    listingRoots(entry.getValue(), ordinal++);
+                }
                 requireProgramUnchanged(modification); checkpoint();
+                diagnostics.stage(FailureDiagnostics.Stage.DECOMPILER_SETUP, System.nanoTime());
                 DecompInterface engine = new DecompInterface();
+                Throwable engineFailure = null;
                 try {
                     DecompileOptions options = new DecompileOptions();
                     options.setMaxInstructions(500000); options.setMaxPayloadMBytes(50); options.setMaxJumpTableEntries(1024);
@@ -160,20 +232,42 @@ public final class ExportInferredInterfacesV1 extends GhidraScript {
                         !engine.toggleSyntaxTree(true) || !engine.toggleCCode(false)) throw new IllegalStateException("decompiler configuration rejected");
                     boolean opened = engine.openProgram(program);
                     ordinal = 0;
-                    for (Function function : functions.values()) {
-                        checkpoint(); record(inferred(function, ordinal++, engine, opened));
+                    for (var entry : functions.entrySet()) {
+                        diagnosticFunction(ordinal, entry.getKey());
+                        diagnostics.stage(FailureDiagnostics.Stage.NATIVE_PRECHECK, System.nanoTime());
+                        checkpoint();
+                        Map<String,Object> functionRecord = inferred(entry.getValue(), ordinal++, engine, opened);
+                        diagnostics.stage(FailureDiagnostics.Stage.FUNCTION_RECORD, System.nanoTime());
+                        record(functionRecord);
+                        diagnostics.functionRecordWritten();
                         requireProgramUnchanged(modification);
                     }
-                } finally { engine.stopProcess(); engine.dispose(); }
+                } catch (Exception | Error failure) {
+                    engineFailure = failure;
+                    reportFailure(failure, FailureDiagnostics.FailureKind.VALIDATION_OR_OUTPUT);
+                    throw failure;
+                } finally {
+                    if (engineFailure == null) { engine.stopProcess(); engine.dispose(); }
+                    else {
+                        try { engine.stopProcess(); } catch (Exception | Error cleanup) { suppressCleanup(engineFailure, cleanup); }
+                        try { engine.dispose(); } catch (Exception | Error cleanup) { suppressCleanup(engineFailure, cleanup); }
+                    }
+                }
+                diagnostics.stage(FailureDiagnostics.Stage.FINAL_VALIDATION, System.nanoTime());
                 target.writeUtf8(recordCount == 0 ? "[]" : "\n  ]");
                 target.writeUtf8(",\n  \"schemaVersion\": 1,\n  \"summary\": "); target.value(summary(functions.values()), 2, false);
                 target.writeUtf8("\n}\n"); bytes = target.bytes;
+              } catch (Exception | Error failure) {
+                reportFailure(failure, FailureDiagnostics.FailureKind.VALIDATION_OR_OUTPUT);
+                throw failure;
+              }
             } finally { output = null; graph = null; }
             if (manager.getFunctionCount() != count || dispositions.values().stream().mapToLong(Long::longValue).sum() != count)
                 throw new IllegalStateException("inferred census changed or omitted outcomes");
             requireUnchanged(modelBefore, hashFile(model, MAXIMUM_MODEL_BYTES));
             requireUnchanged(listingBefore, hashFile(listing, MAXIMUM_BYTES)); requireUnchanged(manifestBefore, hashFile(listingManifest, 65536));
             requireProgramUnchanged(modification); checkpoint();
+            diagnostics.stage(FailureDiagnostics.Stage.PUBLICATION, System.nanoTime());
             byte[] manifest = canonical(object("bytes", bytes, "collectorSha256", collector, "typeGraphSha256", typeGraph, "configurationSha256", configurationSha,
                 "file", "native-inferred-interfaces.json", "inputSha256", input,
                 "kind", "ghidra-native-inferred-interface-observation-manifest-v1", "listingSha256", listingBefore.sha256,
@@ -188,11 +282,20 @@ public final class ExportInferredInterfacesV1 extends GhidraScript {
             requireProgramUnchanged(modification); checkpoint();
             Files.createLink(manifestPath, manifestStage); Files.delete(manifestStage); manifestStage = null;
             complete = true;
+        } catch (Exception | Error failure) {
+            exportFailure = failure;
+            reportFailure(failure, FailureDiagnostics.FailureKind.VALIDATION_OR_OUTPUT);
+            throw failure;
         } finally {
-            if (stage != null) Files.deleteIfExists(stage);
-            if (manifestStage != null) Files.deleteIfExists(manifestStage);
-            removeComparison(comparison);
-            if (!complete) { Files.deleteIfExists(manifestPath); Files.deleteIfExists(observations); Files.deleteIfExists(directory); }
+            try {
+                if (stage != null) Files.deleteIfExists(stage);
+                if (manifestStage != null) Files.deleteIfExists(manifestStage);
+                removeComparison(comparison);
+                if (!complete) { Files.deleteIfExists(manifestPath); Files.deleteIfExists(observations); Files.deleteIfExists(directory); }
+            } catch (Exception | Error cleanup) {
+                if (exportFailure == null) throw cleanup;
+                suppressCleanup(exportFailure, cleanup);
+            }
         }
     }
 
@@ -233,16 +336,31 @@ public final class ExportInferredInterfacesV1 extends GhidraScript {
                 result = object("completed", false, "valid", false, "timedOut", false, "cancelled", false,
                     "failedToStart", true, "diagnostic", text(Objects.toString(engine.getLastMessage(), "")));
             } else {
-                long remaining = MAXIMUM_OPERATION_MILLIS - (System.nanoTime() - started) / 1000000L;
+                long allocatedAt = System.nanoTime();
+                long remaining = MAXIMUM_OPERATION_MILLIS - (allocatedAt - started) / 1000000L;
                 int seconds = (int)Math.min(60, remaining / 1000);
-                if (seconds < 1) throw new IllegalStateException("insufficient inference operation time");
-                DecompileResults nativeResult = Objects.requireNonNull(engine.decompileFunction(function, seconds, task));
+                diagnostics.allocation(seconds);
+                if (seconds < 1) {
+                    diagnostics.freeze(FailureDiagnostics.FailureKind.INSUFFICIENT_WHOLE_SECOND, allocatedAt);
+                    throw new IllegalStateException("insufficient inference operation time");
+                }
+                DecompileResults returned;
+                diagnostics.nativeStarted(System.nanoTime());
+                try {
+                    returned = engine.decompileFunction(function, seconds, task);
+                    diagnostics.nativeReturned(System.nanoTime());
+                } catch (Exception | Error failure) {
+                    reportFailure(failure, FailureDiagnostics.FailureKind.NATIVE_CALL_EXCEPTION);
+                    throw failure;
+                }
+                DecompileResults nativeResult = Objects.requireNonNull(returned);
                 checkpoint();
                 if (nativeResult.getFunction() != function) throw new IllegalStateException("decompiler returned a different function");
                 result = object("completed", nativeResult.decompileCompleted(), "valid", nativeResult.isValid(),
-                    "timedOut", nativeResult.isTimedOut(), "cancelled", nativeResult.isCancelled(), "failedToStart", nativeResult.failedToStart(),
+                    "timedOut", diagnostics.timeoutObserved(nativeResult.isTimedOut()), "cancelled", nativeResult.isCancelled(), "failedToStart", nativeResult.failedToStart(),
                     "diagnostic", text(Objects.toString(nativeResult.getErrorMessage(), "")));
                 HighFunction high = nativeResult.getHighFunction();
+                if (high != null) diagnostics.highFunctionObserved();
                 if (nativeResult.isTimedOut()) disposition = "decompile-timeout";
                 else if (nativeResult.isCancelled()) disposition = "decompile-cancelled";
                 else if (nativeResult.failedToStart()) disposition = "decompiler-start-failed";
@@ -288,6 +406,7 @@ public final class ExportInferredInterfacesV1 extends GhidraScript {
             }
         }
         dispositions.put(disposition, dispositions.get(disposition) + 1);
+        for (int i = 0; i < DISPOSITIONS.length; i++) if (DISPOSITIONS[i].equals(disposition)) { diagnostics.disposition(i); break; }
         return object("recordKind", "function", "functionOrdinal", ordinal, "entry", address(function.getEntryPoint()),
             "isExternal", function.isExternal(), "isThunk", function.isThunk(), "disposition", disposition,
             "attempt", attempt, "result", result, "prototype", prototype, "parameters", params);
@@ -321,6 +440,7 @@ public final class ExportInferredInterfacesV1 extends GhidraScript {
             checkpoint(); if (functions.size() >= MAXIMUM_FUNCTIONS) throw new IllegalStateException("function census bound exceeded");
             Function f = Objects.requireNonNull(iterator.next());
             if (f.isExternal() != external || functions.put(f.getEntryPoint(), f) != null) throw new IllegalStateException("inconsistent native function census");
+            diagnostics.censusInventoried(functions.size());
         }
     }
     private FileIdentity hashFile(Path path, long maximum) throws Exception {
@@ -332,9 +452,14 @@ public final class ExportInferredInterfacesV1 extends GhidraScript {
             throw new IllegalArgumentException("inferred input must be bounded nonaliased regular file");
         MessageDigest digest = MessageDigest.getInstance("SHA-256"); long bytes = 0;
         try (InputStream source = Files.newInputStream(path, StandardOpenOption.READ, LinkOption.NOFOLLOW_LINKS)) {
-            byte[] buffer = new byte[65536]; int n;
-            while ((n = source.read(buffer)) != -1) { checkpoint(); bytes = Math.addExact(bytes,n);
-                if (bytes > maximum) throw new IllegalStateException("inferred input bound exceeded"); digest.update(buffer,0,n); }
+            try {
+                byte[] buffer = new byte[65536]; int n;
+                while ((n = source.read(buffer)) != -1) { checkpoint(); bytes = Math.addExact(bytes,n);
+                    if (bytes > maximum) throw new IllegalStateException("inferred input bound exceeded"); digest.update(buffer,0,n); }
+            } catch (Exception | Error failure) {
+                reportFailure(failure, FailureDiagnostics.FailureKind.VALIDATION_OR_OUTPUT);
+                throw failure;
+            }
         }
         BasicFileAttributes after = Files.readAttributes(path, BasicFileAttributes.class, LinkOption.NOFOLLOW_LINKS);
         if (bytes != before.size() || !sameIdentity(before,after)) throw new IllegalStateException("input changed during hashing");
@@ -421,6 +546,205 @@ public final class ExportInferredInterfacesV1 extends GhidraScript {
         }
         return value;
     }
+
+    /**
+     * Passive, fixed-capacity observations only. No Program/result/exception references survive a
+     * transition. The owner supplies its real monotonic samples; numeric samples are also usable
+     * by package-local controls without providing a collector clock or producer override.
+     */
+    static final class FailureDiagnostics {
+        enum Stage { INPUT_VALIDATION, CENSUS, LISTING_COMPARISON, LISTING_ROOTS, DECOMPILER_SETUP,
+            NATIVE_PRECHECK, NATIVE_CALL, HIGH_EXTRACTION, FUNCTION_RECORD, FINAL_VALIDATION, PUBLICATION }
+        enum FailureKind { OPERATION_DEADLINE, INSUFFICIENT_WHOLE_SECOND, CANCELLATION_OBSERVED,
+            NATIVE_CALL_EXCEPTION, VALIDATION_OR_OUTPUT }
+        private static final String[] STAGES = {"input-validation", "census", "listing-comparison", "listing-roots",
+            "decompiler-setup", "native-precheck", "native-call", "high-extraction", "function-record",
+            "final-validation", "publication"};
+        private static final String[] FAILURES = {"operation-deadline", "insufficient-whole-second",
+            "cancellation-observed", "native-call-exception", "validation-or-output"};
+        private static final String[] CALL_STATES = {"not-started", "in-flight", "returned"};
+        private static final String PREFIX = "DECOMP_INFERRED_FAILURE_V1 ";
+        private static final int MAXIMUM_FRAME_BYTES = 4096;
+        private final long started;
+        private final long[] stageNanos = new long[11], dispositionCounts = new long[9];
+        private final int[] slowOrdinals = new int[4], slowSpaces = new int[4];
+        private final long[] slowOffsets = new long[4], slowNanos = new long[4];
+        private final byte[] slowTimedOut = new byte[4]; // -1 unread, 0 false, 1 true
+        private int stage, failureKind, reported, inventoried, ordinal = -1, space, callState, timeoutSeconds, slowCount;
+        private boolean reportedKnown, inventoriedKnown, censusValid, allocationKnown, frozen, unavailable, emitted;
+        private long stageStarted, offsetBits, callStarted, callElapsed, startedCalls, returnedCalls, writtenFunctions,
+            observedHighFunctions, dispositionTotal, elapsedAtFailure, remainingAtFailure, wholeSecondsAtFailure;
+
+        FailureDiagnostics(long startedNanos) { started = startedNanos; stageStarted = startedNanos; }
+        synchronized void omit() { if (!frozen) unavailable = true; }
+        private boolean mutable() { return !frozen && !unavailable; }
+        private boolean chargeStage(long now) {
+            long duration = now - stageStarted;
+            if (duration < 0 || stageNanos[stage] > Long.MAX_VALUE - duration) { unavailable = true; return false; }
+            stageNanos[stage] += duration; stageStarted = now;
+            return true;
+        }
+        synchronized void stage(Stage value, long now) {
+            if (!mutable()) return;
+            if (value == null) { unavailable = true; return; }
+            if (chargeStage(now)) stage = value.ordinal();
+        }
+        synchronized void censusReported(int count) {
+            if (!mutable()) return;
+            // An out-of-bound native getter is still an actually observed bounded Java int.
+            reported = count; reportedKnown = true;
+        }
+        synchronized void censusInventoried(int count) {
+            if (!mutable()) return;
+            if (count < 0 || count > MAXIMUM_FUNCTIONS) { unavailable = true; return; }
+            inventoried = count; inventoriedKnown = true;
+        }
+        synchronized void censusValidated() {
+            if (!mutable()) return;
+            if (!reportedKnown || !inventoriedKnown || reported != inventoried) { unavailable = true; return; }
+            censusValid = true;
+        }
+        synchronized void function(int functionOrdinal, int spaceIndex, long bits) {
+            if (!mutable()) return;
+            if (functionOrdinal < 0 || functionOrdinal >= MAXIMUM_FUNCTIONS || spaceIndex < 0 || spaceIndex >= 256 || callState == 1) {
+                unavailable = true; return;
+            }
+            ordinal = functionOrdinal; space = spaceIndex; offsetBits = bits;
+            callState = 0; allocationKnown = false; callElapsed = 0;
+        }
+        synchronized void allocation(int seconds) {
+            if (!mutable()) return;
+            if (ordinal < 0 || callState != 0 || seconds > 60) { unavailable = true; return; }
+            timeoutSeconds = seconds; allocationKnown = true;
+        }
+        synchronized void nativeStarted(long now) {
+            if (!mutable()) return;
+            if (ordinal < 0 || callState != 0 || !allocationKnown || timeoutSeconds < 1 || startedCalls >= MAXIMUM_FUNCTIONS) {
+                unavailable = true; return;
+            }
+            if (!chargeStage(now)) return;
+            stage = Stage.NATIVE_CALL.ordinal(); callStarted = now; callState = 1; startedCalls++;
+        }
+        synchronized void nativeReturned(long now) {
+            if (!mutable()) return;
+            long duration = now - callStarted;
+            if (callState != 1 || duration < 0 || returnedCalls >= startedCalls) { unavailable = true; return; }
+            if (!chargeStage(now)) return;
+            stage = Stage.HIGH_EXTRACTION.ordinal(); callElapsed = duration; callState = 2; returnedCalls++;
+            int position = 0;
+            while (position < slowCount && (slowNanos[position] > duration ||
+                    slowNanos[position] == duration && slowOrdinals[position] < ordinal)) position++;
+            if (position == 4) return;
+            for (int i = Math.min(slowCount, 3); i > position; i--) {
+                slowOrdinals[i] = slowOrdinals[i - 1]; slowSpaces[i] = slowSpaces[i - 1];
+                slowOffsets[i] = slowOffsets[i - 1]; slowNanos[i] = slowNanos[i - 1]; slowTimedOut[i] = slowTimedOut[i - 1];
+            }
+            slowOrdinals[position] = ordinal; slowSpaces[position] = space; slowOffsets[position] = offsetBits;
+            slowNanos[position] = duration; slowTimedOut[position] = -1; slowCount = Math.min(4, slowCount + 1);
+        }
+        synchronized boolean timeoutObserved(boolean timedOut) {
+            if (mutable()) {
+                if (callState != 2) unavailable = true;
+                else for (int i = 0; i < slowCount; i++) if (slowOrdinals[i] == ordinal) slowTimedOut[i] = (byte)(timedOut ? 1 : 0);
+            }
+            return timedOut;
+        }
+        synchronized void disposition(int index) {
+            if (!mutable()) return;
+            if (index < 0 || index >= dispositionCounts.length || dispositionTotal >= MAXIMUM_FUNCTIONS) { unavailable = true; return; }
+            dispositionCounts[index]++; dispositionTotal++;
+        }
+        synchronized void functionRecordWritten() {
+            if (!mutable()) return;
+            if (writtenFunctions >= MAXIMUM_FUNCTIONS) { unavailable = true; return; }
+            writtenFunctions++;
+        }
+        synchronized void highFunctionObserved() {
+            if (!mutable()) return;
+            if (observedHighFunctions >= MAXIMUM_FUNCTIONS) { unavailable = true; return; }
+            observedHighFunctions++;
+        }
+        synchronized void freeze(FailureKind kind, long now) {
+            if (!mutable()) return;
+            long elapsed = now - started;
+            if (kind == null || elapsed < 0 || !chargeStage(now)) { unavailable = true; return; }
+            if (callState == 1) {
+                callElapsed = now - callStarted;
+                if (callElapsed < 0) { unavailable = true; return; }
+            }
+            failureKind = kind.ordinal(); elapsedAtFailure = elapsed;
+            remainingAtFailure = MAXIMUM_OPERATION_MILLIS * 1000000L - elapsed;
+            // Match the owner's existing whole-millisecond/whole-second allocation arithmetic.
+            wholeSecondsAtFailure = kind == FailureKind.INSUFFICIENT_WHOLE_SECOND && allocationKnown ? timeoutSeconds :
+                (MAXIMUM_OPERATION_MILLIS - elapsed / 1000000L) / 1000L;
+            frozen = true;
+        }
+        synchronized String frame() {
+            if (!frozen || unavailable) return null;
+            try {
+                Frame out = new Frame();
+                out.put(PREFIX).put("{\"authority\":\"diagnostic-only\",\"census\":{\"reportedFunctions\":");
+                out.nullable(reportedKnown, reported).put(",\"inventoriedFunctions\":").nullable(inventoriedKnown, inventoried)
+                    .put(",\"validated\":").bool(censusValid).put("},\"clock\":{\"maximumOperationMillis\":120000,\"elapsedNanosAtFailure\":")
+                    .number(elapsedAtFailure).put(",\"remainingNanosAtFailure\":").number(remainingAtFailure)
+                    .put(",\"wholeSecondsAvailable\":").number(wholeSecondsAtFailure).put(",\"currentCallElapsedNanos\":")
+                    .nullable(callState != 0, callElapsed).put("},\"complete\":false,\"counts\":{\"nativeCallsStarted\":")
+                    .number(startedCalls).put(",\"nativeCallsReturned\":").number(returnedCalls)
+                    .put(",\"functionRecordsWritten\":").number(writtenFunctions).put(",\"highFunctionsObserved\":")
+                    .number(observedHighFunctions).put(",\"dispositions\":{");
+                for (int i = 0; i < dispositionCounts.length; i++) {
+                    if (i != 0) out.put(",");
+                    out.put("\"").put(DISPOSITIONS[i]).put("\":").number(dispositionCounts[i]);
+                }
+                out.put("}},\"currentFunction\":");
+                if (ordinal < 0) out.put("null");
+                else out.put("{\"ordinal\":").number(ordinal).put(",\"space\":").number(space).put(",\"offsetBits\":\"")
+                    .hex(offsetBits).put("\",\"callState\":\"").put(CALL_STATES[callState]).put("\",\"timeoutSeconds\":")
+                    .nullable(allocationKnown, timeoutSeconds).put("}");
+                out.put(",\"failureKind\":\"").put(FAILURES[failureKind])
+                    .put("\",\"productionInterfacesAdmitted\":false,\"provider\":\"ghidra-inferred-interface-failure-diagnostic-v1\",\"releaseEligible\":false,\"schemaVersion\":1,\"slowestReturnedCalls\":[");
+                for (int i = 0; i < slowCount; i++) {
+                    if (i != 0) out.put(",");
+                    out.put("{\"ordinal\":").number(slowOrdinals[i]).put(",\"space\":").number(slowSpaces[i])
+                        .put(",\"offsetBits\":\"").hex(slowOffsets[i]).put("\",\"elapsedNanos\":").number(slowNanos[i])
+                        .put(",\"timedOut\":").put(slowTimedOut[i] < 0 ? "null" : slowTimedOut[i] == 1 ? "true" : "false").put("}");
+                }
+                out.put("],\"stage\":\"").put(STAGES[stage]).put("\",\"stageNanos\":{");
+                for (int i = 0; i < stageNanos.length; i++) {
+                    if (i != 0) out.put(",");
+                    out.put("\"").put(STAGES[i]).put("\":").number(stageNanos[i]);
+                }
+                return out.put("}}\n").value();
+            } catch (Throwable diagnosticFailure) { unavailable = true; return null; }
+        }
+        synchronized void emitOnce(PrintStream stream) {
+            if (!frozen || emitted) return;
+            emitted = true;
+            try {
+                String value = frame();
+                if (value != null) stream.print(value);
+            } catch (Throwable diagnosticFailure) { /* Never replace the owner's failure. */ }
+        }
+        /** Every appended string is fixed ASCII or bounded primitive formatting. */
+        private static final class Frame {
+            private final StringBuilder bytes = new StringBuilder(MAXIMUM_FRAME_BYTES);
+            private boolean bounded = true;
+            Frame put(String value) {
+                if (!bounded || value.length() > MAXIMUM_FRAME_BYTES - bytes.length()) { bounded = false; return this; }
+                bytes.append(value); return this;
+            }
+            Frame number(long value) { return put(Long.toString(value)); }
+            Frame bool(boolean value) { return put(value ? "true" : "false"); }
+            Frame nullable(boolean present, long value) { return present ? number(value) : put("null"); }
+            Frame hex(long value) {
+                String text = Long.toHexString(value);
+                for (int i = text.length(); i < 16; i++) put("0");
+                return put(text);
+            }
+            String value() { return bounded ? bytes.toString() : null; }
+        }
+    }
+
     private static Map<String, Object> object(Object... pairs) {
         TreeMap<String, Object> value = new TreeMap<>();
         for (int i = 0; i < pairs.length; i += 2) {

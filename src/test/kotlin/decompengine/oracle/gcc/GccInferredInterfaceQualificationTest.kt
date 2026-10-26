@@ -95,7 +95,7 @@ class GccInferredInterfaceQualificationTest {
             publish(evidence.resolve("qualification.json"), read(captured.resolve("qualification-summary.json"), MIB))
         } catch (problem: Throwable) {
             failure = problem
-            try { retainFailureStreams(scratch, evidence) } catch (captureFailure: Throwable) {
+            try { retainFailureStreams(scratch, evidence, problem) } catch (captureFailure: Throwable) {
                 if (captureFailure !== problem) problem.addSuppressed(captureFailure)
             }
             throw problem
@@ -426,8 +426,9 @@ class GccInferredInterfaceQualificationTest {
         return selected
     }
 
-    private fun retainFailureStreams(scratch: Path, evidence: Path) {
-        LinuxFilesystemSyscalls.openRoot(scratch).use { root ->
+    private fun retainFailureStreams(scratch: Path, evidence: Path, primary: Throwable) {
+        var reportsSelected = false
+        try { LinuxFilesystemSyscalls.openRoot(scratch).use { root ->
             val leaseName = LinuxFilesystemSyscalls.directoryEntryNames(root, 1).singleOrNull() ?: return
             require(leaseName.matches(Regex("\\.decomp-oracle-lease-[a-f0-9]{64}")))
             val operation = leaseName.removePrefix(".decomp-oracle-lease-")
@@ -437,22 +438,46 @@ class GccInferredInterfaceQualificationTest {
                         .filter { it.matches(Regex("control-[a-f0-9]{64}")) }.singleOrNull() ?: return
                     LinuxFilesystemSyscalls.openDirectoryAt(run.fd, controlName).use { control ->
                         LinuxFilesystemSyscalls.openDirectoryAt(control.fd, "reports").use { reports ->
-                            for (stream in listOf("stdout", "stderr")) {
-                                LinuxFilesystemSyscalls.openRegularFileAtOrNull(reports.fd, "contained-command.$stream")?.use { source ->
-                                    val bytes = LinuxFilesystemSyscalls.readPrefix(source, 16 * MIB)
-                                    publish(evidence.resolve("failed-command-$stream.bin"), bytes)
-                                    publish(evidence.resolve("failed-command-$stream.json"), OracleJson.canonicalBytes(JsonObject(mapOf(
-                                        "provider" to JsonPrimitive("gcc-interface-failed-stream-prefix-v1"),
-                                        "authority" to JsonPrimitive("diagnostic-only"), "stream" to JsonPrimitive(stream),
-                                        "capturedBytes" to JsonPrimitive(bytes.size), "sha256" to JsonPrimitive(sha(bytes)),
-                                        "captureLimitReached" to JsonPrimitive(bytes.size == 16 * MIB),
-                                        "complete" to JsonPrimitive(false), "scored" to JsonPrimitive(false), "releaseEligible" to JsonPrimitive(false),
-                                    ))))
+                            reportsSelected = true
+                            GccInterfaceFailureStderrTail.retainBestEffort(primary, prefixes = {
+                                for (stream in listOf("stdout", "stderr")) {
+                                    LinuxFilesystemSyscalls.openRegularFileAtOrNull(reports.fd, "contained-command.$stream")?.use { source ->
+                                        val bytes = LinuxFilesystemSyscalls.readPrefix(source, 16 * MIB)
+                                        publish(evidence.resolve("failed-command-$stream.bin"), bytes)
+                                        publish(evidence.resolve("failed-command-$stream.json"), OracleJson.canonicalBytes(JsonObject(mapOf(
+                                            "provider" to JsonPrimitive("gcc-interface-failed-stream-prefix-v1"),
+                                            "authority" to JsonPrimitive("diagnostic-only"), "stream" to JsonPrimitive(stream),
+                                            "capturedBytes" to JsonPrimitive(bytes.size), "sha256" to JsonPrimitive(sha(bytes)),
+                                            "captureLimitReached" to JsonPrimitive(bytes.size == 16 * MIB),
+                                            "complete" to JsonPrimitive(false), "scored" to JsonPrimitive(false), "releaseEligible" to JsonPrimitive(false),
+                                        ))))
+                                    }
                                 }
-                            }
+                            }, tail = {
+                                val tail = GccInterfaceFailureStderrTail.capture(reports)
+                                if (tail == null) {
+                                    publish(evidence.resolve("failed-command-stderr-tail-unavailable.json"),
+                                        OracleJson.canonicalBytes(GccInterfaceFailureStderrTail.unavailable("absent")))
+                                } else {
+                                    // Publish checked range metadata only after exact capture and raw-byte publication.
+                                    // Neither file is a structured diagnostic frame or an execution result.
+                                    publish(evidence.resolve("failed-command-stderr-tail.bin"), tail.bytes)
+                                    publish(evidence.resolve("failed-command-stderr-tail.json"), OracleJson.canonicalBytes(tail.metadata()))
+                                }
+                            }, tailUnavailable = {
+                                publish(evidence.resolve("failed-command-stderr-tail-unavailable.json"),
+                                    OracleJson.canonicalBytes(GccInterfaceFailureStderrTail.unavailable("capture-or-publication-failed")))
+                            })
                         }
                     }
                 }
+            }
+        } } finally {
+            if (!reportsSelected) try {
+                publish(evidence.resolve("failed-command-stderr-tail-unavailable.json"),
+                    OracleJson.canonicalBytes(GccInterfaceFailureStderrTail.unavailable("not-attempted-reports-unavailable")))
+            } catch (captureFailure: Throwable) {
+                if (captureFailure !== primary) primary.addSuppressed(captureFailure)
             }
         }
     }

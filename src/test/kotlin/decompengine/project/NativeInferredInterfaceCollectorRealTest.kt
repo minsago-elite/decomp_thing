@@ -33,6 +33,9 @@ class NativeInferredInterfaceCollectorRealTest {
         val graphControls = root.resolve("NativeInterfaceTypeGraphControls.java")
         checkNotNull(javaClass.getResourceAsStream("/nativeinterfaces/NativeInterfaceTypeGraphControls.java"))
             .use { Files.copy(it, graphControls) }
+        val failureControls = root.resolve("NativeInferredFailureDiagnosticsControls.java")
+        checkNotNull(javaClass.getResourceAsStream("/nativeinterfaces/NativeInferredFailureDiagnosticsControls.java"))
+            .use { Files.copy(it, failureControls) }
         val collector = repository.resolve("ghidra-bridge/src/main/java/ExportInferredInterfacesV1.java")
         val listingCollector = repository.resolve("ghidra-bridge/src/main/java/ExportNativeInterfacesV1.java")
         val typeGraph = repository.resolve("ghidra-bridge/src/main/java/NativeInterfaceTypeGraphV1.java")
@@ -48,7 +51,7 @@ class NativeInferredInterfaceCollectorRealTest {
         val javaProperties = listOf("-Djava.io.tmpdir=$temporary", "-Djna.tmpdir=$temporary", "-Duser.home=$home", "-Djava.awt.headless=true", "-XX:-UsePerfData")
         run(root, listOf(javaBin.resolve("javac").toString()) + javaProperties.map { "-J$it" } +
             listOf("-proc:none", "-cp", classpath, "-d", classes.toString()) +
-            listOf(source, graphControls, collector, listingCollector, typeGraph, callCollector, exporter, dispatch, worker).map(Path::toString),
+            listOf(source, graphControls, failureControls, collector, listingCollector, typeGraph, callCollector, exporter, dispatch, worker).map(Path::toString),
             "compile-controls", Duration.ofSeconds(45))
         run(root, listOf(javaBin.resolve("java").toString(), "-Xmx1g") + javaProperties +
             listOf("-cp", "$classes${System.getProperty("path.separator")}$classpath", "NativeInferredInterfaceControls",
@@ -68,6 +71,7 @@ class NativeInferredInterfaceCollectorRealTest {
             }
         }
         assertStagingControls(root)
+        assertFailureDiagnostics(root)
         val controlReceipt = Json.parseToJsonElement(Files.readString(root.resolve("verified-control-receipt.json"))).jsonObject
         assertTrue(controlReceipt.getValue("fixtureOnly").jsonPrimitive.boolean)
         val nativeRows = controlReceipt.getValue("functions").jsonArray.map { it.jsonObject }
@@ -94,7 +98,59 @@ class NativeInferredInterfaceCollectorRealTest {
         assertEquals("unavailable-native-api", windowsReceipt.getValue("formalEffectiveMeaning").jsonPrimitive.content)
         assertEquals("unavailable-for-plain-decoded-storage", windowsReceipt.getValue("forcedIndirectMeaning").jsonPrimitive.content)
         assertFalse(windowsReceipt.getValue("productionInterfacesAdmitted").jsonPrimitive.boolean)
+        assertTrue(windowsReceipt.getValue("successfulInferenceDiagnosticSilence").jsonPrimitive.boolean)
         validateActual(windows, collector, listingCollector, typeGraph, exporter, dispatch, nativeDecompiler)
+    }
+
+    private fun assertFailureDiagnostics(root: Path) {
+        val evidence = root.resolve("failure-diagnostics-controls")
+        val pure = Json.parseToJsonElement(Files.readString(evidence.resolve("pure-controls.json"))).jsonObject
+        assertEquals("authored-inferred-failure-diagnostics-controls-v1", pure.getValue("kind").jsonPrimitive.content)
+        assertTrue(pure.getValue("fixtureOnly").jsonPrimitive.boolean)
+        assertFalse(pure.getValue("nativeExecutionClaimed").jsonPrimitive.boolean)
+        assertFalse(pure.getValue("productionInterfacesAdmitted").jsonPrimitive.boolean)
+        assertFalse(pure.getValue("releaseEligible").jsonPrimitive.boolean)
+        val cases = pure.getValue("cases").jsonArray.map { it.jsonPrimitive.content }
+        val expected = setOf(
+            "failure-before-census-retains-unknowns",
+            "pre-call-zero-seconds-is-not-a-started-call",
+            "in-flight-exception-retains-unreturned-state",
+            "returned-before-checkpoint-failure-keeps-timeout-unknown-and-duration-frozen",
+            "observed-timeout-is-distinct-from-unread-timeout",
+            "nonoverlapping-stage-totals-and-first-freeze-survive-cleanup",
+            "fixed-four-returned-calls-use-deterministic-duration-ordinal-order",
+            "maximum-count-address-and-time-render-within-framed-4096-bytes",
+            "success-is-silent-and-failure-emission-occurs-at-most-once",
+            "diagnostic-output-failure-never-replaces-or-retries-original-failure",
+            "listing-check-cancellation-preserves-first-exception-before-expired-deadline",
+            "listing-query-true-short-circuits-expired-deadline",
+            "listing-query-false-deadline-freezes-one-guard-sample",
+            "listing-check-deadline-preserves-cancelled-exception-type",
+            "invalid-passive-state-omits-diagnostic-without-product-exception",
+        )
+        assertEquals(expected.size, cases.size)
+        assertEquals(expected, cases.toSet())
+        val cancellation = Json.parseToJsonElement(Files.readString(evidence.resolve("listing-cancellation.json"))).jsonObject
+        assertEquals("authored-inferred-listing-cancellation-control-v1", cancellation.getValue("kind").jsonPrimitive.content)
+        for (field in listOf("fixtureOnly", "actualListingBridgeObserved", "emittedBeforeListingCleanup", "originalExceptionPreserved", "completeFrozenCensusRetained",
+            "outputAndComparisonAbsent", "frozenInputsAndProgramUnchanged")) {
+            assertTrue(cancellation.getValue(field).jsonPrimitive.boolean, "actual cancellation control missing: $field")
+        }
+        assertFalse(cancellation.getValue("productionInterfacesAdmitted").jsonPrimitive.boolean)
+        for (file in listOf("direct-cancellation.stderr", "listing-cancellation.stderr", "staging-refusal.stderr")) {
+            val bytes = Files.readAllBytes(evidence.resolve(file))
+            assertTrue(bytes.size <= 1024 * 1024)
+            val prefix = "DECOMP_INFERRED_FAILURE_V1 "
+            // This is the complete authored fixture stream, not the production raw-tail reader.
+            val frames = bytes.decodeToString().lineSequence().filter { it.startsWith(prefix) }.toList()
+            assertEquals(1, frames.size, file)
+            assertTrue((frames.single() + "\n").toByteArray(Charsets.UTF_8).size <= 4096)
+            val frame = Json.parseToJsonElement(frames.single().removePrefix(prefix)).jsonObject
+            assertEquals("diagnostic-only", frame.getValue("authority").jsonPrimitive.content)
+            for (flag in listOf("complete", "productionInterfacesAdmitted", "releaseEligible"))
+                assertFalse(frame.getValue(flag).jsonPrimitive.boolean)
+        }
+        assertFalse(Files.exists(root.resolve("listing-cancelled-inferred")))
     }
 
     private fun assertStagingControls(root: Path) {
@@ -113,7 +169,7 @@ class NativeInferredInterfaceCollectorRealTest {
         assertEquals(number("staleFrozenInputBytes") + number("staleComparisonAvailableBytes"), number("staleCombinedLimitBytes"))
         assertTrue(number("staleCombinedLimitBytes") < 4L * 1024 * 1024)
         for (field in listOf("belowRejectedWithOutputAndSpoolLive", "belowOutputRemoved", "boundedOutputMatchesOrdinaryBytes",
-            "staleRejectedDuringBoundedWrites", "staleInferredAndComparisonRemoved", "frozenInputsUnchanged")) {
+            "staleRejectedDuringBoundedWrites", "staleInferredAndComparisonRemoved", "frozenInputsUnchanged", "boundedFailureDiagnosticRetained")) {
             assertTrue(receipt.getValue(field).jsonPrimitive.boolean, "staging control missing: $field")
         }
         assertTrue(receipt.getValue("belowFailure").jsonPrimitive.content.contains("while output and type spool are live"))
