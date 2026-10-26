@@ -270,6 +270,9 @@ class WebJobService(
     private val configuredQueueCapacity = queueCapacity
     private val workflowExecutor = executor ?: ownedExecutor!!
     private val active = mutableMapOf<String, OwnedTask>()
+    // Identity token, not a counter: detects even a legacy start/finish wholly inside a row read.
+    // Conservatively invalidate in-flight rows on any legacy admission; retain no per-job history.
+    private var legacyListingEpoch = Any()
     private val uploads = mutableMapOf<Thread, CountDownLatch>()
     private val uploadStorage = WebUploadStorage(store.storageRoot, maximumRetainedStorageBytes)
     private val sourceCatalogEvidence = WebSourceCatalogEvidence(sourceProfiles, ::readSourceCatalogInput, ::readArtifact)
@@ -464,18 +467,26 @@ class WebJobService(
     }
 
     /**
-     * One listing row (#162). Only monitor-guarded service state is captured under the service
-     * monitor; the bounded metadata reads then run under the stores' own per-job locks, so a slow
-     * or stalled record read cannot hold unrelated status reads, uploads or commands behind it.
+     * One listing row (#162). Metadata I/O does not directly retain the service monitor.
+     * Detail/command callers can still convoy on a listing-held attempt-store stripe; this is
+     * not a guarantee of unrelated-request responsiveness under blocked I/O.
      */
     private fun inspectListedJob(jobId: String, read: (String, Int) -> ByteArray): WebJobInspection {
-        val (failure, owner, legacyActive) = synchronized(this) {
+        val (state, epoch) = synchronized(this) {
             requireInitializedRead()
-            Triple(publicationFailures[jobId], attempts, active[jobId] is LegacyTask)
+            Triple(publicationFailures[jobId], attempts, active[jobId]) to legacyListingEpoch
         }
-        val inspection = inspectRecord(jobId, failure, owner, { legacyActive }, read)
-        synchronized(this) { requireInitializedRead() } // A row read across shutdown is never published.
-        return inspection
+        val (failure, owner, task) = state
+        val inspection = inspectRecord(jobId, failure, owner, { task is LegacyTask }, read)
+        return synchronized(this) {
+            requireInitializedRead() // A row read across shutdown is never published.
+            publicationFailures[jobId]?.let { return@synchronized WebJobInspection.Unavailable(it) }
+            if (failure != null || owner !== attempts || task !== active[jobId] || epoch !== legacyListingEpoch) {
+                // Do not retry physical reads outside the original listing budget. In particular,
+                // never combine newly queued legacy metadata with a pre-admission task observation.
+                WebJobInspection.Unavailable(publicWebDiagnostic(jobId, "JOB_RECORD_UNAVAILABLE"))
+            } else inspection
+        }
     }
 
     private fun inspectRecord(jobId: String, failure: WebJobDiagnostic?, owner: WorkflowAttemptStore?,
@@ -896,6 +907,7 @@ class WebJobService(
         if (record.snapshot.attempts.isNotEmpty()) return WebWorkflowAdmission.Unavailable
         store.get(jobId)
         val task = LegacyTask(jobId, workflow)
+        legacyListingEpoch = Any()
         active[jobId] = task
         try {
             store.updateStatus(jobId, "queued", "Waiting for a legacy workflow worker; attempt provenance is unavailable")

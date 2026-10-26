@@ -714,6 +714,68 @@ class WebJobServiceTest {
         }
     }
 
+    @Test fun `listings refuse recovered legacy rows crossed by admission even when the task has already finished`() {
+        for (api in listOf(false, true)) for (completeBeforeResume in listOf(false, true)) withStore { store, _ ->
+            val job = store.createFromUpload("recovered.elf", elfFixture())
+            store.updateStatus(job.id, "analyzing", "Historical legacy work")
+            val tasks = ConcurrentLinkedQueue<Runnable>()
+            WebJobService(store, JobAnalyzer { _, _ -> }, inertReconstructor, Executor { tasks.add(it) }).use { service ->
+                service.initializeExistingStorage()
+                assertTrue(service.presentation(job.id).legacyInterrupted)
+                val physicalReads = AtomicInteger()
+                service.listingReadObserver = { relative -> if (relative.startsWith("${job.id}/")) physicalReads.incrementAndGet() }
+                service.dashboardRows()
+                val finalRead = physicalReads.get()
+                assertTrue(finalRead >= 2, "Expected workflow and presentation reads")
+                val entered = CountDownLatch(1)
+                val release = CountDownLatch(1)
+                physicalReads.set(0)
+                service.listingReadObserver = { relative ->
+                    if (relative.startsWith("${job.id}/") && physicalReads.incrementAndGet() == finalRead) {
+                        entered.countDown()
+                        check(release.await(20, TimeUnit.SECONDS))
+                    }
+                }
+                val callers = Executors.newFixedThreadPool(2)
+                try {
+                    val pending = callers.submit<Unit> {
+                        if (api) {
+                            assertEquals("JOB_RECORD_UNAVAILABLE", assertFailsWith<WebJobServiceException> {
+                                service.collectionRecords().toList()
+                            }.code)
+                        } else {
+                            val rows = service.dashboardRows()
+                            assertTrue(rows.jobs.isEmpty(), "A crossed row must not be presented as failed or interrupted")
+                            assertEquals(listOf(job.id), rows.unavailable.map { it.jobId })
+                            assertEquals(listOf("JOB_RECORD_UNAVAILABLE"), rows.unavailable.map { it.code })
+                        }
+                    }
+                    assertTrue(entered.await(5, TimeUnit.SECONDS), "Listing did not reach its final presentation read")
+                    assertIs<WebWorkflowAdmission.Started>(callers.submit<WebWorkflowAdmission> {
+                        service.start(job.id, WebWorkflow.EXPLORE)
+                    }.get(5, TimeUnit.SECONDS))
+                    if (completeBeforeResume) tasks.remove().run()
+                    assertFalse(pending.isDone)
+                    release.countDown()
+                    pending.get(5, TimeUnit.SECONDS)
+                    // Refusal is per observation, not a latched service failure. A fresh listing
+                    // sees the live queued task (or its completion), never a recovered interruption.
+                    service.listingReadObserver = {}
+                    assertEquals(listOf(if (completeBeforeResume) "complete" else "queued"),
+                        service.dashboardRows().jobs.map { it.status })
+                    assertEquals(listOf(if (completeBeforeResume) "completed" else "queued"),
+                        service.collectionRecords().map { it.getValue("status").toString().trim('"') }.toList())
+                    assertFalse(service.presentation(job.id).legacyInterrupted)
+                } finally {
+                    release.countDown()
+                    service.listingReadObserver = {}
+                    callers.shutdownNow()
+                    assertTrue(callers.awaitTermination(5, TimeUnit.SECONDS))
+                }
+            }
+        }
+    }
+
     @Test
     fun `startup reconciles orphan staging under ownership and releases lease when cleanup refuses storage`() = withStore { store, root ->
         val orphan = Files.createDirectory(root.resolve(".upload-stream-v1-123"), java.nio.file.attribute.PosixFilePermissions.asFileAttribute(

@@ -21,8 +21,8 @@ same query. Jobs sort by creation instant and then job identity, both descending
 and ascending for `oldest`. Sort is part of the cursor-bound query.
 
 The first read captures existing job identities and copies each job's presentation
-under a short service lock. Rows reflect their individual read time; this is not a
-transaction across all job files. Continuations use those retained immutable rows.
+using short service-state checks around the metadata reads. Rows reflect their
+individual read time; this is not a transaction across all job files. Continuations use those retained immutable rows.
 New uploads and subsequent status changes therefore cannot insert, reorder or
 replace rows midway through pagination. Deleting a job does not erase its retained
 historical row; follow-up detail reads still check current storage authority.
@@ -55,12 +55,25 @@ the v1 collection and the legacy HTML dashboard capture the monitor-guarded serv
 state for one record (publication failure, store owner, legacy task) in a short
 section, then read that record's metadata under the attempt store's per-job stripe
 lock only; the job store's listing read takes no store monitor, and its descriptor
-checks refuse a record replaced during the read. A stalled or slow record read therefore
-blocks other reads of that same record, not unrelated job status reads, scheduler
-status, uploads or workflow commands. Each row is rechecked against service shutdown
-before it is published. `WebJobServiceTest` parks both listings inside the first
-(workflow) and last (legacy presentation) physical read of one record and requires another job's status read, a scheduler read and an upload
-to complete while the listing remains in progress (#162).
+checks refuse a record replaced during the read. This removes the listing's direct
+service-monitor hold, but does **not** establish unrelated-request responsiveness
+under blocked I/O (#162). Distinct jobs can share one of the 64 attempt-store stripes.
+A detail or command request can acquire the service monitor and then wait behind a
+listing-held stripe, blocking otherwise unrelated status reads and upload admission.
+Scheduler sampling remains monitor-free. The existing concurrency test covers only
+another job on a distinct stripe with no same-stripe detail/command contender; it
+does not qualify this remaining convoy or same-record-only blocking.
+
+Before publishing a row, the service rechecks shutdown, storage ownership,
+publication failures and task identity. A legacy admission changes an identity token,
+so even a start and finish wholly within a row read invalidate that observation.
+This token conservatively invalidates in-flight rows on any legacy admission without
+retaining per-job history. Changed observations are refused with
+`JOB_RECORD_UNAVAILABLE` (a diagnostic row on the dashboard; collection admission
+fails), rather than combining a new queued record with a pre-admission task flag or
+retrying reads outside the original budget. A fresh read may observe the new state.
+`WebJobServiceTest` covers both projections with a deferred legacy task and with a
+task that finishes before the paused presentation read resumes.
 Each snapshot retains at most 16 MiB of
 serialized row data, with at most 4 KiB per row so a 200-row response fits the
 1 MiB transport ceiling; the cache retains at most eight snapshots and 32 MiB of row
