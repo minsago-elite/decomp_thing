@@ -10,15 +10,15 @@ import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.atomic.AtomicLong
 
 /**
- * Admission defaults for one listener. Every bound is finite; the bootstrap and capacity
- * resources report the values in force so clients never infer a limit.
+ * Request-admission defaults for one listener. These finite executor and request budgets
+ * do not cap accepted TCP connections before executor dispatch. Capacity reports the configured values.
  */
 data class WebAdmissionLimits(
     val workerThreads: Int = 16,
     val queueCapacity: Int = 64,
     val responderThreads: Int = 2,
     val listenBacklog: Int = 64,
-    /** Time a connection may take to deliver its request line and headers once a worker reads it. */
+    /** Worker-start budget for request line/headers and header-limit or overload refusal cleanup; not a socket-count cap. */
     val headerDeadlineMs: Long = 10_000,
     /** Whole-exchange deadline (body read, handling and response write) for ordinary requests. */
     val requestDeadlineMs: Long = 30_000,

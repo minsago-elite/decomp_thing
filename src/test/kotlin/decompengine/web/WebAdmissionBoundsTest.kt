@@ -87,6 +87,36 @@ class WebAdmissionBoundsTest {
         true
     } catch (_: java.net.SocketTimeoutException) { false } catch (_: java.io.IOException) { true }
 
+    /** Keep the peer open even after reading the refusal, so only server-side cleanup can release it. */
+    private fun stalledBody(port: Int, chunked: Boolean, headers: String = ""): Socket = Socket("127.0.0.1", port).also { socket ->
+        pinned += socket
+        val framing = if (chunked) "Transfer-Encoding: chunked\r\n\r\n100000\r\nx" else "Content-Length: 1048576\r\n\r\nx"
+        socket.getOutputStream().write(("POST /w/api/v1/session HTTP/1.1\r\nHost: 127.0.0.1:$port\r\n" +
+            "Accept: application/json\r\n" + headers + framing).toByteArray())
+        socket.getOutputStream().flush()
+    }
+
+    private fun assertRefusalClosed(socket: Socket, status: Int, code: String) {
+        socket.soTimeout = 5_000
+        // readBytes must reach EOF without closing the client, not merely receive the response headers.
+        val response = socket.getInputStream().readBytes().decodeToString()
+        assertEquals(status.toString(), response.substringBefore("\r\n").split(' ')[1], response)
+        assertEquals(code, Json.parseToJsonElement(response.substringAfter("\r\n\r\n")).jsonObject
+            .getValue("error").jsonObject.getValue("code").jsonPrimitive.content)
+        assertFalse(socket.isClosed, "the peer was not released by the test")
+    }
+
+    private fun descriptorCount(): Long? = Path.of("/proc/self/fd").takeIf(Files::isDirectory)?.let { descriptors ->
+        Files.list(descriptors).use { it.count() }
+    }
+
+    private fun awaitDescriptors(baseline: Long?, retainedPeers: Int) {
+        if (baseline != null) await("server descriptors recovered while client peers remain open") {
+            // The client ends intentionally remain open; allow two unrelated JVM housekeeping descriptors.
+            descriptorCount()!! <= baseline + retainedPeers + 2
+        }
+    }
+
     private fun server(limits: WebAdmissionLimits = WebAdmissionLimits(requestDeadlineMs = 120_000)) =
         UploadServer("127.0.0.1", 0, directory.resolve("jobs"), uiMode = WebUiMode.SPA, basePath = "/w/",
             admissionLimits = limits).also { it.start() }
@@ -186,6 +216,61 @@ class WebAdmissionBoundsTest {
                 }
             }
             assertEquals(401, get(port).status)
+        } finally { closePinned(); server.stop() }
+    }
+
+    @Test
+    fun `header count and byte refusals abort stalled fixed and chunked bodies without peer cleanup`() {
+        val server = server(WebAdmissionLimits(workerThreads = 1, queueCapacity = 1, headerDeadlineMs = 1_000,
+            requestDeadlineMs = 120_000, maxHeaderCount = 8, maxHeaderBytes = 1024))
+        try {
+            val port = server.serverPort
+            assertEquals(401, get(port).status)
+            await("idle worker before descriptor baseline") { server.admissionSample().activeWorkers == 0 }
+            val baseline = descriptorCount()
+            val excessive = listOf((1..10).joinToString("") { "X-Fill-$it: value\r\n" }, "X-Fill: ${"x".repeat(2048)}\r\n")
+            for (headers in excessive) for (chunked in listOf(false, true)) {
+                val socket = stalledBody(port, chunked, headers)
+                assertRefusalClosed(socket, 431, "HEADERS_TOO_LARGE")
+                await("rejected body to release its worker") { server.admissionSample().activeWorkers == 0 }
+                awaitDescriptors(baseline, pinned.size)
+                // Exercise reuse of the only worker after each interrupt; its interrupt flag must not leak.
+                assertEquals(401, get(port).status)
+            }
+            assertEquals(4L, server.capacity.headerLimitRejections.get())
+            assertEquals(4L, server.capacity.headerDeadlineClosures.get())
+            assertEquals(0L, server.capacity.requestDeadlineClosures.get(), "refusals use the header watchdog")
+            assertEquals(0, openDescriptorsUnder(directory.resolve("jobs")))
+        } finally { closePinned(); server.stop() }
+    }
+
+    @Test
+    fun `overload refusals abort stalled fixed and chunked bodies and release the responder`() {
+        val server = server(WebAdmissionLimits(workerThreads = 1, queueCapacity = 1, responderThreads = 1,
+            headerDeadlineMs = 1_000, requestDeadlineMs = 120_000))
+        try {
+            val port = server.serverPort
+            assertEquals(401, get(port).status)
+            await("idle worker before saturation") { server.admissionSample().activeWorkers == 0 }
+            pin(port)
+            await("first pinned request to occupy the worker") { server.admissionSample().activeWorkers == 1 }
+            pin(port)
+            await("one active worker and one queued request") {
+                server.admissionSample().let { it.activeWorkers == 1 && it.queuedRequests == 1 }
+            }
+            val baseline = descriptorCount()
+            for (chunked in listOf(false, true)) {
+                val socket = stalledBody(port, chunked)
+                assertRefusalClosed(socket, 429, "SERVER_BUSY")
+                await("refused body to release the responder") { server.admissionSample().activeResponders == 0 }
+                awaitDescriptors(baseline, pinned.size - 2)
+                assertEquals(429, get(port).status, "the same responder serves another refusal after interruption")
+                await("reused responder to finish") { server.admissionSample().activeResponders == 0 }
+            }
+            assertEquals(2L, server.capacity.headerDeadlineClosures.get())
+            assertEquals(0L, server.capacity.requestDeadlineClosures.get())
+            closePinned()
+            awaitServing(port)
         } finally { closePinned(); server.stop() }
     }
 

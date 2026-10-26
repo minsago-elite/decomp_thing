@@ -380,14 +380,17 @@ it never silently launches execution or duplicates accepted publication.
 
 ### Admission and overload
 
-Admission defaults are finite and reported by `GET /api/v1/capacity` (`WebAdmissionLimits`):
+The following request-admission bounds are reported by `GET /api/v1/capacity` (`WebAdmissionLimits`).
+They do **not** cap all accepted TCP connections: the JDK can accept silent sockets before submitting an executor
+task, so neither the executor watchdog nor the listen backlog bounds those sockets. No accepted-connection count
+cap is configured here; that part of #589 remains open, and capacity occupancy is not a socket count.
 
 | Bound | Default | Enforcement |
 | --- | --- | --- |
-| HTTP workers / queued requests | 16 / 64 | Bounded executor; nothing else buffers requests |
+| HTTP workers / queued requests | 16 / 64 | Bounded executor (not a bound on pre-dispatch accepted sockets) |
 | Overload responders | 2, no queue | Fixed `429 SERVER_BUSY` without routing, session or storage access |
 | Listen backlog | 64 | Kernel accept queue |
-| Header deadline | 10 s | A connection that has not delivered its request line and headers when a worker reads it is closed (the worker is interrupted, which closes the socket channel); this applies on the responder tier too |
+| Header deadline | 10 s | From worker start through header parsing and header-limit/overload refusal cleanup; interruption aborts blocked socket-channel I/O even when response close is draining an unfinished body. Applies on the responder tier too; not to silent sockets before executor dispatch |
 | Request deadline | 30 s (120 s for multipart uploads) | The exchange is closed: a slow body, handler or response write releases its worker, staged upload and descriptors |
 | Header count / bytes | 100 / 32 KiB | `431 HEADERS_TOO_LARGE`, `Connection: close` |
 | JSON response / request bodies | 1 MiB response; per-route request ceilings (1–4 KiB mutations) | Checked before serialization or parsing |
@@ -407,7 +410,9 @@ without response, overload responses and closures, header/request deadline closu
 `failureReasons` counted by fixed public error code (unknown codes count as `UNCLASSIFIED`). It never contains a path,
 query, header, body, job identity or exception text. The diagnostic log carries the same vocabulary: per-failure
 `web-http-failure` lines, a rate-limited `web-overload` line when overload begins (at most once a minute) and a
-`web-capacity-summary` line at shutdown.
+`web-capacity-summary` line at shutdown. `headerDeadlineClosures` includes aborted header-limit and overload refusal
+cleanup as well as unfinished header blocks. Refusal cleanup is checked with incomplete fixed-length and chunked bodies
+while the client peers remain open; executor occupancy, peer EOF and Linux descriptor recovery are asserted.
 
 ### Shutdown and resource recovery
 

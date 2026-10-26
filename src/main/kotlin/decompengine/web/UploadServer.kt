@@ -375,7 +375,6 @@ class UploadServer(
         // request line and headers; the JDK parses them on the worker before any handler can install a deadline.
         server.executor = java.util.concurrent.Executor { task -> requestExecutor.execute(HeaderDeadlineTask(task)) }
         val context = server.createContext("/") { exchange ->
-            currentHeaderDeadline.get()?.enterHandler()
             WebResponseAccounting.around(capacity::recordResponse, exchange) { handleAdmitted(exchange) }
         }
         WebRedactionPolicy.install(context, redaction)
@@ -383,7 +382,9 @@ class UploadServer(
 
     private fun handleAdmitted(exchange: HttpExchange) {
         if (Thread.currentThread().name == OVERLOAD_RESPONDER_THREAD) {
-            // Admitted only to be refused: no routing, no deadline, no session or storage access.
+            // Keep the header watchdog armed through refusal cleanup: response close can block draining
+            // an unfinished request body. Interrupting the worker aborts that socket-channel read.
+            // No routing, session or storage access is permitted on this tier.
             capacity.overloadResponses.incrementAndGet()
             logOverload()
             exchange.responseHeaders.set("Connection", "close")
@@ -398,6 +399,10 @@ class UploadServer(
             access.sendDenied(exchange, WebAccessDenied(431, "HEADERS_TOO_LARGE", "The request headers exceed their limit."))
             return
         }
+        // Only accepted requests transfer from the interrupting header watchdog to the exchange deadline.
+        // Both early refusals above retain the watchdog until the entire JDK connection task has unwound;
+        // exchange.close() alone cannot abort a response close already blocked draining unread input.
+        currentHeaderDeadline.get()?.enterHandler()
         val upload = exchange.requestMethod == "POST" &&
             headers.getFirst("Content-Type")?.startsWith("multipart/form-data", true) == true
         val finished = java.util.concurrent.atomic.AtomicBoolean(false)
@@ -430,8 +435,10 @@ class UploadServer(
 
     /**
      * Interrupting a worker blocked in a socket-channel read closes that channel, so a client that never
-     * finishes its header block releases the worker at [WebAdmissionLimits.headerDeadlineMs]. Once the
-     * handler is entered the per-exchange deadline applies instead and no interrupt can be delivered.
+     * finishes its header block releases the worker at [WebAdmissionLimits.headerDeadlineMs]. Header-limit
+     * and overload refusals retain this protection through response cleanup, which may drain unread input.
+     * Only accepted requests enter HANDLER and use the per-exchange deadline instead. The same lock guards
+     * that transition, timeout delivery and task completion so an interrupt cannot reach a reused worker.
      */
     private inner class HeaderDeadlineTask(private val task: Runnable) : Runnable, WebHandlerEntry {
         private var state = HEADERS
