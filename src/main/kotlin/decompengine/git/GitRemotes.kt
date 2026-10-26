@@ -155,6 +155,7 @@ object GitRemoteUrls {
             if (directory.parent != root || !Files.isDirectory(directory, NOFOLLOW_LINKS)) {
                 refuse("DESTINATION_NOT_ALLOWED", "No admitted local remote has that name.")
             }
+            requireContainedRepository(directory)
             return GitRemoteLocation(GitTransport.ADMITTED, "file://${directory.toRealPath()}", null, "admitted:$name")
         }
         val scheme = Regex("^([A-Za-z][A-Za-z0-9+.-]*)://").find(raw)?.groupValues?.get(1)?.lowercase()
@@ -191,6 +192,37 @@ object GitRemoteUrls {
         }
     }
 
+    /**
+     * File transport follows repository metadata independently of the admitted directory. Reject
+     * indirect layouts before Git sees them, including links anywhere in objects/refs (not just
+     * the immediate .git entry). Like local import, alternates and linked worktrees are unsupported.
+     * Operator-owned admitted repositories must not be modified concurrently with a transfer.
+     */
+    private fun requireContainedRepository(directory: Path) {
+        fun denied(): Nothing = refuse("DESTINATION_NOT_ALLOWED", "The admitted remote must be a self-contained repository without links, gitfiles or alternates.")
+        try {
+            val dotGit = directory.resolve(".git")
+            val gitDir = when {
+                Files.isDirectory(dotGit, NOFOLLOW_LINKS) -> dotGit
+                Files.exists(dotGit, NOFOLLOW_LINKS) -> denied()
+                else -> directory
+            }
+            if (!Files.isRegularFile(gitDir.resolve("HEAD"), NOFOLLOW_LINKS) ||
+                !Files.isDirectory(gitDir.resolve("objects"), NOFOLLOW_LINKS) || !Files.isDirectory(gitDir.resolve("refs"), NOFOLLOW_LINKS)) denied()
+            for (path in listOf("commondir", "shallow", "objects/info/alternates", "objects/info/http-alternates")) {
+                if (Files.exists(gitDir.resolve(path), NOFOLLOW_LINKS)) denied()
+            }
+            Files.walk(gitDir, 32).use { paths ->
+                var count = 0
+                for (path in paths) {
+                    val attributes = Files.readAttributes(path, java.nio.file.attribute.BasicFileAttributes::class.java, NOFOLLOW_LINKS)
+                    if (++count > 100_000 || attributes.isSymbolicLink || (!attributes.isDirectory && !attributes.isRegularFile) ||
+                        (attributes.isDirectory && gitDir.relativize(path).nameCount >= 32)) denied()
+                }
+            }
+        } catch (_: IOException) { denied() } catch (_: java.io.UncheckedIOException) { denied() }
+    }
+
     private fun ssh(user: String?, host: String, port: Int?, path: String, policy: GitRemotePolicy): GitRemoteLocation {
         if (user != null && (!USER.matches(user) || user.startsWith("-"))) refuse("VALIDATION_FAILED", "The SSH user name is invalid.")
         if (path.startsWith("-") || path.any { it == '\'' || it == '"' || it == '`' || it == '$' || it == ';' }) {
@@ -223,7 +255,13 @@ object GitTransports {
         val variables = mutableMapOf("GIT_ALLOW_PROTOCOL" to protocol)
         val secrets = mutableMapOf<String, String>()
         when (location.transport) {
-            GitTransport.ADMITTED -> Unit
+            GitTransport.ADMITTED -> {
+                // Revalidate at each ls-remote/fetch, not only when the registration was created.
+                val current = GitRemoteUrls.parse(location.display, policy)
+                if (current.transport != GitTransport.ADMITTED || current.url != location.url) {
+                    throw GitOperationRefusal("DESTINATION_NOT_ALLOWED", "The admitted remote changed since it was reviewed.")
+                }
+            }
             GitTransport.HTTPS -> {
                 val host = checkNotNull(location.host)
                 val credential = policy.credentials.https(host)

@@ -944,7 +944,12 @@ A remote URL is checked before Git runs. The server refuses:
   `DESTINATION_NOT_ALLOWED`;
 - SSH hosts or paths that could be read as options, with `VALIDATION_FAILED`.
 
-An admitted remote is displayed by its name, never by its host path.
+An admitted remote is displayed by its name, never by its host path. It must be a self-contained
+bare repository or ordinary checkout with a real `.git` directory. Gitfiles, linked worktrees,
+shallow repositories, object alternates and links/special files anywhere in Git metadata are
+refused with `DESTINATION_NOT_ALLOWED`, including at transfer time after registration. Admission
+scans at most 100,000 metadata entries and 32 levels. The root is operator-owned; do not modify
+admitted repository metadata concurrently with a transfer.
 
 Credentials never leave the server. For HTTPS, Git receives an `Authorization` header for that
 remote's origin only, through `GIT_CONFIG_*` environment variables. It never appears in argv,
@@ -974,15 +979,17 @@ LFS stay inert, and objects are verified with `fsck`.
 Every transfer is bounded:
 
 - by elapsed time, at most ten minutes;
-- by repository bytes, which are checked while Git runs and once more after it exits, so an overrun stops with `TRANSFER_LIMIT`. A fetch restores its remote-tracking refs, and a clone publishes nothing;
+- by repository bytes, checked while Git runs and unconditionally at admission, so an overrun stops with `TRANSFER_LIMIT`. Clone budgets checkout expansion against the remaining bytes and checks the complete staging tree immediately before publication. Fetch receives into operation-owned quarantine with a read-only alternate to existing managed objects, budgeting existing plus quarantined bytes; rejected objects and refs never enter the live store. Admitted immutable objects are promoted without replacing local objects, then tracking refs publish in one compare-and-swap transaction;
 - by output.
 
 The operation's `progress` reports Git's own phase and percent while it runs (#594).
 `POST G/operations/{id}/cancel` with `{"action": "git.cancel"}` and the operation version in
 `If-Match` stops a queued or running fetch or clone. The operation shows `cancelling` and then ends
-`cancelled`. Partial packs are removed, and local branches, the work tree and accepted snapshots are
-never touched. Git updates each remote-tracking ref only after its pack is complete, so a fetch
-interrupted by a restart leaves refs unchanged or fully updated. It becomes `interrupted` and is
+`cancelled`. Transfer staging (including complete but unadmitted packs) is removed, and local
+branches, the work tree and accepted snapshots are never touched. The atomic tracking-ref
+transaction runs only after object admission, so a fetch interrupted by a restart leaves refs
+unchanged or fully updated. A restart between object promotion and ref publication may retain
+already-admitted objects within the byte cap; it never promotes an oversized quarantine. It becomes `interrupted` and is
 never repeated. Progress is exposed through the durable operation resource. It is not yet published
 on the shared job event stream, which is still run-scoped.
 

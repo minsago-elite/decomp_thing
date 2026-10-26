@@ -112,6 +112,52 @@ class GitRemotesTest {
         refusedUrl("TRANSPORT_UNSUPPORTED", "admitted:upstream.git", GitRemotePolicy(allowedHosts = setOf("git.example.org")))
     }
 
+    @Test fun `admitted clone and fetch refuse indirect Git directories objects and refs`(): Unit = Fixture().use { f ->
+        val outside = f.repositories.root.resolve("outside.git")
+        f.repositories.git("init", "-q", "--bare", outside.toString())
+        val gitfile = Files.createDirectories(f.admitted.resolve("gitfile"))
+        Files.writeString(gitfile.resolve(".git"), "gitdir: $outside\n")
+        val linked = Files.createDirectories(f.admitted.resolve("linked"))
+        Files.createSymbolicLink(linked.resolve(".git"), outside)
+        val objects = f.remote("objects")
+        GitStorage.deleteTree(objects.resolve("objects"))
+        Files.createSymbolicLink(objects.resolve("objects"), outside.resolve("objects"))
+        val refs = f.remote("refs")
+        GitStorage.deleteTree(refs.resolve("refs"))
+        Files.createSymbolicLink(refs.resolve("refs"), outside.resolve("refs"))
+        val alternate = f.remote("alternate")
+        Files.writeString(alternate.resolve("objects/info/alternates"), outside.resolve("objects").toString() + "\n")
+        val httpAlternate = f.remote("http-alternate")
+        Files.writeString(httpAlternate.resolve("objects/info/http-alternates"), "https://unreviewed.invalid/objects\n")
+        val common = f.remote("common")
+        Files.writeString(common.resolve("commondir"), outside.toString() + "\n")
+        val loose = f.remote("loose")
+        val shard = Files.createDirectories(loose.resolve("objects/aa"))
+        Files.createSymbolicLink(shard.resolve("b".repeat(38)), outside.resolve("HEAD"))
+        val names = listOf("gitfile", "linked", "objects.git", "refs.git", "alternate.git", "http-alternate.git", "common.git", "loose.git")
+        service = f.open()
+        for (name in names) {
+            assertEquals("DESTINATION_NOT_ALLOWED", assertFailsWith<ManagedGitException>(name) {
+                service.request(jobId, GitCloneRequest("admitted:$name", "origin", null), key())
+            }.code)
+        }
+        f.initialized()
+        for (name in names) refused("DESTINATION_NOT_ALLOWED", GitOperationAction.REMOTE_ADD, "name" to "origin", "url" to "admitted:$name")
+        // A regular non-bare .git directory remains supported, unlike gitfiles and linked .git.
+        val mutable = f.remote("mutable")
+        val ordinary = f.admitted.resolve("ordinary")
+        Files.move(f.repositories.root.resolve("mutable seed"), ordinary)
+        val policy = GitRemotePolicy(admittedRoot = f.admitted)
+        assertEquals(GitTransport.ADMITTED, parse("admitted:ordinary", policy).transport)
+        val reviewed = parse("admitted:mutable.git", policy)
+        assertEquals(GitOperationState.COMPLETED, sync(GitOperationAction.REMOTE_ADD, "name" to "origin", "url" to reviewed.display).state)
+        val remoteId = service.remotes(jobId, repositoryId).single().record.remoteId
+        Files.writeString(mutable.resolve("objects/info/alternates"), outside.resolve("objects").toString() + "\n")
+        refused("DESTINATION_NOT_ALLOWED", GitOperationAction.FETCH, "remoteId" to remoteId)
+        assertEquals("DESTINATION_NOT_ALLOWED", assertFailsWith<GitOperationRefusal> { GitTransports.context(reviewed, policy) }.code)
+        assertTrue(service.remotes(jobId, repositoryId).single().tracking.isEmpty())
+    }
+
     @Test fun `credentials stay in the child environment and SSH always verifies host keys`(): Unit = Fixture().use { f ->
         val token = f.repositories.root.resolve("token")
         Files.writeString(token, "canary-secret-7f3a\n")
