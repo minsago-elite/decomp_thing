@@ -184,6 +184,8 @@ jobs:
           test "${#web_distribution[@]}" -eq 1
           test -f "${web_distribution[0]}"
           echo "WEB_TEST_ARCHIVE=${web_distribution[0]}" >> "$GITHUB_ENV"
+      - name: Require a byte-identical application JAR across Gradle invocations
+        run: python3 scripts/check-reproducible-jar.py
       - name: Require positive real-browser expiry evidence
         run: >-
           python3 scripts/test-ci-partitions.py
