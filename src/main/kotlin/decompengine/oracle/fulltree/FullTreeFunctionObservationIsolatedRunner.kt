@@ -1043,7 +1043,11 @@ internal object KotlinSystemdCgroupCommandLauncher {
         operationDeadline: ContainedCommandOperationDeadline? = null,
         readOnlyReportsDirectory: LinuxFileIdentity? = null,
         requireTerminalResourceEventProof: Boolean = false,
+        retainedInputVisibility: List<KotlinContainedCommandRetainedInput>? = null,
     ): KotlinSystemdCgroupCommandExecution {
+        require(!requireTerminalResourceEventProof || retainedInputVisibility == null) {
+            "contained command terminal and visibility policies cannot be combined"
+        }
         val cleanup = ContainedCommandCleanup()
         val secret = ByteArray(32).also(SECURE_RANDOM::nextBytes)
         try {
@@ -1053,7 +1057,12 @@ internal object KotlinSystemdCgroupCommandLauncher {
             require(controlDirectoryName == null || validContainedControlName(controlDirectoryName)) {
                 "contained command control directory must have a canonical execution name"
             }
-            val retainedDirectories = ContainedCommandRetainedDirectories(controlDirectoryName, readOnlyControlDirectories, readOnlyStateDirectory, readOnlyReportsDirectory)
+            val retainedDirectories = ContainedCommandRetainedDirectories(controlDirectoryName, readOnlyControlDirectories, readOnlyStateDirectory, readOnlyReportsDirectory, retainedInputVisibility)
+            val visibilityPolicy = retainedDirectories.visibilityToJson()
+            val terminalPolicy = if (requireTerminalResourceEventProof)
+                ContainedCommandTerminalResourceEvidence.policySha256 else null
+            val runtimePolicyFields = containedCommandRuntimePolicyFields(interruption?.policySha256,
+                terminalPolicy, visibilityPolicy)
             borrowed.withPinnedDescriptor(retainedDirectories::verify)
             val writableRoot = borrowed.path
             val controlPath = controlDirectoryName?.let(writableRoot::resolve) ?: writableRoot
@@ -1076,10 +1085,7 @@ internal object KotlinSystemdCgroupCommandLauncher {
                 )) }),
                 "keeperEntryPoint" to JsonPrimitive(KotlinContainedCommandKeeper::class.java.name),
                 "requestVersion" to JsonPrimitive(KotlinContainedCommandProtocol.VERSION),
-            ) + (if (interruption == null) emptyMap() else mapOf(
-                "interruptionPolicySha256" to JsonPrimitive(interruption.policySha256),
-                "commandRequestProvider" to JsonPrimitive("kotlin-contained-command-request-v2"),
-            )) + (if (controlDirectoryName == null) emptyMap() else mapOf(
+            ) + runtimePolicyFields + (if (controlDirectoryName == null) emptyMap() else mapOf(
                 "controlDirectory" to JsonPrimitive(controlPath.toString()),
                 "writableRoot" to JsonPrimitive(writableRoot.toString()),
             )) + (if (retainedDirectories.controlsAreEmpty) emptyMap() else mapOf(
@@ -1087,10 +1093,7 @@ internal object KotlinSystemdCgroupCommandLauncher {
             )) + (retainedDirectories.stateToJson()?.let { mapOf("readOnlyStateDirectory" to it) } ?: emptyMap()) +
                 (retainedDirectories.reportsToJson()?.let { mapOf("readOnlyReportsDirectory" to it) } ?: emptyMap()) +
                 (operationDeadline?.let { mapOf("operationWallDeadline" to it.policy) } ?: emptyMap()) +
-                (if (resources.processorCount == 1) emptyMap() else mapOf("resources" to resources.json())) +
-                (if (requireTerminalResourceEventProof) mapOf("terminalResourcePolicySha256" to
-                    JsonPrimitive(ContainedCommandTerminalResourceEvidence.policySha256),
-                    "commandRequestProvider" to JsonPrimitive("kotlin-contained-command-request-v3")) else emptyMap()))))
+                (if (resources.processorCount == 1) emptyMap() else mapOf("resources" to resources.json())))))
             val runtime = AuthenticatedObservationRuntime.open(configuration)
             cleanup.runtime = runtime
             for (input in additionalInputs) {
@@ -1100,6 +1103,15 @@ internal object KotlinSystemdCgroupCommandLauncher {
                 require(guard.size == input.bytes && guard.authenticatedSha256 == input.sha256) {
                     "contained command input differs from its authenticated identity"
                 }
+            }
+            for (input in retainedDirectories.selectedInputs(writableRoot)) {
+                operationDeadline?.requireCurrent()
+                val guard = StableControlFile.openWithCheckpoint(input.path, input.bytes, "contained visible retained input") {
+                    operationDeadline?.requireCurrent()
+                }
+                cleanup.inputs += guard
+                require(guard.size == input.bytes && guard.authenticatedSha256 == input.sha256)
+                guard.requireSingleLink("contained visible retained input")
             }
             fun verifyInputs(label: String) {
                 operationDeadline?.requireCurrent()
@@ -1119,8 +1131,9 @@ internal object KotlinSystemdCgroupCommandLauncher {
                 effectiveResources.wallSeconds, minOf(resources.maximumFileBytes, 64L * 1024 * 1024),
                 minOf(resources.maximumFileBytes, 64L * 1024 * 1024),
                 allowInterruption = interruption != null,
-                terminalResourcePolicySha256 = if (requireTerminalResourceEventProof)
-                    ContainedCommandTerminalResourceEvidence.policySha256 else null,
+                terminalResourcePolicySha256 = terminalPolicy,
+                retainedInputVisibilitySha256 = visibilityPolicy?.let {
+                    OracleArtifacts.sha256(OracleJson.canonicalBytes(it)) },
             )
             interruption?.bind(request)
             val requestBytes = request.canonicalBytes
@@ -1255,6 +1268,12 @@ internal object KotlinSystemdCgroupCommandLauncher {
                 val live = unit.freezeAndSampleRawCgroup(effectiveResources)
                 unit.killFrozenKeeperAndProveRemoved(effectiveResources, live)
                 unit.stopAndProveRemoved()
+                if (retainedInputVisibility != null) {
+                    verifyInputs("after strict-view command absence")
+                    // No callback can mutate an earlier input after this final whole-set pass.
+                    cleanup.inputs.forEach { it.requirePathAndIdentity("strict-view terminal source identity") }
+                    borrowed.withPinnedDescriptor(retainedDirectories::verify)
+                }
                 cleanup.closeAndProveAbsent()
                 borrowed.withPinnedDescriptor(retainedDirectories::verify)
                 val controlIdentity = if (controlDirectoryName == null) null else runTree.withPinnedDescriptor { LinuxFilesystemSyscalls.identity(it.fd) }
@@ -4553,8 +4572,7 @@ private class TrustedObservationBoundary(
             parents.forEach { addAll(listOf("--dir", it.toString())) }
             mounts.forEach { addAll(listOf("--ro-bind", it.source.toString(), it.destination.toString())) }
             mountedInputs.forEach { addAll(listOf("--ro-bind", it.toString(), it.toString())) }
-            addAll(listOf("--bind", writableRoot.toString(), writableRoot.toString()))
-            addAll(retainedDirectories.mountArguments(writableRoot))
+            addAll(retainedDirectories.runRootMountArguments(writableRoot))
             val privateRuntime = runDirectory.resolve(RUNTIME_DIRECTORY).toString()
             addAll(listOf("--ro-bind", privateRuntime, privateRuntime))
             addAll(listOf("--proc", "/proc", "--dev", "/dev", "--remount-ro", "/"))
