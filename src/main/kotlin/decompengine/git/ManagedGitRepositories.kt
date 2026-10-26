@@ -1465,9 +1465,10 @@ class ManagedGitRepositories(
             if (operations.any { !it.state.terminal }) {
                 throw ManagedGitException("WORKTREE_BUSY", "Another repository operation is still running for this job.")
             }
-            // One bounded overflow slot is reserved for settling existing push evidence. Ordinary
+            // One shared, bounded overflow slot settles existing push or PR evidence. Ordinary
             // work cannot consume it; failed reconciliation records can be retired on the next try.
-            val limit = MAX_OPERATIONS + if (request.action == GitOperationAction.PUSH_RECONCILE) 1 else 0
+            val recovery = request.action == GitOperationAction.PUSH_RECONCILE || request.action == GitOperationAction.GITHUB_PR_RECONCILE
+            val limit = MAX_OPERATIONS + if (recovery) 1 else 0
             if (retireTerminalWorkspace(jobId, operations).size >= limit || executor.queue.remainingCapacity() == 0) {
                 throw ManagedGitException("QUOTA_EXCEEDED", "Repository operation capacity is exhausted. Review existing operations first.")
             }
@@ -2202,10 +2203,12 @@ class ManagedGitRepositories(
         val directory = root.resolve(jobId).resolve("git").resolve("operations")
         // Recovery evidence must survive even if its original operation was settled before an audit
         // failure/crash. Do not retire that original until reconciliation has removed its intent.
-        val pushIntents = repositories(jobId).flatMap { GitPushes.list(repositoryDirectory(jobId, it.repositoryId)) }
-            .map { it.operationId }.toSet()
+        val retainedIntents = repositories(jobId).flatMap {
+            val repository = repositoryDirectory(jobId, it.repositoryId)
+            GitPushes.list(repository).map { intent -> intent.operationId } + pullIntents(repository).map { intent -> intent.operationId }
+        }.toSet()
         val retired = operations.filter { it.action.workspace && it.state.terminal && it.state != GitOperationState.RECOVERY_REQUIRED &&
-            it.operationId !in pushIntents }
+            it.operationId !in retainedIntents }
             .sortedBy { it.createdAt }.take(excess)
         retired.forEach { Files.deleteIfExists(directory.resolve("${it.operationId}.json")) }
         return operations - retired.toSet()

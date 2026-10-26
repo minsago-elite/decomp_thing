@@ -1254,7 +1254,11 @@ An incomplete preflight refuses creation with `PR_AMBIGUOUS` without sending a P
   `completed`, or as `failed` with `PR_NOT_CREATED` only when a complete inventory contains no
   new pull requests. Unmatched new pull requests, conflicting correlations or an incomplete
   inventory without a match fail reconciliation with `PR_AMBIGUOUS` and keep the creation
-  unconfirmed. Reconciliation never repeats the write.
+  unconfirmed. Reconciliation never repeats the write. Push and PR reconciliation share one
+  reserved slot beyond the ordinary 64-operation quota, so a full set of unresolved creations
+  cannot block recovery. Ordinary actions cannot use that slot. Failed reconciliation records
+  may be retired before retry (including after restart), but original records with retained
+  push or PR intents are preserved until their evidence is settled.
 - Completion messages are bounded to the record's 500 characters, so a long provider link never
   makes the operation record unreadable.
 - A remote with an unconfirmed creation cannot be removed (`PR_UNCONFIRMED`).

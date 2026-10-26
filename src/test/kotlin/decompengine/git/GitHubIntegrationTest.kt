@@ -234,11 +234,112 @@ class GitHubIntegrationTest {
         }
     }
 
-    private fun reconcile(operationId: String): GitOperationRecord {
+    private fun reconciliation(operationId: String): GitSyncRequest {
         val view = service.workspace(jobId, repositoryId)
         val guards = GitGuards(GitWorkspaceVersions.repositoryVersion(view.record, view.observation), GitWorkspaceVersions.worktreeVersion(view.observation),
             view.observation.head.objectId, null, null)
-        return run(GitSyncRequest(GitOperationAction.GITHUB_PR_RECONCILE, view.worktreeId, guards, mapOf("prOperationId" to operationId)))
+        return GitSyncRequest(GitOperationAction.GITHUB_PR_RECONCILE, view.worktreeId, guards, mapOf("prOperationId" to operationId))
+    }
+
+    private fun reconcile(operationId: String): GitOperationRecord = run(reconciliation(operationId))
+
+    /** Seed clone + 63 uncertain creations without 63 provider writes. The service must be closed. */
+    private fun Fixture.fillPullRecoveryQuota(uncertain: GitOperationRecord): Path {
+        val operations = store.resolve("$jobId/git/operations")
+        val intents = store.resolve("$jobId/git/repositories/$repositoryId/pull-intents")
+        val operation = Json.parseToJsonElement(Files.readString(operations.resolve("${uncertain.operationId}.json"))).jsonObject
+        val intent = Json.parseToJsonElement(Files.readString(intents.resolve("${uncertain.operationId}.json"))).jsonObject
+        for (index in 1..62) {
+            val id = "operation_" + index.toString(16).padStart(32, '0')
+            val head = "blocked-$index"
+            Files.writeString(operations.resolve("$id.json"), buildJsonObject {
+                operation.forEach { (name, value) -> put(name, value) }
+                put("operationId", id); put("requestKeySha256", GitStorage.sha256(id))
+                put("request", buildJsonObject {
+                    val request = operation.getValue("request").jsonObject
+                    request.forEach { (name, value) -> put(name, value) }
+                    put("parameters", buildJsonObject {
+                        request.getValue("parameters").jsonObject.forEach { (name, value) -> put(name, value) }
+                        put("headBranch", head)
+                    })
+                })
+            }.toString())
+            Files.writeString(intents.resolve("$id.json"), buildJsonObject {
+                intent.forEach { (name, value) -> put(name, value) }
+                put("operationId", id); put("head", head)
+            }.toString())
+        }
+        assertEquals(64L, Files.list(operations).use { it.count() })
+        assertEquals(63L, Files.list(intents).use { it.count() })
+        return operations
+    }
+
+    @Test fun `full PR recovery quota permits bounded retries but not ordinary admission`(): Unit = Fixture().use { f ->
+        FakeGitHub(token).use { fake ->
+            val config = configuration(fake, f.repositories.root, writable = true)
+            f.cloned(config)
+            fake.failCreate = true
+            val uncertain = run(create())
+            assertEquals(GitOperationState.RECOVERY_REQUIRED, uncertain.state)
+            service.close()
+            val operations = f.fillPullRecoveryQuota(uncertain)
+            service = f.open(config)
+            val request = reconciliation(uncertain.operationId)
+            repeat(3) {
+                val requestsBefore = fake.requests.size
+                assertEquals("QUOTA_EXCEEDED", assertFailsWith<ManagedGitException> {
+                    service.requestWorkspace(jobId, repositoryId, create(), key())
+                }.code)
+                assertEquals(requestsBefore, fake.requests.size, "ordinary admission cannot contact the provider at quota")
+                fake.rateLimited = true
+                val retryKey = key()
+                val admission = service.requestWorkspace(jobId, repositoryId, request, retryKey)
+                assertTrue(service.awaitIdle(60_000))
+                val failed = service.operation(jobId, repositoryId, admission.operation.operationId)
+                assertEquals(GitOperationState.FAILED, failed.state)
+                assertEquals("GITHUB_RATE_LIMITED", failed.failureCode)
+                assertEquals(65L, Files.list(operations).use { it.count() }, "one shared recovery slot, not unbounded overflow")
+                assertTrue(service.requestWorkspace(jobId, repositoryId, request, retryKey).replayed)
+                assertEquals(GitOperationState.RECOVERY_REQUIRED, service.operation(jobId, repositoryId, uncertain.operationId).state)
+                assertEquals(63, service.githubStatus(jobId, repositoryId, null, remoteId(), "feature").unconfirmed.size)
+            }
+            fake.rateLimited = false
+            assertEquals(GitOperationState.COMPLETED, reconcile(uncertain.operationId).state)
+            assertEquals("PR_NOT_CREATED", service.operation(jobId, repositoryId, uncertain.operationId).failureCode)
+            assertEquals(62, service.githubStatus(jobId, repositoryId, null, remoteId(), "feature").unconfirmed.size)
+            assertEquals(1, fake.requests.count { it.startsWith("POST") }, "recovery never retries creation")
+            fake.failCreate = false
+            assertEquals(GitOperationState.COMPLETED, run(create()).state, "settlement frees ordinary capacity")
+            assertTrue(Files.list(operations).use { it.count() } <= 64)
+        }
+    }
+
+    @Test fun `PR reconciliation survives restart after a failed attempt in the reserved slot`(): Unit = Fixture().use { f ->
+        FakeGitHub(token).use { fake ->
+            val config = configuration(fake, f.repositories.root, writable = true)
+            f.cloned(config)
+            fake.dropAfterCreate = true
+            val uncertain = run(create())
+            assertEquals(GitOperationState.RECOVERY_REQUIRED, uncertain.state)
+            service.close()
+            val operations = f.fillPullRecoveryQuota(uncertain)
+            service = f.open(config)
+            fake.rateLimited = true
+            assertEquals("GITHUB_RATE_LIMITED", reconcile(uncertain.operationId).failureCode)
+            assertEquals(65L, Files.list(operations).use { it.count() })
+            service.close(); service = f.open(config)
+            assertEquals(63, service.githubStatus(jobId, repositoryId, null, remoteId(), "feature").unconfirmed.size)
+            assertEquals(GitOperationState.RECOVERY_REQUIRED, service.operation(jobId, repositoryId, uncertain.operationId).state)
+            fake.rateLimited = false; fake.dropAfterCreate = false
+            assertEquals(GitOperationState.COMPLETED, reconcile(uncertain.operationId).state)
+            assertEquals(GitOperationState.COMPLETED, service.operation(jobId, repositoryId, uncertain.operationId).state)
+            assertEquals(62, service.githubStatus(jobId, repositoryId, null, remoteId(), "feature").unconfirmed.size)
+            assertEquals(1, fake.pulls.size)
+            assertEquals(1, fake.requests.count { it.startsWith("POST") })
+            assertEquals(65L, Files.list(operations).use { it.count() })
+            service.close(); service = f.open(config)
+            assertEquals(62, service.githubStatus(jobId, repositoryId, null, remoteId(), "feature").unconfirmed.size)
+        }
     }
 
     private fun closedPull(number: Int, title: String) = buildJsonObject {
