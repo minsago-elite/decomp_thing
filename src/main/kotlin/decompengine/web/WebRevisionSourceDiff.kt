@@ -121,6 +121,7 @@ internal fun revisionLineEdits(base: IntArray, head: IntArray, maximumEdits: Int
     val n = base.size - prefix - suffix; val m = head.size - prefix - suffix
     val middle = ArrayList<WebDiffOp>(n + m)
     if (n == 0 || m == 0) {
+        if (n + m > maximumEdits || expired()) return null
         repeat(n) { middle += WebDiffOp.DELETE }; repeat(m) { middle += WebDiffOp.INSERT }
     } else {
         val limit = minOf(n + m, maximumEdits)

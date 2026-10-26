@@ -62,6 +62,25 @@ class WebRevisionSourceDiffTest {
     private fun fileQuery(entry: JsonObject, hunk: Int? = null) = base + listOfNotNull(id(entry, "baseFile")?.let { "&baseFileId=$it" },
         id(entry, "headFile")?.let { "&headFileId=$it" }, hunk?.let { "&hunk=$it" }).joinToString("")
 
+    @Test fun `pure additions removals and trimmed edits obey edit and deadline budgets`() {
+        val limit = WebRevisionSourceDiffs.MAXIMUM_EDITS
+        for (count in listOf(limit, limit + 1)) {
+            val changed = IntArray(count) { it + 10 }
+            val pairs = listOf(IntArray(0) to changed, changed to IntArray(0),
+                intArrayOf(1) to (intArrayOf(1) + changed),
+                (intArrayOf(1) + changed) to intArrayOf(1),
+                intArrayOf(1, 2) to (intArrayOf(1) + changed + intArrayOf(2)))
+            for ((before, after) in pairs) {
+                val ops = revisionLineEdits(before, after, limit) { false }
+                if (count == limit) assertEquals(count, assertNotNull(ops).count { it != WebDiffOp.EQUAL })
+                else assertNull(ops)
+                var calls = 0
+                assertNull(revisionLineEdits(before, after, limit) { calls++; true })
+                if (count == limit) assertEquals(1, calls, "the fast path must consult the deadline")
+            }
+        }
+    }
+
     @Test fun `classification names both exact revisions and separates added removed modified renamed and unchanged files`() {
         val fixture = fixture(
             listOf(side("Makefile", "all:\n"), side("src/old.c", "int moved;\n"), side("src/gone.c", "int gone;\n"), side("src/same.c", "int same;\n"),

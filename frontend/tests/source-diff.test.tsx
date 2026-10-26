@@ -138,6 +138,15 @@ it('lists changed files with explicit status, both revisions and pinned historic
   const target = new URL(compare.getAttribute('href')!, 'https://x.invalid');
   expect(target.pathname).toBe(`${root}/source-diff/file`);
   expect(target.search).toContain('baseFileId=file_0_aaaa');
+  const chosen = sourceFileDiffSelection(target.search);
+  expect(chosen.pin).toEqual({ metadataVersion: page.data.metadataVersion, baseMetadataVersion: page.data.baseMetadataVersion });
+  // The same IDs can survive a manifest-only edit; the summary pin must still refuse the newer evidence.
+  const newer = fixture('source-file-diff-text', 'sourceFileDiff').data;
+  newer.baseFile = page.data.items[0]!.baseFile;
+  newer.headFile = page.data.items[0]!.headFile;
+  newer.metadataVersion = '0'.repeat(64);
+  newer.baseMetadataVersion = page.data.baseMetadataVersion;
+  expect(() => bindSourceFileDiff(newer, selected, chosen)).toThrow(expect.objectContaining({ serverCode: 'CURSOR_EXPIRED' }));
   expect(screen.getByRole('button', { name: 'Next page of changes' }).hasAttribute('disabled')).toBe(false);
   expect(screen.getByRole('button', { name: 'First page of changes' }).hasAttribute('disabled')).toBe(true);
 });
