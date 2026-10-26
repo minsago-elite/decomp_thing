@@ -1431,15 +1431,31 @@ class GccProductionFullExportQualificationTest {
         val start = OracleJson.parseCanonical(retain("independent-machine-call-start-authorized.json")).jsonObject
         assertEquals(binding.requiredText("nativeBindingSha256"), start.requiredText("nativeBindingSha256"))
         assertEquals(binding.requiredText("selectedBoundaryScoreSha256"), start.requiredText("selectedBoundaryScoreSha256"))
-        val request = decompengine.oracle.machinecalls.IndependentMachineCallRequestV1.parse(
+        val request = decompengine.oracle.machinecalls.IndependentMachineCallRequestV2.parse(
             producer.getValue("independent-machine-call-request.json"))
         assertEquals(profile.fullBinary.sha256, request.richFile.sha256)
         assertEquals(profile.fullBinary.bytes, request.richFile.bytes)
         assertEquals(profile.artifactManifestSha256, request.manifestSha256)
         assertEquals(GccDriverStructuralBoundaryEvidenceV1.FUNCTION_ORACLE_SHA256, request.canonicalOracle.sha256)
         val artifacts = intent.getValue("artifacts").jsonArray.map { it.jsonObject }.associateBy { it.requiredText("role") }
-        assertEquals(artifacts.getValue("ghidra-bridge-jar").requiredText("sha256"), request.runtime.bridgeSha256)
-        assertEquals(artifacts.getValue("ghidra-archive").requiredText("sha256"), request.runtime.archiveSha256)
+        val bridgeArtifact = artifacts.getValue("ghidra-bridge-jar")
+        val manifestArtifact = artifacts.getValue("ghidra-runtime-manifest")
+        assertEquals(bridgeArtifact.requiredText("sha256"), request.runtime.bridgeSha256)
+        assertEquals(bridgeArtifact.requiredText("path"),
+            request.runtime.bundleRoot.resolve("decomp-ghidra-bridge.jar").toString())
+        assertEquals(bridgeArtifact.getValue("bytes").jsonPrimitive.long, request.runtime.bridgeSnapshot.bytes)
+        assertEquals(bridgeArtifact.requiredText("sha256"), request.runtime.bridgeSnapshot.sha256)
+        assertEquals(request.controlRoot.resolve("runtime/ghidra-bridge.runtime"), request.runtime.bridgeSnapshot.path)
+        assertEquals(manifestArtifact.requiredText("sha256"), request.runtime.bundleManifestSha256)
+        assertEquals(manifestArtifact.requiredText("path"), request.runtime.bundleRoot.resolve("bundle.sha256").toString())
+        assertEquals(manifestArtifact.getValue("bytes").jsonPrimitive.long, request.runtime.bundleManifestSnapshot.bytes)
+        assertEquals(manifestArtifact.requiredText("sha256"), request.runtime.bundleManifestSnapshot.sha256)
+        assertEquals(request.controlRoot.resolve("runtime/ghidra-bundle-manifest.runtime"),
+            request.runtime.bundleManifestSnapshot.path)
+        val archiveArtifact = artifacts.getValue("ghidra-archive")
+        assertEquals(archiveArtifact.requiredText("path"), request.runtime.ghidraArchivePath.toString())
+        assertEquals(archiveArtifact.getValue("bytes").jsonPrimitive.long, request.runtime.archiveBytes)
+        assertEquals(archiveArtifact.requiredText("sha256"), request.runtime.archiveSha256)
         val reportBytes = retain(GccBundledMachineCallReplayOutputCapture.REPORT_NAME, request.limits.maximumOutputBytes)
         assertEquals(output.resolve(GccBundledMachineCallReplayOutputCapture.REPORT_NAME),
             Path.of(result.requiredText("independentMachineCallReport")))

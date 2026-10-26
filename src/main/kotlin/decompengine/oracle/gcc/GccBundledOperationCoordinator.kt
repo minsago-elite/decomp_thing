@@ -12,11 +12,13 @@ import decompengine.oracle.structural.StructuralBoundaryReplayWorkerV1
 import decompengine.oracle.structural.StructuralProductionReplayContract
 import decompengine.oracle.structural.StructuralReplayAdapterRegistry
 import decompengine.oracle.structural.VerifiedStructuralInputsV1
-import decompengine.oracle.machinecalls.IndependentMachineCallRequestV1
+import decompengine.oracle.machinecalls.IndependentMachineCallRequestV2
 import decompengine.oracle.machinecalls.IndependentMachineCallWorkerV1
 import decompengine.oracle.machinecalls.MachineCallFileV1
 import decompengine.oracle.machinecalls.MachineCallLimitsV1
-import decompengine.oracle.machinecalls.MachineCallRuntimeV1
+import decompengine.oracle.machinecalls.MachineCallRuntimeV2
+import decompengine.oracle.fulltree.FullTreeFunctionObservationRuntimeArtifact
+import decompengine.oracle.fulltree.FullTreeFunctionObservationRuntimeArtifactRole
 import decompengine.oracle.fulltree.StableControlFile
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
@@ -142,7 +144,7 @@ internal class GccBundledStructuralReplayOperation(
 internal class GccBundledMachineCallReplayOperation(
     val native: GccBundledNativeCallOperation,
     val selectedInputs: VerifiedStructuralInputsV1,
-    val request: IndependentMachineCallRequestV1,
+    val request: IndependentMachineCallRequestV2,
     val capture: GccBundledMachineCallReplayCapture,
     attachmentBytes: ByteArray,
     executionBytes: ByteArray,
@@ -924,7 +926,6 @@ internal class GccBundledPreparedOperation internal constructor(
         require(selected.programModelSha256 == native.model.programModelSha256 &&
             selected.inputSha256 == profile.strippedBinary.sha256)
         val original = GccCompilerEngineContainmentContract.parseDefinitionForLiveController(definition)
-        val configuration = deriveRuntimeConfiguration(original, inputs.classPathEntries)
         val nativeBinding = GccNativeCallReceiptLineage.createBinding(native)
         val controlName = "control-" + OracleArtifacts.sha256(
             ("independent-machine-calls-v1\n" + intent.requestSha256 + "\n" +
@@ -934,17 +935,34 @@ internal class GccBundledPreparedOperation internal constructor(
         val archive = artifact(GccCompilerEngineContainmentArtifactRole.GHIDRA_ARCHIVE)
         val bridge = artifact(GccCompilerEngineContainmentArtifactRole.GHIDRA_BRIDGE_JAR)
         val manifest = artifact(GccCompilerEngineContainmentArtifactRole.GHIDRA_RUNTIME_MANIFEST)
-        val request = IndependentMachineCallRequestV1(
+        require(bridge.path == intent.bundledRuntime.root.resolve(FullTreeFunctionObservationRuntimeArtifactRole.GHIDRA_BRIDGE.sourceName) &&
+            manifest.path == intent.bundledRuntime.root.resolve(FullTreeFunctionObservationRuntimeArtifactRole.GHIDRA_BUNDLE_MANIFEST.sourceName)) {
+            "bundled Ghidra bridge and manifest source roles differ from the materializer's fixed inputs"
+        }
+        val runtimeArtifacts = listOf(
+            FullTreeFunctionObservationRuntimeArtifact(FullTreeFunctionObservationRuntimeArtifactRole.GHIDRA_BRIDGE,
+                bridge.path, bridge.bytes, bridge.sha256),
+            FullTreeFunctionObservationRuntimeArtifact(FullTreeFunctionObservationRuntimeArtifactRole.GHIDRA_BUNDLE_MANIFEST,
+                manifest.path, manifest.bytes, manifest.sha256),
+        ).sortedBy { it.role.ordinal }
+        val configuration = deriveRuntimeConfiguration(original, inputs.classPathEntries, runtimeArtifacts)
+        val request = IndependentMachineCallRequestV2(
             MachineCallFileV1(profile.root.resolve("artifacts/gcc-driver.full"), profile.fullBinary.bytes,
                 profile.fullBinary.sha256),
             MachineCallFileV1(profile.root.resolve("function-recovery-oracle.json"), 12_558_460,
                 GccDriverStructuralBoundaryEvidenceV1.FUNCTION_ORACLE_SHA256),
             profile.artifactManifestSha256,
-            MachineCallRuntimeV1(intent.bundledRuntime.root, archive.path, archive.sha256, archive.bytes,
-                bridge.sha256, manifest.sha256, "x86:LE:64:default", "4.8"),
+            MachineCallRuntimeV2(intent.bundledRuntime.root, archive.path, archive.sha256, archive.bytes,
+                bridge.sha256, manifest.sha256, "x86:LE:64:default", "4.8",
+                MachineCallFileV1(controlPath.resolve("runtime").resolve(
+                    FullTreeFunctionObservationRuntimeArtifactRole.GHIDRA_BRIDGE.snapshotName), bridge.bytes, bridge.sha256),
+                MachineCallFileV1(controlPath.resolve("runtime").resolve(
+                    FullTreeFunctionObservationRuntimeArtifactRole.GHIDRA_BUNDLE_MANIFEST.snapshotName), manifest.bytes, manifest.sha256)),
+            controlPath,
             controlPath.resolve("reports").resolve(GccBundledMachineCallReplayOutputCapture.REPORT_NAME),
             MachineCallLimitsV1(maximumWallMillis = deadline.remainingWholeSecondsMillis(300_000)),
         )
+        request.requireMaterializerBindings(configuration, controlPath)
         val requestBytes = request.canonicalBytes
         val requestSha = OracleArtifacts.sha256(requestBytes)
         val requestPath = cli.options.output.resolve("independent-machine-call-request.json")
