@@ -150,7 +150,7 @@ data class GitRepositoryPolicy(
 class ManagedGitException(val code: String, message: String) : RuntimeException(message)
 
 /** Crash points for recovery tests; a crash leaves records and staging exactly as a process death would. */
-enum class GitOperationCrashPoint { AFTER_RUNNING, AFTER_STAGING, BEFORE_PUBLISH, AFTER_PUBLISH }
+enum class GitOperationCrashPoint { AFTER_RUNNING, AFTER_STAGING, BEFORE_PUBLISH, AFTER_PUBLISH, AFTER_SNAPSHOT_CAPTURE }
 internal class SimulatedGitCrash : Error("simulated process death")
 
 /**
@@ -631,6 +631,8 @@ class ManagedGitRepositories(
         val directory = root.resolve(queued.jobId).resolve("git")
         val staging = directory.resolve("staging").resolve(queued.operationId)
         var current = queued
+        var publishedCommit: String? = null
+        var publicationAttempted = false
         try {
             val runner = requireRunner()
             current = synchronized(lock) { advance(directory, current, GitOperationState.RUNNING, RUNNING_WORKSPACE_MESSAGE) }
@@ -649,15 +651,27 @@ class ManagedGitRepositories(
                 is GitCommitRequest -> {
                     GitStorage.deleteTree(staging)
                     GitStorage.directories(directory, "staging", queued.operationId)
-                    val messageFile = staging.resolve("message")
-                    Files.writeString(messageFile, request.message)
-                    crash(GitOperationCrashPoint.AFTER_STAGING)
-                    GitWorkspaceMutations.commit(runner, located.gitDir, located.workTree, messageFile, policy)
+                    GitWorkspaceMutations.withCommitLocks(located.gitDir, queued.operationId) {
+                        val reviewed = synchronized(lock) { validate(runner, located, request) }
+                        val messageFile = staging.resolve("message")
+                        Files.writeString(messageFile, request.message)
+                        val commit = GitWorkspaceMutations.createCommit(runner, located.gitDir, located.workTree, messageFile, policy, reviewed)
+                        crash(GitOperationCrashPoint.AFTER_STAGING)
+                        publicationAttempted = true
+                        GitWorkspaceMutations.publishCommit(runner, located.gitDir, staging, reviewed.head, reviewed.objectFormat, commit) {
+                            publishedCommit = commit
+                        }
+                    }
+                    result = checkNotNull(publishedCommit)
                     crash(GitOperationCrashPoint.AFTER_PUBLISH)
-                    val after = GitRepositoryInspector.inspect(runner, located.gitDir, located.workTree)
-                    result = checkNotNull(after.head.objectId)
-                    if (recordMapping(runner, located, result, after.dirty) == null) {
-                        message += " The commit tree differs from the recorded candidate snapshot, so it is not mapped to a reconstruction revision."
+                    // Mapping is optional. Its IO must never turn a published commit into an
+                    // apparently uncommitted failure, and HEAD may already name another commit.
+                    val mapping = try {
+                        val after = GitRepositoryInspector.inspect(runner, located.gitDir, located.workTree)
+                        recordMapping(runner, located, result, after.dirty)
+                    } catch (_: Exception) { null }
+                    if (mapping == null) {
+                        message += " The reconstruction revision mapping could not be confirmed; treat this commit as not mapped until refreshed."
                     }
                 }
                 else -> error("not a workspace request")
@@ -676,7 +690,10 @@ class ManagedGitRepositories(
                 else -> "STORAGE_FAILED" to "Repository storage could not be written. Read the current status before trying again."
             }
             synchronized(lock) {
-                current = finish(current, if (code == "INTERRUPTED") GitOperationState.INTERRUPTED else GitOperationState.FAILED, code, message.take(500))
+                current = if (publishedCommit != null || (publicationAttempted && failure !is GitOperationRefusal)) {
+                    finish(current, GitOperationState.RECOVERY_REQUIRED, "COMMIT_OUTCOME_REQUIRES_REVIEW",
+                        "Commit publication was attempted before an error. Inspect history before any new commit.", publishedCommit)
+                } else finish(current, if (code == "INTERRUPTED") GitOperationState.INTERRUPTED else GitOperationState.FAILED, code, message.take(500))
                 try { persist(directory, current) } catch (_: Exception) { /* reconciled after restart */ }
             }
         } finally {
@@ -699,16 +716,14 @@ class ManagedGitRepositories(
         val sourceSha256 = record.sourceSha256 ?: return null
         val snapshot = try { sources.resolve(record.jobId, runId, revisionId) } catch (_: Exception) { return null }
         if (snapshot.sourceSha256 != sourceSha256) return null
-        // The retained snapshot must still hold its canonical build-input commitments; a changed
-        // snapshot cannot lend the original revision's identity to a commit.
-        for ((path, commitment) in snapshot.commitments) {
-            val file = snapshot.directory.resolve(path)
-            if (!Files.isRegularFile(file, NOFOLLOW_LINKS) || Files.size(file) != commitment.sizeBytes ||
-                GitSourceCopy.digestOf(file) != commitment.sha256) return null
-        }
+        val capture = GitWorkspaceMutations.captureSnapshot(snapshot.directory, record.objectFormat) ?: return null
+        crash(GitOperationCrashPoint.AFTER_SNAPSHOT_CAPTURE)
+        // Bind the entire file set to initialization, including undeclared copied source files.
+        // Canonical commitments and Git blob IDs must describe the exact same captured bytes.
+        if (GitSourceCopy.manifestDigest(capture.commitments.mapValues { it.value.sha256 }) != record.sourceManifestSha256 ||
+            snapshot.commitments.any { (path, commitment) -> capture.commitments[path] != commitment }) return null
         // Policy-excluded files are copied but can never be committed, so they are not expected.
-        val copied = GitWorkspaceMutations.snapshotBlobs(snapshot.directory, record.objectFormat) ?: return null
-        val expected = copied - GitTrackingPolicy.excluded(runner, copied.keys)
+        val expected = capture.blobs - GitTrackingPolicy.excluded(runner, capture.blobs.keys)
         val actual = GitWorkspaceMutations.commitBlobs(runner, located.gitDir, record.objectFormat, commit) ?: return null
         if (expected != actual) return null
         val mapping = GitMappingRecord(record.repositoryId, commit, revisionId, sourceSha256, clock.instant(), dirty)
@@ -751,7 +766,9 @@ class ManagedGitRepositories(
             // Reconciliation runs inside reconcile(); read the registration directly, never through locate().
             val record = repositories(jobId).single { it.repositoryId == operation.repositoryId }
             val gitDir = root.resolve(jobId).resolve("git/repositories").resolve(record.repositoryId).resolve(GIT_DIR)
-            GitRepositoryInspector.head(runner, gitDir, record.objectFormat).objectId
+            val objectId = GitRepositoryInspector.head(runner, gitDir, record.objectFormat).objectId
+            GitWorkspaceMutations.reclaimCommitLocks(gitDir, root.resolve(jobId).resolve("git/staging").resolve(operation.operationId), operation.operationId)
+            objectId
         } catch (_: Exception) { return finish(operation, GitOperationState.RECOVERY_REQUIRED, "HEAD_UNKNOWN",
             "Interrupted by a server restart and HEAD could not be read. Inspect the repository before a new request.") }
         return if (head == guards?.expectedHeadObjectId) finish(operation, GitOperationState.INTERRUPTED, "INTERRUPTED",

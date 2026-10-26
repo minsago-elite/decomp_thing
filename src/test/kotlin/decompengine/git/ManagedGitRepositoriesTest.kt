@@ -175,7 +175,8 @@ class ManagedGitRepositoriesTest {
     }
 
     @Test fun `restart reconciles every interruption point without exposing or overwriting anything`() {
-        for (point in GitOperationCrashPoint.entries) Fixture().use { f ->
+        // Snapshot capture belongs only to commit mapping, not initialization publication.
+        for (point in GitOperationCrashPoint.entries.filter { it != GitOperationCrashPoint.AFTER_SNAPSHOT_CAPTURE }) Fixture().use { f ->
             val before = f.tree(f.snapshot)
             f.crashes += point
             val first = f.open()

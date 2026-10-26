@@ -791,13 +791,17 @@ After `git rm --cached`, a path is both staged for deletion and untracked, in on
 Selecting that entry for `git.unstage` unstages the deletion, and selecting it for `git.stage`
 stages the replacement.
 
-The server checks guards and selection twice: at admission under the job lock, and again by the
-single operation executor immediately before Git runs. A race with another tab, a worker or an
-external edit therefore fails instead of applying something nobody reviewed.
+The server checks guards and selection at admission under the job lock and again by the single
+operation executor immediately before Git runs. Commits additionally acquire Git's `index.lock`
+and `HEAD.lock`, revalidate, and capture the reviewed index into a private immutable tree. The
+commit uses that tree and the reviewed parent, never the later live index. Publication locks the
+target ref, compares the reviewed HEAD under that lock, and atomically replaces the ref. Busy
+writers or a changed parent are refused; no unreviewed index entries can enter the commit.
 
 | Refusal | Meaning |
 | --- | --- |
 | `409 REF_CHANGED` | `repositoryVersion`, HEAD or the guarded ref changed |
+| `WORKTREE_BUSY` (operation failure) | Another Git writer holds the index, HEAD or target-ref lock; nothing is published |
 | `409 WORKTREE_CHANGED` | The work tree or index changed (any status entry, index blob or file stat) |
 | `409 SELECTION_CHANGED` | A selected file identity is no longer in the current status |
 | `409 INDEX_CHANGED` | A commit's `selectedFileIds` differ from today's staged set; nothing is swept in or left out |
@@ -808,18 +812,27 @@ external edit therefore fails instead of applying something nobody reviewed.
 
 Staging runs `git add -- <paths>` with literal pathspecs. Unstaging runs `reset -q HEAD -- <paths>`
 (or `rm --cached` on an unborn branch), so work-tree contents never change. A commit uses the
-server's configured identity, passed as allowlisted author and committer variables.
-`--no-verify` and `--no-gpg-sign` back up the command-line hook and signing settings, and the
-message is read verbatim from an operation-private file. Nothing is pushed. Bootstrap reports
+server's configured identity, passed as allowlisted author and committer variables. `write-tree`
+uses an operation-private index, and `commit-tree --no-gpg-sign` creates the exact reviewed commit
+without running commit hooks. The message is read verbatim from an operation-private file.
+Managed files-backend ref publication does not append reflogs; history remains object-based.
+Nothing is pushed. Bootstrap reports
 `git-signing` as `unsupported`, so a signing requirement can never hang on a hidden prompt.
 
 A successful commit returns its object ID as `resultObjectId`. It is mapped to the repository's
 candidate revision only when its tree, compared by Git blob IDs computed from the recorded
-snapshot, equals exactly the copied snapshot minus policy-excluded files. The mapping is stored
+snapshot, equals exactly the copied snapshot minus policy-excluded files. The complete captured
+file manifest must match the manifest retained at initialization. SHA-256 commitments, sizes and
+Git blob IDs come from the same bounded read of each file, so changed canonical inputs or added
+undeclared files cannot borrow the original revision's identity. The mapping is stored
 under the repository as `(repositoryId, objectId, revisionId, sourceSha256)` with the
 work-tree's dirty state. `gitWorkspace.mapping` and history entries show it. `acceptance` is read
 from the job's canonical accepted revision at view time, never stored and never changed by a
-commit. Any other commit is a new candidate and stays unmapped.
+commit. Any other commit is a new candidate and stays unmapped. Mapping/inspection IO failure
+also leaves the published commit successful with an explicit unconfirmed-mapping message; it
+never turns that commit into an apparently uncommitted failure. Other post-publication failures
+report `recovery-required`, retaining the exact published `resultObjectId` when known, rather
+than reading a possibly later writer's HEAD as this operation's result.
 
 After a restart, stage and unstage operations become `interrupted`, since the index may have been
 partly updated and status must be re-read. A commit is `interrupted` when HEAD is still the
@@ -838,6 +851,10 @@ hold for a dirty work tree or for unmapped commits is left as a follow-up once i
 - every refusal above, including a `.gitignore` negation that tries to re-include a credential;
 - keyed replay and idempotency conflict;
 - an external edit between admission and execution, which fails with `WORKTREE_CHANGED`;
+- external index writers after capture, busy locks, parent CAS, detached parents in both object
+  formats, and exact result identity when a later writer advances HEAD;
+- snapshot file additions and mutation after capture, ordinary post-publication errors and
+  optional mapping-write failure;
 - restart before and after the commit.
 
 `WebGitControllerTest` covers the HTTP guards, `If-Match` binding, strict bodies and the mapping
