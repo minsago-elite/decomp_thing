@@ -14,6 +14,7 @@ import java.lang.reflect.Proxy
 import java.time.Duration
 import java.util.concurrent.CompletableFuture
 import java.util.concurrent.CountDownLatch
+import java.util.concurrent.Executor
 import java.util.concurrent.ThreadPoolExecutor
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
@@ -242,6 +243,142 @@ class GhidraExportLaunchTest {
             analyzer.analyze(root.resolve("unused-third"), root.resolve("analysis-third"))
         }
         assertEquals(processes.size, launches.get(), "quarantine must refuse before a third process starter runs")
+    }
+
+    @Test
+    fun `quarantine publication is not blocked by an admitted executor submission`() {
+        val submissionEntered = CountDownLatch(1)
+        val releaseSubmission = CountDownLatch(1)
+        val executorCalls = AtomicInteger()
+        val executor = Executor { task ->
+            executorCalls.incrementAndGet()
+            submissionEntered.countDown()
+            releaseSubmission.await()
+            Thread(task, "fixture-blocked-submission").apply { isDaemon = true; start() }
+        }
+        val controller = BoundedAnalysisProcessLaunch(executor)
+        val admittedProcess = FixtureOwnedProcess(fixtureHandle(6001L, initialAlive = true, refusesTermination = false))
+        val failedProcess = FixtureOwnedProcess(fixtureHandle(6002L, initialAlive = true, refusesTermination = false))
+        val starterCalls = AtomicInteger()
+        val admittedResult = AtomicReference<Process?>()
+        val admittedFailure = AtomicReference<Throwable?>()
+        val launchThread = Thread {
+            try {
+                admittedResult.set(controller.start(
+                    checkpoint = {},
+                    processStarter = { starterCalls.incrementAndGet(); admittedProcess },
+                    stopLateProcess = {},
+                ))
+            } catch (failure: Throwable) {
+                admittedFailure.set(failure)
+            }
+        }
+
+        try {
+            launchThread.start()
+            assertTrue(submissionEntered.await(3, TimeUnit.SECONDS), "admitted call did not reach executor submission")
+
+            val cleanupFailure = IllegalStateException("second process cleanup was unconfirmed")
+            val owner = Any()
+            val quarantineReturned = CountDownLatch(1)
+            val quarantineThread = Thread {
+                controller.quarantineUnconfirmedCleanup(cleanupFailure, failedProcess, owner)
+                quarantineReturned.countDown()
+            }
+            quarantineThread.start()
+            assertTrue(quarantineReturned.await(3, TimeUnit.SECONDS),
+                "quarantine publication must complete while executor submission remains blocked")
+            assertTrue(launchThread.isAlive, "the original admission should still be blocked in submit")
+
+            val refused = assertFailsWith<GhidraAnalysisException> {
+                controller.start(
+                    checkpoint = {},
+                    processStarter = { error("quarantined admission must not run") },
+                    stopLateProcess = {},
+                )
+            }
+            assertTrue(refused.cause === cleanupFailure)
+            assertEquals(0, starterCalls.get())
+            assertEquals(1, executorCalls.get())
+
+            releaseSubmission.countDown()
+            launchThread.join(3_000)
+            quarantineThread.join(3_000)
+            assertFalse(launchThread.isAlive)
+            assertFalse(quarantineThread.isAlive)
+            assertTrue(admittedFailure.get() == null, admittedFailure.get()?.toString().orEmpty())
+            assertTrue(admittedResult.get() === admittedProcess,
+                "a process whose admission linearized before quarantine must complete ownership transfer")
+            assertEquals(1, starterCalls.get())
+            assertEquals(1, executorCalls.get(), "the refused call must not submit to the executor")
+            assertTrue(controller.hasQuarantinedProcess(failedProcess))
+        } finally {
+            releaseSubmission.countDown()
+            launchThread.join(3_000)
+        }
+    }
+
+    @Test
+    fun `quarantine publication is not blocked by an inline admitted process starter`() {
+        val starterEntered = CountDownLatch(1)
+        val releaseStarter = CountDownLatch(1)
+        val executor = Executor { task -> task.run() }
+        val controller = BoundedAnalysisProcessLaunch(executor)
+        val admittedProcess = FixtureOwnedProcess(fixtureHandle(6101L, initialAlive = true, refusesTermination = false))
+        val failedProcess = FixtureOwnedProcess(fixtureHandle(6102L, initialAlive = true, refusesTermination = false))
+        val starterCalls = AtomicInteger()
+        val admittedResult = AtomicReference<Process?>()
+        val admittedFailure = AtomicReference<Throwable?>()
+        var quarantineThread: Thread? = null
+        val launchThread = Thread {
+            try {
+                admittedResult.set(controller.start(
+                    checkpoint = {},
+                    processStarter = {
+                        starterCalls.incrementAndGet()
+                        starterEntered.countDown()
+                        releaseStarter.await()
+                        admittedProcess
+                    },
+                    stopLateProcess = {},
+                ))
+            } catch (failure: Throwable) {
+                admittedFailure.set(failure)
+            }
+        }
+
+        try {
+            launchThread.start()
+            assertTrue(starterEntered.await(3, TimeUnit.SECONDS), "inline executor did not enter the admitted starter")
+            val cleanupFailure = IllegalStateException("another owned process cleanup was unconfirmed")
+            val quarantineReturned = CountDownLatch(1)
+            val publisher = Thread {
+                controller.quarantineUnconfirmedCleanup(cleanupFailure, failedProcess, Any())
+                quarantineReturned.countDown()
+            }
+            quarantineThread = publisher
+            publisher.start()
+            assertTrue(quarantineReturned.await(3, TimeUnit.SECONDS),
+                "inline process creation must not hold the quarantine lock")
+            assertTrue(launchThread.isAlive, "the inline process starter should still be blocked")
+            assertFailsWith<GhidraAnalysisException> {
+                controller.start(
+                    checkpoint = {},
+                    processStarter = { error("quarantined admission must not run") },
+                    stopLateProcess = {},
+                )
+            }
+            assertEquals(1, starterCalls.get())
+        } finally {
+            releaseStarter.countDown()
+            launchThread.join(3_000)
+            quarantineThread?.join(3_000)
+        }
+
+        assertFalse(launchThread.isAlive)
+        assertTrue(admittedFailure.get() == null, admittedFailure.get()?.toString().orEmpty())
+        assertTrue(admittedResult.get() === admittedProcess,
+            "the launch admitted before quarantine must still transfer its returned process")
     }
 
     @Test

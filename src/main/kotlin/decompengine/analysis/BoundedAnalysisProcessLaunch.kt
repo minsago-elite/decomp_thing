@@ -80,15 +80,21 @@ internal class BoundedAnalysisProcessLaunch(
             }
             checkpoint("before admitting export process launch")
         } catch (failure: Throwable) { refused(failure) }
-        val launched = try {
+        try {
             synchronized(quarantineLock) {
                 quarantineFailure.get()?.let {
                     throw GhidraAnalysisException("analysis launch is unavailable after an unconfirmed worker cleanup", it)
                 }
-                CompletableFuture.supplyAsync(processStarter, executor)
             }
         } catch (failure: GhidraAnalysisException) {
             refused(failure)
+        }
+        // Passing the protected check is the logical admission point. Submission stays outside
+        // the quarantine lock because Executor.execute/ThreadFactory may block or run inline.
+        // A launch admitted here may finish after quarantine; its existing late-cleanup callback
+        // remains responsible for any process it creates.
+        val launched = try {
+            CompletableFuture.supplyAsync(processStarter, executor)
         } catch (failure: RejectedExecutionException) {
             refused(GhidraAnalysisException("analysis process launch capacity is exhausted", failure))
         }
