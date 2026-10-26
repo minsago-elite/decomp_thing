@@ -291,6 +291,24 @@ class GitRemotesTest {
             val remoteId = service.remotes(jobId, repositoryId).single().record.remoteId
             val gitDir = f.store.resolve("$jobId/git/repositories/$repositoryId/repository.git")
             val beforeCancel = GitDiskWatch.bytes(gitDir)
+            // Keep Git alive behind a stalled response and cross the on-disk budget. Ending
+            // before releasing the server proves the periodic watchdog, not the final gate, ran.
+            service.close()
+            service = f.open(policy(ca = true, limits = GitTransferLimits(maxRepositoryBytes = 128 * 1024)))
+            server.stall = CountDownLatch(1)
+            val (limitView, limitGuards) = guards()
+            val diskAdmission = service.requestWorkspace(jobId, repositoryId, GitSyncRequest(GitOperationAction.FETCH,
+                limitView.worktreeId, limitGuards, mapOf("remoteId" to remoteId)), key())
+            val diskStaging = f.store.resolve("$jobId/git/staging/${diskAdmission.operation.operationId}")
+            val deadline = System.nanoTime() + java.util.concurrent.TimeUnit.SECONDS.toNanos(10)
+            while (!Files.isDirectory(diskStaging.resolve("repository.git/objects")) && System.nanoTime() < deadline) Thread.sleep(10)
+            assertTrue(Files.isDirectory(diskStaging.resolve("repository.git/objects")))
+            Files.write(diskStaging.resolve("watchdog-padding"), ByteArray(128 * 1024))
+            assertTrue(service.awaitIdle(60_000))
+            assertEquals("TRANSFER_LIMIT", service.operation(jobId, repositoryId, diskAdmission.operation.operationId).failureCode)
+            assertEquals(beforeCancel, GitDiskWatch.bytes(gitDir))
+            assertFalse(Files.exists(diskStaging))
+            server.stall?.countDown(); server.stall = null
             server.stall = CountDownLatch(1)
             val (view, guards) = guards()
             val fetchAdmission = service.requestWorkspace(jobId, repositoryId, GitSyncRequest(GitOperationAction.FETCH,
@@ -378,6 +396,8 @@ class GitRemotesTest {
         assertEquals(GitOperationState.COMPLETED, sync(GitOperationAction.FETCH, "remoteId" to remoteId).state)
         val gitDir = f.store.resolve("$jobId/git/repositories/$repositoryId/repository.git")
         val originalRefs = service.remotes(jobId, repositoryId).single().tracking
+        val localFile = f.repositories.root.resolve("local-only.c").also { Files.writeString(it, "int local_only_canary;\n") }
+        val localObject = f.repositories.git("--git-dir=$gitDir", "hash-object", "-w", localFile.toString()).trim()
         val originalBytes = GitDiskWatch.bytes(gitDir)
         val seed = f.repositories.root.resolve("upstream seed")
         val oldTip = f.repositories.git("-C", seed.toString(), "rev-parse", "HEAD").trim()
@@ -405,6 +425,7 @@ class GitRemotesTest {
         assertEquals(GitOperationState.COMPLETED, sync(GitOperationAction.FETCH, "remoteId" to remoteId).state)
         assertTrue(GitDiskWatch.bytes(gitDir) <= 128 * 1024)
         assertEquals("commit", f.repositories.git("--git-dir=$gitDir", "cat-file", "-t", oldTip).trim())
+        assertEquals("int local_only_canary;", f.repositories.git("--git-dir=$gitDir", "cat-file", "-p", localObject).trim())
         assertFalse(Files.exists(gitDir.resolve("objects/info/alternates")))
     }
 
