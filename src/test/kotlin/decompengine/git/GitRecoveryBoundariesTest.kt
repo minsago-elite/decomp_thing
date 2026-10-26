@@ -34,11 +34,11 @@ class GitRecoveryBoundariesTest {
         val commitments = listOf("src/main.c", "src/util.c").associateWith {
             GitSourceCommitment(GitSourceCopy.digestOf(snapshot.resolve(it)), Files.size(snapshot.resolve(it)))
         }
-        fun open() = ManagedGitRepositories(store, GitRuntime.detect(),
+        fun open(remotePolicy: GitRemotePolicy = GitRemotePolicy(admittedRoot = admitted)) = ManagedGitRepositories(store, GitRuntime.detect(),
             { _, run, revision -> GitSourceSnapshot(snapshot, run, revision, "a".repeat(64), commitments) },
             policy = GitRepositoryPolicy(defaultBranch = "main"), crash = { hook(it) },
             acceptance = { _, revision, _ -> if (revision == "revision_1") "accepted" to "artifact_1" else "not-evaluated" to null },
-            remotePolicy = GitRemotePolicy(admittedRoot = admitted)).also(opened::add)
+            remotePolicy = remotePolicy).also(opened::add)
         override fun close() { opened.forEach { it.close() }; repositories.close() }
     }
 
@@ -94,6 +94,98 @@ class GitRecoveryBoundariesTest {
             provenance.verified, commitments.keys.associateWith { GitSourceCopy.digestOf(snapshot.resolve(it)) })
     }
 
+    private fun eventually(message: String, condition: () -> Boolean) {
+        val deadline = System.nanoTime() + java.util.concurrent.TimeUnit.SECONDS.toNanos(15)
+        while (!condition()) {
+            assertTrue(System.nanoTime() < deadline, message)
+            Thread.sleep(20)
+        }
+    }
+
+    private fun assertNoPartialTransfer(gitDir: Path) {
+        Files.walk(gitDir.resolve("objects")).use { paths -> assertTrue(paths.noneMatch {
+            val name = it.fileName.toString()
+            name.startsWith("tmp_") || name.startsWith("incoming-")
+        }, "partial transfer state was removed") }
+    }
+
+    @Test fun `in-flight fetch cancellation and service restart clean partial packs without replay or lost evidence`() {
+        for (cancel in listOf(true, false)) Fixture().use { f ->
+            val token = f.repositories.root.resolve("token").also { Files.writeString(it, "synthetic-transfer-secret\n") }
+            GitHttpsFixture(f.admitted, f.repositories.root.resolve("https"), "bot", "synthetic-transfer-secret").use { server ->
+                val policy = GitRemotePolicy(allowedHosts = setOf("localhost"), credentials = GitCredentialStore(listOf(
+                    GitCredential.Https("localhost", "bot", token, server.certificate))))
+                service = f.open(policy)
+                val init = service.request(jobId, GitRepositoryRequest.Init("run_1", "revision_1", null), key())
+                assertTrue(service.awaitIdle(60_000)); repositoryId = init.operation.repositoryId
+                val accepted = assertNotNull(f.commitAll("Accepted snapshot before transfer").resultObjectId)
+                val evidence = f.evidence(accepted)
+                assertEquals(Evidence("revision_1", "accepted", evidence.exportSha256, true, f.commitments.mapValues { it.value.sha256 }), evidence)
+                val gitDir = f.store.resolve("$jobId/git/repositories/$repositoryId/repository.git")
+                f.repositories.git("--git-dir=$gitDir", "push", "-q", f.bare.toString(), "main")
+                assertEquals(GitOperationState.COMPLETED, run(sync(GitOperationAction.REMOTE_ADD,
+                    "name" to "origin", "url" to server.url("upstream.git"))).state)
+                val remoteId = service.remotes(jobId, repositoryId).single().record.remoteId
+                assertEquals(GitOperationState.COMPLETED, run(sync(GitOperationAction.FETCH, "remoteId" to remoteId)).state)
+                val prior = service.remotes(jobId, repositoryId).single().tracking
+                assertEquals(listOf(accepted), prior.map { it.objectId })
+
+                // More than Git's unpack limit, with deterministic incompressible data, ensures index-pack
+                // receives a real partial pack instead of merely waiting for discovery/credentials.
+                f.repositories.git("clone", "-q", f.bare.toString(), f.seed.toString())
+                val random = java.util.Random(609)
+                repeat(128) { index ->
+                    val bytes = ByteArray(8192).also(random::nextBytes)
+                    Files.write(f.seed.resolve("src/transfer_$index.c"), bytes)
+                }
+                f.repositories.git("-C", f.seed.toString(), "add", "--", "src")
+                f.repositories.git("-C", f.seed.toString(), "commit", "-q", "-m", "Populate the next transfer")
+                f.repositories.git("-C", f.seed.toString(), "push", "-q", "origin", "main")
+                val target = f.repositories.git("-C", f.seed.toString(), "rev-parse", "HEAD").trim()
+                val pause = GitHttpsFixture.PartialUpload()
+                server.partialUpload = pause
+                try {
+                    val pending = service.requestWorkspace(jobId, repositoryId, sync(GitOperationAction.FETCH, "remoteId" to remoteId), key())
+                    assertTrue(pause.started.await(30, java.util.concurrent.TimeUnit.SECONDS), "server sent partial pack bytes")
+                    val packs = gitDir.resolve("objects/pack")
+                    eventually("client received partial pack bytes") {
+                        Files.list(packs).use { paths -> paths.anyMatch { it.fileName.toString().startsWith("tmp_pack_") && Files.size(it) > 0 } }
+                    }
+                    val fetches = ProcessHandle.current().descendants().use { processes -> processes.filter { process ->
+                        val arguments = process.info().arguments().orElse(emptyArray())
+                        "fetch" in arguments && "--git-dir=$gitDir" in arguments
+                    }.toList() }
+                    assertTrue(fetches.isNotEmpty(), "a real managed fetch child is running")
+                    val children = fetches + fetches.flatMap { it.descendants().use { descendants -> descendants.toList() } }
+                    if (cancel) {
+                        assertEquals(GitOperationState.CANCELLING, service.cancel(jobId, repositoryId, pending.operation.operationId).state)
+                        assertTrue(service.awaitIdle(60_000))
+                        assertNoPartialTransfer(gitDir)
+                    }
+                    service.close()
+                    eventually("the fetch and its captured children terminated") { children.none { it.isAlive } }
+                    val requests = server.requests
+                    service = f.open(policy)
+                    val stopped = service.operation(jobId, repositoryId, pending.operation.operationId)
+                    assertEquals(if (cancel) GitOperationState.CANCELLED else GitOperationState.INTERRUPTED, stopped.state, stopped.message)
+                    assertEquals(prior, service.remotes(jobId, repositoryId).single().tracking)
+                    assertEquals(accepted, service.workspace(jobId, repositoryId).observation.head.objectId)
+                    assertEquals(evidence, f.evidence(accepted))
+                    assertNoPartialTransfer(gitDir)
+                    assertTrue(service.awaitIdle(1_000))
+                    assertEquals(requests, server.requests, "restart must not replay the fetch")
+                } finally {
+                    server.partialUpload = null
+                    pause.release.countDown()
+                }
+                // Only a fresh explicit request publishes the new remote-tracking object.
+                assertEquals(GitOperationState.COMPLETED, run(sync(GitOperationAction.FETCH, "remoteId" to remoteId)).state)
+                assertEquals(listOf(target), service.remotes(jobId, repositoryId).single().tracking.map { it.objectId })
+                assertEquals(evidence, f.evidence(accepted))
+            }
+        }
+    }
+
     @Test fun `interruptions at transfer, publication, commit and integration never lose accepted evidence`(): Unit = Fixture().use { f ->
         service = f.open()
         val admission = service.request(jobId, GitRepositoryRequest.Init("run_1", "revision_1", null), "init_key_00000001")
@@ -104,11 +196,11 @@ class GitRecoveryBoundariesTest {
         assertEquals(GitOperationState.COMPLETED, run(sync(GitOperationAction.REMOTE_ADD, "name" to "origin", "url" to "admitted:upstream.git")).state)
         val remoteId = service.remotes(jobId, repositoryId).single().record.remoteId
 
-        // Transfer: a restart while a fetch runs leaves it interrupted; a cancel stops it as cancelled.
+        // Pre-start transfer boundary: RUNNING is durable, but no Git child has started yet.
         val fetch = f.interrupted(GitOperationCrashPoint.AFTER_RUNNING, sync(GitOperationAction.FETCH, "remoteId" to remoteId))
         assertEquals(GitOperationState.INTERRUPTED, fetch.state, fetch.message)
         assertEquals(evidence, f.evidence(accepted))
-        // The running fetch waits at its boundary until the cancel names it.
+        // Cancel at that same pre-start boundary; in-flight coverage is a separate test above.
         val admitted = java.util.concurrent.CountDownLatch(1)
         var cancelled = ""
         f.hook = { point ->

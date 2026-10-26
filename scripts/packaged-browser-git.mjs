@@ -4,6 +4,7 @@ import { spawnSync } from 'node:child_process';
 import { promises as fs } from 'node:fs';
 import { join } from 'node:path';
 import { createWebGitFixture } from './web-git-fixtures.mjs';
+import { assertCredentialAbsent, credentialCanaries, scanCredentialStorage } from './packaged-git-redaction.mjs';
 
 const SUBJECT = 'Packaged journey: add notes';
 
@@ -322,20 +323,13 @@ export async function qualifyGitSync({ fixture, objectId, exportSha256, makeTarg
     for (const read of reads) texts.push(await (await fetch(base + read)).text());
     return texts;
   })()`);
-  for (const text of surfaces) assert.equal(text.includes(fixture.canary), false, 'The credential canary reached a user-facing surface');
-  async function walk(directory) {
-    for (const entry of await fs.readdir(directory, { withFileTypes: true })) {
-      const path = join(directory, entry.name);
-      if (entry.isDirectory()) await walk(path);
-      else if (entry.isFile() && (await fs.stat(path)).size < 16 * 1024 * 1024) {
-        assert.equal((await fs.readFile(path)).includes(fixture.canary), false, `The credential canary was stored in ${path}`);
-      }
-    }
-  }
-  await walk(data);
+  const canaries = credentialCanaries('canary-bot', fixture.canary);
+  for (const text of surfaces) assertCredentialAbsent(text, canaries, 'a checked user-facing surface');
+  const storage = await scanCredentialStorage(data, canaries);
   assert.deepEqual(tab.exceptions, []);
-  return { cloneFetchDivergence: true, conflictResolved: true, mergeCommit: merged, pushedToRemote: true, auditedPublication: true,
-    exportDigestStable: true, remoteUnavailableHandled: true, filterInert: true, credentialCanaryAbsent: true };
+  return { importFetchDivergence: true, conflictResolved: true, mergeCommit: merged, pushedToRemote: true, auditedPublication: true,
+    exportDigestStable: true, remoteUnavailableHandled: true, filterInert: true,
+    credentialRedaction: { checkedSurfaces: surfaces.length, representations: canaries.length, storage, absentOnCheckedSurfaces: true } };
 }
 
 /** Activate a native button once it is enabled; an operation that is still finishing keeps controls disabled. */
