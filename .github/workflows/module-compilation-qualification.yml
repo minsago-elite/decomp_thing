@@ -53,6 +53,8 @@ jobs:
         run: bash scripts/test-module-compile-ext4-scratch-profile.sh
       - name: Verify frozen module deployment task re-entry
         run: python3 scripts/test-module-compiler-deployment.py
+      - name: Verify hosted report freshness ordering
+        run: python3 scripts/test-module-compilation-qualification-freshness.py
       - name: Prepare existing root-owned Java and ABI runtime
         run: bash scripts/ci-prepare-oracle-runtime.sh
       - name: Prepare existing user-session sandbox services

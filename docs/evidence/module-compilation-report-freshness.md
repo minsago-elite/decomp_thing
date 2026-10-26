@@ -1,0 +1,30 @@
+# Hosted module report freshness ordering
+
+## Previous hosted attempt
+
+Run [40273796946](https://github.com/minsago-elite/decomp_thing/actions/runs/40273796946), job `121412120727`, checked out merge commit `829034f722f5a64412d714ec889361c95557e658` (PR #1813 head `16e3b19cd209dc69d5c870c9ef583b9d2aaaa5b4` over #1800 head `6dac057d9681ea7c514d99a03da351d9487c0be4`). The report capture says:
+
+- Worker deployment re-entry, provisioning, Java/runtime setup, scratch preparation, class and test compilation, hosted manifests, compiled-class evidence, and the 104-method/21-class inventory completed.
+- The live Gradle task failed before JUnit started at `module-compilation-qualification.init.gradle:242`: `refusing existing hosted compiler test reports`.
+- All 13 required cases are `not-started`, with no case records. XML verification and case reconciliation consequently fail with `report file membership differs`.
+- Both owned scratch release commands succeeded. The attempt is a Gradle output-preparation ordering failure, not an outcome for the compiler or FD policy.
+
+Artifacts from the attempt are retained locally under `.omo/a-series-20261026/qualifier-40273796946/`.
+
+## Correction
+
+The initialization script now registers a no-output `moduleCompilationLiveQualificationFreshness` prerequisite. It checks the exact report path with `NOFOLLOW_LINKS`, so stale directories, files, and symlinks refuse before the Test task prepares its output directory. The live Test task depends on that prerequisite and no longer repeats the check in `doFirst` after output preparation.
+
+The qualifier shell preflight remains in place. It now treats a symlink at either guarded report/index path as existing state, including a dangling symlink, and refuses before Gradle starts.
+
+## Local verification
+
+- `python3 scripts/test-module-compilation-qualification-freshness.py`: 3 Python controls passed. They preserve stale XML bytes on refusal, reject a symlinked report path, statically verify production task wiring, and run a real one-test Gradle `Test` task after the prerequisite to prove fresh report output is not rejected.
+- `python3 scripts/test-module-compilation-qualification-routing.py`: 13 routing controls passed.
+- `bash -n scripts/qualify-contained-module-compilation.sh` and `git diff --check` passed.
+
+Raw logs and source hashes are under `.omo/a-series-20261026/module-deployment-report-freshness/`.
+
+## Acceptance boundary
+
+This correction is a qualification harness fix. The 13 actual configured Make/Ninja compiler, rollback, cancellation, refusal, cleanup, and retry cases still need to execute on a new exact-head hosted run with complete zero-skip XML and case evidence. The prior 13 `not-started` rows provide no compiler or FD-policy acceptance.

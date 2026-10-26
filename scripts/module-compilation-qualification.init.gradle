@@ -234,13 +234,20 @@ allprojects {
                     archives: archives, entries: entries.sort { it.path }]) + '\n'
             }
         }
+        tasks.register('moduleCompilationLiveQualificationFreshness') {
+            // This has no outputs, so Gradle executes the check on every invocation. As a
+            // prerequisite it runs before the Test task creates/prepares its report directory.
+            doLast {
+                def reports = file('build/test-results/moduleCompilationLiveQualification').toPath()
+                assert !Files.exists(reports, LinkOption.NOFOLLOW_LINKS):
+                    'refusing existing hosted compiler test reports'
+            }
+        }
         tasks.register('moduleCompilationLiveQualification', Test) {
             dependsOn tasks.named('testClasses'), tasks.named('generateAcpGateHelperChecksum'), tasks.named('stageOracleNativeLibraries'), tasks.named('moduleCompilerLiveInventory'), tasks.named('moduleCompilerHostedCompiledEvidence')
+            dependsOn tasks.named('moduleCompilationLiveQualificationFreshness')
             outputs.upToDateWhen { false }
             outputs.doNotCacheIf('hosted compiler authority must execute in this attempt') { true }
-            doFirst {
-                assert !file('build/test-results/moduleCompilationLiveQualification').exists(): 'refusing existing hosted compiler test reports'
-            }
             testClassesDirs = sourceSets.test.output.classesDirs
             classpath = sourceSets.test.runtimeClasspath
             useJUnitPlatform { includeTags 'ci-live' }
