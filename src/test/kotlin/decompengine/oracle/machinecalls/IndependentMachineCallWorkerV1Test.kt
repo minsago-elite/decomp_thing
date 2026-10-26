@@ -4,6 +4,7 @@ import decompengine.analysis.BundledGhidra
 import decompengine.oracle.core.OracleArtifacts
 import decompengine.oracle.core.OracleJson
 import decompengine.oracle.gcc.GccKotlinBootClasspathReference
+import decompengine.oracle.fulltree.FullTreeFunctionObservationRuntimeArtifactRole
 import java.io.File
 import java.util.concurrent.TimeUnit
 import java.net.URLClassLoader
@@ -55,6 +56,26 @@ class IndependentMachineCallWorkerV1Test {
         }
     }
 
+    @Test fun `live v2 request binds snapshot files and exact control root`() = fixture { root ->
+        val request = liveRequest(root)
+        assertContentEquals(request.canonicalBytes,
+            IndependentMachineCallRequestV2.parse(request.canonicalBytes).canonicalBytes)
+        assertFailsWith<IllegalArgumentException> { request.copy(controlRoot = root.resolve("other")) }
+        assertFailsWith<IllegalArgumentException> {
+            request.copy(runtime = request.runtime.copy(bridgeSnapshot =
+                request.runtime.bridgeSnapshot.copy(path = root.resolve("elsewhere/bridge.jar"))))
+        }
+        assertFailsWith<IllegalArgumentException> {
+            request.copy(runtime = request.runtime.copy(bridgeSnapshot =
+                request.runtime.bridgeSnapshot.copy(bytes = FullTreeFunctionObservationRuntimeArtifactRole.GHIDRA_BRIDGE.maximumBytes + 1)))
+        }
+        // A legacy v1 live envelope is still parseable for frozen evidence, but the live worker
+        // admission path must reject it instead of treating its source-path hashes as snapshots.
+        val legacy = request(root)
+        val path = Files.write(root.resolve("legacy-request.json"), legacy.canonicalBytes)
+        assertFailsWith<IllegalArgumentException> { IndependentMachineCallWorkerV1.run(path, OracleArtifacts.sha256(legacy.canonicalBytes)) }
+    }
+
     @Test fun `runtime pins paths hashes and finite budgets cannot be loosened by a request`() = fixture { root ->
         val base = json(request(root))
         val runtime = base.getValue("runtime") as JsonObject
@@ -101,10 +122,39 @@ class IndependentMachineCallWorkerV1Test {
         val manifest = Files.writeString(bundle.resolve("bundle.sha256"),
             OracleArtifacts.sha256(Files.readAllBytes(bridge)) + "  decomp-ghidra-bridge.jar\n")
         Files.write(root.resolve("ghidra.zip"), byteArrayOf(80, 75, 3, 4))
-        val runtime = request(root).runtime.copy(bridgeSha256 = OracleArtifacts.sha256(Files.readAllBytes(bridge)),
-            bundleManifestSha256 = OracleArtifacts.sha256(Files.readAllBytes(manifest)))
-        assertFailsWith<IllegalArgumentException> { AuthenticatedMachineCallRuntimeV1.open(runtime).close() }
+        val runtime = MachineCallRuntimeV2(bundle, root.resolve("ghidra.zip"), BundledGhidra.ARCHIVE_SHA256,
+            569445154L, OracleArtifacts.sha256(Files.readAllBytes(bridge)),
+            OracleArtifacts.sha256(Files.readAllBytes(manifest)), "x86:LE:64:default", "4.8",
+            MachineCallFileV1(root.resolve("control/runtime/ghidra-bridge.runtime"), Files.size(bridge),
+                OracleArtifacts.sha256(Files.readAllBytes(bridge))),
+            MachineCallFileV1(root.resolve("control/runtime/ghidra-bundle-manifest.runtime"), Files.size(manifest),
+                OracleArtifacts.sha256(Files.readAllBytes(manifest))))
+        assertFailsWith<IllegalArgumentException> { AuthenticatedMachineCallRuntimeV2.open(runtime).close() }
         assertFalse(Files.exists(root.resolve("output.json")))
+    }
+
+    @Test fun `runtime library verification consumes the authenticated manifest snapshot`() = fixture { root ->
+        val bundle = Files.createDirectory(root.resolve("bundle"))
+        val bridge = Files.write(bundle.resolve("decomp-ghidra-bridge.jar"), byteArrayOf(1, 2, 3))
+        val application = Files.createDirectories(bundle.resolve("ghidra_${BundledGhidra.VERSION}_PUBLIC/Ghidra"))
+            .resolve("application.properties")
+        Files.writeString(application,
+            "application.version=${BundledGhidra.VERSION}\napplication.release.name=PUBLIC\n")
+        val library = Files.createDirectories(application.parent.resolve("Framework/Test/lib"))
+            .resolve("runtime.jar").also { Files.write(it, byteArrayOf(4, 5, 6)) }
+        fun record(path: Path): String = "${OracleArtifacts.sha256(Files.readAllBytes(path))}  ${bundle.relativize(path).joinToString("/")}\n"
+        val manifestBytes = (record(bridge) + record(application) + record(library)).toByteArray()
+        Files.write(bundle.resolve("bundle.sha256"), manifestBytes)
+        val expected = listOf(library)
+        assertEquals(expected, BundledGhidra.at(bundle)
+            .verifiedLibraryPathsFromManifestSnapshot(manifestBytes) {})
+
+        // The worker's selected inventory remains bound to the snapshot even if the source-side
+        // manifest path changes; a source manifest is not allowed to silently replace it.
+        Files.writeString(bundle.resolve("bundle.sha256"), "malformed source manifest\n")
+        assertEquals(expected, BundledGhidra.at(bundle)
+            .verifiedLibraryPathsFromManifestSnapshot(manifestBytes) {})
+        assertFailsWith<IllegalArgumentException> { BundledGhidra.at(bundle).verifiedLibraryPaths {} }
     }
 
     @Test fun `loaded bridge must have the committed jar source and bytes`() = fixture { root ->
@@ -155,9 +205,7 @@ class IndependentMachineCallWorkerV1Test {
     @Test fun `pinned bundled runtime initializes and decodes bytes in a fresh worker JVM`() = fixture { root ->
         val bundle = Path.of(requireNotNull(System.getProperty("decompengine.ghidra.bundle"))).toAbsolutePath().normalize()
         val archive = Path.of(requireNotNull(System.getProperty("decompengine.ghidra.provenanceArchive"))).toAbsolutePath().normalize()
-        val runtime = MachineCallRuntimeV1(bundle, archive, BundledGhidra.ARCHIVE_SHA256, 569445154L,
-            OracleArtifacts.sha256(Files.readAllBytes(bundle.resolve("decomp-ghidra-bridge.jar"))),
-            OracleArtifacts.sha256(Files.readAllBytes(bundle.resolve("bundle.sha256"))), "x86:LE:64:default", "4.8")
+        val runtime = runtimeV2(root, bundle, archive)
         val bootRoot = Path.of(requireNotNull(System.getProperty("decompengine.oracle.gcc.bootKeeperClasspathRoot")))
         val classpath = GccKotlinBootClasspathReference.open().use { reference ->
             reference.entries.joinToString(File.pathSeparator) { bootRoot.resolve(it.logicalName).toString() }
@@ -166,8 +214,11 @@ class IndependentMachineCallWorkerV1Test {
         val temporary = Files.createDirectory(root.resolve("tmp"))
         val log = Files.createTempDirectory(root.parent, "runtime-evidence-").resolve("worker.log")
         withMachineCallWorkerFixtureV1 { rich, oracle, inputSha, oracleSha, manifestSha ->
-            val request = IndependentMachineCallRequestV1(MachineCallFileV1(rich, Files.size(rich), inputSha),
-                MachineCallFileV1(oracle, Files.size(oracle), oracleSha), manifestSha, runtime, root.resolve("output.json"))
+            val control = Files.createDirectories(root.resolve("control/runtime"))
+            val reports = Files.createDirectory(root.resolve("control/reports"))
+            val request = IndependentMachineCallRequestV2(MachineCallFileV1(rich, Files.size(rich), inputSha),
+                MachineCallFileV1(oracle, Files.size(oracle), oracleSha), manifestSha, runtime, root.resolve("control"),
+                reports.resolve("independent-machine-call-observations.json"))
             val requestPath = Files.write(root.resolve("request.json"), request.canonicalBytes)
             val requestSha = OracleArtifacts.sha256(request.canonicalBytes)
             val process = ProcessBuilder(Path.of(System.getProperty("java.home"), "bin/java").toString(), "-Xmx512m",
@@ -265,6 +316,33 @@ class IndependentMachineCallWorkerV1Test {
         MachineCallRuntimeV1(root.resolve("bundle"), root.resolve("ghidra.zip"), BundledGhidra.ARCHIVE_SHA256,
             569445154L, "4".repeat(64), "5".repeat(64), "x86:LE:64:default", "4.8"), root.resolve("output.json"),
     )
+
+    private fun liveRequest(root: Path): IndependentMachineCallRequestV2 {
+        val control = root.resolve("control")
+        val bridge = MachineCallFileV1(control.resolve("runtime/ghidra-bridge.runtime"), 4, "4".repeat(64))
+        val manifest = MachineCallFileV1(control.resolve("runtime/ghidra-bundle-manifest.runtime"), 5, "5".repeat(64))
+        return IndependentMachineCallRequestV2(
+            MachineCallFileV1(root.resolve("rich.elf"), 3, "1".repeat(64)),
+            MachineCallFileV1(root.resolve("oracle.json"), 2, "2".repeat(64)), "3".repeat(64),
+            MachineCallRuntimeV2(root.resolve("bundle"), root.resolve("ghidra.zip"), BundledGhidra.ARCHIVE_SHA256,
+                569445154L, "4".repeat(64), "5".repeat(64), "x86:LE:64:default", "4.8", bridge, manifest),
+            control, control.resolve("reports/independent-machine-call-observations.json"),
+        )
+    }
+
+    private fun runtimeV2(root: Path, bundle: Path, archive: Path): MachineCallRuntimeV2 {
+        val directory = Files.createDirectories(root.resolve("control/runtime"))
+        val bridgeSource = bundle.resolve("decomp-ghidra-bridge.jar")
+        val manifestSource = bundle.resolve("bundle.sha256")
+        val bridge = Files.copy(bridgeSource, directory.resolve("ghidra-bridge.runtime"))
+        val manifest = Files.copy(manifestSource, directory.resolve("ghidra-bundle-manifest.runtime"))
+        val bridgeSha = OracleArtifacts.sha256(Files.readAllBytes(bridgeSource))
+        val manifestSha = OracleArtifacts.sha256(Files.readAllBytes(manifestSource))
+        return MachineCallRuntimeV2(bundle, archive, BundledGhidra.ARCHIVE_SHA256, 569445154L,
+            bridgeSha, manifestSha, "x86:LE:64:default", "4.8",
+            MachineCallFileV1(bridge, Files.size(bridge), bridgeSha),
+            MachineCallFileV1(manifest, Files.size(manifest), manifestSha))
+    }
 
     private fun json(request: IndependentMachineCallRequestV1) = OracleJson.parseCanonical(request.canonicalBytes) as JsonObject
     private fun parse(value: JsonObject) = IndependentMachineCallRequestV1.parse(OracleJson.canonicalBytes(value))

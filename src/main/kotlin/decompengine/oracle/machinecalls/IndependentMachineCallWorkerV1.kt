@@ -6,6 +6,8 @@ import decompengine.oracle.core.StrictJsonLimits
 import decompengine.oracle.externalcalls.StaticMemoryTransferDecoderV1
 import decompengine.oracle.externalcalls.staticMemoryTransferFromBridgeV1
 import decompengine.oracle.fulltree.StableControlFile
+import decompengine.oracle.fulltree.FullTreeFunctionObservationIsolationConfiguration
+import decompengine.oracle.fulltree.FullTreeFunctionObservationRuntimeArtifactRole
 import decompengine.oracle.fulltree.requireStableDirectory
 import decompengine.oracle.gcc.GccCompilerEngineAnalysisToolchain
 import decompengine.oracle.gcc.GccCompilerEngineArtifactBinding
@@ -79,14 +81,66 @@ internal data class MachineCallRuntimeV1(
     ))
 }
 
-internal data class IndependentMachineCallRequestV1(
-    val richFile: MachineCallFileV1,
-    val canonicalOracle: MachineCallFileV1,
-    val manifestSha256: String,
-    val runtime: MachineCallRuntimeV1,
-    val outputPath: Path,
-    val limits: MachineCallLimitsV1 = MachineCallLimitsV1(),
+internal data class MachineCallRuntimeV2(
+    val bundleRoot: Path,
+    val ghidraArchivePath: Path,
+    val archiveSha256: String,
+    val archiveBytes: Long,
+    val bridgeSha256: String,
+    val bundleManifestSha256: String,
+    val languageId: String,
+    val languageVersion: String,
+    val bridgeSnapshot: MachineCallFileV1,
+    val bundleManifestSnapshot: MachineCallFileV1,
 ) {
+    init {
+        requireMachineCallPath(bundleRoot)
+        requireMachineCallPath(ghidraArchivePath)
+        require(archiveSha256 == BundledGhidra.ARCHIVE_SHA256 && archiveBytes == GHIDRA_ARCHIVE_BYTES)
+        requireMachineCallDigest(bridgeSha256)
+        requireMachineCallDigest(bundleManifestSha256)
+        require(languageId == "x86:LE:64:default" && languageVersion == "4.8")
+        require(bridgeSnapshot.sha256 == bridgeSha256 &&
+            bridgeSnapshot.bytes in 1..FullTreeFunctionObservationRuntimeArtifactRole.GHIDRA_BRIDGE.maximumBytes)
+        require(bundleManifestSnapshot.sha256 == bundleManifestSha256 &&
+            bundleManifestSnapshot.bytes in 1..FullTreeFunctionObservationRuntimeArtifactRole.GHIDRA_BUNDLE_MANIFEST.maximumBytes)
+    }
+
+    fun reportJson(): JsonObject = MachineCallRuntimeV1(bundleRoot, ghidraArchivePath, archiveSha256, archiveBytes,
+        bridgeSha256, bundleManifestSha256, languageId, languageVersion).json()
+
+    fun json(): JsonObject = JsonObject(mapOf(
+        "bundleRoot" to JsonPrimitive(bundleRoot.toString()),
+        "ghidraArchivePath" to JsonPrimitive(ghidraArchivePath.toString()),
+        "archiveSha256" to JsonPrimitive(archiveSha256),
+        "archiveBytes" to JsonPrimitive(archiveBytes),
+        "bridgeSha256" to JsonPrimitive(bridgeSha256),
+        "bundleManifestSha256" to JsonPrimitive(bundleManifestSha256),
+        "languageId" to JsonPrimitive(languageId),
+        "languageVersion" to JsonPrimitive(languageVersion),
+        "bridgeSnapshot" to bridgeSnapshot.json(),
+        "bundleManifestSnapshot" to bundleManifestSnapshot.json(),
+    ))
+}
+
+internal interface IndependentMachineCallRequestIdentity {
+    val richFile: MachineCallFileV1
+    val canonicalOracle: MachineCallFileV1
+    val manifestSha256: String
+    val outputPath: Path
+    val limits: MachineCallLimitsV1
+    val canonicalBytes: ByteArray
+    fun reportRuntimeJson(): JsonObject
+}
+
+internal data class IndependentMachineCallRequestV1(
+    override val richFile: MachineCallFileV1,
+    override val canonicalOracle: MachineCallFileV1,
+    override val manifestSha256: String,
+    val runtime: MachineCallRuntimeV1,
+    override val outputPath: Path,
+    override val limits: MachineCallLimitsV1 = MachineCallLimitsV1(),
+) : IndependentMachineCallRequestIdentity {
     init {
         requireMachineCallDigest(manifestSha256)
         requireMachineCallPath(outputPath)
@@ -103,7 +157,7 @@ internal data class IndependentMachineCallRequestV1(
             limits.maximumWallMillis in 1..1800000L) { "machine-call worker limits exceed the supported bounds" }
     }
 
-    val canonicalBytes: ByteArray get() = OracleJson.canonicalBytes(JsonObject(mapOf(
+    override val canonicalBytes: ByteArray get() = OracleJson.canonicalBytes(JsonObject(mapOf(
         "schemaVersion" to JsonPrimitive(1), "kind" to JsonPrimitive(REQUEST_KIND),
         "richFile" to richFile.json(), "canonicalOracle" to canonicalOracle.json(),
         "manifestSha256" to JsonPrimitive(manifestSha256), "runtime" to runtime.json(),
@@ -117,6 +171,7 @@ internal data class IndependentMachineCallRequestV1(
             "maximumWallMillis" to JsonPrimitive(limits.maximumWallMillis),
         )),
     )), REQUEST_LIMITS)
+    override fun reportRuntimeJson(): JsonObject = runtime.json()
 
     companion object {
         fun parse(bytes: ByteArray): IndependentMachineCallRequestV1 {
@@ -150,6 +205,105 @@ internal data class IndependentMachineCallRequestV1(
     }
 }
 
+/** Live worker request. Snapshot files are fixed children of the exact owned control root. */
+internal data class IndependentMachineCallRequestV2(
+    override val richFile: MachineCallFileV1,
+    override val canonicalOracle: MachineCallFileV1,
+    override val manifestSha256: String,
+    val runtime: MachineCallRuntimeV2,
+    val controlRoot: Path,
+    override val outputPath: Path,
+    override val limits: MachineCallLimitsV1 = MachineCallLimitsV1(),
+) : IndependentMachineCallRequestIdentity {
+    init {
+        requireMachineCallDigest(manifestSha256)
+        requireMachineCallPath(controlRoot)
+        requireMachineCallPath(outputPath)
+        require(richFile.bytes <= 512L * 1024 * 1024 && canonicalOracle.bytes <= 64L * 1024 * 1024)
+        require(richFile.path != canonicalOracle.path && outputPath !in listOf(
+            richFile.path, canonicalOracle.path, runtime.ghidraArchivePath,
+        ) && !outputPath.startsWith(runtime.bundleRoot))
+        require(controlRoot == outputPath.parent?.parent) { "machine-call control root differs from its output root" }
+        require(outputPath == controlRoot.resolve("reports").resolve(MACHINE_CALL_REPORT_NAME)) {
+            "machine-call output path differs from its fixed owned control-root location"
+        }
+        require(runtime.bridgeSnapshot.path == controlRoot.resolve("runtime").resolve(
+            FullTreeFunctionObservationRuntimeArtifactRole.GHIDRA_BRIDGE.snapshotName,
+        )) { "machine-call bridge snapshot path differs from its fixed owned control-root location" }
+        require(runtime.bundleManifestSnapshot.path == controlRoot.resolve("runtime").resolve(
+            FullTreeFunctionObservationRuntimeArtifactRole.GHIDRA_BUNDLE_MANIFEST.snapshotName,
+        )) { "machine-call manifest snapshot path differs from its fixed owned control-root location" }
+        require(limits.maximumRoots in 1..131072 && limits.maximumInstructionsPerRoot in 1..1000000 &&
+            limits.maximumInstructions in 1..10000000L && limits.maximumCalls in 1..1000000 &&
+            limits.maximumWorkUnits in 1..100000000L && limits.maximumOutputBytes in 1..64 * 1024 * 1024 &&
+            limits.maximumWallMillis in 1..1800000L)
+    }
+
+    override val canonicalBytes: ByteArray get() = OracleJson.canonicalBytes(JsonObject(mapOf(
+        "schemaVersion" to JsonPrimitive(2),
+        "kind" to JsonPrimitive(REQUEST_KIND_V2),
+        "richFile" to richFile.json(),
+        "canonicalOracle" to canonicalOracle.json(),
+        "manifestSha256" to JsonPrimitive(manifestSha256),
+        "runtime" to runtime.json(),
+        "controlRoot" to JsonPrimitive(controlRoot.toString()),
+        "outputPath" to JsonPrimitive(outputPath.toString()),
+        "limits" to limits.toJson(),
+    )), REQUEST_LIMITS)
+
+    override fun reportRuntimeJson(): JsonObject = runtime.reportJson()
+
+    fun requireMaterializerBindings(
+        configuration: FullTreeFunctionObservationIsolationConfiguration,
+        expectedControlRoot: Path,
+    ) {
+        require(controlRoot == expectedControlRoot) { "machine-call request control root differs from the owned run root" }
+        decompengine.oracle.externalcalls.requireExternalRuntimeSnapshotBindings(runtime, controlRoot, configuration)
+    }
+
+    companion object {
+        fun parse(bytes: ByteArray): IndependentMachineCallRequestV2 {
+            val root = OracleJson.parseCanonical(bytes, REQUEST_LIMITS) as? JsonObject
+                ?: throw IllegalArgumentException("machine-call request must be an object")
+            root.fields("schemaVersion", "kind", "richFile", "canonicalOracle", "manifestSha256", "runtime",
+                "controlRoot", "outputPath", "limits")
+            require(root.number("schemaVersion") == 2L && root.string("kind") == REQUEST_KIND_V2)
+            fun input(key: String): MachineCallFileV1 {
+                val record = root.obj(key)
+                record.fields("path", "bytes", "sha256")
+                return MachineCallFileV1(Path.of(record.string("path")), record.number("bytes"), record.string("sha256"))
+            }
+            val runtime = root.obj("runtime")
+            runtime.fields("bundleRoot", "ghidraArchivePath", "archiveSha256", "archiveBytes", "bridgeSha256",
+                "bundleManifestSha256", "languageId", "languageVersion", "bridgeSnapshot", "bundleManifestSnapshot")
+            fun nestedInput(key: String): MachineCallFileV1 {
+                val record = runtime.obj(key)
+                record.fields("path", "bytes", "sha256")
+                return MachineCallFileV1(Path.of(record.string("path")), record.number("bytes"), record.string("sha256"))
+            }
+            val limits = root.obj("limits")
+            limits.fields("maximumRoots", "maximumInstructionsPerRoot", "maximumInstructions", "maximumCalls",
+                "maximumWorkUnits", "maximumOutputBytes", "maximumWallMillis")
+            fun boundedInt(key: String): Int = Math.toIntExact(limits.number(key))
+            return IndependentMachineCallRequestV2(input("richFile"), input("canonicalOracle"),
+                root.string("manifestSha256"), MachineCallRuntimeV2(
+                    Path.of(runtime.string("bundleRoot")), Path.of(runtime.string("ghidraArchivePath")),
+                    runtime.string("archiveSha256"), runtime.number("archiveBytes"), runtime.string("bridgeSha256"),
+                    runtime.string("bundleManifestSha256"), runtime.string("languageId"), runtime.string("languageVersion"),
+                    nestedInput("bridgeSnapshot"), nestedInput("bundleManifestSnapshot")),
+                Path.of(root.string("controlRoot")), Path.of(root.string("outputPath")), MachineCallLimitsV1(
+                    maximumRoots = boundedInt("maximumRoots"),
+                    maximumInstructionsPerRoot = boundedInt("maximumInstructionsPerRoot"),
+                    maximumInstructions = limits.number("maximumInstructions"),
+                    maximumCalls = boundedInt("maximumCalls"),
+                    maximumWorkUnits = limits.number("maximumWorkUnits"),
+                    maximumOutputBytes = boundedInt("maximumOutputBytes"),
+                    maximumWallMillis = limits.number("maximumWallMillis"),
+                ))
+        }
+    }
+}
+
 /**
  * Diagnostic child computation, not a launcher or containment receipt. The external owner must
  * provide process/resource/filesystem isolation; even a successful result grants no release or
@@ -166,7 +320,7 @@ object IndependentMachineCallWorkerV1 {
         requireMachineCallDigest(requestSha256)
         StableControlFile.open(requestPath, REQUEST_LIMITS.maximumInputBytes.toLong(), "machine-call request").use { requestFile ->
             require(requestFile.authenticatedSha256 == requestSha256) { "machine-call request SHA-256 differs" }
-            val request = IndependentMachineCallRequestV1.parse(requestFile.readExactly(0L, requestFile.size.toInt(), "machine-call request"))
+            val request = IndependentMachineCallRequestV2.parse(requestFile.readExactly(0L, requestFile.size.toInt(), "machine-call request"))
             require(request.outputPath != requestPath) { "machine-call output overlaps request" }
             val started = System.nanoTime()
             val checkpoint: (String) -> Unit = { label ->
@@ -177,7 +331,7 @@ object IndependentMachineCallWorkerV1 {
             }
             openCommitted(request.richFile, "machine-call rich ELF", checkpoint).use { rich ->
                 openCommitted(request.canonicalOracle, "machine-call canonical oracle", checkpoint).use { oracle ->
-                    AuthenticatedMachineCallRuntimeV1.open(request.runtime, checkpoint).use { runtime ->
+                    AuthenticatedMachineCallRuntimeV2.open(request.runtime, checkpoint).use { runtime ->
                         val result = runtime.withDecoder { decoder ->
                             IndependentMachineCallsV1.produce(request.richFile.path, request.canonicalOracle.path,
                                 request.richFile.sha256, request.canonicalOracle.sha256, request.manifestSha256, decoder, request.limits)
@@ -188,7 +342,7 @@ object IndependentMachineCallWorkerV1 {
                         requestFile.verifyUnchanged("machine-call request after production")
                         checkpoint("before publication")
                         val final = JsonObject(result + mapOf(
-                            "requestSha256" to JsonPrimitive(requestSha256), "runtime" to request.runtime.json(),
+                            "requestSha256" to JsonPrimitive(requestSha256), "runtime" to request.reportRuntimeJson(),
                             "complete" to JsonPrimitive(false), "releaseEligible" to JsonPrimitive(false),
                             "negativeCompleteness" to JsonPrimitive(false),
                             "decoderAuthentication" to JsonPrimitive("authenticated-bundled-worker-v1"),
@@ -206,8 +360,8 @@ object IndependentMachineCallWorkerV1 {
 }
 
 /** Reuses the existing archive/tree verifier; its container's GCC metadata grants no authority. */
-internal class AuthenticatedMachineCallRuntimeV1 private constructor(
-    private val request: MachineCallRuntimeV1,
+internal class AuthenticatedMachineCallRuntimeV2 private constructor(
+    private val request: MachineCallRuntimeV2,
     private val archive: StableControlFile,
     private val bridge: StableControlFile,
     private val manifest: StableControlFile,
@@ -227,7 +381,7 @@ internal class AuthenticatedMachineCallRuntimeV1 private constructor(
             val refusalType = Class.forName("decompengine.ghidra.ByteInstructionDecoderV1\$DecodeException", false, loader)
             for (loaded in listOf(type, recordType, wrapperType, refusalType)) {
                 require(loaded.classLoader === loader) { "static memory decoder escaped its isolated loader" }
-                requireLoadedMachineCallBridgeV1(loaded, request.bundleRoot.resolve(BRIDGE_FILE), request.bridgeSha256)
+                requireLoadedMachineCallBridgeV1(loaded, request.bridgeSnapshot.path, request.bridgeSha256)
             }
             require(recordType.isRecord)
             val decode = type.getMethod("decode", java.lang.Long.TYPE, ByteArray::class.java)
@@ -287,7 +441,8 @@ internal class AuthenticatedMachineCallRuntimeV1 private constructor(
     fun verify(checkpoint: (String) -> Unit) {
         checkpoint("before runtime reauthentication")
         authenticateRelease(request)
-        BundledGhidra.at(request.bundleRoot).verify(checkpoint)
+        val manifestBytes = manifest.readExactly(0L, manifest.size.toInt(), "machine-call bundle manifest snapshot")
+        BundledGhidra.at(request.bundleRoot).verifiedLibraryPathsFromManifestSnapshot(manifestBytes, checkpoint)
         archive.verifyUnchanged("machine-call Ghidra archive after production")
         bridge.verifyUnchanged("machine-call bridge after production")
         manifest.verifyUnchanged("machine-call bundle manifest after production")
@@ -299,21 +454,24 @@ internal class AuthenticatedMachineCallRuntimeV1 private constructor(
     }
 
     companion object {
-        fun open(request: MachineCallRuntimeV1, checkpoint: (String) -> Unit = {}): AuthenticatedMachineCallRuntimeV1 {
+        fun open(request: MachineCallRuntimeV2, checkpoint: (String) -> Unit = {}): AuthenticatedMachineCallRuntimeV2 {
             requireStableDirectory(request.bundleRoot, "machine-call bundle root")
             val opened = mutableListOf<AutoCloseable>()
             try {
                 val archive = openCommitted(MachineCallFileV1(request.ghidraArchivePath, request.archiveBytes, request.archiveSha256),
                     "machine-call Ghidra archive", checkpoint).also(opened::add)
-                val bridgePath = request.bundleRoot.resolve(BRIDGE_FILE)
-                val bridge = StableControlFile.openWithCheckpoint(bridgePath, 128L * 1024 * 1024, "machine-call bridge", checkpoint).also(opened::add)
-                val manifest = StableControlFile.openWithCheckpoint(request.bundleRoot.resolve("bundle.sha256"), 4L * 1024 * 1024,
-                    "machine-call bundle manifest", checkpoint).also(opened::add)
-                require(bridge.authenticatedSha256 == request.bridgeSha256) { "machine-call bridge SHA-256 differs" }
-                require(manifest.authenticatedSha256 == request.bundleManifestSha256) { "machine-call bundle manifest SHA-256 differs" }
+                val bridgePath = request.bridgeSnapshot.path
+                val bridge = openCommitted(request.bridgeSnapshot, "machine-call bridge snapshot", checkpoint).also(opened::add)
+                val manifest = openCommitted(request.bundleManifestSnapshot, "machine-call bundle manifest snapshot", checkpoint).also(opened::add)
+                require(bridge.authenticatedSha256 == request.bridgeSha256) { "machine-call bridge snapshot SHA-256 differs" }
+                require(manifest.authenticatedSha256 == request.bundleManifestSha256) { "machine-call bundle manifest snapshot SHA-256 differs" }
                 checkpoint("before release authentication")
                 authenticateRelease(request)
-                val libraries = BundledGhidra.at(request.bundleRoot).verifiedLibraryPaths(checkpoint)
+                val manifestBytes = manifest.readExactly(0L, manifest.size.toInt(), "machine-call bundle manifest snapshot")
+                manifest.verifyUnchanged("machine-call bundle manifest before library verification")
+                val libraries = BundledGhidra.at(request.bundleRoot)
+                    .verifiedLibraryPathsFromManifestSnapshot(manifestBytes, checkpoint)
+                manifest.verifyUnchanged("machine-call bundle manifest after library verification")
                 require(libraries.size in 1..511) { "machine-call runtime library count exceeds its bound" }
                 val classPath = listOf(bridgePath) + libraries
                 val loader = MachineCallJarClassLoaderV1(classPath, checkpoint).also(opened::add)
@@ -324,7 +482,7 @@ internal class AuthenticatedMachineCallRuntimeV1 private constructor(
                 archive.verifyUnchanged("machine-call archive before decoder initialization")
                 bridge.verifyUnchanged("machine-call bridge before decoder initialization")
                 manifest.verifyUnchanged("machine-call bundle manifest before decoder initialization")
-                return AuthenticatedMachineCallRuntimeV1(request, archive, bridge, manifest, loader, type)
+                return AuthenticatedMachineCallRuntimeV2(request, archive, bridge, manifest, loader, type)
             } catch (failure: Throwable) {
                 opened.asReversed().forEach { resource -> try { resource.close() } catch (close: Throwable) { failure.addSuppressed(close) } }
                 throw failure
@@ -493,7 +651,7 @@ internal fun publishMachineCallResultV1(output: Path, bytes: ByteArray) {
     }
 }
 
-private fun authenticateRelease(request: MachineCallRuntimeV1) {
+private fun authenticateRelease(request: MachineCallRuntimeV2) {
     GccCompilerEngineAnalysisToolchain("independent-machine-call-byte-decoder-v1", 1, request.bridgeSha256,
         "decode-bytes", BundledGhidra.VERSION, "PUBLIC",
         GccCompilerEngineArtifactBinding("ghidra-release.zip", GHIDRA_ARCHIVE_BYTES, BundledGhidra.ARCHIVE_SHA256),
@@ -525,7 +683,8 @@ private fun JsonObject.string(key: String): String = (getValue(key) as? JsonPrim
 private fun JsonObject.number(key: String): Long = (getValue(key) as? JsonPrimitive)?.takeUnless { it.isString }?.longOrNull
     ?: throw IllegalArgumentException("$key must be an integer")
 private const val REQUEST_KIND = "independent-machine-call-request-v1"
-private const val BRIDGE_FILE = "decomp-ghidra-bridge.jar"
+private const val REQUEST_KIND_V2 = "independent-machine-call-request-v2"
+private const val MACHINE_CALL_REPORT_NAME = "independent-machine-call-observations.json"
 private const val GHIDRA_ARCHIVE_BYTES = 569445154L
 private const val MAXIMUM_INPUT_BYTES = 2L * 1024 * 1024 * 1024
 private val REQUEST_LIMITS = StrictJsonLimits(maximumInputBytes = 65536, maximumCanonicalBytes = 65536,

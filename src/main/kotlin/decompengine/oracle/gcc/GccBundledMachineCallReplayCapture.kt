@@ -7,7 +7,8 @@ import decompengine.acp.permissions
 import decompengine.oracle.core.OracleArtifacts
 import decompengine.oracle.core.OracleJson
 import decompengine.oracle.machinecalls.IndependentMachineCallReportV1
-import decompengine.oracle.machinecalls.IndependentMachineCallRequestV1
+import decompengine.oracle.machinecalls.IndependentMachineCallRequestV2
+import decompengine.oracle.machinecalls.IndependentMachineCallRequestIdentity
 import decompengine.oracle.machinecalls.IndependentMachineCallsV1
 import java.nio.file.Files
 import kotlinx.serialization.json.JsonObject
@@ -31,12 +32,17 @@ internal object GccBundledMachineCallReplayOutputCapture {
     const val MAXIMUM_LOG_BYTES = 1024 * 1024
 
     fun capture(run: LinuxDescriptor, controlName: String, expectedControl: LinuxFileIdentity,
-        request: IndependentMachineCallRequestV1, checkpoint: () -> Unit): GccBundledMachineCallReplayCapture {
+        request: IndependentMachineCallRequestIdentity, checkpoint: () -> Unit): GccBundledMachineCallReplayCapture {
         checkpoint()
         require(controlName.matches(Regex("control-[a-f0-9]{64}")))
         val runIdentity = LinuxFilesystemSyscalls.identity(run.fd)
         val runPath = LinuxFilesystemSyscalls.stableDescriptorPath(run.fd).toRealPath()
         require(request.outputPath == runPath.resolve(controlName).resolve("reports").resolve(REPORT_NAME))
+        if (request is IndependentMachineCallRequestV2) {
+            require(request.controlRoot == runPath.resolve(controlName)) {
+                "machine-call request control root differs from the descriptor-owned run root"
+            }
+        }
         return LinuxFilesystemSyscalls.openDirectoryAt(run.fd, controlName).use { control ->
             require(control.identity == expectedControl)
             requirePrivate(control.identity, runIdentity)

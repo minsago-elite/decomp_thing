@@ -6,12 +6,16 @@ import decompengine.oracle.core.OracleJson
 import decompengine.oracle.gcc.GccKotlinBootClasspathReference
 import decompengine.oracle.machinecalls.IndependentMachineCallWorkerV1
 import decompengine.oracle.machinecalls.IndependentMachineCallReportV1
+import decompengine.oracle.machinecalls.IndependentMachineCallRequestV1
+import decompengine.oracle.machinecalls.IndependentMachineCallRequestV2
 import decompengine.oracle.machinecalls.MachineCallFileV1
 import decompengine.oracle.machinecalls.MachineCallRuntimeV1
+import decompengine.oracle.machinecalls.MachineCallRuntimeV2
 import java.net.URLClassLoader
 import java.io.File
 import java.nio.file.Files
 import java.nio.file.Path
+import java.nio.file.attribute.PosixFilePermissions
 import java.util.concurrent.TimeUnit
 import javax.tools.ToolProvider
 import kotlin.test.Test
@@ -26,6 +30,67 @@ import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
 
 class IndependentExternalCallWorkerV1Test {
+    private fun live(request: IndependentExternalCallRequestV1, root: Path, name: String,
+        materializeRuntime: Boolean = false): IndependentExternalCallRequestV2 {
+        val control = Files.createDirectories(root.resolve("$name-control"))
+        Files.createDirectories(control.resolve("reports"))
+        Files.createDirectories(control.resolve("runtime"))
+        val legacy = request.copy(outputPath = control.resolve("reports/independent-external-call-observations.json"))
+        return IndependentExternalCallRequestV2(legacy, runtimeV2(legacy.runtime, control, materializeRuntime), control)
+    }
+
+    private fun liveMachine(request: IndependentMachineCallRequestV1, root: Path, name: String,
+        materializeRuntime: Boolean = false): IndependentMachineCallRequestV2 {
+        val control = Files.createDirectories(root.resolve("$name-control"))
+        Files.createDirectories(control.resolve("reports"))
+        Files.createDirectories(control.resolve("runtime"))
+        val legacy = request.copy(outputPath = control.resolve("reports/independent-machine-call-observations.json"))
+        return IndependentMachineCallRequestV2(legacy.richFile, legacy.canonicalOracle, legacy.manifestSha256,
+            runtimeV2(legacy.runtime, control, materializeRuntime), control, legacy.outputPath, legacy.limits)
+    }
+
+    private fun runtimeV2(runtime: MachineCallRuntimeV1, control: Path, materialize: Boolean): MachineCallRuntimeV2 {
+        fun snapshot(role: decompengine.oracle.fulltree.FullTreeFunctionObservationRuntimeArtifactRole): MachineCallFileV1 {
+            val source = runtime.bundleRoot.resolve(role.sourceName)
+            val destination = control.resolve("runtime/${role.snapshotName}")
+            if (materialize) {
+                val bytes = Files.readAllBytes(source)
+                assertEquals(OracleArtifacts.sha256(bytes), if (role == decompengine.oracle.fulltree.FullTreeFunctionObservationRuntimeArtifactRole.GHIDRA_BRIDGE)
+                    runtime.bridgeSha256 else runtime.bundleManifestSha256)
+                Files.write(destination, bytes)
+                Files.setPosixFilePermissions(destination, PosixFilePermissions.fromString("r--------"))
+                return MachineCallFileV1(destination, bytes.size.toLong(), OracleArtifacts.sha256(bytes))
+            }
+            val sha = if (role == decompengine.oracle.fulltree.FullTreeFunctionObservationRuntimeArtifactRole.GHIDRA_BRIDGE)
+                runtime.bridgeSha256 else runtime.bundleManifestSha256
+            return MachineCallFileV1(destination, 1, sha)
+        }
+        return MachineCallRuntimeV2(runtime.bundleRoot, runtime.ghidraArchivePath, runtime.archiveSha256, runtime.archiveBytes,
+            runtime.bridgeSha256, runtime.bundleManifestSha256, runtime.languageId, runtime.languageVersion,
+            snapshot(decompengine.oracle.fulltree.FullTreeFunctionObservationRuntimeArtifactRole.GHIDRA_BRIDGE),
+            snapshot(decompengine.oracle.fulltree.FullTreeFunctionObservationRuntimeArtifactRole.GHIDRA_BUNDLE_MANIFEST))
+    }
+
+    @Test fun `live v2 request binds snapshots and publication to one exact control root`() = fixture { root ->
+        val control = root.resolve("owned-control")
+        val base = request(root).copy(outputPath = control.resolve("reports/independent-external-call-observations.json"))
+        val runtime = MachineCallRuntimeV2(base.runtime.bundleRoot, base.runtime.ghidraArchivePath,
+            base.runtime.archiveSha256, base.runtime.archiveBytes, base.runtime.bridgeSha256, base.runtime.bundleManifestSha256,
+            base.runtime.languageId, base.runtime.languageVersion,
+            MachineCallFileV1(control.resolve("runtime/ghidra-bridge.runtime"), 1, base.runtime.bridgeSha256),
+            MachineCallFileV1(control.resolve("runtime/ghidra-bundle-manifest.runtime"), 1, base.runtime.bundleManifestSha256))
+        val live = IndependentExternalCallRequestV2(base, runtime, control)
+        val parsed = IndependentExternalCallRequestV2.parse(live.canonicalBytes)
+        assertEquals(live, parsed)
+        assertContentEquals(live.canonicalBytes, parsed.canonicalBytes)
+        assertFails { IndependentExternalCallRequestV2(base, runtime.copy(bridgeSnapshot =
+            runtime.bridgeSnapshot.copy(path = root.resolve("elsewhere.runtime"))), control) }
+        val tampered = OracleJson.parseCanonical(live.canonicalBytes) as JsonObject
+        assertFails { IndependentExternalCallRequestV2.parse(OracleJson.canonicalBytes(JsonObject(tampered +
+            ("controlRoot" to JsonPrimitive(root.resolve("other-control").toString()))))) }
+        assertFails { IndependentExternalCallRequestV1.parse(live.canonicalBytes) }
+    }
+
     @Test fun `closed request round trips all file runtime limit and metadata commitments`() = fixture { root ->
         val original = request(root)
         val parsed = IndependentExternalCallRequestV1.parse(original.canonicalBytes)
@@ -85,13 +150,14 @@ class IndependentExternalCallWorkerV1Test {
         val bytes = byteArrayOf(1, 2, 3)
         val base = request(root).copy(richFile = file("rich.elf", bytes), sourceReport = file("source-report.json", bytes),
             sourceRequest = file("source-request.json", bytes))
-        val requestPath = Files.write(root.resolve("request.json"), base.canonicalBytes)
-        val digest = OracleArtifacts.sha256(base.canonicalBytes)
+        val live = live(base, root, "tamper")
+        val requestPath = Files.write(root.resolve("request.json"), live.canonicalBytes)
+        val digest = OracleArtifacts.sha256(live.canonicalBytes)
         assertFails { IndependentExternalCallWorkerV1.run(requestPath, "0".repeat(64)) }
         for (input in listOf(base.richFile, base.sourceReport, base.sourceRequest)) {
             Files.write(input.path, byteArrayOf(1, 2, 4))
             assertFails { IndependentExternalCallWorkerV1.run(requestPath, digest) }
-            assertFalse(Files.exists(base.outputPath))
+            assertFalse(Files.exists(live.legacy.outputPath))
             Files.write(input.path, bytes)
         }
     }
@@ -157,19 +223,23 @@ class IndependentExternalCallWorkerV1Test {
         val classpath = GccKotlinBootClasspathReference.open().use { reference ->
             reference.entries.joinToString(File.pathSeparator) { bootRoot.resolve(it.logicalName).toString() }
         }
-        val sourceRequest = authored.request.copy(runtime = runtime, outputPath = root.resolve("authenticated-source-report.json"))
+        val sourceRequestLegacy = authored.request.copy(runtime = runtime,
+            outputPath = root.resolve("machine-control/reports/independent-machine-call-observations.json"))
+        val sourceRequest = liveMachine(sourceRequestLegacy, root, "machine", materializeRuntime = true)
         val sourceRequestPath = Files.write(root.resolve("authenticated-source-request.json"), sourceRequest.canonicalBytes)
         val sourceRequestSha = OracleArtifacts.sha256(sourceRequest.canonicalBytes)
         freshWorker(root, "source", classpath, IndependentMachineCallWorkerV1::class.java.name, sourceRequestPath, sourceRequestSha)
-        val sourceReportBytes = Files.readAllBytes(sourceRequest.outputPath)
+        val sourceReportBytes = Files.readAllBytes(sourceRequestLegacy.outputPath)
         IndependentMachineCallReportV1.validateWorker(OracleJson.parseCanonical(sourceReportBytes) as JsonObject, sourceRequestSha, sourceRequest)
-        val request = IndependentExternalCallRequestV1(sourceRequest.richFile,
-            MachineCallFileV1(sourceRequest.outputPath, sourceReportBytes.size.toLong(), OracleArtifacts.sha256(sourceReportBytes)),
-            MachineCallFileV1(sourceRequestPath, Files.size(sourceRequestPath), sourceRequestSha), runtime, root.resolve("external-report.json"))
+        val legacy = IndependentExternalCallRequestV1(sourceRequestLegacy.richFile,
+            MachineCallFileV1(sourceRequestLegacy.outputPath, sourceReportBytes.size.toLong(), OracleArtifacts.sha256(sourceReportBytes)),
+            MachineCallFileV1(sourceRequestPath, Files.size(sourceRequestPath), sourceRequestSha), runtime,
+            root.resolve("external-control/reports/independent-external-call-observations.json"))
+        val request = live(legacy, root, "external", materializeRuntime = true)
         val requestPath = Files.write(root.resolve("external-request.json"), request.canonicalBytes)
         val requestSha = OracleArtifacts.sha256(request.canonicalBytes)
         freshWorker(root, "external", classpath, IndependentExternalCallWorkerV1::class.java.name, requestPath, requestSha)
-        val output = OracleJson.parseCanonical(Files.readAllBytes(request.outputPath)) as JsonObject
+        val output = OracleJson.parseCanonical(Files.readAllBytes(request.legacy.outputPath)) as JsonObject
         IndependentExternalCallReportV1.validateWorker(output, requestSha, request)
         val sites = (output.getValue("sites") as JsonArray).map { it as JsonObject }
         assertEquals(2, sites.size, "forwarding evidence must not invent a second physical call")

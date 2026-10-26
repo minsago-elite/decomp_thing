@@ -121,6 +121,38 @@ internal data class FullTreeFunctionObservationClassPathEntry(
     }
 }
 
+/** Fixed non-classpath files from a root-owned runtime closure that must be snapshotted for a child. */
+internal enum class FullTreeFunctionObservationRuntimeArtifactRole(
+    val sourceName: String,
+    val snapshotName: String,
+    val maximumBytes: Long,
+) {
+    GHIDRA_BRIDGE("decomp-ghidra-bridge.jar", "ghidra-bridge.runtime", 128L * 1024 * 1024),
+    GHIDRA_BUNDLE_MANIFEST("bundle.sha256", "ghidra-bundle-manifest.runtime", 4L * 1024 * 1024),
+}
+
+internal data class FullTreeFunctionObservationRuntimeArtifact(
+    val role: FullTreeFunctionObservationRuntimeArtifactRole,
+    val path: Path,
+    val bytes: Long,
+    val expectedSha256: String,
+) {
+    init {
+        require(path.isAbsolute && path.normalize() == path)
+        require(bytes in 1..role.maximumBytes)
+        require(expectedSha256.matches(Regex("[0-9a-f]{64}")))
+    }
+
+    internal fun canonicalIdentity(): JsonObject = JsonObject(mapOf(
+        "bytes" to JsonPrimitive(bytes),
+        "expectedSha256" to JsonPrimitive(expectedSha256),
+        "path" to JsonPrimitive(path.toString()),
+        "role" to JsonPrimitive(role.name),
+        "snapshotName" to JsonPrimitive(role.snapshotName),
+        "sourceName" to JsonPrimitive(role.sourceName),
+    ))
+}
+
 /**
  * Trusted host executables used to put one Kotlin derivation in a cgroup and read-only mount view.
  *
@@ -150,11 +182,14 @@ internal class FullTreeFunctionObservationIsolationConfiguration(
     val expectedScopeSupervisorSha256: String,
     val expectedScopeInspectorSha256: String,
     val expectedSystemdBusControllerSha256: String,
+    runtimeArtifacts: List<FullTreeFunctionObservationRuntimeArtifact> = emptyList(),
 ) {
     val systemLibraryMounts: List<FullTreeFunctionObservationRuntimeMount> =
         java.util.List.copyOf(systemLibraryMounts)
     val workerClassPath: List<FullTreeFunctionObservationClassPathEntry> =
         java.util.List.copyOf(workerClassPath)
+    val runtimeArtifacts: List<FullTreeFunctionObservationRuntimeArtifact> =
+        java.util.List.copyOf(runtimeArtifacts)
 
     /** Canonical identity consumed by the durable operation binding; never caller supplied. */
     val canonicalSha256: String by lazy {
@@ -180,6 +215,11 @@ internal class FullTreeFunctionObservationIsolationConfiguration(
         }
         require(systemLibraryMounts.isNotEmpty() && systemLibraryMounts.size <= MAXIMUM_RUNTIME_MOUNTS)
         require(workerClassPath.isNotEmpty() && workerClassPath.size <= MAXIMUM_CLASSPATH_ENTRIES)
+        require(this.runtimeArtifacts.size <= FullTreeFunctionObservationRuntimeArtifactRole.entries.size)
+        require(this.runtimeArtifacts.map { it.role }.distinct().size == this.runtimeArtifacts.size)
+        require(this.runtimeArtifacts == this.runtimeArtifacts.sortedBy { it.role.ordinal }) {
+            "function-observation runtime artifacts are not in fixed role order"
+        }
         val runtimeMounts = listOf(javaRuntime) + systemLibraryMounts
         require(runtimeMounts.none { mount ->
             pathsOverlap(mount.source, systemdUserRuntimeDirectory) ||
@@ -202,9 +242,9 @@ internal class FullTreeFunctionObservationIsolationConfiguration(
 
     internal fun canonicalBytesForTest(): ByteArray = canonicalBytes()
 
-    private fun canonicalBytes(): ByteArray = OracleJson.canonicalBytes(
-        JsonObject(
-            mapOf(
+    private fun canonicalBytes(): ByteArray {
+        val version = if (runtimeArtifacts.isEmpty()) 4 else 5
+        val canonicalFields = mapOf(
                 "bubblewrapExecutable" to JsonPrimitive(bubblewrapExecutable.toString()),
                 "expectedBubblewrapSha256" to JsonPrimitive(expectedBubblewrapSha256),
                 "expectedJavaSha256" to JsonPrimitive(expectedJavaSha256),
@@ -218,9 +258,10 @@ internal class FullTreeFunctionObservationIsolationConfiguration(
                 "nativeLibraryProfileSha256" to JsonPrimitive(OracleNativeLibraries.policySha256),
                 "producerConfigurationSha256" to
                     JsonPrimitive(FullTreeFunctionObservations.configurationSha256),
-                "provider" to JsonPrimitive(ISOLATION_CONFIGURATION_PROVIDER),
+                "provider" to JsonPrimitive(if (version == 4) ISOLATION_CONFIGURATION_PROVIDER_V4
+                    else ISOLATION_CONFIGURATION_PROVIDER_V5),
                 "resourceLimiterExecutable" to JsonPrimitive(resourceLimiterExecutable.toString()),
-                "schemaVersion" to JsonPrimitive(ISOLATION_CONFIGURATION_SCHEMA_VERSION),
+                "schemaVersion" to JsonPrimitive(version),
                 "scopeInspectorExecutable" to JsonPrimitive(scopeInspectorExecutable.toString()),
                 "scopeSupervisorExecutable" to JsonPrimitive(scopeSupervisorExecutable.toString()),
                 "supervisorEntryPoint" to
@@ -245,10 +286,11 @@ internal class FullTreeFunctionObservationIsolationConfiguration(
                 "workerProtocolVersion" to JsonPrimitive(WORKER_PROTOCOL_VERSION),
                 "workerRequestVersion" to JsonPrimitive(WORKER_REQUEST_VERSION),
                 "workerStartWaitPolicy" to JsonPrimitive(WORKER_START_WAIT_POLICY),
-            ),
-        ),
-        ISOLATION_CONFIGURATION_JSON_LIMITS,
-    )
+            ) + if (runtimeArtifacts.isEmpty()) emptyMap() else mapOf(
+                "runtimeArtifacts" to JsonArray(runtimeArtifacts.map { it.canonicalIdentity() }),
+            )
+        return OracleJson.canonicalBytes(JsonObject(canonicalFields), ISOLATION_CONFIGURATION_JSON_LIMITS)
+    }
 }
 
 private fun FullTreeFunctionObservationRuntimeMount.canonicalIdentity(): JsonObject = JsonObject(
@@ -349,15 +391,18 @@ private fun pathsOverlap(first: Path, second: Path): Boolean =
 private class AuthenticatedObservationRuntime private constructor(
     private val runtimeMounts: List<Pair<FullTreeFunctionObservationRuntimeMount, String>>,
     private val classPath: List<Pair<FullTreeFunctionObservationClassPathEntry, StableControlFile>>,
+    private val runtimeArtifacts: List<Pair<FullTreeFunctionObservationRuntimeArtifact, StableControlFile>>,
     private val nativeDirectory: Path,
 ) : AutoCloseable {
-    val classPathBytes: Long = classPath.fold(0L) { total, (_, guard) ->
-        addExact(total, guard.size, "authenticated class-path byte count")
-    }
+    val runtimeSnapshotBytes: Long = (classPath.map { it.second.size } + runtimeArtifacts.map { it.second.size })
+        .fold(0L) { total, size -> addExact(total, size, "authenticated runtime snapshot byte count") }
 
-    fun materializeClassPath(runTree: ObservationRunTreeAccess): MaterializedObservationClassPath =
+    fun materializeClassPath(
+        runTree: ObservationRunTreeAccess,
+        checkpoint: () -> Unit = {},
+    ): MaterializedObservationClassPath =
         runTree.withPinnedDescriptor { descriptor ->
-            materializeObservationClassPath(runTree.path, descriptor, classPath)
+            materializeObservationClassPath(runTree.path, descriptor, classPath, runtimeArtifacts, checkpoint)
         }
 
     /** Reauthenticates, but never rewrites, the class-path snapshot in a cold BOOT run tree. */
@@ -369,7 +414,13 @@ private class AuthenticatedObservationRuntime private constructor(
             runTree.path.resolve(RUNTIME_DIRECTORY).resolve("classpath-$index.jar")
         }
         val expected = classPath.map { (entry, guard) -> guard.size to entry.expectedSha256 }
-        return MaterializedObservationClassPath(paths, expected).also { materialized ->
+        val artifactPaths = runtimeArtifacts.associate { (artifact, _) ->
+            artifact.role to runTree.path.resolve(RUNTIME_DIRECTORY).resolve(artifact.role.snapshotName)
+        }
+        val expectedArtifacts = runtimeArtifacts.map { (artifact, guard) ->
+            artifact to (guard.size to artifact.expectedSha256)
+        }
+        return MaterializedObservationClassPath(paths, expected, artifactPaths, expectedArtifacts).also { materialized ->
             materialized.authenticatePreparedLayout(runTree, listOf(BOOT_FILE))
             materialized.verify("after cold materialized class-path authentication")
         }
@@ -390,11 +441,25 @@ private class AuthenticatedObservationRuntime private constructor(
             }
             guard.verifyUnchanged("isolated class-path entry $index $label")
         }
+        runtimeArtifacts.forEach { (artifact, guard) ->
+            if (guard.size != artifact.bytes ||
+                guard.sha256(label = "isolated runtime artifact ${artifact.role} $label") != artifact.expectedSha256) {
+                isolationFail("isolated runtime artifact differs $label: ${artifact.role}")
+            }
+            guard.verifyUnchanged("isolated runtime artifact ${artifact.role} $label")
+        }
     }
 
     override fun close() {
         var failure: Throwable? = null
         classPath.asReversed().forEach { (_, guard) ->
+            runCatching { guard.close() }.exceptionOrNull()?.let { closeFailure ->
+                if (failure == null) failure = closeFailure else if (closeFailure !== failure) {
+                    failure.addSuppressed(closeFailure)
+                }
+            }
+        }
+        runtimeArtifacts.asReversed().forEach { (_, guard) ->
             runCatching { guard.close() }.exceptionOrNull()?.let { closeFailure ->
                 if (failure == null) failure = closeFailure else if (closeFailure !== failure) {
                     failure.addSuppressed(closeFailure)
@@ -439,10 +504,27 @@ private class AuthenticatedObservationRuntime private constructor(
                     total = addExact(total, guard.size, "authenticated class-path byte count")
                     entry to guard
                 }
+                val runtimeArtifacts = configuration.runtimeArtifacts.map { artifact ->
+                    val guard = StableControlFile.open(
+                        artifact.path,
+                        artifact.bytes,
+                        "isolated runtime artifact ${artifact.role}",
+                    ).also(opened::addFirst)
+                    if (guard.size != artifact.bytes || guard.authenticatedSha256 != artifact.expectedSha256) {
+                        isolationFail("isolated runtime artifact differs from its declared identity: ${artifact.role}")
+                    }
+                    artifact to guard
+                }
+                val totalSnapshotBytes = runtimeArtifacts.fold(total) { sum, (_, guard) ->
+                    addExact(sum, guard.size, "authenticated runtime snapshot byte count")
+                }
+                if (totalSnapshotBytes > MAXIMUM_AUTHENTICATED_CLASSPATH_BYTES) {
+                    isolationFail("authenticated class path and runtime artifacts exceed their aggregate byte bound")
+                }
                 val nativeDirectory = configuration.javaRuntime.source.resolve(OracleNativeLibraries.relativeDirectory)
                 OracleNativeLibraries.requireCurrent(nativeDirectory, classPath.map { it.second.authenticatedSha256 })
                 opened.clear()
-                return AuthenticatedObservationRuntime(verifiedMounts, classPath, nativeDirectory)
+                return AuthenticatedObservationRuntime(verifiedMounts, classPath, runtimeArtifacts, nativeDirectory)
             } catch (failure: Throwable) {
                 opened.forEach { guard -> runCatching { guard.close() }.exceptionOrNull()?.let(failure::addSuppressed) }
                 throw failure
@@ -457,11 +539,14 @@ private data class PreparedObservationRunLayout(
     val temporary: LinuxFileIdentity,
     val runtime: LinuxFileIdentity,
     val classPath: List<LinuxFileIdentity>,
+    val runtimeArtifacts: List<LinuxFileIdentity>,
 )
 
-private class MaterializedObservationClassPath(
+internal class MaterializedObservationClassPath(
     val paths: List<Path>,
     private val expected: List<Pair<Long, String>>,
+    val runtimeArtifactPaths: Map<FullTreeFunctionObservationRuntimeArtifactRole, Path> = emptyMap(),
+    private val expectedRuntimeArtifacts: List<Pair<FullTreeFunctionObservationRuntimeArtifact, Pair<Long, String>>> = emptyList(),
 ) {
     val encoded: String = validatedClassPath(paths)
     private var preparedLayout: PreparedObservationRunLayout? = null
@@ -474,6 +559,17 @@ private class MaterializedObservationClassPath(
                     isolationFail("materialized class-path entry changed $label")
                 }
                 guard.verifyUnchanged("materialized class-path entry $index $label")
+            }
+        }
+        expectedRuntimeArtifacts.forEach { (artifact, sizeAndDigest) ->
+            val (size, digest) = sizeAndDigest
+            val path = runtimeArtifactPaths[artifact.role]
+                ?: isolationFail("materialized runtime artifact path is missing: ${artifact.role}")
+            StableControlFile.open(path, size, "materialized runtime artifact ${artifact.role}").use { guard ->
+                if (guard.size != size || guard.sha256(label = "materialized runtime artifact $label") != digest) {
+                    isolationFail("materialized runtime artifact changed $label: ${artifact.role}")
+                }
+                guard.verifyUnchanged("materialized runtime artifact ${artifact.role} $label")
             }
         }
     }
@@ -490,6 +586,8 @@ private class MaterializedObservationClassPath(
                 root,
                 paths,
                 expected,
+                runtimeArtifactPaths,
+                expectedRuntimeArtifacts,
                 rootFiles = rootFiles,
                 retained = null,
             )
@@ -509,6 +607,8 @@ private class MaterializedObservationClassPath(
                 root,
                 paths,
                 expected,
+                runtimeArtifactPaths,
+                expectedRuntimeArtifacts,
                 rootFiles,
                 retained,
             )
@@ -516,6 +616,24 @@ private class MaterializedObservationClassPath(
         if (current != retained) {
             isolationFail("prepared class-path inode layout changed")
         }
+    }
+}
+
+internal fun containedCommandRuntimeNames(
+    classPath: MaterializedObservationClassPath,
+    additionalNames: List<String>,
+): List<String> = classPath.paths.map { it.fileName.toString() } +
+    classPath.runtimeArtifactPaths.values.map { it.fileName.toString() } + additionalNames
+
+internal fun requireContainedCommandRuntimeClosureWithinLimit(
+    runtimeSnapshotBytes: Long,
+    requestBytes: Long,
+    maximumPrivateFileBytes: Long,
+) {
+    require(runtimeSnapshotBytes >= 0 && requestBytes > 0 && maximumPrivateFileBytes > 0)
+    val retainedBytes = addExact(runtimeSnapshotBytes, requestBytes, "contained command runtime closure bytes")
+    if (retainedBytes > maximumPrivateFileBytes) {
+        isolationFail("contained command authenticated runtime closure exceeds its existing private-file allowance")
     }
 }
 
@@ -531,6 +649,8 @@ private fun authenticatePreparedObservationRunLayout(
     root: LinuxDescriptor,
     classPathPaths: List<Path>,
     classPathExpected: List<Pair<Long, String>>,
+    runtimeArtifactPaths: Map<FullTreeFunctionObservationRuntimeArtifactRole, Path>,
+    runtimeArtifactExpected: List<Pair<FullTreeFunctionObservationRuntimeArtifact, Pair<Long, String>>>,
     rootFiles: List<String>,
     retained: PreparedObservationRunLayout?,
 ): PreparedObservationRunLayout {
@@ -544,6 +664,19 @@ private fun authenticatePreparedObservationRunLayout(
         isolationFail("prepared function-observation root-file allowance is invalid")
     }
     val classPathNames = classPathExpected.indices.map { index -> "classpath-$index.jar" }
+    if (runtimeArtifactPaths.keys != runtimeArtifactExpected.map { it.first.role }.toSet()) {
+        isolationFail("prepared function-observation runtime artifact role count differs")
+    }
+    val runtimeArtifactNames = runtimeArtifactExpected.map { (artifact, _) -> artifact.role.snapshotName }
+    if (runtimeArtifactNames.distinct().size != runtimeArtifactNames.size ||
+        runtimeArtifactNames.any { it in classPathNames }) {
+        isolationFail("prepared function-observation runtime artifact names overlap")
+    }
+    runtimeArtifactExpected.forEach { (artifact, _) ->
+        if (runtimeArtifactPaths[artifact.role] != runPath.resolve(RUNTIME_DIRECTORY).resolve(artifact.role.snapshotName)) {
+            isolationFail("prepared function-observation runtime artifact path differs from its fixed role")
+        }
+    }
     val expectedPaths = classPathNames.map { name ->
         runPath.resolve(RUNTIME_DIRECTORY).resolve(name)
     }
@@ -598,7 +731,8 @@ private fun authenticatePreparedObservationRunLayout(
                 }
                 requireExactPreparedNames(scratchDirectory, emptyList(), "scratch directory")
                 requireExactPreparedNames(temporaryDirectory, emptyList(), "temporary directory")
-                requireExactPreparedNames(runtimeDirectory, classPathNames, "runtime directory")
+                val runtimeNames = classPathNames + runtimeArtifactNames
+                requireExactPreparedNames(runtimeDirectory, runtimeNames, "runtime directory")
 
                 val classPathIdentities = classPathNames.mapIndexed { index, name ->
                     val selected = LinuxFilesystemSyscalls.openRegularFileAtOrNull(runtimeDirectory.fd, name)
@@ -623,13 +757,48 @@ private fun authenticatePreparedObservationRunLayout(
                     }
                 }
 
-                requireExactPreparedNames(runtimeDirectory, classPathNames, "runtime directory after hashing")
+                val runtimeArtifactIdentities = runtimeArtifactExpected.map { (artifact, sizeAndDigest) ->
+                    val (expectedBytes, expectedSha256) = sizeAndDigest
+                    val name = artifact.role.snapshotName
+                    val selected = LinuxFilesystemSyscalls.openRegularFileAtOrNull(runtimeDirectory.fd, name)
+                        ?: isolationFail("prepared runtime artifact is absent: ${artifact.role}")
+                    selected.use { runtimeArtifact ->
+                        val before = LinuxFilesystemSyscalls.identity(runtimeArtifact.fd)
+                        requirePreparedRuntimeArtifactIdentity(before, rootBefore, name)
+                        val retainedIndex = runtimeArtifactExpected.indexOfFirst { it.first.role == artifact.role }
+                        retained?.let { expected ->
+                            if (before != expected.runtimeArtifacts[retainedIndex]) {
+                                isolationFail("prepared runtime artifact inode changed: ${artifact.role}")
+                            }
+                        }
+                        if (digestDescriptor(runtimeArtifact, expectedBytes) != expectedSha256) {
+                            isolationFail("prepared runtime artifact bytes changed: ${artifact.role}")
+                        }
+                        val after = LinuxFilesystemSyscalls.identity(runtimeArtifact.fd)
+                        if (after != before) {
+                            isolationFail("prepared runtime artifact identity changed while hashing: ${artifact.role}")
+                        }
+                        before
+                    }
+                }
+
+                requireExactPreparedNames(runtimeDirectory, runtimeNames, "runtime directory after hashing")
                 classPathNames.forEachIndexed { index, name ->
                     val selected = LinuxFilesystemSyscalls.openRegularFileAtOrNull(runtimeDirectory.fd, name)
                         ?: isolationFail("prepared class-path entry disappeared: $name")
                     selected.use { classPathEntry ->
                         if (LinuxFilesystemSyscalls.identity(classPathEntry.fd) != classPathIdentities[index]) {
                             isolationFail("prepared class-path name selected a replacement inode: $name")
+                        }
+                    }
+                }
+                runtimeArtifactExpected.forEachIndexed { index, (artifact, _) ->
+                    val name = artifact.role.snapshotName
+                    val selected = LinuxFilesystemSyscalls.openRegularFileAtOrNull(runtimeDirectory.fd, name)
+                        ?: isolationFail("prepared runtime artifact disappeared: ${artifact.role}")
+                    selected.use { runtimeArtifact ->
+                        if (LinuxFilesystemSyscalls.identity(runtimeArtifact.fd) != runtimeArtifactIdentities[index]) {
+                            isolationFail("prepared runtime artifact name selected a replacement inode: ${artifact.role}")
                         }
                     }
                 }
@@ -667,13 +836,14 @@ private fun authenticatePreparedObservationRunLayout(
                     temporaryIdentity,
                     runtimeIdentity,
                     classPathIdentities.toList(),
+                    runtimeArtifactIdentities.toList(),
                 )
             }
         }
     }
 }
 
-private fun requireExactPreparedNames(
+internal fun requireExactPreparedNames(
     directory: LinuxDescriptor,
     expected: List<String>,
     label: String,
@@ -718,6 +888,19 @@ private fun requirePreparedClassPathIdentity(
         identity.uid != root.uid || identity.gid != root.gid || identity.mountId != root.mountId ||
         identity.key.device != root.key.device
     ) isolationFail("prepared class-path entry is outside the exact private layout: $name")
+}
+
+internal fun requirePreparedRuntimeArtifactIdentity(
+    identity: LinuxFileIdentity,
+    root: LinuxFileIdentity,
+    name: String,
+) {
+    if (
+        !identity.isRegularFile || identity.isDirectory || identity.isSymbolicLink ||
+        identity.mode.permissions != OWNER_READ_ONLY_MODE || identity.linkCount != 1 ||
+        identity.uid != root.uid || identity.gid != root.gid || identity.mountId != root.mountId ||
+        identity.key.device != root.key.device
+    ) isolationFail("prepared runtime artifact is outside the exact private layout: $name")
 }
 
 private fun requireObservationBootLayout(
@@ -1065,6 +1248,14 @@ internal object KotlinSystemdCgroupCommandLauncher {
             require(runtimeMounts.size in 1..MAXIMUM_RUNTIME_MOUNTS)
             val additionalMounts = java.util.List.copyOf(runtimeMounts)
             val additionalInputs = java.util.List.copyOf(readOnlyInputs)
+            configuration.runtimeArtifacts.forEach { artifact ->
+                val sourceMount = additionalMounts.singleOrNull { mount ->
+                    artifact.path == mount.source.resolve(artifact.role.sourceName)
+                } ?: isolationFail("runtime artifact is not an exact file in one authenticated read-only mount: ${artifact.role}")
+                if (sourceMount.expectedManifestSha256.isBlank()) {
+                    isolationFail("runtime artifact source mount has no authenticated manifest: ${artifact.role}")
+                }
+            }
             val runtimeClosureSha256 = OracleArtifacts.sha256(OracleJson.canonicalBytes(JsonObject(mapOf(
                 "provider" to JsonPrimitive("kotlin-lease-contained-command-runtime-v${if (resources.processorCount == 1) 1 else 2}"),
                 "configurationSha256" to JsonPrimitive(configuration.canonicalSha256),
@@ -1154,7 +1345,10 @@ internal object KotlinSystemdCgroupCommandLauncher {
                     }
                     LinuxFilesystemSyscalls.synchronize(root)
                 }
-                val classPath = runtime.materializeClassPath(runTree)
+                requireContainedCommandRuntimeClosureWithinLimit(
+                    runtime.runtimeSnapshotBytes, requestBytes.size.toLong(), resources.maximumFileBytes,
+                )
+                val classPath = runtime.materializeClassPath(runTree) { operationDeadline?.requireCurrent() }
                 fun requirePrepared(boot: Boolean) {
                     runTree.withPinnedDescriptor { root ->
                         requireExactPreparedNames(
@@ -1177,7 +1371,8 @@ internal object KotlinSystemdCgroupCommandLauncher {
                                 "contained command runtime directory identity changed"
                             }
                             requireExactPreparedNames(
-                                directory, classPath.paths.map { it.fileName.toString() } + "contained-command-request.json",
+                                directory, containedCommandRuntimeNames(classPath,
+                                    listOf("contained-command-request.json")),
                                 "contained command runtime",
                             )
                             val current = DescriptorBoundAtomicStateFile.readOrNull(directory, "contained-command-request.json", 256 * 1024)
@@ -1407,7 +1602,7 @@ internal object KotlinSystemdCgroupBootLauncher {
             val openedRuntime = AuthenticatedObservationRuntime.open(configuration)
             runtime = openedRuntime
             val requiredCleanupBytes = addExact(
-                openedRuntime.classPathBytes,
+                openedRuntime.runtimeSnapshotBytes,
                 PROTOCOL_CLEANUP_ALLOWANCE_BYTES,
                 "Kotlin BOOT private cleanup closure",
             )
@@ -1867,7 +2062,7 @@ internal class FullTreeFunctionObservationPreparedIsolation private constructor(
                 runtime = openedRuntime
                 val resources = IsolatedObservationResources.derive(
                     authenticated,
-                    openedRuntime.classPathBytes,
+                    openedRuntime.runtimeSnapshotBytes,
                 )
                 requireFullTreeObservationDiskClosureCompatibility(binding, resources.cleanupLimits)
                 val openedGuards = ParentObservationInputGuards.open(paths, authenticated)
@@ -2498,7 +2693,7 @@ internal class FullTreeFunctionObservationRecoveredUnitAttachedBootObservation p
                 FullTreeScopeControl.validate(authenticated)
                 val openedRuntime = AuthenticatedObservationRuntime.open(configuration)
                 runtime = openedRuntime
-                val resources = IsolatedObservationResources.derive(authenticated, openedRuntime.classPathBytes)
+                val resources = IsolatedObservationResources.derive(authenticated, openedRuntime.runtimeSnapshotBytes)
                 requireFullTreeObservationDiskClosureCompatibility(binding, resources.cleanupLimits)
                 val openedGuards = ParentObservationInputGuards.open(paths, authenticated)
                 guards = openedGuards
@@ -2715,7 +2910,7 @@ internal object FullTreeFunctionObservationIsolatedFixtureRunner {
         }
 
         AuthenticatedObservationRuntime.open(configuration).use { runtime ->
-            val resources = IsolatedObservationResources.derive(authenticated, runtime.classPathBytes)
+            val resources = IsolatedObservationResources.derive(authenticated, runtime.runtimeSnapshotBytes)
             ParentObservationInputGuards.open(paths, authenticated).use { guards ->
                 val parentInputs = FullTreeFunctionObservationProducer.authenticateShardInputs(
                     inventoryPath = paths.inventory,
@@ -3275,7 +3470,7 @@ private data class IsolatedObservationResources(
     companion object {
         fun derive(
             scope: AuthenticatedFullTreeScope,
-            classPathBytes: Long,
+            runtimeSnapshotBytes: Long,
         ): IsolatedObservationResources {
             val perShard = scope.document.controlObject("bounds").controlObject("perShard")
             val authenticatedOutput = perShard.controlLong("serializedBytes")
@@ -3297,7 +3492,7 @@ private data class IsolatedObservationResources(
                 DEFAULT_CONTROL_LIMITS.maximumDwarfScratchBytes,
                 addExact(
                     PROTOCOL_CLEANUP_ALLOWANCE_BYTES,
-                    classPathBytes,
+                    runtimeSnapshotBytes,
                     "private cleanup runtime allowance",
                 ),
             )
@@ -3672,17 +3867,22 @@ internal sealed interface ObservationRunTreeAccess {
     fun <T> withPinnedDescriptor(action: (LinuxDescriptor) -> T): T
 }
 
-private fun materializeObservationClassPath(
+internal fun materializeObservationClassPath(
     runPath: Path,
     descriptor: LinuxDescriptor,
     entries: List<Pair<FullTreeFunctionObservationClassPathEntry, StableControlFile>>,
+    runtimeArtifacts: List<Pair<FullTreeFunctionObservationRuntimeArtifact, StableControlFile>> = emptyList(),
+    checkpoint: () -> Unit = {},
 ): MaterializedObservationClassPath {
     val paths = mutableListOf<Path>()
     val expected = mutableListOf<Pair<Long, String>>()
+    val artifactPaths = linkedMapOf<FullTreeFunctionObservationRuntimeArtifactRole, Path>()
+    val expectedArtifacts = mutableListOf<Pair<FullTreeFunctionObservationRuntimeArtifact, Pair<Long, String>>>()
     descriptor.whileOpen { fd ->
         LinuxFilesystemSyscalls.openDirectoryAt(fd, RUNTIME_DIRECTORY)
     }.use { runtime ->
         entries.forEachIndexed { index, (entry, source) ->
+            source.verifyUnchanged("authenticated class-path source before snapshot $index")
             val name = "classpath-$index.jar"
             val target = runtime.whileOpen { fd ->
                 LinuxFilesystemSyscalls.createRegularFile(fd, name, OWNER_READ_WRITE_MODE)
@@ -3698,6 +3898,7 @@ private fun materializeObservationClassPath(
                         val bytes = ByteArray(COPY_BUFFER_BYTES)
                         var total = 0L
                         while (true) {
+                            checkpoint()
                             val count = input.read(bytes)
                             if (count < 0) break
                             if (count == 0) continue
@@ -3718,15 +3919,66 @@ private fun materializeObservationClassPath(
                 }
                 LinuxFilesystemSyscalls.chmod(target, OWNER_READ_ONLY_MODE)
                 LinuxFilesystemSyscalls.synchronize(target)
+                checkpoint()
+                source.verifyUnchanged("authenticated class-path source after snapshot $index")
                 paths.add(runPath.resolve(RUNTIME_DIRECTORY).resolve(name))
                 expected += source.size to actualDigest
             } finally {
                 target.close()
             }
         }
+        runtimeArtifacts.forEach { (artifact, source) ->
+            source.verifyUnchanged("authenticated runtime artifact source before snapshot ${artifact.role}")
+            val name = artifact.role.snapshotName
+            if (name in entries.indices.map { "classpath-$it.jar" } || artifactPaths.put(artifact.role,
+                    runPath.resolve(RUNTIME_DIRECTORY).resolve(name)) != null) {
+                isolationFail("runtime artifact role or name is duplicated")
+            }
+            val target = runtime.whileOpen { fd ->
+                LinuxFilesystemSyscalls.createRegularFile(fd, name, OWNER_READ_WRITE_MODE)
+            }
+            try {
+                val digest = MessageDigest.getInstance("SHA-256")
+                FileChannel.open(
+                    LinuxFilesystemSyscalls.stableDescriptorPath(target.fd),
+                    StandardOpenOption.WRITE,
+                    StandardOpenOption.TRUNCATE_EXISTING,
+                ).use { output ->
+                    source.slice().use { input ->
+                        val bytes = ByteArray(COPY_BUFFER_BYTES)
+                        var total = 0L
+                        while (true) {
+                            checkpoint()
+                            val count = input.read(bytes)
+                            if (count < 0) break
+                            if (count == 0) continue
+                            digest.update(bytes, 0, count)
+                            var buffer = ByteBuffer.wrap(bytes, 0, count)
+                            while (buffer.hasRemaining()) output.write(buffer)
+                            total = addExact(total, count.toLong(), "materialized runtime artifact bytes")
+                        }
+                        if (total != source.size || total != artifact.bytes) {
+                            isolationFail("authenticated runtime artifact snapshot has the wrong byte count")
+                        }
+                    }
+                    output.force(true)
+                }
+                val actualDigest = digest.digest().hex()
+                if (actualDigest != artifact.expectedSha256 || actualDigest != source.authenticatedSha256) {
+                    isolationFail("authenticated runtime artifact snapshot has the wrong digest: ${artifact.role}")
+                }
+                LinuxFilesystemSyscalls.chmod(target, OWNER_READ_ONLY_MODE)
+                LinuxFilesystemSyscalls.synchronize(target)
+                checkpoint()
+                source.verifyUnchanged("authenticated runtime artifact source after snapshot ${artifact.role}")
+                expectedArtifacts += artifact to (source.size to actualDigest)
+            } finally {
+                target.close()
+            }
+        }
         LinuxFilesystemSyscalls.synchronize(runtime)
     }
-    return MaterializedObservationClassPath(paths, expected).also {
+    return MaterializedObservationClassPath(paths, expected, artifactPaths, expectedArtifacts).also {
         it.verify("immediately after snapshotting")
     }
 }
@@ -8086,9 +8338,10 @@ private inline fun <T> translateIsolationFailures(
 private fun isolationFail(message: String): Nothing =
     throw FullTreeFunctionObservationIsolationException(message)
 
-private const val ISOLATION_CONFIGURATION_SCHEMA_VERSION = 4
-private const val ISOLATION_CONFIGURATION_PROVIDER =
+private const val ISOLATION_CONFIGURATION_PROVIDER_V4 =
     "kotlin-full-tree-function-observation-isolation-configuration-v4"
+private const val ISOLATION_CONFIGURATION_PROVIDER_V5 =
+    "kotlin-full-tree-function-observation-isolation-configuration-v5"
 private const val WORKER_PROTOCOL_VERSION = "1"
 private const val WORKER_REQUEST_VERSION = "2"
 private const val WORKER_START_WAIT_POLICY = "scope-derived-systemd-lifetime-upper-bound-v1"

@@ -67,6 +67,41 @@ class IndependentMachineCallsV1Test {
         assertNoNegativeAuthority(report)
     }
 
+    @Test fun `below base raw extent revokes overlapping caller ownership and positive calls`() =
+        withBelowBaseCallFixture(0x130) { report, visits ->
+            val roots = report.records("roots")
+            val below = roots.single { it["rva"] == JsonNull }
+            val caller = roots.single { it.text("rva") == "0x110" }
+            assertTrue("below-image-base" in below.texts("ownershipProblems"))
+            for (record in listOf(below, caller)) assertTrue("overlapping-symbol-extents" in record.texts("ownershipProblems"))
+            assertEquals(listOf(0x400150UL), visits)
+            assertEquals(0L, report.count("physicalCallSites"))
+            assertEquals(0L, report.count("positiveInternalCallSites"))
+            assertEquals("unresolved-symbol-extent", report.records("canonicalPopulation")
+                .single { it.text("rva") == "0x110" }.text("disposition"))
+            IndependentMachineCallReportV1.validateComponent(report)
+            assertNoNegativeAuthority(report)
+        }
+
+    @Test fun `validator rejects below base overlap hidden behind a positive caller`() =
+        withBelowBaseCallFixture(0x120) { report, visits ->
+            // Touching ranges do not overlap. The caller legitimately emits a positive here.
+            assertEquals(listOf(0x400110UL, 0x400115UL, 0x400150UL), visits)
+            assertEquals(1L, report.count("positiveInternalCallSites"))
+            IndependentMachineCallReportV1.validateComponent(report)
+            // Extend only the invalid below-base origin across the caller. Keep the forged
+            // owned caller, positive call, canonical dispositions, and aggregate counts intact.
+            val roots = report.records("roots").map { record ->
+                if (record["rva"] != JsonNull) record else JsonObject(record + mapOf(
+                    "endExclusiveRva" to str("0x120"),
+                    "origins" to JsonArray(record.records("origins").map { origin ->
+                        JsonObject(origin + ("size" to str("0x130")))
+                    }),
+                ))
+            }
+            assertFails { IndependentMachineCallReportV1.validateComponent(JsonObject(report + ("roots" to JsonArray(roots)))) }
+        }
+
     @Test fun `CFG follows both branch successors and call fallthrough while preserving external and indirect calls`() = fixture { root ->
         val input = input(root, listOf(Symbol("caller", 0x110, 0x20), Symbol("target", 0x150, 1)), listOf(0x110, 0x150))
         val visits = mutableListOf<ULong>()
@@ -226,6 +261,18 @@ class IndependentMachineCallsV1Test {
         assertNoNegativeAuthority(report)
     }
 
+    private fun withBelowBaseCallFixture(size: Int, action: (JsonObject, List<ULong>) -> Unit) = fixture { root ->
+        val input = input(root, listOf(Symbol("below", 0x100, size, value = 0x3ffff0UL),
+            Symbol("caller", 0x110, 6), Symbol("target", 0x150, 1)), listOf(0x110, 0x150))
+        val visits = mutableListOf<ULong>()
+        val report = input.produce(MachineInstructionDecoderV1 { address, bytes ->
+            visits += address
+            if (address == 0x400110UL) instruction(address, bytes, "direct-call", 5, target = 0x400150UL)
+            else instruction(address, bytes, "return")
+        })
+        action(report, visits)
+    }
+
     private fun cfgDecoder(visits: MutableList<ULong> = mutableListOf()) = MachineInstructionDecoderV1 { address, bytes ->
         visits += address
         when (address) {
@@ -252,7 +299,7 @@ class IndependentMachineCallsV1Test {
         assertFalse(report.records("calls").any { it.text("disposition").startsWith("negative") })
     }
 
-    private data class Symbol(val name: String, val rva: Int?, val size: Int, val type: Int = 2)
+    private data class Symbol(val name: String, val rva: Int?, val size: Int, val type: Int = 2, val value: ULong? = null)
     private data class Input(val rich: Path, val oracle: Path, val inputSha: String, val oracleSha: String, val manifestSha: String) {
         fun produce(decoder: MachineInstructionDecoderV1, limits: MachineCallLimitsV1 = MachineCallLimitsV1()) =
             IndependentMachineCallsV1.produce(rich, oracle, inputSha, oracleSha, manifestSha, decoder, limits)
@@ -266,8 +313,11 @@ class IndependentMachineCallsV1Test {
         bytes.fill(0xc3.toByte(), 0x100, 0x200)
         code.forEach { (offset, instructions) -> instructions.copyInto(bytes, offset) }
         val symbolOffset = FullTreeElfTestBytes.symbolTableOffset(bytes)
-        symbols.forEachIndexed { index, symbol -> FullTreeElfTestBytes.put64(bytes, symbolOffset + (index + 1) * 24 + 16,
-            symbol.size.toULong(), true) }
+        symbols.forEachIndexed { index, symbol ->
+            val entry = symbolOffset + (index + 1) * 24
+            symbol.value?.let { FullTreeElfTestBytes.put64(bytes, entry + 8, it, true) }
+            FullTreeElfTestBytes.put64(bytes, entry + 16, symbol.size.toULong(), true)
+        }
         val inputSha = OracleArtifacts.sha256(bytes)
         val manifestSha = "6".repeat(64)
         val rich = Files.write(root.resolve("rich.elf"), bytes)

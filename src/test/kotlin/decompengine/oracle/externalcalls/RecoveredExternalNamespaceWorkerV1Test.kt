@@ -6,10 +6,12 @@ import decompengine.oracle.core.OracleJson
 import decompengine.oracle.gcc.GccKotlinBootClasspathReference
 import decompengine.oracle.machinecalls.MachineCallFileV1
 import decompengine.oracle.machinecalls.MachineCallRuntimeV1
+import decompengine.oracle.machinecalls.MachineCallRuntimeV2
 import java.io.File
 import java.nio.file.Files
 import java.nio.file.Path
 import java.nio.file.StandardCopyOption
+import java.nio.file.attribute.PosixFilePermissions
 import java.util.concurrent.TimeUnit
 import kotlin.test.Test
 import kotlin.test.assertContentEquals
@@ -24,6 +26,50 @@ import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
 
 class RecoveredExternalNamespaceWorkerV1Test {
+    private fun live(request: RecoveredExternalNamespaceRequestV1, root: Path, name: String,
+        materializeRuntime: Boolean = false): RecoveredExternalNamespaceRequestV2 {
+        val control = Files.createDirectories(root.resolve("$name-control"))
+        Files.createDirectories(control.resolve("reports"))
+        Files.createDirectories(control.resolve("runtime"))
+        val legacy = request.copy(outputPath = control.resolve("reports/recovered-external-call-observations.json"))
+        fun snapshot(role: decompengine.oracle.fulltree.FullTreeFunctionObservationRuntimeArtifactRole): MachineCallFileV1 {
+            val source = legacy.runtime.bundleRoot.resolve(role.sourceName)
+            val destination = control.resolve("runtime/${role.snapshotName}")
+            val sha = if (role == decompengine.oracle.fulltree.FullTreeFunctionObservationRuntimeArtifactRole.GHIDRA_BRIDGE)
+                legacy.runtime.bridgeSha256 else legacy.runtime.bundleManifestSha256
+            if (!materializeRuntime) return MachineCallFileV1(destination, 1, sha)
+            val bytes = Files.readAllBytes(source)
+            assertEquals(sha, sha(bytes))
+            Files.write(destination, bytes)
+            Files.setPosixFilePermissions(destination, PosixFilePermissions.fromString("r--------"))
+            return MachineCallFileV1(destination, bytes.size.toLong(), sha)
+        }
+        val runtime = MachineCallRuntimeV2(legacy.runtime.bundleRoot, legacy.runtime.ghidraArchivePath,
+            legacy.runtime.archiveSha256, legacy.runtime.archiveBytes, legacy.runtime.bridgeSha256,
+            legacy.runtime.bundleManifestSha256, legacy.runtime.languageId, legacy.runtime.languageVersion,
+            snapshot(decompengine.oracle.fulltree.FullTreeFunctionObservationRuntimeArtifactRole.GHIDRA_BRIDGE),
+            snapshot(decompengine.oracle.fulltree.FullTreeFunctionObservationRuntimeArtifactRole.GHIDRA_BUNDLE_MANIFEST))
+        return RecoveredExternalNamespaceRequestV2(legacy, runtime, control)
+    }
+
+    @Test fun `live v2 recovered request binds each snapshot and report to its owned control root`() = fixture { root ->
+        val source = request(root)
+        val control = root.resolve("owned-recovered-control")
+        val legacy = source.copy(outputPath = control.resolve("reports/recovered-external-call-observations.json"))
+        val runtime = MachineCallRuntimeV2(legacy.runtime.bundleRoot, legacy.runtime.ghidraArchivePath,
+            legacy.runtime.archiveSha256, legacy.runtime.archiveBytes, legacy.runtime.bridgeSha256, legacy.runtime.bundleManifestSha256,
+            legacy.runtime.languageId, legacy.runtime.languageVersion,
+            MachineCallFileV1(control.resolve("runtime/ghidra-bridge.runtime"), 1, legacy.runtime.bridgeSha256),
+            MachineCallFileV1(control.resolve("runtime/ghidra-bundle-manifest.runtime"), 1, legacy.runtime.bundleManifestSha256))
+        val live = RecoveredExternalNamespaceRequestV2(legacy, runtime, control)
+        val parsed = RecoveredExternalNamespaceRequestV2.parse(live.canonicalBytes)
+        assertEquals(live, parsed)
+        assertContentEquals(live.canonicalBytes, parsed.canonicalBytes)
+        assertFails { RecoveredExternalNamespaceRequestV2.parse(OracleJson.canonicalBytes(
+            JsonObject((OracleJson.parseCanonical(live.canonicalBytes) as JsonObject) +
+                ("controlRoot" to JsonPrimitive(root.resolve("confused-root").toString()))))) }
+        assertFails { RecoveredExternalNamespaceRequestV1.parse(live.canonicalBytes) }
+    }
     @Test fun `closed request preserves native artifact runtime and bounded composition commitments`() = fixture { root ->
         val original = request(root)
         val parsed = RecoveredExternalNamespaceRequestV1.parse(original.canonicalBytes)
@@ -95,7 +141,7 @@ class RecoveredExternalNamespaceWorkerV1Test {
     @Test fun `malformed native census fails before absent ELF files are opened`() = fixture { root ->
         val original = runtimeBound(nativeExternalFixtureV1(), runtime(root))
         val malformed = original.replace(listOf("summary", "sites"), JsonPrimitive(99))
-        val request = nativeRequest(root, malformed)
+        val request = live(nativeRequest(root, malformed), root, "malformed")
         val path = Files.write(root.resolve("request.json"), request.canonicalBytes)
         val stages = mutableListOf<String>()
         val failure = assertFails {
@@ -111,7 +157,7 @@ class RecoveredExternalNamespaceWorkerV1Test {
 
     @Test fun `changed request and native input pins fail before freeze or publication`() = fixture { root ->
         val native = runtimeBound(nativeExternalFixtureV1(), runtime(root))
-        val request = nativeRequest(root, native)
+        val request = live(nativeRequest(root, native), root, "changed")
         val requestPath = Files.write(root.resolve("request.json"), request.canonicalBytes)
         assertFails { RecoveredExternalNamespaceWorkerV1.run(requestPath, "0".repeat(64)) }
         for (input in listOf(request.nativeManifest, request.nativeObservations)) {
@@ -128,7 +174,7 @@ class RecoveredExternalNamespaceWorkerV1Test {
 
     @Test fun `native path replacement after freeze is rejected before absent ELF input access`() = fixture { root ->
         val native = runtimeBound(nativeExternalFixtureV1(), runtime(root))
-        val request = nativeRequest(root, native)
+        val request = live(nativeRequest(root, native), root, "replacement")
         val requestPath = Files.write(root.resolve("request.json"), request.canonicalBytes)
         val replacement = Files.write(root.resolve("replacement-native.json"), native.observationBytes())
         var replaced = false
@@ -149,8 +195,9 @@ class RecoveredExternalNamespaceWorkerV1Test {
     @Test fun `every independent ELF input remains bound after native selection`(): Unit =
         withRecoveredExternalFixtureV1 { files, original ->
             val native = runtimeBound(original, runtime(files.root))
-            val request = nativeRequest(files.root, native).copy(
+            val request = live(nativeRequest(files.root, native).copy(
                 artifactManifest = pin(files.manifest), richFile = pin(files.rich), strippedFile = pin(files.stripped))
+                , files.root, "elf-pins")
             val requestPath = Files.write(files.root.resolve("request.json"), request.canonicalBytes)
             for (input in listOf(request.artifactManifest, request.richFile, request.strippedFile)) {
                 val bytes = Files.readAllBytes(input.path)
@@ -166,7 +213,7 @@ class RecoveredExternalNamespaceWorkerV1Test {
 
     @Test fun `existing output remains untouched on worker refusal`() = fixture { root ->
         val native = runtimeBound(nativeExternalFixtureV1(), runtime(root))
-        val request = nativeRequest(root, native)
+        val request = live(nativeRequest(root, native), root, "existing-output")
         val sentinel = "existing result must survive".toByteArray()
         Files.write(request.outputPath, sentinel)
         val path = Files.write(root.resolve("request.json"), request.canonicalBytes)
@@ -179,8 +226,9 @@ class RecoveredExternalNamespaceWorkerV1Test {
         withRecoveredExternalFixtureV1 { files, original ->
             val runtime = actualRuntime()
             val native = runtimeBound(original, runtime)
-            val request = nativeRequest(files.root, native, runtime).copy(
-                artifactManifest = pin(files.manifest), richFile = pin(files.rich), strippedFile = pin(files.stripped))
+            val request = live(nativeRequest(files.root, native, runtime).copy(
+                artifactManifest = pin(files.manifest), richFile = pin(files.rich), strippedFile = pin(files.stripped)),
+                files.root, "authenticated", materializeRuntime = true)
             val requestPath = Files.write(files.root.resolve("request.json"), request.canonicalBytes)
             val requestSha = sha(request.canonicalBytes)
             freshWorker(files.root, requestPath, requestSha)

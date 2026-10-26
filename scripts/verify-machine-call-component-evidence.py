@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+from contextlib import contextmanager
 from hashlib import sha256
 import json
 import os
@@ -33,12 +34,21 @@ SOURCE_PATHS = {
     "src/main/kotlin/decompengine/oracle/machinecalls/IndependentMachineCallWorkerV1.kt",
     "src/main/kotlin/decompengine/oracle/machinecalls/IndependentMachineCallsV1.kt",
 }
-EXTERNAL_SOURCE_PATHS = SOURCE_PATHS | {
+EXTERNAL_SOURCE_PATHS_V1 = SOURCE_PATHS | {
     "ghidra-bridge/src/main/java/decompengine/ghidra/ByteStaticMemoryTransferDecoderV1.java",
     *{"src/main/kotlin/decompengine/oracle/externalcalls/" + name + ".kt" for name in (
         "BoundedElfDynamicBindingsV1", "ElfRelocationWriteCoverageV1", "IndependentExternalCallsV1",
         "IndependentExternalCallReportV1", "IndependentExternalCallWorkerV1")},
 }
+EXTERNAL_SOURCE_PATHS_V2 = EXTERNAL_SOURCE_PATHS_V1 | {
+    "src/main/kotlin/decompengine/oracle/externalcalls/RecoveredExternalNamespaceV1.kt",
+    "src/main/kotlin/decompengine/oracle/externalcalls/RecoveredExternalNamespaceWorkerV1.kt",
+    "src/main/kotlin/decompengine/oracle/externalcalls/FrozenNativeExternalClaimsV1.kt",
+    "src/main/kotlin/decompengine/oracle/externalcalls/ElfExternalNamespacePairV1.kt",
+    "src/main/kotlin/decompengine/oracle/externalcalls/ExternalRuntimeSnapshotV2.kt",
+}
+# Current external evidence inventory; live verification selects this only for request schema 2.
+EXTERNAL_SOURCE_PATHS = EXTERNAL_SOURCE_PATHS_V2
 MACHINE_KIND = "retained-machine-call-component-evidence"
 EXTERNAL_KIND = "retained-external-call-component-evidence"
 EXTERNAL_LIMITS = {key: value for key, value in LIMIT_CEILINGS.items()
@@ -92,36 +102,43 @@ def informational_path(value: object) -> None:
     require(path.is_absolute() and str(path) == value and ".." not in path.parts, "invalid informational original path")
 
 
-def repository_path(path: Path, *, existing: bool) -> Path:
-    root = REPOSITORY_ROOT.resolve()
+def repository_path(path: Path, *, existing: bool | None = None) -> Path:
+    # Lexical admission only; filesystem access uses a held repository parent descriptor.
+    root = REPOSITORY_ROOT
     absolute = path if path.is_absolute() else root / path
     require(absolute == Path(os.path.abspath(absolute)), "path must be normalized")
     require(absolute.is_relative_to(root) and absolute != root, "path is outside the repository")
-    cursor = root
-    for part in absolute.relative_to(root).parts[:-1]:
-        cursor /= part
-        info = cursor.lstat()
-        require(stat.S_ISDIR(info.st_mode) and not stat.S_ISLNK(info.st_mode), "path parent must be an existing nonsymlink directory")
-    if existing:
-        info = absolute.lstat()
-        require(stat.S_ISREG(info.st_mode) and not stat.S_ISLNK(info.st_mode), "input must be a regular nonsymlink file")
-    else:
-        require(not os.path.lexists(absolute), "extraction destination already exists")
     return absolute
 
 
+@contextmanager
+def repository_parent(path: Path):
+    absolute = repository_path(path)
+    parts = absolute.relative_to(REPOSITORY_ROOT).parts
+    flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
+    parent = os.open(REPOSITORY_ROOT, flags)
+    try:
+        for part in parts[:-1]:
+            child = os.open(part, flags, dir_fd=parent)
+            os.close(parent)
+            parent = child
+        yield parent, parts[-1]
+    finally:
+        os.close(parent)
+
+
 def read_file(path: Path, maximum: int) -> bytes:
-    path = repository_path(path, existing=True)
-    descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
-    with os.fdopen(descriptor, "rb") as stream:
-        before = os.fstat(stream.fileno())
-        require(stat.S_ISREG(before.st_mode) and before.st_size <= maximum, "input file exceeds byte bound")
-        result = stream.read(maximum + 1)
-        after = os.fstat(stream.fileno())
-        require(len(result) <= maximum and len(result) == before.st_size and
-                (before.st_dev, before.st_ino, before.st_size, before.st_mtime_ns, before.st_ctime_ns) ==
-                (after.st_dev, after.st_ino, after.st_size, after.st_mtime_ns, after.st_ctime_ns), "input changed while reading")
-        return result
+    with repository_parent(path) as (parent, name):
+        descriptor = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC, dir_fd=parent)
+        with os.fdopen(descriptor, "rb") as stream:
+            before = os.fstat(stream.fileno())
+            require(stat.S_ISREG(before.st_mode) and before.st_size <= maximum, "input file exceeds byte bound")
+            result = stream.read(maximum + 1)
+            after = os.fstat(stream.fileno())
+            require(len(result) <= maximum and len(result) == before.st_size and
+                    (before.st_dev, before.st_ino, before.st_size, before.st_mtime_ns, before.st_ctime_ns) ==
+                    (after.st_dev, after.st_ino, after.st_size, after.st_mtime_ns, after.st_ctime_ns), "input changed while reading")
+            return result
 
 
 def canonical_bytes(value: object) -> bytes:
@@ -263,16 +280,42 @@ def false_authority(record: dict) -> None:
         require(record[key] is False, f"{key} cannot grant authority")
 
 
+def verify_runtime_snapshots(request: dict, runtime: dict, report_name: str) -> None:
+    root_text = request.get("controlRoot")
+    informational_path(root_text)
+    root = PurePosixPath(root_text)
+    require(str(root) == root_text and root.is_absolute() and ".." not in root.parts, "invalid owned control root")
+    require(request.get("outputPath") == str(root / "reports" / report_name), "request output differs from fixed control-root destination")
+    roles = (("bridgeSnapshot", "ghidra-bridge.runtime", "bridgeSha256", 128 * 1024 * 1024),
+             ("bundleManifestSnapshot", "ghidra-bundle-manifest.runtime", "bundleManifestSha256", 4 * 1024 * 1024))
+    for key, name, digest_key, maximum in roles:
+        snapshot = fields(runtime[key], {"path", "bytes", "sha256"}, "runtime snapshot")
+        require(snapshot["path"] == str(root / "runtime" / name), "runtime snapshot path differs from fixed control-root layout")
+        informational_path(snapshot["path"])
+        integer(snapshot["bytes"], 1, maximum)
+        require(snapshot["sha256"] == runtime[digest_key], "runtime snapshot digest differs from source commitment")
+
+
 def verify_report_bindings(evidence: dict, request: dict, report: dict) -> None:
-    fields(request, {"schemaVersion", "kind", "canonicalOracle", "richFile", "manifestSha256", "runtime", "limits", "outputPath"}, "request")
-    require(type(request["schemaVersion"]) is int and request["schemaVersion"] == 1 and request["kind"] == "independent-machine-call-request-v1", "request schema differs")
+    version = request.get("schemaVersion")
+    expected_request_fields = {"schemaVersion", "kind", "canonicalOracle", "richFile", "manifestSha256", "runtime", "limits", "outputPath"}
+    if version == 2:
+        expected_request_fields |= {"controlRoot"}
+    fields(request, expected_request_fields, "request")
+    require(type(version) is int and ((version == 1 and request["kind"] == "independent-machine-call-request-v1") or
+        (version == 2 and request["kind"] == "independent-machine-call-request-v2")), "request schema differs")
     informational_path(request["outputPath"])
     limits = fields(request["limits"], set(LIMIT_CEILINGS), "request limits")
     for key, ceiling in LIMIT_CEILINGS.items():
         integer(limits[key], 1, ceiling)
-    runtime = fields(request["runtime"], RUNTIME | RUNTIME_PATHS, "request runtime")
+    runtime_fields = RUNTIME | RUNTIME_PATHS
+    if version == 2:
+        runtime_fields |= {"bridgeSnapshot", "bundleManifestSnapshot"}
+    runtime = fields(request["runtime"], runtime_fields, "request runtime")
     for key in RUNTIME_PATHS:
         informational_path(runtime[key])
+    if version == 2:
+        verify_runtime_snapshots(request, runtime, "independent-machine-call-observations.json")
     require({key: runtime[key] for key in RUNTIME} == evidence["runtime"], "request runtime commitment differs")
     for input_key, request_key in (("rich", "richFile"), ("canonicalOracle", "canonicalOracle")):
         reference = fields(request[request_key], {"path", "bytes", "sha256"}, "request input")
@@ -289,7 +332,8 @@ def verify_report_bindings(evidence: dict, request: dict, report: dict) -> None:
     false_authority(report)
     require(report["canonicalPopulationComplete"] is True and report["rawSymbolPopulationComplete"] is True, "report input inventory is incomplete")
     require(report["containmentStatus"] == "external-owner-required" and report["decoderAuthentication"] == "authenticated-bundled-worker-v1", "report boundary differs")
-    require(report["requestSha256"] == evidence["payloads"]["request"]["sha256"] and report["runtime"] == runtime and
+    report_runtime = {key: runtime[key] for key in RUNTIME | RUNTIME_PATHS}
+    require(report["requestSha256"] == evidence["payloads"]["request"]["sha256"] and report["runtime"] == report_runtime and
             report["limits"] == limits, "report request/runtime/limit commitment differs")
     fields(report["limits"], set(LIMIT_CEILINGS), "report limits")
     for key, ceiling in LIMIT_CEILINGS.items():
@@ -603,13 +647,23 @@ class RetainedRelocationIndex:
 
 def verify_external_bindings(evidence: dict, request: dict, report: dict, source: dict,
         source_request_bytes: bytes, source_report_bytes: bytes, source_request: dict, source_report: dict) -> None:
-    fields(request, {"schemaVersion", "kind", "richFile", "sourceReport", "sourceRequest", "runtime", "outputPath", "limits", "metadataPolicy"}, "external request")
-    require(type(request["schemaVersion"]) is int and request["schemaVersion"] == 1 and request["kind"] == "independent-external-call-request-v1",
+    version = request.get("schemaVersion")
+    expected_fields = {"schemaVersion", "kind", "richFile", "sourceReport", "sourceRequest", "runtime", "outputPath", "limits", "metadataPolicy"}
+    if version == 2:
+        expected_fields.add("controlRoot")
+    fields(request, expected_fields, "external request")
+    require(type(version) is int and ((version == 1 and request["kind"] == "independent-external-call-request-v1") or
+            (version == 2 and request["kind"] == "independent-external-call-request-v2")),
             "external request schema differs")
     informational_path(request["outputPath"])
-    runtime = fields(request["runtime"], RUNTIME | RUNTIME_PATHS, "external request runtime")
+    runtime_fields = RUNTIME | RUNTIME_PATHS
+    if version == 2:
+        runtime_fields |= {"bridgeSnapshot", "bundleManifestSnapshot"}
+    runtime = fields(request["runtime"], runtime_fields, "external request runtime")
     for key in RUNTIME_PATHS:
         informational_path(runtime[key])
+    if version == 2:
+        verify_runtime_snapshots(request, runtime, "independent-external-call-observations.json")
     require({key: runtime[key] for key in RUNTIME} == evidence["runtime"], "external request runtime commitment differs")
     limits = fields(request["limits"], set(EXTERNAL_LIMITS), "external request limits")
     for key, ceiling in EXTERNAL_LIMITS.items():
@@ -634,7 +688,8 @@ def verify_external_bindings(evidence: dict, request: dict, report: dict, source
             report["containmentStatus"] == "external-owner-required", "external report boundary differs")
     false_authority(report)
     require(report["sourceCallRecordsEnumerated"] is True and report["sourceCallPopulationComplete"] is False, "source population authority differs")
-    require(report["requestSha256"] == evidence["payloads"]["request"]["sha256"] and canonical_bytes(report["runtime"]) == canonical_bytes(runtime) and
+    report_runtime = {key: runtime[key] for key in RUNTIME | RUNTIME_PATHS}
+    require(report["requestSha256"] == evidence["payloads"]["request"]["sha256"] and canonical_bytes(report["runtime"]) == canonical_bytes(report_runtime) and
             canonical_bytes(report["limits"]) == canonical_bytes(limits) and
             report["metadataPolicy"] == request["metadataPolicy"], "external report request/runtime/policy commitment differs")
     require(type(report["inputBytes"]) is int and report["inputBytes"] == request["richFile"]["bytes"] and report["inputSha256"] == request["richFile"]["sha256"] and
@@ -871,7 +926,13 @@ def verify_evidence(evidence_path: Path) -> tuple[bytes, dict]:
         _, report_bytes, _, _ = verify_machine_evidence(evidence, load)
     else:
         verify_envelope(evidence, EXTERNAL_KIND)
-        commit = verify_source(evidence, EXTERNAL_SOURCE_PATHS)
+        payloads = read_payloads(evidence, load)
+        external_request = payloads[2]
+        external_request_version = external_request.get("schemaVersion")
+        require(type(external_request_version) is int and external_request_version in (1, 2),
+                "unsupported external request source inventory version")
+        expected_source_paths = EXTERNAL_SOURCE_PATHS_V1 if external_request_version == 1 else EXTERNAL_SOURCE_PATHS_V2
+        commit = verify_source(evidence, expected_source_paths)
         source_reference = file_reference(evidence["sourceEvidence"])
         source = parse_canonical(read_git_blob(commit, source_reference, MAX_CONTROL_BYTES), MAX_CONTROL_BYTES)
         parent = PurePosixPath(source_reference["path"]).parent
@@ -881,23 +942,27 @@ def verify_evidence(evidence_path: Path) -> tuple[bytes, dict]:
             return read_git_blob(commit, reference | {"path": path}, maximum)
 
         source_request_bytes, source_report_bytes, source_request, source_report = verify_machine_evidence(source, load_source)
-        _, report_bytes, request, report = read_payloads(evidence, load)
+        _, report_bytes, request, report = payloads
         verify_external_bindings(evidence, request, report, source, source_request_bytes, source_report_bytes, source_request, source_report)
         require(len(report_bytes) <= request["limits"]["maximumOutputBytes"], "report exceeds committed output limit")
     return report_bytes, evidence["counts"]
 
 
 def extract_report(destination: Path, report_bytes: bytes) -> None:
-    destination = repository_path(destination, existing=False)
-    descriptor = os.open(destination, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
-    try:
-        with os.fdopen(descriptor, "wb") as stream:
-            stream.write(report_bytes)
-            stream.flush()
-            os.fsync(stream.fileno())
-    except BaseException:
-        destination.unlink()
-        raise
+    with repository_parent(destination) as (parent, name):
+        try:
+            descriptor = os.open(name, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC,
+                                 0o600, dir_fd=parent)
+        except FileExistsError as error:
+            raise VerificationError("extraction destination already exists") from error
+        try:
+            with os.fdopen(descriptor, "wb") as stream:
+                stream.write(report_bytes)
+                stream.flush()
+                os.fsync(stream.fileno())
+        except BaseException:
+            os.unlink(name, dir_fd=parent)
+            raise
 
 
 def main(argv: list[str] | None = None) -> int:
