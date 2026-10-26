@@ -18,6 +18,7 @@ SPEC.loader.exec_module(bundle_module)
 
 SECRET = "sk-fixture-provider-secret-value"
 JOB = "0123456789abcdef0123456789abcdef"
+PASSPHRASE = "private-keystore-passphrase"
 REQUEST = "web-http-failure request_id=6f1c2d3e-4a5b-4c6d-8e9f-0a1b2c3d4e5f status=503 code=JOB_STORAGE_UNAVAILABLE"
 
 
@@ -52,6 +53,7 @@ class SupportBundleTest(unittest.TestCase):
         (job / "workflow-state.json").write_text(json.dumps({"schemaVersion": 1}))
         (job / "reports/exploration.json").write_text("{\"stdout\": \"private output\"}")
         (self.data / ".web-owner.lock").write_bytes(b"")
+        (self.data / "customer-confidential-project.lock").write_bytes(b"")
         self.log = self.root / "server.err"
         self.log.write_text(
             "Serving decomp_engine spa UI on http://127.0.0.1:8000/\n"
@@ -65,7 +67,22 @@ class SupportBundleTest(unittest.TestCase):
             "capabilities": [{"id": "workflows", "state": "unavailable", "reasonCode": "PREVIEW_UNAVAILABLE", "message": "m"}],
             "limits": {"maxUploadBytes": "33554432"},
             "runtime": {"javaVersion": "21", "osName": "linux", "architecture": "x86_64", "gitVersion": None}}}))
-        self.environment = {"PATH": "/usr/bin:/bin", "OPENAI_API_KEY": SECRET, "HOME": str(self.root)}
+        java_home = self.root / "jdk"
+        (java_home / "bin").mkdir(parents=True)
+        java = java_home / "bin/java"
+        # Mirrors the JVM: option variables are echoed to stderr before the version lines.
+        java.write_text(
+            "#!/bin/sh\n"
+            "[ -n \"$JAVA_TOOL_OPTIONS\" ] && echo \"Picked up JAVA_TOOL_OPTIONS: $JAVA_TOOL_OPTIONS\" >&2\n"
+            "[ -n \"$JDK_JAVA_OPTIONS\" ] && echo \"NOTE: Picked up JDK_JAVA_OPTIONS: $JDK_JAVA_OPTIONS\" >&2\n"
+            "echo 'openjdk version \"21.0.12.1\" 2026-08-18 LTS' >&2\n"
+            "echo 'OpenJDK Runtime Environment Temurin-21.0.12.1+1 (build 21.0.12.1+1-LTS)' >&2\n"
+            "echo 'OpenJDK 64-Bit Server VM Temurin-21.0.12.1+1 (build 21.0.12.1+1-LTS, mixed mode, sharing)' >&2\n")
+        java.chmod(0o755)
+        self.environment = {"PATH": "/usr/bin:/bin", "OPENAI_API_KEY": SECRET, "HOME": str(self.root),
+                            "JAVA_HOME": str(java_home),
+                            "JAVA_TOOL_OPTIONS": f"-Djavax.net.ssl.keyStorePassword={PASSPHRASE}",
+                            "JDK_JAVA_OPTIONS": f"-Dprovider.password={PASSPHRASE}"}
 
     def collect(self) -> Path:
         return bundle_module.collect(self.install, self.root / "out", self.data, self.log, self.reply, self.environment)
@@ -75,7 +92,7 @@ class SupportBundleTest(unittest.TestCase):
         names = sorted(path.name for path in bundle.iterdir())
         self.assertEqual(["README.txt", "distribution.json", "doctor.txt", "java.txt", "requests.txt", "runtime.json", "storage.json"], names)
         text = "\n".join(path.read_text() for path in bundle.iterdir())
-        for forbidden in (SECRET, str(self.root), str(self.data), JOB, "customer-secret", "private", "bootstrap=",
+        for forbidden in (SECRET, PASSPHRASE, "Picked up", "customer-confidential", str(self.root), str(self.data), JOB, "customer-secret", "private", "bootstrap=",
                           "csrf-secret", "instance", "unlisted diagnostic"):
             self.assertNotIn(forbidden, text)
         self.assertEqual(REQUEST + "\n", (bundle / "requests.txt").read_text())
@@ -86,6 +103,8 @@ class SupportBundleTest(unittest.TestCase):
         self.assertEqual(1, storage["jobDirectories"])
         self.assertEqual({"1": 1}, storage["workflowStateSchemaVersions"])
         self.assertEqual([".web-owner.lock"], storage["ownerLocks"])
+        self.assertEqual(3, len((bundle / "java.txt").read_text().splitlines()))
+        self.assertIn('openjdk version "21.0.12.1"', (bundle / "java.txt").read_text())
         doctor = (bundle / "doctor.txt").read_text()
         self.assertIn("[ok] Java: Check passed.", doctor)
         self.assertIn("<redacted>", doctor)

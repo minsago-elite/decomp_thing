@@ -34,6 +34,11 @@ REQUEST_LINE = re.compile(r"web-http-failure request_id=[0-9a-f]{8}-[0-9a-f]{4}-
 DOCTOR_LINE = re.compile(r"\[(ok|failed|skipped|warning)\] .{0,400}|Environment check (passed|failed).{0,200}")
 SECRET_NAME = re.compile(r"TOKEN|SECRET|KEY|PASSWORD|PASSWD|CREDENTIAL|AUTH|COOKIE|SESSION", re.IGNORECASE)
 JOB_NAME = re.compile(r"[a-f0-9]{32}")
+OWNER_LOCKS = (".web-owner.lock", ".workflow-owner.lock")
+# The JVM echoes these option variables ("Picked up ...") and they can carry credentials.
+JVM_OPTION_VARIABLES = ("JAVA_TOOL_OPTIONS", "JDK_JAVA_OPTIONS", "_JAVA_OPTIONS")
+JAVA_VERSION_LINE = re.compile(r"(?:openjdk|java) version \"[0-9A-Za-z._+-]{1,64}\"(?: [0-9-]{10})?(?: LTS)?"
+                               r"|[A-Za-z0-9 ()._+-]{1,120}(?:Runtime Environment|VM) [A-Za-z0-9 ()._+,-]{1,160}")
 MAX_LOG_BYTES = 64 * 1024 * 1024
 MAX_STORAGE_ENTRIES = 200_000
 
@@ -79,11 +84,13 @@ def java_version(environment: dict[str, str]) -> str:
     java = str(Path(home) / "bin/java") if home else shutil.which("java", path=environment.get("PATH"))
     if not java:
         return "java: not found\n"
+    probe = {name: value for name, value in environment.items() if name not in JVM_OPTION_VARIABLES}
     try:
-        result = subprocess.run([java, "-version"], capture_output=True, text=True, timeout=30, env=environment)
+        result = subprocess.run([java, "-version"], capture_output=True, text=True, timeout=30, env=probe)
     except (OSError, subprocess.TimeoutExpired) as failure:
         return f"java: unavailable ({type(failure).__name__})\n"
-    return result.stderr
+    # Keep version facts only; any other line (including echoed options) is dropped.
+    return "".join(f"{line}\n" for line in result.stderr.splitlines() if JAVA_VERSION_LINE.fullmatch(line.strip()))
 
 
 def doctor(install: Path, environment: dict[str, str]) -> str:
@@ -124,7 +131,8 @@ def storage(data_dir: Path) -> dict:
                 continue
             files += 1
             total += path.lstat().st_size
-            if name.endswith(".lock") and here == data_dir:
+            # Only the application's own owner locks are named; other filenames are never copied.
+            if name in OWNER_LOCKS and here == data_dir:
                 locks.add(name)
             if "pending" in name:
                 pending += 1

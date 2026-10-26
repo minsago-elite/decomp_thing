@@ -106,9 +106,9 @@ python3 scripts/collect-support-bundle.py \
 | File | Contents |
 |---|---|
 | `distribution.json` | Version, `applicationBuildId` and `uiBuildId`, computed from the installed JAR. |
-| `java.txt` | `java -version` of `JAVA_HOME` or `PATH`. |
+| `java.txt` | The version lines of `java -version` for `JAVA_HOME` or `PATH`. The probe runs without `JAVA_TOOL_OPTIONS`, `JDK_JAVA_OPTIONS` and `_JAVA_OPTIONS`, and any other output line is dropped, so echoed JVM options never appear. |
 | `doctor.txt` | `doctor --tools-only` status and summary lines only. Host paths and secret-looking environment values are replaced. Pass `--no-doctor` to skip it. |
-| `storage.json` | Job-directory, file, directory and byte counts, pending records, owner locks and a count of `workflow-state.json` schema versions. No names, job IDs or contents. |
+| `storage.json` | Job-directory, file, directory and byte counts, pending records, which of the two owner locks (`.web-owner.lock`, `.workflow-owner.lock`) exist, and a count of `workflow-state.json` schema versions. No names, job IDs or contents. |
 | `requests.txt` | The last 1,000 `web-http-failure` lines of the given log. Every other line, including the session link and stack traces, is dropped. |
 | `runtime.json` | From a saved session or bootstrap reply: build IDs, readiness, capability IDs, states and reason codes, limits and runtime facts. The CSRF token, session expiry and server instance ID are dropped. |
 | `README.txt` | What was included and what was excluded. |
