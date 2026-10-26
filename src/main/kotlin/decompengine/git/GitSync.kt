@@ -175,7 +175,7 @@ internal object GitTransfers {
         return transaction
     }
 
-    data class Advertisement(val branch: String?, val format: GitObjectFormat)
+    data class Advertisement(val branch: String?, val format: GitObjectFormat, val headObjectId: String?)
 
     /** Discover the remote's format before init, including empty SHA-256 repositories. */
     fun advertisement(runner: GitCommandRunner, location: GitRemoteLocation, policy: GitRemotePolicy, control: GitProcessControl): Advertisement {
@@ -199,7 +199,7 @@ internal object GitTransfers {
         val format = capability.get()?.let(GitObjectFormat::fromGit)
             ?: if (headId?.length == GitObjectFormat.SHA256.hexLength) GitObjectFormat.SHA256 else GitObjectFormat.SHA1
         if (format == GitObjectFormat.UNKNOWN) throw GitOperationRefusal("REPOSITORY_UNSUPPORTED", "The remote uses an unsupported object format.")
-        return Advertisement(branch, format)
+        return Advertisement(branch, format, headId)
     }
 
     /** Partial pack files a stopped transfer can leave behind; refs are only updated after a complete pack. */

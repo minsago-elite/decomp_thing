@@ -631,6 +631,11 @@ class ManagedGitRepositories(
         val watch = GitDiskWatch(staging, remotePolicy.limits.maxRepositoryBytes) { false }
         val control = transferControl(operation.operationId, staging)
         val advertisement = GitTransfers.advertisement(runner, location, remotePolicy, control)
+        // A detached advertised HEAD is not an empty remote and must not silently become unborn
+        // on our configured default branch. This clone path materializes branches only.
+        if (request.branch == null && advertisement.branch == null && advertisement.headObjectId != null) {
+            throw GitOperationFailure("REPOSITORY_UNSUPPORTED", "The remote HEAD is detached. Select a branch explicitly to clone it.")
+        }
         runner.run(GitInvocation("init", listOf("--quiet", "--bare", "--initial-branch=${policy.defaultBranch}",
             "--object-format=${advertisement.format.wireName}", gitDir.toString())))
         configureManaged(runner, gitDir)

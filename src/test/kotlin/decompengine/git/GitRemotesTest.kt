@@ -313,6 +313,33 @@ class GitRemotesTest {
         assertTrue(Files.list(f.store.resolve("$jobId/git/staging")).use { it.count() } == 0L)
     }
 
+    @Test fun `clone refuses detached remote HEAD without an explicit branch instead of publishing unborn main`() {
+        for (format in listOf("sha1", "sha256")) Fixture().use { f ->
+            val remote = f.remote(format = format)
+            val expected = f.repositories.git("-C", remote.toString(), "rev-parse", "refs/heads/topic").trim()
+            f.repositories.git("-C", remote.toString(), "update-ref", "--no-deref", "HEAD", expected)
+            f.repositories.git("-C", remote.toString(), "branch", "-D", "main")
+            service = f.open()
+            val clone = service.request(jobId, GitCloneRequest("admitted:upstream.git", "origin", null), key())
+            assertTrue(service.awaitIdle(60_000))
+            val result = service.operation(jobId, clone.operation.repositoryId, clone.operation.operationId)
+            assertEquals(GitOperationState.FAILED, result.state, result.message)
+            assertEquals("REPOSITORY_UNSUPPORTED", result.failureCode)
+            assertTrue(result.message.contains("detached"))
+            assertFalse(Files.exists(f.store.resolve("$jobId/git/repositories/${result.repositoryId}")))
+            assertEquals(0L, Files.list(f.store.resolve("$jobId/git/staging")).use { it.count() })
+            // The refusal is actionable: selecting a real branch publishes that branch and bytes.
+            val explicit = service.request(jobId, GitCloneRequest("admitted:upstream.git", "origin", "topic"), key())
+            assertTrue(service.awaitIdle(60_000))
+            val completed = service.operation(jobId, explicit.operation.repositoryId, explicit.operation.operationId)
+            assertEquals(GitOperationState.COMPLETED, completed.state, completed.message)
+            val view = service.workspace(jobId, completed.repositoryId)
+            assertEquals("refs/heads/topic", view.observation.head.refName)
+            assertEquals(expected, view.observation.head.objectId)
+            assertEquals("int util;\n", Files.readString(f.store.resolve("$jobId/git/repositories/${completed.repositoryId}/worktree/util.c")))
+        }
+    }
+
     @Test fun `clone discovers SHA256 rather than imposing the default including empty remotes`() {
         for (empty in listOf(false, true)) Fixture().use { f ->
             if (empty) f.repositories.git("init", "-q", "--bare", "--initial-branch=main", "--object-format=sha256", f.admitted.resolve("upstream.git").toString())
