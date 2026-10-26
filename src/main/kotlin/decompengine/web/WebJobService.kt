@@ -1181,10 +1181,14 @@ class WebJobService(
         if (predecessor.state == WorkflowRunState.COMPLETED) return refuse("ATTEMPT_COMPLETED")
         if (snapshot.latestRun?.runId != predecessor.runId) return refuse("ATTEMPT_SUPERSEDED")
         if (active.containsKey(jobId)) return refuse("ACTIVE_RUN")
-        // The predecessor's own option; a single registration serves callers that recorded no harness.
+        // The predecessor's own option when it is still registered. Otherwise an explicit retry is a fresh
+        // attempt under the workflow's sole current option, except that a different agent is never
+        // substituted for one the user chose; resume can never continue under another harness.
+        val sole = registrationFor(predecessor.workflow, null)
         val registration = registrations[predecessor.workflow to predecessor.harnessCapabilityId]
-            ?: (if (predecessor.harnessCapabilityId == null) registrationFor(predecessor.workflow, null) else null)
-            ?: return refuse("WORKFLOW_UNAVAILABLE")
+            ?: sole?.takeIf { mode == WorkflowRecoveryMode.RESUME || it.adapter.launch?.contactsAgent != true }
+            ?: return refuse(if (mode == WorkflowRecoveryMode.RESUME && registrations.keys.any { it.first == predecessor.workflow })
+                "HARNESS_CHANGED" else "WORKFLOW_UNAVAILABLE")
         // Never silently substitute another workspace: the recorded input must still be trusted evidence.
         // An option that starts from a recorded revision re-resolves that revision's retained source here.
         val inputSourceTree = if (registration.adapter.input == DurableWebWorkflowInput.RECORDED_REQUIRED) {
