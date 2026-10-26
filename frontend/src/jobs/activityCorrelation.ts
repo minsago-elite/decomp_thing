@@ -4,7 +4,7 @@ import type { Run } from '../api/generated';
 /** Durable identities this view can link; digests are matched exactly, never by prefix. */
 export type KnownIdentityKind = 'attempt' | 'previous-attempt' | 'input-revision' | 'result-revision';
 export interface KnownIdentity { kind: KnownIdentityKind; id: string }
-export type IdentityDigests = ReadonlyMap<string, KnownIdentity>;
+export type IdentityDigests = ReadonlyMap<string, readonly KnownIdentity[]>;
 
 const encoder = new TextEncoder();
 async function sha256(text: string): Promise<string> {
@@ -22,11 +22,13 @@ export async function identityDigests(run: Pick<Run, 'runId' | 'previousRunId' |
   if (run.previousRunId) entries.push({ kind: 'previous-attempt', id: run.previousRunId });
   if (run.inputRevisionId) entries.push({ kind: 'input-revision', id: run.inputRevisionId });
   if (run.resultRevisionId) entries.push({ kind: 'result-revision', id: run.resultRevisionId });
-  const digests = new Map<string, KnownIdentity>();
+  const digests = new Map<string, KnownIdentity[]>();
   for (const entry of entries) {
     const digest = await sha256(entry.id);
-    // Equal identities keep the first, most specific relation (an attempt before a revision).
-    if (!digests.has(digest)) digests.set(digest, entry);
+    // One identity can have several relations, such as a result that reuses its input revision.
+    const identities = digests.get(digest) ?? [];
+    identities.push(entry);
+    digests.set(digest, identities);
   }
   return digests;
 }
@@ -42,9 +44,11 @@ export type Correlation =
 export function correlate(digest: string | undefined, digests: IdentityDigests | null, linkable: readonly KnownIdentityKind[]): Correlation {
   if (digest === undefined) return { state: 'missing' };
   if (digests === null) return { state: 'pending' };
-  const identity = digests.get(digest);
-  if (!identity) return { state: 'unlinked' };
-  return linkable.includes(identity.kind) ? { state: 'linked', identity } : { state: 'matched', identity };
+  const identities = digests.get(digest);
+  const linked = identities?.find(identity => linkable.includes(identity.kind));
+  if (linked) return { state: 'linked', identity: linked };
+  const identity = identities?.[0];
+  return identity ? { state: 'matched', identity } : { state: 'unlinked' };
 }
 
 /** Digests of the loaded attempt's identities; null until computed or when no attempt is loaded. */

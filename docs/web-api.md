@@ -1468,7 +1468,8 @@ how many observed tasks reached a final stage and that no percentage is shown.
 Correlation disclosures render on demand. The browser hashes the loaded attempt's own
 identities (attempt, previous attempt, input and result revision) with SHA-256, the same plain
 commitment the journal uses, and links only exact matches: a result revision to its source
-browser and a workflow-run digest to the previous attempt. Every other reference states why
+browser and a workflow-run digest to the previous attempt. Equal input and result revision IDs
+retain both relations, so result sources remain linkable. Every other reference states why
 it is not linked (not recorded, not compared yet, no published task or session evidence page,
 or no matching revision). A task digest can narrow the page filter instead.
 
