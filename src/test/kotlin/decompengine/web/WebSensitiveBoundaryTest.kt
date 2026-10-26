@@ -133,8 +133,10 @@ class WebSensitiveBoundaryTest {
             assertTrue("e".repeat(32) in exportTargets, "a refused export of a validated job ID keeps that target")
             assertEquals(1, server.audit.read(jobId).entries.count { it.action == WebAuditAction.SUPPORT_EXPORT })
             val cancelEntry = audit.single { it.getValue("action").jsonPrimitive.content == "run.cancel" }
-            assertEquals("version_1", cancelEntry.getValue("target").jsonObject.getValue("expectedVersion").jsonPrimitive.content)
-            assertEquals("run_missing", cancelEntry.getValue("target").jsonObject.getValue("runId").jsonPrimitive.content)
+            assertEquals(WebAuditRecorder.versionCommitment("version_1"),
+                cancelEntry.getValue("target").jsonObject.getValue("expectedVersion").jsonPrimitive.content)
+            assertEquals(WebAuditRecorder.runCommitment("run_missing"),
+                cancelEntry.getValue("target").jsonObject.getValue("runId").jsonPrimitive.content)
 
             val auditBytes = Files.readString(root.resolve(".web-audit/current.jsonl"))
             val token = session.cookie.substringAfter('=')
@@ -151,6 +153,86 @@ class WebSensitiveBoundaryTest {
         assertFalse(combined.contains(root.toString()), "the private storage path escaped")
         assertFalse(combined.contains(parent.toString()), "a private host path escaped")
         assertTrue(diagnostics.isNotEmpty() && diagnostics.all { it.startsWith("web-http-failure request_id=") })
+    }
+
+    @Test fun `near-limit filenames stay readable in upload read listing and scoped export responses`() {
+        val root = Files.createTempDirectory(Files.createDirectories(Path.of("build/test-tmp/web-sensitive").toAbsolutePath()), "bounded-")
+        val server = UploadServer("127.0.0.1", 0, root, JobAnalyzer { _, _ -> error("unexpected") },
+            JobReconstructor { _, _ -> error("unexpected") }, uiMode = WebUiMode.SPA, basePath = "/workbench/",
+            sensitiveValues = listOf("shortish9"), redactionEnvironment = mapOf("TEST_TOKEN" to "shortish9"))
+        try {
+            server.start()
+            val session = establish(server)
+            val uploaded = upload(server, session, filename = "shortish9".repeat(28) + ".c")
+            assertEquals(201, uploaded.statusCode(), uploaded.body())
+            fun data(response: HttpResponse<String>): JsonObject = Json.parseToJsonElement(response.body()).jsonObject.getValue("data").jsonObject
+            val job = data(uploaded)
+            val id = job.getValue("jobId").jsonPrimitive.content
+            fun bounded(value: JsonObject) {
+                assertEquals("[redacted]", value.getValue("displayFilename").jsonPrimitive.content)
+                assertTrue(value.getValue("displayFilename").jsonPrimitive.content.length in 1..255)
+            }
+            bounded(job)
+            val read = get(server, "/workbench/api/v1/jobs/$id", session)
+            assertEquals(200, read.statusCode()); bounded(data(read))
+            val listed = get(server, "/workbench/api/v1/jobs", session)
+            assertEquals(200, listed.statusCode())
+            bounded(data(listed).getValue("items").jsonArray.single().jsonObject)
+            val exported = exportData(get(server, "/workbench/api/v1/support-export?scope=job&jobId=$id", session))
+            bounded(sections(exported).getValue("job"))
+        } finally { server.stop(); root.toFile().deleteRecursively() }
+    }
+
+    @Test fun `server support export counts entries omitted by its audit window`() {
+        val root = Files.createTempDirectory(Files.createDirectories(Path.of("build/test-tmp/web-sensitive").toAbsolutePath()), "window-")
+        val server = UploadServer("127.0.0.1", 0, root, JobAnalyzer { _, _ -> error("unexpected") },
+            JobReconstructor { _, _ -> error("unexpected") }, uiMode = WebUiMode.SPA, basePath = "/workbench/")
+        try {
+            server.start()
+            val session = establish(server)
+            awaitAudit(server, 1)
+            repeat(110) {
+                server.audit.record(WebAuditActor.OPERATOR, WebAuditAction.RUN_CANCEL, WebAuditTarget(),
+                    WebAuditOutcome.ACCEPTED, 202, null, null)
+            }
+            awaitAudit(server, 111)
+            val page = sections(exportData(get(server, "/workbench/api/v1/support-export?scope=server", session))).getValue("audit")
+            val entries = page.getValue("entries").jsonArray
+            assertEquals(100, entries.size)
+            assertEquals("12", entries.first().jsonObject.getValue("sequence").jsonPrimitive.content)
+            assertEquals("111", entries.last().jsonObject.getValue("sequence").jsonPrimitive.content)
+            assertEquals("11", page.getValue("omittedEntries").jsonPrimitive.content)
+            assertEquals("false", page.getValue("complete").toString())
+        } finally { server.stop(); root.toFile().deleteRecursively() }
+    }
+
+    @Test fun `requested versions cannot persist configured cookie or csrf credentials even on denials`() {
+        val root = Files.createTempDirectory(Files.createDirectories(Path.of("build/test-tmp/web-sensitive").toAbsolutePath()), "preconditions-")
+        val server = UploadServer("127.0.0.1", 0, root, JobAnalyzer { _, _ -> error("unexpected") },
+            JobReconstructor { _, _ -> error("unexpected") }, uiMode = WebUiMode.SPA, basePath = "/workbench/",
+            sensitiveValues = listOf(canary), redactionEnvironment = mapOf("TEST_TOKEN" to canary))
+        try {
+            server.start()
+            val session = establish(server)
+            val values = listOf(canary, session.cookie.substringAfter('='), session.csrf)
+            for (authenticated in listOf(false, true)) for (value in values) {
+                val denied = request(server, "/workbench/api/v1/jobs/${"a".repeat(32)}/runs/$value/cancel",
+                    if (authenticated) session else null, "POST", "{}", mapOf("If-Match" to "\"$value\""))
+                assertTrue(denied.statusCode() >= 400)
+            }
+            awaitAudit(server, 7)
+            val stored = Files.readString(root.resolve(".web-audit/current.jsonl"))
+            val exported = get(server, "/workbench/api/v1/support-export?scope=server", session)
+            assertEquals(200, exported.statusCode())
+            values.forEach { value ->
+                assertFalse(stored.contains(value), "raw requested versions must not reach durable storage")
+                assertFalse(exported.body().contains(value), "raw requested versions must not reach exports")
+            }
+            val entries = server.audit.read().entries.filter { it.action == WebAuditAction.RUN_CANCEL }
+            assertEquals(6, entries.size)
+            assertEquals(values.map { WebAuditRecorder.versionCommitment(it) }.toSet(), entries.map { it.target.expectedVersion }.toSet())
+            assertEquals(values.map { WebAuditRecorder.runCommitment(it) }.toSet(), entries.map { it.target.runId }.toSet())
+        } finally { server.stop(); root.toFile().deleteRecursively() }
     }
 
     @Test fun `legacy JSON uploads are attributed to their job and legacy report downloads are redacted`() {
