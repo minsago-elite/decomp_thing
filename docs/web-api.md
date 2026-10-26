@@ -1483,8 +1483,10 @@ source `git`. It reports these reasons:
 
 - `GIT_OPERATION_ACTIVE`: a repository operation is queued or running and owns its staging and
   records.
-- `GIT_UNCOMMITTED_CHANGES`: a managed work tree has uncommitted changes. A freshly initialized
-  work tree counts, because its files are untracked until a commit.
+- `GIT_UNCOMMITTED_CHANGES`: a managed work tree has uncommitted changes. A fresh
+  initialization has no commit yet. While its work tree still holds exactly the recorded candidate
+  source it was copied from, it contains no user work, so it does not hold deletion. Any added,
+  modified or deleted file does hold it; `build/` output is excluded, as it is from the copy.
 - `GIT_UNPUSHED_COMMITS`: a branch tip is contained by no remote-tracking ref. A repository without
   remote-tracking refs has nothing to push to.
 - `GIT_STATE_UNAVAILABLE`: a repository could not be inspected, so it is retained.

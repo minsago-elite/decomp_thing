@@ -244,7 +244,7 @@ class WebGitControllerTest {
         error(response, 409, "RETENTION_PROTECTED").getValue("details").jsonArray.map { it.jsonObject.getValue("code").jsonPrimitive.content }
             .filter { it.startsWith("GIT_") }
 
-    @Test fun `deletion is refused while a Git operation owns the job and while its work tree has uncommitted changes`(): Unit = Fixture().use { f ->
+    @Test fun `deletion is refused while a Git operation owns the job or its work tree diverges from the initialization source`(): Unit = Fixture().use { f ->
         val running = java.util.concurrent.CountDownLatch(1)
         val release = java.util.concurrent.CountDownLatch(1)
         f.hook = { point -> if (point == decompengine.git.GitOperationCrashPoint.AFTER_RUNNING) { running.countDown(); release.await(30, TimeUnit.SECONDS) } }
@@ -256,9 +256,29 @@ class WebGitControllerTest {
         release.countDown(); f.hook = {}
         assertEquals("completed", f.awaitOperation(admitted.headers().firstValue("Location").orElseThrow().removePrefix(f.origin))
             .getValue("state").jsonPrimitive.content)
-        // An initialized work tree holds only uncommitted files until an explicit commit.
+        val workTree = Files.walk(f.root.resolve(f.job.id).resolve("git/repositories")).use { paths ->
+            paths.filter { it.endsWith("src/modules/unit.c") }.toList().single() }.parent.parent.parent
+        // A modified, added or deleted file is user work in an initialized work tree, even before any commit.
+        Files.writeString(workTree.resolve("src/modules/unit.c"), "int edited;\n")
         assertEquals(listOf("GIT_UNCOMMITTED_CHANGES"), retentionCodes(f.delete("delete_git_dirty_00001")))
+        Files.writeString(workTree.resolve("src/modules/unit.c"), SOURCES.getValue("src/modules/unit.c"))
+        Files.writeString(workTree.resolve("notes.txt"), "added\n")
+        assertEquals(listOf("GIT_UNCOMMITTED_CHANGES"), retentionCodes(f.delete("delete_git_added_00001")))
+        Files.delete(workTree.resolve("notes.txt"))
+        Files.delete(workTree.resolve("Makefile"))
+        assertEquals(listOf("GIT_UNCOMMITTED_CHANGES"), retentionCodes(f.delete("delete_git_removed_0001")))
+        Files.writeString(workTree.resolve("Makefile"), SOURCES.getValue("Makefile"))
         assertTrue(Files.isDirectory(f.root.resolve(f.job.id)))
+        // Unchanged from the recorded candidate source, the fresh initialization holds nothing. Accepting
+        // the attempt clears the fixture's own publication protection, so only Git could still retain it.
+        val snapshot = (f.owner.inspect(f.job.id) as WorkflowJobInspection.Available).snapshot
+        f.owner.recordAcceptedRevision(f.job.id, f.run.runId, snapshot.version, snapshot.attempts.single().version,
+            WorkflowAcceptanceReference(f.job.id, f.run.runId, "revision_one", recordedSourceDigest(SOURCES), "graph_one", "artifact_one", "b".repeat(64)))
+        val deleted = f.delete("delete_git_fresh_00001")
+        assertEquals(202, deleted.statusCode(), deleted.body())
+        val deadline = System.nanoTime() + Duration.ofSeconds(30).toNanos()
+        while (Files.exists(f.root.resolve(f.job.id)) && System.nanoTime() < deadline) Thread.sleep(50)
+        assertFalse(Files.exists(f.root.resolve(f.job.id)), "the fresh repository is deleted with the job")
     }
 
     @Test fun `Git admission and job deletion never both proceed`(): Unit = Fixture(withImports = true).use { f ->

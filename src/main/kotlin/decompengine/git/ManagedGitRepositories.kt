@@ -277,13 +277,40 @@ class ManagedGitRepositories(
             val directory = root.resolve(jobId).resolve("git").resolve("repositories").resolve(record.repositoryId)
             try {
                 val observation = GitRepositoryInspector.inspect(runner, directory.resolve(GIT_DIR), directory.resolve(WORK_TREE))
-                if (observation.dirty) reasons += GitRetentionReason.UNCOMMITTED_CHANGES
+                // A fresh initialization with no commit whose work tree still holds exactly the job's
+                // recorded candidate source contains no user work: deleting the job deletes only its own data.
+                if (observation.dirty && !(observation.head.state == GitHeadState.UNBORN &&
+                        unchangedInitialization(record, directory.resolve(WORK_TREE)))) {
+                    reasons += GitRetentionReason.UNCOMMITTED_CHANGES
+                }
                 if (unpushed(runner, directory.resolve(GIT_DIR))) reasons += GitRetentionReason.UNPUSHED_COMMITS
             } catch (_: Exception) {
                 reasons += GitRetentionReason.UNREADABLE
             }
         }
         return reasons.toList()
+    }
+
+    /**
+     * Whether an initialized work tree still holds exactly the files copied from its source snapshot:
+     * no file added, modified or deleted. Anything unreadable or beyond the copy bound counts as changed.
+     */
+    private fun unchangedInitialization(record: GitRepositoryRecord, workTree: Path): Boolean {
+        val expected = record.sourceManifestSha256?.takeIf { record.origin == "initialized" } ?: return false
+        val digests = sortedMapOf<String, String>()
+        Files.walk(workTree).use { paths ->
+            for (path in paths) {
+                GitStorage.checkInterrupted()
+                if (path == workTree) continue
+                val relative = workTree.relativize(path)
+                // The copy never includes these roots, so output written there is not part of the comparison.
+                if (relative.getName(0).toString() in GitTrackingPolicy.UNCOPIED_ROOTS) continue
+                if (Files.isDirectory(path, NOFOLLOW_LINKS)) continue
+                if (!Files.isRegularFile(path, NOFOLLOW_LINKS) || digests.size >= GitSourceCopy.MAX_FILES) return false
+                digests[relative.toString()] = GitSourceCopy.digestOf(path)
+            }
+        }
+        return GitSourceCopy.manifestDigest(digests) == expected
     }
 
     /**
