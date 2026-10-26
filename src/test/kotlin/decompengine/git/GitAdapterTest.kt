@@ -209,6 +209,108 @@ class GitAdapterTest {
         assertEquals(wideCommit, wide.head.objectId)
     }
 
+    @Test fun `symbolic HEAD must name a branch rather than a tag or other namespace`(): Unit = GitTestRepositories().use { f ->
+        val (gitDir, workTree) = f.managed("head-namespace")
+        Files.writeString(workTree.resolve("main.c"), "int main;\n")
+        val commit = f.commitAll(gitDir, workTree, "fixture")
+        f.git("--git-dir=$gitDir", "update-ref", "refs/tags/odd", commit)
+        for (ref in listOf("refs/tags/odd", "refs/tags/missing", "refs/custom/missing")) {
+            f.git("--git-dir=$gitDir", "symbolic-ref", "HEAD", ref)
+            assertEquals("REPOSITORY_UNSUPPORTED", assertFailsWith<GitRepositoryException>(ref) {
+                GitRepositoryInspector.inspect(f.runner, gitDir, workTree)
+            }.code)
+        }
+    }
+
+    @Test fun `bounded refs always retain the attached HEAD without duplicates`(): Unit = GitTestRepositories().use { f ->
+        val (gitDir, workTree) = f.managed("many-refs")
+        Files.writeString(workTree.resolve("main.c"), "int main;\n")
+        val commit = f.commitAll(gitDir, workTree, "fixture")
+        repeat(GitRepositoryInspector.MAX_REFS - 1) { index ->
+            f.git("--git-dir=$gitDir", "update-ref", "refs/heads/a%03d".format(index), commit)
+        }
+        val full = GitRepositoryInspector.inspect(f.runner, gitDir, workTree)
+        assertEquals(GitRepositoryInspector.MAX_REFS, full.refs.size)
+        assertFalse(full.refsTruncated)
+        assertTrue(GitRefObservation("refs/heads/trunk", commit) in full.refs)
+        repeat(8) { index ->
+            f.git("--git-dir=$gitDir", "update-ref", "refs/heads/a%03d".format(GitRepositoryInspector.MAX_REFS - 1 + index), commit)
+        }
+        val bounded = GitRepositoryInspector.inspect(f.runner, gitDir, workTree)
+        assertTrue(bounded.refsTruncated)
+        assertEquals(GitRepositoryInspector.MAX_REFS, bounded.refs.size)
+        assertEquals(1, bounded.refs.count { it == GitRefObservation("refs/heads/trunk", commit) })
+        f.git("--git-dir=$gitDir", "symbolic-ref", "HEAD", "refs/heads/a000")
+        val earlyHead = GitRepositoryInspector.inspect(f.runner, gitDir, workTree)
+        assertTrue(earlyHead.refsTruncated)
+        assertEquals(GitRepositoryInspector.MAX_REFS, earlyHead.refs.size)
+        assertEquals(1, earlyHead.refs.count { it.name == "refs/heads/a000" && it.objectId == commit })
+    }
+
+    @Test fun `status fingerprint is display only and not dirty source identity`(): Unit = GitTestRepositories().use { f ->
+        val (gitDir, workTree) = f.managed("status-display")
+        val source = workTree.resolve("main.c")
+        Files.writeString(source, "int one;\n")
+        val untracked = GitRepositoryInspector.inspect(f.runner, gitDir, workTree)
+        val firstBytes = Files.readAllBytes(source)
+        Files.writeString(source, "int two_different;\n")
+        val editedUntracked = GitRepositoryInspector.inspect(f.runner, gitDir, workTree)
+        assertFalse(firstBytes.contentEquals(Files.readAllBytes(source)))
+        assertTrue(untracked.dirty && editedUntracked.dirty)
+        assertNotEquals(untracked.statusDigest, editedUntracked.statusDigest)
+        // Read cursors observe size/mtime changes, but the fingerprint remains no content identity:
+        // changing bytes while preserving both metadata fields must not be mistaken for proof.
+        val untrackedTime = Files.getLastModifiedTime(source)
+        Files.writeString(source, "int TWO_different;\n")
+        Files.setLastModifiedTime(source, untrackedTime)
+        assertEquals(editedUntracked.statusDigest, GitRepositoryInspector.inspect(f.runner, gitDir, workTree).statusDigest)
+        assertFalse(Files.readAllBytes(source).contentEquals("int two_different;\n".toByteArray()))
+        f.commitAll(gitDir, workTree, "fixture")
+        Files.writeString(source, "int tracked_dirty;\n")
+        val modified = GitRepositoryInspector.inspect(f.runner, gitDir, workTree)
+        val modifiedBytes = Files.readAllBytes(source)
+        Files.writeString(source, "int tracked_dirty_again;\n")
+        val editedModified = GitRepositoryInspector.inspect(f.runner, gitDir, workTree)
+        assertFalse(modifiedBytes.contentEquals(Files.readAllBytes(source)))
+        assertTrue(modified.dirty && editedModified.dirty)
+        assertNotEquals(modified.statusDigest, editedModified.statusDigest)
+        val modifiedTime = Files.getLastModifiedTime(source)
+        Files.writeString(source, "int TRACKED_dirty_again;\n")
+        Files.setLastModifiedTime(source, modifiedTime)
+        assertEquals(editedModified.statusDigest, GitRepositoryInspector.inspect(f.runner, gitDir, workTree).statusDigest)
+        assertFalse(Files.readAllBytes(source).contentEquals("int tracked_dirty_again;\n".toByteArray()))
+    }
+
+    @Test fun `linked roots ancestors worktrees and nested repository metadata are refused`(): Unit = GitTestRepositories().use { f ->
+        val (gitDir, workTree) = f.managed("physical")
+        val linkedRoot = Files.createSymbolicLink(f.root.resolve("linked-root.git"), gitDir)
+        val linkedParent = Files.createSymbolicLink(f.root.resolve("linked-parent"), f.root)
+        val linkedTree = Files.createSymbolicLink(f.root.resolve("linked-worktree"), workTree)
+        for ((directory, tree) in listOf(linkedRoot to workTree, linkedParent.resolve(gitDir.fileName) to workTree, gitDir to linkedTree)) {
+            assertEquals("REPOSITORY_UNSUPPORTED", assertFailsWith<GitRepositoryException> {
+                GitRepositoryInspector.inspect(f.runner, directory, tree)
+            }.code)
+        }
+        assertEquals("REPOSITORY_UNSUPPORTED", assertFailsWith<GitRepositoryException> {
+            GitManagedLayout.prepare(linkedRoot)
+        }.code)
+        for (component in listOf("info", "objects", "refs", "refs/heads", "HEAD", "config", "info/attributes")) {
+            val (directory, tree) = f.managed("linked-${component.replace('/', '-')}")
+            val entry = directory.resolve(component)
+            val target = f.root.resolve("target-${component.replace('/', '-')}")
+            Files.move(entry, target)
+            Files.createSymbolicLink(entry, target)
+            assertEquals("REPOSITORY_UNSUPPORTED", assertFailsWith<GitRepositoryException>(component) {
+                GitRepositoryInspector.inspect(f.runner, directory, tree)
+            }.code)
+        }
+        // Links deeper than fixed layout components must not escape the check either.
+        Files.createSymbolicLink(gitDir.resolve("refs/heads/linked"), f.root)
+        assertEquals("REPOSITORY_UNSUPPORTED", assertFailsWith<GitRepositoryException> {
+            GitRepositoryInspector.inspect(f.runner, gitDir, workTree)
+        }.code)
+    }
+
     @Test fun `missing corrupt and unreviewed repositories have distinct outcomes`(): Unit = GitTestRepositories().use { f ->
         val missing = assertFailsWith<GitRepositoryException> {
             GitRepositoryInspector.inspect(f.runner, f.root.resolve("absent.git"), f.root)
