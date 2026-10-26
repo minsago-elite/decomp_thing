@@ -172,6 +172,15 @@ class WebRedactionPolicyTest {
         assertEquals(clean, policy.json(clean), "clean longer Git ref names are unchanged")
     }
 
+    @Test fun `an accepted filename of repeated credential assignments stays within its contract bound`() {
+        val filename = "token=x;".repeat(30) + ".elf"
+        assertEquals(244, filename.length)
+        val safe = policy.json(buildJsonObject { put("displayFilename", filename) }).jsonObject
+            .getValue("displayFilename").jsonPrimitive.content
+        assertTrue(safe.length <= 255, "${safe.length}")
+        assertFalse(safe.contains("token=x"))
+    }
+
     @Test fun `unsupported short named credentials are refused instead of silently excluded`() {
         for (length in 1..7) {
             val secret = "s".repeat(length)
