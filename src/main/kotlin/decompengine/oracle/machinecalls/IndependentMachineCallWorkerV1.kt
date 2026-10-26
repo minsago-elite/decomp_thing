@@ -413,7 +413,8 @@ internal class AuthenticatedMachineCallRuntimeV2 private constructor(
     fun verify(checkpoint: (String) -> Unit) {
         checkpoint("before runtime reauthentication")
         authenticateRelease(request)
-        BundledGhidra.at(request.bundleRoot).verify(checkpoint)
+        val manifestBytes = manifest.readExactly(0L, manifest.size.toInt(), "machine-call bundle manifest snapshot")
+        BundledGhidra.at(request.bundleRoot).verifiedLibraryPathsFromManifestSnapshot(manifestBytes, checkpoint)
         archive.verifyUnchanged("machine-call Ghidra archive after production")
         bridge.verifyUnchanged("machine-call bridge after production")
         manifest.verifyUnchanged("machine-call bundle manifest after production")
@@ -438,7 +439,11 @@ internal class AuthenticatedMachineCallRuntimeV2 private constructor(
                 require(manifest.authenticatedSha256 == request.bundleManifestSha256) { "machine-call bundle manifest snapshot SHA-256 differs" }
                 checkpoint("before release authentication")
                 authenticateRelease(request)
-                val libraries = BundledGhidra.at(request.bundleRoot).verifiedLibraryPaths(checkpoint)
+                val manifestBytes = manifest.readExactly(0L, manifest.size.toInt(), "machine-call bundle manifest snapshot")
+                manifest.verifyUnchanged("machine-call bundle manifest before library verification")
+                val libraries = BundledGhidra.at(request.bundleRoot)
+                    .verifiedLibraryPathsFromManifestSnapshot(manifestBytes, checkpoint)
+                manifest.verifyUnchanged("machine-call bundle manifest after library verification")
                 require(libraries.size in 1..511) { "machine-call runtime library count exceeds its bound" }
                 val classPath = listOf(bridgePath) + libraries
                 val loader = MachineCallJarClassLoaderV1(classPath, checkpoint).also(opened::add)
