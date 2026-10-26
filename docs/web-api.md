@@ -720,9 +720,13 @@ a valid full ref name, such as `refs/tags/HEAD`; one that cannot be imported fai
 instead of being dropped. Selected symbolic refs are resolved as bounded inert data (at most 16
 steps), including targets in omitted namespaces, and stored as full object IDs; HEAD retains its
 branch name. Cyclic or excessive symbolic chains give `REPOSITORY_UNSUPPORTED`.
-Object copying pins source directories with secure directory streams, refuses links at actual
-opens, and streams at most 512 MiB into newly created regular files (at most 100,000 object-store
-files and directories combined). A provider without secure directory streams is unsupported.
+Object copying pins every source ancestor with descriptor-relative no-follow directory opens.
+The shared Linux filesystem boundary opens leaves with `O_PATH`, authenticates regular-file type
+on the pinned descriptor, then reopens that exact inode with `O_NONBLOCK` for reading. A raced-in
+FIFO cannot block an import waiting for a writer, and links cannot redirect reads. Copies stream
+at most 512 MiB into newly created regular files (at most 100,000 object-store files and directories
+combined). Unsupported native/default-filesystem/procfs boundaries fail closed as
+`REPOSITORY_UNSUPPORTED`; there is no pathname-copy fallback.
 Configuration, hooks, `info/`, the index, reflogs, remotes, notes, replace refs, worktrees, submodule repositories and
 uncommitted working-tree changes are not copied. A full `git fsck` must succeed, which re-hashes
 every object against its ID (integrity errors give `REPOSITORY_CORRUPT`). Verification runs with

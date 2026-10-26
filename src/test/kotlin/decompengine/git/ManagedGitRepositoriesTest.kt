@@ -370,6 +370,65 @@ class ManagedGitRepositoriesTest {
         }
     }
 
+    @Test fun `object copy refuses a FIFO substituted after stat without a writer and honors interruption`() {
+        GitTestRepositories().use { g ->
+            for (interrupt in listOf(false, true)) {
+                val source = Files.createDirectory(g.root.resolve("fifo source $interrupt"))
+                // An empty regular file and FIFO both report size zero: size alone is not a type check.
+                val objectFile = Files.writeString(source.resolve("object"), "")
+                val target = Files.createDirectory(g.root.resolve("fifo target $interrupt"))
+                val outcome = java.util.concurrent.atomic.AtomicReference<Throwable>()
+                val replaced = java.util.concurrent.CountDownLatch(1)
+                val copier = Thread {
+                    try {
+                        GitImportObjectCopy.copy(source, target) { relative: Path ->
+                            if (relative.toString() == "object") {
+                                Files.delete(objectFile)
+                                val mkfifo = ProcessBuilder("/usr/bin/mkfifo", objectFile.toString()).start()
+                                try {
+                                    check(mkfifo.waitFor(2, java.util.concurrent.TimeUnit.SECONDS) && mkfifo.exitValue() == 0)
+                                } finally { if (mkfifo.isAlive) mkfifo.destroyForcibly() }
+                                if (interrupt) Thread.currentThread().interrupt()
+                                replaced.countDown()
+                            }
+                        }
+                    } catch (failure: Throwable) { outcome.set(failure) }
+                }.apply { isDaemon = true; start() }
+                try {
+                    assertTrue(replaced.await(5, java.util.concurrent.TimeUnit.SECONDS))
+                    copier.join(2_000)
+                    assertFalse(copier.isAlive, "a FIFO replacement must not require a writer to release the import worker")
+                    if (interrupt) assertTrue(outcome.get() is java.io.InterruptedIOException, outcome.get().toString())
+                    else assertEquals("REPOSITORY_UNSUPPORTED", (outcome.get() as? GitOperationFailure)?.code)
+                    assertFalse(Files.exists(target.resolve("object"), NOFOLLOW_LINKS), "no destination is created for a special file")
+                } finally { copier.interrupt() }
+            }
+        }
+    }
+
+    @Test fun `an imported FIFO object store fails without publication or a lingering worker`() {
+        val (f, importRoot) = importFixture()
+        f.use {
+            val source = importRoot.resolve("fifo")
+            f.repositories.git("init", "-q", "--initial-branch=main", source.toString())
+            val mkfifo = ProcessBuilder("/usr/bin/mkfifo", source.resolve(".git/objects/fifo").toString()).start()
+            try {
+                assertTrue(mkfifo.waitFor(2, java.util.concurrent.TimeUnit.SECONDS) && mkfifo.exitValue() == 0)
+            } finally { if (mkfifo.isAlive) mkfifo.destroyForcibly() }
+            val service = f.open()
+            val admission = service.request(jobId, GitRepositoryRequest.Attach("fifo"), "import_fifo_key_0001")
+            assertTrue(service.awaitIdle(5_000))
+            val failed = service.operation(jobId, admission.operation.repositoryId, admission.operation.operationId)
+            assertEquals(GitOperationState.FAILED, failed.state)
+            assertEquals("REPOSITORY_UNSUPPORTED", failed.failureCode)
+            assertTrue(service.listing(jobId).repositories.isEmpty())
+            assertFalse(f.repositoryDirectory(failed.repositoryId).exists())
+            assertFalse(f.store.resolve(jobId).resolve("git/staging/${failed.operationId}").exists())
+            service.close()
+            assertTrue(service.terminated)
+        }
+    }
+
     @Test fun `object-store imports charge empty directories against the entry quota before creating them`() {
         GitTestRepositories().use { g ->
             val source = Files.createDirectories(g.root.resolve("wide/objects"))
