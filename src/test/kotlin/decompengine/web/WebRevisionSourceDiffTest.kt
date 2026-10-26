@@ -142,11 +142,29 @@ class WebRevisionSourceDiffTest {
         assertEquals(listOf("<script>alert(1)</script>", "tail"), added.map { it.getValue("text").jsonPrimitive.content })
         assertTrue(added.last().getValue("missingFinalNewline").jsonPrimitive.boolean)
         val patch = String(diffs(fixture).patch(jobId, "run_2", "revision_2", fileQuery(entry)).bytes)
-        assertTrue(patch.startsWith("--- a/src/a.c\n+++ b/src/a.c\n@@ -2,7 +2,7 @@\n"), patch)
+        assertTrue(patch.startsWith("--- a/src/a.c\t\n+++ b/src/a.c\t\n@@ -2,7 +2,7 @@\n"), patch)
         assertTrue(patch.contains("-line 5\n+line five\n"))
         assertTrue(patch.endsWith("+tail\n\\ No newline at end of file\n"), patch)
         // Applying the patch independently reproduces the head bytes exactly.
         assertEquals(after, applyPatch(before, patch))
+    }
+
+    @Test fun `patch headers delimit complete filenames including date-like suffixes for modifications additions and removals`() {
+        for (path in listOf("foo 2026-01-01", "src/é \"quoted\" 2026-01-01")) {
+            for (status in listOf("modified", "added", "removed")) {
+                val before = if (status == "added") "" else "old\n"
+                val after = if (status == "removed") "" else "new\n"
+                val fixture = fixture(listOf(side("Makefile", "all:\n")) + if (status == "added") emptyList() else listOf(side(path, before)),
+                    listOf(side("Makefile", "all:\n")) + if (status == "removed") emptyList() else listOf(side(path, after)))
+                val entry = items(diffs(fixture).summary("owner", jobId, "run_2", "revision_2", base)).single()
+                assertEquals(status, entry.getValue("status").jsonPrimitive.content)
+                val patch = String(diffs(fixture).patch(jobId, "run_2", "revision_2", fileQuery(entry)).bytes, Charsets.UTF_8)
+                val basePath = if (status == "added") "/dev/null" else "a/$path"
+                val headPath = if (status == "removed") "/dev/null" else "b/$path"
+                assertTrue(patch.startsWith("--- $basePath\t\n+++ $headPath\t\n"), patch)
+                assertEquals(after, applyPatch(before, patch))
+            }
+        }
     }
 
     @Test fun `long diffs page by hunk with explicit continuation while long lines are marked truncated`() {

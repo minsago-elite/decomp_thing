@@ -147,7 +147,7 @@ class WebRevisionSourceRoutesTest {
         assertTrue(patch.headers().firstValue("Content-Disposition").orElseThrow().startsWith("attachment;"))
         assertEquals("nosniff", patch.headers().firstValue("X-Content-Type-Options").orElseThrow())
         assertEquals(summary.getValue("baseSourceSha256").jsonPrimitive.content, patch.headers().firstValue("X-Decomp-Base-Source-SHA256").orElseThrow())
-        assertTrue(String(patch.body()).startsWith("--- a/$path\n+++ b/$path\n@@ "))
+        assertTrue(String(patch.body()).startsWith("--- a/$path\t\n+++ b/$path\t\n@@ "))
         val headOnly = get(fixture, "${fixture.revision(fixture.second)}/source-diff/patch?$fileQuery", "application/octet-stream", "HEAD")
         assertEquals(200, headOnly.statusCode()); assertEquals(0, headOnly.body().size)
         // A cross-job or unknown base revision cannot be compared.

@@ -443,7 +443,8 @@ internal class WebRevisionSourceDiffs(
         val basePath = entry.base?.let { "a/" + pair.base.files[it].evidence.path } ?: "/dev/null"
         val headPath = entry.head?.let { "b/" + pair.head.files[it].evidence.path } ?: "/dev/null"
         val text = StringBuilder()
-        text.append("--- ").append(basePath).append('\n').append("+++ ").append(headPath).append('\n')
+        // A tab terminates the filename field: a date-like suffix must not be parsed as a diff timestamp.
+        text.append("--- ").append(basePath).append("\t\n").append("+++ ").append(headPath).append("\t\n")
         // Display pages split long change groups at 128 rows; a downloaded patch keeps each group whole so it applies
         // with ordinary context rules.
         val groups = ArrayList<WebDiffHunk>()

@@ -1027,7 +1027,9 @@ pair, with `truncated` and the full `characters`. The final line reports a missi
 `source-diff/patch` (with the same pair, without `hunk`) returns the complete unified
 diff of a text comparison as an inert `application/octet-stream` attachment named
 `<file>.diff`, with `X-Decomp-Diff-Authority`, both source commitments and both metadata
-versions. Other representations are `409 SOURCE_DIFF_NOT_TEXT`, as is an added or removed
+versions. Patch filename fields end with a tab before the header newline so spaces and
+date-like suffixes remain part of the filename rather than being read as timestamps.
+Other representations are `409 SOURCE_DIFF_NOT_TEXT`, as is an added or removed
 empty file: no line changes, so a unified diff cannot recreate it and `patchAvailable` is
 false. In every case both complete files
 remain available through their own content routes. Comparisons are presentation
