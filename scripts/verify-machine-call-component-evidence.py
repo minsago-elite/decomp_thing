@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+from contextlib import contextmanager
 from hashlib import sha256
 import json
 import os
@@ -33,6 +34,27 @@ SOURCE_PATHS = {
     "src/main/kotlin/decompengine/oracle/machinecalls/IndependentMachineCallWorkerV1.kt",
     "src/main/kotlin/decompengine/oracle/machinecalls/IndependentMachineCallsV1.kt",
 }
+EXTERNAL_SOURCE_PATHS_V1 = SOURCE_PATHS | {
+    "ghidra-bridge/src/main/java/decompengine/ghidra/ByteStaticMemoryTransferDecoderV1.java",
+    *{"src/main/kotlin/decompengine/oracle/externalcalls/" + name + ".kt" for name in (
+        "BoundedElfDynamicBindingsV1", "ElfRelocationWriteCoverageV1", "IndependentExternalCallsV1",
+        "IndependentExternalCallReportV1", "IndependentExternalCallWorkerV1")},
+}
+EXTERNAL_SOURCE_PATHS_V2 = EXTERNAL_SOURCE_PATHS_V1 | {
+    "src/main/kotlin/decompengine/oracle/externalcalls/RecoveredExternalNamespaceV1.kt",
+    "src/main/kotlin/decompengine/oracle/externalcalls/RecoveredExternalNamespaceWorkerV1.kt",
+    "src/main/kotlin/decompengine/oracle/externalcalls/FrozenNativeExternalClaimsV1.kt",
+    "src/main/kotlin/decompengine/oracle/externalcalls/ElfExternalNamespacePairV1.kt",
+    "src/main/kotlin/decompengine/oracle/externalcalls/ExternalRuntimeSnapshotV2.kt",
+}
+# Current external evidence inventory; live verification selects this only for request schema 2.
+EXTERNAL_SOURCE_PATHS = EXTERNAL_SOURCE_PATHS_V2
+MACHINE_KIND = "retained-machine-call-component-evidence"
+EXTERNAL_KIND = "retained-external-call-component-evidence"
+EXTERNAL_LIMITS = {key: value for key, value in LIMIT_CEILINGS.items()
+                   if key in {"maximumCalls", "maximumWorkUnits", "maximumOutputBytes", "maximumWallMillis"}}
+EXTERNAL_LIMITS["maximumCalls"] = 100000
+EXTERNAL_COUNTS = {"sourcePhysicalSites", "composedSiteRecords", "namespaceEntries", "dispositions"}
 
 
 class VerificationError(ValueError):
@@ -80,36 +102,43 @@ def informational_path(value: object) -> None:
     require(path.is_absolute() and str(path) == value and ".." not in path.parts, "invalid informational original path")
 
 
-def repository_path(path: Path, *, existing: bool) -> Path:
-    root = REPOSITORY_ROOT.resolve()
+def repository_path(path: Path, *, existing: bool | None = None) -> Path:
+    # Lexical admission only; filesystem access uses a held repository parent descriptor.
+    root = REPOSITORY_ROOT
     absolute = path if path.is_absolute() else root / path
     require(absolute == Path(os.path.abspath(absolute)), "path must be normalized")
     require(absolute.is_relative_to(root) and absolute != root, "path is outside the repository")
-    cursor = root
-    for part in absolute.relative_to(root).parts[:-1]:
-        cursor /= part
-        info = cursor.lstat()
-        require(stat.S_ISDIR(info.st_mode) and not stat.S_ISLNK(info.st_mode), "path parent must be an existing nonsymlink directory")
-    if existing:
-        info = absolute.lstat()
-        require(stat.S_ISREG(info.st_mode) and not stat.S_ISLNK(info.st_mode), "input must be a regular nonsymlink file")
-    else:
-        require(not os.path.lexists(absolute), "extraction destination already exists")
     return absolute
 
 
+@contextmanager
+def repository_parent(path: Path):
+    absolute = repository_path(path)
+    parts = absolute.relative_to(REPOSITORY_ROOT).parts
+    flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
+    parent = os.open(REPOSITORY_ROOT, flags)
+    try:
+        for part in parts[:-1]:
+            child = os.open(part, flags, dir_fd=parent)
+            os.close(parent)
+            parent = child
+        yield parent, parts[-1]
+    finally:
+        os.close(parent)
+
+
 def read_file(path: Path, maximum: int) -> bytes:
-    path = repository_path(path, existing=True)
-    descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
-    with os.fdopen(descriptor, "rb") as stream:
-        before = os.fstat(stream.fileno())
-        require(stat.S_ISREG(before.st_mode) and before.st_size <= maximum, "input file exceeds byte bound")
-        result = stream.read(maximum + 1)
-        after = os.fstat(stream.fileno())
-        require(len(result) <= maximum and len(result) == before.st_size and
-                (before.st_dev, before.st_ino, before.st_size, before.st_mtime_ns, before.st_ctime_ns) ==
-                (after.st_dev, after.st_ino, after.st_size, after.st_mtime_ns, after.st_ctime_ns), "input changed while reading")
-        return result
+    with repository_parent(path) as (parent, name):
+        descriptor = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC, dir_fd=parent)
+        with os.fdopen(descriptor, "rb") as stream:
+            before = os.fstat(stream.fileno())
+            require(stat.S_ISREG(before.st_mode) and before.st_size <= maximum, "input file exceeds byte bound")
+            result = stream.read(maximum + 1)
+            after = os.fstat(stream.fileno())
+            require(len(result) <= maximum and len(result) == before.st_size and
+                    (before.st_dev, before.st_ino, before.st_size, before.st_mtime_ns, before.st_ctime_ns) ==
+                    (after.st_dev, after.st_ino, after.st_size, after.st_mtime_ns, after.st_ctime_ns), "input changed while reading")
+            return result
 
 
 def canonical_bytes(value: object) -> bytes:
@@ -231,11 +260,19 @@ def verify_git_object(specification: str, kind: str) -> int:
     return integer(int(size), 0)
 
 
-def verify_git_blob(commit: str, reference: dict) -> None:
+def read_git_blob(commit: str, reference: dict, maximum: int = MAX_BYTES) -> bytes:
+    file_reference(reference)
     specification = commit + ":" + reference["path"]
-    require(verify_git_object(specification, "blob") == reference["bytes"], "recorded Git blob byte count differs")
+    require(reference["bytes"] <= maximum and verify_git_object(specification, "blob") == reference["bytes"],
+            "recorded Git blob byte count differs or exceeds bound")
     # Type and size are checked first. --no-textconv prevents Git from invoking a content transformer.
-    verify_bytes(git(["show", "--no-ext-diff", "--no-textconv", specification], reference["bytes"]), reference)
+    data = git(["show", "--no-ext-diff", "--no-textconv", specification], reference["bytes"])
+    verify_bytes(data, reference)
+    return data
+
+
+def verify_git_blob(commit: str, reference: dict) -> None:
+    read_git_blob(commit, reference)
 
 
 def false_authority(record: dict) -> None:
@@ -243,16 +280,42 @@ def false_authority(record: dict) -> None:
         require(record[key] is False, f"{key} cannot grant authority")
 
 
+def verify_runtime_snapshots(request: dict, runtime: dict, report_name: str) -> None:
+    root_text = request.get("controlRoot")
+    informational_path(root_text)
+    root = PurePosixPath(root_text)
+    require(str(root) == root_text and root.is_absolute() and ".." not in root.parts, "invalid owned control root")
+    require(request.get("outputPath") == str(root / "reports" / report_name), "request output differs from fixed control-root destination")
+    roles = (("bridgeSnapshot", "ghidra-bridge.runtime", "bridgeSha256", 128 * 1024 * 1024),
+             ("bundleManifestSnapshot", "ghidra-bundle-manifest.runtime", "bundleManifestSha256", 4 * 1024 * 1024))
+    for key, name, digest_key, maximum in roles:
+        snapshot = fields(runtime[key], {"path", "bytes", "sha256"}, "runtime snapshot")
+        require(snapshot["path"] == str(root / "runtime" / name), "runtime snapshot path differs from fixed control-root layout")
+        informational_path(snapshot["path"])
+        integer(snapshot["bytes"], 1, maximum)
+        require(snapshot["sha256"] == runtime[digest_key], "runtime snapshot digest differs from source commitment")
+
+
 def verify_report_bindings(evidence: dict, request: dict, report: dict) -> None:
-    fields(request, {"schemaVersion", "kind", "canonicalOracle", "richFile", "manifestSha256", "runtime", "limits", "outputPath"}, "request")
-    require(type(request["schemaVersion"]) is int and request["schemaVersion"] == 1 and request["kind"] == "independent-machine-call-request-v1", "request schema differs")
+    version = request.get("schemaVersion")
+    expected_request_fields = {"schemaVersion", "kind", "canonicalOracle", "richFile", "manifestSha256", "runtime", "limits", "outputPath"}
+    if version == 2:
+        expected_request_fields |= {"controlRoot"}
+    fields(request, expected_request_fields, "request")
+    require(type(version) is int and ((version == 1 and request["kind"] == "independent-machine-call-request-v1") or
+        (version == 2 and request["kind"] == "independent-machine-call-request-v2")), "request schema differs")
     informational_path(request["outputPath"])
     limits = fields(request["limits"], set(LIMIT_CEILINGS), "request limits")
     for key, ceiling in LIMIT_CEILINGS.items():
         integer(limits[key], 1, ceiling)
-    runtime = fields(request["runtime"], RUNTIME | RUNTIME_PATHS, "request runtime")
+    runtime_fields = RUNTIME | RUNTIME_PATHS
+    if version == 2:
+        runtime_fields |= {"bridgeSnapshot", "bundleManifestSnapshot"}
+    runtime = fields(request["runtime"], runtime_fields, "request runtime")
     for key in RUNTIME_PATHS:
         informational_path(runtime[key])
+    if version == 2:
+        verify_runtime_snapshots(request, runtime, "independent-machine-call-observations.json")
     require({key: runtime[key] for key in RUNTIME} == evidence["runtime"], "request runtime commitment differs")
     for input_key, request_key in (("rich", "richFile"), ("canonicalOracle", "canonicalOracle")):
         reference = fields(request[request_key], {"path", "bytes", "sha256"}, "request input")
@@ -269,7 +332,8 @@ def verify_report_bindings(evidence: dict, request: dict, report: dict) -> None:
     false_authority(report)
     require(report["canonicalPopulationComplete"] is True and report["rawSymbolPopulationComplete"] is True, "report input inventory is incomplete")
     require(report["containmentStatus"] == "external-owner-required" and report["decoderAuthentication"] == "authenticated-bundled-worker-v1", "report boundary differs")
-    require(report["requestSha256"] == evidence["payloads"]["request"]["sha256"] and report["runtime"] == runtime and
+    report_runtime = {key: runtime[key] for key in RUNTIME | RUNTIME_PATHS}
+    require(report["requestSha256"] == evidence["payloads"]["request"]["sha256"] and report["runtime"] == report_runtime and
             report["limits"] == limits, "report request/runtime/limit commitment differs")
     fields(report["limits"], set(LIMIT_CEILINGS), "report limits")
     for key, ceiling in LIMIT_CEILINGS.items():
@@ -328,17 +392,471 @@ def verify_report_bindings(evidence: dict, request: dict, report: dict) -> None:
     require(instructions <= limits["maximumInstructions"] and len(locators) <= limits["maximumRoots"], "retained population exceeds request bounds")
 
 
-def verify_evidence(evidence_path: Path) -> tuple[bytes, dict]:
-    evidence_path = repository_path(evidence_path, existing=True)
-    evidence = parse_canonical(read_file(evidence_path, MAX_CONTROL_BYTES), MAX_CONTROL_BYTES)
+def address(value: object, *, nullable: bool = False) -> int | None:
+    if nullable and value is None:
+        return None
+    require(type(value) is str and re.fullmatch(r"0x(?:0|[1-9a-f][0-9a-f]{0,15})", value) is not None,
+            "invalid canonical unsigned address")
+    return int(value, 16)
+
+
+def inventory_rows(value: object, keys: set[str], maximum: int, label: str) -> list[dict]:
+    require(type(value) is list and len(value) <= maximum, f"{label}: inventory exceeds bound")
+    for item in value:
+        fields(item, keys, label)
+    return value
+
+
+EXTERNAL_STATUSES = {"retained-canonical-target", "static-import-request-reference"} | {
+    "unresolved-" + suffix for suffix in (
+        "source-instruction-boundary", "source-caller", "source-target-exclusion", "source-target-extent",
+        "null-physical-target", "forwarder-byte-ownership", "memory-decoder-refusal", "forwarder-sequence",
+        "memory-transfer", "unexpanded-relocation-writes", "slot-without-relocation", "competing-relocations",
+        "relocation-runtime-membership", "slot-memory-ownership", "slot-file-storage", "inactive-symbol-table",
+        "irelative-resolver", "relocation-type", "null-symbol-index", "relocation-write-coverage",
+        "ifunc-runtime-implementation", "defined-symbol-reference", "symbol-import-identity", "symbol-version",
+        "weak-runtime-target", "untyped-import-request")}
+INVENTORY_ROWS = {
+    "sections": (131072, {"index", "name", "type", "flags", "address", "offset", "size", "link", "info", "alignment", "entrySize"}),
+    "programHeaders": (65535, {"index", "type", "flags", "offset", "virtualAddress", "physicalAddress", "fileSize", "memorySize", "alignment"}),
+    "dynamicEntries": (65536, {"index", "fileOffset", "tag", "value"}),
+    "dynamicSymbols": (131072, {"tableSectionIndex", "symbolIndex", "locator", "nameOffset", "name", "info", "other", "type", "binding",
+        "visibility", "rawSectionIndex", "resolvedSectionIndex", "sectionKind", "value", "size", "version"}),
+    "relocations": (1000000, {"sectionIndex", "relocationIndex", "fileOffset", "locator", "symbolTableSectionIndex", "symbolIndex", "offset",
+        "type", "addend", "dynamicTables", "slotFileOffset", "slotLoadIndices", "dispositions"}),
+    "versionRequirements": (131072, {"sectionIndex", "stringSectionIndex", "recordOffset", "auxiliaryOffset", "providerRequest", "name",
+        "rawIndex", "index", "flags", "hash"}),
+    "versionDefinitions": (131072, {"sectionIndex", "stringSectionIndex", "recordOffset", "rawIndex", "index", "flags", "hash", "name",
+        "parentNames", "auxiliaryOffsets"}),
+}
+SYMBOL_VERSION_KEYS = {"sectionIndex", "fileOffset", "raw", "index", "hidden", "kind", "name", "providerRequest"}
+SITE_KEYS = {"sourceOrdinal", "callerRoot", "callerCanonicalId", "callerRva", "instructionRva", "instructionBytes", "instructionLength",
+    "returnAddress", "physicalClassification", "physicalTargetAddress", "sourceDisposition", "compositionDisposition", "targetBindingDisposition",
+    "externalTargetId", "viaForwarder", "memoryProbe", "memoryTransfer", "relocationBinding", "negativeCompleteness"}
+TRANSFER_KEYS = {"address", "length", "bytes", "classification", "pointerSlotAddress", "pointerWidthBytes", "relationship", "rawReadOpcode",
+    "rawReadOpIndex", "rawTransferOpcode", "rawTransferOpIndex", "rawCopyOpIndices", "contextStatus", "unresolvedReason"}
+TRANSFER_CLASSIFICATIONS = {"direct-call", "indirect-call", "direct-jump", "indirect-jump", "return", "ordinary", "unsupported-pcode",
+    "unsupported-context", "unsupported-trap-or-userop", "unsupported-flow"}
+TRANSFER_CONTEXTS = {"language-default-no-commits-v1", "context-change", "unassessed-userop-context", "unassessed-pcode-context"}
+TRANSFER_REFUSALS = {"pcode-bound", "unsupported-transfer-profile", "pcode-varnode-bound", "unsupported-pcode-or-userop",
+    "competing-or-invalid-transfers", "internal-pcode-control", "missing-indirect-transfer", "trailing-pcode-after-transfer", "multiple-memory-loads",
+    "unsupported-pointer-width", "nondefault-memory-space", "register-transfer", "nonmemory-indirect-value", "overlapping-value-write",
+    "missing-value-definition", "unsupported-value-transform", "nondefault-load-space", "nonstatic-load-address", "pointer-slot-wrap",
+    "memory-write-before-read", "typed-flow-disagreement", "not-indirect-transfer", "unsupported-context", "unsupported-pcode",
+    "unsupported-trap-or-userop", "unsupported-flow"}
+
+
+def verify_external_inventory(inventory: dict, namespace: dict, checksum: str, input_sha: str, base: str) -> tuple[dict, dict, dict]:
+    """Closed retained metadata/identity checks; this does not reparse the ELF or re-execute decoding."""
+    fields(inventory, {"schemaVersion", "kind", "authority", "inputSha256", "elfClass", "byteOrder", "elfType", "machine", "imageBase",
+        "activeSymbolTableSectionIndex", "symbolPopulationBasis", "complete", "releaseEligible", "negativeCompleteness",
+        "neededLibraries", "unsupportedReasons"} | set(INVENTORY_ROWS), "dynamic inventory")
+    require(type(inventory["schemaVersion"]) is int and inventory["schemaVersion"] == 1 and
+            inventory["kind"] == "independent-elf-dynamic-bindings-v1" and inventory["authority"] == "diagnostic-authenticated-elf-metadata" and
+            inventory["symbolPopulationBasis"] == "section-declared-dynsym", "inventory boundary differs")
+    false_authority(inventory)
+    require(inventory["inputSha256"] == input_sha and inventory["imageBase"] == base and inventory["elfType"] in {"ET_EXEC", "ET_DYN"},
+            "inventory input/profile differs")
+    for key, value in (("elfClass", 2), ("byteOrder", 1), ("machine", 62)):
+        require(type(inventory[key]) is int and inventory[key] == value, "inventory architecture differs")
+    integer(inventory["activeSymbolTableSectionIndex"], 1, 131071)
+    for key in ("neededLibraries", "unsupportedReasons"):
+        require(type(inventory[key]) is list and len(inventory[key]) <= 65536, "inventory string list exceeds bound")
+        for value in inventory[key]:
+            require(type(value) is str and len(value) <= 16384 and "\0" not in value, "invalid metadata string")
+    for key, (maximum, keys) in INVENTORY_ROWS.items():
+        inventory_rows(inventory[key], keys, maximum, key)
+    # Primitive closure also rules out nested, unrecognized authority objects in scalar fields.
+    address_fields = {"flags", "address", "size", "alignment", "entrySize", "virtualAddress", "physicalAddress", "fileSize", "memorySize", "tag", "value"}
+    string_fields = {"name", "locator", "sectionKind", "providerRequest"}
+    list_fields = {"dynamicTables", "slotLoadIndices", "dispositions", "parentNames", "auxiliaryOffsets"}
+    for group in INVENTORY_ROWS:
+        for row in inventory[group]:
+            for key, value in row.items():
+                if key == "version":
+                    continue  # Closed below with the version schema.
+                if key in list_fields:
+                    require(type(value) is list and len(value) <= 65535, "metadata array exceeds bound")
+                    for item in value:
+                        if key in {"slotLoadIndices", "auxiliaryOffsets"}:
+                            integer(item, 0, (1 << 63) - 1)
+                        else:
+                            require(type(item) is str and len(item) <= 16384, "invalid metadata array string")
+                elif key in string_fields:
+                    require(type(value) is str and len(value) <= 16384 and "\0" not in value, "invalid metadata string")
+                elif key in address_fields and not (key == "flags" and group in {"programHeaders", "versionRequirements", "versionDefinitions"}):
+                    address(value)
+                elif key == "offset" and group in {"programHeaders", "relocations"}:
+                    address(value)
+                elif key in {"slotFileOffset", "addend"} and value is None:
+                    continue
+                else:
+                    integer(value, -(1 << 63) if key == "addend" else 0, (1 << 63) - 1)
+    symbols, relocations, imports = {}, {}, {}
+    namespace_entries = []
+    for symbol in inventory["dynamicSymbols"]:
+        key = (integer(symbol["tableSectionIndex"], 1, 131071), integer(symbol["symbolIndex"], 0, 131071))
+        require(key not in symbols, "duplicate dynamic symbol")
+        symbols[key] = symbol
+        text(symbol["locator"])
+        require(type(symbol["name"]) is str and len(symbol["name"]) <= 16384, "invalid dynamic symbol name")
+        version = symbol["version"]
+        if version is not None:
+            fields(version, SYMBOL_VERSION_KEYS, "symbol version")
+            require(type(version["hidden"]) is bool, "invalid version visibility")
+            for name in ("sectionIndex", "fileOffset", "raw", "index"):
+                integer(version[name], 0, (1 << 63) - 1)
+            text(version["kind"], 128)
+            for name in ("name", "providerRequest"):
+                require(version[name] is None or type(version[name]) is str and len(version[name]) <= 16384, "invalid version request string")
+        if key[1] != 0 and symbol["sectionKind"] == "undefined" and symbol["name"] and symbol["binding"] in (1, 2) and symbol["visibility"] == 0 and symbol["type"] in (0, 2, 10):
+            identity = {"schemaVersion": 1, "namespace": "elf-static-import-request-v1", "inputSha256": input_sha,
+                "symbolTableSectionIndex": key[0], "symbolIndex": key[1],
+                **{name: symbol[name] for name in ("name", "type", "binding", "visibility")},
+                "version": None if version is None else {name: version[name] for name in SYMBOL_VERSION_KEYS - {"sectionIndex", "fileOffset"}},
+                "weakMayRemainNull": symbol["binding"] == 2, "ifuncImplementationUnresolved": symbol["type"] == 10,
+                "runtimeProviderAvailable": False, "runtimeImplementationAvailable": False, "interpositionUnresolved": True}
+            identifier = "ext-" + sha256(canonical_bytes(identity)).hexdigest()
+            imports[key] = identifier
+            namespace_entries.append({"id": identifier, "identity": identity})
+    for relocation in inventory["relocations"]:
+        locator = text(relocation["locator"])
+        require(locator not in relocations, "duplicate relocation locator")
+        require((relocation["symbolTableSectionIndex"], relocation["symbolIndex"]) in symbols, "missing relocation symbol")
+        address(relocation["offset"])
+        relocations[locator] = relocation
+    expected_namespace = {"schemaVersion": 1, "kind": "elf-static-import-request-namespace-v1", "inputSha256": input_sha,
+        "populationBasis": "eligible-section-declared-undefined-dynamic-symbols", "runtimeImplementationAvailable": False,
+        "negativeCompleteness": False, "entries": namespace_entries}
+    require(canonical_bytes(namespace) == canonical_bytes(expected_namespace) and checksum == sha256(canonical_bytes(namespace)).hexdigest(),
+            "namespace identity/population/hash differs")
+    return symbols, relocations, imports
+
+
+class RetainedRelocationIndex:
+    """Recheck positive metadata claims; no ELF reads or instruction decoding occur here.
+
+    Widths mirror ElfRelocationWriteCoverageV1. Sorting once and prefix maximum ends
+    make each candidate's competing-write check constant time, excluding itself.
+    """
+    def __init__(self, inventory: dict, symbols: dict, input_bytes: int):
+        self.inventory = inventory
+        self.mechanism_uncertain = any(reason in {"packed-relr-relocations-not-expanded", "android-packed-relocations-not-expanded", "unclassified-dynamic-tag"}
+                                       for reason in inventory["unsupportedReasons"])
+        self.sections = {row["index"]: row for row in inventory["sections"]}
+        require(len(self.sections) == len(inventory["sections"]), "duplicate retained section index")
+        self.requirements = {}
+        for row in inventory["versionRequirements"]:
+            self.requirements.setdefault((row["stringSectionIndex"], row["index"]), []).append(row)
+        self.supported_versions = {key for key, symbol in symbols.items() if self.import_version(symbol)}
+        self.loads, self.load_positions, self.load_prefix_ends = [], {}, []
+        for row in inventory["programHeaders"]:
+            if row["type"] != 1:
+                continue
+            start, size, file_size, offset = (address(row[key]) for key in ("virtualAddress", "memorySize", "fileSize", "offset"))
+            require(file_size <= size and start + size <= (1 << 64) - 1 and offset + file_size <= input_bytes,
+                    "retained load bounds differ")
+            if size:
+                self.loads.append((start, row["index"], start + size - 1, file_size, offset))
+        self.loads.sort()
+        for index, row in enumerate(self.loads):
+            require(row[1] not in self.load_positions, "duplicate retained load index")
+            self.load_positions[row[1]] = index
+            self.load_prefix_ends.append(max(row[2], self.load_prefix_ends[-1] if self.load_prefix_ends else 0))
+        self.slot_counts, self.active, self.positions = {}, {}, {}
+        self.unknown = self.overflow = False
+        self.writes = []
+        identities = set()
+        for row in inventory["relocations"]:
+            slot = address(row["offset"])
+            self.slot_counts[slot] = self.slot_counts.get(slot, 0) + 1
+            if not row["dynamicTables"] or row["symbolTableSectionIndex"] != inventory["activeSymbolTableSectionIndex"]:
+                continue
+            require(len(row["dynamicTables"]) <= 3 and all(name in {"rela", "rel", "jmprel"} for name in row["dynamicTables"]),
+                    "invalid active dynamic relocation membership")
+            identity = (row["sectionIndex"], row["relocationIndex"])
+            require(identity not in identities, "duplicate active relocation identity")
+            identities.add(identity)
+            kind = row["type"]
+            width = 0 if kind == 0 else 8 if kind in {1, 6, 7, 8, 16, 17, 18, 33, 37, 38} else 4 if kind in {2, 10, 32} else 16 if kind == 36 else None
+            if kind == 5:
+                symbol = symbols[(row["symbolTableSectionIndex"], row["symbolIndex"])]
+                section = self.sections.get(symbol["resolvedSectionIndex"])
+                if symbol["sectionKind"] == "defined" and address(symbol["value"]) == slot and section is not None and address(section["flags"]) & 2:
+                    width = address(symbol["size"])
+            self.active[row["locator"]] = (slot, width)
+            if width is None:
+                self.unknown = True
+            elif width and slot + width - 1 > (1 << 64) - 1:
+                self.overflow = True
+            elif width:
+                self.writes.append((slot, *identity, row["locator"], slot + width - 1))
+        self.writes.sort()
+        self.prefix_ends = []
+        for index, row in enumerate(self.writes):
+            self.positions[row[3]] = index
+            self.prefix_ends.append(max(row[4], self.prefix_ends[-1] if self.prefix_ends else 0))
+
+    def safe_slot(self, locator: str, slot: int) -> bool:
+        if self.unknown or self.overflow or self.active.get(locator) != (slot, 8) or slot > (1 << 64) - 8:
+            return False
+        index = self.positions[locator]
+        return ((index == 0 or self.prefix_ends[index - 1] < slot) and
+                (index + 1 == len(self.writes) or self.writes[index + 1][0] > slot + 7))
+
+    def owned_slot(self, relocation: dict, slot: int) -> bool:
+        if len(relocation["slotLoadIndices"]) != 1 or relocation["slotFileOffset"] is None:
+            return False
+        index = self.load_positions.get(relocation["slotLoadIndices"][0])
+        if index is None:
+            return False
+        start, _, end, file_size, offset = self.loads[index]
+        return (start <= slot and slot + 7 <= end and slot + 8 <= start + file_size and
+                offset + slot - start == relocation["slotFileOffset"] and
+                (index == 0 or self.load_prefix_ends[index - 1] < slot) and
+                (index + 1 == len(self.loads) or self.loads[index + 1][0] > slot + 7))
+
+    def import_version(self, symbol: dict) -> bool:
+        version = symbol["version"]
+        if version is None:
+            return True
+        raw, index = version["raw"], version["index"]
+        if not 0 <= raw <= 65535 or index != raw & 0x7fff or version["hidden"] is not bool(raw & 0x8000):
+            return False
+        if index <= 1:
+            return (version["kind"] == ("local" if index == 0 else "global-unversioned") and
+                    version["name"] is None and version["providerRequest"] is None)
+        table = self.sections.get(symbol["tableSectionIndex"])
+        versym = self.sections.get(version["sectionIndex"])
+        if table is None or table["type"] != 11 or versym is None or versym["type"] != 0x6fffffff or versym["link"] != table["index"]:
+            return False
+        requirements = self.requirements.get((table["link"], index), [])
+        return (version["kind"] == "required-version" and bool(version["name"]) and bool(version["providerRequest"]) and
+                len(requirements) == 1 and requirements[0]["name"] == version["name"] and
+                requirements[0]["providerRequest"] == version["providerRequest"] and requirements[0]["rawIndex"] & 0x7fff == index)
+
+    def static_import(self, relocation: dict, symbol: dict, slot: int) -> bool:
+        return (not self.mechanism_uncertain and self.slot_counts[slot] == 1 and len(relocation["dynamicTables"]) == 1 and
+                self.owned_slot(relocation, slot) and relocation["symbolTableSectionIndex"] == self.inventory["activeSymbolTableSectionIndex"] and
+                relocation["type"] in {6, 7} and relocation["symbolIndex"] != 0 and self.safe_slot(relocation["locator"], slot) and
+                symbol["sectionKind"] == "undefined" and symbol["rawSectionIndex"] == 0 and symbol["resolvedSectionIndex"] == 0 and
+                symbol["binding"] == 1 and symbol["type"] == 2 and symbol["visibility"] == 0 and
+                symbol["info"] == 18 and symbol["other"] & 3 == 0 and bool(symbol["name"]) and
+                (symbol["tableSectionIndex"], symbol["symbolIndex"]) in self.supported_versions)
+
+
+def verify_external_bindings(evidence: dict, request: dict, report: dict, source: dict,
+        source_request_bytes: bytes, source_report_bytes: bytes, source_request: dict, source_report: dict) -> None:
+    version = request.get("schemaVersion")
+    expected_fields = {"schemaVersion", "kind", "richFile", "sourceReport", "sourceRequest", "runtime", "outputPath", "limits", "metadataPolicy"}
+    if version == 2:
+        expected_fields.add("controlRoot")
+    fields(request, expected_fields, "external request")
+    require(type(version) is int and ((version == 1 and request["kind"] == "independent-external-call-request-v1") or
+            (version == 2 and request["kind"] == "independent-external-call-request-v2")),
+            "external request schema differs")
+    informational_path(request["outputPath"])
+    runtime_fields = RUNTIME | RUNTIME_PATHS
+    if version == 2:
+        runtime_fields |= {"bridgeSnapshot", "bundleManifestSnapshot"}
+    runtime = fields(request["runtime"], runtime_fields, "external request runtime")
+    for key in RUNTIME_PATHS:
+        informational_path(runtime[key])
+    if version == 2:
+        verify_runtime_snapshots(request, runtime, "independent-external-call-observations.json")
+    require({key: runtime[key] for key in RUNTIME} == evidence["runtime"], "external request runtime commitment differs")
+    limits = fields(request["limits"], set(EXTERNAL_LIMITS), "external request limits")
+    for key, ceiling in EXTERNAL_LIMITS.items():
+        integer(limits[key], 1, ceiling)
+    require(request["metadataPolicy"] == "elf-dynamic-binding-default-limits-v1", "unsupported metadata policy")
+    require(evidence["inputs"]["rich"] == source["inputs"]["rich"], "source evidence rich input differs")
+    expected_inputs = {"richFile": evidence["inputs"]["rich"], "sourceReport": {"bytes": len(source_report_bytes), "sha256": sha256(source_report_bytes).hexdigest()},
+        "sourceRequest": {"bytes": len(source_request_bytes), "sha256": sha256(source_request_bytes).hexdigest()}}
+    for key, expected in expected_inputs.items():
+        reference = fields(request[key], {"path", "bytes", "sha256"}, "external request input")
+        informational_path(reference["path"])
+        require(type(reference["bytes"]) is int and reference["bytes"] == expected["bytes"] and reference["sha256"] == expected["sha256"],
+                "external request input/source commitment differs")
+    paths = [request[key]["path"] for key in expected_inputs]
+    require(len(set(paths)) == 3 and request["outputPath"] not in paths, "external request paths overlap")
+    fields(report, {"schemaVersion", "kind", "scope", "decoderAuthentication", "complete", "releaseEligible", "negativeCompleteness",
+        "sourceCallRecordsEnumerated", "sourceCallPopulationComplete", "limits", "metadataPolicy", "inputSha256", "inputBytes", "imageBase",
+        "sourceReportSha256", "sourceRequestSha256", "externalNamespaceSha256", "externalNamespace", "sourceCanonicalPopulation", "dynamicInventory",
+        "sites", "counts", "requestSha256", "runtime", "containmentStatus"}, "external report")
+    require(type(report["schemaVersion"]) is int and report["schemaVersion"] == 1 and report["kind"] == "independent-external-call-component-v1" and
+            report["scope"] == "component" and report["decoderAuthentication"] == "authenticated-bundled-worker-v1" and
+            report["containmentStatus"] == "external-owner-required", "external report boundary differs")
+    false_authority(report)
+    require(report["sourceCallRecordsEnumerated"] is True and report["sourceCallPopulationComplete"] is False, "source population authority differs")
+    report_runtime = {key: runtime[key] for key in RUNTIME | RUNTIME_PATHS}
+    require(report["requestSha256"] == evidence["payloads"]["request"]["sha256"] and canonical_bytes(report["runtime"]) == canonical_bytes(report_runtime) and
+            canonical_bytes(report["limits"]) == canonical_bytes(limits) and
+            report["metadataPolicy"] == request["metadataPolicy"], "external report request/runtime/policy commitment differs")
+    require(type(report["inputBytes"]) is int and report["inputBytes"] == request["richFile"]["bytes"] and report["inputSha256"] == request["richFile"]["sha256"] and
+            report["sourceReportSha256"] == request["sourceReport"]["sha256"] and report["sourceRequestSha256"] == request["sourceRequest"]["sha256"],
+            "external report input/source commitment differs")
+    require(report["imageBase"] == source_report["imageBase"], "source image base differs")
+    base = address(report["imageBase"])
+    expected_canonical = [{key: row[key] for key in ("id", "rva", "exclusion")} for row in source_report["canonicalPopulation"]]
+    require(report["sourceCanonicalPopulation"] == expected_canonical, "source canonical population differs")
+    canonical_by_id = {row["id"]: row for row in expected_canonical}
+    canonical_addresses = {base + address(row["rva"]) for row in expected_canonical if row["rva"] is not None}
+    symbols, relocations, imports = verify_external_inventory(report["dynamicInventory"], report["externalNamespace"],
+        report["externalNamespaceSha256"], report["inputSha256"], report["imageBase"])
+    relocation_index = RetainedRelocationIndex(report["dynamicInventory"], symbols, report["inputBytes"])
+    sites = inventory_rows(report["sites"], SITE_KEYS, limits["maximumCalls"], "external sites")
+    require(len(sites) == len(source_report["calls"]), "source physical calls were omitted or duplicated")
+    counts = {}
+    for ordinal, (site, call) in enumerate(zip(sites, source_report["calls"])):
+        require(type(site["sourceOrdinal"]) is int and site["sourceOrdinal"] == ordinal and site["negativeCompleteness"] is False and
+                type(site["viaForwarder"]) is bool, "site identity/authority differs")
+        for key in ("callerRoot", "callerCanonicalId", "callerRva", "instructionRva", "instructionBytes", "instructionLength"):
+            require(type(site[key]) is type(call[key]) and site[key] == call[key], "source physical site differs")
+        require(site["physicalClassification"] == call["classification"] and site["physicalTargetAddress"] == call["directTargetAddress"] and
+                site["sourceDisposition"] == call["disposition"] and site["returnAddress"] == call["fallthroughAddress"], "source physical transfer differs")
+        classification = site["physicalClassification"]
+        target = address(site["physicalTargetAddress"], nullable=True)
+        require(classification in {"direct-call", "indirect-call"} and (classification == "direct-call") == (target is not None),
+                "physical call classification/target differs")
+        location = base + address(site["instructionRva"])
+        require(location <= (1 << 64) - 1 and re.fullmatch(r"(?:[0-9a-f]{2}){1,15}", site["instructionBytes"]) is not None and
+                len(site["instructionBytes"]) == 2 * integer(site["instructionLength"], 1, 15) and
+                address(site["returnAddress"]) == location + site["instructionLength"], "invalid source instruction coordinates")
+        status = site["compositionDisposition"]
+        require(status in EXTERNAL_STATUSES and site["targetBindingDisposition"] in EXTERNAL_STATUSES, "unknown external disposition")
+        caller = canonical_by_id.get(site["callerCanonicalId"])
+        if site["sourceDisposition"] == "unresolved-instruction-overlap":
+            expected_status = "unresolved-source-instruction-boundary"
+        elif caller is None or caller["exclusion"] is not None:
+            expected_status = "unresolved-source-caller"
+        elif site["sourceDisposition"] == "unresolved-target-canonical-exclusion":
+            expected_status = "unresolved-source-target-exclusion"
+        elif site["sourceDisposition"] == "unresolved-target-extent":
+            expected_status = "unresolved-source-target-extent"
+        else:
+            expected_status = site["targetBindingDisposition"]
+        require(status == expected_status, "source disposition authority differs")
+        if site["sourceDisposition"] == "unresolved-instruction-overlap" or target in canonical_addresses:
+            expected_binding = "unresolved-source-instruction-boundary" if site["sourceDisposition"] == "unresolved-instruction-overlap" else "retained-canonical-target"
+            require(site["targetBindingDisposition"] == expected_binding and site["viaForwarder"] is False and
+                    all(site[key] is None for key in ("memoryProbe", "memoryTransfer", "relocationBinding", "externalTargetId")),
+                    "canonical/source-boundary site gained external evidence")
+        else:
+            probe_location = target if classification == "direct-call" else location
+            require(site["viaForwarder"] is (probe_location != location), "forwarding mode differs from physical call destination")
+        counts[status] = counts.get(status, 0) + 1
+        verify_external_site(site, location, symbols, relocations, imports, relocation_index)
+    expected_counts = {"sourcePhysicalSites": len(sites), "composedSiteRecords": len(sites), "namespaceEntries": len(imports), "dispositions": counts}
+    fields(report["counts"], EXTERNAL_COUNTS, "external report counts")
+    require(canonical_bytes(report["counts"]) == canonical_bytes(expected_counts) == canonical_bytes(evidence["counts"]),
+            "external counts differ from retained populations")
+
+
+def verify_external_site(site: dict, location: int, symbols: dict, relocations: dict, imports: dict, relocation_index: RetainedRelocationIndex) -> None:
+    probe, transfer, binding = (site[key] for key in ("memoryProbe", "memoryTransfer", "relocationBinding"))
+    if site["targetBindingDisposition"] == "static-import-request-reference":
+        require(binding is not None and site["externalTargetId"] is not None, "static import disposition has no binding")
+    if probe is None:
+        require(transfer is None and binding is None and site["externalTargetId"] is None, "proof without byte probe")
+        return
+    fields(probe, {"address", "availableBytes", "refusal"}, "memory probe")
+    probe_address = address(probe["address"])
+    expected_address = address(site["physicalTargetAddress"]) if site["physicalClassification"] == "direct-call" else location
+    require(site["viaForwarder"] is (expected_address != location), "forwarding mode differs from physical call destination")
+    require(probe_address == expected_address and re.fullmatch(r"(?:[0-9a-f]{2}){1,15}", probe["availableBytes"]) is not None, "memory probe coordinates differ")
+    if probe["refusal"] is not None:
+        require(re.fullmatch(r"[a-z0-9-]{1,128}", text(probe["refusal"], 128)) is not None and transfer is None and binding is None and
+                site["externalTargetId"] is None, "decoder refusal contains proof")
+        return
+    fields(transfer, TRANSFER_KEYS, "memory transfer")
+    require(transfer["classification"] in TRANSFER_CLASSIFICATIONS and transfer["contextStatus"] in TRANSFER_CONTEXTS, "unknown transfer classification/context")
+    require(address(transfer["address"]) == probe_address and type(transfer["bytes"]) is str and
+            re.fullmatch(r"(?:[0-9a-f]{2}){1,15}", transfer["bytes"]) is not None and
+            len(transfer["bytes"]) == 2 * integer(transfer["length"], 1, 15) and probe["availableBytes"].startswith(transfer["bytes"]), "memory transfer byte commitment differs")
+    if not site["viaForwarder"]:
+        require(transfer["length"] == site["instructionLength"] and transfer["bytes"] == site["instructionBytes"] and
+                transfer["classification"] == site["physicalClassification"], "same-instruction memory receipt differs from physical call")
+    require(type(transfer["rawCopyOpIndices"]) is list and len(transfer["rawCopyOpIndices"]) <= 4096 and
+            transfer["rawCopyOpIndices"] == sorted(set(transfer["rawCopyOpIndices"])), "invalid copy opcode inventory")
+    for index in transfer["rawCopyOpIndices"]:
+        integer(index, 0, 4095)
+    transfer_opcode, transfer_index = transfer["rawTransferOpcode"], transfer["rawTransferOpIndex"]
+    expected_opcode = {"indirect-call": "CALLIND", "indirect-jump": "BRANCHIND"}.get(transfer["classification"])
+    require((transfer_opcode is None) == (transfer_index is None), "transfer opcode/index pairing differs")
+    if transfer_opcode is not None:
+        require(type(transfer_opcode) is str and transfer_opcode == expected_opcode, "transfer opcode/classification differs")
+        integer(transfer_index, 0, 4095)
+    slot = address(transfer["pointerSlotAddress"], nullable=True)
+    if slot is None:
+        require(transfer["relationship"] == "unresolved" and transfer["pointerWidthBytes"] is None and transfer["unresolvedReason"] in TRANSFER_REFUSALS and
+                transfer["rawReadOpcode"] is None and transfer["rawReadOpIndex"] is None and not transfer["rawCopyOpIndices"] and
+                binding is None and site["externalTargetId"] is None, "unresolved transfer contains slot proof")
+        return
+    require(transfer["pointerWidthBytes"] == 8 and type(transfer["pointerWidthBytes"]) is int and slot <= (1 << 64) - 8 and
+            transfer["contextStatus"] == "language-default-no-commits-v1" and transfer["unresolvedReason"] is None and
+            transfer["relationship"] in {"static-ram-varnode-exact-transfer-v1", "single-static-load-exact-transfer-v1"}, "invalid static slot proof")
+    require(transfer["classification"] in {"indirect-call", "indirect-jump"} and
+            transfer["rawTransferOpcode"] == ("CALLIND" if transfer["classification"] == "indirect-call" else "BRANCHIND"), "transfer opcode/classification differs")
+    read_index = integer(transfer["rawReadOpIndex"], 0, 4095)
+    transfer_index = integer(transfer["rawTransferOpIndex"], read_index, 4095)
+    copies = transfer["rawCopyOpIndices"]
+    require(all(read_index <= index < transfer_index for index in copies), "copy opcode is outside transfer chain")
+    if transfer["relationship"] == "single-static-load-exact-transfer-v1":
+        require(transfer["rawReadOpcode"] == "LOAD" and read_index < transfer_index and all(index > read_index for index in copies), "invalid LOAD chain")
+    elif transfer["rawReadOpcode"] == "COPY":
+        require(bool(copies) and copies[0] == read_index and read_index < transfer_index, "invalid implicit memory COPY chain")
+    else:
+        require(transfer["rawReadOpcode"] == transfer["rawTransferOpcode"] and read_index == transfer_index and not copies, "invalid implicit memory transfer")
+    if binding is None:
+        require(site["externalTargetId"] is None, "external identity without relocation binding")
+        return
+    fields(binding, {"slotAddress", "relocationLocator", "relocationType", "relocationAddend", "dynamicTables", "slotLoadIndices", "slotFileOffset",
+        "relocationDispositions", "writeCoverage", "symbolTableSectionIndex", "symbolIndex", "symbolLocator", "runtimeImplementationAvailable",
+        "runtimeProviderAvailable"}, "relocation binding")
+    require(binding["runtimeImplementationAvailable"] is False and binding["runtimeProviderAvailable"] is False and address(binding["slotAddress"]) == slot,
+            "binding grants runtime authority or differs from slot")
+    relocation = relocations.get(binding["relocationLocator"])
+    require(relocation is not None and address(relocation["offset"]) == slot, "missing slot relocation")
+    for target, source in (("relocationType", "type"), ("relocationAddend", "addend"), ("relocationDispositions", "dispositions"),
+            ("dynamicTables", "dynamicTables"), ("slotLoadIndices", "slotLoadIndices"), ("slotFileOffset", "slotFileOffset"),
+            ("symbolTableSectionIndex", "symbolTableSectionIndex"), ("symbolIndex", "symbolIndex")):
+        require(canonical_bytes(binding[target]) == canonical_bytes(relocation[source]), "relocation binding differs from inventory")
+    key = (relocation["symbolTableSectionIndex"], relocation["symbolIndex"])
+    require(binding["symbolLocator"] == symbols[key]["locator"] and site["externalTargetId"] == imports.get(key), "external symbol identity differs")
+    coverage = fields(binding["writeCoverage"], {"kind", "slotAddress", "candidateLocator", "candidateActive", "candidateCoversSlot", "slotAddressOverflow",
+        "unknownWriteWidth", "writeAddressOverflow", "overlappingWrite", "overlapLocator", "unknownWidthLocator", "overflowLocator",
+        "safeForStaticSlotAssociation", "negativeCompleteness"}, "relocation write coverage")
+    require(coverage["kind"] == "elf-relocation-slot-write-coverage-v1" and coverage["slotAddress"] == binding["slotAddress"] and
+            coverage["candidateLocator"] == binding["relocationLocator"] and coverage["negativeCompleteness"] is False, "write coverage boundary differs")
+    flags = ("candidateActive", "candidateCoversSlot", "slotAddressOverflow", "unknownWriteWidth", "writeAddressOverflow", "overlappingWrite", "safeForStaticSlotAssociation")
+    require(all(type(coverage[key]) is bool for key in flags), "write coverage flags must be booleans")
+    for flag, locator in (("overlappingWrite", "overlapLocator"), ("unknownWriteWidth", "unknownWidthLocator"), ("writeAddressOverflow", "overflowLocator")):
+        if coverage[locator] is not None:
+            text(coverage[locator])
+        require(coverage[flag] is (coverage[locator] is not None), "write coverage flag/witness differs")
+    safe = coverage["candidateActive"] and coverage["candidateCoversSlot"] and not any(coverage[key] for key in flags[2:6])
+    require(coverage["safeForStaticSlotAssociation"] is safe, "write coverage summary differs")
+    if site["targetBindingDisposition"] == "static-import-request-reference":
+        require(safe and site["externalTargetId"] is not None and relocation_index.static_import(relocation, symbols[key], slot) and
+                transfer["classification"] == ("indirect-jump" if site["viaForwarder"] else "indirect-call"),
+                "static import disposition contradicts retained binding")
+
+
+def verify_envelope(evidence: dict, kind: str) -> None:
     fields(evidence, {"schemaVersion", "kind", "authority", "complete", "releaseEligible", "negativeCompleteness", "containmentStatus",
-        "counts", "inputs", "payloads", "producerJar", "runtime", "source"}, "evidence")
-    require(type(evidence["schemaVersion"]) is int and evidence["schemaVersion"] == 1 and evidence["kind"] == "retained-machine-call-component-evidence" and
+        "counts", "inputs", "payloads", "producerJar", "runtime", "source"} | ({"sourceEvidence"} if kind == EXTERNAL_KIND else set()), "evidence")
+    require(type(evidence["schemaVersion"]) is int and evidence["schemaVersion"] == 1 and evidence["kind"] == kind and
             evidence["authority"] == "component-only" and evidence["containmentStatus"] == "external-owner-required", "unsupported evidence boundary")
     false_authority(evidence)
-    fields(evidence["counts"], COUNTS, "evidence counts")
-    for value in evidence["counts"].values():
-        integer(value, 0, 10000000)
+    fields(evidence["counts"], EXTERNAL_COUNTS if kind == EXTERNAL_KIND else COUNTS, "evidence counts")
+    for key, value in evidence["counts"].items():
+        if key == "dispositions":
+            require(type(value) is dict, "invalid disposition counts")
+            for disposition, count in value.items():
+                text(disposition, 128)
+                integer(count, 1, 100000)
+        else:
+            integer(value, 0, 10000000)
     fields(evidence["runtime"], RUNTIME, "evidence runtime")
     runtime = evidence["runtime"]
     require(type(runtime["archiveBytes"]) is int and runtime["archiveBytes"] == 569445154 and
@@ -348,22 +866,30 @@ def verify_evidence(evidence_path: Path) -> tuple[bytes, dict]:
         digest(runtime[key])
     # Metadata only: no producer-JAR bytes are retained, loaded, or attested by this verifier.
     file_reference(evidence["producerJar"])
-    inputs = fields(evidence["inputs"], {"artifactManifest", "canonicalOracle", "rich"}, "evidence inputs")
+    inputs = fields(evidence["inputs"], {"rich"} if kind == EXTERNAL_KIND else {"artifactManifest", "canonicalOracle", "rich"}, "evidence inputs")
     for reference in inputs.values():
         file_reference(reference)
+
+
+def read_payloads(evidence: dict, load) -> tuple[bytes, bytes, dict, dict]:
+    """load consumes a relative payload reference, never an original-host request path."""
     payloads = fields(evidence["payloads"], {"report", "request"}, "evidence payloads")
     file_reference(payloads["request"])
     file_reference(payloads["report"], stored=True)
     require(payloads["report"]["path"] != payloads["request"]["path"], "payload paths overlap")
-    request_bytes = read_file(evidence_path.parent / payloads["request"]["path"], MAX_CONTROL_BYTES)
+    request_bytes = load(payloads["request"], MAX_CONTROL_BYTES)
     verify_bytes(request_bytes, payloads["request"])
-    report_stored = read_file(evidence_path.parent / payloads["report"]["path"], MAX_BYTES)
+    report_reference = payloads["report"]
+    report_stored = load({"path": report_reference["path"], "bytes": report_reference["storedBytes"],
+                          "sha256": report_reference["storedSha256"]}, MAX_BYTES)
     verify_bytes(report_stored, payloads["report"], stored=True)
     report_bytes = inflate_report(report_stored)
     verify_bytes(report_bytes, payloads["report"])
     request, report = parse_canonical(request_bytes, MAX_CONTROL_BYTES), parse_canonical(report_bytes)
-    verify_report_bindings(evidence, request, report)
-    require(len(report_bytes) <= request["limits"]["maximumOutputBytes"], "report exceeds committed output limit")
+    return request_bytes, report_bytes, request, report
+
+
+def verify_source(evidence: dict, expected_paths: set[str]) -> str:
     source = fields(evidence["source"], {"commit", "tree", "files"}, "source provenance")
     commit, tree = digest(source["commit"], 40), digest(source["tree"], 40)
     try:
@@ -372,26 +898,71 @@ def verify_evidence(evidence_path: Path) -> tuple[bytes, dict]:
         raise VerificationError(f"recorded source commit {commit} is unavailable or invalid; fetch that commit's history before offline verification") from error
     verify_git_object(tree, "tree")
     require(git(["show", "-s", "--format=%T", commit], 64) == (tree + "\n").encode(), "recorded source commit/tree disagree")
-    require(type(source["files"]) is list and len(source["files"]) == len(SOURCE_PATHS), "incomplete source inventory")
+    require(type(source["files"]) is list and len(source["files"]) == len(expected_paths), "incomplete source inventory")
     for reference in source["files"]:
         file_reference(reference)
-    require([item["path"] for item in source["files"]] == sorted(SOURCE_PATHS), "source inventory is not exact and ordered")
-    for reference in [*source["files"], *inputs.values()]:
+    require([item["path"] for item in source["files"]] == sorted(expected_paths), "source inventory is not exact and ordered")
+    for reference in [*source["files"], *evidence["inputs"].values()]:
         verify_git_blob(commit, reference)
+    return commit
+
+
+def verify_machine_evidence(evidence: dict, load) -> tuple[bytes, bytes, dict, dict]:
+    # Intentionally single-level: an external manifest cannot be used as source evidence.
+    verify_envelope(evidence, MACHINE_KIND)
+    payloads = read_payloads(evidence, load)
+    request_bytes, report_bytes, request, report = payloads
+    verify_report_bindings(evidence, request, report)
+    require(len(report_bytes) <= request["limits"]["maximumOutputBytes"], "report exceeds committed output limit")
+    verify_source(evidence, SOURCE_PATHS)
+    return payloads
+
+
+def verify_evidence(evidence_path: Path) -> tuple[bytes, dict]:
+    evidence_path = repository_path(evidence_path, existing=True)
+    evidence = parse_canonical(read_file(evidence_path, MAX_CONTROL_BYTES), MAX_CONTROL_BYTES)
+    load = lambda reference, maximum: read_file(evidence_path.parent / reference["path"], maximum)
+    if evidence.get("kind") == MACHINE_KIND:
+        _, report_bytes, _, _ = verify_machine_evidence(evidence, load)
+    else:
+        verify_envelope(evidence, EXTERNAL_KIND)
+        payloads = read_payloads(evidence, load)
+        external_request = payloads[2]
+        external_request_version = external_request.get("schemaVersion")
+        require(type(external_request_version) is int and external_request_version in (1, 2),
+                "unsupported external request source inventory version")
+        expected_source_paths = EXTERNAL_SOURCE_PATHS_V1 if external_request_version == 1 else EXTERNAL_SOURCE_PATHS_V2
+        commit = verify_source(evidence, expected_source_paths)
+        source_reference = file_reference(evidence["sourceEvidence"])
+        source = parse_canonical(read_git_blob(commit, source_reference, MAX_CONTROL_BYTES), MAX_CONTROL_BYTES)
+        parent = PurePosixPath(source_reference["path"]).parent
+
+        def load_source(reference: dict, maximum: int) -> bytes:
+            path = relative_path(str(parent / relative_path(reference["path"])))
+            return read_git_blob(commit, reference | {"path": path}, maximum)
+
+        source_request_bytes, source_report_bytes, source_request, source_report = verify_machine_evidence(source, load_source)
+        _, report_bytes, request, report = payloads
+        verify_external_bindings(evidence, request, report, source, source_request_bytes, source_report_bytes, source_request, source_report)
+        require(len(report_bytes) <= request["limits"]["maximumOutputBytes"], "report exceeds committed output limit")
     return report_bytes, evidence["counts"]
 
 
 def extract_report(destination: Path, report_bytes: bytes) -> None:
-    destination = repository_path(destination, existing=False)
-    descriptor = os.open(destination, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
-    try:
-        with os.fdopen(descriptor, "wb") as stream:
-            stream.write(report_bytes)
-            stream.flush()
-            os.fsync(stream.fileno())
-    except BaseException:
-        destination.unlink()
-        raise
+    with repository_parent(destination) as (parent, name):
+        try:
+            descriptor = os.open(name, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC,
+                                 0o600, dir_fd=parent)
+        except FileExistsError as error:
+            raise VerificationError("extraction destination already exists") from error
+        try:
+            with os.fdopen(descriptor, "wb") as stream:
+                stream.write(report_bytes)
+                stream.flush()
+                os.fsync(stream.fileno())
+        except BaseException:
+            os.unlink(name, dir_fd=parent)
+            raise
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -406,8 +977,12 @@ def main(argv: list[str] | None = None) -> int:
     except (VerificationError, OSError, subprocess.SubprocessError, KeyError, TypeError) as error:
         print(f"verification failed: {error}", file=sys.stderr)
         return 1
-    print(f"verified retained component payloads and recorded Git blobs: {counts['physicalCallSites']} call sites, "
-          f"{counts['positiveInternalCallSites']} positive internal sites")
+    if "physicalCallSites" in counts:
+        print(f"verified retained component payloads and recorded Git blobs: {counts['physicalCallSites']} call sites, "
+              f"{counts['positiveInternalCallSites']} positive internal sites")
+    else:
+        print(f"verified retained component payloads and recorded Git blobs: {counts['sourcePhysicalSites']} source call sites, "
+              f"{counts['namespaceEntries']} static import requests")
     print("Component-only; no production qualification. Producer JAR identity is a recorded build observation; "
           "its bytes and source-to-binary attestation are not verified.")
     if arguments.extract_report is not None:

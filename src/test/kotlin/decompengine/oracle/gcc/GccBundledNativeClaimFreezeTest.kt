@@ -7,6 +7,7 @@ import decompengine.oracle.core.OracleArtifacts
 import decompengine.oracle.core.OracleJson
 import decompengine.oracle.fulltree.FullTreeElfExecutableRange
 import decompengine.oracle.structural.NativeRecoveredCallPopulationLimitsV1
+import decompengine.oracle.externalcalls.FrozenNativeExternalClaimsV1
 import java.nio.file.Files
 import java.nio.file.Path
 import java.nio.file.StandardCopyOption
@@ -253,6 +254,45 @@ class GccBundledNativeClaimFreezeTest {
                     assertFails { constructor.newInstance(*arguments) }
                 }
             }
+        }
+    }
+
+    @Test
+    fun `dual freezes bind identical original bytes model and complete raw census`() = fixture { fixture ->
+        val captured = fixture.capture()
+        val core = fixture.freeze(captured)
+        val external = FrozenNativeExternalClaimsV1.freeze(core.rawManifestBytes, core.rawObservationBytes, captured.summary.bindings)
+        requireGccDualNativeFreezeMatches(core, external, captured.summary.bindings)
+        assertEquals(9L, external.rawRecordCount)
+        assertEquals(3L, external.rawSiteCount)
+        assertContentEquals(core.rawManifestBytes, external.rawManifestBytes)
+        assertContentEquals(core.rawObservationBytes, external.rawObservationBytes)
+        val again = FrozenNativeExternalClaimsV1.freeze(external.rawManifestBytes, external.rawObservationBytes, captured.summary.bindings)
+        assertContentEquals(external.canonicalEvidenceBytes, again.canonicalEvidenceBytes)
+        external.rawObservationBytes.fill(0)
+        requireGccDualNativeFreezeMatches(core, external, captured.summary.bindings)
+        assertFalse(external.productionVerified)
+    }
+
+    @Test
+    fun `dual freeze cannot replace guarded bindings or adopt a different source`() = fixture { fixture ->
+        val captured = fixture.capture()
+        val core = fixture.freeze(captured)
+        val external = FrozenNativeExternalClaimsV1.freeze(core.rawManifestBytes, core.rawObservationBytes, captured.summary.bindings)
+        assertFails { requireGccDualNativeFreezeMatches(core, external,
+            captured.summary.bindings.copy(programModelSha256 = "0".repeat(64))) }
+        fixture.replace("reports/native-calls-v1/native-calls.json")
+        assertFails { fixture.requireUnchanged(captured) }
+        assertFails { fixture.freeze(captured) }
+        assertContentEquals(core.rawObservationBytes, external.rawObservationBytes)
+    }
+
+    @Test
+    fun `combined external operation has no public raw report or boolean credential constructor`() {
+        for (constructor in GccBundledExternalCallReplayOperation::class.java.constructors) {
+            assertTrue(GccBundledMachineCallReplayOperation::class.java in constructor.parameterTypes)
+            assertFalse(Boolean::class.javaPrimitiveType in constructor.parameterTypes)
+            assertFails { constructor.newInstance(*arrayOfNulls<Any>(constructor.parameterCount)) }
         }
     }
 

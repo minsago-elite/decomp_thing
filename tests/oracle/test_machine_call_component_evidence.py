@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from contextlib import redirect_stdout
+import copy
 from hashlib import sha256
 import gzip
 import importlib.util
@@ -28,6 +29,24 @@ def reference(path: str, data: bytes) -> dict:
 
 
 class MachineCallComponentEvidenceTest(unittest.TestCase):
+    def test_v2_runtime_snapshots_bind_fixed_source_roles_and_exact_control_root(self) -> None:
+        request = copy.deepcopy(self.request)
+        root = "/unavailable/owned-control"
+        request.update(schemaVersion=2, kind="independent-machine-call-request-v2", controlRoot=root,
+                       outputPath=root + "/reports/independent-machine-call-observations.json")
+        request["runtime"].update(
+            bridgeSnapshot={"path": root + "/runtime/ghidra-bridge.runtime", "bytes": 128, "sha256": "a" * 64},
+            bundleManifestSnapshot={"path": root + "/runtime/ghidra-bundle-manifest.runtime", "bytes": 32, "sha256": "b" * 64})
+        VERIFY.verify_runtime_snapshots(request, request["runtime"], "independent-machine-call-observations.json")
+        tampered = copy.deepcopy(request)
+        tampered["runtime"]["bridgeSnapshot"]["path"] = root + "/elsewhere.runtime"
+        with self.assertRaises(VERIFY.VerificationError):
+            VERIFY.verify_runtime_snapshots(tampered, tampered["runtime"], "independent-machine-call-observations.json")
+        tampered = copy.deepcopy(request)
+        tampered["outputPath"] = root + "/state/redirect.json"
+        with self.assertRaises(VERIFY.VerificationError):
+            VERIFY.verify_runtime_snapshots(tampered, tampered["runtime"], "independent-machine-call-observations.json")
+
     def setUp(self) -> None:
         temporary_root = ROOT / "build/machine-call-evidence-controls"
         temporary_root.mkdir(parents=True, exist_ok=True)
@@ -43,6 +62,7 @@ class MachineCallComponentEvidenceTest(unittest.TestCase):
             return subprocess.run(["git", "-C", str(self.root), *arguments], env=environment,
                                   stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=True, timeout=10).stdout.decode().strip()
 
+        self.git = git
         git("init", "--quiet")
         sources = []
         for index, path in enumerate(sorted(VERIFY.SOURCE_PATHS)):
@@ -221,14 +241,14 @@ verify = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(verify)
 verify.REPOSITORY_ROOT = Path(sys.argv[2])
 victim = verify.REPOSITORY_ROOT / "fifo-substitution.bin"
-original = verify.repository_path
-def substitute(path, *, existing):
-    selected = original(path, existing=existing)
-    assert selected == victim and existing
-    selected.unlink()
-    os.mkfifo(selected, 0o600)
-    return selected
-verify.repository_path = substitute
+original = os.open
+def substitute(path, flags, *args, **kwargs):
+    if path == victim.name:
+        assert kwargs.get("dir_fd") is not None
+        victim.unlink()
+        os.mkfifo(victim, 0o600)
+    return original(path, flags, *args, **kwargs)
+os.open = substitute
 try:
     verify.read_file(victim, 64)
 except verify.VerificationError:
@@ -242,6 +262,81 @@ else:
             env=os.environ | {"PYTHONDONTWRITEBYTECODE": "1"}, stdout=subprocess.PIPE,
             stderr=subprocess.PIPE, timeout=5, check=True)
         self.assertIn(b"real FIFO substitution refused", result.stdout)
+
+    def test_parent_substitution_cannot_redirect_read_create_or_failure_cleanup(self) -> None:
+        # Deterministic syscall-boundary substitutions, not timing-dependent race loops.
+        for operation in ("read", "create", "cleanup"):
+            with self.subTest(operation=operation):
+                base = self.root / operation
+                repository = base / "repository"
+                parent = repository / "parent"
+                outside = base / "outside"
+                parent.mkdir(parents=True)
+                outside.mkdir()
+                held = repository / "held-parent"
+                destination = parent / "report.json"
+                sentinel = outside / destination.name
+                sentinel.write_bytes(b"outside sentinel")
+                if operation == "read":
+                    destination.write_bytes(b"inside input")
+                original_open = os.open
+                substituted = False
+
+                def substitute(path, flags, *args, **kwargs):
+                    nonlocal substituted
+                    if path == destination.name:
+                        self.assertIsNotNone(kwargs.get("dir_fd"))
+                        self.assertFalse(substituted)
+                        parent.rename(held)
+                        parent.symlink_to(outside, target_is_directory=True)
+                        substituted = True
+                    return original_open(path, flags, *args, **kwargs)
+
+                with mock.patch.object(VERIFY, "REPOSITORY_ROOT", repository), mock.patch.object(VERIFY.os, "open", substitute):
+                    if operation == "read":
+                        self.assertEqual(b"inside input", VERIFY.read_file(destination, 64))
+                    elif operation == "create":
+                        VERIFY.extract_report(destination, b"inside output")
+                        self.assertEqual(b"inside output", (held / destination.name).read_bytes())
+                    else:
+                        with mock.patch.object(VERIFY.os, "fsync", side_effect=OSError("authored write failure")):
+                            with self.assertRaisesRegex(OSError, "authored write failure"):
+                                VERIFY.extract_report(destination, b"partial output")
+                        self.assertFalse((held / destination.name).exists())
+                self.assertTrue(substituted)
+                self.assertEqual(b"outside sentinel", sentinel.read_bytes())
+
+    def test_parent_substitution_before_directory_open_is_rejected(self) -> None:
+        parent = self.root / "race-parent"
+        parent.mkdir()
+        outside = self.root / "race-outside"
+        outside.mkdir()
+        original_open = os.open
+
+        def substitute(path, flags, *args, **kwargs):
+            if path == parent.name:
+                parent.rename(self.root / "race-held")
+                parent.symlink_to(outside, target_is_directory=True)
+            return original_open(path, flags, *args, **kwargs)
+
+        with mock.patch.object(VERIFY.os, "open", substitute):
+            with self.assertRaises(OSError):
+                VERIFY.extract_report(parent / "report.json", b"must not escape")
+        self.assertEqual([], list(outside.iterdir()))
+
+    def test_read_refuses_symlink_parent_final_symlink_and_oversized_input(self) -> None:
+        victim = self.root / "input.bin"
+        victim.write_bytes(b"bounded input")
+        link = self.root / "input-link"
+        link.symlink_to(victim)
+        parent_link = self.root / "input-parent-link"
+        parent_link.symlink_to(self.directory, target_is_directory=True)
+        for candidate in (link, parent_link / "request.json", self.directory):
+            with self.subTest(path=candidate):
+                with self.assertRaises((VERIFY.VerificationError, OSError)):
+                    VERIFY.read_file(candidate, 64)
+        with self.assertRaises(VERIFY.VerificationError):
+            VERIFY.read_file(victim, 1)
 
     def test_extraction_refuses_overwrite_symlinks_missing_parent_and_repository_escape(self) -> None:
         recovered, _ = self.verify()
@@ -259,6 +354,508 @@ else:
                     VERIFY.extract_report(destination, recovered)
         self.assertEqual(recovered, output.read_bytes())
         self.assertFalse((self.directory / "output.json").exists())
+
+
+class ExternalCallComponentEvidenceTest(unittest.TestCase):
+    def test_v2_external_runtime_snapshot_bindings_are_fixed_and_report_scoped(self) -> None:
+        control = "/unavailable/external-control"
+        request = {"controlRoot": control, "outputPath": control + "/reports/independent-external-call-observations.json",
+            "runtime": {"bridgeSha256": "a" * 64, "bundleManifestSha256": "b" * 64,
+                "bridgeSnapshot": {"path": control + "/runtime/ghidra-bridge.runtime", "bytes": 64, "sha256": "a" * 64},
+                "bundleManifestSnapshot": {"path": control + "/runtime/ghidra-bundle-manifest.runtime", "bytes": 16, "sha256": "b" * 64}}}
+        VERIFY.verify_runtime_snapshots(request, request["runtime"], "independent-external-call-observations.json")
+        for key, field, value in (("bridgeSnapshot", "sha256", "c" * 64),
+                                  ("bundleManifestSnapshot", "path", control + "/runtime/other.runtime")):
+            tampered = copy.deepcopy(request)
+            tampered["runtime"][key][field] = value
+            with self.assertRaises(VERIFY.VerificationError):
+                VERIFY.verify_runtime_snapshots(tampered, tampered["runtime"], "independent-external-call-observations.json")
+
+    # Reuse the tiny authored Git fixture without inheriting/re-running the eight machine controls.
+    write_manifest = MachineCallComponentEvidenceTest.write_manifest
+    write_payloads = MachineCallComponentEvidenceTest.write_payloads
+    verify = MachineCallComponentEvidenceTest.verify
+
+    def setUp(self) -> None:
+        MachineCallComponentEvidenceTest.setUp(self)
+        call = self.report["calls"][0]
+        call.update(instructionBytes="e8eb0f0000", directTargetRva="0x1000", directTargetAddress="0x2000",
+            rawPcodeCallTargetAddress="0x2000", directTargetAddresses=["0x2000"], targetCanonicalId=None,
+            disposition="unresolved-target-outside-canonical-population")
+        for counts in (self.report["counts"], self.evidence["counts"]):
+            counts.update(positiveInternalCallSites=0, unresolvedCallSites=1)
+        self.write_payloads()
+        self.source_evidence = copy.deepcopy(self.evidence)
+        self.source_report = copy.deepcopy(self.report)
+        self.source_request = copy.deepcopy(self.request)
+        self.source_manifest = self.manifest
+        self.source_directory = self.directory
+        for index, path in enumerate(sorted(VERIFY.EXTERNAL_SOURCE_PATHS - VERIFY.SOURCE_PATHS)):
+            destination = self.root / path
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            destination.write_bytes(f"authored external source {index}\n".encode())
+        self.git("add", ".")
+        self.commit("authored external source and retained machine payloads")
+        source = self.source_provenance()
+        runtime = copy.deepcopy(self.source_request["runtime"])
+        runtime["bridgeSha256"] = "c" * 64  # The new bridge legitimately differs from the source run's bridge.
+        self.request = {"schemaVersion": 1, "kind": "independent-external-call-request-v1",
+            "richFile": copy.deepcopy(self.source_request["richFile"]),
+            "sourceReport": self.source_evidence["payloads"]["report"] | {"path": "/unavailable/source-report.json"},
+            "sourceRequest": self.source_evidence["payloads"]["request"] | {"path": "/unavailable/source-request.json"},
+            "runtime": runtime, "outputPath": "/unavailable/external-report.json", "limits": dict(VERIFY.EXTERNAL_LIMITS),
+            "metadataPolicy": "elf-dynamic-binding-default-limits-v1"}
+        self.request["sourceReport"] = {key: self.request["sourceReport"][key] for key in ("path", "bytes", "sha256")}
+        input_sha = self.source_report["inputSha256"]
+        symbol = {"tableSectionIndex": 1, "symbolIndex": 1, "locator": "dynsym:1:1", "nameOffset": 1, "name": "imported_function",
+            "info": 18, "other": 0, "type": 2, "binding": 1, "visibility": 0, "rawSectionIndex": 0, "resolvedSectionIndex": 0,
+            "sectionKind": "undefined", "value": "0x0", "size": "0x0", "version": None}
+        relocation = {"sectionIndex": 2, "relocationIndex": 0, "fileOffset": 0, "locator": "rela:2:0", "symbolTableSectionIndex": 1,
+            "symbolIndex": 1, "offset": "0x3000", "type": 7, "addend": 0, "dynamicTables": ["jmprel"],
+            "slotFileOffset": 0, "slotLoadIndices": [0], "dispositions": []}
+        inventory = {"schemaVersion": 1, "kind": "independent-elf-dynamic-bindings-v1", "authority": "diagnostic-authenticated-elf-metadata",
+            "inputSha256": input_sha, "elfClass": 2, "byteOrder": 1, "elfType": "ET_DYN", "machine": 62, "imageBase": "0x1000",
+            "activeSymbolTableSectionIndex": 1, "symbolPopulationBasis": "section-declared-dynsym", "complete": False,
+            "releaseEligible": False, "negativeCompleteness": False, "sections": [], "programHeaders": [{"index": 0, "type": 1,
+                "flags": 6, "offset": "0x0", "virtualAddress": "0x3000", "physicalAddress": "0x3000", "fileSize": "0x8",
+                "memorySize": "0x8", "alignment": "0x1"}], "dynamicEntries": [],
+            "dynamicSymbols": [symbol], "relocations": [relocation], "versionRequirements": [], "versionDefinitions": [],
+            "neededLibraries": ["libexample.so"], "unsupportedReasons": ["runtime-provider-and-interposition-unresolved"]}
+        identity = {"schemaVersion": 1, "namespace": "elf-static-import-request-v1", "inputSha256": input_sha,
+            "symbolTableSectionIndex": 1, "symbolIndex": 1, "name": "imported_function", "type": 2, "binding": 1, "visibility": 0,
+            "version": None, "weakMayRemainNull": False, "ifuncImplementationUnresolved": False, "runtimeProviderAvailable": False,
+            "runtimeImplementationAvailable": False, "interpositionUnresolved": True}
+        identifier = "ext-" + sha256(VERIFY.canonical_bytes(identity)).hexdigest()
+        namespace = {"schemaVersion": 1, "kind": "elf-static-import-request-namespace-v1", "inputSha256": input_sha,
+            "populationBasis": "eligible-section-declared-undefined-dynamic-symbols", "runtimeImplementationAvailable": False,
+            "negativeCompleteness": False, "entries": [{"id": identifier, "identity": identity}]}
+        coverage = {"kind": "elf-relocation-slot-write-coverage-v1", "slotAddress": "0x3000", "candidateLocator": "rela:2:0",
+            "candidateActive": True, "candidateCoversSlot": True, "slotAddressOverflow": False, "unknownWriteWidth": False,
+            "writeAddressOverflow": False, "overlappingWrite": False, "overlapLocator": None, "unknownWidthLocator": None,
+            "overflowLocator": None, "safeForStaticSlotAssociation": True, "negativeCompleteness": False}
+        binding = {"slotAddress": "0x3000", "relocationLocator": "rela:2:0", "relocationType": 7, "relocationAddend": 0,
+            "dynamicTables": ["jmprel"], "slotLoadIndices": [0], "slotFileOffset": 0, "relocationDispositions": [],
+            "writeCoverage": coverage, "symbolTableSectionIndex": 1, "symbolIndex": 1, "symbolLocator": "dynsym:1:1",
+            "runtimeImplementationAvailable": False, "runtimeProviderAvailable": False}
+        transfer = {"address": "0x2000", "length": 6, "bytes": "ff25fa0f0000", "classification": "indirect-jump",
+            "pointerSlotAddress": "0x3000", "pointerWidthBytes": 8, "relationship": "static-ram-varnode-exact-transfer-v1",
+            "rawReadOpcode": "BRANCHIND", "rawReadOpIndex": 0, "rawTransferOpcode": "BRANCHIND", "rawTransferOpIndex": 0,
+            "rawCopyOpIndices": [], "contextStatus": "language-default-no-commits-v1", "unresolvedReason": None}
+        site = {key: call[key] for key in ("callerRoot", "callerCanonicalId", "callerRva", "instructionRva", "instructionBytes", "instructionLength")}
+        site.update(sourceOrdinal=0, returnAddress=call["fallthroughAddress"], physicalClassification=call["classification"],
+            physicalTargetAddress=call["directTargetAddress"], sourceDisposition=call["disposition"], compositionDisposition="static-import-request-reference",
+            targetBindingDisposition="static-import-request-reference", externalTargetId=identifier, viaForwarder=True,
+            memoryProbe={"address": "0x2000", "availableBytes": "ff25fa0f0000", "refusal": None}, memoryTransfer=transfer,
+            relocationBinding=binding, negativeCompleteness=False)
+        counts = {"sourcePhysicalSites": 1, "composedSiteRecords": 1, "namespaceEntries": 1, "dispositions": {"static-import-request-reference": 1}}
+        self.report = {"schemaVersion": 1, "kind": "independent-external-call-component-v1", "scope": "component",
+            "decoderAuthentication": "authenticated-bundled-worker-v1", "complete": False, "releaseEligible": False,
+            "negativeCompleteness": False, "sourceCallRecordsEnumerated": True, "sourceCallPopulationComplete": False,
+            "limits": dict(VERIFY.EXTERNAL_LIMITS), "metadataPolicy": "elf-dynamic-binding-default-limits-v1", "inputSha256": input_sha,
+            "inputBytes": self.source_report["inputBytes"], "imageBase": "0x1000", "sourceReportSha256": self.request["sourceReport"]["sha256"],
+            "sourceRequestSha256": self.request["sourceRequest"]["sha256"], "externalNamespaceSha256": sha256(VERIFY.canonical_bytes(namespace)).hexdigest(),
+            "externalNamespace": namespace, "sourceCanonicalPopulation": [{key: row[key] for key in ("id", "rva", "exclusion")}
+                for row in self.source_report["canonicalPopulation"]], "dynamicInventory": inventory, "sites": [site], "counts": copy.deepcopy(counts),
+            "requestSha256": "", "runtime": runtime, "containmentStatus": "external-owner-required"}
+        self.evidence = {"schemaVersion": 1, "kind": VERIFY.EXTERNAL_KIND, "authority": "component-only", "complete": False,
+            "releaseEligible": False, "negativeCompleteness": False, "containmentStatus": "external-owner-required", "counts": counts,
+            "inputs": {"rich": copy.deepcopy(self.source_evidence["inputs"]["rich"])}, "payloads": {},
+            "producerJar": copy.deepcopy(self.source_evidence["producerJar"]), "runtime": {key: runtime[key] for key in VERIFY.RUNTIME},
+            "source": source, "sourceEvidence": reference("evidence/evidence.json", self.source_manifest.read_bytes())}
+        self.directory = self.root / "external-evidence"
+        self.directory.mkdir()
+        self.manifest = self.directory / "evidence.json"
+        self.write_payloads()
+        self.assertEqual(VERIFY.canonical_bytes(self.report), self.verify()[0])
+
+    def commit(self, message: str) -> None:
+        self.git("-c", "user.name=Authored Evidence Test", "-c", "user.email=evidence-test@example.invalid",
+            "-c", "commit.gpgsign=false", "commit", "--quiet", "-m", message)
+
+    def source_provenance(self) -> dict:
+        expected_paths = (VERIFY.EXTERNAL_SOURCE_PATHS_V1 if self.request["schemaVersion"] == 1
+                          else VERIFY.EXTERNAL_SOURCE_PATHS_V2)
+        return {"commit": self.git("rev-parse", "HEAD"), "tree": self.git("rev-parse", "HEAD^{tree}"),
+            "files": [reference(path, (self.root / path).read_bytes()) for path in sorted(expected_paths)]}
+
+    def commit_changed_source_manifest(self, value: dict) -> None:
+        data = VERIFY.canonical_bytes(value)
+        self.source_manifest.write_bytes(data)
+        self.git("add", "evidence/evidence.json")
+        self.commit("authored changed source evidence boundary")
+        self.evidence["source"] = self.source_provenance()
+        self.evidence["sourceEvidence"] = reference("evidence/evidence.json", data)
+        self.write_manifest()
+
+    def test_external_recovery_uses_committed_source_payloads_and_two_distinct_source_commits(self) -> None:
+        self.assertNotEqual(self.source_evidence["source"]["commit"], self.evidence["source"]["commit"])
+        self.assertEqual(11, len(self.evidence["source"]["files"]))
+        for path in self.source_directory.iterdir():
+            path.unlink()
+        for item in self.evidence["source"]["files"] + list(self.evidence["inputs"].values()):
+            (self.root / item["path"]).write_bytes(b"uncommitted replacement")
+        raw, counts = self.verify()
+        self.assertEqual(VERIFY.canonical_bytes(self.report), raw)
+        self.assertEqual(self.evidence["counts"], counts)
+        output = io.StringIO()
+        with redirect_stdout(output):
+            self.assertEqual(0, VERIFY.main([str(self.manifest), "--extract-report", str(self.root / "recovered-external.json")]))
+        self.assertEqual(raw, (self.root / "recovered-external.json").read_bytes())
+        self.assertIn("1 static import requests", output.getvalue())
+        self.assertIn("no production qualification", output.getvalue())
+
+    def test_v2_external_evidence_uses_expanded_source_inventory_and_snapshot_bindings(self) -> None:
+        control = "/unavailable/external-control"
+        self.request.update(schemaVersion=2, kind="independent-external-call-request-v2", controlRoot=control,
+            outputPath=control + "/reports/independent-external-call-observations.json")
+        self.request["runtime"].update(
+            bridgeSnapshot={"path": control + "/runtime/ghidra-bridge.runtime", "bytes": 128,
+                "sha256": self.request["runtime"]["bridgeSha256"]},
+            bundleManifestSnapshot={"path": control + "/runtime/ghidra-bundle-manifest.runtime", "bytes": 32,
+                "sha256": self.request["runtime"]["bundleManifestSha256"]})
+        self.report["runtime"] = {key: self.request["runtime"][key]
+            for key in VERIFY.RUNTIME | VERIFY.RUNTIME_PATHS}
+        self.evidence["source"] = self.source_provenance()
+        self.assertEqual(16, len(self.evidence["source"]["files"]))
+        self.write_payloads()
+        raw, _ = self.verify()
+        self.assertEqual(VERIFY.canonical_bytes(self.report), raw)
+        original = copy.deepcopy(self.request["runtime"]["bridgeSnapshot"])
+        self.request["runtime"]["bridgeSnapshot"]["path"] = control + "/runtime/other.runtime"
+        self.write_payloads()
+        with self.assertRaises(VERIFY.VerificationError):
+            self.verify()
+        self.request["runtime"]["bridgeSnapshot"] = original
+        self.write_payloads()
+
+    def test_external_source_reference_hash_commit_exact_inventory_and_recursion_are_required(self) -> None:
+        original = copy.deepcopy(self.evidence)
+        mutations = [lambda: self.evidence["sourceEvidence"].update(sha256="0" * 64),
+            lambda: self.evidence["sourceEvidence"].update(path="../escape.json"),
+            lambda: self.evidence["source"].update(commit="0" * 40),
+            lambda: self.evidence["source"].update(tree="0" * 40),
+            lambda: self.evidence["source"]["files"].pop(),
+            lambda: self.evidence["source"]["files"][0].update(sha256="0" * 64)]
+        for change in mutations:
+            self.evidence = copy.deepcopy(original)
+            change(); self.write_manifest()
+            with self.assertRaises(VERIFY.VerificationError):
+                self.verify()
+        self.evidence = original
+        self.commit_changed_source_manifest(self.source_evidence | {"kind": VERIFY.EXTERNAL_KIND})
+        with self.assertRaises(VERIFY.VerificationError):
+            self.verify()
+
+    def test_source_manifest_machine_semantics_are_verified_after_git_recovery(self) -> None:
+        changed = copy.deepcopy(self.source_evidence)
+        changed["releaseEligible"] = True
+        self.commit_changed_source_manifest(changed)
+        with self.assertRaises(VERIFY.VerificationError):
+            self.verify()
+        changed = copy.deepcopy(self.source_evidence)
+        changed["source"]["commit"] = "0" * 40
+        self.commit_changed_source_manifest(changed)
+        with self.assertRaisesRegex(VERIFY.VerificationError, "fetch that commit's history"):
+            self.verify()
+
+    def test_external_request_runtime_inputs_and_authority_cannot_be_rehashed_away(self) -> None:
+        original_request, original_report = copy.deepcopy(self.request), copy.deepcopy(self.report)
+        changes = [lambda: self.request["sourceReport"].update(sha256="0" * 64),
+            lambda: self.request["sourceRequest"].update(bytes=self.request["sourceRequest"]["bytes"] + 1),
+            lambda: self.request["richFile"].update(sha256="0" * 64), lambda: self.request["runtime"].update(bridgeSha256="0" * 64),
+            lambda: self.report.update(complete=True), lambda: self.report.update(sourceCallPopulationComplete=True),
+            lambda: self.report.update(sourceCallRecordsEnumerated=False), lambda: self.report.update(sourceReportSha256="0" * 64),
+            lambda: self.report.update(runtime=original_report["runtime"] | {"bridgeSha256": "0" * 64}),
+            lambda: self.request.update(metadataPolicy="unbounded"), lambda: self.request.update(recoveredFunctions=[])]
+        for index, change in enumerate(changes):
+            with self.subTest(index=index):
+                self.request, self.report = copy.deepcopy(original_request), copy.deepcopy(original_report)
+                change(); self.write_payloads()
+                with self.assertRaises(VERIFY.VerificationError):
+                    self.verify()
+
+    def test_external_sites_namespace_nested_authority_and_population_are_bound(self) -> None:
+        original = copy.deepcopy(self.report)
+        changes = [lambda: self.report["sites"].clear(), lambda: self.report["sites"].append(copy.deepcopy(self.report["sites"][0])),
+            lambda: self.report["sites"][0].update(instructionBytes="e800000000"), lambda: self.report["sites"][0].update(returnAddress="0x1016"),
+            lambda: self.report["sites"][0].update(externalTargetId="ext-" + "0" * 64), lambda: self.report["sites"][0].update(negativeCompleteness=True),
+            lambda: self.report["sites"][0]["relocationBinding"].update(runtimeImplementationAvailable=True),
+            lambda: self.report["sites"][0]["relocationBinding"]["writeCoverage"].update(negativeCompleteness=True),
+            lambda: self.report["sites"][0]["memoryTransfer"].update(rawReadOpcode="CALLIND"),
+            lambda: self.report["sites"][0]["memoryTransfer"].update(runtimeImplementation="invented"),
+            lambda: self.report["dynamicInventory"].update(releaseEligible=True),
+            lambda: self.report["externalNamespace"]["entries"][0]["identity"].update(runtimeProviderAvailable=True),
+            lambda: self.report["sourceCanonicalPopulation"].clear(), lambda: self.report["counts"].update(sourcePhysicalSites=2)]
+        for index, change in enumerate(changes):
+            with self.subTest(index=index):
+                self.report = copy.deepcopy(original)
+                change()
+                self.report["externalNamespaceSha256"] = sha256(VERIFY.canonical_bytes(self.report["externalNamespace"])).hexdigest()
+                self.write_payloads()
+                with self.assertRaises(VERIFY.VerificationError):
+                    self.verify()
+
+    def test_external_gzip_and_git_recovered_source_gzip_both_refuse_trailing_members(self) -> None:
+        data = (self.directory / "report.json.gz").read_bytes() + gzip.compress(b"", mtime=0)
+        (self.directory / "report.json.gz").write_bytes(data)
+        self.evidence["payloads"]["report"].update(storedBytes=len(data), storedSha256=sha256(data).hexdigest())
+        self.write_manifest()
+        with self.assertRaises(VERIFY.VerificationError):
+            self.verify()
+        self.write_payloads()
+        data = (self.source_directory / "report.json.gz").read_bytes() + b"trailing"
+        (self.source_directory / "report.json.gz").write_bytes(data)
+        changed = copy.deepcopy(self.source_evidence)
+        changed["payloads"]["report"].update(storedBytes=len(data), storedSha256=sha256(data).hexdigest())
+        self.git("add", "evidence/report.json.gz")
+        self.commit_changed_source_manifest(changed)
+        with self.assertRaises(VERIFY.VerificationError):
+            self.verify()
+
+    def test_unresolved_transfer_opcode_and_index_remain_closed_typed_and_paired(self) -> None:
+        site = self.report["sites"][0]
+        site.update(relocationBinding=None, externalTargetId=None, compositionDisposition="unresolved-memory-transfer",
+                    targetBindingDisposition="unresolved-memory-transfer")
+        site["memoryTransfer"].update(pointerSlotAddress=None, pointerWidthBytes=None, relationship="unresolved",
+            rawReadOpcode=None, rawReadOpIndex=None, unresolvedReason="register-transfer")
+        for counts in (self.report["counts"], self.evidence["counts"]):
+            counts["dispositions"] = {"unresolved-memory-transfer": 1}
+        self.write_payloads()
+        self.verify()
+        original = copy.deepcopy(site["memoryTransfer"])
+        for change in ({"rawTransferOpcode": value} for value in (None, {}, [], 0, True, "CALLIND", "UNKNOWN")):
+            with self.subTest(change=change):
+                site["memoryTransfer"] = original | change
+                self.write_payloads()
+                with self.assertRaises(VERIFY.VerificationError):
+                    self.verify()
+        for value in (None, {}, [], True, "0", -1, 4096):
+            with self.subTest(index=value):
+                site["memoryTransfer"] = original | {"rawTransferOpIndex": value}
+                self.write_payloads()
+                with self.assertRaises(VERIFY.VerificationError):
+                    self.verify()
+        site["memoryTransfer"] = original | {"rawTransferOpcode": None, "rawTransferOpIndex": None}
+        self.write_payloads()
+        self.verify()
+
+    def test_write_coverage_optional_witnesses_are_typed_and_match_flags(self) -> None:
+        original = copy.deepcopy(self.report)
+        for flag, locator in (("overlappingWrite", "overlapLocator"), ("unknownWriteWidth", "unknownWidthLocator"),
+                              ("writeAddressOverflow", "overflowLocator")):
+            for value in ({}, [], True, 7, "", "rela:2:0"):
+                with self.subTest(flag=flag, witness=value):
+                    self.report = copy.deepcopy(original)
+                    self.report["sites"][0]["relocationBinding"]["writeCoverage"][locator] = value
+                    self.write_payloads()
+                    with self.assertRaises(VERIFY.VerificationError):
+                        self.verify()
+            # Rehash a negative assessment with a true uncertainty flag but no locator witness.
+            self.report = copy.deepcopy(original)
+            site = self.report["sites"][0]
+            site.update(compositionDisposition="unresolved-relocation-write-coverage", targetBindingDisposition="unresolved-relocation-write-coverage")
+            site["relocationBinding"]["writeCoverage"].update({flag: True, "safeForStaticSlotAssociation": False})
+            for counts in (self.report["counts"], self.evidence["counts"]):
+                counts["dispositions"] = {"unresolved-relocation-write-coverage": 1}
+            self.write_payloads()
+            with self.assertRaises(VERIFY.VerificationError):
+                self.verify()
+            # The scalar envelope accepts a bounded named witness with its matching flag.
+            site["relocationBinding"]["writeCoverage"][locator] = "rela:2:0"
+            self.write_payloads()
+            self.verify()
+            self.evidence["counts"]["dispositions"] = {"static-import-request-reference": 1}
+
+    def test_binding_numeric_commitments_reject_python_boolean_integer_equivalence(self) -> None:
+        original = copy.deepcopy(self.report["sites"][0]["relocationBinding"])
+        for key, value in (("symbolTableSectionIndex", True), ("symbolIndex", True), ("relocationAddend", False),
+                           ("slotFileOffset", False), ("slotLoadIndices", [False])):
+            with self.subTest(field=key):
+                self.report["sites"][0]["relocationBinding"] = original | {key: value}
+                self.write_payloads()
+                with self.assertRaises(VERIFY.VerificationError):
+                    self.verify()
+
+    def test_external_direct_call_cannot_be_rehashed_as_same_site_indirect_transfer(self) -> None:
+        site = self.report["sites"][0]
+        site["viaForwarder"] = False
+        site["memoryProbe"].update(address="0x1010", availableBytes="ff15ea1f0000")
+        site["memoryTransfer"].update(address="0x1010", bytes="ff15ea1f0000", classification="indirect-call",
+            rawReadOpcode="CALLIND", rawTransferOpcode="CALLIND")
+        self.write_payloads()
+        with self.assertRaises(VERIFY.VerificationError):
+            self.verify()
+
+    def test_external_forwarding_mode_is_bound_even_without_a_probe(self) -> None:
+        site = self.report["sites"][0]
+        disposition = "unresolved-forwarder-byte-ownership"
+        site.update(memoryProbe=None, memoryTransfer=None, relocationBinding=None, externalTargetId=None,
+            targetBindingDisposition=disposition, compositionDisposition=disposition)
+        self.report["counts"]["dispositions"] = {disposition: 1}
+        self.evidence["counts"] = copy.deepcopy(self.report["counts"])
+        self.write_payloads()
+        self.verify()  # The original noncanonical direct destination still requires forwarding mode.
+        site["viaForwarder"] = False
+        self.write_payloads()
+        with self.assertRaises(VERIFY.VerificationError):
+            self.verify()
+
+    def test_nonforwarded_receipt_requires_the_exact_physical_instruction(self) -> None:
+        symbols, relocations, imports = VERIFY.verify_external_inventory(self.report["dynamicInventory"],
+            self.report["externalNamespace"], self.report["externalNamespaceSha256"], self.report["inputSha256"], self.report["imageBase"])
+        index = VERIFY.RetainedRelocationIndex(self.report["dynamicInventory"], symbols, self.report["inputBytes"])
+        site = copy.deepcopy(self.report["sites"][0])
+        site.update(physicalClassification="indirect-call", physicalTargetAddress=None, viaForwarder=False,
+            instructionBytes="ff15ea1f0000", instructionLength=6, returnAddress="0x1016")
+        site["memoryProbe"].update(address="0x1010", availableBytes=site["instructionBytes"])
+        site["memoryTransfer"].update(address="0x1010", bytes=site["instructionBytes"], classification="indirect-call",
+            rawReadOpcode="CALLIND", rawTransferOpcode="CALLIND")
+        VERIFY.verify_external_site(site, 0x1010, symbols, relocations, imports, index)
+        mutations = [lambda row: row["memoryTransfer"].update(length=5, bytes="ff15ea1f00"),
+            lambda row: (row["memoryTransfer"].update(bytes="ff15eb1f0000"), row["memoryProbe"].update(availableBytes="ff15eb1f0000")),
+            lambda row: row["memoryTransfer"].update(classification="indirect-jump", rawReadOpcode="BRANCHIND", rawTransferOpcode="BRANCHIND"),
+            lambda row: row.update(viaForwarder=True)]
+        for ordinal, change in enumerate(mutations):
+            with self.subTest(mutation=ordinal):
+                changed = copy.deepcopy(site)
+                change(changed)
+                with self.assertRaises(VERIFY.VerificationError):
+                    VERIFY.verify_external_site(changed, 0x1010, symbols, relocations, imports, index)
+
+    def test_direct_self_target_preserves_same_instruction_unresolved_receipt(self) -> None:
+        symbols, relocations, imports = VERIFY.verify_external_inventory(self.report["dynamicInventory"],
+            self.report["externalNamespace"], self.report["externalNamespaceSha256"], self.report["inputSha256"], self.report["imageBase"])
+        index = VERIFY.RetainedRelocationIndex(self.report["dynamicInventory"], symbols, self.report["inputBytes"])
+        site = copy.deepcopy(self.report["sites"][0])
+        site.update(physicalTargetAddress="0x1010", viaForwarder=False, instructionBytes="e8fbffffff", instructionLength=5,
+            relocationBinding=None, externalTargetId=None, targetBindingDisposition="unresolved-forwarder-sequence",
+            compositionDisposition="unresolved-forwarder-sequence")
+        site["memoryProbe"].update(address="0x1010", availableBytes=site["instructionBytes"])
+        site["memoryTransfer"].update(address="0x1010", bytes=site["instructionBytes"], length=5, classification="direct-call",
+            pointerSlotAddress=None, pointerWidthBytes=None, relationship="unresolved", rawReadOpcode=None, rawReadOpIndex=None,
+            rawTransferOpcode=None, rawTransferOpIndex=None, rawCopyOpIndices=[], unresolvedReason="unsupported-transfer-profile")
+        VERIFY.verify_external_site(site, 0x1010, symbols, relocations, imports, index)
+
+    def test_static_import_rejects_irelative_after_rehash(self) -> None:
+        for kind in (6, 7):
+            self.report["dynamicInventory"]["relocations"][0]["type"] = kind
+            self.report["sites"][0]["relocationBinding"]["relocationType"] = kind
+            self.write_payloads()
+            self.verify()
+        self.report["dynamicInventory"]["relocations"][0]["type"] = 37
+        self.report["sites"][0]["relocationBinding"]["relocationType"] = 37
+        self.write_payloads()
+        with self.assertRaises(VERIFY.VerificationError):
+            self.verify()
+
+    def test_static_import_checks_active_binding_and_slot_metadata_after_rehash(self) -> None:
+        original = copy.deepcopy(self.report)
+        for field, binding_field, value in (("type", "relocationType", 8), ("type", "relocationType", 36),
+                ("dynamicTables", "dynamicTables", []), ("dynamicTables", "dynamicTables", ["rela", "jmprel"]),
+                ("dynamicTables", "dynamicTables", ["invented"]), ("slotLoadIndices", "slotLoadIndices", []),
+                ("slotLoadIndices", "slotLoadIndices", [0, 1]), ("slotLoadIndices", "slotLoadIndices", [1]),
+                ("slotFileOffset", "slotFileOffset", None), ("slotFileOffset", "slotFileOffset", 1)):
+            with self.subTest(field=field, value=value):
+                self.report = copy.deepcopy(original)
+                self.report["dynamicInventory"]["relocations"][0][field] = value
+                self.report["sites"][0]["relocationBinding"][binding_field] = value
+                self.write_payloads()
+                with self.assertRaises(VERIFY.VerificationError):
+                    self.verify()
+        changes = [lambda inv: inv.update(activeSymbolTableSectionIndex=2),
+            lambda inv: inv["unsupportedReasons"].append("packed-relr-relocations-not-expanded"),
+            lambda inv: inv["unsupportedReasons"].append("android-packed-relocations-not-expanded"),
+            lambda inv: inv["unsupportedReasons"].append("unclassified-dynamic-tag"),
+            lambda inv: inv["dynamicSymbols"][0].update(info=17),
+            lambda inv: inv["dynamicSymbols"][0].update(other=1),
+            lambda inv: inv["dynamicSymbols"][0].update(rawSectionIndex=4),
+            lambda inv: inv["dynamicSymbols"][0].update(resolvedSectionIndex=4),
+            lambda inv: inv["programHeaders"][0].update(fileSize="0x7"),
+            lambda inv: inv["programHeaders"].append(inv["programHeaders"][0] | {"index": 1})]
+        for index, change in enumerate(changes):
+            with self.subTest(metadata=index):
+                self.report = copy.deepcopy(original)
+                change(self.report["dynamicInventory"])
+                self.write_payloads()
+                with self.assertRaises(VERIFY.VerificationError):
+                    self.verify()
+
+    def test_static_import_recomputes_competing_writes_instead_of_trusting_safe_flags(self) -> None:
+        original = copy.deepcopy(self.report)
+        # The original candidate always falsely retains safe=true in the rejecting cases.
+        cases = [(2, 0x2ffc, ["rela"], True), (2, 0x2ffd, ["rela"], False),
+                 (8, 0x3008, ["rela"], True), (8, 0x3007, ["rela"], False),
+                 (36, 0x2ff8, ["rela"], False), (7, 0x3000, ["rela"], False),
+                 (1, (1 << 64) - 1, ["rela"], False), (777, 0x9000, ["rela"], False),
+                 (5, 0x9000, ["rela"], False), (0, 0x9000, ["rela"], True), (777, 0x9000, [], True)]
+        for kind, slot, tables, accepted in cases:
+            with self.subTest(kind=kind, slot=hex(slot), tables=tables):
+                self.report = copy.deepcopy(original)
+                inventory = self.report["dynamicInventory"]
+                inventory["relocations"].append(inventory["relocations"][0] | {"relocationIndex": 1, "locator": "rela:2:1",
+                    "fileOffset": 24, "offset": hex(slot), "type": kind, "dynamicTables": tables,
+                    "slotFileOffset": None, "slotLoadIndices": []})
+                self.write_payloads()
+                if accepted:
+                    self.verify()
+                else:
+                    with self.assertRaises(VERIFY.VerificationError):
+                        self.verify()
+        self.report = copy.deepcopy(original)
+        inventory = self.report["dynamicInventory"]
+        inventory["sections"] = [{"index": 4, "name": ".bss", "type": 8, "flags": "0x2", "address": "0x2fe0", "offset": 0,
+            "size": "0x40", "link": 0, "info": 0, "alignment": "0x8", "entrySize": "0x0"}]
+        inventory["dynamicSymbols"].append(inventory["dynamicSymbols"][0] | {"symbolIndex": 2, "locator": "dynsym:1:2",
+            "name": "copy_storage", "info": 17, "type": 1, "rawSectionIndex": 4, "resolvedSectionIndex": 4,
+            "sectionKind": "defined", "value": "0x2fe0", "size": "0x40"})
+        for index, kind, slot, symbol in ((1, 5, 0x2fe0, 2), (2, 2, 0x2ff0, 1)):
+            inventory["relocations"].append(inventory["relocations"][0] | {"relocationIndex": index, "locator": f"rela:2:{index}",
+                "offset": hex(slot), "type": kind, "symbolIndex": symbol, "dynamicTables": ["rela"], "slotFileOffset": None, "slotLoadIndices": []})
+        self.write_payloads()
+        # Earlier COPY encloses the slot although the immediately preceding short write does not.
+        with self.assertRaises(VERIFY.VerificationError):
+            self.verify()
+
+    def test_static_import_requires_consistent_retained_version_identity(self) -> None:
+        inventory = self.report["dynamicInventory"]
+        inventory["sections"] = [{"index": index, "name": name, "type": kind, "flags": "0x2", "address": "0x0", "offset": 0,
+            "size": "0x0", "link": link, "info": 0, "alignment": "0x1", "entrySize": "0x0"}
+            for index, name, kind, link in ((1, ".dynsym", 11, 2), (2, ".dynstr", 3, 0),
+                                           (3, ".gnu.version", 0x6fffffff, 1), (4, ".gnu.version_r", 0x6ffffffe, 2))]
+        inventory["dynamicSymbols"][0]["version"] = {"sectionIndex": 3, "fileOffset": 0, "raw": 2, "index": 2, "hidden": False,
+            "kind": "required-version", "name": "VER_1", "providerRequest": "libexample.so"}
+        inventory["versionRequirements"] = [{"sectionIndex": 4, "stringSectionIndex": 2, "recordOffset": 0, "auxiliaryOffset": 16,
+            "providerRequest": "libexample.so", "name": "VER_1", "rawIndex": 2, "index": 2, "flags": 0, "hash": 0x5aa821}]
+
+        def rehash_identity() -> None:
+            version = self.report["dynamicInventory"]["dynamicSymbols"][0]["version"]
+            entry = self.report["externalNamespace"]["entries"][0]
+            entry["identity"]["version"] = {key: value for key, value in version.items() if key not in {"sectionIndex", "fileOffset"}}
+            entry["id"] = "ext-" + sha256(VERIFY.canonical_bytes(entry["identity"])).hexdigest()
+            self.report["sites"][0]["externalTargetId"] = entry["id"]
+            self.report["externalNamespaceSha256"] = sha256(VERIFY.canonical_bytes(self.report["externalNamespace"])).hexdigest()
+            self.write_payloads()
+
+        rehash_identity()
+        self.verify()
+        original = copy.deepcopy(self.report)
+        changes = [lambda inv: inv["dynamicSymbols"][0]["version"].update(name=None),
+            lambda inv: inv["dynamicSymbols"][0]["version"].update(providerRequest=None),
+            lambda inv: inv["dynamicSymbols"][0]["version"].update(kind="defined-version"),
+            lambda inv: inv["dynamicSymbols"][0]["version"].update(raw=3),
+            lambda inv: inv["dynamicSymbols"][0]["version"].update(hidden=True),
+            lambda inv: inv["versionRequirements"].clear(),
+            lambda inv: inv["versionRequirements"].append(copy.deepcopy(inv["versionRequirements"][0])),
+            lambda inv: inv["versionRequirements"][0].update(providerRequest="other.so"),
+            lambda inv: inv["versionRequirements"][0].update(rawIndex=3),
+            lambda inv: inv["sections"][0].update(link=9), lambda inv: inv["sections"][2].update(link=9)]
+        for index, change in enumerate(changes):
+            with self.subTest(version=index):
+                self.report = copy.deepcopy(original)
+                change(self.report["dynamicInventory"])
+                rehash_identity()
+                with self.assertRaises(VERIFY.VerificationError):
+                    self.verify()
 
 
 if __name__ == "__main__":

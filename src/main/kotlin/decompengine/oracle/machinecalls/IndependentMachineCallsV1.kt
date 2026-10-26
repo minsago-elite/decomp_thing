@@ -289,7 +289,7 @@ private fun classifyRoots(
         }
     }.sortedWith(compareBy<Root> { it.rva == null }.thenBy { it.rva }.thenBy { it.id })
     // Even an otherwise invalid symbol can make another physical extent ambiguous.
-    val ranges = roots.filter { it.end != null && it.rva != null }.sortedBy { it.symbols.first().value }
+    val ranges = roots.filter { it.end != null }.sortedBy { it.symbols.first().value }
     var previous: Root? = null
     ranges.forEach { root ->
         budget.check("extent overlap classification")

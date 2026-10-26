@@ -23,12 +23,12 @@ object IndependentMachineCallReportV1 {
 
     fun validateComponent(document: JsonObject) = validate(document, worker = false)
 
-    internal fun validateWorker(document: JsonObject, expectedRequestSha256: String, request: IndependentMachineCallRequestV1) {
+    internal fun validateWorker(document: JsonObject, expectedRequestSha256: String, request: IndependentMachineCallRequestIdentity) {
         digest(expectedRequestSha256)
         require(OracleArtifacts.sha256(request.canonicalBytes) == expectedRequestSha256) { "expected request digest does not bind the request" }
         validate(document, worker = true)
         require(document.string("requestSha256") == expectedRequestSha256) { "worker request commitment differs" }
-        require(document["runtime"] == request.runtime.json()) { "worker runtime commitment differs" }
+        require(document["runtime"] == request.reportRuntimeJson()) { "worker runtime commitment differs" }
         require(document.string("inputSha256") == request.richFile.sha256 && document.number("inputBytes") == request.richFile.bytes &&
             document.string("canonicalOracleSha256") == request.canonicalOracle.sha256 &&
             document.string("artifactManifestSha256") == request.manifestSha256 && document["limits"] == request.limits.toJson()) {
@@ -289,13 +289,18 @@ object IndependentMachineCallReportV1 {
             group.forEach { require("conflicting-symbols-at-start" in it.problems) }
         }
         var previous: Root? = null
-        roots.filter { it.rva != null && it.end != null }.sortedBy { it.value }.forEach { root ->
+        // Raw physical ranges remain ownership conflicts even when no RVA can be formed.
+        roots.filter { it.end != null }.sortedBy { it.value }.forEach { root ->
             checkpoint("ownership relation")
             val prior = previous
             if (prior != null && root.value < prior.end!!) {
                 require("overlapping-symbol-extents" in root.problems && "overlapping-symbol-extents" in prior.problems)
             }
             if (prior == null || root.end!! > prior.end!!) previous = root
+        }
+        // Canonical coordinates are RVAs; keep this check separate from absolute-range overlap.
+        roots.filter { it.rva != null && it.end != null }.forEach { root ->
+            checkpoint("canonical ownership relation")
             val next = canonicalStarts.binarySearch(root.rva!!).let { if (it < 0) -it - 1 else it + 1 }
             if (next < canonicalStarts.size && canonicalStarts[next] < root.endRva!!) require("interior-canonical-start" in root.problems)
         }
