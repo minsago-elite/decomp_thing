@@ -438,6 +438,57 @@ class GitIntegrationTest {
         assertTrue(service.workspace(jobId, repositoryId).observation.status.entries.any { it.unstaged != GitIndexChange.NONE })
     }
 
+    @Test fun `merge evidence survives publication and a second crash during reconciliation`(): Unit = Fixture().use { f ->
+        f.cloned()
+        Files.writeString(f.seed.resolve("util.c"), "int incoming = 8;\n"); f.remoteCommit("incoming")
+        fetch()
+        val worktreeId = service.workspace(jobId, repositoryId).worktreeId
+        val evidence = f.store.resolve("$jobId/git/repositories/$repositoryId/integrations/$worktreeId.json")
+        val target = trackingObject()
+        f.hook = { if (it == GitOperationCrashPoint.BEFORE_TERMINAL_PERSIST) throw SimulatedGitCrash() }
+        val (view, g) = guards()
+        val admission = service.requestWorkspace(jobId, repositoryId,
+            GitSyncRequest(GitOperationAction.MERGE, view.worktreeId, g, merge("fast-forward")), key())
+        assertTrue(service.awaitIdle(60_000))
+        assertTrue(Files.exists(evidence), "published result keeps recovery evidence until terminal persistence")
+        assertEquals(target, service.workspace(jobId, repositoryId).observation.head.objectId)
+        service.close(); service = f.open()
+        // Reconciliation computes the result, but dies before persisting it. Evidence must still survive.
+        assertFailsWith<SimulatedGitCrash> { service.operation(jobId, repositoryId, admission.operation.operationId) }
+        assertTrue(Files.exists(evidence), "a second crash cannot consume the recovery evidence")
+        service.close(); f.hook = {}; service = f.open()
+        val recovered = service.operation(jobId, repositoryId, admission.operation.operationId)
+        assertEquals(GitOperationState.COMPLETED, recovered.state, recovered.message)
+        assertEquals(target, recovered.resultObjectId)
+        assertFalse(Files.exists(evidence), "cleanup follows the durable terminal result")
+    }
+
+    @Test fun `durable terminal merge and abort records survive crashes before evidence cleanup`(): Unit = Fixture().use { f ->
+        f.cloned()
+        Files.writeString(f.seed.resolve("util.c"), "int incoming = 9;\n"); f.remoteCommit("incoming")
+        fetch()
+        val worktreeId = service.workspace(jobId, repositoryId).worktreeId
+        val evidence = f.store.resolve("$jobId/git/repositories/$repositoryId/integrations/$worktreeId.json")
+        f.hook = { if (it == GitOperationCrashPoint.AFTER_TERMINAL_PERSIST) throw SimulatedGitCrash() }
+        val forwarded = sync(GitOperationAction.MERGE, merge("fast-forward"))
+        assertEquals(GitOperationState.COMPLETED, forwarded.state)
+        assertTrue(Files.exists(evidence))
+        service.close(); f.hook = {}; service = f.open()
+        assertEquals(GitOperationState.COMPLETED, service.operation(jobId, repositoryId, forwarded.operationId).state)
+        assertFalse(Files.exists(evidence), "restart retries post-terminal cleanup")
+        f.conflictOn("README.md")
+        f.hook = { if (it == GitOperationCrashPoint.BEFORE_TERMINAL_PERSIST) throw SimulatedGitCrash() }
+        val (view, g) = guards()
+        val abort = service.requestWorkspace(jobId, repositoryId, GitSyncRequest(GitOperationAction.MERGE_ABORT, view.worktreeId, g), key())
+        assertTrue(service.awaitIdle(60_000))
+        assertFalse(service.conflicts(jobId, repositoryId, null).mergeInProgress)
+        assertTrue(Files.exists(evidence), "abort retains evidence until terminal persistence")
+        service.close(); f.hook = {}; service = f.open()
+        assertEquals(GitOperationState.COMPLETED, service.operation(jobId, repositoryId, abort.operation.operationId).state)
+        assertFalse(Files.exists(evidence))
+        assertEquals("line one\nlocal two\n", Files.readString(f.workTree().resolve("README.md")))
+    }
+
     @Test fun `symbolic link conflicts remain unsupported even when materialized as plain files`(): Unit = Fixture().use { f ->
         Files.createSymbolicLink(f.seed.resolve("link"), Path.of("base-target")); f.remoteCommit("base link")
         f.cloned()

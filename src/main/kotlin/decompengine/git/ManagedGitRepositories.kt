@@ -167,7 +167,7 @@ data class GitRepositoryPolicy(
 class ManagedGitException(val code: String, message: String) : RuntimeException(message)
 
 /** Crash points for recovery tests; a crash leaves records and staging exactly as a process death would. */
-enum class GitOperationCrashPoint { AFTER_RUNNING, AFTER_STAGING, BEFORE_PUBLISH, AFTER_PUBLISH }
+enum class GitOperationCrashPoint { AFTER_RUNNING, AFTER_STAGING, BEFORE_PUBLISH, AFTER_PUBLISH, BEFORE_TERMINAL_PERSIST, AFTER_TERMINAL_PERSIST }
 internal class SimulatedGitCrash : Error("simulated process death")
 
 /**
@@ -943,7 +943,6 @@ class ManagedGitRepositories(
                     val count = GitIntegrations.conflicts(runner, located.gitDir, located.workTree).size
                     null to "The merge stopped with $count conflicted file(s). Resolve and stage them, then commit explicitly, or abort the merge."
                 } else {
-                    GitIntegrations.delete(directory, located.worktreeId)
                     head to (if (strategy == GitIntegrationStrategy.FAST_FORWARD) "Fast-forwarded ${branch.removePrefix("refs/heads/")}." else "Created a merge commit.") +
                         " The result is a new source candidate: it is not validated or accepted until existing checks run."
                 }
@@ -958,7 +957,6 @@ class ManagedGitRepositories(
                     GitIntegrations.abort(runner, located.gitDir, located.workTree)
                 }
                 crash(GitOperationCrashPoint.AFTER_PUBLISH)
-                GitIntegrations.delete(directory, located.worktreeId)
                 GitRemoteStore.audit(directory, GitRemoteStore.auditEntry("merge.abort", operation.operationId, "completed", null, clock.instant(),
                     ref = record?.branch, oldObjectId = record?.target, newObjectId = record?.headBefore))
                 GitRepositoryInspector.head(runner, located.gitDir, located.record.objectFormat).objectId to
@@ -1388,8 +1386,6 @@ class ManagedGitRepositories(
                     crash(GitOperationCrashPoint.AFTER_STAGING)
                     GitWorkspaceMutations.commit(runner, located.gitDir, located.workTree, messageFile, policy)
                     crash(GitOperationCrashPoint.AFTER_PUBLISH)
-                    // A commit that concludes a merge ends its integration record.
-                    if (!GitIntegrations.mergeInProgress(located.gitDir)) GitIntegrations.delete(repositoryDirectory(queued.jobId, queued.repositoryId), located.worktreeId)
                     val after = GitRepositoryInspector.inspect(runner, located.gitDir, located.workTree, located.commonDir)
                     result = checkNotNull(after.head.objectId)
                     if (recordMapping(runner, located, result, after.dirty) == null) {
@@ -1701,18 +1697,16 @@ class ManagedGitRepositories(
                     merging -> finish(operation, GitOperationState.RECOVERY_REQUIRED, "MERGE_IN_PROGRESS",
                         "The server restarted during the merge. Its state is retained: resolve and commit the conflicts, or abort the merge.")
                     integration == null || head == integration.headBefore -> {
-                        GitIntegrations.delete(directory, operation.worktreeId)
                         finish(operation, GitOperationState.INTERRUPTED, "INTERRUPTED", "Interrupted by a server restart before the merge changed the branch.")
                     }
                     else -> {
-                        GitIntegrations.delete(directory, operation.worktreeId)
                         finish(operation, GitOperationState.COMPLETED, null, "The merge finished before the server restarted. It is a new candidate until validated.", head)
                     }
                 }
             }
             GitOperationAction.MERGE_ABORT -> if (merging) finish(operation, GitOperationState.INTERRUPTED, "INTERRUPTED",
                 "Interrupted by a server restart before the merge was aborted; it is still in progress.")
-                else { GitIntegrations.delete(directory, operation.worktreeId); finish(operation, GitOperationState.COMPLETED, null, "The merge was aborted before the server restarted.", head) }
+                else finish(operation, GitOperationState.COMPLETED, null, "The merge was aborted before the server restarted.", head)
             GitOperationAction.CONFLICT_SAVE -> {
                 val saved = GitIntegrations.conflicts(runner, gitDir, workTree).singleOrNull { it.path.fileId(operation.worktreeId) == request.parameters["fileId"] }
                     ?.path?.exact?.let { GitIntegrations.contentDigest(workTree.resolve(it)) }
@@ -1754,7 +1748,8 @@ class ManagedGitRepositories(
         if (Files.isDirectory(directory, NOFOLLOW_LINKS)) {
             val published = repositories(jobId).associateBy { it.operationId }
             for (operation in operations(jobId)) {
-                if (operation.state.terminal || operation.operationId in active) continue
+                if (operation.state.terminal) { retireIntegration(operation); continue }
+                if (operation.operationId in active) continue
                 val staging = directory.resolve("staging").resolve(operation.operationId)
                 if (operation.action.workspace) {
                     persist(directory, reconcileWorkspace(jobId, operation))
@@ -1818,7 +1813,28 @@ class ManagedGitRepositories(
 
     private fun persist(directory: Path, operation: GitOperationRecord) {
         val operations = GitStorage.directories(directory, "operations")
+        if (operation.action.workspace && operation.state.terminal) crash(GitOperationCrashPoint.BEFORE_TERMINAL_PERSIST)
         GitStorage.replaceAtomically(operations.resolve("${operation.operationId}.json"), encode(operation).toByteArray())
+        if (operation.action.workspace && operation.state.terminal) crash(GitOperationCrashPoint.AFTER_TERMINAL_PERSIST)
+        retireIntegration(operation)
+    }
+
+    /** Evidence is retired only after its terminal operation is durable, including during recovery.
+     * A restart retries this idempotent cleanup for already-terminal records as well. */
+    private fun retireIntegration(operation: GitOperationRecord) {
+        if (!(operation.state == GitOperationState.COMPLETED && operation.action in setOf(GitOperationAction.MERGE,
+                GitOperationAction.MERGE_ABORT, GitOperationAction.COMMIT) ||
+                operation.state == GitOperationState.INTERRUPTED && operation.action == GitOperationAction.MERGE)) return
+        try {
+            val directory = repositoryDirectory(operation.jobId, operation.repositoryId)
+            val integration = GitIntegrations.record(directory, operation.worktreeId) ?: return
+            // Never let an older completed merge retire the evidence of a newer integration.
+            if (operation.action == GitOperationAction.MERGE && integration.operationId != operation.operationId) return
+            if (operation.action != GitOperationAction.MERGE && integration.startedAt > operation.createdAt) return
+            val record = repositories(operation.jobId).single { it.repositoryId == operation.repositoryId }
+            val gitDir = directory.resolve(GIT_DIR).let { if (operation.worktreeId == record.worktreeId) it else it.resolve("worktrees").resolve(operation.worktreeId) }
+            if (!GitIntegrations.mergeInProgress(gitDir)) GitIntegrations.delete(directory, operation.worktreeId)
+        } catch (_: Exception) { /* Terminal state is durable; retry cleanup at the next restart. */ }
     }
 
     /**
