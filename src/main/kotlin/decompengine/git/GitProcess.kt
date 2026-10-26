@@ -184,12 +184,13 @@ class GitTransportContext(
     init {
         require(configuration.size <= 32 && configuration.all { (key, value) -> key.matches(Regex("[A-Za-z0-9.-]{1,128}")) && value.length <= 4096 && '\u0000' !in value })
         require(variables.keys.all { it in PUBLIC_VARIABLES })
+        require(variables["GIT_TRACE_PACKET"].let { it == null || it == "1" }) // Never a trace-file path.
         require(secretVariables.keys.all { it.matches(Regex("GIT_CONFIG_(?:COUNT|KEY_[0-9]|VALUE_[0-9])")) } && secretVariables.values.all { '\u0000' !in it && it.length <= 8192 })
     }
     internal fun environment(): Map<String, String> = variables + secretVariables
     override fun toString(): String = "GitTransportContext(configuration=${configuration.map { it.first }}, secrets=${secretVariables.size})"
 
-    companion object { val PUBLIC_VARIABLES = setOf("GIT_ALLOW_PROTOCOL", "GIT_SSH_VARIANT", "GIT_HTTP_LOW_SPEED_LIMIT", "GIT_HTTP_LOW_SPEED_TIME") }
+    companion object { val PUBLIC_VARIABLES = setOf("GIT_ALLOW_PROTOCOL", "GIT_SSH_VARIANT", "GIT_HTTP_LOW_SPEED_LIMIT", "GIT_HTTP_LOW_SPEED_TIME", "GIT_TRACE_PACKET") }
 }
 
 /**

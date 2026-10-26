@@ -971,8 +971,11 @@ output: `CERTIFICATE_INVALID`, `AUTHENTICATION_REQUIRED`, `HOST_KEY_UNVERIFIED`,
 
 `POST J/repositories` with `git.clone` (`url`, `remoteName`, `branch`) fetches into a fresh managed
 repository in private staging (#592). The repository receives the remote's branches as
-remote-tracking refs plus its tags. Then the server creates the default or named branch, checks it
-out within the checkout bound and registers the remote. The repository is published only when it
+remote-tracking refs plus its tags. It discovers and preserves the remote's object format before
+initialization, including empty SHA-256 repositories, rather than imposing the new-repository
+default. Format discovery uses bounded, server-only protocol capability diagnostics; those never
+enter records, operation progress or client responses. Then the server creates the default or named
+branch, checks it out within the checkout bound and registers the remote. The repository is published only when it
 is complete; a failure or cancellation removes the staging tree. Hooks, filters, submodules and
 LFS stay inert, and objects are verified with `fsck`.
 

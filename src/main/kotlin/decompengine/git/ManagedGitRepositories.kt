@@ -628,18 +628,18 @@ class ManagedGitRepositories(
             throw GitOperationFailure(refusal.code, refusal.message ?: "The remote is not allowed.")
         }
         val gitDir = staging.resolve(GIT_DIR)
-        runner.run(GitInvocation("init", listOf("--quiet", "--bare", "--initial-branch=${policy.defaultBranch}",
-            "--object-format=${policy.objectFormat.wireName}", gitDir.toString())))
-        configureManaged(runner, gitDir)
         val watch = GitDiskWatch(staging, remotePolicy.limits.maxRepositoryBytes) { false }
         val control = transferControl(operation.operationId, staging)
-        val remoteHead = GitTransfers.remoteHead(runner, location, remotePolicy, control)
+        val advertisement = GitTransfers.advertisement(runner, location, remotePolicy, control)
+        runner.run(GitInvocation("init", listOf("--quiet", "--bare", "--initial-branch=${policy.defaultBranch}",
+            "--object-format=${advertisement.format.wireName}", gitDir.toString())))
+        configureManaged(runner, gitDir)
         GitTransfers.fetch(runner, gitDir, location, request.remoteName, remotePolicy, control, tags = true)
         if (watch.exceeded()) throw GitOperationFailure("TRANSFER_LIMIT", "The clone exceeded the repository size bound. Nothing was published.")
         GitConfigurationAudit.requireManaged(runner, gitDir)
         GitRepositoryImport.verify(runner, gitDir)
         val format = GitRepositoryInspector.objectFormat(runner, gitDir)
-        val branch = request.branch ?: remoteHead?.takeIf { GitRefNames.isPlausibleBranchName(it) } ?: policy.defaultBranch
+        val branch = request.branch ?: advertisement.branch?.takeIf { GitRefNames.isPlausibleBranchName(it) } ?: policy.defaultBranch
         try { GitRefNames.requireBranchName(runner, branch) } catch (_: IllegalArgumentException) {
             throw GitOperationFailure("VALIDATION_FAILED", "The remote's default branch name cannot be used by the workbench.")
         }

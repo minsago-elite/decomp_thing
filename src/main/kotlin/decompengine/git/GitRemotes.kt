@@ -249,10 +249,16 @@ object GitTransports {
         return "'$text'"
     }
 
-    fun context(location: GitRemoteLocation, policy: GitRemotePolicy): GitTransportContext {
+    fun context(location: GitRemoteLocation, policy: GitRemotePolicy, discoverFormat: Boolean = false): GitTransportContext {
         val protocol = when (location.transport) { GitTransport.HTTPS -> "https"; GitTransport.SSH -> "ssh"; GitTransport.ADMITTED -> "file" }
         val configuration = mutableListOf("protocol.$protocol.allow" to "always")
         val variables = mutableMapOf("GIT_ALLOW_PROTOCOL" to protocol)
+        if (discoverFormat) {
+            configuration += "protocol.version" to "2"
+            // Packet capabilities expose object-format even for an empty remote. This is bounded
+            // stderr only, never a trace file, client progress, HTTP header trace or persisted log.
+            variables["GIT_TRACE_PACKET"] = "1"
+        }
         val secrets = mutableMapOf<String, String>()
         when (location.transport) {
             GitTransport.ADMITTED -> {

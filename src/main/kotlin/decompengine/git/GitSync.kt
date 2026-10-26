@@ -151,14 +151,31 @@ internal object GitTransfers {
         return changed.size
     }
 
-    /** The branch the remote's HEAD names, or null when it has none. */
-    fun remoteHead(runner: GitCommandRunner, location: GitRemoteLocation, policy: GitRemotePolicy, control: GitProcessControl): String? {
+    data class Advertisement(val branch: String?, val format: GitObjectFormat)
+
+    /** Discover the remote's format before init, including empty SHA-256 repositories. */
+    fun advertisement(runner: GitCommandRunner, location: GitRemoteLocation, policy: GitRemotePolicy, control: GitProcessControl): Advertisement {
+        val capability = java.util.concurrent.atomic.AtomicReference<String?>()
+        val formatLine = Regex("ls-remote< object-format=([a-z0-9]+)\\s*$")
         val result = runner.run(GitInvocation("ls-remote", listOf("--symref", "--", location.url, "HEAD"),
-            limits = GitExecutionLimits(Duration.ofSeconds(60), 64 * 1024, 64 * 1024), transport = GitTransports.context(location, policy),
-            control = control))
-        return result.text.lineSequence().firstNotNullOfOrNull { line ->
+            limits = GitExecutionLimits(Duration.ofSeconds(60), 64 * 1024, 64 * 1024),
+            transport = GitTransports.context(location, policy, discoverFormat = true),
+            control = GitProcessControl(stop = control.stop, progress = { line ->
+                // Capture the capability before a large advertisement displaces the bounded tail.
+                // This listener is private: no packet diagnostics become operation progress.
+                formatLine.find(line)?.groupValues?.get(1)?.let { capability.compareAndSet(null, it) }
+            })))
+        val branch = result.text.lineSequence().firstNotNullOfOrNull { line ->
             Regex("^ref: refs/heads/([^\t]+)\tHEAD$").matchEntire(line)?.groupValues?.get(1)
         }
+        // SHA-1 is the protocol default when an older server lacks object-format. A detached
+        // SHA-256 HEAD also identifies its format through its full advertised object ID.
+        val headId = result.text.lineSequence().map { it.substringBefore('\t') }
+            .firstOrNull { id -> GitObjectFormat.SHA1.objectIdOrNull(id) != null || GitObjectFormat.SHA256.objectIdOrNull(id) != null }
+        val format = capability.get()?.let(GitObjectFormat::fromGit)
+            ?: if (headId?.length == GitObjectFormat.SHA256.hexLength) GitObjectFormat.SHA256 else GitObjectFormat.SHA1
+        if (format == GitObjectFormat.UNKNOWN) throw GitOperationRefusal("REPOSITORY_UNSUPPORTED", "The remote uses an unsupported object format.")
+        return Advertisement(branch, format)
     }
 
     /** Partial pack files a stopped transfer can leave behind; refs are only updated after a complete pack. */

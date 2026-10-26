@@ -29,11 +29,11 @@ class GitRemotesTest {
             policy = GitRepositoryPolicy(defaultBranch = "main"), crash = { hook(it) }, remotePolicy = policy).also(opened::add)
 
         /** A bare remote with two commits on `main` and one on `topic`, populated with raw fixture Git. */
-        fun remote(name: String = "upstream"): Path {
+        fun remote(name: String = "upstream", format: String = "sha1"): Path {
             val bare = admitted.resolve("$name.git")
-            repositories.git("init", "-q", "--bare", "--initial-branch=main", bare.toString())
+            repositories.git("init", "-q", "--bare", "--initial-branch=main", "--object-format=$format", bare.toString())
             val work = Files.createDirectories(repositories.root.resolve("$name seed"))
-            repositories.git("init", "-q", "--initial-branch=main", work.toString())
+            repositories.git("init", "-q", "--initial-branch=main", "--object-format=$format", work.toString())
             Files.writeString(work.resolve("README.md"), "remote\n")
             repositories.git("-C", work.toString(), "add", "-A"); repositories.git("-C", work.toString(), "commit", "-q", "-m", "one")
             Files.writeString(work.resolve("util.c"), "int util;\n")
@@ -249,6 +249,49 @@ class GitRemotesTest {
         assertEquals("origin", service.remotes(jobId, repositoryId).single().record.name)
         assertFalse(Files.exists(f.repositories.root.resolve("hook-ran")))
         assertTrue(Files.list(f.store.resolve("$jobId/git/staging")).use { it.count() } == 0L)
+    }
+
+    @Test fun `clone discovers SHA256 rather than imposing the default including empty remotes`() {
+        for (empty in listOf(false, true)) Fixture().use { f ->
+            if (empty) f.repositories.git("init", "-q", "--bare", "--initial-branch=main", "--object-format=sha256", f.admitted.resolve("upstream.git").toString())
+            else {
+                val bare = f.remote(format = "sha256")
+                val tip = f.repositories.git("--git-dir=$bare", "rev-parse", "HEAD").trim()
+                // Packet diagnostics exceed their retained tail; capability capture stays bounded
+                // and must not lose the early object-format line or reject a large advertisement.
+                repeat(300) { Files.writeString(bare.resolve("refs/heads/branch$it"), "$tip\n") }
+            }
+            service = f.open() // New repositories default to SHA-1, but clones preserve the remote format.
+            val clone = service.request(jobId, GitCloneRequest("admitted:upstream.git", "origin", null), key())
+            assertTrue(service.awaitIdle(60_000))
+            val result = service.operation(jobId, clone.operation.repositoryId, clone.operation.operationId)
+            assertEquals(GitOperationState.COMPLETED, result.state, result.message)
+            repositoryId = result.repositoryId
+            val view = service.workspace(jobId, repositoryId)
+            assertEquals(GitObjectFormat.SHA256, view.record.objectFormat)
+            assertEquals(GitObjectFormat.SHA256, view.observation.objectFormat)
+            if (empty) assertNull(view.observation.head.objectId) else assertEquals(64, view.observation.head.objectId?.length)
+            assertEquals(GitOperationState.COMPLETED, sync(GitOperationAction.FETCH,
+                "remoteId" to service.remotes(jobId, repositoryId).single().record.remoteId).state)
+        }
+    }
+
+    @Test fun `HTTPS clone discovers and preserves SHA256 with server-only diagnostics`(): Unit = Fixture().use { f ->
+        val bare = f.remote(format = "sha256")
+        GitHttpsFixture(f.admitted, f.repositories.root.resolve("https sha256"), null, null).use { server ->
+            val policy = GitRemotePolicy(allowedHosts = setOf("localhost"), credentials = GitCredentialStore(listOf(
+                GitCredential.Https("localhost", "bot", f.repositories.root.resolve("token").also { Files.writeString(it, "inert-token") }, server.certificate))))
+            service = f.open(policy)
+            val clone = service.request(jobId, GitCloneRequest(server.url(bare.fileName.toString()), "origin", null), key())
+            assertTrue(service.awaitIdle(60_000))
+            val result = service.operation(jobId, clone.operation.repositoryId, clone.operation.operationId)
+            assertEquals(GitOperationState.COMPLETED, result.state, result.message)
+            repositoryId = result.repositoryId
+            assertEquals(GitObjectFormat.SHA256, service.workspace(jobId, repositoryId).record.objectFormat)
+            assertFalse(result.message.contains("packet:") || result.message.contains("object-format="))
+            assertEquals(GitOperationState.COMPLETED, sync(GitOperationAction.FETCH,
+                "remoteId" to service.remotes(jobId, repositoryId).single().record.remoteId).state)
+        }
     }
 
     @Test fun `https transfers verify certificates, use server credentials, and stop on cancel and bounds`(): Unit = Fixture().use { f ->
