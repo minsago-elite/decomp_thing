@@ -18,6 +18,7 @@ import zipfile
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 HOST_MARKERS = (".analysis-io-build-", ".native-helper-build-")
+MODULE_QUALIFICATION_INIT = ROOT / "scripts/module-compilation-qualification.init.gradle"
 
 
 def application_jar() -> pathlib.Path:
@@ -51,6 +52,11 @@ def main() -> int:
 
     gradle(options.gradle_arg, ["jar"])
     jar = application_jar()
+    # Freeze the exact worker deployment before forcing generated resources and the JAR
+    # through another invocation. The second deployment task must authenticate and reuse
+    # these bytes instead of silently staging a changed application JAR.
+    gradle(options.gradle_arg + ["--init-script", str(MODULE_QUALIFICATION_INIT)],
+           ["moduleCompilerDeploymentManifest"])
     evidence = ROOT / "build/reproducible-jar"
     shutil.rmtree(evidence, ignore_errors=True)
     evidence.mkdir(parents=True)
@@ -59,6 +65,8 @@ def main() -> int:
 
     gradle(options.gradle_arg, ["processResources", "--rerun", "jar", "--rerun"])
     second = application_jar()
+    gradle(options.gradle_arg + ["--init-script", str(MODULE_QUALIFICATION_INIT)],
+           ["moduleCompilerDeploymentManifest"])
     first_sha, second_sha = sha256(first), sha256(second)
     print(f"first  {first_sha}  {jar.name}")
     print(f"second {second_sha}  {second.name}")
