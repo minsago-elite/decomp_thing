@@ -3,10 +3,14 @@ package decompengine.project
 import decompengine.analysis.ANALYSIS_PROCESS_LAUNCH_EXECUTOR
 import decompengine.analysis.AnalysisDeadline
 import decompengine.analysis.BundledGhidraVerificationProcess
+import decompengine.analysis.BoundedAnalysisProcessLaunch
 import decompengine.analysis.GhidraAnalysisException
 import decompengine.oracle.fulltree.inControlTemporaryDirectory
 import java.nio.file.Files
 import java.nio.file.Path
+import java.io.ByteArrayInputStream
+import java.io.ByteArrayOutputStream
+import java.lang.reflect.Proxy
 import java.time.Duration
 import java.util.concurrent.CompletableFuture
 import java.util.concurrent.CountDownLatch
@@ -22,11 +26,147 @@ import kotlin.io.path.writeBytes
 import kotlin.test.Test
 import kotlin.test.assertContentEquals
 import kotlin.test.assertEquals
+import kotlin.test.assertFailsWith
 import kotlin.test.assertFalse
 import kotlin.test.assertIs
 import kotlin.test.assertTrue
 
 class GhidraExportLaunchTest {
+    @Test
+    fun `unconfirmed retained descendant quarantines launch and preserves prior model`() = inControlTemporaryDirectory { root ->
+        val work = root.resolve("analysis")
+        val reports = work.resolve("reports")
+        Files.createDirectories(reports)
+        val priorModel = "previous accepted model bytes\n".toByteArray()
+        val priorCalls = "previous call evidence\n".toByteArray()
+        reports.resolve("program_model.json").writeBytes(priorModel)
+        reports.resolve("program_model_calls.json").writeBytes(priorCalls)
+        val child = fixtureHandle(1002L, initialAlive = true, refusesTermination = true)
+        val clock = AtomicLong()
+        val launches = AtomicInteger()
+        val controller = BoundedAnalysisProcessLaunch()
+        val process = FixtureOwnedProcess(fixtureHandle(1001L, initialAlive = true, refusesTermination = false))
+        val analyzer = GhidraHeadlessProgramModelAnalyzer(
+            commandFactory = { listOf("fixture-owned-export") },
+            limits = GhidraProgramModelExportLimits(wallClockTimeout = Duration.ofSeconds(5), terminationGrace = Duration.ZERO),
+            processStarter = { _, _ -> launches.incrementAndGet(); process },
+        ).withProcessLifecycleForTests(controller) { owned, grace ->
+            ExportProcessTree(
+                owned, grace,
+                nanoTime = clock::get,
+                sleepNanos = { nanos -> clock.addAndGet(nanos) },
+                descendantObservation = { _, retain -> retain(child) },
+            )
+        }
+
+        val failure = assertFailsWith<GhidraAnalysisException> { analyzer.analyze(root.resolve("unused-input"), work) }
+
+        assertTrue(failure.message.orEmpty().contains("exceeded") || failure.message.orEmpty().contains("could not prove"), failure.toString())
+        assertTrue(controller.hasQuarantinedOwner())
+        assertEquals(1, launches.get())
+        assertContentEquals(priorModel, reports.resolve("program_model.json").readBytes())
+        assertContentEquals(priorCalls, reports.resolve("program_model_calls.json").readBytes())
+        assertFailsWith<GhidraAnalysisException> { analyzer.analyze(root.resolve("unused-input"), root.resolve("second-analysis")) }
+        assertEquals(1, launches.get(), "quarantine must refuse before another process is admitted")
+    }
+
+    @Test
+    fun `process tree confirms known exit and retains yielded handles when observation later fails`() {
+        val exited = FixtureOwnedProcess(fixtureHandle(2001L, initialAlive = true, refusesTermination = false))
+        val clock = AtomicLong()
+        val confirmed = ExportProcessTree(
+            exited, Duration.ZERO,
+            nanoTime = clock::get,
+            sleepNanos = { nanos -> clock.addAndGet(nanos) },
+            descendantObservation = { _, _ -> },
+        ).terminate()
+        assertTrue(confirmed.confirmedAbsent)
+
+        val stubborn = fixtureHandle(2003L, initialAlive = true, refusesTermination = true)
+        val stuck = FixtureOwnedProcess(fixtureHandle(2002L, initialAlive = true, refusesTermination = false))
+        val failedObservation = ExportProcessTree(
+            stuck, Duration.ZERO,
+            nanoTime = clock::get,
+            sleepNanos = { nanos -> clock.addAndGet(nanos) },
+            descendantObservation = { _, retain ->
+                retain(stubborn)
+                throw java.io.IOException("fixture snapshot failed after one yielded child")
+            },
+        ).let { tree -> tree.terminate() to tree.retainedHandleCount() }
+        assertFalse(failedObservation.first.confirmedAbsent)
+        assertTrue(generateSequence(failedObservation.first.failure) { it.cause }
+            .any { it.message.orEmpty().contains("fixture snapshot failed") })
+        assertEquals(2, failedObservation.second, "root and already-yielded child must remain retained")
+    }
+
+    @Test
+    fun `operation failure remains primary with unconfirmed cleanup suppressed`() = inControlTemporaryDirectory { root ->
+        val primary = IllegalStateException("authored process wait failure")
+        val process = FixtureOwnedProcess(
+            fixtureHandle(3001L, initialAlive = true, refusesTermination = false), primary,
+        )
+        val clock = AtomicLong()
+        val controller = BoundedAnalysisProcessLaunch()
+        val child = fixtureHandle(3002L, initialAlive = true, refusesTermination = true)
+        val analyzer = GhidraHeadlessProgramModelAnalyzer(
+            commandFactory = { listOf("fixture-owned-export") },
+            limits = GhidraProgramModelExportLimits(wallClockTimeout = Duration.ofSeconds(5), terminationGrace = Duration.ZERO),
+            processStarter = { _, _ -> process },
+        ).withProcessLifecycleForTests(controller) { owned, grace ->
+            ExportProcessTree(
+                owned, grace,
+                nanoTime = clock::get,
+                sleepNanos = { nanos -> clock.addAndGet(nanos) },
+                descendantObservation = { _, retain -> retain(child) },
+            )
+        }
+
+        val failure = assertFailsWith<IllegalStateException> {
+            analyzer.analyze(root.resolve("unused-input"), root.resolve("analysis"))
+        }
+
+        assertTrue(failure === primary, "cleanup failure must not replace the operation failure")
+        assertTrue(failure.suppressed.any { it.message.orEmpty().contains("could not prove absence") })
+        assertTrue(controller.hasQuarantinedOwner())
+    }
+
+    @Test
+    fun `stream close failure quarantines process admission`() = inControlTemporaryDirectory { root ->
+        val reports = root.resolve("analysis/reports")
+        Files.createDirectories(reports)
+        val priorModel = "prior model survives stream close failure\n".toByteArray()
+        reports.resolve("program_model.json").writeBytes(priorModel)
+        val closeFailure = java.io.IOException("fixture stream close failed")
+        val process = FixtureOwnedProcess(
+            fixtureHandle(4001L, initialAlive = true, refusesTermination = false),
+            streamCloseFailure = closeFailure,
+        )
+        val clock = AtomicLong()
+        val controller = BoundedAnalysisProcessLaunch()
+        val launches = AtomicInteger()
+        val analyzer = GhidraHeadlessProgramModelAnalyzer(
+            commandFactory = { listOf("fixture-owned-export") },
+            limits = GhidraProgramModelExportLimits(wallClockTimeout = Duration.ofSeconds(5), terminationGrace = Duration.ZERO),
+            processStarter = { _, _ -> launches.incrementAndGet(); process },
+        ).withProcessLifecycleForTests(controller) { owned, grace ->
+            ExportProcessTree(
+                owned, grace,
+                nanoTime = clock::get,
+                sleepNanos = { nanos -> clock.addAndGet(nanos) },
+                descendantObservation = { _, _ -> },
+            )
+        }
+
+        val failure = assertFailsWith<java.io.IOException> { analyzer.analyze(root.resolve("unused-input"), root.resolve("analysis")) }
+
+        assertTrue(failure === closeFailure, "the first output-stream failure must remain primary")
+        assertTrue(failure.suppressed.any { generateSequence(it) { cause -> cause.cause }.any { cause -> cause === closeFailure } })
+        assertTrue(controller.hasQuarantinedOwner())
+        assertContentEquals(priorModel, reports.resolve("program_model.json").readBytes())
+        assertFailsWith<GhidraAnalysisException> { analyzer.analyze(root.resolve("unused-input"), root.resolve("second-analysis")) }
+        assertEquals(1, launches.get())
+    }
+
     @Test
     fun `shared deadline refuses blocked process launch before it returns and preserves prior evidence`(): Unit =
         inControlTemporaryDirectory { root ->
@@ -315,7 +455,9 @@ class GhidraExportLaunchTest {
 
         fun analyzer(starter: (List<String>, Path) -> Process) = GhidraHeadlessProgramModelAnalyzer(
             commandFactory = { invocation ->
-                assertEquals(model.toAbsolutePath().normalize(), Path.of(invocation.postScripts.single().arguments.last()))
+                val scriptArguments = invocation.postScripts.single().arguments
+                assertEquals(model.toAbsolutePath().normalize(), Path.of(scriptArguments[3]))
+                assertEquals("owned-model-candidate-v1", scriptArguments[4])
                 listOf("/bin/sh", "-c", """
                     printf 'ready\n'
                     IFS= read -r permit || exit 70
@@ -323,7 +465,7 @@ class GhidraExportLaunchTest {
                     printf 'activated\n' > "${'$'}1"
                     cp "${'$'}2" "${'$'}3"
                     printf 'new analysis evidence\n' > "${'$'}4"
-                """.trimIndent(), "gated-export", activation.toString(), canonical.toString(), model.toString(), report.toString())
+                """.trimIndent(), "gated-export", activation.toString(), canonical.toString(), scriptArguments.last(), report.toString())
             },
             limits = GhidraProgramModelExportLimits(wallClockTimeout = Duration.ofSeconds(5), terminationGrace = Duration.ZERO),
             processStarter = starter,
@@ -383,6 +525,63 @@ class GhidraExportLaunchTest {
             assertTrue(elapsedNanos.get() < TimeUnit.MILLISECONDS.toNanos(maximumMillis), "launch did not return promptly")
             return assertIs<T>(failure.get())
         }
+    }
+
+    private class FixtureOwnedProcess(
+        private val handle: ProcessHandle,
+        private val waitFailure: Throwable? = null,
+        private val streamCloseFailure: Throwable? = null,
+    ) : Process() {
+        private val alive = AtomicBoolean(true)
+        private val output = object : ByteArrayOutputStream() {
+            override fun close() { streamCloseFailure?.let { throw it }; super.close() }
+        }
+        private val input = fixtureStream()
+        private val error = fixtureStream()
+        private fun fixtureStream() = object : ByteArrayInputStream(byteArrayOf()) {
+            override fun close() { streamCloseFailure?.let { throw it }; super.close() }
+        }
+        override fun getOutputStream(): java.io.OutputStream = output
+        override fun getInputStream(): java.io.InputStream = input
+        override fun getErrorStream(): java.io.InputStream = error
+        override fun waitFor(): Int = if (alive.get()) throw IllegalThreadStateException() else 70
+        override fun waitFor(timeout: Long, unit: TimeUnit): Boolean {
+            waitFailure?.let { throw it }
+            return false
+        }
+        override fun exitValue(): Int = if (alive.get()) throw IllegalThreadStateException() else 70
+        override fun destroy(): Unit { alive.set(false) }
+        override fun destroyForcibly(): Process { alive.set(false); return this }
+        override fun isAlive(): Boolean = alive.get()
+        override fun toHandle(): ProcessHandle = handle
+    }
+
+    private fun fixtureHandle(pid: Long, initialAlive: Boolean, refusesTermination: Boolean): ProcessHandle {
+        val alive = AtomicBoolean(initialAlive)
+        lateinit var handle: ProcessHandle
+        handle = Proxy.newProxyInstance(
+            ProcessHandle::class.java.classLoader,
+            arrayOf(ProcessHandle::class.java),
+        ) { _, method, arguments ->
+            when (method.name) {
+                "pid" -> pid
+                "isAlive" -> alive.get()
+                "destroy", "destroyForcibly" -> {
+                    if (!refusesTermination) alive.set(false)
+                    !refusesTermination
+                }
+                "supportsNormalTermination" -> true
+                "parent" -> java.util.Optional.empty<ProcessHandle>()
+                "children", "descendants" -> java.util.stream.Stream.empty<ProcessHandle>()
+                "onExit" -> CompletableFuture.completedFuture(handle)
+                "compareTo" -> java.lang.Long.compare(pid, (arguments!![0] as ProcessHandle).pid())
+                "toString" -> "FixtureProcessHandle[$pid]"
+                "hashCode" -> pid.hashCode()
+                "equals" -> handle === arguments?.get(0)
+                else -> null
+            }
+        } as ProcessHandle
+        return handle
     }
 
     private companion object {

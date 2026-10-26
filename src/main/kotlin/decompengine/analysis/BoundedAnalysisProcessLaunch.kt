@@ -20,7 +20,16 @@ internal val ANALYSIS_PROCESS_LAUNCH_EXECUTOR: Executor = ThreadPoolExecutor(
 internal class BoundedAnalysisProcessLaunch(
     private val executor: Executor = ANALYSIS_PROCESS_LAUNCH_EXECUTOR,
 ) {
-    private val lateCleanupFailure = AtomicReference<Throwable?>()
+    private data class QuarantinedOwner(val failure: Throwable, val retainedOwner: Any)
+
+    private val quarantinedOwner = AtomicReference<QuarantinedOwner?>()
+
+    /** Retains known process/capture ownership and refuses later launches after uncertain cleanup. */
+    internal fun quarantineUnconfirmedCleanup(failure: Throwable, retainedOwner: Any) {
+        quarantinedOwner.compareAndSet(null, QuarantinedOwner(failure, retainedOwner))
+    }
+
+    internal fun hasQuarantinedOwner(): Boolean = quarantinedOwner.get() != null
 
     fun start(
         checkpoint: (String) -> Unit,
@@ -43,8 +52,8 @@ internal class BoundedAnalysisProcessLaunch(
             throw failure
         }
         try {
-            lateCleanupFailure.get()?.let {
-                throw GhidraAnalysisException("analysis launch is unavailable after an unconfirmed late-worker cleanup", it)
+            quarantinedOwner.get()?.let {
+                throw GhidraAnalysisException("analysis launch is unavailable after an unconfirmed worker cleanup", it.failure)
             }
             checkpoint("before admitting export process launch")
         } catch (failure: Throwable) { refused(failure) }
@@ -76,7 +85,7 @@ internal class BoundedAnalysisProcessLaunch(
                     try {
                         stopLateProcess(process)
                     } catch (cleanupFailure: Throwable) {
-                        lateCleanupFailure.compareAndSet(null, cleanupFailure)
+                        quarantineUnconfirmedCleanup(cleanupFailure, process)
                         if (cleanupFailure !== failure) failure.addSuppressed(cleanupFailure)
                     }
                 }
