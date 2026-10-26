@@ -802,7 +802,7 @@ class ManagedGitRepositories(
             val current = GitConflictFiles.observe(located.workTree, path)
             fun stage(objectId: String?) = objectId?.let { GitIntegrations.blobText(runner, located.commonDir, it) }
             GitConflictFileView(located.worktreeId, entry, stage(entry.baseObjectId), stage(entry.oursObjectId), stage(entry.theirsObjectId),
-                current.text, current.sha256, current.size)
+                current.text.takeIf { entry.plainFile }, current.sha256, current.size)
         }
     }
 
@@ -814,6 +814,8 @@ class ManagedGitRepositories(
 
     /** Work-tree path of a conflict, refusing names the workbench cannot write safely. */
     private fun conflictPath(runner: GitCommandRunner, located: Located, entry: GitConflictEntry): Path {
+        if (!entry.plainFile) GitWorkspaceMutations.refuse("UNSUPPORTED_CONFLICT",
+            "This conflict includes a symbolic link or another non-plain index type. Resolve it outside the workbench, or abort the merge.")
         val path = entry.path.exact ?: GitWorkspaceMutations.refuse("UNSUPPORTED_CONFLICT", "This file name is not valid UTF-8; resolve it outside the workbench.")
         if (GitTrackingPolicy.excluded(runner, listOf(path)).isNotEmpty()) {
             GitWorkspaceMutations.refuse("EXCLUDED_PATH", "This conflicted file is excluded by the source-only policy and cannot be resolved here.")

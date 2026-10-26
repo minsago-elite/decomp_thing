@@ -438,6 +438,33 @@ class GitIntegrationTest {
         assertTrue(service.workspace(jobId, repositoryId).observation.status.entries.any { it.unstaged != GitIndexChange.NONE })
     }
 
+    @Test fun `symbolic link conflicts remain unsupported even when materialized as plain files`(): Unit = Fixture().use { f ->
+        Files.createSymbolicLink(f.seed.resolve("link"), Path.of("base-target")); f.remoteCommit("base link")
+        f.cloned()
+        f.localCommit("ours-target", "link")
+        Files.delete(f.seed.resolve("link")); Files.createSymbolicLink(f.seed.resolve("link"), Path.of("theirs-target")); f.remoteCommit("remote link")
+        fetch()
+        val merged = sync(GitOperationAction.MERGE, merge("merge"))
+        assertTrue(merged.message.contains("1 conflicted file"), merged.message)
+        val gitDir = f.store.resolve("$jobId/git/repositories/$repositoryId/repository.git")
+        fun index() = f.repositories.git("--git-dir=$gitDir", "--work-tree=${f.workTree()}", "ls-files", "-s", "--", "link")
+        val before = index()
+        assertTrue(before.lines().filter { it.isNotBlank() }.all { it.startsWith("120000 ") }, before)
+        assertTrue(Files.isRegularFile(f.workTree().resolve("link"), java.nio.file.LinkOption.NOFOLLOW_LINKS))
+        val conflicts = service.conflicts(jobId, repositoryId, null)
+        val entry = conflicts.files.single()
+        assertEquals(setOf("120000"), entry.modes)
+        val fileId = entry.path.fileId(conflicts.worktreeId)
+        val detail = service.conflictFile(jobId, repositoryId, null, fileId)
+        assertNull(detail.current, "the response reports unsupported instead of offering plain-file completion")
+        refused("UNSUPPORTED_CONFLICT", GitOperationAction.CONFLICT_COMPLETE, content = "$fileId ${detail.currentSha256}\n")
+        refused("UNSUPPORTED_CONFLICT", GitOperationAction.CONFLICT_SAVE, mapOf("fileId" to fileId,
+            "expectedSha256" to detail.currentSha256, "resolution" to "text"), "new-target")
+        assertEquals(before, index(), "no index type or stage changed")
+        assertEquals("ours-target", Files.readString(f.workTree().resolve("link")))
+        assertEquals(GitOperationState.COMPLETED, sync(GitOperationAction.MERGE_ABORT).state)
+    }
+
     @Test fun `merge and abort exclude workflow admission through publication`(): Unit = Fixture().use { f ->
         f.cloned()
         Files.writeString(f.seed.resolve("util.c"), "int incoming = 7;\n"); f.remoteCommit("incoming")

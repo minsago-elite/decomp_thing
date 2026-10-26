@@ -32,7 +32,11 @@ data class GitIntegrationRecord(
 )
 
 /** One unresolved path with its stage blobs (#597). */
-data class GitConflictEntry(val path: GitPath, val baseObjectId: String?, val oursObjectId: String?, val theirsObjectId: String?)
+data class GitConflictEntry(val path: GitPath, val baseObjectId: String?, val oursObjectId: String?, val theirsObjectId: String?,
+    val modes: Set<String> = setOf("100644")) {
+    // core.symlinks=false materializes a link as a plain file: filesystem type alone is not enough.
+    val plainFile: Boolean get() = modes.all { it == "100644" || it == "100755" }
+}
 
 /** Divergence of a local branch from one remote-tracking ref (#595). */
 data class GitDivergence(val ahead: Long, val behind: Long, val mergeBase: String?)
@@ -103,16 +107,17 @@ internal object GitIntegrations {
     /** Every unmerged path with the blob of each stage that exists. */
     fun conflicts(runner: GitCommandRunner, gitDir: Path, workTree: Path): List<GitConflictEntry> {
         val result = runner.run(GitInvocation("ls-files", listOf("-u", "-z"), gitDir = gitDir, workTree = workTree, limits = LIMITS))
-        val stages = LinkedHashMap<String, MutableMap<Int, String>>()
+        val stages = LinkedHashMap<String, MutableMap<Int, Pair<String, String>>>()
         for (record in result.stdout.toString(Charsets.ISO_8859_1).split('\u0000')) {
             if (record.isEmpty()) continue
             val (meta, path) = record.split('\t', limit = 2).takeIf { it.size == 2 }?.let { it[0] to it[1] } ?: continue
             val parts = meta.split(' ')
             if (parts.size != 3) continue
-            stages.getOrPut(path) { mutableMapOf() }[parts[2].toInt()] = parts[1]
+            stages.getOrPut(path) { mutableMapOf() }[parts[2].toInt()] = parts[0] to parts[1]
         }
         return stages.map { (path, byStage) ->
-            GitConflictEntry(GitPath.of(path.toByteArray(Charsets.ISO_8859_1)), byStage[1], byStage[2], byStage[3])
+            GitConflictEntry(GitPath.of(path.toByteArray(Charsets.ISO_8859_1)), byStage[1]?.second, byStage[2]?.second, byStage[3]?.second,
+                byStage.values.map { it.first }.toSet())
         }
     }
 
