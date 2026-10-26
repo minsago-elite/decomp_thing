@@ -328,9 +328,9 @@ class ManagedGitRepositories(
         live(operation)
     }
 
-    private fun transferControl(operationId: String, directory: Path): GitProcessControl {
+    private fun transferControl(operationId: String, directory: Path, maxBytes: Long = remotePolicy.limits.maxRepositoryBytes): GitProcessControl {
         val flag = synchronized(lock) { cancellations[operationId] } ?: java.util.concurrent.atomic.AtomicBoolean()
-        val watch = GitDiskWatch(directory, remotePolicy.limits.maxRepositoryBytes) { flag.get() }
+        val watch = GitDiskWatch(directory, maxBytes) { flag.get() }
         return GitProcessControl(stop = watch::stop, progress = { line -> GitProgress.parse(line)?.let { progress[operationId] = it } })
     }
 
@@ -772,28 +772,21 @@ class ManagedGitRepositories(
             GitOperationAction.FETCH -> {
                 val remote = remoteFor(located, request.parameters["remoteId"])
                 val location = allowedLocation(remote)
-                val before = GitTransfers.allTrackingRefs(runner, located.commonDir, located.record.objectFormat, remote.name).associate { it.name to it.objectId }
-                try {
-                    GitTransfers.fetch(runner, located.commonDir, location, remote.name, remotePolicy, transferControl(operation.operationId, located.commonDir))
-                } catch (failure: GitCommandException) {
-                    GitTransfers.removePartialPacks(located.commonDir)
-                    val (code, _) = GitTransports.classify(failure, failure.diagnostic, location.transport)
+                val staging = GitStorage.directories(root.resolve(operation.jobId).resolve("git"), "staging", operation.operationId)
+                val remaining = (remotePolicy.limits.maxRepositoryBytes - GitDiskWatch.bytes(located.commonDir)).coerceAtLeast(0)
+                val changed = try {
+                    GitTransfers.fetchQuarantined(runner, located.commonDir, staging.resolve(GIT_DIR), located.record.objectFormat,
+                        location, remote.name, remotePolicy, remaining, transferControl(operation.operationId, staging, remaining))
+                } catch (failure: Exception) {
+                    val code = when (failure) {
+                        is GitCommandException -> GitTransports.classify(failure, failure.diagnostic, location.transport).first
+                        is GitOperationRefusal -> failure.code
+                        else -> "TRANSFER_FAILED"
+                    }
                     GitRemoteStore.audit(directory, GitRemoteStore.auditEntry("fetch", operation.operationId, code.lowercase(), remote, clock.instant()))
                     throw failure
                 }
-                var after = GitTransfers.allTrackingRefs(runner, located.commonDir, located.record.objectFormat, remote.name).associate { it.name to it.objectId }
-                // The bound is enforced once more after Git exits: an overrun in the last interval is not accepted.
-                if (GitDiskWatch(located.commonDir, remotePolicy.limits.maxRepositoryBytes) { false }.exceeded()) {
-                    for (name in before.keys + after.keys) {
-                        val old = before[name]
-                        if (old == after[name]) continue
-                        runner.run(GitInvocation("update-ref", if (old == null) listOf("-d", name) else listOf(name, old), gitDir = located.commonDir))
-                    }
-                    GitRemoteStore.audit(directory, GitRemoteStore.auditEntry("fetch", operation.operationId, "transfer_limit", remote, clock.instant()))
-                    throw GitOperationRefusal("TRANSFER_LIMIT", "The fetch exceeded the repository size bound; its remote-tracking refs were restored and nothing was accepted.")
-                }
                 writeFetchState(directory, remote.remoteId, operation.operationId)
-                val changed = (before.keys + after.keys).count { before[it] != after[it] }
                 GitRemoteStore.audit(directory, GitRemoteStore.auditEntry("fetch", operation.operationId, "completed", remote, clock.instant(),
                     detail = "$changed remote-tracking refs changed"))
                 null to "Fetched ${remote.name}: $changed remote-tracking ref(s) changed. Nothing was merged or checked out."

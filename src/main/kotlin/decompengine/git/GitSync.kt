@@ -86,6 +86,71 @@ internal object GitTransfers {
             gitDir = gitDir, limits = limits(policy), transport = GitTransports.context(location, policy), control = control))
     }
 
+    /**
+     * Receive objects and refs in operation-owned storage. The sole alternate is the managed
+     * object store (read-only); neither a stopped process nor a rejected final pack can grow it.
+     * Only after admission do immutable objects move into the live store and a single CAS ref
+     * transaction publishes the tracking changes. Restart reconciliation removes the quarantine.
+     */
+    fun fetchQuarantined(runner: GitCommandRunner, live: Path, quarantine: Path, format: GitObjectFormat,
+        location: GitRemoteLocation, name: String, policy: GitRemotePolicy, remainingBytes: Long, control: GitProcessControl): Int {
+        val before = allTrackingRefs(runner, live, format, name).associate { it.name to it.objectId }
+        runner.run(GitInvocation("init", listOf("--quiet", "--bare", "--object-format=${format.wireName}", quarantine.toString())))
+        Files.writeString(quarantine.resolve("objects/info/alternates"), live.resolve("objects").toString() + "\n")
+        for ((ref, objectId) in before) {
+            val path = quarantine.resolve(ref)
+            GitStorage.directories(quarantine, *quarantine.relativize(path.parent).map { it.toString() }.toTypedArray())
+            Files.writeString(path, "$objectId\n")
+        }
+        fetch(runner, quarantine, location, name, policy, control)
+        val after = allTrackingRefs(runner, quarantine, format, name).associate { it.name to it.objectId }
+        // Include quarantine metadata and all final object files, even on a very fast transfer.
+        if (GitDiskWatch(quarantine, remainingBytes) { false }.exceeded()) {
+            throw GitOperationRefusal("TRANSFER_LIMIT", "The fetch exceeded the repository size bound. Its quarantined objects and refs were not accepted.")
+        }
+        control.stop()?.let { reason -> throw GitCommandException(GitCommandException.Kind.STOPPED, "The fetch was stopped.", stopReason = reason) }
+        val changed = (before.keys + after.keys).filter { before[it] != after[it] }
+        val transaction = buildString {
+            append("start\n")
+            for (ref in changed) {
+                val old = before[ref]
+                val next = after[ref]
+                when {
+                    next == null -> append("delete $ref $old\n")
+                    old == null -> append("create $ref $next\n")
+                    else -> append("update $ref $next $old\n")
+                }
+            }
+            append("prepare\ncommit\n")
+        }.toByteArray()
+        if (transaction.size > 4 * 1024 * 1024) throw GitOperationRefusal("TRANSFER_LIMIT", "The fetch changed more refs than one bounded transaction can publish.")
+        val promoted = mutableListOf<Path>()
+        var publishingRefs = false
+        try {
+            val objects = quarantine.resolve("objects")
+            Files.walk(objects).use { paths ->
+                for (file in paths.filter { Files.isRegularFile(it, NOFOLLOW_LINKS) }.toList()) {
+                    val relative = objects.relativize(file)
+                    if (relative.getName(0).toString() == "info") continue // Never publish the alternate.
+                    val target = live.resolve("objects").resolve(relative)
+                    GitStorage.directories(live.resolve("objects"), *relative.parent.map { it.toString() }.toTypedArray())
+                    if (!Files.exists(target, NOFOLLOW_LINKS)) {
+                        Files.move(file, target) // No replacement of a pre-existing/local object.
+                        promoted.add(target)
+                    }
+                }
+            }
+            publishingRefs = true
+            runner.run(GitInvocation("update-ref", listOf("--stdin"), gitDir = live, input = transaction))
+        } catch (failure: Exception) {
+            // Never remove objects after an uncertain ref publication. They were already admitted
+            // within the cap; reconciliation may observe committed refs even if output was lost.
+            if (!publishingRefs) promoted.forEach { Files.deleteIfExists(it) }
+            throw failure
+        }
+        return changed.size
+    }
+
     /** The branch the remote's HEAD names, or null when it has none. */
     fun remoteHead(runner: GitCommandRunner, location: GitRemoteLocation, policy: GitRemotePolicy, control: GitProcessControl): String? {
         val result = runner.run(GitInvocation("ls-remote", listOf("--symref", "--", location.url, "HEAD"),

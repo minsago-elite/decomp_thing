@@ -242,7 +242,21 @@ class GitRemotesTest {
             assertEquals(GitOperationState.COMPLETED, cloned.state, cloned.message)
             repositoryId = cloned.repositoryId
             assertEquals("configured", service.remotes(jobId, repositoryId).single().credential)
-            val fetched = sync(GitOperationAction.FETCH, "remoteId" to service.remotes(jobId, repositoryId).single().record.remoteId)
+            val remoteId = service.remotes(jobId, repositoryId).single().record.remoteId
+            val gitDir = f.store.resolve("$jobId/git/repositories/$repositoryId/repository.git")
+            val beforeCancel = GitDiskWatch.bytes(gitDir)
+            server.stall = CountDownLatch(1)
+            val (view, guards) = guards()
+            val fetchAdmission = service.requestWorkspace(jobId, repositoryId, GitSyncRequest(GitOperationAction.FETCH,
+                view.worktreeId, guards, mapOf("remoteId" to remoteId)), key())
+            Thread.sleep(500)
+            service.cancel(jobId, repositoryId, fetchAdmission.operation.operationId)
+            assertTrue(service.awaitIdle(60_000))
+            assertEquals(GitOperationState.CANCELLED, service.operation(jobId, repositoryId, fetchAdmission.operation.operationId).state)
+            assertEquals(beforeCancel, GitDiskWatch.bytes(gitDir))
+            assertEquals(0L, Files.list(f.store.resolve("$jobId/git/staging")).use { it.count() })
+            server.stall?.countDown(); server.stall = null
+            val fetched = sync(GitOperationAction.FETCH, "remoteId" to remoteId)
             assertEquals(GitOperationState.COMPLETED, fetched.state, fetched.message)
             // Nothing persisted by the server holds the credential.
             Files.walk(f.store).use { paths ->
@@ -269,10 +283,14 @@ class GitRemotesTest {
         service.close()
         val pack = f.store.resolve("$jobId/git/repositories/$repositoryId/repository.git/objects/pack/tmp_pack_partial")
         Files.writeString(pack, "partial")
+        val quarantine = f.store.resolve("$jobId/git/staging/${admission.operation.operationId}/repository.git/objects")
+        Files.createDirectories(quarantine)
+        Files.write(quarantine.resolve("completed-but-unadmitted-object"), ByteArray(256 * 1024))
         service = f.open()
         val reconciled = service.operation(jobId, repositoryId, admission.operation.operationId)
         assertEquals(GitOperationState.INTERRUPTED, reconciled.state, reconciled.message)
         assertFalse(Files.exists(pack))
+        assertFalse(Files.exists(quarantine))
         assertTrue(service.remotes(jobId, repositoryId).single().tracking.isEmpty())
         // The explicit retry is a new operation; nothing was repeated automatically.
         assertEquals(GitOperationState.COMPLETED, sync(GitOperationAction.FETCH, "remoteId" to remoteId).state)
@@ -304,6 +322,65 @@ class GitRemotesTest {
         assertTrue(first != second)
         refused("NOT_FOUND", GitOperationAction.FETCH, "remoteId" to first)
         refused("NOT_FOUND", GitOperationAction.REMOTE_REMOVE, "remoteId" to first)
+    }
+
+    @Test fun `rejected fetches discard received objects and a subsequent small fetch recovers`(): Unit = Fixture().use { f ->
+        val bare = f.remote()
+        f.initialized()
+        sync(GitOperationAction.REMOTE_ADD, "name" to "upstream", "url" to "admitted:upstream.git")
+        val remoteId = service.remotes(jobId, repositoryId).single().record.remoteId
+        assertEquals(GitOperationState.COMPLETED, sync(GitOperationAction.FETCH, "remoteId" to remoteId).state)
+        val gitDir = f.store.resolve("$jobId/git/repositories/$repositoryId/repository.git")
+        val originalRefs = service.remotes(jobId, repositoryId).single().tracking
+        val originalBytes = GitDiskWatch.bytes(gitDir)
+        val seed = f.repositories.root.resolve("upstream seed")
+        val oldTip = f.repositories.git("-C", seed.toString(), "rev-parse", "HEAD").trim()
+        val payload = ByteArray(2 * 1024 * 1024).also { java.util.Random(1760).nextBytes(it) }
+        Files.write(seed.resolve("large.c"), payload)
+        f.repositories.git("-C", seed.toString(), "add", "-A")
+        f.repositories.git("-C", seed.toString(), "commit", "-q", "-m", "large source")
+        f.repositories.git("-C", seed.toString(), "push", "-q", bare.toString(), "main")
+        service.close()
+        service = f.open(GitRemotePolicy(admittedRoot = f.admitted, limits = GitTransferLimits(maxRepositoryBytes = 128 * 1024)))
+        repeat(2) {
+            val result = sync(GitOperationAction.FETCH, "remoteId" to remoteId)
+            assertEquals("TRANSFER_LIMIT", result.failureCode, result.message)
+            assertEquals(originalBytes, GitDiskWatch.bytes(gitDir))
+            assertEquals(originalRefs, service.remotes(jobId, repositoryId).single().tracking)
+            assertEquals(0L, Files.list(f.store.resolve("$jobId/git/staging")).use { it.count() })
+        }
+        // Replace the oversized branch with a small forward update; old local objects survive.
+        f.repositories.git("-C", seed.toString(), "reset", "--hard", oldTip)
+        Files.writeString(seed.resolve("small.c"), "int small;\n")
+        f.repositories.git("-C", seed.toString(), "add", "-A")
+        f.repositories.git("-C", seed.toString(), "commit", "-q", "-m", "small source")
+        f.repositories.git("--git-dir=$bare", "update-ref", "refs/heads/main", oldTip)
+        f.repositories.git("-C", seed.toString(), "push", "-q", bare.toString(), "main")
+        assertEquals(GitOperationState.COMPLETED, sync(GitOperationAction.FETCH, "remoteId" to remoteId).state)
+        assertTrue(GitDiskWatch.bytes(gitDir) <= 128 * 1024)
+        assertEquals("commit", f.repositories.git("--git-dir=$gitDir", "cat-file", "-t", oldTip).trim())
+        assertFalse(Files.exists(gitDir.resolve("objects/info/alternates")))
+    }
+
+    @Test fun `quarantine final admission rejects a completed pack without touching live objects or refs`(): Unit = Fixture().use { f ->
+        val bare = f.remote()
+        val seed = f.repositories.root.resolve("upstream seed")
+        Files.write(seed.resolve("large.c"), ByteArray(512 * 1024).also { java.util.Random(593).nextBytes(it) })
+        f.repositories.git("-C", seed.toString(), "add", "-A")
+        f.repositories.git("-C", seed.toString(), "commit", "-q", "-m", "large source")
+        f.repositories.git("-C", seed.toString(), "push", "-q", bare.toString(), "main")
+        val (live, _) = f.repositories.managed("quarantine destination")
+        val originalBytes = GitDiskWatch.bytes(live)
+        val quarantine = f.repositories.root.resolve("quarantine.git")
+        val policy = GitRemotePolicy(admittedRoot = f.admitted)
+        assertEquals("TRANSFER_LIMIT", assertFailsWith<GitOperationRefusal> {
+            // Disable periodic checks deliberately: only the final, unthrottled gate can reject.
+            GitTransfers.fetchQuarantined(f.repositories.runner, live, quarantine, GitObjectFormat.SHA1,
+                parse("admitted:upstream.git", policy), "origin", policy, 128 * 1024, GitProcessControl())
+        }.code)
+        assertTrue(GitDiskWatch.bytes(quarantine) > 128 * 1024)
+        assertEquals(originalBytes, GitDiskWatch.bytes(live))
+        assertTrue(GitTransfers.allTrackingRefs(f.repositories.runner, live, GitObjectFormat.SHA1, "origin").isEmpty())
     }
 
     @Test fun `clone budgets compressible checkout expansion and all publication metadata`(): Unit = Fixture().use { f ->
