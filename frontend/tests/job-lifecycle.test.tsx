@@ -84,7 +84,7 @@ it('hands a running deletion to the page before announcing it to this and other 
   const deleted = vi.fn();
   const seen: unknown[] = [];
   const stop = onLibraryChange('/', () => { seen.push(deleted.mock.calls[0]?.[0]); });
-  client.get.mockResolvedValueOnce({ data: preview() }).mockRejectedValueOnce(new ApiClientError('network_error'));
+  client.get.mockResolvedValueOnce({ data: preview() });
   client.put.mockResolvedValueOnce({ data: operation('running') });
   try {
     render(<JobDeletion job={job()} client={typed} basePath="/" session={session} onDeleted={deleted} />);
@@ -92,7 +92,8 @@ it('hands a running deletion to the page before announcing it to this and other 
     fireEvent.input(await screen.findByLabelText(/Type the file name/), { target: { value: 'router.elf' } });
     fireEvent.click(screen.getByRole('button', { name: 'Delete permanently' }));
     await waitFor(() => expect(seen).toHaveLength(1), { timeout: 4000 });
-    // A failed status read keeps the accepted running operation instead of reporting a failed deletion.
+    // The accepted operation is handed off without a cancellable status read in the form.
+    expect(client.get).toHaveBeenCalledOnce();
     expect(deleted).toHaveBeenCalledWith(expect.objectContaining({ state: 'running' }));
     expect(seen[0]).toEqual(expect.objectContaining({ state: 'running' }));
   } finally { stop(); }

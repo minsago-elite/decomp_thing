@@ -138,19 +138,12 @@ export function JobDeletion({ job, client, basePath, session, onDeleted }: {
     const controller = new AbortController(); active.current = controller;
     setBusy(true); setNotice(copy.deleting);
     try {
-      let result = (await client.put('operation', `/jobs/${job.jobId}`, 'jobDeletionRequest', { confirmJobId: job.jobId }, {
+      const result = (await client.put('operation', `/jobs/${job.jobId}`, 'jobDeletionRequest', { confirmJobId: job.jobId }, {
         csrfToken, ifMatch: `"${preview.version}"`, idempotencyKey: crypto.randomUUID(), signal: controller.signal,
       }, 'DELETE')).data;
       if (result.jobId !== job.jobId || result.action !== 'job.delete') throw new ApiClientError('invalid_response');
-      // Bounded observation of the purge; an unfinished cleanup is truthfully reported as running.
-      // A failed observation keeps the accepted operation rather than reporting the deletion as failed.
-      for (let attempt = 0; attempt < 5 && !['completed', 'failed'].includes(result.state); attempt++) {
-        await new Promise(resolve => setTimeout(resolve, 1000));
-        if (controller.signal.aborted) return;
-        try { result = (await client.get('operation', `/jobs/${job.jobId}/operations/${result.operationId}`, { signal: controller.signal })).data; }
-        catch { if (controller.signal.aborted) return; break; }
-      }
-      if (controller.signal.aborted) return;
+      // Acceptance is durable even if visibility, connectivity or navigation cancels observation.
+      // Report the accepted state without polling in this soon-to-be-unmounted deletion form.
       setOperation(result); setPreview(null);
       setNotice(textMessage(copy.accepted, { state: result.state }));
       // Hand the operation to the page before the hint: this tab's own job view also reacts to it.

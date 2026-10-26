@@ -93,6 +93,8 @@ internal object JobStorageAccounting {
                         when {
                             attributes.isDirectory && !attributes.isSymbolicLink -> {
                                 if (removing != null && path.size == 2) pending.putIfAbsent(removing, StorageTally())
+                                // Every directory below the scan root is an entry with no bytes, including empty ones.
+                                charge(classifyDirectory(path), 0, job, removing)
                                 directory.newDirectoryStream(entry.fileName, NOFOLLOW_LINKS).use { child ->
                                     visit(child as SecureDirectoryStream<Path>, path, depth + 1)
                                 }
@@ -125,6 +127,23 @@ internal object JobStorageAccounting {
             first.startsWith(".upload-") -> StorageCategory.TEMPORARY
             first == JobDeletionStore.DIRECTORY -> if (path.size == 2 && name.endsWith(".json")) StorageCategory.METADATA else StorageCategory.TEMPORARY
             first == ".workflow-owner.lock" && path.size == 1 -> StorageCategory.METADATA
+            else -> StorageCategory.OTHER
+        }
+    }
+
+    /** Directories take the category of the content their fixed layout position holds. */
+    internal fun classifyDirectory(path: List<String>): StorageCategory {
+        val first = path.first()
+        return when {
+            jobName.matches(first) -> when {
+                path.size == 1 -> StorageCategory.METADATA
+                path[1] != "reports" -> StorageCategory.OTHER
+                "source-tree" in path -> StorageCategory.SOURCE_SNAPSHOTS
+                "logs" in path -> StorageCategory.LOGS
+                else -> StorageCategory.REPORTS
+            }
+            first.startsWith(".upload-") -> StorageCategory.TEMPORARY
+            first == JobDeletionStore.DIRECTORY -> if (path.size == 1) StorageCategory.METADATA else StorageCategory.TEMPORARY
             else -> StorageCategory.OTHER
         }
     }

@@ -1,6 +1,8 @@
 import type { RevisionDirectory, RevisionFile } from '../api/generated';
 import { ApiClientError, withApiFailureReference } from '../api/errors';
 import { sourceCopy as copy } from '../copy/sources';
+import { jobCopy } from '../copy/job';
+import { isDeletedJob } from '../shared/retainMetadata';
 import { sourceReadRoute } from '../app/paths';
 import type { SourceSelection, SourceSnapshotPin } from '../app/paths';
 
@@ -64,7 +66,8 @@ export function sourceSnapshotSelection(search: string): { pin: SourceSnapshotPi
 export function sourceReadMessage(failure: unknown): string {
   let text: string = copy.unavailable;
   if (failure instanceof ApiClientError) {
-    if (failure.code === 'invalid_request') text = copy.invalid;
+    if (isDeletedJob(failure)) text = jobCopy.thisJobWasDeleted;
+    else if (failure.code === 'invalid_request') text = copy.invalid;
     else if (failure.status === 404) text = copy.noSnapshot;
     else if (failure.status === 429) text = copy.busy;
     else if (failure.status === 416) text = copy.invalidRange;
