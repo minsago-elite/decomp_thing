@@ -156,6 +156,22 @@ class WebSourceArchiveRoutesTest {
             sha256(Files.readAllBytes(extracted.resolve(artifact.getValue("path").jsonPrimitive.content))))
     }
 
+    @Test fun `operation location and key replay survive missing source metadata`() = withFixture { fixture ->
+        val digest = sha256(Files.readAllBytes(fixture.archive))
+        val key = "archive-metadata-loss-0001"
+        val accepted = verify(fixture, digest, key)
+        val operation = data(accepted, "operation", 202)
+        val completed = finish(fixture, operation)
+        assertEquals("completed", completed.getValue("state").jsonPrimitive.content)
+        Files.delete(fixture.tree.resolve("source_tree_manifest.json"))
+        val location = accepted.headers().firstValue("Location").orElseThrow()
+        assertEquals(completed, data(get(fixture, location), "operation"))
+        val replay = verify(fixture, digest, key)
+        assertEquals("true", replay.headers().firstValue("Idempotency-Replayed").orElseThrow())
+        assertEquals(completed, data(replay, "operation", 202))
+        assertEquals(503, verify(fixture, digest, "archive-new-after-loss-01").statusCode())
+    }
+
     @Test fun `a metadata-only change of the same archive asks for a new check instead of claiming a replacement`() = withFixture { fixture ->
         val bytes = Files.readAllBytes(fixture.archive)
         assertEquals("completed", finish(fixture, data(verify(fixture, sha256(bytes)), "operation", 202)).getValue("state").jsonPrimitive.content)

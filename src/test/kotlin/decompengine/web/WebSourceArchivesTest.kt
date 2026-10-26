@@ -23,7 +23,12 @@ class WebSourceArchivesTest {
             roles = setOf(ProjectFileRole.BUILD_INPUT), contentKind = ProjectContentKind.UTF8_TEXT), 1)))
 
     private fun archives(release: CountDownLatch, verified: CountDownLatch, observe: () -> Unit = {},
-        shutdownTimeoutMs: Long = 60_000): WebSourceArchives {
+        shutdownTimeoutMs: Long = 60_000, entered: CountDownLatch = CountDownLatch(0),
+        capture: () -> WebRevisionSourceSnapshot = { snapshot },
+        checked: () -> WebRevisionSourceSnapshot = { snapshot },
+        reference: (String, String, String) -> WebRevisionSourceReference = { job, run, revision ->
+            snapshot.reference.copy(jobId = job, runId = run, revisionId = revision)
+        }): WebSourceArchives {
         val at = Instant.parse("2026-10-25T00:00:00Z")
         val attempt = WorkflowAttempt("run_1", jobId, WorkflowKind.RECONSTRUCT, WorkflowRunState.COMPLETED, "version_1", at, at, at, null, null, null,
             WorkflowExecutionLimits(1u, 1u, 1u, 0u), WorkflowTerminalReason.COMPLETED, null, WorkflowCandidate("revision_1", "c".repeat(64)), null)
@@ -34,13 +39,20 @@ class WebSourceArchivesTest {
                 consume: (ByteArray, Int) -> Unit, cancellationCheck: () -> Unit): StableFileDigest { observe(); return StableFileDigest(digest, 10, identity) }
             override fun revisionCommitments(jobId: String, runId: String, revisionId: String) = null
         }
-        return WebSourceArchives({ _, _, _ -> snapshot }, { _, _ -> attempt }, store, { _, _ -> null }, { _, _, sha ->
+        return WebSourceArchives({ job, run, revision ->
+            val captured = capture()
+            WebRevisionSourceSnapshot(captured.reference.copy(jobId = job, runId = run, revisionId = revision),
+                captured.manifestSha256, captured.descriptorSha256, captured.files)
+        }, { _, _ -> attempt }, store, { _, _ -> null }, { _, _, sha ->
             // Like ZIP extraction, this verifier does not stop when interrupted.
+            entered.countDown()
             var waiting = true
             while (waiting) try { assertTrue(release.await(10, TimeUnit.SECONDS)); waiting = false } catch (_: InterruptedException) { }
             verified.countDown()
-            WebArchiveSnapshot(ByteArray(0), sha, WebSourceArchivesTestViews.view, kotlinx.serialization.json.JsonObject(emptyMap()), snapshot.descriptorSha256)
-        }, Executors.newSingleThreadExecutor(), shutdownTimeoutMs = shutdownTimeoutMs)
+            val observed = checked()
+            WebArchiveSnapshot(ByteArray(0), sha, WebSourceArchivesTestViews.view, kotlinx.serialization.json.JsonObject(emptyMap()),
+                observed.descriptorSha256, observed.manifestSha256)
+        }, Executors.newSingleThreadExecutor(), reference, shutdownTimeoutMs = shutdownTimeoutMs)
     }
 
     @Test fun `a deduplicated request binds its own key to the returned operation`() {
@@ -81,10 +93,107 @@ class WebSourceArchivesTest {
         }
     }
 
-    @Test fun `shutdown waits for a running verifier and reports an unfinished one`() {
+    private fun awaitTerminal(record: WebArchiveVerification) {
+        val deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(10)
+        while (!record.terminal && System.nanoTime() < deadline) Thread.sleep(5)
+        assertTrue(record.terminal, "verification did not finish")
+    }
+
+    @Test fun `metadata loss does not hide the failed operation or its idempotent replay`() {
         val release = CountDownLatch(1); val verified = CountDownLatch(1)
-        val archives = archives(release, verified)
+        val available = java.util.concurrent.atomic.AtomicBoolean(true)
+        val authorized = java.util.concurrent.atomic.AtomicBoolean(true)
+        val selectedSource = java.util.concurrent.atomic.AtomicReference(snapshot.reference.sourceSha256)
+        archives(release, verified, capture = {
+            if (!available.get()) throw WebAccessDenied(503, "SOURCE_REVISION_UNAVAILABLE", "Fixture metadata is unavailable.")
+            snapshot
+        }, reference = { job, run, revision ->
+            if (!authorized.get()) throw WebAccessDenied(404, "REVISION_NOT_FOUND", "Fixture candidate is unavailable.")
+            snapshot.reference.copy(jobId = job, runId = run, revisionId = revision, sourceSha256 = selectedSource.get())
+        }).use { archives ->
+            val key = "key-metadata-loss-0001"
+            val record = archives.start(jobId, "run_1", "revision_1", digest, key).record
+            available.set(false)
+            release.countDown(); awaitTerminal(record)
+            assertEquals("failed", record.state)
+            assertEquals("REVISION_UNAVAILABLE", record.progress.failureCode)
+            assertSame(record, archives.operation(jobId, "run_1", "revision_1", record.operationId))
+            val replay = archives.start(jobId, "run_1", "revision_1", digest, key)
+            assertTrue(replay.replayed); assertSame(record, replay.record)
+            assertEquals("SOURCE_REVISION_UNAVAILABLE", assertFailsWith<WebAccessDenied> {
+                archives.start(jobId, "run_1", "revision_1", digest, "key-new-metadata-0001") }.code)
+            for ((job, run, revision) in listOf(Triple("f".repeat(32), "run_1", "revision_1"),
+                Triple(jobId, "run_2", "revision_1"), Triple(jobId, "run_1", "revision_2"))) {
+                assertEquals("OPERATION_NOT_FOUND", assertFailsWith<WebAccessDenied> {
+                    archives.operation(job, run, revision, record.operationId) }.code)
+                assertEquals("IDEMPOTENCY_CONFLICT", assertFailsWith<WebAccessDenied> {
+                    archives.start(job, run, revision, digest, key) }.code)
+            }
+            selectedSource.set("f".repeat(64))
+            assertEquals("SOURCE_REVISION_CHANGED", assertFailsWith<WebAccessDenied> {
+                archives.operation(jobId, "run_1", "revision_1", record.operationId) }.code)
+            assertEquals("SOURCE_REVISION_CHANGED", assertFailsWith<WebAccessDenied> {
+                archives.start(jobId, "run_1", "revision_1", digest, key) }.code)
+            selectedSource.set(snapshot.reference.sourceSha256)
+            authorized.set(false)
+            assertEquals("REVISION_NOT_FOUND", assertFailsWith<WebAccessDenied> {
+                archives.operation(jobId, "run_1", "revision_1", record.operationId) }.code)
+            assertEquals("REVISION_NOT_FOUND", assertFailsWith<WebAccessDenied> {
+                archives.start(jobId, "run_1", "revision_1", digest, key) }.code)
+        }
+    }
+
+    @Test fun `a manifest observed only by the verifier cannot verify another selected manifest`() {
+        val release = CountDownLatch(1); val verified = CountDownLatch(1)
+        val selected = java.util.concurrent.atomic.AtomicReference(snapshot) // Admission sees B.
+        val manifestA = WebRevisionSourceSnapshot(snapshot.reference, "a".repeat(64), snapshot.descriptorSha256, snapshot.files)
+        archives(release, verified, capture = { selected.get() }, checked = {
+            selected.set(manifestA) // The verifier observes A, with unchanged source inputs and descriptor.
+            val observed = selected.get()
+            selected.set(snapshot) // B is restored before the coordinator recaptures metadata.
+            observed
+        }).use { archives ->
+            val record = archives.start(jobId, "run_1", "revision_1", digest, "key-manifest-race-0001").record
+            release.countDown(); awaitTerminal(record)
+            assertEquals(snapshot.metadataVersion, record.metadataVersion)
+            assertEquals("failed", record.state)
+            assertEquals("REVISION_MISMATCH", record.progress.failureCode)
+            val status = archives.status("/", jobId, "run_1", "revision_1")
+            val progress = status.getValue("verification") as kotlinx.serialization.json.JsonObject
+            assertEquals(kotlinx.serialization.json.JsonPrimitive("failed"), progress.getValue("state"))
+            assertEquals(kotlinx.serialization.json.JsonNull, progress.getValue("verifiedAt"))
+        }
+    }
+
+    @Test fun `interrupted shutdown still waits for verifier cleanup and restores interruption`() {
+        for (interruptBeforeClose in listOf(true, false)) {
+            val release = CountDownLatch(1); val verified = CountDownLatch(1); val entered = CountDownLatch(1)
+            val archives = archives(release, verified, entered = entered)
+            archives.start(jobId, "run_1", "revision_1", digest, "key-interrupt-0000001")
+            assertTrue(entered.await(10, TimeUnit.SECONDS))
+            val result = java.util.concurrent.CompletableFuture<Boolean>()
+            val closing = Thread {
+                if (interruptBeforeClose) Thread.currentThread().interrupt()
+                try { archives.close(); result.complete(Thread.currentThread().isInterrupted) }
+                catch (failure: Throwable) { result.completeExceptionally(failure) }
+            }.apply { start() }
+            try {
+                closing.join(100)
+                if (!interruptBeforeClose) closing.interrupt()
+                closing.join(100)
+                assertTrue(closing.isAlive, "interruption must not abandon active verifier cleanup")
+                release.countDown()
+                assertTrue(result.get(10, TimeUnit.SECONDS))
+                assertEquals(0, verified.count)
+            } finally { release.countDown(); closing.join(10_000); archives.close() }
+        }
+    }
+
+    @Test fun `shutdown waits for a running verifier and reports an unfinished one`() {
+        val release = CountDownLatch(1); val verified = CountDownLatch(1); val entered = CountDownLatch(1)
+        val archives = archives(release, verified, entered = entered)
         archives.start(jobId, "run_1", "revision_1", digest, "key-shutdown-00001")
+        assertTrue(entered.await(10, TimeUnit.SECONDS))
         val closing = Thread { archives.close() }.apply { start() }
         closing.join(300)
         assertTrue(closing.isAlive, "close must wait while the verifier still reads storage")
@@ -92,11 +201,17 @@ class WebSourceArchivesTest {
         assertFalse(closing.isAlive); assertEquals(0, verified.count)
 
         val stuck = CountDownLatch(1)
-        val bounded = archives(stuck, CountDownLatch(1), shutdownTimeoutMs = 100)
+        val stuckEntered = CountDownLatch(1)
+        val bounded = archives(stuck, CountDownLatch(1), shutdownTimeoutMs = 100, entered = stuckEntered)
         val record = bounded.start(jobId, "run_1", "revision_1", digest, "key-shutdown-00002").record
-        assertEquals("SHUTDOWN_INCOMPLETE", assertFailsWith<WebJobServiceException> { bounded.close() }.code)
-        assertEquals("interrupted", record.state)
-        stuck.countDown()
+        assertTrue(stuckEntered.await(10, TimeUnit.SECONDS))
+        try {
+            Thread.currentThread().interrupt()
+            assertEquals("SHUTDOWN_INCOMPLETE", assertFailsWith<WebJobServiceException> { bounded.close() }.code)
+            assertTrue(Thread.currentThread().isInterrupted)
+            assertEquals("interrupted", record.state)
+        } finally { Thread.interrupted(); stuck.countDown() }
+        bounded.close()
     }
 }
 
@@ -123,8 +238,9 @@ class WebSourceArchivesConsistencyTest {
         val archives = WebSourceArchives({ _, _, _ -> snapshot }, { _, _ -> attempt }, store, { _, _ -> null }, { _, _, sha ->
             // Alternate verified and failed outcomes so both terminal shapes are polled.
             if (synchronized(this) { round++ } % 2 == 1) throw IllegalArgumentException("payload differs")
-            WebArchiveSnapshot(ByteArray(0), sha, SourceTreeView(emptyList(), null), kotlinx.serialization.json.JsonObject(emptyMap()), snapshot.descriptorSha256)
-        }, Executors.newSingleThreadExecutor())
+            WebArchiveSnapshot(ByteArray(0), sha, SourceTreeView(emptyList(), null), kotlinx.serialization.json.JsonObject(emptyMap()),
+                snapshot.descriptorSha256, snapshot.manifestSha256)
+        }, Executors.newSingleThreadExecutor(), { _, _, _ -> snapshot.reference })
         archives.use {
             val stop = java.util.concurrent.atomic.AtomicBoolean(false)
             val problems = java.util.concurrent.ConcurrentLinkedQueue<String>()

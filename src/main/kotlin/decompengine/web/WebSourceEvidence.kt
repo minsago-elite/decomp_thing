@@ -70,7 +70,7 @@ internal class WebSourceEvidence(
         }
         requireSame(manifestSnapshot, readArtifact(jobId, manifestPath, MAXIMUM_MANIFEST_BYTES))
         requireSame(input, store.readInput(jobId))
-        return WebSourceSnapshot(manifest, manifestDocument, files, profile)
+        return WebSourceSnapshot(manifest, manifestDocument, files, profile, manifestSnapshot.sha256)
     }
 
     companion object {
@@ -98,6 +98,8 @@ internal class WebSourceSnapshot(
     val manifestDocument: JsonObject,
     private val files: Map<String, StableRegularFile>,
     val profile: ReconstructionProfile,
+    /** Digest of the exact raw manifest bytes checked by this observation, not its reserialized JSON. */
+    val manifestSha256: String,
 ) {
     private val viewable = manifest.files.filter {
         ProjectFileRole.VIEWABLE in it.roles && it.contentKind == ProjectContentKind.UTF8_TEXT

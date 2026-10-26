@@ -57,7 +57,8 @@ internal class WebApiController(
             try { jobs.readArtifact(job, "reports/runs/$run/source-tree/reports/build_contract.json", 1_048_576).bytes }
             catch (failure: Exception) { if (failure is InterruptedException) throw failure; null }
         }, { job, run, digest -> evidence.read(job, digest, "reports/runs/$run") },
-            java.util.concurrent.Executors.newSingleThreadExecutor { task -> Thread(task, "decomp-archive-verifier").apply { isDaemon = true } }, clock)
+            java.util.concurrent.Executors.newSingleThreadExecutor { task -> Thread(task, "decomp-archive-verifier").apply { isDaemon = true } },
+            jobs::revisionSourceReference, clock)
     }
     private val artifactContent = WebArtifactContent(artifactStore)
     internal val artifactDownloads = WebArtifactDownloads()
