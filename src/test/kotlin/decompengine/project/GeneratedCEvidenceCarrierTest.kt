@@ -426,6 +426,11 @@ class GeneratedCEvidenceCarrierTest {
                 emptyList(), emptyList(), boundaryEvidence = emptyList())
         })
         writeBoundFile(project, "reports/module_plan.json", plan.toJson())
+        val staleSummary = assertFailsWith<IllegalArgumentException> {
+            SourceTreeManifestReader.read(project, profile)
+        }
+        assertTrue(staleSummary.message.orEmpty().contains("planSha256 commitment"), staleSummary.message)
+        rebindManifestPlanCommitment(project, sha256(project.resolve("reports/module_plan.json").readBytes()))
         val manifest = SourceTreeManifestReader.read(project, profile)
         val failure = assertFailsWith<IllegalArgumentException> {
             GeneratedCEvidenceCarrier.verifyProject(project, profile, manifest)
@@ -548,6 +553,17 @@ class GeneratedCEvidenceCarrierTest {
                 hashes[file.getValue("path").jsonPrimitive.content]?.let { JsonObject(file + ("sha256" to JsonPrimitive(it))) } ?: file
             },
         ))) }
+    }
+    /** Keep the schema-4 summary coherent when this fixture intentionally changes the plan. */
+    private fun rebindManifestPlanCommitment(project: Path, planSha256: String) {
+        rewriteManifest(project) { document ->
+            val summary = RecordedRecoverySummaryV1.parse(document.getValue("recordedRecoverySummary").jsonObject)
+            val summaryDocument = summary.document
+            val bindings = summaryDocument.getValue("bindings").jsonObject
+            val rebound = RecordedRecoverySummaryV1.parse(JsonObject(summaryDocument + ("bindings" to
+                JsonObject(bindings + ("planSha256" to JsonPrimitive(planSha256))))))
+            JsonObject(document + ("recordedRecoverySummary" to rebound.toJsonObject()))
+        }
     }
     private fun fixture(block: (Path) -> Unit) {
         val root = Files.createTempDirectory(Path.of("build", "generated-c-carrier-tests").createDirectories(), "case-").toAbsolutePath()
