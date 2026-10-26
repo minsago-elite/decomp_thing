@@ -99,7 +99,6 @@ class RecoveredAbiInterfaceCandidateProjectionV1 private constructor(private val
                 listing.manifest.programModelSha256 == listing.bindings.programModelSha256 &&
                 inferred.bindings.listingBindings == listing.bindings && inferred.bindings.listingBytes == listing.manifest.bytes &&
                 inferred.bindings.listingSha256 == listing.manifest.sha256 &&
-                inferred.bindings.listingManifestSha256 == listing.manifest.sha256 &&
                 inferred.manifest.collectorSha256 == inferred.bindings.collectorSha256 &&
                 inferred.manifest.configurationSha256 == inferred.bindings.configurationSha256 &&
                 inferred.manifest.typeGraphSha256 == inferred.bindings.typeGraphSha256 &&
@@ -444,6 +443,7 @@ class RecoveredAbiInterfaceCandidateProjectionV1 private constructor(private val
                 "inputSha256" to str(listing.bindings.inputSha256),
                 "programModelSha256" to str(listing.bindings.programModelSha256),
                 "claimedListingObservationsSha256" to str(listing.manifest.sha256),
+                "claimedListingManifestSha256" to str(inferred.bindings.listingManifestSha256),
                 "claimedInferredObservationsSha256" to str(inferred.manifest.sha256),
                 "typeGraphSha256" to str(inferred.manifest.typeGraphSha256),
                 "configurationSha256" to str(inferred.manifest.configurationSha256),
@@ -501,6 +501,9 @@ class RecoveredAbiInterfaceCandidateProjectionV1 private constructor(private val
             listing: NativeInterfaceFunctionV1?, inferred: NativeInferredInterfaceFunctionV1, target: StructuralTargetAbiV1,
         ): NormalizationResult {
             if (listing == null) return NormalizationResult(null, "listing-function-is-absent")
+            if (listing.isThunk || inferred.isThunk) {
+                return NormalizationResult(null, "thunk-signature-is-not-an-independent-interface")
+            }
             if (inferred.disposition != "high-function-observed" || inferred.prototype == null) {
                 return NormalizationResult(null, "highfunction-prototype-was-not-observed")
             }

@@ -47,6 +47,31 @@ class RecoveredAbiInterfaceCandidateProjectionV1Test {
     }
 
     @Test
+    fun `mapped thunk varargs remain unknown despite completed agreeing observations`() {
+        val original = fixture()
+        val function = original.listingFunction.copy(isThunk = true, immediateThunkTarget = original.listingFunction.entry)
+        val listing = original.listing.copy(scan = original.listing.scan.copy(thunks = 1))
+        val input = original.withListing(listing).withListingFunction(function)
+            .withInferenceFunction(original.inferredFunction.copy(isThunk = true))
+        val document = project(input).document
+        val entity = document.getValue("candidateEntities").jsonArray.single().jsonObject
+        val variadic = entity.getValue("facts").jsonArray.map { it.jsonObject }
+            .single { it.getValue("dimension").jsonPrimitive.content == "function.variadic" }
+        assertEquals("recovered-unknown", variadic.getValue("state").jsonPrimitive.content)
+    }
+
+    @Test
+    fun `listing report and listing manifest commitments remain distinct`() {
+        val fixture = fixture()
+        val bindings = project(fixture).document.getValue("bindings").jsonObject
+        val reportDigest = bindings.getValue("claimedListingObservationsSha256").jsonPrimitive.content
+        val manifestDigest = bindings.getValue("claimedListingManifestSha256").jsonPrimitive.content
+        assertNotEquals(reportDigest, manifestDigest)
+        assertEquals("b".repeat(64), reportDigest)
+        assertEquals("c".repeat(64), manifestDigest)
+    }
+
+    @Test
     fun `same count caller-constructed record mutation changes candidate without changing claimed stream digest`() {
         val original = fixture()
         val changedFunction = original.listingFunction.copy(varArgs = false)
@@ -108,7 +133,10 @@ class RecoveredAbiInterfaceCandidateProjectionV1Test {
         val target: StructuralTargetAbiV1,
     ) {
         fun withListingFunction(value: NativeInterfaceFunctionV1) = Fixture(listing, value, inferred, inferredFunction, target)
-        fun withListing(value: NativeInterfaceObservationSummaryV1) = Fixture(value, listingFunction, inferred, inferredFunction, target)
+        fun withListing(value: NativeInterfaceObservationSummaryV1) = Fixture(value, listingFunction,
+            inferred.copy(listing = value, scan = inferred.scan.copy(
+                internalFunctions = value.scan.internalFunctions, externalFunctions = value.scan.externalFunctions, thunks = value.scan.thunks,
+            )), inferredFunction, target)
         fun withInferenceFunction(value: NativeInferredInterfaceFunctionV1) = Fixture(listing, listingFunction, inferred, value, target)
     }
 
@@ -117,7 +145,9 @@ class RecoveredAbiInterfaceCandidateProjectionV1Test {
         val address = NativeCallAddressV1(0, "0000000000000001")
         val binding = NativeCallBindingsV1(digest, "compiler", digest, NativeCallAddressV1(0, "0000000000000000"),
             digest, "language", 1, digest, digest)
-        val listingManifest = NativeInterfaceManifestV1(1, digest, digest, digest, digest)
+        val listingReportDigest = "b".repeat(64)
+        val listingManifestDigest = "c".repeat(64)
+        val listingManifest = NativeInterfaceManifestV1(1, digest, digest, digest, listingReportDigest)
         val listingFunction = NativeInterfaceFunctionV1(address, "candidate", false, false, null, "DEFAULT",
             NativeInterfaceConventionV1("sysv", if (conventionState == "named-resolved") "__cdecl" else null, conventionState),
             true, false, 0, 0, null, emptyList())
@@ -131,8 +161,9 @@ class RecoveredAbiInterfaceCandidateProjectionV1Test {
             false, false, false, false, false, null, storage)
         val inferredFunction = NativeInferredInterfaceFunctionV1(0, address, false, false,
             "high-function-observed", 1, result, prototype, emptyList())
-        val inferredBindings = NativeInferredInterfaceBindingsV1(binding, digest, digest, digest, 1, digest, digest, digest, digest)
-        val inferredManifest = NativeInferredInterfaceManifestV1(1, digest, digest, digest, digest, digest, digest, digest)
+        val inferredBindings = NativeInferredInterfaceBindingsV1(binding, digest, digest, digest, 1,
+            listingReportDigest, listingManifestDigest, digest, digest)
+        val inferredManifest = NativeInferredInterfaceManifestV1(1, digest, digest, digest, listingReportDigest, digest, digest, digest)
         val inferred = NativeInferredInterfaceSummaryV1(inferredManifest, inferredBindings, listing,
             JsonObject(mapOf("sizeAlignments" to JsonArray(emptyList()))),
             NativeInferredInterfaceScanV1(1, 1, 0, 0, 1, 1, 0, 0, 0, 0, 0, 1, mapOf("high-function-observed" to 1)))
