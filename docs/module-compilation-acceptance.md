@@ -60,7 +60,8 @@ compilation. Compiler-only retries do not rewrite an already accepted ACP sessio
 rejected. Failed compilation, unexpected runtime errors, and cancellation preserve a
 previous accepted source, checkpoint, receipt, and manifest.
 
-This proves module-object compilation against the recorded closure. It does not prove
+The intended proof is module-object compilation against the recorded closure, subject
+to the unresolved integrity and qualification blockers below. It does not prove
 whole-project linking, entrypoint correctness, recovered ABI truth, behavior, production
 ACP execution, or release readiness. The public generated-C repair validator remains
 behind its separate qualification guard.
@@ -77,3 +78,27 @@ cancellation, historical replay separation, and a handled task-limit refusal. A 
 with no omitted, skipped, duplicated, failed, or cached controls. Missing
 configured authority fails the lane. Local protocol and
 worker tests are useful implementation evidence; they do not replace that hosted run.
+
+## Outstanding acceptance blockers
+
+Issue #738 remains open. Endpoint inventories do not authenticate the complete compiler
+search namespace throughout compilation: a same-UID host peer can add and remove an
+undeclared sibling between inventories without modifying a pinned manifest member.
+The read-only sandbox bind does not exclude host-side writes. Whole-namespace interval
+protection (including transient headers, shadow headers and sidecars), empty-header
+protection and the complete-set terminal-validation cutoff remain unfinished. Existing
+file leases must not be replaced with endpoint hashes or inotify-only byte protection.
+Configured synchronized mutation negatives and successful hosted qualification are
+required before claiming the intended complete-closure acceptance guarantee.
+
+The current shared NOFILE 512 policy also cannot retain every nonempty input in an
+otherwise admitted large snapshot. Issue #1786 and PR #1800 own the separately versioned,
+authenticated module-only finite descriptor correction and configured Make/Ninja scale
+qualification; they are not incorporated by this PR. The advertised 4096-input ceiling
+is not evidence that the current launcher can execute that population. Do not drop
+inputs, raise generic worker limits or infer acceptance from diagnostic worker success.
+
+The lightweight preflight regression runs an isolated Java/JUnit fixture through the
+real Gradle init script: fresh execution must reach a test, and both existing XML and
+an empty preexisting report directory must refuse before Test output preparation.
+It checks task ordering only, not native compiler containment or live admission.
