@@ -7,13 +7,17 @@ import decompengine.jobs.WorkflowStoreException
  * bytes, host paths and exception messages never reach it. Returns null for unrelated failures.
  */
 internal fun webStorageStartupGuidance(failure: Throwable): String? {
-    val (code, changesMayHaveBegun) = generateSequence(failure) { it.cause }.take(8).firstNotNullOfOrNull { cause ->
+    val chain = generateSequence(failure) { it.cause }.take(8).toList()
+    // The outermost storage code is the public classification; a web wrapper can hide an uncertain
+    // recovery outcome in its cause, so the whole chain decides whether changes may have begun.
+    val code = chain.firstNotNullOfOrNull { cause ->
         when (cause) {
-            is WorkflowStoreException -> cause.code to cause.outcomeUnknown
-            is WebJobServiceException -> cause.code to false
+            is WorkflowStoreException -> cause.code
+            is WebJobServiceException -> cause.code
             else -> null
         }
     } ?: return null
+    val changesMayHaveBegun = chain.any { it is WorkflowStoreException && it.outcomeUnknown }
     val reason = when (code) {
         "UNSUPPORTED_WORKFLOW_SCHEMA" ->
             "A workflow-state.json file uses a schema version this build does not support. It was probably written by a newer application version; start that version again or restore a verified backup taken before the upgrade."

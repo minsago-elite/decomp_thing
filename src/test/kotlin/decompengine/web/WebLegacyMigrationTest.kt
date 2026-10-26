@@ -313,6 +313,23 @@ class WebLegacyMigrationTest {
     }
 
     @Test
+    fun `startup guidance keeps an uncertain recovery outcome hidden behind a web wrapper`() {
+        val uncertain = decompengine.jobs.WorkflowStoreException("STARTUP_RECOVERY_INCOMPLETE",
+            "Startup recovery did not finish; changes may have begun.", true,
+            WebJobServiceException("STORE_DURABILITY_UNAVAILABLE", "durability"))
+        // webStartupFailure reports durability failures through this wrapper while the cause stays uncertain.
+        val wrapped = webStartupFailure(uncertain)
+        assertTrue(wrapped is WebJobServiceException && wrapped.code == "STORE_DURABILITY_UNAVAILABLE")
+        val guidance = assertNotNull(webStorageStartupGuidance(wrapped))
+        assertTrue(guidance.contains("STORE_DURABILITY_UNAVAILABLE"), guidance)
+        assertTrue(guidance.contains("Recovery changes may have begun"), guidance)
+        assertFalse(guidance.contains("No recovery changes were applied"), guidance)
+        val certain = assertNotNull(webStorageStartupGuidance(WebJobServiceException("STORE_DURABILITY_UNAVAILABLE", "durability",
+            decompengine.jobs.WorkflowStoreException("STARTUP_RECOVERY_INCOMPLETE", "Startup recovery did not finish.", false))))
+        assertTrue(certain.contains("No recovery changes were applied"), certain)
+    }
+
+    @Test
     fun `a newer workflow schema is refused on rollback instead of being rewritten`() {
         val fixture = retainedLegacyStore()
         start(WebUiMode.SPA).close()
