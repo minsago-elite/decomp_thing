@@ -21,10 +21,11 @@ import java.security.MessageDigest
 import java.time.Instant
 
 /**
- * A read-only reason a job must be retained, contributed by another subsystem. Git workspaces
- * are not implemented yet; when they are, a repository/worktree adapter registers a hold that
- * reports uncommitted, unpushed or in-progress Git work so deletion and maintenance refuse to
- * discard it (#509). An implementation must be fast and side-effect free; throwing fails closed.
+ * A read-only reason a job must be retained, contributed by another subsystem. The managed Git
+ * repositories register [WebGitRetentionHold], which reports in-progress, uncommitted and unpushed
+ * Git work so deletion and maintenance refuse to discard it (#509). An implementation must be
+ * fast and side-effect free; throwing fails closed. Holds are evaluated under the job service's
+ * lock, which Git admission also takes first, so a check and a new Git operation never interleave.
  */
 fun interface JobRetentionHold {
     fun holds(jobId: String): List<JobRetentionHoldReason>
@@ -342,4 +343,10 @@ internal class WebJobLifecycleController(
     }
 
     private companion object { const val MAX_BODY = 4096 }
+}
+
+/** Production Git retention hold (#509): queued or running operations, uncommitted and unpushed work. */
+internal class WebGitRetentionHold(private val repositories: decompengine.git.ManagedGitRepositories) : JobRetentionHold {
+    override fun holds(jobId: String): List<JobRetentionHoldReason> =
+        repositories.retentionHolds(jobId).map { JobRetentionHoldReason("git", it.code, it.message) }
 }
