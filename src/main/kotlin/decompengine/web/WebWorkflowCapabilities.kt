@@ -81,9 +81,16 @@ private fun capability(id: String, state: String, reason: String?, message: Stri
 internal fun webAdmissionPrerequisites(
     adapters: List<DurableWebWorkflowAdapter>, request: decompengine.jobs.NewWorkflowAttempt,
     passive: WebWorkflowPrerequisites?, inspectSandbox: () -> WebPrerequisite,
+): WebWorkflowPrerequisites? = webAdmissionPrerequisites(adapters, request.workflow, request.harnessCapabilityId, passive, inspectSandbox)
+
+/** Same rule for a recovery command, selected by the predecessor's recorded workflow and harness. */
+internal fun webAdmissionPrerequisites(
+    adapters: List<DurableWebWorkflowAdapter>, workflow: WorkflowKind, harnessCapabilityId: String?,
+    passive: WebWorkflowPrerequisites?, inspectSandbox: () -> WebPrerequisite,
 ): WebWorkflowPrerequisites? {
     val facts = passive ?: return null
-    val adapter = adapters.firstOrNull { it.workflow == request.workflow && it.harnessCapabilityId == request.harnessCapabilityId }
+    val adapter = adapters.firstOrNull { it.workflow == workflow && it.harnessCapabilityId == harnessCapabilityId }
+        ?: adapters.singleOrNull { it.workflow == workflow }.takeIf { harnessCapabilityId == null }
         ?: return facts
     if (WebWorkflowRequirement.SANDBOX !in adapter.requirements || !facts.sandbox.unknown) return facts
     if (facts.copy(sandbox = WebPrerequisite.AVAILABLE).unmet(adapter.requirements) != null) return facts

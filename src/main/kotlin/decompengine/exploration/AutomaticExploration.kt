@@ -12,7 +12,6 @@ import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 import java.nio.file.Path
 import java.util.Locale
-import java.util.concurrent.CompletableFuture
 import kotlin.io.path.createDirectories
 import kotlin.io.path.pathString
 import kotlin.io.path.writeText
@@ -88,12 +87,7 @@ class PythonAngrExplorer(
             argvBytes.toString(),
             stdinBytes.toString(),
         )
-        val process = ProcessBuilder(command).start()
-        val stdoutFuture = CompletableFuture.supplyAsync { process.inputStream.bufferedReader().readText() }
-        val stderrFuture = CompletableFuture.supplyAsync { process.errorStream.bufferedReader().readText() }
-        val exitCode = awaitOwnedProcess(process)
-        val stdout = stdoutFuture.join()
-        val stderr = stderrFuture.join()
+        val (exitCode, stdout, stderr) = collectOwnedExplorationProcess(ProcessBuilder(command).start())
         if (exitCode != 0) {
             val reason = if (exitCode == 124) "timed out after ${timeoutSeconds}s" else "failed with exit code $exitCode"
             error("angr candidate generation $reason: ${stderr.ifBlank { stdout }}")
@@ -253,10 +247,7 @@ class StaticHintGenerator(
         val process = ProcessBuilder(stringsPath.pathString, "-a", "-n", "3", binaryPath.pathString)
             .redirectErrorStream(true)
             .start()
-        // Read on an owned reader so the interruptible wait, not a blocking pipe read, owns cancellation.
-        val outputFuture = CompletableFuture.supplyAsync { process.inputStream.bufferedReader().readText() }
-        val exitCode = awaitOwnedProcess(process)
-        val output = outputFuture.join()
+        val (exitCode, output) = collectOwnedExplorationProcess(process)
         if (exitCode != 0) error("strings failed with exit code $exitCode: $output")
         val hints = output.lineSequence()
             .map(String::trim)
@@ -456,32 +447,6 @@ class AutomaticExplorer(
         reportPath.writeText(report.toJson())
         return report
     }
-}
-
-/**
- * Waits for an owned helper. Interruption (cancellation or an exhausted workflow limit) kills its
- * descendants first, while their parent can still reap them, then the helper itself, and returns
- * only after each has exited. A killed descendant left as an unreaped zombie holds no resources and
- * counts as exited, so a container without a reaping init cannot hang cancellation.
- */
-internal fun awaitOwnedProcess(process: Process): Int = try {
-    process.waitFor()
-} catch (interrupted: InterruptedException) {
-    var reinterrupt = false
-    fun await(member: ProcessHandle, exited: () -> Boolean) {
-        member.destroyForcibly()
-        while (!exited()) {
-            try { member.onExit().get(100, java.util.concurrent.TimeUnit.MILLISECONDS) }
-            catch (_: InterruptedException) { reinterrupt = true }
-            catch (_: java.util.concurrent.TimeoutException) { member.destroyForcibly() }
-            catch (_: java.util.concurrent.ExecutionException) { }
-        }
-    }
-    // Deepest first: each parent outlives its children and can reap them.
-    process.descendants().toList().reversed().forEach { member -> await(member) { !member.isAlive || isZombie(member.pid()) } }
-    await(process.toHandle()) { !process.isAlive } // The JVM reaps its own direct child.
-    if (reinterrupt) Thread.currentThread().interrupt()
-    throw interrupted
 }
 
 /** Linux process state Z: exited and awaiting its parent's wait; no other platform reports one. */

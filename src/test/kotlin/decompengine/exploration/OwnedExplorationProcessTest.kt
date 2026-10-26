@@ -29,6 +29,50 @@ class OwnedExplorationProcessTest {
             StaticHintGenerator(stringsPath = helper).generate(directory.resolve("binary"))
         }
 
+    @Test
+    fun `successful strings helper exit cleans a descendant that retains stdout`() =
+        exitedHelper { helper, directory -> StaticHintGenerator(stringsPath = helper).generate(directory.resolve("binary")) }
+
+    @Test
+    fun `successful angr helper exit cleans a descendant that retains both pipes`() =
+        exitedHelper { helper, directory ->
+            PythonAngrExplorer(python = Path.of("/bin/true"), timeout = helper).generate(directory.resolve("binary"))
+        }
+
+    private fun exitedHelper(run: (Path, Path) -> Unit) {
+        val parent = Files.createDirectories(Path.of("build/test-tmp/owned-exploration").toAbsolutePath())
+        val directory = Files.createTempDirectory(parent, "exited-")
+        var worker: Thread? = null
+        var ownedPids = emptyList<Long>()
+        try {
+            val pids = directory.resolve("pids")
+            val helper = directory.resolve("helper").also {
+                // The leader exits normally; its observed child retains stdout/stderr for five minutes.
+                it.writeText("#!/bin/sh\nsleep 300 &\necho \"$$ $!\" > '$pids'\nsleep 0.3\nexit 0\n")
+                it.toFile().setExecutable(true)
+            }
+            worker = Thread {
+                // Empty output is intentionally not valid angr JSON. We care about owned completion.
+                try { run(helper, directory) } catch (_: IllegalStateException) { }
+            }.apply { isDaemon = true; start() }
+            val deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(5)
+            while (!Files.exists(pids) && System.nanoTime() < deadline) Thread.sleep(10)
+            ownedPids = pids.readText().trim().split(' ').map(String::toLong)
+            worker.join(5_000)
+            assertFalse(worker.isAlive, "normal helper exit left an inherited-pipe reader blocked")
+            ownedPids.forEach { pid ->
+                assertTrue(ProcessHandle.of(pid).map { !it.isAlive || isZombie(pid) }.orElse(true), "helper member outlived completion")
+            }
+            assertFalse(Thread.getAllStackTraces().keys.any { it.isAlive && it.name.startsWith("decomp-exploration-") },
+                "owned reader outlived helper completion")
+        } finally {
+            // Even a failed regression only stops its own inert fixture processes.
+            ownedPids.reversed().forEach { pid -> ProcessHandle.of(pid).ifPresent { it.destroyForcibly() } }
+            worker?.interrupt(); worker?.join(5_000)
+            directory.toFile().deleteRecursively()
+        }
+    }
+
     private fun interruptedHelper(script: String, run: (Path, Path) -> Unit = { helper, directory ->
         PythonAngrExplorer(python = Path.of("/bin/true"), timeout = helper).generate(directory.resolve("binary"))
     }) {
