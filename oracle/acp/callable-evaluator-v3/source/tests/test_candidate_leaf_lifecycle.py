@@ -482,7 +482,9 @@ class PhaseArtifactContinuity(unittest.TestCase):
             pins={str(work/input_name):e.CopiedInput(work/input_name,e._file_version((work/input_name).stat()),hashlib.sha256(expected).hexdigest()).pin()}
             produced[label]=work/output_name;produced[label].write_bytes(data);calls.append(label)
             return {'status':'passed'},self.process(pins)
-        with patch.object(e,'new_worker_leaf',side_effect=leaf),patch.object(e,'copy_input',side_effect=copied),patch.object(e,'_run',side_effect=worker),patch.object(e,'capture_artifact',wraps=capture) as snapshots:
+        # Exercise only post-admission byte continuity using an explicit inert
+        # producer boundary; the real boundary refuses without protected authority.
+        with patch.object(e,'_capture_producer_artifact',side_effect=capture) as snapshots,patch.object(e,'new_worker_leaf',side_effect=leaf),patch.object(e,'copy_input',side_effect=copied),patch.object(e,'_run',side_effect=worker):
             statuses,artifacts=e.compile_sequence(e.CapturedArtifact(b'authored source'),initial_deadline=self.end)
         self.assertEqual(['preprocess','compile','link'],calls)
         self.assertEqual(3,snapshots.call_count)
@@ -490,6 +492,96 @@ class PhaseArtifactContinuity(unittest.TestCase):
         self.assertEqual([row[3] for row in phases],[artifacts[row[0]].data for row in phases])
         self.assertFalse(artifacts['link'].evidence()['producerOriginQualified'])
         self.assertFalse(artifacts['link'].evidence()['ordinaryMountAbaQualified'])
+
+    def test_producer_boundary_refuses_stable_replacements_without_reading_a_new_baseline(self):
+        for name in ('candidate.i','candidate.o','libcandidate.so','expected.i'):
+            path=self.root/name;path.write_bytes(b'authored substituted output')
+            with self.subTest(name=name),patch.object(e,'capture_artifact') as capture:
+                with self.assertRaisesRegex(ValueError,'producer-output authority unavailable'):
+                    e._capture_producer_artifact(path,deadline=self.end)
+                capture.assert_not_called()
+            self.assertEqual(b'authored substituted output',path.read_bytes())
+        self.now=self.end
+        with self.assertRaises(TimeoutError):
+            e._capture_producer_artifact(self.root/'expected.i',deadline=self.end)
+
+    def test_each_compile_phase_refuses_pre_capture_substitution_and_stops_propagation(self):
+        boundary=e._capture_producer_artifact
+        graph=[('preprocess','candidate.c','candidate.i'),('compile','candidate.i','candidate.o'),('link','candidate.o','libcandidate.so')]
+        for stop in range(3):
+            calls=[];retained=[];leaves=[]
+            def leaf(label):
+                path=self.root/(str(stop)+'-'+label);path.mkdir();leaves.append(path);return path
+            def worker(argv,work,**kwargs):
+                phase,_,output=graph[len(calls)];calls.append(phase)
+                (work/output).write_bytes(b'authored producer bytes')
+                (work/output).write_bytes(b'authored stable replacement before first capture')
+                return {'status':'passed','execution':{'authored':'producer execution only'},
+                        'producerOriginQualified':True},None
+            def handoff(path,**kwargs):
+                # Earlier phases are synthetic admitted boundaries solely to
+                # reach each real refusing consumer. Flags cannot authorize it.
+                return boundary(path,**kwargs) if len(calls)==stop+1 else e.capture_artifact(path,**kwargs)
+            with self.subTest(phase=graph[stop][0]),patch.object(e,'new_worker_leaf',side_effect=leaf),patch.object(e,'run',side_effect=worker),patch.object(e,'_capture_producer_artifact',side_effect=handoff):
+                statuses,artifacts=e.compile_sequence(e.CapturedArtifact(b'authored source'),retain=lambda name,row:retained.append((name,row)),initial_deadline=self.end)
+                self.assertEqual([row[0] for row in graph[:stop+1]],calls)
+                self.assertEqual([row[0] for row in graph[:stop]],list(artifacts))
+                refused=statuses[graph[stop][0]]
+                self.assertEqual('unknown',refused['status'])
+                self.assertIn('producer-output authority unavailable',refused['reason'])
+                self.assertEqual({'authored':'producer execution only'},refused['execution'])
+                self.assertNotIn('outputArtifact',refused)
+                self.assertEqual(refused,retained[-1][1])
+                self.assertEqual(b'authored stable replacement before first capture',(leaves[-1]/graph[stop][2]).read_bytes())
+
+    def _producer_refusal_evaluation_fixture(self):
+        from test_process_results import observations
+        contracts=self.root/'contracts';contracts.mkdir()
+        for path in (e.BASE/'contracts').iterdir():
+            if path.is_file():(contracts/path.name).write_bytes(path.read_bytes())
+        private=self.root/'private';private.mkdir()
+        for name in ('original.c','original.h'):(private/name).write_bytes(b'authored reference fixture')
+        for name in ('candidate.c','helper','caller'):(self.root/name).write_bytes(b'authored inert input')
+        return observations()
+
+    def test_unqualified_producer_cannot_admit_candidate_or_request_runtime(self):
+        observations=self._producer_refusal_evaluation_fixture();calls=[]
+        def worker(argv,work,**kwargs):
+            calls.append(argv);(work/'candidate.i').write_bytes(b'authored replacement before capture')
+            return {'status':'passed','execution':{'authored':'execution is not output authority'}},None
+        with patch.object(e,'BASE',self.root),patch('bounded_runtime.BASE',self.root),patch.object(e,'profile',side_effect=e.load_profile),patch.object(e,'validated_observations',return_value=observations),patch.object(e,'run',side_effect=worker),patch.object(e,'probe') as probe,patch.object(e,'export_inventory') as exports:
+            report=e._evaluate(self.root/'candidate.c',self.root/'output',self.root/'helper',self.root/'caller',self.root,self.root/'observations.json')
+        self.assertEqual(1,len(calls));probe.assert_not_called();exports.assert_not_called()
+        self.assertFalse(report['admitted']);self.assertIsNone(report['runtimeInputs'])
+        self.assertEqual(0,report['runtimeRequestCount']);self.assertEqual(24,report['admissionRefusedCount'])
+        self.assertEqual('unknown',report['phases']['preprocess']['status'])
+        for name in ('compile','link','exports','declarations','gccAssertions','load','behavior'):
+            self.assertEqual('not-attempted',report['phases'][name]['status'])
+        receipt=json.loads((self.root/'output/preprocess.json').read_bytes())
+        self.assertEqual({'authored':'execution is not output authority'},receipt['execution'])
+        self.assertNotIn('outputArtifact',receipt)
+        self.assertIsNone(report['processBehaviorRate']);self.assertIsNone(report['formalStructuralScore'])
+
+    def test_expected_preprocess_also_refuses_unqualified_output_before_assertions(self):
+        observations=self._producer_refusal_evaluation_fixture();calls=[]
+        def compile_fixture(source,*,retain,initial_deadline):
+            for phase in ('preprocess','compile','link'):retain(phase,{'status':'passed'})
+            return {},{'preprocess':e.CapturedArtifact(b'authored candidate preprocessed'),
+                       'link':e.CapturedArtifact(b'authored linked library')}
+        def worker(argv,work,**kwargs):
+            calls.append(argv)
+            if '-o' in argv:(work/'expected.i').write_bytes(b'authored substituted expected output')
+            return {'status':'passed','execution':{'authored':'expected execution only'}},None
+        with patch.object(e,'BASE',self.root),patch('bounded_runtime.BASE',self.root),patch.object(e,'profile',side_effect=e.load_profile),patch.object(e,'validated_observations',return_value=observations),patch.object(e,'compile_sequence',side_effect=compile_fixture),patch.object(e,'run',side_effect=worker),patch.object(e,'probe',return_value={'status':'supported','interfaces':{'acp_state':{}}}),patch.object(e,'compare_descriptors',return_value={'status':'passed'}),patch.object(e,'layout_assertions',return_value='authored inert assertion') as assertions,patch.object(e,'resolve_declaration',return_value={'sizeBits':64}),patch.object(e,'export_inventory',return_value={'status':'unknown'}):
+            report=e._evaluate(self.root/'candidate.c',self.root/'output',self.root/'helper',self.root/'caller',self.root,self.root/'observations.json')
+        retained=json.loads((self.root/'output/gcc-expected-preprocess.json').read_bytes())
+        self.assertEqual('unknown',retained['status']);self.assertNotIn('outputArtifact',retained)
+        self.assertIn('producer-output authority unavailable',retained['reason'])
+        self.assertEqual({'authored':'expected execution only'},retained['execution'])
+        self.assertEqual(1,assertions.call_count)
+        self.assertEqual('candidate.i',assertions.call_args.args[0].name)
+        self.assertEqual('unknown',report['phases']['gccAssertions']['status'])
+        self.assertFalse(report['admitted']);self.assertEqual(0,report['runtimeRequestCount'])
 
     def test_changed_copy_or_missing_consumer_pin_is_unknown_and_never_rebaseline(self):
         _,artifact=self.artifact();copied=e.copy_input(artifact,self.root/'input.i',deadline=self.end)
@@ -558,7 +650,7 @@ class PhaseArtifactContinuity(unittest.TestCase):
 
     def test_compile_missing_output_stops_chain_as_unknown_not_candidate_failure(self):
         def leaf(label):path=self.root/label;path.mkdir();return path
-        with patch.object(e,'new_worker_leaf',side_effect=leaf),patch.object(e,'run',return_value=({'status':'passed','execution':{'authored':'retained producer record'}},None)) as worker:
+        with patch.object(e,'_capture_producer_artifact',side_effect=e.capture_artifact),patch.object(e,'new_worker_leaf',side_effect=leaf),patch.object(e,'run',return_value=({'status':'passed','execution':{'authored':'retained producer record'}},None)) as worker:
             statuses,artifacts=e.compile_sequence(e.CapturedArtifact(b'authored source'),initial_deadline=self.end)
         self.assertEqual('unknown',statuses['preprocess']['status']);self.assertEqual({},artifacts)
         self.assertEqual({'authored':'retained producer record'},statuses['preprocess']['execution'])
@@ -796,7 +888,7 @@ class PhaseArtifactContinuity(unittest.TestCase):
                 return receipt(stdout=json.dumps(graph()).encode(),phase='probe',caller=str(helper),caller_sha=pin(helper)['sha256'],input_pins=pins)
             self.assertEqual(linked,(work/'libcandidate.so').read_bytes());inspections.append(1)
             return self.process(pins,phase='elf-inspection',stdout=symbols if len(inspections)==1 else sections)
-        with patch.object(e,'BASE',self.root),patch('bounded_runtime.BASE',self.root),patch.object(e,'verified_visible_snapshot',return_value=admitted_profile),patch.object(e,'validated_observations',return_value=observations),patch.object(e,'profile',side_effect=e.load_profile),patch.object(e,'new_worker_leaf',side_effect=leaf),patch.object(e,'copy_input',side_effect=copied),patch.object(e,'_run',side_effect=compiler),patch.object(gate,'profile',return_value=declared_profile),patch.object(gate,'bounded_run',side_effect=inspection),patch.object(e,'validate_exchange'):
+        with patch.object(e,'BASE',self.root),patch('bounded_runtime.BASE',self.root),patch.object(e,'verified_visible_snapshot',return_value=admitted_profile),patch.object(e,'validated_observations',return_value=observations),patch.object(e,'profile',side_effect=e.load_profile),patch.object(e,'new_worker_leaf',side_effect=leaf),patch.object(e,'copy_input',side_effect=copied),patch.object(e,'_run',side_effect=compiler),patch.object(e,'_capture_producer_artifact',side_effect=e.capture_artifact),patch.object(gate,'profile',return_value=declared_profile),patch.object(gate,'bounded_run',side_effect=inspection),patch.object(e,'validate_exchange'):
             report=e.evaluate(candidate,self.root/'output',helper,caller,visible,observations_path)
         diagnostic=json.dumps({
             'phases':{name:{'status':row['status'],'reason':str(row.get('reason',''))[:300]}

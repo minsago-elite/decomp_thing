@@ -478,6 +478,20 @@ def capture_artifact(path, *, deadline, maximum=None):
     return artifact
 
 
+def _capture_producer_artifact(path, *, deadline):
+    """Refuse output handoff until an authenticated producer channel exists.
+
+    A successful worker proof authenticates execution, not the mutable output
+    name after worker exit. capture_artifact() can preserve bytes but cannot
+    distinguish producer bytes from a stable replacement before its first read.
+    There is deliberately no pathname, digest, receipt flag or caller-supplied
+    qualification fallback. A future protected channel needs separate admission
+    and qualification before this boundary can return a usable artifact.
+    """
+    phase_remaining(deadline, 1)
+    raise ValueError('producer-output authority unavailable; pathname capture cannot authorize handoff')
+
+
 def copy_input(source, destination, *, deadline, executable=False):
     """Materialize captured bytes only. A Path cannot establish a new baseline."""
     if type(source) is not CapturedArtifact:
@@ -537,7 +551,7 @@ def compile_sequence(source, headers=(), retain=None, *, initial_deadline=None):
             status,result=run(phase_command(leaf,p['commands'][phase],read_only_files=[item.path for item in inputs]),leaf,
                               deadline=end,expected_inputs=_input_pins(inputs))
             if status['status']=='passed':
-                artifact=capture_artifact(leaf/output_name,deadline=end)
+                artifact=_capture_producer_artifact(leaf/output_name,deadline=end)
                 status={**status,'outputArtifact':artifact.evidence(),'inputArtifacts':[previous.evidence()]}
                 files[phase]=artifact;previous=artifact
         except (OSError,ValueError,TimeoutError) as error:
@@ -727,7 +741,7 @@ def _evaluate(candidate, output, helper, caller, visible, observations_path):
                     expected_artifact=None
                     if pre['status']=='passed':
                         try:
-                            expected_artifact=capture_artifact(prework/'expected.i',deadline=pre_end)
+                            expected_artifact=_capture_producer_artifact(prework/'expected.i',deadline=pre_end)
                             pre={**pre,'outputArtifact':expected_artifact.evidence()}
                         except (OSError,ValueError,TimeoutError) as error:
                             pre={**pre,'status':'unknown','reason':'expected output handoff unverified: '+str(error)[:300]}
