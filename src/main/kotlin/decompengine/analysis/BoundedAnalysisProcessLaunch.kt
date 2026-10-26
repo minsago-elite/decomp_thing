@@ -50,6 +50,9 @@ internal class BoundedAnalysisProcessLaunch(
     internal fun retainedQuarantineReferenceCount(process: Process): Int = synchronized(quarantineLock) {
         quarantinedOwners[process]?.retainedReferences?.size ?: 0
     }
+    internal fun retainedQuarantineOwnerForTests(process: Process): Any? = synchronized(quarantineLock) {
+        quarantinedOwners[process]?.retainedReferences?.firstOrNull { it !== process }
+    }
     internal fun quarantinedFailureCount(process: Process): Int = synchronized(quarantineLock) {
         quarantinedOwners[process]?.failures?.size ?: 0
     }

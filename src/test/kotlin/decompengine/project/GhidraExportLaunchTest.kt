@@ -193,6 +193,69 @@ class GhidraExportLaunchTest {
     }
 
     @Test
+    fun `stream close submission failure preserves primary and quarantines retained cleanup owner`() =
+        inControlTemporaryDirectory { root ->
+            val primary = IllegalStateException("authored process wait failure")
+            val rejected = java.util.concurrent.RejectedExecutionException("fixture close submission rejected")
+            val process = FixtureOwnedProcess(
+                fixtureHandle(4101L, initialAlive = true, refusesTermination = false),
+                waitFailure = primary,
+            )
+            val clock = AtomicLong()
+            val controller = BoundedAnalysisProcessLaunch()
+            val launches = AtomicInteger()
+            val closeSubmissions = AtomicInteger()
+            val closeActions = AtomicInteger()
+            val modelCandidate = AtomicReference<Path?>()
+            val analyzer = GhidraHeadlessProgramModelAnalyzer(
+                commandFactory = { invocation ->
+                    modelCandidate.set(Path.of(invocation.postScripts.single().arguments.last()))
+                    listOf("fixture-owned-export")
+                },
+                limits = GhidraProgramModelExportLimits(
+                    wallClockTimeout = Duration.ofSeconds(5), terminationGrace = Duration.ZERO,
+                ),
+                processStarter = { _, _ -> launches.incrementAndGet(); process },
+            ).withProcessLifecycleForTests(controller) { owned, grace ->
+                ExportProcessTree(
+                    owned, grace,
+                    // Cleanup settlement uses real bounded sleeps; advance the injected clock
+                    // on each remaining-window read so the rejected close expires deterministically.
+                    nanoTime = { clock.getAndAdd(TimeUnit.SECONDS.toNanos(1)) },
+                    sleepNanos = { nanos -> clock.addAndGet(nanos) },
+                    descendantObservation = { _, _ -> },
+                )
+            }.withStreamCloseSubmitterForTests { task ->
+                if (closeSubmissions.getAndIncrement() == 0) throw rejected
+                closeActions.incrementAndGet()
+                task.run()
+                CompletableFuture.completedFuture(null)
+            }
+
+            val failure = assertFailsWith<IllegalStateException> {
+                analyzer.analyze(root.resolve("unused-input"), root.resolve("analysis"))
+            }
+
+            assertTrue(failure === primary, "a close-task submission failure must not replace the operation failure")
+            assertTrue(failure.suppressed.any {
+                generateSequence(it) { cause -> cause.cause }.any { cause -> cause === rejected }
+            }, "the rejected stream-close submission must remain visible")
+            assertEquals(3, closeSubmissions.get(), "cleanup must continue submitting closures for every stream")
+            assertEquals(2, closeActions.get(), "all non-rejected stream-close tasks must execute")
+            assertTrue(controller.hasQuarantinedProcess(process))
+            val owner = assertIs<ExportProcessCleanupOwner>(controller.retainedQuarantineOwnerForTests(process))
+            assertEquals(listOf(checkNotNull(modelCandidate.get())), owner.outputCandidates)
+            assertEquals(3, owner.streams.size)
+            assertTrue(owner.tasks.isNotEmpty(), "the quarantine owner must retain its capture/close task set")
+            assertTrue(owner.taskSettlements.any { !it.get() }, "the rejected close remains explicitly unsettled")
+
+            assertFailsWith<GhidraAnalysisException> {
+                analyzer.analyze(root.resolve("unused-next-input"), root.resolve("next-analysis"))
+            }
+            assertEquals(1, launches.get(), "quarantine must refuse admission before another process starts")
+        }
+
+    @Test
     fun `concurrent unconfirmed owners are all retained and repeated reports coalesce`() = inControlTemporaryDirectory { root ->
         val processes = listOf(
             FixtureOwnedProcess(fixtureHandle(5001L, initialAlive = true, refusesTermination = false)),

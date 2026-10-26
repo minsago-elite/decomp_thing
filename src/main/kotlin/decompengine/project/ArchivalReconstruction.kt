@@ -81,6 +81,7 @@ class GhidraHeadlessProgramModelAnalyzer private constructor(
     private val requiresLaunchPermit: Boolean,
     private val processLaunch: BoundedAnalysisProcessLaunch,
     private val processTreeFactory: (Process, Duration) -> ExportProcessTree,
+    private val streamCloseSubmitter: (Runnable) -> CompletableFuture<*> = { task -> CompletableFuture.runAsync(task) },
 ) : ExportBudgetedProgramModelAnalyzer {
     internal constructor(
         commandFactory: (GhidraInvocation) -> List<String>,
@@ -126,6 +127,7 @@ class GhidraHeadlessProgramModelAnalyzer private constructor(
             requiresLaunchPermit = requiresLaunchPermit,
             processLaunch = processLaunch,
             processTreeFactory = processTreeFactory,
+            streamCloseSubmitter = streamCloseSubmitter,
         )
 
     internal fun withProcessLifecycleForTests(
@@ -140,6 +142,21 @@ class GhidraHeadlessProgramModelAnalyzer private constructor(
         requiresLaunchPermit = requiresLaunchPermit,
         processLaunch = controller,
         processTreeFactory = treeFactory,
+        streamCloseSubmitter = streamCloseSubmitter,
+    )
+
+    internal fun withStreamCloseSubmitterForTests(
+        submitter: (Runnable) -> CompletableFuture<*>,
+    ): GhidraHeadlessProgramModelAnalyzer = GhidraHeadlessProgramModelAnalyzer(
+        commandFactory = commandFactory,
+        limits = limits,
+        analysisToolSha256 = analysisToolSha256,
+        recoveryMode = recoveryMode,
+        processStarter = processStarter,
+        requiresLaunchPermit = requiresLaunchPermit,
+        processLaunch = processLaunch,
+        processTreeFactory = processTreeFactory,
+        streamCloseSubmitter = submitter,
     )
 
     override fun analyze(binaryPath: Path, workDir: Path): RecoveredProgramModel =
@@ -453,14 +470,23 @@ class GhidraHeadlessProgramModelAnalyzer private constructor(
                 val settled = AtomicBoolean(false)
                 streamSettlements += settled
                 taskSettlements += settled
-                CompletableFuture.runAsync {
+                val closeTask = try { streamCloseSubmitter(Runnable {
                     try { stream.close() } catch (failure: Throwable) {
                         streamCloseFailures.add(failure)
                         throw failure
                     } finally {
                         settled.set(true)
                     }
-                }.also(tasks::add)
+                }) } catch (failure: Throwable) {
+                    // A rejected close task leaves settlement unknown even if another actor later
+                    // closes the stream. Record it now and keep trying the other owned streams.
+                    recordCleanupFailure(GhidraAnalysisException(
+                        "Ghidra export cleanup could not submit a bounded stream close",
+                        failure,
+                    ))
+                    return@forEach
+                }
+                tasks.add(closeTask)
             }
             var taskCleanupInterrupted = false
             while (taskSettlements.any { !it.get() }) {
@@ -600,7 +626,7 @@ class GhidraHeadlessProgramModelAnalyzer private constructor(
 internal data class ExportProcessCleanupResult(val confirmedAbsent: Boolean, val failure: Throwable?)
 
 /** References retained after unresolved cleanup prevent another launch from assuming capacity. */
-private data class ExportProcessCleanupOwner(
+internal data class ExportProcessCleanupOwner(
     val processTree: ExportProcessTree,
     val process: Process,
     val tasks: List<CompletableFuture<*>>,
