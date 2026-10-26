@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+from contextlib import contextmanager
 from hashlib import sha256
 import json
 import os
@@ -80,36 +81,45 @@ def informational_path(value: object) -> None:
     require(path.is_absolute() and str(path) == value and ".." not in path.parts, "invalid informational original path")
 
 
-def repository_path(path: Path, *, existing: bool) -> Path:
-    root = REPOSITORY_ROOT.resolve()
+def repository_path(path: Path) -> Path:
+    # Lexical admission only. Filesystem access must use repository_parent, never this pathname.
+    root = REPOSITORY_ROOT
     absolute = path if path.is_absolute() else root / path
     require(absolute == Path(os.path.abspath(absolute)), "path must be normalized")
     require(absolute.is_relative_to(root) and absolute != root, "path is outside the repository")
-    cursor = root
-    for part in absolute.relative_to(root).parts[:-1]:
-        cursor /= part
-        info = cursor.lstat()
-        require(stat.S_ISDIR(info.st_mode) and not stat.S_ISLNK(info.st_mode), "path parent must be an existing nonsymlink directory")
-    if existing:
-        info = absolute.lstat()
-        require(stat.S_ISREG(info.st_mode) and not stat.S_ISLNK(info.st_mode), "input must be a regular nonsymlink file")
-    else:
-        require(not os.path.lexists(absolute), "extraction destination already exists")
     return absolute
 
 
+@contextmanager
+def repository_parent(path: Path):
+    absolute = repository_path(path)
+    parts = absolute.relative_to(REPOSITORY_ROOT).parts
+    flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
+    parent = os.open(REPOSITORY_ROOT, flags)
+    try:
+        # Hold each selected directory before opening its child. A renamed ancestor cannot
+        # redirect subsequent reads, creates, or cleanup through a substituted symlink.
+        for part in parts[:-1]:
+            child = os.open(part, flags, dir_fd=parent)
+            os.close(parent)
+            parent = child
+        yield parent, parts[-1]
+    finally:
+        os.close(parent)
+
+
 def read_file(path: Path, maximum: int) -> bytes:
-    path = repository_path(path, existing=True)
-    descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
-    with os.fdopen(descriptor, "rb") as stream:
-        before = os.fstat(stream.fileno())
-        require(stat.S_ISREG(before.st_mode) and before.st_size <= maximum, "input file exceeds byte bound")
-        result = stream.read(maximum + 1)
-        after = os.fstat(stream.fileno())
-        require(len(result) <= maximum and len(result) == before.st_size and
-                (before.st_dev, before.st_ino, before.st_size, before.st_mtime_ns, before.st_ctime_ns) ==
-                (after.st_dev, after.st_ino, after.st_size, after.st_mtime_ns, after.st_ctime_ns), "input changed while reading")
-        return result
+    with repository_parent(path) as (parent, name):
+        descriptor = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC, dir_fd=parent)
+        with os.fdopen(descriptor, "rb") as stream:
+            before = os.fstat(stream.fileno())
+            require(stat.S_ISREG(before.st_mode) and before.st_size <= maximum, "input file exceeds byte bound")
+            result = stream.read(maximum + 1)
+            after = os.fstat(stream.fileno())
+            require(len(result) <= maximum and len(result) == before.st_size and
+                    (before.st_dev, before.st_ino, before.st_size, before.st_mtime_ns, before.st_ctime_ns) ==
+                    (after.st_dev, after.st_ino, after.st_size, after.st_mtime_ns, after.st_ctime_ns), "input changed while reading")
+            return result
 
 
 def canonical_bytes(value: object) -> bytes:
@@ -329,7 +339,7 @@ def verify_report_bindings(evidence: dict, request: dict, report: dict) -> None:
 
 
 def verify_evidence(evidence_path: Path) -> tuple[bytes, dict]:
-    evidence_path = repository_path(evidence_path, existing=True)
+    evidence_path = repository_path(evidence_path)
     evidence = parse_canonical(read_file(evidence_path, MAX_CONTROL_BYTES), MAX_CONTROL_BYTES)
     fields(evidence, {"schemaVersion", "kind", "authority", "complete", "releaseEligible", "negativeCompleteness", "containmentStatus",
         "counts", "inputs", "payloads", "producerJar", "runtime", "source"}, "evidence")
@@ -382,16 +392,20 @@ def verify_evidence(evidence_path: Path) -> tuple[bytes, dict]:
 
 
 def extract_report(destination: Path, report_bytes: bytes) -> None:
-    destination = repository_path(destination, existing=False)
-    descriptor = os.open(destination, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
-    try:
-        with os.fdopen(descriptor, "wb") as stream:
-            stream.write(report_bytes)
-            stream.flush()
-            os.fsync(stream.fileno())
-    except BaseException:
-        destination.unlink()
-        raise
+    with repository_parent(destination) as (parent, name):
+        try:
+            descriptor = os.open(name, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC,
+                                 0o600, dir_fd=parent)
+        except FileExistsError as error:
+            raise VerificationError("extraction destination already exists") from error
+        try:
+            with os.fdopen(descriptor, "wb") as stream:
+                stream.write(report_bytes)
+                stream.flush()
+                os.fsync(stream.fileno())
+        except BaseException:
+            os.unlink(name, dir_fd=parent)
+            raise
 
 
 def main(argv: list[str] | None = None) -> int:
