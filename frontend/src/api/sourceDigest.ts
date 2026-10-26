@@ -22,7 +22,7 @@ export function sourceDigestExpectation(metadata: RevisionFile): SourceDigestExp
   const { binding, item, sourceSha256, metadataVersion } = metadata;
   if (metadata.authority !== 'source-input-commitments' || metadata.contentVerification !== 'not-performed'
     || item.declaredArchivable !== true || !sha256.test(sourceSha256) || !sha256.test(metadataVersion) || !sha256.test(item.sha256)
-    || (item.commitment === 'source-input') !== (item.sizeBytes !== null)
+    || ((item.commitment ?? 'source-input') === 'source-input') !== (item.sizeBytes !== null)
     || (item.sizeBytes !== null && (!/^(0|[1-9][0-9]{0,7})$/.test(item.sizeBytes) || BigInt(item.sizeBytes) > 8388608n))
     || !/^file_(0|[1-9][0-9]{0,4})_[a-f0-9]{64}$/.test(item.fileId)
     || Number(item.fileId.split('_')[1]) >= 25000) throw new ApiClientError('invalid_request');

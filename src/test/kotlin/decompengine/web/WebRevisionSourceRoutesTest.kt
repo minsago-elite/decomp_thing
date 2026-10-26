@@ -91,9 +91,11 @@ class WebRevisionSourceRoutesTest {
         } finally { fixture.server.stop(); root.toFile().deleteRecursively() }
     }
 
-    private fun get(fixture: Fixture, path: String, accept: String = "application/json", method: String = "GET"): HttpResponse<ByteArray> =
+    private fun get(fixture: Fixture, path: String, accept: String = "application/json", method: String = "GET", includeManifest: Boolean = false): HttpResponse<ByteArray> =
         client.send(HttpRequest.newBuilder(URI("http://127.0.0.1:${fixture.server.serverPort}$path")).timeout(Duration.ofSeconds(30))
-            .header("Accept", accept).header("Cookie", fixture.cookie).method(method, HttpRequest.BodyPublishers.noBody()).build(),
+            .header("Accept", accept).header("Cookie", fixture.cookie)
+            .apply { if (includeManifest) header("X-Decomp-Source-Inventory", "manifest") }
+            .method(method, HttpRequest.BodyPublishers.noBody()).build(),
             HttpResponse.BodyHandlers.ofByteArray())
 
     private fun data(response: HttpResponse<ByteArray>, kind: String): JsonObject {
@@ -108,7 +110,7 @@ class WebRevisionSourceRoutesTest {
             .getValue("files").jsonArray.associate { it.jsonObject.getValue("path").jsonPrimitive.content to it.jsonObject.getValue("sha256").jsonPrimitive.content }
 
     private fun flat(fixture: Fixture, attempt: Attempt): List<JsonObject> =
-        data(get(fixture, "${fixture.revision(attempt)}/sources?limit=200"), "revisionSources").getValue("items").jsonArray.map { it.jsonObject }
+        data(get(fixture, "${fixture.revision(attempt)}/sources?limit=200", includeManifest = true), "revisionSources").getValue("items").jsonArray.map { it.jsonObject }
 
     @Test fun `diffs of two retained candidates match their manifests and expose bounded hunks and an exact patch`() = withFixture { fixture ->
         val base = manifest(fixture.first); val head = manifest(fixture.second)
@@ -145,7 +147,7 @@ class WebRevisionSourceRoutesTest {
         assertTrue(patch.headers().firstValue("Content-Disposition").orElseThrow().startsWith("attachment;"))
         assertEquals("nosniff", patch.headers().firstValue("X-Content-Type-Options").orElseThrow())
         assertEquals(summary.getValue("baseSourceSha256").jsonPrimitive.content, patch.headers().firstValue("X-Decomp-Base-Source-SHA256").orElseThrow())
-        assertTrue(String(patch.body()).startsWith("--- a/$path\n+++ b/$path\n@@ "))
+        assertTrue(String(patch.body()).startsWith("--- a/$path\t\n+++ b/$path\t\n@@ "))
         val headOnly = get(fixture, "${fixture.revision(fixture.second)}/source-diff/patch?$fileQuery", "application/octet-stream", "HEAD")
         assertEquals(200, headOnly.statusCode()); assertEquals(0, headOnly.body().size)
         // A cross-job or unknown base revision cannot be compared.
@@ -191,6 +193,17 @@ class WebRevisionSourceRoutesTest {
         assertTrue(inputs.isNotEmpty() && inputs.all { it.getValue("sizeBytes") is JsonPrimitive && it.getValue("sizeBytes") != JsonNull })
         val report = recorded.first { it.getValue("displayName").jsonPrimitive.content.endsWith(".json") }
         val id = report.getValue("fileId").jsonPrimitive.content
+        val revision = fixture.revision(fixture.first)
+        val legacy = data(get(fixture, "$revision/sources?limit=200"), "revisionSources")
+        assertEquals(inputs, legacy.getValue("items").jsonArray.map { it.jsonObject })
+        val legacyRoot = data(get(fixture, "$revision/source-directories/root?limit=200"), "revisionDirectory")
+        assertTrue(legacyRoot.getValue("items").jsonArray.filter { it.jsonObject["kind"]?.jsonPrimitive?.content == "file" }
+            .all { it.jsonObject.getValue("sizeBytes") != JsonNull })
+        assertEquals(404, get(fixture, "$revision/source-files/$id").statusCode())
+        val metadata = data(get(fixture, "$revision/source-files/$id", includeManifest = true), "revisionFile")
+        assertEquals(JsonNull, metadata.getValue("item").jsonObject.getValue("sizeBytes"))
+        val expandedRoot = data(get(fixture, "$revision/source-directories/root?limit=200", includeManifest = true), "revisionDirectory")
+        assertTrue(expandedRoot.getValue("sourceFileCount").jsonPrimitive.int > legacyRoot.getValue("sourceFileCount").jsonPrimitive.int)
         val chunk = data(get(fixture, "${fixture.revision(fixture.first)}/source-files/$id/chunk?maxBytes=131072"), "sourceChunk")
         val bytes = Files.readAllBytes(fixture.first.tree.resolve(report.getValue("displayName").jsonPrimitive.content))
         assertEquals(bytes.size.toString(), chunk.getValue("sizeBytes").jsonPrimitive.content)

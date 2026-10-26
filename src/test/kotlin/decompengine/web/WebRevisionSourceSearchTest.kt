@@ -100,6 +100,21 @@ class WebRevisionSourceSearchTest {
         assertEquals("Makefile", string(items(page).first(), "displayName"))
     }
 
+    @Test fun `search links retain canonical input identities when manifest entries precede the results`() {
+        val harness = harness(listOf(entry("Makefile", "needle\n"), entry("src/a.c", "needle\n")))
+        val legacy = harness.snapshot
+        val report = WebRevisionSourceFile(GeneratedFileEvidence("A/report.json", "e".repeat(64), "fixture",
+            roles = setOf(ProjectFileRole.VIEWABLE), contentKind = ProjectContentKind.UTF8_TEXT), null)
+        harness.snapshot = WebRevisionSourceSnapshot(legacy.reference, legacy.manifestSha256, legacy.descriptorSha256, legacy.files + report)
+        val matches = all(WebRevisionSourceSearch(harness::source), "q=needle&limit=1")
+        assertEquals(listOf("Makefile", "src/a.c"), matches.map { string(it, "displayName") })
+        for ((index, item) in matches.withIndex()) {
+            val id = string(item, "fileId")
+            assertEquals(revisionSourceFileId(legacy.reference, index, legacy.files[index].evidence.path), id)
+            assertSame(legacy.files[index], resolveRevisionSourceFile(harness.snapshot, id))
+        }
+    }
+
     @Test fun `case and symbol modes are explicit and symbol matches require identifier boundaries`() {
         val entries = listOf(entry("a.c", "int Count = count_total + COUNT;\ncount();\nÉcole école ÉCOLE\n"))
         val engine = WebRevisionSourceSearch(harness(entries)::source)

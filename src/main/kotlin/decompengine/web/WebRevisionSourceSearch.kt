@@ -208,7 +208,7 @@ internal class WebRevisionSourceSearch(
                     bytePosition += utf8Length(content, charPosition, start); charPosition = start
                     searchFrom = end
                     if (bytePosition < from) continue
-                    val item = item(ref, fileIndex, file, content, start, end, line, lineStart, bytePosition)
+                    val item = item(ref, snapshot.identityIndex(file), file, content, start, end, line, lineStart, bytePosition)
                     val size = item.toString().toByteArray(Charsets.UTF_8).size + 1
                     if (items.size >= query.limit || itemBytes + size > MAXIMUM_ITEM_BYTES) {
                         stop = Stop("result-limit", fileIndex, bytePosition); position--; break@files

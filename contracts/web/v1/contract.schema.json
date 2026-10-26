@@ -3196,8 +3196,7 @@
         "sizeBytes",
         "sha256",
         "declaredUtf8Text",
-        "declaredViewable",
-        "commitment"
+        "declaredViewable"
       ],
       "additionalProperties": false,
       "allOf": [
@@ -3348,8 +3347,7 @@
         "sizeBytes",
         "sha256",
         "declaredUtf8Text",
-        "declaredViewable",
-        "commitment"
+        "declaredViewable"
       ],
       "additionalProperties": false,
       "allOf": [
@@ -3745,8 +3743,7 @@
         "sha256",
         "declaredUtf8Text",
         "declaredViewable",
-        "declaredArchivable",
-        "commitment"
+        "declaredArchivable"
       ],
       "additionalProperties": false,
       "allOf": [

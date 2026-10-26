@@ -197,8 +197,9 @@ class WebRecordedModuleProvenanceTest {
             assertEquals(WebRecordedModuleProvenance.MAXIMUM_BYTES.toLong(), maximum)
             change(path, count, record)
         })
-        // File identities index the complete recorded manifest, including entries outside the input commitment.
-        val index = value.manifest.files.sortedBy { it.path }.indexOfFirst { it === value.selected.evidence }
+        // Stable v1 identities: canonical build inputs in path order come first; manifest-only entries follow them.
+        val identityOrder = inputs.sortedBy { it.path } + value.manifest.files.filter { ProjectFileRole.BUILD_INPUT !in it.roles }.sortedBy { it.path }
+        val index = identityOrder.indexOfFirst { it === value.selected.evidence }
         return CaptureControl(source, reference, revisionSourceFileId(reference, index, value.selected.evidence.path), reads)
     }
 

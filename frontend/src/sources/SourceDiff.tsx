@@ -176,7 +176,8 @@ export function SourceDiff({ selected, basePath, search }: { selected: SourceSel
               {item.status === 'renamed' ? <><bdi>{item.baseFile!.displayName}</bdi> → <bdi>{name}</bdi></> : <bdi>{name}</bdi>}</p>
             <p>{copy.diffBase}: {fileFacts(item.baseFile)}</p>
             <p>{copy.diffHead}: {fileFacts(item.headFile)}</p>
-            <p><a href={sourceFileDiffPath(basePath, selected, { base, baseFileId: item.baseFile?.fileId ?? null, headFileId: item.headFile?.fileId ?? null })}
+            <p><a href={sourceFileDiffPath(basePath, selected, { base, baseFileId: item.baseFile?.fileId ?? null, headFileId: item.headFile?.fileId ?? null,
+              pin: { metadataVersion: data.metadataVersion, baseMetadataVersion: data.baseMetadataVersion } })}
               aria-label={textMessage(copy.diffOpenEntry, { path: name })}>{copy.diffOpenEntryShort}</a></p>
           </li>;
         })}

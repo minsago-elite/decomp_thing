@@ -29,6 +29,14 @@ it('copies exact source identities into a closed download route without treating
   expect(Object.keys(expected)).not.toContain('displayName'); expect(Object.keys(expected)).not.toContain('acceptance');
 });
 
+it('interprets an omitted legacy commitment as source-input without losing its size check', () => {
+  const value = metadata();
+  delete value.item.commitment;
+  expect(sourceDigestExpectation(value).sizeBytes).toBe('42');
+  value.item.sizeBytes = null;
+  expect(() => sourceDigestExpectation(value)).toThrow();
+});
+
 it('refuses unarchivable oversized malformed and path-shaped selectors before a request can be created', () => {
   const mutations: Array<(value: RevisionFile) => void> = [
     value => { value.item.declaredArchivable = false; },
