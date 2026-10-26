@@ -23,12 +23,12 @@ object IndependentMachineCallReportV1 {
 
     fun validateComponent(document: JsonObject) = validate(document, worker = false)
 
-    internal fun validateWorker(document: JsonObject, expectedRequestSha256: String, request: IndependentMachineCallRequestV1) {
+    internal fun validateWorker(document: JsonObject, expectedRequestSha256: String, request: IndependentMachineCallRequestIdentity) {
         digest(expectedRequestSha256)
         require(OracleArtifacts.sha256(request.canonicalBytes) == expectedRequestSha256) { "expected request digest does not bind the request" }
         validate(document, worker = true)
         require(document.string("requestSha256") == expectedRequestSha256) { "worker request commitment differs" }
-        require(document["runtime"] == request.runtime.json()) { "worker runtime commitment differs" }
+        require(document["runtime"] == request.reportRuntimeJson()) { "worker runtime commitment differs" }
         require(document.string("inputSha256") == request.richFile.sha256 && document.number("inputBytes") == request.richFile.bytes &&
             document.string("canonicalOracleSha256") == request.canonicalOracle.sha256 &&
             document.string("artifactManifestSha256") == request.manifestSha256 && document["limits"] == request.limits.toJson()) {
