@@ -806,7 +806,7 @@ try {
     }
     await ready(authenticated, `document.body.innerText.includes('${libraryText}')`, 'persistent job library');
     await evaluate(authenticated, `(() => {
-      const field = [...document.querySelectorAll('label')].find(label => label.textContent.startsWith('Filename search')).querySelector('input');
+      const field = [...document.querySelectorAll('label')].find(label => label.textContent.startsWith('Filename or label search')).querySelector('input');
       field.value = 'absent fixture'; field.dispatchEvent(new Event('input', { bubbles: true }));
     })()`);
     await evaluate(authenticated, `[...document.querySelectorAll('button')].find(button => button.textContent === 'Apply filters').click()`);

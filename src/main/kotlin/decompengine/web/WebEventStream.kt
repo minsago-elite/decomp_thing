@@ -15,6 +15,7 @@ internal class WebEventStream(
     private val pollMs: Long = 1000,
     private val heartbeatMs: Long = 15_000,
     private val clock: Clock = Clock.systemUTC(),
+    private val deleted: (String) -> Boolean = { false },
 ) {
     init { require(pollMs in 1..1000 && heartbeatMs in 1..15_000) }
 
@@ -90,7 +91,9 @@ internal class WebEventStream(
             } catch (failure: WebJobServiceException) {
                 if (exchange.responseCode == -1) {
                     val missing = failure.code in setOf("JOB_NOT_FOUND", "RUN_NOT_FOUND")
-                    access.sendDenied(exchange, WebAccessDenied(if (missing) 404 else 503,
+                    access.sendDenied(exchange, if (missing && deleted(jobId)) WebAccessDenied(410, "RESOURCE_GONE",
+                        "This job was deleted. Only its deletion record is retained.")
+                    else WebAccessDenied(if (missing) 404 else 503,
                         if (missing) "NOT_FOUND" else "PROGRESS_UNAVAILABLE", "The requested progress is unavailable."))
                 }
             } catch (_: InterruptedException) {
