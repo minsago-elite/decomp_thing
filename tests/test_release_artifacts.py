@@ -80,7 +80,7 @@ class ReleaseArtifactsTest(unittest.TestCase):
             "node_modules/vite": {"version": "1.0.0", "dev": True},
         }}))
         self.composition = self.root / "bundle-composition.json"
-        self.composition.write_text(json.dumps([{"chunk": "a.js", "owner": "application"}, {"chunk": "a.js", "owner": "preact"}]))
+        self.composition.write_text(json.dumps([{"chunk": "assets/index-A.js", "owner": "application"}, {"chunk": "assets/index-A.js", "owner": "preact"}]))
 
     def assemble(self, zip_members: dict, tar_members: dict | None = None, revision: str | None = None) -> Path:
         self.assembled = getattr(self, "assembled", 0) + 1
@@ -155,9 +155,9 @@ class ReleaseArtifactsTest(unittest.TestCase):
         self.lockfile.write_text(json.dumps(lock))
         with self.assertRaisesRegex(release.ReleaseError, "package-lock"):
             release.verify(output, self.lockfile)
-        self.composition.write_text(json.dumps([{"chunk": "a.js", "owner": "left-pad"}]))
+        self.composition.write_text(json.dumps([{"chunk": "assets/index-A.js", "owner": "left-pad"}]))
         with self.assertRaisesRegex(release.ReleaseError, "outside the locked runtime set"):
-            release.frontend_dependencies(self.lockfile, self.composition)
+            release.frontend_dependencies(self.lockfile, release.read_composition(self.composition))
 
     def test_missing_bundle_composition_refuses_assembly_and_unowned_records_fail_verification(self) -> None:
         unnoticed = members()
@@ -165,15 +165,45 @@ class ReleaseArtifactsTest(unittest.TestCase):
         self.composition.unlink()
         with self.assertRaisesRegex(release.ReleaseError, "bundle composition"):
             self.assemble(unnoticed)
-        self.composition.write_text(json.dumps([{"chunk": "a.js", "owner": "preact"}]))
+        self.composition.write_text(json.dumps([{"chunk": "assets/index-A.js", "owner": "preact"}]))
         output = self.assemble(members())
         dependencies = json.loads((output / "frontend-dependencies.json").read_text())
         dependencies["browserModuleOwners"] = None
+        dependencies["chunkOwners"] = None
         for package in dependencies["packages"]:
             package["browserModules"] = None
         (output / "frontend-dependencies.json").write_text(json.dumps(dependencies))
         release.write_checksums(output)
         with self.assertRaisesRegex(release.ReleaseError, "browser-module owners"):
+            release.verify(output, None)
+
+    def test_bundle_composition_must_describe_the_shipped_ui_build(self) -> None:
+        unnoticed = members()
+        unnoticed["docs/frontend-THIRD_PARTY_NOTICES.txt"] = (b"Notices\n", 0o644)
+        # A composition from another build: its only chunk is absent from the shipped UI manifest.
+        self.composition.write_text(json.dumps([{"chunk": "assets/old-build.js", "owner": "application"}]))
+        with self.assertRaisesRegex(release.ReleaseError, "does not describe the shipped UI build"):
+            self.assemble(unnoticed)
+        self.composition.write_text(json.dumps([
+            {"chunk": "assets/index-A.js", "owner": "application"}, {"chunk": "assets/index-A.js", "owner": "preact"},
+            {"chunk": "assets/extra.js", "owner": "application"}]))
+        with self.assertRaisesRegex(release.ReleaseError, "does not describe the shipped UI build"):
+            self.assemble(members())
+        self.composition.write_text(json.dumps([
+            {"chunk": "assets/index-A.js", "owner": "application"}, {"chunk": "assets/index-A.js", "owner": "preact"}]))
+        output = self.assemble(members())
+        dependencies = json.loads((output / "frontend-dependencies.json").read_text())
+        self.assertEqual({"assets/index-A.js": ["application", "preact"]}, dependencies["chunkOwners"])
+        # Rewriting the records to drop the owner is caught even when SHA256SUMS is regenerated.
+        dependencies["chunkOwners"] = {"assets/index-A.js": ["application"]}
+        (output / "frontend-dependencies.json").write_text(json.dumps(dependencies))
+        release.write_checksums(output)
+        with self.assertRaisesRegex(release.ReleaseError, "browser-module owners differ"):
+            release.verify(output, None)
+        dependencies["chunkOwners"] = {"assets/old-build.js": ["application", "preact"]}
+        (output / "frontend-dependencies.json").write_text(json.dumps(dependencies))
+        release.write_checksums(output)
+        with self.assertRaisesRegex(release.ReleaseError, "does not describe the shipped UI build"):
             release.verify(output, None)
 
     def test_source_is_unknown_unless_explicitly_asserted(self) -> None:

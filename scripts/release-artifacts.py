@@ -212,11 +212,27 @@ def launcher_classpath(members: dict[str, Member], application_jar: str) -> list
     return entries
 
 
-def frontend_dependencies(lockfile: Path, composition: Path | None) -> dict:
+def read_composition(composition: Path) -> dict[str, list[str]]:
+    """Maps each emitted JavaScript chunk to the module owners bundle-report.mjs attributed to it."""
+    chunks: dict[str, set[str]] = {}
+    for item in json.loads(composition.read_text()):
+        chunks.setdefault(item["chunk"], set()).add(item["owner"])
+    return {chunk: sorted(owners) for chunk, owners in sorted(chunks.items())}
+
+
+def check_composition(chunks: dict, manifest: dict) -> None:
+    """The composition must describe exactly the JavaScript the shipped UI build contains."""
+    shipped = {item["path"] for item in manifest["files"] if item["path"].endswith(".js")}
+    if set(chunks) != shipped:
+        difference = sorted(set(chunks) ^ shipped)[:5]
+        raise ReleaseError(f"the bundle composition does not describe the shipped UI build {manifest['buildId']}: {difference}")
+
+
+def frontend_dependencies(lockfile: Path, chunks: dict | None) -> dict:
     lock = json.loads(lockfile.read_text())
     owners = None
-    if composition is not None:
-        owners = sorted({item["owner"] for item in json.loads(composition.read_text())} - {"application"})
+    if chunks is not None:
+        owners = sorted({owner for chunk_owners in chunks.values() for owner in chunk_owners} - {"application"})
     packages = []
     for key, value in sorted(lock["packages"].items()):
         if not key or value.get("dev"):
@@ -234,7 +250,8 @@ def frontend_dependencies(lockfile: Path, composition: Path | None) -> dict:
     if unknown:
         raise ReleaseError(f"bundle modules come from packages outside the locked runtime set: {unknown}")
     return {"schemaVersion": 1, "lockfile": "frontend/package-lock.json",
-            "lockfileSha256": file_sha256(lockfile), "browserModuleOwners": owners, "packages": packages}
+            "lockfileSha256": file_sha256(lockfile), "browserModuleOwners": owners, "chunkOwners": chunks,
+            "packages": packages}
 
 
 def check_notices(notices: bytes, dependencies: dict) -> None:
@@ -285,7 +302,9 @@ def assemble(distributions: Path, output: Path, lockfile: Path, composition: Pat
         raise ReleaseError(f"the distribution omits {application_jar}")
     manifest = ui_manifest(members[application_jar].data)
     classpath = launcher_classpath(members, application_jar)
-    dependencies = frontend_dependencies(lockfile, composition)
+    chunks = read_composition(composition)
+    check_composition(chunks, manifest)
+    dependencies = frontend_dependencies(lockfile, chunks)
     if NOTICES not in members:
         raise ReleaseError(f"the distribution omits {NOTICES}")
     check_notices(members[NOTICES].data, dependencies)
@@ -370,15 +389,19 @@ def verify(release: Path, lockfile: Path | None) -> dict:
             raise ReleaseError("the shipped notices differ from the release copy")
     check_source(record["source"])
     dependencies = json.loads((release / "frontend-dependencies.json").read_text())
-    if not isinstance(dependencies.get("browserModuleOwners"), list):
+    if not isinstance(dependencies.get("browserModuleOwners"), list) or not isinstance(dependencies.get("chunkOwners"), dict):
         raise ReleaseError("the release was assembled without browser-module owners; notice coverage is unchecked")
+    check_composition(dependencies["chunkOwners"], json.loads((release / "ui-manifest.json").read_text()))
+    derived = frontend_dependencies(lockfile, dependencies["chunkOwners"]) if lockfile is not None else None
+    owners = sorted({owner for chunk_owners in dependencies["chunkOwners"].values() for owner in chunk_owners} - {"application"})
+    if owners != dependencies["browserModuleOwners"] or any(
+            package["browserModules"] != (package["name"] in owners) for package in dependencies["packages"]):
+        raise ReleaseError("the recorded browser-module owners differ from the recorded chunk owners")
     check_notices((release / "frontend-THIRD_PARTY_NOTICES.txt").read_bytes(), dependencies)
     if lockfile is not None:
         if file_sha256(lockfile) != dependencies["lockfileSha256"]:
             raise ReleaseError("frontend/package-lock.json differs from the one recorded for this release")
-        current = frontend_dependencies(lockfile, None)["packages"]
-        recorded = [{key: value for key, value in package.items() if key != "browserModules"} for package in dependencies["packages"]]
-        if recorded != [{key: value for key, value in package.items() if key != "browserModules"} for package in current]:
+        if derived is None or derived["packages"] != dependencies["packages"]:
             raise ReleaseError("the recorded frontend dependencies differ from the lockfile")
     return {"release": release.name, "verifiedFiles": len(expected_files), "archives": 2,
             "uiResources": len(json.loads((release / "ui-manifest.json").read_text())["files"]),

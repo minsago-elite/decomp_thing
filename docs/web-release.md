@@ -50,7 +50,7 @@ distribution. `assemble` reads `build/distributions/` and writes
 | the two archives | Byte-for-byte copies of the built ZIP and TAR. |
 | `release-inventory.json` | Every shipped file: relative path, size, SHA-256, mode and role, plus the launcher class path. |
 | `ui-manifest.json` | The embedded UI manifest as read from inside the application JAR. |
-| `frontend-dependencies.json` | Every non-development package in `frontend/package-lock.json`, with version, resolved URL, integrity and license, and whether it contributes browser modules according to `build/frontend/bundle-composition.json`. Includes the lockfile's SHA-256. |
+| `frontend-dependencies.json` | Every non-development package in `frontend/package-lock.json`, with version, resolved URL, integrity and license, and whether it contributes browser modules. Also records the per-chunk module owners (`chunkOwners`) from `build/frontend/bundle-composition.json` and the lockfile's SHA-256. |
 | `frontend-THIRD_PARTY_NOTICES.txt` | The notices file as shipped in the distribution. |
 | `release-record.json` | Version, the source binding, `applicationBuildId`, `uiBuildId`, archive sizes and digests, and the platform. |
 | `SHA256SUMS` | `sha256sum -c`-compatible lines for every other file in the directory. |
@@ -67,6 +67,8 @@ application JARs ([#1789](https://github.com/minsago-elite/decomp_thing/issues/1
 
 - `build/frontend/bundle-composition.json` (or the `--bundle-composition` path) is missing.
   Without it, browser-module owners and notice coverage cannot be checked.
+- The composition's chunks are not exactly the JavaScript files in the shipped UI manifest. This
+  catches a composition left over from another frontend build.
 - The ZIP and TAR ship different files, bytes or modes.
 - A UI resource in the application JAR differs from its manifest, the JAR contains an unlisted
   resource in the UI namespace, or the manifest's `buildId` does not hash its own contents.
@@ -79,7 +81,9 @@ application JARs ([#1789](https://github.com/minsago-elite/decomp_thing/issues/1
 directory that `SHA256SUMS` does not list, and then reads both archives from their bytes. Every
 member must match its inventory size, digest and mode, and no member may be missing or extra. It
 repeats the application-JAR, UI, class-path and notice checks. It rejects records assembled
-without browser-module owners, and source blocks other than the two bindings above. It also confirms that
+without browser-module owners, chunk owners that do not cover exactly the shipped UI's JavaScript,
+owner flags that disagree with the chunk owners, and source blocks other than the two bindings
+above. It also confirms that
 `applicationBuildId` is the SHA-256 of the shipped application JAR, which is the value the running
 server reports. With `--lockfile`, the recorded frontend packages and lockfile digest must equal
 the current lockfile.
