@@ -185,8 +185,9 @@ pending timers and intervals, and open broadcast channels. Element listeners are
 they die with their nodes. It navigates through every SPA route four times with a live session.
 After the first cycle, which loads each lazy route, every later cycle must end with exactly the
 same retained set, and unmounting the shell and disposing the session must return to the
-pre-render baseline. A second case subscribes to and cancels the event stream 60 times
-under one long-lived page signal. Every response body must be cancelled, and no reader, deadline
-timer or abort listener may remain. A control case proves the harness reports an injected
-listener, interval and channel. This is a structural retention check in jsdom; the Chromium heap
+pre-render baseline. A second case subscribes to the event stream 60 times with one shared page signal that is never
+aborted, unsubscribing at each yielded event. Every response body must be cancelled, and no
+reader, deadline timer or listener on that live signal may remain. The harness patches both the
+DOM and the runtime `EventTarget` implementations, so abort-signal listeners are counted. Control
+cases prove it reports an injected global listener, interval, channel and live-signal listener. This is a structural retention check in jsdom; the Chromium heap
 budgets above still need a heap trace on the reference profile.

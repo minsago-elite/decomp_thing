@@ -42,9 +42,6 @@ function instrument() {
   const timers = new Map<unknown, 'timeout' | 'interval'>();
   const channels = new Set<BroadcastChannel>();
   const originals = {
-    // Capturing the original methods is the point: they are re-invoked with an explicit receiver.
-    // eslint-disable-next-line @typescript-eslint/unbound-method
-    add: EventTarget.prototype.addEventListener, remove: EventTarget.prototype.removeEventListener,
     setTimeout: globalThis.setTimeout, clearTimeout: globalThis.clearTimeout,
     setInterval: globalThis.setInterval, clearInterval: globalThis.clearInterval,
     channel: globalThis.BroadcastChannel, windowChannel: window.BroadcastChannel,
@@ -53,20 +50,33 @@ function instrument() {
   const capture = (options: unknown) => typeof options === 'boolean' ? options : !!(options as AddEventListenerOptions | undefined)?.capture;
   const find = (target: EventTarget, type: string, listener: unknown, captured: boolean) =>
     [...listeners].find(entry => entry.target === target && entry.type === type && entry.listener === listener && entry.capture === captured);
-  EventTarget.prototype.addEventListener = function (this: EventTarget, type: string, listener: EventListenerOrEventListenerObject | null, options?: boolean | AddEventListenerOptions) {
-    if (listener && outlives(this) && !find(this, type, listener, capture(options))) listeners.add({ target: this, type, listener, capture: capture(options) });
-    return originals.add.call(this, type, listener, options);
+  // jsdom's DOM targets and the runtime's AbortSignal can come from different EventTarget
+  // implementations; patch each prototype that owns addEventListener.
+  const owner = (prototype: object | null): object | null => {
+    for (let current = prototype; current; current = Object.getPrototypeOf(current) as object | null) {
+      if (Object.hasOwn(current, 'addEventListener')) return current;
+    }
+    return null;
   };
-  EventTarget.prototype.removeEventListener = function (this: EventTarget, type: string, listener: EventListenerOrEventListenerObject | null, options?: boolean | EventListenerOptions) {
-    const entry = find(this, type, listener, capture(options));
-    if (entry) listeners.delete(entry);
-    return originals.remove.call(this, type, listener, options);
-  };
+  type Methods = { addEventListener: EventTarget['addEventListener']; removeEventListener: EventTarget['removeEventListener'] };
+  const owners = [...new Set([EventTarget.prototype, owner(AbortSignal.prototype)].filter((value): value is Methods & object => value !== null))]
+    .map(prototype => ({ prototype, add: prototype.addEventListener, remove: prototype.removeEventListener }));
+  for (const { prototype, add, remove } of owners) {
+    prototype.addEventListener = function (this: EventTarget, type: string, listener: EventListenerOrEventListenerObject | null, options?: boolean | AddEventListenerOptions) {
+      if (listener && outlives(this) && !find(this, type, listener, capture(options))) listeners.add({ target: this, type, listener, capture: capture(options) });
+      return add.call(this, type, listener, options);
+    };
+    prototype.removeEventListener = function (this: EventTarget, type: string, listener: EventListenerOrEventListenerObject | null, options?: boolean | EventListenerOptions) {
+      const entry = find(this, type, listener, capture(options));
+      if (entry) listeners.delete(entry);
+      return remove.call(this, type, listener, options);
+    };
+  }
   // jsdom's window carries its own EventTarget methods; route them through the same tracking.
   // Capturing the original methods is the point: they are re-invoked with an explicit receiver.
   // eslint-disable-next-line @typescript-eslint/unbound-method
   const windowAdd = window.addEventListener, windowRemove = window.removeEventListener;
-  const patchedWindow = windowAdd !== EventTarget.prototype.addEventListener && windowAdd !== originals.add;
+  const patchedWindow = owners.every(entry => windowAdd !== entry.prototype.addEventListener && windowAdd !== entry.add);
   if (patchedWindow) {
     window.addEventListener = function (type: string, listener: EventListenerOrEventListenerObject | null, options?: boolean | AddEventListenerOptions) {
       if (listener && !find(window, type, listener, capture(options))) listeners.add({ target: window, type, listener, capture: capture(options) });
@@ -103,7 +113,9 @@ function instrument() {
   return {
     /** Live counts by retained target class; an aborted signal can never call its listeners again. */
     snapshot() {
-      const live = [...listeners].filter(entry => !(entry.target instanceof AbortSignal && entry.target.aborted));
+      // Node's MessagePort bridges add internal newListener/removeListener hooks; the app never uses them.
+      const live = [...listeners].filter(entry => !(entry.target instanceof AbortSignal && entry.target.aborted)
+        && entry.type !== 'newListener' && entry.type !== 'removeListener');
       const where = (entry: Tracked) => entry.target === window ? 'window' : entry.target === document ? 'document'
         : entry.target instanceof AbortSignal ? 'signal' : entry.target.constructor.name;
       const byTarget: Record<string, number> = {};
@@ -111,8 +123,7 @@ function instrument() {
       return { listeners: byTarget, timers: timers.size, intervals: [...timers.values()].filter(kind => kind === 'interval').length, channels: channels.size };
     },
     restore() {
-      EventTarget.prototype.addEventListener = originals.add;
-      EventTarget.prototype.removeEventListener = originals.remove;
+      for (const { prototype, add, remove } of owners) { prototype.addEventListener = add; prototype.removeEventListener = remove; }
       globalThis.setTimeout = originals.setTimeout; globalThis.clearTimeout = originals.clearTimeout;
       globalThis.setInterval = originals.setInterval; globalThis.clearInterval = originals.clearInterval;
       if (originals.channel) { globalThis.BroadcastChannel = originals.channel; window.BroadcastChannel = originals.windowChannel; }
@@ -198,11 +209,13 @@ it('detects a retained global listener, interval and open channel (harness contr
 });
 
 function eventStreamResponse(onCancel: () => void) {
+  // One valid event per connection, then keepalives until the consumer cancels.
+  const event = { ...(fixture('events-poll').data.items as ({ cursor: string; type: string } & Record<string, unknown>)[])[0]!, jobId, runId };
   let interval: ReturnType<typeof setInterval> | undefined;
   const body = new ReadableStream<Uint8Array>({
     start(controller) {
       const encoder = new TextEncoder();
-      controller.enqueue(encoder.encode(': connected\n\n'));
+      controller.enqueue(encoder.encode(`id: ${event.cursor}\nevent: ${event.type}\ndata: ${JSON.stringify(event)}\n\n`));
       interval = setInterval(() => controller.enqueue(encoder.encode(': keepalive\n\n')), 1);
     },
     cancel() { clearInterval(interval); onCancel(); },
@@ -210,28 +223,36 @@ function eventStreamResponse(onCancel: () => void) {
   return new Response(body, { status: 200, headers: { 'Content-Type': 'text/event-stream', 'X-Request-ID': 'request_stream_1' } });
 }
 
-it('releases every stream reader, deadline and abort listener across repeated subscribe/unsubscribe', async () => {
+it('releases every stream reader, deadline and listener on one still-live signal across repeated subscribe/unsubscribe', async () => {
   harness = instrument();
   const baseline = harness.snapshot();
   let cancelled = 0;
   const fetch = vi.fn(() => Promise.resolve(eventStreamResponse(() => { cancelled += 1; })));
   const stream = createEventStream({ basePath: '/nested', fetch });
   const rounds = 60;
+  // Every subscription shares one long-lived page signal that is never aborted, so a listener a
+  // subscription forgets to remove stays counted (live signals are not excluded).
   const page = new AbortController();
   for (let round = 0; round < rounds; round += 1) {
-    const controller = new AbortController();
-    // A long-lived page signal is shared by every subscription; none may leave a listener on it.
-    page.signal.addEventListener('abort', () => controller.abort(), { once: true });
-    const subscription = stream({ jobId, runId, signal: controller.signal });
-    const pending = subscription.next();
-    await new Promise(resolve => setTimeout(resolve, 2));
-    controller.abort();
-    await expect(pending).rejects.toMatchObject({ code: 'aborted' });
-    await subscription.return(undefined);
+    const subscription = stream({ jobId, runId, signal: page.signal });
+    const first = await subscription.next();
+    expect(first.done).toBe(false);
+    await subscription.return(undefined); // Unsubscribe at the yielded event.
   }
   await new Promise(resolve => setTimeout(resolve, 10));
   expect(fetch).toHaveBeenCalledTimes(rounds);
   expect(cancelled).toBe(rounds);
-  page.abort();
+  expect(page.signal.aborted).toBe(false);
+  expect(harness.snapshot()).toEqual(baseline);
+});
+
+it('reports a subscription listener left on a live signal (stream harness control)', () => {
+  harness = instrument();
+  const baseline = harness.snapshot();
+  const page = new AbortController();
+  const forgotten = () => undefined;
+  page.signal.addEventListener('abort', forgotten);
+  expect(harness.snapshot().listeners['signal:abort']).toBe((baseline.listeners['signal:abort'] ?? 0) + 1);
+  page.signal.removeEventListener('abort', forgotten);
   expect(harness.snapshot()).toEqual(baseline);
 });
