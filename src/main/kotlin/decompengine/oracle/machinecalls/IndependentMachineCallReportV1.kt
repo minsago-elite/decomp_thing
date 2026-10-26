@@ -289,13 +289,17 @@ object IndependentMachineCallReportV1 {
             group.forEach { require("conflicting-symbols-at-start" in it.problems) }
         }
         var previous: Root? = null
-        roots.filter { it.rva != null && it.end != null }.sortedBy { it.value }.forEach { root ->
+        // Physical ambiguity does not depend on whether the symbol has an image-relative start.
+        roots.filter { it.end != null }.sortedBy { it.value }.forEach { root ->
             checkpoint("ownership relation")
             val prior = previous
             if (prior != null && root.value < prior.end!!) {
                 require("overlapping-symbol-extents" in root.problems && "overlapping-symbol-extents" in prior.problems)
             }
             if (prior == null || root.end!! > prior.end!!) previous = root
+        }
+        roots.filter { it.rva != null && it.end != null }.forEach { root ->
+            checkpoint("canonical start relation")
             val next = canonicalStarts.binarySearch(root.rva!!).let { if (it < 0) -it - 1 else it + 1 }
             if (next < canonicalStarts.size && canonicalStarts[next] < root.endRva!!) require("interior-canonical-start" in root.problems)
         }
