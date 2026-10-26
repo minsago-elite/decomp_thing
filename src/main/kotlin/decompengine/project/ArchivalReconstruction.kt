@@ -15,6 +15,7 @@ import java.nio.file.Path
 import java.nio.file.StandardCopyOption
 import java.security.MessageDigest
 import java.time.Duration
+import java.util.LinkedHashSet
 import java.util.concurrent.CompletableFuture
 import java.util.concurrent.ConcurrentLinkedQueue
 import java.util.concurrent.TimeUnit
@@ -642,7 +643,7 @@ internal class ExportProcessTree(
     private var terminationStartedNanos: Long? = null
     private var result: ExportProcessCleanupResult? = null
     private var rootHandle: ProcessHandle? = null
-    private val observedHandles = LinkedHashMap<Long, ProcessHandle>()
+    private val observedHandles = LinkedHashSet<ProcessHandle>()
     private var observationFailure: Throwable? = null
 
     @Synchronized
@@ -654,14 +655,15 @@ internal class ExportProcessTree(
             try {
                 val root = rootHandle ?: process.toHandle().also { rootHandle = it }
                 descendantObservation(root) { handle ->
-                    if (!observedHandles.containsKey(handle.pid())) {
+                    if (!observedHandles.contains(handle)) {
                         if (observedHandles.size + 1 >= MAXIMUM_RETAINED_HANDLES) {
                             throw IllegalStateException("Ghidra export process inventory exceeded $MAXIMUM_RETAINED_HANDLES retained handles")
                         }
-                        // Retain incrementally: if stream traversal fails after yielding handles,
-                        // already-observed references remain signalable and available for cleanup.
-                        // This is not process-group containment proof.
-                        observedHandles[handle.pid()] = handle
+                        // Retain by ProcessHandle identity/equality rather than PID alone: a reused
+                        // PID with a different process identity must remain separately observable.
+                        // Insert incrementally so a later stream failure does not discard this handle.
+                        // Never-observed or reparented descendants remain outside this inventory.
+                        observedHandles.add(handle)
                     }
                 }
             } catch (failure: Throwable) {
@@ -670,7 +672,7 @@ internal class ExportProcessTree(
                 ) else if (observationFailure !== failure) observationFailure?.addSuppressed(failure)
             }
         }
-        fun knownHandles(): List<ProcessHandle> = observedHandles.values.toList()
+        fun knownHandles(): List<ProcessHandle> = observedHandles.toList()
         fun aliveOrUnknown(): Boolean {
             var alive = false
             try { alive = process.isAlive || alive } catch (failure: Throwable) {

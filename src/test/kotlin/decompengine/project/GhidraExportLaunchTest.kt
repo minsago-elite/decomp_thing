@@ -101,6 +101,30 @@ class GhidraExportLaunchTest {
     }
 
     @Test
+    fun `process tree retains a new process identity that reuses a dead handle PID`() {
+        val rootProcess = FixtureOwnedProcess(fixtureHandle(6201L, initialAlive = true, refusesTermination = false))
+        val oldDeadHandle = fixtureHandle(6210L, initialAlive = false, refusesTermination = true)
+        val newLiveHandle = fixtureHandle(6210L, initialAlive = true, refusesTermination = true)
+        assertEquals(oldDeadHandle.pid(), newLiveHandle.pid())
+        val observations = AtomicInteger()
+        val clock = AtomicLong()
+        val tree = ExportProcessTree(
+            rootProcess, Duration.ZERO,
+            nanoTime = clock::get,
+            sleepNanos = { nanos -> clock.addAndGet(nanos) },
+            descendantObservation = { _, retain ->
+                retain(if (observations.getAndIncrement() == 0) oldDeadHandle else newLiveHandle)
+            },
+        )
+
+        val result = tree.terminate()
+
+        assertFalse(result.confirmedAbsent, "the later live identity must not be hidden by its reused PID")
+        assertTrue(newLiveHandle.isAlive)
+        assertEquals(3, tree.retainedHandleCount(), "root and both distinct same-PID handles must remain retained")
+    }
+
+    @Test
     fun `operation failure remains primary with unconfirmed cleanup suppressed`() = inControlTemporaryDirectory { root ->
         val primary = IllegalStateException("authored process wait failure")
         val process = FixtureOwnedProcess(
