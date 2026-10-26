@@ -62,6 +62,25 @@ class WebRevisionSourceDiffTest {
     private fun fileQuery(entry: JsonObject, hunk: Int? = null) = base + listOfNotNull(id(entry, "baseFile")?.let { "&baseFileId=$it" },
         id(entry, "headFile")?.let { "&headFileId=$it" }, hunk?.let { "&hunk=$it" }).joinToString("")
 
+    @Test fun `pure additions removals and trimmed edits obey edit and deadline budgets`() {
+        val limit = WebRevisionSourceDiffs.MAXIMUM_EDITS
+        for (count in listOf(limit, limit + 1)) {
+            val changed = IntArray(count) { it + 10 }
+            val pairs = listOf(IntArray(0) to changed, changed to IntArray(0),
+                intArrayOf(1) to (intArrayOf(1) + changed),
+                (intArrayOf(1) + changed) to intArrayOf(1),
+                intArrayOf(1, 2) to (intArrayOf(1) + changed + intArrayOf(2)))
+            for ((before, after) in pairs) {
+                val ops = revisionLineEdits(before, after, limit) { false }
+                if (count == limit) assertEquals(count, assertNotNull(ops).count { it != WebDiffOp.EQUAL })
+                else assertNull(ops)
+                var calls = 0
+                assertNull(revisionLineEdits(before, after, limit) { calls++; true })
+                if (count == limit) assertEquals(1, calls, "the fast path must consult the deadline")
+            }
+        }
+    }
+
     @Test fun `classification names both exact revisions and separates added removed modified renamed and unchanged files`() {
         val fixture = fixture(
             listOf(side("Makefile", "all:\n"), side("src/old.c", "int moved;\n"), side("src/gone.c", "int gone;\n"), side("src/same.c", "int same;\n"),
@@ -87,6 +106,23 @@ class WebRevisionSourceDiffTest {
         assertEquals(0, fixture.reads)
     }
 
+    @Test fun `mixed inventory summaries and comparisons use stable input selectors rather than display indices`() {
+        val reportRoles = setOf(ProjectFileRole.VIEWABLE, ProjectFileRole.ARCHIVE_PAYLOAD)
+        val fixture = fixture(listOf(side("Makefile", "all:\n"), side("A/report.json", "old report\n", reportRoles), side("src/a.c", "old source\n")),
+            listOf(side("Makefile", "all:\n"), side("A/report.json", "new report\n", reportRoles), side("src/a.c", "new source\n")))
+        val engine = diffs(fixture)
+        val entries = items(engine.summary("owner", jobId, "run_2", "revision_2", base))
+        for (entry in entries) {
+            val path = entry.getValue("headFile").jsonObject.getValue("displayName").jsonPrimitive.content
+            val index = if (path == "src/a.c") 1 else 2
+            assertTrue(id(entry, "headFile")!!.startsWith("file_${index}_"))
+            val snapshot = fixture.snapshots.getValue("run_2" to "revision_2")
+            assertEquals(path, resolveRevisionSourceFile(snapshot, id(entry, "headFile")!!).evidence.path)
+            assertEquals("text", engine.file(jobId, "run_2", "revision_2", fileQuery(entry)).getValue("representation").jsonPrimitive.content)
+            assertTrue(engine.patch(jobId, "run_2", "revision_2", fileQuery(entry)).bytes.isNotEmpty())
+        }
+    }
+
     @Test fun `text hunks carry exact line numbers context and honest omitted ranges with a complete patch`() {
         val before = (1..40).joinToString("") { "line $it\n" }
         val after = before.replace("line 5\n", "line five\n").replace("line 37\n", "<script>alert(1)</script>\n") + "tail"
@@ -106,11 +142,29 @@ class WebRevisionSourceDiffTest {
         assertEquals(listOf("<script>alert(1)</script>", "tail"), added.map { it.getValue("text").jsonPrimitive.content })
         assertTrue(added.last().getValue("missingFinalNewline").jsonPrimitive.boolean)
         val patch = String(diffs(fixture).patch(jobId, "run_2", "revision_2", fileQuery(entry)).bytes)
-        assertTrue(patch.startsWith("--- a/src/a.c\n+++ b/src/a.c\n@@ -2,7 +2,7 @@\n"), patch)
+        assertTrue(patch.startsWith("--- a/src/a.c\t\n+++ b/src/a.c\t\n@@ -2,7 +2,7 @@\n"), patch)
         assertTrue(patch.contains("-line 5\n+line five\n"))
         assertTrue(patch.endsWith("+tail\n\\ No newline at end of file\n"), patch)
         // Applying the patch independently reproduces the head bytes exactly.
         assertEquals(after, applyPatch(before, patch))
+    }
+
+    @Test fun `patch headers delimit complete filenames including date-like suffixes for modifications additions and removals`() {
+        for (path in listOf("foo 2026-01-01", "src/é \"quoted\" 2026-01-01")) {
+            for (status in listOf("modified", "added", "removed")) {
+                val before = if (status == "added") "" else "old\n"
+                val after = if (status == "removed") "" else "new\n"
+                val fixture = fixture(listOf(side("Makefile", "all:\n")) + if (status == "added") emptyList() else listOf(side(path, before)),
+                    listOf(side("Makefile", "all:\n")) + if (status == "removed") emptyList() else listOf(side(path, after)))
+                val entry = items(diffs(fixture).summary("owner", jobId, "run_2", "revision_2", base)).single()
+                assertEquals(status, entry.getValue("status").jsonPrimitive.content)
+                val patch = String(diffs(fixture).patch(jobId, "run_2", "revision_2", fileQuery(entry)).bytes, Charsets.UTF_8)
+                val basePath = if (status == "added") "/dev/null" else "a/$path"
+                val headPath = if (status == "removed") "/dev/null" else "b/$path"
+                assertTrue(patch.startsWith("--- $basePath\t\n+++ $headPath\t\n"), patch)
+                assertEquals(after, applyPatch(before, patch))
+            }
+        }
     }
 
     @Test fun `long diffs page by hunk with explicit continuation while long lines are marked truncated`() {

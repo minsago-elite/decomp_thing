@@ -1121,16 +1121,30 @@ acceptance or release relationship, including when the stored attempt has an acc
 reference. Missing registration returns 404; inconsistent capture returns 409; missing,
 malformed, unsupported or oversized metadata has a fixed unavailable response.
 
-Every other manifest entry (for the generated-C profiles: JSON reports and the
-`UNRESOLVED.md` note) is listed too, so every recorded generated file is reachable. Each
-item names its `commitment`: `source-input` entries carry their committed decimal
-`sizeBytes` and belong to `sourceSha256`; `manifest-digest` entries are bound only by
-the manifest digest (and so by `metadataVersion`), have `sizeBytes: null` because the
-manifest records no size, and never change the source commitment. Their bodies use the
-same reader, digest check and 8 MiB ceiling; an oversized body returns
+The existing v1 source listing, directory and file-metadata routes default to canonical
+inputs only, retaining the original decimal-string `sizeBytes` semantics. A client may
+explicitly opt into the broader representation by sending exactly one
+`X-Decomp-Source-Inventory: manifest` header on those GET/HEAD routes. Duplicate or
+unknown values are refused with 422. With this opt-in, every other manifest entry
+(for the generated-C profiles: JSON reports and `UNRESOLVED.md`) is listed too, so
+every recorded generated file is reachable. The SPA sends this header; older v1
+servers ignore it and can still return their original input-only responses.
+
+The additive `commitment` field is optional on existing v1 item shapes; omission means
+`source-input` and still requires a decimal `sizeBytes`. `source-input` entries belong
+to `sourceSha256`; negotiated `manifest-digest` entries are bound only by the manifest
+digest (and so by `metadataVersion`), have `sizeBytes: null` because the manifest records
+no size, and never change the source commitment. A manifest-only file-metadata selector
+without negotiation returns 404 rather than changing an existing v1 field type.
+The new diff routes include both kinds of entries without further negotiation.
+Bodies use the same reader, digest check and 8 MiB ceiling; an oversized body returns
 `SOURCE_FILE_TOO_LARGE`. Build logs and progress journals are attempt artifacts in the
-artifact catalog, not source-tree entries. File IDs index the complete sorted recorded
-list, so IDs issued before manifest entries were listed differ for the same files.
+artifact catalog, not source-tree entries. Canonical-input file and directory IDs retain
+their original input-order identity even when manifest-only entries sort before them.
+Manifest-only file selectors follow the canonical-input selector range, independently
+of presentation ordering. A selector is always checked against its complete identity
+digest, never used as a path. Saved input links and their metadata pins survive this
+adapter coverage upgrade without changing the retained revision.
 Accepted publication remains separate; bootstrap advertises the chunk reader's range ceiling. In-memory controls cover canonical
 identity, conflicts, exact large sizes/Unicode, 25,000 commitments, paging and capture
 admission. They do not establish the D0 physical source workload or delivery budgets.
@@ -1152,6 +1166,8 @@ They remain stable across sessions and listener restarts for that input set. Fil
 are identical to those in the flat revision source listing. Display labels are single
 components and never become path selectors. A continuation also binds its directory
 and page size; session mismatch is invalid, and changed metadata expires it explicitly.
+Flat and directory continuations also bind the negotiated inventory mode: a cursor
+cannot be transferred between the default input-only and manifest inventories.
 
 The root has a null display label and parent. Other directories include a parent ID,
 depth and breadcrumbs. Breadcrumbs retain the root and at most the last 31 components;
@@ -1369,7 +1385,9 @@ pair, with `truncated` and the full `characters`. The final line reports a missi
 `source-diff/patch` (with the same pair, without `hunk`) returns the complete unified
 diff of a text comparison as an inert `application/octet-stream` attachment named
 `<file>.diff`, with `X-Decomp-Diff-Authority`, both source commitments and both metadata
-versions. Other representations are `409 SOURCE_DIFF_NOT_TEXT`, as is an added or removed
+versions. Patch filename fields end with a tab before the header newline so spaces and
+date-like suffixes remain part of the filename rather than being read as timestamps.
+Other representations are `409 SOURCE_DIFF_NOT_TEXT`, as is an added or removed
 empty file: no line changes, so a unified diff cannot recreate it and `patchAvailable` is
 false. In every case both complete files
 remain available through their own content routes. Comparisons are presentation

@@ -12,6 +12,22 @@ const response = (name = 'session', status = 200, headers: Record<string, string
 afterEach(() => { vi.useRealTimers(); });
 
 describe('bounded v1 fetch client', () => {
+  it('explicitly negotiates manifest inventory while accepting an older server input-only response', async () => {
+    for (const [name, kind] of [['revision-sources', 'revisionSources'], ['revision-directory-root', 'revisionDirectory'],
+      ['revision-file-root', 'revisionFile']] as const) {
+      const text = fixture(`${name}-legacy`);
+      const document = JSON.parse(text) as { requestId: string };
+      const fetcher = vi.fn<typeof fetch>().mockResolvedValue(new Response(text, { headers: {
+        'Content-Type': 'application/json', 'X-Request-ID': document.requestId,
+      } }));
+      await expect(createApiClient({ basePath: '/', fetch: fetcher }).get(kind, '/source-fixture')).resolves.toEqual(JSON.parse(text));
+      expect(new Headers(fetcher.mock.calls[0]?.[1]?.headers).get('X-Decomp-Source-Inventory')).toBe('manifest');
+      expect(fetcher).toHaveBeenCalledOnce(); // No negotiation retry or mutation replay.
+    }
+    const fetcher = vi.fn<typeof fetch>().mockResolvedValue(response('session'));
+    await createApiClient({ basePath: '/', fetch: fetcher }).get('session', '/session');
+    expect(new Headers(fetcher.mock.calls[0]?.[1]?.headers).has('X-Decomp-Source-Inventory')).toBe(false);
+  });
   it('submits explicit preflight with CSRF and no fabricated resource or replay guards', async () => {
     const fetcher = vi.fn<typeof fetch>().mockResolvedValue(response('agent-preflight-inspecting', 202,
       { 'X-Request-ID': 'request_preflight_fixture' }));

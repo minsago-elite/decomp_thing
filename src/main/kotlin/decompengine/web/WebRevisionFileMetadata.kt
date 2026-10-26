@@ -10,10 +10,10 @@ internal class WebRevisionFileMetadata(
     constructor(source: (String, String, String) -> WebRevisionSourceSnapshot) :
         this({ job, run, revision, _ -> WebRevisionFileMetadataSnapshot(source(job, run, revision), null) })
 
-    fun read(jobId: String, runId: String, revisionId: String, fileId: String): JsonObject {
+    fun read(jobId: String, runId: String, revisionId: String, fileId: String, includeManifest: Boolean = false): JsonObject {
         revisionSourceFileIndex(fileId)
         val captured = source(jobId, runId, revisionId, fileId)
-        val snapshot = captured.source
+        val snapshot = captured.source.inventory(includeManifest)
         val ref = snapshot.reference
         check(ref.jobId == jobId && ref.runId == runId && ref.revisionId == revisionId)
         val file = resolveRevisionSourceFile(snapshot, fileId)

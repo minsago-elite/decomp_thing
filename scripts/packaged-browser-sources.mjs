@@ -250,7 +250,7 @@ export async function qualifySources({ fixture, makeTarget, cdp, evaluate, ready
   assert.equal(patch.status, 200);
   assert.equal(patch.type, 'application/octet-stream');
   assert.match(patch.disposition, /^attachment;/);
-  assert.ok(patch.text.startsWith('--- a/src/modules/core.c\n+++ b/src/modules/core.c\n@@ -17,7 +17,7 @@\n'), patch.text.slice(0, 120));
+  assert.ok(patch.text.startsWith('--- a/src/modules/core.c\t\n+++ b/src/modules/core.c\t\n@@ -17,7 +17,7 @@\n'), patch.text.slice(0, 120));
   await cdp.call('Emulation.setDeviceMetricsOverride', { width: 320, height: 900, deviceScaleFactor: 1, mobile: false }, tab.sessionId);
   assert.ok(await evaluate(tab, `document.documentElement.scrollWidth <= document.documentElement.clientWidth`), 'File comparison must fit 320 px');
   await cdp.call('Emulation.setDeviceMetricsOverride', { width: 1280, height: 900, deviceScaleFactor: 1, mobile: false }, tab.sessionId);

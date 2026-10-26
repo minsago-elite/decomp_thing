@@ -254,7 +254,8 @@ internal class WebApiController(
                     requireJsonAccept(exchange)
                     requireNoWebApiQuery(exchange)
                     val parts = resource.split('/')
-                    sendWebApiResponse(exchange, 200, "revisionFile", revisionFileMetadata.read(parts[1], parts[3], parts[5], parts[7]))
+                    sendWebApiResponse(exchange, 200, "revisionFile", revisionFileMetadata.read(parts[1], parts[3], parts[5], parts[7],
+                        sourceInventoryIncludesManifest(exchange.requestHeaders["X-Decomp-Source-Inventory"])))
                 }
                 resource.matches(Regex("jobs/[^/]+/runs/[^/]+/revisions/[^/]+/source-files/[^/]+/(?:chunk|content)")) -> {
                     access.authorize(exchange, WebEndpointPolicy.privateRead(allowHead = true))
@@ -281,7 +282,8 @@ internal class WebApiController(
                     requireJsonAccept(exchange)
                     val parts = resource.split('/')
                     sendWebApiResponse(exchange, 200, "revisionDirectory", revisionDirectoryPages.page(session.sessionId,
-                        parts[1], parts[3], parts[5], parts[7], exchange.requestURI.rawQuery))
+                        parts[1], parts[3], parts[5], parts[7], exchange.requestURI.rawQuery,
+                        sourceInventoryIncludesManifest(exchange.requestHeaders["X-Decomp-Source-Inventory"])))
                 }
                 resource.matches(Regex("jobs/[^/]+/runs/[^/]+/revisions/[^/]+/source-search")) -> {
                     val session = checkNotNull(access.authorize(exchange, WebEndpointPolicy.privateRead(allowHead = true)))
@@ -344,7 +346,8 @@ internal class WebApiController(
                     requireJsonAccept(exchange)
                     val parts = resource.split('/')
                     sendWebApiResponse(exchange, 200, "revisionSources",
-                        revisionSourcePages.page(session.sessionId, parts[1], parts[3], parts[5], exchange.requestURI.rawQuery))
+                        revisionSourcePages.page(session.sessionId, parts[1], parts[3], parts[5], exchange.requestURI.rawQuery,
+                            sourceInventoryIncludesManifest(exchange.requestHeaders["X-Decomp-Source-Inventory"])))
                 }
                 resource.matches(Regex("jobs/[^/]+/runs/[^/]+/source-catalog")) -> {
                     val session = checkNotNull(access.authorize(exchange, WebEndpointPolicy.privateRead()))
