@@ -20,7 +20,7 @@ class AcpProviderDnsRuntimeContentInspectionTest {
         val b = ByteBuffer.wrap(bytes).order(ByteOrder.LITTLE_ENDIAN)
         byteArrayOf(127, 69, 76, 70, 2, 1, 1).copyInto(bytes)
         b.putShort(16, 3); b.putShort(18, 62); b.putInt(20, 1)
-        b.putLong(32, 64); b.putShort(52, 64); b.putShort(54, 56); b.putShort(56, if (interpreter) 3 else 2)
+        b.putLong(32, 64); b.putShort(52, 64); b.putShort(54, 56); b.putShort(56, if (interpreter) 4 else 3)
         fun ph(at: Int, type: Int, offset: Long, size: Long) {
             b.putInt(at, type); b.putInt(at + 4, 4); b.putLong(at + 8, offset)
             b.putLong(at + 16, 0x400000 + offset); b.putLong(at + 32, size); b.putLong(at + 40, size)
@@ -39,6 +39,7 @@ class AcpProviderDnsRuntimeContentInspectionTest {
             val name = "/lib64/ld-linux-x86-64.so.2\u0000".toByteArray()
             name.copyInto(bytes, 900); ph(176, 3, 900, name.size.toLong())
         }
+        ph(if (interpreter) 232 else 176, 0x6474e551, 0, 0)
         return bytes
     }
     private fun payloads(): MutableMap<String, ByteArray> = linkedMapOf<String, ByteArray>().apply {
@@ -70,7 +71,8 @@ class AcpProviderDnsRuntimeContentInspectionTest {
         listOf("jdk/release", "jdk/conf/net.properties", "jdk/conf/security/java.security", "jdk/legal/java.base/LICENSE")
             .forEach { put(it, "inert data".toByteArray()) }
     }
-    private fun manifest(p: Map<String, ByteArray>, omit: Set<String> = emptySet()): ByteArray {
+    private fun manifest(p: Map<String, ByteArray>, omit: Set<String> = emptySet(),
+        extraEdges: List<AcpProviderDnsRuntimeEdge> = emptyList()): ByteArray {
         val files = p.keys.map { path -> buildJsonObject {
             put("path", path); put("kind", "file"); put("mode", if (path == "jdk/bin/java" || path == loader) "0755" else "0644")
             put("owner", "root"); put("size", p.getValue(path).size); put("sha256", dnsSha(p.getValue(path)))
@@ -91,7 +93,7 @@ class AcpProviderDnsRuntimeContentInspectionTest {
                 put("fileBytes", 16L * 1024 * 1024); put("moduleBytes", 192L * 1024 * 1024); put("edges", 256); put("nativeLibraries", 32)
             }
             put("entries", JsonArray((directories + files).sortedBy { it.getValue("path").jsonPrimitive.content }))
-            put("elfEdges", JsonArray(candidate(p, omit = omit).edges().map { edge -> buildJsonObject {
+            put("elfEdges", JsonArray(candidate(p, extraEdges = extraEdges, omit = omit).edges().map { edge -> buildJsonObject {
                 put("from", edge.from); put("kind", edge.kind); put("name", edge.name); put("target", edge.target)
             } }))
             val root = AcpProviderDnsRuntimeProfiles.ROOT
@@ -128,6 +130,60 @@ class AcpProviderDnsRuntimeContentInspectionTest {
         // Matching path, SONAME and graph edges cannot turn an executable into a provider.
         p["jdk/lib/libextra.so"] = executableProvider
         assertFails { inspect(p) }
+    }
+
+    @Test fun `PIE launchers remain admissible but PIE SONAME providers fail direct and composed validation`() {
+        val needed = AcpProviderDnsRuntimeEdge("jdk/bin/java", "DT_NEEDED", "libextra.so", "jdk/lib/libextra.so")
+        for (flags in listOf(0x08000000L, 0x08000001L)) {
+            val p = manifestPayloads().apply {
+                put("jdk/bin/java", elf(interpreter = true, needed = "libextra.so",
+                    extraDynamicTags = listOf(0x6ffffffbL to flags)))
+            }
+            val launcher = AcpProviderDnsElfInspection.inspect(p.getValue("jdk/bin/java"))
+            assertEquals(3, launcher.elfType); assertTrue(launcher.isPie)
+            val provider = AcpProviderDnsElfInspection.inspect(p.getValue("jdk/lib/libextra.so"))
+            assertEquals(3, provider.elfType); assertTrue(!provider.isPie)
+            val checked = AcpProviderDnsRuntimeProfiles.validateCandidate(manifest(p, extraEdges = listOf(needed))) {
+                ByteArrayInputStream(p.getValue(it.path))
+            }
+            assertTrue(checked.objects().getValue("jdk/bin/java").isPie)
+            // Correct SONAME, hashes and DT_NEEDED/DLOPEN edges cannot make PIE loadable as a library.
+            val pieProvider = elf("libextra.so", extraDynamicTags = listOf(0x6ffffffbL to flags))
+            assertFails { AcpProviderDnsElfInspection.inspect(pieProvider) }
+            p["jdk/lib/libextra.so"] = pieProvider
+            assertFails { inspect(p, candidate(p, extraEdges = listOf(needed))) }
+            assertFails { AcpProviderDnsRuntimeProfiles.validateCandidate(manifest(p, extraEdges = listOf(needed))) {
+                ByteArrayInputStream(p.getValue(it.path))
+            } }
+        }
+    }
+
+    @Test fun `GNU_STACK must be present unique and explicitly non executable in objects and composed candidates`() {
+        for (path in listOf("jdk/bin/java", "jdk/lib/libextra.so")) {
+            for (variant in listOf("missing", "executable", "duplicate", "conflicting duplicate")) {
+                val p = manifestPayloads()
+                val bytes = p.getValue(path).copyOf()
+                val b = ByteBuffer.wrap(bytes).order(ByteOrder.LITTLE_ENDIAN)
+                val stack = if (path == "jdk/bin/java") 232 else 176
+                when (variant) {
+                    "missing" -> b.putInt(stack, 0) // PT_NULL cannot stand in for an NX declaration.
+                    "executable" -> b.putInt(stack + 4, 7)
+                    else -> {
+                        val count = b.getShort(56).toInt()
+                        val duplicate = 64 + count * 56
+                        bytes.copyInto(bytes, duplicate, stack, stack + 56)
+                        b.putShort(56, (count + 1).toShort())
+                        if (variant == "conflicting duplicate") b.putInt(duplicate + 4, 7)
+                    }
+                }
+                assertFails("$path $variant") { AcpProviderDnsElfInspection.inspect(bytes) }
+                p[path] = bytes
+                assertFails("$path $variant") { inspect(p) }
+                assertFails("$path $variant") { AcpProviderDnsRuntimeProfiles.validateCandidate(manifest(p)) {
+                    ByteArrayInputStream(p.getValue(it.path))
+                } }
+            }
+        }
     }
 
     @Test fun `DT_TEXTREL presence and DF_TEXTREL each refuse text relocations`() {

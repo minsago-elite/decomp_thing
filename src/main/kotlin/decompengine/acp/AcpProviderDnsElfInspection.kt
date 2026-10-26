@@ -7,7 +7,8 @@ import java.util.Collections
 /** Non-executing ELF64 observation. No host library lookup, ldd, producer edges or dlopen inference. */
 internal object AcpProviderDnsElfInspection {
     class Metadata internal constructor(val sha256: String, val bytes: Long, val interpreter: String?,
-        val soname: String?, needed: List<String>, versionsNeeded: Map<String, Set<String>>, versionsDefined: Set<String>) {
+        val elfType: Int, val isPie: Boolean, val soname: String?, needed: List<String>,
+        versionsNeeded: Map<String, Set<String>>, versionsDefined: Set<String>) {
         val needed = Collections.unmodifiableList(needed.toList())
         val versionsNeeded = Collections.unmodifiableMap(versionsNeeded.mapValues { Collections.unmodifiableSet(it.value.toSet()) })
         val versionsDefined = Collections.unmodifiableSet(versionsDefined.toSet())
@@ -29,11 +30,13 @@ internal object AcpProviderDnsElfInspection {
         fun u32(at: Int) = b.getInt(at).toLong() and 0xffffffffL
         fun nonnegative(at: Int) = b.getLong(at).also { require(it >= 0) }
         fun range(offset: Long, length: Long): Int { require(offset >= 0 && length >= 0 && offset <= bytes.size && length <= bytes.size - offset); return offset.toInt() }
-        require(u16(16) in setOf(2, 3) && u16(18) == 62 && u32(20) == 1L && u32(48) == 0L && u16(52) == 64)
+        val elfType = u16(16)
+        require(elfType in setOf(2, 3) && u16(18) == 62 && u32(20) == 1L && u32(48) == 0L && u16(52) == 64)
         val ph = nonnegative(32); val count = u16(56)
         require(count in 1..512 && u16(54) == 56); range(ph, count * 56L)
         data class Load(val offset: Long, val address: Long, val length: Long, val memory: Long)
         var mappedMemory = 0L
+        var nonExecutableStack = false
         val loads = mutableListOf<Load>(); var dynamic: Triple<Long, Long, Long>? = null; var interpreter: String? = null
         fun text(offset: Long, maximum: Long): String {
             val start = range(offset, maximum); require(maximum in 1..1024 * 1024)
@@ -50,7 +53,10 @@ internal object AcpProviderDnsElfInspection {
             range(offset, size); require(memory >= size && memory <= AcpProviderDnsRuntimeProfiles.MAXIMUM_BYTES && address <= Long.MAX_VALUE - memory)
             val alignment = nonnegative(at + 48)
             require(alignment == 0L || alignment and (alignment - 1) == 0L && alignment <= 2L * 1024 * 1024 && offset % alignment == address % alignment)
-            if (type == 0x6474e551L) require(flags and 1L == 0L)
+            if (type == 0x6474e551L) {
+                require(!nonExecutableStack && flags and 1L == 0L) { "ELF requires exactly one non-executable GNU_STACK" }
+                nonExecutableStack = true
+            }
             when (type) {
                 1L -> { require(flags and 3L != 3L)
                     mappedMemory = dnsCharge(mappedMemory, memory, AcpProviderDnsRuntimeProfiles.MAXIMUM_BYTES)
@@ -62,6 +68,8 @@ internal object AcpProviderDnsElfInspection {
                 else -> error("unsupported ELF program header")
             }
         }
+        // Missing GNU_STACK is not an explicit NX declaration on the supported Linux/glibc ABI.
+        require(nonExecutableStack) { "ELF requires an explicit non-executable GNU_STACK" }
         fun mapped(address: Long, length: Long): Int {
             require(length > 0 && address >= 0 && address <= Long.MAX_VALUE - length)
             // Even a second LOAD covering only part of the range makes loaded bytes ambiguous.
@@ -95,6 +103,7 @@ internal object AcpProviderDnsElfInspection {
         }
         tags[30L]?.let { require(it and (8L or 16L).inv() == 0L) }
         tags[0x6ffffffbL]?.let { require(it and (1L or 0x08000000L).inv() == 0L) }
+        val isPie = (tags[0x6ffffffbL] ?: 0L) and 0x08000000L != 0L
         val stringBytes = tags[10L]
         val stringStart = tags[5L]?.let { mapped(it, requireNotNull(stringBytes).also { size -> require(size in 1..1024 * 1024) }) }
         require((tags[5L] == null) == (stringBytes == null))
@@ -102,7 +111,7 @@ internal object AcpProviderDnsElfInspection {
         fun name(index: Long) = string(index).also { require(it.matches(Regex("[A-Za-z0-9_.+~-]{1,255}"))) }
         val needed = neededOffsets.map(::name); require(needed.distinct().size == needed.size)
         val soname = tags[14L]?.let(::name)
-        require(soname == null || u16(16) == 3) { "ELF SONAME provider must be ET_DYN" }
+        require(soname == null || elfType == 3 && !isPie) { "ELF SONAME provider must be non-PIE ET_DYN" }
         val versionIndices = mutableSetOf(0, 1)
         val definitions = linkedSetOf<String>(); val parentVersions = linkedSetOf<String>(); val requirements = linkedMapOf<String, Set<String>>()
         fun records(addressTag: Long, countTag: Long, bytesPerRecord: Long, action: (Int, Long) -> Long) {
@@ -167,7 +176,7 @@ internal object AcpProviderDnsElfInspection {
             val table = mapped(address, size / 24 * 2)
             repeat((size / 24).toInt()) { index -> require((u16(table + index * 2) and 0x7fff) in versionIndices) }
         }
-        return Metadata(dnsSha(bytes), bytes.size.toLong(), interpreter, soname, needed, requirements, definitions)
+        return Metadata(dnsSha(bytes), bytes.size.toLong(), interpreter, elfType, isPie, soname, needed, requirements, definitions)
     }
 
     private fun elfNameHash(name: String): Long {
@@ -188,7 +197,9 @@ internal object AcpProviderDnsElfInspection {
         val providers = objects.filterValues { it.soname != null }.entries.groupBy { it.value.soname }
         require(providers.values.all { it.size == 1 })
         objects.forEach { (path, metadata) ->
-            metadata.soname?.let { require(path.substringAfterLast('/') == it) }
+            metadata.soname?.let {
+                require(metadata.elfType == 3 && !metadata.isPie && path.substringAfterLast('/') == it)
+            }
             if (metadata.interpreter != null) require(objects["native/ld-linux-x86-64.so.2"]?.soname == "ld-linux-x86-64.so.2")
             metadata.needed.forEach { name ->
             val provider = requireNotNull(providers[name]).single().value

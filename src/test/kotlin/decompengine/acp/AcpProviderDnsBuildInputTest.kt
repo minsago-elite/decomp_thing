@@ -611,9 +611,10 @@ class AcpProviderDnsBuildInputTest {
     private fun elf(tag: Long = 0, value: Long = 0, soname: Boolean = false): ByteArray {
         val raw = ByteArray(1024); val b = ByteBuffer.wrap(raw).order(ByteOrder.LITTLE_ENDIAN)
         byteArrayOf(0x7f, 69, 76, 70, 2, 1, 1).copyInto(raw)
-        b.putShort(16, 3); b.putShort(18, 62); b.putInt(20, 1); b.putLong(32, 64); b.putShort(52, 64); b.putShort(54, 56); b.putShort(56, 2)
+        b.putShort(16, 3); b.putShort(18, 62); b.putInt(20, 1); b.putLong(32, 64); b.putShort(52, 64); b.putShort(54, 56); b.putShort(56, 3)
         b.putInt(64, 1); b.putLong(72, 0); b.putLong(80, 0x400000); b.putLong(96, raw.size.toLong()); b.putLong(104, raw.size.toLong())
         b.putInt(120, 2); b.putLong(128, 256); b.putLong(136, 0x400100); b.putLong(152, 80); b.putLong(160, 80)
+        b.putInt(176, 0x6474e551); b.putInt(180, 6)
         b.putLong(256, 5); b.putLong(264, 0x400200); b.putLong(272, 10); b.putLong(280, 128)
         b.putLong(288, if (soname) 14 else tag); b.putLong(296, if (soname) 1 else value)
         "\u0000libfixture.so\u0000".toByteArray().copyInto(raw, 512)
@@ -703,26 +704,33 @@ class AcpProviderDnsBuildInputTest {
             ByteBuffer.wrap(it).order(ByteOrder.LITTLE_ENDIAN).putLong(136, 0x900000)
         }) }
     }
+    // Relocate the header table so a fourth header cannot overwrite the dynamic table at 256.
+    private fun elfWithExtraProgramHeader(): ByteArray = elf().copyOf(2048).also { raw ->
+        raw.copyInto(raw, 1024, 64, 232)
+        val b = ByteBuffer.wrap(raw).order(ByteOrder.LITTLE_ENDIAN)
+        b.putLong(32, 1024); b.putShort(56, 4)
+        raw.fill(0, 256, 336)
+    }
+
     @Test fun `ELF ambiguous load mapping of an otherwise empty dynamic table is refused`() {
-        val raw = elf().also { it.fill(0, 256, 336) }
-        raw.copyInto(raw, 176, 64, 120)
-        ByteBuffer.wrap(raw).order(ByteOrder.LITTLE_ENDIAN).putShort(56, 3)
+        val raw = elfWithExtraProgramHeader()
+        raw.copyInto(raw, 1192, 1024, 1080)
         assertFails { AcpProviderDnsElfInspection.inspect(raw) }
     }
     @Test fun `ELF partially overlapping load also makes the dynamic table ambiguous`() {
-        val raw = elf().also { it.fill(0, 256, 336) }
+        val raw = elfWithExtraProgramHeader()
         val b = ByteBuffer.wrap(raw).order(ByteOrder.LITTLE_ENDIAN)
-        b.putShort(56, 3); b.putInt(176, 1)
-        b.putLong(184, 768); b.putLong(192, 0x400110); b.putLong(208, 16); b.putLong(216, 16)
+        b.putInt(1192, 1)
+        b.putLong(1200, 768); b.putLong(1208, 0x400110); b.putLong(1224, 16); b.putLong(1232, 16)
         assertFails { AcpProviderDnsElfInspection.inspect(raw) }
     }
 
     private fun elfWithSecondLoad(fileSize: Long, memorySize: Long, address: Long): ByteArray {
-        val raw = elf().also { it.fill(0, 256, 336) }
+        val raw = elfWithExtraProgramHeader()
         val b = ByteBuffer.wrap(raw).order(ByteOrder.LITTLE_ENDIAN)
-        b.putShort(56, 3); b.putInt(176, 1)
-        b.putLong(184, address - 0x400000); b.putLong(192, address)
-        b.putLong(208, fileSize); b.putLong(216, memorySize); b.putLong(224, 4096)
+        b.putInt(1192, 1)
+        b.putLong(1200, address - 0x400000); b.putLong(1208, address)
+        b.putLong(1224, fileSize); b.putLong(1232, memorySize); b.putLong(1240, 4096)
         return raw
     }
 
