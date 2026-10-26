@@ -289,8 +289,11 @@ upload, runtime, job overview, attempt history/overview/activity/evidence, sourc
 directory and file, the not-found page, the open display-preference panel and a failed
 job read. Any WCAG 2.0/2.1/2.2 A or AA rule violation fails `npm test`. jsdom has no
 layout or colour, so contrast and reflow stay in the packaged Chrome checks
-(`scripts/packaged-browser-contrast.mjs`); manual screen-reader audit evidence is
-recorded separately (#617). Add a new route or state to that suite when you add a view.
+(`scripts/packaged-browser-contrast.mjs` and the `--mode audit` route audit in
+`scripts/packaged-browser-audit.mjs`); `tests/contrast-tokens.test.ts` checks the token
+pairings early. [The audit record](../docs/web-accessibility-audit.md) lists every gate,
+its findings and the manual screen-reader checklist (#617). Add a new route or state to the
+component suite and to the packaged audit's page list when you add a view.
 
 A production build empties the output directory, builds split assets and writes
 `build/frontend/bundle-report.json`. The report includes every output's SHA-256,
