@@ -804,6 +804,7 @@ writers or a changed parent are refused; no unreviewed index entries can enter t
 | `WORKTREE_BUSY` (operation failure) | Another Git writer holds the index, HEAD or target-ref lock; nothing is published |
 | `409 WORKTREE_CHANGED` | The work tree or index changed (any status entry, index blob or file stat) |
 | `409 SELECTION_CHANGED` | A selected file identity is no longer in the current status |
+| `409 SELECTION_OVERLAP` | A pathspec would affect unselected descendants, or staging a descendant would remove an unselected tracked ancestor |
 | `409 INDEX_CHANGED` | A commit's `selectedFileIds` differ from today's staged set; nothing is swept in or left out |
 | `409 CONFLICTED`, `409 NOTHING_TO_COMMIT` | Unmerged paths exist, or nothing is staged |
 | `422 EXCLUDED_PATH` | The file is excluded by the source-only policy (decided independently of any repository `.gitignore`), is a submodule, or has a non-UTF-8 name |
@@ -858,6 +859,8 @@ hold for a dirty work tree or for unmapped commits is left as a follow-up once i
 - every refusal above, including a `.gitignore` negation that tries to re-include a credential;
 - keyed replay and idempotency conflict;
 - an external edit between admission and execution, which fails with `WORKTREE_CHANGED`;
+- staging a descendant refuses an unselected tracked ancestor deletion, but succeeds after that
+  deletion is explicitly staged;
 - external index writers after capture, busy locks, parent CAS, detached parents in both object
   formats, and exact result identity when a later writer advances HEAD;
 - snapshot file additions and mutation after capture, ordinary post-publication errors and

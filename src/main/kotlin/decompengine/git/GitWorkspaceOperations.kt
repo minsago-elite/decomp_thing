@@ -124,22 +124,31 @@ internal object GitWorkspaceMutations {
             if (entry.conflict != null) refuse("CONFLICTED", "Resolve conflicted files in the work tree before staging them.")
             if (!applies(entry)) refuse("NOTHING_SELECTED", if (stage) "A selected file has no unstaged change." else "A selected file has no staged change.")
             entry
-        }.also { selected -> refuseOverlap(observation, selected) }
+        }.also { selected -> refuseOverlap(observation, selected, stage) }
     }
 
     /**
-     * Pathspecs match descendants: a selected path (or a rename's original path) that is now a
-     * directory holding other tracked or staged entries would act on those too. Refuse instead.
+     * Pathspecs match descendants, and add resolves index file/directory conflicts by removing
+     * tracked ancestors. Neither direction may silently act on an unselected index entry.
      */
-    private fun refuseOverlap(observation: GitWorkspaceObservation, selected: List<GitStatusEntry>) {
+    private fun refuseOverlap(observation: GitWorkspaceObservation, selected: List<GitStatusEntry>, stage: Boolean) {
         val chosen = selected.toSet()
+        val paths = selected.mapNotNull { it.path.exact }
         val prefixes = selected.flatMap { listOfNotNull(it.path.exact, it.originalPath?.exact) }.map { "$it/" }
         val overlapping = observation.status.entries.any { entry ->
-            entry !in chosen && !entry.ignored && !entry.untracked && listOfNotNull(entry.path.exact, entry.originalPath?.exact).any { path ->
-                prefixes.any { path.startsWith(it) }
+            if (entry in chosen || entry.ignored || entry.untracked) false
+            else {
+                val descendant = listOfNotNull(entry.path.exact, entry.originalPath?.exact).any { path ->
+                    prefixes.any { path.startsWith(it) }
+                }
+                // A staged deletion has no remaining index entry; adding below it is safe.
+                val ancestor = stage && entry.staged != GitIndexChange.DELETED && entry.path.exact?.let { path ->
+                    paths.any { it.startsWith("$path/") }
+                } == true
+                descendant || ancestor
             }
         }
-        if (overlapping) refuse("SELECTION_OVERLAP", "A selected path is now a directory containing other changes. Select those entries explicitly or resolve the overlap first.")
+        if (overlapping) refuse("SELECTION_OVERLAP", "A selected path overlaps other tracked changes. Select those entries explicitly or resolve the overlap first.")
     }
 
     /** The reviewed selection must be exactly today's staged set: nothing swept in, nothing left out. */

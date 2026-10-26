@@ -199,11 +199,27 @@ class GitWorkspaceMutationsTest {
         val (replaced, replacedGuards) = service.guards(repositoryId)
         val deletion = replaced.ids { it.path.exact == "src/util.c" && it.unstaged == GitIndexChange.DELETED }
         assertEquals(1, deletion.size)
+        val descendant = replaced.ids { it.path.exact == "src/util.c/extra.c" }
+        assertEquals("SELECTION_OVERLAP", assertFailsWith<ManagedGitException> {
+            service.requestWorkspace(jobId, repositoryId,
+                GitStageRequest(replaced.record.worktreeId, replacedGuards, descendant, true), "stage_child_only_01")
+        }.code)
+        val unchanged = service.guards(repositoryId)
+        assertEquals(replacedGuards, unchanged.second, "refusal must leave the index unchanged")
+        // Explicitly selecting both affected entries is allowed; the index-only deletion runs first.
+        assertEquals(2, GitWorkspaceMutations.select(replaced.record, replaced.observation, deletion + descendant, true).size)
         val stagedDeletion = service.run(repositoryId, GitStageRequest(replaced.record.worktreeId, replacedGuards, deletion, true), "stage_key_0000032")
         assertEquals(GitOperationState.COMPLETED, stagedDeletion.state, stagedDeletion.message)
         val after = service.workspace(jobId, repositoryId).observation.status.entries
         assertEquals(GitIndexChange.DELETED, after.single { it.path.exact == "src/util.c" }.staged)
         assertTrue(after.single { it.path.exact == "src/util.c/extra.c" }.untracked)
+        // Once the ancestor deletion is already staged, adding the child sweeps in nothing else.
+        val (afterDeletion, afterDeletionGuards) = service.guards(repositoryId)
+        val child = service.run(repositoryId, GitStageRequest(afterDeletion.record.worktreeId, afterDeletionGuards, descendant, true), "stage_child_safe_01")
+        assertEquals(GitOperationState.COMPLETED, child.state, child.message)
+        assertEquals(GitIndexChange.ADDED, service.workspace(jobId, repositoryId).observation.status.entries.single {
+            it.path.exact == "src/util.c/extra.c"
+        }.staged)
     }
 
     @Test fun `routine work-tree operations retire old terminal records instead of exhausting the quota`(): Unit = Fixture().use { f ->
