@@ -21,6 +21,15 @@ class GitIntegrationTest {
         var hook: (GitOperationCrashPoint) -> Unit = {}
         val runs = mutableMapOf("run_1" to false)
         var signed = false
+        var stable = false
+        val activity = object : GitJobActivity {
+            override fun runs(jobId: String) = runs.toMap()
+            override fun <T> withStableRuns(jobId: String, block: (Map<String, Boolean>) -> T): T {
+                check(!stable)
+                stable = true
+                return try { block(runs(jobId)) } finally { stable = false }
+            }
+        }
         private val opened = mutableListOf<ManagedGitRepositories>()
         init {
             Files.createDirectories(store.resolve("0123456789abcdef0123456789abcdef"))
@@ -36,7 +45,7 @@ class GitIntegrationTest {
             repositories.git("-C", seed.toString(), "push", "-q", bare.toString(), "main")
         }
         fun open() = ManagedGitRepositories(store, GitRuntime.detect(), { _, _, _ -> error("no snapshots") },
-            policy = GitRepositoryPolicy(defaultBranch = "main", requireSignedCommits = signed), crash = { hook(it) }, activity = { runs.toMap() },
+            policy = GitRepositoryPolicy(defaultBranch = "main", requireSignedCommits = signed), crash = { hook(it) }, activity = activity,
             remotePolicy = GitRemotePolicy(admittedRoot = admitted)).also(opened::add)
         override fun close() { opened.forEach { it.close() }; repositories.close() }
     }
@@ -427,6 +436,40 @@ class GitIntegrationTest {
         assertEquals(unreviewed, Files.readString(f.workTree().resolve("README.md")))
         assertTrue(service.conflicts(jobId, repositoryId, null).files.isEmpty())
         assertTrue(service.workspace(jobId, repositoryId).observation.status.entries.any { it.unstaged != GitIndexChange.NONE })
+    }
+
+    @Test fun `merge and abort exclude workflow admission through publication`(): Unit = Fixture().use { f ->
+        f.cloned()
+        Files.writeString(f.seed.resolve("util.c"), "int incoming = 7;\n"); f.remoteCommit("incoming")
+        fetch()
+        val before = service.workspace(jobId, repositoryId).observation.head.objectId
+        for (point in listOf(GitOperationCrashPoint.AFTER_STAGING, GitOperationCrashPoint.BEFORE_PUBLISH)) {
+            f.hook = { if (it == point) {
+                if (point == GitOperationCrashPoint.BEFORE_PUBLISH) assertTrue(f.stable)
+                f.runs["run_1"] = true
+            } }
+            assertEquals("ACTIVE_RUN", sync(GitOperationAction.MERGE, merge("fast-forward")).failureCode)
+            assertEquals(before, service.workspace(jobId, repositoryId).observation.head.objectId)
+            assertEquals("int util;\n", Files.readString(f.workTree().resolve("util.c")))
+            f.runs["run_1"] = false
+        }
+        f.hook = { if (it == GitOperationCrashPoint.BEFORE_PUBLISH) assertTrue(f.stable) }
+        assertEquals(GitOperationState.COMPLETED, sync(GitOperationAction.MERGE, merge("fast-forward")).state)
+        f.hook = {}
+        f.conflictOn("README.md")
+        val conflicted = Files.readString(f.workTree().resolve("README.md"))
+        for (point in listOf(GitOperationCrashPoint.AFTER_STAGING, GitOperationCrashPoint.BEFORE_PUBLISH)) {
+            f.hook = { if (it == point) {
+                if (point == GitOperationCrashPoint.BEFORE_PUBLISH) assertTrue(f.stable)
+                f.runs["run_1"] = true
+            } }
+            assertEquals("ACTIVE_RUN", sync(GitOperationAction.MERGE_ABORT).failureCode)
+            assertEquals(conflicted, Files.readString(f.workTree().resolve("README.md")))
+            assertTrue(service.conflicts(jobId, repositoryId, null).mergeInProgress)
+            f.runs["run_1"] = false
+        }
+        f.hook = { if (it == GitOperationCrashPoint.BEFORE_PUBLISH) assertTrue(f.stable) }
+        assertEquals(GitOperationState.COMPLETED, sync(GitOperationAction.MERGE_ABORT).state)
     }
 
     @Test fun `the content digest is streamed and matches the file bytes`(): Unit = Fixture().use { f ->

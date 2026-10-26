@@ -925,7 +925,12 @@ class ManagedGitRepositories(
                     tracking.objectId, tracking.name, clock.instant()))
                 crash(GitOperationCrashPoint.AFTER_STAGING)
                 val message = "Merge ${tracking.name.removePrefix("refs/remotes/")} into ${branch.removePrefix("refs/heads/")}"
-                val conflicted = GitIntegrations.merge(runner, located.gitDir, located.workTree, tracking.objectId, strategy, message, policy)
+                val conflicted = activity.withStableRuns(located.record.jobId) { runs ->
+                    requireNoLease(located, runs)
+                    crash(GitOperationCrashPoint.BEFORE_PUBLISH)
+                    requireNoLease(located)
+                    GitIntegrations.merge(runner, located.gitDir, located.workTree, tracking.objectId, strategy, message, policy)
+                }
                 crash(GitOperationCrashPoint.AFTER_PUBLISH)
                 val head = GitRepositoryInspector.head(runner, located.gitDir, located.record.objectFormat).objectId
                 val remote = GitRemoteStore.list(directory, located.record.repositoryId).singleOrNull { tracking.name.startsWith(it.trackingPrefix) }
@@ -943,7 +948,14 @@ class ManagedGitRepositories(
             }
             GitOperationAction.MERGE_ABORT -> {
                 val record = GitIntegrations.record(directory, located.worktreeId)
-                GitIntegrations.abort(runner, located.gitDir, located.workTree)
+                crash(GitOperationCrashPoint.AFTER_STAGING)
+                activity.withStableRuns(located.record.jobId) { runs ->
+                    requireNoLease(located, runs)
+                    crash(GitOperationCrashPoint.BEFORE_PUBLISH)
+                    requireNoLease(located)
+                    GitIntegrations.abort(runner, located.gitDir, located.workTree)
+                }
+                crash(GitOperationCrashPoint.AFTER_PUBLISH)
                 GitIntegrations.delete(directory, located.worktreeId)
                 GitRemoteStore.audit(directory, GitRemoteStore.auditEntry("merge.abort", operation.operationId, "completed", null, clock.instant(),
                     ref = record?.branch, oldObjectId = record?.target, newObjectId = record?.headBefore))
