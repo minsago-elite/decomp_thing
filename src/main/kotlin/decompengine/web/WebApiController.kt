@@ -73,6 +73,7 @@ internal class WebApiController(
         "jobs/[^/]+/runs/[^/]+/cancel",
         "jobs/[^/]+/runs/[^/]+/recover",
         "jobs/[^/]+/runs/[^/]+/controls",
+        "jobs/[^/]+/runs/[^/]+/queue-position",
         "jobs/[^/]+/artifacts/[^/]+/content",
     ).map(::Regex)
 
@@ -327,6 +328,12 @@ internal class WebApiController(
                     val session = checkNotNull(access.authorize(exchange, WebEndpointPolicy.privateRead()))
                     requireJsonAccept(exchange)
                     sendWebApiResponse(exchange, 200, "runs", runPages.page(session.sessionId, resource.split('/')[1], exchange.requestURI.rawQuery))
+                }
+                resource.matches(Regex("jobs/[^/]+/runs/[^/]+/queue-position")) -> {
+                    access.authorize(exchange, WebEndpointPolicy.privateRead())
+                    requireNoWebApiQuery(exchange); requireJsonAccept(exchange)
+                    val parts = resource.split('/')
+                    sendWebApiResponse(exchange, 200, "queuePosition", webQueuePosition(parts[1], parts[3], jobs.queuePosition(parts[1], parts[3])))
                 }
                 resource.matches(Regex("jobs/[^/]+/runs/[^/]+")) -> {
                     access.authorize(exchange, WebEndpointPolicy.privateRead())

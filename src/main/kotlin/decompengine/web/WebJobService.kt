@@ -355,6 +355,25 @@ class WebJobService(
             pool.queue.size, configuredQueueCapacity)
     }
 
+    /**
+     * Sampled position of one queued attempt. The executor queue is FIFO, but queued work can be
+     * cancelled or stopped, two workers start tasks independently and the attempt record and queue are
+     * read separately, so the result is approximate. Only a count of other queued tasks is exposed.
+     * Like [schedulerSnapshot], this does not acquire the service monitor.
+     */
+    fun queuePosition(jobId: String, runId: String): WebQueuePosition {
+        val attempt = getAttempt(jobId, runId)
+        val sampledAt = java.time.Instant.now()
+        if (attempt.state != WorkflowRunState.QUEUED) return WebQueuePosition.NotQueued(sampledAt, attempt.state)
+        val pool = ownedExecutor ?: return WebQueuePosition.Unavailable(sampledAt, "EXTERNAL_EXECUTOR")
+        val queued: List<Runnable> = pool.queue.toList()
+        val index = queued.indexOfFirst { it is DurableTask && it.jobId == jobId && it.attempt.runId == runId }
+        if (index < 0) return WebQueuePosition.Unavailable(sampledAt, "NOT_IN_LOCAL_QUEUE")
+        val limit = pool.maximumPoolSize
+        return WebQueuePosition.Queued(sampledAt, index + 1, queued.size.coerceIn(index + 1, 32),
+            pool.activeCount.coerceIn(0, limit), limit)
+    }
+
     /** Serialize with terminal publication before acquiring the service, executor or listener cleanup locks. */
     internal fun signalShutdown() = completionPublication.signalShutdown()
 
@@ -929,7 +948,7 @@ class WebJobService(
             task.finish(WorkflowTransition.Finish(WorkflowRunState.FAILED, WorkflowTerminalReason.REFUSED))
             return DurableWebWorkflowAdmission.Unavailable("CAPACITY_UNAVAILABLE")
         } catch (failure: Throwable) {
-            try { task.finish(WorkflowTransition.Finish(WorkflowRunState.FAILED, WorkflowTerminalReason.FAILED)) }
+            try { task.finish(WorkflowTransition.Finish(WorkflowRunState.FAILED, WorkflowTerminalReason.INFRASTRUCTURE_FAILED)) }
             catch (cleanup: Throwable) { if (cleanup !== failure) failure.addSuppressed(cleanup) }
             throw failure
         }
@@ -1008,7 +1027,7 @@ class WebJobService(
         catch (_: RejectedExecutionException) {
             task.finish(WorkflowTransition.Finish(WorkflowRunState.FAILED, WorkflowTerminalReason.REFUSED))
         } catch (failure: Throwable) {
-            try { task.finish(WorkflowTransition.Finish(WorkflowRunState.FAILED, WorkflowTerminalReason.FAILED)) }
+            try { task.finish(WorkflowTransition.Finish(WorkflowRunState.FAILED, WorkflowTerminalReason.INFRASTRUCTURE_FAILED)) }
             catch (cleanup: Throwable) { if (cleanup !== failure) failure.addSuppressed(cleanup) }
             if (failure !is Exception) throw failure
             if (publicationFailures.isNotEmpty()) throw WebJobServiceException("RECOVERY_REQUIRED",
@@ -1331,7 +1350,8 @@ class WebJobService(
                 synchronized(this@WebJobService) {
                     publicationFailure?.let { throw it }
                     try { finish(if (closed || stopping || Thread.currentThread().isInterrupted || failure is InterruptedException) interrupted()
-                        else WorkflowTransition.Finish(WorkflowRunState.FAILED, WorkflowTerminalReason.FAILED)) }
+                        // An adapter that throws never reported a workflow outcome: record an infrastructure failure.
+                        else WorkflowTransition.Finish(WorkflowRunState.FAILED, WorkflowTerminalReason.INFRASTRUCTURE_FAILED)) }
                     catch (cleanup: Exception) { if (cleanup !== failure) failure.addSuppressed(cleanup); throw failure }
                 }
             } finally { synchronized(this@WebJobService) { release() } }
