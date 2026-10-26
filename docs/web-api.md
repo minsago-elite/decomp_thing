@@ -1201,8 +1201,10 @@ explicit write, refused when:
 - an earlier creation for the same branches is unconfirmed, with `PR_UNCONFIRMED`.
 
 The creation intent is recorded before GitHub is contacted, and every outcome is audited. The
-intent records the GitHub repository contacted and the numbers of pull requests that already
-existed for those branches.
+intent records the canonical API endpoint, GitHub repository contacted and the numbers of pull
+requests that already existed for the head on any base. The presentation listing is limited to
+30 entries; creation preflight and recovery use a separate inventory bounded to ten pages of 30.
+An incomplete preflight refuses creation with `PR_AMBIGUOUS` without sending a POST.
 
 - An open pull request that already exists for the branches is reported as the result, and
   nothing is written. A duplicate refusal from GitHub during creation is resolved the same way.
@@ -1210,20 +1212,25 @@ existed for those branches.
   a pull request already exists.
 - The body sent to GitHub ends with a hidden comment,
   `<!-- decomp-workbench-operation: <operationId> -->`, that ties the pull request to its
-  creating operation.
+  creating operation. Reserved correlation comments copied into the draft are stripped before
+  the server appends its own marker. Conflicting markers in a provider body are ambiguous.
 - Only definite refusals fail the operation: unauthorized, forbidden, not found, validation,
   read-only, missing credential and rate limited.
 - Any other outcome becomes `recovery-required` with `PR_UNCONFIRMED`. Examples are a dropped
-  connection, a stalled or unreadable response, or a server error.
+  connection, a stalled or unreadable response, a server error, or a local audit/completion failure
+  after the external write. The intent stays until audit and operation completion are durable;
+  confirmed intents left by a crash are cleaned up idempotently after restart.
 - `github.pr.reconcile` with `prOperationId` looks in the recorded repository, even if the
-  remote's binding has since changed. It searches every base, because the pull request may have
-  been retargeted, and ignores pull requests that already existed for the head. It matches by the
-  correlation comment, which survives a title edit or retargeting. Otherwise it matches by the
-  title digest on the original base. It
-  settles the original operation as `completed`, or as `failed` with `PR_NOT_CREATED` when no new
-  pull request exists, and it never repeats the write. A new pull request may carry no correlation
-  and still not match. The reconciliation then fails with `PR_AMBIGUOUS`, and the creation stays
-  unconfirmed.
+  remote's binding has since changed. A changed API endpoint (or a legacy intent without a
+  recorded endpoint) refuses reconciliation with `PR_UNCONFIRMED` and retains the intent. It
+  never sends current credentials to a previously configured endpoint automatically.
+  Recovery searches every base, because the pull request may have been retargeted, and ignores
+  pull requests that already existed for the head. Only a unique correlation comment confirms
+  creation; a matching title alone is not provenance. It settles the original operation as
+  `completed`, or as `failed` with `PR_NOT_CREATED` only when a complete inventory contains no
+  new pull requests. Unmatched new pull requests, conflicting correlations or an incomplete
+  inventory without a match fail reconciliation with `PR_AMBIGUOUS` and keep the creation
+  unconfirmed. Reconciliation never repeats the write.
 - Completion messages are bounded to the record's 500 characters, so a long provider link never
   makes the operation record unreadable.
 - A remote with an unconfirmed creation cannot be removed (`PR_UNCONFIRMED`).
@@ -1250,7 +1257,11 @@ remote, branches and commits.
 - confirmation by correlation after a title edit or retargeting, and `PR_AMBIGUOUS` for an
   unidentifiable pull request;
 - an existing open pull request reported without writing, and GitHub's `custom` duplicate error;
-- a long provider link bounded in the record, and a moved reviewed commit refused.
+- a long provider link bounded in the record, and a moved reviewed commit refused;
+- page-two correlation and capped inventories, including refusal of an incomplete preflight;
+- copied/conflicting markers and independent same-title pull requests;
+- a restart with a different provider, without querying either provider during refusal;
+- post-response crash/audit failure recovery and confirmed-intent cleanup after restart.
 
 The separate `github-optional` CI lane runs these tests and the fixture's own test with no
 secrets or network credentials (#612).

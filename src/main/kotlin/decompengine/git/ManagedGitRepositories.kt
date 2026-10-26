@@ -901,7 +901,7 @@ class ManagedGitRepositories(
      * reconciliation looks in the same place and never mistakes an older pull request for this one.
      */
     data class GitPullIntent(val operationId: String, val remoteId: String, val head: String, val base: String, val titleSha256: String,
-        val owner: String, val repository: String, val existing: Set<Int>)
+        val owner: String, val repository: String, val existing: Set<Int>, val apiIdentity: String? = null)
 
     private fun pullIntents(directory: Path): List<GitPullIntent> {
         val intents = directory.resolve(PULL_INTENTS)
@@ -911,7 +911,8 @@ class ManagedGitRepositories(
                 val value = Json.parseToJsonElement(GitStorage.read(file, 16 * 1024).toString(Charsets.UTF_8)).jsonObject
                 GitPullIntent(value.text("operationId"), value.text("remoteId"), value.text("head"), value.text("base"), value.text("titleSha256"),
                     value.text("owner"), value.text("repository"),
-                    (value.getValue("existing") as kotlinx.serialization.json.JsonArray).map { (it as JsonPrimitive).content.toInt() }.toSet())
+                    (value.getValue("existing") as kotlinx.serialization.json.JsonArray).map { (it as JsonPrimitive).content.toInt() }.toSet(),
+                    (value["apiIdentity"] as? JsonPrimitive)?.content)
             }
         }
     }
@@ -975,6 +976,9 @@ class ManagedGitRepositories(
                 val intent = pullIntents(directory).singleOrNull { it.operationId == request.parameters["prOperationId"] }
                     ?: GitWorkspaceMutations.refuse("NOT_FOUND", "No unconfirmed pull request creation has that operation identity.")
                 remoteFor(located, intent.remoteId)
+                // Legacy intents lack a provider identity and cannot safely establish absence either.
+                if (intent.apiIdentity == null || intent.apiIdentity != configuration.apiIdentity) GitWorkspaceMutations.refuse("PR_UNCONFIRMED",
+                    "The recorded GitHub provider cannot be verified against this configuration. Restore the original API endpoint or inspect the creation manually; it stays unconfirmed.")
             }
             else -> error("not a GitHub request")
         }
@@ -990,7 +994,8 @@ class ManagedGitRepositories(
                 val head = request.text("headBranch"); val base = request.text("baseBranch"); val title = request.text("title")
                 val intents = GitStorage.directories(directory, PULL_INTENTS)
                 // Pull requests that already exist for this head, on any base, can never be this creation's result.
-                val listed = client.pulls(binding, head)
+                val inventory = client.inventory(binding, head)
+                val listed = inventory.pulls
                 fun audit(outcome: String, detail: String?) = GitRemoteStore.audit(directory, GitRemoteStore.auditEntry("github.pr.create",
                     operation.operationId, outcome, remote, clock.instant(), ref = "refs/heads/$head", detail = detail))
                 // An open pull request for these branches already exists: report it and never write.
@@ -998,28 +1003,32 @@ class ManagedGitRepositories(
                     audit("existed", "#${it.number}")
                     return null to "A pull request already existed for these branches: #${it.number} ${it.url}"
                 }
+                if (!inventory.complete) throw GitOperationRefusal("PR_AMBIGUOUS",
+                    "The GitHub inventory exceeds the bounded search. No creation was attempted; inspect the existing pull requests on GitHub.")
                 val existing = listed.map { it.number }
                 GitStorage.replaceAtomically(intents.resolve("${operation.operationId}.json"), buildJsonObject {
                     put("operationId", operation.operationId); put("remoteId", remote.remoteId); put("head", head); put("base", base)
                     put("titleSha256", GitStorage.sha256(title)); put("owner", binding.owner); put("repository", binding.repository)
+                    put("apiIdentity", checkNotNull(github).apiIdentity)
                     put("existing", kotlinx.serialization.json.JsonArray(existing.map(::JsonPrimitive)))
                 }.toString().toByteArray())
                 crash(GitOperationCrashPoint.AFTER_STAGING)
-                val body = (request.content ?: "") + GitHubCorrelation.comment(operation.operationId)
+                val body = GitHubCorrelation.draft(request.content ?: "") + GitHubCorrelation.comment(operation.operationId)
                 val pull = try { client.create(binding, head, base, title, body) } catch (failure: GitHubException) {
                     when {
                         !client.definiteRefusal(failure.code) && failure.code != "GITHUB_PR_EXISTS" -> {
                             audit("unconfirmed", null)
                             throw GitOperationRefusal("PR_UNCONFIRMED", "GitHub did not report the outcome. Reconcile before creating it again; nothing is claimed.")
                         }
-                        failure.code == "GITHUB_PR_EXISTS" -> client.pulls(binding, head, base).firstOrNull { it.state == "open" && it.baseRef == base }
-                            ?.also { Files.deleteIfExists(intents.resolve("${operation.operationId}.json")); audit("existed", "#${it.number}") }
+                        failure.code == "GITHUB_PR_EXISTS" -> client.inventory(binding, head, base).pulls.firstOrNull { it.state == "open" && it.baseRef == base }
+                            ?.also { crash(GitOperationCrashPoint.AFTER_PUBLISH); audit("existed", "#${it.number}") }
                             ?.let { return null to "A pull request already existed for these branches: #${it.number} ${it.url}" }
                             ?: run { Files.deleteIfExists(intents.resolve("${operation.operationId}.json")); audit("rejected", failure.code.lowercase()); throw failure }
                         else -> { Files.deleteIfExists(intents.resolve("${operation.operationId}.json")); audit("rejected", failure.code.lowercase()); throw failure }
                     }
                 }
-                Files.deleteIfExists(intents.resolve("${operation.operationId}.json"))
+                // The external write is visible, but completion and audit are not yet durable.
+                crash(GitOperationCrashPoint.AFTER_PUBLISH)
                 audit("created", "#${pull.number}")
                 null to "Created pull request #${pull.number}: ${pull.url}. Its review or checks are not build or reconstruction acceptance."
             }
@@ -1029,26 +1038,24 @@ class ManagedGitRepositories(
                 // Look in the repository that was actually contacted, whatever the remote is bound to now.
                 val binding = GitHubBinding(remote.location.display, intent.owner, intent.repository)
                 // Every base is searched: a collaborator may have retargeted the created pull request.
-                val candidates = client.pulls(binding, intent.head).filter { it.number !in intent.existing }
-                // The correlation comment identifies the result even after a title edit or retargeting; the
-                // title digest on the original base is the fallback. Another operation's correlation is never ours.
-                val found = candidates.firstOrNull { it.correlation == intent.operationId }
-                    ?: candidates.firstOrNull { it.correlation == null && it.baseRef == intent.base && GitStorage.sha256(it.title) == intent.titleSha256 }
-                val unidentified = candidates.filter { it.correlation == null }
-                if (found == null && unidentified.isNotEmpty()) throw GitOperationRefusal("PR_AMBIGUOUS",
-                    "Pull request(s) ${unidentified.joinToString { "#${it.number}" }} were created for this head since, but none carries " +
-                        "this creation's identity or title. The creation stays unconfirmed; check them on GitHub.")
+                val inventory = client.inventory(binding, intent.head)
+                val candidates = inventory.pulls.filter { it.number !in intent.existing }
+                // Mutable titles are not provenance: an independently created same-title PR is ambiguous.
+                val matches = candidates.filter { it.correlation == intent.operationId }
+                val found = matches.singleOrNull()
+                if (matches.size > 1 || (found == null && (!inventory.complete || candidates.isNotEmpty()))) throw GitOperationRefusal("PR_AMBIGUOUS",
+                    "The bounded GitHub search cannot establish this creation's outcome. New or conflicting pull requests may exist; " +
+                        "the creation stays unconfirmed. Inspect them on GitHub.")
                 val (state, code, message) = if (found != null) Triple(GitOperationState.COMPLETED, null,
                     "Reconciliation found pull request #${found.number}: ${found.url}")
                     else Triple(GitOperationState.FAILED, "PR_NOT_CREATED", "Reconciliation found no such pull request; it was not created.")
+                GitRemoteStore.audit(directory, GitRemoteStore.auditEntry("github.pr.reconcile", operation.operationId,
+                    if (found != null) "confirmed" else "not_created", remote, clock.instant(), ref = "refs/heads/${intent.head}",
+                    detail = found?.let { "#${it.number}" }))
                 synchronized(lock) {
                     operations(operation.jobId).singleOrNull { it.operationId == intent.operationId && !it.state.equals(GitOperationState.COMPLETED) }
                         ?.let { persist(root.resolve(operation.jobId).resolve("git"), finish(it, state, code, message)) }
                 }
-                Files.deleteIfExists(directory.resolve(PULL_INTENTS).resolve("${intent.operationId}.json"))
-                GitRemoteStore.audit(directory, GitRemoteStore.auditEntry("github.pr.reconcile", operation.operationId,
-                    if (found != null) "confirmed" else "not_created", remote, clock.instant(), ref = "refs/heads/${intent.head}",
-                    detail = found?.let { "#${it.number}" }))
                 null to message
             }
             else -> error("not a GitHub request")
@@ -1681,11 +1688,18 @@ class ManagedGitRepositories(
                 else -> error("not a workspace request")
             }
             synchronized(lock) { current = finish(current, GitOperationState.COMPLETED, null, message, result); persist(directory, current) }
+            // As for push completion, this boundary is after the terminal record but before intent cleanup.
+            if (queued.action in GitSyncRequest.GITHUB) crash(GitOperationCrashPoint.BEFORE_PUBLISH)
+            cleanupPullIntent(current)
         } catch (_: SimulatedGitCrash) {
             synchronized(lock) { active -= queued.operationId }
             return
         } catch (failure: Throwable) {
-            val (code, message) = when (failure) {
+            val pendingPull = queued.action == GitOperationAction.GITHUB_PR_CREATE && Files.exists(
+                repositoryDirectory(queued.jobId, queued.repositoryId).resolve(PULL_INTENTS).resolve("${queued.operationId}.json"), NOFOLLOW_LINKS)
+            val (code, message) = if (pendingPull) "PR_UNCONFIRMED" to
+                "GitHub creation or local completion could not be confirmed. Reconcile before creating it again; the recovery intent is retained."
+            else when (failure) {
                 is GitOperationRefusal -> failure.code to (failure.message ?: "")
                 is GitRepositoryException -> failure.code to (failure.message ?: "")
                 is ManagedGitException -> failure.code to (failure.message ?: "")
@@ -1711,6 +1725,19 @@ class ManagedGitRepositories(
             try { GitStorage.deleteTree(staging) } catch (_: Exception) { /* removed by reconciliation */ }
             synchronized(lock) { active -= queued.operationId; cancellations -= queued.operationId; progress -= queued.operationId }
         }
+    }
+
+    /** Cleanup is best-effort and only follows durable completion; restart repeats it idempotently. */
+    private fun cleanupPullIntent(operation: GitOperationRecord) {
+        val request = operation.request as? GitSyncRequest ?: return
+        val operationId = when {
+            operation.action == GitOperationAction.GITHUB_PR_CREATE && (operation.state == GitOperationState.COMPLETED ||
+                (operation.state == GitOperationState.FAILED && operation.failureCode == "PR_NOT_CREATED")) -> operation.operationId
+            operation.action == GitOperationAction.GITHUB_PR_RECONCILE && operation.state == GitOperationState.COMPLETED -> request.parameters["prOperationId"]
+            else -> null
+        } ?: return
+        try { Files.deleteIfExists(repositoryDirectory(operation.jobId, operation.repositoryId).resolve(PULL_INTENTS).resolve("$operationId.json")) }
+        catch (_: IOException) { /* safe to retry after restart: completion is already durable */ }
     }
 
     /** Apply one validated branch, tag or work-tree intent. Returns the resulting object, if any. */
@@ -2043,7 +2070,8 @@ class ManagedGitRepositories(
         if (Files.isDirectory(directory, NOFOLLOW_LINKS)) {
             val published = repositories(jobId).associateBy { it.operationId }
             for (operation in operations(jobId)) {
-                if (operation.state.terminal || operation.operationId in active) continue
+                if (operation.operationId in active) continue
+                if (operation.state.terminal) { cleanupPullIntent(operation); continue }
                 val staging = directory.resolve("staging").resolve(operation.operationId)
                 if (operation.action.workspace) {
                     persist(directory, reconcileWorkspace(jobId, operation))
