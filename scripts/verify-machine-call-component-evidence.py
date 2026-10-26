@@ -521,6 +521,11 @@ def retained_relocation_tables(inventory: dict, sections: dict) -> tuple[bool, d
     active = [section for section in sections.values() if section["type"] == 11 and address(section["address"]) == tags.get(6)]
     require(len(active) == 1 and active[0]["index"] == inventory["activeSymbolTableSectionIndex"] and
             address(active[0]["entrySize"]) == tags.get(11) == 24, "retained active symbol table differs from raw tags")
+    active_versions = [section for section in sections.values()
+                       if section["type"] == 0x6fffffff and section["link"] == inventory["activeSymbolTableSectionIndex"]]
+    require((0x6ffffff0 in tags) == bool(active_versions) and
+            (not active_versions or len(active_versions) == 1 and address(active_versions[0]["address"]) == tags[0x6ffffff0]),
+            "retained DT_VERSYM presence/pointer differs from version sections")
     if any(section["type"] == 11 and section["index"] != inventory["activeSymbolTableSectionIndex"] for section in sections.values()):
         reasons.add("inactive-dynsym-table-retained")
     require(inventory["unsupportedReasons"] == sorted(reasons), "retained unsupported reasons differ from dynamic metadata")
@@ -559,6 +564,7 @@ def retained_relocation_tables(inventory: dict, sections: dict) -> tuple[bool, d
         require(all(tag in tags for tag in (23, 2, 20)) and tags[20] in {7, 17}, "invalid retained JMPREL tags")
         add_range("jmprel", tags[23], tags[2], 4 if tags[20] == 7 else 9, 24 if tags[20] == 7 else 16)
     memberships, identities, counts = {}, set(), {}
+    relative_tables = {"rela": [], "rel": []}
     for row in inventory["relocations"]:
         section = sections.get(row["sectionIndex"])
         require(section is not None and section["type"] in {4, 9}, "missing retained relocation section")
@@ -575,6 +581,9 @@ def retained_relocation_tables(inventory: dict, sections: dict) -> tuple[bool, d
         tables = [name for name, start, end, kind in ranges if kind == section["type"] and start <= location < end]
         require(row["dynamicTables"] == tables, "retained dynamic relocation membership differs from raw tags")
         memberships[row["locator"]] = tables
+        for name in relative_tables:
+            if name in tables:
+                relative_tables[name].append((location, row))
     for section in sections.values():
         linked = sections.get(section["link"])
         if section["type"] in {4, 9} and linked is not None and linked["type"] == 11:
@@ -582,6 +591,14 @@ def retained_relocation_tables(inventory: dict, sections: dict) -> tuple[bool, d
             require(address(section["entrySize"]) == width and address(section["size"]) % width == 0 and
                     counts.get(section["index"], 0) == address(section["size"]) // width,
                     "retained relocation section population differs")
+    for tag, name in ((0x6ffffff9, "rela"), (0x6ffffffa, "rel")):
+        if tag not in tags:
+            continue
+        count = tags[tag]
+        ordered = sorted(relative_tables[name], key=lambda item: item[0])
+        require(count <= len(ordered), "relative relocation prefix exceeds its retained table")
+        require(all(row["type"] == 8 and row["symbolIndex"] == 0 for _, row in ordered[:count]),
+                "relative relocation prefix contains a non-relative symbol reference")
     uncertain = bool(reasons & {"packed-relr-relocations-not-expanded", "android-packed-relocations-not-expanded", "unclassified-dynamic-tag"})
     return uncertain, memberships
 
@@ -597,6 +614,16 @@ class RetainedRelocationIndex:
         self.sections = {row["index"]: row for row in inventory["sections"]}
         require(len(self.sections) == len(inventory["sections"]), "duplicate retained section index")
         self.mechanism_uncertain, self.memberships = retained_relocation_tables(inventory, self.sections)
+        self.version_sections = {}
+        for section in self.sections.values():
+            if section["type"] == 0x6fffffff:
+                table = self.sections.get(section["link"])
+                require(table is not None and table["type"] == 11 and table["index"] not in self.version_sections,
+                        "retained VERSYM table linkage/uniqueness differs")
+                self.version_sections[table["index"]] = section
+        for symbol in symbols.values():
+            require((symbol["version"] is not None) == (symbol["tableSectionIndex"] in self.version_sections),
+                    "retained symbol version presence differs from VERSYM metadata")
         self.requirements = {}
         for row in inventory["versionRequirements"]:
             self.requirements.setdefault((row["stringSectionIndex"], row["index"]), []).append(row)
@@ -668,18 +695,20 @@ class RetainedRelocationIndex:
 
     def import_version(self, symbol: dict) -> bool:
         version = symbol["version"]
+        versym = self.version_sections.get(symbol["tableSectionIndex"])
         if version is None:
-            return True
+            return versym is None
+        table = self.sections.get(symbol["tableSectionIndex"])
+        if (table is None or table["type"] != 11 or versym is None or version["sectionIndex"] != versym["index"] or
+                address(versym["entrySize"]) != 2 or version["fileOffset"] != versym["offset"] + symbol["symbolIndex"] * 2 or
+                symbol["symbolIndex"] * 2 + 2 > address(versym["size"])):
+            return False
         raw, index = version["raw"], version["index"]
         if not 0 <= raw <= 65535 or index != raw & 0x7fff or version["hidden"] is not bool(raw & 0x8000):
             return False
         if index <= 1:
             return (version["kind"] == ("local" if index == 0 else "global-unversioned") and
                     version["name"] is None and version["providerRequest"] is None)
-        table = self.sections.get(symbol["tableSectionIndex"])
-        versym = self.sections.get(version["sectionIndex"])
-        if table is None or table["type"] != 11 or versym is None or versym["type"] != 0x6fffffff or versym["link"] != table["index"]:
-            return False
         requirements = self.requirements.get((table["link"], index), [])
         return (version["kind"] == "required-version" and bool(version["name"]) and bool(version["providerRequest"]) and
                 len(requirements) == 1 and requirements[0]["name"] == version["name"] and

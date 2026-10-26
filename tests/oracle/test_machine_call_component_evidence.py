@@ -786,12 +786,62 @@ class ExternalCallComponentEvidenceTest(unittest.TestCase):
         with self.assertRaises(VERIFY.VerificationError):
             self.verify()
 
+    def test_relative_count_tags_require_bounded_relative_symbol_zero_prefixes(self) -> None:
+        original = copy.deepcopy(self.report)
+        # Keep the JMPREL import positive while adding a separate REL/RELA prefix.
+        for kind, width, pointer, size, entry_size, count_tag, name in (
+                (4, 24, 7, 8, 9, 0x6ffffff9, "rela"), (9, 16, 17, 18, 19, 0x6ffffffa, "rel")):
+            for count, relocation_type, symbol_index, accepted in (
+                    (0, 6, 1, True), (1, 8, 0, True), (2, 8, 0, True),
+                    (3, 8, 0, False), (1, 6, 0, False), (1, 8, 1, False), (1, 6, 1, False)):
+                with self.subTest(table=name, count=count, kind=relocation_type, symbol=symbol_index):
+                    self.report = copy.deepcopy(original)
+                    inventory = self.report["dynamicInventory"]
+                    inventory["sections"][3].update(type=kind, entrySize=hex(width), size=hex(width * 2))
+                    inventory["dynamicEntries"][3:6] = [
+                        {"index": index + 3, "fileOffset": (index + 3) * 16, "tag": hex(tag), "value": hex(value)}
+                        for index, (tag, value) in enumerate(((pointer, 0x5000), (size, width * 2),
+                                                            (entry_size, width), (count_tag, count)))]
+                    inventory["dynamicSymbols"].insert(0, inventory["dynamicSymbols"][0] | {
+                        "symbolIndex": 0, "locator": "dynsym:1:0", "name": "", "nameOffset": 0,
+                        "info": 0, "type": 0, "binding": 0})
+                    # Reverse input order: prefix ordering must derive from section address/index.
+                    for index in (1, 0):
+                        # A count-one valid prefix may be followed by a non-relative row.
+                        nonrelative_suffix = accepted and count == 1 and index == 1
+                        inventory["relocations"].append(inventory["relocations"][0] | {
+                            "sectionIndex": 5, "relocationIndex": index, "locator": f"{name}:5:{index}",
+                            "fileOffset": 24 + index * width, "offset": hex(0x9000 + index * 8),
+                            "type": 6 if nonrelative_suffix else relocation_type,
+                            "symbolIndex": 1 if nonrelative_suffix else symbol_index, "dynamicTables": [name],
+                            "slotFileOffset": None, "slotLoadIndices": []})
+                    self.write_payloads()
+                    if accepted:
+                        self.verify()
+                    else:
+                        with self.assertRaisesRegex(VERIFY.VerificationError, "relative relocation prefix"):
+                            self.verify()
+        for tag in (0x6ffffff9, 0x6ffffffa):
+            for count in (0, 1):
+                with self.subTest(empty_or_absent_table=hex(tag), count=count):
+                    self.report = copy.deepcopy(original)
+                    self.report["dynamicInventory"]["dynamicEntries"].insert(-1,
+                        {"index": 8, "fileOffset": 128, "tag": hex(tag), "value": hex(count)})
+                    self.write_payloads()
+                    if count == 0:
+                        self.verify()
+                    else:
+                        with self.assertRaisesRegex(VERIFY.VerificationError, "relative relocation prefix"):
+                            self.verify()
+
     def test_static_import_requires_consistent_retained_version_identity(self) -> None:
         inventory = self.report["dynamicInventory"]
         inventory["sections"].extend({"index": index, "name": name, "type": kind, "flags": "0x2", "address": "0x0", "offset": 0,
             "size": "0x0", "link": link, "info": 0, "alignment": "0x1", "entrySize": "0x0"}
             for index, name, kind, link in ((6, ".gnu.version", 0x6fffffff, 1), (7, ".gnu.version_r", 0x6ffffffe, 3)))
-        inventory["dynamicSymbols"][0]["version"] = {"sectionIndex": 6, "fileOffset": 0, "raw": 2, "index": 2, "hidden": False,
+        inventory["sections"][4].update(entrySize="0x2", size="0x4")
+        inventory["dynamicEntries"].insert(-1, {"index": 8, "fileOffset": 128, "tag": "0x6ffffff0", "value": "0x0"})
+        inventory["dynamicSymbols"][0]["version"] = {"sectionIndex": 6, "fileOffset": 2, "raw": 2, "index": 2, "hidden": False,
             "kind": "required-version", "name": "VER_1", "providerRequest": "libexample.so"}
         inventory["versionRequirements"] = [{"sectionIndex": 7, "stringSectionIndex": 3, "recordOffset": 0, "auxiliaryOffset": 16,
             "providerRequest": "libexample.so", "name": "VER_1", "rawIndex": 2, "index": 2, "flags": 0, "hash": 0x5aa821}]
@@ -799,7 +849,8 @@ class ExternalCallComponentEvidenceTest(unittest.TestCase):
         def rehash_identity() -> None:
             version = self.report["dynamicInventory"]["dynamicSymbols"][0]["version"]
             entry = self.report["externalNamespace"]["entries"][0]
-            entry["identity"]["version"] = {key: value for key, value in version.items() if key not in {"sectionIndex", "fileOffset"}}
+            entry["identity"]["version"] = None if version is None else {
+                key: value for key, value in version.items() if key not in {"sectionIndex", "fileOffset"}}
             entry["id"] = "ext-" + sha256(VERIFY.canonical_bytes(entry["identity"])).hexdigest()
             self.report["sites"][0]["externalTargetId"] = entry["id"]
             self.report["externalNamespaceSha256"] = sha256(VERIFY.canonical_bytes(self.report["externalNamespace"])).hexdigest()
@@ -808,7 +859,12 @@ class ExternalCallComponentEvidenceTest(unittest.TestCase):
         rehash_identity()
         self.verify()
         original = copy.deepcopy(self.report)
-        changes = [lambda inv: inv["dynamicSymbols"][0]["version"].update(name=None),
+        changes = [lambda inv: inv["dynamicSymbols"][0].update(version=None),
+            lambda inv: inv["sections"].append(copy.deepcopy(inv["sections"][4]) | {"index": 8}),
+            lambda inv: inv["dynamicEntries"][-2].update(value="0x1234"),
+            lambda inv: inv["dynamicEntries"].pop(-2),
+            lambda inv: inv["dynamicSymbols"][0]["version"].update(fileOffset=0),
+            lambda inv: inv["dynamicSymbols"][0]["version"].update(name=None),
             lambda inv: inv["dynamicSymbols"][0]["version"].update(providerRequest=None),
             lambda inv: inv["dynamicSymbols"][0]["version"].update(kind="defined-version"),
             lambda inv: inv["dynamicSymbols"][0]["version"].update(raw=3),
@@ -825,6 +881,20 @@ class ExternalCallComponentEvidenceTest(unittest.TestCase):
                 rehash_identity()
                 with self.assertRaises(VERIFY.VerificationError):
                     self.verify()
+        # Local/global version indices still require the correct VERSYM owner/offset.
+        for index, kind in ((0, "local"), (1, "global-unversioned")):
+            self.report = copy.deepcopy(original)
+            version = self.report["dynamicInventory"]["dynamicSymbols"][0]["version"]
+            version.update(raw=index, index=index, kind=kind, name=None, providerRequest=None)
+            rehash_identity()
+            self.verify()
+            for field, value in (("sectionIndex", 7), ("fileOffset", 0)):
+                previous = version[field]
+                version[field] = value
+                rehash_identity()
+                with self.assertRaises(VERIFY.VerificationError):
+                    self.verify()
+                version[field] = previous
 
 
 class RetainedExternalEvidenceRegressionTest(unittest.TestCase):
@@ -840,12 +910,37 @@ class RetainedExternalEvidenceRegressionTest(unittest.TestCase):
             (output / "driver-request.json").write_bytes((directory / "driver-request.json").read_bytes())
             for mutation, error in (("packed-relr", "unsupported reasons differ"), ("empty-jmprel", "membership differs"),
                                     ("false-canonical", "noncanonical physical destination"),
-                                    ("indirect-canonical", "noncanonical physical destination")):
+                                    ("indirect-canonical", "noncanonical physical destination"),
+                                    ("stripped-strlen-version", "version presence differs"),
+                                    ("relacount-nonrelative-prefix", "relative relocation prefix"),
+                                    ("relacount-exceeds-population", "relative relocation prefix"),
+                                    ("relcount-without-table", "relative relocation prefix")):
                 with self.subTest(mutation=mutation):
                     report, evidence = copy.deepcopy(original_report), copy.deepcopy(original_evidence)
                     if mutation == "packed-relr":
                         entry = next(row for row in report["dynamicInventory"]["dynamicEntries"] if row["tag"] == "0x15")
                         entry.update(tag="0x24", value="0x401da0")
+                    elif mutation == "stripped-strlen-version":
+                        symbol = next(row for row in report["dynamicInventory"]["dynamicSymbols"] if row["name"] == "strlen")
+                        self.assertEqual(("GLIBC_2.2.5", "libc.so.6"),
+                            (symbol["version"]["name"], symbol["version"]["providerRequest"]))
+                        symbol["version"] = None
+                        entry = next(row for row in report["externalNamespace"]["entries"] if row["identity"]["name"] == "strlen")
+                        old_id = entry["id"]
+                        entry["identity"]["version"] = None
+                        entry["id"] = "ext-" + sha256(VERIFY.canonical_bytes(entry["identity"])).hexdigest()
+                        report["externalNamespaceSha256"] = sha256(VERIFY.canonical_bytes(report["externalNamespace"])).hexdigest()
+                        affected = 0
+                        for site in report["sites"]:
+                            if site["externalTargetId"] == old_id:
+                                site["externalTargetId"] = entry["id"]
+                                affected += site["compositionDisposition"] == "static-import-request-reference"
+                        self.assertEqual(376, affected)
+                    elif mutation.startswith("relacount-") or mutation == "relcount-without-table":
+                        tag, value = {"relacount-nonrelative-prefix": (0x6ffffff9, 4),
+                            "relacount-exceeds-population": (0x6ffffff9, 9), "relcount-without-table": (0x6ffffffa, 1)}[mutation]
+                        entry = next(row for row in report["dynamicInventory"]["dynamicEntries"] if row["tag"] == "0x15")
+                        entry.update(tag=hex(tag), value=hex(value))
                     elif mutation == "empty-jmprel":
                         entry = next(row for row in report["dynamicInventory"]["dynamicEntries"] if row["tag"] == "0x2")
                         entry["value"] = "0x0"
