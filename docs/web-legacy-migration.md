@@ -60,9 +60,13 @@ presentation); API, attachment and source requests never receive the SPA shell. 
 In the SPA presentation each answers 404 or 405 and starts nothing, even with a valid session and CSRF token;
 SPA uploads use `POST /api/v1/jobs` and SPA workflow starts use the v1 run API.
 
-**Not covered here.** The SPA routes added by the D-series (`/runtime`, `/upload`, attempt, activity, evidence and
-source views) are specified in [navigation](web-navigation.md); browser-side "no automatic execution" for those
-pages is exercised by the packaged browser suite (#225), not by this server matrix.
+**In the browser.** The packaged legacy browser journey (`scripts/packaged-browser-legacy.mjs`) opens a D0-shaped
+job and asserts that the only non-GET requests are the session exchange, the explicit upload and sign-out. In the
+SPA on `master`, the typed client's only mutations are the session exchange, upload, progress pin and the attempt
+cancel/recover commands, each sent only from an explicit control; no SPA code path starts a workflow (the launch
+form is pending in #1702). The SPA routes added by the D-series (`/runtime`, `/upload`, attempt, activity, evidence
+and source views) are specified in [navigation](web-navigation.md) and exercised by the packaged browser suite
+(#225).
 
 ## Persisted-job upgrade
 
