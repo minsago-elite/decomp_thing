@@ -260,6 +260,55 @@ class GhidraExportLaunchTest {
         }
 
     @Test
+    fun `queued monitor and capture tasks run after stream closure before the cleanup cutoff`() =
+        inControlTemporaryDirectory { root ->
+            val primary = IllegalStateException("authored process wait failure")
+            val process = FixtureOwnedProcess(
+                fixtureHandle(4201L, initialAlive = true, refusesTermination = false),
+                waitFailure = primary,
+            )
+            val clock = AtomicLong()
+            val controller = BoundedAnalysisProcessLaunch()
+            val taskExecutor = QueuedExecutor()
+            val queuedBeforeDrain = AtomicInteger()
+            val drainedQueuedTasks = AtomicBoolean()
+            val analyzer = GhidraHeadlessProgramModelAnalyzer(
+                commandFactory = { listOf("fixture-owned-export") },
+                limits = GhidraProgramModelExportLimits(
+                    wallClockTimeout = Duration.ofSeconds(5), terminationGrace = Duration.ZERO,
+                ),
+                processStarter = { _, _ -> process },
+            ).withProcessLifecycleForTests(controller) { owned, grace ->
+                ExportProcessTree(
+                    owned, grace,
+                    // Settlement uses real bounded sleeps; this clock advances each time the
+                    // existing cleanup window is read, without adding time to that window.
+                    nanoTime = { clock.getAndAdd(TimeUnit.SECONDS.toNanos(1)) },
+                    sleepNanos = { nanos -> clock.addAndGet(nanos) },
+                    descendantObservation = { _, _ -> },
+                )
+            }.withAnalysisTaskExecutorForTests(taskExecutor).withStreamCloseSubmitterForTests { task ->
+                task.run()
+                if (drainedQueuedTasks.compareAndSet(false, true)) {
+                    queuedBeforeDrain.set(taskExecutor.pendingCount())
+                    taskExecutor.runQueued()
+                }
+                CompletableFuture.completedFuture(null)
+            }
+
+            val failure = assertFailsWith<IllegalStateException> {
+                analyzer.analyze(root.resolve("unused-input"), root.resolve("analysis"))
+            }
+
+            assertTrue(failure === primary, "the process operation failure remains primary")
+            assertEquals(3, queuedBeforeDrain.get(), "monitor and both captures should be queued before cleanup drains them")
+            assertEquals(3, taskExecutor.completedCount())
+            assertEquals(0, taskExecutor.pendingCount(), "every queued body must actually run")
+            assertFalse(controller.hasQuarantinedOwner(), "settled tasks must not poison subsequent process admission")
+            assertFalse(process.isAlive)
+        }
+
+    @Test
     fun `returned call-site receipt names the readable published artifact`() = inControlTemporaryDirectory { root ->
         val input = root.resolve("input.bin")
         val inputBytes = "fixture executable bytes".toByteArray()
@@ -915,6 +964,25 @@ class GhidraExportLaunchTest {
         override fun destroyForcibly(): Process { alive.set(false); return this }
         override fun isAlive(): Boolean = alive.get()
         override fun toHandle(): ProcessHandle = handle
+    }
+
+    private class QueuedExecutor : java.util.concurrent.Executor {
+        private val tasks = java.util.ArrayDeque<Runnable>()
+        private val completed = AtomicInteger()
+
+        override fun execute(command: Runnable) {
+            synchronized(tasks) { tasks.addLast(command) }
+        }
+
+        fun pendingCount(): Int = synchronized(tasks) { tasks.size }
+        fun completedCount(): Int = completed.get()
+
+        fun runQueued() {
+            while (true) {
+                val task = synchronized(tasks) { if (tasks.isEmpty()) null else tasks.removeFirst() } ?: return
+                try { task.run() } finally { completed.incrementAndGet() }
+            }
+        }
     }
 
     private fun fixtureHandle(pid: Long, initialAlive: Boolean, refusesTermination: Boolean): ProcessHandle {

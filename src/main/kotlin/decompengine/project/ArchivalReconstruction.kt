@@ -18,6 +18,8 @@ import java.time.Duration
 import java.util.LinkedHashSet
 import java.util.concurrent.CompletableFuture
 import java.util.concurrent.ConcurrentLinkedQueue
+import java.util.concurrent.Executor
+import java.util.concurrent.ForkJoinPool
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicLong
@@ -82,6 +84,7 @@ class GhidraHeadlessProgramModelAnalyzer private constructor(
     private val processLaunch: BoundedAnalysisProcessLaunch,
     private val processTreeFactory: (Process, Duration) -> ExportProcessTree,
     private val streamCloseSubmitter: (Runnable) -> CompletableFuture<*> = { task -> CompletableFuture.runAsync(task) },
+    private val analysisTaskExecutor: Executor = ForkJoinPool.commonPool(),
 ) : ExportBudgetedProgramModelAnalyzer {
     internal constructor(
         commandFactory: (GhidraInvocation) -> List<String>,
@@ -128,6 +131,7 @@ class GhidraHeadlessProgramModelAnalyzer private constructor(
             processLaunch = processLaunch,
             processTreeFactory = processTreeFactory,
             streamCloseSubmitter = streamCloseSubmitter,
+            analysisTaskExecutor = analysisTaskExecutor,
         )
 
     internal fun withProcessLifecycleForTests(
@@ -143,6 +147,7 @@ class GhidraHeadlessProgramModelAnalyzer private constructor(
         processLaunch = controller,
         processTreeFactory = treeFactory,
         streamCloseSubmitter = streamCloseSubmitter,
+        analysisTaskExecutor = analysisTaskExecutor,
     )
 
     internal fun withStreamCloseSubmitterForTests(
@@ -157,7 +162,22 @@ class GhidraHeadlessProgramModelAnalyzer private constructor(
         processLaunch = processLaunch,
         processTreeFactory = processTreeFactory,
         streamCloseSubmitter = submitter,
+        analysisTaskExecutor = analysisTaskExecutor,
     )
+
+    internal fun withAnalysisTaskExecutorForTests(executor: Executor): GhidraHeadlessProgramModelAnalyzer =
+        GhidraHeadlessProgramModelAnalyzer(
+            commandFactory = commandFactory,
+            limits = limits,
+            analysisToolSha256 = analysisToolSha256,
+            recoveryMode = recoveryMode,
+            processStarter = processStarter,
+            requiresLaunchPermit = requiresLaunchPermit,
+            processLaunch = processLaunch,
+            processTreeFactory = processTreeFactory,
+            streamCloseSubmitter = streamCloseSubmitter,
+            analysisTaskExecutor = executor,
+        )
 
     override fun analyze(binaryPath: Path, workDir: Path): RecoveredProgramModel =
         analyzeInternal(binaryPath, workDir, false, null).first
@@ -321,7 +341,7 @@ class GhidraHeadlessProgramModelAnalyzer private constructor(
             val memoryMonitorFinished = AtomicBoolean(false)
             taskSettlements += memoryMonitorFinished
             captureSettlements += memoryMonitorFinished
-            val memoryMonitor = CompletableFuture.runAsync {
+            val memoryMonitor = CompletableFuture.runAsync({
                 try {
                     while (process.isAlive) {
                         val observed = residentBytes(process)
@@ -339,12 +359,12 @@ class GhidraHeadlessProgramModelAnalyzer private constructor(
                 } finally {
                     memoryMonitorFinished.set(true)
                 }
-            }.also(tasks::add)
+            }, analysisTaskExecutor).also(tasks::add)
             fun capture(stream: java.io.InputStream): CompletableFuture<ByteArray> {
                 val finished = AtomicBoolean(false)
                 taskSettlements += finished
                 captureSettlements += finished
-                return CompletableFuture.supplyAsync {
+                return CompletableFuture.supplyAsync({
                     try {
                         val bytes = stream.readNBytes(limits.maximumDiagnosticBytesPerStream + 1)
                         if (bytes.size > limits.maximumDiagnosticBytesPerStream) {
@@ -358,7 +378,7 @@ class GhidraHeadlessProgramModelAnalyzer private constructor(
                     } finally {
                         finished.set(true)
                     }
-                }.also(tasks::add)
+                }, analysisTaskExecutor).also(tasks::add)
             }
             val stdoutTask = capture(process.inputStream).also { stdout = it }
             val stderrTask = capture(process.errorStream).also { stderr = it }
@@ -463,7 +483,11 @@ class GhidraHeadlessProgramModelAnalyzer private constructor(
                 recordCleanupFailure(treeResult.failure)
             }
             preserveTaskFailures()
-            tasks.forEach { task -> cleanup { task.cancel(true) } }
+            // Cancelling a CompletableFuture that is still queued marks the future done without
+            // running its body/finally settlement acknowledgement. Stop the owned process and
+            // close its streams, then let every submitted task settle inside the original window.
+            // A queued or running task that still has not acknowledged settlement at cutoff is
+            // retained and quarantined by the same fail-closed path below.
             val streamCloseFailures = ConcurrentLinkedQueue<Throwable>()
             val streamSettlements = ArrayList<AtomicBoolean>()
             listOf(process.inputStream, process.errorStream, process.outputStream).forEach { stream ->
