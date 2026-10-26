@@ -195,7 +195,7 @@ function LiveActivity({ jobId, runId, basePath, windowLinks }: { jobId: string; 
     <button type="button" onClick={() => {
       pageAfter.current = null;
       position.current = { initialized: false, cursor: null, rows: [], last: null };
-      setRows([]); setSnapshot(null); setLastRead(null); setRetry(0); failures.current = 0; streamFailures.current = 0; fallback.current = false; setPeriodic(false); reconcile.current = true; setError(''); setReset(value => value + 1); setFollowing(true);
+      setRows([]); setSnapshot(null); setLastRead(null); setRetry(0); failures.current = 0; streamFailures.current = 0; fallback.current = streamingUnavailable; setPeriodic(streamingUnavailable); reconcile.current = true; setError(''); setReset(value => value + 1); setFollowing(true);
     }}>{copy.readFreshActivityHistory}</button>
     {windowLinks && !following && pageAfter.current && rows.at(-1)?.cursor && pageAfter.current !== rows.at(-1)!.cursor && <p>
       <a href={`${runViewPath(basePath, jobId, runId, 'activity')}${activityWindowSearch({ after: pageAfter.current, through: rows.at(-1)!.cursor!, event: null })}`}>{activityHistoryCopy.save}</a>

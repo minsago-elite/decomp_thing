@@ -58,6 +58,15 @@ describe('feature detection (#631)', () => {
     expect(kinds.filter(kind => kind === 'events').length).toBeGreaterThanOrEqual(3);
     expect(transport.get.mock.calls.filter(call => call[0] === 'events').every(call => call[1].includes('transport=poll'))).toBe(true);
     expect(fetch).not.toHaveBeenCalled();
+    // A fresh history read keeps the capability decision instead of retrying the stream.
+    const before = transport.get.mock.calls.length;
+    transport.get.mockImplementation(kind => Promise.resolve(kind === 'snapshot' ? snapshot : empty));
+    await act(async () => { await Promise.resolve(); fireEvent.click(screen.getByRole('button', { name: 'Read fresh activity history' })); });
+    for (let round = 0; round < 3; round += 1) await act(async () => { await Promise.resolve(); await vi.advanceTimersByTimeAsync(2500); });
+    expect(document.body.textContent).toContain('Using periodic refresh because streaming was unavailable.');
+    expect(transport.get.mock.calls.slice(before).filter(call => call[0] === 'events').length).toBeGreaterThanOrEqual(3);
+    expect(screen.queryByRole('alert')).toBeNull();
+    expect(fetch).not.toHaveBeenCalled();
   });
 
   function sourceFixtures() {
