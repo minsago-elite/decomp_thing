@@ -835,10 +835,17 @@ report `recovery-required`, retaining the exact published `resultObjectId` when 
 than reading a possibly later writer's HEAD as this operation's result.
 
 After a restart, stage and unstage operations become `interrupted`, since the index may have been
-partly updated and status must be re-read. A commit is `interrupted` when HEAD is still the
-reviewed parent. It becomes `recovery-required` with the new HEAD as `resultObjectId` when HEAD
-moved, because the commit may or may not be the requested one. Nothing is repeated
-automatically.
+partly updated and status must be re-read. Commit locks have private inode witnesses persisted
+before the public lock names are linked, so owned locks can be reclaimed even with empty or
+partial contents. A replacement inode is never reclaimed on the basis of matching contents when
+a witness exists. Complete operation markers from older versions remain recoverable; legacy
+partial locks without ownership proof are preserved.
+
+A commit is `interrupted` when HEAD is still the reviewed parent and no unproven Git locks
+remain. Otherwise it becomes `recovery-required`: `COMMIT_LOCKS_REQUIRE_REVIEW` means a remaining
+index, HEAD or target-ref lock requires inspection of the repository and its writers. A moved
+HEAD is included as `resultObjectId`, because the commit may or may not be the requested one.
+Nothing is repeated automatically.
 
 Job retention: uncommitted or unpublished Git work should hold the job against deletion. The
 `JobRetentionHold` interface arrives with #1694 (D10, #509) and has not merged yet. Registering a
@@ -855,7 +862,8 @@ hold for a dirty work tree or for unmapped commits is left as a follow-up once i
   formats, and exact result identity when a later writer advances HEAD;
 - snapshot file additions and mutation after capture, ordinary post-publication errors and
   optional mapping-write failure;
-- restart before and after the commit.
+- restart before and after the commit, empty/partial owned lock recovery, external replacement
+  preservation and conservative recovery status for unproven legacy locks.
 
 `WebGitControllerTest` covers the HTTP guards, `If-Match` binding, strict bodies and the mapping
 shown on the workspace and in history.

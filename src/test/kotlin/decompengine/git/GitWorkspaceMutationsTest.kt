@@ -612,7 +612,9 @@ class GitWorkspaceMutationsTest {
                 else Files.createLink(gitDir.resolve(name), witness)
             }
             val restarted = f.open()
-            assertEquals(GitOperationState.INTERRUPTED, restarted.operation(jobId, repositoryId, operationId).state)
+            val recovered = restarted.operation(jobId, repositoryId, operationId)
+            assertEquals(GitOperationState.RECOVERY_REQUIRED, recovered.state)
+            assertEquals("COMMIT_LOCKS_REQUIRE_REVIEW", recovered.failureCode)
             assertEquals(marker, Files.readString(gitDir.resolve(replacement)))
             val owned = if (replacement == "index.lock") "HEAD.lock" else "index.lock"
             assertTrue(Files.notExists(gitDir.resolve(owned)))
@@ -623,6 +625,38 @@ class GitWorkspaceMutationsTest {
             Files.delete(gitDir.resolve(replacement)) // Release this test-owned external writer's lock explicitly.
             val retried = restarted.run(repositoryId, request, "retry_external_01")
             assertEquals(GitOperationState.COMPLETED, retried.state, retried.message)
+        }
+    }
+
+    @Test fun `legacy unproven partial locks require recovery while complete markers remain reclaimable`(): Unit {
+        for (name in listOf("index.lock", "HEAD.lock", "refs/heads/trunk.lock")) {
+            for (contents in listOf("", "decomp-operation:", "complete")) Fixture().use { f ->
+                val service = f.open()
+                val repositoryId = service.initialized()
+                val gitDir = f.store.resolve("$jobId/git/repositories/$repositoryId/repository.git")
+                val (view, guards) = service.guards(repositoryId)
+                service.run(repositoryId, GitStageRequest(view.record.worktreeId, guards, view.ids { it.untracked }, true), "stage_legacy_001")
+                val (staged, stagedGuards) = service.guards(repositoryId)
+                f.hook = { if (it == GitOperationCrashPoint.AFTER_STAGING) throw SimulatedGitCrash() }
+                val admission = service.requestWorkspace(jobId, repositoryId, GitCommitRequest(staged.record.worktreeId, stagedGuards,
+                    staged.ids { it.staged != GitIndexChange.NONE }, "Interrupted legacy commit"), "crash_legacy_001")
+                assertTrue(service.awaitIdle(60_000)); service.close(); f.hook = {}
+                val bytes = if (contents == "complete") "decomp-operation:${admission.operation.operationId}\n" else contents
+                val file = gitDir.resolve(name)
+                Files.createDirectories(file.parent)
+                Files.writeString(file, bytes) // No private inode witness exists for this legacy/external lock.
+                val restarted = f.open()
+                val recovered = restarted.operation(jobId, repositoryId, admission.operation.operationId)
+                if (contents == "complete" && name != "refs/heads/trunk.lock") {
+                    assertEquals(GitOperationState.INTERRUPTED, recovered.state)
+                    assertTrue(Files.notExists(file))
+                } else {
+                    assertEquals(GitOperationState.RECOVERY_REQUIRED, recovered.state, "$name / $contents")
+                    assertEquals("COMMIT_LOCKS_REQUIRE_REVIEW", recovered.failureCode)
+                    assertEquals(bytes, Files.readString(file))
+                }
+                assertNull(recovered.resultObjectId)
+            }
         }
     }
 

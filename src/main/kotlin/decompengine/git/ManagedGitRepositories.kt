@@ -755,8 +755,9 @@ class ManagedGitRepositories(
     /**
      * After a restart a workspace operation is never repeated. Stage and unstage may have partly
      * updated the index, so they become `interrupted` and status must be re-read. A commit is
-     * `interrupted` while HEAD is still the reviewed parent; if HEAD moved it becomes
-     * `recovery-required` with the new HEAD, because the commit may or may not be the requested one.
+     * `interrupted` while HEAD is still the reviewed parent and no unproven Git locks remain;
+     * otherwise it is `recovery-required`. A moved HEAD is included because the commit may or
+     * may not be the requested one; external or legacy partial locks are never removed blindly.
      */
     private fun reconcileWorkspace(jobId: String, operation: GitOperationRecord): GitOperationRecord {
         if (operation.action != GitOperationAction.COMMIT) {
@@ -769,9 +770,15 @@ class ManagedGitRepositories(
             // Reconciliation runs inside reconcile(); read the registration directly, never through locate().
             val record = repositories(jobId).single { it.repositoryId == operation.repositoryId }
             val gitDir = root.resolve(jobId).resolve("git/repositories").resolve(record.repositoryId).resolve(GIT_DIR)
-            val objectId = GitRepositoryInspector.head(runner, gitDir, record.objectFormat).objectId
+            val observed = GitRepositoryInspector.head(runner, gitDir, record.objectFormat)
             GitWorkspaceMutations.reclaimCommitLocks(gitDir, root.resolve(jobId).resolve("git/staging").resolve(operation.operationId), operation.operationId)
-            objectId
+            val lockNames = listOf("index.lock", "HEAD.lock") + listOfNotNull(observed.refName?.let { "$it.lock" })
+            if (lockNames.any { Files.exists(gitDir.resolve(it), NOFOLLOW_LINKS) }) {
+                return finish(operation, GitOperationState.RECOVERY_REQUIRED, "COMMIT_LOCKS_REQUIRE_REVIEW",
+                    "Interrupted by a server restart with a Git lock whose ownership could not be confirmed. Inspect the repository and its writers before a new request.",
+                    observed.objectId.takeIf { it != guards?.expectedHeadObjectId })
+            }
+            observed.objectId
         } catch (_: Exception) { return finish(operation, GitOperationState.RECOVERY_REQUIRED, "HEAD_UNKNOWN",
             "Interrupted by a server restart and HEAD could not be read. Inspect the repository before a new request.") }
         return if (head == guards?.expectedHeadObjectId) finish(operation, GitOperationState.INTERRUPTED, "INTERRUPTED",
