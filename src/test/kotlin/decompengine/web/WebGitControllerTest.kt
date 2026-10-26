@@ -50,14 +50,20 @@ class WebGitControllerTest {
     private val schema = Json.parseToJsonElement(Files.readString(Path.of("contracts/web/v1/contract.schema.json")))
         .jsonObject.getValue("definitions").jsonObject
 
-    private class Fixture(availability: GitAvailability = GitRuntime.detect()) : AutoCloseable {
+    private class Fixture(availability: GitAvailability = GitRuntime.detect(), withImports: Boolean = false) : AutoCloseable {
         val root: Path = Files.createTempDirectory(Files.createDirectories(Path.of("build/test-tmp/git").toAbsolutePath()), "web git http ")
         val store = JobStore(root)
         val job = store.createFromUpload("inert.elf", elfFixture())
         lateinit var owner: WorkflowAttemptStore
         val service = WebJobService(store, JobAnalyzer { _, _ -> error("Unexpected analysis") }, JobReconstructor { _, _ -> error("Unexpected reconstruction") },
             attemptStoreFactory = { WorkflowAttemptStore.open(it).also { opened -> owner = opened } })
-        val repositories = ManagedGitRepositories(root, availability, service::gitSourceSnapshot)
+        /** Operator-admitted import root, outside the job store. */
+        val imports: Path = Files.createTempDirectory(Files.createDirectories(Path.of("build/test-tmp/git").toAbsolutePath()), "web git imports ")
+        @Volatile var hook: (decompengine.git.GitOperationCrashPoint) -> Unit = {}
+        val repositories = ManagedGitRepositories(root, availability, service::gitSourceSnapshot,
+            importRoot = imports.takeIf { withImports }, crash = { hook(it) })
+        // The production wiring: deletion and maintenance retain jobs with in-progress, uncommitted or unpushed Git work.
+        val retention = service.registerRetentionHold(WebGitRetentionHold(repositories))
         val server: HttpServer = HttpServer.create(InetSocketAddress("127.0.0.1", 0), 0)
         val origin = "http://127.0.0.1:${server.address.port}"
         val access = LocalWebAccess(LocalWebAccessConfiguration(origin))
@@ -93,9 +99,11 @@ class WebGitControllerTest {
             return client.send(b.build(), HttpResponse.BodyHandlers.ofString()).also(::assertNoWebCors)
         }
         fun read(target: String = collection) = send(headers = mapOf("Cookie" to cookie), target = target)
-        fun jobVersion(): String = Json.parseToJsonElement(read("/workbench/api/v1/jobs/${job.id}").body()).jsonObject
+        fun delete(key: String, id: String = job.id) =
+            send("DELETE", "{\"confirmJobId\":\"$id\"}", headers(jobVersion(id), key, id), "/workbench/api/v1/jobs/$id")
+        fun jobVersion(id: String = job.id): String = Json.parseToJsonElement(read("/workbench/api/v1/jobs/$id").body()).jsonObject
             .getValue("data").jsonObject.getValue("version").jsonPrimitive.content
-        fun headers(version: String = jobVersion(), key: String = "http_git_init_intent_1") = mapOf("Cookie" to cookie, "Origin" to origin,
+        fun headers(version: String = jobVersion(), key: String = "http_git_init_intent_1", id: String = job.id) = mapOf("Cookie" to cookie, "Origin" to origin,
             "Content-Type" to "application/json", "X-CSRF-Token" to csrf, "If-Match" to "\"$version\"", "Idempotency-Key" to key)
         fun init(branch: String? = null) = buildJsonObject {
             put("action", "git.init"); put("runId", run.runId); put("revisionId", "revision_one")
@@ -104,6 +112,7 @@ class WebGitControllerTest {
         override fun close() {
             repositories.close(); server.stop(0); resources.close(); workers.shutdownNow()
             check(workers.awaitTermination(5, TimeUnit.SECONDS)); client.close(); access.close(); service.close(); root.toFile().deleteRecursively()
+            imports.toFile().deleteRecursively()
         }
     }
 
@@ -229,4 +238,90 @@ class WebGitControllerTest {
             }
             assertFalse(Files.exists(f.root.resolve("${f.job.id}/git")))
         }
+
+    /** The Git protections of a refused deletion; the fixture's completed attempt adds its own workflow protection. */
+    private fun retentionCodes(response: HttpResponse<String>): List<String> =
+        error(response, 409, "RETENTION_PROTECTED").getValue("details").jsonArray.map { it.jsonObject.getValue("code").jsonPrimitive.content }
+            .filter { it.startsWith("GIT_") }
+
+    @Test fun `deletion is refused while a Git operation owns the job and while its work tree has uncommitted changes`(): Unit = Fixture().use { f ->
+        val running = java.util.concurrent.CountDownLatch(1)
+        val release = java.util.concurrent.CountDownLatch(1)
+        f.hook = { point -> if (point == decompengine.git.GitOperationCrashPoint.AFTER_RUNNING) { running.countDown(); release.await(30, TimeUnit.SECONDS) } }
+        val admitted = f.send("POST", f.init(), f.headers())
+        assertEquals(202, admitted.statusCode(), admitted.body())
+        assertTrue(running.await(30, TimeUnit.SECONDS))
+        assertEquals(listOf("GIT_OPERATION_ACTIVE"), retentionCodes(f.delete("delete_git_running_0001")))
+        assertTrue(Files.isDirectory(f.root.resolve(f.job.id).resolve("git")), "the running operation keeps its storage")
+        release.countDown(); f.hook = {}
+        assertEquals("completed", f.awaitOperation(admitted.headers().firstValue("Location").orElseThrow().removePrefix(f.origin))
+            .getValue("state").jsonPrimitive.content)
+        // An initialized work tree holds only uncommitted files until an explicit commit.
+        assertEquals(listOf("GIT_UNCOMMITTED_CHANGES"), retentionCodes(f.delete("delete_git_dirty_00001")))
+        assertTrue(Files.isDirectory(f.root.resolve(f.job.id)))
+    }
+
+    @Test fun `Git admission and job deletion never both proceed`(): Unit = Fixture(withImports = true).use { f ->
+        val job = f.store.createFromUpload("race.elf", elfFixture())
+        // Deletion decides first, holding the job service's lock: a racing Git request waits and is refused.
+        val deciding = java.util.concurrent.CountDownLatch(1)
+        val gitStarted = java.util.concurrent.CountDownLatch(1)
+        val slowHold = f.service.registerRetentionHold { id ->
+            if (id == job.id) { deciding.countDown(); gitStarted.await(30, TimeUnit.SECONDS); Thread.sleep(200) }
+            emptyList()
+        }
+        val version = f.jobVersion(job.id)
+        val deletion = java.util.concurrent.CompletableFuture.supplyAsync { f.delete("delete_git_race_00001", job.id) }
+        assertTrue(deciding.await(30, TimeUnit.SECONDS))
+        val git = java.util.concurrent.CompletableFuture.supplyAsync {
+            f.send("POST", "{\"action\":\"git.attach\",\"sourceName\":\"project\"}", f.headers(version, "http_git_race_intent_1", job.id),
+                "/workbench/api/v1/jobs/${job.id}/repositories")
+        }
+        gitStarted.countDown()
+        val deleted = deletion.get(60, TimeUnit.SECONDS)
+        assertEquals(202, deleted.statusCode(), deleted.body())
+        val refused = git.get(60, TimeUnit.SECONDS)
+        assertEquals(410, refused.statusCode(), refused.body())
+        slowHold.close()
+        assertFalse(Files.exists(f.root.resolve(job.id).resolve("git")), "no Git operation was admitted for the deleted job")
+    }
+
+    @Test fun `unpushed and uncommitted work hold deletion and a clean repository is deleted with its files`(): Unit = Fixture(withImports = true).use { f ->
+        // A job without workflow attempts, so only Git work can protect it.
+        val job = f.store.createFromUpload("imported.elf", elfFixture())
+        val source = Files.createDirectories(f.imports.resolve("project"))
+        fun git(vararg arguments: String): String {
+            val process = ProcessBuilder(listOf("git") + arguments).redirectErrorStream(true).start()
+            val output = process.inputStream.readAllBytes().toString(Charsets.UTF_8)
+            check(process.waitFor() == 0) { output }
+            return output
+        }
+        git("init", "-q", "--initial-branch=main", source.toString())
+        for (step in 1..2) {
+            Files.writeString(source.resolve("unit.c"), "int step = $step;\n")
+            git("-C", source.toString(), "-c", "user.name=Fixture", "-c", "user.email=fixture@localhost.invalid", "add", "-A")
+            git("-C", source.toString(), "-c", "user.name=Fixture", "-c", "user.email=fixture@localhost.invalid", "commit", "-q", "-m", "step $step")
+        }
+        val admitted = f.send("POST", "{\"action\":\"git.attach\",\"sourceName\":\"project\"}",
+            f.headers(f.jobVersion(job.id), "http_git_attach_intent_1", job.id), "/workbench/api/v1/jobs/${job.id}/repositories")
+        assertEquals(202, admitted.statusCode(), admitted.body())
+        val operation = f.awaitOperation(admitted.headers().firstValue("Location").orElseThrow().removePrefix(f.origin))
+        assertEquals("completed", operation.getValue("state").jsonPrimitive.content, operation.toString())
+        val repository = f.root.resolve(job.id).resolve("git/repositories").resolve(operation.getValue("repositoryId").jsonPrimitive.content)
+        val gitDir = Files.list(repository).use { entries -> entries.filter { Files.exists(it.resolve("HEAD")) && Files.isDirectory(it.resolve("objects")) }.toList().single() }
+        val workTree = Files.list(repository).use { entries -> entries.filter { Files.exists(it.resolve("unit.c")) }.toList().single() }
+        // A remote-tracking ref that does not contain the branch tip: the newest commit is unpushed.
+        git("--git-dir=$gitDir", "update-ref", "refs/remotes/origin/main", "HEAD~1")
+        assertEquals(listOf("GIT_UNPUSHED_COMMITS"), retentionCodes(f.delete("delete_git_unpushed_01", job.id)))
+        git("--git-dir=$gitDir", "update-ref", "refs/remotes/origin/main", "HEAD")
+        Files.writeString(workTree.resolve("unit.c"), "int edited;\n")
+        assertEquals(listOf("GIT_UNCOMMITTED_CHANGES"), retentionCodes(f.delete("delete_git_dirty_00002", job.id)))
+        Files.writeString(workTree.resolve("unit.c"), "int step = 2;\n")
+        val deleted = f.delete("delete_git_clean_00001", job.id)
+        assertEquals(202, deleted.statusCode(), deleted.body())
+        val deadline = System.nanoTime() + Duration.ofSeconds(30).toNanos()
+        while (Files.exists(f.root.resolve(job.id)) && System.nanoTime() < deadline) Thread.sleep(50)
+        assertFalse(Files.exists(f.root.resolve(job.id)), "the repository files are removed with the job")
+        assertFalse(Files.exists(repository), "the repository files are removed with the job")
+    }
 }

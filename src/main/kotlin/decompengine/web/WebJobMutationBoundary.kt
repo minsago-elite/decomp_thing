@@ -62,15 +62,18 @@ internal class WebJobMutationBoundary(
 
     fun authorizeGitRepository(exchange: HttpExchange): AuthorizedWebGitRepository {
         checkNotNull(access.authorize(exchange, WebEndpointPolicy.jsonMutation("POST")))
-        return AuthorizedWebGitRepository()
+        return AuthorizedWebGitRepository(jobs)
     }
 }
 
-/** Repository-creation capability; the body selects only typed intent, never a path or command. */
-internal class AuthorizedWebGitRepository internal constructor() {
+/**
+ * Repository-creation capability; the body selects only typed intent, never a path or command.
+ * Admission is serialized with job deletion, so deletion never purges storage a Git operation owns.
+ */
+internal class AuthorizedWebGitRepository internal constructor(private val jobs: WebJobService) {
     fun request(repositories: decompengine.git.ManagedGitRepositories, jobId: String,
         request: decompengine.git.GitRepositoryRequest, requestKey: String, precondition: () -> Unit,
-    ): decompengine.git.GitOperationAdmission = repositories.request(jobId, request, requestKey, precondition)
+    ): decompengine.git.GitOperationAdmission = jobs.withGitAdmission(jobId) { repositories.request(jobId, request, requestKey, precondition) }
 }
 
 /** Display-metadata capability; the body selects only allowlisted label/archive values. */

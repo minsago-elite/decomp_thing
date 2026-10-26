@@ -300,6 +300,8 @@ class UploadServer(
     private val gitAvailability = decompengine.git.GitRuntime.detect()
     private val gitRepositories = decompengine.git.ManagedGitRepositories(store.storageRoot, gitAvailability,
         jobs::gitSourceSnapshot, gitImportRoot)
+    // Deletion and maintenance retain jobs whose Git work is in progress, uncommitted or unpushed (#509).
+    private val gitRetention = jobs.registerRetentionHold(WebGitRetentionHold(gitRepositories))
     private val api = spaAssets?.let { WebApiController(access, it, jobs, jobMutations, streamResources,
         harnessReadiness = harnessReadiness, agentPreflight = agentPreflight,
         git = WebGitCapability(gitAvailability, gitRepositories)) }

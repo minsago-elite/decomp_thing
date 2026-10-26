@@ -134,6 +134,20 @@ data class GitRepositoryPolicy(
 
 class ManagedGitException(val code: String, message: String) : RuntimeException(message)
 
+/** One reason a job's Git storage must be retained (#509); codes and messages are fixed public text. */
+data class GitRetentionReason(val code: String, val message: String) {
+    companion object {
+        val OPERATION_ACTIVE = GitRetentionReason("GIT_OPERATION_ACTIVE",
+            "A Git repository operation for this job is queued or running. Wait until it finishes, then review the job again.")
+        val UNCOMMITTED_CHANGES = GitRetentionReason("GIT_UNCOMMITTED_CHANGES",
+            "A managed Git work tree has uncommitted changes. Commit or remove them before deleting the job.")
+        val UNPUSHED_COMMITS = GitRetentionReason("GIT_UNPUSHED_COMMITS",
+            "A managed Git branch has commits that no remote-tracking branch contains. Push them before deleting the job.")
+        val UNREADABLE = GitRetentionReason("GIT_STATE_UNAVAILABLE",
+            "A managed Git repository could not be inspected, so its work is retained. Check Git on the server.")
+    }
+}
+
 /** Crash points for recovery tests; a crash leaves records and staging exactly as a process death would. */
 enum class GitOperationCrashPoint { AFTER_RUNNING, AFTER_STAGING, BEFORE_PUBLISH, AFTER_PUBLISH }
 internal class SimulatedGitCrash : Error("simulated process death")
@@ -236,6 +250,54 @@ class ManagedGitRepositories(
                     "Repository operation capacity was exhausted before this operation started."))
             }
             return GitOperationAdmission(operations(jobId).single { it.operationId == operation.operationId }, replayed = false)
+        }
+    }
+
+    // ---- Retention --------------------------------------------------------------------------
+
+    /**
+     * Why the job's Git storage must be retained (#509): a queued or running operation owns its
+     * staging and records, and a work tree with uncommitted changes or a branch with commits no
+     * remote-tracking ref contains would be lost by deletion. Read-only; an uninspectable repository
+     * is retained. The caller (job deletion) serializes this check with Git admission.
+     */
+    fun retentionHolds(jobId: String): List<GitRetentionReason> {
+        if (!jobId.matches(JOB_ID) || !Files.isDirectory(root.resolve(jobId).resolve("git"), NOFOLLOW_LINKS)) return emptyList()
+        val reasons = LinkedHashSet<GitRetentionReason>()
+        val records = try {
+            synchronized(lock) {
+                if (availability is GitAvailability.Available) reconcile(jobId)
+                if (operations(jobId).any { !it.state.terminal }) reasons += GitRetentionReason.OPERATION_ACTIVE
+                repositories(jobId)
+            }
+        } catch (_: Exception) { return listOf(GitRetentionReason.UNREADABLE) }
+        if (records.isEmpty()) return reasons.toList()
+        val runner = try { requireRunner() } catch (_: ManagedGitException) { return (reasons + GitRetentionReason.UNREADABLE).toList() }
+        for (record in records) {
+            val directory = root.resolve(jobId).resolve("git").resolve("repositories").resolve(record.repositoryId)
+            try {
+                val observation = GitRepositoryInspector.inspect(runner, directory.resolve(GIT_DIR), directory.resolve(WORK_TREE))
+                if (observation.dirty) reasons += GitRetentionReason.UNCOMMITTED_CHANGES
+                if (unpushed(runner, directory.resolve(GIT_DIR))) reasons += GitRetentionReason.UNPUSHED_COMMITS
+            } catch (_: Exception) {
+                reasons += GitRetentionReason.UNREADABLE
+            }
+        }
+        return reasons.toList()
+    }
+
+    /**
+     * A branch tip that no remote-tracking ref contains. A repository without any remote-tracking
+     * ref has nothing to push to, so it has no unpushed commits.
+     */
+    private fun unpushed(runner: GitCommandRunner, gitDir: Path): Boolean {
+        fun refs(vararg arguments: String) = runner.run(GitInvocation("for-each-ref", listOf(*arguments), gitDir = gitDir))
+            .text.lines().filter { it.isNotBlank() }
+        if (refs("--count=1", "--format=%(refname)", "refs/remotes/").isEmpty()) return false
+        val tips = refs("--count=${MAX_RETENTION_BRANCHES + 1}", "--format=%(objectname)", "refs/heads/")
+        if (tips.size > MAX_RETENTION_BRANCHES) return true
+        return tips.distinct().any { tip ->
+            refs("--count=1", "--format=%(refname)", "--contains", tip, "refs/remotes/").isEmpty()
         }
     }
 
@@ -631,6 +693,8 @@ class ManagedGitRepositories(
         const val MAX_LISTED_OPERATIONS = 20
         const val MAX_QUEUED = 8
         const val MAX_RECORD_BYTES = 16 * 1024
+        /** Branches inspected for unpushed work; a repository with more is retained conservatively. */
+        const val MAX_RETENTION_BRANCHES = 256
         val JOB_ID = Regex("[a-f0-9]{32}")
         val ID = Regex("[A-Za-z0-9][A-Za-z0-9_-]{0,127}")
         const val QUEUED_MESSAGE = "Queued. The repository becomes visible only after it is completely prepared."

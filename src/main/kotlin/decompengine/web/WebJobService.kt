@@ -1436,7 +1436,23 @@ class WebJobService(
         } else task.worker?.interrupt()
     }
 
-    /** Future Git workspace adapters (and fixtures) register read-only holds here; see #509. */
+    /**
+     * Admit Git work for [jobId] under the same lock deletion admits under (#509). A job whose
+     * deletion was admitted refuses new Git work, and an admitted Git operation is always visible
+     * to the next deletion's retention check, so the two never both proceed. The lock order is
+     * always this service first, then the Git service.
+     */
+    internal fun <T> withGitAdmission(jobId: String, admit: () -> T): T = synchronized(this) {
+        requireInitializedRead()
+        if (closed || stopping) throw WebJobServiceException("SERVICE_STOPPED", "The job service is stopping.")
+        val journal = deletions
+        if (journal != null && (journal.deleted(jobId) != null || journal.pending().any { it.jobId == jobId })) {
+            throw WebJobServiceException("JOB_DELETED", "The job was deleted.")
+        }
+        admit()
+    }
+
+    /** Subsystems such as the managed Git repositories (and fixtures) register read-only holds here; see #509. */
     fun registerRetentionHold(hold: JobRetentionHold): AutoCloseable {
         holds += hold
         return AutoCloseable { holds.remove(hold) }

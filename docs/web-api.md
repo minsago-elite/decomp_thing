@@ -1478,9 +1478,20 @@ service monitor: a nonterminal attempt (`ACTIVE_ATTEMPT`), a worker that still o
 progress journal (`PINNED_EVIDENCE`), an artifact or source download still being delivered
 (`DOWNLOAD_IN_PROGRESS`, held by a per-request lease), an upload measuring storage
 (`STORAGE_BUSY`), uncertain publication (`RECOVERY_REQUIRED`), and any registered
-`JobRetentionHold`. Holds are the registration point for repository workspaces (#509), which
-are not implemented yet: a repository/worktree adapter will report uncommitted, unpushed or
-in-progress repository work as hold reasons. A hold that throws fails closed
+`JobRetentionHold`. The server registers the managed Git repositories as a hold (#509) with
+source `git`. It reports these reasons:
+
+- `GIT_OPERATION_ACTIVE`: a repository operation is queued or running and owns its staging and
+  records.
+- `GIT_UNCOMMITTED_CHANGES`: a managed work tree has uncommitted changes. A freshly initialized
+  work tree counts, because its files are untracked until a commit.
+- `GIT_UNPUSHED_COMMITS`: a branch tip is contained by no remote-tracking ref. A repository without
+  remote-tracking refs has nothing to push to.
+- `GIT_STATE_UNAVAILABLE`: a repository could not be inspected, so it is retained.
+
+Git admission takes the job service's lock before the Git service's lock, and deletion decides
+under the same lock. A job whose deletion was admitted therefore refuses new Git work with `410`,
+and an admitted Git operation is always visible to the next deletion check. A hold that throws fails closed
 (`RETENTION_HOLD_UNAVAILABLE`). A refused `DELETE` is `409 RETENTION_PROTECTED` with one error
 `details` entry (pointer `/protections/N`, protection code, recovery message) per reason.
 
