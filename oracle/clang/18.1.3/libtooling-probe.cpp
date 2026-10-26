@@ -16,6 +16,7 @@
 #include "clang/Lex/Preprocessor.h"
 #include "clang/Tooling/Tooling.h"
 #include "llvm/ADT/ArrayRef.h"
+#include "llvm/ADT/IntrusiveRefCntPtr.h"
 #include "llvm/Config/llvm-config.h"
 
 #include <array>
@@ -96,44 +97,53 @@ public:
   }
 };
 
+struct MacroObservations {
+  unsigned expansionCount = 0;
+  unsigned macroInfoChecks = 0;
+  unsigned nonBuiltinClassifications = 0;
+};
+
+// ToolInvocation destroys its FrontendAction before run() returns. Keep all
+// report state in main, independently of the action, consumer and callbacks.
+struct ProbeResult {
+  bool failed = false;
+  bool translationUnitHandled = false;
+  std::string targetTriple;
+  MacroObservations macroObservations;
+  std::vector<std::string> runtimeLangOptionsChecks;
+};
+
 class ProbeConsumer : public ASTConsumer {
 public:
-  explicit ProbeConsumer(CompilerInstance &compiler) : compiler(compiler) {}
+  ProbeConsumer(CompilerInstance &compiler, ProbeResult &result)
+      : compiler(compiler), result(result) {}
 
   void HandleTranslationUnit(ASTContext &context) override {
     const LangOptions &options = compiler.getLangOpts();
     if (options.CPlusPlus14)
-      runtimeLangOptionsChecks.emplace_back("LangOptions::CPlusPlus14=true");
+      result.runtimeLangOptionsChecks.emplace_back("LangOptions::CPlusPlus14=true");
     if (!options.CPlusPlus20)
-      runtimeLangOptionsChecks.emplace_back("LangOptions::CPlusPlus20=false");
+      result.runtimeLangOptionsChecks.emplace_back("LangOptions::CPlusPlus20=false");
     if (options.DoubleSquareBracketAttributes)
-      runtimeLangOptionsChecks.emplace_back("LangOptions::DoubleSquareBracketAttributes=true");
+      result.runtimeLangOptionsChecks.emplace_back("LangOptions::DoubleSquareBracketAttributes=true");
     if (options.Trigraphs)
-      runtimeLangOptionsChecks.emplace_back("LangOptions::Trigraphs=true");
-    if (runtimeLangOptionsChecks.size() != 4)
-      failed = true;
-    targetTriple = compiler.getTarget().getTriple().str();
-    if (targetTriple != "x86_64-pc-linux-gnu")
-      failed = true;
+      result.runtimeLangOptionsChecks.emplace_back("LangOptions::Trigraphs=true");
+    if (result.runtimeLangOptionsChecks.size() != 4)
+      result.failed = true;
+    result.targetTriple = compiler.getTarget().getTriple().str();
+    if (result.targetTriple != "x86_64-pc-linux-gnu")
+      result.failed = true;
     ApiVisitor visitor;
     visitor.TraverseDecl(context.getTranslationUnitDecl());
     const SourceManager &sources = context.getSourceManager();
     (void)Lexer::getLocForEndOfToken(sources.getLocForEndOfFile(sources.getMainFileID()),
                                      0, sources, context.getLangOpts());
+    result.translationUnitHandled = true;
   }
-
-  bool failed = false;
-  std::string targetTriple;
-  std::vector<std::string> runtimeLangOptionsChecks;
 
 private:
   CompilerInstance &compiler;
-};
-
-struct MacroObservations {
-  unsigned expansionCount = 0;
-  unsigned macroInfoChecks = 0;
-  unsigned nonBuiltinClassifications = 0;
+  ProbeResult &result;
 };
 
 class MacroCallbackProbe : public PPCallbacks {
@@ -159,40 +169,30 @@ private:
 
 class ProbeAction : public ASTFrontendAction {
 public:
+  explicit ProbeAction(ProbeResult &result) : result(result) {}
+
   std::unique_ptr<ASTConsumer> CreateASTConsumer(CompilerInstance &compiler,
                                                  StringRef) override {
-    auto consumer = std::make_unique<ProbeConsumer>(compiler);
-    consumerView = consumer.get();
-    return consumer;
+    return std::make_unique<ProbeConsumer>(compiler, result);
   }
 
   bool BeginSourceFileAction(CompilerInstance &compiler) override {
     (void)compiler.getPreprocessor().getLangOpts();
     compiler.getPreprocessor().addPPCallbacks(
-        std::make_unique<MacroCallbackProbe>(macroObservations));
+        std::make_unique<MacroCallbackProbe>(result.macroObservations));
     return true;
   }
 
   void EndSourceFileAction() override {
-    if (consumerView && consumerView->failed)
-      failed = true;
-    if (consumerView) {
-      targetTriple = consumerView->targetTriple;
-      runtimeLangOptionsChecks = consumerView->runtimeLangOptionsChecks;
-    }
-    if (macroObservations.expansionCount == 0 ||
-        macroObservations.macroInfoChecks == 0 ||
-        macroObservations.nonBuiltinClassifications == 0)
-      failed = true;
+    if (!result.translationUnitHandled ||
+        result.macroObservations.expansionCount == 0 ||
+        result.macroObservations.macroInfoChecks == 0 ||
+        result.macroObservations.nonBuiltinClassifications == 0)
+      result.failed = true;
   }
 
-  bool failed = false;
-  std::string targetTriple;
-  MacroObservations macroObservations;
-  std::vector<std::string> runtimeLangOptionsChecks;
-
 private:
-  ProbeConsumer *consumerView = nullptr;
+  ProbeResult &result;
 };
 
 int main(int argc, char **argv) {
@@ -211,27 +211,29 @@ int main(int argc, char **argv) {
   }
 
   FileSystemOptions filesystemOptions;
-  FileManager files(filesystemOptions);
+  // CompilerInstance takes an intrusive reference during run(). Retain our
+  // own heap-backed reference until after ToolInvocation has been destroyed.
+  llvm::IntrusiveRefCntPtr<FileManager> files(new FileManager(filesystemOptions));
+  ProbeResult result;
   std::vector<std::string> command = {
       "clang++-18", "--no-default-config", "-std=c++14", "-fsyntax-only", argv[1]};
-  auto action = std::make_unique<ProbeAction>();
-  ProbeAction *actionView = action.get();
-  tooling::ToolInvocation invocation(std::move(command), std::move(action), &files);
-  if (!invocation.run() || actionView->failed)
+  auto action = std::make_unique<ProbeAction>(result);
+  tooling::ToolInvocation invocation(std::move(command), std::move(action), files.get());
+  if (!invocation.run() || result.failed || !result.translationUnitHandled)
     return 4;
 
   std::cout << "{\"compilerVersion\":\"" << getClangVersion()
-            << "\",\"target\":\"" << actionView->targetTriple
+            << "\",\"target\":\"" << result.targetTriple
             << "\",\"runtimeLangOptionsChecks\":[";
-  for (std::size_t i = 0; i < actionView->runtimeLangOptionsChecks.size(); ++i) {
+  for (std::size_t i = 0; i < result.runtimeLangOptionsChecks.size(); ++i) {
     if (i) std::cout << ',';
-    std::cout << '\"' << actionView->runtimeLangOptionsChecks[i] << '\"';
+    std::cout << '\"' << result.runtimeLangOptionsChecks[i] << '\"';
   }
   std::cout << "],\"macroObservations\":{\"expansionCount\":"
-            << actionView->macroObservations.expansionCount
-            << ",\"macroInfoChecks\":" << actionView->macroObservations.macroInfoChecks
+            << result.macroObservations.expansionCount
+            << ",\"macroInfoChecks\":" << result.macroObservations.macroInfoChecks
             << ",\"nonBuiltinClassifications\":"
-            << actionView->macroObservations.nonBuiltinClassifications
+            << result.macroObservations.nonBuiltinClassifications
             << "},\"callingConventions\":[";
   for (std::size_t i = 0; i < names.size(); ++i) {
     if (i) std::cout << ',';
