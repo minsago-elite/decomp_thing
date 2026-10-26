@@ -155,7 +155,7 @@ internal storage optimization and must not merge identity, permissions or histor
 | `PUT R/progress-pin` | `200 progressPin`, original result on keyed replay | Strict `progressPinRequest`, session/Origin/CSRF, run If-Match and idempotency; #172/#177 |
 | `GET /agent/preflight` | `200 agentPreflight` | Last explicit agent inspection result; never starts the agent; #493 |
 | `POST /agent/preflight` | `202 agentPreflight`, `409` while one runs | Strict `agentPreflightRequest` (`{"action":"inspect"}`), session/Origin/CSRF; starts one single-flight `preflight(WEB)`; #493 |
-| `POST J/runs` | `202 run`, `Location: R` | `workflowStart` request, capability/limits/input checks, job If-Match; #163 |
+| `POST J/runs` | `202 run`, `Location: R` | `workflowStart` request, explicit option, server-approved limits, input policy and fresh readiness checks, job If-Match; #163/#478 |
 | `POST R/cancel` | `202 run` or `200 run` if already terminal | Closed `workflowCancel` request, idempotent recorded intent, run If-Match; #163 |
 | `POST R/recover` | `202 run`, `Location` of a new attempt | Closed `recover` request; explicit `retry` or capability-gated `resume`; run If-Match and idempotency; #486 |
 | `GET R/controls` | `200 attemptControls`, strong run ETag | Read-only cancel/retry/resume eligibility with closed reasons; reserves nothing; #528/#529 |
@@ -226,13 +226,23 @@ publication returns a recovery failure without a success location. A scheduler
 refusal that was durably recorded returns its failed run; another scheduling
 exception requires reconciliation through the job and retained key.
 
-Production durable adapters remain unregistered, and bootstrap continues to
-report them unavailable. Without registered adapters or retained keyed starts,
-POST retains the existing 405 response without consuming a body. A retained
+The SPA server registers production durable adapters for exploration, agent
+reconstruction, evidence-only reconstruction and repair; see
+[production workflow adapters](#production-workflow-adapters-and-restart-reconciliation).
+Admission rechecks the selected option's runtime prerequisites against a fresh
+readiness snapshot after any keyed replay: a missing or undetermined
+prerequisite returns `503 CAPABILITY_UNAVAILABLE` with its fixed reason message
+and records nothing. The harness is an explicit choice: `harnessCapabilityId`
+must name one registered option for the workflow (or null where the option has
+none) and never falls back to another option. Limits must equal the advertised
+defaults or, for options whose launch facts set `limitsAdjustable`, lower one or
+more fields; a raised field returns 503. An input revision is refused with 422
+`INPUT_REVISION_UNAVAILABLE` unless the option's `input` policy admits it, and an
+option that requires a recorded revision returns 422 `INPUT_REVISION_REQUIRED`
+when none is selected. Servers without registrations (the legacy UI and inert
+embeddings) keep the existing 405 response without consuming a body. A retained
 receipt keeps the route available for authenticated read-only replay after
-registrations are removed; it does not enable fresh work. Injected inert
-adapters qualify transport/storage behavior, not runtime readiness or upstream
-model/binary execution and accepted-publication integration.
+registrations are removed; it does not enable fresh work.
 
 The reserved cancellation transport has a closed `workflowCancel` data object:
 exactly `{"action":"cancel"}`, bounded to 1024 bytes. The fixture wrapper is not
@@ -267,9 +277,9 @@ diagnostic preservation, guards, strict JSON, actor isolation, revocation,
 capacity and publication faults. Service/storage restart coverage retains the
 same listener's in-memory authorization service. It does not establish replay by
 a new session after a full listener restart. These authored methods await their
-own Actions qualification; browser and production-adapter/runtime qualification
-remain unfinished. Bootstrap continues to report workflows unavailable, and
-fresh starts without registrations or retained start receipts retain 405.
+own Actions qualification; browser and live model/binary runtime qualification
+remain unfinished. Fresh starts on a server without registrations or retained
+start receipts retain 405.
 
 The recovery transport accepts only the closed `recover` data object (not its
 fixture wrapper), bounded to 1024 bytes: `mode` is `retry` or `resume`, and
@@ -383,6 +393,65 @@ Retry/resume create a distinct run referencing the previous attempt and preserve
 Restart marks abandoned active attempts interrupted and reconciles committed publication journals;
 it never silently launches execution or duplicates accepted publication.
 
+### Production workflow adapters and restart reconciliation
+
+Each adapter reuses the CLI implementation: `explore` runs the existing
+automatic explorer against the uploaded binary in the sandbox; `reconstruct`
+runs archival reconstruction with the bundled Ghidra analyzer and either the
+configured agent harness (ACP or the deprecated legacy adapter selected by
+`ACP_HARNESS`) or the explicit agent-free evidence-only profile, with no
+credential-based fallback between them; `repair` copies the selected recorded
+revision's retained source tree into the new attempt and runs the secure repair
+runtime there, so the selected revision's evidence is never modified.
+
+Every adapter runs its body on an owned child thread and enforces the attempt's
+recorded limits: wall-clock time, idle time (no new output or agent progress),
+the byte total of the attempt's own report directory and, where metered, agent
+tool calls (identities are distinct within each agent invocation and summed across
+invocations; a returned receipt reporting more calls raises the count). Limits are
+checked again when a body finishes between samples. A breach or cancellation
+interrupts the child, which kills and awaits its helper process trees (including
+exploration's angr and strings helpers), and the adapter does not return while the
+child is alive. Breaches record
+`LIMIT_EXHAUSTED`; cancellation and shutdown keep their existing `CANCELLED` and
+`PROCESS_INTERRUPTED` outcomes. Repair's tool-call ceiling is structural (five
+iterations, each one agent invocation bounded at 256 tool calls), so its limits
+are fixed. Usage records wall-clock time and, for agent reconstruction, tool
+calls and any returned token counts. Report paths stay internal.
+
+Reconstruction and repair record a candidate whenever a canonical source digest
+exists: the schema-3 build contract's `sourceRevisionSha256`, or the repair
+graph's published head. The revision identifier is derived from the digest, so
+one identifier can never name different sources. A candidate is never
+acceptance. After a repair attempt completes, and while the service still owns
+it, a read-only attestation reads the canonical repair graph: only a fully
+accepted head bound to a fully accepted run that began within this attempt, and
+published for release (test-only publication is refused), yields an acceptance. An
+input that already validates is accepted as the graph root without a repair
+iteration; its source digest and proof assurance come from the graph's recorded
+acceptance proof, and only a strictly contained proof is release-eligible. The result is an acceptance
+reference (`graphNodeId` = head, `artifactId` = `repair-graph`,
+`artifactSha256` = graph digest). The service records it once, rechecking the
+persisted candidate, versions and that the attempt is still the latest.
+
+Production options declare no checkpoint policy yet, so `POST R/recover` and
+`GET R/controls` report resume as `RESUME_UNSUPPORTED`; an explicit retry starts a
+fresh linked attempt with the predecessor's own option and recorded (possibly
+lowered) limits; recovery never raises them. A new recovery command passes the same
+runtime-prerequisite admission as a fresh start, including the bounded sandbox check
+at submission, while a keyed replay stays read-only. A repair retry
+re-resolves the predecessor's recorded input revision (accepted or completed
+candidate) and copies its retained source afresh; if that revision is no longer
+retained, retry is refused with `INPUT_UNVERIFIED`.
+
+Startup recovery keeps its existing transitions and then reconciles. Queued
+attempts become `interrupted` with no `startedAt`: they never executed. Active
+attempts become `interrupted` with their `startedAt` and partial evidence. Neither
+is resumed or re-executed. A completed candidate whose attestation now verifies
+(for example after a crash between completion and acceptance) is published once;
+an existing acceptance is never repeated or replaced. Reconciliation reads
+retained evidence only and never executes a binary, model or adapter body.
+
 ### Admission and overload
 
 The server admits at most 16 concurrent requests, with 64 more waiting in a bounded queue. A request that finds
@@ -414,6 +483,41 @@ also retain every decimal digit, including values above JavaScript's exact integ
 range. Missing metadata is labelled not reported. A reported zero stays zero;
 the view assigns it no unlimited or unsupported meaning. Reports without an
 assigned workflow stay in the general capability section.
+
+Workflow capabilities name one launchable option each (`workflow-explore-tools`,
+`workflow-reconstruct-agent`, `workflow-reconstruct-evidence-only`,
+`workflow-repair-agent`). Their `launch` object carries the server's launch
+facts: the `harnessCapabilityId` a start must submit, the execution `mode`
+(`tools`, `agent` or `evidence-only`), whether the option executes the uploaded
+binary or contacts the configured agent, its required tools, its input-revision
+policy (`none`, `accepted-optional` or `recorded-required`) and whether its
+`limits` are adjustable. For a launch option, `limits` are the server-approved
+defaults and, when adjustable, per-field ceilings. `agentContractVersion` is
+reported exactly for options that contact an agent. `supported` means every
+declared prerequisite (sandbox helpers, bundled Ghidra, a configured agent
+harness and, for repair, a production-qualified contained repair validator) was
+established by the current readiness observation. Workflow prerequisites follow the
+same passive rule as harness readiness: a page load reads configuration and file
+metadata only (helper executability, bundled Ghidra presence) and launches no
+helper. Options that execute the binary therefore report `unknown` with
+`SANDBOX_HELPER_UNCHECKED` ("checked when this workflow starts") unless a recent
+explicit agent preflight already checked the helpers. Starting a workflow is itself
+an explicit operator action: when the selected option needs the sandbox, its other
+prerequisites hold and the helpers are unchecked, `POST J/runs` runs the same
+bounded helper check (at most five seconds) before admission; a keyed replay still
+returns its recorded run whatever the check reports. It needs no configured agent and no prior
+preflight. Only a failed or timed-out check refuses the start, with
+`503 CAPABILITY_UNAVAILABLE` and its fixed reason message; nothing is recorded.
+Evidence-only reconstruction needs only Ghidra presence. Until the secure repair
+runtime's validator qualification gate opens, repair reports
+`REPAIR_VALIDATOR_UNQUALIFIED` and is refused at admission. A missing prerequisite
+is `unavailable` with its fixed reason code, and a probe that did not finish makes
+the option `unknown`. Workflows without a production adapter (`build`,
+`validate`) are reported `unsupported` with `WORKFLOW_NOT_IMPLEMENTED`. Every
+other capability has `launch: null`. `launch` is optional within v1: an older
+producer omits it, and clients treat absence like null (no launch facts, no start
+control). Launch facts describe adapters; admission
+rechecks registration, limits, input and readiness.
 
 These are report-level observations, separate from an individual attempt's
 recorded limits and job-specific admission. Displaying them performs no new

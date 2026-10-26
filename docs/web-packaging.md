@@ -77,7 +77,8 @@ omit internal paths and raw status diagnostics, preserve unsigned ELF addresses,
 and leave unknown run/acceptance identity null. Their ETag binds the current
 metadata; it does not prove a reconstruction revision or acceptance. Bootstrap
 identifies the actual application JAR by SHA-256, or reports `development` for
-exploded classes. Workflow capabilities remain unavailable in this preview.
+exploded classes. Workflow capabilities report each production option with its
+prerequisite state; see [the API contract](web-api.md#bootstrap-and-capability-truth).
 
 Host/Origin checks precede API dispatch, including namespace misses; private
 responses require the same cookie boundary. The legacy UI has not yet migrated

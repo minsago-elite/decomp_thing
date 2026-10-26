@@ -280,13 +280,14 @@ it.each(['unavailable', 'unsupported', 'unknown', 'missing', 'empty'] as const)(
     if (reported !== 'missing' && reported !== 'empty') capabilities.push({
       id: 'harness_acp', state: reported, reasonCode: 'SELECTED_HARNESS_NOT_READY',
       message: 'The selected harness cannot start these workflows.', workflows,
-      agentContractVersion: 1, limits: null,
+      agentContractVersion: 1, limits: null, launch: null,
     });
     if (reported !== 'empty') capabilities.push({
       id: 'harness_builtin', state: 'supported', reasonCode: null,
       message: 'The alternate harness fixture reports support.', workflows,
       agentContractVersion: null,
       limits: { wallClockMs: '60000', idleMs: '15000', maxOutputBytes: '1048576', maxToolCalls: '16' },
+      launch: null,
     });
     const gateway = {
       bootstrap: vi.fn().mockResolvedValue({ ...bootstrap, capabilities, basePath: '/nested/',
