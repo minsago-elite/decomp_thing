@@ -398,8 +398,7 @@ class WebJobService(
         }
         checkCancellation()
         if (Files.exists(store.storageRoot, NOFOLLOW_LINKS)) {
-            val owner = acquireAndRecover(cancellation)
-            if (registrations.values.any { it.adapter.publication != null }) reconcileStartupPublications(owner, cancellation)
+            acquireAndRecover(cancellation)
         }
         checkCancellation()
         initialized = true
@@ -411,8 +410,9 @@ class WebJobService(
         if (stopping || Thread.currentThread().isInterrupted || cancellation()) throw decompengine.jobs.WorkflowStoreException(
             "RECOVERY_CANCELLED", "Startup recovery was cancelled before acquiring storage.")
         val acquired = attemptStoreFactory(store.storageRoot)
+        val budget = decompengine.jobs.WorkflowStartupRecoveryBudget(startupRecoveryLimits) { stopping || cancellation() }
         try {
-            acquired.recoverForStartup(limits = startupRecoveryLimits, cancellation = { stopping || cancellation() }) { check ->
+            val admittedIds = acquired.recoverForStartup(limits = startupRecoveryLimits, budget = budget) { check ->
                 check()
                 try {
                     store.prepareStorageDirectories()
@@ -424,8 +424,11 @@ class WebJobService(
                 decompengine.jobs.UploadStagingRecovery.recover(store.storageRoot, check)
             }
             attempts = acquired
+            if (registrations.values.any { it.adapter.publication != null }) reconcileStartupPublications(acquired, admittedIds, budget)
+            budget.checkpoint()
             return acquired
         } catch (failure: Throwable) {
+            attempts = null
             try { acquired.close() } catch (cleanup: Throwable) { failure.addSuppressed(cleanup) }
             throw webStartupFailure(failure)
         }
@@ -1040,16 +1043,19 @@ class WebJobService(
     }
 
     /** Called under the service monitor. recordAcceptedRevision refuses a second acceptance for the attempt. */
-    private fun recordAcceptance(jobId: String, verified: WorkflowAttempt, reference: decompengine.jobs.WorkflowAcceptanceReference): WorkflowAttempt? =
-        completionPublication.publishCompletion {
+    private fun recordAcceptance(jobId: String, verified: WorkflowAttempt, reference: decompengine.jobs.WorkflowAcceptanceReference,
+        startup: decompengine.jobs.WorkflowStartupRecoveryBudget? = null,
+    ): WorkflowAttempt? = completionPublication.publishCompletion {
             val owner = attempts
             if (closed || stopping || owner == null || publicationFailures.isNotEmpty()) return@publishCompletion null
-            val view = owner.inspect(jobId) as? WorkflowJobInspection.Available ?: return@publishCompletion null
+            val view = (if (startup == null) owner.inspect(jobId) else owner.inspectForListing(jobId) { relative, maximum ->
+                startup.read(store.storageRoot, relative, maximum)
+            }) as? WorkflowJobInspection.Available ?: return@publishCompletion null
             val current = view.snapshot.attempts.singleOrNull { it.runId == verified.runId } ?: return@publishCompletion null
             if (!current.publicationPending || current.candidate != verified.candidate || view.snapshot.latestRun?.runId != current.runId)
                 return@publishCompletion null
             try {
-                owner.recordAcceptedRevision(jobId, current.runId, view.snapshot.version, current.version, reference).attempt
+                owner.recordAcceptedRevision(jobId, current.runId, view.snapshot.version, current.version, reference, startup).attempt
             } catch (failure: WorkflowStoreException) {
                 if (failure.outcomeUnknown) publicationFailures[jobId] = WebJobDiagnostic(jobId, "RECOVERY_REQUIRED",
                     "Acceptance publication is uncertain. Reopen storage to reconcile before admitting more work.")
@@ -1062,21 +1068,32 @@ class WebJobService(
      * interrupted; a completed candidate whose trusted attestation verifies is published once; an
      * existing acceptance is never repeated. Nothing here executes a binary, model or adapter body.
      */
-    private fun reconcileStartupPublications(owner: WorkflowAttemptStore, cancellation: () -> Boolean) {
+    private fun reconcileStartupPublications(owner: WorkflowAttemptStore, admittedIds: List<String>,
+        budget: decompengine.jobs.WorkflowStartupRecoveryBudget,
+    ) {
         val counts = IntArray(decompengine.jobs.WorkflowRecoveryDisposition.entries.size)
         var published = 0
-        for (jobId in store.jobIds()) {
-            if (stopping || Thread.currentThread().isInterrupted || cancellation()) throw WorkflowStoreException(
-                "RECOVERY_CANCELLED", "Startup reconciliation was cancelled; preserve storage and restart to finish it.")
-            val snapshot = (owner.inspect(jobId) as? WorkflowJobInspection.Available)?.snapshot ?: continue
+        // Reuse the complete admitted inventory, not a second unaccounted root enumeration.
+        for (jobId in admittedIds) {
+            budget.checkpoint()
+            var jobBytes: ByteArray? = null
+            val snapshot = (owner.inspectForListing(jobId) { relative, maximum ->
+                budget.read(store.storageRoot, relative, maximum).also { if (relative.endsWith("/job.json")) jobBytes = it }
+            } as? WorkflowJobInspection.Available)?.snapshot ?: continue
             snapshot.attempts.forEach { counts[it.recoveryDisposition.ordinal]++ }
             val latest = snapshot.latestRun?.takeIf { it.publicationPending } ?: continue
             val registration = registrations[latest.workflow to latest.harnessCapabilityId] ?: continue
             val publication = registration.adapter.publication ?: continue
             val reference = try {
-                publication.verify(DurableWebWorkflowPublicationContext(store.get(jobId), latest, store.runReportsDirectory(jobId, latest.runId)))
-            } catch (_: Exception) { null } ?: continue
-            if (recordAcceptance(jobId, latest, reference) != null) {
+                val job = store.decodeJobRecord(jobId, decompengine.oracle.core.OracleJson.parse(checkNotNull(jobBytes)) as kotlinx.serialization.json.JsonObject)
+                publication.verify(DurableWebWorkflowPublicationContext(job, latest, store.runReportsDirectory(jobId, latest.runId),
+                    budget::checkpoint, budget::reserveEvidence))
+            } catch (_: Exception) { null }
+            budget.checkpoint() // A diagnostic reader/adapter cannot swallow cancellation or exhaustion.
+            if (reference == null) continue
+            val recorded = recordAcceptance(jobId, latest, reference, budget)
+            budget.checkpoint()
+            if (recorded != null) {
                 published++
                 counts[decompengine.jobs.WorkflowRecoveryDisposition.COMPLETED_UNPUBLISHED.ordinal]--
                 counts[decompengine.jobs.WorkflowRecoveryDisposition.ACCEPTED.ordinal]++
@@ -1166,7 +1183,8 @@ class WebJobService(
         if (active.containsKey(jobId)) return refuse("ACTIVE_RUN")
         // The predecessor's own option; a single registration serves callers that recorded no harness.
         val registration = registrations[predecessor.workflow to predecessor.harnessCapabilityId]
-            ?: registrationFor(predecessor.workflow, null) ?: return refuse("WORKFLOW_UNAVAILABLE")
+            ?: (if (predecessor.harnessCapabilityId == null) registrationFor(predecessor.workflow, null) else null)
+            ?: return refuse("WORKFLOW_UNAVAILABLE")
         // Never silently substitute another workspace: the recorded input must still be trusted evidence.
         // An option that starts from a recorded revision re-resolves that revision's retained source here.
         val inputSourceTree = if (registration.adapter.input == DurableWebWorkflowInput.RECORDED_REQUIRED) {

@@ -215,7 +215,7 @@ internal class RepairWorkflowAdapter(
     private val engines: WebWorkflowEngines,
     private val executor: BoundedWorkflowExecutor,
     override val harnessCapabilityId: String,
-    // Test seam only: production never accepts a test-only, release-ineligible graph publication.
+    // Inert integration seam only; metadata cannot attest production acceptance (see #478).
     private val acceptTestOnlyPublication: Boolean = false,
 ) : DurableWebWorkflowAdapter {
     override val workflow = WorkflowKind.REPAIR
@@ -230,7 +230,10 @@ internal class RepairWorkflowAdapter(
     override val input = DurableWebWorkflowInput.RECORDED_REQUIRED
     override val launch = DurableWebWorkflowLaunch(DurableWebWorkflowMode.AGENT, executesBinary = true, contactsAgent = true,
         requiredTools = listOf("sandbox", "agent-harness", "c-toolchain"))
-    override val publication = DurableWebWorkflowPublication { context -> verifyRepairAcceptance(context, acceptTestOnlyPublication) }
+    // No production publisher until canonical evidence attestation is qualified; do not scan a
+    // library's graphs merely because the repair execution adapter is registered.
+    override val publication: DurableWebWorkflowPublication? = if (acceptTestOnlyPublication)
+        DurableWebWorkflowPublication { context -> verifyRepairAcceptance(context, allowTestOnly = true) } else null
     private val harness = when (harnessCapabilityId) {
         "agent-legacy-openai" -> "legacy-openai"
         else -> "acp"
@@ -304,10 +307,21 @@ private fun repairCandidate(project: Path, attemptStartedMillis: Long?, allowTes
     return WorkflowCandidate(webSourceRevisionId(sha), sha)
 }
 
-/** Read-only attestation from the canonical repair graph; a candidate digest alone is never acceptance. */
+/**
+ * Inert publication control only. Recorded history is metadata, NOT acceptance authority: it does
+ * not verify installed sources, blobs, receipt bodies or their binary/profile/corpus commitments.
+ * Production must remain closed until a workflow-owned bounded read-only attestation is qualified
+ * for that full scope (#478). Never substitute the mutating graph recovery path here.
+ */
 internal fun verifyRepairAcceptance(context: DurableWebWorkflowPublicationContext, allowTestOnly: Boolean = false): WorkflowAcceptanceReference? {
+    if (!allowTestOnly) return null
     val candidate = context.attempt.candidate ?: return null
-    val snapshot = recordedHistory(context.reportsDirectory.resolve("source-tree")) ?: return null
+    context.checkpoint()
+    val history = readProjectRecordedRepairHistory(context.reportsDirectory.resolve("source-tree"),
+        reserveCapture = context.reserveCapture, cancel = context.checkpoint)
+    // The diagnostic reader withholds a snapshot on any failure; never swallow the caller's latch.
+    context.checkpoint()
+    val snapshot = history.snapshot?.takeIf { history.status == RepairHistoryReadStatus.RECORDED } ?: return null
     val (node, sha) = acceptedHead(snapshot, context.attempt.startedAt?.toEpochMilli(), allowTestOnly) ?: return null
     if (candidate != WorkflowCandidate(webSourceRevisionId(sha), sha) || !snapshot.graphSha256.matches(DIGEST)) return null
     return WorkflowAcceptanceReference(context.attempt.jobId, context.attempt.runId, candidate.revisionId, sha,
