@@ -1055,8 +1055,14 @@ repository again. The view has these parts:
   source revision and attempt. Inspecting a commit shows its files, provenance, export digest and
   verification, and offers the export download and a tag form.
 - **Branches and work trees.** Branches show their exact object IDs. Switching is disabled, with
-  the reason shown, while the work tree has changes or an operation is running. Linked work trees
-  show their owning attempt, and removal is offered only for the selected, clean one.
+  the reason shown, while the work tree has changes, status is incomplete or an operation is running.
+  The `active-worker` status notice projects the backend lease for the selected work tree: any active
+  attempt holds the primary tree, while only the owning attempt holds a linked tree. Switching and
+  removal are disabled while that notice is present; reads and non-checkout actions stay available.
+  This is advisory snapshot evidence, not a lease reservation: mutation admission still rechecks
+  ownership and guards, and users refresh after the worker finishes. Linked work trees show their
+  owning attempt, and removal is offered only for the selected, clean one. A refused removal retains
+  that selection.
 
 All controls are native buttons, checkboxes and forms. Outcomes are announced in a polite status
 region.
@@ -1064,7 +1070,7 @@ region.
 `node scripts/check-packaged-web-browser.mjs --mode git` (#584) runs the packaged journey in the
 `web-packaged` CI job. It runs the session journey, then:
 
-1. Creates a disposable repository with `scripts/web-git-fixtures.mjs`. Its pre-commit hook always
+1. Creates a disposable, 1,001-commit repository with `scripts/web-git-fixtures.mjs`. Its pre-commit hook always
    fails. The repository lives under the work parent and is admitted with `--git-import-root`.
 2. Puts the system `git` on the packaged application's otherwise minimal `PATH`.
 
@@ -1072,6 +1078,8 @@ In the browser, the journey:
 
 - uploads an inert ELF from the keyboard and follows the job page's link to the workspace;
 - imports the repository by name from the keyboard;
+- traverses all 51 bounded history pages using Enter and compares every displayed object ID, in
+  order, with the admitted repository's `rev-list main`, with no mutation requests;
 - edits the managed work tree on disk and checks that a policy-excluded `helper.o` is only counted;
 - selects and stages one file with Space and Enter, and checks that the review lists exactly that
   file;
@@ -1083,6 +1091,10 @@ admitted repository is unchanged. Finally it replaces the JVM on the same origin
 session, loads `/jobs/{jobId}/git` directly. It confirms that the commit, the unstaged change and
 the export digest are still there. The route is a server-classified SPA document path, so a direct
 load or reload gets the shell. No network access or credentials are used.
+
+This journey does not start a fake workflow worker. Worker lease projection/admission is covered by
+HTTP, service and component regressions; the active-fake-worker packaged qualification required by
+#206 remains outstanding. Component or service results do not substitute for that gate.
 
 ## Legacy compatibility
 

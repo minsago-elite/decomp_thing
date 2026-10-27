@@ -44,6 +44,7 @@ internal class WebWorkflowStartController(
                 "VERSION_CONFLICT" -> throw WebAccessDenied(412, failure.code, "The job version changed. Refresh before starting new work.")
                 "IDEMPOTENCY_CONFLICT" -> throw WebAccessDenied(409, failure.code, "The request key was used for a different workflow start.")
                 "ACTIVE_RUN" -> throw WebAccessDenied(409, failure.code, "This job already has an active workflow attempt.")
+                "WORKTREE_BUSY" -> throw WebAccessDenied(409, failure.code, "A Git checkout or work-tree removal owns this job. Wait for it to finish before starting a workflow.")
                 "CAPACITY_UNAVAILABLE", "UPLOAD_CAPACITY" -> throw WebAccessDenied(429, "QUOTA_EXCEEDED", "Workflow admission is at capacity. Inspect current work before a new request.")
                 "WORKFLOW_UNAVAILABLE", "WORKFLOW_LIMITS_UNAVAILABLE", "HARNESS_UNAVAILABLE" ->
                     throw WebAccessDenied(503, "CAPABILITY_UNAVAILABLE", "The requested workflow, harness or limits are unavailable.")

@@ -58,7 +58,8 @@ class WebGitControllerTest {
         val service = WebJobService(store, JobAnalyzer { _, _ -> error("Unexpected analysis") }, JobReconstructor { _, _ -> error("Unexpected reconstruction") },
             attemptStoreFactory = { WorkflowAttemptStore.open(it).also { opened -> owner = opened } })
         val admitted: Path = Files.createDirectories(root.resolve("admitted")).toRealPath()
-        val repositories = ManagedGitRepositories(root, availability, service::gitSourceSnapshot,
+        val activeRuns = java.util.concurrent.ConcurrentHashMap<String, Boolean>()
+        val repositories = ManagedGitRepositories(root, availability, service::gitSourceSnapshot, activity = { activeRuns.toMap() },
             remotePolicy = decompengine.git.GitRemotePolicy(admittedRoot = admitted))
         val server: HttpServer = HttpServer.create(InetSocketAddress("127.0.0.1", 0), 0)
         val origin = "http://127.0.0.1:${server.address.port}"
@@ -190,6 +191,19 @@ class WebGitControllerTest {
         awaitOperation(admitted.headers().firstValue("Location").orElseThrow())
         val repositoryId = data(admitted, 202, "operation").getValue("repositoryId").jsonPrimitive.content
         return "$collection/$repositoryId" to root.resolve("${job.id}/git/repositories/$repositoryId")
+    }
+
+    @Test fun `status reports an active worker without claiming a Git operation is busy`(): Unit = Fixture().use { f ->
+        val (base, _) = f.initialized()
+        f.activeRuns[f.run.runId] = true
+        val held = data(f.read("$base/status"), 200, "gitStatus")
+        assertFalse(held.getValue("busy").jsonPrimitive.boolean)
+        val notice = held.getValue("notices").jsonArray.single { it.jsonObject.getValue("code").jsonPrimitive.content == "active-worker" }.jsonObject
+        assertTrue(notice.getValue("message").jsonPrimitive.content.contains("Switching and removal wait"))
+        assertFalse(held.toString().contains(f.root.toString()))
+        f.activeRuns[f.run.runId] = false
+        val released = data(f.read("$base/status"), 200, "gitStatus")
+        assertFalse(released.getValue("notices").jsonArray.any { it.jsonObject.getValue("code").jsonPrimitive.content == "active-worker" })
     }
 
     @Test fun `status history diff and refs reads are bounded anchored and path-free`(): Unit = Fixture().use { f ->

@@ -266,6 +266,7 @@ class WebJobService(
     } else null
     private val configuredQueueCapacity = queueCapacity
     private val workflowExecutor = executor ?: ownedExecutor!!
+    internal val gitWorkspaceLeases = decompengine.git.GitWorkspaceLeases()
     private val active = mutableMapOf<String, OwnedTask>()
     private val uploads = mutableMapOf<Thread, CountDownLatch>()
     private val uploadStorage = WebUploadStorage(store.storageRoot, maximumRetainedStorageBytes)
@@ -746,9 +747,12 @@ class WebJobService(
         }
 
     /** Every attempt of a job and whether it is still active, for Git work-tree leases. */
+    @Synchronized
     internal fun gitRunActivity(jobId: String): Map<String, Boolean> = when (val inspected = inspectDurableJob(jobId)) {
-        is WorkflowJobInspection.Available -> inspected.snapshot.attempts.associate { it.runId to !it.state.terminal }
-        is WorkflowJobInspection.Unavailable -> emptyMap()
+        is WorkflowJobInspection.Available -> inspected.snapshot.attempts.associate { it.runId to !it.state.terminal } +
+            (active[jobId]?.let { task -> mapOf((if (task is DurableTask) task.attempt.runId else "legacy-task") to true) } ?: emptyMap())
+        is WorkflowJobInspection.Unavailable -> throw decompengine.git.ManagedGitException("WORKTREE_BUSY",
+            "Workflow ownership could not be inspected. Nothing was changed; restore job storage before retrying.")
     }
 
     /** Shared fixed-path journal read for both HTTP adapters; absence is not empty history. */
@@ -899,61 +903,67 @@ class WebJobService(
 
     @Synchronized
     fun start(jobId: String, workflow: WebWorkflow): WebWorkflowAdmission {
-        if (closed || stopping || uploads.isNotEmpty()) return WebWorkflowAdmission.Unavailable
-        if (publicationFailures.isNotEmpty()) return WebWorkflowAdmission.Unavailable
-        val owner = writableStore()
-        val record = inspectStoredJob(owner, jobId) as? WorkflowJobInspection.Available ?: return WebWorkflowAdmission.Unavailable
-        if (active.containsKey(jobId)) return WebWorkflowAdmission.AlreadyRunning
-        // Legacy shared report locations cannot be used to write into a job with durable history.
-        if (record.snapshot.attempts.isNotEmpty()) return WebWorkflowAdmission.Unavailable
-        store.get(jobId)
-        val task = LegacyTask(jobId, workflow)
-        active[jobId] = task
+        val lease = gitWorkspaceLeases.tryWorkflowAdmission(jobId) ?: return WebWorkflowAdmission.Unavailable
         try {
-            store.updateStatus(jobId, "queued", "Waiting for a legacy workflow worker; attempt provenance is unavailable")
-            workflowExecutor.execute(task)
-        } catch (_: RejectedExecutionException) {
-            task.finish("failed", "Workflow capacity is unavailable; retry when a worker is available")
-            return WebWorkflowAdmission.Unavailable
-        } catch (failure: Throwable) {
-            try { task.finish("failed", "Workflow could not be scheduled; retry when a worker is available") }
-            catch (cleanup: Throwable) { if (cleanup !== failure) failure.addSuppressed(cleanup) }
-            throw failure
-        }
-        return WebWorkflowAdmission.Started(jobId)
+            if (closed || stopping || uploads.isNotEmpty()) return WebWorkflowAdmission.Unavailable
+            if (publicationFailures.isNotEmpty()) return WebWorkflowAdmission.Unavailable
+            val owner = writableStore()
+            val record = inspectStoredJob(owner, jobId) as? WorkflowJobInspection.Available ?: return WebWorkflowAdmission.Unavailable
+            if (active.containsKey(jobId)) return WebWorkflowAdmission.AlreadyRunning
+            // Legacy shared report locations cannot be used to write into a job with durable history.
+            if (record.snapshot.attempts.isNotEmpty()) return WebWorkflowAdmission.Unavailable
+            store.get(jobId)
+            val task = LegacyTask(jobId, workflow)
+            active[jobId] = task
+            try {
+                store.updateStatus(jobId, "queued", "Waiting for a legacy workflow worker; attempt provenance is unavailable")
+                workflowExecutor.execute(task)
+            } catch (_: RejectedExecutionException) {
+                task.finish("failed", "Workflow capacity is unavailable; retry when a worker is available")
+                return WebWorkflowAdmission.Unavailable
+            } catch (failure: Throwable) {
+                try { task.finish("failed", "Workflow could not be scheduled; retry when a worker is available") }
+                catch (cleanup: Throwable) { if (cleanup !== failure) failure.addSuppressed(cleanup) }
+                throw failure
+            }
+            return WebWorkflowAdmission.Started(jobId)
+        } finally { lease.close() }
     }
 
     @Synchronized
     fun startDurable(jobId: String, expectedJobVersion: String, request: DurableWebWorkflowRequest): DurableWebWorkflowAdmission {
-        if (uploads.isNotEmpty()) return DurableWebWorkflowAdmission.Unavailable("UPLOAD_CAPACITY")
-        if (closed || stopping) return DurableWebWorkflowAdmission.Unavailable("SERVICE_STOPPED")
-        if (publicationFailures.isNotEmpty()) return DurableWebWorkflowAdmission.Unavailable("RECOVERY_REQUIRED")
-        val registration = registrations[request.workflow] ?: return DurableWebWorkflowAdmission.Unsupported(request.workflow)
-        val owner = writableStore()
-        val view = inspectStoredJob(owner, jobId) as? WorkflowJobInspection.Available
-            ?: throw WebJobServiceException("JOB_RECORD_UNAVAILABLE", "The job record is unavailable; inspect its storage diagnostic.")
-        val publicVersion = webJob(presentation(jobId)).getValue("version").jsonPrimitive.content
-        if (publicVersion != expectedJobVersion) throw WorkflowStoreException("VERSION_CONFLICT", "The workflow version changed; refresh before starting another attempt.")
-        if (active.containsKey(jobId) || view.snapshot.attempts.any { !it.state.terminal }) return DurableWebWorkflowAdmission.AlreadyRunning
-        if (request.inputRevisionId != null && request.inputRevisionId != view.snapshot.acceptedRevision?.revisionId) {
-            throw WebJobServiceException("INPUT_REVISION_UNAVAILABLE", "The requested input revision has no trusted publication reference for this job.")
-        }
-        val job = store.get(jobId)
-        val queued = owner.create(jobId, view.snapshot.version,
-            NewWorkflowAttempt(request.workflow, registration.limits, request.inputRevisionId,
-                harnessCapabilityId = registration.harnessCapabilityId, previousRunId = request.previousRunId))
-        val task = DurableTask(job, queued.attempt, registration.adapter)
-        active[jobId] = task
-        try { workflowExecutor.execute(task) }
-        catch (_: RejectedExecutionException) {
-            task.finish(WorkflowTransition.Finish(WorkflowRunState.FAILED, WorkflowTerminalReason.REFUSED))
-            return DurableWebWorkflowAdmission.Unavailable("CAPACITY_UNAVAILABLE")
-        } catch (failure: Throwable) {
-            try { task.finish(WorkflowTransition.Finish(WorkflowRunState.FAILED, WorkflowTerminalReason.FAILED)) }
-            catch (cleanup: Throwable) { if (cleanup !== failure) failure.addSuppressed(cleanup) }
-            throw failure
-        }
-        return DurableWebWorkflowAdmission.Started(jobId, queued.attempt.runId)
+        val lease = gitWorkspaceLeases.tryWorkflowAdmission(jobId) ?: return DurableWebWorkflowAdmission.Unavailable("WORKTREE_BUSY")
+        try {
+            if (uploads.isNotEmpty()) return DurableWebWorkflowAdmission.Unavailable("UPLOAD_CAPACITY")
+            if (closed || stopping) return DurableWebWorkflowAdmission.Unavailable("SERVICE_STOPPED")
+            if (publicationFailures.isNotEmpty()) return DurableWebWorkflowAdmission.Unavailable("RECOVERY_REQUIRED")
+            val registration = registrations[request.workflow] ?: return DurableWebWorkflowAdmission.Unsupported(request.workflow)
+            val owner = writableStore()
+            val view = inspectStoredJob(owner, jobId) as? WorkflowJobInspection.Available
+                ?: throw WebJobServiceException("JOB_RECORD_UNAVAILABLE", "The job record is unavailable; inspect its storage diagnostic.")
+            val publicVersion = webJob(presentation(jobId)).getValue("version").jsonPrimitive.content
+            if (publicVersion != expectedJobVersion) throw WorkflowStoreException("VERSION_CONFLICT", "The workflow version changed; refresh before starting another attempt.")
+            if (active.containsKey(jobId) || view.snapshot.attempts.any { !it.state.terminal }) return DurableWebWorkflowAdmission.AlreadyRunning
+            if (request.inputRevisionId != null && request.inputRevisionId != view.snapshot.acceptedRevision?.revisionId) {
+                throw WebJobServiceException("INPUT_REVISION_UNAVAILABLE", "The requested input revision has no trusted publication reference for this job.")
+            }
+            val job = store.get(jobId)
+            val queued = owner.create(jobId, view.snapshot.version,
+                NewWorkflowAttempt(request.workflow, registration.limits, request.inputRevisionId,
+                    harnessCapabilityId = registration.harnessCapabilityId, previousRunId = request.previousRunId))
+            val task = DurableTask(job, queued.attempt, registration.adapter)
+            active[jobId] = task
+            try { workflowExecutor.execute(task) }
+            catch (_: RejectedExecutionException) {
+                task.finish(WorkflowTransition.Finish(WorkflowRunState.FAILED, WorkflowTerminalReason.REFUSED))
+                return DurableWebWorkflowAdmission.Unavailable("CAPACITY_UNAVAILABLE")
+            } catch (failure: Throwable) {
+                try { task.finish(WorkflowTransition.Finish(WorkflowRunState.FAILED, WorkflowTerminalReason.FAILED)) }
+                catch (cleanup: Throwable) { if (cleanup !== failure) failure.addSuppressed(cleanup) }
+                throw failure
+            }
+            return DurableWebWorkflowAdmission.Started(jobId, queued.attempt.runId)
+        } finally { lease.close() }
     }
 
     /** Transport availability is not runtime readiness. Existing receipts remain replayable
@@ -992,46 +1002,50 @@ class WebJobService(
             throw WebJobServiceException(failure.code, "The recorded workflow start is unavailable. Refresh its state before retrying.", failure)
         }
         if (replay != null) return DurableWebWorkflowStartResult(replay.attempt, replayed = true)
-        if (stopping) throw WebJobServiceException("SERVICE_STOPPED", "The job service is stopping.")
-        if (uploads.isNotEmpty()) throw WebJobServiceException("UPLOAD_CAPACITY", "Upload capacity is currently in use.")
-        val registration = registrations[request.workflow]
-            ?: throw WebJobServiceException("WORKFLOW_UNAVAILABLE", "The requested workflow is unavailable.")
-        if (request.limits != registration.limits) throw WebJobServiceException("WORKFLOW_LIMITS_UNAVAILABLE", "The requested workflow limits are unavailable.")
-        if (request.harnessCapabilityId != registration.harnessCapabilityId) {
-            throw WebJobServiceException("HARNESS_UNAVAILABLE", "The requested harness capability is unavailable.")
-        }
-        if (owner == null) throw WebJobServiceException("JOB_NOT_FOUND", "The requested job is unavailable.")
-        val view = inspectStoredJob(owner, jobId) as? WorkflowJobInspection.Available
-            ?: throw WebJobServiceException("JOB_RECORD_UNAVAILABLE", "The job record is unavailable; inspect its storage diagnostic.")
-        val publicVersion = webJob(presentation(jobId)).getValue("version").jsonPrimitive.content
-        if (publicVersion != expectedJobVersion) throw WebJobServiceException("VERSION_CONFLICT", "The job version changed. Refresh before starting new work.")
-        if (active.containsKey(jobId) || view.snapshot.attempts.any { !it.state.terminal }) {
-            throw WebJobServiceException("ACTIVE_RUN", "This job already has an active workflow attempt.")
-        }
-        // Admission uses owned task accounting, never sampled executor telemetry.
-        if (active.size >= maximumInFlight) throw WebJobServiceException("CAPACITY_UNAVAILABLE", "Workflow capacity is currently full.")
-        if (request.inputRevisionId != null && request.inputRevisionId != view.snapshot.acceptedRevision?.revisionId) {
-            throw WebJobServiceException("INPUT_REVISION_UNAVAILABLE", "The selected input revision is unavailable for this job.")
-        }
-        val job = store.get(jobId)
-        val admitted = publishStart(jobId) {
-            owner.createIdempotent(jobId, view.snapshot.version, request, requestKey, expectedJobVersion)
-        }
-        if (admitted.replayed) return DurableWebWorkflowStartResult(admitted.attempt, replayed = true)
-        val task = DurableTask(job, admitted.attempt, registration.adapter)
-        active[jobId] = task
-        try { workflowExecutor.execute(task) }
-        catch (_: RejectedExecutionException) {
-            task.finish(WorkflowTransition.Finish(WorkflowRunState.FAILED, WorkflowTerminalReason.REFUSED))
-        } catch (failure: Throwable) {
-            try { task.finish(WorkflowTransition.Finish(WorkflowRunState.FAILED, WorkflowTerminalReason.FAILED)) }
-            catch (cleanup: Throwable) { if (cleanup !== failure) failure.addSuppressed(cleanup) }
-            if (failure !is Exception) throw failure
-            if (publicationFailures.isNotEmpty()) throw WebJobServiceException("RECOVERY_REQUIRED",
-                "Workflow publication is uncertain. Reopen storage before starting more work.", failure)
-            throw WebJobServiceException("SCHEDULING_FAILED", "Workflow scheduling did not finish. Read its retained attempt before retrying.", failure)
-        }
-        return DurableWebWorkflowStartResult(task.attempt, replayed = false)
+        val lease = gitWorkspaceLeases.tryWorkflowAdmission(jobId) ?: throw WebJobServiceException("WORKTREE_BUSY",
+            "A Git checkout or work-tree removal owns this job. Wait for it to finish before starting a workflow.")
+        try {
+            if (stopping) throw WebJobServiceException("SERVICE_STOPPED", "The job service is stopping.")
+            if (uploads.isNotEmpty()) throw WebJobServiceException("UPLOAD_CAPACITY", "Upload capacity is currently in use.")
+            val registration = registrations[request.workflow]
+                ?: throw WebJobServiceException("WORKFLOW_UNAVAILABLE", "The requested workflow is unavailable.")
+            if (request.limits != registration.limits) throw WebJobServiceException("WORKFLOW_LIMITS_UNAVAILABLE", "The requested workflow limits are unavailable.")
+            if (request.harnessCapabilityId != registration.harnessCapabilityId) {
+                throw WebJobServiceException("HARNESS_UNAVAILABLE", "The requested harness capability is unavailable.")
+            }
+            if (owner == null) throw WebJobServiceException("JOB_NOT_FOUND", "The requested job is unavailable.")
+            val view = inspectStoredJob(owner, jobId) as? WorkflowJobInspection.Available
+                ?: throw WebJobServiceException("JOB_RECORD_UNAVAILABLE", "The job record is unavailable; inspect its storage diagnostic.")
+            val publicVersion = webJob(presentation(jobId)).getValue("version").jsonPrimitive.content
+            if (publicVersion != expectedJobVersion) throw WebJobServiceException("VERSION_CONFLICT", "The job version changed. Refresh before starting new work.")
+            if (active.containsKey(jobId) || view.snapshot.attempts.any { !it.state.terminal }) {
+                throw WebJobServiceException("ACTIVE_RUN", "This job already has an active workflow attempt.")
+            }
+            // Admission uses owned task accounting, never sampled executor telemetry.
+            if (active.size >= maximumInFlight) throw WebJobServiceException("CAPACITY_UNAVAILABLE", "Workflow capacity is currently full.")
+            if (request.inputRevisionId != null && request.inputRevisionId != view.snapshot.acceptedRevision?.revisionId) {
+                throw WebJobServiceException("INPUT_REVISION_UNAVAILABLE", "The selected input revision is unavailable for this job.")
+            }
+            val job = store.get(jobId)
+            val admitted = publishStart(jobId) {
+                owner.createIdempotent(jobId, view.snapshot.version, request, requestKey, expectedJobVersion)
+            }
+            if (admitted.replayed) return DurableWebWorkflowStartResult(admitted.attempt, replayed = true)
+            val task = DurableTask(job, admitted.attempt, registration.adapter)
+            active[jobId] = task
+            try { workflowExecutor.execute(task) }
+            catch (_: RejectedExecutionException) {
+                task.finish(WorkflowTransition.Finish(WorkflowRunState.FAILED, WorkflowTerminalReason.REFUSED))
+            } catch (failure: Throwable) {
+                try { task.finish(WorkflowTransition.Finish(WorkflowRunState.FAILED, WorkflowTerminalReason.FAILED)) }
+                catch (cleanup: Throwable) { if (cleanup !== failure) failure.addSuppressed(cleanup) }
+                if (failure !is Exception) throw failure
+                if (publicationFailures.isNotEmpty()) throw WebJobServiceException("RECOVERY_REQUIRED",
+                    "Workflow publication is uncertain. Reopen storage before starting more work.", failure)
+                throw WebJobServiceException("SCHEDULING_FAILED", "Workflow scheduling did not finish. Read its retained attempt before retrying.", failure)
+            }
+            return DurableWebWorkflowStartResult(task.attempt, replayed = false)
+        } finally { lease.close() }
     }
 
     private fun <T> publishStart(jobId: String, command: () -> T): T = try { command() }

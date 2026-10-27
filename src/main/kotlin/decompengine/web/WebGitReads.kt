@@ -168,6 +168,8 @@ internal class WebGitReads(private val repositories: () -> ManagedGitRepositorie
             if (view.observation.dirty) add("dirty" to "The work tree has uncommitted changes. Review, stage and commit them, or keep them; nothing is discarded automatically.")
             else add("clean" to "The work tree matches HEAD apart from ignored files.")
             if (busy) add("busy" to "A repository operation is running. Reads stay available; changes wait until it finishes.")
+            if (service.activeWorker(jobId, repositoryId, worktree)) add("active-worker" to
+                "A worker is using this work tree. Switching and removal wait until it finishes; refresh and review again. Source and evidence browsing stay available.")
             if (!view.observation.status.complete) add("incomplete" to "Status output exceeded its bound, so this listing is incomplete.")
         }
         return buildJsonObject {
