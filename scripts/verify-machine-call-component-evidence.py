@@ -738,6 +738,7 @@ class RetainedRelocationIndex:
         self.load_starts = [row[0] for row in self.loads]
         self.load_ends = sorted(row[2] for row in self.loads)
         self.load_flags = {row["index"]: row["flags"] for row in inventory["programHeaders"] if row["type"] == 1}
+        self.validate_metadata_storage(input_bytes)
         self.code_sections, self.code_prefix_ends = [], []
         for section in self.sections.values():
             start, size = address(section["address"]), address(section["size"])
@@ -781,6 +782,50 @@ class RetainedRelocationIndex:
         for index, row in enumerate(self.writes):
             self.positions[row[3]] = index
             self.prefix_ends.append(max(row[4], self.prefix_ends[-1] if self.prefix_ends else 0))
+
+    def validate_metadata_storage(self, input_bytes: int) -> None:
+        """Reconcile retained metadata storage, without opening original-host ELF paths.
+
+        Mirror metadataSection()/metadata(): required dynamic tables are allocated,
+        uncompressed file storage; each nonempty range has exactly one intersecting
+        LOAD, fully backs onto that LOAD's file bytes, and agrees on file offsets.
+        Reuse the LOAD interval index so adversarial overlaps do not cause a scan
+        per metadata section.
+        """
+        # retained_relocation_tables() has already authenticated the active index.
+        active = self.sections[self.inventory["activeSymbolTableSectionIndex"]]
+        strings = self.sections.get(active["link"])
+        if strings is None or strings["type"] != 3:
+            raise VerificationError("retained dynamic metadata string table is missing")
+        required = {active["index"], strings["index"]}
+        for section in self.sections.values():
+            kind, flags = section["type"], address(section["flags"])
+            assert flags is not None
+            if kind in {6, 0x6fffffff, 0x6ffffffe, 0x6ffffffd} or kind in {11, 4, 9} and flags & 2:
+                required.add(section["index"])
+            if kind in {0x6ffffffe, 0x6ffffffd}:
+                linked = self.sections.get(section["link"])
+                if linked is None or linked["type"] != 3:
+                    raise VerificationError("retained dynamic metadata version string table is missing")
+                required.add(linked["index"])
+        for index in sorted(required):
+            section = self.sections[index]
+            start, size, flags = (address(section[key]) for key in ("address", "size", "flags"))
+            # Nonnullable address() calls guarantee integers; make that contract
+            # explicit for analyzers that do not narrow through require().
+            assert start is not None and size is not None and flags is not None
+            require(flags & 2 != 0 and not flags & 0x800 and section["type"] != 8 and
+                    start + size <= (1 << 64) - 1 and section["offset"] + size <= input_bytes,
+                    "retained dynamic metadata is not allocated uncompressed file storage within bounds")
+            if not size:
+                continue  # As in the producer, an empty table requires no LOAD owner.
+            end = start + size - 1
+            require(bisect_right(self.load_starts, end) - bisect_left(self.load_ends, start) == 1,
+                    "retained dynamic metadata lacks unique LOAD ownership")
+            load = self.loads[bisect_left(self.load_prefix_ends, start)]
+            require(load[0] <= start and end < load[0] + load[3] and
+                    load[4] + start - load[0] == section["offset"],
+                    "retained dynamic metadata file and LOAD mappings disagree")
 
     def code_window_length(self, location: int) -> int | None:
         """Unique executable section/LOAD ownership, mirroring codeWindowLength().

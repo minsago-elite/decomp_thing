@@ -421,6 +421,12 @@ class ExternalCallComponentEvidenceTest(unittest.TestCase):
             "dynamicSymbols": [symbol], "relocations": [relocation], "versionRequirements": [], "versionDefinitions": [],
             "neededLibraries": ["libexample.so"], "unsupportedReasons": ["dynamic-hash-population-not-reconciled",
                 "runtime-provider-and-interposition-unresolved"]}
+        # Dynamic relocation sections need their own file-backed LOAD witnesses;
+        # leave room for tests that extend the separate relative-relocation table.
+        for index, start, offset, size in ((20, 0x4000, 0, 24), (21, 0x5000, 24, 128)):
+            inventory["programHeaders"].append({"index": index, "type": 1, "flags": 4, "offset": hex(offset),
+                "virtualAddress": hex(start), "physicalAddress": hex(start), "fileSize": hex(size),
+                "memorySize": hex(size), "alignment": "0x1"})
         for index, name, start, offset in ((9, ".text", 0x1010, 16), (10, ".plt", 0x2000, 32)):
             inventory["sections"].append({"index": index, "name": name, "type": 1, "flags": "0x6", "address": hex(start),
                 "offset": offset, "size": "0xf", "link": 0, "info": 0, "alignment": "0x1", "entrySize": "0x0"})
@@ -933,12 +939,81 @@ class ExternalCallComponentEvidenceTest(unittest.TestCase):
                         with self.assertRaisesRegex(VERIFY.VerificationError, "relative relocation prefix"):
                             self.verify()
 
+    def test_dynamic_metadata_requires_allocated_uncompressed_uniquely_mapped_storage(self) -> None:
+        inventory = self.report["dynamicInventory"]
+        # Include nonempty symbol/string/dynamic tables, not only relocation storage.
+        for name, start, offset, size in ((".dynsym", 0x7000, 256, 48), (".dynstr", 0x7100, 512, 32),
+                                         (".dynamic", 0x7200, 768, 16)):
+            if name == ".dynamic":
+                inventory["sections"].append({"index": 23, "name": name, "type": 6, "flags": "0x2", "address": hex(start),
+                    "offset": offset, "size": hex(size), "link": 3, "info": 0, "alignment": "0x8", "entrySize": "0x10"})
+            else:
+                section = next(row for row in inventory["sections"] if row["name"] == name)
+                section.update(address=hex(start), offset=offset, size=hex(size))
+            index = {".dynsym": 24, ".dynstr": 25, ".dynamic": 26}[name]
+            inventory["programHeaders"].append({"index": index, "type": 1, "flags": 4, "offset": hex(offset),
+                "virtualAddress": hex(start), "physicalAddress": hex(start), "fileSize": hex(size),
+                "memorySize": hex(size), "alignment": "0x1"})
+        next(row for row in inventory["dynamicEntries"] if row["tag"] == "0x6")["value"] = "0x7000"
+        self.write_payloads()
+        self.verify()
+        original = copy.deepcopy(self.report)
+        for name in (".dynsym", ".dynstr", ".dynamic", ".rela.plt"):
+            for mutation in ("unallocated", "compressed", "file-bounds", "address-overflow", "offset", "absent-load",
+                             "partial-load", "zero-fill", "duplicate-load", "nested-load"):
+                with self.subTest(section=name, mutation=mutation):
+                    self.report = copy.deepcopy(original)
+                    inventory = self.report["dynamicInventory"]
+                    section = next(row for row in inventory["sections"] if row["name"] == name)
+                    start = int(section["address"], 16)
+                    load = next(row for row in inventory["programHeaders"] if int(row["virtualAddress"], 16) == start)
+                    if mutation == "unallocated":
+                        section["flags"] = "0x0"
+                    elif mutation == "compressed":
+                        section["flags"] = "0x802"
+                    elif mutation == "file-bounds":
+                        section["offset"] = self.report["inputBytes"]
+                    elif mutation == "address-overflow":
+                        section["address"] = "0xfffffffffffffff0"
+                        if name == ".dynsym":
+                            next(row for row in inventory["dynamicEntries"] if row["tag"] == "0x6")["value"] = section["address"]
+                    elif mutation == "offset":
+                        section["offset"] += 1
+                        # Preserve the derived relocation file offsets: reject mapping, not row mismatch.
+                        for row in inventory["relocations"]:
+                            if row["sectionIndex"] == section["index"]:
+                                row["fileOffset"] += 1
+                    elif mutation == "absent-load":
+                        inventory["programHeaders"].remove(load)
+                    elif mutation == "partial-load":
+                        load["virtualAddress"] = hex(start + 1)
+                    elif mutation == "zero-fill":
+                        load["fileSize"] = hex(int(section["size"], 16) - 1)
+                    else:
+                        other = load | {"index": 27}
+                        if mutation == "nested-load":
+                            other.update(virtualAddress=hex(start + 1), fileSize="0x1", memorySize="0x1")
+                        inventory["programHeaders"].append(other)
+                    self.write_payloads()
+                    with self.assertRaises(VERIFY.VerificationError):
+                        self.verify()
+        # Empty tables still require allocated/uncompressed flags, but no LOAD.
+        for flags in ("0x0", "0x802"):
+            self.report = copy.deepcopy(original)
+            section = next(row for row in self.report["dynamicInventory"]["sections"] if row["name"] == ".dynsym")
+            section.update(size="0x0", flags=flags)
+            self.write_payloads()
+            with self.assertRaises(VERIFY.VerificationError):
+                self.verify()
+
     def test_static_import_requires_consistent_retained_version_identity(self) -> None:
         inventory = self.report["dynamicInventory"]
         inventory["sections"].extend({"index": index, "name": name, "type": kind, "flags": "0x2", "address": "0x0", "offset": 0,
             "size": "0x0", "link": link, "info": 0, "alignment": "0x1", "entrySize": "0x0"}
             for index, name, kind, link in ((6, ".gnu.version", 0x6fffffff, 1), (7, ".gnu.version_r", 0x6ffffffe, 3)))
         inventory["sections"][6].update(entrySize="0x2", size="0x4")
+        inventory["programHeaders"].append({"index": 22, "type": 1, "flags": 4, "offset": "0x0",
+            "virtualAddress": "0x0", "physicalAddress": "0x0", "fileSize": "0x4", "memorySize": "0x4", "alignment": "0x1"})
         inventory["sections"][7].update(address="0x6000", offset=64, size="0x20", info=1)
         inventory["programHeaders"].append({"index": 1, "type": 1, "flags": 4, "offset": "0x40",
             "virtualAddress": "0x6000", "physicalAddress": "0x6000", "fileSize": "0x20", "memorySize": "0x20", "alignment": "0x1"})
@@ -977,6 +1052,11 @@ class ExternalCallComponentEvidenceTest(unittest.TestCase):
             lambda inv: inv["versionRequirements"][0].update(providerRequest="other.so"),
             lambda inv: inv["versionRequirements"][0].update(rawIndex=3),
             lambda inv: inv["sections"][0].update(link=9), lambda inv: inv["sections"][6].update(link=9),
+            lambda inv: inv["sections"][6].update(flags="0x0"), lambda inv: inv["sections"][6].update(flags="0x802"),
+            lambda inv: (inv["sections"][6].update(offset=1), inv["dynamicSymbols"][0]["version"].update(fileOffset=3)),
+            lambda inv: inv["programHeaders"].remove(next(row for row in inv["programHeaders"] if row["index"] == 22)),
+            lambda inv: next(row for row in inv["programHeaders"] if row["index"] == 22).update(fileSize="0x3"),
+            lambda inv: inv["programHeaders"].append(next(row for row in inv["programHeaders"] if row["index"] == 22) | {"index": 23}),
             lambda inv: inv["sections"][7].update(type=1), lambda inv: inv["sections"][7].update(link=1),
             lambda inv: inv["sections"][7].update(info=2), lambda inv: inv["sections"][7].update(flags="0x802"),
             lambda inv: inv["sections"][7].update(offset=4090), lambda inv: inv["sections"][7].update(address="0x6001"),
@@ -1174,7 +1254,8 @@ class RetainedExternalEvidenceRegressionTest(unittest.TestCase):
         with tempfile.TemporaryDirectory(prefix="real-driver-", dir=temporary_root) as temporary:
             output = Path(temporary)
             (output / "driver-request.json").write_bytes((directory / "driver-request.json").read_bytes())
-            for mutation, error in (("packed-relr", "unsupported reasons differ"), ("empty-jmprel", "membership differs"),
+            for mutation, error in (("dynsym-unallocated", "dynamic metadata"), ("jmprel-mapping-disagrees", "dynamic metadata"),
+                                    ("packed-relr", "unsupported reasons differ"), ("empty-jmprel", "membership differs"),
                                     ("false-canonical", "noncanonical physical destination"),
                                     ("indirect-canonical", "noncanonical physical destination"),
                                     ("stripped-strlen-version", "version presence differs"),
@@ -1189,7 +1270,16 @@ class RetainedExternalEvidenceRegressionTest(unittest.TestCase):
                                     ("plt-nonexecutable-load", "byte-window ownership")):
                 with self.subTest(mutation=mutation):
                     report, evidence = copy.deepcopy(original_report), copy.deepcopy(original_evidence)
-                    if mutation == "packed-relr":
+                    if mutation == "dynsym-unallocated":
+                        next(row for row in report["dynamicInventory"]["sections"] if row["name"] == ".dynsym")["flags"] = "0x0"
+                    elif mutation == "jmprel-mapping-disagrees":
+                        inventory = report["dynamicInventory"]
+                        section = next(row for row in inventory["sections"] if row["name"] == ".rela.plt")
+                        section["offset"] += 1
+                        for row in inventory["relocations"]:
+                            if row["sectionIndex"] == section["index"]:
+                                row["fileOffset"] += 1
+                    elif mutation == "packed-relr":
                         entry = next(row for row in report["dynamicInventory"]["dynamicEntries"] if row["tag"] == "0x15")
                         entry.update(tag="0x24", value="0x401da0")
                     elif mutation == "stripped-strlen-version":
