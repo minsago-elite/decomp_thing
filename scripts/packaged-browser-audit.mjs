@@ -149,7 +149,9 @@ export const measurePage = `(() => {
   const describe = element => [element.tagName.toLowerCase(), element.id ? '#' + element.id : '',
     element.classList.length ? '.' + [...element.classList].join('.') : ''].join('') + ' ' + JSON.stringify((element.textContent || '').trim().slice(0, 48));
   const shown = element => {
-    if (element.closest('[hidden], .sr-only') || element.getClientRects().length === 0) return false;
+    // Closed <details> descendants can still have client rects and computed styles.
+    // checkVisibility excludes those unrendered boxes without exempting open disclosures.
+    if (element.closest('[hidden], .sr-only') || !element.checkVisibility()) return false;
     const style = getComputedStyle(element);
     return style.visibility === 'visible' && style.display !== 'none';
   };
@@ -222,7 +224,7 @@ export const measureContrast = `(() => {
     const element = node.parentElement;
     if (!element || seen.has(element) || !node.textContent.trim()) continue;
     seen.add(element);
-    if (element.closest('[hidden], .sr-only, script, style, noscript') || element.getClientRects().length === 0) continue;
+    if (element.closest('[hidden], .sr-only, script, style, noscript') || !element.checkVisibility()) continue;
     const style = getComputedStyle(element);
     if (style.visibility !== 'visible' || Number(style.opacity) === 0) continue;
     // WCAG 1.4.3 exempts inactive controls.

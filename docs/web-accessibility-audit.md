@@ -25,6 +25,7 @@ own live status; this page records what is checked, how, and what still needs a 
 | The reduced-motion rule set `transition-duration: 0.01ms` on every element, so any property change (for example switching to the dark theme) started hundreds of real transitions; in a throttled tab the old colours stayed on screen and measured 1.004:1. | Packaged audit: `document.getAnimations()` and text contrast after a theme switch. | Reduced motion now sets `animation: none` and `transition: none`. The app declares no animations, so nothing that was meant to run is removed. |
 | Breadcrumb links ("All jobs") rendered below 24×24 CSS px. | Packaged audit target-size check. | Breadcrumb links are inline-flex with a 1.5rem minimum height and width. |
 | "Download complete recorded input" used `download=""`. preact-iso only skips truthy `link.download`, so Enter or a click turned the attachment into an in-app route and no download began. | Packaged audit keyboard download, then a component regression test. | The link carries the file's display name; the server's `Content-Disposition` still names the saved file. |
+| Populated validation history/case tables widened narrow and zoomed attempt views and pushed inspection actions off-screen. The comparison table had the same missing styling. | Hosted populated-content audit (PR #1782, run `40266450563`); component regressions cover all three table wrappers. | All validation tables now use the existing bounded `.retained-case-table` styling on their named, keyboard-focusable regions; the surrounding evidence section uses the retained-evidence wrapping rules. Hosted qualification of the fix is required. |
 
 ### Audit coverage corrections
 
@@ -43,6 +44,12 @@ clipping outside the named source/table exemptions. Dependency-free regression c
 missing content/reads and bounded `auto`/`hidden`/`clip` overflow; these models are not browser
 rendering evidence. The expanded populated-content coverage requires its own hosted packaged
 qualification; earlier shell-only results must not be used as that evidence.
+
+The populated-content run also exposed an audit false positive: descendants of closed
+`<details>` can retain client rects even though they are not rendered. Layout and contrast now
+use `checkVisibility()` to exclude those boxes. Opening the disclosure restores the checks;
+regression controls require visible overflow and insufficient contrast to fail. This does not
+exempt visible previews or add any new horizontal-scroll exception.
 
 Contrast, reflow, focus, target-size and reduced-motion results are retained in the CI
 `packaged-web-verification` artifact

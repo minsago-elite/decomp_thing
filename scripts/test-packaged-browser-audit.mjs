@@ -235,12 +235,12 @@ test('evidence fixtures preserve attempt identity, validation owner commitments 
   assert.equal(receipt.validationCases.graphSha256, history.graphSha256);
 });
 
-function geometryModel({ exempt = false, overflow = 'auto', outsideChild = false } = {}) {
+function geometryModel({ exempt = false, overflow = 'auto', outsideChild = false, visible = true } = {}) {
   const selectors = '.source-rows, .retained-case-table';
   const node = (name, right = 300) => ({
     tagName: name.toUpperCase(), id: '', classList: [], textContent: name, tabIndex: 0,
     clientWidth: 300, scrollWidth: 300,
-    closest: () => null, getClientRects: () => [{}], matches: () => false,
+    closest: () => null, getClientRects: () => [{}], checkVisibility: () => visible, matches: () => false,
     getBoundingClientRect: () => ({ left: 0, right, width: right, height: 32 }),
     getAttribute: () => 'Named table',
   });
@@ -280,6 +280,29 @@ test('measurement and verdict reject bounded non-exempt scrolling and clipping w
   assert.equal(measured.overflowCount, 0);
   const audit = clean(); Object.assign(audit.layout[0], measured);
   assert.deepEqual(verdict(audit), []);
+});
+
+test('closed disclosure content with client rects is not measured as visible overflow', () => {
+  assert.equal(geometryModel({ visible: false, outsideChild: true }).overflowCount, 0);
+  assert.equal(geometryModel({ visible: true, outsideChild: true }).overflowCount, 2,
+    'Opening a disclosure must restore both local and off-screen overflow checks');
+});
+
+test('contrast ignores unrendered disclosure text but measures it when opened', () => {
+  for (const visible of [false, true]) {
+    const element = { closest: () => null, checkVisibility: () => visible };
+    const text = { parentElement: element, textContent: 'Closed preview' };
+    let visited = false;
+    const document = { body: {}, createTreeWalker: () => ({ nextNode: () => {
+      if (visited) return null;
+      visited = true; return text;
+    } }) };
+    const measured = runInNewContext(measureContrast, { document, NodeFilter: { SHOW_TEXT: 4 },
+      getComputedStyle: () => ({ visibility: 'visible', opacity: '1', color: 'rgb(255, 255, 255)',
+        backgroundImage: 'none', backgroundColor: 'rgb(255, 255, 255)', fontSize: '16px', fontWeight: '400' }) });
+    assert.equal(measured.measured, visible ? 1 : 0);
+    assert.equal(measured.failureCount, visible ? 1 : 0, 'Visible white-on-white text must still fail');
+  }
 });
 
 test('covers the documented desktop, narrow, 320px and 200%/400% zoom profiles', () => {
