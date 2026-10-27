@@ -115,6 +115,36 @@ class ObservationSystemdCleanupDecisionTest {
         }
     }
 
+    @Test
+    fun `missing or malformed identity metadata refuses before path observation or reselection`() {
+        val unit = "inert.scope"
+        val invocation = "a".repeat(32)
+        val cgroup = java.nio.file.Path.of("/sys/fs/cgroup/user.slice/$unit")
+        val snapshot = mapOf("LoadState" to "loaded", "ActiveState" to "active", "Id" to unit, "Transient" to "yes",
+            "InvocationID" to invocation, "ControlGroup" to "/user.slice/$unit")
+        val cases = mapOf(
+            "missing Id" to snapshot - "Id",
+            "empty Id" to snapshot + ("Id" to ""),
+            "missing Transient" to snapshot - "Transient",
+            "empty Transient" to snapshot + ("Transient" to ""),
+            "missing InvocationID" to snapshot - "InvocationID",
+            "empty InvocationID" to snapshot + ("InvocationID" to ""),
+            "short InvocationID" to snapshot + ("InvocationID" to "a".repeat(31)),
+            "long InvocationID" to snapshot + ("InvocationID" to "a".repeat(33)),
+            "nonhex InvocationID" to snapshot + ("InvocationID" to "g".repeat(32)),
+        )
+        for ((label, properties) in cases) {
+            val state = decideObservationUnitMutationTarget(properties, unit, invocation, cgroup,
+                pathAbsent = { error("$label must refuse before observing the path") },
+                reselect = { error("$label must refuse before reselection") },
+                onSelectionFailure = { error("$label must refuse without a selection failure") })
+            assertEquals(ObservationUnitMutationTargetState.REPLACED, state, label)
+            assertFailsWith<FullTreeFunctionObservationIsolationException>(label) {
+                observationSystemdCleanupMutationPermitted(state)
+            }
+        }
+    }
+
     /**
      * #1566: the first SIGKILL empties the scope, and systemd prunes its cgroup asynchronously
      * (scope_enter_dead -> unit_notify -> unit_prune_cgroup). An atomic pre-prune snapshot can still
