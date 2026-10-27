@@ -25,7 +25,7 @@ it('builds canonical catalog routes and withholds pages for another selection', 
   expect(() => bindArtifactCatalog({ ...page, items: [unlabelled] }, jobId, runId, null)).toThrow(ApiClientError);
 });
 
-it('lists artifacts explicitly and distinguishes verified digests from available files with native download links', async () => {
+it('lists artifacts explicitly and distinguishes checked inventories from unvalidated digests with native download links', async () => {
   const first = fixture('artifacts-run');
   first.data.page.nextCursor = 'cursor_artifacts_2';
   const second = fixture('artifacts-run');
@@ -46,7 +46,10 @@ it('lists artifacts explicitly and distinguishes verified digests from available
   expect(links[2]!.getAttribute('href')).toBe(first.data.items[2]!.contentHref);
   expect(screen.getByText(/^26214400 /u)).toBeTruthy();
   fireEvent.click(screen.getByRole('button', { name: 'Next artifact page' }));
-  expect(await screen.findByText(/2 retained files could not be read consistently/u)).toBeTruthy();
+  const unavailable = await screen.findByText(/2 retained files could not be read consistently/u);
+  expect(unavailable.textContent).toContain('512 MiB per-file catalog ceiling');
+  expect(unavailable.textContent).toContain('Detail reads and downloads have a separate 4 GiB ceiling');
+  expect(unavailable.textContent).not.toContain('4 GiB catalog limit');
   expect(fetcher.mock.calls[1]![0] as string).toContain('cursor=cursor_artifacts_2');
   fireEvent.click(screen.getByRole('checkbox', { name: 'Show only files bound to the result revision' }));
   await waitFor(() => expect(fetcher).toHaveBeenCalledTimes(3));
