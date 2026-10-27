@@ -1355,7 +1355,7 @@ its refusal codes.
 | Credentials | Server-side HTTPS username and token files, and SSH identity files, from `--git-credentials`. Passed only through the child environment, never through argv, records, audit, responses or exports | Browser-supplied credentials, credential helpers and interactive prompts |
 | Identity | Every commit and merge uses the server identity (`Decomp Workbench <workbench@localhost.invalid>` by default) as author and committer | Per-user or repository-configured identities |
 | Signing | Commits and merges are unsigned. Bootstrap reports `git-signing` as `unsupported`. A policy that requires signed commits refuses commits and merge commits (`SIGNING_UNAVAILABLE`) but keeps fast-forwards | Signing keys, GPG or SSH signing, and verification of existing signatures |
-| Repositories | Bare and non-bare imports in SHA-1 or SHA-256 object format. The packaged server supports full clones of SHA-1 remotes only. HEAD may be attached, detached or unborn. Server-managed linked work trees for attempts | SHA-256 remote clones (the clone destination is initialized as SHA-1; remote object-format negotiation is not implemented). Shallow repositories and shallow or partial clones, alternates, `commondir`, `.git` files, reftable, repository format above 1, and extensions other than `objectFormat`, `worktreeConfig`, `noop` and `preciousObjects` (`REPOSITORY_UNSUPPORTED`) |
+| Repositories | Bare and non-bare imports in SHA-1 or SHA-256 object format. Full clones discover the remote's advertised object format and initialize the destination accordingly, including empty SHA-256 remotes. JVM regressions cover admitted and HTTPS SHA-256 clones; the packaged browser journey still qualifies import/fetch, not clone. Imported HEAD may be attached, detached or unborn; cloning a detached remote HEAD requires an explicit branch. Server-managed linked work trees for attempts | Shallow repositories and shallow or partial clones, alternates, `commondir`, `.git` files, reftable, repository format above 1, and extensions other than `objectFormat`, `worktreeConfig`, `noop` and `preciousObjects` (`REPOSITORY_UNSUPPORTED`). Packaged clone/candidate-validation qualification remains open (#608) |
 | Detached HEAD | Status, history, diffs, provenance, branch creation and switching | Integration (`DETACHED`): switch to a branch first |
 | Integration | Fetch-then-review divergence, fast-forward and merge with conflict review, explicit staging and commit, and abort | Rebase, cherry-pick, squash, history rewriting and force pushes |
 | Publication | Explicit, reviewed fast-forward pushes, leased to the reviewed remote state, with reconciliation after an uncertain outcome | Force pushes, deleting remote branches, pushing tags |
@@ -1365,10 +1365,11 @@ its refusal codes.
 `GitRecoveryBoundariesTest` includes pre-start fetch restart/cancellation cases (#609): the
 operation has reached durable `running`, but no transfer child has started. Separate in-flight
 cases use a populated loopback HTTPS remote, pause after sending pack data, and wait for a
-nonempty client partial pack before cancellation or service shutdown/reopen. They check child
-termination, partial-state cleanup, unchanged prior tracking refs and HEAD, no implicit replay,
-and an explicit retry. This is orderly service restart coverage, not an OS process-death test.
-The remaining boundaries restart a push after publication, a commit after Git committed, and
+nonempty client partial pack in the operation's private quarantine before cancellation or service
+shutdown/reopen. They identify the fetch child by that staging Git directory and check child
+termination, removal of the entire staging tree, an unchanged live object store, prior tracking
+refs and HEAD, no implicit replay, and an explicit retry. This is orderly service restart coverage,
+not an OS process-death test. The remaining boundaries restart a push after publication, a commit after Git committed, and
 a merge after Git stopped with conflicts. The accepted evidence of the first commit is compared
 after each interruption: recorded snapshot digests, the revision mapping with its `accepted`
 state, and the verified export digest. Passing hosted JVM evidence is required before treating
@@ -1438,7 +1439,11 @@ synthetic server-side credential. Selected repository API responses, bootstrap, 
 and all regular files in application storage are checked for the raw token, username/token pair,
 Base64 pair, Basic value and complete Authorization header. Storage scanning is streamed with
 no large-file exclusion; non-regular entries are not followed and are listed in the report.
-`credentialRedaction` records surface/representation counts and storage coverage, and asserts
+Each required API read must return HTTP 200, the expected API-version/kind envelope, and non-null
+DTO contents tied to this repository and journey (including the published merge). Unavailable,
+missing, malformed or empty responses fail qualification rather than counting as clean surfaces;
+negative controls exercise these failures using the same collector injected into the browser.
+`credentialRedaction` records surface names/representation counts and storage coverage, and asserts
 absence only on those checked surfaces. It does not certify every user-facing download/export
 or demonstrate a production credential leak. Positive-control scanner tests run in frontend CI.
 Full #610 acceptance, including all export surfaces and submodule isolation, remains separate.

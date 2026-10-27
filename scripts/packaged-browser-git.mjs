@@ -4,7 +4,7 @@ import { spawnSync } from 'node:child_process';
 import { promises as fs } from 'node:fs';
 import { join } from 'node:path';
 import { createWebGitFixture } from './web-git-fixtures.mjs';
-import { assertCredentialAbsent, credentialCanaries, scanCredentialStorage } from './packaged-git-redaction.mjs';
+import { assertCredentialAbsent, collectGitRedactionSurfaces, credentialCanaries, scanCredentialStorage } from './packaged-git-redaction.mjs';
 
 const SUBJECT = 'Packaged journey: add notes';
 
@@ -313,23 +313,17 @@ export async function qualifyGitSync({ fixture, objectId, exportSha256, makeTarg
 
   // Isolation and redaction checks (#610).
   assert.equal(await fs.stat(fixture.marker).then(() => true, () => false), false, 'A repository filter driver ran');
-  const surfaces = await evaluate(tab, `(async () => {
-    const base = location.pathname.replace(/\\/git$/, '').replace('/nested/', '/nested/api/v1/') + '/repositories';
-    const listing = await (await fetch(base)).json();
-    const repository = listing.data.repositories[0].repositoryId;
-    const reads = ['', '/' + repository, '/' + repository + '/remotes', '/' + repository + '/audit?limit=200', '/' + repository + '/status',
-      '/' + repository + '/history', '/' + repository + '/refs'];
-    const texts = [JSON.stringify(listing), document.body.innerText, await (await fetch('/nested/api/v1/bootstrap')).text()];
-    for (const read of reads) texts.push(await (await fetch(base + read)).text());
-    return texts;
-  })()`);
+  const base = `/nested/api/v1/jobs/${fixture.jobId}/repositories`;
+  const surfaces = await evaluate(tab, `(${collectGitRedactionSurfaces.toString()})(
+    ${JSON.stringify(base)}, ${JSON.stringify(fixture.jobId)}, ${JSON.stringify(merged)}, document.body.innerText)`);
   const canaries = credentialCanaries('canary-bot', fixture.canary);
-  for (const text of surfaces) assertCredentialAbsent(text, canaries, 'a checked user-facing surface');
+  for (const { name, text } of surfaces) assertCredentialAbsent(text, canaries, `the ${name} surface`);
   const storage = await scanCredentialStorage(data, canaries);
   assert.deepEqual(tab.exceptions, []);
   return { importFetchDivergence: true, conflictResolved: true, mergeCommit: merged, pushedToRemote: true, auditedPublication: true,
     exportDigestStable: true, remoteUnavailableHandled: true, filterInert: true,
-    credentialRedaction: { checkedSurfaces: surfaces.length, representations: canaries.length, storage, absentOnCheckedSurfaces: true } };
+    credentialRedaction: { checkedSurfaces: surfaces.length, surfaceNames: surfaces.map(surface => surface.name),
+      representations: canaries.length, storage, absentOnCheckedSurfaces: true } };
 }
 
 /** Activate a native button once it is enabled; an operation that is still finishing keeps controls disabled. */
