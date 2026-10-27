@@ -29,15 +29,16 @@ internal object GccBundledCliIntentBuilder {
         require(!fullRecoveryExport || engineId in setOf("cc1", "driver")) {
             "full-recovery structural export requires cc1 or driver"
         }
-        require(engineId != "driver" || fullRecoveryExport) {
-            "driver admission requires a fresh full-recovery export"
+        require(engineId != "driver" || fullRecoveryExport || nativeCallObservations) {
+            "driver admission requires a fresh full-recovery or native-call export"
         }
-        require(cliInvocation == null || (cliInvocation.options.fullRecoveryExport == fullRecoveryExport &&
+        require(cliInvocation == null || (cliInvocation.options.engineId == engineId &&
+            cliInvocation.options.fullRecoveryExport == fullRecoveryExport &&
             cliInvocation.options.runtimeDiagnostics == runtimeDiagnostics)) {
-            "CLI invocation command differs from requested recovery mode"
+            "CLI invocation target or command differs from requested recovery mode"
         }
-        require(!nativeCallObservations || (engineId == "cc1" && runKind == GccCompilerEngineContainmentRunKind.FRESH_CONTROL)) {
-            "native call observations require a fresh uninterrupted cc1 operation"
+        require(!nativeCallObservations || (engineId in setOf("cc1", "driver") && runKind == GccCompilerEngineContainmentRunKind.FRESH_CONTROL)) {
+            "native call observations require a fresh uninterrupted cc1 or driver operation"
         }
         require(!nativeCallObservations || cliInvocation != null) {
             "native call observations require a bound production CLI invocation"
