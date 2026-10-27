@@ -308,20 +308,14 @@ class AcpAgentHarness(
         } catch (_: WorkspaceSnapshotCancelled) {
             AgentExecutionOutcome.Returned(AgentExecutionResult(AgentStopReason.CANCELLED, "cancelled during ACP session reconciliation"))
         } catch (failure: Error) {
-            prefixObservation?.failureCurrent(RuntimeCopyStatistics.Prefix.Failure.ERROR)
-            RuntimeCopyStatistics.Prefix.attach(prefixObservation, failure)
             try { sessionJournal?.close() } catch (cleanup: Throwable) { if (cleanup !== failure) failure.addSuppressed(cleanup) }
             throw failure
         } catch (failure: AgentExecutionException) {
-            prefixObservation?.failureCurrent()
-            RuntimeCopyStatistics.Prefix.attach(prefixObservation, failure)
             // Preserve the typed exception itself as the compatibility exception's cause. This
             // retains its original stack, nested cause, and suppressed cleanup diagnostics.
             cause = failure
             AgentExecutionOutcome.Failed(failure.failure)
         } catch (failure: Exception) {
-            prefixObservation?.failureCurrent()
-            RuntimeCopyStatistics.Prefix.attach(prefixObservation, failure)
             cause = failure
             AgentExecutionOutcome.Failed(
                 AgentFailure(
