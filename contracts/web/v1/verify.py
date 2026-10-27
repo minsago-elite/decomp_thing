@@ -214,7 +214,7 @@ def check_run(run: dict) -> None:
     reasons = {
         "queued": (None,), "running": (None,), "cancelling": (None,),
         "completed": ("COMPLETED", "NO_CHANGES"),
-        "failed": ("FAILED", "REFUSED", "LIMIT_EXHAUSTED"),
+        "failed": ("FAILED", "REFUSED", "LIMIT_EXHAUSTED", "TIMED_OUT", "INFRASTRUCTURE_FAILED"),
         "cancelled": ("CANCELLED",), "interrupted": ("PROCESS_INTERRUPTED",),
     }
     if run["terminalReason"] not in reasons[run["state"]]:
@@ -223,6 +223,42 @@ def check_run(run: dict) -> None:
         raise ValueError("queued attempt has already started")
     if run["state"] in ("running", "completed") and run["startedAt"] is None:
         raise ValueError("running or completed attempt has no start timestamp")
+    recovery = run.get("recovery")
+    if recovery is not None:
+        if run["previousRunId"] is None:
+            raise ValueError("recovery attempt has no predecessor")
+        if (recovery["mode"] == "retry") != (recovery["restores"] is None and recovery["checkpointSha256"] is None) \
+                or (recovery["restores"] is None) != (recovery["checkpointSha256"] is None):
+            raise ValueError("retry restores nothing; resume names its verified checkpoint and scope")
+
+
+RECOVERY_REASONS = ("RECOVERY_REQUIRED", "SERVICE_STOPPED", "ATTEMPT_ACTIVE", "ATTEMPT_COMPLETED", "ATTEMPT_SUPERSEDED",
+                    "ACTIVE_RUN", "WORKFLOW_UNAVAILABLE", "INPUT_UNVERIFIED", "UPLOAD_CAPACITY", "CAPACITY_UNAVAILABLE")
+ATTEMPT_CONTROL_REASONS = {
+    "cancel": ("RECOVERY_REQUIRED", "ATTEMPT_TERMINAL", "CANCEL_PENDING", "SERVICE_STOPPED", "NO_OWNED_WORKER", "RECEIPT_CAPACITY"),
+    "retry": RECOVERY_REASONS,
+    "resume": RECOVERY_REASONS + ("RESUME_UNSUPPORTED", "HARNESS_CHANGED", "CHECKPOINT_MISSING", "CHECKPOINT_MISMATCH",
+                                  "CHECKPOINT_UNVERIFIED", "WORKSPACE_UNVERIFIED", "SESSION_QUARANTINED", "CLEANUP_UNVERIFIED"),
+}
+
+
+def check_attempt_controls(data: dict) -> None:
+    """Eligibility is explicit per command; it never implies a reservation or a result."""
+    for name in ("cancel", "retry", "resume"):
+        if data[name]["available"] != (data[name]["reason"] is None):
+            raise ValueError("attempt control availability and reason disagree")
+        if data[name]["reason"] not in (None, *ATTEMPT_CONTROL_REASONS[name]):
+            raise ValueError("attempt control reason belongs to another command")
+    if (data["resumeRestores"] is None) == data["resume"]["available"]:
+        raise ValueError("resume restoration scope requires an available resume")
+    if data["cancel"]["available"] and data["state"] not in ("queued", "running"):
+        raise ValueError("only queued or running attempts can be cancelled")
+    recoverable = data["state"] in ("failed", "cancelled", "interrupted")
+    for name in ("retry", "resume"):
+        if data[name]["available"] and (not recoverable or data["successorRunId"] is not None):
+            raise ValueError("only the latest unsuccessful attempt can be recovered")
+    if data["successorRunId"] == data["runId"]:
+        raise ValueError("an attempt cannot succeed itself")
 
 
 def check_source_page(data: dict, version: str) -> None:
@@ -371,6 +407,8 @@ def check_semantics(document: dict) -> None:
             raise ValueError("recovery inventory exceeds its bounded inspection")
     elif kind == "run":
         check_run(data)
+    elif kind == "attemptControls":
+        check_attempt_controls(data)
     elif kind == "runs":
         items = data["items"]
         if len(items) > data["page"]["limit"] or len({item["runId"] for item in items}) != len(items):
@@ -385,6 +423,10 @@ def check_semantics(document: dict) -> None:
         identities = [item["jobId"] for item in data["items"]]
         if len(identities) != len(set(identities)):
             raise ValueError("a job appears more than once in a page")
+    elif kind == "queuePosition":
+        if data["state"] == "queued" and (int(data["ahead"]) != int(data["position"]) - 1
+                or int(data["position"]) > int(data["queuedTasks"]) or int(data["activeWorkers"]) > int(data["workerLimit"])):
+            raise ValueError("queue position sample is inconsistent")
     elif kind == "bootstrap":
         retention = data["runtime"].get("progressRetention")
         if retention is not None:
@@ -487,11 +529,11 @@ def check_run_lifecycle_controls(validate) -> int:
     expected = {
         "queued": {None}, "running": {None}, "cancelling": {None},
         "completed": {"COMPLETED", "NO_CHANGES"},
-        "failed": {"FAILED", "REFUSED", "LIMIT_EXHAUSTED"},
+        "failed": {"FAILED", "REFUSED", "LIMIT_EXHAUSTED", "TIMED_OUT", "INFRASTRUCTURE_FAILED"},
         "cancelled": {"CANCELLED"}, "interrupted": {"PROCESS_INTERRUPTED"},
     }
-    all_reasons = [None, "COMPLETED", "NO_CHANGES", "REFUSED", "CANCELLED",
-                   "LIMIT_EXHAUSTED", "FAILED", "PROCESS_INTERRUPTED"]
+    all_reasons = [None, "COMPLETED", "NO_CHANGES", "REFUSED", "CANCELLED", "LIMIT_EXHAUSTED",
+                   "TIMED_OUT", "FAILED", "INFRASTRUCTURE_FAILED", "PROCESS_INTERRUPTED"]
     checked = 0
 
     def check(run, valid):
