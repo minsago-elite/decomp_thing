@@ -2039,6 +2039,9 @@ def _launch_config_digest(receipt, *, deadline):
 
 
 def _finish_worker_proof(result, receipt, launch, bounds, deadline=None):
+    # Never preserve a previous completion claim when collecting fresh diagnostics.
+    result.update(exitCode=None, workerExecVerified=False,
+                  workerTerminationVerified=False, workerTermination=None)
     proof = {'protocolVersion': 1, 'status': 'unknown', 'proofSha256': None,
              'fileIdentityVerified': False, 'pinsUnchanged': False, 'reason': 'proof-not-read'}
     result['workerProof'] = proof
@@ -2073,18 +2076,16 @@ def _finish_worker_proof(result, receipt, launch, bounds, deadline=None):
             raise ValueError('launch source/runtime/input pins changed')
         _revalidate_compiler_inputs(launch, deadline)
         proof['pinsUnchanged'] = True
-        parsed = _parse_worker_proof(raw, launch['expected'], deadline=deadline)
-        proof.update(status=parsed['status'], proofSha256=parsed['proofSha256'], reason=parsed['reason'])
-        result.update(workerExecVerified=parsed['workerExecVerified'],
-                      workerTerminationVerified=parsed['workerTerminationVerified'], workerTermination=parsed['workerTermination'])
-        if (parsed['status'] == 'verified' and result['launcherExitCode'] == 0 and
-                result['captureComplete'] and result['waitComplete'] and result['scopeVerified'] and
-                result['scopeAdmitted'] and result['launcherPidIdentityVerified'] and
-                not result['timedOut'] and not result['outputExceeded'] and not result['infrastructureFailure']):
-            result['exitCode'] = parsed['exitCode']
-        else:
-            result['infrastructureFailure'] = True
-            result['infrastructureReason'] = 'worker-proof-or-controller-chain-incomplete'
+        _parse_worker_proof(raw, launch['expected'], deadline=deadline)
+        # This generation writes proof to a same-UID-owned regular file. A held
+        # inode, stable read and canonical protocol do not authenticate its writer:
+        # a host peer can rewrite terminal bytes before this first capture. Keep
+        # the bytes/hash and input checks as diagnostics, never completion credit.
+        # No report field, mode bit or caller-provided flag supplies this missing
+        # authority. Admission needs an independently protected producer channel.
+        proof['reason'] = 'exclusive-proof-write-authority-unavailable'
+        result.update(infrastructureFailure=True,
+                      infrastructureReason='worker-proof-write-authority-unavailable')
     except Exception as failure:
         proof['status'] = 'unknown'
         proof['reason'] = 'receipt-validation-' + type(failure).__name__

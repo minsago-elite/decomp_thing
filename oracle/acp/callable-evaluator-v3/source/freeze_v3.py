@@ -298,7 +298,7 @@ def _pairs(pairs):
 # Closed source selection only; interpreter/stdlib/coordinator origin remains unqualified.
 _FREEZE_DEPENDENCY_SOURCES = (
     ('build_contract',26463,'a54fb8b508ebf85a2f576972f5809095b50763c7ef3ef265ce1864a456ffeb6c'),
-    ('bounded_runtime',136314,'1095decb5115e513bcf30973c0543d45e2d5a4aef2ee4e757d14bfe4d33c67a5'),
+    ('bounded_runtime',136323,'792ac756951a7784047b1a43fa8f2771a45ca3745a3beb6c3d72164695a85737'),
     ('interface_gate_v3',35287,'caefa9fa3859715dab6a9202f1b0e75280730e8b2bd20b2c8745645336ec8e2e'),
     ('evaluate_candidate_v3',49087,'d5a9bbae5d34f05b86c105c7d496c611fc8e1d1e63fb146e78efd50231a4cf53'),
 )

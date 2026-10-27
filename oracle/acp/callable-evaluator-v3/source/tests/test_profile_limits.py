@@ -323,7 +323,7 @@ class ProfileLimits(unittest.TestCase):
 
     def simulate(self, *, output=b'ok', limit=None, clock=None, cleanup_failure=False,
                  wrapper=0, proof_kind='complete', admission=True, setup_failure=False, provisioning=False, late_cleanup_wait=False, late_absence=False, cleanup_prework=0.0,
-                 metadata_failure=None, census_failure=None):
+                 metadata_failure=None, census_failure=None, synthetic_completion=False):
         import worker_exec_proof as parser
         declared_profile_sha=contract.load_profile_with_digest()[1]
         stack = ExitStack(); self.addCleanup(stack.close)
@@ -366,6 +366,21 @@ class ProfileLimits(unittest.TestCase):
         stack.enter_context(patch.object(runtime.os,'read',side_effect=read))
         stack.enter_context(patch.object(runtime.time,'monotonic',side_effect=clock if clock is not None else lambda:now[0]))
         stack.enter_context(patch.object(runtime,'_worker_proof_parser',return_value=parser.parse_proof))
+        if synthetic_completion:
+            # Isolate reclamation/controller predicates from the unavailable proof
+            # producer channel. Only explicit authored metadata tests opt in; this
+            # is not runner completion or native authority qualification.
+            finish=runtime._finish_worker_proof
+            def authored_completion(result,receipt,launch,bounds,deadline=None):
+                finish(result,receipt,launch,bounds,deadline=deadline)
+                self.assertEqual('exclusive-proof-write-authority-unavailable',result['workerProof']['reason'])
+                parsed=parser.parse_proof(result['workerProofRaw'],launch['expected'])
+                self.assertEqual('verified',parsed['status'])
+                result['workerProof'].update(status=parsed['status'],reason=parsed['reason'])
+                result.update(exitCode=parsed['exitCode'],workerExecVerified=parsed['workerExecVerified'],
+                    workerTerminationVerified=parsed['workerTerminationVerified'],workerTermination=parsed['workerTermination'],
+                    infrastructureFailure=False,infrastructureReason=None)
+            stack.enter_context(patch.object(runtime,'_finish_worker_proof',side_effect=authored_completion))
         pins={'/authored/worker':{'device':7,'inode':8,'mode':0o755,'sha256':'0'*64},
               '/authored/bwrap':{'device':3,'inode':4,'mode':0o755,'sha256':'0'*64},
               '/authored/monitor':{'device':13,'inode':14,'mode':0o500,'sha256':'9'*64},
@@ -444,7 +459,8 @@ class ProfileLimits(unittest.TestCase):
 
     def test_controller_metadata_refusals_preserve_original_deadlines_and_unknown_results(self):
         result=self.simulate()
-        self.assertTrue(runtime.worker_execution_complete(result))
+        self.assertFalse(runtime.worker_execution_complete(result))
+        self.assertEqual('exclusive-proof-write-authority-unavailable',result['workerProof']['reason'])
         self.assertTrue(self.last_admission_deadlines)
         self.assertEqual({100+runtime.execution_bounds(phase='runtime')['wallSeconds']},set(self.last_admission_deadlines))
         self.assertEqual([105],self.last_census_deadlines)
@@ -468,17 +484,19 @@ class ProfileLimits(unittest.TestCase):
 
     def test_mock_complete_proof_separates_worker_from_launcher_and_public_bytes(self):
         result = self.simulate()
-        self.assertTrue(runtime.worker_execution_complete(result))
-        self.assertEqual(0,result['launcherExitCode']); self.assertEqual(139,result['exitCode'])
+        self.assertFalse(runtime.worker_execution_complete(result))
+        self.assertEqual(0,result['launcherExitCode']); self.assertIsNone(result['exitCode'])
+        self.assertEqual('exclusive-proof-write-authority-unavailable',result['workerProof']['reason'])
         self.assertEqual(b'err',result['stderr']); self.assertTrue(result['workerProofRaw'])
         public = runtime.public_result(result)
         self.assertNotIn('workerProofRaw',public)
         self.assertEqual(result['workerProofRaw'].hex(),public['workerProofRawHex'])
-        self.assertTrue(runtime.worker_execution_complete(public))
+        self.assertFalse(runtime.worker_execution_complete(public))
         self.assertIs(self.last_popen.call_args.kwargs['close_fds'], True)
         self.assertFalse('pass_fds' in self.last_popen.call_args.kwargs)
         result = self.simulate(proof_kind='signal')
-        self.assertEqual(-11,result['exitCode']); self.assertTrue(runtime.worker_execution_complete(result))
+        self.assertIsNone(result['exitCode']); self.assertFalse(runtime.worker_execution_complete(result))
+        self.assertFalse(result['workerTerminationVerified']);self.assertIsNone(result['workerTermination'])
 
     def test_mock_provisioning_is_channel_free_and_never_worker_completion(self):
         result=self.simulate(provisioning=True,wrapper=7)
@@ -491,7 +509,7 @@ class ProfileLimits(unittest.TestCase):
     def test_mock_complete_receipt_layout_is_actually_consumed_closed_and_reclaimed(self):
         for provisioning in (False,True):
             with self.subTest(provisioning=provisioning):
-                result=self.simulate(provisioning=provisioning)
+                result=self.simulate(provisioning=provisioning,synthetic_completion=not provisioning)
                 self.assertIsNone(self.last_receipt['fd'])
                 self.assertEqual('retained',result['_receiptCleanup']['status'])
                 self.assertEqual('exclusive-deletion-authority-unavailable',result['_receiptCleanup']['reason'])
@@ -508,7 +526,7 @@ class ProfileLimits(unittest.TestCase):
             return reclaim(receipt,result,**kwargs)
         with patch.object(runtime,'_reclaim_worker_receipt',side_effect=missing):
             with self.assertRaisesRegex(ValueError,'owned receipt directory reclamation failed') as caught:
-                self.simulate()
+                self.simulate(synthetic_completion=True)
         result=caught.exception.bounded_result
         self.assertEqual('refused',result['_receiptCleanup']['status'])
         self.assertEqual([],result['_receiptCleanup']['removedEntries'])
@@ -525,7 +543,7 @@ class ProfileLimits(unittest.TestCase):
         for provisioning in (False,True):
             with self.subTest(provisioning=provisioning),patch.object(runtime,'_reclaim_worker_receipt',side_effect=injected):
                 with self.assertRaisesRegex(ValueError,'owned receipt directory reclamation failed') as caught:
-                    self.simulate(provisioning=provisioning)
+                    self.simulate(provisioning=provisioning,synthetic_completion=not provisioning)
             result=caught.exception.bounded_result
             self.assertEqual('refused',result['_receiptCleanup']['status'])
             self.assertEqual([],result['_receiptCleanup']['removedEntries'])
@@ -543,10 +561,10 @@ class ProfileLimits(unittest.TestCase):
                     self.assertEqual(wrapper,result['launcherExitCode']); self.assertIsNone(result['exitCode'])
                     self.assertFalse(runtime.worker_execution_complete(result))
                     self.assertTrue(result['infrastructureFailure'])
-                    self.assertEqual(kind=='exec-only',result['workerExecVerified'])
-        # Even an authenticated complete terminal cannot repair a failed wrapper transport.
+                    self.assertFalse(result['workerExecVerified'])
+        # Complete canonical bytes cannot repair missing producer authority or transport.
         result=self.simulate(wrapper=1)
-        self.assertTrue(result['workerTerminationVerified']); self.assertIsNone(result['exitCode'])
+        self.assertFalse(result['workerTerminationVerified']); self.assertIsNone(result['exitCode'])
 
     def test_mock_prelaunch_and_no_admission_retain_raw_refusal_and_cleanup(self):
         with self.assertRaises(OSError) as caught: self.simulate(setup_failure=True)
@@ -615,7 +633,8 @@ class ProfileLimits(unittest.TestCase):
         self.assertFalse(caught.exception.bounded_result['launcherCreated'])
 
     def test_completion_requires_all_controller_facts_and_exact_streams(self):
-        value=self.simulate()
+        value=self.simulate(synthetic_completion=True)
+        self.assertTrue(runtime.worker_execution_complete(value))
         for key in ('launcherCreated','launcherPidIdentityVerified','scopeVerified','scopeAdmitted','captureComplete',
                     'waitComplete','cleanupVerified','rootReaped','finalAbsenceVerified','workerExecVerified','workerTerminationVerified'):
             changed=copy.deepcopy(value);changed[key]=False

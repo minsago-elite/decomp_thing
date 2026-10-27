@@ -1762,11 +1762,12 @@ class RuntimeWorkerProof(unittest.TestCase):
                     self.assertEqual('OSError',result['failureClass'])
                 if mutation is None:
                     self.assertEqual('retained',result['_receiptCleanup']['status'])
-                    self.assertEqual('exclusive-deletion-authority-unavailable',result['_receiptCleanup']['reason'])
-                    self.assertEqual([],result['_receiptCleanup']['removedEntries'])
+                    self.assertEqual('receipt-not-fully-consumed',result['_receiptCleanup']['reason'])
+                    self.assertEqual([],result['_receiptCleanup'].get('removedEntries',[]))
                     self.assertTrue(receipt['directory'].is_dir())
+                    self.assertEqual('exclusive-proof-write-authority-unavailable',result['workerProof']['reason'])
                     with patch.object(runtime,'BASE',base):
-                        self.assertTrue(runtime.worker_execution_complete(result))
+                        self.assertFalse(runtime.worker_execution_complete(result))
                 else:
                     self.assertTrue(receipt['directory'].exists());self.assertNotEqual('removed',result['_receiptCleanup']['status'])
                 if mutation not in ('prelaunch','absence'):
@@ -1775,7 +1776,7 @@ class RuntimeWorkerProof(unittest.TestCase):
                     self.assertEqual(b'',result['workerProofRaw'])
                     self.assertEqual(authored['workerProofRaw'],receipt['path'].read_bytes())
                 if mutation=='delete':
-                    self.assertTrue(result['cleanupVerified']);self.assertTrue(result['workerTerminationVerified'])
+                    self.assertTrue(result['cleanupVerified']);self.assertFalse(result['workerTerminationVerified'])
                     self.assertTrue(result['infrastructureFailure']);self.assertIn('secondaryError',result['_receiptCleanup'])
                 self.assertNotIn('_receiptCleanup',runtime.public_result(result))
 
@@ -2014,10 +2015,59 @@ class RuntimeWorkerProof(unittest.TestCase):
                     patch.object(runtime,'_pin_files',return_value=launch['pins']), \
                     patch.object(runtime,'_fixed_source_module',side_effect=AssertionError('path loader forbidden')):
                 runtime._finish_worker_proof(result,receipt,launch,{'workerLimits':{'workerProofBytes':1024}},deadline=10)
-                self.assertEqual('verified',result['workerProof']['status']);self.assertEqual(0,result['exitCode'])
-                self.assertTrue(runtime.worker_execution_complete(result))
-                self.assertTrue(evaluator._proof_replays(result));self.assertTrue(evaluator.process_observation(result)['completed'])
+                self.assertEqual('unknown',result['workerProof']['status']);self.assertIsNone(result['exitCode'])
+                self.assertEqual('exclusive-proof-write-authority-unavailable',result['workerProof']['reason'])
+                self.assertFalse(runtime.worker_execution_complete(result))
+                self.assertFalse(evaluator._proof_replays(result));self.assertFalse(evaluator.process_observation(result)['completed'])
             lock.acquire.assert_called_once_with(False);lock.release.assert_called_once_with()
+
+    def test_same_inode_terminal_rewrite_cannot_confer_completion(self):
+        import evaluate_candidate_v3 as evaluator
+        for exit_code in (0, 7, -9):
+            with self.subTest(exit_code=exit_code):
+                base,receipt,result=self.receipt_fixture(close=False)
+                rows=[json.loads(row) for row in result['workerProofRaw'].splitlines()]
+                rows[-1].update(r=exit_code<<8 if exit_code>=0 else -exit_code,
+                                k='exit' if exit_code>=0 else 'signal',n=abs(exit_code))
+                original=b''.join((json.dumps(row,separators=(',',':'))+'\n').encode() for row in rows)
+                receipt['path'].write_bytes(original)
+                before=receipt['path'].stat()
+                # A host peer forges canonical zero-exit bytes after production,
+                # preserving the owned inode, mode and link count. Stable reads
+                # cannot distinguish this from a genuine producer record.
+                forged=result['workerProofRaw']
+                with receipt['path'].open('r+b') as writer:
+                    writer.write(forged);writer.truncate()
+                after=receipt['path'].stat()
+                for name in ('st_dev','st_ino','st_mode','st_uid','st_nlink'):
+                    self.assertEqual(getattr(before,name),getattr(after,name))
+                launch={'expected':result['workerProofBindings']['expected'],'pins':result['launchInputPins'],
+                        'configSha256':runtime.digest(receipt['directory']/'launch.json')}
+                with patch.object(runtime,'BASE',base),patch.object(runtime.time,'monotonic',return_value=0), \
+                        patch.object(runtime,'_pin_files',return_value=launch['pins']):
+                    runtime._finish_worker_proof(result,receipt,launch,{'workerLimits':{'workerProofBytes':1024}},deadline=10)
+                    self.assertFalse(runtime.worker_execution_complete(result))
+                    self.assertFalse(evaluator._proof_replays(runtime.public_result(result)))
+                    self.assertFalse(evaluator.process_observation(result)['completed'])
+                self.assertEqual(forged,result['workerProofRaw'])
+                self.assertEqual(hashlib.sha256(forged).hexdigest(),result['workerProof']['proofSha256'])
+                self.assertTrue(result['workerProof']['fileIdentityVerified'])
+                self.assertTrue(result['workerProof']['pinsUnchanged'])
+                self.assertEqual('unknown',result['workerProof']['status'])
+                self.assertEqual('exclusive-proof-write-authority-unavailable',result['workerProof']['reason'])
+                self.assertTrue(result['infrastructureFailure']);self.assertIsNone(result['exitCode'])
+                self.assertFalse(result['workerExecVerified']);self.assertFalse(result['workerTerminationVerified'])
+                self.assertIsNone(result['workerTermination'])
+                self.assertEqual(b'preserved behavior',result['stdout'])
+
+    def test_unprepared_finish_clears_stale_completion_claims(self):
+        from test_identity_graph import completed_result
+        result=completed_result()
+        runtime._finish_worker_proof(result,None,None,{})
+        self.assertIsNone(result['exitCode']);self.assertIsNone(result['workerTermination'])
+        self.assertFalse(result['workerExecVerified']);self.assertFalse(result['workerTerminationVerified'])
+        self.assertEqual('launch-not-prepared',result['workerProof']['reason'])
+        self.assertFalse(runtime.worker_execution_complete(result))
 
     def test_evaluator_preserves_strict_hex_subclass_raw_type_ambiguity_and_terminal_replays(self):
         import copy
@@ -2973,9 +3023,12 @@ class LaunchConfigCaptureTests(unittest.TestCase):
                 self.assertIsNone(value.error);self.assert_closed(value)
                 self.assertEqual(b'proof',value.result['workerProofRaw'])
                 if mutation is None:
-                    self.assertEqual('verified',value.result['workerProof']['status'])
+                    self.assertEqual('unknown',value.result['workerProof']['status'])
                     self.assertTrue(value.result['workerProof']['pinsUnchanged'])
-                    self.assertEqual(0,value.result['exitCode'])
+                    self.assertEqual('exclusive-proof-write-authority-unavailable',value.result['workerProof']['reason'])
+                    self.assertIsNone(value.result['exitCode'])
+                    self.assertTrue(value.result['infrastructureFailure'])
+                    self.assertFalse(value.result['workerExecVerified']);self.assertFalse(value.result['workerTerminationVerified'])
                     value.parser.parse_proof.assert_called_once_with(b'proof',{'phase':'runtime'})
                 else:
                     self.assertEqual('unknown',value.result['workerProof']['status'])
