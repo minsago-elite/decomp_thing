@@ -171,7 +171,7 @@ class ManagedGitException(val code: String, message: String) : RuntimeException(
 enum class GitOperationCrashPoint {
     AFTER_RUNNING, AFTER_STAGING, BEFORE_PUBLISH, AFTER_PUBLISH, BEFORE_TERMINAL_PERSIST, AFTER_TERMINAL_PERSIST,
     AFTER_SNAPSHOT_CAPTURE, AFTER_COMMIT_PUBLISH,
-    AFTER_REMOTE_MUTATION, AFTER_REMOTE_AUDIT, AFTER_WORKSPACE_VALIDATION, AFTER_WORKSPACE_CAPTURE,
+    AFTER_REMOTE_MUTATION, AFTER_REMOTE_AUDIT, AFTER_WORKSPACE_VALIDATION, AFTER_WORKSPACE_CAPTURE, BEFORE_CONFLICT_LOCK,
 }
 internal class SimulatedGitCrash : Error("simulated process death")
 
@@ -883,6 +883,9 @@ class ManagedGitRepositories(
         when (request.action) {
             GitOperationAction.MERGE -> {
                 requireNoLease(located)
+                if (request.retainedDestinationRef == null || observation.head.refName != request.retainedDestinationRef) {
+                    GitWorkspaceMutations.refuse("REF_CHANGED", "The destination branch changed before the merge was queued. Review it again first.")
+                }
                 val strategy = GitIntegrationStrategy.entries.singleOrNull { it.wireName == request.parameters["strategy"] }
                     ?: GitWorkspaceMutations.refuse("VALIDATION_FAILED", "The strategy is fast-forward or merge.")
                 if (strategy == GitIntegrationStrategy.REBASE) GitWorkspaceMutations.refuse("STRATEGY_UNSUPPORTED",
@@ -1070,24 +1073,43 @@ class ManagedGitRepositories(
                 null to "Saved the resolution of ${entry.path.fileId(located.worktreeId)}. It is not staged; mark it resolved when the review is complete."
             }
             GitOperationAction.CONFLICT_COMPLETE -> {
+                val staging = directory.resolve("staging").resolve(operation.operationId)
+                GitStorage.directories(directory, "staging", operation.operationId)
+                GitStorage.forceDirectory(staging.parent)
+                GitStorage.forceDirectory(directory)
                 val count = activity.withStableRuns(located.record.jobId) { runs ->
                     requireNoLease(located, runs)
-                    val reviewed = completionList(request).map { (fileId, sha256) ->
-                        val entry = conflictFor(runner, located, fileId)
-                        conflictPath(runner, located, entry)
-                        val path = checkNotNull(entry.path.exact)
-                        val current = GitConflictFiles.observe(located.workTree, path)
-                        if (current.sha256 != sha256) GitWorkspaceMutations.refuse("CONTENT_CHANGED", "A file changed since review. Nothing was staged.")
-                        val text = current.text ?: GitWorkspaceMutations.refuse("UNSUPPORTED_CONFLICT", "A reviewed file is binary or too large.")
-                        if (GitIntegrations.hasMarkers(text, GitIntegrations.markerSize(runner, located.gitDir, located.workTree, path))) {
-                            GitWorkspaceMutations.refuse("UNRESOLVED_MARKERS", "A reviewed file still contains conflict markers. Nothing was staged.")
+                    crash(GitOperationCrashPoint.BEFORE_CONFLICT_LOCK)
+                    GitWorkspaceMutations.withWorkspaceLocks(runner, located.gitDir, staging, operation.operationId,
+                        located.record.objectFormat, located.commonDir) {
+                        requireNoLease(located, runs)
+                        // External Git writers coordinate through these locks. Revalidate both the
+                        // retained merge and every reviewed path while index, HEAD and branch are pinned.
+                        val lockedObservation = GitRepositoryInspector.inspect(runner, located.gitDir, located.workTree, located.commonDir)
+                        validateIntegration(runner, located, lockedObservation, request)
+                        val reviewed = completionList(request).map { (fileId, sha256) ->
+                            val entry = conflictFor(runner, located, fileId)
+                            conflictPath(runner, located, entry)
+                            val path = checkNotNull(entry.path.exact)
+                            val current = GitConflictFiles.observe(located.workTree, path)
+                            if (current.sha256 != sha256) GitWorkspaceMutations.refuse("CONTENT_CHANGED", "A file changed since review. Nothing was staged.")
+                            val text = current.text ?: GitWorkspaceMutations.refuse("UNSUPPORTED_CONFLICT", "A reviewed file is binary or too large.")
+                            if (GitIntegrations.hasMarkers(text, GitIntegrations.markerSize(runner, located.gitDir, located.workTree, path))) {
+                                GitWorkspaceMutations.refuse("UNRESOLVED_MARKERS", "A reviewed file still contains conflict markers. Nothing was staged.")
+                            }
+                            entry.path to current
                         }
-                        entry.path to current
+                        val index = staging.resolve("reviewed-index")
+                        Files.copy(located.gitDir.resolve("index"), index)
+                        crash(GitOperationCrashPoint.BEFORE_PUBLISH)
+                        requireNoLease(located, runs)
+                        GitIntegrations.stageReviewed(runner, located.gitDir, located.workTree, located.record.objectFormat, index, reviewed)
+                        if (GitRepositoryInspector.head(runner, located.gitDir, located.record.objectFormat) != lockedObservation.head) {
+                            GitWorkspaceMutations.refuse("REF_CHANGED", "HEAD changed while the reviewed resolutions were prepared. Nothing was staged.")
+                        }
+                        GitWorkspaceMutations.publishIndex(located.gitDir, index)
+                        reviewed.size
                     }
-                    crash(GitOperationCrashPoint.BEFORE_PUBLISH)
-                    requireNoLease(located)
-                    GitIntegrations.stageReviewed(runner, located.gitDir, located.workTree, located.record.objectFormat, reviewed)
-                    reviewed.size
                 }
                 val remaining = GitIntegrations.conflicts(runner, located.gitDir, located.workTree).size
                 null to "Staged $count resolved file(s); $remaining conflict(s) remain. Commit explicitly when the review is complete."
@@ -1264,11 +1286,18 @@ class ManagedGitRepositories(
             if (retireTerminalWorkspace(jobId, operations).size >= MAX_OPERATIONS || executor.queue.remainingCapacity() == 0) {
                 throw ManagedGitException("QUOTA_EXCEEDED", "Repository operation capacity is exhausted. Review existing operations first.")
             }
-            refusing { validate(runner, located, request) }
+            // Capture the attached destination branch in the durable request. Client guard
+            // identities are optional on older callers, but recovery still needs to distinguish
+            // an unchanged branch from a branch switch before the integration record is written.
+            val admittedRequest = if (request is GitSyncRequest && request.action == GitOperationAction.MERGE) {
+                val current = GitRepositoryInspector.inspect(runner, located.gitDir, located.workTree, located.commonDir)
+                request.copy(retainedDestinationRef = current.head.refName)
+            } else request
+            refusing { validate(runner, located, admittedRequest) }
             // A new work tree's identity is assigned at admission and is the operation's work tree.
-            val worktreeId = if (request.action == GitOperationAction.WORKTREE_ADD) identity("worktree") else located.worktreeId
+            val worktreeId = if (admittedRequest.action == GitOperationAction.WORKTREE_ADD) identity("worktree") else located.worktreeId
             val operation = GitOperationRecord(identity("operation"), jobId, repositoryId, worktreeId,
-                request.action, GitOperationState.QUEUED, 1, clock.instant(), null, null, null, QUEUED_WORKSPACE_MESSAGE, keyDigest, request)
+                admittedRequest.action, GitOperationState.QUEUED, 1, clock.instant(), null, null, null, QUEUED_WORKSPACE_MESSAGE, keyDigest, admittedRequest)
             persist(directory, operation)
             active += operation.operationId
             if (operation.action in GitSyncRequest.CANCELLABLE) cancellations[operation.operationId] = java.util.concurrent.atomic.AtomicBoolean()
@@ -1979,8 +2008,11 @@ class ManagedGitRepositories(
         when (request.action) {
             GitOperationAction.MERGE -> {
                 val integration = GitIntegrations.record(directory, operation.worktreeId)?.takeIf { it.operationId == operation.operationId }
-                val sameBranch = observed.state == GitHeadState.ATTACHED && observed.refName?.let {
-                    GitWorkspaceVersions.refId(record.repositoryId, it) } == request.guards.expectedRefId
+                val observedRefId = observed.refName?.let { GitWorkspaceVersions.refId(record.repositoryId, it) }
+                val sameBranch = observed.state == GitHeadState.ATTACHED &&
+                    (request.retainedDestinationRef?.let { observed.refName == it } ?:
+                        (request.guards.expectedRefId != null && observedRefId == request.guards.expectedRefId)) &&
+                    (request.guards.expectedRefId == null || observedRefId == request.guards.expectedRefId)
                 when {
                     integration == null -> if (!merging && sameBranch && head == request.guards.expectedHeadObjectId)
                         finish(operation, GitOperationState.INTERRUPTED, "INTERRUPTED", "Interrupted by a server restart before the merge started.")
@@ -2283,6 +2315,7 @@ class ManagedGitRepositories(
             }
             is GitSyncRequest -> buildJsonObject {
                 put("worktreeId", request.worktreeId); put("guards", encodeGuards(request.guards))
+                put("retainedDestinationRef", request.retainedDestinationRef?.let(::JsonPrimitive) ?: JsonNull)
                 put("parameters", buildJsonObject { request.parameters.toSortedMap().forEach { (key, value) -> put(key, value?.let(::JsonPrimitive) ?: JsonNull) } })
                 put("contentSha256", request.contentSha256?.let(::JsonPrimitive) ?: JsonNull)
             }
@@ -2331,7 +2364,8 @@ class ManagedGitRepositories(
                         if (value == JsonNull) null else (value as JsonPrimitive).also { require(it.isString) }.content
                     }
                     GitSyncRequest(action, request.text("worktreeId"), decodeGuards(request.getValue("guards").jsonObject),
-                        parameters + listOfNotNull(request.nullableText("contentSha256")?.let { "contentSha256" to it }))
+                        parameters + listOfNotNull(request.nullableText("contentSha256")?.let { "contentSha256" to it }),
+                        retainedDestinationRef = request.nullableText("retainedDestinationRef"))
                 }
             }
         }

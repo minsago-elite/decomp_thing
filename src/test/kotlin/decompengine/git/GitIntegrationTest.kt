@@ -178,7 +178,15 @@ class GitIntegrationTest {
         assertEquals("line one\nresolved two\n", Files.readString(f.workTree().resolve("README.md")))
         val current = service.conflictFile(jobId, repositoryId, null, fileId)
         refused("CONTENT_CHANGED", GitOperationAction.CONFLICT_COMPLETE, content = "$fileId ${detail.currentSha256}\n")
+        val gitDir = f.store.resolve("$jobId/git/repositories/$repositoryId/repository.git")
+        var locksObserved = false
+        f.hook = { point -> if (point == GitOperationCrashPoint.BEFORE_PUBLISH) {
+            locksObserved = Files.exists(gitDir.resolve("index.lock")) && Files.exists(gitDir.resolve("HEAD.lock")) &&
+                Files.exists(gitDir.resolve("refs/heads/main.lock"))
+        } }
         val completed = sync(GitOperationAction.CONFLICT_COMPLETE, content = "$fileId ${current.currentSha256}\n")
+        f.hook = {}
+        assertTrue(locksObserved, "index, HEAD and destination branch were locked")
         assertEquals(GitOperationState.COMPLETED, completed.state, completed.message)
         assertTrue(service.conflicts(jobId, repositoryId, null).files.isEmpty())
         // Completion staged only; the final commit is an explicit, reviewed action.
@@ -247,6 +255,25 @@ class GitIntegrationTest {
         val merged = sync(GitOperationAction.MERGE, merge("merge"))
         assertTrue(merged.message.contains("1 conflicted file"), merged.message)
         return service.conflicts(jobId, repositoryId, null).files.single().path.fileId(service.workspace(jobId, repositoryId).worktreeId)
+    }
+
+    @Test fun `conflict completion rejects an abort between review and Git lock acquisition`() = Fixture().use { f ->
+        f.cloned()
+        val fileId = f.conflictOn("README.md")
+        val detail = service.conflictFile(jobId, repositoryId, null, fileId)
+        sync(GitOperationAction.CONFLICT_SAVE, mapOf("fileId" to fileId, "expectedSha256" to detail.currentSha256,
+            "resolution" to "text"), "line one\nreviewed resolution\n")
+        val current = service.conflictFile(jobId, repositoryId, null, fileId)
+        val gitDir = f.store.resolve("$jobId/git/repositories/$repositoryId/repository.git")
+        f.hook = { if (it == GitOperationCrashPoint.BEFORE_CONFLICT_LOCK) {
+            GitIntegrations.abort(f.repositories.runner, gitDir, f.workTree())
+        } }
+        val completion = sync(GitOperationAction.CONFLICT_COMPLETE, content = "$fileId ${current.currentSha256}\n")
+        f.hook = {}
+        assertEquals(GitOperationState.FAILED, completion.state)
+        assertEquals("WORKTREE_CHANGED", completion.failureCode)
+        assertEquals("line one\nlocal two\n", Files.readString(f.workTree().resolve("README.md")))
+        assertTrue(service.workspace(jobId, repositoryId).observation.status.entries.none { it.staged != GitIndexChange.NONE })
     }
 
     @Test fun `integration never overwrites ignored local output`(): Unit = Fixture().use { f ->
@@ -877,6 +904,23 @@ class GitIntegrationTest {
             assertTrue(service.workspace(jobId, repositoryId).observation.status.entries.none { !it.ignored })
             assertEquals(1, service.auditLog(jobId, repositoryId, 100).count { it["operationId"].toString().trim('"') == operation.operationId })
         }
+    }
+
+    @Test fun `merge admission retains destination branch for restart before integration record`() = Fixture().use { f ->
+        f.cloned()
+        f.localCommit("line one\\nlocal two\\n")
+        Files.writeString(f.seed.resolve("README.md"), "line one\\nremote two\\n"); f.remoteCommit("remote edit")
+        fetch()
+        val (view, g) = guards()
+        f.hook = { if (it == GitOperationCrashPoint.AFTER_RUNNING) throw SimulatedGitCrash() }
+        val admission = service.requestWorkspace(jobId, repositoryId, GitSyncRequest(GitOperationAction.MERGE, view.worktreeId,
+            g.copy(expectedRefId = null, expectedRefObjectId = null), merge("merge")), key())
+        val retained = admission.operation.request as GitSyncRequest
+        assertEquals("refs/heads/main", retained.retainedDestinationRef)
+        service.close(); f.hook = {}; service = f.open()
+        val recovered = service.operation(jobId, repositoryId, admission.operation.operationId)
+        assertEquals(GitOperationState.INTERRUPTED, recovered.state, recovered.message)
+        assertEquals("INTERRUPTED", recovered.failureCode)
     }
 
     @Test fun `abort recovery uses retained server branch identity when client ref guards are omitted`() {

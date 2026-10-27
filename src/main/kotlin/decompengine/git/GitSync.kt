@@ -16,6 +16,8 @@ data class GitSyncRequest(
     val guards: GitGuards,
     val parameters: Map<String, String?> = emptyMap(),
     val content: String? = null,
+    /** Server-retained destination branch for merge admission and crash recovery; never client authority. */
+    val retainedDestinationRef: String? = null,
 ) : GitRepositoryRequest {
     init {
         require(action in ACTIONS)

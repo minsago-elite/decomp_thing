@@ -198,7 +198,7 @@ internal object GitIntegrations {
 
     /** Publish only captured reviewed bytes, never ask Git to reopen mutable work-tree paths. */
     fun stageReviewed(runner: GitCommandRunner, gitDir: Path, workTree: Path, format: GitObjectFormat,
-        files: List<Pair<GitPath, GitConflictFiles.Observation>>) {
+        index: Path, files: List<Pair<GitPath, GitConflictFiles.Observation>>) {
         val zero = "0".repeat(checkNotNull(format.hexLength))
         val indexInfo = buildString {
             for ((path, current) in files) {
@@ -214,7 +214,7 @@ internal object GitIntegrations {
             }
         }.toByteArray(Charsets.UTF_8)
         runner.run(GitInvocation("update-index", listOf("-z", "--index-info"), gitDir = gitDir, workTree = workTree,
-            input = indexInfo, limits = LIMITS))
+            variables = mapOf("GIT_INDEX_FILE" to index.toString()), input = indexInfo, limits = LIMITS))
     }
 
     fun utf8(bytes: ByteArray): String? = if (bytes.size > MAX_TEXT_BYTES || bytes.any { it == 0.toByte() }) null else try {
