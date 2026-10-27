@@ -241,6 +241,7 @@ jobs:
           path: |
             build/reports/tests/test
             build/test-results/test
+            build/reports/junit-signatures
 
   native-runtime-measurement:
     if: github.event_name == 'workflow_dispatch' && inputs.qualification == 'native-runtime-measurement'
