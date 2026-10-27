@@ -32,6 +32,28 @@ export async function seedLive(root) {
   return { root, jobs, input };
 }
 
+const ownerLocks = ['.web-owner.lock', '.workflow-owner.lock'];
+
+/** Recognize only the listener's known storage metadata, without ignoring arbitrary hidden entries. */
+export async function inspectLiveStorage(root, jobs) {
+  assert.deepEqual((await fs.readdir(root)).sort(), ['.web-audit', ...ownerLocks, ...jobs.map(job => job.id)].sort());
+  const owners = await Promise.all(ownerLocks.map(name => fs.lstat(join(root, name))));
+  for (const owner of owners) assert.ok(owner.isFile() && !owner.isSymbolicLink());
+  const auditRoot = join(root, '.web-audit');
+  const directory = await fs.lstat(auditRoot);
+  assert.ok(directory.isDirectory() && !directory.isSymbolicLink(), 'Audit storage must be a real directory');
+  const names = (await fs.readdir(auditRoot)).sort();
+  assert.deepEqual(names, ['current.jsonl', 'incomplete']);
+  const audit = [];
+  for (const name of names) {
+    const path = join(auditRoot, name);
+    const stat = await fs.lstat(path);
+    assert.ok(stat.isFile() && !stat.isSymbolicLink(), 'Audit entries must be regular files');
+    audit.push({ name, bytes: await fs.readFile(path) });
+  }
+  return { owners, audit };
+}
+
 export async function qualifyLive({ fixture, makeTarget, cdp, evaluate, ready, waitFor, browserOrigin }) {
   const tab = await makeTarget();
   await cdp.call('Page.bringToFront', {}, tab.sessionId);
@@ -42,10 +64,8 @@ export async function qualifyLive({ fixture, makeTarget, cdp, evaluate, ready, w
   assert.deepEqual(await evaluate(tab, rows), initial);
   // The running JVM owns these cooperative locks. Inspect metadata only and keep
   // both original files in place throughout the authored fixture updates.
-  const ownerLocks = ['.web-owner.lock', '.workflow-owner.lock'];
-  assert.deepEqual((await fs.readdir(fixture.root)).sort(), [...ownerLocks, ...fixture.jobs.map(job => job.id)].sort());
-  const initialOwners = await Promise.all(ownerLocks.map(name => fs.lstat(join(fixture.root, name))));
-  for (const owner of initialOwners) assert.ok(owner.isFile() && !owner.isSymbolicLink());
+  const initialStorage = await inspectLiveStorage(fixture.root, fixture.jobs);
+  const initialOwners = initialStorage.owners;
   const heldPath = '/nested/jobs/' + fixture.jobs[0].id;
   assert.equal(await evaluate(tab, `(() => {
     const link = document.querySelector('ul[aria-label="Uploaded jobs"] a[href="${heldPath}"]');
@@ -80,9 +100,10 @@ export async function qualifyLive({ fixture, makeTarget, cdp, evaluate, ready, w
   assert.equal(await evaluate(tab, `[...document.querySelectorAll('button')].some(button => button.textContent === 'Resume live updates' && button.getAttribute('aria-pressed') === 'true')`), true);
 
   const finalJobs = [changed, fixture.jobs[1], added];
-  assert.deepEqual((await fs.readdir(fixture.root)).sort(), [...ownerLocks, ...finalJobs.map(job => job.id)].sort());
+  const finalStorage = await inspectLiveStorage(fixture.root, finalJobs);
+  assert.deepEqual(finalStorage.audit, initialStorage.audit, 'Read-only dashboard checks must not change audit history');
   for (const [index, name] of ownerLocks.entries()) {
-    const finalOwner = await fs.lstat(join(fixture.root, name));
+    const finalOwner = finalStorage.owners[index];
     assert.ok(finalOwner.isFile() && !finalOwner.isSymbolicLink());
     for (const field of ['dev', 'ino', 'size', 'mtimeMs', 'ctimeMs']) assert.equal(finalOwner[field], initialOwners[index][field],
       'Live dashboard checks changed the running JVM owner lock: ' + name + ' ' + field);
@@ -100,6 +121,7 @@ export async function qualifyLive({ fixture, makeTarget, cdp, evaluate, ready, w
     stateUpdatePreservesRowAndFocus: true, newJobDeferredWithoutReorder: true,
     explicitRefreshAppliesCompleteSnapshot: true, pauseControlOperable: true,
     fixtureMutations: ['one atomic authored job status update', 'one authored inert job publication'],
-    existingOwnerLockPreserved: true, existingWorkflowOwnerLockPreserved: true, jobStorageUnchangedExceptFixtureEdits: true,
+    existingOwnerLockPreserved: true, existingWorkflowOwnerLockPreserved: true, existingAuditHistoryPreserved: true,
+    jobStorageUnchangedExceptFixtureEdits: true,
     mutationRequests: 0, executionStarted: false };
 }
