@@ -67,11 +67,20 @@ internal object GitStorage {
         }
     }
 
+    /**
+     * Long filesystem loops stop at their next step once the worker is interrupted (shutdown), so
+     * no copy or cleanup outlives the executor's termination wait.
+     */
+    fun checkInterrupted() {
+        if (Thread.currentThread().isInterrupted) throw java.io.InterruptedIOException("Repository storage work was interrupted.")
+    }
+
     /** Delete a private tree without following links. Missing trees are already removed. */
     fun deleteTree(root: Path) {
         if (!Files.exists(root, NOFOLLOW_LINKS)) return
         Files.walkFileTree(root, object : SimpleFileVisitor<Path>() {
             override fun visitFile(file: Path, attributes: BasicFileAttributes): FileVisitResult {
+                checkInterrupted()
                 Files.delete(file); return FileVisitResult.CONTINUE
             }
             override fun postVisitDirectory(directory: Path, failure: IOException?): FileVisitResult {

@@ -52,6 +52,7 @@ object GitSourceExports {
         if (listing.stdoutTruncated) tooLarge()
         data class Entry(val path: ByteArray, val text: String, val objectId: String, val size: Long)
         val entries = mutableListOf<Entry>()
+        val paths = GitExportPaths()
         var skipped = 0
         var total = 0L
         for (record in GitReads.records(listing.stdout)) {
@@ -62,6 +63,8 @@ object GitSourceExports {
             if (fields[1] != "blob" || fields[0] !in setOf("100644", "100755")) { skipped++; continue }
             val path = record.copyOfRange(tab + 1, record.size)
             val text = GitPath.of(path).exact ?: throw GitRepositoryException("REPOSITORY_UNSUPPORTED", "A file name is not valid UTF-8 and cannot be exported.")
+            if (!paths.add(text)) throw GitRepositoryException("REPOSITORY_UNSUPPORTED",
+                "The tree contains an unsafe or colliding portable archive path and cannot be exported.")
             val size = fields[3].toLongOrNull() ?: throw GitRepositoryException("REPOSITORY_CORRUPT", "The commit tree listing is malformed.")
             total += size
             if (entries.size >= MAX_FILES || total > MAX_BYTES) tooLarge()
@@ -137,11 +140,15 @@ object GitSourceExports {
 
     private fun verifyEntries(bytes: ByteArray, format: GitObjectFormat, expected: Map<String, String>): Boolean {
         val seen = HashMap<String, String>()
+        val paths = GitExportPaths()
+        var total = 0
         ZipInputStream(ByteArrayInputStream(bytes)).use { zip ->
             while (true) {
                 val entry = zip.nextEntry ?: break
-                if (entry.isDirectory || entry.name in seen || entry.name.split('/').any { it == ".git" || it == ".." }) return false
-                val content = zip.readAllBytes()
+                if (entry.isDirectory || seen.size >= MAX_FILES || !paths.add(entry.name)) return false
+                val content = zip.readNBytes(MAX_BYTES - total + 1)
+                total += content.size
+                if (total > MAX_BYTES) return false
                 val digest = MessageDigest.getInstance(if (format == GitObjectFormat.SHA256) "SHA-256" else "SHA-1")
                 digest.update("blob ${content.size}\u0000".toByteArray(Charsets.US_ASCII)); digest.update(content)
                 seen[entry.name] = digest.digest().joinToString("") { "%02x".format(it) }

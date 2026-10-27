@@ -304,7 +304,7 @@ class UploadServer(
             override fun <T> withStableRuns(jobId: String, block: (Map<String, Boolean>) -> T): T = synchronized(jobs) {
                 block(jobs.gitRunActivity(jobId))
             }
-        }, remotePolicy = gitRemotePolicy)
+        }, remotePolicy = gitRemotePolicy, workspaceLeases = jobs.gitWorkspaceLeases)
     private val api = spaAssets?.let { WebApiController(access, it, jobs, jobMutations, streamResources,
         harnessReadiness = harnessReadiness, agentPreflight = agentPreflight,
         git = WebGitCapability(gitAvailability, gitRepositories)) }
@@ -524,8 +524,10 @@ class UploadServer(
     private fun releaseOwnershipIfIdle(): Boolean {
         // Sample service quiescence before taking the lifecycle lock; stopping closes the service to new work.
         val jobsIdle = jobs.isIdle()
+        // A Git worker that outlived its shutdown wait may still be writing staging; keep ownership.
+        val gitIdle = gitRepositories.terminated
         return synchronized(lifecycleLock) {
-            if (stopping && activeRequests == 0 && jobsIdle && streamResources.snapshot().active == 0) {
+            if (stopping && activeRequests == 0 && jobsIdle && gitIdle && streamResources.snapshot().active == 0) {
                 ownership.close()
                 true
             } else false

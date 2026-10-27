@@ -72,6 +72,29 @@ internal object GitIntegrations {
 
     fun mergeInProgress(gitDir: Path): Boolean = Files.exists(gitDir.resolve("MERGE_HEAD"), NOFOLLOW_LINKS)
 
+    /** Pending parents for the locked commit-tree path. Managed merges have exactly one target. */
+    fun mergeParents(gitDir: Path, format: GitObjectFormat): List<String> {
+        if (!mergeInProgress(gitDir)) return emptyList()
+        val parents = GitStorage.read(gitDir.resolve("MERGE_HEAD"), 16 * 1024).toString(Charsets.US_ASCII).lineSequence()
+            .filter { it.isNotEmpty() }.toList()
+        if (parents.size !in 1..32 || parents.any { format.objectIdOrNull(it) == null }) {
+            GitWorkspaceMutations.refuse("REPOSITORY_UNSUPPORTED", "The pending merge parents cannot be reviewed within their bounds.")
+        }
+        return parents
+    }
+
+    /** Retire Git merge state only when the published commit proves the exact pending parents.
+     * The caller owns index/HEAD locks. ORIG_HEAD is retained, just as with git commit. */
+    fun finishCommit(runner: GitCommandRunner, gitDir: Path, format: GitObjectFormat, commit: String, before: String?) {
+        val pending = mergeParents(gitDir, format)
+        if (pending.isEmpty() || before == null) return
+        val parents = runner.run(GitInvocation("rev-list", listOf("--parents", "-n", "1", commit), gitDir = gitDir, limits = LIMITS))
+            .text.trim().split(' ').drop(1)
+        if (parents != (listOf(before) + pending).distinct()) return
+        for (name in listOf("MERGE_MSG", "MERGE_MODE", "AUTO_MERGE", "MERGE_HEAD")) Files.deleteIfExists(gitDir.resolve(name))
+        GitStorage.forceDirectory(gitDir)
+    }
+
     fun divergence(runner: GitCommandRunner, commonDir: Path, local: String, tracking: String): GitDivergence {
         val counts = runner.run(GitInvocation("rev-list", listOf("--left-right", "--count", "$local...$tracking"), gitDir = commonDir, limits = LIMITS))
             .text.trim().split(Regex("\\s+"))

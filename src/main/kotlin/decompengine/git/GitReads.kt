@@ -147,6 +147,8 @@ data class GitRefsPage(val entries: List<GitRefEntry>, val more: Boolean, val an
 object GitReads {
     const val MAX_STATUS_BYTES = 4 * 1024 * 1024
     const val MAX_PATCH_BYTES = 128 * 1024
+    // All parents are preserved. Oversized history output fails explicitly, never drops parents.
+    const val MAX_HISTORY_BYTES = 128 * 1024
     const val MAX_DIFF_FILES = 2000
     const val MAX_SUBJECT = 200
     private val LIMITS = GitExecutionLimits(Duration.ofSeconds(30), MAX_STATUS_BYTES, 16 * 1024)
@@ -247,7 +249,8 @@ object GitReads {
         // or newline and %s is a single line, so arbitrary subject or name text cannot shift a field.
         val result = runner.run(GitInvocation("log", listOf("--no-decorate", "--no-color", "--no-show-signature",
             "--no-notes", "--no-use-mailmap", "--topo-order", "--skip=$skip", "--max-count=${limit + 1}",
-            "--format=%H%x00%P%x00%an%x00%ae%x00%at%x00%ct%x00%s%x00", objectId, "--"), gitDir = gitDir, limits = LIMITS))
+            "--format=%H%x00%P%x00%an%x00%ae%x00%at%x00%ct%x00%s%x00", objectId, "--"), gitDir = gitDir,
+            limits = LIMITS.copy(maxStdoutBytes = MAX_HISTORY_BYTES)))
         val tokens = records(result.stdout)
         if (tokens.isNotEmpty() && tokens.last().all { it == '\n'.code.toByte() }) tokens.removeAt(tokens.lastIndex)
         if (tokens.size % 7 != 0) throw GitRepositoryException("REPOSITORY_CORRUPT", "Git history output is malformed.")
@@ -374,9 +377,10 @@ object GitReads {
         }
         val zero = "0".repeat(file.oldObjectId?.length ?: file.newObjectId?.length ?: 40)
         fun index(section: String) = Regex("(?m)^index ([0-9a-f]+)\\.\\.([0-9a-f]+)").find(section)?.let { it.groupValues[1] to it.groupValues[2] }
+        val header = "diff --git ${quoted("a/" + (file.originalPath?.exact ?: path))} ${quoted("b/$path")}\n"
         val matching = sections.filter { section ->
             val (old, new) = index(section) ?: return@filter false
-            old == (file.oldObjectId ?: zero) && (file.newObjectId == null || new == file.newObjectId)
+            section.startsWith(header) && old == (file.oldObjectId ?: zero) && (file.newObjectId == null || new == file.newObjectId)
         }
         // Git prints a type change (file to symlink and back) as a deletion section followed by an
         // addition section; one listing record owns both, so both are kept in order.
@@ -392,13 +396,15 @@ object GitReads {
         } else null
         // Pure renames and mode-only changes have no index line; identify them by their exact
         // header, quoted the way Git quotes unusual names.
-        val header = "diff --git ${quoted("a/" + (file.originalPath?.exact ?: path))} ${quoted("b/$path")}\n"
         val combined = listOf("diff --cc ${quoted(path)}\n", "diff --combined ${quoted(path)}\n")
         val selected = typeChange ?: matching.firstOrNull()
             ?: sections.firstOrNull { it.startsWith(header) && !Regex("(?m)^index ").containsMatchIn(it) }
             ?: sections.firstOrNull { section -> combined.any(section::startsWith) } ?: ""
         val bytes = selected.toByteArray(Charsets.UTF_8)
-        val cut = bytes.size > MAX_PATCH_BYTES || (result.stdoutTruncated && selected === sections.lastOrNull())
+        // The bound may precede the selected section entirely, or cut one half of a type change.
+        // Conservatively report incompleteness whenever the source capture was incomplete; an
+        // empty selection in that case must never masquerade as a complete empty patch.
+        val cut = bytes.size > MAX_PATCH_BYTES || result.stdoutTruncated
         return GitPatch(if (bytes.size > MAX_PATCH_BYTES) bytes.copyOf(MAX_PATCH_BYTES).toString(Charsets.UTF_8).trimEnd('\uFFFD') else selected,
             cut, binary = false)
     }

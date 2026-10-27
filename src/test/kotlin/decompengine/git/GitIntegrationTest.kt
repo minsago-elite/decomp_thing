@@ -23,6 +23,7 @@ class GitIntegrationTest {
         var signed = false
         var clock: java.time.Clock = java.time.Clock.systemUTC()
         var stable = false
+        val leases = GitWorkspaceLeases()
         val activity = object : GitJobActivity {
             override fun runs(jobId: String) = runs.toMap()
             override fun <T> withStableRuns(jobId: String, block: (Map<String, Boolean>) -> T): T {
@@ -47,7 +48,7 @@ class GitIntegrationTest {
         }
         fun open() = ManagedGitRepositories(store, GitRuntime.detect(), { _, _, _ -> error("no snapshots") },
             policy = GitRepositoryPolicy(defaultBranch = "main", requireSignedCommits = signed), clock = clock, crash = { hook(it) }, activity = activity,
-            remotePolicy = GitRemotePolicy(admittedRoot = admitted)).also(opened::add)
+            remotePolicy = GitRemotePolicy(admittedRoot = admitted), workspaceLeases = leases).also(opened::add)
         override fun close() { opened.forEach { it.close() }; repositories.close() }
     }
 
@@ -285,6 +286,26 @@ class GitIntegrationTest {
         assertEquals("NOTHING_TO_COMMIT", assertFailsWith<ManagedGitException> {
             service.requestWorkspace(jobId, repositoryId, GitCommitRequest(clean.worktreeId, cg, emptyList(), "empty"), key())
         }.code)
+    }
+
+    @Test fun `integration publication owns the shared workflow admission lease`(): Unit = Fixture().use { f ->
+        f.cloned()
+        Files.writeString(f.seed.resolve("util.c"), "int remote_util;\n"); f.remoteCommit("advance"); fetch()
+        fun excludeAdmissions() { f.hook = { if (it == GitOperationCrashPoint.BEFORE_PUBLISH) {
+            assertNull(f.leases.tryWorkflowAdmission(jobId), "workflow admission must not enter a file-replacing integration")
+        } } }
+        excludeAdmissions()
+        assertEquals(GitOperationState.COMPLETED, sync(GitOperationAction.MERGE, merge("fast-forward")).state)
+        f.hook = {}
+        val fileId = f.conflictOn("README.md")
+        val detail = service.conflictFile(jobId, repositoryId, null, fileId)
+        excludeAdmissions()
+        assertEquals(GitOperationState.COMPLETED, sync(GitOperationAction.CONFLICT_SAVE, mapOf("fileId" to fileId,
+            "expectedSha256" to detail.currentSha256, "resolution" to "ours")).state)
+        val saved = service.conflictFile(jobId, repositoryId, null, fileId)
+        assertEquals(GitOperationState.COMPLETED, sync(GitOperationAction.CONFLICT_COMPLETE, content = "$fileId ${saved.currentSha256}\n").state)
+        assertEquals(GitOperationState.COMPLETED, sync(GitOperationAction.MERGE_ABORT).state)
+        f.leases.tryWorkflowAdmission(jobId).use { assertNotNull(it, "the lease is released after publication") }
     }
 
     @Test fun `complete index review commits large merges without splitting incoming changes`(): Unit = Fixture().use { f ->
