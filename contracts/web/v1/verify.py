@@ -214,7 +214,7 @@ def check_run(run: dict) -> None:
     reasons = {
         "queued": (None,), "running": (None,), "cancelling": (None,),
         "completed": ("COMPLETED", "NO_CHANGES"),
-        "failed": ("FAILED", "REFUSED", "LIMIT_EXHAUSTED"),
+        "failed": ("FAILED", "REFUSED", "LIMIT_EXHAUSTED", "TIMED_OUT", "INFRASTRUCTURE_FAILED"),
         "cancelled": ("CANCELLED",), "interrupted": ("PROCESS_INTERRUPTED",),
     }
     if run["terminalReason"] not in reasons[run["state"]]:
@@ -567,6 +567,10 @@ def check_semantics(document: dict) -> None:
         identities = [item["jobId"] for item in data["items"]]
         if len(identities) != len(set(identities)):
             raise ValueError("a job appears more than once in a page")
+    elif kind == "queuePosition":
+        if data["state"] == "queued" and (int(data["ahead"]) != int(data["position"]) - 1
+                or int(data["position"]) > int(data["queuedTasks"]) or int(data["activeWorkers"]) > int(data["workerLimit"])):
+            raise ValueError("queue position sample is inconsistent")
     elif kind == "bootstrap":
         retention = data["runtime"].get("progressRetention")
         if retention is not None:
@@ -669,11 +673,11 @@ def check_run_lifecycle_controls(validate) -> int:
     expected = {
         "queued": {None}, "running": {None}, "cancelling": {None},
         "completed": {"COMPLETED", "NO_CHANGES"},
-        "failed": {"FAILED", "REFUSED", "LIMIT_EXHAUSTED"},
+        "failed": {"FAILED", "REFUSED", "LIMIT_EXHAUSTED", "TIMED_OUT", "INFRASTRUCTURE_FAILED"},
         "cancelled": {"CANCELLED"}, "interrupted": {"PROCESS_INTERRUPTED"},
     }
-    all_reasons = [None, "COMPLETED", "NO_CHANGES", "REFUSED", "CANCELLED",
-                   "LIMIT_EXHAUSTED", "FAILED", "PROCESS_INTERRUPTED"]
+    all_reasons = [None, "COMPLETED", "NO_CHANGES", "REFUSED", "CANCELLED", "LIMIT_EXHAUSTED",
+                   "TIMED_OUT", "FAILED", "INFRASTRUCTURE_FAILED", "PROCESS_INTERRUPTED"]
     checked = 0
 
     def check(run, valid):
