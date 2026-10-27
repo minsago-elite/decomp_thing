@@ -229,21 +229,62 @@ class WebRevisionSourceSearchTest {
         assertEquals(12, found.size)
     }
 
-    @Test fun `long lines are deadline checked within a file and resume at a line boundary`() {
-        // Fewer than 256 lines: the deadline must still be observed between these 192 KiB lines.
+    @Test fun `long lines are deadline checked within a line and resume without losing matches`() {
+        // Fewer than 256 lines: matching these 192 KiB lines must still observe the deadline.
         val body = (1..20).joinToString("") { "a".repeat(192 * 1024) + "Needle $it\n" }
         val entries = listOf(entry("long.c", body))
-        var now = 0L
-        val engine = WebRevisionSourceSearch(harness(entries)::source, nanoTime = { now.also { now += 1_000_000 } }, deadlineNanos = 3_000_000)
+        var now = 0L; var ticking = true
+        val engine = WebRevisionSourceSearch(harness(entries)::source,
+            nanoTime = { now.also { if (ticking) now += 1_000_000 } }, deadlineNanos = 3_000_000)
         val first = search(engine, "q=needle&case=insensitive")
         assertEquals("deadline", first.getValue("stopReason").jsonPrimitive.content)
         assertTrue(items(first).size < 20)
         val resume = cursor(first)!!.split('_')
         assertEquals("0", resume[1])
         val offset = resume[2].toInt()
-        assertTrue(offset > 0 && body.toByteArray()[offset - 1] == 10.toByte())
-        val found = all(engine, "q=needle&case=insensitive")
+        assertTrue(offset in 1 until 192 * 1024, "the first long line must be interrupted")
+        ticking = false
+        val continued = search(engine, "q=needle&case=insensitive&cursor=${cursor(first)}")
+        assertEquals("complete", continued.getValue("status").jsonPrimitive.content)
+        val found = items(first) + items(continued)
         assertEquals(truth(body.toByteArray(), "Needle").map { it.toString() }, found.map { string(it, "offsetBytes") })
+    }
+
+    @Test fun `repetitive maximum width queries stop inside the matcher and continuations make progress`() {
+        for (sensitive in listOf(true, false)) {
+            val needle = "a".repeat(127) + "b"
+            val body = "😀" + "a".repeat(4096) + needle + "😀" + "a".repeat(4096) + needle
+            val entries = listOf(entry("repetitive.c", body))
+            var now = 0L
+            val engine = WebRevisionSourceSearch(harness(entries)::source,
+                nanoTime = { now.also { now += 1_000_000 } }, deadlineNanos = 3_000_000)
+            val query = "q=$needle&case=${if (sensitive) "sensitive" else "insensitive"}"
+            val first = search(engine, query)
+            assertEquals("deadline", first.getValue("stopReason").jsonPrimitive.content)
+            assertTrue(items(first).isEmpty(), "stop before the first match, not only after a matching line")
+            var previous = 0
+            val found = all(engine, query) { page ->
+                cursor(page)?.let {
+                    val offset = it.split('_')[2].toInt()
+                    assertTrue(offset > previous, "a continuation must advance within the same long line")
+                    assertTrue((body.toByteArray()[offset].toInt() and 0xc0) != 0x80, "UTF-8 boundary")
+                    previous = offset
+                }
+            }
+            assertEquals(truth(body.toByteArray(), needle).map(Int::toString), found.map { string(it, "offsetBytes") })
+        }
+    }
+
+    @Test fun `interruption is observed inside matching without clearing the thread flag`() {
+        val state = harness(listOf(entry("long.c", "a".repeat(4096))))
+        val engine = WebRevisionSourceSearch(state::source)
+        try {
+            Thread.currentThread().interrupt()
+            val page = search(engine, "q=${"a".repeat(127)}b&case=insensitive")
+            assertEquals("deadline", page.getValue("stopReason").jsonPrimitive.content)
+            assertNotNull(cursor(page))
+            assertTrue(Thread.currentThread().isInterrupted)
+        } finally { Thread.interrupted() }
     }
 
     @Test fun `coverage gaps from earlier pages are carried by signed continuations`() {
