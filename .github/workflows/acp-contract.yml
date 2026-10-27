@@ -63,11 +63,14 @@ jobs:
       - name: Prepare required live ACP sandbox host
         run: scripts/ci-prepare-acp-sandbox.sh
       - name: Prepare finite ACP quota fixture
+        id: prepare-quota
         run: bash scripts/ci-prepare-acp-quota.sh
       - name: Qualify every required ACP and shared-agent suite
         run: bash scripts/validate-acp-contract.sh
       - name: Release finite ACP quota fixture
-        if: always()
+        # A failed prerequisite stops before checkout or quota preparation. Still clean up
+        # after failed/cancelled preparation, which can leave a partially acquired fixture.
+        if: ${{ always() && steps.prepare-quota.outcome != 'skipped' && steps.prepare-quota.outcome != '' }}
         run: bash scripts/ci-release-acp-quota.sh
       - uses: actions/upload-artifact@v7
         if: always()

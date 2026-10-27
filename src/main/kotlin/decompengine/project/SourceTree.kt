@@ -146,7 +146,7 @@ class BoundedLlmModuleReconstructor(
 
     internal fun requireRetainableFallbackObservation(request: ModuleReconstructionRequest) {
         if (promptBudgetFailure(request, modulePromptEvidence(request).text) != null) {
-            requireRetainableModuleObservation(request.observedBehavior)
+            ModuleObservationRetention.retain(request)
         }
     }
 
@@ -582,6 +582,9 @@ object SourceTreeGenerator {
         val headerHashes = headers.mapValues { sha256(it.value.toByteArray()) }
         val interfaceFingerprints = moduleInterfaceFingerprints(dependenciesByModule, headerHashes)
         val privateHeaders = plan.modules.associate { module -> module.id to rendering.privateInterface(module) }
+        if (selectedReconstructor is BoundedLlmModuleReconstructor) {
+            ModuleObservationRetention.requireRawInput(observedBehavior)
+        }
         if (selectedReconstructor is BoundedLlmModuleReconstructor && observedBehavior != null &&
             observedBehavior.toByteArray(Charsets.UTF_8).size > MAXIMUM_RETAINED_MODULE_OBSERVATION_BYTES) {
             // Validate actual fallback inputs before writing any project state. Larger
@@ -873,9 +876,8 @@ object SourceTreeGenerator {
                     sourceSha256 = normalizedSourceSha256,
                     generator = attempted.generator,
                     workflowOrigin = workflowOrigin,
-                    preDispatchObservedBehavior = observedBehavior.takeIf {
-                        workflowOrigin == "pre-dispatch-context-budget-fallback"
-                    },
+                    preDispatchObservedBehavior = if (workflowOrigin == "pre-dispatch-context-budget-fallback")
+                        ModuleObservationRetention.retain(request) else null,
                     reconstructorIdentity = cacheIdentity,
                     promptSha256 = attempted.promptSha256,
                     promptCharacters = attempted.promptCharacters,
