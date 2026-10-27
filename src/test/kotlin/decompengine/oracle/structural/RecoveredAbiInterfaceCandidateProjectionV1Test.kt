@@ -128,6 +128,46 @@ class RecoveredAbiInterfaceCandidateProjectionV1Test {
     }
 
     @Test
+    fun `contradictory formal local and observed parameter counts keep varargs unknown`() {
+        for (parameterCount in listOf(0, 1)) {
+            val original = fixture(parameterCount = parameterCount)
+            val prototype = checkNotNull(original.inferredFunction.prototype)
+            val differentCount = parameterCount + 1
+            val mutations = listOf(
+                prototype.copy(localSymbolParameterCount = differentCount),
+                prototype.copy(parameterCount = differentCount),
+                prototype.copy(parameterCount = differentCount, localSymbolParameterCount = differentCount),
+                prototype.copy(parameterCountsMatch = false),
+            )
+            for (mutation in mutations) {
+                val changed = original.withInferenceFunction(original.inferredFunction.copy(prototype = mutation))
+                val entity = project(changed).document.getValue("candidateEntities").jsonArray.single().jsonObject
+                val variadic = entity.getValue("facts").jsonArray.map { it.jsonObject }
+                    .single { it.getValue("dimension").jsonPrimitive.content == "function.variadic" }
+                assertEquals("recovered-unknown", variadic.getValue("state").jsonPrimitive.content,
+                    "observed=$parameterCount, prototype=$mutation")
+                assertEquals(kotlinx.serialization.json.JsonNull, variadic.getValue("value"))
+                val decision = entity.getValue("decisions").jsonArray.map { it.jsonObject }
+                    .single { it.getValue("factId") == variadic.getValue("id") }
+                assertEquals("highfunction-parameter-counts-do-not-match", decision.getValue("reason").jsonPrimitive.content)
+            }
+        }
+    }
+
+    @Test
+    fun `consistent nonzero formal local and observed parameter counts permit paired varargs`() {
+        val entity = project(fixture(parameterCount = 1)).document.getValue("candidateEntities").jsonArray.single().jsonObject
+        val prototype = entity.getValue("inferredObservation").jsonObject.getValue("prototype").jsonObject
+        assertEquals("1", prototype.getValue("parameterCount").jsonPrimitive.content)
+        assertEquals("1", prototype.getValue("localSymbolParameterCount").jsonPrimitive.content)
+        assertEquals(1, entity.getValue("inferredObservation").jsonObject.getValue("parameters").jsonArray.size)
+        val variadic = entity.getValue("facts").jsonArray.map { it.jsonObject }
+            .single { it.getValue("dimension").jsonPrimitive.content == "function.variadic" }
+        assertEquals("recovered", variadic.getValue("state").jsonPrimitive.content)
+        assertEquals("true", variadic.getValue("value").jsonObject.getValue("abi").jsonObject.getValue("variadic").jsonPrimitive.content)
+    }
+
+    @Test
     fun `listing report and listing manifest commitments remain distinct`() {
         val fixture = fixture()
         val bindings = project(fixture).document.getValue("bindings").jsonObject
@@ -298,7 +338,7 @@ class RecoveredAbiInterfaceCandidateProjectionV1Test {
         fun withInferenceFunction(value: NativeInferredInterfaceFunctionV1) = Fixture(listing, listingFunction, inferred, value, target)
     }
 
-    private fun fixture(inferredVarArgs: Boolean = true, conventionState: String = "named-resolved"): Fixture {
+    private fun fixture(inferredVarArgs: Boolean = true, conventionState: String = "named-resolved", parameterCount: Int = 0): Fixture {
         val digest = "a".repeat(64)
         val address = NativeCallAddressV1(0, "0000000000000001")
         val binding = NativeCallBindingsV1(digest, "gcc", digest, NativeCallAddressV1(0, "0000000000000000"),
@@ -306,25 +346,32 @@ class RecoveredAbiInterfaceCandidateProjectionV1Test {
         val listingReportDigest = "b".repeat(64)
         val listingManifestDigest = "c".repeat(64)
         val listingManifest = NativeInterfaceManifestV1(1, digest, digest, digest, listingReportDigest)
+        val storage = NativeInterfaceStorageV1("none", null, null, null, null, emptyList())
+        val listingParameters = List(parameterCount) { index ->
+            NativeInterfaceParameterV1(index, null, "DEFAULT", false, null, false, null, null, storage)
+        }
+        val inferredParameters = List(parameterCount) { index ->
+            NativeInferredInterfaceParameterV1(index, index, null, "absent", "0000000000000000", null, null,
+                false, false, false, false, storage, null)
+        }
         val listingFunction = NativeInterfaceFunctionV1(address, "candidate", false, false, null, "DEFAULT",
             NativeInterfaceConventionV1("sysv", if (conventionState == "named-resolved") "__cdecl" else null, conventionState),
-            true, false, 0, 0, null, emptyList())
+            true, false, parameterCount, 0, null, listingParameters)
         val listing = NativeInterfaceObservationSummaryV1(listingManifest, binding, emptyList(),
-            NativeInterfaceScanV1(1, 1, 0, 0, 0, 0, 0, 0),
+            NativeInterfaceScanV1(1, 1, 0, 0, parameterCount.toLong(), 0, 0, 0),
             listOf(NativeInterfaceModelFunctionV1("model-1", "0000000000000001", listOf(address), "matched")),
             listOf(NativeInterfaceObservedFunctionV1(address, "matched", listOf("model-1"))))
-        val storage = NativeInterfaceStorageV1("none", null, null, null, null, emptyList())
         val result = NativeInferredInterfaceResultV1(true, true, false, false, false, "")
-        val prototype = NativeInferredInterfacePrototypeV1(0, 0, true, true, "model", inferredVarArgs, 0,
+        val prototype = NativeInferredInterfacePrototypeV1(parameterCount, parameterCount, true, true, "model", inferredVarArgs, 0,
             false, false, false, false, false, null, storage)
         val inferredFunction = NativeInferredInterfaceFunctionV1(0, address, false, false,
-            "high-function-observed", 1, result, prototype, emptyList())
+            "high-function-observed", 1, result, prototype, inferredParameters)
         val inferredBindings = NativeInferredInterfaceBindingsV1(binding, digest, digest, digest, 1,
             listingReportDigest, listingManifestDigest, digest, digest)
         val inferredManifest = NativeInferredInterfaceManifestV1(1, digest, digest, digest, listingReportDigest, digest, digest, digest)
         val inferred = NativeInferredInterfaceSummaryV1(inferredManifest, inferredBindings, listing,
             JsonObject(mapOf("sizeAlignments" to JsonArray(emptyList()))),
-            NativeInferredInterfaceScanV1(1, 1, 0, 0, 1, 1, 0, 0, 0, 0, 0, 1, mapOf("high-function-observed" to 1)))
+            NativeInferredInterfaceScanV1(1, 1, 0, 0, 1, 1, parameterCount.toLong(), 0, 0, 0, 0, 1, mapOf("high-function-observed" to 1)))
         val target = StructuralRecoveryV1Inputs.loadTargetAbi(Path.of("src/test/resources/oracle/structural-v1/target-abi.json"))
         return Fixture(listing, listingFunction, inferred, inferredFunction, target)
     }
