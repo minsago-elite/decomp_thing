@@ -647,7 +647,8 @@ corpus that cannot be reproduced from the recorded graph is `unavailable` with
 `CASES_UNVERIFIABLE`.
 
 A validation start must carry `cases: {"presetId": "retained-corpus-v1", "corpusSha256":
-"<digest>"}`; every other option sends `cases: null`. The caller can never supply a case,
+"<digest>"}`; other options omit `cases` for compatibility with older v1 servers (a current
+server also accepts `cases: null`). The caller can never supply a case,
 command, executable path or runner setting. Admission recomputes the plan from the selected
 revision and refuses a missing selection (`422 VALIDATION_CASES_REQUIRED`), another preset, an
 unverifiable corpus or a selection on another option (`422 VALIDATION_CASES_UNAVAILABLE`) and a
@@ -656,6 +657,11 @@ the attempt records `configuration.validation` (`presetId`, `corpusSha256`, `cas
 adapter checks the copied revision's corpus again before validating and refuses the attempt
 (`REFUSED`) if it differs. Revision identities are content-addressed and the request names one
 explicitly, so a newer accepted revision never retargets a configured or running validation.
+An explicit retry keeps the predecessor's case selection, recomputes it against the recorded
+input, and records the validated preset, digest and count on the successor. A missing or changed
+reviewed corpus makes recovery unavailable (`INPUT_UNVERIFIED`); the user must review cases in a
+new start rather than implicitly accepting another corpus. Receipt replay remains read-only.
+The validation adapter refuses a missing admission corpus before copying or invoking the engine.
 
 The start form shows the target revision as fixed, notes when the job's accepted revision is a
 different one, lists the reviewed cases and submits only their digest; a changed corpus reloads
@@ -665,7 +671,8 @@ the cases for review.
 
 Each `validationHistory` owner reports `origin`: `this-attempt` when its graph run began
 within the selected web attempt, `inherited` when it came with the attempt's input revision
-history, or `unknown`. Owners keep their own identity (`attempt` for a repair candidate
+history, or `unknown`. Older v1 responses may omit this additive field; the UI shows `Unknown`
+rather than inferring ownership. Owners keep their own identity (`attempt` for a repair candidate
 validation, `run-baseline` for a revision validation, `run-failure` for a validator failure),
 and inspecting one opens the existing recorded case pages and mismatch navigation. Validation
 and repair attempts link their overview to this evidence view.

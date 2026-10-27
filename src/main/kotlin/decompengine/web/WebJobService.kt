@@ -6,6 +6,7 @@ import decompengine.jobs.NewWorkflowAttempt
 import decompengine.jobs.WorkflowAttempt
 import decompengine.jobs.WorkflowAttemptRecovery
 import decompengine.jobs.WorkflowAttemptStore
+import decompengine.jobs.WorkflowAttemptValidation
 import decompengine.jobs.WorkflowCancellationReceipts
 import decompengine.jobs.WorkflowJobInspection
 import decompengine.jobs.WorkflowKind
@@ -1210,7 +1211,7 @@ class WebJobService(
 
     private sealed interface RecoveryDecision {
         data class Admissible(val registration: Registration, val recovery: WorkflowAttemptRecovery, val predecessorReports: Path?,
-            val inputSourceTree: Path? = null) : RecoveryDecision
+            val inputSourceTree: Path? = null, val validation: WorkflowAttemptValidation? = null) : RecoveryDecision
         data class Refused(val code: String) : RecoveryDecision
     }
 
@@ -1248,6 +1249,14 @@ class WebJobService(
             }
             null
         }
+        // Retrying validation must run the exact corpus the user reviewed, not silently choose
+        // today's preset or lose the copied-corpus check along with its admission record.
+        val validation = if (registration.adapter.validationCases) {
+            val cases = predecessor.cases ?: return refuse("INPUT_UNVERIFIED")
+            val input = inputSourceTree ?: return refuse("INPUT_UNVERIFIED")
+            try { webAdmitValidationCases(WebValidationCasePlan.of(input), cases) }
+            catch (_: WebJobServiceException) { return refuse("INPUT_UNVERIFIED") }
+        } else null
         val decision = if (mode == WorkflowRecoveryMode.RETRY) {
             RecoveryDecision.Admissible(registration, WorkflowAttemptRecovery(WorkflowRecoveryMode.RETRY), null, inputSourceTree)
         } else {
@@ -1265,7 +1274,7 @@ class WebJobService(
         }
         if (uploads.isNotEmpty()) return refuse("UPLOAD_CAPACITY")
         if (active.size >= maximumInFlight) return refuse("CAPACITY_UNAVAILABLE")
-        return decision
+        return decision.copy(validation = validation)
     }
 
     /**
@@ -1315,7 +1324,8 @@ class WebJobService(
         val scope = predecessor.scope
         val request = NewWorkflowAttempt(predecessor.workflow, predecessor.limits, predecessor.inputRevisionId,
             decision.registration.harnessCapabilityId, predecessor.runId, recovery = decision.recovery,
-            configuration = webAttemptConfiguration(decision.registration.adapter, prerequisites, scope), scope = scope)
+            configuration = webAttemptConfiguration(decision.registration.adapter, prerequisites, scope)
+                ?.copy(validation = decision.validation), scope = scope, cases = predecessor.cases)
         val job = store.get(jobId)
         val admitted = publishStart(jobId) {
             owner.createIdempotent(jobId, view.snapshot.version, request, requestKey, expectedRunVersion)

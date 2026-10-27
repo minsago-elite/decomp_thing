@@ -320,10 +320,13 @@ internal class ValidateWorkflowAdapter(
         val project = context.reportsDirectory.resolve("source-tree")
         val meter = WorkflowExecutionMeter(context.reportsDirectory, toolCallsMetered = false)
         val (result, usage) = executor.run(context.attempt.limits, meter) {
+            // A missing admission record is not permission to validate an unreviewed corpus.
+            val recorded = context.attempt.configuration?.validation ?: throw WebValidationCasesChanged()
             copyWebSourceTree(input, project)
             // The copied graph contributes its retained corpus; admission bound the merged digest.
-            val recorded = context.attempt.configuration?.validation
-            if (recorded != null && WebValidationCasePlan.of(project).corpusSha256 != recorded.corpusSha256) throw WebValidationCasesChanged()
+            val copied = WebValidationCasePlan.of(project)
+            if (recorded.presetId != WEB_VALIDATION_PRESET || copied.corpusSha256 != recorded.corpusSha256 ||
+                copied.cases.size != recorded.caseCount) throw WebValidationCasesChanged()
             engines.validate(project, context.job.binaryPath, context.reportsDirectory, WEB_VALIDATION_DEFAULT_CASES)
         }
         val candidate = repairCandidate(project, context.attempt.startedAt?.toEpochMilli(), acceptTestOnlyPublication)

@@ -872,7 +872,7 @@ class WebProductionWorkflowsTest {
         assertEquals(WorkflowRecoveryMode.RETRY, retried.recovery?.mode)
         assertEquals(failed.scope, retried.scope)
         assertEquals(60_000uL, retried.configuration?.reconstruction?.maxContextCharacters)
-        assertEquals(listOf(60_000, 60_000), engines.contexts, "retry raised the explicitly bounded context budget")
+        assertEquals(listOf<Int?>(60_000, 60_000), engines.contexts, "retry raised the explicitly bounded context budget")
         assertEquals("b".repeat(64), retried.configuration?.harness?.configurationSha256)
         assertEquals("b".repeat(64), webRun(retried).getValue("configuration").jsonObject
             .getValue("harness").jsonObject.getValue("configurationSha256").jsonPrimitive.content)
@@ -1098,6 +1098,71 @@ class WebProductionWorkflowsTest {
             assertNotEquals(plan.corpusSha256, retainedPlan.corpusSha256)
             assertCode("VALIDATION_CASES_CHANGED") { start(request.copy(inputRevisionId = revisionB, cases = reviewed), "validate_b_stale_cases") }
         }
+    }
+
+    @Test
+    fun `validation retry retains the reviewed corpus and refuses a changed retained corpus`() = withRoot { root ->
+        for (changed in listOf(false, true)) {
+            val store = JobStore(root.resolve("retry-$changed"))
+            val job = store.createFromUpload("validation-retry.elf", elfFixture())
+            val engines = FakeEngines().apply { validateBody = { error("inert validation failure") } }
+            var retried: WorkflowAttempt? = null
+            service(store, adapters(engines) + ValidateWorkflowAdapter(engines, FAST)).use { service ->
+                service.initializeExistingStorage()
+                fun start(request: NewWorkflowAttempt, key: String) = service.requestDurableStart(job.id, version(service, job.id), request, key).attempt
+                val source = start(NewWorkflowAttempt(WorkflowKind.RECONSTRUCT, WebWorkflowDefaults.RECONSTRUCT_EVIDENCE,
+                    harnessCapabilityId = EVIDENCE_ONLY_CAPABILITY), "validation_retry_source_1")
+                val revision = checkNotNull(source.candidate).revisionId
+                val plan = service.readValidationCasePlan(job.id, revision)
+                val cases = WorkflowValidationCases(WEB_VALIDATION_PRESET, checkNotNull(plan.corpusSha256))
+                val failed = start(NewWorkflowAttempt(WorkflowKind.VALIDATE, WebWorkflowDefaults.VALIDATE, revision,
+                    cases = cases), "validation_retry_failed_1")
+                assertEquals(WorkflowRunState.FAILED, failed.state)
+                val calls = engines.calls.get()
+                if (changed) {
+                    // Same source revision, different retained graph corpus: never silently validate new cases.
+                    acceptRepairBaseline(store.runReportsDirectory(job.id, source.runId).resolve("source-tree"))
+                    assertEquals("INPUT_UNVERIFIED", service.attemptControls(job.id, failed.runId).retryReason)
+                    assertCode("INPUT_UNVERIFIED") {
+                        service.requestDurableRecovery(job.id, failed.runId, failed.version, WorkflowRecoveryMode.RETRY,
+                            revision, "validation_retry_changed_1")
+                    }
+                    assertEquals(calls, engines.calls.get())
+                } else {
+                    assertNull(service.attemptControls(job.id, failed.runId).retryReason)
+                    engines.validateBody = { RepairRunStatus.REJECTED }
+                    val result = service.requestDurableRecovery(job.id, failed.runId, failed.version, WorkflowRecoveryMode.RETRY,
+                        revision, "validation_retry_reviewed_1")
+                    val attempt = result.attempt
+                    assertEquals(WorkflowRunState.COMPLETED, attempt.state)
+                    assertEquals(failed.runId, attempt.previousRunId); assertEquals(revision, attempt.inputRevisionId)
+                    assertEquals(cases, attempt.cases); assertEquals(failed.configuration?.validation, attempt.configuration?.validation)
+                    val replay = service.requestDurableRecovery(job.id, failed.runId, failed.version, WorkflowRecoveryMode.RETRY,
+                        revision, "validation_retry_reviewed_1")
+                    assertTrue(replay.replayed); assertEquals(attempt.runId, replay.attempt.runId)
+                    assertEquals(calls + 1, engines.calls.get())
+                    retried = attempt
+                }
+            }
+            retried?.let { expected ->
+                WorkflowAttemptStore.open(store.storageRoot).use { owner ->
+                    val retained = assertIs<WorkflowJobInspection.Available>(owner.inspect(job.id)).snapshot.latestRun!!
+                    assertEquals(expected, retained, "retry lost its validation selection, configuration or receipt on restart")
+                }
+            }
+        }
+    }
+
+    @Test
+    fun `a validation without an admission corpus is refused before copying or validating`() = withRoot { root ->
+        val engines = FakeEngines()
+        val input = root.resolve("input"); writeSourceTree(input, "base")
+        val reports = root.resolve("reports")
+        val base = context(root, reports, WebWorkflowDefaults.VALIDATE)
+        val context = base.copy(attempt = base.attempt.copy(workflow = WorkflowKind.VALIDATE), inputSourceTree = input)
+        val refused = assertIs<DurableWebWorkflowOutcome.Failed>(ValidateWorkflowAdapter(engines, FAST).execute(context))
+        assertEquals(WorkflowTerminalReason.REFUSED, refused.reason)
+        assertTrue(engines.validated.isEmpty()); assertFalse(Files.exists(reports.resolve("source-tree")))
     }
 
     @Test
