@@ -12,11 +12,13 @@ import decompengine.oracle.fulltree.KotlinContainedCommandRequest
 import decompengine.oracle.fulltree.isolatedObservationServiceRuntimeSeconds
 import decompengine.oracle.fulltree.runDirectoryName
 import decompengine.oracle.fulltree.containedCommandFileDescriptorAdmission
+import decompengine.oracle.fulltree.containedCommandFileDescriptorRuntimeBytes
 import java.nio.file.Path
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
 import kotlin.test.assertFalse
+import kotlin.test.assertNotEquals
 import kotlin.test.assertTrue
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonElement
@@ -304,6 +306,78 @@ class ContainedModuleCompilationProofTest {
         for (field in listOf("controlDirectory", "writableRoot")) {
             reject2(rehash2(changeNested(proof, "runtimeClosure", field, JsonPrimitive("/srv/unowned"))), "runtime paths")
         }
+    }
+
+    @Test
+    fun `owned executable runtime composes the full FD proof without reinterpreting old runtime bytes`(): Unit {
+        for (profile in ReconstructionProfiles.builtIn) for (success in listOf(true, false)) {
+            val original = fixture2(success, profile)
+            val legacyClosure = original.proof.objectField("runtimeClosure")
+            assertTrue(bytes(legacyClosure).contentEquals(containedCommandFileDescriptorRuntimeBytes(legacyClosure)))
+            val proof = ownedExecutableProof(original)
+            val closure = proof.objectField("runtimeClosure")
+            assertProof2HashJoins(proof)
+            assertTrue(bytes(closure).contentEquals(containedCommandFileDescriptorRuntimeBytes(closure)))
+            assertNotEquals(sha256(bytes(legacyClosure)), sha256(bytes(closure)))
+            val evidence = original.copy(proof = proof).evidence()
+            assertEquals(success, evidence.passed)
+            ContainedModuleCompilationProof.verify(evidence)
+            assertFalse(evidence.authorizesAcceptance(original.request.sourceSha256, profile.sha256,
+                ContainedModuleCompilationPolicy.POLICY_ID))
+            ContainedModuleCompilationProof.verify(original.evidence())
+        }
+    }
+
+    @Test
+    fun `rehashed owned executable runtime refuses changed alias pins providers populations or extra fields`(): Unit {
+        val proof = ownedExecutableProof(fixture2())
+        val closure = proof.objectField("runtimeClosure")
+        for (field in listOf("baseRuntimeProvider", "executableAliases")) {
+            val missing = JsonObject(closure - field)
+            assertFailsWith<IllegalArgumentException> { containedCommandFileDescriptorRuntimeBytes(missing) }
+            reject2(rehash2(change(proof, "runtimeClosure", missing)))
+        }
+        val wrongBase = change(closure, "baseRuntimeProvider", JsonPrimitive("kotlin-lease-contained-command-runtime-v3"))
+        assertFailsWith<IllegalArgumentException> { containedCommandFileDescriptorRuntimeBytes(wrongBase) }
+        reject2(rehash2(change(proof, "runtimeClosure", wrongBase)), "v5 base runtime")
+        val relabeledLegacy = change(closure, "provider", JsonPrimitive("kotlin-lease-contained-command-runtime-v5"))
+        assertFailsWith<IllegalArgumentException> { containedCommandFileDescriptorRuntimeBytes(relabeledLegacy) }
+        reject2(rehash2(change(proof, "runtimeClosure", relabeledLegacy)), "runtime closure fields differ")
+        val aliases = closure.getValue("executableAliases") as JsonArray
+        val alias = aliases.single() as JsonObject
+        for (invalid in listOf(JsonArray(emptyList()), JsonArray(aliases + aliases),
+            JsonArray(listOf(change(alias, "source", JsonPrimitive("/tmp/unbound/compiler")))),
+            JsonArray(listOf(change(alias, "destination", JsonPrimitive("/opt/other/compiler")))),
+            JsonArray(listOf(change(alias, "extra", JsonPrimitive(true)))))) {
+            reject2(rehash2(changeNested(proof, "runtimeClosure", "executableAliases", invalid)), "executable alias differs")
+        }
+        val inputs = closure.getValue("readOnlyInputs") as JsonArray
+        for (population in listOf(inputs.dropLast(1), inputs + inputs.last())) {
+            reject2(rehash2(changeNested(proof, "runtimeClosure", "readOnlyInputs", JsonArray(population))), "exactly its private request")
+        }
+        for ((field, value) in listOf("path" to JsonPrimitive("/tmp/other/compiler"), "bytes" to JsonPrimitive(4097),
+            "sha256" to JsonPrimitive("d".repeat(64)), "extra" to JsonPrimitive(true))) {
+            val changed = JsonArray(inputs.take(2) + change(inputs[2] as JsonObject, field, value))
+            reject2(rehash2(changeNested(proof, "runtimeClosure", "readOnlyInputs", changed)), "executable snapshot differs")
+        }
+        val largerPins = JsonArray(inputs.mapIndexed { index, value -> if (index == 0) value else
+            change(value as JsonObject, "bytes", JsonPrimitive(64L * 1024 * 1024 + 1)) })
+        reject2(rehash2(changeNested(proof, "runtimeClosure", "readOnlyInputs", largerPins)), "executable snapshot differs")
+    }
+
+    private fun ownedExecutableProof(fixture: Fixture): JsonObject {
+        val closure = fixture.proof.objectField("runtimeClosure")
+        val inputs = closure.getValue("readOnlyInputs") as JsonArray
+        val snapshot = change(inputs[1] as JsonObject, "path", JsonPrimitive(
+            Path.of((inputs[0] as JsonObject).text("path")).parent.resolve("compiler").toString()))
+        val aliased = JsonObject(closure + mapOf(
+            "provider" to JsonPrimitive("kotlin-lease-contained-command-runtime-owned-executable-v1"),
+            "baseRuntimeProvider" to closure.getValue("provider"),
+            "readOnlyInputs" to JsonArray(inputs + snapshot),
+            "executableAliases" to JsonArray(listOf(JsonObject(mapOf(
+                "source" to snapshot.getValue("path"), "destination" to (inputs[1] as JsonObject).getValue("path"))))),
+        ))
+        return rehash2(change(fixture.proof, "runtimeClosure", aliased))
     }
 
     @Test

@@ -160,7 +160,11 @@ internal fun containedCommandFileDescriptorRuntimeBytes(value: JsonObject): Byte
         "terminalResourcePolicySha256", "fileDescriptorAdmission")
     val optional = setOf("interruptionPolicySha256", "controlDirectory", "writableRoot", "readOnlyControlDirectories",
         "readOnlyStateDirectory", "readOnlyReportsDirectory", "operationWallDeadline", "retainedInputVisibility")
-    require(value.keys.containsAll(required) && (value.keys - required).all { it in optional })
-    require(value["provider"] == JsonPrimitive("kotlin-lease-contained-command-runtime-v5"))
+    val ownedExecutable = value["provider"] == JsonPrimitive("kotlin-lease-contained-command-runtime-owned-executable-v1")
+    val fields = required + if (ownedExecutable) setOf("baseRuntimeProvider", "executableAliases") else emptySet()
+    require(value.keys.containsAll(fields) && (value.keys - fields).all { it in optional })
+    if (ownedExecutable) {
+        require(value["baseRuntimeProvider"] == JsonPrimitive("kotlin-lease-contained-command-runtime-v5"))
+    } else require(value["provider"] == JsonPrimitive("kotlin-lease-contained-command-runtime-v5"))
     return OracleJson.canonicalBytes(value, FD_RUNTIME_LIMITS)
 }

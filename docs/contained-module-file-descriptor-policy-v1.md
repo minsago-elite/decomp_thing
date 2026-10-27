@@ -102,5 +102,15 @@ not success. Issue #1827 owns the authenticated host-to-user-namespace compiler
 ownership handoff. A host-root compiler can appear as an unmapped owner in the
 contained namespace; accepting UID 65534, removing the lease guard, or merely
 checking a read-only mount is not a safe correction. The staged-member owner fix
-does not solve this compiler admission failure. Parent #1727's separate off-snapshot
-compiler-read integrity finding also remains a blocker; FD controls cannot clear it.
+alone does not solve this compiler admission failure. Parent #1727's host-side owned
+compiler snapshot and read-only same-path executable alias are integrated separately;
+the intermediate output-tree copy is superseded because leased scratch stays noexec.
+The owned-executable runtime provider retains `baseRuntimeProvider` v5 and all FD
+request/resource/admission fields. Proof v2 checks the exact three ordered inputs
+(private request, configured compiler, private `compiler` snapshot), identical compiler
+pins, the 64 MiB snapshot bound and the single exact alias. Old no-alias v5 bytes and
+historical replay semantics remain unchanged. Rehashed alias/path/pin/population/provider
+substitutions must refuse. This candidate handoff still needs complete current-source
+hosted qualification; local worker positives do not close #1827. Parent #1727's separate
+off-snapshot compiler-read integrity finding also remains a blocker; FD controls cannot
+clear it.
