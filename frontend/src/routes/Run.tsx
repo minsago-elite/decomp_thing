@@ -21,6 +21,8 @@ import type { Received } from '../shared/receiptTime';
 import { MetadataReceipt } from '../shared/MetadataReceipt';
 import { canRetainMetadata, isDeletedJob, metadataFailureKind } from '../shared/retainMetadata';
 import { onLibraryChange } from '../jobs/libraryChannel';
+import { attemptOutcomeCopy as outcomeCopy, stopOutcomeCopy } from '../copy/attemptOutcome';
+import { QueuePosition } from '../jobs/QueuePosition';
 
 function Details({ jobId, runId, basePath, session, view, navigation }: {
   jobId: string; runId: string; basePath: string; session: BrowserSession; view: RunView; navigation?: ValidationNavigation;
@@ -76,15 +78,19 @@ function Details({ jobId, runId, basePath, session, view, navigation }: {
         <dt>{copy.created}</dt><dd><time dateTime={run.createdAt} title={run.createdAt}>{formatExactTimestamp(run.createdAt)}</time></dd>
         <dt>{copy.started}</dt><dd>{run.startedAt ? <time dateTime={run.startedAt} title={run.startedAt}>{formatExactTimestamp(run.startedAt)}</time> : copy.notRecorded}</dd>
         <dt>{copy.ended}</dt><dd>{run.endedAt ? <time dateTime={run.endedAt} title={run.endedAt}>{formatExactTimestamp(run.endedAt)}</time> : copy.notRecorded}</dd>
-        <dt>{copy.terminalReason}</dt><dd>{run.terminalReason ?? copy.noTerminalReasonRecorded}</dd>
+        <dt>{outcomeCopy.stopReason}</dt><dd>{run.terminalReason ? <>
+          <strong>{stopOutcomeCopy[run.terminalReason].label}</strong>. {stopOutcomeCopy[run.terminalReason].detail}{' '}
+          {displayMessage(outcomeCopy.recordedCode, { code: <code>{run.terminalReason}</code> })}
+        </> : copy.noTerminalReasonRecorded}</dd>
         <dt>{copy.inputRevision}</dt><dd>{run.inputRevisionId ?? copy.originalUploadedInput}</dd>
         <dt>{copy.resultRevision}</dt><dd>{run.resultRevisionId ?? copy.noResultRevisionRecorded}</dd>
       </dl>
       <p>{copy.completionAloneDoesNotEstablishAcceptedReconstructionAcceptanceBelongsTo}</p>
       <p>{copy.recordedHarnessBoundary}</p>
       {run.previousRunId && <a href={runPath(basePath, jobId, run.previousRunId)}>{copy.openPreviousAttempt}</a>}
+      {run.state === 'queued' && <QueuePosition key={`queue/${jobId}/${runId}/${run.version}`} jobId={jobId} runId={runId} basePath={basePath} />}
       <h2>{copy.recordedLimits}</h2>
-      <p>{copy.sourceThePersistedConfigurationForThisAttemptLimitsDoNot}</p>
+      <p>{displayMessage(outcomeCopy.limitsSource, { time: <time dateTime={run.createdAt} title={run.createdAt}>{formatExactTimestamp(run.createdAt)}</time> })}</p>
       <dl class="job-facts">
         <dt>{copy.wallClockLimit2}</dt><dd>{displayMessage(copy.wallClockLimit, { value: run.limits.wallClockMs })}</dd>
         <dt>{copy.idleLimit2}</dt><dd>{displayMessage(copy.idleLimit, { value: run.limits.idleMs })}</dd>
@@ -92,7 +98,8 @@ function Details({ jobId, runId, basePath, session, view, navigation }: {
         <dt>{copy.toolCallLimit2}</dt><dd>{displayMessage(copy.toolCallLimit, { value: run.limits.maxToolCalls })}</dd>
       </dl>
       <h2>{copy.reportedUsage}</h2>
-      <p>{copy.sourceThePersistedAttemptReceiptMeasurementTimeIsNotReported}</p>
+      <p>{run.endedAt ? displayMessage(outcomeCopy.usageSource, { time: <time dateTime={run.endedAt} title={run.endedAt}>{formatExactTimestamp(run.endedAt)}</time> })
+        : outcomeCopy.usageWhileActive}</p>
       {run.usage ? <dl class="job-facts">
         <dt>{copy.inputTokens}</dt><dd>{run.usage.inputTokens ?? copy.notReported}</dd>
         <dt>{copy.outputTokens}</dt><dd>{run.usage.outputTokens ?? copy.notReported}</dd>

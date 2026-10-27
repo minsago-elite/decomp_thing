@@ -717,7 +717,9 @@
                 "REFUSED",
                 "CANCELLED",
                 "LIMIT_EXHAUSTED",
+                "TIMED_OUT",
                 "FAILED",
+                "INFRASTRUCTURE_FAILED",
                 "PROCESS_INTERRUPTED"
               ]
             },
@@ -5373,6 +5375,135 @@
         "omittedProtectedJobs"
       ],
       "additionalProperties": false
+    },
+    "queuePosition": {
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "jobId": {
+              "$ref": "#/definitions/id"
+            },
+            "runId": {
+              "$ref": "#/definitions/id"
+            },
+            "sampledAt": {
+              "$ref": "#/definitions/instant"
+            },
+            "state": {
+              "const": "queued"
+            },
+            "source": {
+              "const": "web-workflow-executor"
+            },
+            "approximate": {
+              "const": true
+            },
+            "position": {
+              "type": "string",
+              "pattern": "^([1-9]|[12][0-9]|3[0-2])$"
+            },
+            "ahead": {
+              "type": "string",
+              "pattern": "^([0-9]|[12][0-9]|3[01])$"
+            },
+            "queuedTasks": {
+              "type": "string",
+              "pattern": "^([1-9]|[12][0-9]|3[0-2])$"
+            },
+            "activeWorkers": {
+              "type": "string",
+              "pattern": "^[0-2]$"
+            },
+            "workerLimit": {
+              "type": "string",
+              "pattern": "^[1-2]$"
+            }
+          },
+          "required": [
+            "jobId",
+            "runId",
+            "sampledAt",
+            "state",
+            "source",
+            "approximate",
+            "position",
+            "ahead",
+            "queuedTasks",
+            "activeWorkers",
+            "workerLimit"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "jobId": {
+              "$ref": "#/definitions/id"
+            },
+            "runId": {
+              "$ref": "#/definitions/id"
+            },
+            "sampledAt": {
+              "$ref": "#/definitions/instant"
+            },
+            "state": {
+              "const": "not-queued"
+            },
+            "runState": {
+              "type": "string",
+              "enum": [
+                "running",
+                "cancelling",
+                "completed",
+                "failed",
+                "cancelled",
+                "interrupted"
+              ]
+            }
+          },
+          "required": [
+            "jobId",
+            "runId",
+            "sampledAt",
+            "state",
+            "runState"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "jobId": {
+              "$ref": "#/definitions/id"
+            },
+            "runId": {
+              "$ref": "#/definitions/id"
+            },
+            "sampledAt": {
+              "$ref": "#/definitions/instant"
+            },
+            "state": {
+              "const": "unavailable"
+            },
+            "reasonCode": {
+              "type": "string",
+              "enum": [
+                "EXTERNAL_EXECUTOR",
+                "NOT_IN_LOCAL_QUEUE"
+              ]
+            }
+          },
+          "required": [
+            "jobId",
+            "runId",
+            "sampledAt",
+            "state",
+            "reasonCode"
+          ],
+          "additionalProperties": false
+        }
+      ]
     }
   },
   "oneOf": [
@@ -5873,6 +6004,30 @@
         },
         "data": {
           "$ref": "#/definitions/progressPin"
+        }
+      },
+      "required": [
+        "apiVersion",
+        "kind",
+        "requestId",
+        "data"
+      ],
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "properties": {
+        "apiVersion": {
+          "const": 1
+        },
+        "kind": {
+          "const": "queuePosition"
+        },
+        "requestId": {
+          "$ref": "#/definitions/requestId"
+        },
+        "data": {
+          "$ref": "#/definitions/queuePosition"
         }
       },
       "required": [
