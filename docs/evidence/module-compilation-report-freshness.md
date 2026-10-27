@@ -52,6 +52,48 @@ Raw remediation logs and active YAML/Python LSP results are retained under
 from the parent retain its 159-test focused evidence; full current-source builds,
 bundled-Ghidra tests and configured containment remain Actions-owned gates.
 
+## Final independent-review remediation (2026-10-27)
+
+Independent review identified a second staged-member boundary: the metadata admitted
+before hashing was not compared with the hash helper's later descriptor snapshot.
+The verifier now requires the complete post-hash version (device, inode, mode,
+link count, UID, GID, size, mtime and ctime) to equal that admission-time version,
+as well as the final filename observation. A deterministic regression hashes the
+actual unchanged bytes while modeling six transitions immediately after admission:
+UID, GID, writable mode, link count, mtime and ctime. All six were accepted before
+the correction and now refuse without altering frozen manifest/member bytes.
+These are modeled interleavings, not an end-to-end privileged exploit demonstration.
+All 18 deployment controls, including actual repeated Gradle invocation, pass.
+
+The latest completed [qualification run 40437749681, job 121970424441](https://github.com/minsago-elite/decomp_thing/actions/runs/40437749681/job/121970424441)
+reached JUnit at the previous child head `c03edaf754f006eceacc10715b3ca13a137183b3`:
+104 tests, 91 failures and zero skips. All 91 failures contain the unsupported
+foreign non-root compiler-owner refusal. The required case summary has five failed,
+five not-started and three passed rows; this is not accepted qualification.
+Artifact `12709593052` and its exact failure triage are retained in the evidence
+directory below. This is not the earlier report-output preparation problem.
+
+Non-destructive integration now includes parent #1800 at
+`e8b03d6a84fd519f65b0829a1ab93a18676234fb` and upstream #1727's normal-completion
+cleanup correction at `3bc38cd037fcd58fdc06c6f01575ca0f9e732f88`. The bounded,
+digest-pinned owned compiler snapshot and read-only same-path alias retain ordinary
+worker leases, noexec scratch, FD proof v2 and original resource/command policy.
+Normal cleanup removes that staged executable only after proven process/scope
+absence and scratch release. Foreign/unmapped ownership is not made trustworthy.
+Fresh narrow artifact-assisted compilation of 39 changed Kotlin paths and 209 JUnit
+methods passes with zero failures, errors or skips, including both-profile real
+namespace/noexec regressions, foreign/substituted executable refusals, proof-tamper
+controls and staged-executable cleanup. Unchanged dependencies are retained build
+artifacts: this does **not** replace a full current-source build or authenticated
+configured Make/Ninja qualification. Kotlin LSP is unavailable; active settled
+Python/YAML LSP with an explicit workspace is clear on all supported changed paths.
+
+Raw final-pass evidence uses `final-fix-*` names under
+`.worktrees/review-remediation/evidence/prs/1813/live/`. #1827 remains open pending
+actual hosted qualification and exact-head external code/security review. Parent
+#1800/#1727 and #738's off-snapshot compiler-read integrity boundary remain separate
+unresolved dependencies; no closure, acceptance or merge is claimed.
+
 ## Acceptance boundary
 
 This correction is a qualification harness fix. The 13 actual configured Make/Ninja compiler, rollback, cancellation, refusal, cleanup, and retry cases still need to execute on a new exact-head hosted run with complete zero-skip XML and case evidence. The prior 13 `not-started` rows provide no compiler or FD-policy acceptance.
