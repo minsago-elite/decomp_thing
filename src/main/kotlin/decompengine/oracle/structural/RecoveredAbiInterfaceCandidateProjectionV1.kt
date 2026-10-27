@@ -349,8 +349,9 @@ class RecoveredAbiInterfaceCandidateProjectionV1 private constructor(private val
             val listingByEntry = uniqueBy(listingFunctions, NativeInterfaceFunctionV1::entry, "listing function entry")
             val inferredByEntry = uniqueBy(inferredFunctions, NativeInferredInterfaceFunctionV1::entry, "inferred function entry")
             val classifiedRoots = RecoveredAbiTypeGraphClassifierV1.classify(
-                inferredRecords, target, inferred.dataOrganization,
-                minOf(limits.maximumParameters.toLong() * 4L + limits.maximumNativeFunctions.toLong() * 2L,
+                inferredRecords, target, listing.bindings, inferred.dataOrganization,
+                // Two listing roots plus one inferred root for each parameter and return.
+                minOf(limits.maximumParameters * 3L + limits.maximumNativeFunctions.toLong() * 3L,
                     3_393_216L).coerceAtLeast(1L).toInt(), checkpoint,
             )
             val listingFunctionOrdinals = listingFunctions.withIndex().associate { it.value.entry to it.index }
@@ -448,7 +449,7 @@ class RecoveredAbiInterfaceCandidateProjectionV1 private constructor(private val
 
                 val functionOrdinal = listingFunction?.let { listingFunctionOrdinals[it.entry] }
                 val returnCandidate = listingFunction?.returned?.let { returned ->
-                    if (functionOrdinal == null || listingFunction.customStorage || returned.forcedIndirect || returned.autoParameterType != null) null
+                    if (functionOrdinal == null || listingFunction.isThunk || listingFunction.customStorage || returned.forcedIndirect || returned.autoParameterType != null) null
                     else classifiedFormalRoot(classifiedRoots, functionOrdinal, "return-formal", -1, returned.formalType, listingTypesByOrdinal, target)
                 }
                 if (returnCandidate?.value != null) {
@@ -457,6 +458,7 @@ class RecoveredAbiInterfaceCandidateProjectionV1 private constructor(private val
                 } else {
                     val reason = when {
                         entry == null -> "native-function-not-uniquely-mapped"
+                        listingFunction?.isThunk == true -> "thunk-signature-is-not-an-independent-interface"
                         listingFunction?.customStorage == true -> "custom-function-storage-can-override-target-abi-passing"
                         listingFunction?.returned?.forcedIndirect == true -> "return-forced-indirect-role-is-not-normalized"
                         listingFunction?.returned?.autoParameterType != null -> "return-auto-role-is-not-a-source-return-value"
@@ -467,7 +469,7 @@ class RecoveredAbiInterfaceCandidateProjectionV1 private constructor(private val
                 }
                 listingFunction?.parameters.orEmpty().sortedBy { it.ordinal }.forEach { parameter ->
                     checkpoint()
-                    val parameterCandidate = if (functionOrdinal == null || listingFunction.customStorage || parameter.autoParameter ||
+                    val parameterCandidate = if (functionOrdinal == null || listingFunction.isThunk || listingFunction.customStorage || parameter.autoParameter ||
                         parameter.forcedIndirect || parameter.autoParameterType != null) null else classifiedFormalRoot(
                         classifiedRoots, functionOrdinal, "parameter-formal", parameter.ordinal, parameter.formalType, listingTypesByOrdinal, target,
                     )
@@ -477,6 +479,7 @@ class RecoveredAbiInterfaceCandidateProjectionV1 private constructor(private val
                     } else {
                         val reason = when {
                             entry == null -> "native-function-not-uniquely-mapped"
+                            listingFunction?.isThunk == true -> "thunk-signature-is-not-an-independent-interface"
                             listingFunction?.customStorage == true -> "custom-function-storage-can-override-target-abi-passing"
                             parameter.autoParameter || parameter.autoParameterType != null -> "automatic-this-or-hidden-role-is-not-a-source-formal-parameter"
                             parameter.forcedIndirect -> "parameter-forced-indirect-role-is-not-normalized"

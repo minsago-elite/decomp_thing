@@ -185,6 +185,97 @@ class RecoveredAbiInterfaceCandidateProjectionV1Test {
         }
     }
 
+    @Test
+    fun `mapped thunk with complete formal return and parameter graphs never promotes ABI classes`() {
+        val ordinary = projectFormalGraph().getValue("candidateEntities").jsonArray.single().jsonObject
+        val thunk = projectFormalGraph(thunk = true).getValue("candidateEntities").jsonArray.single().jsonObject
+        val dimensions = setOf("function.return-abi-class", "function.parameter-abi-class")
+        for (entity in listOf(ordinary, thunk)) {
+            val facts = entity.getValue("facts").jsonArray.map { it.jsonObject }
+                .filter { it.getValue("dimension").jsonPrimitive.content in dimensions }
+            assertEquals(2, facts.size)
+            facts.forEach {
+                assertEquals(if (entity == thunk) "recovered-unknown" else "recovered", it.getValue("state").jsonPrimitive.content)
+                if (entity == thunk) assertEquals(JsonNull, it.getValue("value"))
+            }
+        }
+        assertEquals(2, thunk.getValue("decisions").jsonArray.map { it.jsonObject }.count {
+            it.getValue("reason").jsonPrimitive.content == "thunk-signature-is-not-an-independent-interface" &&
+                it.getValue("channel").jsonPrimitive.content == "listing-formal-type-graph"
+        })
+    }
+
+    @Test
+    fun `one zero parameter function admits both listing return roots and inferred return root at exact limits`() {
+        val document = projectFormalGraph(parameter = false, limits = RecoveredAbiInterfaceCandidateProjectionLimitsV1(
+            maximumNativeFunctions = 1, maximumParameters = 0,
+        ))
+        val returned = document.getValue("candidateEntities").jsonArray.single().jsonObject
+            .getValue("facts").jsonArray.map { it.jsonObject }
+            .single { it.getValue("dimension").jsonPrimitive.content == "function.return-abi-class" }
+        assertEquals("recovered", returned.getValue("state").jsonPrimitive.content)
+    }
+
+    @Test
+    fun `LP64 observations from incompatible captured languages or compilers remain unknown`() {
+        for ((language, compiler) in listOf("AARCH64:LE:64:v8A" to "gcc", "x86:LE:64:default" to "windows")) {
+            val document = projectFormalGraph(language = language, compiler = compiler)
+            val entity = document.getValue("candidateEntities").jsonArray.single().jsonObject
+            val facts = entity.getValue("facts").jsonArray.map { it.jsonObject }.filter {
+                it.getValue("dimension").jsonPrimitive.content in setOf("function.return-abi-class", "function.parameter-abi-class")
+            }
+            assertEquals(2, facts.size)
+            assertTrue(facts.all { it.getValue("state").jsonPrimitive.content == "recovered-unknown" && it.getValue("value") == JsonNull })
+            assertEquals(2, entity.getValue("decisions").jsonArray.map { it.jsonObject }.count {
+                it.getValue("reason").jsonPrimitive.content == "captured-language-or-compiler-is-not-the-supported-sysv-amd64-profile"
+            })
+        }
+    }
+
+    private fun projectFormalGraph(
+        thunk: Boolean = false,
+        parameter: Boolean = true,
+        language: String = "x86:LE:64:default",
+        compiler: String = "gcc",
+        limits: RecoveredAbiInterfaceCandidateProjectionLimitsV1 = RecoveredAbiInterfaceCandidateProjectionLimitsV1(),
+    ): JsonObject {
+        val base = fixture()
+        val formal = NativeInterfaceParameterV1(0, "x", "USER_DEFINED", false, null, false, 0, 0,
+            NativeInterfaceStorageV1("none", null, null, null, null, emptyList()))
+        val function = base.listingFunction.copy(isThunk = thunk,
+            immediateThunkTarget = if (thunk) base.listingFunction.entry else null,
+            returned = formal.copy(ordinal = -1), parameterCount = if (parameter) 1 else 0,
+            parameters = if (parameter) listOf(formal) else emptyList())
+        val listing = base.listing.copy(bindings = base.listing.bindings.copy(languageId = language, compilerSpecId = compiler),
+            scan = base.listing.scan.copy(thunks = if (thunk) 1 else 0, parameters = if (parameter) 1 else 0, types = 1))
+        val type = NativeInterfaceTypeV1(0, "integer", "ghidra.program.model.data.IntegerDataType", "int", "/int",
+            4, 4, 4, false, false, "signed")
+        val node = NativeInterfaceTypeNodeV1(NativeInterfaceGraphScopeV1("listing", 0), 0,
+            type.nativeClass, "integer", 4, 4, 4, false, false, false, "terminal", 0,
+            JsonObject(mapOf("signed" to JsonPrimitive(true))))
+        val inferredNode = node.copy(scope = NativeInterfaceGraphScopeV1("inferred", 0))
+        val roots = listOf(
+            NativeInterfaceTypeRootV1(node.scope, "return-formal", -1, 0, 0),
+            NativeInterfaceTypeRootV1(node.scope, "return-effective", -1, 0, 0),
+            NativeInterfaceTypeRootV1(inferredNode.scope, "inferred-return", -1, null, 0),
+        ) + if (parameter) listOf(
+            NativeInterfaceTypeRootV1(node.scope, "parameter-formal", 0, 0, 0),
+            NativeInterfaceTypeRootV1(node.scope, "parameter-effective", 0, 0, 0),
+        ) else emptyList()
+        val inferred = base.inferred.copy(listing = listing,
+            bindings = base.inferred.bindings.copy(listingBindings = listing.bindings),
+            dataOrganization = JsonObject(mapOf(
+                "bigEndian" to JsonPrimitive(false), "pointerSize" to JsonPrimitive(8), "pointerShift" to JsonPrimitive(0),
+                "charSize" to JsonPrimitive(1), "shortSize" to JsonPrimitive(2), "integerSize" to JsonPrimitive(4),
+                "longSize" to JsonPrimitive(8), "longLongSize" to JsonPrimitive(8), "floatSize" to JsonPrimitive(4),
+                "doubleSize" to JsonPrimitive(8), "sizeAlignments" to JsonArray(emptyList()),
+            )), scan = base.inferred.scan.copy(thunks = if (thunk) 1 else 0, roots = roots.size.toLong(), graphNodes = 2, graphWork = roots.size.toLong() + 7))
+        val inferredFunction = base.inferredFunction.copy(isThunk = thunk,
+            prototype = base.inferredFunction.prototype!!.copy(returnType = 0))
+        return RecoveredAbiInterfaceCandidateProjectionV1.project(listing, listOf(function, type), inferred,
+            listOf(inferredFunction, node, inferredNode) + roots, base.target, limits).document
+    }
+
     private fun project(
         fixture: Fixture,
         limits: RecoveredAbiInterfaceCandidateProjectionLimitsV1 = RecoveredAbiInterfaceCandidateProjectionLimitsV1(),
@@ -210,8 +301,8 @@ class RecoveredAbiInterfaceCandidateProjectionV1Test {
     private fun fixture(inferredVarArgs: Boolean = true, conventionState: String = "named-resolved"): Fixture {
         val digest = "a".repeat(64)
         val address = NativeCallAddressV1(0, "0000000000000001")
-        val binding = NativeCallBindingsV1(digest, "compiler", digest, NativeCallAddressV1(0, "0000000000000000"),
-            digest, "language", 1, digest, digest)
+        val binding = NativeCallBindingsV1(digest, "gcc", digest, NativeCallAddressV1(0, "0000000000000000"),
+            digest, "x86:LE:64:default", 1, digest, digest)
         val listingReportDigest = "b".repeat(64)
         val listingManifestDigest = "c".repeat(64)
         val listingManifest = NativeInterfaceManifestV1(1, digest, digest, digest, listingReportDigest)

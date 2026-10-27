@@ -2,6 +2,7 @@ package decompengine.oracle.structural
 
 import decompengine.oracle.core.OracleArtifacts
 import decompengine.project.NativeInferredInterfaceRecordV1
+import decompengine.project.NativeInterfaceBindingsV1
 import decompengine.project.NativeInterfaceTypeEdgeV1
 import decompengine.project.NativeInterfaceTypeNodeV1
 import decompengine.project.NativeInterfaceTypeRootV1
@@ -42,10 +43,13 @@ internal object RecoveredAbiTypeGraphClassifierV1 {
     fun classify(
         records: Collection<NativeInferredInterfaceRecordV1>,
         target: StructuralTargetAbiV1,
+        bindings: NativeInterfaceBindingsV1,
         dataOrganization: JsonObject,
         maximumRoots: Int,
         checkpoint: () -> Unit,
+        workLimit: Int = maximumWork,
     ): Map<RootKey, Result> {
+        require(workLimit in 1..maximumWork)
         require(maximumRoots in 1..RecoveredAbiTypeGraphClassifierV1.maximumRoots)
         val scopes = linkedMapOf<ScopeKey, Graph>()
         var nodes = 0
@@ -83,8 +87,13 @@ internal object RecoveredAbiTypeGraphClassifierV1 {
             }
         }
 
-        val targetReason = unsupportedTargetReason(target, dataOrganization)
+        val targetReason = unsupportedTargetReason(target, bindings, dataOrganization)
         var work = 0
+        fun chargeWork() {
+            checkpoint()
+            // Budget exhaustion must escape the per-root malformed-layout catch below.
+            check(++work <= workLimit) { "recovered ABI aggregate work bound exceeded" }
+        }
         val output = LinkedHashMap<RootKey, Result>(formalRoots)
         for ((scope, graph) in scopes) {
             checkpoint()
@@ -98,8 +107,7 @@ internal object RecoveredAbiTypeGraphClassifierV1 {
             val active = HashSet<Int>()
 
             fun shape(id: Int, depth: Int): DwarfAbiTypeShape {
-                checkpoint()
-                require(++work <= maximumWork) { "recovered ABI type-shape work bound exceeded" }
+                chargeWork()
                 if (depth > 64) throw UnsupportedShape("type-depth-bound")
                 if (shapeCache.containsKey(id)) return shapeCache[id] ?: throw UnsupportedShape("type-node-has-unsupported-shape")
                 val node = graph.nodes[id] ?: throw UnsupportedShape("root-or-edge-target-is-absent")
@@ -219,7 +227,8 @@ internal object RecoveredAbiTypeGraphClassifierV1 {
                 try {
                     val candidate = shape(rootNode, 1)
                     val classification = classCache[rootNode]
-                        ?: DwarfSysvAmd64Classification.classify(candidate).also { classCache[rootNode] = it }
+                        ?: DwarfSysvAmd64Classification.classifyWithCheckpoint(candidate, checkpoint = ::chargeWork)
+                            .also { classCache[rootNode] = it }
                     output[rootKey] = Result(root, graph.nodes[rootNode], token, candidate, classification,
                         if (classification.known) "complete-native-type-layout-classified-under-explicit-sysv-amd64-target"
                         else classification.reasons.joinToString(";"))
@@ -257,13 +266,20 @@ internal object RecoveredAbiTypeGraphClassifierV1 {
         for (root in graph.roots) require(root.node == null || root.node in graph.nodes) { "native type root refers to an absent graph node" }
     }
 
-    private fun unsupportedTargetReason(target: StructuralTargetAbiV1, organization: JsonObject): String? {
+    private fun unsupportedTargetReason(
+        target: StructuralTargetAbiV1,
+        bindings: NativeInterfaceBindingsV1,
+        organization: JsonObject,
+    ): String? {
         val targetObject = target.document["target"] as? JsonObject ?: return "target-abi-descriptor-is-incomplete"
         val supported = target.id == "sysv-amd64-elf-v1" && target.addressBits == 64 && target.objectFormat == "ELF" &&
             targetObject.string("architecture") == "x86_64" && targetObject.string("endianness") == "little" &&
             target.conventionAliases["sysv"] == "sysv-amd64" && target.conventionAliases["__cdecl"] == "sysv-amd64" &&
             target.abiClasses.containsAll(SYSV_CLASSES)
         if (!supported) return "target-abi-descriptor-is-not-the-supported-sysv-amd64-elf-profile"
+        if (bindings.languageId != "x86:LE:64:default" || bindings.compilerSpecId != "gcc") {
+            return "captured-language-or-compiler-is-not-the-supported-sysv-amd64-profile"
+        }
         val dataModel = organization.boolean("bigEndian") == false && organization.int("pointerSize") == 8 &&
             organization.int("pointerShift") == 0 && organization.int("charSize") == 1 &&
             organization.int("shortSize") == 2 && organization.int("integerSize") == 4 &&
