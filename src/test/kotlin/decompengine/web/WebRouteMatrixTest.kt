@@ -58,6 +58,8 @@ class WebRouteMatrixTest {
         val media: String = JSON,
         /** Mutation media type checked before CSRF/session (multipart upload uses its own). */
         val mutationType: String = JSON,
+        /** Authorized mutation refusal in this inert fixture; never admits a workflow. */
+        val mutationRefusal: Outcome? = null,
     )
 
     /** Keys are documented templates after prefix and brace expansion, exactly as [documentedRoutes] yields them. */
@@ -74,6 +76,9 @@ class WebRouteMatrixTest {
         "$R" to Live(setOf("GET"), Outcome(200, "run")),
         "$R/progress-pin" to Live(setOf("GET", "PUT"), Outcome(200, "progressPin")),
         "$R/cancel" to Live(setOf("POST")),
+        "$R/recover" to Live(setOf("POST"), mutationRefusal = Outcome(503, "CAPABILITY_UNAVAILABLE")),
+        "$R/controls" to Live(setOf("GET"), Outcome(200, "attemptControls")),
+        "$R/queue-position" to Live(setOf("GET"), Outcome(200, "queuePosition")),
         "$R/snapshot" to Live(setOf("GET"), Outcome(200, "snapshot")),
         "$R/events" to Live(setOf("GET"), Outcome(200, "events"), Query.PAGED),
         "$R/events?transport=poll" to Live(setOf("GET"), Outcome(200, "events"), Query.PAGED),
@@ -146,18 +151,23 @@ class WebRouteMatrixTest {
             if (route.template != "/api/v1/session" || route.method != "POST") {
                 expectError(call(server, route.method, path, origin(server, mutation, contentType)), 401, "SESSION_REQUIRED", "$label without session")
             }
+            // Check method/Allow behavior for mutation-only resources as well as reads.
+            for (other in listOf("GET", "HEAD", "POST", "PUT", "PATCH", "DELETE") - spec.methods) {
+                val response = call(server, other, path, session.all(server, contentType))
+                expectError(response, 405, "METHOD_NOT_ALLOWED", "$label as $other")
+                assertEquals(allow, response.header("Allow"), "$label as $other Allow")
+            }
             if (mutation) {
                 expectError(call(server, route.method, path, session.cookie + mapOf("Content-Type" to contentType)), 403, "ORIGIN_DENIED", "$label without Origin")
                 expectError(call(server, route.method, path, session.all(server, "text/plain")), 415, "UNSUPPORTED_MEDIA_TYPE", "$label text body")
                 if (route.template != "/api/v1/session") {
                     expectError(call(server, route.method, path, session.cookie + origin(server, true, contentType)), 403, "CSRF_DENIED", "$label without CSRF")
                 }
+                spec.mutationRefusal?.let { expected ->
+                    expectError(call(server, route.method, path, session.all(server, contentType)),
+                        expected.status, expected.kindOrCode, "$label without a registered workflow")
+                }
                 continue
-            }
-            for (other in listOf("GET", "HEAD", "POST", "PUT", "PATCH", "DELETE") - spec.methods) {
-                val response = call(server, other, path, session.all(server, contentType))
-                expectError(response, 405, "METHOD_NOT_ALLOWED", "$label as $other")
-                assertEquals(allow, response.header("Allow"), "$label as $other Allow")
             }
             if (route.method == "HEAD") continue
             val accept = if (spec.media == OCTETS) "application/octet-stream" else JSON
