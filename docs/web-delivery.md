@@ -129,8 +129,14 @@ keyboard checks pass (`scripts/packaged-browser-audit.mjs`). It records 20 cold 
 each in a new target with the HTTP cache disabled, timed from navigation to a populated first
 page with no alert; and 50 in-app route activations cycling through job, attempt, activity,
 evidence and source views, timed to the new heading receiving focus (local feedback) and to the
-view's populated data. It asserts p95 ≤1.5 s cold, ≤100 ms feedback and ≤500 ms first data,
-the loopback budgets above, and keeps the raw samples and median/p95 in `report.json`.
+view's initial-route metadata (or source rows for source views). Attempt metadata readiness
+is not evidence/activity readiness: those routes intentionally require explicit reads. Before
+each layout/contrast/focus pass, the audit activates the activity/exploration/history/receipt
+controls and requires their populated content and successful reads. Each explicit action's
+elapsed time and expected reads are recorded separately in `interactions`, not folded into
+route timing or claimed as a qualified interaction p95. The navigation gate asserts p95 ≤1.5 s
+cold, ≤100 ms feedback and ≤500 ms first route data, the loopback budgets above, and keeps the
+raw navigation samples and median/p95 in `report.json`.
 
 The API reads in this mode are contract fixtures fulfilled in DevTools; the document, CSP,
 chunks and worker are real packaged responses. That isolates browser-side navigation and
