@@ -542,20 +542,20 @@ class JobStore internal constructor(
         }
     }
 
-    private companion object {
-        const val MAX_STATUS_MESSAGE_CHARACTERS = 500
-        const val MAX_INPUT_BYTES = 32 * 1024 * 1024
-        const val MAX_METADATA_BYTES = 256 * 1024
-        val METADATA_LIMITS = StrictJsonLimits(
+    companion object {
+        private const val MAX_STATUS_MESSAGE_CHARACTERS = 500
+        internal const val MAX_INPUT_BYTES = 32 * 1024 * 1024
+        private const val MAX_METADATA_BYTES = 256 * 1024
+        private val METADATA_LIMITS = StrictJsonLimits(
             maximumCanonicalBytes = MAX_METADATA_BYTES,
             maximumStringBytes = MAX_METADATA_BYTES,
             maximumTotalStringBytes = MAX_METADATA_BYTES,
             maximumDepth = 8,
             maximumNodes = 128,
         )
-        val VALID_STATUSES = setOf("uploaded", "queued", "analyzing", "complete", "failed")
-        val STATUS_MESSAGE_RESERVE = "\u0001".repeat(500)
-        const val MAXIMUM_UPDATE_TIMESTAMP = "9999-12-31T23:59:59.999999999Z"
+        private val VALID_STATUSES = setOf("uploaded", "queued", "analyzing", "complete", "failed")
+        private val STATUS_MESSAGE_RESERVE = "\u0001".repeat(500)
+        private const val MAXIMUM_UPDATE_TIMESTAMP = "9999-12-31T23:59:59.999999999Z"
     }
 }
 

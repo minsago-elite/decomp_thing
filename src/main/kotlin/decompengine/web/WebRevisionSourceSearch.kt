@@ -182,7 +182,7 @@ internal class WebRevisionSourceSearch(
             val bytes = read(file)
             progressed = true; resumeOffset = 0; position++
             // A read can fail its final revalidation after reading the whole body; charge its committed size either way.
-            if (bytes == null) { unavailable++; scannedBytes += file.sizeBytes; continue }
+            if (bytes == null) { unavailable++; scannedBytes += checkNotNull(file.sizeBytes); continue }
             check(bytes.size.toLong() == file.sizeBytes)
             scannedFiles++; scannedBytes += bytes.size
             if (WebRevisionSourceContent.textFallback(bytes) != null) { unsearchableText++; continue }
