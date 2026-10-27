@@ -1108,7 +1108,11 @@ object. Its `Location` names `archive-verifications/{operationId}`, which report
 `running`, `completed` (verified), `failed` (with a fixed message) or `interrupted`.
 
 Operation records and verified labels live in memory for the listener lifetime, at most 256
-records. After a restart every archive reads as not verified until it is verified again.
+records and 256 admitted request keys (including deduplicated aliases). When key capacity is full,
+the oldest terminal operation and all its aliases are evicted together; if every retained operation
+is still active, a new key receives `429 ARCHIVE_VERIFICATION_BUSY` until one finishes. Existing
+keys still replay or conflict at capacity. After eviction, a key is no longer bound to the removed
+operation. After a restart every archive reads as not verified until it is verified again.
 
 The SPA shows this panel on the root directory of each revision. Status is read only after an
 explicit action. The panel lists revision, recorded build, acceptance, digest, size and Git mapping

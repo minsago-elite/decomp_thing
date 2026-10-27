@@ -147,6 +147,13 @@ internal class WebSourceArchives(
         synchronized(this) {
             // Recheck under the admission lock: a concurrent request with this key may have been admitted meanwhile.
             replay(key, intent, selected)?.let { return it }
+            // Aliases are retained state too: deduplicating onto one slow verifier must not admit unlimited keys.
+            while (keys.size >= MAXIMUM_KEYS) {
+                val oldest = records.values.firstOrNull { it.terminal }
+                    ?: throw WebAccessDenied(429, "ARCHIVE_VERIFICATION_BUSY",
+                        "Archive verification request-key capacity is full. Try again after verification finishes.")
+                forget(oldest)
+            }
             records.values.lastOrNull { !it.terminal && it.jobId == jobId && it.runId == runId && it.revisionId == revisionId &&
                 it.archiveSha256 == archiveSha256 && it.metadataVersion == snapshot.metadataVersion }?.let { running ->
                 keys[key] = running.operationId // A deduplicated request still binds its key to the returned operation.
@@ -160,7 +167,7 @@ internal class WebSourceArchives(
             records[record.operationId] = record; keys[key] = record.operationId
             while (records.size > MAXIMUM_RECORDS) {
                 val oldest = records.values.firstOrNull { it.terminal } ?: break
-                records.remove(oldest.operationId); keys.values.removeAll { it == oldest.operationId }
+                forget(oldest)
             }
             try { executor.execute { run(record) } }
             catch (_: RejectedExecutionException) {
@@ -169,6 +176,12 @@ internal class WebSourceArchives(
             }
             return Started(record, false)
         }
+    }
+
+    /** Caller holds the monitor. Evict the operation and all admitted aliases together. */
+    private fun forget(record: WebArchiveVerification) {
+        records.remove(record.operationId)
+        keys.values.removeAll { it == record.operationId }
     }
 
     /** Caller holds the monitor. A bound key replays its operation; another intent under that key conflicts. */
@@ -251,6 +264,7 @@ internal class WebSourceArchives(
         const val ARCHIVE = "source-tree.zip"
         const val MAXIMUM_ARCHIVE_BYTES = 64L * 1024 * 1024
         const val MAXIMUM_RECORDS = 256
+        const val MAXIMUM_KEYS = 256
         const val MAXIMUM_ACTIVE = 2
         private const val RECAPTURE_ATTEMPTS = 50
         private const val RECAPTURE_DELAY_MS = 20L

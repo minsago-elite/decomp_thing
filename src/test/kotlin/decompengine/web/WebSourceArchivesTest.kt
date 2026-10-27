@@ -73,6 +73,39 @@ class WebSourceArchivesTest {
         }
     }
 
+    @Test fun `deduplicated key aliases stay bounded and are evicted with their completed operation`() {
+        val release = CountDownLatch(1); val verified = CountDownLatch(1)
+        archives(release, verified).use { archives ->
+            val key = "key-alias-00000000"
+            val first = archives.start(jobId, "run_1", "revision_1", digest, key).record
+            try {
+                for (index in 1 until WebSourceArchives.MAXIMUM_KEYS) {
+                    val alias = "key-alias-${index.toString().padStart(8, '0')}"
+                    val admitted = archives.start(jobId, "run_1", "revision_1", digest, alias)
+                    assertSame(first, admitted.record); assertFalse(admitted.replayed)
+                }
+                val lastAlias = "key-alias-${(WebSourceArchives.MAXIMUM_KEYS - 1).toString().padStart(8, '0')}"
+                val extra = "key-capacity-extra-0001"
+                assertEquals("ARCHIVE_VERIFICATION_BUSY", assertFailsWith<WebAccessDenied> {
+                    archives.start(jobId, "run_1", "revision_1", digest, extra) }.code)
+                // Full capacity must not discard existing replay or conflict bindings.
+                assertTrue(archives.start(jobId, "run_1", "revision_1", digest, key).replayed)
+                assertTrue(archives.start(jobId, "run_1", "revision_1", digest, lastAlias).replayed)
+                assertEquals("IDEMPOTENCY_CONFLICT", assertFailsWith<WebAccessDenied> {
+                    archives.start(jobId, "run_1", "revision_2", digest, lastAlias) }.code)
+                release.countDown(); awaitTerminal(first)
+                assertEquals("completed", first.state)
+                // A terminal operation can now be evicted to free every alias; the refused key was never bound.
+                val next = archives.start(jobId, "run_1", "revision_1", digest, extra)
+                assertFalse(next.replayed); assertNotSame(first, next.record)
+                assertEquals("OPERATION_NOT_FOUND", assertFailsWith<WebAccessDenied> {
+                    archives.operation(jobId, "run_1", "revision_1", first.operationId) }.code)
+                assertNotSame(first, archives.start(jobId, "run_1", "revision_1", digest, key).record)
+                assertNotSame(first, archives.start(jobId, "run_1", "revision_1", digest, lastAlias).record)
+            } finally { release.countDown() }
+        }
+    }
+
     @Test fun `a key admitted concurrently for another intent conflicts instead of being overwritten`() {
         val release = CountDownLatch(1); val verified = CountDownLatch(1)
         val firstObserving = CountDownLatch(1); val secondAdmitted = CountDownLatch(1)
