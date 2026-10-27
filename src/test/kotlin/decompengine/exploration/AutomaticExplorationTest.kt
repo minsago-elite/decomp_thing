@@ -2,6 +2,11 @@ package decompengine.exploration
 
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonNull
+import kotlinx.serialization.json.JsonArray
+import kotlinx.serialization.json.JsonPrimitive
+import kotlinx.serialization.json.buildJsonObject
+import kotlinx.serialization.json.put
+import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 import decompengine.validation.ProcessInput
@@ -14,6 +19,7 @@ import kotlin.io.path.writeText
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertTrue
+import org.junit.jupiter.api.Assumptions.assumeTrue
 
 class AutomaticExplorationTest {
     @Test
@@ -38,8 +44,12 @@ class AutomaticExplorationTest {
 
     @Test
     fun `real angr symbolically discovers branching argv and stdin when configured`() {
-        val python = System.getenv("ANGR_PYTHON")?.takeIf(String::isNotBlank) ?: return
-        val tempDir = createTempDirectory("exploration-angr-real-")
+        val python = System.getenv("ANGR_PYTHON").orEmpty()
+        assumeTrue(python.isNotBlank(), "real Angr requires an explicitly configured ANGR_PYTHON")
+        val evidenceRoot = java.nio.file.Path.of(
+            System.getProperty("decompengine.angr.evidenceRoot", "build/test-work/exploration-angr-real"),
+        ).toAbsolutePath().createDirectories()
+        val tempDir = java.nio.file.Files.createTempDirectory(evidenceRoot, "fixture-")
         val binary = compileBranchingProgram(tempDir)
         val explorer = PythonAngrExplorer(
             python = java.nio.file.Path.of(python),
@@ -50,6 +60,30 @@ class AutomaticExplorationTest {
         )
 
         val candidates = explorer.generate(binary)
+        val diagnostics = checkNotNull(explorer.diagnostics)
+        fun sha256(path: java.nio.file.Path): String = java.security.MessageDigest.getInstance("SHA-256")
+            .digest(java.nio.file.Files.readAllBytes(path)).joinToString("") { "%02x".format(it) }
+        evidenceRoot.resolve("discovery.json").writeText(buildJsonObject {
+            put("schema", "decomp-angr-authored-fixture-v1")
+            put("binarySha256", sha256(binary))
+            put("fixtureSourceSha256", sha256(binary.resolveSibling("branching.c")))
+            put("timeoutSeconds", 60)
+            put("maxSteps", 400)
+            put("maxStates", 96)
+            put("argvBytes", 16)
+            put("stdinBytes", 8)
+            put("argvStates", diagnostics.argvStates)
+            put("stdinStates", diagnostics.stdinStates)
+            put("argvSteps", diagnostics.argvSteps)
+            put("stdinSteps", diagnostics.stdinSteps)
+            put("candidates", JsonArray(candidates.map { candidate ->
+                buildJsonObject {
+                    put("id", candidate.id)
+                    put("args", JsonArray(candidate.args.map(::JsonPrimitive)))
+                    put("stdinHex", candidate.stdin.joinToString("") { "%02x".format(it) })
+                }
+            }))
+        }.toString() + "\n")
 
         assertTrue(candidates.any { it.args == listOf("secret") }, candidates.toString())
         assertTrue(candidates.any { it.stdin.decodeToString().startsWith("open\n") }, candidates.toString())
@@ -86,6 +120,16 @@ class AutomaticExplorationTest {
         assertTrue(expanded.any { it.stdin.decodeToString() == "open\n" })
         assertTrue(expanded.any { it.args == listOf("SecretSecret") })
         assertTrue(expanded.any { it.args.singleOrNull()?.length == 64 })
+    }
+
+    @Test
+    fun `mutation deduplication preserves no arguments and one empty argument`() {
+        val seed = CandidateInput("empty_arg", CandidateSource.SEED, args = listOf(""), stdin = "\n".toByteArray())
+        val expanded = MutationExpander().expand(listOf(seed, seed.copy(id = "same_content")))
+
+        assertTrue(expanded.any { it.args.isEmpty() && it.stdin.isEmpty() })
+        assertTrue(expanded.any { it.args == listOf("") && it.stdin.isEmpty() })
+        assertEquals(1, expanded.count { it.args == listOf("") && it.stdin.isEmpty() })
     }
 
     @Test
@@ -158,6 +202,25 @@ class AutomaticExplorationTest {
         assertTrue(json.contains("\"newOutputSignatures\""))
         assertTrue(json.contains("\"observations\""))
         assertTrue(json.contains("\"argvStates\": 2"))
+    }
+
+    @Test
+    fun `exploration report round trips all non NUL JSON control characters in arguments`() {
+        val tempParent = java.nio.file.Path.of("build", "test-work", "exploration-json-controls").createDirectories()
+        val tempDir = java.nio.file.Files.createTempDirectory(tempParent, "case-")
+        val binary = compileBranchingProgram(tempDir)
+        val argument = (1..31).map { it.toChar() }.joinToString("")
+        val seed = CandidateInput("controls", CandidateSource.SEED, args = listOf(argument))
+        val noSymbolicCandidates = object : AngrExplorer {
+            override fun generate(binaryPath: java.nio.file.Path): List<CandidateInput> = emptyList()
+        }
+        val report = AutomaticExplorer(angrExplorer = noSymbolicCandidates, maxCandidates = 1)
+            .explore(binary, listOf(seed), tempDir.resolve("reports"))
+
+        val candidate = Json.parseToJsonElement(report.reportPath.readText()).jsonObject
+            .getValue("candidates").jsonArray.single().jsonObject
+        assertEquals(seed.id, candidate.getValue("id").jsonPrimitive.content)
+        assertEquals(argument, candidate.getValue("args").jsonArray.single().jsonPrimitive.content)
     }
 
     private class FakeAngrExplorer : AngrExplorer {

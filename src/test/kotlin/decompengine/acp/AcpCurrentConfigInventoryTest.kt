@@ -3,7 +3,9 @@ package decompengine.acp
 import com.agentclientprotocol.annotations.UnstableApi
 import com.agentclientprotocol.model.SessionConfigOption
 import decompengine.agent.AgentExecutionException
+import decompengine.agent.AgentFailure
 import decompengine.agent.AgentFailureKind
+import decompengine.jobs.ProgressRedactor
 import kotlinx.serialization.json.*
 import kotlin.test.*
 
@@ -150,6 +152,325 @@ class AcpCurrentConfigInventoryTest {
             if (privateIds.any { preview.contains(it) }) assertEquals("", preview)
             privateIds.forEach { assertFalse(preview.contains(it)) }
         }
+    }
+
+    @Test
+    fun `choice previews do not publish sensitive omission markers`() {
+        val secrets = listOf("[oversized text omitted]", "[redacted]", "[unredactable text omitted]", "preview truncated")
+        // Use environment secrets, not private preferences: the outer preference guard cannot rescue this path.
+        val preview = previewSessionChoices(sequenceOf("x".repeat(16_385), "[redacted]", "x".repeat(100)), secrets)
+        assertEquals(listOf("", "", ""), Json.parseToJsonElement(preview).jsonArray.map { it.jsonPrimitive.content })
+        secrets.forEach { assertFalse(preview.contains(it)) }
+    }
+
+    @Test
+    fun `choice previews recheck configured secrets after formatting`() {
+        assertEquals("", previewSessionChoices(
+            sequenceOf("x".repeat(16_385)), listOf("[oversized text omitted]", "[\"\"]"),
+        ))
+        assertEquals("", previewSessionChoices(sequenceOf("plain"), listOf("[\"plain\"]")))
+        assertEquals("", previewSessionChoices(sequenceOf("plain"), listOf("\u0000[\"plain\"]")))
+        assertEquals("", previewSessionChoices(emptySequence(), listOf("[]")))
+        assertEquals("", previewSessionChoices(sequenceOf("\""), listOf("\\\"")))
+        assertEquals("", previewSessionChoices(
+            sequenceOf("a", "b", "c", "d", "e"), listOf("(more choices omitted)"),
+        ))
+        assertEquals("[\"safe\"]", previewSessionChoices(sequenceOf("safe"), listOf("unrelated")))
+    }
+
+    @Test
+    fun `complete current inventory diagnostics protect private boolean literals and fixed labels`() {
+        val cases = listOf(
+            "[false,true]" to booleanInventory(),
+            "Current option ID previews" to booleanInventory(),
+            "value previews" to booleanInventory(),
+            CURRENT_DIAGNOSTIC_BASE to booleanInventory(),
+            "unavailable or ambiguous" to emptyList(),
+        )
+        for ((privateValue, options) in cases) {
+            val preference = AcpSessionConfigPreference("telemetry", AcpSessionConfigValue.Select(privateValue))
+            val failure = assertFailsWith<AgentExecutionException> {
+                requireCurrentSessionConfigPreference(options, preference, 5)
+            }
+            assertEquals(AgentFailureKind.CONFIGURATION, failure.failure.kind)
+            assertEquals(mapOf("preference" to "configOption", "preferenceIndex" to "5",
+                "reason" to "currentInventoryMismatch"), failure.failure.details)
+            assertTrue(failure.failure.message.isNotBlank())
+            assertTrue(failure.failure.message.length < 1024)
+            assertFalse(failure.failure.message.contains(privateValue))
+            assertFalse(failure.stackTraceToString().contains(privateValue))
+        }
+    }
+
+    @Test
+    fun `complete diagnostic scans formatting boundaries and retains unrelated safe choices`() {
+        val base = INITIAL_DIAGNOSTIC_BASE
+        val hint = " Advertised choice previews: [\"safe-choice\"]"
+        assertEquals(base + hint, redactedSessionPreferenceDiagnostic(base, hint, listOf("unrelated"), emptyList()))
+        for (secret in listOf(base.takeLast(12) + hint.take(12), "Advertised choice previews", "[\"safe-choice\"]")) {
+            val message = redactedSessionPreferenceDiagnostic(base, hint, listOf(secret), emptyList())
+            assertTrue(message.isNotBlank()); assertTrue(message.length < 1024)
+            assertFalse(message.contains(secret))
+        }
+    }
+
+    @Test
+    fun `initial rejection base remains private when no choice hint exists`() {
+        for (secrets in listOf(listOf(" "), listOf("ACP", "[redacted]", "[unredactable text omitted]",
+            "[oversized text omitted]", "!", "?", "\u26a0"))) {
+            val message = redactedSessionPreferenceDiagnostic(INITIAL_DIAGNOSTIC_BASE, "", secrets, emptyList())
+            assertTrue(message.isNotBlank()); assertEquals(1, message.length)
+            secrets.forEach { assertFalse(message.contains(it)) }
+        }
+    }
+
+    @Test
+    fun `hostile omission markers retain a typed current rejection with a private nonblank indicator`() {
+        val preference = AcpSessionConfigPreference("telemetry", AcpSessionConfigValue.Select("[false,true]"))
+        val privateValues = listOf(preference.id, "[false,true]", CURRENT_DIAGNOSTIC_BASE,
+            "[redacted]", "[unredactable text omitted]", "[oversized text omitted]", "!", "?", "\u26a0")
+        val failure = assertFailsWith<AgentExecutionException> {
+            requireCurrentSessionConfigPreference(booleanInventory(), preference, 2, emptyList(), privateValues)
+        }
+        assertEquals(AgentFailureKind.CONFIGURATION, failure.failure.kind)
+        assertEquals(mapOf("preference" to "configOption", "preferenceIndex" to "2",
+            "reason" to "currentInventoryMismatch"), failure.failure.details)
+        assertTrue(failure.failure.message.isNotBlank()); assertEquals(1, failure.failure.message.length)
+        privateValues.forEach { assertFalse(failure.failure.message.contains(it)) }
+    }
+
+    @Test
+    fun `nonblank omission avoids the maximum normalized inventory without an unchecked fixed replacement`() {
+        val markers = listOf("[redacted]", "[unredactable text omitted]", "[oversized text omitted]", "!", "?", "\u26a0")
+        val primaryGlyphCount = 4096 - markers.size
+        val glyphs = List(primaryGlyphCount + 130) { ('\ue000'.code + it).toChar().toString() }
+        val primary = markers + glyphs.take(primaryGlyphCount).mapIndexed { index, glyph ->
+            if (index % 2 == 0) "\u0000$glyph" else glyph
+        }
+        val privateValues = glyphs.drop(primaryGlyphCount)
+        val message = ProgressRedactor(primary, privateValues).nonBlankText(glyphs.first(), 1000)
+        assertEquals(4096, primary.size); assertEquals(130, privateValues.size)
+        assertTrue(message.isNotBlank()); assertEquals(1, message.length)
+        (markers + glyphs).forEach { assertFalse(message.contains(it)) }
+    }
+
+    @Test
+    fun `whole diagnostic preserves full environment and preference budgets together`() {
+        val environment = List(4096) { it.toString().padStart(256, 'x') }
+        val preferences = AcpSessionPreferences("ACP", "Current option ID previews", List(64) {
+            AcpSessionConfigPreference("option-$it", AcpSessionConfigValue.Select("value-$it"))
+        })
+        val privateValues = preferences.privateIdentifiers()
+        val failure = assertFailsWith<AgentExecutionException> {
+            requireCurrentSessionConfigPreference(booleanInventory(), preferences.configOptions.first(), 1,
+                environment, privateValues)
+        }
+        assertEquals(AgentFailureKind.CONFIGURATION, failure.failure.kind)
+        assertEquals("currentInventoryMismatch", failure.failure.details["reason"])
+        assertEquals("1", failure.failure.details["preferenceIndex"])
+        assertTrue(failure.failure.message.isNotBlank()); assertTrue(failure.failure.message.length < 1024)
+        privateValues.forEach { assertFalse(failure.failure.message.contains(it)) }
+    }
+
+    @Test
+    fun `applied prefix keeps valid flat grouped and boolean choices without selecting future preferences`() {
+        val preferences = appliedPreferences()
+        for (name in listOf("session-new-configured.response", "session-new-grouped-config.response")) {
+            val options = appliedInventory(name)
+            for (count in 0..preferences.size) {
+                requireAppliedSessionConfigPreferences(options, preferences.take(count), emptyList(),
+                    preferences.flatMap { listOfNotNull(it.id, (it.value as? AcpSessionConfigValue.Select)?.valueId) }) {
+                    error("valid applied prefix was rejected at $it")
+                }
+            }
+            val pending = editOption(options, "telemetry") { JsonObject(it + ("currentValue" to JsonPrimitive(true))) }
+            requireAppliedSessionConfigPreferences(pending, preferences.take(1), emptyList(), emptyList()) {
+                error("future unconfigured preference was required at $it")
+            }
+        }
+    }
+
+    @Test
+    fun `a later complete flat inventory cannot remove or duplicate an earlier applied choice`() {
+        val options = appliedInventory("session-new-configured.response")
+        for (duplicate in listOf(false, true)) {
+            val changed = editOption(options, "reasoning") { option ->
+                val choices = option.getValue("options").jsonArray
+                val high = choices.single { it.jsonObject.getValue("value").jsonPrimitive.content == "high" }
+                JsonObject(option + ("options" to JsonArray(if (duplicate) choices + high else choices.filter { it != high })))
+            }
+            assertEquals("high", (changed.first() as SessionConfigOption.Select).currentValue.value)
+            assertEquals(false, (changed.last() as SessionConfigOption.BooleanOption).currentValue)
+            val failure = assertFailsWith<AgentExecutionException> {
+                requireAppliedSessionConfigPreferences(changed, appliedPreferences(), emptyList(), emptyList()) {
+                    error("consistent selected values must reach the current-choice check")
+                }
+            }
+            assertEquals(AgentFailureKind.CONFIGURATION, failure.failure.kind)
+            assertEquals("currentInventoryMismatch", failure.failure.details["reason"])
+            assertEquals("0", failure.failure.details["preferenceIndex"])
+        }
+    }
+
+    @Test
+    fun `an applied grouped choice remains unique across the entire replacement group inventory`() {
+        val options = appliedInventory("session-new-grouped-config.response")
+        for (duplicate in listOf(false, true)) {
+            val changed = editOption(options, "reasoning") { option ->
+                val groups = option.getValue("options").jsonArray
+                val choices = if (duplicate) groups + JsonObject(groups.first().jsonObject + ("group" to JsonPrimitive("another-group")))
+                else groups.map { group -> JsonObject(group.jsonObject + ("options" to JsonArray(
+                    group.jsonObject.getValue("options").jsonArray.filter {
+                        it.jsonObject.getValue("value").jsonPrimitive.content != "high" }))) }
+                JsonObject(option + ("options" to JsonArray(choices)))
+            }
+            assertEquals("high", (changed.first() as SessionConfigOption.Select).currentValue.value)
+            val failure = assertFailsWith<AgentExecutionException> {
+                requireAppliedSessionConfigPreferences(changed, appliedPreferences(), emptyList(), emptyList()) {
+                    error("consistent grouped current value must reach the current-choice check")
+                }
+            }
+            assertEquals(AgentFailureKind.CONFIGURATION, failure.failure.kind)
+            assertEquals("0", failure.failure.details["preferenceIndex"])
+        }
+    }
+
+    @Test
+    fun `original applied response failures keep their exact typed rejection before additional freshness checks`() {
+        val options = appliedInventory("session-new-configured.response")
+        val noEarlierChoices = editOption(options, "reasoning") { JsonObject(it + ("options" to JsonArray(emptyList()))) }
+        val changedType = editOption(options, "reasoning") { JsonObject((it - "options") + mapOf(
+            "type" to JsonPrimitive("boolean"), "currentValue" to JsonPrimitive(true))) }
+        val variants = listOf(emptyList<SessionConfigOption>() to 0, (options + options.first()) to 0,
+            editOption(options, "reasoning") { JsonObject(it + ("currentValue" to JsonPrimitive("low"))) } to 0,
+            editOption(options, "telemetry") { JsonObject(it + ("currentValue" to JsonPrimitive(true))) } to 1,
+            changedType to 0,
+            editOption(noEarlierChoices, "telemetry") { JsonObject(it + ("currentValue" to JsonPrimitive(true))) } to 1)
+        for ((changed, index) in variants) {
+            val marker = AgentExecutionException(AgentFailure(AgentFailureKind.PROTOCOL, "Original typed response failure"))
+            val callbacks = mutableListOf<Int>()
+            val failure = assertFailsWith<AgentExecutionException> {
+                requireAppliedSessionConfigPreferences(changed, appliedPreferences(), emptyList(), emptyList()) {
+                    callbacks += it; marker
+                }
+            }
+            assertSame(marker, failure); assertEquals(listOf(index), callbacks)
+        }
+    }
+
+    @Test
+    fun `applied inventory freshness diagnostics protect the full private configuration beyond the applied prefix`() {
+        val prefix = appliedPreferences().take(1)
+        val preferences = AcpSessionPreferences("private-model", "private-mode", prefix +
+            AcpSessionConfigPreference("private-later-option", AcpSessionConfigValue.Select("private-later-value")))
+        val options = editOption(appliedInventory("session-new-configured.response"), "reasoning") { option ->
+            val choices = listOf("prefix-private-model", "prefix-private-later-value", "prefix-peer-secret")
+            JsonObject(option + ("options" to JsonArray(choices.map { buildJsonObject {
+                put("value", it); put("name", "Display choice") } })))
+        }
+        val privateValues = preferences.privateIdentifiers()
+        val failure = assertFailsWith<AgentExecutionException> {
+            requireAppliedSessionConfigPreferences(options, prefix, listOf("peer-secret"), privateValues) {
+                error("consistent applied value must reach the private freshness diagnostic")
+            }
+        }
+        assertEquals(AgentFailureKind.CONFIGURATION, failure.failure.kind)
+        assertEquals("0", failure.failure.details["preferenceIndex"])
+        assertTrue(failure.failure.message.isNotBlank()); assertTrue(failure.failure.message.length < 1024)
+        (privateValues + "peer-secret").forEach { assertFalse(failure.stackTraceToString().contains(it)) }
+    }
+
+    @Test
+    fun `setter failure constructors retain protocol kind and original control metadata`() {
+        for ((kind, index) in listOf("model" to null, "mode" to null, "configOption" to 3)) {
+            for (rpcCode in listOf(null, "-32602", "0")) {
+                val failure = sessionPreferenceSetterFailure(kind, index, emptyList(), emptyList(), rpcCode)
+                assertEquals(AgentFailureKind.PROTOCOL, failure.failure.kind)
+                assertEquals(buildMap {
+                    put("preference", kind)
+                    index?.let { put("preferenceIndex", it.toString()) }
+                    rpcCode?.let { put("rpcCode", it) }
+                }, failure.failure.details)
+                assertEquals(if (rpcCode == null) "ACP session preference setter returned an invalid response"
+                    else "ACP session preference setter was rejected", failure.failure.message)
+                assertNull(failure.cause)
+            }
+        }
+    }
+
+    @Test
+    fun `fixed setter messages cannot echo private labels or redaction marker collisions`() {
+        val privateValues = listOf("ACP", "setter", "session preference", "[redacted]",
+            "ACP session preference setter was rejected", "ACP session preference setter returned an invalid response")
+        for (privateValue in privateValues) {
+            for (rpcCode in listOf(null, "-32602")) {
+                val failure = sessionPreferenceSetterFailure("configOption", 0, emptyList(), listOf(privateValue), rpcCode)
+                assertEquals(AgentFailureKind.PROTOCOL, failure.failure.kind)
+                assertTrue(failure.failure.message.isNotBlank())
+                assertTrue(failure.failure.message.length < 1024)
+                assertFalse(failure.failure.message.contains(privateValue))
+                assertFalse(failure.message.orEmpty().contains(privateValue))
+            }
+        }
+    }
+
+    @Test
+    fun `setter failure diagnostics include unapplied preferences and the full environment budget`() {
+        val environment = List(4096) { if (it == 4095) "setter" else "environment-$it" }
+        val preferences = AcpSessionPreferences("private-model", "private-mode", List(64) {
+            if (it == 63) AcpSessionConfigPreference("was rejected", AcpSessionConfigValue.Select("returned an invalid response"))
+            else AcpSessionConfigPreference("option-$it", AcpSessionConfigValue.Select("value-$it"))
+        })
+        val identifiers = preferences.privateIdentifiers()
+        assertEquals(130, identifiers.size)
+        for (rpcCode in listOf(null, "-32602")) {
+            val failure = sessionPreferenceSetterFailure("configOption", 0, environment, identifiers, rpcCode)
+            assertEquals(AgentFailureKind.PROTOCOL, failure.failure.kind)
+            assertEquals("0", failure.failure.details["preferenceIndex"])
+            assertTrue(failure.failure.message.isNotBlank())
+            assertTrue(failure.failure.message.length < 1024)
+            (environment + identifiers).forEach { assertFalse(failure.failure.message.contains(it)) }
+        }
+    }
+
+    @Test
+    fun `setter failure screening handles raw whitespace without an unsafe fixed fallback`() {
+        val privateValues = listOf("ACP session preference setter was rejected",
+            "ACP session preference setter returned an invalid response", "[redacted]")
+        for (rpcCode in listOf(null, "0")) {
+            val failure = sessionPreferenceSetterFailure("mode", null, listOf(" "), privateValues, rpcCode)
+            assertTrue(failure.failure.message.isNotBlank())
+            assertTrue(failure.failure.message.length < 1024)
+            assertFalse(failure.failure.message.contains(' '))
+            privateValues.forEach { assertFalse(failure.failure.message.contains(it)) }
+            assertEquals(if (rpcCode == null) mapOf("preference" to "mode")
+                else mapOf("preference" to "mode", "rpcCode" to rpcCode), failure.failure.details)
+        }
+    }
+
+    private fun appliedPreferences() = listOf(
+        AcpSessionConfigPreference("reasoning", AcpSessionConfigValue.Select("high")),
+        AcpSessionConfigPreference("telemetry", AcpSessionConfigValue.BooleanValue(false)),
+    )
+
+    private fun appliedInventory(name: String): List<SessionConfigOption> =
+        editOption(editOption(inventory(name), "reasoning") {
+            JsonObject(it + ("currentValue" to JsonPrimitive("high"))) }, "telemetry") {
+            JsonObject(it + ("currentValue" to JsonPrimitive(false))) }
+
+    private fun editOption(options: List<SessionConfigOption>, id: String,
+        edit: (JsonObject) -> JsonObject): List<SessionConfigOption> = options.map { option ->
+        if (option.id.value != id) option else Json.decodeFromJsonElement(SessionConfigOption.serializer(),
+            edit(Json.encodeToJsonElement(SessionConfigOption.serializer(), option).jsonObject))
+    }
+
+    private fun booleanInventory(): List<SessionConfigOption> = listOf(Json.decodeFromString<SessionConfigOption>(
+        """{"type":"boolean","id":"telemetry","name":"Telemetry","currentValue":true}""",
+    ))
+
+    private companion object {
+        const val CURRENT_DIAGNOSTIC_BASE = "ACP configured option no longer has an unambiguous match in the current session inventory."
+        const val INITIAL_DIAGNOSTIC_BASE = "ACP configured session preference was not advertised by the exact session/new response"
     }
 
     private fun inventory(name: String): List<SessionConfigOption> {

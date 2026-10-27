@@ -1,3 +1,4 @@
+import { homeCopy as copy } from '../copy/shell';
 import type { BrowserSession } from '../session/session';
 import { useSession } from '../session/useSession';
 import { Upload } from '../jobs/Upload';
@@ -6,19 +7,14 @@ export default function Home({ basePath = '', session = null }: { basePath?: str
   const state = useSession(session);
   return (
     <section aria-labelledby="workspace-title">
-      <p class="eyebrow">Reconstruction workspace</p>
-      <h1 id="workspace-title">Your work, with its evidence</h1>
-      <p class="lead">
-        Review reconstructed source, inspect validation evidence, and follow each revision.
-      </p>
+      <p class="eyebrow">{copy.reconstructionWorkspace}</p>
+      <h1 id="workspace-title">{copy.yourWorkWithItsEvidence}</h1>
+      <p class="lead">{copy.reviewReconstructedSourceInspectValidationEvidenceAndFollowEachRevision}</p>
       {session && <Upload basePath={basePath} session={session} />}
-      {state?.status === 'authenticated' ? <Dashboard basePath={basePath} /> : <div class="notice" aria-labelledby="availability-title">
-        <h2 id="availability-title">The workbench shell is ready</h2>
-        <p>
-          Connect a local session to browse uploaded jobs. The public shell does not
-          read jobs or start workflows.
-        </p>
-        <p>Existing command-line workflows remain available.</p>
+      {state?.status === 'authenticated' ? <Dashboard key={state.generation} basePath={basePath} /> : <div class="notice" aria-labelledby="availability-title">
+        <h2 id="availability-title">{copy.theWorkbenchShellIsReady}</h2>
+        <p>{copy.connectALocalSessionToBrowseUploadedJobsThePublic}</p>
+        <p>{copy.existingCommandLineWorkflowsRemainAvailable}</p>
       </div>}
     </section>
   );

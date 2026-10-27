@@ -6,6 +6,7 @@ import decompengine.jobs.WorkflowCandidate
 import decompengine.jobs.WorkflowExecutionLimits
 import decompengine.jobs.WorkflowJobSnapshot
 import decompengine.jobs.WorkflowKind
+import decompengine.jobs.WorkflowResumeRestoration
 import decompengine.jobs.WorkflowStoreDiagnostic
 import decompengine.jobs.WorkflowTerminalReason
 import decompengine.jobs.WorkflowUsage
@@ -15,21 +16,61 @@ import java.nio.file.Path
 interface DurableWebWorkflowAdapter {
     val workflow: WorkflowKind
     val limits: WorkflowExecutionLimits
+    val harnessCapabilityId: String? get() = null
+    /** Null means checkpoint resume is unsupported; explicit retry remains a separate new attempt. */
+    val checkpoints: DurableWebWorkflowCheckpointPolicy? get() = null
     fun execute(context: DurableWebWorkflowContext): DurableWebWorkflowOutcome
 }
 
-/** Internal execution context. Paths are never transport DTO fields. */
-data class DurableWebWorkflowContext(val job: Job, val attempt: WorkflowAttempt, val reportsDirectory: Path)
+/**
+ * Trusted, workflow-owned checkpoint verification. Implementations reconcile the predecessor's persisted
+ * checkpoint, accepted revision and workspace identity with the shared harness recovery policy
+ * (for ACP, [decompengine.agent.AgentSessionJournal]) before any admission. Inspection must be bounded and
+ * read-only: it cannot start a process, load a session, quarantine or mutate evidence. The execution context
+ * later carries the recorded digest; an adapter must refuse to continue if its checkpoint no longer matches.
+ */
+fun interface DurableWebWorkflowCheckpointPolicy {
+    fun inspect(request: DurableWebWorkflowCheckpointRequest): DurableWebWorkflowCheckpoint
+}
+
+/** Internal only: the predecessor directory is workflow-owned and never a transport or caller value. */
+data class DurableWebWorkflowCheckpointRequest(val job: Job, val predecessor: WorkflowAttempt, val predecessorReportsDirectory: Path)
+
+sealed interface DurableWebWorkflowCheckpoint {
+    data class Verified(val checkpointSha256: String, val restores: WorkflowResumeRestoration) : DurableWebWorkflowCheckpoint {
+        init { require(checkpointSha256.matches(Regex("[0-9a-f]{64}"))) { "invalid checkpoint identity" } }
+    }
+    data class Refused(val reason: DurableWebWorkflowCheckpointRefusal) : DurableWebWorkflowCheckpoint
+}
+
+/** Closed public vocabulary; adapter diagnostics stay server-side. */
+enum class DurableWebWorkflowCheckpointRefusal(val code: String) {
+    CHECKPOINT_MISSING("CHECKPOINT_MISSING"),
+    CHECKPOINT_MISMATCH("CHECKPOINT_MISMATCH"),
+    WORKSPACE_UNVERIFIED("WORKSPACE_UNVERIFIED"),
+    SESSION_QUARANTINED("SESSION_QUARANTINED"),
+    CLEANUP_UNVERIFIED("CLEANUP_UNVERIFIED"),
+}
+
+/**
+ * Internal execution context. Paths are never transport DTO fields. A recovery attempt records its
+ * mode/checkpoint in [WorkflowAttempt.recovery]; [predecessorReportsDirectory] is present only for resume.
+ */
+data class DurableWebWorkflowContext(val job: Job, val attempt: WorkflowAttempt, val reportsDirectory: Path,
+    val predecessorReportsDirectory: Path? = null)
 
 sealed interface DurableWebWorkflowOutcome {
     data class Completed(val candidate: WorkflowCandidate? = null, val usage: WorkflowUsage? = null) : DurableWebWorkflowOutcome
     data class Failed(val reason: WorkflowTerminalReason = WorkflowTerminalReason.FAILED,
         val candidate: WorkflowCandidate? = null, val usage: WorkflowUsage? = null) : DurableWebWorkflowOutcome {
-        init { require(reason in setOf(WorkflowTerminalReason.FAILED, WorkflowTerminalReason.REFUSED, WorkflowTerminalReason.LIMIT_EXHAUSTED)) }
+        init { require(reason in setOf(WorkflowTerminalReason.FAILED, WorkflowTerminalReason.REFUSED, WorkflowTerminalReason.LIMIT_EXHAUSTED, WorkflowTerminalReason.TIMED_OUT)) }
     }
 }
 
 data class DurableWebWorkflowRequest(val workflow: WorkflowKind, val inputRevisionId: String? = null, val previousRunId: String? = null)
+
+/** A durable command result, including an explicitly refused scheduler outcome; never acceptance evidence. */
+internal data class DurableWebWorkflowStartResult(val attempt: WorkflowAttempt, val replayed: Boolean)
 
 sealed interface DurableWebWorkflowAdmission {
     data class Started(val jobId: String, val runId: String) : DurableWebWorkflowAdmission

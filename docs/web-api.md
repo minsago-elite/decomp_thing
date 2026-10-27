@@ -30,8 +30,9 @@ artifact as JSON. JSON mutation bodies require
 `Content-Type: application/json`; upload requires `multipart/form-data` with exactly one `binary`
 part. No request to `/api/**` receives SPA HTML, including unknown routes, malformed requests,
 exceptions and unsupported methods. Unsupported methods return `405` plus `Allow`; unsupported
-`Accept` returns `406`, and unsupported request content type returns `415`. `HEAD` is permitted
-only for immutable artifact download metadata, where its headers equal GET without a body.
+`Accept` returns `406`, and unsupported request content type returns `415`. `HEAD` support is
+route-specific; permitted HEAD requests return the corresponding GET status and content headers
+without a response body.
 GET/HEAD never upload, queue, resume, cancel, accept, initialize Git, fetch or publish anything.
 
 Request fixtures wrap the actual body as `{apiVersion, kind, data}` only to select the schema;
@@ -46,6 +47,9 @@ unsupported/unknown state; it never maps to success or accepted. Invalid JSON or
 wrong types produce a decoder error, retain the previous snapshot as stale and disable dependent
 mutations. Bootstrap negotiates supported API versions and UI/application build IDs. An incompatible
 major produces a version recovery view; reloading cannot repeatedly replay a mutation.
+An unsupported bootstrap contract clears private session/instance observations and displays an
+explicit incompatible-version recovery message with a manual browser reload action. It offers
+no retry that can replay a sign-in mutation. An unsupported logout response remains unconfirmed.
 
 IDs are case-sensitive opaque strings. Clients must not parse their spelling or synthesize them.
 The existing 32-character lowercase hexadecimal `Job.id` remains a valid `jobId`; migration must
@@ -62,6 +66,43 @@ Small, explicitly bounded page limits, HTTP status, line numbers and schema vers
 Finite confidence ratios remain numbers in `[0,1]` with their meaning and denominator displayed.
 Binary payload snippets use lowercase hex, never implicit text decoding; strict UTF-8 text reads
 report decoding failure and still allow a bounded byte view/download.
+
+
+### Bootstrap build and listener identities
+
+The current bootstrap producer reports `apiVersions`, `applicationBuildId`, `uiBuildId`,
+configured upload/request/page limits, and explicit workflow capability states. Unavailable
+workflow adapters remain unavailable; reading bootstrap does not launch a tool or workflow.
+`applicationBuildId` identifies application bytes and `uiBuildId` identifies packaged UI bytes.
+Neither identifies a running server. Runtime shows a mismatched page/server UI build and asks
+for a reload; the decoder rejects an unsupported API major without replaying mutations.
+
+`serverInstanceId` is an opaque, non-secret identity generated once per listener lifetime.
+It remains stable across requests and browser sessions and changes when the server restarts,
+including a restart of the same application/UI build on the same job store. It is not an
+authorization token, durable job/run/revision identity, or proof that a tool is available.
+The property is optional in the v1 schema so older servers remain compatible; absence means
+unknown and is displayed as “Not reported”. Clients must not substitute a build hash for it.
+
+Each successfully checked bootstrap publishes a fresh page-local session generation. Private
+job, history, attempt/event and dashboard subtrees use that generation as their lifetime key,
+so an intermediate checking render being coalesced cannot keep an old private cache or event
+connection alive. A changed or unreported server instance also invalidates pending
+instance-bound upload observations. Durable upload tickets retain their explicit reconciliation
+path; the browser does not replay a mutation automatically. No identity enables workflow actions
+or changes their separate capability/authorization gates.
+
+### Unexpected internal API failures
+
+The HTTP matrix exercises unexpected exceptions inside real v1/legacy request dispatchers,
+including unknown v1 routes/majors and the shared versioned session/CSRF routes in legacy mode.
+It requires `500 INTERNAL_ERROR`, JSON, no-store caching, matching opaque response/header IDs and
+fixed messages without exception text or private values. A response already committed is closed;
+the server does not attempt to append a second error envelope. Each scenario recovers through
+a read under the original session, without changing stored job bytes, invoking a workflow or
+replaying an ambiguous session mutation. This covers controller routing separately from the
+direct error-renderer control; it does not establish live provider/tool behavior, complete
+legacy sunset migration or production-release qualification.
 
 ## Resource and authority identities
 
@@ -99,6 +140,7 @@ internal storage optimization and must not merge identity, permissions or histor
 | `DELETE /api/v1/session` | `204` | Authorized CSRF-protected logout; #161 |
 | `GET /api/v1/bootstrap` | `200 bootstrap` | Sanitized capabilities/readiness/build IDs/limits; #166 |
 | `GET /api/v1/jobs` | `200 jobs` | Bounded cursor/filter query; #162 |
+| `GET`, `HEAD /api/v1/recovery` | `200 recovery` | Private, bounded, display-only recovery-file summary; no query parameters |
 | `GET /api/v1/uploads/{uploadId}` | `200 uploadProgress` | Ephemeral session-bound transfer bytes and publication phase; #169 |
 | `POST /api/v1/jobs` | `201 job`, `Location: J` | Multipart, upload limits, idempotency; #162 |
 | `GET J` | `200 job`, ETag | Snapshot read; #159/#160 |
@@ -107,13 +149,24 @@ internal storage optimization and must not merge identity, permissions or histor
 | `GET J/runs`, `GET R` | `200 runs`, `200 run` | Bounded attempts or durable attempt snapshot; #160 |
 | `GET R/progress-pin` | `200 progressPin`, strong run ETag | Current per-attempt journal pin; #172 |
 | `PUT R/progress-pin` | `200 progressPin`, original result on keyed replay | Strict `progressPinRequest`, session/Origin/CSRF, run If-Match and idempotency; #172/#177 |
+| `GET /agent/preflight` | `200 agentPreflight` | Last explicit agent inspection result; never starts the agent; #493 |
+| `POST /agent/preflight` | `202 agentPreflight`, `409` while one runs | Strict `agentPreflightRequest` (`{"action":"inspect"}`), session/Origin/CSRF; starts one single-flight `preflight(WEB)`; #493 |
 | `POST J/runs` | `202 run`, `Location: R` | `workflowStart` request, capability/limits/input checks, job If-Match; #163 |
-| `POST R/cancel` | `202 run` or `200 run` if already terminal | Idempotent recorded intent, run If-Match; #163 |
-| `POST R/recover` | `202 run`, `Location` of a new attempt | Explicit `retry` or capability-gated `resume`; If-Match; #163 |
+| `POST R/cancel` | `202 run` or `200 run` if already terminal | Closed `workflowCancel` request, idempotent recorded intent, run If-Match; #163 |
+| `POST R/recover` | `202 run`, `Location` of a new attempt | Closed `recover` request; explicit `retry` or capability-gated `resume`; run If-Match and idempotency; #486 |
+| `GET R/controls` | `200 attemptControls`, strong run ETag | Read-only cancel/retry/resume eligibility with closed reasons; reserves nothing; #528/#529 |
 | `GET R/snapshot` | `200 snapshot`, ETag | Run state and consistent event watermark; #174 |
+| `GET R/queue-position` | `200 queuePosition` | Approximate sampled position of one queued attempt; no query, counts only; #530 |
 | `GET R/events` | `200 text/event-stream` | Resume with `Last-Event-ID` or `after`, never both; #174 |
 | `GET R/events?transport=poll` | `200 events` | Same retention/cursor semantics, bounded page; #174 |
 | `GET R/reports/{reportId}` | `200 report` | State may be missing/partial/unsupported/unknown; #165 |
+| `GET R/source-catalog` | `200 sourceCatalog` | Bounded flat manifest metadata; selected durable job/run; #490 |
+| `GET`, `HEAD R/reports/revision-validation` | `200 report` | Explicit graph and evidence-owner selection; checked normal summary and bounded case pages; #489, #543 |
+| `GET`, `HEAD R/revisions/{revisionId}/sources` | `200 revisionSources` | Bounded canonical input commitments for the selected persisted candidate; #490 |
+| `GET`, `HEAD R/revisions/{revisionId}/source-directories/{directoryId}` | `200 revisionDirectory` | Lazy immediate children of canonical input prefixes; use `root` for the first directory; #188 |
+| `GET`, `HEAD R/revisions/{revisionId}/source-files/{fileId}` | `200 revisionFile` | Recorded file metadata and opaque parent directory, without requesting its body; #188 |
+| `GET`, `HEAD R/revisions/{revisionId}/source-files/{fileId}/chunk` | `200 sourceChunk` | Digest-verified bounded UTF-8 or hex ranges of a committed input; #490, #545 |
+| `GET`, `HEAD R/revisions/{revisionId}/source-files/{fileId}/content` | `200 application/octet-stream` | Complete authorized input download, at most 8 MiB; #491, #545 |
 | `GET J/revisions`, `GET V` | `200 revisions`, `200 revision` | Immutable source/acceptance bindings; #165/#199 |
 | `GET V/sources`, `GET V/sources/{fileId}` | `200 files`, `200 file` | Bounded tree/page/read; #165/#188/#189 |
 | `GET V/search` | `200 matches` | Explicit revision and query/byte/result/deadline bounds; #190 |
@@ -147,6 +200,117 @@ absence of a total never prevents page navigation.
 
 ## Errors, deadlines and concurrent mutations
 
+The workflow-start transport accepts only the `workflowStart` data object (not
+its fixture wrapper), bounded to 4096 bytes. It uses the shared local
+session/Origin/JSON/CSRF mutation boundary before reading a body or job record.
+It requires a canonical job target, no query, one strong job `If-Match`, one
+16–128 character `Idempotency-Key`, and no other conditional headers. Both
+identity fields must be present as bounded IDs or null; all four limit fields
+must be canonical unsigned decimal strings. Duplicate keys, unknown fields,
+invalid UTF-8, numeric JSON limits and arbitrary command/path fields are refused.
+
+An admitted start returns `202 run`, its run `Location` and strong run ETag.
+Replay returns the same retained run identity and current retained run state,
+with `Idempotency-Replayed: true`, even after later work or a restart. It neither
+requeues work nor promotes candidate output to acceptance. Key conflicts are
+409, a fresh stale guard is 412, per-job active work is 409, admission capacity
+is 429, and unavailable workflow/harness/limits are 503. Missing guards are 428;
+invalid request values or unavailable accepted input are 422. Uncertain
+publication returns a recovery failure without a success location. A scheduler
+refusal that was durably recorded returns its failed run; another scheduling
+exception requires reconciliation through the job and retained key.
+
+Production durable adapters remain unregistered, and bootstrap continues to
+report them unavailable. Without registered adapters or retained keyed starts,
+POST retains the existing 405 response without consuming a body. A retained
+receipt keeps the route available for authenticated read-only replay after
+registrations are removed; it does not enable fresh work. Injected inert
+adapters qualify transport/storage behavior, not runtime readiness or upstream
+model/binary execution and accepted-publication integration.
+
+The reserved cancellation transport has a closed `workflowCancel` data object:
+exactly `{"action":"cancel"}`, bounded to 1024 bytes. The fixture wrapper is not
+the HTTP body. Job/run identity comes from the canonical route, the optimistic
+run guard from one strong `If-Match`, and replay identity from one 16–128 character
+`Idempotency-Key`. No query, other conditional header, caller-selected actor,
+command, path or execution target is accepted. The shared local
+session/Origin/JSON/CSRF mutation policy must succeed before body consumption or
+any service read. Duplicate keys, unknown fields and invalid UTF-8 are refused.
+
+Cancellation returns the current retained `run`, its strong ETag and canonical
+run `Location`. An originally nonterminal acknowledgement uses 202, even if a
+queued task has already become cancelled by response time. An acknowledgement
+recorded for an already terminal run uses 200. Replay preserves that original
+status with `Idempotency-Replayed: true` and returns current run state without a
+second signal or an old task version. The actor is derived only from the
+authorized session; actor and receipt internals are not response fields. Neither
+202 nor receipt replay asserts worker termination or promotes candidate output
+to an accepted revision.
+
+The cancellation handler now dispatches this route through
+`WebJobMutationBoundary.authorizeCancellation`. The capability derives the actor
+from the authorized session and calls the owned service coordinator; the HTTP
+controller cannot select an actor or write storage directly. Fresh stale guards
+return 412, conflicting retained intent 409, exhausted receipt capacity 429, and
+unknown/foreign targets 404. Uncertain publication returns 503 without a success
+location or signal. Running work without an owned task requires reconciliation.
+
+`WebCancellationControllerTest` adds inert HTTP controls for queued/running
+cancellation, concurrent replay, completion races, accepted-reference and
+diagnostic preservation, guards, strict JSON, actor isolation, revocation,
+capacity and publication faults. Service/storage restart coverage retains the
+same listener's in-memory authorization service. It does not establish replay by
+a new session after a full listener restart. These authored methods await their
+own Actions qualification; browser and production-adapter/runtime qualification
+remain unfinished. Bootstrap continues to report workflows unavailable, and
+fresh starts without registrations or retained start receipts retain 405.
+
+The recovery transport accepts only the closed `recover` data object (not its
+fixture wrapper), bounded to 1024 bytes: `mode` is `retry` or `resume`, and
+`expectedInputRevisionId` is the predecessor's recorded input revision or null for
+the original upload. It uses the same shared session/Origin/JSON/CSRF boundary
+before any body or service read, one strong run `If-Match`, one 16–128 character
+`Idempotency-Key` and no query or other conditional header. Workflow, limits,
+harness, checkpoint and paths are never caller fields; they come from the
+trusted registration and the predecessor attempt.
+
+Only the latest unsuccessful (failed, cancelled or interrupted) attempt can be
+recovered, and only while its recorded input is the original upload or the
+job's current accepted revision. A different expected input is 409
+`INPUT_REVISION_CONFLICT`; an input that is no longer trusted evidence is 409
+`INPUT_UNVERIFIED`, so recovery never silently starts from an unverified
+workspace. `retry` always publishes a new queued attempt linked through
+`previousRunId`, with `recovery.mode: retry` and no restored state. `resume`
+requires the registered adapter's trusted checkpoint policy, the exact recorded
+harness identity and a verified checkpoint; the new attempt records
+`recovery.restores` (`agent-session` or `project-evidence`) and the checkpoint
+digest, and the adapter receives the predecessor's workflow-owned report
+directory. Unsupported or unsafe resume is 409 with a specific code
+(`RESUME_UNSUPPORTED`, `HARNESS_CHANGED`, `CHECKPOINT_MISSING`,
+`CHECKPOINT_MISMATCH`, `CHECKPOINT_UNVERIFIED`, `WORKSPACE_UNVERIFIED`,
+`SESSION_QUARANTINED`, `CLEANUP_UNVERIFIED`). A newer attempt is 409
+`ATTEMPT_SUPERSEDED`, unfinished or completed predecessors 409
+`ATTEMPT_ACTIVE`/`ATTEMPT_COMPLETED`, a stale run guard 412, a key reused for
+different intent 409, admission capacity 429 and an unavailable workflow 503.
+
+Success is `202 run` for the new attempt with its `Location` and ETag. The
+recovery receipt shares the atomic attempt publication; its replay identity is
+the predecessor, its version, the mode and the expected input, so a keyed replay
+returns the same new attempt with `Idempotency-Replayed: true` before any
+eligibility, capacity or capability check, and never schedules again. Without
+registered workflows or retained keyed receipts the route answers 503
+`CAPABILITY_UNAVAILABLE` without reading the body. Production adapters remain
+unregistered and none declares a checkpoint policy yet, so packaged builds
+report retry and resume unavailable; ACP session continuation through the
+shared `AgentSessionJournal` policy still needs a registered adapter (#68).
+
+`GET R/controls` returns `attemptControls`: the run version and state, the
+recorded input revision, `cancel`, `retry` and `resume` each with `available`
+and a closed `reason`, the scope a resume would restore and any linked
+`successorRunId`. It is computed from durable state and current owned work, is
+private and read-only, and is not a reservation; each command re-checks its
+guards. Browsers read it explicitly and never send a command on load or reload.
+
 Errors carry `code`, safe `message`, `retryable`, optional field-level `details` and
 `retryAfterMs`; the correlation ID connects to redacted server logs. A detail contains a JSON
 pointer plus stable code/message and never the rejected value. Resource existence is disclosed
@@ -167,6 +331,19 @@ are never browser diagnostics.
 | `429` | `QUOTA_EXCEEDED` | Honor `Retry-After` without duplicating work |
 | `501` / `503` | `CAPABILITY_UNSUPPORTED`, `CAPABILITY_UNAVAILABLE`, `SERVER_DRAINING` | Explain reason and retain view |
 | `500` / `504` | `INTERNAL_ERROR`, `DEADLINE_EXCEEDED` | Show request ID; reconcile uncertain mutation outcome |
+
+An authorized streamed upload that reports a typed uncertain publication returns
+`409 RECOVERY_REQUIRED` with `Location: <basePath>api/v1/jobs/<jobId>`. The existing
+error envelope remains unchanged, with `retryable:false` and no `Retry-After`.
+The location identifies the retained job for an authenticated read; it is not an
+instruction to submit the upload again or an assertion that analysis completed.
+Private filesystem causes and paths are withheld.
+
+Until storage is reopened, the job read truthfully reports recovery is required.
+The service also refuses further uploads. That separate
+`503 RECOVERY_REQUIRED` refusal has no guessed job location. After explicit
+restart/reconciliation, an upload with the same idempotency key and intent can
+replay its retained publication receipt rather than create another job.
 
 The server advertises stricter configured limits at bootstrap. Contract defaults are 30 seconds
 for ordinary HTTP requests, 120 seconds for upload and 120 seconds download idle time; JSON bodies
@@ -200,6 +377,18 @@ Retry/resume create a distinct run referencing the previous attempt and preserve
 Restart marks abandoned active attempts interrupted and reconciles committed publication journals;
 it never silently launches execution or duplicates accepted publication.
 
+### Admission and overload
+
+The server admits at most 16 concurrent requests, with 64 more waiting in a bounded queue. A request that finds
+every worker and queue slot taken is answered immediately, without routing, session lookup or storage access, with
+`429` and the fixed error code `SERVER_BUSY` (`retryable: true`, `retryAfterMs: "30000"`, `Retry-After: 30`,
+`Cache-Control: no-store`, `Connection: close`), in the same error envelope as every other denial. The 30-second guidance
+matches the longest ordinary request deadline, after which a slow request releases its worker. A small responder
+pool (two threads, no queue) produces these answers, so overload never buffers more than the main queue holds. If
+that responder pool is also busy, the connection is closed without a response; clients should treat a reset
+connection like `SERVER_BUSY`. Each admitted request's exchange is closed at a 30-second deadline (120 seconds for
+multipart uploads); the release of a worker pinned by a slow client at that deadline is not yet covered by a test.
+
 ## Bootstrap and capability truth
 
 Bootstrap contains API/UI/application versions, `basePath`, readiness, sanitized runtime versions,
@@ -211,6 +400,19 @@ supported workflow names, configured bounds and (where applicable) harness contr
 harness selection is not evidence that a session ran. Missing binaries/configuration produce
 unavailable; unfinished built-in/ACP resume/permission/Git features remain unsupported or unknown.
 Never enable controls from a fixture, environment variable name, endpoint guess or frontend flag.
+
+The job's workflow availability view displays the contract version and execution
+limits in that last authenticated capability report. Wall-clock and idle limits
+retain their exact decimal millisecond values; output bytes and tool-call counts
+also retain every decimal digit, including values above JavaScript's exact integer
+range. Missing metadata is labelled not reported. A reported zero stays zero;
+the view assigns it no unlimited or unsupported meaning. Reports without an
+assigned workflow stay in the general capability section.
+
+These are report-level observations, separate from an individual attempt's
+recorded limits and job-specific admission. Displaying them performs no new
+request, preflight, provider selection or workflow action. Implementation-version,
+deprecation, selection and full workflow qualification requirements remain open.
 
 Runtime information uses allowlisted implementation/version/platform names and effective limit
 values. It excludes absolute installations/worktrees, environment values, credential-bearing
@@ -301,6 +503,7 @@ sanitized derivatives have separate identity, digest and provenance.
 
 | DTO fields | Authoritative current source or explicit implementation owner |
 | --- | --- |
+| `workflowCancel.action` | Constant caller intent only. The route selects job/run, If-Match selects the run version, and the shared authorized session supplies the actor. No body field chooses an actor, command or execution target. HTTP integration remains owned by #485. |
 | `progressPin.jobId/runId/version/pinned` | Selected durable `WorkflowAttempt` for GET; atomic `WorkflowPinAuditEntry` original result for PUT/replay. No actor, key digest or receipt internals are public. |
 | `job.jobId`, display filename, timestamps | `Jobs.kt: Job.id/filename/createdAt/updatedAt`; never expose `binaryPath` |
 | `job.sizeBytes`, `binary.*` | `Job.sizeBytes` to decimal string; `ElfMetadata` names/format and unsigned `entryPoint` to hex. V1 must not reuse lossy/signed `Job.toJson()` numerics |
@@ -312,6 +515,11 @@ sanitized derivatives have separate identity, digest and provenance.
 | Validation summary `result/casesCompared/sourceSha256` | #165 adapter derives scoped result/count from `BehaviorComparisonReport`; binds the canonical node's `sourceRevisionSha256`. These are new presentation names, not fields parsed from `RepairEvidence.summary` |
 | `report.acceptance`, validation status | Existing canonical graph/validation strategy and receipt authority, exposed by #165. No inference from `Job.status == complete`, source-tree existence or a confidence threshold |
 | Source file provenance/digest/module acceptance | `SourceTree.kt: GeneratedFileEvidence`/module checkpoints, project `source_tree_manifest.json` and exact registered source snapshot; #165 obtains byte sizes from that snapshot. Manifest is a compatibility projection after canonical repair publication, see [revision authority](repair-revision-graph.md) |
+| `sourceCatalog.*` | Fixed selected-run manifest/input capture; host-profile-validated `GeneratedFileEvidence` metadata only. Manifest SHA-256 is an observation version; file IDs are scoped HMAC identities, labels are display text, flags/digests are unverified declarations, and revision binding is null |
+| `revisionSources.*` | Actual selected `WorkflowAttempt.candidate` plus schema-3 build-contract source inputs, cross-checked against the host-profile-validated manifest and canonical build/repair digest preimage. Sizes are exact descriptor commitments; source bodies and acceptance are not verified by this listing |
+| `revisionDirectory.*` | Immediate-child grouping of those same canonical input commitments. Counts describe recorded input files; empty physical directories are not recorded, and directory IDs are opaque selectors within the selected candidate |
+| `revisionFile.*` | One exact committed input declaration and server-derived parent selector. `contentVerification: "not-performed"` explicitly excludes selected-file body verification by this metadata read |
+| `sourceChunk.*` | Captured input bytes match the selected candidate's canonical path/size/digest commitment and configured host declaration. Range and line fields describe those exact bytes; compiler results, graph acceptance and release authority remain separate |
 | Event `agentInvocationId/agentSequence/type/payload` | Shared `AgentExecutionEvent` variants above; #69 stream mapping; #174 durable publication and redaction |
 | Event cursor/sequence/time/gap, snapshot watermark; page cursor/version | New #174 journal and #162 snapshot pagination metadata, not existing agent timestamps or `JobStore.list()` offsets |
 | Bootstrap capability/harness descriptors | `selectWebReconstructionStrategy`, `AcpHarnessProvenance` safe fields; #166 performs real readiness checks. The selection report explicitly does not prove execution |
@@ -397,8 +605,10 @@ Legacy event reads and v1 progress reads now use the same fixed-path service ope
 which validates job/attempt ownership and applies the retained-descriptor artifact reader's
 2 MiB ceiling. Legacy event reads no longer fabricate a zero-event snapshot when the journal
 is missing. Malformed and oversized journals also return `PROGRESS_UNAVAILABLE`; an actual
-persisted, valid zero-event journal still returns 200. This does not add cursor replay or v1
-session authorization to the legacy route, nor add a new event authority.
+persisted, valid zero-event journal still returns 200. Legacy event reads require the shared
+local session policy, including revocation, before this service read; this is the same
+LocalWebAccess boundary used by the versioned controller. The legacy payload still adds no
+cursor replay or new event authority.
 
 Legacy successful event JSON and initial HTML now share a closed metadata projection.
 Raw `text`, plan `entries`, `path` and unknown fields are withheld. Message prose is withheld
@@ -416,9 +626,10 @@ the SPA retains its activity-view restriction as well. See [the transport projec
 The HTTP tests cover missing/unknown resources, invalid query/upload, damaged storage,
 request-ID agreement, content type, cache policy and preservation of stored bytes. Unexpected
 internal failures use the same response helper but are not fault-injected by that HTTP test.
-The two legacy JSON read routes (`/api/jobs/J` and `/api/jobs/J/events`) accept GET only.
-Other methods return 405 with `Allow: GET` before storage reads; HEAD sends the same error
-headers without a body. Unknown routes retain 404. GET shares v1's bounded Accept policy:
+The two legacy JSON read routes (`/api/jobs/J` and `/api/jobs/J/events`) accept GET and HEAD.
+Other methods return 405 with `Allow: GET, HEAD` before storage reads. HEAD returns the same
+status and content headers as GET without a response body. Unknown routes retain 404.
+Both methods share v1's bounded Accept policy:
 a missing header allows JSON; explicit JSON, `application/*` and `*/*` ranges are supported;
 a more specific `q=0` exclusion overrides a broader wildcard. Nonmatching/malformed supported
 ranges yield 406. Repeated Accept headers or a value over 512 characters yield 400. Errors
@@ -471,6 +682,338 @@ report unavailable metrics without zero values. Runtime uses the session-time
 snapshot; it neither polls these counts nor infers workflow availability from
 capacity. See [scheduler summary and verification](web-scheduler-summary.md).
 
+### Attempt queue position and stop reasons
+
+`GET jobs/J/runs/R/queue-position` samples one attempt's place in this process's executor queue.
+A queued attempt reports `position`/`ahead`, the total `queuedTasks` and busy/limit workers, always
+with `approximate: true`: queued work can be cancelled or stopped, two workers start tasks
+independently, and the queue is read separately from the attempt record. Other tasks are counted,
+never identified. A started or terminal attempt reports `not-queued` with its state; a borrowed
+executor or an attempt not found in the local queue reports `unavailable` with
+`EXTERNAL_EXECUTOR`/`NOT_IN_LOCAL_QUEUE`. The sample is display-only, never admission authority.
+The attempt view reads it on demand only while the attempt is queued.
+
+Terminal reasons keep stop outcomes separate. `LIMIT_EXHAUSTED` is a used-up budget (tool calls,
+output, tokens), `TIMED_OUT` a wall-clock or idle deadline, `CANCELLED` a recorded user request,
+`FAILED` a workflow-reported failure, `INFRASTRUCTURE_FAILED` an adapter or executor submission that
+could not produce any outcome, and `PROCESS_INTERRUPTED` a service stop or restart. Adapters may
+report `FAILED`, `REFUSED`, `LIMIT_EXHAUSTED` or `TIMED_OUT`; only the service records
+cancellation, infrastructure failure and interruption.
+
+Reported attempt usage comes from the terminal receipt. The view gives its units, its source and
+the receipt time (`endedAt`); the provider's own measurement time is not reported and stays
+"Not reported", as does every missing counter. Limits name the configuration persisted at
+`createdAt`. Live context-usage observations are coalesced for display only (one pending snapshot
+per 100 ms window) and never change the acknowledged cursor or persisted evidence.
+
+## Current source catalog metadata
+
+`GET /api/v1/jobs/{jobId}/runs/{runId}/source-catalog` requires the existing private
+session and an exact durable attempt belonging to that job. It accepts only `limit`
+(default 50, maximum 200) and `cursor`. It returns a flat, deterministic path-sorted
+metadata page with opaque session/job/run/manifest-bound `fileId` values. `displayName`
+is a portable relative display label; no endpoint accepts it as a filesystem selector.
+`nextCursor` explicitly identifies more records, including when the response byte
+ceiling admits fewer rows than the requested limit. A cursor from another session,
+job, run or page size is rejected. A changed manifest expires a valid continuation
+with `410 CURSOR_EXPIRED` and requires refreshing the first page.
+
+The producer captures only the fixed source manifest and uploaded input through the
+retained-descriptor read boundary, then rechecks their bytes, hashes and identities.
+The manifest must use the same configured host profile allowlist as legacy source
+evidence and bind to the uploaded input. Both readers receive one captured copy of
+the server's configuration; the catalog does not restore excluded default profiles.
+Metadata capture admits at most 25,000 files and a 16 MiB manifest; response items
+have a separate 1,000,000-byte ceiling within the existing 1 MiB JSON response limit.
+One catalog capture/page is admitted per controller at a time; concurrent catalog
+reads receive `429 SOURCE_CATALOG_BUSY`. Each filesystem read retains the service's
+lifecycle check and read lock, while manifest parsing runs outside the global job
+lock. Admission is released on both success and failure. There is no retained
+catalog cache, directory traversal or manifest-declared source file read. Missing,
+malformed, unregistered or oversized metadata returns a fixed unavailable response;
+changed capture or attempt identity returns a conflict without a partial page.
+
+The `sourceCatalog` contract has `authority: "manifest-metadata"` and a null
+`binding.revisionId`. `manifestSha256`/`page.snapshotVersion` identify the observed
+manifest bytes. File hashes and the `declaredUtf8Text`/`declaredViewable` flags are
+manifest declarations; this read does not verify source bodies, text encoding or
+acceptance. It creates no immutable project revision or release relationship.
+The planned revision-scoped source routes above remain separate work. Bootstrap's
+source chunk limit remains zero until a source text producer is implemented.
+
+In-memory controls exercise the 25,000-record capture/page workload, scoped cursor
+refusal, byte-limited continuation and changed capture refusal. They do not qualify
+HTTP/controller behavior, the source tree UI, 8 MiB source delivery, the 256 KiB line,
+latency or memory budgets. Those remaining obligations stay open under #490/#188/#189.
+
+## Candidate revision source input listings
+
+`GET`/`HEAD /api/v1/jobs/{jobId}/runs/{runId}/revisions/{revisionId}/sources`
+uses the private session boundary and accepts only `limit` and `cursor`. The selected
+terminal attempt must contain that actual persisted candidate reference. The reader
+never creates a revision ID from a manifest digest. Conflicting reuse of a revision
+ID with a different source digest in another retained attempt returns a conflict.
+Other attempts containing the same revision/digest retain their explicit run namespace.
+
+The common metadata capture reads the fixed manifest, uploaded input and
+`source-tree/reports/build_contract.json` through the retained-descriptor boundary.
+Only build-contract schema 3 is supported. Its unique, sorted `sourceInputs`
+must exactly match the manifest's host-declared `BUILD_INPUT` paths and file digests,
+include a build definition, and reproduce the persisted candidate's source digest
+using the existing `path.length:path:byteLength:fileSha256` plus newline preimage.
+The build and repair producers use UTF-16 path length and exact decimal byte counts;
+wire `sizeBytes` values remain decimal strings. The reader does not use the legacy
+job-record digest as an ELF content digest. Manifest, descriptor and uploaded input
+are rechecked, followed by the selected candidate/version and revision conflict checks.
+
+Both metadata producers share one capture admission in the service. Parsing runs
+outside the global job monitor; each read unit still checks service lifecycle and
+namespace ownership. Each metadata document has a 16 MiB ceiling and the manifest
+and canonical input set admit at most 25,000 records. Pages default to 50, admit at
+most 200 rows and retain the separate 1,000,000-byte item ceiling. Signed continuations
+bind the session, job, run, revision, page size and captured metadata version. A changed
+version expires the cursor explicitly. No page cache or source body is retained.
+
+`revisionSources` has non-null job/run/revision bindings and
+`authority: "source-input-commitments"`. `sourceSha256` is the persisted canonical
+commitment; `metadataVersion` identifies the observed manifest/descriptor pair.
+File IDs are stable opaque values across sessions and listener restarts for the same
+job/run/revision/source input set. They grant no access without the session boundary.
+Display labels never become filesystem selectors. Viewability/encoding flags remain
+host-profile declarations. This projection reports no compiler result, canonical graph
+acceptance or release relationship, including when the stored attempt has an accepted
+reference. Missing registration returns 404; inconsistent capture returns 409; missing,
+malformed, unsupported or oversized metadata has a fixed unavailable response.
+
+This endpoint lists only the canonical build input set. The observed catalog above
+continues to describe other manifest entries. Reads outside that committed input set,
+UI/HTTP/performance qualification and accepted publication remain open;
+bootstrap source chunk advertising stays zero. In-memory controls cover canonical
+identity, conflicts, exact large sizes/Unicode, 25,000 commitments, paging and capture
+admission. They do not establish the D0 physical source workload or delivery budgets.
+
+### Lazy canonical input directories
+
+`GET`/`HEAD jobs/J/runs/R/revisions/V/source-directories/root` returns a
+`revisionDirectory` envelope through the same private read and metadata capture boundaries.
+Only `limit` and `cursor` are accepted, with the same default 50, maximum 200 and
+sub-MiB response ceiling. Each page groups immediate children of the selected prefix;
+directories sort first, then files, each in UTF-16 label order. Selecting a directory
+does not recursively fetch its children. Counts include only canonical input files.
+`emptyDirectories: "not-recorded"` explicitly describes the file-only inventory;
+an unknown directory returns `SOURCE_DIRECTORY_NOT_FOUND`, without asserting physical
+absence. File/directory prefix collisions return a source revision conflict.
+
+Directory IDs bind the job, run, revision, source commitment and canonical prefix.
+They remain stable across sessions and listener restarts for that input set. File IDs
+are identical to those in the flat revision source listing. Display labels are single
+components and never become path selectors. A continuation also binds its directory
+and page size; session mismatch is invalid, and changed metadata expires it explicitly.
+
+The root has a null display label and parent. Other directories include a parent ID,
+depth and breadcrumbs. Breadcrumbs retain the root and at most the last 31 components;
+`omittedAncestors` counts intervening components. Parent IDs retain the complete
+upward navigation chain even when breadcrumbs are shortened. Shared consumers reject
+inconsistent ancestry, counts, duplicate identities, ordering and continuation bounds.
+Pure captured-DTO controls cover 25,000 wide directories, deep Unicode/space paths,
+stable IDs and cursor isolation. These controls do not qualify physical source reads,
+HTTP/browser navigation, empty directory support, timing, memory or the full D0 workload.
+
+### Bounded canonical input source reads
+
+The `source-files/F/chunk` and `source-files/F/content` routes bind `F` to the same
+opaque file ID returned by the revision input and directory listings. The private
+GET/HEAD policy applies before capture. A display label or client path never selects
+the source file. Preview requires the configured `VIEWABLE` role; complete download
+requires `ARCHIVE_PAYLOAD`. Missing permission returns a fixed representation refusal.
+These declarations are checked independently of a file's name or extension.
+
+The reader holds the shared source capture admission through metadata and body reads.
+It selects only the exact job/run `source-tree` namespace, using the existing pinned
+regular-file descriptor reader and its ancestry/identity revalidation. Source project
+paths use the host's normalized grammar, including deep paths; the generic report
+artifact reader retains its separate limits. At most 8 MiB is captured for one input.
+The byte count and actual SHA-256 must match the selected commitment. A second body
+capture must match bytes and identity, followed by descriptor, manifest, input and
+persisted candidate/version rechecks. No path, stream or mutable cached source body
+is handed to a later request. Missing/unreadable data has an unavailable response;
+changed observed data returns a conflict. This is captured-byte verification, not an
+immutable archival registry or accepted graph publication.
+
+Chunk queries accept canonical decimal `offset` (default 0), `maxBytes` (default
+65,536; 4–131,072) and optional `metadataVersion`. Unknown/repeated keys are rejected
+before capture. A changed requested metadata version expires explicitly. A UTF-8
+offset must be at a character boundary; out-of-file or split-character offsets return
+416. The emitted end is shortened when necessary to preserve a complete character.
+Empty files have one empty complete representation; nonempty files reject an EOF-only
+range. `offsetBytes`, `lengthBytes`, `sizeBytes` and `nextOffsetBytes` are exact decimal
+strings. `completeFile` is true only for a response containing the entire original file.
+Clients must retain the binding, file/source digests and metadata version when joining
+ranges; a final range alone is not a complete-file copy.
+
+Declared UTF-8 is validated without retaining a decoded whole-file string. Valid text
+with lines at most 256 KiB before LF is returned unchanged as `representation: "utf8"`.
+The line byte ceiling includes a CR before LF. CRLF, BOM, Unicode and markup-like text
+are preserved. `firstLine` counts LF bytes before the offset plus one; `startsMidLine`
+and `endsMidLine` explicitly describe partial lines, with EOF ending the final line.
+This JSON text grants no HTML/Markdown execution or remote highlighting authority.
+Declared binary content, malformed UTF-8 and overlong lines select `hex`, with a fixed
+fallback reason and two lowercase digits per original byte. Text line fields are null
+for hex. Both representations keep the response below 1 MiB and expose the complete
+byte range and continuation explicitly. Shared consumers reject inconsistent byte
+lengths, completeness, continuations and line metadata, including malformed surrogates.
+
+The `content` route accepts an optional canonical `metadataVersion` commitment and returns the complete verified bytes as a
+no-store, nosniff `application/octet-stream` attachment. The ASCII fallback filename
+and encoded UTF-8 basename cannot insert header syntax; the response also carries a
+sandbox/default-deny CSP. HEAD verifies the same captured file and returns its length
+without a body. Range and conditional HTTP headers are explicitly unsupported on both
+routes; bounded JSON offsets provide the chunk operation.
+
+Each chunk currently verifies a complete bounded file before returning its range.
+No timing, RSS, physical deep-path or actual HTTP/browser qualification is inferred
+from captured-byte controls. General viewer qualification, all-manifest/log/report
+families, local highlighting and full D0 physical budgets remain open. Bootstrap
+source chunk advertising remains zero pending those gates.
+
+### Explicit source download digest observation
+
+Successful source `content` GET/HEAD responses now include
+`X-Decomp-Content-Verification: committed-digest`, `X-Decomp-Source-SHA256`,
+`X-Decomp-Metadata-Version`, `X-Decomp-File-ID` and `X-Decomp-Content-SHA256`. These headers describe
+the same captured file that already passed complete size/digest and repeated
+identity/metadata checks. The existing ARCHIVE_PAYLOAD authorization and 8 MiB
+ceiling apply. No compiler, behavior or archive verifier is invoked by this read.
+
+For a downloadable recorded input, the file detail page offers an explicit
+digest check through the existing private attachment HEAD route. The normal
+session transport enforces its existing deadline and cancellation, performs one
+request without retries, and reads no response body. Only status 200, a bodyless
+response, octet-stream/nosniff headers, exact byte length and matching source,
+metadata and file digests can produce the transient matching-byte observation.
+Unknown, missing, changed or combined integrity header values fail closed.
+Bodyless HEAD denials carry `X-Decomp-Session-Error` only for status 401 with
+the exact `SESSION_REQUIRED` or `SESSION_EXPIRED` codes. The client accepts this
+signal only with a valid request identity, JSON/nosniff error headers and no body,
+and preserves it for the existing generation-bound session invalidation observer.
+Other statuses or missing, combined and unknown error codes grant no session signal.
+Navigation, metadata refresh and session removal discard the observation and
+cancel its read. Metadata reads still report `contentVerification: not-performed`;
+they do not start this check. The actual source-chunk bootstrap permission stays
+zero. A matching file digest is separate from compilation, behavioral validation,
+archive verification and accepted reconstruction. The general snapshot artifact
+catalog and its full family/verification requirements remain outstanding.
+
+The new controls use only captured byte arrays, synthetic identities, DTOs and
+injected string lookups. Actual source HTTP/browser qualification and physical
+D0 time/memory/workload evidence remain unproved; no new actual context trial is
+introduced by those controls.
+
+## SPA recorded source navigation
+
+The attempt page links a recorded result revision to
+`jobs/J/runs/R/revisions/V/sources/root`. Directory links retain that exact selection
+and an opaque directory ID; file links use
+`jobs/J/runs/R/revisions/V/source-files/F`. The embedded shell admits these exact
+GET/HEAD document routes and keeps its existing trailing-slash redirect policy.
+The source API still verifies an actual retained candidate; a displayed result
+reference alone does not establish source availability or accepted publication.
+
+Each directory view requests one 50-entry metadata page. Expanding a directory or
+opening the next page is explicit navigation; no recursive walk, body request or
+download runs in the background. A continuation lives in the documented `cursor`
+query so back/forward can restore the page within its valid session/snapshot.
+Changed/expired continuations require first-page refresh. The rendered list contains
+only the selected page, with an explicit count and next-page state. Breadcrumbs use
+server selectors and show omitted ancestors; parent navigation retains the complete
+chain. All display labels are escaped text with bidi isolation, separate from URLs.
+
+Direct file links read `revisionFile` metadata through the same private bounded
+transport. That endpoint accepts no query, resolves the opaque file ID, and returns
+the recorded relative label, exact size/digest, host encoding/view/archive flags,
+binding, metadata version and opaque parent ID. It neither requires body permissions
+to explain an excluded entry nor requests the selected file's body. The UI labels
+these as commitments, explains unsupported preview/download declarations and the
+8 MiB reader limit, and offers an explicit authorized attachment link when applicable.
+Bootstrap source-chunk advertising stays zero; the UI does not enable text reads
+under that report. A capability from 1 to 3 bytes is also too small for the reader's
+minimum UTF-8 range and remains disabled.
+
+Source reads clear the previous selection before a different request can render,
+check job/run/revision/resource bindings, abort on navigation/session replacement,
+and withhold late callback results even if cancellation is ignored. Directory
+continuations also retain the observed source/metadata identity across loaded pages.
+Failures use fixed recovery copy plus a canonical reference ID, never raw diagnostics.
+Authenticated state owns the views; expiry or logout removes their private metadata.
+
+Pure DTO/path/callback controls cover these bindings, page bounds, opaque URLs,
+obsolete reads and role/size/runtime explanations. They do not qualify actual source
+HTTP/browser navigation, keyboard/layout behavior, physical deep paths, all generated
+manifest/log/report families or D0 timing/memory/workload budgets. Those requirements
+and the original parent acceptance criteria remain open.
+
+### Bounded source preview consumer
+
+When a runtime reports at least four source-chunk bytes, a viewable input within the
+8 MiB file ceiling offers an explicit preview button. Plain metadata navigation does
+not start a body read. Direct range links use the closed document query
+`?byte=O` or `?byte=O&line=L` on the exact job/run/revision/file route. Offsets are
+canonical decimal bytes, not character indices; a linked line must match the
+server's first LF-based line at that offset. Display labels never construct paths.
+The private file-metadata endpoint still receives no query.
+
+One request reads at most the lesser of the reported limit and 64 KiB. Every read
+supplies the observed metadata version and checks job/run/revision/file, source
+commitment, file size/digest, download declaration, exact offset and returned bound.
+Foreign, changed, excessive or mismatched responses are withheld. Refresh and next
+range are explicit; no prefetch, range accumulation or implicit retry occurs.
+Selection/session changes abort and withhold late results through the existing
+callback lifetime. The server still captures/verifies the complete bounded file for
+each range; this UI does not reduce or qualify that physical work.
+
+UTF-8 is escaped plain text, including Markdown and markup-like input. Invisible
+controls, CR, BOM and bidi formatting are displayed as U+ markers, while original
+LF positions and byte offsets identify line links. Tabs remain tabs. At most 200
+line fragments or 16-byte hex rows are rendered at once, with explicit local row
+paging and counts. Binary declarations, invalid UTF-8 and excessive line length
+retain the server's named hex fallback; hex rows have byte offsets, not invented
+text lines. Empty files retain line 1; a trailing LF does not invent an extra
+zero-byte row/link beyond a nonempty file's readable offsets.
+
+The copy button sends only the currently displayed UTF-8 rows' original string to
+the clipboard: no line numbers, U+ marker substitutions or undisplayed ranges.
+Its offset/length and partial-range status are explicit. Clipboard encoding or line
+ending normalization remains possible; the complete authorized attachment is the
+byte-preserving path. Hex fallback has no text-copy action. Source is never executed
+or parsed as markup.
+
+Local highlighting is an additional explicit action for C/C++, JSON and build
+files. It sends only the current displayed rows to one packaged worker, with at
+most 200 rows, 262144 UTF-16 units and 4096 output tokens. The one-second operation
+timer requests termination on timeout; it is not a physical browser latency or
+whole-operation CPU/RSS qualification. Completion, failure, view/range changes
+and unmount detach callbacks, clear the owned timer and terminate the worker.
+The worker also closes after its single response. Invalid, stale, excessive or
+changed results leave the complete original display plain. Every accepted token
+uses a closed presentation class and must concatenate to exactly its original row;
+individual token boundaries cannot split Unicode surrogate pairs. Rendering uses
+escaped text children, never HTML, styles or URLs supplied by the source.
+
+Formatting has local syntax context only within the displayed rows. It changes
+neither original copy data nor revision/byte/line identities and performs no
+additional source read. Unsupported files and hex stay plain. The worker URL is a
+static build reference emitted into the embedded hashed asset inventory, under the
+existing self-only worker CSP. Page and worker module ownership share the same
+production exclusions; the existing all-dist gzip budget also counts worker bytes.
+No external rendering asset or new package is used.
+
+Pure Node DTO/string controls cover the range, identity, representation, Unicode,
+row and copy-span decisions, plus lexer/response and memory-only worker-owner
+lifetime controls. Actual source HTTP/browser/clipboard/focus/keyboard,
+packaged worker loading/termination and physical D0 workload/time/memory qualification remain
+outstanding. The current zero bootstrap limit remains unchanged, so this consumer
+does not activate previews against that report.
+
 ## Legacy session migration
 
 Legacy pages, JSON routes and downloads now require the local session described in
@@ -518,6 +1061,67 @@ Run state now stays locked during bounded journal capture, with locks released b
 Controlled authenticated HTTP snapshot/replay and SSE eviction/resume checks now cover concurrent
 cutover. Slow-socket qualification and timed retention remain outstanding under #174.
 
+### Activity stages, correlation and private reasoning
+
+The Activity view summarizes the retained page as stages. The attempt row comes from the
+durable snapshot (`queued` waiting, `running`, `cancelling` blocked, `completed` accepted or
+completed without acceptance, `cancelled`, `failed`/`interrupted` terminal failure). Task rows
+group observations by `taskIdSha256` and keep the latest reported stage: analysis, planning
+and agent work are running; policy, build and behavior checks plus provisional/compile-valid
+results are validating; `unresolved` or a denied permission is blocked; `accepted`,
+`rolled_back`, `completed`, `cancelled` and failure phases are final. Rows without a stage
+(messages, tools, usage) keep the previous stage. Journal stages never establish acceptance.
+
+A percentage is shown only for an authoritative, producer-declared total. Observed task counts
+are not a denominator because tasks that have not started are invisible, so the view states
+how many observed tasks reached a final stage and that no percentage is shown.
+
+Correlation disclosures render on demand. The browser hashes the loaded attempt's own
+identities (attempt, previous attempt, input and result revision) with SHA-256, the same plain
+commitment the journal uses, and links only exact matches: a result revision to its source
+browser and a workflow-run digest to the previous attempt. Every other reference states why
+it is not linked (not recorded, not compared yet, no published task or session evidence page,
+or no matching revision). A task digest can narrow the page filter instead.
+
+Provider reasoning (`agent_thought_chunk`, role `thought`) is private. The journal records only
+its position, role, completion and `textOmitted: true`; it never buffers, stores, measures or
+commits to its text. Public projection also withholds `contentSha256`/`chunkCharacters` from
+older thought records. The ACP client never requests reasoning and no workflow depends on it.
+
+## Agent preflight and harness readiness
+
+`GET /api/v1/agent/preflight` returns `agentPreflight` with `status` (`idle`, `inspecting`, `ready`, `failed`, `cancelled`), an application-generated `inspectionId` and a fixed `reasonCode` (`AGENT_PREFLIGHT_FAILED` only). `POST` with the exact body `{"action":"inspect"}` starts one inspection and returns `202`; a second request while one runs returns `409 AGENT_PREFLIGHT_IN_PROGRESS`. The inspection runs the configured harness's `preflight(WEB)` (initialize negotiation, no session, no model prompt) and is cancelled when the server stops. Exception text, inventories and configuration are discarded and never appear in the response.
+
+The schema ties the detail fields to the status: `idle` has neither an inspection id nor a reason; `inspecting`, `ready` and `cancelled` have an id and no reason; `failed` has an id and exactly `AGENT_PREFLIGHT_FAILED`. The typed client submits the `POST` with the CSRF token only: this action has no resource version, so `If-Match` and `Idempotency-Key` are refused rather than given an undefined meaning. Server shutdown cancels a running inspection and waits for its provider cleanup before returning.
+
+The server rejects resource conditional headers and replay keys before inspection work. The typed
+exception is confined to POST, the exact route and request/response kinds; upload-only options are
+also refused. Other mutation guards remain unchanged. Each call performs one fetch. After ambiguous
+transport failure, read the current status and require a fresh explicit operator action; do not
+automatically replay the POST. Shutdown closes admission, publishes cancellation immediately and
+waits for the owned callback cleanup while preserving the shutdown caller's interrupt status.
+
+Passive bootstrap never starts an agent or a helper probe. It reads configuration, helper-file
+metadata and bundled-Ghidra presence. Missing or invalid prerequisites remain unavailable; a valid
+configuration with no fresh helper observation is `unknown` with reason
+`SANDBOX_HELPER_UNCHECKED`. Use the explicit `POST /api/v1/agent/preflight` inspect action to check
+the configured agent and, after successful agent initialization, the existing bounded helper
+prerequisite. A `ready` agent-preflight result describes agent initialization; helper readiness is
+reported separately by bootstrap.
+
+Configuration metadata and explicit helper observations retain the original ten-second cache
+lifetime. A helper observation can supply `supported` only while it is fresh and its configuration
+identity and helper metadata match the current projection. Expiry returns to `unknown`; it never
+automatically runs another inspection. Configuration/helper identities stay internal and never
+appear in either public JSON document. The helper observation neither reads nor seeds the native
+execution capability cache and grants no workflow or admission authority.
+
+A failed inspection belonging to the current configuration demotes a configured harness to
+`unavailable`/`AGENT_PREFLIGHT_FAILED`. A `ready` inspection for that same configuration can report
+that the agent started, but a result for another configuration cannot make that claim. Missing,
+running, cancelled or mismatched agent observations leave agent readiness unproven. These fields
+do not establish that any job can start work; unavailable workflow adapters remain unavailable.
+
 ## Implemented progress-pin policy endpoint
 
 `GET` and `PUT /api/v1/jobs/{jobId}/runs/{runId}/progress-pin` are available under the configured deployment prefix. This pin protects only the selected persisted progress journal. It does not pin the full job, source revisions, reports or downloaded evidence. Unpinning neither resets the retention deadline nor restores removed history; SPA periodic progress maintenance is enabled by default; legacy mode keeps it disabled.
@@ -529,3 +1133,279 @@ Successful changes and no-ops use the durable receipts described in [pin audit/r
 The generated `progressPin`/`progressPinRequest` contracts and the client's guarded `put` method support this endpoint. The client performs one request without automatically retrying ambiguous mutations. The authenticated attempt page now provides explicit read/pin/unpin controls with fresh-read reconciliation. Audit presentation and denied/failed-request audit coverage remain unfinished; successful policy receipts alone do not complete #177.
 
 Private bootstrap now includes an optional `runtime.progressRetention` sample with enabled configuration, sample time, completed attempt checks, expired journals, failed checks and the last diagnostic code. Runtime displays this process-local sample from the last session check without launching another probe. The SPA `terminalEventRetentionMs` value is 86400000: the threshold for timed expiry, not a guarantee against earlier size/count eviction or a maximum scan delay. See [production retention](web-progress-adapter.md#spa-production-retention-and-sampled-status).
+
+
+### Recorded repair validation case comparisons
+
+The embedded repair-history view can inspect the selected canonical normal-validation
+receipt using the existing checked artifact listing and request-wide byte allowance.
+The source/corpus/proof bindings are checked before case projection. A closed ordered
+sequence of one build scope and one reference/candidate pair per corpus input supplies
+exact exit-code, standard-output and standard-error comparisons. Canonical base64 is
+validated and compared without allocating another complete decoded output payload.
+Before deriving outcomes, the selected case reader reuses the canonical pure sandbox
+binding verifier. It recomputes the ordered field digest, rejects empty or duplicate
+inventories, checks the contained-launch flags, and binds the nonempty command,
+executable runtime manifests and single writable authority to each scope's records.
+Self-consistent receipt hashes cannot replace those checks. These are retained-record
+consistency checks and confer no execution or acceptance authority.
+Matching ordinary nonzero exits remain matching comparisons; folded signal-like exits
+cannot establish a runtime failure or crash cause.
+
+Case identities use the same opaque corpus-bound identity as retained repair cases.
+The table includes at most twenty rows and finite byte counts. Each compared output
+stream has a preview of at most its first 128 bytes. Hexadecimal preserves every
+retained prefix byte; escaped UTF-8 text is also shown when that prefix is valid.
+An incomplete UTF-8 character at a truncated boundary stays in hexadecimal only;
+malformed bytes are never replaced to manufacture a text preview. Backslashes,
+line endings, tabs and control characters are escaped in text. Every preview states
+its observed size, displayed byte count and whether it is complete or truncated.
+Empty observed output stays distinct from unobserved case output. Comparison still
+uses the entire retained byte sequence without normalization, so equal previews
+cannot conceal a mismatch outside the prefix. Separate
+`historyValidationPage` navigation retains the selected graph, report run and evidence
+owner; pages beyond the captured count show an explicit out-of-range state and a
+graph-bound return link. History and retained-case-reference pagination stay separate.
+
+Empty scope evidence is unavailable. Missing, foreign, duplicated, misordered or
+inconsistent scopes withhold case comparisons. Compile failure and compile-only
+validation leave case pairs unobserved; neither becomes a skipped or successful run.
+Fatal diagnostic phase/position identifies an enclosing producer operation and does
+not prove that a child process started or completed. The normal case table does not
+infer those fatal outcomes.
+
+This is read-only presentation of retained evidence. It does not add execution or
+acceptance authority. The versioned normal-operation report and case pages described
+below do not complete fatal-case outcome production or source links
+to the validated snapshot. Native actor attribution,
+physical resource bounds, positive authentication and decompilation effectiveness
+require their own evidence.
+
+### Selected recorded validation reports and case pages
+
+The private `GET`/`HEAD R/reports/revision-validation` route projects the existing v1
+`report` contract from one selected recorded normal validation operation. Supply
+`historyGraph=<64 lowercase hex digits>` and exactly one of
+`historyEvidence=<attempt reference>` or `historyRunEvidence=<repair-run reference>`.
+The latter selects that repair run's recorded baseline validation, not its latest
+workflow outcome. Optional `historyPage` selects the same fixed20-owner history
+window used by recorded inspection. Optional canonical `historyValidationPage` selects
+one20-case comparison window independently of the history-owner window. Duplicate,
+foreign, noncanonical and missing selection parameters are refused before capture.
+Case-reference pagination does not apply to this endpoint.
+
+The controller applies the existing session, method and JSON negotiation boundary.
+Graph/owner selection precedes report inventory or payload work. Only the selected
+normal primary and required derived diff are resolved through the existing checked
+report inventory and descriptor-backed reader. Their captures share the existing
+64 MiB recorded-evidence allowance; failed reads consume their reservation. One
+capture/projection is admitted at a time. Both the captured graph digest and selected
+durable attempt version are rechecked after reading; changes return an explicit409.
+The common response writer retains the1 MiB JSON ceiling and private no-store headers.
+These are application admission/byte bounds, not physical RSS or latency qualification.
+
+`state` distinguishes unavailable bytes (`unknown`), unavailable required scopes or
+diffs (`partial`), unsupported declared producer versions (`unsupported`) and corrupt
+or inconsistent evidence (`invalid`). Their summary is null. A normal receipt
+is not inferred from an owner alone: no normal receipt remains `unknown` with a null
+producer version. A `partial` normal report identifies the supported producer schema.
+A checked normal receipt can be `available`: compile failure reports `failed`, compile-only reports `unknown`,
+and complete behavior comparisons report `passed` or `failed` from all retained paired
+bytes. Exact completed-pair counts are decimal strings; the source digest and candidate
+reference come from that operation's graph-bound proof. A report ID binds the selected
+job, durable run, graph, evidence-owner kind/reference and primary digest. It cannot
+silently name a later report or edited source. Out-of-range comparison windows return
+an explicit400 after checking the captured scope population.
+
+An available normal report includes optional v1 `validationCases`. Older reports
+without this extension remain readable; an unavailable, incomplete, unsupported or
+invalid report carries null case detail. Every page identifies its graph, owner kind
+and reference, source and corpus digests, exact comparison policy, global input/match
+counts, window/continuation numbers and stable case identities. At most20 rows retain
+four128-byte output prefixes each. Exact byte counts remain decimal strings. Each
+preview carries canonical hex, strict escaped UTF-8 when available, consumed/prefix
+byte counts and a truncation flag. Identical truncated prefixes can still belong to
+different full outputs. Compile-failed and compile-only rows retain null comparison,
+byte-count and preview fields; they are not skipped or successful behavior executions.
+
+The shared Python wire checks and SPA decoder enforce population/window/ordinal
+consistency, source association, bounded preview geometry and canonical hex, exact
+empty/unobserved distinctions, full-summary/page consistency and comparison flags.
+When both prefixes cover complete streams their equality must match the recorded
+comparison flag; truncated prefixes cannot decide full equality. These metadata
+checks do not independently authenticate the receipt or certify native execution.
+
+Every response has observation authority and `acceptance: "not-evaluated"`.
+No accepted artifact, raw command, host path, credential, source-artifact download URL
+or unverified fatal-case result is manufactured. A source commitment is not a navigable
+validated-source snapshot. Fatal outcome production, bounded mismatch-centered diff
+windows, validated-source navigation,
+complete export and new physical HTTP/browser qualification remain required by their
+original owners. Twenty-one API controls use authored DTOs and callbacks only; three
+shared wire fixtures and three pure decoder controls cover the new protocol boundaries.
+The original41 case-control bodies and actual execution fixtures are unchanged.
+The new source awaits its own ordinary Actions and review.
+
+### Validation history discovery and SPA selection
+
+The private `GET`/`HEAD R/validation-history` response uses the closed v1
+`validationHistory` envelope. An initial read needs no query. `historyGraph` pins a
+continuation to the captured graph; canonical `historyPage` selects a fixed window
+of at most 20 finalized attempts, 20 repair-run baselines, 20 recorded failed
+operations from those repair runs, and one pending attempt on the
+latest page. These are operation families within the selected durable run, not
+additional jobs or runs to execute. All other selection parameters are refused.
+
+The producer reads existing history metadata with graph and durable-attempt version
+checks around the capture. It does not read a selected receipt or source body.
+`hasReceipt` records metadata presence only. `canInspect` additionally requires
+disclosed owner and candidate identities; withheld references cannot select evidence.
+Each inspectable owner carries the source and corpus commitments of its own recorded
+operation. An older receipt corpus can differ from the history's current corpus.
+Absent and unavailable history remain distinct states with null graph, population
+and navigation fields. Discovery and receipt projection share one admission slot.
+
+The attempt SPA provides explicit history reads, operation selection and case-page
+navigation. Each response must match the requested job, durable run, graph, owner,
+candidate, source and selected receipt corpus. Case continuations also retain the
+report identity. Obsolete reads are aborted on selection/context changes or unmount;
+failed, denied and unverified reads clear the displayed evidence. There are no
+automatic reads or retries in this panel. Output prefixes render as escaped text,
+with exact byte-count strings, explicit truncation and absent/binary/empty distinctions.
+
+Eight new metadata controls use DTOs and callbacks. Two shared discovery fixtures,
+two decoder controls, eight in-memory fetch/JSDOM controls and one existing-session
+route control cover this addition. These are authored component and protocol controls;
+they do not establish physical browser/HTTP, authentication, native cleanup or ACP
+decompilation effectiveness. The original acceptance scopes remain open until their
+required evidence is available. This source still needs its own Actions and review.
+
+### Selected failed-operation diagnostics
+
+`R/reports/revision-validation?historyGraph=<digest>&historyFailureRun=<run>`
+explicitly selects a repair run's recorded failure diagnostic. This selector cannot
+be combined with an attempt or baseline selector. History discovery uses the distinct
+`run-failure` owner kind and a finite `failureKind`; its candidate/source/corpus can
+differ from that same run's baseline. Only the first diagnostic page is supported;
+no case-page continuation or case comparison result is invented for a fatal receipt.
+
+Normal and failed-operation capture share the existing checked inventory/target
+resolver, descriptor-backed reader, 64 MiB request allowance, graph and durable-version
+brackets, and single admission slot. The selected receipt and its required diagnostic
+are separately byte/hash checked against the invocation-owned binding. Their source,
+corpus, runtime, classification, candidate and invocation association must agree.
+The disclosed input population is rederived against the selected historical corpus.
+Missing primary bytes remain `unknown`; missing required diagnostics are `partial`;
+unsupported declared versions and inconsistent evidence remain distinct refusals.
+
+An available report carries optional closed `validationFailure` with
+`authority: "producer-diagnostic"`, graph/owner/source/corpus bindings, finite reason
+and enclosing phase, exact decimal input/count strings, optional one-based input
+position and explicitly producer-reported cleanup. The report summary and
+`validationCases` are null, and repair acceptance remains unevaluated. Timeout,
+resource exhaustion, cancellation, unverified cleanup and other validation failures
+retain their separate producer labels. A before-case or original/rebuilt operation
+phase requires a position matching the reported completed prefix. Earlier phases
+cannot claim completed case pairs. No raw exception, command, path or peer text is
+returned.
+
+These diagnostics identify an enclosing producer operation. They do not prove which
+child process started or failed, actual process absence, independent cleanup, or
+successful case comparisons. Per-case fatal outcome production, partial comparison
+inspection, skipped/unsupported case evidence, bounded difference windows, source
+navigation and complete export remain required in the original full scopes.
+
+The SPA offers an explicit failure action, verifies the selected bindings and clears
+unverified evidence. Eighteen added DTO/callback methods, four shared wire fixtures,
+two decoder controls and four mocked-fetch/JSDOM controls cover this extension.
+They do not add actual execution contexts or physical qualification. Own Actions,
+generated drift verification and automatic review are still required.
+
+### Validation source snapshot links
+
+A checked normal case report or failed-operation diagnostic offers an explicit
+source-resolution action. Repair-graph revision references and durable workflow
+candidate references have separate namespaces. The action reads the selected
+workflow run and its retained result candidate's root source metadata, then requires
+its recomputed input-source commitment to equal the selected validation's source
+SHA-256. It offers a source link only after that match. Missing retained candidates,
+nonterminal runs, unavailable metadata and mismatched job/run/revision/source values
+leave the source link unavailable. The reader does not substitute a different
+workflow run or infer source from a display label.
+
+A matched link carries the exact observed `sourceSha256` and `metadataVersion` in
+the application URL. Directory pages, breadcrumbs, file links, refreshes and line/
+range navigation preserve this pair. Both first-page and continued directory/file
+responses must match it; changed observations clear the displayed source metadata.
+Incomplete, repeated, malformed and foreign query fields are refused before reads.
+A pin by itself does not request source text or enable the preview control. Actual
+bootstrap source-chunk advertising remains zero.
+
+Metadata requests retain their existing API selectors and authorization. Explicit
+source downloads and digest HEAD observations carry the captured `metadataVersion`
+to the content endpoint. That optional query accepts one lowercase 64-digit digest;
+other/repeated parameters are rejected. The existing checked capture compares the
+metadata commitment before invoking any source-body callback. Legacy content reads
+without the optional commitment remain supported. File identity, source SHA-256,
+manifest roles, byte limits and digest/identity rechecks remain required.
+
+The link identifies retained workflow source with the validation's exact source
+commitment. It does not establish accepted reconstruction, independent file-content
+verification, compiler/behavior equivalence or physical HTTP/browser qualification.
+Historical repair revisions without corresponding retained workflow source remain
+unavailable and still require the original full historical-source/retention scope.
+Complete diagnostic locations, export and all other case/report families remain open.
+
+Three added backend methods use authored metadata/bytes/callbacks only. Thirteen new
+frontend controls cover pin parsing, route/range propagation, exact digest HEAD,
+source resolution and in-memory session navigation without new actual execution
+contexts. The original controller/native fixtures and source-chunk limits are
+unchanged. This source awaits its own Actions and review.
+
+### Retained validation receipt consistency
+
+A normal selected validation result additionally checks the retained source inventory against the graph-bound source commitment and resource budget, and the canonical runtime configuration against its recorded digest, registered tool roles, normalized mounts and profile. Behavior comparisons recompute the original executable/input/exit/stdout/stderr observation digest across all cases and bind it to the selected durable repair run. Missing graph or reference metadata leaves the report partial; contradictory metadata is invalid. These checks also run when a caller selects a later case page.
+
+Failed-operation reports recompute the retained source manifest and revision before attributing a diagnostic to the selected source. A failure before source capture, or a missing bound profile, leaves the report partial with no source-attributed failure detail. Such a report still provides neither per-case failure outcomes nor cleanup qualification.
+
+Server-rendered history withholds case rows and output previews when required diff evidence or owner/candidate identity is unavailable or corrupt. Both the SPA decoder and Python wire verifier independently derive escaped text from the exact hexadecimal preview, including strict UTF-8, incomplete suffixes, BOM and control/format escaping. Partial selected validation reports cannot carry a result summary or case detail.
+
+### Save a selected validation observation
+
+The recorded-validation consumer offers an explicit JSON download only for an available observation bound to its selected job/run/revision, graph, owner, source and corpus. A normal export contains the currently inspected case page, including exact string counts, comparison flags and bounded previews. A failure export contains only the selected enclosing producer diagnostic, with no inferred case rows. The versioned export identifies its limited scope and preserves report identity; it is not a complete receipt, a full multi-page export, source content or an acceptance decision.
+
+Export uses the already-read observation, rechecks the shared closed wire projection and presentation semantics, strips additive private fields, and imposes a 192 KiB UTF-8 limit before producing a JSON data download. It makes no additional request or execution admission. Loading another page, refreshing, a denied read or a changed attempt removes the prior download with its prior observation. This does not qualify actual browser/download behavior, full validation export or physical D0 resource limits.
+
+### Navigate directly to recorded mismatch pages
+
+Available normal case detail now reports optional nullable `firstMismatchPage`, `previousMismatchPage` and `nextMismatchPage`. The producer computes these across every input pair in the same fully checked receipt before exposing a page, retaining only three page numbers. Multiple differences on one page yield one destination; all-match, compile-only and compile-failed observations report nulls. Corrupt or missing required evidence still withholds all case detail and navigation. Ordinary page membership, counts, exact-byte comparisons, previews and source/corpus bindings are unchanged.
+
+The SPA and server-rendered history offer explicit first/previous/next mismatch-page actions through the existing selected-evidence route. Actions retain the graph, owner and report identity, keep at most twenty surrounding cases on each page, and never execute validation. Both wire consumers reject incomplete navigation groups, invalid directions/windows and contradictions with reported or visible differences. Older v1 producers may omit the entire group and retain ordinary paging; missing metadata never means no differences. Selected-observation JSON exports preserve recognized navigation metadata. This is bounded inspection of normal comparisons, not classification of unseen fatal child outcomes or physical HTTP/browser/resource qualification.
+
+Available behavior comparisons with at most 10,000 inputs also carry an optional nullable `comparisonIndex`. Its `referenceObservationsSha256` is the checked durable digest of the original binary, ordered input identities and complete reference exit/stdout/stderr observations. `mismatchBitmapHex` encodes one bit per input ordinal, least significant bit first within each byte, as canonical lowercase hexadecimal. Bit one means mismatch; zero means matched. The byte length is exactly `ceil(totalInputs / 8)` and unused high bits must be zero. The producer records these bits during the existing complete receipt scan and exposes them only after all source, sandbox, budget, output and reference checks succeed. The maximum additional bitmap is 1,250 bytes / 2,500 hexadecimal characters; no additional receipt read or validation run is needed.
+
+Both consumers check bitmap bounds, padding, complete mismatch counts, each visible case and any reported mismatch-page destinations. Compile-only/failed, incomplete, corrupt and out-of-range observations cannot supply a comparison index. Populations above 10,000 and older adapters without the extension remain inspectable through ordinary case pages, with cross-attempt comparison unavailable rather than inferred. An index preserves the existing `exact-bytes-v1` policy and observation-only authority; it does not establish repair acceptance, independent execution/containment or equivalence.
+
+The SPA can retain one explicitly selected observation as a comparison baseline and compare it to another already-read observation. Compatibility requires the same job, run, captured graph, retained corpus, input count, exact-byte policy and complete reference-observation digest. Different source revisions are expected; a different corpus, normalization policy or reference behavior yields an incompatible message, never new/resolved regression claims. Re-selecting the same owner is not a second observation. The complete indexed population is classified into new, persistent and resolved mismatches plus inputs matched in both observations. Case ordinals are meaningful only within that exact ordered corpus.
+
+Comparison windows show at most twenty positions per category, with local paging and explicit links to the selected observation's ordinary case pages for stable IDs/previews. Pinning and comparison paging issue no requests. Swapping the two sides uses the existing read-only selected-evidence route with the original history page, graph, owner and report identity. A new history refresh, denied/invalid read or job/run/transport binding change removes the saved baseline; compatible history pagination can retain it. The download can contain the recognized full-corpus index alongside the selected case details, with an explicit limitation that unselected details/full outputs are absent. Authored DTO/JSDOM controls are separate from physical HTTP/browser/large-resource qualification.
+
+Normal case inspection also applies the canonical retained-input shape and budget contract to the receipt itself. IDs must be unique, sorted, nonblank and NUL-free; arguments must be NUL-free. The complete input count, argument count and combined UTF-8 ID/argument plus decoded-stdin bytes must fit the selected graph budget, including inputs outside the visible page. The archive verifier and normal reader share this pure metadata check. Receipt and corpus hashes alone do not admit out-of-policy inputs. A violation withholds every comparison, summary and compact index; it does not execute a case or alter the separate enclosing-failure projection.
+
+Normal case inspection shares the archive verifier's exact executable metadata policy: the closed field set, recorded binary digest, reference/candidate role, immutable mode 320, positive integer byte length and runtime manifest digest must agree before any case detail is exposed. Failed-operation details with retained source and graph context also validate the complete runtime configuration against its recorded digest, canonical shape, registered tool roles, normalized mounts and selected profile. Copying the bound runtime digest into an inconsistent receipt does not admit a producer diagnostic. These checks read retained metadata and do not launch a process or read executable bytes.
+
+For failed operations, the producer's exact empty source-snapshot object means source capture did not complete. It is treated as unavailable, like a legacy null snapshot, and yields a partial report without source-attributed failure labels. Nonempty malformed snapshots remain invalid. Before exposing details for retained source, the reader also requires the exact graph/host behavior-budget evidence and checks that the source quota's mount commitment equals the runtime's normalized source mount. Coherently bound metadata preserves the existing finite enclosing-operation diagnostic; it does not establish case comparisons or cleanup.
+
+
+### Optional job snapshot navigation metadata
+
+The shared v1 page shape permits `currentCursor`, `previousCursor` and `pageNumber`. Job responses
+from this server provide the complete triplet. `currentCursor` selects the returned page,
+`previousCursor` is null only for page one, and `pageNumber` is a bounded one-based display value.
+Clients treat cursor bytes as opaque and return them with the same filters and page limit.
+Legacy responses may omit the entire triplet; partial or contradictory job metadata is rejected.
+
+First pages, including empty results, have a signed zero-offset return cursor. All tokens retain
+the existing session, normalized query, limit, HMAC and process-local expiry checks. Current and
+previous tokens do not rescan storage or execute workflows. Snapshot count/byte/scan/admission
+limits remain unchanged; invalid, expired and evicted cursors retain explicit error responses.

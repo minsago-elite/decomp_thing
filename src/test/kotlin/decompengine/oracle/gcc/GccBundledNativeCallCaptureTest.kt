@@ -200,8 +200,8 @@ class GccBundledNativeCallCaptureTest {
                 if (index == 0 || line == "}") "    $line" else "  $line"
             }.joinToString("\n")
             Files.writeString(export.resolve("functions/fn_0000000000400010.json"), producerRecord)
-            Files.writeString(reports.resolve("program_model.json"), "{\n  \"schemaVersion\": 2,\n  \"inputSha256\": \"${INPUT}\",\n  \"functions\": [\n$producerRecord\n  ],\n  \"globals\": [\n  ],\n  \"types\": [\n  ]\n}\n")
-            Files.writeString(export.resolve("state.json"), "{\"schemaVersion\":2,\"exporterVersion\":11,\"exporterSha256\":\"${EXPORTER}\",\"analysisToolSha256\":\"${ARCHIVE}\",\"recoveryMode\":\"full\",\"inputSha256\":\"${INPUT}\",\"language\":\"x86:LE:64:default\",\"compilerSpec\":\"gcc\",\"semanticStateBinding\":null}\n")
+            Files.writeString(reports.resolve("program_model.json"), "{\n  \"schemaVersion\": 4,\n  \"inputSha256\": \"${INPUT}\",\n  \"functions\": [\n$producerRecord\n  ],\n  \"globals\": [\n  ],\n  \"types\": [\n  ]\n}\n")
+            Files.writeString(export.resolve("state.json"), "{\"schemaVersion\":2,\"exporterVersion\":17,\"exporterSha256\":\"${EXPORTER}\",\"analysisToolSha256\":\"${ARCHIVE}\",\"recoveryMode\":\"full\",\"decompilationWorkers\":1,\"inputSha256\":\"${INPUT}\",\"language\":\"x86:LE:64:default\",\"compilerSpec\":\"gcc\",\"semanticStateBinding\":null}\n")
             Files.writeString(reports.resolve("program_model.json.progress.json"), "{\"schemaVersion\":1,\"phase\":\"complete\",\"completed\":1,\"total\":1,\"recovered\":1,\"partial\":0,\"failed\":0,\"reused\":0,\"currentFunction\":null}\n")
             privateDirectory(Files.createDirectory(root.resolve(CONTROL)))
             LinuxFilesystemSyscalls.openRoot(root).use { run ->

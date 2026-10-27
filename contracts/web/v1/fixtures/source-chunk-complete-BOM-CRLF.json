@@ -1,0 +1,29 @@
+{
+  "apiVersion": 1,
+  "kind": "sourceChunk",
+  "requestId": "request_source_chunk_1",
+  "data": {
+    "binding": {
+      "jobId": "job_1",
+      "runId": "run_1",
+      "revisionId": "revision_1"
+    },
+    "fileId": "file_1_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "sourceSha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+    "metadataVersion": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+    "sha256": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+    "sizeBytes": "9",
+    "offsetBytes": "0",
+    "lengthBytes": "9",
+    "nextOffsetBytes": null,
+    "completeFile": true,
+    "downloadAvailable": true,
+    "representation": "utf8",
+    "fallbackReason": null,
+    "text": "\ufeffx\r\n<>&",
+    "lineConvention": "LF",
+    "firstLine": "1",
+    "startsMidLine": false,
+    "endsMidLine": false
+  }
+}

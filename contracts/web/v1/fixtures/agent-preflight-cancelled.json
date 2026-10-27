@@ -1,0 +1,10 @@
+{
+  "apiVersion": 1,
+  "kind": "agentPreflight",
+  "requestId": "request_preflight_fixture",
+  "data": {
+    "status": "cancelled",
+    "inspectionId": "inspection_fixture",
+    "reasonCode": null
+  }
+}

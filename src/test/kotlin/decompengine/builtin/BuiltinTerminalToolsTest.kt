@@ -84,14 +84,16 @@ class BuiltinTerminalToolsTest {
     @Test fun `nonzero command exits are feedback and truncated success cannot pass validation`() {
         fixture(mode = "unknown-mode") { fixture -> fixture.open().use { dispatcher ->
             val result = dispatcher.execute(call(), fixture.control)
-            assertFalse(result.failed)
+            assertFalse(result.failed, terminalAuditContext(dispatcher))
             val body = Json.parseToJsonElement(result.content).jsonObject
             assertEquals(2, body.getValue("exitCode").jsonPrimitive.int)
             assertFalse(body.getValue("passed").jsonPrimitive.boolean)
             dispatcher.finish()
         } }
         fixture(retainedBytes = 8) { fixture -> fixture.open().use { dispatcher ->
-            val body = Json.parseToJsonElement(dispatcher.execute(call(), fixture.control).content).jsonObject
+            val result = dispatcher.execute(call(), fixture.control)
+            assertFalse(result.failed, terminalAuditContext(dispatcher))
+            val body = Json.parseToJsonElement(result.content).jsonObject
             assertTrue(body.getValue("truncated").jsonPrimitive.boolean)
             assertFalse(body.getValue("passed").jsonPrimitive.boolean)
             assertEquals("89abcdef", body.getValue("output").jsonPrimitive.content)
@@ -141,6 +143,12 @@ class BuiltinTerminalToolsTest {
         assertEquals(AgentStopReason.COMPLETED, receipt.requireResult().stopReason)
         assertTrue(requireNotNull(tools).terminalAudit().any { it.reason == AcpTerminalAuditReason.RELEASED })
     }
+
+    /** Closed enums only: no command, output, environment, paths, identifiers or raw errors. */
+    private fun terminalAuditContext(dispatcher: BuiltinTerminalDispatcher): String =
+        dispatcher.audit().takeLast(8).joinToString(prefix = "terminal audit=[", postfix = "]") {
+            "${it.outcome.name}/${it.reason.name}"
+        } + "; " + dispatcher.launchFailureContext()
 
     private class Fixture(val request: AgentExecutionRequest, val control: BuiltinExecutionControl,
         val configuration: AcpLinuxSandboxConfiguration, val policy: AcpTerminalExecutionPolicy,

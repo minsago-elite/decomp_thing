@@ -1,3 +1,5 @@
+import { assetRecoveryNoticeCopy as copy } from '../copy/shell';
+import { message as displayMessage } from './messages';
 import { useLayoutEffect, useRef, useState } from 'preact/hooks';
 import type { AssetRecovery } from '../app/assetRecovery';
 import type { BuildIdentity } from '../app/buildIdentity';
@@ -20,17 +22,14 @@ export function AssetRecoveryNotice({ recovery, identity, reload }: {
   if (state === 'ready') return null;
   return (
     <aside ref={notice} class="asset-notice notice" aria-labelledby="asset-notice-title" role="alert">
-      <h2 id="asset-notice-title">The application may have updated</h2>
-      <p>
-        An application file could not be loaded. The server may have updated, or the
-        connection may have been interrupted. Copy any unsaved input before reloading.
-      </p>
-      {identity.uiBuildId && <p>Open UI build: <code>{identity.uiBuildId}</code></p>}
+      <h2 id="asset-notice-title">{copy.theApplicationMayHaveUpdated}</h2>
+      <p>{copy.anApplicationFileCouldNotBeLoadedTheServerMay}</p>
+      {identity.uiBuildId && <p>{displayMessage(copy.build, { build: <code>{identity.uiBuildId}</code> })}</p>}
       {state === 'manual-reload' ? (
-        <p>Use your browser’s Reload action to request the current version.</p>
+        <p>{copy.useYourBrowserSReloadActionToRequestTheCurrent}</p>
       ) : (
         <button type="button" disabled={state === 'reloading'} onClick={() => recovery.requestReload(reload)}>
-          {state === 'reloading' ? 'Reloading…' : 'Reload application'}
+          {state === 'reloading' ? copy.reloading : copy.reloadApplication}
         </button>
       )}
     </aside>

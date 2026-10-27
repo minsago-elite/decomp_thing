@@ -12,7 +12,10 @@ fi
 export DECOMP_REQUIRE_LIVE_ACP_CONTRACT=1
 export DECOMP_REQUIRE_NATIVE_PROVIDER_DNS=1
 export DECOMP_ACP_CONTRACT_RUN_ID="$(python3 -B -c 'import uuid; print(uuid.uuid4())')"
-./gradlew --no-daemon test --tests 'decompengine.acp.*' --tests 'decompengine.agent.*'
+# The full oracle CI role owns GCC planning's isolated JVM. This qualifier's
+# required inventory below covers ACP and shared-agent suites only.
+./gradlew --no-daemon test --tests 'decompengine.acp.*' --tests 'decompengine.agent.*' \
+  --exclude-task :gccCompilerEnginePlanningIsolated
 ./gradlew --no-daemon verifyProviderDnsNativeQualification
 
 python3 -B - <<'PY'

@@ -5,6 +5,9 @@ import decompengine.project.RecoveredGlobal
 import decompengine.project.RecoveredProgramModel
 import decompengine.project.RecoveredType
 import decompengine.project.RecoveryStatus
+import decompengine.project.ReferencedDataByteEvidence
+import decompengine.project.ReferencedDataByteOrigin
+import decompengine.project.ReferencedDataByteWindow
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.jsonArray
@@ -79,6 +82,43 @@ class StructuralRecoveryAssessmentJoinV1Test {
             assertTrue(typed.functions.all { typed.isRecoveryUnresolved(it.status) })
             assertTrue(typed.globals.all { typed.isRecoveryUnresolved(it.status) })
             assertTrue(typed.types.all { typed.isRecoveryUnresolved(it.status) })
+        }
+
+    @Test
+    fun `fixture joins admit active schema four and retain historical identity-only compatibility`(): Unit =
+        withStructuralFixture { fixture ->
+            val inputs = fixture.load()
+            val score = StructuralRecoveryV1.scoreFixture(
+                inputs.oracle, inputs.recovered, inputs.boundary, inputs.identity, inputs.target,
+            )
+            val base = programModel(inputs.recovered.document)
+            fun join(model: RecoveredProgramModel): FixtureStructuralFindingJoinV1 {
+                val bytes = model.toJson().toByteArray(Charsets.UTF_8)
+                val binding = FixtureStructuralFindingJoinBindingV1.capture(bytes, score, inputs.target)
+                return StructuralRecoveryAssessmentJoinV1.joinFixture(bytes, score, inputs.target, binding)
+            }
+            val historical = join(base)
+            for (schema in listOf(3, 4)) {
+                val model = base.copy(schemaVersion = schema, globals = base.globals.map { global ->
+                    global.copy(byteEvidence = ReferencedDataByteEvidence(
+                        schemaVersion = schema - 2,
+                        windows = listOf(ReferencedDataByteWindow(
+                            address = global.address,
+                            requestedLength = null,
+                            origin = ReferencedDataByteOrigin(0x400010UL, global.address, 0, "unknown_width"),
+                            availability = "unknown",
+                            segments = emptyList(),
+                        )),
+                        omissionReason = "unknown_access_width",
+                    ))
+                })
+                val joined = join(model)
+                assertEquals(historical.entities, joined.entities, "schema $schema stable entity findings")
+                assertEquals(historical.oracleOnlyEntities, joined.oracleOnlyEntities, "schema $schema oracle-only findings")
+                assertEquals("fixture-only", joined.authority)
+                assertEquals("unassessed", joined.recoveryAssessmentState)
+            }
+            assertFails { join(base.copy(schemaVersion = 1)) }
         }
 
     @Test

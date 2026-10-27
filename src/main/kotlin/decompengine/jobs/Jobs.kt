@@ -12,6 +12,8 @@ import decompengine.oracle.core.StrictJsonException
 import decompengine.project.ArchiveTransportLayout
 import decompengine.repair.StableRegularFile
 import decompengine.repair.readStableRegularFile
+import decompengine.repair.RepairHistoryReadResult
+import decompengine.repair.readSelectedJobRecordedRepairHistory
 import java.io.IOException
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
@@ -75,6 +77,11 @@ class JobStore internal constructor(
     private val root = root.toAbsolutePath().normalize()
     internal val storageRoot: Path get() = root
 
+    /** Caller holds store ownership; confirm newly created directories before recovery or upload. */
+    internal fun prepareStorageDirectories() {
+        storeDirectories.prepare(root)
+    }
+
     /** Bounded identities only; malformed records are inspected separately instead of disappearing. */
     internal fun jobIds(): List<String> {
         if (!Files.exists(root, java.nio.file.LinkOption.NOFOLLOW_LINKS)) return emptyList()
@@ -99,7 +106,7 @@ class JobStore internal constructor(
             throw InvalidUploadException(exception.message ?: "uploaded file is not an ELF binary", exception)
         }
 
-        storeDirectories.prepare(root)
+        prepareStorageDirectories()
         val jobId = newJobId().also { require(it.matches(Regex("[a-f0-9]{32}"))) }
         val jobDir = root.resolve(jobId)
         val binaryPath = jobDir.resolve("input.elf")
@@ -145,6 +152,13 @@ class JobStore internal constructor(
             throw JobStoreException("job metadata is unavailable or its path changed")
         }
         return decodeJobRecord(jobId, payload)
+    }
+
+    /** Display-only collection read; the caller supplies one namespace-bound accounting reader. */
+    @Synchronized
+    internal fun getForListing(jobId: String, read: (String, Int) -> ByteArray): Job {
+        jobDirectory(jobId)
+        return decodeJobRecord(jobId, OracleJson.parse(read("$jobId/job.json", MAX_METADATA_BYTES)).jsonObject)
     }
 
     private fun decodeJob(jobId: String, bytes: ByteArray): Job = decodeJobRecord(jobId, OracleJson.parse(bytes).jsonObject)
@@ -244,6 +258,13 @@ class JobStore internal constructor(
         return artifact
     }
 
+    /** Fixed selected layout only; service authorization and H reconciliation remain separate. */
+    internal fun readRecordedRepairHistory(
+        jobId: String,
+        runId: String?,
+        cancel: () -> Unit = {},
+    ): RepairHistoryReadResult = readSelectedJobRecordedRepairHistory(root, jobId, runId, cancel)
+
     internal fun readArtifact(
         jobId: String,
         relativePath: String,
@@ -269,6 +290,19 @@ class JobStore internal constructor(
             readStableRegularFile(root, "$jobId/input.elf", MAX_INPUT_BYTES.toLong())
         } catch (_: IOException) {
             throw JobStoreException("job input is unavailable or its path changed")
+        }
+    }
+
+    /** Exact selected source namespace, using the same pinned-descriptor containment primitive. */
+    internal fun readSourceInput(jobId: String, runId: String, sourcePath: String, maximumBytes: Long): StableRegularFile {
+        jobDirectory(jobId)
+        require(runId.matches(Regex("[A-Za-z0-9][A-Za-z0-9_-]{0,127}"))) { "source attempt identity is invalid" }
+        decompengine.project.requireNormalizedProjectPath(sourcePath, "selected source input")
+        require(maximumBytes in 1..8L * 1024 * 1024) { "source input read limit is invalid" }
+        return try {
+            readStableRegularFile(root, "$jobId/reports/runs/$runId/source-tree/$sourcePath", maximumBytes)
+        } catch (_: IOException) {
+            throw JobStoreException("source input is unavailable or its path changed")
         }
     }
 

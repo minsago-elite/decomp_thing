@@ -26,7 +26,8 @@ const { chromium } = require(process.env.DECOMP_PLAYWRIGHT_MODULE || 'playwright
     page.on('pageerror', error => errors.push(error.message));
     let mode = 'window';
     const events = Array.from({ length: 40 }, (_, sequence) => ({
-      sequence, kind: 'workflow_phase', phase: 'build_validating', text: '<img src=x> display text',
+      sequence, kind: 'workflow_phase', phase: 'build_validating', status: '<img src=x> display text',
+      text: '<img src=x> withheld narrative',
     }));
     await page.route('**/*', async route => {
       const url = new URL(route.request().url());
@@ -44,13 +45,16 @@ const { chromium } = require(process.env.DECOMP_PLAYWRIGHT_MODULE || 'playwright
     const waitGap = text => page.waitForFunction(expected =>
       document.querySelector('#agent-event-gap').textContent === expected, text, { timeout: 10000 });
     await page.goto('http://progress.fixture/jobs/fixture');
-    await waitGap('Showing the latest 30 of 40 retained events.');
+    await waitGap(' Showing the latest 30 of 40 retained events.');
     assert.equal(await page.locator('#agent-event-list li').count(), 30);
     assert.equal(await page.locator('#agent-event-list img').count(), 0);
+    const displayed = await page.locator('#agent-event-list').textContent();
+    assert(displayed.includes('<img src=x> display text'), 'displayed fields must remain literal text');
+    assert(!displayed.includes('withheld narrative'), 'peer-authored narrative must stay withheld');
     mode = 'loss';
-    await waitGap('Some progress events were not retained. Showing the latest 30 of 40 retained events.');
+    await waitGap('Some progress events were not retained. Earlier events were omitted from this bounded view. Inspect the invocation receipts for retained evidence. Showing the latest 30 of 40 retained events.');
     mode = 'http-error';
-    await waitGap('Progress history is unavailable; retrying.');
+    await waitGap('Retained progress is unavailable. Missing data does not establish an empty history.');
     assert.equal(await page.locator('#agent-event-list li').count(), 30);
     mode = 'network-error';
     await waitGap('Progress connection interrupted; retrying.');

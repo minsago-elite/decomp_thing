@@ -1053,8 +1053,9 @@ private class ProviderHttpAttempt(
         val callback = receiver.get()
         try {
             activeMillis()
-            // Resolve the exact admitted name once, select one address, and never fall back.
-            val address = selectProviderAddress(InetAddress.getAllByName(authority.endpoint.host))
+            // No ambient JVM/NSS lookup: named-host authority is refused until an authenticated,
+            // invocation-owned terminable resolver can be composed under this exact deadline.
+            val address = selectProviderAddress(arrayOf(authority.resolveAddress()))
             activeMillis()
             val socket = Socket(Proxy.NO_PROXY)
             raw.set(socket)
@@ -1243,6 +1244,7 @@ private class ProviderChunkMetadataBuffer(private val source: SessionInputBuffer
 /** Distinct concrete authorities: fixture TLS never changes production default trust. */
 private sealed class AcpProviderNetworkAuthority protected constructor() {
     abstract val endpoint: URI
+    abstract fun resolveAddress(): InetAddress
     open fun admitToBackend() = Unit
     abstract val bounds: AcpProviderTransportBounds
     abstract val tlsContext: SSLContext
@@ -1254,6 +1256,10 @@ private class ChatGptAcpProviderNetworkAuthority(policy: AcpProviderTransportPol
     override val bounds = policy.bounds
     override val tlsContext: SSLContext = SSLContext.getDefault()
     init { require(endpoint == APPROVED_CODEX_CHATGPT_RESPONSES_ENDPOINT) { "provider network authority is unavailable" } }
+    // #1510 has not qualified runtime/context issuance for deadline-owned named-host DNS.
+    // Reject before Core allocates its executor or can retain an authorized request.
+    override fun admitToBackend(): Nothing = throw AcpProviderBrokerFailure(AcpProviderTerminalKind.UNSUPPORTED_OPERATION)
+    override fun resolveAddress(): Nothing = throw AcpProviderBrokerFailure(AcpProviderTerminalKind.UNSUPPORTED_OPERATION)
     override fun authorize(request: BasicClassicHttpRequest, credentials: AcpProviderCredentialMaterial) {
         request.setHeader("Authorization", "Bearer ${credentials.accessToken}")
         request.setHeader("ChatGPT-Account-ID", credentials.accountId)
@@ -1268,6 +1274,10 @@ private class FixtureAcpProviderNetworkAuthority(
     init { require(hasProvenance(provenance)) { "fixture network authority is unavailable" } }
     override val endpoint: URI = policy.endpoint
     override val bounds = policy.bounds
+    override fun resolveAddress(): InetAddress {
+        require(endpoint.host == "127.0.0.1") { "fixture address is unavailable" }
+        return InetAddress.getByAddress(byteArrayOf(127, 0, 0, 1))
+    }
     // All authority state is private instance state, not companion static fields whose synthetic
     // accessors could return provenance or mutable identity registries.
     private class Issuer {

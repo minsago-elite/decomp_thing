@@ -1,7 +1,7 @@
 {
   "historicalStartingCount": 43,
   "kind": "kotlin-oracle-schema-inventory",
-  "schemaCount": 78,
+  "schemaCount": 83,
   "schemaInventoryVersion": 1,
   "schemas": [
     {
@@ -481,10 +481,55 @@
       "formatVersions": [
         1
       ],
+      "name": "gcc/compiler-engines-exporter12",
+      "path": "oracle/gcc/compiler-engines-exporter12.schema.json",
+      "registration": "shared-kotlin",
+      "schemaSha256": "324aa87b637272b23a68db11b846908a9ad37088e60dde4b285a85f5b08b2171"
+    },
+    {
+      "formatVersions": [
+        1
+      ],
+      "name": "gcc/compiler-engines-exporter13",
+      "path": "oracle/gcc/compiler-engines-exporter13.schema.json",
+      "registration": "shared-kotlin",
+      "schemaSha256": "5b8c6b6a6a48c15be8f4966bee0466313766854f9e380a98898a9274bc554725"
+    },
+    {
+      "formatVersions": [
+        1
+      ],
+      "name": "gcc/compiler-engines-exporter17",
+      "path": "oracle/gcc/compiler-engines-exporter17.schema.json",
+      "registration": "shared-kotlin",
+      "schemaSha256": "2c6de2807d2f4bb18264098436bce04211e0bdc65ce78d161374b0bff5562d42"
+    },
+    {
+      "formatVersions": [
+        1
+      ],
       "name": "gcc/oracle-manifest",
       "path": "oracle/gcc/oracle-manifest.schema.json",
       "registration": "shared-kotlin",
       "schemaSha256": "f75499d2b24ac755576dbc62c8a39d5be324c1404743cfcdb8b7ab3765522521"
+    },
+    {
+      "formatVersions": [
+        1
+      ],
+      "name": "gcc/source-build-ownership-action-receipt-v1",
+      "path": "oracle/gcc/source-build-ownership-action-receipt-v1.schema.json",
+      "registration": "shared-kotlin",
+      "schemaSha256": "c2a4547c7d852e89b84c9aabc9d29b4879330e1638308a7ad2dd796912bf76bf"
+    },
+    {
+      "formatVersions": [
+        1
+      ],
+      "name": "gcc/source-build-ownership-profile-v1",
+      "path": "oracle/gcc/source-build-ownership-profile-v1.schema.json",
+      "registration": "shared-kotlin",
+      "schemaSha256": "d4fa1183fb3988291aa41fb5353247eefd02edd784ccfdb4b2cf680b0c9e3a02"
     },
     {
       "formatVersions": [
@@ -711,9 +756,9 @@
       "name": "unassessed-recovery-population",
       "path": "oracle/unassessed-recovery-population.schema.json",
       "registration": "retained-outside-shared-catalog",
-      "schemaSha256": "f41bfd2f5ef84d6172d74e2dcfb80371379d542c34e85b151dd3b7a9dcce692a",
+      "schemaSha256": "550079ced463886e1608be56c86ad1d16bad677106303f95417422da98d97164",
       "scopeNote": "Retained format; no current Kotlin OracleSchemas consumer is registered for it."
     }
   ],
-  "sharedCatalogCount": 74
+  "sharedCatalogCount": 79
 }

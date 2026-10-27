@@ -1,5 +1,17 @@
 # D2 service-boundary audit
 
+## Cancellation command extension
+
+The current POST cancellation handler obtains an operation-specific capability
+through the shared mutation boundary before reading a body or service record.
+The capability derives the actor from its authorized session; the service alone
+owns receipt publication, exact-task signalling and terminal coordination.
+Controllers do not edit storage. New authored HTTP methods cover replay,
+denial, uncertain publication and accepted-reference preservation with inert
+adapters and await their own Actions qualification. Browser and production
+runtime integration remain open under #485. This extension does not expand the
+historical completion claims below to unqualified operations.
+
 This audit concerns issue #158 at application commit `98778b6`. It establishes two
 acceptance criteria, not completion of D2 or the full service migration.
 

@@ -1,0 +1,89 @@
+{
+  "issue": 1506,
+  "base": "05b073fc8378bd2faaf0ee4163cf055ba61e11da",
+  "status": "source implementation verified locally; real stripped fixture and Actions/review qualification pending coordinator",
+  "files": {
+    "src/main/resources/ghidra_scripts/ExportProgramModel.java": "785333472aa90b0c78832df882d0267ff2971c5b07bac19ea80be91960e47cb1",
+    "oracle/gcc/16.2.0/compiler-engines-exporter12.json": "f91fc867af801e8ab5e3f58c40673e0feafdd7539d04b950dcec5a912600b148",
+    "oracle/gcc/16.2.0/structural-full-export-profile-exporter12.json": "58a797129436cb8bb8d59df93b24f4c6ef515df0255cac013f02b7c3024e33cb",
+    "oracle/gcc/16.2.0/compiler-engines.json": "d32c73335a8639c335c8e04d822a51256aee79dc889de1c9bfe999d584610732",
+    "oracle/gcc/16.2.0/structural-full-export-profile.json": "e3f74c9329c2124be0d123525d10ac59928097570f028afdf40ce5f8363539e4",
+    "src/test/resources/ghidra/ReferencedBytesProbe.java": "f0c87768ba8cc654a99c1982664297643713b00c2b3454d9623e4eaa616583d5",
+    "src/test/kotlin/decompengine/project/ReferencedDataBytesRealGhidraTest.kt": "9f61ea2ebc2d3881b1f33d44df311ca9b782dacbc5309cf16784a0e3cbdc50c6",
+    "src/main/kotlin/decompengine/project/ReferencedDataByteEvidence.kt": "610dd681dbd6e76a6e7e671c5c62a33c4e7643d4ee122afcf81cec2de6522c7a",
+    "oracle/gcc/compiler-engines.schema.json": "5dbb9ca01eba8c02e7db34a7323902454f839506e4826c0e8145bb58da7befe4",
+    "oracle/gcc/compiler-engines-exporter12.schema.json": "324aa87b637272b23a68db11b846908a9ad37088e60dde4b285a85f5b08b2171",
+    "oracle/kotlin-schema-inventory-v1.json": "47a7f465e391c8e42891072720b09d25d8d320edd77f3495dd66230355c01ef3"
+  },
+  "standaloneBundledJavaApiProbe": "passed compilation and execution; all five exact/one-over bounds, leading zeros, missing spans, pcode ambiguity, cancellation and default address-space rejection",
+  "initialFocused": {
+    "tests": 190,
+    "failures": 17,
+    "skipped": 1,
+    "remainingCorrections": "active profile schema const12, schema drift4 expectation, planning schema3 expectation, directory link-count portability"
+  },
+  "realFixture": "implemented; default run skipped; requires bundled-ghidra Actions job with RUN_REAL_GHIDRA=true",
+  "authority": {
+    "oracle": false,
+    "abi": false,
+    "scoring": false,
+    "release": false
+  },
+  "frozenExperiment1504": "unchanged",
+  "lastUnified": {
+    "tests": 200,
+    "passed": 198,
+    "failures": 1,
+    "skipped": 1,
+    "failure": "stale expected active profile hash in test, corrected to authenticated exporter12 profile hashes",
+    "log": "build/issue1506-final-focused.log"
+  },
+  "historicalValidation": "original gcc/compiler-engines schema11 retained byte-identical; new gcc/compiler-engines-exporter12 schema registered atomically with79 total and75 shared schema inventory entries; named historical validator and production rejection tested",
+  "securityPortability": "directory admission test allows constant linkCount on supported filesystems, retains inode-key equality and full authenticated child-tree capture validation",
+  "streamingPreallocation": "per-key arrays32windows/256segments, provisional cumulative windows/requested bytes checked before constructing additional payload",
+  "finalAffected": {
+    "tests": 50,
+    "failures": 0,
+    "skipped": 0,
+    "classes": [
+      {
+        "name": "decompengine.oracle.core.OracleSchemasTest",
+        "tests": 10,
+        "failures": 0,
+        "skipped": 0
+      },
+      {
+        "name": "decompengine.oracle.gcc.GccCompilerEngineProfileTest",
+        "tests": 10,
+        "failures": 0,
+        "skipped": 0
+      },
+      {
+        "name": "decompengine.oracle.gcc.GccDriverStructuralProfileTest",
+        "tests": 9,
+        "failures": 0,
+        "skipped": 0
+      },
+      {
+        "name": "decompengine.oracle.structural.CanonicalProgramModelStreamingTest",
+        "tests": 9,
+        "failures": 0,
+        "skipped": 0
+      },
+      {
+        "name": "decompengine.project.ReferencedDataByteEvidenceTest",
+        "tests": 12,
+        "failures": 0,
+        "skipped": 0
+      }
+    ],
+    "log": "build/issue1506-final-boundary.log",
+    "logSha256": "3b6e2cb7d22d71850f8a27dc488a8e9a04971cae05054c2ce773235de57017f4",
+    "result": "BUILD SUCCESSFUL in38s"
+  },
+  "remaining": [
+    "Run bundled-ghidra Actions job with RUN_REAL_GHIDRA=true to execute stripped ELF end-to-end fixture",
+    "Required CI and automatic Codex review must pass and resolve before merge",
+    "Coordinator owns commit/push/issue evidence updates; no closure asserted"
+  ]
+}

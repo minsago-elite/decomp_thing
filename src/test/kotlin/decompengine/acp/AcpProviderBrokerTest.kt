@@ -1110,17 +1110,20 @@ class AcpProviderBrokerTest {
     }
 
     @Test
-    fun `concrete HTTP transport and lifecycle terminate without any provider request`() {
-        val request = AgentExecutionRequest("construct and close host owner only", listOf(AgentWorkspaceRoot("fixture", Path.of(System.getProperty("user.dir")))),
+    fun `concrete named-host HTTP backend refuses admission before owning a worker or request`() {
+        val request = AgentExecutionRequest("refuse unqualified named-host resolver", listOf(AgentWorkspaceRoot("fixture", Path.of(System.getProperty("user.dir")))),
             accessPolicy = AgentAccessPolicy(emptyList()), limits = AgentExecutionLimits(wallClockTimeout = Duration.ofSeconds(10)))
-        val broker = AcpProviderBroker.openForProtectedQualification(policy(), request, Duration.ofSeconds(2),
-            AcpProviderCredentialMaterial.cachedChatGpt(TEST_TOKEN, "fixture_account"))
-        assertEquals(AcpProviderBrokerCleanup.NOT_ATTEMPTED, broker.snapshot().cleanup)
-        broker.close()
-        assertEquals(AcpProviderBrokerCleanup.VERIFIED, broker.snapshot().cleanup)
-        assertEquals(0L, broker.snapshot().wireRequestBytes)
-        assertTrue(broker.snapshot().requests.isEmpty())
-        assertFalse(broker.snapshot().adapterQualified)
+        val before = Thread.getAllStackTraces().keys.filter { it.name == "decomp-acp-provider-http" }.toSet()
+        repeat(3) {
+            val failure = assertFailsWith<AcpProviderBrokerFailure> {
+                AcpProviderBroker.openForProtectedQualification(policy(), request, Duration.ofSeconds(2),
+                    AcpProviderCredentialMaterial.cachedChatGpt(TEST_TOKEN, "fixture_account"))
+            }
+            assertEquals(AcpProviderTerminalKind.UNSUPPORTED_OPERATION, failure.kind)
+            assertNull(failure.cause)
+            assertFalse(failure.toString().contains(TEST_TOKEN))
+        }
+        assertTrue(Thread.getAllStackTraces().keys.filter { it.name == "decomp-acp-provider-http" }.all { it in before })
     }
 
     @Test

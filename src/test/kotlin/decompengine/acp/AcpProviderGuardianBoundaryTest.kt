@@ -232,6 +232,34 @@ class AcpProviderGuardianBoundaryTest {
         }
 
     @Test
+    fun `natural root exit with live detached descendant emits a decodable bounded cleanup receipt`() =
+        withLiveFixture("descendant-exit") { _, _, sandboxed, running ->
+            val input = running.stdout()
+            val setup = channelSetup()
+            val authenticator = AcpProviderCleanupAuthenticator.fromSetup(setup)
+            running.write(AcpProviderFrameTag.CHANNEL_OPEN, setup)
+            setup.fill(0)
+            assertEquals("DESCENDANT_READY\n", running.readAcp(input))
+            val frame = assertNotNull(running.read(input))
+            assertEquals(AcpProviderFrameTag.CHANNEL_CLEANUP, frame.tag)
+            // Consume the actual native producer payload through the strict host decoder.
+            val receipt = frame.consumeCleanupPayload(authenticator, PROFILE.bounds.cleanupTimeout.toMillis())
+            assertEquals(AcpProviderCleanupCause.PROTOCOL_FAILURE, receipt.cause)
+            assertEquals(AcpProviderChildExitKind.EXITED, receipt.childExitKind)
+            assertEquals(0, receipt.childExitCode)
+            assertEquals(0L, receipt.rawWaitStatus)
+            assertTrue(receipt.sigtermSent)
+            assertTrue(receipt.sigkillSent)
+            assertTrue(receipt.nativeCleanupVerified, receipt.toString())
+            assertNull(running.read(input))
+            input.close()
+            running.assertNaturalEmptyStderr()
+            running.assertRawOutputCount()
+            assertBoundaryGone(sandboxed, 1)
+            assertEquals(0, sandboxed.process.exitValue())
+        }
+
+    @Test
     fun `guardian signal progresses while asynchronous buffered close waits for the real JDK writer monitor`() =
         withLiveFixture("idle") { fixture, _, sandboxed, running ->
             val input = running.stdout()

@@ -19,13 +19,20 @@ internal class GccBundledPlannerOutputAssessment private constructor(plan: ByteA
 
     companion object {
         fun assess(request: GccBundledPlannerRequest, capturedModel: ByteArray,
-            capturedPlan: ByteArray, capturedMetadata: ByteArray): GccBundledPlannerOutputAssessment {
+            capturedPlan: ByteArray, capturedMetadata: ByteArray): GccBundledPlannerOutputAssessment =
+            assess(request, capturedModel, capturedPlan, capturedMetadata) {}
+
+        internal fun assess(request: GccBundledPlannerRequest, capturedModel: ByteArray,
+            capturedPlan: ByteArray, capturedMetadata: ByteArray, checkpoint: (String) -> Unit): GccBundledPlannerOutputAssessment {
+            checkpoint("before planner model binding")
             require(capturedModel.size == request.modelBytes && OracleArtifacts.sha256(capturedModel) == request.modelSha256)
-            val model = ProgramModelJson.readCanonical(capturedModel)
+            val model = ProgramModelJson.readCanonical(capturedModel, checkpoint)
             require(model.inputSha256 == request.inputSha256 && model.functions.size.toLong() == request.functionCount)
             require(model.functions.size.toLong() + model.globals.size + model.types.size <= request.maximumEntities)
-            val plan = ModulePlanJson.readCanonical(capturedPlan, request.maximumPlanBytes)
-            ModulePlanJson.requireExactOwnership(plan, model, request.layout, request.maximumFunctionsPerModule)
+            checkpoint("before planner plan validation")
+            val plan = ModulePlanJson.readCanonical(capturedPlan, request.maximumPlanBytes, checkpoint)
+            ModulePlanJson.requireExactOwnership(plan, model, request.layout, request.maximumFunctionsPerModule, checkpoint)
+            checkpoint("before planner metadata validation")
             val metadata = OracleJson.parseCanonical(capturedMetadata, METADATA_LIMITS).jsonObject
             val work = metadata.getValue("sparseWorkUnits").jsonPrimitive
             require(!work.isString && work.content.matches(Regex("0|[1-9][0-9]*")))
@@ -47,12 +54,15 @@ internal class GccBundledPlannerOutputAssessment private constructor(plan: ByteA
             val expected = OracleJson.canonicalBytes(JsonObject(fields +
                 ("provider" to JsonPrimitive("gcc-bundled-planner-output-v1"))), METADATA_LIMITS)
             require(expected.contentEquals(capturedMetadata)) { "planner metadata differs from captured output bindings" }
+            checkpoint("after planner metadata validation")
             val assessment = OracleJson.canonicalBytes(JsonObject(fields + mapOf(
                 "provider" to JsonPrimitive("gcc-bundled-planner-byte-assessment-v1"),
                 "authority" to JsonPrimitive("non-authoritative-byte-assessment"),
                 "workerOutputSha256" to JsonPrimitive(OracleArtifacts.sha256(capturedMetadata)),
             )), METADATA_LIMITS)
-            return GccBundledPlannerOutputAssessment(capturedPlan, assessment)
+            val result = GccBundledPlannerOutputAssessment(capturedPlan, assessment)
+            checkpoint("after retaining planner assessment")
+            return result
         }
     }
 }

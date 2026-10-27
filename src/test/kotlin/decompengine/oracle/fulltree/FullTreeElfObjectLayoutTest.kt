@@ -85,7 +85,7 @@ class FullTreeElfObjectLayoutTest {
         }
 
     @Test
-    fun `DWARF function membership uses executable overlap union and exclusive end`() =
+    fun `DWARF function membership uses executable overlap union and exclusive end`(): Unit =
         inInterfaceFixtureDirectory { directory ->
             val starts = listOf(0x100L, 0x13fL, 0x140L, 0x17fL, 0x180L)
             val fixture = typeElf(*starts.map { rva ->
@@ -560,7 +560,7 @@ class FullTreeElfObjectLayoutTest {
         }
 
     @Test
-    fun `object observations cannot escape a changed stable source`() =
+    fun `object observations cannot escape a changed stable source`(): Unit =
         inInterfaceFixtureDirectory { directory ->
             val bytes = objectBytes(symbols = listOf(TestElfSymbol("object", 0x110UL, type = 1)))
             val path = writeElf(directory.resolve("changing.elf"), bytes)

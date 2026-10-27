@@ -274,6 +274,9 @@ class Case:
                             assert count == 0xffffffff or count in range(33)
                             assert bool(flags & 64) == (count == 0)
                             assert mask & ~0x3f == 0 and bool(flags & 16) == (mask == 0x3f)
+                            # Same signal/cause invariants as the strict Kotlin receipt decoder.
+                            assert not flags & 8 or flags & 4
+                            assert cause != 0 or (present and not flags & 12)
                             assert elapsed <= self.times[2] + 1
                             assert bool(flags & 128) == (elapsed == self.times[2] + 1)
                             self.receipt = {'cause': cause, 'outcome': outcome, 'flags': flags, 'rawWaitStatus': status, 'remainingDescendants': count, 'closedDescriptorMask': mask, 'elapsedMillis': elapsed}
@@ -528,6 +531,21 @@ try:
         complete_receipt(c, 3, 2)
         assert c.receipt['flags'] & 12 == 12
 
+        c = Case('v2-natural-root-live-descendant', 'descendant-exit', version=2)
+        c.finish({0}, b'DESCENDANT_READY')
+        complete_receipt(c, 4, 1)
+        assert c.receipt['rawWaitStatus'] == 0 and c.receipt['flags'] & 12 == 12
+
+        c = Case('v2-delayed-adoption-term-before-kill', 'late-adoption', version=2,
+                 times=(1000, 100, 500), supervisor='supervise-delay-cleanup-adoption')
+        c.finish({124}, b'DESCENDANT_READY')
+        complete_receipt(c, 3, 2)
+        assert c.receipt['flags'] & 12 == 12
+        traces = V2_RESULTS[-1].get('trustedSupervisorTrace', [])
+        assert 'TRACE_ADOPTION rootExitedDuringHold=1' in traces
+        assert any(line.startswith('TRACE_HOLD point=cleanup-adoption elapsedMillis=') for line in traces)
+        assert any(line.startswith('TRACE_SUMMARY point=cleanup-adoption held=1') for line in traces)
+
         for name, initial in (
             ('missing-feature', frame(7, payload=setup(version=2, features=0), version=2)),
             ('unknown-feature', frame(7, payload=setup(version=2, features=3), version=2)),
@@ -726,42 +744,62 @@ static long scheduled_guardian_syscall(long number, ...) {
 static int control(int sig, int before) {
     int pipes[2];
     if (pipe2(pipes, O_CLOEXEC)) return 10;
+    /* Inherit a blocked TERM for the escalation control, with no child-ready race.
+     * Its first real TERM must succeed before owned_children may select KILL. */
+    sigset_t blocked, previous;
+    sigemptyset(&blocked); sigaddset(&blocked, SIGTERM);
+    if (sigprocmask(SIG_BLOCK, &blocked, &previous)) { close(pipes[0]); close(pipes[1]); return 11; }
     pid_t child = fork();
-    if (child < 0) { close(pipes[0]); close(pipes[1]); return 11; }
+    if (child < 0) {
+        (void)sigprocmask(SIG_SETMASK, &previous, NULL);
+        close(pipes[0]); close(pipes[1]); return 11;
+    }
     if (!child) {
         close(pipes[1]);
+        if (sig == SIGTERM && sigprocmask(SIG_SETMASK, &previous, NULL)) _exit(92);
         char release;
         ssize_t received = read(pipes[0], &release, 1);
         _exit(received == 1 && release == 'R' ? 0 : 91);
     }
     close(pipes[0]);
     Guardian guardian = {.childpid = child, .terminal_cause = UNKNOWN};
+    CleanupChildren owned = {.grace = 0};
     controlled_child = child; controlled_guardian = &guardian;
-    release_fd = pipes[1]; exit_before_send = before; send_calls = 0;
+    release_fd = pipes[1]; exit_before_send = 0; send_calls = 0;
     observed_return = -2; observed_errno = -1;
     unsigned flags = 0;
     int result = 12;
-    int snapshot_count = owned_children(&guardian, sig, &flags);
-    if (snapshot_count != 1 || send_calls != 1 || guardian.auxiliary_close_failure) goto done;
+    if (sigprocmask(SIG_SETMASK, &previous, NULL)) goto done;
+    if (sig == SIGKILL) {
+        if (owned_children(&guardian, true, &flags, &owned) != 1 || send_calls != 1 ||
+            observed_return != 0 || flags != SIGTERM_SENT || owned.used != 1 ||
+            !owned.children[0].term_sent) goto done;
+    }
+    exit_before_send = before;
+    int snapshot_count = owned_children(&guardian, true, &flags, &owned);
+    if (snapshot_count != 1 || send_calls != (sig == SIGKILL ? 2 : 1) || guardian.auxiliary_close_failure) goto done;
     if (!before) {
         siginfo_t status;
         if (waitid(P_PID, (id_t)child, &status, WEXITED | WNOWAIT) ||
             status.si_pid != child || reap_owned(&guardian) != 1) goto done;
     }
-    if (!guardian.child_reaped || owned_children(&guardian, 0, &flags) != 0 ||
+    if (!guardian.child_reaped || owned_children(&guardian, false, &flags, &owned) != 0 ||
         reap_owned(&guardian) != 1) goto done;
     printf("SIGNAL_DELIVERY signal=%d phase=%s sendReturn=%d sendErrno=%d flags=%u waitStatus=%u childReaped=1 finalEchild=1\n",
            sig, before ? "exited-before-send" : "delivered", observed_return,
            observed_errno, flags, (unsigned)guardian.child_status);
-    if (before ? (observed_return != -1 || observed_errno != ESRCH || flags != 0 ||
-                  !WIFEXITED(guardian.child_status) || WEXITSTATUS(guardian.child_status) != 0)
-               : (observed_return != 0 || observed_errno != 0 ||
-                  flags != (sig == SIGTERM ? SIGTERM_SENT : SIGKILL_SENT) ||
-                  !WIFSIGNALED(guardian.child_status) || WTERMSIG(guardian.child_status) != sig)) goto done;
+    unsigned expected_flags = sig == SIGKILL ? SIGTERM_SENT : 0;
+    if (!before) expected_flags |= sig == SIGTERM ? SIGTERM_SENT : SIGKILL_SENT;
+    if (flags != expected_flags ||
+        (before ? (observed_return != -1 || observed_errno != ESRCH ||
+                   !WIFEXITED(guardian.child_status) || WEXITSTATUS(guardian.child_status) != 0)
+                : (observed_return != 0 || observed_errno != 0 ||
+                   !WIFSIGNALED(guardian.child_status) || WTERMSIG(guardian.child_status) != sig))) goto done;
     result = 0;
 done:
     if (!guardian.child_reaped) { (void)kill(child, SIGKILL); (void)waitpid(child, NULL, 0); }
-    close(pipes[1]);
+    for (unsigned i = 0; i < owned.used; ++i) close_auxiliary(&guardian, &owned.children[i].fd);
+    if (guardian.auxiliary_close_failure || close(pipes[1])) result = 13;
     return result;
 }
 int main(int argc, char **argv) {
@@ -876,7 +914,7 @@ finally:
             'cgroupAdmissionQualified': False,
         },
         'completed': (failure_type is None and not cleanup_failures and len(RESULTS) == 42
-                      and (not args.include_v2 or len(V2_RESULTS) == 21)
+                      and (not args.include_v2 or len(V2_RESULTS) == 23)
                       and (not args.include_v2 or len(REVIEW_RESULTS) == 18)
                       and (not args.compare_prior_guardian or len(PRIOR_RESULTS) == 2)
                       and inputs_unchanged and tools_unchanged and binaries_unchanged),
@@ -885,7 +923,7 @@ finally:
         'cleanupFailures': cleanup_failures,
         'passed': len(RESULTS),
         'results': RESULTS,
-        'v2ExpectedControlCount': 21 if args.include_v2 else 0,
+        'v2ExpectedControlCount': 23 if args.include_v2 else 0,
         'v2Passed': len(V2_RESULTS),
         'v2Results': V2_RESULTS,
         'reviewRegressionExpectedCount': 18 if args.include_v2 else 0,

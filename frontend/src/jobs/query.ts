@@ -1,3 +1,4 @@
+import { queryCopy as copy } from '../copy/workspace';
 export const JOB_STATUSES = ['uploaded', 'queued', 'running', 'completed', 'failed', 'cancelled', 'interrupted', 'unknown'] as const;
 export type JobFilters = { search: string; status: string; createdAfter: string; createdBefore: string; limit: string; sort: string };
 export const DEFAULT_FILTERS: JobFilters = { search: '', status: '', createdAfter: '', createdBefore: '', limit: '50', sort: 'newest' };
@@ -31,22 +32,42 @@ export function jobFilters(search: string): JobFilters {
     values[key as keyof JobFilters] = value;
   }
   if (values.search.length > 256 || [...values.search].some(character => character.charCodeAt(0) < 32 || character.charCodeAt(0) === 127 || character === '\ufffd'))
-    throw new JobFilterError('search', 'Use at most 256 characters without control characters.');
-  if (!['50', '100', '200'].includes(values.limit)) throw new JobFilterError('limit', 'Choose 50, 100 or 200 jobs per page.');
-  if (!['newest', 'oldest'].includes(values.sort)) throw new JobFilterError('sort', 'Choose newest first or oldest first.');
-  if (values.status !== '' && !(JOB_STATUSES as readonly string[]).includes(values.status)) throw new JobFilterError('status', 'Choose a listed workflow state.');
+    throw new JobFilterError('search', copy.search);
+  if (!['50', '100', '200'].includes(values.limit)) throw new JobFilterError('limit', copy.limit);
+  if (!['newest', 'oldest'].includes(values.sort)) throw new JobFilterError('sort', copy.sort);
+  if (values.status !== '' && !(JOB_STATUSES as readonly string[]).includes(values.status)) throw new JobFilterError('status', copy.status);
   function date(field: 'createdAfter' | 'createdBefore') {
     try { return filterInstant(values[field]); }
-    catch { throw new JobFilterError(field, 'Enter a valid calendar date and time with a time zone, for example 2026-09-05T00:00:00Z.'); }
+    catch { throw new JobFilterError(field, copy.date); }
   }
   const after = date('createdAfter');
   const before = date('createdBefore');
-  if (after !== null && before !== null && after >= before) throw new JobFilterError('createdBefore', 'Created before must be later than Created at or after.');
+  if (after !== null && before !== null && after >= before) throw new JobFilterError('createdBefore', copy.dateOrder);
   return values;
 }
 
 export function filterSearch(filters: JobFilters): string {
   const params = new URLSearchParams();
   for (const [key, value] of Object.entries(filters)) if (value && value !== DEFAULT_FILTERS[key as keyof JobFilters]) params.set(key, value);
+  return params.toString();
+}
+
+
+/** Opaque server cursors are carried unchanged; only filters are interpreted by the browser. */
+export function jobLocation(search: string): { filters: JobFilters; cursor: string | null; invalidCursor: boolean } {
+  if (search.length > 4096) throw new Error('Invalid filters');
+  const params = new URLSearchParams(search), values = params.getAll('cursor');
+  params.delete('cursor');
+  const filters = jobFilters(params.toString());
+  const invalidCursor = values.length > 1 || (values.length === 1 && !/^[A-Za-z0-9_-]{1,128}$/.test(values[0]!));
+  return { filters, cursor: values.length === 1 && !invalidCursor ? values[0]! : null, invalidCursor };
+}
+
+export function jobPageSearch(filters: JobFilters, cursor: string | null): string {
+  const params = new URLSearchParams(filterSearch(filters));
+  if (cursor !== null) {
+    if (!/^[A-Za-z0-9_-]{1,128}$/.test(cursor)) throw new Error('Invalid job page cursor');
+    params.set('cursor', cursor);
+  }
   return params.toString();
 }

@@ -136,6 +136,11 @@ class EmbeddedWebAssetsTest {
             assertTrue(html.contains("name=\"decomp-base-path\" content=\"/workbench/nested/\""))
             assertTrue(html.contains("name=\"decomp-application-version\" content=\"0.1.0\""))
             assertTrue(html.contains("src=\"/workbench/nested/assets/ui/assets/index-12345678.js\""))
+            val bootstrap = "<script src=\"/workbench/nested/assets/ui/assets/display-preferences-bootstrap-12345678.js\"></script>"
+            assertTrue(html.contains(bootstrap))
+            assertTrue(html.indexOf(bootstrap) < html.indexOf("<link rel=\"stylesheet\""))
+            assertTrue(html.indexOf(bootstrap) < html.indexOf("<script type=\"module\""))
+            assertTrue(html.indexOf("<script ") < html.indexOf("</head>"))
             assertTrue(html.contains("href=\"/workbench/nested/assets/ui/assets/index-12345678.css\""))
             assertTrue(html.contains("id=\"app\""))
             assertFalse(html.contains("<base"))
@@ -161,6 +166,9 @@ class EmbeddedWebAssetsTest {
     @Test
     fun `startup rejects absent corrupted and inconsistent inventory resources`() {
         val original = fixture()
+        val vite = Json.parseToJsonElement(original.getValue(".vite/manifest.json").decodeToString()).jsonObject
+        val ambiguousBootstrap = JsonObject(vite + ("duplicate-bootstrap" to vite.getValue("different-build/prelude.js")))
+            .toString().toByteArray()
         val variants = listOf(
             original - "asset-manifest.json",
             original - "index.html",
@@ -174,6 +182,7 @@ class EmbeddedWebAssetsTest {
             changeManifest(original) { root -> root + ("entryScript" to JsonPrimitive("assets/missing.js")) },
             changeManifest(original) { root -> root + ("files" to JsonArray((root.getValue("files") as JsonArray).let { it + it.first() })) },
             changeManifest(original) { root -> root + ("secret" to JsonPrimitive("synthetic unexpected field")) },
+            fixture(viteOverride = ambiguousBootstrap),
         )
         variants.forEach { invalid ->
             val failure = assertFailsWith<EmbeddedWebAssetsException> { fromMap(invalid) }
@@ -280,6 +289,7 @@ class EmbeddedWebAssetsTest {
             "index.html" to "<!doctype html><html><body>private build input</body></html>".toByteArray(),
             "assets/index-12345678.js" to "import './dynamic-12345678.js';\n".toByteArray(),
             "assets/dynamic-12345678.js" to "export const value = 1;\n".toByteArray(),
+            "assets/display-preferences-bootstrap-12345678.js" to "(() => {})();\n".toByteArray(),
             "assets/index-12345678.css" to "body { color: black; }\n".toByteArray(),
             "assets/mark-12345678.svg" to "<svg xmlns=\"http://www.w3.org/2000/svg\"/>\n".toByteArray(),
         )
@@ -293,6 +303,11 @@ class EmbeddedWebAssetsTest {
                 put("assets", JsonArray(listOf(JsonPrimitive("assets/mark-12345678.svg"))))
             })
             put("src/dynamic.ts", buildJsonObject { put("file", "assets/dynamic-12345678.js") })
+            put("different-build/prelude.js", buildJsonObject {
+                put("file", "assets/display-preferences-bootstrap-12345678.js")
+                put("name", "display-preferences-bootstrap")
+                put("isEntry", true)
+            })
         }.toString().toByteArray()
         val payload = buildJsonObject {
             put("schemaVersion", 1)

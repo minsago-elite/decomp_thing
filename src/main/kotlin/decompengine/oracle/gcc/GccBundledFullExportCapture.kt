@@ -4,6 +4,7 @@ import decompengine.acp.LinuxDescriptor
 import decompengine.acp.LinuxFileIdentity
 import decompengine.acp.LinuxFilesystemSyscalls
 import decompengine.acp.permissions
+import decompengine.project.ReferencedDataByteEvidenceJson
 import decompengine.oracle.core.OracleArtifacts
 import decompengine.oracle.core.OracleJson
 import decompengine.oracle.core.StrictJsonLimits
@@ -131,7 +132,7 @@ internal object GccBundledFullExportCapture {
         "referencedGlobals", "strings", "decompiledC",
     )
     private val GLOBAL_FIELDS = listOf(
-        "id", "name", "address", "type", "initializer", "extractionStatus", "recoveryAssessment",
+        "id", "name", "address", "type", "initializer", "byteEvidence", "extractionStatus", "recoveryAssessment",
     )
     private val TYPE_FIELDS = listOf("id", "declaration", "sourceAddress", "extractionStatus", "recoveryAssessment")
     private val FUNCTION_ARRAY_FIELDS = setOf("calls", "referencedGlobals", "strings")
@@ -151,7 +152,8 @@ internal object GccBundledFullExportCapture {
         expectedReports: LinuxFileIdentity,
         artifacts: List<GccCompilerEngineContainmentArtifactIdentity>,
         limits: GccResumeByteValidationLimits = GccResumeByteValidationLimits(),
-    ): GccBundledFullExportSnapshot = captureExact(run, expectedReports, artifacts, limits, false)
+        expectedDecompilerWorkers: Int = 1,
+    ): GccBundledFullExportSnapshot = captureExact(run, expectedReports, artifacts, limits, false, expectedDecompilerWorkers)
 
     /** Fixed native-operation sibling only; ordinary full exports retain their exact inventory. */
     internal fun captureWithNativeCallSibling(
@@ -160,7 +162,7 @@ internal object GccBundledFullExportCapture {
         artifacts: List<GccCompilerEngineContainmentArtifactIdentity>,
         limits: GccResumeByteValidationLimits = GccResumeByteValidationLimits(),
         checkpoint: () -> Unit = {},
-    ): GccBundledFullExportSnapshot = captureExact(run, expectedReports, artifacts, limits, true, checkpoint)
+    ): GccBundledFullExportSnapshot = captureExact(run, expectedReports, artifacts, limits, true, 1, checkpoint)
 
     private fun captureExact(
         run: LinuxDescriptor,
@@ -168,9 +170,14 @@ internal object GccBundledFullExportCapture {
         artifacts: List<GccCompilerEngineContainmentArtifactIdentity>,
         limits: GccResumeByteValidationLimits,
         nativeCallSibling: Boolean,
+        expectedDecompilerWorkers: Int,
         checkpoint: () -> Unit = {},
     ): GccBundledFullExportSnapshot {
         checkpoint()
+        require(expectedDecompilerWorkers == 1 || expectedDecompilerWorkers == 4) {
+            "GCC full export capture worker count is unsupported"
+        }
+        require(!nativeCallSibling || expectedDecompilerWorkers == 1) { "native call capture requires its serial runtime" }
         val byRole = artifacts.associateBy { it.role }
         require(byRole.size == artifacts.size) { "GCC full export capture contains duplicate invocation roles" }
         val expectedInput = byRole.getValue(GccCompilerEngineContainmentArtifactRole.ENGINE_BINARY).sha256
@@ -211,7 +218,7 @@ internal object GccBundledFullExportCapture {
                                         run, reports, export, planning, functions, globals, types, failures,
                                         expectedReports, expectedInput, expectedExporter, expectedAnalysisTool,
                                         expectedInputBytes, expectedExporterBytes, expectedAnalysisToolBytes,
-                                        topNames, limits, expectedReportNames, checkpoint,
+                                        topNames, limits, expectedDecompilerWorkers, expectedReportNames, checkpoint,
                                     )
                                 }
                             }
@@ -240,24 +247,26 @@ internal object GccBundledFullExportCapture {
         expectedAnalysisToolBytes: Long,
         expectedTop: Set<String>,
         limits: GccResumeByteValidationLimits,
+        expectedDecompilerWorkers: Int,
         expectedReportNames: Set<String>,
         checkpoint: () -> Unit,
     ): GccBundledFullExportSnapshot {
         val capture = GccBoundExportFiles(limits.transitionAggregateBytes, checkpoint)
         val stateBytes = capture.read(export, "state.json", limits.exporterStateBytes)
-        val target = requireFullState(stateBytes, expectedInput, expectedExporter, expectedAnalysisTool)
+        val target = requireFullState(stateBytes, expectedInput, expectedExporter, expectedAnalysisTool, expectedDecompilerWorkers)
         val progressBytes = capture.read(reports, "program_model.json.progress.json", limits.progressBytes)
         val progress = requireFullProgress(progressBytes)
         require(progress.reused == 0L) { "fresh full GCC export unexpectedly reused function records" }
         val model = capture.read(reports, "program_model.json", minOf(limits.assembledModelBytes, MAXIMUM_MODEL_BYTES))
         requireFullModelHeader(model, expectedInput)
         val modelVerifier = ExactByteVerifier(model, "GCC full program model", MAXIMUM_MODEL_BYTES)
-        modelVerifier.accept("{\n  \"schemaVersion\": 2,\n  \"inputSha256\": \"$expectedInput\",\n  \"functions\": [\n")
+        modelVerifier.accept("{\n  \"schemaVersion\": 4,\n  \"inputSha256\": \"$expectedInput\",\n  \"functions\": [\n")
 
         val functionNames = captureDirectoryFiles(functions, MAXIMUM_FULL_FUNCTIONS, MAXIMUM_FULL_FUNCTION_RECORD_BYTES)
         require(functionNames.size.toLong() == progress.total &&
             functionNames.all { it.matches(Regex("fn_[0-9a-f]{16}\\.json")) }
         ) { "GCC full export function records differ from the completed progress inventory" }
+        val byteEvidenceBudget = ReferencedDataByteEvidenceJson.Budget()
         val globalNames = captureDirectoryFiles(globals, MAXIMUM_FULL_FUNCTIONS, MAXIMUM_FULL_EVIDENCE_RECORD_BYTES)
         require(globalNames.all { it.matches(Regex("global_[0-9a-f]{16}\\.json")) }) {
             "GCC full export global record names are invalid"
@@ -286,7 +295,7 @@ internal object GccBundledFullExportCapture {
                 when (prefix) {
                     "functions" -> functionStatuses[name.removeSuffix(".json")] =
                         requireFullFunctionRecord(bytes, name.removeSuffix(".json"), globalIds, sourceAddresses, referencedGlobalIds)
-                    "globals" -> sourceAddresses += requireFullGlobalRecord(bytes, name.removeSuffix(".json"))
+                    "globals" -> sourceAddresses += requireFullGlobalRecord(bytes, name.removeSuffix(".json"), byteEvidenceBudget)
                     "types" -> requireFullTypeRecord(bytes, name.removeSuffix(".json"), sourceAddresses)
                     "failures" -> requireFullFailureRecord(
                         bytes, name.removeSuffix(".json"), functionStatuses[name.removeSuffix(".json")],
@@ -409,16 +418,18 @@ internal object GccBundledFullExportCapture {
         expectedInput: String,
         expectedExporter: String,
         expectedAnalysisTool: String,
+        expectedDecompilerWorkers: Int,
     ): GccBundledFullExportTarget {
         require(bytes.isNotEmpty() && bytes.last() == '\n'.code.toByte() && bytes.none { it == '\r'.code.toByte() }) {
             "GCC full exporter state is not a complete LF-terminated record"
         }
         val root = OracleJson.parse(bytes).jsonObject
         require(root.keys == setOf(
-            "schemaVersion", "exporterVersion", "exporterSha256", "analysisToolSha256", "recoveryMode",
+            "schemaVersion", "exporterVersion", "exporterSha256", "analysisToolSha256", "recoveryMode", "decompilationWorkers",
             "inputSha256", "language", "compilerSpec", "semanticStateBinding",
         )) { "GCC full exporter state fields are invalid" }
-        require(number(root, "schemaVersion") == 2L && number(root, "exporterVersion") == 11L &&
+        require(number(root, "schemaVersion") == 2L && number(root, "exporterVersion") == 17L &&
+            number(root, "decompilationWorkers") == expectedDecompilerWorkers.toLong() &&
             string(root, "recoveryMode") == "full" && root.getValue("semanticStateBinding") == JsonNull &&
             string(root, "inputSha256") == expectedInput && string(root, "exporterSha256") == expectedExporter &&
             string(root, "analysisToolSha256") == expectedAnalysisTool
@@ -434,7 +445,8 @@ internal object GccBundledFullExportCapture {
             append("{\"schemaVersion\":2,\"exporterVersion\":").append(number(root, "exporterVersion"))
             append(",\"exporterSha256\":\"").append(expectedExporter)
             append("\",\"analysisToolSha256\":\"").append(expectedAnalysisTool)
-            append("\",\"recoveryMode\":\"full\",\"inputSha256\":\"").append(expectedInput)
+            append("\",\"recoveryMode\":\"full\",\"decompilationWorkers\":").append(expectedDecompilerWorkers)
+            append(",\"inputSha256\":\"").append(expectedInput)
             append("\",\"language\":\"").append(target.language)
             append("\",\"compilerSpec\":\"").append(target.compilerSpec)
             append("\",\"semanticStateBinding\":null}\n")
@@ -479,7 +491,7 @@ internal object GccBundledFullExportCapture {
     }
 
     private fun requireFullModelHeader(model: ByteArray, inputSha256: String) {
-        val prefix = "{\n  \"schemaVersion\": 2,\n  \"inputSha256\": \"$inputSha256\",\n  \"functions\": [\n".toByteArray(StandardCharsets.UTF_8)
+        val prefix = "{\n  \"schemaVersion\": 4,\n  \"inputSha256\": \"$inputSha256\",\n  \"functions\": [\n".toByteArray(StandardCharsets.UTF_8)
         val suffix = "  ]\n}\n".toByteArray(StandardCharsets.UTF_8)
         require(model.size >= prefix.size + suffix.size && model.copyOfRange(0, prefix.size).contentEquals(prefix) &&
             model.copyOfRange(model.size - suffix.size, model.size).contentEquals(suffix)
@@ -556,13 +568,16 @@ internal object GccBundledFullExportCapture {
         return false
     }
 
-    private fun requireFullGlobalRecord(bytes: ByteArray, expectedId: String): String {
+    private fun requireFullGlobalRecord(bytes: ByteArray, expectedId: String, budget: ReferencedDataByteEvidenceJson.Budget): String {
         val root = requireFullNamedRecord(bytes, expectedId, "recovered", setOf(
-            "id", "name", "address", "type", "initializer", "extractionStatus", "recoveryAssessment",
+            "id", "name", "address", "type", "initializer", "byteEvidence", "extractionStatus", "recoveryAssessment",
         ))
         val address = string(root, "address")
         require(canonicalAddress(address) && expectedId == "global_" + address.removePrefix("0x").padStart(16, '0')) {
             "GCC full global record identity does not match its canonical 64-bit address"
+        }
+        requireNotNull(ReferencedDataByteEvidenceJson.parseForModel(root.getValue("byteEvidence"), 4, budget)) {
+            "eligible bundled exporter global lacks supplied byte evidence schema 2"
         }
         requirePrettyExporterRecord(bytes, root, "global", GLOBAL_FIELDS, nullableField = "initializer")
         return address
@@ -816,6 +831,7 @@ internal object GccBundledFullExportCapture {
                     }
                     verifier.accept("]")
                 }
+                field == "byteEvidence" -> verifier.accept(ReferencedDataByteEvidenceJson.render(requireNotNull(ReferencedDataByteEvidenceJson.parseForModel(value, 4))))
                 field == nullableField && value == JsonNull -> verifier.accept("null")
                 else -> verifier.acceptExporterString(string(root, field))
             }

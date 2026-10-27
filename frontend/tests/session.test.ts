@@ -85,6 +85,86 @@ describe('bootstrap fragment removal', () => {
 });
 
 describe('page-local session state', () => {
+  it('exposes an incompatible bootstrap while clearing private state and pending observations', async () => {
+    const { session, gateway, data } = setup();
+    await session.initialize({ kind: 'absent' });
+    const invalidated = vi.fn(() => { expect(session.csrf()).toBeNull(); });
+    session.onInvalidated(invalidated);
+    const oldFailure = session.observeRequestFailure();
+    gateway.bootstrap.mockRejectedValueOnce(new ApiClientError('unsupported_contract'));
+    await session.refresh();
+    expect(session.snapshot()).toEqual({ status: 'unavailable', reason: 'incompatible' });
+    expect(invalidated).toHaveBeenCalledOnce();
+    expect(invalidated).toHaveBeenCalledWith(false);
+    expect(session.csrf()).toBeNull();
+    expect(JSON.stringify(session.snapshot())).not.toContain(data.csrfToken);
+    oldFailure(denied('SESSION_EXPIRED'));
+    expect(session.snapshot()).toEqual({ status: 'unavailable', reason: 'incompatible' });
+    expect(gateway.bootstrap).toHaveBeenCalledTimes(2);
+    expect(gateway.exchange).not.toHaveBeenCalled();
+    expect(gateway.logout).not.toHaveBeenCalled();
+  });
+
+  it('keeps an unsupported logout response unconfirmed without retrying the mutation', async () => {
+    const { session, gateway } = setup();
+    await session.initialize({ kind: 'absent' });
+    gateway.logout.mockRejectedValueOnce(new ApiClientError('unsupported_contract'));
+    await session.logout();
+    await session.logout();
+    expect(session.snapshot()).toEqual({ status: 'unavailable', reason: 'logout-unconfirmed' });
+    expect(session.csrf()).toBeNull();
+    expect(gateway.logout).toHaveBeenCalledOnce();
+    expect(gateway.bootstrap).toHaveBeenCalledOnce();
+    expect(gateway.exchange).not.toHaveBeenCalled();
+  });
+
+  it('invalidates instance-bound state before exposing a restarted server without replay', async () => {
+    const { gateway, session, data } = setup();
+    await session.initialize({ kind: 'absent' });
+    const first = session.snapshot();
+    const oldFailure = session.observeRequestFailure();
+    const invalidated = vi.fn(() => { expect(session.csrf()).toBeNull(); });
+    session.onInvalidated(invalidated);
+    gateway.bootstrap.mockResolvedValue({ ...data, serverInstanceId: 'server_fixture_2' });
+    await session.refresh();
+    expect(invalidated).toHaveBeenCalledOnce();
+    expect(invalidated).toHaveBeenCalledWith(false);
+    const current = session.snapshot();
+    expect(current.status).toBe('authenticated');
+    if (first.status !== 'authenticated' || current.status !== 'authenticated') throw new Error('Expected authenticated fixtures');
+    expect(current.runtime.serverInstanceId).toBe('server_fixture_2');
+    expect(current.runtime.applicationBuildId).toBe(first.runtime.applicationBuildId);
+    expect(current.generation).toBeGreaterThan(first.generation);
+    oldFailure(denied('SESSION_EXPIRED'));
+    expect(session.snapshot()).toBe(current);
+    await session.refresh(); // A stable reported instance does not repeat the instance invalidation.
+    expect(invalidated).toHaveBeenCalledOnce();
+    expect(gateway.bootstrap).toHaveBeenCalledTimes(3);
+    expect(gateway.exchange).not.toHaveBeenCalled();
+    expect(gateway.logout).not.toHaveBeenCalled();
+  });
+
+  it('keeps an unreported instance unknown and invalidates on every successful refresh', async () => {
+    const { gateway, session, data } = setup();
+    delete data.serverInstanceId;
+    await session.initialize({ kind: 'absent' });
+    const invalidated = vi.fn();
+    session.onInvalidated(invalidated);
+    await session.refresh();
+    expect(invalidated).toHaveBeenCalledOnce();
+    expect(invalidated).toHaveBeenCalledWith(false);
+    const unknown = session.snapshot();
+    if (unknown.status !== 'authenticated') throw new Error('Expected authenticated fixture');
+    expect(unknown.runtime.serverInstanceId).toBeUndefined();
+    gateway.bootstrap.mockResolvedValueOnce({ ...data, serverInstanceId: 'server_fixture_2' });
+    await session.refresh();
+    await session.refresh(); // Reported -> unreported cannot reuse the previous instance identity.
+    expect(invalidated).toHaveBeenCalledTimes(3);
+    expect(JSON.stringify(session.snapshot())).not.toContain(data.csrfToken);
+    expect(gateway.exchange).not.toHaveBeenCalled();
+    expect(gateway.logout).not.toHaveBeenCalled();
+  });
+
   it('restores cookies through one read-only bootstrap and coalesces initial calls', async () => {
     const { gateway, session } = setup();
     await Promise.all([session.initialize({ kind: 'absent' }), session.initialize({ kind: 'absent' })]);

@@ -1,0 +1,41 @@
+{
+  "apiVersion": 1,
+  "kind": "revisionSources",
+  "requestId": "request_revision_sources_1",
+  "data": {
+    "binding": {
+      "jobId": "job_1",
+      "runId": "run_1",
+      "revisionId": "revision_1"
+    },
+    "authority": "source-input-commitments",
+    "sourceSha256": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+    "manifestSha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+    "descriptorSha256": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+    "metadataVersion": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+    "totalFiles": 2,
+    "items": [
+      {
+        "fileId": "file_0_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "displayName": "Makefile",
+        "sizeBytes": "0",
+        "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "declaredUtf8Text": true,
+        "declaredViewable": true
+      },
+      {
+        "fileId": "file_1_bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "displayName": "src/\u00e9.c",
+        "sizeBytes": "9007199254740993",
+        "sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "declaredUtf8Text": true,
+        "declaredViewable": true
+      }
+    ],
+    "page": {
+      "nextCursor": null,
+      "snapshotVersion": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+      "limit": 50
+    }
+  }
+}

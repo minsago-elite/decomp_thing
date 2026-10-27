@@ -33,12 +33,50 @@ class GccCompilerEnginePlanningTest {
         val input = temporary.resolve("input").also { it.writeBytes(bytes) }
         val output = temporary.resolve("output")
         val service = GccCompilerEnginePlanningService.diagnostic(ProgramModelAnalyzer { _, _ ->
-            model(OracleArtifacts.sha256(bytes)).copy(schemaVersion = 1)
+            model(OracleArtifacts.sha256(bytes)).let { it.copy(schemaVersion = 1, globals = it.globals.map { g -> g.copy(byteEvidence = null) }) }
         })
         val failure = assertFailsWith<GccCompilerEnginePlanningException> {
             service.plan(suite(bytes), "cc1", input, output)
         }
-        assertTrue(failure.message.orEmpty().contains("requires program model schema 2"))
+        assertTrue(failure.message.orEmpty().contains("requires program model schema 4"))
+        assertFalse(output.resolve("planning/compiler_engine_plan_assessment.json").exists())
+    }
+
+    @Test
+    fun `bundled planning rejects generic model four null evidence before publication`() {
+        val temporary = createTempDirectory(Path.of("build").toAbsolutePath().normalize().createDirectories(), "gcc-engine-null-evidence-").toAbsolutePath().normalize()
+        val bytes = "authored nullable evidence fixture".toByteArray()
+        val input = temporary.resolve("input").also { it.writeBytes(bytes) }
+        val output = temporary.resolve("output")
+        val service = GccCompilerEnginePlanningService.diagnostic(ProgramModelAnalyzer { _, _ ->
+            model(OracleArtifacts.sha256(bytes)).let { current ->
+                current.copy(globals = current.globals.map { it.copy(byteEvidence = null) })
+            }
+        })
+        val failure = assertFailsWith<GccCompilerEnginePlanningException> {
+            service.plan(suite(bytes), "cc1", input, output)
+        }
+        assertTrue(failure.message.orEmpty().contains("supplied byte evidence schema 2"))
+        assertFalse(output.resolve("planning/compiler_engine_plan_assessment.json").exists())
+    }
+
+    @Test
+    fun `bundled planning rejects valid historical model three evidence one at generation gate`() {
+        val temporary = createTempDirectory(Path.of("build").toAbsolutePath().normalize().createDirectories(), "gcc-engine-historical-evidence-").toAbsolutePath().normalize()
+        val bytes = "authored historical evidence fixture".toByteArray()
+        val input = temporary.resolve("input").also { it.writeBytes(bytes) }
+        val output = temporary.resolve("output")
+        val service = GccCompilerEnginePlanningService.diagnostic(ProgramModelAnalyzer { _, _ ->
+            model(OracleArtifacts.sha256(bytes)).let { current ->
+                current.copy(schemaVersion = 3, globals = current.globals.map { global ->
+                    global.copy(byteEvidence = global.byteEvidence!!.copy(schemaVersion = 1))
+                })
+            }
+        })
+        val failure = assertFailsWith<GccCompilerEnginePlanningException> {
+            service.plan(suite(bytes), "cc1", input, output)
+        }
+        assertTrue(failure.message.orEmpty().contains("exporter version 17 requires program model schema 4"))
         assertFalse(output.resolve("planning/compiler_engine_plan_assessment.json").exists())
     }
 
@@ -254,7 +292,7 @@ class GccCompilerEnginePlanningTest {
             sourceRevision = "78d4ac73dd391005b895a6148cd9831e28e1208b",
             analysis = GccCompilerEngineAnalysisToolchain(
                 exporterId = "decompengine-ghidra-program-model",
-                exporterVersion = 11,
+                exporterVersion = 17,
                 exporterSha256 = SHA_E,
                 exporterMode = "planning",
                 ghidraVersion = "12.1.3",
@@ -296,7 +334,7 @@ class GccCompilerEnginePlanningTest {
     )
 
     private fun model(inputSha256: String) = RecoveredProgramModel(
-        schemaVersion = 2,
+        schemaVersion = 4,
         inputSha256 = inputSha256,
         functions = listOf(
             RecoveredFunction(
@@ -318,6 +356,9 @@ class GccCompilerEnginePlanningTest {
             RecoveredGlobal(
                 id = "global_0000000000003000",
                 name = "parse_state",
+                byteEvidence = decompengine.project.ReferencedDataByteEvidence(schemaVersion = 2, windows = listOf(
+                    decompengine.project.ReferencedDataByteWindow(0x3000UL, null,
+                        decompengine.project.ReferencedDataByteOrigin(0x1000UL, 0x3000UL, null, "unknown_width"), "unknown", emptyList())), omissionReason = "unknown_access_width"),
                 address = 0x3000u,
                 type = "int",
             ),

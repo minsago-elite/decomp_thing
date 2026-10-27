@@ -893,9 +893,38 @@ static int drain_child(Guardian *g, int *fd, bool acp) {
         g->child_eof = true;
     return 1;
 }
+typedef struct {
+    pid_t pid;
+    int fd;
+    bool term_sent;
+    uint64_t term_started;
+} CleanupChild;
+typedef struct {
+    CleanupChild children[32];
+    unsigned used;
+    uint64_t grace;
+} CleanupChildren;
+/* Retain each identity through escalation. A newly adopted child gets its own TERM
+ * grace, never the elapsed grace of another process. The total deadline is unchanged. */
+static int prune_cleanup_children(Guardian *g, CleanupChildren *owned) {
+    for (unsigned i = 0; i < owned->used;) {
+        struct pollfd p = {.fd = owned->children[i].fd, .events = POLLIN};
+        int ready = poll(&p, 1, 0);
+        if (ready < 0 || (p.revents & ~(POLLIN | POLLHUP)))
+            return -1;
+        if (ready && (p.revents & (POLLIN | POLLHUP))) {
+            close_auxiliary(g, &owned->children[i].fd);
+            owned->children[i] = owned->children[--owned->used];
+        } else
+            i++;
+    }
+    return 0;
+}
 /* Only direct children reported by our own proc task are considered. Open pidfds
  * before signalling and repeat after reparenting; no ambient PID/cmdline scan. */
-static int owned_children(Guardian *g, int sig, unsigned *flags) {
+static int owned_children(Guardian *g, bool signal_children, unsigned *flags, CleanupChildren *owned) {
+    if (signal_children && prune_cleanup_children(g, owned))
+        return -1;
     char path[96], bytes[4096];
     snprintf(path, sizeof path, "/proc/self/task/%ld/children", (long)getpid());
     int fd = open(path, O_RDONLY | O_CLOEXEC);
@@ -918,19 +947,38 @@ static int owned_children(Guardian *g, int sig, unsigned *flags) {
         long pid = strtol(cursor, &end, 10);
         if (errno || end == cursor || pid <= 0 || pid > INT_MAX || ++count > 32)
             return -1;
-        if (sig) {
-            int pidfd = (int)syscall(SYS_pidfd_open, (pid_t)pid, 0);
-            if (pidfd >= 0) {
-                int rc = (int)syscall(SYS_pidfd_send_signal, pidfd, sig, NULL, 0);
+        if (signal_children) {
+            unsigned i = 0;
+            while (i < owned->used && owned->children[i].pid != (pid_t)pid)
+                i++;
+            if (i == owned->used) {
+                if (owned->used == 32)
+                    return -1;
+                int pidfd = (int)syscall(SYS_pidfd_open, (pid_t)pid, 0);
+                if (pidfd < 0) {
+                    if (errno != ESRCH)
+                        return -1;
+                    cursor = end;
+                    continue;
+                }
+                owned->children[owned->used++] = (CleanupChild){.pid = (pid_t)pid, .fd = pidfd};
+            }
+            CleanupChild *child = &owned->children[i];
+            uint64_t now = now_ms();
+            int sig = !child->term_sent ? SIGTERM : now - child->term_started >= owned->grace ? SIGKILL : 0;
+            if (sig) {
+                int rc = (int)syscall(SYS_pidfd_send_signal, child->fd, sig, NULL, 0);
                 int saved = errno;
-                if (!rc)
+                if (!rc) {
                     *flags |= sig == SIGTERM ? SIGTERM_SENT : SIGKILL_SENT;
-                if (close(pidfd))
-                    g->auxiliary_close_failure = true;
+                    if (sig == SIGTERM) {
+                        child->term_sent = true;
+                        child->term_started = now_ms();
+                    }
+                }
                 if (rc && saved != ESRCH)
                     return -1;
-            } else if (errno != ESRCH)
-                return -1;
+            }
         }
         cursor = end;
     }
@@ -1029,25 +1077,29 @@ static int cleanup(Guardian *g) {
         grace = 1;
     if (grace > 100)
         grace = 100;
-    uint64_t term_started = now_ms();
-    bool first_pass = true;
+    CleanupChildren owned = {.grace = grace};
     do {
         int reaped = reap_owned(g);
-        int remaining = owned_children(g, first_pass || now_ms() - term_started < grace ? SIGTERM : SIGKILL, &flags);
-        first_pass = false;
+        int remaining = owned_children(g, true, &flags, &owned);
         if (remaining < 0 || reaped < 0) {
             count = UINT32_MAX;
             break;
         }
         count = (uint32_t)remaining;
         /* Observe ECHILD and the proc-owned list again after any reparenting/reap. */
-        if (!remaining && reap_owned(g) == 1 && owned_children(g, 0, &flags) == 0) {
+        if (!remaining && reap_owned(g) == 1 && owned_children(g, false, &flags, &owned) == 0) {
             flags |= FINAL_ECHILD | DESCENDANTS_ZERO;
             observed = true;
             break;
         }
         (void)poll(NULL, 0, 5);
     } while (now_ms() < deadline);
+    for (unsigned i = 0; i < owned.used; i++)
+        close_auxiliary(g, &owned.children[i].fd);
+    // Natural direct-child exit is not normal channel completion if live descendants
+    // require bounded shutdown. Keep its actual wait status separate from this cause.
+    if (g->terminal_cause == NORMAL && (flags & (SIGTERM_SENT | SIGKILL_SENT)))
+        g->terminal_cause = PROTOCOL_FAILURE;
     close_owned(g, &g->childpidfd, 5);
     if (count == 0)
         flags |= DESCENDANTS_ZERO;

@@ -48,12 +48,22 @@ internal data class AcpSchedulingSnapshot(
  */
 internal class AcpExecutionScheduler(
     private val limits: AcpSchedulingLimits = AcpSchedulingLimits(),
+    private val lock: ReentrantLock = ReentrantLock(true),
+    private val nanoTime: () -> Long = System::nanoTime,
 ) {
     private class Waiter(val group: String)
+    private enum class ReservationState { RESERVED, GRANTED, INVALIDATED }
+    private class Reservation(val group: String) {
+        val state = java.util.concurrent.atomic.AtomicReference(ReservationState.RESERVED)
+    }
 
-    private val lock = ReentrantLock(true)
+    init { require(lock.isFair) { "ACP admission requires a fair scheduler lock" } }
+
     private val changed = lock.newCondition()
+    // Includes active/quarantined slots, queued callers and initial mutex contenders.
+    private val ingress = java.util.concurrent.Semaphore(limits.maximumActive + limits.maximumQueued, true)
     private val queue = ArrayList<Waiter>()
+    private val reservations = ArrayList<Reservation>()
     private val activeByGroup = HashMap<String, Int>()
     private val quarantinedByGroup = HashMap<String, Int>()
     private var active = 0
@@ -65,89 +75,128 @@ internal class AcpExecutionScheduler(
         requestExpired: () -> Boolean,
     ): Permit? {
         require(workspaceGroup.isNotEmpty())
-        val queueStartedAt = System.nanoTime()
+        val queueStartedAt = nanoTime()
         val queueTimeoutNanos = limits.maximumQueueWait.toNanos()
+        fun remaining(): Long = queueTimeoutNanos - (nanoTime() - queueStartedAt).coerceAtLeast(0)
+        fun observe(): Boolean {
+            if (Thread.currentThread().isInterrupted || cancellation.isCancellationRequested()) return false
+            if (requestExpired()) throw schedulingFailure("requestDeadline", AgentFailureKind.TIMEOUT)
+            if (remaining() <= 0) throw schedulingFailure("queueDeadline", AgentFailureKind.TIMEOUT)
+            return true
+        }
+        val entered = try {
+            ingress.tryAcquire(0L, TimeUnit.NANOSECONDS)
+        } catch (_: InterruptedException) {
+            Thread.currentThread().interrupt()
+            return null
+        }
+        if (!entered) {
+            // This caller cannot enter or wait. Observe cancellation/deadlines before refusal.
+            if (!observe()) return null
+            throw schedulingFailure("queueCapacity", AgentFailureKind.RESOURCE_EXHAUSTED)
+        }
+
         val waiter = Waiter(workspaceGroup)
+        var ownsIngress = true
         var queued = false
+        var reservation: Reservation? = null
+        var granted = false
+        var refusal: AgentExecutionException? = null
         try {
-            // The queue position is reserved before the caller's first observer runs, so a
-            // slow observer can neither be overtaken by later callers nor wait outside the
-            // queue bounds.
-            lock.withLock {
-                if (quarantinedByGroup.containsKey(workspaceGroup) || quarantinedCount() == limits.maximumActive) {
-                    throw schedulingFailure("cleanupUnverified", AgentFailureKind.UNAVAILABLE, retryable = false)
-                }
-                val immediatelyAdmissible = active < limits.maximumActive &&
-                    eligible(workspaceGroup) &&
-                    queue.none { eligible(it.group) }
-                if (!immediatelyAdmissible) {
-                    if (queue.size >= limits.maximumQueued ||
-                        queue.count { it.group == workspaceGroup } >= limits.maximumQueuedPerWorkspace
-                    ) {
-                        throw schedulingFailure("queueCapacity", AgentFailureKind.RESOURCE_EXHAUSTED)
+            if (!enterBeforeDeadline(queueStartedAt, queueTimeoutNanos, ::observe)) return null
+            try {
+                when {
+                    quarantinedByGroup.containsKey(workspaceGroup) || quarantinedCount() == limits.maximumActive ->
+                        refusal = schedulingFailure("cleanupUnverified", AgentFailureKind.UNAVAILABLE, retryable = false)
+                    active < limits.maximumActive && eligible(workspaceGroup) && queue.none { eligible(it.group) } ->
+                        reservation = reserve(workspaceGroup)
+                    queue.size >= limits.maximumQueued ||
+                        queue.count { it.group == workspaceGroup } >= limits.maximumQueuedPerWorkspace ->
+                        refusal = schedulingFailure("queueCapacity", AgentFailureKind.RESOURCE_EXHAUSTED)
+                    else -> {
+                        queue.add(waiter)
+                        queued = true
                     }
-                    queue.add(waiter)
-                    queued = true
                 }
+            } finally {
+                lock.unlock()
+            }
+            if (refusal != null) {
+                // No work was reserved: a rejected observer owns neither a queue nor ingress slot.
+                ingress.release()
+                ownsIngress = false
             }
             while (true) {
-                // Caller-provided observers must never hold the process-wide scheduler lock.
-                // A slow observer must not prevent permit release or observation of scheduler state.
-                if (Thread.currentThread().isInterrupted || cancellation.isCancellationRequested()) return null
-                if (requestExpired()) throw schedulingFailure("requestDeadline", AgentFailureKind.TIMEOUT)
-                val elapsed = (System.nanoTime() - queueStartedAt).coerceAtLeast(0)
-                if (elapsed >= queueTimeoutNanos) throw schedulingFailure("queueDeadline", AgentFailureKind.TIMEOUT)
-                // The observations above are current. Admission may only commit while they
-                // stay current: waiting for the lock invalidates them, so that pass gives up
-                // its admission decisions and the state is re-observed before the next one.
-                var current = true
-                try {
-                    if (!lock.tryLock()) {
-                        if (!lock.tryLock(minOf(POLL_NANOS, queueTimeoutNanos - elapsed), TimeUnit.NANOSECONDS)) continue
-                        current = false
+                // Every accepted observer has a bounded FIFO place or a reserved active slot.
+                // Observers run without either scheduler or executor locks.
+                if (!observe()) return null
+                refusal?.let { throw it }
+                val held = reservation
+                if (held != null) {
+                    val permit = Permit { cleanupUnverified -> finish(held, cleanupUnverified) }
+                    // Quarantine invalidates pending same-group reservations before publication.
+                    // The CAS orders grant against that invalidation without another mutex wait.
+                    if (!held.state.compareAndSet(ReservationState.RESERVED, ReservationState.GRANTED)) {
+                        throw schedulingFailure("cleanupUnverified", AgentFailureKind.UNAVAILABLE, retryable = false)
                     }
-                    try {
-                        val remaining = queueTimeoutNanos - (System.nanoTime() - queueStartedAt).coerceAtLeast(0)
-                        if (remaining <= 0) throw schedulingFailure("queueDeadline", AgentFailureKind.TIMEOUT)
-                        if (quarantinedByGroup.containsKey(workspaceGroup) || quarantinedCount() == limits.maximumActive) {
-                            throw schedulingFailure("cleanupUnverified", AgentFailureKind.UNAVAILABLE, retryable = false)
-                        }
-                        if (!queued) {
-                            // Queue bounds charge waiting work only. A blocked workspace cannot
-                            // prevent immediate admission to spare capacity for an eligible group.
-                            if (active < limits.maximumActive && eligible(workspaceGroup) && queue.none { eligible(it.group) }) {
-                                if (current) return admit(workspaceGroup)
-                                continue
-                            }
-                            if (queue.size >= limits.maximumQueued ||
-                                queue.count { it.group == workspaceGroup } >= limits.maximumQueuedPerWorkspace
-                            ) {
-                                throw schedulingFailure("queueCapacity", AgentFailureKind.RESOURCE_EXHAUSTED)
-                            }
-                            queue.add(waiter)
-                            queued = true
-                        }
-                        if (active < limits.maximumActive && queue.firstOrNull { eligible(it.group) } === waiter) {
-                            if (current) {
-                                queue.remove(waiter)
-                                return admit(workspaceGroup)
-                            }
-                            continue
-                        }
-                        changed.awaitNanos(minOf(POLL_NANOS, remaining))
-                    } finally {
-                        lock.unlock()
-                    }
-                } catch (_: InterruptedException) {
-                    Thread.currentThread().interrupt()
-                    return null
+                    granted = true
+                    ownsIngress = false // The permit retains this slot through verified cleanup.
+                    return permit
                 }
+                if (!enterBeforeDeadline(queueStartedAt, queueTimeoutNanos, ::observe)) return null
+                try {
+                    val left = remaining()
+                    if (left <= 0) continue
+                    if (quarantinedByGroup.containsKey(workspaceGroup) || quarantinedCount() == limits.maximumActive) {
+                        refusal = schedulingFailure("cleanupUnverified", AgentFailureKind.UNAVAILABLE, retryable = false)
+                    } else if (active < limits.maximumActive && queue.firstOrNull { eligible(it.group) } === waiter) {
+                        queue.remove(waiter)
+                        queued = false
+                        reservation = reserve(workspaceGroup)
+                    } else {
+                        try {
+                            changed.awaitNanos(minOf(POLL_NANOS, left))
+                        } catch (_: InterruptedException) {
+                            Thread.currentThread().interrupt()
+                            return null
+                        }
+                    }
+                } finally {
+                    lock.unlock()
+                }
+                // A fair-lock wait reserves capacity, then refreshes observations outside the
+                // mutex. It never discards that place just because another caller was queued.
             }
         } finally {
-            if (queued) lock.withLock {
-                queue.remove(waiter)
-                changed.signalAll()
+            try {
+                if (!granted && (queued || reservation != null)) lock.withLock {
+                    if (queued) queue.remove(waiter)
+                    reservation?.let { releaseReservation(it) }
+                    changed.signalAll()
+                }
+            } finally {
+                if (ownsIngress) ingress.release()
             }
+        }
+    }
+
+    private fun enterBeforeDeadline(startedAt: Long, timeoutNanos: Long, observe: () -> Boolean): Boolean {
+        while (true) {
+            if (Thread.currentThread().isInterrupted) return false
+            val remaining = timeoutNanos - (nanoTime() - startedAt).coerceAtLeast(0)
+            if (remaining <= 0) {
+                if (!observe()) return false
+                throw schedulingFailure("queueDeadline", AgentFailureKind.TIMEOUT)
+            }
+            try {
+                if (lock.tryLock(minOf(POLL_NANOS, remaining), TimeUnit.NANOSECONDS)) return true
+            } catch (_: InterruptedException) {
+                Thread.currentThread().interrupt()
+                return false
+            }
+            // A missed timed slice owns no mutex; explicit cancellation and the request
+            // deadline must remain observable before another fair-lock wait starts.
+            if (!observe()) return false
         }
     }
 
@@ -161,34 +210,43 @@ internal class AcpExecutionScheduler(
 
     private fun quarantinedCount(): Int = quarantinedByGroup.values.sum()
 
-    private fun admit(group: String): Permit {
+    private fun reserve(group: String): Reservation {
+        val reservation = Reservation(group)
         active += 1
         activeByGroup[group] = activeByGroup.getOrDefault(group, 0) + 1
+        reservations.add(reservation)
         changed.signalAll()
-        return Permit(this, group)
+        return reservation
     }
 
-    private fun finish(group: String, cleanupUnverified: Boolean) = lock.withLock {
+    private fun releaseReservation(reservation: Reservation) {
+        check(reservations.remove(reservation))
+        active -= 1
+        val group = reservation.group
+        val remaining = activeByGroup.getValue(group) - 1
+        if (remaining == 0) activeByGroup.remove(group) else activeByGroup[group] = remaining
+    }
+
+    private fun finish(reservation: Reservation, cleanupUnverified: Boolean) = lock.withLock {
         if (cleanupUnverified) {
-            // A failed cleanup proof cannot create spare capacity for another agent. Keep the
-            // slot and group reserved for the lifetime of this application process.
-            quarantinedByGroup[group] = quarantinedByGroup.getOrDefault(group, 0) + 1
+            // Invalidate before publishing quarantine: a racing CAS either grants before
+            // quarantine, or observes invalidation and releases its unused reservation.
+            reservations.filter { it.group == reservation.group }.forEach {
+                it.state.compareAndSet(ReservationState.RESERVED, ReservationState.INVALIDATED)
+            }
+            quarantinedByGroup[reservation.group] = quarantinedByGroup.getOrDefault(reservation.group, 0) + 1
         } else {
-            active -= 1
-            val remaining = activeByGroup.getValue(group) - 1
-            if (remaining == 0) activeByGroup.remove(group) else activeByGroup[group] = remaining
+            releaseReservation(reservation)
+            ingress.release()
         }
         changed.signalAll()
     }
 
-    class Permit internal constructor(
-        private val scheduler: AcpExecutionScheduler,
-        private val group: String,
-    ) {
+    class Permit internal constructor(private val finishReservation: (Boolean) -> Unit) {
         private val finished = AtomicBoolean(false)
 
         fun finish(cleanupUnverified: Boolean = false) {
-            if (finished.compareAndSet(false, true)) scheduler.finish(group, cleanupUnverified)
+            if (finished.compareAndSet(false, true)) finishReservation(cleanupUnverified)
         }
     }
 

@@ -15,6 +15,18 @@ case "${DECOMP_CI_TEST_SHARD:-full}" in
       v3BoundaryFinalStagingIsolated v3BoundaryPublicationIsolated v3BoundaryCensusIsolated \
       -PciTestShard=core -PisolateV3BoundaryTests=true
     ;;
+  core-main)
+    ./gradlew --no-daemon verifyReconstructionNeutrality test -PciTestShard=core-main
+    ;;
+  core-oracle)
+    ./gradlew --no-daemon verifyReconstructionNeutrality test \
+      v3BoundaryFinalStagingIsolated v3BoundaryPublicationIsolated v3BoundaryCensusIsolated \
+      -PciTestShard=core-oracle -PisolateV3BoundaryTests=true
+    ;;
   live) ./gradlew --no-daemon verifyReconstructionNeutrality test "-PciTestShard=$DECOMP_CI_TEST_SHARD" ;;
+  live-fulltree|live-rest)
+    ./gradlew --no-daemon verifyReconstructionNeutrality test \
+      -PciTestShard=live "-PciLivePackagePartition=${DECOMP_CI_TEST_SHARD#live-}"
+    ;;
   *) echo "unsupported DECOMP_CI_TEST_SHARD" >&2; exit 2 ;;
 esac

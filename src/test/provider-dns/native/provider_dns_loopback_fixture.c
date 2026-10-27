@@ -59,7 +59,14 @@ static int parse_u64(const char *text, uint64_t *result)
     return 1;
 }
 
-static int expected_capabilities(void)
+/* Supervisor-only result; NULL preserves the standalone helper's silent behavior. */
+struct legacy_diagnostic { unsigned stage; int error; };
+static int legacy_failure(struct legacy_diagnostic *diagnostic, unsigned stage, int error) {
+    if (diagnostic) { diagnostic->stage = stage; diagnostic->error = error; }
+    return 1;
+}
+
+static int expected_capabilities(struct legacy_diagnostic *diagnostic)
 {
     struct __user_cap_header_struct header = {
         .version = _LINUX_CAPABILITY_VERSION_3,
@@ -71,9 +78,11 @@ static int expected_capabilities(void)
     uint64_t effective;
 
     if (syscall(SYS_capget, &header, data) != 0) {
+        (void)legacy_failure(diagnostic, 80, errno);
         return 0;
     }
     effective = ((uint64_t)data[1].effective << 32) | data[0].effective;
+    if (effective != required) (void)legacy_failure(diagnostic, 81, 0);
     return effective == required;
 }
 
@@ -130,7 +139,7 @@ static void put_u32(unsigned char *output, uint32_t value)
     }
 }
 
-static int write_receipt(const unsigned char receipt[RECEIPT_SIZE])
+static int write_receipt(const unsigned char receipt[RECEIPT_SIZE], struct legacy_diagnostic *diagnostic)
 {
     size_t written = 0;
 
@@ -142,6 +151,7 @@ static int write_receipt(const unsigned char receipt[RECEIPT_SIZE])
             continue;
         }
         if (count <= 0) {
+            (void)legacy_failure(diagnostic, 89, count < 0 ? errno : 0);
             return 0;
         }
         written += (size_t)count;
@@ -149,7 +159,7 @@ static int write_receipt(const unsigned char receipt[RECEIPT_SIZE])
     return 1;
 }
 
-static int legacy_loopback(int argc, char **argv)
+static int legacy_loopback(int argc, char **argv, struct legacy_diagnostic *diagnostic)
 {
     uint64_t parent[4];
     struct stat net_namespace;
@@ -160,51 +170,52 @@ static int legacy_loopback(int argc, char **argv)
     uint32_t after;
     int descriptor;
 
-    if (argc != 5) {
-        return 1;
-    }
+    if (argc != 5) return legacy_failure(diagnostic, 70, 0);
     for (unsigned int index = 0; index < 4; ++index) {
-        if (!parse_u64(argv[index + 1], &parent[index]) || parent[index] == 0) {
-            return 1;
-        }
+        if (!parse_u64(argv[index + 1], &parent[index]) || parent[index] == 0)
+            return legacy_failure(diagnostic, 71, 0);
     }
-    if (stat("/proc/self/ns/net", &net_namespace) != 0 ||
-        stat("/proc/self/ns/user", &user_namespace) != 0 ||
-        net_namespace.st_ino == 0 || user_namespace.st_ino == 0 ||
-        ((uint64_t)net_namespace.st_dev == parent[0] &&
-         (uint64_t)net_namespace.st_ino == parent[1]) ||
-        ((uint64_t)user_namespace.st_dev == parent[2] &&
-         (uint64_t)user_namespace.st_ino == parent[3]) ||
-        geteuid() != 0 || getegid() != 0 || !expected_capabilities()) {
-        return 1;
-    }
+    if (stat("/proc/self/ns/net", &net_namespace) != 0) return legacy_failure(diagnostic, 72, errno);
+    if (stat("/proc/self/ns/user", &user_namespace) != 0) return legacy_failure(diagnostic, 73, errno);
+    if (net_namespace.st_ino == 0) return legacy_failure(diagnostic, 74, 0);
+    if (user_namespace.st_ino == 0) return legacy_failure(diagnostic, 75, 0);
+    if ((uint64_t)net_namespace.st_dev == parent[0] && (uint64_t)net_namespace.st_ino == parent[1])
+        return legacy_failure(diagnostic, 76, 0);
+    if ((uint64_t)user_namespace.st_dev == parent[2] && (uint64_t)user_namespace.st_ino == parent[3])
+        return legacy_failure(diagnostic, 77, 0);
+    if (geteuid() != 0) return legacy_failure(diagnostic, 78, 0);
+    if (getegid() != 0) return legacy_failure(diagnostic, 79, 0);
+    if (!expected_capabilities(diagnostic)) return 1;
 
     descriptor = socket(AF_INET, SOCK_DGRAM | SOCK_CLOEXEC, 0);
-    if (descriptor < 0) {
-        return 1;
-    }
+    if (descriptor < 0) return legacy_failure(diagnostic, 82, errno);
     memcpy(request.ifr_name, "lo", sizeof("lo"));
     if (ioctl(descriptor, SIOCGIFFLAGS, &request) != 0) {
+        int failure_errno = errno;
         (void)close(descriptor);
-        return 1;
+        return legacy_failure(diagnostic, 83, failure_errno);
     }
     before = (uint32_t)(unsigned short)request.ifr_flags;
     if ((before & IFF_LOOPBACK) == 0) {
         (void)close(descriptor);
-        return 1;
+        return legacy_failure(diagnostic, 84, 0);
     }
     request.ifr_flags = (short)(before | IFF_UP);
-    if (ioctl(descriptor, SIOCSIFFLAGS, &request) != 0 ||
-        ioctl(descriptor, SIOCGIFFLAGS, &request) != 0) {
+    if (ioctl(descriptor, SIOCSIFFLAGS, &request) != 0) {
+        int failure_errno = errno;
         (void)close(descriptor);
-        return 1;
+        return legacy_failure(diagnostic, 85, failure_errno);
+    }
+    if (ioctl(descriptor, SIOCGIFFLAGS, &request) != 0) {
+        int failure_errno = errno;
+        (void)close(descriptor);
+        return legacy_failure(diagnostic, 86, failure_errno);
     }
     after = (uint32_t)(unsigned short)request.ifr_flags;
     int closed = close(descriptor);
-    if ((after & (IFF_UP | IFF_LOOPBACK)) != (IFF_UP | IFF_LOOPBACK) ||
-        closed != 0) {
-        return 1;
-    }
+    int close_errno = closed != 0 ? errno : 0;
+    if ((after & (IFF_UP | IFF_LOOPBACK)) != (IFF_UP | IFF_LOOPBACK)) return legacy_failure(diagnostic, 87, 0);
+    if (closed != 0) return legacy_failure(diagnostic, 88, close_errno);
 
     /* PDNSLO01, four namespace identity u64s, then two flag u32s; all BE. */
     memcpy(receipt, "PDNSLO01", 8);
@@ -214,7 +225,7 @@ static int legacy_loopback(int argc, char **argv)
     put_u64(receipt + 32, (uint64_t)user_namespace.st_ino);
     put_u32(receipt + 40, before);
     put_u32(receipt + 44, after);
-    return write_receipt(receipt) ? 0 : 1;
+    return write_receipt(receipt, diagnostic) ? 0 : 1;
 }
 
 /* #1521 fixture owner. All commands, filter and limits are source-owned, never
@@ -250,7 +261,7 @@ static int all_write(int fd, const void *raw, size_t size) {
     return 0;
 }
 /* Fixed diagnostic vocabulary only. Never emit argv, paths, input bytes or strerror.
- * Five progress records plus at most one failure record remain well below the
+ * Five progress records plus at most two failure records remain well below the
  * unchanged 256-byte host stream ceiling, including existing gate/terminal markers.
  * error is immediate errno from a known failed syscall, or zero for a predicate. */
 static void owned_diag(unsigned stage, int error) {
@@ -557,7 +568,8 @@ static int supervisor(int argc, char **argv) {
     if (dup2(setup[1], 1) < 0) return owned_diag_failure(31, errno);
     char numbers[4][24]; char *setup_argv[5] = {argv[0], numbers[0], numbers[1], numbers[2], numbers[3]};
     for (unsigned i = 0; i < 4; ++i) snprintf(numbers[i], sizeof numbers[i], "%" PRIu64, parent[i]);
-    int configured = legacy_loopback(5, setup_argv);
+    struct legacy_diagnostic legacy = {0};
+    int configured = legacy_loopback(5, setup_argv, &legacy);
     if (dup2(saved_stdout, 1) < 0) return owned_diag_failure(33, errno);
     if (close(saved_stdout)) return owned_diag_failure(33, errno);
     if (close(setup[1])) return owned_diag_failure(33, errno);
@@ -565,7 +577,11 @@ static int supervisor(int argc, char **argv) {
     int received_error = received < 0 ? errno : 0;
     if (close(setup[0])) return owned_diag_failure(34, errno);
     if (received < 0) return owned_diag_failure(34, received_error);
-    if (configured || received != 48) return owned_diag_failure(35, 0);
+    if (configured) {
+        owned_diag(legacy.stage, legacy.error); /* Captured before any legacy cleanup. */
+        return owned_diag_failure(35, 0); /* Legacy configuration failed, not a receipt-length claim. */
+    }
+    if (received != 48) return owned_diag_failure(37, 0); /* Configured successfully; nonnegative short receipt. */
     owned_diag(36, 0);
     int blackhole = socket(AF_INET, SOCK_DGRAM | SOCK_NONBLOCK | SOCK_CLOEXEC, 0);
     if (blackhole < 0) return owned_diag_failure(40, errno);
@@ -711,5 +727,5 @@ int main(int argc, char **argv) {
     if (argc > 1 && !strcmp(argv[1], "supervise")) return supervisor(argc, argv);
     if (argc > 1 && !strcmp(argv[1], "bootstrap")) return bootstrap(argc, argv, 0);
     if (argc > 1 && !strcmp(argv[1], "bootstrap-dropped")) return bootstrap(argc, argv, 1);
-    return legacy_loopback(argc, argv);
+    return legacy_loopback(argc, argv, NULL);
 }

@@ -5,8 +5,12 @@ import decompengine.acp.AcpHarnessKind
 import decompengine.acp.AcpHarnessSelection
 import decompengine.acp.AcpAgentHarness
 import decompengine.acp.AcpPreflightWorkflow
+import decompengine.acp.AcpInvocationEvidenceSnapshot
+import decompengine.acp.AcpMountEventWitness
+import decompengine.acp.AuthenticationPreviewFragments
 import decompengine.agent.AgentExecutionException
 import decompengine.analysis.BundledGhidra
+import decompengine.jobs.ProgressRedactor
 import decompengine.project.ReconstructionAdapters
 import decompengine.project.ReconstructionHostSafetyLimits
 import decompengine.project.ReconstructionProfile
@@ -46,7 +50,32 @@ data class DoctorCheck(
     val name: String,
     val passed: Boolean,
     val detail: String,
-)
+) {
+    internal var toolsOnlyKind: DoctorToolKind? = null
+        private set
+
+    internal fun withToolsOnlyKind(kind: DoctorToolKind?): DoctorCheck =
+        copy().also { it.toolsOnlyKind = kind }
+}
+
+/** Compiled display facts attached by check producers, independent of private diagnostic text. */
+internal enum class DoctorToolKind(val label: String, val remediation: String) {
+    JAVA("Java", "Install a Java 21 runtime and ensure java is on PATH."),
+    C_COMPILER("C compiler", "Install the selected C compiler and ensure it is executable."),
+    MAKE("Make", "Install Make and ensure it is executable."),
+    NINJA("Ninja", "Install Ninja and ensure it is executable."),
+    READELF("binutils/readelf", "Install binutils and ensure readelf is on PATH."),
+    STRINGS("binutils/strings", "Install binutils and ensure strings is on PATH."),
+    PYTHON("Python", "Install Python 3 and ensure python3 is on PATH."),
+    ANGR("angr", "Install angr for the selected Python interpreter or set ANGR_PYTHON."),
+    GHIDRA("Ghidra", "Reinstall the complete application distribution and verify its Java runtime."),
+    SANITIZERS("C sanitizers", "Verify writable temporary storage, the selected compiler, sanitizer runtimes and probe cleanup."),
+    BUBBLEWRAP("bubblewrap", "Install bubblewrap; analyzed binary execution requires a sandbox boundary."),
+    OUTPUT("output directory", "Choose an existing writable directory with --output."),
+    PROFILE("reconstruction profile", "Select a supported reconstruction profile with --profile."),
+    LIMITS("diagnostic limits", "Verify the selected profile and host diagnostic limits."),
+    UNKNOWN("tool check", "Verify the selected profile's toolchain and output settings."),
+}
 
 data class DoctorReport(val checks: List<DoctorCheck>) {
     val passed: Boolean = checks.all(DoctorCheck::passed)
@@ -66,6 +95,7 @@ class Doctor(
     private val environment: Map<String, String> = System.getenv(),
     private val commandProbe: CommandProbe = SystemCommandProbe,
     private val connectivityProbe: ConnectivityProbe = HttpConnectivityProbe(),
+    private val sensitiveValues: Collection<String> = emptyList(),
 ) {
     fun inspect(options: DoctorOptions): DoctorReport = inspect(options, ReconstructionProfiles.default)
 
@@ -75,6 +105,7 @@ class Doctor(
         hostSafetyLimits: ReconstructionHostSafetyLimits = ReconstructionHostSafetyLimits.DEFAULT,
     ): DoctorReport {
         requireDoctorActive()
+        val diagnostic = DoctorDiagnostics(sensitiveValues)
         hostSafetyLimits.requireAllows(profile.budgets)
         val diagnostics = ReconstructionAdapters.resolve(profile).diagnostics.prepare(profile)
         val hostProbeLimits = CommandProbeLimits()
@@ -86,27 +117,33 @@ class Doctor(
             maximumWallClockMillis = minOf(hostProbeLimits.maximumWallClockMillis, profile.budgets.exportWallClockMillis),
         )
         val checks = mutableListOf<DoctorCheck>()
-        checks += executableCheck("Java", listOf("java", "-version"), "Install a Java 21 runtime and ensure java is on PATH.")
+        checks += executableCheck("Java", listOf("java", "-version"), "Install a Java 21 runtime and ensure java is on PATH.",
+            toolsOnlyKind = DoctorToolKind.JAVA)
         val toolchainBudget = CommandProbeBudget(toolchainLimits)
         val toolchainProbe = boundedProbe(toolchainBudget)
         for (probe in diagnostics.versionProbes) {
-            checks += executableCheck(probe.name, probe.command, probe.remediation, toolchainProbe)
+            checks += executableCheck(probe.name, probe.command, probe.remediation, toolchainProbe, probe.toolsOnlyKind)
         }
         // Run the adapter's compiler/sanitizer capability probe before unrelated host checks
         // can consume the selected profile's contiguous toolchain budget. Keep its authored
         // report position below Ghidra for compatibility with the doctor output contract.
         val capabilityChecks = diagnostics.checkCapabilities(toolchainProbe, toolchainBudget::checkpoint)
-        checks += executableCheck("binutils/readelf", listOf("readelf", "--version"), "Install binutils and ensure readelf is on PATH.")
-        checks += executableCheck("binutils/strings", listOf("strings", "--version"), "Install binutils and ensure strings is on PATH.")
-        checks += executableCheck("Python", listOf("python3", "--version"), "Install Python 3 and ensure python3 is on PATH.")
+        checks += executableCheck("binutils/readelf", listOf("readelf", "--version"), "Install binutils and ensure readelf is on PATH.",
+            toolsOnlyKind = DoctorToolKind.READELF)
+        checks += executableCheck("binutils/strings", listOf("strings", "--version"), "Install binutils and ensure strings is on PATH.",
+            toolsOnlyKind = DoctorToolKind.STRINGS)
+        checks += executableCheck("Python", listOf("python3", "--version"), "Install Python 3 and ensure python3 is on PATH.",
+            toolsOnlyKind = DoctorToolKind.PYTHON)
         val angrPython = environment["ANGR_PYTHON"]?.takeIf(String::isNotBlank) ?: "python3"
-        checks += executableCheck("angr", listOf(angrPython, "-c", "import angr"), "Install angr for the configured Python interpreter or set ANGR_PYTHON.")
-        checks += ghidraCheck(exportLimits)
+        checks += executableCheck("angr", listOf(angrPython, "-c", "import angr"), "Install angr for the configured Python interpreter or set ANGR_PYTHON.",
+            toolsOnlyKind = DoctorToolKind.ANGR)
+        checks += ghidraCheck(exportLimits).withToolsOnlyKind(DoctorToolKind.GHIDRA)
         checks += capabilityChecks
         requireDoctorActive()
-        checks += bubblewrapCheck()
-        checks += outputCheck(options.outputDir)
+        checks += bubblewrapCheck().withToolsOnlyKind(DoctorToolKind.BUBBLEWRAP)
+        checks += outputCheck(options.outputDir).withToolsOnlyKind(DoctorToolKind.OUTPUT)
         checks += DoctorCheck("reconstruction profile", true, "Selected ${profile.id}; sha256=${profile.sha256}")
+            .withToolsOnlyKind(DoctorToolKind.PROFILE)
         checks += DoctorCheck("diagnostic limits", true,
             "Local command ceiling: ${hostProbeLimits.maximumWallClockMillis} ms and ${hostProbeLimits.maximumOutputBytes} combined output bytes; " +
                 "toolchain group: ${toolchainLimits.maximumWallClockMillis} ms and ${toolchainLimits.maximumOutputBytes} combined output bytes; " +
@@ -114,6 +151,7 @@ class Doctor(
                 "command cleanup allowance: ${hostProbeLimits.cleanupMillis} ms. " +
                 if (commandProbe is BudgetedCommandProbe) "Owned command execution enforces these limits."
                 else "Injected command callbacks receive cooperative before/after checks only.")
+            .withToolsOnlyKind(DoctorToolKind.LIMITS)
         if (!options.toolsOnly) {
             val harnessSelection = runCatching {
                 AcpHarnessFactory.fromEnvironment(withHarnessOverride(options.harnessOverride))
@@ -122,13 +160,14 @@ class Doctor(
                 harnessSelection,
                 options.workflowOverride ?: AcpPreflightWorkflow.ALL,
                 options.showAuthMethods,
+                diagnostic,
             )
             if (harnessSelection.getOrNull()?.kind == AcpHarnessKind.LEGACY_OPENAI && !options.showAuthMethods) {
-                checks += llmChecks()
+                checks += llmChecks(diagnostic)
             }
         }
         requireDoctorActive()
-        return DoctorReport(checks)
+        return diagnostic.report(DoctorReport(checks))
     }
 
     private fun executableCheck(
@@ -136,7 +175,8 @@ class Doctor(
         command: List<String>,
         remediation: String,
         probe: CommandProbe = boundedProbe(CommandProbeBudget(CommandProbeLimits())),
-    ): DoctorCheck = try {
+        toolsOnlyKind: DoctorToolKind? = null,
+    ): DoctorCheck = (try {
         requireDoctorActive()
         val result = probe.run(command, null)
         if (result.exitCode == 0) DoctorCheck(name, true, result.output.firstLineOr("available"))
@@ -144,7 +184,7 @@ class Doctor(
     } catch (failure: Exception) {
         requireDoctorActive(failure)
         DoctorCheck(name, false, "$remediation ${failure.message.orEmpty()}".trim())
-    }
+    }).withToolsOnlyKind(toolsOnlyKind)
 
     private fun boundedProbe(budget: CommandProbeBudget): CommandProbe = CommandProbe { command, directory ->
         budget.checkpoint("before command probe")
@@ -164,6 +204,7 @@ class Doctor(
         selection: Result<AcpHarnessSelection>,
         workflow: AcpPreflightWorkflow,
         showAuthMethods: Boolean,
+        diagnostic: DoctorDiagnostics,
     ): List<DoctorCheck> = selection.fold(
         onSuccess = { resolved ->
             when (resolved.kind) {
@@ -182,7 +223,7 @@ class Doctor(
                             if (result.authentication.methods.isEmpty()) authChecks += DoctorCheck(
                                 "ACP authentication methods", true, "No authentication methods advertised; no login attempted.")
                             result.authentication.methods.forEachIndexed { index, method ->
-                                fun quoted(value: String) = quoteTerminalPreview(value)
+                                fun quoted(value: String) = quoteTerminalPreview(diagnostic.preview(value))
                                 authChecks += DoctorCheck("ACP authentication method ${index + 1}", true,
                                     "id preview=${quoted(method.idPreview)}; variant=${method.variant}; " +
                                         "name=${quoted(method.namePreview)}; " +
@@ -255,6 +296,8 @@ class Doctor(
                 append("; ")
                 append(safeDetails)
             }
+            append("; ")
+            append(acpDoctorFailureContext(execution))
             append(". Verify the configured agent's stable-v1 support, required capabilities, and sandbox cleanup.")
         }
     }
@@ -299,28 +342,32 @@ class Doctor(
         }
     }
 
-    private fun llmChecks(): List<DoctorCheck> {
-        val baseUrlText = environment["BASE_URL"].orEmpty().trim()
+    private fun llmChecks(diagnostic: DoctorDiagnostics): List<DoctorCheck> {
+        val rawBaseUrl = environment["BASE_URL"].orEmpty()
+        val baseUrlText = rawBaseUrl.trim()
         val apiKey = environment["API_KEY"].orEmpty()
-        val model = environment["MODEL"].orEmpty().trim()
+        diagnostic.include(apiKey)
+        val rawModel = environment["MODEL"].orEmpty()
+        val model = rawModel.trim()
         val baseUrl = runCatching { URI.create(baseUrlText) }.getOrNull()
         val validBaseUrl = baseUrl != null && baseUrl.scheme in setOf("http", "https") && !baseUrl.host.isNullOrBlank()
         val checks = mutableListOf(
-            DoctorCheck("LLM base URL", validBaseUrl, if (validBaseUrl) "configured for ${baseUrl.scheme}://${baseUrl.host}" else "Set BASE_URL to an absolute HTTP(S) OpenAI-compatible API URL."),
+            DoctorCheck("LLM base URL", validBaseUrl, if (validBaseUrl) "configured for ${diagnostic.projected(rawBaseUrl, "${baseUrl.scheme}://${baseUrl.host}")}" else "Set BASE_URL to an absolute HTTP(S) OpenAI-compatible API URL."),
             DoctorCheck("LLM API key", apiKey.isNotBlank(), if (apiKey.isNotBlank()) "configured (value redacted)" else "Set API_KEY; its value will not be printed or persisted."),
-            DoctorCheck("LLM model", model.isNotBlank(), if (model.isNotBlank()) "configured as $model" else "Set MODEL to an available model identifier."),
+            DoctorCheck("LLM model", model.isNotBlank(), if (model.isNotBlank()) "configured as ${diagnostic.projected(rawModel, model)}" else "Set MODEL to an available model identifier."),
         )
-        val reasoning = environment["REASONING_EFFORT"]?.trim().orEmpty()
+        val rawReasoning = environment["REASONING_EFFORT"].orEmpty()
+        val reasoning = rawReasoning.trim()
         if (reasoning.isNotEmpty()) {
             val supported = reasoning in setOf("none", "minimal", "low", "medium", "high", "xhigh")
-            checks += DoctorCheck("reasoning effort", supported, if (supported) "configured as $reasoning" else "Use none, minimal, low, medium, high, or xhigh.")
+            checks += DoctorCheck("reasoning effort", supported, if (supported) "configured as ${diagnostic.projected(rawReasoning, reasoning)}" else "Use none, minimal, low, medium, high, or xhigh.")
         }
         checks += if (validBaseUrl && apiKey.isNotBlank()) {
             runCatching { connectivityProbe.check(requireNotNull(baseUrl), apiKey) }.fold(
                 onSuccess = { DoctorCheck("LLM connectivity", true, it) },
-                onFailure = {
-                    requireDoctorActive(it)
-                    DoctorCheck("LLM connectivity", false, "Could not authenticate to ${baseUrl.host}: ${it.message}. Check BASE_URL, API_KEY, proxy, and network access.")
+                onFailure = { failure ->
+                    requireDoctorActive(failure)
+                    doctorConnectivityFailure(diagnostic.projected(rawBaseUrl, baseUrl.host), failure)
                 },
             )
         } else {
@@ -332,10 +379,69 @@ class Doctor(
 
 private object SystemCommandProbe : BudgetedCommandProbe by BoundedSystemCommandProbe()
 
-private fun requireDoctorActive(failure: Throwable? = null) {
+internal fun doctorConnectivityFailure(host: String?, failure: Throwable): DoctorCheck {
+    requireDoctorActive(failure)
+    // HTTP header-validation exceptions can contain the entire Authorization value.
+    return DoctorCheck("LLM connectivity", false,
+        "Could not authenticate to $host. Check BASE_URL, API_KEY, proxy, and network access.")
+}
+
+internal fun requireDoctorActive(failure: Throwable? = null) {
     if (failure is InterruptedException || failure is CancellationException || failure is Error) throw failure
     if (Thread.currentThread().isInterrupted) {
         throw InterruptedException("Doctor inspection cancelled").also { if (failure != null) it.initCause(failure) }
+    }
+}
+
+internal class DoctorDiagnosticAdmissionException : IllegalArgumentException("doctor diagnostic configuration is not admitted")
+
+/** The configuration map may be opaque; callers supply display secrets through a separate inventory. */
+internal class DoctorDiagnostics(values: Collection<String>) {
+    private var admitted = admit(values)
+    private var redactor = ProgressRedactor(admitted)
+    private var fragments = AuthenticationPreviewFragments(admitted)
+
+    fun include(value: String) {
+        requireDoctorActive()
+        if (value.length > 1024 * 1024) throw DoctorDiagnosticAdmissionException()
+        if (value.isBlank() || value in admitted) return
+        val next = admit(admitted + value)
+        val nextRedactor = ProgressRedactor(next)
+        val nextFragments = AuthenticationPreviewFragments(next)
+        admitted = next
+        redactor = nextRedactor
+        fragments = nextFragments
+    }
+
+    fun text(value: String, maximumCharacters: Int = 4096): String = redactor.text(value, maximumCharacters)
+
+    fun preview(value: String, maximumCharacters: Int = 4096): String = fragments.conceal(text(value, maximumCharacters))
+
+    /** Check raw configuration before whitespace normalization or extracting a destination host. */
+    fun projected(source: String, projected: String): String =
+        if (text(source, source.length) == source) preview(projected)
+        else text("[redacted]")
+
+    fun report(report: DoctorReport): DoctorReport = DoctorReport(report.checks.map { check ->
+        requireDoctorActive()
+        check.copy(name = preview(check.name), detail = preview(check.detail)).withToolsOnlyKind(check.toolsOnlyKind)
+    })
+
+    private fun admit(values: Collection<String>): List<String> = try {
+        requireDoctorActive()
+        require(values.size in 0..4096)
+        val snapshot = ArrayList<String>()
+        var characters = 0L
+        for (value in values) {
+            requireDoctorActive()
+            require(snapshot.size < 4096 && value.length.toLong() <= 1024 * 1024 - characters)
+            characters += value.length
+            snapshot += value
+        }
+        snapshot
+    } catch (failure: Exception) {
+        requireDoctorActive(failure)
+        throw DoctorDiagnosticAdmissionException()
     }
 }
 
@@ -378,6 +484,56 @@ private class HttpConnectivityProbe(
         return "authenticated GET /models succeeded with HTTP ${response.statusCode()}"
     }
 }
+
+/** Already-captured, failure-only scalars. Missing records never mean successful cleanup or process absence. */
+internal fun acpDoctorFailureContext(failure: AgentExecutionException): String = try {
+    val evidence = failure.receipt?.providerEvidence as? AcpInvocationEvidenceSnapshot
+    val diagnostics = evidence?.diagnostics
+    val pending = java.util.ArrayDeque<Throwable>()
+    val seen = ArrayList<Throwable>(8)
+    var mountRecord: String? = null
+    var mountAdmissionRecord: String? = null
+    pending.add(failure)
+    failure.receipt?.failureCause?.let { pending.add(it) }
+    while (pending.isNotEmpty() && seen.size < 8) {
+        val current = pending.removeFirst()
+        if (seen.any { it === current }) continue
+        seen.add(current)
+        val record = (current as? AcpMountEventWitness)?.diagnosticRecord
+        if (record != null && record.length <= 512 && DOCTOR_MOUNT_WITNESS.matches(record)) {
+            mountRecord = record
+            val admission = (current as AcpMountEventWitness).admissionRecord
+            if (admission != null && admission.length <= 192 && DOCTOR_MOUNT_ADMISSION.matches(admission)) {
+                mountAdmissionRecord = admission
+            }
+            break
+        }
+        // getSuppressed() clones the complete array. Only bounded cause links are inspected.
+        current.cause?.let { if (pending.size < 16) pending.add(it) }
+    }
+    ("recordedPhase=${evidence?.phaseReached?.name ?: "MISSING"} " +
+        "recordedCleanup=${evidence?.cleanupDisposition?.name ?: "MISSING"} " +
+        "recordedDiagnostics=${if (diagnostics == null) "MISSING" else "PRESENT"} " +
+        "recordedRemainingProcessCount=${diagnostics?.remainingProcessIds?.size ?: "MISSING"} " +
+        "recordedOutputOverflow=${diagnostics?.outputLimitExceeded ?: "MISSING"} " +
+        "mountEventRecord=${mountRecord ?: "MISSING"} " +
+        "mountAdmissionRecord=${mountAdmissionRecord ?: "MISSING"}").take(1024)
+} catch (contextFailure: Throwable) {
+    requireDoctorActive(contextFailure)
+    "recordedContext=UNAVAILABLE"
+}
+
+private val DOCTOR_MOUNT_WITNESS = Regex(
+    "mount-event-v1 phase=(CHECKPOINT|CONTROL_ADMISSION|REFRESH) " +
+        "generation=(NOT_EVALUATED|MISMATCH_ALREADY_OBSERVED) outcome=(EVENT|INVALID_DESCRIPTOR|SYSCALL_ERROR) " +
+        "rc=(NA|-?[0-9]{1,10}) revents=(NA|[0-9]{1,5}) errno=(NA|-?[0-9]{1,10})",
+)
+
+private val DOCTOR_MOUNT_ADMISSION = Regex(
+    "mount-admission-v1 stage=(CONSTRUCTING|ADMITTED) " +
+        "initialMounts=(0|[1-9][0-9]{0,9}) initialControls=(0|[1-9][0-9]{0,9}) " +
+        "owner=(true|false) initialFast=(true|false)",
+)
 
 private fun String.firstLineOr(fallback: String): String = lineSequence().firstOrNull { it.isNotBlank() }?.trim() ?: fallback
 

@@ -243,15 +243,15 @@ internal class AcpProviderResponseStream(
         }
         // Usage is optional upstream, but this adapter's existing token-budget policy requires it.
         val usage = response["usage"] as? JsonObject ?: reject(AcpProviderTerminalKind.MALFORMED_RESPONSE)
-        wireInteger(usage["total_tokens"])
+        usageCounter(usage["total_tokens"])
         optionalValue(usage["input_tokens_details"])?.let {
             val details = it as? JsonObject ?: reject(AcpProviderTerminalKind.MALFORMED_RESPONSE)
-            wireInteger(details["cached_tokens"])
-            details["cache_write_tokens"]?.let(::wireInteger)
+            usageCounter(details["cached_tokens"])
+            details["cache_write_tokens"]?.let(::usageCounter)
         }
         optionalValue(usage["output_tokens_details"])?.let {
             val details = it as? JsonObject ?: reject(AcpProviderTerminalKind.MALFORMED_RESPONSE)
-            wireInteger(details["reasoning_tokens"])
+            usageCounter(details["reasoning_tokens"])
         }
         optionalValue(usage["codex_rollout_budget_units"])?.let {
             val number = it as? JsonPrimitive ?: reject(AcpProviderTerminalKind.MALFORMED_RESPONSE)
@@ -263,6 +263,11 @@ internal class AcpProviderResponseStream(
     }
 
     private fun optionalValue(value: JsonElement?): JsonElement? = value?.takeUnless { it == JsonNull }
+
+    /** Auxiliary accounting uses the pinned signed-Long range, but never negative counts. */
+    private fun usageCounter(value: JsonElement?): Long = wireInteger(value).also {
+        if (it < 0) reject(AcpProviderTerminalKind.MALFORMED_RESPONSE)
+    }
 
     private fun wireInteger(value: JsonElement?): Long {
         val primitive = value as? JsonPrimitive ?: reject(AcpProviderTerminalKind.MALFORMED_RESPONSE)

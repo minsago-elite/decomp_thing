@@ -99,6 +99,26 @@ class SecureRepairRuntimeSurfaceTest {
     }
 
     @Test
+    fun `recovery index bridge rejects forged identity before inspecting any view or path`() {
+        var touched = false
+        val view = object : RepairRecoverySourceView {
+            override val sourcePaths: List<String> get() { touched = true; error("view touched") }
+            override val editablePaths: List<String> get() { touched = true; error("view touched") }
+            override fun readSource(relative: String): ByteArray { touched = true; error("view touched") }
+        }
+        assertFailsWith<SecurityException> {
+            ModuleRepairIndex.loadRecoveryAuthorized(Any(), Any(), null, null, null, view)
+        }
+        assertFailsWith<SecurityException> {
+            SecureRepairRuntime.loadRecoveryIndex(Any(), null, null, null, view)
+        }
+        assertFalse(touched)
+        val bridge = SecureRepairRuntime::class.java.declaredMethods.single { it.name == "loadRecoveryIndex" }
+        assertFalse(Modifier.isPublic(bridge.modifiers))
+        assertFalse(Modifier.isProtected(bridge.modifiers))
+    }
+
+    @Test
     fun `generic runtime bytecode has no program adapter constants and pins service discovery loader`() {
         val genericTypes = listOf(
             SecureRepairRuntime::class.java,

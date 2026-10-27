@@ -1,54 +1,76 @@
+import { jobCopy as copy } from '../copy/job';
+import { message as displayMessage } from '../shared/messages';
 import { usePrivateTransport } from '../session/PrivateTransport';
-import { useEffect, useState } from 'preact/hooks';
-import { ApiClientError, withApiFailureReference } from '../api/client';
+import { useEffect, useMemo, useState } from 'preact/hooks';
+import { withApiFailureReference } from '../api/client';
 import type { Job as JobData } from '../api/generated';
 import { appPath, jobPath, runPath } from '../app/paths';
-import type { BrowserSession } from '../session/session';
+import type { BrowserSession, RuntimeSnapshot } from '../session/session';
 import { useSession } from '../session/useSession';
 import { JobSummary } from '../jobs/JobSummary';
+import { WorkflowAvailability } from '../jobs/WorkflowAvailability';
+import { receive } from '../shared/receiptTime';
+import type { ReceiptTime } from '../shared/receiptTime';
+import type { Received } from '../shared/receiptTime';
+import { MetadataReceipt } from '../shared/MetadataReceipt';
+import { canRetainMetadata, metadataFailureKind } from '../shared/retainMetadata';
 
-function JobDetails({ jobId, basePath }: { jobId: string; basePath: string }) {
+function JobDetails({ jobId, basePath, runtime, runtimeReceipt }: { jobId: string; basePath: string; runtime: RuntimeSnapshot; runtimeReceipt: ReceiptTime | undefined }) {
   const { client } = usePrivateTransport(basePath);
-  const [job, setJob] = useState<JobData | null>(null);
-  const [error, setError] = useState('');
+  const binding = useMemo(() => ({ client, basePath, jobId }), [client, basePath, jobId]);
+  const [stored, setStored] = useState<{ binding: typeof binding; data: Received<JobData> | null; error: string; loading: boolean }>(
+    { binding, data: null, error: '', loading: true });
+  const { data: observation, error, loading } = stored.binding === binding ? stored : { data: null, error: '', loading: true };
+  const job = observation?.value;
   const [refresh, setRefresh] = useState(0);
-  const [loading, setLoading] = useState(true);
   useEffect(() => {
-    const controller = new AbortController(); setLoading(true); setError(''); setJob(null);
-    if (!/^[0-9a-f]{32}$/.test(jobId)) { setError('This job identity is invalid.'); setLoading(false); return; }
+    const controller = new AbortController();
+    setStored(previous => ({ binding, data: previous.binding === binding ? previous.data : null, error: '', loading: true }));
+    if (!/^[0-9a-f]{32}$/.test(jobId)) {
+      setStored({ binding, data: null, error: copy.thisJobIdentityIsInvalid, loading: false }); return;
+    }
     void client.get('job', `/jobs/${jobId}`, { signal: controller.signal }).then(response => {
       if (!controller.signal.aborted) {
-        if (response.data.jobId !== jobId) { setError('The server returned a different job identity.'); return; }
-        setJob(response.data);
+        if (response.data.jobId !== jobId) {
+          setStored({ binding, data: null, error: copy.theServerReturnedADifferentJobIdentity, loading: false }); return;
+        }
+        setStored({ binding, data: receive(response.data), error: '', loading: false });
       }
     }).catch((failure: unknown) => {
-      if (!controller.signal.aborted) setError(withApiFailureReference(failure instanceof ApiClientError && failure.status === 404
-        ? 'This job is unavailable. It may have been removed.' : failure instanceof ApiClientError && (['CORRUPT_LEGACY_JOB', 'JOB_RECORD_UNAVAILABLE'].includes(failure.serverCode ?? '')
-          || ['invalid_json', 'invalid_response', 'unsupported_contract'].includes(failure.code))
-          ? 'Stored job metadata is unavailable or malformed. No binary facts can be shown; inspect job storage or retry after repair.'
-          : 'Job metadata could not be loaded. Check the local session and server.', failure));
-    }).finally(() => { if (!controller.signal.aborted) setLoading(false); });
+      if (!controller.signal.aborted) setStored(previous => ({ binding,
+        data: previous.binding === binding && canRetainMetadata(failure) ? previous.data : null,
+        error: withApiFailureReference({
+          session: copy.reconnectToReadThisJob, denied: copy.jobAccessDenied,
+          missing: copy.thisJobIsUnavailableItMayHaveBeenRemoved, unsupported: copy.incompatibleJobResponse,
+          unverified: copy.storedJobMetadataIsUnavailableOrMalformedNoBinaryFacts,
+          failed: copy.jobMetadataCouldNotBeLoadedCheckTheLocalSession,
+        }[metadataFailureKind(failure)], failure), loading: false }));
+    });
     return () => { controller.abort(); };
-  }, [client, jobId, refresh]);
+  }, [binding, client, jobId, refresh]);
   return <>
-    {loading && <p role="status">Loading job…</p>}
+    {loading && <p role="status">{job ? copy.refreshingJob : copy.loadingJob}</p>}
     {error && <p role="alert">{error}</p>}
-    <button type="button" disabled={loading} onClick={() => setRefresh(value => value + 1)}>Refresh job</button>
+    {error && job && <p>{copy.previousJobMetadataMayBeOutdated}</p>}
+    <button type="button" disabled={loading} onClick={() => setRefresh(value => value + 1)}>{copy.refreshJob}</button>
     {job && <>
-      <h2>{job.displayFilename}</h2><p>Job identity: <code>{job.jobId}</code></p>
+      <MetadataReceipt kind="job" receipt={observation?.receipt} />
+      <h2>{job.displayFilename}</h2><p>{displayMessage(copy.identity, { identity: <code>{job.jobId}</code> })}</p>
       <JobSummary job={job} />
-      <p><a href={`${jobPath(basePath, job.jobId)}/runs`}>Browse attempt history</a></p>
-      {job.latestRunId && <a href={runPath(basePath, job.jobId, job.latestRunId)}>Open latest recorded attempt</a>}
-      <h3>Binary metadata</h3>
+      <p><a href={`${jobPath(basePath, job.jobId)}/runs`}>{copy.browseAttemptHistory}</a></p>
+      {job.latestRunId && <a href={runPath(basePath, job.jobId, job.latestRunId)}>{copy.openLatestRecordedAttempt}</a>}
+      <h3>{copy.binaryMetadata}</h3>
       <dl class="job-facts">
-        <dt>Format</dt><dd>{job.binary.format}</dd><dt>Machine</dt><dd>{job.binary.machine}</dd>
-        <dt>Endianness</dt><dd>{job.binary.endianness}</dd><dt>Object type</dt><dd>{job.binary.objectType}</dd>
-        <dt>OS ABI</dt><dd>{job.binary.osAbi}</dd><dt>Entry address</dt><dd><code>{job.binary.entryPoint}</code></dd>
-        <dt>Input SHA-256</dt><dd>Not reported by the job API</dd>
+        <dt>{copy.format}</dt><dd>{job.binary.format}</dd><dt>{copy.machine}</dt><dd>{job.binary.machine}</dd>
+        <dt>{copy.endianness}</dt><dd>{job.binary.endianness}</dd><dt>{copy.objectType}</dt><dd>{job.binary.objectType}</dd>
+        <dt>{copy.osABI}</dt><dd>{job.binary.osAbi}</dd><dt>{copy.entryAddress}</dt><dd><code>{job.binary.entryPoint}</code></dd>
+        <dt>{copy.inputSHA256}</dt><dd>{copy.notReportedByTheJobAPI}</dd>
       </dl>
-      <p>Completion is an attempt outcome. Only the recorded accepted revision identifies accepted reconstruction.</p>
-      <p>The attempt page retains its exact identity as newer work is recorded. Evidence views are not connected yet. The job API does not supply an input-file digest; a report-artifact digest identifies different bytes.</p>
-      <a href={appPath(basePath, '/runtime')}>View reported workflow availability</a>
+      <p>{copy.completionIsAnAttemptOutcomeOnlyTheRecordedAcceptedRevision}</p>
+      <p>{copy.theAttemptPageRetainsItsExactIdentityAsNewerWork}</p>
+      <p>{copy.startingExplorationReconstructionBuildsValidationOrRepairIsUnavailableIn}</p>
+      <WorkflowAvailability runtime={runtime} {...(runtimeReceipt ? { receipt: runtimeReceipt } : {})} />
+      <a href={appPath(basePath, '/runtime')}>{copy.viewReportedWorkflowAvailability}</a>
     </>}
   </>;
 }
@@ -56,9 +78,9 @@ function JobDetails({ jobId, basePath }: { jobId: string; basePath: string }) {
 export default function Job({ jobId, basePath, session }: { jobId: string; basePath: string; session: BrowserSession | null }) {
   const state = useSession(session);
   return <section aria-labelledby="job-title">
-    <h1 id="job-title">Job overview</h1>
-    <a href={appPath(basePath, '/')}>Return to jobs</a>
-    {state?.status === 'authenticated' ? <JobDetails key={jobId} jobId={jobId} basePath={basePath} />
-      : <p>Connect a local session to view this job.</p>}
+    <h1 id="job-title">{copy.jobOverview}</h1>
+    <a href={appPath(basePath, '/')}>{copy.returnToJobs}</a>
+    {state?.status === 'authenticated' ? <JobDetails key={`${state.generation}/${jobId}`} jobId={jobId} basePath={basePath} runtime={state.runtime} runtimeReceipt={state.runtimeReceipt} />
+      : <p>{copy.connectALocalSessionToViewThisJob}</p>}
   </section>;
 }

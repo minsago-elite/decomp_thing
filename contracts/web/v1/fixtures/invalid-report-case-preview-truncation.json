@@ -1,0 +1,92 @@
+{
+  "apiVersion": 1,
+  "kind": "report",
+  "requestId": "request_recorded_cases",
+  "data": {
+    "reportId": "validation_cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+    "binding": {
+      "jobId": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "runId": "run_selected",
+      "revisionId": "root_111111111111111111111111"
+    },
+    "reportType": "revision-validation",
+    "adapterVersion": 1,
+    "producerSchemaVersion": 2,
+    "state": "available",
+    "authority": "observations",
+    "sourceArtifact": null,
+    "acceptance": "not-evaluated",
+    "acceptanceArtifactId": null,
+    "limitations": [
+      "Authored wire data only; not acceptance, containment or native execution qualification."
+    ],
+    "summary": {
+      "result": "passed",
+      "casesCompared": "1",
+      "sourceSha256": "2222222222222222222222222222222222222222222222222222222222222222"
+    },
+    "validationCases": {
+      "authority": "observations",
+      "comparisonPolicy": "exact-bytes-v1",
+      "graphSha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "corpusSha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "sourceSha256": "2222222222222222222222222222222222222222222222222222222222222222",
+      "ownerKind": "run-baseline",
+      "ownerId": "run_00000001",
+      "normalOutcome": "behavior-checked",
+      "page": 1,
+      "pageSize": 20,
+      "totalPages": 1,
+      "totalInputs": "1",
+      "matchedInputs": "1",
+      "previousPage": null,
+      "nextPage": null,
+      "items": [
+        {
+          "caseId": "case_example_1",
+          "ordinal": "1",
+          "outcome": "matched",
+          "exitCodeMatches": true,
+          "stdoutMatches": true,
+          "stderrMatches": true,
+          "originalStdoutBytes": "3",
+          "rebuiltStdoutBytes": "3",
+          "originalStderrBytes": "0",
+          "rebuiltStderrBytes": "0",
+          "originalStdoutPreview": {
+            "totalBytes": "3",
+            "prefixBytes": 3,
+            "hex": "00 ff 0a",
+            "text": null,
+            "textBytes": null,
+            "truncated": true
+          },
+          "rebuiltStdoutPreview": {
+            "totalBytes": "3",
+            "prefixBytes": 3,
+            "hex": "00 ff 0a",
+            "text": null,
+            "textBytes": null,
+            "truncated": false
+          },
+          "originalStderrPreview": {
+            "totalBytes": "0",
+            "prefixBytes": 0,
+            "hex": "",
+            "text": "",
+            "textBytes": 0,
+            "truncated": false
+          },
+          "rebuiltStderrPreview": {
+            "totalBytes": "0",
+            "prefixBytes": 0,
+            "hex": "",
+            "text": "",
+            "textBytes": 0,
+            "truncated": false
+          }
+        }
+      ]
+    }
+  }
+}

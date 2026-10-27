@@ -12,41 +12,57 @@ internal object UploadStagingRecovery {
     private val files = setOf("input.elf", "job.json", "upload-receipt.json")
     private data class Stage(val name: String, val identity: LinuxFileIdentity, val entries: Map<String, LinuxFileIdentity>)
 
-    fun recover(root: Path): Int {
+    fun recover(root: Path, check: () -> Unit = {}): Int {
+        var cleanupStarted = false
         try {
+            check()
             return Linux.openRoot(root).use { directory ->
                 // Bound the complete scan before deleting anything, including unrelated root entries.
                 val candidates = Linux.directoryEntryNames(directory, 10_512).filter { stageName.matches(it) }.sorted()
                 require(candidates.size <= 256) { "Too many upload staging entries" }
-                val inspected = candidates.map { inspect(directory, it) }
+                check()
+                val inspected = candidates.map { check(); inspect(directory, it, check) }
                 for (stage in inspected) {
-                    require(inspect(directory, stage.name) == stage) { "Upload staging changed before cleanup" }
+                    check()
+                    require(inspect(directory, stage.name, check) == stage) { "Upload staging changed before cleanup" }
                     Linux.openDirectoryAt(directory.fd, stage.name).use { child ->
                         require(child.identity == stage.identity) { "Upload staging directory changed" }
                         for ((name, identity) in stage.entries) {
+                            check()
                             Linux.openPathAtOrNull(child.fd, name).use { current ->
                                 require(current?.identity == identity) { "Upload staging file changed" }
+                                check()
+                                cleanupStarted = true
                                 Linux.unlink(child.fd, name)
                             }
                         }
                         require(Linux.directoryEntryNames(child, 1).isEmpty()) { "Upload staging gained unexpected entries" }
+                        check()
                         Linux.synchronize(child)
+                        check()
                         Linux.openPathAtOrNull(directory.fd, stage.name).use { current ->
                             require(current?.identity == stage.identity) { "Upload staging path changed" }
+                            check()
+                            cleanupStarted = true
                             Linux.removeDirectory(directory.fd, stage.name)
                         }
                     }
                     Linux.synchronize(directory)
+                    check()
                 }
+                check()
                 inspected.size
             }
         } catch (failure: Exception) {
+            if (failure is WorkflowStoreException && failure.code == "RECOVERY_CANCELLED") throw failure
             throw WorkflowStoreException("UPLOAD_STAGING_RECOVERY_REQUIRED",
-                "Upload staging could not be safely reconciled. Preserve unexpected entries and inspect storage before reopening.", cause = failure)
+                "Upload staging could not be safely reconciled. Preserve unexpected entries and inspect storage before reopening.",
+                outcomeUnknown = cleanupStarted, cause = failure)
         }
     }
 
-    private fun inspect(root: LinuxDescriptor, name: String): Stage {
+    private fun inspect(root: LinuxDescriptor, name: String, check: () -> Unit): Stage {
+        check()
         Linux.openPathAtOrNull(root.fd, name).use { selected ->
             val identity = requireNotNull(selected).identity
             require(identity.isDirectory && !identity.isSymbolicLink && identity.uid == root.identity.uid &&
@@ -56,6 +72,7 @@ internal object UploadStagingRecovery {
                 val names = Linux.directoryEntryNames(directory, 4).sorted()
                 require(names.all { it in files }) { "Upload staging contains an unexpected entry" }
                 val entries = names.associateWith { entry ->
+                    check()
                     Linux.openPathAtOrNull(directory.fd, entry).use { file ->
                         val observed = requireNotNull(file).identity
                         require(observed.isRegularFile && !observed.isSymbolicLink && observed.linkCount == 1 &&
@@ -63,6 +80,7 @@ internal object UploadStagingRecovery {
                         observed
                     }
                 }
+                check()
                 require(Linux.directoryEntryNames(directory, 4).sorted() == names && Linux.identity(directory.fd) == identity) {
                     "Upload staging changed during inspection"
                 }

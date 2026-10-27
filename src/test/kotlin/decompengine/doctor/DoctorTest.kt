@@ -1,13 +1,216 @@
 package decompengine.doctor
 
+import decompengine.acp.AcpExecutionCleanupDisposition
+import decompengine.acp.AcpExecutionEvidenceCompleteness
+import decompengine.acp.AcpExecutionLifecyclePhase
+import decompengine.acp.AcpInvocationEvidenceSnapshot
+import decompengine.acp.AcpProcessDiagnostics
+import decompengine.agent.AgentExecutionException
+import decompengine.agent.AgentExecutionOutcome
+import decompengine.agent.AgentExecutionReceipt
+import decompengine.agent.AgentExecutionRequestBinding
+import decompengine.agent.AgentFailure
+import decompengine.agent.AgentFailureKind
 import java.net.URI
 import kotlin.io.path.createTempDirectory
 import kotlin.test.Test
+import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
 import kotlin.test.assertFalse
+import kotlin.test.assertSame
 import kotlin.test.assertTrue
 
 class DoctorTest {
+    @Test
+    fun `ACP failure context reports an owned witness while withholding unknown receipt and private cause text`() {
+        val observations: List<Triple<String, Int?, Int?>> = listOf(
+            Triple("EVENT", 10, null), Triple("INVALID_DESCRIPTOR", 32, null),
+            Triple("INVALID_DESCRIPTOR", 16, null), Triple("SYSCALL_ERROR", null, 5))
+        for ((outcome, events, error) in observations) {
+            val witness = fixedMountWitness(outcome, if (error == null) 1 else -1, events, error)
+            val cause = java.io.IOException("PRIVATE message /PRIVATE/path").apply {
+                initCause(witness)
+                addSuppressed(witness)
+                addSuppressed(IllegalStateException("PRIVATE suppressed"))
+            }
+            val failure = AgentExecutionException(AgentFailure(AgentFailureKind.CONFIGURATION, "PRIVATE failure",
+                details = mapOf("PRIVATE-key" to "PRIVATE-value")), cause)
+            val context = acpDoctorFailureContext(failure)
+            assertTrue("recordedPhase=MISSING recordedCleanup=MISSING" in context, context)
+            assertTrue("recordedDiagnostics=MISSING recordedRemainingProcessCount=MISSING" in context, context)
+            assertTrue("mountEventRecord=${requireNotNull(witness.message)}" in context, context)
+            assertFalse("PRIVATE" in context || "/" in context, context)
+            assertTrue(context.length <= 1024 && context.all { it.code in 32..126 })
+        }
+    }
+
+    @Test
+    fun `ACP failure context uses the invocation receipt without exposing process ids stderr or peer text`() {
+        val failure = AgentFailure(AgentFailureKind.CONFIGURATION, "PRIVATE failure")
+        val diagnostics = AcpProcessDiagnostics(123456789L, null, "PRIVATE stderr", false, 0, 100, false,
+            true, true, listOf(234567891L, 345678912L), "PRIVATE containment", false, false)
+        val evidence = AcpInvocationEvidenceSnapshot(null, AcpExecutionLifecyclePhase.SANDBOX_LAUNCH,
+            AcpExecutionCleanupDisposition.UNVERIFIED, null, null, diagnostics, emptyList(), emptyList(),
+            emptyList(), null, AcpExecutionEvidenceCompleteness(false, false, false), null)
+        val receipt = AgentExecutionReceipt(AgentExecutionRequestBinding(1, "a".repeat(64), "b".repeat(64)),
+            AgentExecutionOutcome.Failed(failure), evidence, fixedMountWitness())
+        val context = acpDoctorFailureContext(AgentExecutionException(failure, receipt = receipt))
+        assertTrue("recordedPhase=SANDBOX_LAUNCH recordedCleanup=UNVERIFIED" in context, context)
+        assertTrue("recordedDiagnostics=PRESENT recordedRemainingProcessCount=2 recordedOutputOverflow=false" in context, context)
+        assertTrue("mountEventRecord=mount-event-v1" in context, context)
+        assertFalse(listOf("PRIVATE", "123456789", "234567891", "345678912").any { it in context }, context)
+    }
+
+    @Test
+    fun `ACP failure context bounds cause cycles and depth without traversing arbitrary suppression lists`() {
+        val first = java.io.IOException("PRIVATE first")
+        val second = IllegalStateException("PRIVATE second")
+        first.initCause(second); second.initCause(first)
+        first.addSuppressed(Throwable(fixedMountWitness().message))
+        fun context(cause: Throwable) = acpDoctorFailureContext(AgentExecutionException(
+            AgentFailure(AgentFailureKind.CONFIGURATION, "PRIVATE failure"), cause))
+        val cycle = context(first)
+        assertTrue("mountEventRecord=MISSING" in cycle, cycle)
+        assertFalse("PRIVATE" in cycle || "mount-event-v1" in cycle, cycle)
+        var deep: Throwable = fixedMountWitness()
+        repeat(9) { deep = IllegalStateException("PRIVATE wrapper", deep) }
+        assertTrue("mountEventRecord=MISSING" in context(deep))
+        val suppressed = java.io.IOException("PRIVATE primary").apply {
+            addSuppressed(fixedMountWitness())
+            repeat(64) { addSuppressed(Throwable("PRIVATE suppressed $it")) }
+        }
+        assertTrue("mountEventRecord=MISSING" in context(suppressed))
+    }
+
+    @Test
+    fun `ACP failure context preserves fatal interruption and cancellation policy during metadata formatting`() {
+        fun contextFor(fault: Throwable): String {
+            val cause = object : RuntimeException("PRIVATE metadata failure") {
+                override val cause: Throwable? get() = throw fault
+            }
+            return acpDoctorFailureContext(AgentExecutionException(
+                AgentFailure(AgentFailureKind.CONFIGURATION, "PRIVATE failure"), cause))
+        }
+        assertEquals("recordedContext=UNAVAILABLE", contextFor(IllegalStateException("PRIVATE recoverable")))
+        val fatalAndCancellation: List<Throwable> = listOf(AssertionError("PRIVATE fatal"),
+            OutOfMemoryError("PRIVATE memory"), java.util.concurrent.CancellationException("PRIVATE cancelled"),
+            InterruptedException("PRIVATE interrupted"))
+        for (fault in fatalAndCancellation) {
+            assertSame(fault, assertFailsWith<Throwable> { contextFor(fault) })
+        }
+    }
+
+    private fun fixedMountWitness(
+        outcomeName: String = "EVENT", result: Int? = 1, events: Int? = 10, error: Int? = null,
+    ): Throwable {
+        val phase = Class.forName("decompengine.acp.RuntimePrivateControlScope\$MountEventPhase")
+        val outcome = Class.forName("decompengine.acp.RuntimePrivateControlScope\$MountEventOutcome")
+        val type = Class.forName("decompengine.acp.RuntimePrivateControlScope\$MountEventDiagnostic")
+        val constructor = type.getDeclaredConstructor(phase, outcome, java.lang.Integer::class.java,
+            java.lang.Integer::class.java, java.lang.Integer::class.java).apply { isAccessible = true }
+        return constructor.newInstance(phase.enumConstants.single { (it as Enum<*>).name == "CHECKPOINT" },
+            outcome.enumConstants.single { (it as Enum<*>).name == outcomeName }, result, events, error) as Throwable
+    }
+
+    @Test
+    fun `doctor report diagnostics snapshot supplied secrets and mask fields before projection`() {
+        val fragmentSecret = "0123456789abcdefghijklmnopqrstuv"
+        val values = mutableListOf("private-literal", "  padded-model  ", fragmentSecret)
+        val diagnostic = DoctorDiagnostics(values)
+        values.clear()
+        val original = DoctorReport(listOf(
+            DoctorCheck("public private-literal", false, "Authorization: Basic synthetic-wire-value private-literal"),
+            DoctorCheck("large", true, "x".repeat(16_385)),
+        ))
+        val report = diagnostic.report(original)
+        assertFalse(report.passed)
+        assertEquals(listOf(false, true), report.checks.map { it.passed })
+        assertEquals(2, report.checks.size)
+        val text = report.checks.joinToString()
+        assertFalse(text.contains("private-literal") || text.contains("synthetic-wire-value"))
+        assertFalse(text.contains("x".repeat(100)))
+        assertTrue(original.checks.first().detail.contains("private-literal"))
+        assertFalse(diagnostic.projected("  padded-model  ", "padded-model").contains("padded-model"))
+        assertEquals("", diagnostic.preview("public " + fragmentSecret.substring(5, 25)))
+        diagnostic.include("  private-credential  ")
+        assertFalse(diagnostic.projected("  private-credential  ", "private-credential").contains("private-credential"))
+        val quoted = quoteTerminalPreview(diagnostic.preview("private-literal\nAuthorization: Basic synthetic-wire-value", 256))
+        assertFalse(quoted.contains("private-literal") || quoted.contains("synthetic-wire-value"))
+    }
+
+    @Test
+    fun `doctor diagnostic inventories bound iteration and retain masking after rejected additions`() {
+        val oversized = object : AbstractCollection<String>() {
+            override val size: Int = 4097
+            override fun iterator(): Iterator<String> = error("oversized inventory must not be iterated")
+        }
+        assertFailsWith<DoctorDiagnosticAdmissionException> { DoctorDiagnostics(oversized) }
+        DoctorDiagnostics(listOf("a".repeat(1024 * 1024)))
+        assertFailsWith<DoctorDiagnosticAdmissionException> { DoctorDiagnostics(listOf("a".repeat(1024 * 1024 + 1))) }
+        val diagnostic = DoctorDiagnostics((0 until 4096).map { "private-$it-end" })
+        diagnostic.include("private-0-end")
+        assertFailsWith<DoctorDiagnosticAdmissionException> { diagnostic.include("additional-private-key") }
+        assertFalse(diagnostic.text("private-0-end").contains("private-0-end"))
+        val interrupted = InterruptedException("private inventory failure")
+        val foreign = object : AbstractCollection<String>() {
+            override val size: Int get() = throw interrupted
+            override fun iterator(): Iterator<String> = error("foreign inventory must not be iterated")
+        }
+        assertSame(interrupted, assertFailsWith<InterruptedException> { DoctorDiagnostics(foreign) })
+        val fatal = AssertionError("private fatal inventory")
+        val fatalValues = object : AbstractCollection<String>() {
+            override val size: Int get() = throw fatal
+            override fun iterator(): Iterator<String> = error("fatal inventory must not be iterated")
+        }
+        assertSame(fatal, assertFailsWith<AssertionError> { DoctorDiagnostics(fatalValues) })
+    }
+
+    @Test
+    fun `connectivity failure diagnostics omit raw header credentials and exception chains`() {
+        val secret = "synthetic-private-token-Ā"
+        val cause = IllegalStateException("private provider body")
+        val failure = IllegalArgumentException("invalid header value: \"Bearer $secret\"", cause)
+        val check = doctorConnectivityFailure("models.example.test", failure)
+        assertEquals("LLM connectivity", check.name)
+        assertFalse(check.passed)
+        assertTrue(check.detail.contains("models.example.test"))
+        assertTrue(check.detail.contains("Check BASE_URL, API_KEY, proxy, and network access."))
+        for (privateText in listOf(secret, "Bearer", "invalid header value", cause.message.orEmpty())) {
+            assertFalse(check.detail.contains(privateText))
+        }
+        assertSame(cause, failure.cause)
+        assertTrue(failure.message.orEmpty().contains(secret))
+    }
+
+    @Test
+    fun `connectivity diagnostic failures preserve interruption cancellation and fatal errors`() {
+        val interrupted = InterruptedException("private interruption")
+        assertSame(interrupted, assertFailsWith<InterruptedException> {
+            doctorConnectivityFailure("models.example.test", interrupted)
+        })
+        val cancelled = java.util.concurrent.CancellationException("private cancellation")
+        assertSame(cancelled, assertFailsWith<java.util.concurrent.CancellationException> {
+            doctorConnectivityFailure("models.example.test", cancelled)
+        })
+        val fatal = AssertionError("private fatal error")
+        assertSame(fatal, assertFailsWith<AssertionError> {
+            doctorConnectivityFailure("models.example.test", fatal)
+        })
+        val wasInterrupted = Thread.interrupted()
+        try {
+            Thread.currentThread().interrupt()
+            val ordinary = IllegalArgumentException("private ordinary failure")
+            val propagated = assertFailsWith<InterruptedException> {
+                doctorConnectivityFailure("models.example.test", ordinary)
+            }
+            assertSame(ordinary, propagated.cause)
+            assertTrue(Thread.currentThread().isInterrupted)
+        } finally {
+            Thread.interrupted()
+            if (wasInterrupted) Thread.currentThread().interrupt()
+        }
+    }
+
     @Test
     fun `authentication previews escape terminal controls and Unicode formatting`() {
         val text = "login\u009b31m\u202ePASS\u2066\u2028\u2029\u001b\n\"\\"
@@ -87,6 +290,10 @@ class DoctorTest {
         assertTrue(report.checks.any { it.name == "C sanitizers" && !it.passed && it.detail.contains("libasan") })
         assertFalse(report.checks.any { it.name == "ACP harness" || it.name == "ACP preflight" })
         assertFalse(report.checks.any { it.name.startsWith("LLM") })
+        assertEquals(listOf(DoctorToolKind.JAVA, DoctorToolKind.C_COMPILER, DoctorToolKind.MAKE,
+            DoctorToolKind.READELF, DoctorToolKind.STRINGS, DoctorToolKind.PYTHON, DoctorToolKind.ANGR,
+            DoctorToolKind.GHIDRA, DoctorToolKind.SANITIZERS, DoctorToolKind.BUBBLEWRAP, DoctorToolKind.OUTPUT,
+            DoctorToolKind.PROFILE, DoctorToolKind.LIMITS), report.checks.map { it.toolsOnlyKind })
     }
 
     @Test
@@ -203,5 +410,53 @@ class DoctorTest {
         assertTrue(report.checks.any { it.name == "LLM base URL" && !it.passed })
         assertTrue(report.checks.any { it.name == "LLM API key" && !it.passed })
         assertTrue(report.checks.any { it.name == "LLM model" && !it.passed })
+    }
+
+    @Test
+    fun `ACP failure context retains captured admission metadata from its selected typed witness`() {
+        for (stage in listOf("CONSTRUCTING", "ADMITTED")) {
+            val admission = "mount-admission-v1 stage=$stage initialMounts=29 initialControls=1 owner=false initialFast=true"
+            val witness = fixedMountAdmissionWitness(admission)
+            val context = acpDoctorFailureContext(AgentExecutionException(
+                AgentFailure(AgentFailureKind.CONFIGURATION, "PRIVATE failure"), witness))
+            assertTrue("mountEventRecord=${requireNotNull(witness.message)}" in context, context)
+            assertTrue("mountAdmissionRecord=$admission" in context, context)
+            assertTrue("recordedCleanup=MISSING" in context, context)
+            assertTrue(context.length <= 1024 && context.all { it.code in 32..126 })
+            assertFalse("PRIVATE" in context || "/" in context, context)
+        }
+        val legacy = acpDoctorFailureContext(AgentExecutionException(
+            AgentFailure(AgentFailureKind.CONFIGURATION, "PRIVATE failure"), fixedMountWitness()))
+        assertTrue("mountAdmissionRecord=MISSING" in legacy, legacy)
+    }
+
+    @Test
+    fun `ACP admission display refuses forged private oversized and noncanonical records without extra graph traversal`() {
+        val valid = "mount-admission-v1 stage=ADMITTED initialMounts=29 initialControls=1 owner=false initialFast=true"
+        val invalid = listOf("PRIVATE /private/path", valid + " private=PRIVATE", valid.replace("29", "-1"),
+            valid.replace("29", "029"), valid.replace("ADMITTED", "UNKNOWN"), valid.repeat(4))
+        for (admission in invalid) {
+            val context = acpDoctorFailureContext(AgentExecutionException(
+                AgentFailure(AgentFailureKind.CONFIGURATION, "PRIVATE failure"), fixedMountAdmissionWitness(admission)))
+            assertTrue("mountEventRecord=mount-event-v1" in context, context)
+            assertTrue("mountAdmissionRecord=MISSING" in context, context)
+            assertFalse("PRIVATE" in context || "/" in context, context)
+        }
+        val forged = Throwable(valid).apply { addSuppressed(fixedMountAdmissionWitness(valid)) }
+        val context = acpDoctorFailureContext(AgentExecutionException(
+            AgentFailure(AgentFailureKind.CONFIGURATION, "PRIVATE failure"), forged))
+        assertTrue("mountEventRecord=MISSING" in context && "mountAdmissionRecord=MISSING" in context, context)
+        assertFalse(valid in context, context)
+    }
+
+    /** Constructs an owned diagnostic Throwable only; no scope, descriptor, syscall or context. */
+    private fun fixedMountAdmissionWitness(admission: String): Throwable {
+        val phase = Class.forName("decompengine.acp.RuntimePrivateControlScope\$MountEventPhase")
+        val outcome = Class.forName("decompengine.acp.RuntimePrivateControlScope\$MountEventOutcome")
+        val type = Class.forName("decompengine.acp.RuntimePrivateControlScope\$MountEventDiagnostic")
+        val constructor = type.getDeclaredConstructor(phase, outcome, java.lang.Integer::class.java,
+            java.lang.Integer::class.java, java.lang.Integer::class.java, String::class.java).apply { isAccessible = true }
+        return constructor.newInstance(phase.enumConstants.single { (it as Enum<*>).name == "CHECKPOINT" },
+            outcome.enumConstants.single { (it as Enum<*>).name == "EVENT" }, 1, 10, null, admission) as Throwable
     }
 }

@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import { copyFile, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import test from 'node:test';
@@ -23,8 +23,26 @@ function check(root, expectedStatus = 0) {
   return result;
 }
 
+async function expectedFailure(root, scenario, message) {
+  const snapshot = () => Promise.all(files.map(async path => ({
+    path, sha256: createHash('sha256').update(await readFile(join(root, path))).digest('hex'),
+  })));
+  const before = await snapshot();
+  const result = check(root, 1);
+  assert.equal(result.signal, null);
+  assert.match(result.stderr, message);
+  assert.deepEqual(await snapshot(), before, 'The rejected check must preserve every fixture input');
+  const diagnostic = result.stderr.replaceAll(root, '<fixture>').trim();
+  assert.ok(diagnostic.length > 0 && Buffer.byteLength(diagnostic, 'utf8') <= 4096);
+  console.log(`expected-web-api-rejection: ${JSON.stringify({
+    scenario, exit: result.status, signal: result.signal, diagnostic, fixtureFilesUnchanged: true,
+  })}`);
+}
+
 test('the generated API drift gate rejects schema and both TypeScript output changes', async () => {
-  const root = await mkdtemp(join(tmpdir(), 'decomp-api-drift-test-'));
+  const parent = join(sourceRoot, 'build');
+  await mkdir(parent, { recursive: true });
+  const root = await mkdtemp(join(parent, 'decomp-api-drift-test-'));
   try {
     for (const path of files) {
       const target = join(root, path);
@@ -40,7 +58,7 @@ test('the generated API drift gate rejects schema and both TypeScript output cha
     for (const path of [types, schemaModule]) {
       const original = await readFile(path);
       await writeFile(path, Buffer.concat([original, Buffer.from('\n// unintended drift\n')]));
-      assert.match(check(root, 1).stderr, /Generated contract drift:/);
+      await expectedFailure(root, path === types ? 'changed-typescript-types' : 'changed-typescript-schema', /Generated contract drift:/);
       assert.deepEqual(await readFile(path), Buffer.concat([original, Buffer.from('\n// unintended drift\n')]),
         'The check must report drift without silently rewriting the file');
       await writeFile(path, original);
@@ -51,7 +69,7 @@ test('the generated API drift gate rejects schema and both TypeScript output cha
     const changed = JSON.parse(originalSchema);
     changed.definitions.driftProbe = { type: 'string', enum: ['new-contract-case'] };
     await writeFile(source, `${JSON.stringify(changed, null, 2)}\n`);
-    assert.match(check(root, 1).stderr, /Generated contract drift:/);
+    await expectedFailure(root, 'changed-contract-schema', /Generated contract drift:/);
     assert.deepEqual(await readFile(types), await readFile(join(sourceRoot, 'frontend/src/api/generated.ts')),
       'Schema drift must not silently regenerate TypeScript during CI');
     await writeFile(source, originalSchema);
@@ -60,7 +78,7 @@ test('the generated API drift gate rejects schema and both TypeScript output cha
     const unsupported = JSON.parse(originalSchema);
     unsupported.definitions.driftProbe = { type: 'string', minProperties: 1 };
     await writeFile(source, `${JSON.stringify(unsupported, null, 2)}\n`);
-    assert.match(check(root, 1).stderr, /Unsupported schema keyword: minProperties/);
+    await expectedFailure(root, 'unsupported-contract-schema-keyword', /Unsupported schema keyword: minProperties/);
   } finally {
     await rm(root, { recursive: true, force: true });
   }

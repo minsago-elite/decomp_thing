@@ -42,43 +42,38 @@ if [[ ! "$frontend_sha256" =~ ^[0-9a-f]{64}$ ]]; then
   exit 2
 fi
 frontend_stage=$(mktemp -d "$frontend_parent/.decomp-frontend-node.XXXXXX")
-trap 'rm -rf -- "$frontend_stage"' EXIT
+frontend_cache_tmp=''
+trap 'rm -rf -- "$frontend_stage"; if [[ -n "$frontend_cache_tmp" ]]; then rm -f -- "$frontend_cache_tmp"; fi' EXIT
 
-# Only archive bytes are cached. Opt-in cache failures never bypass verification
-# or make the default uncached installation depend on another prerequisite.
-frontend_prepare_cache() {
-  [[ "${FRONTEND_NODE_ARCHIVE_CACHE:-}" == /* && ! -L "$FRONTEND_NODE_ARCHIVE_CACHE" ]] || return 1
-  command -v realpath >/dev/null 2>&1 && command -v cp >/dev/null 2>&1 || return 1
-  local frontend_cache_path frontend_physical_repo
-  frontend_cache_path=$(realpath -m -- "$FRONTEND_NODE_ARCHIVE_CACHE") || return 1
-  frontend_physical_repo=$(cd -- "$frontend_repo_root" && pwd -P) || return 1
-  [[ "$frontend_cache_path" == "$frontend_physical_repo/"* ]] || return 1
-  mkdir -p -m 0700 -- "$frontend_cache_path" || return 1
-  [[ -d "$frontend_cache_path" && ! -L "$frontend_cache_path" && -O "$frontend_cache_path" ]] || return 1
-  printf '%s' "$frontend_cache_path"
-}
-frontend_cache=
-if [[ -n "${FRONTEND_NODE_ARCHIVE_CACHE:-}" ]]; then
-  if ! frontend_cache=$(frontend_prepare_cache); then
-    echo "Node archive cache unavailable; using the pinned download" >&2
-    frontend_cache=
+# Only normal Actions installation steps opt in. Docker/standalone callers keep
+# their original download behavior and need no writable repository cache.
+frontend_cache_dir=''
+frontend_cached_archive=''
+case "${DECOMP_FRONTEND_NODE_DOWNLOAD_CACHE:-0}" in
+  0) ;;
+  1)
+    frontend_cache_dir="$frontend_repo_root/build/frontend-node-downloads"
+    if [[ -L "$frontend_repo_root/build" || -L "$frontend_cache_dir" ]]; then
+      echo "frontend Node download cache directories must not be links" >&2
+      exit 2
+    fi
+    mkdir -p -- "$frontend_cache_dir"
+    frontend_cached_archive="$frontend_cache_dir/$frontend_archive"
+    ;;
+  *) echo "DECOMP_FRONTEND_NODE_DOWNLOAD_CACHE must be 0 or 1" >&2; exit 2 ;;
+esac
+frontend_archive_from_cache=false
+if [[ -n "$frontend_cache_dir" && ( -e "$frontend_cached_archive" || -L "$frontend_cached_archive" ) ]]; then
+  if [[ ! -f "$frontend_cached_archive" || -L "$frontend_cached_archive" ]]; then
+    echo "frontend Node download cache must contain a regular archive, not a link" >&2
+    exit 2
   fi
-fi
-frontend_archive_cached=false
-if [[ -n "$frontend_cache" && -f "$frontend_cache/$frontend_archive" && ! -L "$frontend_cache/$frontend_archive" ]]; then
-  # Authenticate the fresh staged copy, not mutable cache metadata or a cache-hit flag.
-  if cp -- "$frontend_cache/$frontend_archive" "$frontend_stage/$frontend_archive" 2>/dev/null && (
-    cd -- "$frontend_stage"
-    printf '%s  %s\n' "$frontend_sha256" "$frontend_archive" | sha256sum --check --strict >/dev/null 2>&1
-  ); then
-    frontend_archive_cached=true
-  else
-    rm -f -- "$frontend_stage/$frontend_archive"
-  fi
-fi
-if [[ "$frontend_archive_cached" != true ]]; then
+  cp -- "$frontend_cached_archive" "$frontend_stage/$frontend_archive"
+  frontend_archive_from_cache=true
+else
   curl --fail --silent --show-error --location --proto '=https' --proto-redir '=https' \
-    --tlsv1.2 --retry 3 --connect-timeout 15 --max-time 180 \
+    --tlsv1.2 --retry 3 --retry-all-errors --retry-max-time 300 \
+    --connect-timeout 15 --max-time 180 \
     "https://nodejs.org/download/release/v${frontend_node_version}/${frontend_archive}" \
     --output "$frontend_stage/$frontend_archive"
 fi
@@ -86,18 +81,6 @@ fi
   cd -- "$frontend_stage"
   printf '%s  %s\n' "$frontend_sha256" "$frontend_archive" | sha256sum --check --strict
 )
-# Publish only bytes that passed the unchanged exact checksum above. A private
-# directory inside the owned cache keeps incomplete copies away from readers.
-if [[ -n "$frontend_cache" && "$frontend_archive_cached" != true ]]; then
-  if ! (
-    frontend_cache_stage=$(mktemp -d "$frontend_cache/.publish.XXXXXX") || exit 1
-    trap 'rm -rf -- "$frontend_cache_stage"' EXIT
-    cp -- "$frontend_stage/$frontend_archive" "$frontend_cache_stage/archive" || exit 1
-    mv -T -- "$frontend_cache_stage/archive" "$frontend_cache/$frontend_archive" || exit 1
-  ); then
-    echo "Node archive cache publication failed; verified installation continues" >&2
-  fi
-fi
 tar --extract --gzip --no-same-owner --file "$frontend_stage/$frontend_archive" \
   --directory "$frontend_stage"
 frontend_extracted="$frontend_stage/node-v${frontend_node_version}-linux-${frontend_arch}"
@@ -121,6 +104,34 @@ if [[ "$("$frontend_extracted/bin/node" "$frontend_extracted/lib/node_modules/np
   echo "downloaded npm version differs from the reviewed pin" >&2
   exit 1
 fi
+# Publish only after all archive/tool/repository pins pass, through an owned
+# same-directory temporary file. A concurrent winner is never overwritten.
+if [[ -n "$frontend_cache_dir" ]]; then
+  if [[ "$frontend_archive_from_cache" == false ]]; then
+    frontend_cache_tmp=$(mktemp "$frontend_cache_dir/.${frontend_archive}.XXXXXX")
+    cp -- "$frontend_stage/$frontend_archive" "$frontend_cache_tmp"
+    frontend_cache_move_status=0
+    mv -T --no-clobber -- "$frontend_cache_tmp" "$frontend_cached_archive" || frontend_cache_move_status=$?
+    if [[ -e "$frontend_cache_tmp" ]]; then
+      # No-clobber exit status varies. Accept only a complete reviewed winner.
+      if [[ ! -f "$frontend_cached_archive" || -L "$frontend_cached_archive" ]]; then
+        echo "frontend Node archive cache could not be published" >&2
+        exit 1
+      fi
+      (
+        cd -- "$frontend_cache_dir"
+        printf '%s  %s\n' "$frontend_sha256" "$frontend_archive" | sha256sum --check --strict
+      )
+    elif [[ "$frontend_cache_move_status" != 0 ]]; then
+      exit "$frontend_cache_move_status"
+    fi
+    rm -f -- "$frontend_cache_tmp"
+    frontend_cache_tmp=''
+  fi
+  printf 'Verified reviewed Node archive %s (download cache hit: %s)\n' \
+    "$frontend_archive" "$frontend_archive_from_cache"
+fi
+
 mv -T --no-clobber -- "$frontend_extracted" "$frontend_destination"
 if [[ -e "$frontend_extracted" ]]; then
   echo "frontend Node destination appeared during installation; existing state was preserved" >&2
