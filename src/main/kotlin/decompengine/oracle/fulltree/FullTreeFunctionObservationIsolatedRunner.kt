@@ -1043,6 +1043,7 @@ internal object KotlinSystemdCgroupCommandLauncher {
         operationDeadline: ContainedCommandOperationDeadline? = null,
         readOnlyReportsDirectory: LinuxFileIdentity? = null,
         requireTerminalResourceEventProof: Boolean = false,
+        executableSnapshots: List<ContainedCommandExecutableAlias> = emptyList(),
     ): KotlinSystemdCgroupCommandExecution {
         val cleanup = ContainedCommandCleanup()
         val secret = ByteArray(32).also(SECURE_RANDOM::nextBytes)
@@ -1065,8 +1066,15 @@ internal object KotlinSystemdCgroupCommandLauncher {
             require(runtimeMounts.size in 1..MAXIMUM_RUNTIME_MOUNTS)
             val additionalMounts = java.util.List.copyOf(runtimeMounts)
             val additionalInputs = java.util.List.copyOf(readOnlyInputs)
+            val executableAliases = java.util.List.copyOf(executableSnapshots)
+            require(executableAliases.isEmpty() || requireTerminalResourceEventProof) {
+                "executable snapshots require authenticated terminal resource proof"
+            }
+            requireContainedCommandExecutableAliases(additionalInputs, executableAliases)
+            val baseRuntimeProvider = "kotlin-lease-contained-command-runtime-v${if (requireTerminalResourceEventProof) 3 else if (resources.processorCount == 1) 1 else 2}"
             val runtimeClosureSha256 = OracleArtifacts.sha256(OracleJson.canonicalBytes(JsonObject(mapOf(
-                "provider" to JsonPrimitive("kotlin-lease-contained-command-runtime-v${if (requireTerminalResourceEventProof) 3 else if (resources.processorCount == 1) 1 else 2}"),
+                "provider" to JsonPrimitive(if (executableAliases.isEmpty()) baseRuntimeProvider else
+                    "kotlin-lease-contained-command-runtime-owned-executable-v1"),
                 "configurationSha256" to JsonPrimitive(configuration.canonicalSha256),
                 "deploymentClosureSha256" to JsonPrimitive(deploymentClosureSha256),
                 "runtimeMounts" to JsonArray(additionalMounts.map { it.canonicalIdentity() }),
@@ -1090,7 +1098,10 @@ internal object KotlinSystemdCgroupCommandLauncher {
                 (if (resources.processorCount == 1) emptyMap() else mapOf("resources" to resources.json())) +
                 (if (requireTerminalResourceEventProof) mapOf("terminalResourcePolicySha256" to
                     JsonPrimitive(ContainedCommandTerminalResourceEvidence.policySha256),
-                    "commandRequestProvider" to JsonPrimitive("kotlin-contained-command-request-v3")) else emptyMap()))))
+                    "commandRequestProvider" to JsonPrimitive("kotlin-contained-command-request-v3")) else emptyMap()) +
+                (if (executableAliases.isEmpty()) emptyMap() else mapOf(
+                    "baseRuntimeProvider" to JsonPrimitive(baseRuntimeProvider),
+                    "executableAliases" to JsonArray(executableAliases.map { it.json() }))))))
             val runtime = AuthenticatedObservationRuntime.open(configuration)
             cleanup.runtime = runtime
             for (input in additionalInputs) {
@@ -1111,6 +1122,7 @@ internal object KotlinSystemdCgroupCommandLauncher {
                     }
                 }
                 cleanup.inputs.forEach { it.verifyUnchanged(label) }
+                requireContainedCommandExecutableAliases(additionalInputs, executableAliases)
                 operationDeadline?.requireCurrent()
             }
             val effectiveResources = IsolatedObservationResources.forContainedCommand(resources)
@@ -1185,7 +1197,7 @@ internal object KotlinSystemdCgroupCommandLauncher {
                 cleanup.boundary = boundary
                 val unit = boundary.launchContainedCommandKeeper(
                     unitName, nonce, request.sha256, runTree, effectiveResources,
-                    additionalInputs.map { it.path }, additionalMounts, secret, writableRoot, retainedDirectories,
+                    additionalInputs.map { it.path }, additionalMounts, secret, writableRoot, retainedDirectories, executableAliases,
                 ) {
                     verifyInputs("immediately before contained keeper launch")
                     requirePrepared(false)
@@ -4165,11 +4177,12 @@ private class TrustedObservationBoundary(
         secret: ByteArray,
         writableRoot: Path,
         retainedDirectories: ContainedCommandRetainedDirectories,
+        executableAliases: List<ContainedCommandExecutableAlias>,
         beforeLaunch: () -> Unit,
     ): ManagedObservationUnit {
         require(unitName.matches(PRODUCTION_KOTLIN_BOOT_UNIT_NAME) && nonce.matches(SHA256))
         require(requestSha256.matches(SHA256) && secret.size == 32)
-        val worker = buildContainedCommandKeeperCommand(runTree.path, nonce, requestSha256, readOnlyInputs, runtimeMounts, writableRoot, retainedDirectories)
+        val worker = buildContainedCommandKeeperCommand(runTree.path, nonce, requestSha256, readOnlyInputs, runtimeMounts, writableRoot, retainedDirectories, executableAliases)
         return launchPrebuilt(
             unitName, runTree.path, nonce, resources, worker,
             ObservationBootProcessTopology.SINGLE_KOTLIN_COMMAND_KEEPER, null, beforeLaunch,
@@ -4507,6 +4520,7 @@ private class TrustedObservationBoundary(
         additionalMounts: List<FullTreeFunctionObservationRuntimeMount>,
         writableRoot: Path,
         retainedDirectories: ContainedCommandRetainedDirectories,
+        executableAliases: List<ContainedCommandExecutableAlias>,
     ): List<String> {
         require(runDirectory == writableRoot || runDirectory.parent == writableRoot) {
             "contained command control directory must belong to its retained writable root"
@@ -4532,6 +4546,13 @@ private class TrustedObservationBoundary(
             }
         }
         requireSyntheticMountPlan(mounts, mountedInputs, writableRoot, runDirectory)
+        executableAliases.forEach { alias ->
+            require(alias.source in mountedInputs && alias.destination in readOnlyInputs &&
+                mounts.any { mount -> alias.destination.startsWith(mount.destination) &&
+                    mount.source.resolve(mount.destination.relativize(alias.destination)) == alias.destination }) {
+                "executable alias must overlay exactly one existing same-path runtime input"
+            }
+        }
         mounts.forEachIndexed { index, mount ->
             require(!pathsOverlap(mount.source, writableRoot)) { "contained command runtime source overlaps writable output" }
             require(mounts.drop(index + 1).none { pathsOverlap(mount.destination, it.destination) }) {
@@ -4553,6 +4574,7 @@ private class TrustedObservationBoundary(
             parents.forEach { addAll(listOf("--dir", it.toString())) }
             mounts.forEach { addAll(listOf("--ro-bind", it.source.toString(), it.destination.toString())) }
             mountedInputs.forEach { addAll(listOf("--ro-bind", it.toString(), it.toString())) }
+            executableAliases.forEach { addAll(listOf("--ro-bind", it.source.toString(), it.destination.toString())) }
             addAll(listOf("--bind", writableRoot.toString(), writableRoot.toString()))
             addAll(retainedDirectories.mountArguments(writableRoot))
             val privateRuntime = runDirectory.resolve(RUNTIME_DIRECTORY).toString()

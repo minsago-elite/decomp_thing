@@ -36,19 +36,24 @@ runtime, missing enforcement, or uncertain cleanup cannot produce accepted evide
 A nondumpable Java worker derives the command from the registered profile and invokes
 the pinned compiler through the native bounded process helper. Host root can appear as
 an unmapped foreign UID inside the user namespace; that UID is never treated as trusted
-root. The controller keeps its original runtime/input authentication. The worker copies
-the compiler through a no-follow regular-file descriptor into its private output tree,
-with a streaming byte bound, single-link/non-writable-by-group-or-other checks, and
-owner-only read/execute permissions. It authenticates the copy against the request's
-compiler digest and retains an ordinary `StableControlFile` kernel lease on the exact
-owned copy it executes through result capture. Foreign source ownership grants no
-execution authority: only a digest-identical owned copy can reach launch. Compiler
-materialization consumes the existing finite scratch/file/time budgets; none are raised.
-The request's compiler path continues to identify the configured runtime source; the
-worker replaces only argv[0] with `output/compiler-runtime/<compiler basename>`.
-All profile arguments, including `-B` pointing to the
-original authenticated toolchain closure, remain unchanged. No old proof recreates a
-live permit. The worker retains the raw
+root. The controller keeps its original runtime/input authentication and streams at
+most 64 MiB of pinned compiler bytes into its private host request directory, never
+into the **noexec** leased scratch. Both the original and its owner-read/execute-only,
+single-linked copy are authenticated and retained as stable inputs. An explicit
+read-only executable alias overlays the copy at the original runtime compiler path.
+It must join two identical pinned input records, target an existing host-root executable
+inside a same-path runtime tree, and retain authenticated terminal-resource enforcement.
+The alias mapping and both pins are bound into the distinct
+`kotlin-lease-contained-command-runtime-owned-executable-v1` preimage together with its
+base terminal-runtime provider. Calls without aliases keep their original runtime bytes.
+The worker acquires the ordinary `StableControlFile` kernel lease on the exact owned
+inode at the original compiler path through result capture. Scratch remains noexec,
+no writable executable mount is added, and no arbitrary foreign owner is trusted.
+The request and complete command, including argv[0], profile flags and `-B` toolchain
+closure, remain unchanged. Host staging must itself support execution or the attempt
+fails closed; the bounded staging file is removed only before launch or after proven
+process/scope absence. Resource limits are not raised. No old proof recreates a live
+permit. The worker retains the raw
 exit or signal, bounded diagnostic hashes, and a regular ELF `ET_REL` object's bytes
 and hash. Timeout/output failures have no claimed raw exit status; empty retained logs
 in those cases mean no captured bytes were available, not that nothing was emitted.
@@ -93,10 +98,14 @@ with no omitted, skipped, duplicated, failed, or cached controls. Missing
 configured authority fails the lane. Local protocol and
 worker tests are useful implementation evidence; they do not replace that hosted run.
 The required inventory also includes a direct worker user-namespace regression for
-both built-ins: an actual host-root compiler inode is mounted over a staged toolchain's
-compiler, the test records its namespace UID and UID/GID maps, and compilation must
-succeed through the owned-copy handoff. The configured exact-snapshot positive separately
-asserts root ownership and the runtime compiler pin before its real contained invocation.
+both built-ins: an actual host-root compiler inode is materialized before namespace
+entry, its owned snapshot overlays the staged toolchain's compiler, and the test records
+both namespace-visible UIDs and UID/GID maps. Compilation must succeed through the
+owned-copy handoff, without changing the compiler command. A second required regression
+bind-remounts output noexec inside an isolated mount namespace and uses a different UID
+map; both built-ins must still compile. Unaliased foreign compilers and digest-substituted
+executables refuse. The configured exact-snapshot positive separately asserts root
+ownership and the runtime compiler pin before its real contained invocation.
 These controls do not claim complete #1827 qualification until the hosted lane passes.
 
 ## Outstanding acceptance blockers

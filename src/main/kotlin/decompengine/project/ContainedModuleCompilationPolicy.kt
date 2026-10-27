@@ -76,6 +76,7 @@ internal class VerifiedContainedModuleCompilation private constructor(private va
             val temporary = Files.createTempDirectory(canonicalProject, ".module-compilation-",
                 PosixFilePermissions.asFileAttribute(PosixFilePermissions.fromString("rwx------")))
             val requestPath = temporary.resolve("request.json")
+            val executableSnapshotPath = temporary.resolve("compiler")
             var launched = false
             var absenceProved = true
             var lease: FullTreeDiskScratchLease? = null
@@ -124,6 +125,9 @@ internal class VerifiedContainedModuleCompilation private constructor(private va
                 var workerResult: ContainedModuleCompilerResult? = null
                 val execution = acquired.withCurrentOperationRunRootForContainedExecution(rootToken) { borrowed ->
                     val compilerInput = configuration.verifyCompilerInput()
+                    val executableSnapshot = materializeOwnedModuleCompilerSnapshot(compilerInput, executableSnapshotPath) {
+                        checkCancellation(); deadline.requireCurrent()
+                    }
                     snapshot.requireCurrent { deadline.requireCurrent() }
                     deadline.requireCurrent()
                     checkCancellation()
@@ -134,7 +138,7 @@ internal class VerifiedContainedModuleCompilation private constructor(private va
                             "${configuration.managerControlGroup.trimEnd('/')}/app.slice/$unit", nonce,
                             containedModuleCompilerCommand(configuration.isolation, requestPath, request),
                             mapOf("LANG" to "C.UTF-8", "LC_ALL" to "C.UTF-8", "TZ" to "UTC"),
-                            listOf(KotlinSystemdCgroupCommandInput(requestPath, request.canonicalBytes.size.toLong(), request.sha256), compilerInput),
+                            listOf(KotlinSystemdCgroupCommandInput(requestPath, request.canonicalBytes.size.toLong(), request.sha256), compilerInput, executableSnapshot),
                             configuration.compilerRuntimeMounts,
                             KotlinSystemdCgroupCommandResources(deadline.remainingWholeSecondsMillis(60_000), 512L * 1024 * 1024,
                                 128, ContainedModuleCompilerRequest.MAXIMUM_OBJECT_BYTES), configuration.configurationSha256,
@@ -147,7 +151,8 @@ internal class VerifiedContainedModuleCompilation private constructor(private va
                                 attachment = receipt.canonicalBytes
                             }, controlDirectoryName = moduleCompileControl(request.nonce),
                             readOnlyStateDirectory = checkNotNull(stateIdentity), operationDeadline = deadline,
-                            requireTerminalResourceEventProof = true)
+                            requireTerminalResourceEventProof = true,
+                            executableSnapshots = listOf(ContainedCommandExecutableAlias(executableSnapshot.path, compilerInput.path)))
                     } catch (failure: KotlinSystemdCgroupCommandExecutionException) {
                         // Polling sleeps clear interruption before the launcher wraps it. Keep that
                         // cancellation visible while allowing owned cleanup to run without a set flag.
@@ -258,6 +263,7 @@ internal class VerifiedContainedModuleCompilation private constructor(private va
                 }
                 if (!launched || absenceProved) {
                     cleanup { Files.deleteIfExists(requestPath) }
+                    cleanup { Files.deleteIfExists(executableSnapshotPath) }
                     cleanup { Files.deleteIfExists(temporary) }
                 }
                 if (!failedBeforeCleanup) primaryFailure?.let { throw it }
