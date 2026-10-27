@@ -98,6 +98,10 @@ class ManagedGitRepositoriesTest {
             { service.history(jobId, "repository_missing", null, 0, 1) },
             { service.diff(jobId, "repository_missing", GitDiffScope.UNSTAGED, null, null) },
             { service.refs(jobId, "repository_missing", 0, 1) },
+            { service.worktrees(jobId, "repository_missing") },
+            { service.activeWorker(jobId, "repository_missing") },
+            { service.export(jobId, "repository_missing", "a".repeat(40)) },
+            { service.provenance(jobId, "repository_missing", "a".repeat(40)) },
         )) assertEquals("NOT_FOUND", assertFailsWith<ManagedGitException> { read() }.code)
         assertEquals(before, f.storageTree())
         assertFalse(f.store.resolve(".git-runtime").exists())
@@ -126,6 +130,10 @@ class ManagedGitRepositoriesTest {
                 { restarted.history(jobId, operation.repositoryId, null, 0, 1) },
                 { restarted.diff(jobId, operation.repositoryId, GitDiffScope.UNSTAGED, null, null) },
                 { restarted.refs(jobId, operation.repositoryId, 0, 1) },
+                { restarted.worktrees(jobId, operation.repositoryId) },
+                { restarted.activeWorker(jobId, operation.repositoryId) },
+                { restarted.export(jobId, operation.repositoryId, "a".repeat(40)) },
+                { restarted.provenance(jobId, operation.repositoryId, "a".repeat(40)) },
             )) assertEquals("STORAGE_UNAVAILABLE", assertFailsWith<ManagedGitException> { read() }.code)
             assertEquals(before, f.storageTree())
             assertTrue(f.store.resolve("$jobId/git/staging/${operation.operationId}").exists())
@@ -156,8 +164,21 @@ class ManagedGitRepositoriesTest {
             assertNull(restarted.history(jobId, completed.repositoryId, null, 0, 1).first)
             assertTrue(restarted.diff(jobId, completed.repositoryId, GitDiffScope.UNSTAGED, null, null).listing.files.isEmpty())
             assertTrue(restarted.refs(jobId, completed.repositoryId, 0, 1).second.entries.isEmpty())
+            assertEquals(1, restarted.worktrees(jobId, completed.repositoryId).size)
+            assertFalse(restarted.activeWorker(jobId, completed.repositoryId))
+            for (read in listOf<() -> Any>(
+                { restarted.export(jobId, completed.repositoryId, "a".repeat(40)) },
+                { restarted.provenance(jobId, completed.repositoryId, "a".repeat(40)) },
+            )) assertEquals("NOT_FOUND", assertFailsWith<ManagedGitException> { read() }.code)
         }
         assertEquals(before, f.storageTree())
+        // Missing runtime policy is an operator/startup concern, never a reason for GET to rebuild it.
+        Files.delete(f.store.resolve(".git-runtime/policy-source-only-v1/repository.git/info/exclude"))
+        val damaged = f.storageTree()
+        assertEquals("REPOSITORY_UNAVAILABLE", assertFailsWith<ManagedGitException> {
+            restarted.workspace(jobId, completed.repositoryId)
+        }.code)
+        assertEquals(damaged, f.storageTree())
     }
 
     @Test fun `workspace reads refuse missing or changed tracking policy without recreating scratch`() {

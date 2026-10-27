@@ -622,6 +622,10 @@ higher precedence, so a pattern such as `!secret.key` would re-include a credent
 therefore enforced on its own terms. `GitTrackingPolicy.excluded` evaluates paths with
 `check-ignore --no-index` in a server-owned scratch repository whose only ignore source is the
 policy, so no repository file can override it. Staging refuses any path it excludes.
+Startup or mutation-owned runtime preparation creates this policy repository before reads. Workspace
+reads only use the prepared policy; missing policy storage is unavailable, not silently recreated.
+A completed recovery sweep can leave a worktree conflict available for read-only inspection; viewing
+it does not retry recovery. After operator repair, sweep explicitly before reviewing new guards.
 
 ### Server-owned Git adapter
 
@@ -912,10 +916,18 @@ Selecting that entry for `git.unstage` unstages the deletion, and selecting it f
 stages the replacement. Its staged deletion remains protected by overlap checks: an untracked
 replacement does not allow another selected path to silently unstage the deletion.
 
-The server checks guards and selection at admission under the job lock and again by the single
-operation executor immediately before Git runs. Commits additionally acquire Git's `index.lock`
-and `HEAD.lock`, revalidate, and capture the reviewed index into a private immutable tree. The
-commit uses that tree and the reviewed parent, never the later live index. Publication locks the
+The server checks guards and selection at admission under the job lock. Mutation worktree
+versions additionally bind bounded exact content/mode commitments for non-ignored status paths;
+the metadata-only pagination fingerprint is not staging authorization. Status must be complete.
+Stage/unstage acquire Git's `index.lock`, `HEAD.lock` and the symbolic HEAD's branch lock before
+final validation. They mutate a private index and atomically publish it under those locks, so an
+external Git writer cannot invalidate overlap checks between validation and mutation. Unstage
+resets against the guarded parent object ID, not mutable `HEAD`. Stage captures selected file/link
+bytes, verifies their reviewed commitments, and writes exact blob/index entries from the capture;
+later worktree edits never supply unreviewed bytes to Git. Content reads share a 512 MiB bound and
+fail closed on drift, unsupported entries or overflow; partial private mutations are not published.
+Commits acquire `index.lock` and `HEAD.lock`, revalidate, and capture the reviewed index into a
+private immutable tree. The commit uses that tree and the reviewed parent, never the later live index. Publication locks the
 target ref, compares the reviewed HEAD under that lock, and atomically replaces the ref. Busy
 writers or a changed parent are refused; no unreviewed index entries can enter the commit.
 Because read-only status suppresses submodules, commit validation separately reads a bounded,
@@ -961,8 +973,8 @@ never turns that commit into an apparently uncommitted failure. Other post-publi
 report `recovery-required`, retaining the exact published `resultObjectId` when known, rather
 than reading a possibly later writer's HEAD as this operation's result.
 
-After a restart, stage and unstage operations become `interrupted`, since the index may have been
-partly updated and status must be re-read. Commit locks have private inode witnesses persisted
+After a restart, stage and unstage operations become `interrupted`: their index publication may
+have completed, so status must be re-read; they are never replayed. All mutation locks have private inode witnesses persisted
 before the public lock names are linked, so owned locks can be reclaimed even with empty or
 partial contents. A replacement inode is never reclaimed on the basis of matching contents when
 a witness exists. Complete operation markers from older versions remain recoverable; legacy
@@ -1020,6 +1032,13 @@ resume answers `409 WORKTREE_BUSY` while Git owns it. Replays of retained workfl
 remain read-only and do not schedule another worker. At most one Git operation runs per job,
 on a single executor.
 
+A branch switch also holds the destination's common-repository Git ref lock through final
+validation and checkout, so an external ref writer cannot substitute a new tip after the size
+and identity checks. A busy destination is `WORKTREE_BUSY`; symbolic branch aliases are refused
+as `SWITCH_REFUSED` because locking an alias would not pin its referent. Restart reclaims only
+inode-witnessed owned locks and does not report a later external destination move as a completed
+checkout of the reviewed object.
+
 `GET G/worktrees` (`gitWorktrees`) lists the primary and linked work trees with HEAD, dirty state,
 version and owner. `GET G/worktrees/{worktreeId}` returns that work tree's `gitWorkspace`.
 `G/status`, `G/history` and `G/diff` accept `worktree=<id>`, and every mutation names its target
@@ -1059,7 +1078,10 @@ represented. The provenance envelope travels separately and is never inside the 
 
 `GitSourceExports.verify` checks an export independently. It recomputes every entry's Git blob ID
 from the archive bytes and compares the set with the commit tree; it needs no remote and trusts no
-ref name. The reconstruction pipeline's own deterministic `source-tree.zip` is unchanged: it is
+ref name. It verifies this deterministic STORED ZIP profile, not arbitrary ZIP variants: local
+headers, the complete matching central directory and end record must reproduce exactly, with no
+trailing bytes. Truncated directories and non-ZIP payloads fail even for an empty expected tree;
+a complete empty ZIP succeeds. The reconstruction pipeline's own deterministic `source-tree.zip` is unchanged: it is
 still built from recorded snapshots, and its packager still refuses any `.git` path. A Git
 repository is never an input to it.
 
@@ -1216,8 +1238,13 @@ repository again. The view has these parts:
 - **History.** History pages with **Older commits**. Each commit shows whether it is mapped to a
   reconstruction revision and that revision's acceptance. A mapped commit links to the recorded
   source revision and attempt. Inspecting a commit shows its files, provenance, export digest and
-  verification, and offers the export download and a tag form.
-- **Branches and work trees.** Branches show their exact object IDs. Switching is disabled, with
+  verification, and offers the export download and a tag form. Changed files and immutable-target
+  tagging appear as soon as the diff pages arrive; optional provenance/export has a separate pending
+  or unavailable state and cannot delay them. Obsolete export results cannot replace a new selection.
+- **Branches and work trees.** Branches show their exact object IDs. The current marker comes from
+  the selected tree's HEAD, not the repository-scoped primary-tree ref marker. Branches checked out
+  elsewhere are labelled explicitly and cannot be switched to or deleted; the selected current
+  branch has no switch-self/delete controls. Switching is disabled, with
   the reason shown, while the work tree has changes, status is incomplete or an operation is running.
   The `active-worker` status notice projects the backend lease for the selected work tree: any active
   attempt holds the primary tree, while only the owning attempt holds a linked tree. Switching and

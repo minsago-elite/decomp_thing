@@ -257,6 +257,7 @@ data class GitInvocation(
             "status", "read-tree", "fsck", "cat-file", "ls-files", "ls-tree", "check-ignore", "update-ref",
             "log", "diff", "diff-tree", "add", "rm", "reset", "commit", "switch", "worktree", "rev-list", "write-tree", "commit-tree",
             "fetch", "push", "ls-remote", "merge", "merge-base", "checkout-index",
+            "hash-object", "update-index",
         )
         val TRANSPORT_SUBCOMMANDS = setOf("fetch", "push", "ls-remote")
         val VARIABLES = setOf("GIT_AUTHOR_NAME", "GIT_AUTHOR_EMAIL", "GIT_AUTHOR_DATE",

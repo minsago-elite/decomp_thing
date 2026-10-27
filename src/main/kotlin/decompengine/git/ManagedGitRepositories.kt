@@ -167,7 +167,7 @@ class ManagedGitException(val code: String, message: String) : RuntimeException(
 /** Crash points for recovery tests; a crash leaves records and staging exactly as a process death would. */
 enum class GitOperationCrashPoint {
     AFTER_RUNNING, AFTER_STAGING, BEFORE_PUBLISH, AFTER_PUBLISH, AFTER_SNAPSHOT_CAPTURE,
-    AFTER_REMOTE_MUTATION, AFTER_REMOTE_AUDIT,
+    AFTER_REMOTE_MUTATION, AFTER_REMOTE_AUDIT, AFTER_WORKSPACE_VALIDATION, AFTER_WORKSPACE_CAPTURE,
 }
 internal class SimulatedGitCrash : Error("simulated process death")
 
@@ -378,7 +378,7 @@ class ManagedGitRepositories(
     }
 
     /**
-     * Resolved storage of one registered work tree. Linked work trees share the primary repository
+     * Prepared runtime and existing storage of one registered work tree. Linked work trees share the primary repository
      * as their common directory and have a private administrative directory beneath it.
      */
     private data class Located(val runner: GitCommandRunner, val record: GitRepositoryRecord, val gitDir: Path, val workTree: Path, val commonDir: Path,
@@ -1148,6 +1148,7 @@ class ManagedGitRepositories(
         var current = queued
         var worktreeAddAttempted = false
         var lease: AutoCloseable? = null
+        var switchBranchLock: AutoCloseable? = null
         var publishedCommit: String? = null
         var publicationAttempted = false
         try {
@@ -1158,17 +1159,42 @@ class ManagedGitRepositories(
             val runner = requireRunner()
             current = synchronized(lock) { advance(directory, current, GitOperationState.RUNNING, RUNNING_WORKSPACE_MESSAGE) }
             crash(GitOperationCrashPoint.AFTER_RUNNING)
+            val switchRequest = (queued.request as? GitRefRequest)?.takeIf { it.action == GitOperationAction.SWITCH }
+            switchRequest?.refId?.let { refId ->
+                val branch = branchFor(runner, located, refId).first
+                GitStorage.directories(directory, "staging", queued.operationId)
+                GitStorage.forceDirectory(staging.parent)
+                switchBranchLock = GitRefOperations.lockSwitchBranch(runner, located.commonDir, branch, staging)
+            }
             // Admission cannot race this final activity check: retain exclusive ownership through publication.
-            val observation = synchronized(lock) { validate(runner, located, queued.request) }
+            synchronized(lock) { validate(runner, located, queued.request) }
             crash(GitOperationCrashPoint.BEFORE_PUBLISH)
             var result: String? = null
             var message = completedMessage(queued.action)
             when (val request = queued.request) {
                 is GitStageRequest -> {
-                    val entries = GitWorkspaceMutations.select(located.record, observation, request.fileIds, request.stage, located.worktreeId)
-                    if (request.stage) GitWorkspaceMutations.stage(runner, located.gitDir, located.workTree, entries)
-                    else GitWorkspaceMutations.unstage(runner, located.gitDir, located.workTree, entries,
-                        observation.head.state == GitHeadState.UNBORN)
+                    GitStorage.deleteTree(staging)
+                    GitStorage.directories(directory, "staging", queued.operationId)
+                    GitStorage.forceDirectory(staging.parent)
+                    GitStorage.forceDirectory(directory)
+                    GitWorkspaceMutations.withWorkspaceLocks(runner, located.gitDir, staging, queued.operationId, located.record.objectFormat, located.commonDir) {
+                        // External Git writers obey index.lock, not our JVM lease. Validation,
+                        // private mutation and atomic publication all live inside that lock.
+                        val reviewed = synchronized(lock) { validate(runner, located, request) }
+                        val entries = GitWorkspaceMutations.select(located.record, reviewed, request.fileIds, request.stage, located.worktreeId)
+                        crash(GitOperationCrashPoint.AFTER_WORKSPACE_VALIDATION)
+                        val index = staging.resolve("reviewed-index")
+                        if (Files.exists(located.gitDir.resolve("index"), NOFOLLOW_LINKS)) {
+                            Files.copy(located.gitDir.resolve("index"), index)
+                        }
+                        if (request.stage) GitWorkspaceMutations.stage(runner, located.gitDir, located.workTree, entries, reviewed, staging, index) {
+                            crash(GitOperationCrashPoint.AFTER_WORKSPACE_CAPTURE)
+                        } else GitWorkspaceMutations.unstage(runner, located.gitDir, located.workTree, entries, request.guards.expectedHeadObjectId, index)
+                        if (GitRepositoryInspector.head(runner, located.gitDir, reviewed.objectFormat) != reviewed.head) {
+                            GitWorkspaceMutations.refuse("REF_CHANGED", "The reviewed HEAD changed. Nothing was staged; read the current state first.")
+                        }
+                        GitWorkspaceMutations.publishIndex(located.gitDir, index)
+                    }
                 }
                 is GitCommitRequest -> {
                     GitStorage.deleteTree(staging)
@@ -1207,6 +1233,10 @@ class ManagedGitRepositories(
                 }
                 else -> error("not a workspace request")
             }
+            // Release before persisting a terminal record: a process death must not leave a lock
+            // attached to an operation that restart reconciliation would otherwise skip.
+            switchBranchLock?.close()
+            switchBranchLock = null
             synchronized(lock) { current = finish(current, GitOperationState.COMPLETED, null, message, result); persist(directory, current) }
             clearRemoteAudit(current)
         } catch (_: SimulatedGitCrash) {
@@ -1225,6 +1255,8 @@ class ManagedGitRepositories(
                 }
                 else -> "STORAGE_FAILED" to "Repository storage could not be written. Read the current status before trying again."
             }
+            switchBranchLock?.close()
+            switchBranchLock = null
             synchronized(lock) {
                 val state = when (code) {
                     "INTERRUPTED" -> GitOperationState.INTERRUPTED
@@ -1252,9 +1284,13 @@ class ManagedGitRepositories(
                 try { persist(directory, current); clearRemoteAudit(current) } catch (_: Exception) { /* reconciled after restart */ }
             }
         } finally {
-            try { GitStorage.deleteTree(staging) } catch (_: Exception) { /* removed by reconciliation */ }
-            synchronized(lock) { active -= queued.operationId; cancellations -= queued.operationId; progress -= queued.operationId }
-            lease?.close()
+            try {
+                switchBranchLock?.close()
+                try { GitStorage.deleteTree(staging) } catch (_: Exception) { /* removed by reconciliation */ }
+            } finally {
+                synchronized(lock) { active -= queued.operationId; cancellations -= queued.operationId; progress -= queued.operationId }
+                lease?.close()
+            }
         }
     }
 
@@ -1272,8 +1308,14 @@ class ManagedGitRepositories(
                 objectId
             }
             GitOperationAction.SWITCH -> {
-                val branch = request.refId?.let { branchFor(runner, located, it).first.removePrefix("refs/heads/") }
-                GitRefOperations.switch(runner, located.gitDir, located.workTree, branch, request.objectId)
+                val destination = request.refId?.let { branchFor(runner, located, it) }
+                if (destination != null) {
+                    // Persist the exact pinned target even for guard-covered switches that omit objectId.
+                    // Restart must not mistake a later external branch move for our checkout result.
+                    val staging = root.resolve(operation.jobId).resolve("git/staging").resolve(operation.operationId)
+                    GitStorage.replaceAtomically(staging.resolve("switch-target"), destination.second.toByteArray(Charsets.US_ASCII))
+                }
+                GitRefOperations.switch(runner, located.gitDir, located.workTree, destination?.first?.removePrefix("refs/heads/"), request.objectId)
                 crash(GitOperationCrashPoint.AFTER_PUBLISH)
                 GitRepositoryInspector.head(runner, located.gitDir, format).objectId
             }
@@ -1368,8 +1410,17 @@ class ManagedGitRepositories(
         (operation.request as? GitRefRequest)?.let { return reconcileRef(jobId, operation, it) }
         (operation.request as? GitSyncRequest)?.let { return reconcileSync(jobId, operation, it) }
         if (operation.action != GitOperationAction.COMMIT) {
+            // Stage/unstage use the same witnessed Git locks as commits. Reclaim only inodes
+            // proven to belong to this operation; never replay an interrupted index publication.
+            val record = repositories(jobId).singleOrNull { it.repositoryId == operation.repositoryId }
+            if (record != null) {
+                val commonDir = root.resolve(jobId).resolve("git/repositories").resolve(record.repositoryId).resolve(GIT_DIR)
+                val gitDir = if (operation.worktreeId == record.worktreeId) commonDir else commonDir.resolve("worktrees").resolve(operation.worktreeId)
+                GitWorkspaceMutations.reclaimCommitLocks(gitDir,
+                    root.resolve(jobId).resolve("git/staging").resolve(operation.operationId), operation.operationId, commonDir)
+            }
             return finish(operation, GitOperationState.INTERRUPTED, "INTERRUPTED",
-                "Interrupted by a server restart. The index may be partly updated; read the current status before a new request.")
+                "Interrupted by a server restart. Review the current index before a new request.")
         }
         val guards = (operation.request as? GitRetainedCommit)?.guards
         val head = try {
@@ -1431,14 +1482,24 @@ class ManagedGitRepositories(
                 }
                 GitOperationAction.SWITCH -> {
                     val gitDir = if (operation.worktreeId == record.worktreeId) commonDir else commonDir.resolve("worktrees").resolve(operation.worktreeId)
+                    val staging = root.resolve(jobId).resolve("git/staging").resolve(operation.operationId)
+                    GitWorkspaceMutations.reclaimCommitLocks(gitDir, staging, operation.operationId, commonDir)
                     val head = GitRepositoryInspector.head(runner, gitDir, format)
                     val target = request.refId?.let { refId ->
                         GitReads.allRefs(runner, commonDir, format).singleOrNull { GitWorkspaceVersions.refId(record.repositoryId, it.name) == refId }?.name
                     }
+                    if (target != null && Files.exists(commonDir.resolve("$target.lock"), NOFOLLOW_LINKS)) {
+                        return recovery("SWITCH_LOCK_REQUIRES_REVIEW", "The destination branch has a Git lock whose ownership could not be confirmed. Inspect its writers before switching again.")
+                    }
+                    val targetFile = staging.resolve("switch-target")
+                    val expectedTarget = request.objectId ?: if (Files.isRegularFile(targetFile, NOFOLLOW_LINKS))
+                        format.objectIdOrNull(GitStorage.read(targetFile, 128).toString(Charsets.US_ASCII)) else null
                     when {
                         head.state == GitHeadState.UNBORN && head.refName != null && target == null && request.refId != null ->
                             recovery("REF_DELETED", "HEAD names a branch that no longer exists (unborn). Choose a branch or commit before new work.")
-                        target != null && head.refName == target -> completed("The switch finished before the server restarted.", head.objectId)
+                        target != null && head.refName == target && (expectedTarget == null || head.objectId != expectedTarget) ->
+                            recovery("REF_CHANGED", "The destination's reviewed object cannot be confirmed after restart. Inspect the checkout before any new request.", head.objectId)
+                        target != null && head.refName == target -> completed("The switch finished before the server restarted.", expectedTarget)
                         request.objectId != null && head.state == GitHeadState.DETACHED && head.objectId == request.objectId ->
                             completed("The switch finished before the server restarted.", head.objectId)
                         head.objectId == request.guards.expectedHeadObjectId && (request.guards.expectedRefId == null ||
@@ -1633,9 +1694,11 @@ class ManagedGitRepositories(
     private fun requireRunner(): GitCommandRunner = when (val current = availability) {
         is GitAvailability.Unavailable -> throw ManagedGitException("CAPABILITY_UNAVAILABLE", current.message)
         is GitAvailability.Available -> synchronized(lock) {
-            runner ?: try { current.runner(GitEnvironment.prepare(root.resolve(".git-runtime"))) } catch (_: Exception) {
+            runner ?: try {
+                current.runner(GitEnvironment.prepare(root.resolve(".git-runtime"))).also { GitTrackingPolicy.prepare(it) }
+            } catch (_: Exception) {
                 throw ManagedGitException("CAPABILITY_UNAVAILABLE", "The server-owned Git runtime directory is unavailable.")
-            }.also { GitTrackingPolicy.prepare(it); runner = it }
+            }.also { runner = it }
         }
     }
 

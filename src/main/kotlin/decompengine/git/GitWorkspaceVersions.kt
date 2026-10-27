@@ -21,7 +21,11 @@ object GitWorkspaceVersions {
         digest("repository_v_", "${record.repositoryId}\n${record.operationId}\n${observation.refsTruncated}\n" +
             refs(observation).joinToString("") { "${it.name}\u0000${it.objectId}\n" })
 
-    fun worktreeVersion(observation: GitWorkspaceObservation): String = digest("worktree_v_", observation.statusDigest)
+    /** Mutation guards bind exact status-path bytes/modes as well as the read-only stat cursor. */
+    fun worktreeVersion(observation: GitWorkspaceObservation): String = digest("worktree_v_",
+        observation.statusDigest + "\n" + observation.contentFingerprints.entries.joinToString("") { (path, content) ->
+            "${GitStorage.sha256(path.bytes)}\u0000$content\n"
+        })
 
     fun headRefId(record: GitRepositoryRecord, observation: GitWorkspaceObservation): String? =
         observation.head.takeIf { it.state == GitHeadState.ATTACHED }?.refName?.let { refId(record.repositoryId, it) }
