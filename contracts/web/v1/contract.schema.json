@@ -1130,6 +1130,10 @@
               "type": "null"
             }
           ]
+        },
+        "profileId": {
+          "description": "Earlier v1 servers reported only this always-null placeholder; it carries no reconstruction profile authority.",
+          "type": "null"
         }
       },
       "required": [
@@ -1140,10 +1144,13 @@
         "requiredTools",
         "input",
         "limitsAdjustable",
-        "harness",
-        "reconstruction"
+        "harness"
       ],
       "additionalProperties": false,
+      "oneOf": [
+        { "required": ["reconstruction"] },
+        { "required": ["profileId"] }
+      ],
       "allOf": [
         {
           "if": {
@@ -2796,8 +2803,7 @@
         "workflow",
         "inputRevisionId",
         "harnessCapabilityId",
-        "limits",
-        "scope"
+        "limits"
       ],
       "additionalProperties": false
     },

@@ -218,8 +218,9 @@ export function WorkflowLaunch({ job, runtime, basePath, session, onRefresh, onS
     workflow: selected.workflows[0]!, inputRevisionId: inputRevisionId === '' ? null : inputRevisionId,
     harnessCapabilityId: selected.launch.harnessCapabilityId,
     limits: selected.launch.limitsAdjustable ? { ...values } : { ...selected.limits },
-    // Only the context budget can narrow a reconstruction; the planner keeps every module.
-    scope: contextRange ? { maxContextCharacters: context } : null,
+    // Only submit scope when the server advertises it. Older v1 servers reject even an unknown null field.
+    // The context budget can narrow a reconstruction; the planner keeps every module.
+    ...(contextRange ? { scope: { maxContextCharacters: context } } : {}),
   } : null;
   const signature = body ? JSON.stringify([job.jobId, job.version, body]) : null;
 

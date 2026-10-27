@@ -28,6 +28,32 @@ function mismatchContract(page = 1) {
 }
 
 describe('generated v1 contract pipeline', () => {
+  it('accepts the pre-reconstruction v1 admission record without inferring a profile', () => {
+    const text = fixture('legacy-run-before-reconstruction');
+    for (const mode of ['producer', 'response'] as const) {
+      const document = decodeContract(text, { mode });
+      expect(document).toEqual(JSON.parse(text));
+      if (document.kind !== 'run') throw Error('Expected run fixture');
+      expect(document.data.configuration?.reconstruction).toBeUndefined();
+      // A historical placeholder can never claim profile authority or replace a malformed current record.
+      for (const configuration of [
+        { ...document.data.configuration, profileId: 'generated-c-make-v1' },
+        { ...document.data.configuration, reconstruction: { profileId: 'generated-c-make-v1' } },
+      ]) {
+        expect(() => decodeContract(JSON.stringify({ ...document, data: { ...document.data, configuration } }), { mode }))
+          .toThrow(ApiClientError);
+      }
+    }
+  });
+  it('encodes a scope-less start with the same closed request shape accepted by earlier v1 servers', () => {
+    const text = fixture('legacy-request-before-reconstruction');
+    const document = decodeContract(text, { mode: 'producer' });
+    if (document.kind !== 'workflowStartRequest') throw Error('Expected start fixture');
+    expect(encodeRequest('workflowStartRequest', document.data)).toBe(JSON.stringify(JSON.parse(text).data));
+    for (const scope of ['all', { modules: ['module_a'] }, { maxContextCharacters: 60000 }]) {
+      expect(() => encodeRequest('workflowStartRequest', { ...document.data, scope } as never)).toThrow(ApiClientError);
+    }
+  });
   it.each(['run', 'runs', 'snapshot', 'bootstrap'])('accepts the pre-configuration v1 %s response unchanged', kind => {
     const text = fixture(`legacy-${kind}-before-configuration`);
     // Frozen older-server wire bytes, not a new producer fixture with fields deleted at runtime.

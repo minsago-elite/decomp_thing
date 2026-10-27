@@ -77,6 +77,19 @@ it('labels omitted older-server harness facts as not reported without inferring 
   expect(transport.post).not.toHaveBeenCalled();
 });
 
+it('does not send unsupported scope fields to an older v1 server', async () => {
+  transport.post.mockResolvedValue(run({ harnessCapabilityId: 'evidence-only' }));
+  mount({ capabilities: fixture<Bootstrap>('legacy-bootstrap-before-configuration').capabilities });
+  fireEvent.click(screen.getByLabelText('Reconstruction: evidence only'));
+  expect(screen.queryByLabelText('Maximum context characters per module')).toBeNull();
+  fireEvent.click(start(/Start Reconstruction/));
+  expect(transport.post).toHaveBeenCalledOnce();
+  const body = transport.post.mock.calls[0]![3];
+  expect(Object.keys(body).sort()).toEqual(['harnessCapabilityId', 'inputRevisionId', 'limits', 'workflow']);
+  expect(body).not.toHaveProperty('scope');
+  await waitFor(() => expect(screen.getByRole('link', { name: 'Open the started attempt' })).toBeTruthy());
+});
+
 it('starts from server defaults with one guarded keyed request and opens the recorded attempt', async () => {
   let answer!: (value: unknown) => void;
   transport.post.mockImplementation(() => new Promise(resolve => { answer = resolve; }));
@@ -92,7 +105,7 @@ it('starts from server defaults with one guarded keyed request and opens the rec
   const [kind, path, requestKind, body, settings] = transport.post.mock.calls[0]!;
   expect([kind, path, requestKind]).toEqual(['run', '/jobs/' + job.jobId + '/runs', 'workflowStartRequest']);
   expect(body).toEqual({ workflow: 'reconstruct', inputRevisionId: null, harnessCapabilityId: 'evidence-only',
-    limits: { wallClockMs: '7200000', idleMs: '1200000', maxOutputBytes: '4294967296', maxToolCalls: '0' }, scope: null });
+    limits: { wallClockMs: '7200000', idleMs: '1200000', maxOutputBytes: '4294967296', maxToolCalls: '0' } });
   expect(settings).toMatchObject({ csrfToken: session.csrf(), ifMatch: '"job_version_1"' });
   expect(settings.idempotencyKey).toMatch(/^[A-Za-z0-9_-]{16,128}$/);
   expect(start(/Start Reconstruction/)).toHaveProperty('disabled', true);
@@ -118,7 +131,7 @@ it('validates lowered bounds locally and never submits a raised or inconsistent 
   expect(start()).toHaveProperty('disabled', false);
   fireEvent.click(start());
   expect(transport.post.mock.calls[0]?.[3]).toEqual({ workflow: 'explore', inputRevisionId: null, harnessCapabilityId: null,
-    limits: { wallClockMs: '1000', idleMs: '1000', maxOutputBytes: '1024', maxToolCalls: '0' }, scope: null });
+    limits: { wallClockMs: '1000', idleMs: '1000', maxOutputBytes: '1024', maxToolCalls: '0' } });
 });
 
 it('requires a revision recorded by this job for repair and keeps its fixed limits read-only', async () => {

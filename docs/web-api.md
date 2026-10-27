@@ -518,8 +518,9 @@ are never rewritten. Neither kind of record qualifies a real provider invocation
 
 ### Reconstruction scope
 
-Reconstruction options report `launch.reconstruction` (null for other workflows): the
-reconstruction `profileId`, `planner: "deterministic"`, `moduleSelection: "all-planned"`,
+New servers report `launch.reconstruction` for reconstruction options (null for other
+workflows). This additive v1 field may be omitted by earlier servers; omission does not
+establish a profile or authorize scope controls. When present, it describes the reconstruction `profileId`, `planner: "deterministic"`, `moduleSelection: "all-planned"`,
 the planner's scale bounds (`plannerMaximumEntities`, `plannerMaximumDependencyEdges`,
 `plannerMaximumWorkUnits`) and `maximumFunctionsPerModule`, and for the agent option the
 per-module `contextCharacters` range (`default`, `minimum`; null for evidence-only). The
@@ -528,14 +529,20 @@ start cannot select, exclude or reorder modules or supply a plan. Planner bounds
 limits: a binary beyond them stops during planning rather than reconstructing partially.
 Large-binary support and harness availability remain separate feature-level dependencies.
 
-A start's `scope` is `null` or `{"maxContextCharacters": "<uint64>"}`; any other field,
+A start's optional `scope` is `null` or `{"maxContextCharacters": "<uint64>"}`; omission and
+null both mean the server default. The form omits the field when no context range is
+advertised, so it can still start work on older v1 servers that reject unknown fields. Any other field,
 unquoted number or non-object is `422 VALIDATION_FAILED`. Admission refuses a scope outside
 the option's range, or on an option without a context range, as `422
 RECONSTRUCTION_SCOPE_UNAVAILABLE`. A scope is part of the start intent (absent for scope-less
 starts, so earlier receipts keep their digest). The attempt records the exact effective values
 in `configuration.reconstruction`: `profileId`, the profile's `profileSha256` and the
 `maxContextCharacters` the run used (the default when none was requested; null for
-evidence-only). The agent reconstructor runs with that recorded budget.
+evidence-only). The agent reconstructor runs with that recorded budget. Earlier v1
+servers instead reported the always-null `configuration.profileId` placeholder. Consumers
+accept that shape without inferring a profile or budget; a non-null legacy placeholder or
+malformed reconstruction record is still refused. Durable storage decodes the earlier shape
+as unrecorded reconstruction provenance while preserving the rest of the admission record.
 
 ### Module progress and retained plans
 

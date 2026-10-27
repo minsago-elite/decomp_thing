@@ -877,6 +877,14 @@
     {
       "file": "fixtures/invalid-module-progress-plan-override.json",
       "valid": false
+    },
+    {
+      "file": "fixtures/legacy-run-before-reconstruction.json",
+      "valid": true
+    },
+    {
+      "file": "fixtures/legacy-request-before-reconstruction.json",
+      "valid": true
     }
   ]
 }
