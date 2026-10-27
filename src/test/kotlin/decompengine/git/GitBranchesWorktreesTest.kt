@@ -2,6 +2,8 @@ package decompengine.git
 
 import java.nio.file.Files
 import java.nio.file.Path
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.TimeUnit
 import kotlin.io.path.exists
 import kotlin.test.Test
 import kotlin.test.assertContentEquals
@@ -20,7 +22,8 @@ class GitBranchesWorktreesTest {
         val store: Path = Files.createDirectories(repositories.root.resolve("store"))
         val snapshot: Path = Files.createDirectories(store.resolve("0123456789abcdef0123456789abcdef/reports/runs/run_1/source-tree"))
         var hook: (GitOperationCrashPoint) -> Unit = {}
-        val runs = mutableMapOf("run_1" to false, "run_2" to false)
+        val runs = java.util.concurrent.ConcurrentHashMap(mapOf("run_1" to false, "run_2" to false))
+        val leases = GitWorkspaceLeases()
         private val opened = mutableListOf<ManagedGitRepositories>()
         init {
             mapOf("CMakeLists.txt" to "project(fixture C)\n", "src/main.c" to "int main(void) { return 0; }\n").forEach { (name, text) ->
@@ -30,7 +33,8 @@ class GitBranchesWorktreesTest {
         fun open() = ManagedGitRepositories(store, GitRuntime.detect(), { _, run, revision ->
             GitSourceSnapshot(snapshot, run, revision, "a".repeat(64), mapOf("src/main.c" to GitSourceCommitment(
                 GitSourceCopy.digestOf(snapshot.resolve("src/main.c")), Files.size(snapshot.resolve("src/main.c")))))
-        }, policy = GitRepositoryPolicy(defaultBranch = "trunk"), crash = { hook(it) }, activity = { runs.toMap() }).also(opened::add)
+        }, policy = GitRepositoryPolicy(defaultBranch = "trunk"), crash = { hook(it) }, activity = { runs.toMap() },
+            workspaceLeases = leases).also(opened::add)
         override fun close() { opened.forEach { it.close() }; repositories.close() }
     }
 
@@ -297,6 +301,164 @@ class GitBranchesWorktreesTest {
         assertNull(GitRefOperations.refObject(f.repositories.runner, f.gitDir(), GitObjectFormat.SHA1, "refs/heads/experiment"))
         val retried = run(GitRefRequest(GitOperationAction.WORKTREE_ADD, primary, guards().second, name = "experiment", objectId = base))
         assertEquals(GitOperationState.COMPLETED, retried.state, retried.message)
+    }
+
+    @Test fun `checkout and removal exclude workflow admission in both orders`(): Unit {
+        for (action in listOf(GitOperationAction.SWITCH, GitOperationAction.WORKTREE_REMOVE)) Fixture().use { f ->
+            val base = f.prepare()
+            val primary = service.workspace(jobId, repositoryId).worktreeId
+            val target = if (action == GitOperationAction.WORKTREE_REMOVE) {
+                run(GitRefRequest(GitOperationAction.WORKTREE_ADD, primary, guards().second, objectId = base, runId = "run_1")).worktreeId
+            } else primary
+            fun request() = GitRefRequest(action, target, guards(target).second,
+                objectId = base.takeIf { action == GitOperationAction.SWITCH })
+            val entered = CountDownLatch(1); val release = CountDownLatch(1)
+            f.hook = { if (it == GitOperationCrashPoint.BEFORE_PUBLISH) {
+                entered.countDown(); check(release.await(10, TimeUnit.SECONDS))
+            } }
+            val admitted = service.requestWorkspace(jobId, repositoryId, request(), "lease_order_git_first")
+            try {
+                assertTrue(entered.await(10, TimeUnit.SECONDS))
+                // This is after the final activity check and before the actual file-replacing command.
+                assertNull(f.leases.tryWorkflowAdmission(jobId))
+                assertNotNull(f.leases.tryWorkflowAdmission("other-job")).close()
+            } finally { release.countDown() }
+            assertTrue(service.awaitIdle(60_000))
+            assertEquals(GitOperationState.COMPLETED, service.operation(jobId, repositoryId, admitted.operation.operationId).state)
+            f.hook = {}
+            val nextTarget = if (action == GitOperationAction.WORKTREE_REMOVE) {
+                run(GitRefRequest(GitOperationAction.WORKTREE_ADD, primary, guards().second, objectId = base, runId = "run_1")).worktreeId
+            } else primary
+            // Workflow admission first: even before an active attempt is published, Git cannot run.
+            assertNotNull(f.leases.tryWorkflowAdmission(jobId)).use {
+                val operation = run(GitRefRequest(action, nextTarget, guards(nextTarget).second,
+                    objectId = base.takeIf { action == GitOperationAction.SWITCH }))
+                assertEquals(GitOperationState.FAILED, operation.state)
+                assertEquals("ACTIVE_RUN", operation.failureCode)
+                f.runs["run_1"] = true // durable activity is published before releasing admission ownership
+            }
+            refused("ACTIVE_RUN", GitRefRequest(action, nextTarget, guards(nextTarget).second,
+                objectId = base.takeIf { action == GitOperationAction.SWITCH }))
+            f.runs["run_1"] = false
+            assertEquals(GitOperationState.COMPLETED, run(GitRefRequest(action, nextTarget, guards(nextTarget).second,
+                objectId = base.takeIf { action == GitOperationAction.SWITCH })).state)
+        }
+    }
+
+    @Test fun `branch deletion compares the reviewed tip even if the branch moves after validation`(): Unit = Fixture().use { f ->
+        val base = f.prepare()
+        val primary = service.workspace(jobId, repositoryId).worktreeId
+        run(GitRefRequest(GitOperationAction.BRANCH_CREATE, primary, guards().second, name = "reviewed", objectId = base))
+        val moved = f.repositories.git("--git-dir=${f.gitDir()}", "commit-tree", "-p", base, "-m", "unique unmerged tip", "$base^{tree}").trim()
+        f.hook = { if (it == GitOperationCrashPoint.BEFORE_PUBLISH) {
+            f.repositories.git("--git-dir=${f.gitDir()}", "update-ref", "refs/heads/reviewed", moved, base)
+        } }
+        val operation = run(GitRefRequest(GitOperationAction.BRANCH_DELETE, primary, guards().second,
+            refId = refId("refs/heads/reviewed"), objectId = base))
+        assertEquals(GitOperationState.FAILED, operation.state); assertEquals("REF_CHANGED", operation.failureCode)
+        assertEquals(moved, GitRefOperations.refObject(f.repositories.runner, f.gitDir(), GitObjectFormat.SHA1, "refs/heads/reviewed"))
+    }
+
+    @Test fun `work-tree command failure rolls back partial creation and permits retry after restart`(): Unit = Fixture().use { f ->
+        val base = f.prepare()
+        val primary = service.workspace(jobId, repositoryId).worktreeId
+        // A historical object can fit the checkout bounds but contain a filename that the host
+        // cannot materialize. Git creates -b's branch before checkout fails inside worktree add.
+        val blob = f.raw("rev-parse", "$base:src/main.c").trim()
+        f.raw("update-index", "--add", "--cacheinfo", "100644,$blob,${"x".repeat(256)}")
+        val tree = f.raw("write-tree").trim()
+        val historical = f.raw("commit-tree", "-p", base, "-m", "uncheckoutable history", tree).trim()
+        f.raw("read-tree", base)
+        GitRepositoryImport.requireCheckoutBounds(f.repositories.runner, f.gitDir(), historical, GitCheckoutLimits())
+        for (name in listOf("failed-checkout", null)) {
+            val failed = run(GitRefRequest(GitOperationAction.WORKTREE_ADD, primary, guards().second,
+                name = name, objectId = historical))
+            assertEquals(GitOperationState.FAILED, failed.state, failed.message)
+            assertEquals("REPOSITORY_UNAVAILABLE", failed.failureCode)
+            assertFalse(f.gitDir().parent.resolve("worktrees/${failed.worktreeId}").exists())
+            assertFalse(f.gitDir().resolve("worktrees/${failed.worktreeId}").exists())
+            assertFalse(f.raw("worktree", "list", "--porcelain").contains(failed.worktreeId))
+            assertNull(GitRefOperations.refObject(f.repositories.runner, f.gitDir(), GitObjectFormat.SHA1, "refs/heads/failed-checkout"))
+            service.close(); service = f.open()
+            assertEquals(GitOperationState.FAILED, service.operation(jobId, repositoryId, failed.operationId).state)
+            assertEquals(listOf(primary), service.worktrees(jobId, repositoryId).map { it.worktreeId })
+            assertNull(GitRefOperations.refObject(f.repositories.runner, f.gitDir(), GitObjectFormat.SHA1, "refs/heads/failed-checkout"))
+            val retried = run(GitRefRequest(GitOperationAction.WORKTREE_ADD, primary, guards().second, name = name, objectId = base))
+            assertEquals(GitOperationState.COMPLETED, retried.state, retried.message)
+            assertEquals(GitOperationState.COMPLETED, run(GitRefRequest(GitOperationAction.WORKTREE_REMOVE,
+                retried.worktreeId, guards(retried.worktreeId).second)).state)
+            if (name != null) assertEquals(GitOperationState.COMPLETED, run(GitRefRequest(GitOperationAction.BRANCH_DELETE,
+                primary, guards().second, refId = refId("refs/heads/$name"), objectId = base)).state)
+        }
+        assertEquals(base, service.workspace(jobId, repositoryId).observation.head.objectId)
+        assertTrue(service.workspace(jobId, repositoryId).observation.status.entries.isEmpty())
+        assertEquals("int main(void) { return 0; }\n", Files.readString(f.snapshot.resolve("src/main.c")))
+    }
+
+    @Test fun `ordinary work-tree registration failure rolls back allocation and branch across restart`(): Unit = Fixture().use { f ->
+        val base = f.prepare()
+        val primary = service.workspace(jobId, repositoryId).worktreeId
+        val records = f.gitDir().parent.resolve("worktree-records")
+        f.hook = { if (it == GitOperationCrashPoint.AFTER_STAGING) Files.writeString(records, "storage obstruction") }
+        val failed = run(GitRefRequest(GitOperationAction.WORKTREE_ADD, primary, guards().second, name = "experiment", objectId = base))
+        assertEquals(GitOperationState.FAILED, failed.state); assertEquals("STORAGE_FAILED", failed.failureCode)
+        assertFalse(f.gitDir().parent.resolve("worktrees/${failed.worktreeId}").exists())
+        assertNull(GitRefOperations.refObject(f.repositories.runner, f.gitDir(), GitObjectFormat.SHA1, "refs/heads/experiment"))
+        service.close(); Files.delete(records); f.hook = {}; service = f.open()
+        assertEquals(GitOperationState.FAILED, service.operation(jobId, repositoryId, failed.operationId).state)
+        assertEquals(listOf(primary), service.worktrees(jobId, repositoryId).map { it.worktreeId })
+        // No invisible allocation consumes disk or branch names, and the full quota is reusable.
+        repeat(GitRefOperations.MAX_LINKED_WORKTREES) { index ->
+            assertEquals(GitOperationState.COMPLETED, run(GitRefRequest(GitOperationAction.WORKTREE_ADD, primary, guards().second,
+                name = if (index == 0) "experiment" else null, objectId = base)).state)
+        }
+        refused("QUOTA_EXCEEDED", GitRefRequest(GitOperationAction.WORKTREE_ADD, primary, guards().second, objectId = base))
+    }
+
+    @Test fun `failed registration with a moved branch retains recovery ownership until reconciled`(): Unit = Fixture().use { f ->
+        val base = f.prepare()
+        val primary = service.workspace(jobId, repositoryId).worktreeId
+        val records = f.gitDir().parent.resolve("worktree-records")
+        val moved = f.repositories.git("--git-dir=${f.gitDir()}", "commit-tree", "-p", base, "-m", "external", "$base^{tree}").trim()
+        f.hook = { if (it == GitOperationCrashPoint.AFTER_STAGING) {
+            f.repositories.git("--git-dir=${f.gitDir()}", "update-ref", "refs/heads/experiment", moved, base)
+            Files.writeString(records, "storage obstruction")
+        } }
+        val failed = run(GitRefRequest(GitOperationAction.WORKTREE_ADD, primary, guards().second, name = "experiment", objectId = base))
+        assertEquals(GitOperationState.RECOVERY_REQUIRED, failed.state); assertEquals("REF_CONFLICT", failed.failureCode)
+        service.close(); Files.delete(records); f.hook = {}; service = f.open()
+        assertEquals(GitOperationState.RECOVERY_REQUIRED, service.operation(jobId, repositoryId, failed.operationId).state)
+        refused("WORKTREE_BUSY", GitRefRequest(GitOperationAction.WORKTREE_ADD, primary, guards().second, objectId = base))
+        assertEquals(moved, GitRefOperations.refObject(f.repositories.runner, f.gitDir(), GitObjectFormat.SHA1, "refs/heads/experiment"))
+        // An explicit operator repair can be reconciled without forgetting or replaying the failed add.
+        f.repositories.git("--git-dir=${f.gitDir()}", "update-ref", "refs/heads/experiment", base, moved)
+        assertEquals(GitOperationState.COMPLETED, run(GitRefRequest(GitOperationAction.WORKTREE_ADD, primary, guards().second,
+            name = "experiment", objectId = base)).state)
+    }
+
+    @Test fun `exports and verification refuse unsafe portable paths and aliases`(): Unit = Fixture().use { f ->
+        f.prepare()
+        val unsafe = listOf("..\\escaped.txt", "C:\\escaped.txt", "trailing.", "NUL.txt")
+        for (name in unsafe) {
+            Files.writeString(f.workTree().resolve(name), "payload")
+            f.raw("add", "-f", "--", name); f.raw("commit", "-q", "-m", "unsafe file")
+            val head = f.repositories.git("--git-dir=${f.gitDir()}", "rev-parse", "HEAD").trim()
+            assertEquals("REPOSITORY_UNSUPPORTED", assertFailsWith<ManagedGitException> { service.export(jobId, repositoryId, head) }.code)
+            f.raw("rm", "--", name); f.raw("commit", "-q", "-m", "remove unsafe file")
+        }
+        for (names in unsafe.map { listOf(it) } + listOf(listOf("/absolute"), listOf("../escape"), listOf(".GIT/config"),
+            listOf("A.c", "a.c"), listOf("Dir/a", "dir/b"), listOf("é.c", "e\u0301.c"), listOf("a", "a/b"))) {
+            val payload = "payload".toByteArray()
+            val digest = java.security.MessageDigest.getInstance("SHA-1").digest("blob ${payload.size}\u0000".toByteArray() + payload)
+                .joinToString("") { "%02x".format(it) }
+            val output = java.io.ByteArrayOutputStream()
+            java.util.zip.ZipOutputStream(output).use { zip -> names.forEach { name ->
+                zip.putNextEntry(java.util.zip.ZipEntry(name)); zip.write(payload); zip.closeEntry()
+            } }
+            assertFalse(GitSourceExports.verify(output.toByteArray(), GitObjectFormat.SHA1, names.associateWith { digest }), names.toString())
+        }
+        val paths = GitExportPaths()
+        assertTrue(paths.add("src/normal.c")); assertTrue(paths.add("src/other.c")); assertFalse(paths.add("src/normal.c"))
     }
 
     @Test fun `a large file exports within the capture bounds`(): Unit = Fixture().use { f ->

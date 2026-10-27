@@ -59,6 +59,37 @@ class DurableWebWorkflowStartTest {
     }
 
     @Test
+    fun `Git ownership refuses every workflow admission but not retained keyed replay`() = withRoot { root ->
+        val store = JobStore(root); val job = store.createFromUpload("git-lease.elf", elfFixture())
+        val queued = mutableListOf<Runnable>()
+        service(store, executor = Executor(queued::add)).use { service ->
+            service.initializeExistingStorage()
+            val original = version(service, job.id)
+            assertNotNull(service.gitWorkspaceLeases.tryGit(job.id)).use {
+                assertEquals(WebWorkflowAdmission.Unavailable, service.start(job.id, WebWorkflow.RECONSTRUCT))
+                assertEquals(DurableWebWorkflowAdmission.Unavailable("WORKTREE_BUSY"),
+                    service.startDurable(job.id, original, DurableWebWorkflowRequest(WorkflowKind.RECONSTRUCT)))
+                assertCode("WORKTREE_BUSY") { service.requestDurableStart(job.id, original, REQUEST, KEY) }
+                assertTrue(queued.isEmpty())
+                assertTrue(service.gitRunActivity(job.id).values.none { it })
+            }
+            val started = service.requestDurableStart(job.id, original, REQUEST, KEY)
+            assertEquals(1, queued.size)
+            assertEquals(true, service.gitRunActivity(job.id)[started.attempt.runId])
+            assertNotNull(service.gitWorkspaceLeases.tryGit(job.id)).use {
+                assertTrue(service.requestDurableStart(job.id, original, REQUEST, KEY).replayed)
+                assertCode("WORKTREE_BUSY") { service.requestDurableStart(job.id, version(service, job.id), REQUEST, OTHER_KEY) }
+                assertEquals(1, queued.size)
+            }
+            queued.single().run()
+            assertTrue(service.gitRunActivity(job.id).values.none { it })
+            // Corrupt/unavailable workflow ownership must never be interpreted as an empty lease set.
+            Files.writeString(state(root, job.id), "not a workflow record")
+            assertEquals("WORKTREE_BUSY", assertFailsWith<decompengine.git.ManagedGitException> { service.gitRunActivity(job.id) }.code)
+        }
+    }
+
+    @Test
     fun `public request version and storage CAS stay separate and old replay never dispatches later work`() = withRoot { root ->
         val store = JobStore(root); val job = store.createFromUpload("authored.elf", elfFixture())
         val calls = AtomicInteger()
