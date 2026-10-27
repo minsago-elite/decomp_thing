@@ -95,6 +95,11 @@ accepted source, receipts, and checkpoints remain protected by rollback. These d
 can contain snippets of the candidate source; they are not echoed into the general event log and do not authorize
 acceptance or relax compiler warnings.
 
+[Recorded corpus qualification](benchmarks/qualifications/chatgpt-c-vul-20261027.json) identifies the ten tested
+input hashes, installed application hash, two verified runs per input, archives, and replayable run IDs.
+The repeat round reused all 47 modules with no inference tasks. Its warm continuation scope, initial observation-lock
+failure, verified retry, and unassessed native behavioral equivalence are retained explicitly in the report.
+
 To qualify all numbered inputs through a shared output, with a second round verifying continuation:
 
 ```sh

@@ -1,0 +1,321 @@
+{
+  "schemaVersion": 1,
+  "qualifiedAt": "2026-10-27T04:39:19.719703+00:00",
+  "sourceCommit": "ec0c39c5da60fff4cbf7d736367949cba6c42f6c",
+  "implementationSha256": "7c3add1a5d9d731b73b42742700d46403e9c2010ce4bc2b0555d62213f94606f",
+  "harness": "chatgpt-plan",
+  "command": "llm_bin_patch reconstruct --harness chatgpt-plan <binary> --output <shared-output>",
+  "inputs": [
+    {
+      "name": "binary_01",
+      "sha256": "97b415454ee17ffcfa490d24682e3ce3f66525967e662579582ab9779dcb5ccc"
+    },
+    {
+      "name": "binary_02",
+      "sha256": "2e7ec471ca3866df932dbdca5629773bd185c6a801bfb3cbab9fbef068de6572"
+    },
+    {
+      "name": "binary_03",
+      "sha256": "03951f29f1fa38274c7b5eee039ea873395f01c71243041d806cde9affbbd724"
+    },
+    {
+      "name": "binary_04",
+      "sha256": "47166cd2ce98e0c8423a33bac6b9c03bad948918ef7edbd75580ffb244c72388"
+    },
+    {
+      "name": "binary_05",
+      "sha256": "c06e60d2bf40f9749b467e9f8d83e47eaa39cf79031cf7b838aca1c745aa29d9"
+    },
+    {
+      "name": "binary_06",
+      "sha256": "434dbef615f60fb684b80acb04c4bc897f31a0620b93e37354120abe64820c49"
+    },
+    {
+      "name": "binary_07",
+      "sha256": "378a4106330bffde9777304f5ece595164dbd67fe623ea31ae632022eb6666bf"
+    },
+    {
+      "name": "binary_08",
+      "sha256": "f057e26fcf094af001228b988d60a04d89900ee15e9faf813a2aebb19dec3e29"
+    },
+    {
+      "name": "binary_09",
+      "sha256": "30f8e387af52a5bf3e882d19e57181e4a61b896b43982a1cfd538efbfeb66758"
+    },
+    {
+      "name": "binary_10",
+      "sha256": "b914178fc3a3dc302a029855eebf92207e73155ddd795406f5af6cbe118969f7"
+    }
+  ],
+  "qualification": {
+    "allTenInputsHaveTwoVerifiedRuns": true,
+    "cleanBuildAndArchiveChecks": true,
+    "fullRunHistoryHashChainReplay": true,
+    "allRepeatedModulesCached": true,
+    "agentTasksInSelectedRuns": 0,
+    "activeOutputInput": "binary_01"
+  },
+  "limits": [
+    "These qualification runs start from source/checkpoints generated during the preceding reconstruction fixes. They do not measure cold inference performance.",
+    "Native execution and behavioral equivalence were not assessed; schema-2 recovery accuracy remains unassessed.",
+    "One initial test-runner restart collided with the prior observation lease. Its CLI exited 0 but full history was unavailable; the rejected check is preserved below and replaced only by an independently verified retry."
+  ],
+  "excludedAttempts": [
+    {
+      "round": 1,
+      "input": "binary_01",
+      "exitCode": 0,
+      "status": "failed",
+      "failure": "AssertionError: full run history was not retained",
+      "implementationSha256": "7c3add1a5d9d731b73b42742700d46403e9c2010ce4bc2b0555d62213f94606f"
+    }
+  ],
+  "runs": [
+    {
+      "round": 1,
+      "input": "binary_01",
+      "inputSha256": "97b415454ee17ffcfa490d24682e3ce3f66525967e662579582ab9779dcb5ccc",
+      "archiveSha256": "2f52514281f69aa286fe420097bfdca124ef20e1bd9fc2fe313ac71679fe6cee",
+      "modules": 5,
+      "functions": 10,
+      "globals": 9,
+      "agentTasks": 0,
+      "cachedModules": 5,
+      "runId": "ab480612-6dbd-49dd-9133-c7ad01786389",
+      "attempt": "retry after observation lease released"
+    },
+    {
+      "round": 1,
+      "input": "binary_02",
+      "inputSha256": "2e7ec471ca3866df932dbdca5629773bd185c6a801bfb3cbab9fbef068de6572",
+      "archiveSha256": "aac615475204791df9467f445bcdf39a7a4ab2753c17878b230a07d6ec6210ed",
+      "modules": 5,
+      "functions": 10,
+      "globals": 9,
+      "agentTasks": 0,
+      "cachedModules": 5,
+      "runId": "9d783243-9867-49f2-81cc-68ab7b7c34d3"
+    },
+    {
+      "round": 1,
+      "input": "binary_03",
+      "inputSha256": "03951f29f1fa38274c7b5eee039ea873395f01c71243041d806cde9affbbd724",
+      "archiveSha256": "9237d41bf1d4d01b37df3886273236e9b36ab544de0ac98b769967aa6feab47c",
+      "modules": 5,
+      "functions": 10,
+      "globals": 9,
+      "agentTasks": 0,
+      "cachedModules": 5,
+      "runId": "bfbe328d-f369-4e06-8538-2e8b72d3a41c"
+    },
+    {
+      "round": 1,
+      "input": "binary_04",
+      "inputSha256": "47166cd2ce98e0c8423a33bac6b9c03bad948918ef7edbd75580ffb244c72388",
+      "archiveSha256": "5752bf5746918372c764e45d22de1c3d96630cd10973fee8b0cc588c0fb7cfcd",
+      "modules": 5,
+      "functions": 10,
+      "globals": 10,
+      "agentTasks": 0,
+      "cachedModules": 5,
+      "runId": "bc002a8b-f710-44ac-8695-48160be75f82"
+    },
+    {
+      "round": 1,
+      "input": "binary_05",
+      "inputSha256": "c06e60d2bf40f9749b467e9f8d83e47eaa39cf79031cf7b838aca1c745aa29d9",
+      "archiveSha256": "c6f475b069de9ea3ae56c1bd8a6b1d150a89254ec2d312c97e007050f9252df8",
+      "modules": 4,
+      "functions": 9,
+      "globals": 10,
+      "agentTasks": 0,
+      "cachedModules": 4,
+      "runId": "ca13f1b4-3de9-435a-abf4-b1b04288f919"
+    },
+    {
+      "round": 1,
+      "input": "binary_06",
+      "inputSha256": "434dbef615f60fb684b80acb04c4bc897f31a0620b93e37354120abe64820c49",
+      "archiveSha256": "6c48ba7c16c40db4380801034a33e480077beb903f722618e24d28cb6a8f4ca1",
+      "modules": 5,
+      "functions": 10,
+      "globals": 9,
+      "agentTasks": 0,
+      "cachedModules": 5,
+      "runId": "6fa62e64-275f-44d9-927f-8a1e7bc28a27"
+    },
+    {
+      "round": 1,
+      "input": "binary_07",
+      "inputSha256": "378a4106330bffde9777304f5ece595164dbd67fe623ea31ae632022eb6666bf",
+      "archiveSha256": "2c59d14b11b99bb4f8402190fbc217c4797927267f109d6459719b3be5614d00",
+      "modules": 5,
+      "functions": 10,
+      "globals": 10,
+      "agentTasks": 0,
+      "cachedModules": 5,
+      "runId": "40282998-73d3-4eb4-a361-e136098d677a"
+    },
+    {
+      "round": 1,
+      "input": "binary_08",
+      "inputSha256": "f057e26fcf094af001228b988d60a04d89900ee15e9faf813a2aebb19dec3e29",
+      "archiveSha256": "02f8de77060a3261037045cccb5b00c697d210fa32c2f1de0b3e9393cddc8d9a",
+      "modules": 4,
+      "functions": 9,
+      "globals": 11,
+      "agentTasks": 0,
+      "cachedModules": 4,
+      "runId": "de6f3855-5e8c-43a9-b37d-36407a99b084"
+    },
+    {
+      "round": 1,
+      "input": "binary_09",
+      "inputSha256": "30f8e387af52a5bf3e882d19e57181e4a61b896b43982a1cfd538efbfeb66758",
+      "archiveSha256": "57fbe64ef631a7a5ea5162b6f9283ee05a493913ecc9de21ca07842e22bd5bf7",
+      "modules": 5,
+      "functions": 10,
+      "globals": 10,
+      "agentTasks": 0,
+      "cachedModules": 5,
+      "runId": "c57c29c3-7776-46dd-b149-e226c4937ec1"
+    },
+    {
+      "round": 1,
+      "input": "binary_10",
+      "inputSha256": "b914178fc3a3dc302a029855eebf92207e73155ddd795406f5af6cbe118969f7",
+      "archiveSha256": "e569fb061938403b7a9091ed2e6ea98bc764bfeaebc83e482a5f415ee1cf5adc",
+      "modules": 4,
+      "functions": 9,
+      "globals": 9,
+      "agentTasks": 0,
+      "cachedModules": 4,
+      "runId": "8ca759d2-0397-416c-9083-283dc853f512"
+    },
+    {
+      "round": 2,
+      "input": "binary_01",
+      "inputSha256": "97b415454ee17ffcfa490d24682e3ce3f66525967e662579582ab9779dcb5ccc",
+      "archiveSha256": "2f52514281f69aa286fe420097bfdca124ef20e1bd9fc2fe313ac71679fe6cee",
+      "modules": 5,
+      "functions": 10,
+      "globals": 9,
+      "agentTasks": 0,
+      "cachedModules": 5,
+      "runId": "f061460e-3801-46e5-811d-4de54afd181a"
+    },
+    {
+      "round": 2,
+      "input": "binary_02",
+      "inputSha256": "2e7ec471ca3866df932dbdca5629773bd185c6a801bfb3cbab9fbef068de6572",
+      "archiveSha256": "aac615475204791df9467f445bcdf39a7a4ab2753c17878b230a07d6ec6210ed",
+      "modules": 5,
+      "functions": 10,
+      "globals": 9,
+      "agentTasks": 0,
+      "cachedModules": 5,
+      "runId": "4637ec07-e9b0-4943-943c-991320710577"
+    },
+    {
+      "round": 2,
+      "input": "binary_03",
+      "inputSha256": "03951f29f1fa38274c7b5eee039ea873395f01c71243041d806cde9affbbd724",
+      "archiveSha256": "9237d41bf1d4d01b37df3886273236e9b36ab544de0ac98b769967aa6feab47c",
+      "modules": 5,
+      "functions": 10,
+      "globals": 9,
+      "agentTasks": 0,
+      "cachedModules": 5,
+      "runId": "4cae6bb5-c253-48ad-912a-27007e3d0757"
+    },
+    {
+      "round": 2,
+      "input": "binary_04",
+      "inputSha256": "47166cd2ce98e0c8423a33bac6b9c03bad948918ef7edbd75580ffb244c72388",
+      "archiveSha256": "5752bf5746918372c764e45d22de1c3d96630cd10973fee8b0cc588c0fb7cfcd",
+      "modules": 5,
+      "functions": 10,
+      "globals": 10,
+      "agentTasks": 0,
+      "cachedModules": 5,
+      "runId": "414ae3f2-8f14-49f5-a2b6-a2956ffd338a"
+    },
+    {
+      "round": 2,
+      "input": "binary_05",
+      "inputSha256": "c06e60d2bf40f9749b467e9f8d83e47eaa39cf79031cf7b838aca1c745aa29d9",
+      "archiveSha256": "c6f475b069de9ea3ae56c1bd8a6b1d150a89254ec2d312c97e007050f9252df8",
+      "modules": 4,
+      "functions": 9,
+      "globals": 10,
+      "agentTasks": 0,
+      "cachedModules": 4,
+      "runId": "1fe723d7-2412-49c1-9ee2-b39b45b7557f"
+    },
+    {
+      "round": 2,
+      "input": "binary_06",
+      "inputSha256": "434dbef615f60fb684b80acb04c4bc897f31a0620b93e37354120abe64820c49",
+      "archiveSha256": "6c48ba7c16c40db4380801034a33e480077beb903f722618e24d28cb6a8f4ca1",
+      "modules": 5,
+      "functions": 10,
+      "globals": 9,
+      "agentTasks": 0,
+      "cachedModules": 5,
+      "runId": "1e10e328-b87b-4ab2-ba14-3f0548c659ac"
+    },
+    {
+      "round": 2,
+      "input": "binary_07",
+      "inputSha256": "378a4106330bffde9777304f5ece595164dbd67fe623ea31ae632022eb6666bf",
+      "archiveSha256": "2c59d14b11b99bb4f8402190fbc217c4797927267f109d6459719b3be5614d00",
+      "modules": 5,
+      "functions": 10,
+      "globals": 10,
+      "agentTasks": 0,
+      "cachedModules": 5,
+      "runId": "56cd954b-46f7-46bc-8372-99daa3f18864"
+    },
+    {
+      "round": 2,
+      "input": "binary_08",
+      "inputSha256": "f057e26fcf094af001228b988d60a04d89900ee15e9faf813a2aebb19dec3e29",
+      "archiveSha256": "02f8de77060a3261037045cccb5b00c697d210fa32c2f1de0b3e9393cddc8d9a",
+      "modules": 4,
+      "functions": 9,
+      "globals": 11,
+      "agentTasks": 0,
+      "cachedModules": 4,
+      "runId": "89818f26-e28b-4d67-afcc-5c16106acfcc"
+    },
+    {
+      "round": 2,
+      "input": "binary_09",
+      "inputSha256": "30f8e387af52a5bf3e882d19e57181e4a61b896b43982a1cfd538efbfeb66758",
+      "archiveSha256": "57fbe64ef631a7a5ea5162b6f9283ee05a493913ecc9de21ca07842e22bd5bf7",
+      "modules": 5,
+      "functions": 10,
+      "globals": 10,
+      "agentTasks": 0,
+      "cachedModules": 5,
+      "runId": "8c3a08a7-de25-4d82-bc93-d1086cb3d0ea"
+    },
+    {
+      "round": 2,
+      "input": "binary_10",
+      "inputSha256": "b914178fc3a3dc302a029855eebf92207e73155ddd795406f5af6cbe118969f7",
+      "archiveSha256": "e569fb061938403b7a9091ed2e6ea98bc764bfeaebc83e482a5f415ee1cf5adc",
+      "modules": 4,
+      "functions": 9,
+      "globals": 9,
+      "agentTasks": 0,
+      "cachedModules": 4,
+      "runId": "074c928f-d36d-438b-8601-36f42f3a9978"
+    }
+  ],
+  "timing": {
+    "successfulAutomatedRuns": 19,
+    "elapsedSecondsTotal": 241.148,
+    "repeatRoundSeconds": 119.336
+  }
+}
