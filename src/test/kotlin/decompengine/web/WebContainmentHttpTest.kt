@@ -21,11 +21,13 @@ import java.nio.file.Path
 import java.security.MessageDigest
 import java.time.Duration
 import java.util.concurrent.CopyOnWriteArrayList
+import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
 import kotlin.test.AfterTest
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFalse
+import kotlin.test.assertFailsWith
 import kotlin.test.assertTrue
 
 /**
@@ -45,6 +47,24 @@ class WebContainmentHttpTest {
     private val canary = "{\"fixture\":\"OUTSIDE_CONTAINMENT_CANARY\"}".toByteArray()
 
     private fun sha256(bytes: ByteArray) = MessageDigest.getInstance("SHA-256").digest(bytes).joinToString("") { "%02x".format(it) }
+
+    private fun assertDiagnostics(failures: List<String>, lines: List<String>) {
+        val pattern = Regex("web-http-failure request_id=([0-9a-f-]{36}) status=[45][0-9]{2} code=[A-Z_]+")
+        assertTrue(lines.all { pattern.matches(it) }, "diagnostics carry only fixed fields: $lines")
+        assertEquals(failures.size, failures.distinct().size, "each refusal has a distinct response ID")
+        assertEquals(failures.associateWith { 1 },
+            lines.map { pattern.matchEntire(it)!!.groupValues[1] }.groupingBy { it }.eachCount(),
+            "each refusal logs exactly one line with its own response ID")
+    }
+
+    @Test
+    fun `exact diagnostic counts reject duplicate lines even when request ID sets match`() {
+        val id = "00000000-0000-0000-0000-000000000001"
+        val line = "web-http-failure request_id=$id status=404 code=NOT_FOUND"
+        assertDiagnostics(listOf(id), listOf(line))
+        assertFailsWith<AssertionError> { assertDiagnostics(listOf(id), listOf(line, line)) }
+        assertFailsWith<AssertionError> { assertDiagnostics(listOf(id), emptyList()) }
+    }
 
     @Test
     fun `report and artifact reads refuse indirection and oversize without disclosing outside bytes or paths`() {
@@ -140,12 +160,14 @@ class WebContainmentHttpTest {
                 requireContained(call(path, cookie), path)
             }
             requireContained(call("/w/api/v1/jobs", mapOf("Cookie" to "decomp_web_session=OUTSIDE_CONTAINMENT_CANARY")), "foreign cookie")
-            val deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(10)
-            while (lines.size < failures.size && System.nanoTime() < deadline) Thread.sleep(10)
-            val pattern = Regex("web-http-failure request_id=([0-9a-f-]{36}) status=[45][0-9]{2} code=[A-Z_]+")
-            assertTrue(lines.all { pattern.matches(it) }, "diagnostics carry only fixed fields: $lines")
-            assertEquals(failures.toSet(), lines.map { pattern.matchEntire(it)!!.groupValues[1] }.toSet(),
-                "each refusal logs exactly its own response ID")
+            // stop() drains admitted handlers, so all their diagnostic submissions precede our
+            // sentinel on the single FIFO diagnostic executor. A size-based wait could return on
+            // duplicates before later lines arrive; the sentinel proves the full queue was drained.
+            server.stop()
+            val drained = CountDownLatch(1)
+            recordWebRequestFailure("00000000-0000-0000-0000-000000000002", 404, "NOT_FOUND") { drained.countDown() }
+            assertTrue(drained.await(10, TimeUnit.SECONDS), "request diagnostics did not drain")
+            assertDiagnostics(failures, lines.toList())
         } finally { server.stop() }
     }
 }

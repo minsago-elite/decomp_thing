@@ -21,11 +21,13 @@ import kotlin.test.AfterTest
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFalse
+import kotlin.test.assertFailsWith
 import kotlin.test.assertTrue
 
 /**
  * Upload cleanup, snapshot-bound pagination and read limits through the real v1 listener. Failed uploads
  * leave no staging entry and no job; continuations stay inside their captured snapshot and selection.
+ * This qualifies job/event pagination, not populated persisted source snapshots (#640 remains open).
  */
 class WebBoundedReadsHttpTest {
     private val root: Path = Files.createTempDirectory(Files.createDirectories(Path.of("build/test-tmp")), "web-bounded-reads-")
@@ -42,7 +44,40 @@ class WebBoundedReadsHttpTest {
         }
     }
 
-    private fun entries(): Set<String> = Files.list(root).use { paths -> paths.map { it.fileName.toString() }.toList().toSet() }
+    private fun entries(): Set<String> = Files.walk(root).use { paths -> paths.map { root.relativize(it).toString() }.toList().toSet() }
+
+    private fun assertStorageRestored(names: Set<String>, bytes: Map<String, String>) {
+        assertEquals(names, entries(), "an upload left a staging, job or nested storage entry")
+        assertEquals(bytes, digest(), "an upload changed stored bytes")
+    }
+
+    private fun awaitCondition(label: String, condition: () -> Boolean) {
+        val deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(30)
+        while (!condition() && System.nanoTime() < deadline) Thread.sleep(10)
+        assertTrue(condition(), label)
+    }
+
+    private fun awaitHandlers(server: UploadServer) = awaitCondition("HTTP handlers did not finish") {
+        server.admissionSnapshot().let { it.workers == 0 && it.queued == 0 && it.responders == 0 }
+    }
+
+    @Test
+    fun `storage baseline rejects stranded staging nested entries and changed bytes`() {
+        val input = Files.write(Files.createDirectories(root.resolve("fixture-job")).resolve("input.elf"), elfFixture())
+        val names = entries()
+        val bytes = digest()
+        val stranded = Files.createDirectories(root.resolve(".upload-stream-v1-123"))
+        Files.write(stranded.resolve("input.elf"), elfFixture())
+        assertFailsWith<AssertionError> { assertStorageRestored(names, bytes) }
+        stranded.toFile().deleteRecursively()
+        val nested = Files.createDirectory(input.parent.resolve("stranded"))
+        assertFailsWith<AssertionError> { assertStorageRestored(names, bytes) }
+        Files.delete(nested)
+        Files.write(input, byteArrayOf(1, 2, 3))
+        assertFailsWith<AssertionError> { assertStorageRestored(names, bytes) }
+        Files.write(input, elfFixture())
+        assertStorageRestored(names, bytes)
+    }
 
     @Test
     fun `refused and abandoned uploads leave no staging entry job or changed bytes`() {
@@ -57,8 +92,8 @@ class WebBoundedReadsHttpTest {
                     assertEquals(status, response.statusCode(), "$label: ${response.text()}")
                     assertEquals(code, response.errorCode(), label)
                     assertFalse(response.headers().firstValue("Location").isPresent, "$label has no success location")
-                    assertEquals(names, entries(), "$label left a staging or job entry")
-                    assertEquals(before, digest(), "$label changed stored bytes")
+                    awaitHandlers(server)
+                    assertStorageRestored(names, before)
                 }
                 refused(browser.upload("bad.elf", byteArrayOf(1, 2, 3), "bounded-upload-key-0002"), 422, "INVALID_ELF", "non-ELF")
                 refused(browser.upload("renamed.elf", elfFixture(), "bounded-upload-key-0001"), 409, "IDEMPOTENCY_CONFLICT", "changed intent")
@@ -74,19 +109,28 @@ class WebBoundedReadsHttpTest {
                         "X-CSRF-Token: ${browser.csrf}\r\nAccept: application/json\r\nIdempotency-Key: bounded-upload-key-0005\r\n" +
                         "Content-Type: multipart/form-data; boundary=fixture_boundary\r\nContent-Length: 1000000\r\n\r\n" +
                         "--fixture_boundary\r\nContent-Disposition: form-data; name=\"binary\"; filename=\"partial.elf\"\r\n\r\n"
-                    socket.getOutputStream().write(head.toByteArray() + elfFixture() + ByteArray(65_536))
+                    socket.getOutputStream().write(head.toByteArray() + elfFixture() + ByteArray(262_144))
                     socket.getOutputStream().flush()
+                    // A client write is not admission evidence. Keep the peer alive until the real
+                    // multipart handler has created staging AND persisted part of this request.
+                    awaitCondition("the partial upload never reached staging") {
+                        Files.list(root).use { paths -> paths.anyMatch { stage ->
+                            stage.fileName.toString().startsWith(".upload-stream-v1-") &&
+                                Files.isRegularFile(stage.resolve("input.elf")) && Files.size(stage.resolve("input.elf")) > 0
+                        } }
+                    }
                 }
-                val deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(30)
-                while (entries() != names && System.nanoTime() < deadline) Thread.sleep(10)
-                assertEquals(names, entries(), "an abandoned upload left a staging entry")
-                assertEquals(before, digest())
+                // First observe completion, not just absence (which could precede admission).
+                awaitHandlers(server)
+                assertStorageRestored(names, before)
                 // The replay of the accepted upload still resolves its original job.
                 val replay = browser.upload("first.elf", elfFixture(), "bounded-upload-key-0001")
                 assertEquals(201, replay.statusCode())
                 assertEquals("true", replay.headers().firstValue("Idempotency-Replayed").orElse(null))
                 assertEquals(accepted.data().getValue("jobId"), replay.data().getValue("jobId"))
                 assertEquals(1, JobStore(root).jobIds().size)
+                awaitHandlers(server)
+                assertStorageRestored(names, before)
             }
         } finally { server.stop() }
     }
