@@ -155,11 +155,36 @@ export async function seedStructure(root) {
 const ROWS = `[...document.querySelectorAll('table[aria-label], table')].filter(table => table.querySelector('caption')?.textContent === 'Recovered functions')
   .flatMap(table => [...table.querySelectorAll('tbody tr')]).map(row => row.querySelector('td code')?.textContent)`;
 
+/** Compare with the originating module response, never with pins read back from the link itself. */
+export function assertStructureSourceLink(href, { revision, browserOrigin, snapshot }) {
+  assert.equal(typeof href, 'string', 'Missing module implementation link');
+  assert.match(snapshot.sourceSha256, /^[a-f0-9]{64}$/);
+  assert.match(snapshot.metadataVersion, /^[a-f0-9]{64}$/);
+  assert.match(snapshot.module.implementationFileId, /^file_[0-9]+_[a-f0-9]{64}$/);
+  const url = new URL(href, browserOrigin);
+  assert.equal(url.origin, new URL(browserOrigin).origin);
+  assert.equal(url.username, '');
+  assert.equal(url.password, '');
+  assert.equal(url.hash, '');
+  assert.equal(url.pathname, `${revision}/source-files/${snapshot.module.implementationFileId}`);
+  assert.deepEqual([...url.searchParams].sort(([a], [b]) => a.localeCompare(b)), [
+    ['metadataVersion', snapshot.metadataVersion], ['sourceSha256', snapshot.sourceSha256],
+  ], 'Source link must carry exactly the originating source and metadata pins');
+}
+
 export async function qualifyStructure({ fixture, makeTarget, cdp, evaluate, ready, browserOrigin }) {
   const tab = await makeTarget();
   await cdp.call('Performance.enable', {}, tab.sessionId);
   const inventoryReads = [];
   const graphReads = [];
+  const moduleResponses = new Map();
+  cdp.on('Network.responseReceived', (event) => {
+    const url = new URL(event.response.url);
+    if (url.origin === new URL(browserOrigin).origin && event.response.status === 200
+      && /\/api\/v1\/jobs\/[^/]+\/runs\/[^/]+\/revisions\/[^/]+\/modules\/[^/]+$/.test(url.pathname)) {
+      moduleResponses.set(url.pathname, event.requestId);
+    }
+  }, tab.sessionId);
   cdp.on('Network.requestWillBeSent', (event) => {
     const url = new URL(event.request.url);
     if (/\/api\/v1\/jobs\/[^/]+\/runs\/[^/]+\/revisions\/[^/]+\/functions$/.test(url.pathname)) inventoryReads.push(url.searchParams.get('limit'));
@@ -264,7 +289,13 @@ export async function qualifyStructure({ fixture, makeTarget, cdp, evaluate, rea
   const owned = Math.min(24, OWNED - Math.floor(99998 / 24) * 24);
   assert.equal(await evaluate(tab, `document.querySelectorAll('table tbody tr').length`), owned);
   const implementation = await evaluate(tab, `[...document.querySelectorAll('a')].find(a => a.textContent === 'src/modules/${module}.c')?.getAttribute('href')`);
-  assert.match(implementation, new RegExp(`^${revision}/source-files/file_[0-9]+_[a-f0-9]{64}$`));
+  const requestId = moduleResponses.get(`/nested/api/v1/jobs/${fixture.jobId}/runs/${fixture.runId}/revisions/${fixture.revisionId}/modules/${module}`);
+  assert.ok(requestId, 'Missing originating module detail response');
+  // Rendering has completed, so the response body consumed by the UI is available without another API read.
+  const response = await cdp.call('Network.getResponseBody', { requestId }, tab.sessionId);
+  const snapshot = JSON.parse(response.base64Encoded ? Buffer.from(response.body, 'base64').toString('utf8') : response.body).data;
+  assert.equal(snapshot.module.moduleId, module);
+  assertStructureSourceLink(implementation, { revision, browserOrigin, snapshot });
   await cdp.call('Page.navigate', { url: browserOrigin + `${revision}/modules` }, tab.sessionId);
   await ready(tab, `document.body.innerText.includes('Showing 1–100 of ${fixture.modules} modules.') && document.querySelector('table caption')?.textContent === 'Recorded totals'`, 'module inventory with recorded totals');
   assert.ok(await evaluate(tab, `[...document.querySelectorAll('dt')].find(dt => dt.textContent === 'Names shared by several functions or globals')?.nextElementSibling.textContent === '1'`));
