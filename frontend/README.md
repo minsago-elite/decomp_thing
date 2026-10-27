@@ -264,9 +264,12 @@ slot names. No language selector or locale persistence is introduced by these
 catalogs.
 
 `tests/copy-catalog.test.ts` parses every component with the TypeScript compiler and
-fails on inline JSX text, inline accessible names/titles/placeholders, prose string
-literals and punctuation that composes a sentence around values. Compose such text
-with a catalog template (for example `commonCopy.labeledValue`, `{label}: {value}`)
+fails on inline JSX text, rendered string/template expressions, inline accessible
+names/titles/placeholders, prose string literals and punctuation that composes a
+sentence around values. Parser fixtures cover expression and interpolated-label
+bypasses as well as technical attributes, protocol comparisons and catalog references.
+This is a syntax guard, not general data-flow analysis through arbitrary helper calls.
+Compose such text with a catalog template (for example `commonCopy.labeledValue`, `{label}: {value}`)
 so a translation can reorder it. The exported validation record's limitation sentences
 are catalogued separately as stable record text because they belong to a versioned file
 format, not to the interface.

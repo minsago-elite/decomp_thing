@@ -39,39 +39,117 @@ function technicalCall(node: ts.Node): boolean {
   return /Error$|querySelector|matchMedia|matches|closest|getAttribute|setAttribute|addEventListener|removeEventListener|Worker/.test(callee);
 }
 
-function inlineCopy(): string[] {
-  const findings: string[] = [];
-  for (const file of sources(root)) {
-    const path = relative(root, file).replaceAll('\\', '/');
-    if (exempt(path)) continue;
-    const source = ts.createSourceFile(file, readFileSync(file, 'utf8'), ts.ScriptTarget.Latest, true,
-      file.endsWith('.tsx') ? ts.ScriptKind.TSX : ts.ScriptKind.TS);
-    const report = (node: ts.Node, kind: string, text: string) =>
-      findings.push(`${path}:${source.getLineAndCharacterOfPosition(node.getStart()).line + 1} ${kind} ${JSON.stringify(text.trim()).slice(0, 80)}`);
-    const visit = (node: ts.Node) => {
-      // Letters, or punctuation that composes sentences around values, belong in a catalog template.
-      if (ts.isJsxText(node) && (/\p{L}/u.test(node.text) || /[:;,.!?]/.test(node.text))) report(node, 'jsx-text', node.text);
-      if (ts.isStringLiteral(node) || ts.isNoSubstitutionTemplateLiteral(node)) {
-        const attribute = attributeName(node);
-        const text = node.text;
-        const compared = ts.isBinaryExpression(node.parent) && [ts.SyntaxKind.EqualsEqualsEqualsToken, ts.SyntaxKind.ExclamationEqualsEqualsToken]
-          .includes(node.parent.operatorToken.kind);
-        if (attribute !== null && !textAttributes.has(attribute)) { /* IDs, roles, classes and other DOM tokens. */ }
-        else if (attribute !== null) { if (!compared && /\p{L}/u.test(text)) report(node, 'attribute', text); }
-        else if ( !ts.isImportDeclaration(node.parent) && !ts.isExportDeclaration(node.parent)
-          && !technicalCall(node) && !technical.has(text) && /\p{L}{2,}[,.;:]?\s+\p{L}{2,}/u.test(text)) report(node, 'prose', text);
-      }
-      if (ts.isTemplateExpression(node) && (attributeName(node) === null || textAttributes.has(attributeName(node)!))) {
-        const parts = [node.head.text, ...node.templateSpans.map(span => span.literal.text)];
-        if (parts.some(part => /\p{L}{2,}\s+\p{L}{2,}/u.test(part)) || (attributeName(node) !== null && parts.some(part => /[:,.]\s/.test(part))))
-          report(node, 'template', parts.join('…'));
-      }
-      ts.forEachChild(node, visit);
-    };
-    visit(source);
+// Follow only expressions whose value reaches JSX. Strings used to select a branch, index a
+// record or call a protocol/formatting helper are not themselves rendered copy.
+function renderedValue(node: ts.Node): boolean {
+  let current = node;
+  while (current.parent) {
+    const parent = current.parent;
+    if (ts.isJsxExpression(parent)) return true;
+    if (ts.isParenthesizedExpression(parent) || ts.isAsExpression(parent)
+      || ts.isSatisfiesExpression(parent) || ts.isNonNullExpression(parent) || ts.isArrayLiteralExpression(parent)
+      || (ts.isConditionalExpression(parent) && current !== parent.condition)
+      || (ts.isBinaryExpression(parent) && (
+        [ts.SyntaxKind.PlusToken, ts.SyntaxKind.BarBarToken, ts.SyntaxKind.QuestionQuestionToken].includes(parent.operatorToken.kind)
+        || (parent.operatorToken.kind === ts.SyntaxKind.AmpersandAmpersandToken && current === parent.right)
+      ))) current = parent;
+    else return false;
   }
+  return false;
+}
+
+const copyFragment = (text: string) => /\p{L}|[:;,.!?]/u.test(text);
+
+function inlineSourceCopy(source: ts.SourceFile, path: string): string[] {
+  const findings: string[] = [];
+  const report = (node: ts.Node, kind: string, text: string) =>
+    findings.push(`${path}:${source.getLineAndCharacterOfPosition(node.getStart()).line + 1} ${kind} ${JSON.stringify(text.trim()).slice(0, 80)}`);
+  const visit = (node: ts.Node) => {
+    // Letters, or punctuation that composes sentences around values, belong in a catalog template.
+    if (ts.isJsxText(node) && copyFragment(node.text)) report(node, 'jsx-text', node.text);
+    if (ts.isStringLiteral(node) || ts.isNoSubstitutionTemplateLiteral(node)) {
+      const attribute = attributeName(node);
+      const text = node.text;
+      const compared = ts.isBinaryExpression(node.parent) && [ts.SyntaxKind.EqualsEqualsEqualsToken, ts.SyntaxKind.ExclamationEqualsEqualsToken]
+        .includes(node.parent.operatorToken.kind);
+      if (attribute !== null && !textAttributes.has(attribute)) { /* IDs, roles, classes and other DOM tokens. */ }
+      else if (attribute !== null) { if (!compared && copyFragment(text)) report(node, 'attribute', text); }
+      else if (renderedValue(node) && copyFragment(text)) report(node, 'jsx-expression', text);
+      else if (!ts.isImportDeclaration(node.parent) && !ts.isExportDeclaration(node.parent)
+        && !technicalCall(node) && !technical.has(text) && /\p{L}{2,}[,.;:]?\s+\p{L}{2,}/u.test(text)) report(node, 'prose', text);
+    }
+    if (ts.isTemplateExpression(node) && (attributeName(node) === null || textAttributes.has(attributeName(node)!))) {
+      const parts = [node.head.text, ...node.templateSpans.map(span => span.literal.text)];
+      if (((renderedValue(node) || attributeName(node) !== null) && parts.some(copyFragment))
+        || parts.some(part => /\p{L}{2,}\s+\p{L}{2,}/u.test(part)))
+        report(node, 'template', parts.join('…'));
+    }
+    ts.forEachChild(node, visit);
+  };
+  visit(source);
   return findings;
 }
+
+function inlineCopy(): string[] {
+  return sources(root).flatMap(file => {
+    const path = relative(root, file).replaceAll('\\', '/');
+    if (exempt(path)) return [];
+    const source = ts.createSourceFile(file, readFileSync(file, 'utf8'), ts.ScriptTarget.Latest, true,
+      file.endsWith('.tsx') ? ts.ScriptKind.TSX : ts.ScriptKind.TS);
+    return inlineSourceCopy(source, path);
+  });
+}
+
+function fixtureCopy(code: string): string[] {
+  const source = ts.createSourceFile('fixture.tsx', code, ts.ScriptTarget.Latest, true, ts.ScriptKind.TSX);
+  return inlineSourceCopy(source, 'fixture.tsx');
+}
+
+it.each([
+  '<p>Save</p>',
+  '<p>{label}: {value}</p>',
+  "<p>{label}{': '}{value}</p>",
+  '<p>{"Save"}</p>',
+  '<p>{`Save`}</p>',
+  '<p>{`Recorded ${code}.`}</p>',
+  '<p>{`${code}.`}</p>',
+  '<button aria-label={`Inspect ${id}`} />',
+  '<button aria-label="Inspect" />',
+  '<button aria-label={"Inspect"} />',
+  '<button title={`Recorded ${code}.`} />',
+  '<input placeholder={`Find ${id}`} />',
+  '<img alt={`Preview ${id}`} />',
+  '<p>{ready ? "Save" : copy.wait}</p>',
+  '<p>{ready && "Save"}</p>',
+  '<p>{value ?? "Unknown"}</p>',
+  '<p>{value || "Unknown"}</p>',
+  '<p>{("Save" as string)}</p>',
+  '<p>{"Recorded " + code}</p>',
+  '<p>{["Save", value]}</p>',
+])('rejects rendered inline copy: %s', code => {
+  expect(fixtureCopy(code)).not.toEqual([]);
+});
+
+it.each([
+  '<p>{copy.save}</p>',
+  '<p>{" "}{value}</p>',
+  '<code>{code}</code>',
+  '<p>{status === "failed" ? copy.failed : copy.ready}</p>',
+  '<p>{"failed" === status && copy.failed}</p>',
+  '<p>{copy.status["failed"]}</p>',
+  '<p>{formatExactTimestamp("2026-09-05T00:00:00Z")}</p>',
+  '<p>{textMessage(copy.recorded, { code })}</p>',
+  '<p>{`${code}${id}`}</p>',
+  '<button aria-label={status === "failed" ? copy.failed : copy.ready} />',
+  '<button aria-label={textMessage(copy.inspect, { id })} />',
+  '<button className="inspect-button" role="button" data-testid="inspect" />',
+  '<button id={`inspect-${id}`} aria-controls={`panel-${id}`} />',
+  'const selector = document.querySelector("button.inspect");',
+  'const escaped = event.key === "Escape";',
+  'const protocol = "failed";',
+])('allows catalog references and technical strings: %s', code => {
+  expect(fixtureCopy(code)).toEqual([]);
+});
 
 it('keeps human-facing interface text in the copy catalogs instead of components', () => {
   expect(inlineCopy()).toEqual([]);
