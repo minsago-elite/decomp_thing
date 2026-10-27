@@ -91,14 +91,18 @@ class AcpHarnessSelection internal constructor(
  * through the explicit `ACP_HARNESS=legacy-openai` compatibility selection.
  */
 object AcpHarnessFactory {
-    fun fromEnvironment(environment: Map<String, String> = System.getenv()): AcpHarnessSelection {
+    @JvmOverloads
+    fun fromEnvironment(
+        environment: Map<String, String> = System.getenv(),
+        diagnosticLog: (String) -> Unit = { System.err.println(it) },
+    ): AcpHarnessSelection {
         val selected = environment[ACP_HARNESS_ENVIRONMENT] ?: ACP_HARNESS_NAME
         require(selected.isNotBlank()) { "$ACP_HARNESS_ENVIRONMENT must not be blank" }
 
         return when (selected) {
             ACP_HARNESS_NAME -> acpSelection(environment)
             LEGACY_OPENAI_HARNESS_NAME -> legacySelection(environment)
-            CHATGPT_PLAN_HARNESS_NAME -> chatGptPlanSelection()
+            CHATGPT_PLAN_HARNESS_NAME -> chatGptPlanSelection(diagnosticLog)
             else -> throw IllegalArgumentException(
                 "unknown $ACP_HARNESS_ENVIRONMENT value " +
                 "(expected exactly $ACP_HARNESS_NAME, $LEGACY_OPENAI_HARNESS_NAME, or $CHATGPT_PLAN_HARNESS_NAME; " +
@@ -161,7 +165,7 @@ object AcpHarnessFactory {
         }
     }
 
-    private fun chatGptPlanSelection(): AcpHarnessSelection {
+    private fun chatGptPlanSelection(diagnosticLog: (String) -> Unit): AcpHarnessSelection {
         val provenance = AcpHarnessProvenance(
             harness = CHATGPT_PLAN_HARNESS_NAME,
             implementationId = "siwc-responses-repair",
@@ -172,7 +176,7 @@ object AcpHarnessFactory {
             deprecated = false,
         )
         return AcpHarnessSelection(AcpHarnessKind.CHATGPT_PLAN, null, provenance) {
-            RepairClientAgentHarness(ChatGptPlanRepairClient())
+            RepairClientAgentHarness(ChatGptPlanRepairClient(diagnosticLog = diagnosticLog))
         }
     }
 }

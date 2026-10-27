@@ -10,6 +10,52 @@ import kotlin.test.assertTrue
 
 class ArchivalReconstructionTest {
     @Test
+    fun `generation passes do not repeat authentication failures`() {
+        val temp = createTempDirectory("archival-auth-stop-")
+        val binary = temp.resolve("input.elf").also { it.writeBytes(byteArrayOf(1)) }
+        val analyzer = ProgramModelAnalyzer { _, _ -> RecoveredProgramModel(
+            inputSha256 = "input", functions = listOf(RecoveredFunction("fn_1000", "decomp_engine_main", 0x1000UL,
+                "int decomp_engine_main(void)")),
+        ) }
+        var calls = 0
+        val harness = decompengine.agent.AgentHarness { _, _ ->
+            calls++
+            throw decompengine.agent.AgentExecutionException(decompengine.agent.AgentFailure(
+                decompengine.agent.AgentFailureKind.AUTHENTICATION, "private error omitted"))
+        }
+        kotlin.test.assertFailsWith<ReconstructionIncompleteException> {
+            ArchivalReconstructionService(analyzer, BoundedLlmModuleReconstructor(harness)).reconstruct(binary, temp.resolve("result"))
+        }
+        assertEquals(1, calls)
+    }
+
+    @Test
+    fun `bounded generation passes correct compiler failures and preserve acceptance evidence`() {
+        val temp = createTempDirectory("archival-generation-retry-")
+        val binary = temp.resolve("input.elf").also { it.writeBytes(byteArrayOf(1)) }
+        val analyzer = ProgramModelAnalyzer { _, _ -> RecoveredProgramModel(
+            inputSha256 = sha256(byteArrayOf(1)), functions = listOf(RecoveredFunction("fn_1000", "decomp_engine_main", 0x1000UL,
+                "int decomp_engine_main(void)")),
+        ) }
+        var calls = 0
+        val client = object : decompengine.repair.RepairClient {
+            override fun modelIdentifier() = "fixture"
+            override fun requestRepair(request: decompengine.repair.RepairRequest,
+                invocation: decompengine.repair.RepairClientInvocation): decompengine.repair.RepairResponse {
+                calls++
+                if (calls > 1) assertTrue(request.prompt.contains("Previous candidate assessment"))
+                return decompengine.repair.RepairResponse("candidate", listOf(decompengine.repair.SourcePatch(
+                    "src/modules/decomp.c", "/* fn_1000 */\nint decomp_engine_main(void) { return ${if (calls == 1) "missing_symbol" else "17"}; }\n")))
+            }
+        }
+        val result = ArchivalReconstructionService(analyzer,
+            BoundedLlmModuleReconstructor(decompengine.repair.RepairClientAgentHarness(client))).reconstruct(binary, temp.resolve("result"))
+        assertEquals(2, calls)
+        assertTrue(result.bundle.archivePath.exists())
+        assertEquals(0, result.build.returnCode)
+    }
+
+    @Test
     fun `incomplete agent reconstruction preserves reports without building placeholders`() {
         val temp = createTempDirectory("archival-incomplete-")
         val binary = temp.resolve("input.elf").also { it.writeBytes(byteArrayOf(1)) }

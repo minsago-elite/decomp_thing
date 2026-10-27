@@ -31,6 +31,8 @@ class AgentProgressJournal(
     private val maximumQueuedEvents: Int = 128,
     private val maximumSnapshotBytes: Int = 512 * 1024,
     private val onPhase: (AgentWorkflowPhase) -> Unit = {},
+    recordFullRun: Boolean = false,
+    maximumFullRunBytes: Long = FullRunJournal.MAXIMUM_RUN_BYTES,
 ) : AgentWorkflowProgress, AutoCloseable {
     private val monitor = Object()
     private val queue = ArrayDeque<JsonObject>()
@@ -45,6 +47,8 @@ class AgentProgressJournal(
     private var dirty = false
     private val writerLease: AgentProgressJournalLease
     private val writer: Thread
+    private var fullRun: FullRunJournal? = null
+    val fullRunDirectory: Path? get() = fullRun?.directory
 
     init {
         require(workflow.matches(Regex("[a-z][a-z0-9-]{0,63}"))) { "invalid progress workflow" }
@@ -63,9 +67,11 @@ class AgentProgressJournal(
                 previous.getValue("events").jsonArray.forEach { retained.add(it.jsonObject) }
                 while (retained.size > maximumEvents) { retained.removeFirst(); historyDropped++ }
             }
+            if (recordFullRun) fullRun = FullRunJournal.create(reportsDirectory, runId, workflow, sequence, maximumFullRunBytes)
             writer = Thread(::writeLoop, "decomp-progress-$workflow").apply { isDaemon = true; start() }
             enqueue("run_started") { put("status", "running") }
         } catch (problem: Throwable) {
+            runCatching { fullRun?.close() }
             writerLease.close()
             throw problem
         }
@@ -239,6 +245,13 @@ class AgentProgressJournal(
         onPhase(observation.phase)
     }
 
+    override fun runContext(inputSha256: String, profileSha256: String) {
+        if (listOf(inputSha256, profileSha256).any { !it.matches(Regex("[0-9a-f]{64}")) }) return
+        enqueue("run_context") { put("inputSha256", inputSha256); put("profileSha256", profileSha256) }
+    }
+
+    override fun diagnostic(message: String) = enqueue("diagnostic") { put("text", redactor.text(message, 2048)) }
+
     private fun enqueue(kind: String, body: JsonObjectBuilder.() -> Unit) = synchronized(monitor) {
         check(!closed) { "progress journal is closed" }
         failure.get()?.let { throw IllegalStateException("progress journal persistence failed", it) }
@@ -253,6 +266,8 @@ class AgentProgressJournal(
         if (queue.size >= maximumQueuedEvents) queueDropped++ else queue.add(record)
         dirty = true
         monitor.notifyAll()
+        fullRun?.append(record)
+        Unit
     }
 
     private fun writeLoop() {
@@ -301,7 +316,7 @@ class AgentProgressJournal(
 
     override fun close() {
         synchronized(monitor) { closed = true; monitor.notifyAll() }
-        writer.join(5_000)
+        try { writer.join(5_000) } finally { fullRun?.close() }
         // Do not release a lock while a live writer could still publish a snapshot.
         check(!writer.isAlive) { "progress writer did not stop within five seconds" }
         writerLease.close()

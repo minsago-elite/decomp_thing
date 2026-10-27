@@ -10,7 +10,7 @@ internal class RepairProgressProjection(reportsDirectory: Path) : AutoCloseable 
     private var journal: AgentProgressJournal? = null
 
     init {
-        observe { journal = AgentProgressJournal(reportsDirectory, "repair", System.getenv().values) }
+        observe { journal = AgentProgressJournal(reportsDirectory, "repair", System.getenv().values, recordFullRun = true) }
     }
 
     fun task(id: String, request: AgentExecutionRequest, graph: ModuleRevisionGraph): AgentTaskProgress {

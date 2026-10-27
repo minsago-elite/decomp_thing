@@ -44,14 +44,35 @@ Reconstruction writes module starts, HTTP status, attempt counts, safe failure c
 acceptance outcomes to stderr. Capture it with `2>reconstruction.log` when troubleshooting. Module reports
 under `source-tree/reports/modules/` retain failure classifications; `agent-progress.json` retains task outcomes.
 Tokens, prompts, source bodies, raw server errors, and arbitrary exception messages are excluded from these diagnostics.
-Eligible transient failures receive at most three attempts sharing the original wall deadline; cancellation,
-authentication/TLS failures, malformed streams, and explicit no-change responses are not retried automatically.
-An empty patch set means no source changes were proposed, rather than malformed protocol data.
+Eligible transient transport failures receive at most three attempts sharing the original invocation deadline;
+cancellation, authentication/TLS failures, malformed streams, and explicit no-change responses do not trigger
+transport retries. Agent reconstruction can use up to three generation passes, retaining independently accepted
+checkpoints and giving unresolved candidates their previous assessment. Each candidate must still pass all ownership,
+receipt, declaration, and compiler checks. An empty patch set means no source changes were proposed, rather than
+malformed protocol data.
 
 If agent-backed modules remain unresolved, the CLI exits with status 1 and writes an `incomplete` summary to
 `reconstruction.json`, preserving partial source and `source-tree/UNRESOLVED.md` without packaging placeholders.
 After an exporter upgrade, use a fresh output directory: old analysis checkpoints remain bound to their original
 exporter and must not be mixed with new typed signature evidence.
+
+Each new reconstruction attempt also retains a private `run-history/<run-id>/` directory containing
+`events.jsonl` and `run.json`. This complete, redacted event sequence is separate from the bounded live snapshot;
+it includes input/profile identities, task/request commitments, inference diagnostics, and terminal outcomes.
+Records are hash chained and flushed to disk. Accepted source and execution receipts remain in the source tree.
+A replay displays observations and never executes a binary, contacts a provider, or authorizes source acceptance.
+
+```sh
+llm_bin_patch runs list <output-directory>
+llm_bin_patch runs follow <output-directory> [run-id]
+llm_bin_patch runs replay <output-directory> <run-id>
+```
+
+Continue by rerunning the original reconstruction command with the same binary and output directory. The workflow
+independently verifies accepted checkpoints before reusing them, and creates a separate run history for the new
+attempt. Keep the full output directory for continuation; the observation log alone cannot restore source state.
+History is retained until explicitly removed. A 256 MiB per-attempt quota prevents unlimited growth; exhaustion
+is reported as `logging-failed` with `complete=false`, rather than silently dropping historical events.
 
 ### Docker qualification profile
 

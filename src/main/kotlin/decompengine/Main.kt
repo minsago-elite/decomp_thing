@@ -33,6 +33,7 @@ import java.util.Locale
 
 fun main(args: Array<String>) {
     when (args.firstOrNull()) {
+        "runs" -> runRunHistory(args.drop(1))
         "doctor" -> runDoctor(args.drop(1))
         "chatgpt" -> runChatGptPlanCommand(args.drop(1))
         "patch" -> runPatch(args.drop(1))
@@ -154,7 +155,10 @@ internal fun selectReconstructionStrategy(
     }
 
     val effectiveEnvironment = withHarnessOverride(environment, harnessOverride)
-    val selection = AcpHarnessFactory.fromEnvironment(effectiveEnvironment)
+    val selection = AcpHarnessFactory.fromEnvironment(effectiveEnvironment) { line ->
+        System.err.println(line)
+        progress.diagnostic(line)
+    }
     return ReconstructionStrategy(
         BoundedLlmModuleReconstructor(
             selection.createHarness(),
@@ -547,6 +551,9 @@ private fun printHelp() {
     println(
         """
         Usage:
+          llm_bin_patch runs list <output-directory>
+          llm_bin_patch runs replay <output-directory> <run-id>
+          llm_bin_patch runs follow <output-directory> [run-id]
           llm_bin_patch chatgpt login [--account <id>] | status | models [--select <slug>] | use <account-id> | logout [--account <id>]
           llm_bin_patch doctor --tools-only [--output <directory>]
           llm_bin_patch doctor [--output <directory>] [--harness acp|legacy-openai|chatgpt-plan] [--workflow all|patch|reconstruct|repair|web] [--auth-methods]

@@ -130,6 +130,8 @@ class RepairClientAgentHarness(
         }
         if (changes.isEmpty()) {
             onEvent(AgentToolEvent(1, "legacy-repair-request", "Request source changes", AgentToolStatus.SUCCEEDED))
+            onEvent(AgentMessageEvent(2, "legacy-repair-summary", AgentMessageRole.ASSISTANT,
+                response.summary, completed = true))
             return AgentExecutionResult(
                 AgentStopReason.NO_CHANGES,
                 response.summary,

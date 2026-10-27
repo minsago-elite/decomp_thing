@@ -2,6 +2,8 @@ package decompengine.agent
 
 /** Display-only workflow observations. A progress event never authorizes a revision. */
 interface AgentWorkflowProgress {
+    fun diagnostic(message: String) = Unit
+    fun runContext(inputSha256: String, profileSha256: String) = Unit
     fun beginTask(taskId: String, request: AgentExecutionRequest): AgentTaskProgress
     fun beginTask(taskId: String, request: AgentExecutionRequest, workflowRunId: String): AgentTaskProgress =
         beginTask(taskId, request)

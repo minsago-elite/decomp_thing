@@ -286,6 +286,7 @@ class ArchivalReconstructionService(
         outputDir.createDirectories()
         progress.phase(AgentWorkflowPhase.ANALYZING)
         val model = analyzer.analyze(binaryPath, outputDir.resolve("analysis"))
+        progress.runContext(model.inputSha256, profile.sha256)
         val project = outputDir.resolve("source-tree")
         val progressPath = outputDir.resolve("reconstruction_progress.json")
         progressPath.writeText("{\"phase\":\"planning\",\"completed\":0,\"total\":0}\n")
@@ -299,17 +300,30 @@ class ArchivalReconstructionService(
             maximumDependencyEdges = profile.budgets.plannerMaximumDependencyEdges,
             maximumWorkUnits = profile.budgets.plannerMaximumWorkUnits,
         )
-        val manifest = SourceTreeGenerator.generate(
-            model,
-            project,
-            planner = planner,
-            reconstructor = reconstructor,
-            observedBehavior = observedBehavior,
-            profile = profile,
-            progress = progress,
-        ) { completed, total, module ->
-            moduleTotal = total
-            progressPath.writeText("{\"phase\":\"modules\",\"completed\":$completed,\"total\":$total,\"module\":\"$module\"}\n")
+        fun generatePass(pass: Int): SourceTreeManifest {
+            val message = "reconstruction: generation pass=$pass/3; accepted checkpoints remain authoritative"
+            System.err.println(message)
+            progress.diagnostic(message)
+            return SourceTreeGenerator.generate(
+                model,
+                project,
+                planner = planner,
+                reconstructor = reconstructor,
+                observedBehavior = observedBehavior,
+                profile = profile,
+                progress = progress,
+            ) { completed, total, module ->
+                moduleTotal = total
+                progressPath.writeText("{\"phase\":\"modules\",\"completed\":$completed,\"total\":$total,\"module\":\"$module\"}\n")
+            }
+        }
+        var manifest = generatePass(1)
+        if (reconstructor.requiresExecutionEvidenceForCheckpointReuse()) {
+            for (pass in 2..3) {
+                if (manifest.unresolvedImplementationIds.isEmpty() || manifest.blockedByAgentConfiguration) break
+                progress.phase(AgentWorkflowPhase.PLANNING)
+                manifest = generatePass(pass)
+            }
         }
         if (reconstructor.requiresExecutionEvidenceForCheckpointReuse() && manifest.unresolvedImplementationIds.isNotEmpty()) {
             val unresolvedModules = manifest.files.filter {

@@ -110,7 +110,10 @@ internal fun selectWebReconstructionStrategy(
     val configuredMode = environment[WEB_RECONSTRUCTION_MODE_ENVIRONMENT] ?: WebReconstructionMode.AGENT.configurationValue
     return when (configuredMode) {
         WebReconstructionMode.AGENT.configurationValue -> {
-            val selection = AcpHarnessFactory.fromEnvironment(environment)
+            val selection = AcpHarnessFactory.fromEnvironment(environment) { line ->
+                System.err.println(line)
+                progress.diagnostic(line)
+            }
             WebReconstructionStrategy(
                 WebReconstructionMode.AGENT,
                 BoundedLlmModuleReconstructor(

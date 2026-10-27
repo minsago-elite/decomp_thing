@@ -69,6 +69,7 @@ data class ModuleReconstructionRequest(
     val profile: ReconstructionProfile = GeneratedCMakeReconstructionProfile.descriptor,
     val sessionEvidenceFingerprint: String? = null,
     val acceptedSourceSha256: String? = null,
+    val priorAssessment: String? = null,
 )
 
 data class ReconstructedModule(
@@ -326,9 +327,15 @@ class BoundedLlmModuleReconstructor(
                 .materialize(mapOf("module" to request.module.id)) to request.privateHeader,
         )
             .apply { putAll(request.dependencyHeaders) }
+        val includeInstructions = files.keys.joinToString("\n") { path ->
+            val relative = Path.of(target).parent.relativize(Path.of(path)).toString().replace('\\', '/')
+            "#include \"$relative\""
+        }
+        val effectiveObjective = objective + "\n\nUse these exact relative include paths from the target source directory:\n" + includeInstructions +
+            (request.priorAssessment?.let { "\n\nPrevious candidate assessment:\n$it\nCorrect the captured candidate where the evidence permits; do not fabricate missing behavior." } ?: "")
         val observed = request.observedBehavior ?: "<not yet available; report this limitation>"
         val promptEvidence = buildString {
-            append(objective).append("\n\n").append(evidence).append("\n\n").append(observed)
+            append(effectiveObjective).append("\n\n").append(evidence).append("\n\n").append(observed)
             files.toSortedMap().forEach { (path, content) ->
                 append("\n\n--- ").append(path).append(" ---\n").append(content)
             }
@@ -354,7 +361,7 @@ class BoundedLlmModuleReconstructor(
         var invocationEvidence: ReconstructionAgentExecutionEvidence? = null
         try {
             val agentRequest = AgentExecutionRequest(
-                objective = objective,
+                objective = effectiveObjective,
                 workspaceRoots = listOf(root),
                 contextInputs = listOf(
                     AgentContextInput("recovered-module-evidence", evidence),
@@ -491,6 +498,11 @@ class BoundedLlmModuleReconstructor(
     }
 }
 
+private fun reconstructionDiagnostic(progress: AgentWorkflowProgress, message: String) {
+    System.err.println("reconstruction: $message")
+    progress.diagnostic("reconstruction: $message")
+}
+
 private const val MAXIMUM_HARNESS_PROVENANCE_BYTES = 4 * 1024
 
 class ModuleContextBudgetExceededException(
@@ -579,6 +591,7 @@ class SourceTreeManifest(
     files: List<GeneratedFileEvidence>,
     unresolvedEntityIds: List<String>,
     unresolvedImplementationIds: List<String> = emptyList(),
+    val blockedByAgentConfiguration: Boolean = false,
 ) {
     val files: List<GeneratedFileEvidence> = Collections.unmodifiableList(files.toList().sortedBy(GeneratedFileEvidence::path))
     val unresolvedEntityIds: List<String> = Collections.unmodifiableList(unresolvedEntityIds.toList().distinct().sorted())
@@ -727,6 +740,7 @@ object SourceTreeGenerator {
             file.writeText(content)
         }
 
+        var blockedByAgentConfiguration = false
         val generated = mutableListOf<GeneratedFileEvidence>()
         generated += evidence(profile, typesHeaderPath, typesHeader, "planner", model.types.map { it.id })
         headers.forEach { (id, content) ->
@@ -810,6 +824,9 @@ object SourceTreeGenerator {
                 profile = profile,
                 sessionEvidenceFingerprint = fingerprint,
                 acceptedSourceSha256 = verifiedPreviousAcceptance?.sourceSha256,
+                priorAssessment = recordedCheckpoint?.takeIf { !it.accepted }?.issues?.take(8)
+                    ?.map { it.code }?.filter { it.matches(Regex("[a-z0-9-]{1,128}")) }
+                    ?.joinToString(", ")?.takeIf(String::isNotEmpty),
             )
             val cacheIdentity = reconstructor.cacheIdentity()
             val cached = recordedCheckpoint?.takeIf { checkpoint ->
@@ -825,7 +842,7 @@ object SourceTreeGenerator {
                     (if (checkpoint.accepted) checkpoint.hasCurrentModuleAcceptance() else !checkpoint.retryable)
             }
             val moduleStarted = System.nanoTime()
-            System.err.println("reconstruction: module=${module.id} index=${index + 1}/${plan.modules.size} ${if (cached == null) "started" else "cached"}")
+            reconstructionDiagnostic(progress, "module=${module.id} index=${index + 1}/${plan.modules.size} ${if (cached == null) "started" else "cached"}")
             val checkpoint = cached ?: run {
                 val previousAccepted = verifiedPreviousAcceptance
                 val previousSource = previousAccepted?.let { sourcePath.readText() }
@@ -867,7 +884,7 @@ object SourceTreeGenerator {
                     throw failure
                 } catch (failure: Exception) {
                     if (generateSequence<Throwable>(failure) { it.cause }.any { it is AgentSessionRecoveryException }) throw failure
-                    unresolvedFallback(request, cacheIdentity, failure)
+                    unresolvedFallback(request, cacheIdentity, failure, progress)
                 }
                 val normalizedSource = attempted.source.trimEnd() + "\n"
                 val executionEvidence = attempted.agentExecutionEvidence?.let(::persistExecutionEvidence)
@@ -936,12 +953,17 @@ object SourceTreeGenerator {
                 request, checkpoint.accepted, checkpoint.sourceSha256,
                 checkpoint.executionRequestSha256, checkpoint.executionEvidenceSha256,
             )
-            System.err.println("reconstruction: module=${module.id} ${if (checkpoint.accepted) "accepted" else "unresolved"} " +
+            reconstructionDiagnostic(progress, "module=${module.id} ${if (checkpoint.accepted) "accepted" else "unresolved"} " +
                 "elapsedMillis=${java.util.concurrent.TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - moduleStarted)} " +
                 "issues=${checkpoint.issues.take(8).joinToString(",") { it.code }} report=reports/modules/${module.id}.json")
             val normalizedSource = sourcePath.readText()
             val moduleEntityIds = module.functionIds + module.globalIds
-            if (!checkpoint.accepted) unresolvedImplementations += moduleEntityIds
+            if (!checkpoint.accepted) {
+                unresolvedImplementations += moduleEntityIds
+                if (checkpoint.issues.any { it.code in setOf("agent-authentication", "agent-authorization", "agent-configuration") }) {
+                    blockedByAgentConfiguration = true
+                }
+            }
             progress.phase(
                 if (checkpoint.accepted) AgentWorkflowPhase.ACCEPTED else AgentWorkflowPhase.UNRESOLVED,
                 module.id,
@@ -1055,6 +1077,7 @@ object SourceTreeGenerator {
                 model.globals.filter { model.isRecoveryUnresolved(it.status) }.map { it.id } +
                 model.types.filter { model.isRecoveryUnresolved(it.status) }.map { it.id },
             unresolvedImplementationIds = unresolvedImplementations.toList(),
+            blockedByAgentConfiguration = blockedByAgentConfiguration,
         )
         projectDir.resolve("source_tree_manifest.json").writeText(manifest.toJson())
         return manifest
@@ -1430,13 +1453,14 @@ object SourceTreeGenerator {
         request: ModuleReconstructionRequest,
         reconstructorIdentity: String,
         failure: Exception,
+        progress: AgentWorkflowProgress,
     ): ReconstructedModule {
         val fallback = EvidenceModuleReconstructor().reconstruct(request)
         val entityIds = request.module.functionIds + request.module.globalIds
         val agentOutcome = failure as? ModuleReconstructionAgentOutcomeException
         val agentFailure = generateSequence<Throwable>(failure) { it.cause }.take(16)
             .filterIsInstance<AgentExecutionException>().firstOrNull()?.failure
-        agentFailure?.let { System.err.println("reconstruction: module=${request.module.id} failed ${safeAgentFailureDiagnostic(it)}") }
+        agentFailure?.let { reconstructionDiagnostic(progress, "module=${request.module.id} failed ${safeAgentFailureDiagnostic(it)}") }
         val code = when {
             failure is ModuleContextBudgetExceededException -> "context-budget-exceeded"
             agentOutcome != null -> "agent-${agentOutcome.evidence.terminalOutcome}"

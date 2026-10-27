@@ -14,7 +14,10 @@ internal class BestEffortProgressJournal(
     private var journal: AgentProgressJournal? = null
 
     init {
-        observe { journal = AgentProgressJournal(reportsDirectory, workflow, sensitiveValues, onPhase = onPhase) }
+        observe {
+            journal = AgentProgressJournal(reportsDirectory, workflow, sensitiveValues, onPhase = onPhase, recordFullRun = true)
+            journal?.fullRunDirectory?.let { System.err.println("run history: $it") }
+        }
     }
 
     private inline fun observe(evenIfFailed: Boolean = false, action: () -> Unit) {
@@ -29,6 +32,10 @@ internal class BestEffortProgressJournal(
             }
         }
     }
+
+    override fun runContext(inputSha256: String, profileSha256: String) = observe { journal?.runContext(inputSha256, profileSha256) }
+
+    override fun diagnostic(message: String) = observe { journal?.diagnostic(message) }
 
     override fun beginTask(taskId: String, request: AgentExecutionRequest): AgentTaskProgress =
         task { it.beginTask(taskId, request) }
