@@ -2365,7 +2365,9 @@ class ManagedGitRepositories(
                     }
                     GitSyncRequest(action, request.text("worktreeId"), decodeGuards(request.getValue("guards").jsonObject),
                         parameters + listOfNotNull(request.nullableText("contentSha256")?.let { "contentSha256" to it }),
-                        retainedDestinationRef = request.nullableText("retainedDestinationRef"))
+                        retainedDestinationRef = request["retainedDestinationRef"]?.let {
+                            if (it == JsonNull) null else (it as JsonPrimitive).also { primitive -> require(primitive.isString) }.content
+                        })
                 }
             }
         }
