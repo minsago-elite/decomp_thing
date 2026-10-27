@@ -1,0 +1,15 @@
+# Recovered ABI interface candidate projection v1
+
+`RecoveredAbiInterfaceCandidateProjectionV1` is a deterministic, bounded projection from separately validated native listing and HighFunction observations into structural fact-shaped **candidates**. The result is caller-supplied/untrusted data. It is not a validation receipt, oracle observation, score, production replay, or `INTERFACES` admission grant. The typed records and their digest fields are public DTOs; the projection labels stream digests as claims because it does not reopen and authenticate the original report bytes.
+
+The model-to-native identity comes only from the listing assessment's unique matched entry mapping. The projection retains every model function as an entity and every native listing function not consumed by a unique match in a separate `nativeOnlyFunctions` partition. It recomputes candidate sets, mapping states, and paired external/thunk flags from the supplied typed rows, then checks the complete listing and inference scan totals. Listing parameter ordinals and HighFunction parameter indices, category indices, and high slots remain separate raw channels; there is no positional join between them.
+
+The only currently recoverable candidate dimensions are:
+
+- `function.calling-convention`: known only when the raw convention state is `named-resolved`, both its raw name and resolved model alias resolve to the same entry in the supplied target descriptor, and the function is uniquely mapped and not a thunk.
+- `function.variadic`: known only when the HighFunction observation completed validly, its formal and local counts both equal its observed parameter population (checked directly as well as through the claimed agreement flag), and its `varArgs` bit agrees with the listing bit on a uniquely mapped non-thunk function.
+- Prototype, return ABI class, and parameter ABI classes remain `recovered-unknown`. The separate listing and inference observation payloads carry selected raw prototype and parameter fields, including the return type ordinal and each parameter's explicit hidden-return flag. This projection is not a replacement for the original typed observation streams. A return type being present is not evidence that it is a hidden return.
+
+The target descriptor is parsed and structurally validated by the existing loader, but that DTO is not an authenticated production capability. The projection never receives oracle visibility controls and never classifies absent candidates as oracle-unobservable. These candidates cannot establish unknown/unsupported oracle partitions or conservation required by the scorer. Any future scoring path must separately validate source bytes and join candidates with trusted oracle evidence under its own admission boundary.
+
+The projection bounds input record counts, per-function and total parameter counts, mapping references, per-storage and aggregate varnodes, cumulative UTF-8 field bytes, nested type-detail JSON nodes and traversal queue, conservative serialized size, and final canonical output size. It checkpoints across record and nested-detail traversal. Failure returns no partial projection.
