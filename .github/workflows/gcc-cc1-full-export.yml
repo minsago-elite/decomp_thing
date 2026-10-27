@@ -217,6 +217,7 @@ jobs:
             ${{ runner.temp }}/process-cpu-samples.txt
             build/reports/tests/test
             build/test-results/test
+            build/reports/junit-signatures
       - name: Release dedicated full-export scratch
         if: always()
         run: bash scripts/ci-release-oracle-ext4-scratch.sh --gcc-engine-cc1-fresh

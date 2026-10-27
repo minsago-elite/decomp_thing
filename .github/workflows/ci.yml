@@ -248,6 +248,7 @@ jobs:
             build/packaged-browser-*/*.png
             build/reports/tests/test
             build/test-results/test
+            build/reports/junit-signatures
 
   kotlin-suite:
     needs: frontend
@@ -523,6 +524,7 @@ jobs:
             build/test-results/full-suite
             build/reports/tests/test
             build/test-results/test
+            build/reports/junit-signatures
             build/issue930-evidence
             build/issue933-evidence
             build/web-job-recovery-inventory.json
@@ -666,6 +668,7 @@ jobs:
           path: |
             build/reports/tests/test
             build/test-results/test
+            build/reports/junit-signatures
       - uses: actions/upload-artifact@v7
         if: always()
         with:
@@ -740,4 +743,5 @@ jobs:
           path: |
             build/reports/tests/test
             build/test-results/test
+            build/reports/junit-signatures
             build/source-identity-fixture-evidence
