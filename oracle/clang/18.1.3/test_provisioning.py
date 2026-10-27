@@ -137,6 +137,63 @@ class PackagingLifetimeTests(unittest.TestCase):
         temporary=tempfile.TemporaryDirectory(dir=parent);self.addCleanup(temporary.cleanup)
         self.base=Path(temporary.name)
 
+    def test_provisioning_releases_rootfs_descriptors_while_traceback_is_retained(self):
+        for failure in (provision.ProvisionError("authored bootstrap refusal"),
+                        KeyboardInterrupt("authored cancellation")):
+            with self.subTest(failure=type(failure).__name__):
+                base = self.base / type(failure).__name__
+                base.mkdir()
+                canary = base / "unrelated-canary"
+                canary.write_bytes(b"must remain untouched")
+                args = provision.argparse.Namespace(
+                    rootfs=base / "rootfs", output=base / "output", workdir=base / "work",
+                    acquisition=base / "acquisition", contract=provision.CONTRACT_PATH,
+                    keyring=base / "unused-keyring",
+                )
+                bindings = []
+                descriptors = []
+
+                def create_binding(path):
+                    path.mkdir()
+                    parent_fd = provision.open_directory_without_links(path.parent)
+                    root_fd = os.open(path, os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC)
+                    parent, root = os.fstat(parent_fd), os.fstat(root_fd)
+                    binding = provision.PinnedRootfsDirectory(
+                        path, path.parent, parent_fd, root_fd,
+                        (parent.st_dev, parent.st_ino), (root.st_dev, root.st_ino),
+                    )
+                    bindings.append(binding)  # Deliberately prevent finalization.
+                    descriptors.extend((parent_fd, root_fd))
+                    return binding
+
+                try:
+                    retained = None
+                    with mock.patch.object(provision, "load_candidate", return_value=({}, [])), \
+                            mock.patch.object(provision, "remove_optional_source_caches"), \
+                            mock.patch.object(provision, "check_runner_bounds"), \
+                            mock.patch.object(provision, "create_pinned_rootfs_directory", side_effect=create_binding), \
+                            mock.patch.object(provision, "run_checked", side_effect=failure) as run:
+                        try:
+                            provision._provision_rootfs_unqualified(args)
+                        except BaseException as error:
+                            retained = error  # Retain the real consumer traceback too.
+                    self.assertIs(retained, failure)
+                    self.assertIsNotNone(retained.__traceback__)
+                    self.assertEqual(run.call_count, 1)
+                    self.assertIn("debootstrap", run.call_args.args[0])
+                    self.assertEqual(len(bindings), 1)
+                    self.assertEqual((bindings[0].parent_fd, bindings[0].root_fd), (-1, -1))
+                    for descriptor in descriptors:
+                        with self.assertRaises(OSError) as closed:
+                            os.fstat(descriptor)
+                        self.assertEqual(closed.exception.errno, errno.EBADF)
+                    self.assertEqual(canary.read_bytes(), b"must remain untouched")
+                    self.assertTrue(args.rootfs.is_dir())  # Cleanup closes, never deletes evidence.
+                    self.assertFalse(args.output.exists())
+                finally:
+                    for binding in bindings:
+                        binding.close()
+
     def authority_metadata(self, metadata, identity):
         from types import SimpleNamespace
         if (metadata.st_dev,metadata.st_ino)!=identity:return metadata

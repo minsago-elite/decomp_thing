@@ -5288,7 +5288,15 @@ def _provision_rootfs_unqualified(args: argparse.Namespace) -> int:
     candidate, indexes = load_candidate(args.acquisition, contract, args.keyring)
     remove_optional_source_caches(args.acquisition)
     check_runner_bounds(args.workdir, profile)
-    rootfs_binding = create_pinned_rootfs_directory(canonical_rootfs)
+    # Exception tracebacks can retain every frame (and the binding) indefinitely.
+    # Release descriptor ownership synchronously, not through __del__, on every exit.
+    with contextlib.closing(create_pinned_rootfs_directory(canonical_rootfs)) as rootfs_binding:
+        return _provision_rootfs_pinned(args, contract, captured, candidate, rootfs_binding)
+
+
+def _provision_rootfs_pinned(args: argparse.Namespace, contract: dict, captured: dict[Path, bytes],
+                            candidate: dict, rootfs_binding: PinnedRootfsDirectory) -> int:
+    profile = contract["profile"]
     profile_root = rootfs_binding.descriptor_path
 
     def bound_call(action, *values, **options):
@@ -5503,7 +5511,6 @@ def _provision_rootfs_unqualified(args: argparse.Namespace) -> int:
         rootfs_binding.remove_empty_path()
     else:
         rootfs_binding.require_path_binding()
-    rootfs_binding.close()
     print(f"provisioned {profile['id']} rootfs sha256:{rootfs_identity['sha256']} image {image_record['imageDigest']}")
     return 0
 
