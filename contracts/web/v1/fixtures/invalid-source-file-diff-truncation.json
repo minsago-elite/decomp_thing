@@ -1,0 +1,123 @@
+{
+  "apiVersion": 1,
+  "kind": "sourceFileDiff",
+  "requestId": "request_diff_2",
+  "data": {
+    "binding": {
+      "jobId": "job_1",
+      "runId": "run_2",
+      "revisionId": "revision_2"
+    },
+    "base": {
+      "runId": "run_1",
+      "revisionId": "revision_1"
+    },
+    "authority": "recorded-digests",
+    "sourceSha256": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+    "metadataVersion": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+    "baseSourceSha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+    "baseMetadataVersion": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+    "status": "modified",
+    "baseFile": {
+      "fileId": "file_4_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "displayName": "src/main.c",
+      "sizeBytes": "12",
+      "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "declaredUtf8Text": true,
+      "declaredViewable": true,
+      "commitment": "source-input"
+    },
+    "headFile": {
+      "fileId": "file_4_bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "displayName": "src/main.c",
+      "sizeBytes": "12",
+      "sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "declaredUtf8Text": true,
+      "declaredViewable": true,
+      "commitment": "source-input"
+    },
+    "representation": "text",
+    "fallbackReason": null,
+    "baseLines": 12,
+    "headLines": 13,
+    "totalHunks": 2,
+    "hunkOffset": 0,
+    "nextHunk": 1,
+    "unchangedAfter": 2,
+    "hunks": [
+      {
+        "baseStart": 4,
+        "baseCount": 4,
+        "headStart": 4,
+        "headCount": 5,
+        "unchangedBefore": 3,
+        "lines": [
+          {
+            "kind": "context",
+            "baseLine": 4,
+            "headLine": 4,
+            "text": "int main(void) {",
+            "truncated": false,
+            "characters": 16,
+            "missingFinalNewline": false
+          },
+          {
+            "kind": "removed",
+            "baseLine": 5,
+            "headLine": null,
+            "text": "  return 0;",
+            "truncated": false,
+            "characters": 99,
+            "missingFinalNewline": false
+          },
+          {
+            "kind": "added",
+            "baseLine": null,
+            "headLine": 5,
+            "text": "  /* </pre><script>inert</script> */",
+            "truncated": false,
+            "characters": 36,
+            "missingFinalNewline": false
+          },
+          {
+            "kind": "added",
+            "baseLine": null,
+            "headLine": 6,
+            "text": "  return 1;",
+            "truncated": false,
+            "characters": 11,
+            "missingFinalNewline": false
+          },
+          {
+            "kind": "context",
+            "baseLine": 6,
+            "headLine": 7,
+            "text": "}",
+            "truncated": false,
+            "characters": 1,
+            "missingFinalNewline": false
+          },
+          {
+            "kind": "context",
+            "baseLine": 7,
+            "headLine": 8,
+            "text": "",
+            "truncated": false,
+            "characters": 0,
+            "missingFinalNewline": false
+          }
+        ]
+      }
+    ],
+    "patchAvailable": true,
+    "limits": {
+      "maximumFileBytes": "1048576",
+      "maximumLines": 50000,
+      "maximumEdits": 2000,
+      "contextLines": 3,
+      "hunksPerPage": 20,
+      "rowsPerPage": 2000,
+      "lineCharacters": 1000
+    }
+  }
+}

@@ -164,97 +164,6 @@
       ],
       "additionalProperties": false
     },
-    "workflowLaunch": {
-      "type": "object",
-      "description": "Server-reported launch facts for one registered workflow option. They describe the adapter; admission rechecks capability, limits and readiness.",
-      "properties": {
-        "harnessCapabilityId": {
-          "anyOf": [
-            {
-              "$ref": "#/definitions/id"
-            },
-            {
-              "type": "null"
-            }
-          ]
-        },
-        "mode": {
-          "type": "string",
-          "enum": [
-            "tools",
-            "agent",
-            "evidence-only"
-          ]
-        },
-        "executesBinary": {
-          "type": "boolean"
-        },
-        "contactsAgent": {
-          "type": "boolean"
-        },
-        "requiredTools": {
-          "type": "array",
-          "items": {
-            "type": "string",
-            "enum": [
-              "sandbox",
-              "ghidra",
-              "agent-harness",
-              "c-toolchain",
-              "angr"
-            ]
-          },
-          "maxItems": 8,
-          "uniqueItems": true
-        },
-        "input": {
-          "type": "string",
-          "enum": [
-            "none",
-            "accepted-optional",
-            "recorded-required"
-          ]
-        },
-        "limitsAdjustable": {
-          "type": "boolean"
-        }
-      },
-      "required": [
-        "harnessCapabilityId",
-        "mode",
-        "executesBinary",
-        "contactsAgent",
-        "requiredTools",
-        "input",
-        "limitsAdjustable"
-      ],
-      "additionalProperties": false,
-      "allOf": [
-        {
-          "if": {
-            "properties": {
-              "mode": {
-                "const": "agent"
-              }
-            }
-          },
-          "then": {
-            "properties": {
-              "contactsAgent": {
-                "const": true
-              }
-            }
-          },
-          "else": {
-            "properties": {
-              "contactsAgent": {
-                "const": false
-              }
-            }
-          }
-        }
-      ]
-    },
     "capability": {
       "type": "object",
       "properties": {
@@ -1014,6 +923,21 @@
             {
               "type": "null"
             }
+          ]
+        },
+        "family": {
+          "enum": [
+            "exploration-report",
+            "progress-journal",
+            "source-manifest",
+            "build-contract",
+            "source-archive"
+          ]
+        },
+        "verification": {
+          "enum": [
+            "not-verified",
+            "source-inventory-checked"
           ]
         }
       },
@@ -3317,7 +3241,15 @@
           "pattern": "^(?!/)[^\\\\\\u0000-\\u001f\\u007f:]+$"
         },
         "sizeBytes": {
-          "$ref": "#/definitions/uint64"
+          "anyOf": [
+            {
+              "$ref": "#/definitions/uint64"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Committed size of a canonical source input; manifest-only entries record no size."
         },
         "sha256": {
           "$ref": "#/definitions/sha256"
@@ -3327,6 +3259,14 @@
         },
         "declaredViewable": {
           "type": "boolean"
+        },
+        "commitment": {
+          "type": "string",
+          "enum": [
+            "source-input",
+            "manifest-digest"
+          ],
+          "description": "source-input entries belong to the revision source digest; manifest-digest entries are bound only by the manifest digest."
         }
       },
       "required": [
@@ -3337,7 +3277,32 @@
         "declaredUtf8Text",
         "declaredViewable"
       ],
-      "additionalProperties": false
+      "additionalProperties": false,
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "commitment": {
+                "const": "source-input"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "sizeBytes": {
+                "$ref": "#/definitions/uint64"
+              }
+            }
+          },
+          "else": {
+            "properties": {
+              "sizeBytes": {
+                "type": "null"
+              }
+            }
+          }
+        }
+      ]
     },
     "revisionSources": {
       "type": "object",
@@ -3426,7 +3391,15 @@
           "$ref": "#/definitions/revisionDirectoryLabel"
         },
         "sizeBytes": {
-          "$ref": "#/definitions/uint64"
+          "anyOf": [
+            {
+              "$ref": "#/definitions/uint64"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Committed size of a canonical source input; manifest-only entries record no size."
         },
         "sha256": {
           "$ref": "#/definitions/sha256"
@@ -3436,6 +3409,14 @@
         },
         "declaredViewable": {
           "type": "boolean"
+        },
+        "commitment": {
+          "type": "string",
+          "enum": [
+            "source-input",
+            "manifest-digest"
+          ],
+          "description": "source-input entries belong to the revision source digest; manifest-digest entries are bound only by the manifest digest."
         }
       },
       "required": [
@@ -3447,7 +3428,32 @@
         "declaredUtf8Text",
         "declaredViewable"
       ],
-      "additionalProperties": false
+      "additionalProperties": false,
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "commitment": {
+                "const": "source-input"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "sizeBytes": {
+                "$ref": "#/definitions/uint64"
+              }
+            }
+          },
+          "else": {
+            "properties": {
+              "sizeBytes": {
+                "type": "null"
+              }
+            }
+          }
+        }
+      ]
     },
     "revisionDirectoryChild": {
       "type": "object",
@@ -3778,7 +3784,15 @@
           "pattern": "^(?!/)[^\\\\\\u0000-\\u001f\\u007f:]+$"
         },
         "sizeBytes": {
-          "$ref": "#/definitions/uint64"
+          "anyOf": [
+            {
+              "$ref": "#/definitions/uint64"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Committed size of a canonical source input; manifest-only entries record no size."
         },
         "sha256": {
           "$ref": "#/definitions/sha256"
@@ -3791,6 +3805,14 @@
         },
         "declaredArchivable": {
           "type": "boolean"
+        },
+        "commitment": {
+          "type": "string",
+          "enum": [
+            "source-input",
+            "manifest-digest"
+          ],
+          "description": "source-input entries belong to the revision source digest; manifest-digest entries are bound only by the manifest digest."
         }
       },
       "required": [
@@ -3802,7 +3824,32 @@
         "declaredViewable",
         "declaredArchivable"
       ],
-      "additionalProperties": false
+      "additionalProperties": false,
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "commitment": {
+                "const": "source-input"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "sizeBytes": {
+                "$ref": "#/definitions/uint64"
+              }
+            }
+          },
+          "else": {
+            "properties": {
+              "sizeBytes": {
+                "type": "null"
+              }
+            }
+          }
+        }
+      ]
     },
     "revisionFile": {
       "type": "object",
@@ -5077,6 +5124,5051 @@
         }
       ]
     },
+    "logLine": {
+      "type": "object",
+      "properties": {
+        "number": {
+          "type": "string",
+          "pattern": "^[1-9][0-9]{0,8}$"
+        },
+        "text": {
+          "type": "string",
+          "maxLength": 4096
+        },
+        "truncated": {
+          "type": "boolean"
+        },
+        "replacedInvalidText": {
+          "type": "boolean"
+        },
+        "redacted": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "number",
+        "text",
+        "truncated",
+        "replacedInvalidText",
+        "redacted"
+      ],
+      "additionalProperties": false
+    },
+    "logRange": {
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "jobId": {
+              "$ref": "#/definitions/id"
+            },
+            "runId": {
+              "$ref": "#/definitions/id"
+            },
+            "logId": {
+              "const": "build"
+            },
+            "source": {
+              "const": "generated-build-log"
+            },
+            "attempt": {
+              "type": "object",
+              "properties": {
+                "state": {
+                  "$ref": "#/definitions/runState"
+                },
+                "startedAt": {
+                  "anyOf": [
+                    {
+                      "$ref": "#/definitions/instant"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                },
+                "endedAt": {
+                  "anyOf": [
+                    {
+                      "$ref": "#/definitions/instant"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                }
+              },
+              "required": [
+                "state",
+                "startedAt",
+                "endedAt"
+              ],
+              "additionalProperties": false
+            },
+            "readAt": {
+              "$ref": "#/definitions/instant"
+            },
+            "redactionPolicy": {
+              "const": "web-log-v1"
+            },
+            "state": {
+              "const": "available"
+            },
+            "sourceSha256": {
+              "$ref": "#/definitions/sha256"
+            },
+            "totalBytes": {
+              "type": "string",
+              "pattern": "^(0|[1-9][0-9]{0,18})$"
+            },
+            "totalLines": {
+              "type": "string",
+              "pattern": "^(0|[1-9][0-9]{0,6})$"
+            },
+            "redactedLines": {
+              "type": "string",
+              "pattern": "^(0|[1-9][0-9]{0,6})$"
+            },
+            "range": {
+              "type": "object",
+              "properties": {
+                "firstLine": {
+                  "type": "string",
+                  "pattern": "^[1-9][0-9]{0,8}$"
+                },
+                "lineCount": {
+                  "type": "string",
+                  "pattern": "^(0|[1-9][0-9]{0,2})$"
+                },
+                "truncatedBefore": {
+                  "type": "boolean"
+                },
+                "truncatedAfter": {
+                  "type": "boolean"
+                },
+                "byteLimited": {
+                  "type": "boolean"
+                }
+              },
+              "required": [
+                "firstLine",
+                "lineCount",
+                "truncatedBefore",
+                "truncatedAfter",
+                "byteLimited"
+              ],
+              "additionalProperties": false
+            },
+            "lines": {
+              "type": "array",
+              "items": {
+                "$ref": "#/definitions/logLine"
+              },
+              "maxItems": 500
+            },
+            "search": {
+              "anyOf": [
+                {
+                  "type": "null"
+                },
+                {
+                  "type": "object",
+                  "properties": {
+                    "query": {
+                      "type": "string",
+                      "minLength": 1,
+                      "maxLength": 128
+                    },
+                    "scope": {
+                      "const": "whole-log"
+                    },
+                    "matchCount": {
+                      "type": "string",
+                      "pattern": "^(0|[1-9][0-9]{0,18})$"
+                    },
+                    "matches": {
+                      "type": "array",
+                      "items": {
+                        "type": "string",
+                        "pattern": "^[1-9][0-9]{0,8}$"
+                      },
+                      "maxItems": 200
+                    },
+                    "matchesTruncated": {
+                      "type": "boolean"
+                    }
+                  },
+                  "required": [
+                    "query",
+                    "scope",
+                    "matchCount",
+                    "matches",
+                    "matchesTruncated"
+                  ],
+                  "additionalProperties": false
+                }
+              ]
+            }
+          },
+          "required": [
+            "jobId",
+            "runId",
+            "logId",
+            "source",
+            "attempt",
+            "readAt",
+            "redactionPolicy",
+            "state",
+            "sourceSha256",
+            "totalBytes",
+            "totalLines",
+            "redactedLines",
+            "range",
+            "lines",
+            "search"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "jobId": {
+              "$ref": "#/definitions/id"
+            },
+            "runId": {
+              "$ref": "#/definitions/id"
+            },
+            "logId": {
+              "const": "build"
+            },
+            "source": {
+              "const": "generated-build-log"
+            },
+            "attempt": {
+              "type": "object",
+              "properties": {
+                "state": {
+                  "$ref": "#/definitions/runState"
+                },
+                "startedAt": {
+                  "anyOf": [
+                    {
+                      "$ref": "#/definitions/instant"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                },
+                "endedAt": {
+                  "anyOf": [
+                    {
+                      "$ref": "#/definitions/instant"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                }
+              },
+              "required": [
+                "state",
+                "startedAt",
+                "endedAt"
+              ],
+              "additionalProperties": false
+            },
+            "readAt": {
+              "$ref": "#/definitions/instant"
+            },
+            "redactionPolicy": {
+              "const": "web-log-v1"
+            },
+            "state": {
+              "enum": [
+                "missing",
+                "oversized"
+              ]
+            },
+            "maximumBytes": {
+              "type": "string",
+              "pattern": "^(0|[1-9][0-9]{0,18})$"
+            }
+          },
+          "required": [
+            "jobId",
+            "runId",
+            "logId",
+            "source",
+            "attempt",
+            "readAt",
+            "redactionPolicy",
+            "state",
+            "maximumBytes"
+          ],
+          "additionalProperties": false
+        }
+      ]
+    },
+    "structureRecord": {
+      "type": "object",
+      "properties": {
+        "state": {
+          "type": "string",
+          "enum": [
+            "available",
+            "not-recorded",
+            "unsupported",
+            "invalid",
+            "limit-exceeded"
+          ]
+        },
+        "stateReason": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/id"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "path": {
+          "anyOf": [
+            {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 4096,
+              "pattern": "^(?!/)[^\\\\\\u0000-\\u001f\\u007f:]+$"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "sha256": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/sha256"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "sizeBytes": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/uint64"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "schemaVersion": {
+          "anyOf": [
+            {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 4
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "state",
+        "stateReason",
+        "path",
+        "sha256",
+        "sizeBytes",
+        "schemaVersion"
+      ],
+      "additionalProperties": false
+    },
+    "structureCapability": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "enum": [
+            "function-inventory",
+            "recorded-prototypes",
+            "module-ownership",
+            "generated-headers",
+            "global-byte-evidence",
+            "recovery-assessment",
+            "type-references",
+            "type-layouts",
+            "abi-interfaces",
+            "cpp-object-model"
+          ]
+        },
+        "state": {
+          "type": "string",
+          "enum": [
+            "available",
+            "not-recorded",
+            "unsupported",
+            "invalid",
+            "limit-exceeded"
+          ]
+        },
+        "reason": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/id"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "id",
+        "state",
+        "reason"
+      ],
+      "additionalProperties": false
+    },
+    "structureText": {
+      "type": "object",
+      "properties": {
+        "text": {
+          "type": "string",
+          "maxLength": 2048
+        },
+        "characters": {
+          "$ref": "#/definitions/uint64"
+        },
+        "truncated": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "text",
+        "characters",
+        "truncated"
+      ],
+      "additionalProperties": false
+    },
+    "structureEntity": {
+      "type": "object",
+      "properties": {
+        "kind": {
+          "type": "string",
+          "enum": [
+            "function",
+            "global",
+            "type"
+          ]
+        },
+        "entityId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 4096
+        },
+        "selector": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/id"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "recorded": {
+          "const": true
+        },
+        "name": {
+          "anyOf": [
+            {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 4096
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "address": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/address"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "extractionStatus": {
+          "type": "string",
+          "enum": [
+            "recovered",
+            "partial",
+            "failed",
+            "synthetic"
+          ],
+          "description": "Producer extraction label; never a scored recovery assessment."
+        },
+        "evidenceState": {
+          "type": "string",
+          "enum": [
+            "recovered",
+            "inferred",
+            "unresolved",
+            "excluded"
+          ],
+          "description": "Display class derived from recorded fields; see docs/web-program-structure.md."
+        },
+        "ownership": {
+          "type": "string",
+          "enum": [
+            "owned",
+            "unowned",
+            "ambiguous",
+            "not-recorded"
+          ]
+        },
+        "moduleId": {
+          "anyOf": [
+            {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 128,
+              "pattern": "^[A-Za-z0-9_][A-Za-z0-9_.-]{0,127}$"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "moduleSelector": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/id"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "implementationUnresolved": {
+          "type": "boolean"
+        },
+        "reportedUnresolved": {
+          "type": "boolean"
+        },
+        "nameCollision": {
+          "type": "boolean"
+        },
+        "callCount": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "referencedGlobalCount": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        }
+      },
+      "required": [
+        "kind",
+        "entityId",
+        "selector",
+        "recorded",
+        "name",
+        "address",
+        "extractionStatus",
+        "evidenceState",
+        "ownership",
+        "moduleId",
+        "moduleSelector",
+        "implementationUnresolved",
+        "reportedUnresolved",
+        "nameCollision"
+      ],
+      "additionalProperties": false
+    },
+    "structureUnrecordedEntity": {
+      "type": "object",
+      "properties": {
+        "kind": {
+          "type": "string",
+          "enum": [
+            "function",
+            "global",
+            "type"
+          ]
+        },
+        "entityId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 4096
+        },
+        "selector": {
+          "type": "null"
+        },
+        "recorded": {
+          "const": false
+        }
+      },
+      "required": [
+        "kind",
+        "entityId",
+        "selector",
+        "recorded"
+      ],
+      "additionalProperties": false
+    },
+    "structureReference": {
+      "type": "object",
+      "properties": {
+        "kind": {
+          "type": "string",
+          "enum": [
+            "function",
+            "global",
+            "type"
+          ]
+        },
+        "entityId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 4096
+        },
+        "selector": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/id"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "name": {
+          "anyOf": [
+            {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 4096
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "resolution": {
+          "type": "string",
+          "enum": [
+            "recorded",
+            "no-record"
+          ]
+        }
+      },
+      "required": [
+        "kind",
+        "entityId",
+        "selector",
+        "name",
+        "resolution"
+      ],
+      "additionalProperties": false
+    },
+    "structureReferences": {
+      "type": "object",
+      "properties": {
+        "total": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "items": {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/structureReference"
+          },
+          "maxItems": 50
+        }
+      },
+      "required": [
+        "total",
+        "items"
+      ],
+      "additionalProperties": false
+    },
+    "structureModule": {
+      "type": "object",
+      "properties": {
+        "moduleId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[A-Za-z0-9_][A-Za-z0-9_.-]{0,127}$"
+        },
+        "selector": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/id"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "functionCount": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "globalCount": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "typeCount": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "implementationDeclaration": {
+          "type": "string",
+          "enum": [
+            "accepted",
+            "unaccepted",
+            "not-classified"
+          ],
+          "description": "Recorded manifest claim for the module implementation file; not verified acceptance."
+        },
+        "inDependencyCycle": {
+          "type": "boolean"
+        },
+        "functionEvidence": {
+          "type": "object",
+          "properties": {
+            "recovered": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 9007199254740991
+            },
+            "inferred": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 9007199254740991
+            },
+            "unresolved": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 9007199254740991
+            },
+            "excluded": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 9007199254740991
+            }
+          },
+          "required": [
+            "recovered",
+            "inferred",
+            "unresolved",
+            "excluded"
+          ],
+          "additionalProperties": false
+        }
+      },
+      "required": [
+        "moduleId",
+        "selector",
+        "functionCount",
+        "globalCount",
+        "typeCount",
+        "implementationDeclaration",
+        "inDependencyCycle",
+        "functionEvidence"
+      ],
+      "additionalProperties": false
+    },
+    "structureSummary": {
+      "type": "object",
+      "properties": {
+        "functions": {
+          "type": "object",
+          "properties": {
+            "total": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 9007199254740991
+            },
+            "evidence": {
+              "type": "object",
+              "properties": {
+                "recovered": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 9007199254740991
+                },
+                "inferred": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 9007199254740991
+                },
+                "unresolved": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 9007199254740991
+                },
+                "excluded": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 9007199254740991
+                }
+              },
+              "required": [
+                "recovered",
+                "inferred",
+                "unresolved",
+                "excluded"
+              ],
+              "additionalProperties": false
+            },
+            "extraction": {
+              "type": "object",
+              "properties": {
+                "recovered": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 9007199254740991
+                },
+                "partial": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 9007199254740991
+                },
+                "failed": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 9007199254740991
+                },
+                "synthetic": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 9007199254740991
+                }
+              },
+              "required": [
+                "recovered",
+                "partial",
+                "failed",
+                "synthetic"
+              ],
+              "additionalProperties": false
+            },
+            "ownership": {
+              "type": "object",
+              "properties": {
+                "owned": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 9007199254740991
+                },
+                "unowned": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 9007199254740991
+                },
+                "ambiguous": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 9007199254740991
+                },
+                "not-recorded": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 9007199254740991
+                }
+              },
+              "required": [
+                "owned",
+                "unowned",
+                "ambiguous",
+                "not-recorded"
+              ],
+              "additionalProperties": false
+            }
+          },
+          "required": [
+            "total",
+            "evidence",
+            "extraction",
+            "ownership"
+          ],
+          "additionalProperties": false
+        },
+        "globals": {
+          "type": "object",
+          "properties": {
+            "total": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 9007199254740991
+            },
+            "evidence": {
+              "type": "object",
+              "properties": {
+                "recovered": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 9007199254740991
+                },
+                "inferred": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 9007199254740991
+                },
+                "unresolved": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 9007199254740991
+                },
+                "excluded": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 9007199254740991
+                }
+              },
+              "required": [
+                "recovered",
+                "inferred",
+                "unresolved",
+                "excluded"
+              ],
+              "additionalProperties": false
+            },
+            "extraction": {
+              "type": "object",
+              "properties": {
+                "recovered": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 9007199254740991
+                },
+                "partial": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 9007199254740991
+                },
+                "failed": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 9007199254740991
+                },
+                "synthetic": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 9007199254740991
+                }
+              },
+              "required": [
+                "recovered",
+                "partial",
+                "failed",
+                "synthetic"
+              ],
+              "additionalProperties": false
+            },
+            "ownership": {
+              "type": "object",
+              "properties": {
+                "owned": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 9007199254740991
+                },
+                "unowned": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 9007199254740991
+                },
+                "ambiguous": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 9007199254740991
+                },
+                "not-recorded": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 9007199254740991
+                }
+              },
+              "required": [
+                "owned",
+                "unowned",
+                "ambiguous",
+                "not-recorded"
+              ],
+              "additionalProperties": false
+            }
+          },
+          "required": [
+            "total",
+            "evidence",
+            "extraction",
+            "ownership"
+          ],
+          "additionalProperties": false
+        },
+        "types": {
+          "type": "object",
+          "properties": {
+            "total": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 9007199254740991
+            },
+            "evidence": {
+              "type": "object",
+              "properties": {
+                "recovered": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 9007199254740991
+                },
+                "inferred": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 9007199254740991
+                },
+                "unresolved": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 9007199254740991
+                },
+                "excluded": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 9007199254740991
+                }
+              },
+              "required": [
+                "recovered",
+                "inferred",
+                "unresolved",
+                "excluded"
+              ],
+              "additionalProperties": false
+            },
+            "extraction": {
+              "type": "object",
+              "properties": {
+                "recovered": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 9007199254740991
+                },
+                "partial": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 9007199254740991
+                },
+                "failed": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 9007199254740991
+                },
+                "synthetic": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 9007199254740991
+                }
+              },
+              "required": [
+                "recovered",
+                "partial",
+                "failed",
+                "synthetic"
+              ],
+              "additionalProperties": false
+            },
+            "ownership": {
+              "type": "object",
+              "properties": {
+                "owned": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 9007199254740991
+                },
+                "unowned": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 9007199254740991
+                },
+                "ambiguous": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 9007199254740991
+                },
+                "not-recorded": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 9007199254740991
+                }
+              },
+              "required": [
+                "owned",
+                "unowned",
+                "ambiguous",
+                "not-recorded"
+              ],
+              "additionalProperties": false
+            }
+          },
+          "required": [
+            "total",
+            "evidence",
+            "extraction",
+            "ownership"
+          ],
+          "additionalProperties": false
+        },
+        "modules": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "modulesDeclaredAccepted": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "dependencyCycles": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "unknownPlanReferences": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "nameCollisions": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "unresolvedCallTargets": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "unresolvedGlobalReferences": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        }
+      },
+      "required": [
+        "functions",
+        "globals",
+        "types",
+        "modules",
+        "modulesDeclaredAccepted",
+        "dependencyCycles",
+        "unknownPlanReferences",
+        "nameCollisions",
+        "unresolvedCallTargets",
+        "unresolvedGlobalReferences"
+      ],
+      "additionalProperties": false
+    },
+    "functionInventory": {
+      "type": "object",
+      "properties": {
+        "binding": {
+          "type": "object",
+          "properties": {
+            "jobId": {
+              "$ref": "#/definitions/id"
+            },
+            "runId": {
+              "$ref": "#/definitions/id"
+            },
+            "revisionId": {
+              "$ref": "#/definitions/id"
+            }
+          },
+          "required": [
+            "jobId",
+            "runId",
+            "revisionId"
+          ],
+          "additionalProperties": false
+        },
+        "authority": {
+          "const": "recorded-program-model"
+        },
+        "state": {
+          "type": "string",
+          "enum": [
+            "available",
+            "not-recorded",
+            "unsupported",
+            "invalid",
+            "limit-exceeded"
+          ],
+          "description": "Program-model state. Only available records may carry entity rows."
+        },
+        "stateReason": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/id"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "structureVersion": {
+          "$ref": "#/definitions/sha256"
+        },
+        "sourceSha256": {
+          "$ref": "#/definitions/sha256"
+        },
+        "metadataVersion": {
+          "$ref": "#/definitions/sha256"
+        },
+        "manifestSha256": {
+          "$ref": "#/definitions/sha256"
+        },
+        "model": {
+          "$ref": "#/definitions/structureRecord"
+        },
+        "plan": {
+          "$ref": "#/definitions/structureRecord"
+        },
+        "recoveryAssessment": {
+          "type": "string",
+          "enum": [
+            "unassessed",
+            "not-recorded"
+          ]
+        },
+        "capabilities": {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/structureCapability"
+          },
+          "minItems": 1,
+          "maxItems": 32
+        },
+        "query": {
+          "type": "object",
+          "properties": {
+            "sort": {
+              "type": "string",
+              "enum": [
+                "address",
+                "name",
+                "id"
+              ]
+            },
+            "order": {
+              "type": "string",
+              "enum": [
+                "asc",
+                "desc"
+              ]
+            },
+            "search": {
+              "anyOf": [
+                {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 256
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "status": {
+              "anyOf": [
+                {
+                  "type": "string",
+                  "enum": [
+                    "recovered",
+                    "partial",
+                    "failed",
+                    "synthetic"
+                  ]
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "evidence": {
+              "anyOf": [
+                {
+                  "type": "string",
+                  "enum": [
+                    "recovered",
+                    "inferred",
+                    "unresolved",
+                    "excluded"
+                  ]
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "ownership": {
+              "anyOf": [
+                {
+                  "type": "string",
+                  "enum": [
+                    "owned",
+                    "unowned",
+                    "ambiguous",
+                    "not-recorded"
+                  ]
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "module": {
+              "anyOf": [
+                {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 256
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            }
+          },
+          "required": [
+            "sort",
+            "order",
+            "search",
+            "status",
+            "evidence",
+            "ownership",
+            "module"
+          ],
+          "additionalProperties": false
+        },
+        "totalFunctions": {
+          "anyOf": [
+            {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 9007199254740991
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "matchedFunctions": {
+          "anyOf": [
+            {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 9007199254740991
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "items": {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/structureEntity"
+          },
+          "maxItems": 200
+        },
+        "page": {
+          "$ref": "#/definitions/page"
+        }
+      },
+      "required": [
+        "binding",
+        "authority",
+        "state",
+        "stateReason",
+        "structureVersion",
+        "sourceSha256",
+        "metadataVersion",
+        "manifestSha256",
+        "model",
+        "plan",
+        "recoveryAssessment",
+        "capabilities",
+        "query",
+        "totalFunctions",
+        "matchedFunctions",
+        "items",
+        "page"
+      ],
+      "additionalProperties": false,
+      "if": {
+        "properties": {
+          "state": {
+            "const": "available"
+          }
+        }
+      },
+      "else": {
+        "properties": {
+          "totalFunctions": {
+            "type": "null"
+          },
+          "matchedFunctions": {
+            "type": "null"
+          },
+          "items": {
+            "maxItems": 0
+          }
+        }
+      }
+    },
+    "moduleInventory": {
+      "type": "object",
+      "properties": {
+        "binding": {
+          "type": "object",
+          "properties": {
+            "jobId": {
+              "$ref": "#/definitions/id"
+            },
+            "runId": {
+              "$ref": "#/definitions/id"
+            },
+            "revisionId": {
+              "$ref": "#/definitions/id"
+            }
+          },
+          "required": [
+            "jobId",
+            "runId",
+            "revisionId"
+          ],
+          "additionalProperties": false
+        },
+        "authority": {
+          "const": "recorded-program-model"
+        },
+        "state": {
+          "type": "string",
+          "enum": [
+            "available",
+            "not-recorded",
+            "unsupported",
+            "invalid",
+            "limit-exceeded"
+          ],
+          "description": "Program-model state. Only available records may carry entity rows."
+        },
+        "stateReason": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/id"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "structureVersion": {
+          "$ref": "#/definitions/sha256"
+        },
+        "sourceSha256": {
+          "$ref": "#/definitions/sha256"
+        },
+        "metadataVersion": {
+          "$ref": "#/definitions/sha256"
+        },
+        "manifestSha256": {
+          "$ref": "#/definitions/sha256"
+        },
+        "model": {
+          "$ref": "#/definitions/structureRecord"
+        },
+        "plan": {
+          "$ref": "#/definitions/structureRecord"
+        },
+        "recoveryAssessment": {
+          "type": "string",
+          "enum": [
+            "unassessed",
+            "not-recorded"
+          ]
+        },
+        "capabilities": {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/structureCapability"
+          },
+          "minItems": 1,
+          "maxItems": 32
+        },
+        "summary": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/structureSummary"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "totalModules": {
+          "anyOf": [
+            {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 9007199254740991
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "items": {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/structureModule"
+          },
+          "maxItems": 200
+        },
+        "page": {
+          "$ref": "#/definitions/page"
+        }
+      },
+      "required": [
+        "binding",
+        "authority",
+        "state",
+        "stateReason",
+        "structureVersion",
+        "sourceSha256",
+        "metadataVersion",
+        "manifestSha256",
+        "model",
+        "plan",
+        "recoveryAssessment",
+        "capabilities",
+        "summary",
+        "totalModules",
+        "items",
+        "page"
+      ],
+      "additionalProperties": false,
+      "if": {
+        "properties": {
+          "state": {
+            "const": "available"
+          }
+        }
+      },
+      "else": {
+        "properties": {
+          "summary": {
+            "type": "null"
+          },
+          "totalModules": {
+            "type": "null"
+          },
+          "items": {
+            "maxItems": 0
+          }
+        }
+      }
+    },
+    "moduleDetail": {
+      "type": "object",
+      "properties": {
+        "binding": {
+          "type": "object",
+          "properties": {
+            "jobId": {
+              "$ref": "#/definitions/id"
+            },
+            "runId": {
+              "$ref": "#/definitions/id"
+            },
+            "revisionId": {
+              "$ref": "#/definitions/id"
+            }
+          },
+          "required": [
+            "jobId",
+            "runId",
+            "revisionId"
+          ],
+          "additionalProperties": false
+        },
+        "authority": {
+          "const": "recorded-program-model"
+        },
+        "state": {
+          "type": "string",
+          "enum": [
+            "available",
+            "not-recorded",
+            "unsupported",
+            "invalid",
+            "limit-exceeded"
+          ],
+          "description": "Program-model state. Only available records may carry entity rows."
+        },
+        "stateReason": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/id"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "structureVersion": {
+          "$ref": "#/definitions/sha256"
+        },
+        "sourceSha256": {
+          "$ref": "#/definitions/sha256"
+        },
+        "metadataVersion": {
+          "$ref": "#/definitions/sha256"
+        },
+        "manifestSha256": {
+          "$ref": "#/definitions/sha256"
+        },
+        "model": {
+          "$ref": "#/definitions/structureRecord"
+        },
+        "plan": {
+          "$ref": "#/definitions/structureRecord"
+        },
+        "recoveryAssessment": {
+          "type": "string",
+          "enum": [
+            "unassessed",
+            "not-recorded"
+          ]
+        },
+        "capabilities": {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/structureCapability"
+          },
+          "minItems": 1,
+          "maxItems": 32
+        },
+        "module": {
+          "anyOf": [
+            {
+              "type": "object",
+              "properties": {
+                "moduleId": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 128,
+                  "pattern": "^[A-Za-z0-9_][A-Za-z0-9_.-]{0,127}$"
+                },
+                "selector": {
+                  "anyOf": [
+                    {
+                      "$ref": "#/definitions/id"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                },
+                "functionCount": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 9007199254740991
+                },
+                "globalCount": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 9007199254740991
+                },
+                "typeCount": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 9007199254740991
+                },
+                "implementationDeclaration": {
+                  "type": "string",
+                  "enum": [
+                    "accepted",
+                    "unaccepted",
+                    "not-classified"
+                  ],
+                  "description": "Recorded manifest claim for the module implementation file; not verified acceptance."
+                },
+                "inDependencyCycle": {
+                  "type": "boolean"
+                },
+                "functionEvidence": {
+                  "type": "object",
+                  "properties": {
+                    "recovered": {
+                      "type": "integer",
+                      "minimum": 0,
+                      "maximum": 9007199254740991
+                    },
+                    "inferred": {
+                      "type": "integer",
+                      "minimum": 0,
+                      "maximum": 9007199254740991
+                    },
+                    "unresolved": {
+                      "type": "integer",
+                      "minimum": 0,
+                      "maximum": 9007199254740991
+                    },
+                    "excluded": {
+                      "type": "integer",
+                      "minimum": 0,
+                      "maximum": 9007199254740991
+                    }
+                  },
+                  "required": [
+                    "recovered",
+                    "inferred",
+                    "unresolved",
+                    "excluded"
+                  ],
+                  "additionalProperties": false
+                },
+                "implementationPath": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 4096,
+                  "pattern": "^(?!/)[^\\\\\\u0000-\\u001f\\u007f:]+$"
+                },
+                "implementationFileId": {
+                  "anyOf": [
+                    {
+                      "$ref": "#/definitions/id"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                },
+                "interfacePath": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 4096,
+                  "pattern": "^(?!/)[^\\\\\\u0000-\\u001f\\u007f:]+$"
+                },
+                "interfaceFileId": {
+                  "anyOf": [
+                    {
+                      "$ref": "#/definitions/id"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                },
+                "cycle": {
+                  "type": "object",
+                  "properties": {
+                    "total": {
+                      "type": "integer",
+                      "minimum": 0,
+                      "maximum": 9007199254740991
+                    },
+                    "items": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "moduleId": {
+                            "type": "string",
+                            "minLength": 1,
+                            "maxLength": 128,
+                            "pattern": "^[A-Za-z0-9_][A-Za-z0-9_.-]{0,127}$"
+                          },
+                          "selector": {
+                            "anyOf": [
+                              {
+                                "$ref": "#/definitions/id"
+                              },
+                              {
+                                "type": "null"
+                              }
+                            ]
+                          }
+                        },
+                        "required": [
+                          "moduleId",
+                          "selector"
+                        ],
+                        "additionalProperties": false
+                      },
+                      "maxItems": 20
+                    }
+                  },
+                  "required": [
+                    "total",
+                    "items"
+                  ],
+                  "additionalProperties": false
+                },
+                "boundaryEvidence": {
+                  "type": "object",
+                  "properties": {
+                    "total": {
+                      "type": "integer",
+                      "minimum": 0,
+                      "maximum": 9007199254740991
+                    },
+                    "items": {
+                      "type": "array",
+                      "items": {
+                        "$ref": "#/definitions/structureText"
+                      },
+                      "maxItems": 20
+                    }
+                  },
+                  "required": [
+                    "total",
+                    "items"
+                  ],
+                  "additionalProperties": false
+                }
+              },
+              "required": [
+                "moduleId",
+                "selector",
+                "functionCount",
+                "globalCount",
+                "typeCount",
+                "implementationDeclaration",
+                "inDependencyCycle",
+                "functionEvidence",
+                "implementationPath",
+                "implementationFileId",
+                "interfacePath",
+                "interfaceFileId",
+                "cycle",
+                "boundaryEvidence"
+              ],
+              "additionalProperties": false
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "owned": {
+          "anyOf": [
+            {
+              "type": "object",
+              "properties": {
+                "kind": {
+                  "type": "string",
+                  "enum": [
+                    "function",
+                    "global",
+                    "type"
+                  ]
+                },
+                "total": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 9007199254740991
+                },
+                "items": {
+                  "type": "array",
+                  "items": {
+                    "anyOf": [
+                      {
+                        "$ref": "#/definitions/structureEntity"
+                      },
+                      {
+                        "$ref": "#/definitions/structureUnrecordedEntity"
+                      }
+                    ]
+                  },
+                  "maxItems": 200
+                },
+                "page": {
+                  "$ref": "#/definitions/page"
+                }
+              },
+              "required": [
+                "kind",
+                "total",
+                "items",
+                "page"
+              ],
+              "additionalProperties": false
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "binding",
+        "authority",
+        "state",
+        "stateReason",
+        "structureVersion",
+        "sourceSha256",
+        "metadataVersion",
+        "manifestSha256",
+        "model",
+        "plan",
+        "recoveryAssessment",
+        "capabilities",
+        "module",
+        "owned"
+      ],
+      "additionalProperties": false,
+      "if": {
+        "properties": {
+          "state": {
+            "const": "available"
+          }
+        }
+      },
+      "else": {
+        "properties": {
+          "module": {
+            "type": "null"
+          },
+          "owned": {
+            "type": "null"
+          }
+        }
+      }
+    },
+    "entityDetail": {
+      "type": "object",
+      "properties": {
+        "binding": {
+          "type": "object",
+          "properties": {
+            "jobId": {
+              "$ref": "#/definitions/id"
+            },
+            "runId": {
+              "$ref": "#/definitions/id"
+            },
+            "revisionId": {
+              "$ref": "#/definitions/id"
+            }
+          },
+          "required": [
+            "jobId",
+            "runId",
+            "revisionId"
+          ],
+          "additionalProperties": false
+        },
+        "authority": {
+          "const": "recorded-program-model"
+        },
+        "state": {
+          "type": "string",
+          "enum": [
+            "available",
+            "not-recorded",
+            "unsupported",
+            "invalid",
+            "limit-exceeded"
+          ],
+          "description": "Program-model state. Only available records may carry entity rows."
+        },
+        "stateReason": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/id"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "structureVersion": {
+          "$ref": "#/definitions/sha256"
+        },
+        "sourceSha256": {
+          "$ref": "#/definitions/sha256"
+        },
+        "metadataVersion": {
+          "$ref": "#/definitions/sha256"
+        },
+        "manifestSha256": {
+          "$ref": "#/definitions/sha256"
+        },
+        "model": {
+          "$ref": "#/definitions/structureRecord"
+        },
+        "plan": {
+          "$ref": "#/definitions/structureRecord"
+        },
+        "recoveryAssessment": {
+          "type": "string",
+          "enum": [
+            "unassessed",
+            "not-recorded"
+          ]
+        },
+        "capabilities": {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/structureCapability"
+          },
+          "minItems": 1,
+          "maxItems": 32
+        },
+        "entity": {
+          "anyOf": [
+            {
+              "type": "object",
+              "properties": {
+                "kind": {
+                  "type": "string",
+                  "enum": [
+                    "function",
+                    "global",
+                    "type"
+                  ]
+                },
+                "entityId": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 4096
+                },
+                "selector": {
+                  "anyOf": [
+                    {
+                      "$ref": "#/definitions/id"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                },
+                "recorded": {
+                  "const": true
+                },
+                "name": {
+                  "anyOf": [
+                    {
+                      "type": "string",
+                      "minLength": 1,
+                      "maxLength": 4096
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                },
+                "address": {
+                  "anyOf": [
+                    {
+                      "$ref": "#/definitions/address"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                },
+                "extractionStatus": {
+                  "type": "string",
+                  "enum": [
+                    "recovered",
+                    "partial",
+                    "failed",
+                    "synthetic"
+                  ],
+                  "description": "Producer extraction label; never a scored recovery assessment."
+                },
+                "evidenceState": {
+                  "type": "string",
+                  "enum": [
+                    "recovered",
+                    "inferred",
+                    "unresolved",
+                    "excluded"
+                  ],
+                  "description": "Display class derived from recorded fields; see docs/web-program-structure.md."
+                },
+                "ownership": {
+                  "type": "string",
+                  "enum": [
+                    "owned",
+                    "unowned",
+                    "ambiguous",
+                    "not-recorded"
+                  ]
+                },
+                "moduleId": {
+                  "anyOf": [
+                    {
+                      "type": "string",
+                      "minLength": 1,
+                      "maxLength": 128,
+                      "pattern": "^[A-Za-z0-9_][A-Za-z0-9_.-]{0,127}$"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                },
+                "moduleSelector": {
+                  "anyOf": [
+                    {
+                      "$ref": "#/definitions/id"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                },
+                "implementationUnresolved": {
+                  "type": "boolean"
+                },
+                "reportedUnresolved": {
+                  "type": "boolean"
+                },
+                "nameCollision": {
+                  "type": "boolean"
+                },
+                "callCount": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 9007199254740991
+                },
+                "referencedGlobalCount": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 9007199254740991
+                },
+                "texts": {
+                  "type": "array",
+                  "maxItems": 2,
+                  "items": {
+                    "type": "object",
+                    "properties": {
+                      "field": {
+                        "type": "string",
+                        "enum": [
+                          "prototype",
+                          "decompiledC",
+                          "type",
+                          "initializer",
+                          "declaration"
+                        ]
+                      },
+                      "recorded": {
+                        "type": "boolean"
+                      },
+                      "preview": {
+                        "anyOf": [
+                          {
+                            "$ref": "#/definitions/structureText"
+                          },
+                          {
+                            "type": "null"
+                          }
+                        ]
+                      }
+                    },
+                    "required": [
+                      "field",
+                      "recorded",
+                      "preview"
+                    ],
+                    "additionalProperties": false
+                  }
+                },
+                "strings": {
+                  "anyOf": [
+                    {
+                      "type": "object",
+                      "properties": {
+                        "total": {
+                          "type": "integer",
+                          "minimum": 0,
+                          "maximum": 9007199254740991
+                        },
+                        "items": {
+                          "type": "array",
+                          "items": {
+                            "$ref": "#/definitions/structureText"
+                          },
+                          "maxItems": 20
+                        }
+                      },
+                      "required": [
+                        "total",
+                        "items"
+                      ],
+                      "additionalProperties": false
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                },
+                "calls": {
+                  "anyOf": [
+                    {
+                      "$ref": "#/definitions/structureReferences"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                },
+                "referencedGlobals": {
+                  "anyOf": [
+                    {
+                      "$ref": "#/definitions/structureReferences"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                },
+                "calledBy": {
+                  "anyOf": [
+                    {
+                      "$ref": "#/definitions/structureReferences"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                },
+                "referencedBy": {
+                  "anyOf": [
+                    {
+                      "$ref": "#/definitions/structureReferences"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                },
+                "byteEvidence": {
+                  "anyOf": [
+                    {
+                      "type": "string",
+                      "enum": [
+                        "recorded",
+                        "not-recorded",
+                        "unsupported-schema"
+                      ]
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                },
+                "collisions": {
+                  "type": "object",
+                  "properties": {
+                    "total": {
+                      "type": "integer",
+                      "minimum": 0,
+                      "maximum": 9007199254740991
+                    },
+                    "items": {
+                      "type": "array",
+                      "items": {
+                        "$ref": "#/definitions/structureReference"
+                      },
+                      "maxItems": 20
+                    }
+                  },
+                  "required": [
+                    "total",
+                    "items"
+                  ],
+                  "additionalProperties": false
+                },
+                "sources": {
+                  "type": "object",
+                  "properties": {
+                    "implementationPath": {
+                      "anyOf": [
+                        {
+                          "type": "string",
+                          "minLength": 1,
+                          "maxLength": 4096,
+                          "pattern": "^(?!/)[^\\\\\\u0000-\\u001f\\u007f:]+$"
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ]
+                    },
+                    "implementationFileId": {
+                      "anyOf": [
+                        {
+                          "$ref": "#/definitions/id"
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ]
+                    },
+                    "interfacePath": {
+                      "anyOf": [
+                        {
+                          "type": "string",
+                          "minLength": 1,
+                          "maxLength": 4096,
+                          "pattern": "^(?!/)[^\\\\\\u0000-\\u001f\\u007f:]+$"
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ]
+                    },
+                    "interfaceFileId": {
+                      "anyOf": [
+                        {
+                          "$ref": "#/definitions/id"
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ]
+                    },
+                    "sharedInterfacePath": {
+                      "anyOf": [
+                        {
+                          "type": "string",
+                          "minLength": 1,
+                          "maxLength": 4096,
+                          "pattern": "^(?!/)[^\\\\\\u0000-\\u001f\\u007f:]+$"
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ]
+                    },
+                    "sharedInterfaceFileId": {
+                      "anyOf": [
+                        {
+                          "$ref": "#/definitions/id"
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ]
+                    }
+                  },
+                  "required": [
+                    "implementationPath",
+                    "implementationFileId",
+                    "interfacePath",
+                    "interfaceFileId",
+                    "sharedInterfacePath",
+                    "sharedInterfaceFileId"
+                  ],
+                  "additionalProperties": false
+                }
+              },
+              "required": [
+                "kind",
+                "entityId",
+                "selector",
+                "recorded",
+                "name",
+                "address",
+                "extractionStatus",
+                "evidenceState",
+                "ownership",
+                "moduleId",
+                "moduleSelector",
+                "implementationUnresolved",
+                "reportedUnresolved",
+                "nameCollision",
+                "texts",
+                "strings",
+                "calls",
+                "referencedGlobals",
+                "calledBy",
+                "referencedBy",
+                "byteEvidence",
+                "collisions",
+                "sources"
+              ],
+              "additionalProperties": false
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "binding",
+        "authority",
+        "state",
+        "stateReason",
+        "structureVersion",
+        "sourceSha256",
+        "metadataVersion",
+        "manifestSha256",
+        "model",
+        "plan",
+        "recoveryAssessment",
+        "capabilities",
+        "entity"
+      ],
+      "additionalProperties": false,
+      "if": {
+        "properties": {
+          "state": {
+            "const": "available"
+          }
+        }
+      },
+      "else": {
+        "properties": {
+          "entity": {
+            "type": "null"
+          }
+        }
+      }
+    },
+    "auditEntry": {
+      "type": "object",
+      "description": "One durable sensitive-action record. Every field is closed syntax; no request text, credential, filename or host path is recorded.",
+      "properties": {
+        "sequence": {
+          "$ref": "#/definitions/uint64"
+        },
+        "recordedAt": {
+          "$ref": "#/definitions/instant"
+        },
+        "requestId": {
+          "oneOf": [
+            {
+              "type": "string",
+              "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "actor": {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "enum": [
+                "browser_session",
+                "unauthenticated",
+                "operator"
+              ]
+            },
+            "sessionDigest": {
+              "oneOf": [
+                {
+                  "$ref": "#/definitions/sha256"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            }
+          },
+          "required": [
+            "kind",
+            "sessionDigest"
+          ],
+          "additionalProperties": false,
+          "allOf": [
+            {
+              "if": {
+                "properties": {
+                  "kind": {
+                    "const": "browser_session"
+                  }
+                }
+              },
+              "then": {
+                "properties": {
+                  "sessionDigest": {
+                    "$ref": "#/definitions/sha256"
+                  }
+                }
+              },
+              "else": {
+                "properties": {
+                  "sessionDigest": {
+                    "type": "null"
+                  }
+                }
+              }
+            }
+          ]
+        },
+        "action": {
+          "enum": [
+            "session.start",
+            "session.end",
+            "job.upload",
+            "job.update",
+            "job.delete",
+            "run.start",
+            "run.cancel",
+            "run.recover",
+            "run.progress-pin",
+            "agent.preflight",
+            "operator.auth-inspection",
+            "operator.auth-inspection-cancel",
+            "support.export"
+          ]
+        },
+        "target": {
+          "type": "object",
+          "properties": {
+            "jobId": {
+              "oneOf": [
+                {
+                  "type": "string",
+                  "pattern": "^[a-f0-9]{32}$"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "runId": {
+              "oneOf": [
+                {
+                  "$ref": "#/definitions/id"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "expectedVersion": {
+              "oneOf": [
+                {
+                  "$ref": "#/definitions/version"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "resultVersion": {
+              "oneOf": [
+                {
+                  "$ref": "#/definitions/version"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            }
+          },
+          "required": [
+            "jobId",
+            "runId",
+            "expectedVersion",
+            "resultVersion"
+          ],
+          "additionalProperties": false
+        },
+        "outcome": {
+          "enum": [
+            "accepted",
+            "replayed",
+            "rejected",
+            "failed"
+          ]
+        },
+        "status": {
+          "type": "integer",
+          "minimum": 100,
+          "maximum": 599
+        },
+        "reasonCode": {
+          "oneOf": [
+            {
+              "type": "string",
+              "pattern": "^[A-Z][A-Z0-9_]{0,63}$"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "sequence",
+        "recordedAt",
+        "requestId",
+        "actor",
+        "action",
+        "target",
+        "outcome",
+        "status",
+        "reasonCode"
+      ],
+      "additionalProperties": false,
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "outcome": {
+                "enum": [
+                  "accepted",
+                  "replayed"
+                ]
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "status": {
+                "maximum": 399
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "outcome": {
+                "const": "rejected"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "status": {
+                "minimum": 400,
+                "maximum": 499
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "outcome": {
+                "const": "failed"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "reasonCode": {
+                "type": "string"
+              }
+            }
+          }
+        }
+      ]
+    },
+    "auditPage": {
+      "type": "object",
+      "properties": {
+        "entries": {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/auditEntry"
+          },
+          "maxItems": 500
+        },
+        "omittedEntries": {
+          "$ref": "#/definitions/uint64"
+        },
+        "unrecordedEntries": {
+          "$ref": "#/definitions/uint64"
+        },
+        "complete": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "entries",
+        "omittedEntries",
+        "unrecordedEntries",
+        "complete"
+      ],
+      "additionalProperties": false,
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "complete": {
+                "const": true
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "unrecordedEntries": {
+                "const": "0"
+              }
+            }
+          }
+        }
+      ]
+    },
+    "supportExportSection": {
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "id": {
+              "const": "runtime"
+            },
+            "content": {
+              "$ref": "#/definitions/runtime"
+            }
+          },
+          "required": [
+            "id",
+            "content"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "id": {
+              "const": "limits"
+            },
+            "content": {
+              "$ref": "#/definitions/limits"
+            }
+          },
+          "required": [
+            "id",
+            "content"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "id": {
+              "const": "capabilities"
+            },
+            "content": {
+              "type": "array",
+              "items": {
+                "$ref": "#/definitions/capability"
+              },
+              "maxItems": 128
+            }
+          },
+          "required": [
+            "id",
+            "content"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "id": {
+              "const": "recovery"
+            },
+            "content": {
+              "$ref": "#/definitions/recovery"
+            }
+          },
+          "required": [
+            "id",
+            "content"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "id": {
+              "const": "job"
+            },
+            "content": {
+              "$ref": "#/definitions/job"
+            }
+          },
+          "required": [
+            "id",
+            "content"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "id": {
+              "const": "runs"
+            },
+            "content": {
+              "type": "object",
+              "properties": {
+                "items": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/definitions/run"
+                  },
+                  "maxItems": 50
+                },
+                "omittedRuns": {
+                  "$ref": "#/definitions/uint64"
+                }
+              },
+              "required": [
+                "items",
+                "omittedRuns"
+              ],
+              "additionalProperties": false
+            }
+          },
+          "required": [
+            "id",
+            "content"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "id": {
+              "const": "audit"
+            },
+            "content": {
+              "$ref": "#/definitions/auditPage"
+            }
+          },
+          "required": [
+            "id",
+            "content"
+          ],
+          "additionalProperties": false
+        }
+      ]
+    },
+    "supportExport": {
+      "type": "object",
+      "description": "An explicitly scoped, redacted diagnostic export. The browser previews and downloads this exact document.",
+      "properties": {
+        "schemaVersion": {
+          "const": 1
+        },
+        "exportId": {
+          "$ref": "#/definitions/id"
+        },
+        "generatedAt": {
+          "$ref": "#/definitions/instant"
+        },
+        "redactionVersion": {
+          "const": "web-redaction-v1"
+        },
+        "scope": {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "enum": [
+                "server",
+                "job"
+              ]
+            },
+            "jobId": {
+              "oneOf": [
+                {
+                  "type": "string",
+                  "pattern": "^[a-f0-9]{32}$"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            }
+          },
+          "required": [
+            "kind",
+            "jobId"
+          ],
+          "additionalProperties": false,
+          "allOf": [
+            {
+              "if": {
+                "properties": {
+                  "kind": {
+                    "const": "job"
+                  }
+                }
+              },
+              "then": {
+                "properties": {
+                  "jobId": {
+                    "type": "string"
+                  }
+                }
+              },
+              "else": {
+                "properties": {
+                  "jobId": {
+                    "type": "null"
+                  }
+                }
+              }
+            }
+          ]
+        },
+        "sections": {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/supportExportSection"
+          },
+          "maxItems": 7
+        },
+        "omittedSections": {
+          "type": "array",
+          "maxItems": 32,
+          "items": {
+            "type": "object",
+            "properties": {
+              "id": {
+                "enum": [
+                  "runtime",
+                  "limits",
+                  "capabilities",
+                  "recovery",
+                  "job",
+                  "runs",
+                  "audit",
+                  "input-binary",
+                  "source-content",
+                  "artifact-content",
+                  "progress-events",
+                  "environment",
+                  "host-paths",
+                  "credentials",
+                  "session-material",
+                  "agent-reasoning"
+                ]
+              },
+              "reason": {
+                "enum": [
+                  "not-in-scope",
+                  "unavailable",
+                  "job-content",
+                  "private-configuration",
+                  "secret",
+                  "not-recorded"
+                ]
+              }
+            },
+            "required": [
+              "id",
+              "reason"
+            ],
+            "additionalProperties": false
+          }
+        }
+      },
+      "required": [
+        "schemaVersion",
+        "exportId",
+        "generatedAt",
+        "redactionVersion",
+        "scope",
+        "sections",
+        "omittedSections"
+      ],
+      "additionalProperties": false
+    },
+    "capacity": {
+      "type": "object",
+      "description": "Aggregate listener capacity and outcome counts for one listener lifetime. Counts and fixed public error codes only; no request, job or credential content.",
+      "properties": {
+        "schemaVersion": {
+          "const": 1
+        },
+        "sampledAt": {
+          "$ref": "#/definitions/instant"
+        },
+        "since": {
+          "$ref": "#/definitions/instant"
+        },
+        "http": {
+          "type": "object",
+          "properties": {
+            "workerLimit": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 256
+            },
+            "activeWorkers": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 256
+            },
+            "queueCapacity": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 4096
+            },
+            "queuedRequests": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 4096
+            },
+            "responderLimit": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 16
+            },
+            "activeResponders": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 16
+            },
+            "listenBacklog": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 4096
+            },
+            "headerDeadlineMs": {
+              "$ref": "#/definitions/uint64"
+            },
+            "requestDeadlineMs": {
+              "$ref": "#/definitions/uint64"
+            },
+            "uploadDeadlineMs": {
+              "$ref": "#/definitions/uint64"
+            },
+            "maxHeaderCount": {
+              "type": "integer",
+              "minimum": 8,
+              "maximum": 200
+            },
+            "maxHeaderBytes": {
+              "type": "integer",
+              "minimum": 1024,
+              "maximum": 65536
+            },
+            "maxJsonResponseBytes": {
+              "$ref": "#/definitions/uint64"
+            },
+            "maxUploadBytes": {
+              "$ref": "#/definitions/uint64"
+            }
+          },
+          "required": [
+            "workerLimit",
+            "activeWorkers",
+            "queueCapacity",
+            "queuedRequests",
+            "responderLimit",
+            "activeResponders",
+            "listenBacklog",
+            "headerDeadlineMs",
+            "requestDeadlineMs",
+            "uploadDeadlineMs",
+            "maxHeaderCount",
+            "maxHeaderBytes",
+            "maxJsonResponseBytes",
+            "maxUploadBytes"
+          ],
+          "additionalProperties": false
+        },
+        "streams": {
+          "type": "object",
+          "properties": {
+            "limit": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 16
+            },
+            "perSessionLimit": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 2
+            },
+            "active": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 16
+            },
+            "lifetimeMs": {
+              "$ref": "#/definitions/uint64"
+            }
+          },
+          "required": [
+            "limit",
+            "perSessionLimit",
+            "active",
+            "lifetimeMs"
+          ],
+          "additionalProperties": false
+        },
+        "outcomes": {
+          "type": "object",
+          "properties": {
+            "successful": {
+              "$ref": "#/definitions/uint64"
+            },
+            "clientErrors": {
+              "$ref": "#/definitions/uint64"
+            },
+            "serverErrors": {
+              "$ref": "#/definitions/uint64"
+            },
+            "closedWithoutResponse": {
+              "$ref": "#/definitions/uint64"
+            },
+            "overloadResponses": {
+              "$ref": "#/definitions/uint64"
+            },
+            "overloadConnectionsClosed": {
+              "$ref": "#/definitions/uint64"
+            },
+            "headerDeadlineClosures": {
+              "$ref": "#/definitions/uint64"
+            },
+            "requestDeadlineClosures": {
+              "$ref": "#/definitions/uint64"
+            },
+            "headerLimitRejections": {
+              "$ref": "#/definitions/uint64"
+            }
+          },
+          "required": [
+            "successful",
+            "clientErrors",
+            "serverErrors",
+            "closedWithoutResponse",
+            "overloadResponses",
+            "overloadConnectionsClosed",
+            "headerDeadlineClosures",
+            "requestDeadlineClosures",
+            "headerLimitRejections"
+          ],
+          "additionalProperties": false
+        },
+        "failureReasons": {
+          "type": "array",
+          "maxItems": 128,
+          "items": {
+            "type": "object",
+            "properties": {
+              "code": {
+                "type": "string",
+                "pattern": "^[A-Z][A-Z0-9_]{0,63}$"
+              },
+              "count": {
+                "$ref": "#/definitions/uint64"
+              }
+            },
+            "required": [
+              "code",
+              "count"
+            ],
+            "additionalProperties": false
+          }
+        }
+      },
+      "required": [
+        "schemaVersion",
+        "sampledAt",
+        "since",
+        "http",
+        "streams",
+        "outcomes",
+        "failureReasons"
+      ],
+      "additionalProperties": false
+    },
+    "artifacts": {
+      "type": "object",
+      "properties": {
+        "binding": {
+          "$ref": "#/definitions/binding"
+        },
+        "catalogedFamilies": {
+          "type": "array",
+          "items": {
+            "enum": [
+              "exploration-report",
+              "progress-journal",
+              "source-manifest",
+              "build-contract",
+              "source-archive"
+            ]
+          },
+          "minItems": 1,
+          "maxItems": 5,
+          "uniqueItems": true
+        },
+        "unavailableFiles": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 200
+        },
+        "items": {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/artifact"
+          },
+          "maxItems": 200
+        },
+        "page": {
+          "$ref": "#/definitions/page"
+        }
+      },
+      "required": [
+        "binding",
+        "catalogedFamilies",
+        "unavailableFiles",
+        "items",
+        "page"
+      ],
+      "additionalProperties": false
+    },
+    "sourceSearchMatch": {
+      "type": "object",
+      "properties": {
+        "fileId": {
+          "$ref": "#/definitions/id"
+        },
+        "displayName": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 4096,
+          "pattern": "^(?!/)[^\\\\\\u0000-\\u001f\\u007f:]+$"
+        },
+        "sha256": {
+          "$ref": "#/definitions/sha256"
+        },
+        "line": {
+          "$ref": "#/definitions/uint64"
+        },
+        "column": {
+          "$ref": "#/definitions/uint64"
+        },
+        "offsetBytes": {
+          "$ref": "#/definitions/uint64"
+        },
+        "lineOffsetBytes": {
+          "$ref": "#/definitions/uint64"
+        },
+        "before": {
+          "type": "string",
+          "maxLength": 160
+        },
+        "match": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256
+        },
+        "after": {
+          "type": "string",
+          "maxLength": 160
+        },
+        "truncatedBefore": {
+          "type": "boolean"
+        },
+        "truncatedAfter": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "fileId",
+        "displayName",
+        "sha256",
+        "line",
+        "column",
+        "offsetBytes",
+        "lineOffsetBytes",
+        "before",
+        "match",
+        "after",
+        "truncatedBefore",
+        "truncatedAfter"
+      ],
+      "additionalProperties": false
+    },
+    "sourceSearch": {
+      "type": "object",
+      "properties": {
+        "binding": {
+          "type": "object",
+          "properties": {
+            "jobId": {
+              "$ref": "#/definitions/id"
+            },
+            "runId": {
+              "$ref": "#/definitions/id"
+            },
+            "revisionId": {
+              "$ref": "#/definitions/id"
+            }
+          },
+          "required": [
+            "jobId",
+            "runId",
+            "revisionId"
+          ],
+          "additionalProperties": false
+        },
+        "authority": {
+          "const": "source-input-commitments"
+        },
+        "sourceSha256": {
+          "$ref": "#/definitions/sha256"
+        },
+        "metadataVersion": {
+          "$ref": "#/definitions/sha256"
+        },
+        "query": {
+          "type": "object",
+          "properties": {
+            "text": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 256
+            },
+            "match": {
+              "enum": [
+                "text",
+                "symbol"
+              ]
+            },
+            "caseSensitive": {
+              "type": "boolean"
+            },
+            "directoryId": {
+              "$ref": "#/definitions/id"
+            },
+            "path": {
+              "anyOf": [
+                {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 512
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            }
+          },
+          "required": [
+            "text",
+            "match",
+            "caseSensitive",
+            "directoryId",
+            "path"
+          ],
+          "additionalProperties": false
+        },
+        "index": {
+          "const": "none"
+        },
+        "status": {
+          "enum": [
+            "complete",
+            "partial"
+          ]
+        },
+        "stopReason": {
+          "anyOf": [
+            {
+              "enum": [
+                "result-limit",
+                "byte-limit",
+                "deadline"
+              ]
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "scope": {
+          "type": "object",
+          "properties": {
+            "filesInScope": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 25000
+            },
+            "searchableFiles": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 25000
+            },
+            "notViewable": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 25000
+            },
+            "declaredBinary": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 25000
+            },
+            "tooLarge": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 25000
+            }
+          },
+          "required": [
+            "filesInScope",
+            "searchableFiles",
+            "notViewable",
+            "declaredBinary",
+            "tooLarge"
+          ],
+          "additionalProperties": false
+        },
+        "progress": {
+          "type": "object",
+          "properties": {
+            "scannedFiles": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 25000
+            },
+            "scannedBytes": {
+              "$ref": "#/definitions/uint64"
+            },
+            "unsearchableText": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 25000
+            },
+            "unavailableFiles": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 25000
+            },
+            "remainingFiles": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 25000
+            }
+          },
+          "required": [
+            "scannedFiles",
+            "scannedBytes",
+            "unsearchableText",
+            "unavailableFiles",
+            "remainingFiles"
+          ],
+          "additionalProperties": false
+        },
+        "coverageGaps": {
+          "type": "object",
+          "properties": {
+            "unsearchableText": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 25000
+            },
+            "unavailableFiles": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 25000
+            }
+          },
+          "required": [
+            "unsearchableText",
+            "unavailableFiles"
+          ],
+          "additionalProperties": false
+        },
+        "limits": {
+          "type": "object",
+          "properties": {
+            "maxResults": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 100
+            },
+            "maxScannedBytes": {
+              "$ref": "#/definitions/uint64"
+            },
+            "deadlineMs": {
+              "$ref": "#/definitions/uint64"
+            }
+          },
+          "required": [
+            "maxResults",
+            "maxScannedBytes",
+            "deadlineMs"
+          ],
+          "additionalProperties": false
+        },
+        "items": {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/sourceSearchMatch"
+          },
+          "maxItems": 100
+        },
+        "page": {
+          "$ref": "#/definitions/page"
+        }
+      },
+      "required": [
+        "binding",
+        "authority",
+        "sourceSha256",
+        "metadataVersion",
+        "query",
+        "index",
+        "status",
+        "stopReason",
+        "scope",
+        "progress",
+        "coverageGaps",
+        "limits",
+        "items",
+        "page"
+      ],
+      "additionalProperties": false
+    },
+    "sourceDiffFile": {
+      "type": "object",
+      "description": "One side of a compared entry: the same opaque identity and recorded facts as the revision file list.",
+      "properties": {
+        "fileId": {
+          "$ref": "#/definitions/id"
+        },
+        "displayName": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 4096,
+          "pattern": "^(?!/)[^\\\\\\u0000-\\u001f\\u007f:]+$"
+        },
+        "sizeBytes": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/uint64"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Committed size of a canonical source input; manifest-only entries record no size."
+        },
+        "sha256": {
+          "$ref": "#/definitions/sha256"
+        },
+        "declaredUtf8Text": {
+          "type": "boolean"
+        },
+        "declaredViewable": {
+          "type": "boolean"
+        },
+        "commitment": {
+          "type": "string",
+          "enum": [
+            "source-input",
+            "manifest-digest"
+          ],
+          "description": "source-input entries belong to the revision source digest; manifest-digest entries are bound only by the manifest digest."
+        }
+      },
+      "required": [
+        "fileId",
+        "displayName",
+        "sizeBytes",
+        "sha256",
+        "declaredUtf8Text",
+        "declaredViewable",
+        "commitment"
+      ],
+      "additionalProperties": false,
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "commitment": {
+                "const": "source-input"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "sizeBytes": {
+                "$ref": "#/definitions/uint64"
+              }
+            }
+          },
+          "else": {
+            "properties": {
+              "sizeBytes": {
+                "type": "null"
+              }
+            }
+          }
+        }
+      ]
+    },
+    "sourceDiffEntry": {
+      "type": "object",
+      "properties": {
+        "status": {
+          "type": "string",
+          "enum": [
+            "added",
+            "removed",
+            "modified",
+            "renamed"
+          ]
+        },
+        "baseFile": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/sourceDiffFile"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "headFile": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/sourceDiffFile"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "status",
+        "baseFile",
+        "headFile"
+      ],
+      "additionalProperties": false,
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "status": {
+                "const": "added"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "baseFile": {
+                "type": "null"
+              },
+              "headFile": {
+                "$ref": "#/definitions/sourceDiffFile"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "status": {
+                "const": "removed"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "baseFile": {
+                "$ref": "#/definitions/sourceDiffFile"
+              },
+              "headFile": {
+                "type": "null"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "status": {
+                "enum": [
+                  "modified",
+                  "renamed",
+                  "unchanged"
+                ]
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "baseFile": {
+                "$ref": "#/definitions/sourceDiffFile"
+              },
+              "headFile": {
+                "$ref": "#/definitions/sourceDiffFile"
+              }
+            }
+          }
+        }
+      ]
+    },
+    "sourceDiff": {
+      "type": "object",
+      "description": "Paged changed entries between two exact persisted candidates of one job. Unchanged entries are counted, not listed.",
+      "properties": {
+        "binding": {
+          "type": "object",
+          "properties": {
+            "jobId": {
+              "$ref": "#/definitions/id"
+            },
+            "runId": {
+              "$ref": "#/definitions/id"
+            },
+            "revisionId": {
+              "$ref": "#/definitions/id"
+            }
+          },
+          "required": [
+            "jobId",
+            "runId",
+            "revisionId"
+          ],
+          "additionalProperties": false
+        },
+        "base": {
+          "type": "object",
+          "properties": {
+            "runId": {
+              "$ref": "#/definitions/id"
+            },
+            "revisionId": {
+              "$ref": "#/definitions/id"
+            }
+          },
+          "required": [
+            "runId",
+            "revisionId"
+          ],
+          "additionalProperties": false
+        },
+        "authority": {
+          "const": "recorded-digests",
+          "description": "Status comes from recorded paths and digests; it is not compilation, behavior or acceptance evidence."
+        },
+        "sourceSha256": {
+          "$ref": "#/definitions/sha256"
+        },
+        "metadataVersion": {
+          "$ref": "#/definitions/sha256"
+        },
+        "baseSourceSha256": {
+          "$ref": "#/definitions/sha256"
+        },
+        "baseMetadataVersion": {
+          "$ref": "#/definitions/sha256"
+        },
+        "renameDetection": {
+          "const": "identical-digest"
+        },
+        "counts": {
+          "type": "object",
+          "properties": {
+            "added": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 25000
+            },
+            "removed": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 25000
+            },
+            "modified": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 25000
+            },
+            "renamed": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 25000
+            },
+            "unchanged": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 25000
+            }
+          },
+          "required": [
+            "added",
+            "removed",
+            "modified",
+            "renamed",
+            "unchanged"
+          ],
+          "additionalProperties": false
+        },
+        "totalChanged": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 50000
+        },
+        "items": {
+          "type": "array",
+          "maxItems": 200,
+          "items": {
+            "$ref": "#/definitions/sourceDiffEntry"
+          }
+        },
+        "page": {
+          "$ref": "#/definitions/page"
+        }
+      },
+      "required": [
+        "binding",
+        "base",
+        "authority",
+        "sourceSha256",
+        "metadataVersion",
+        "baseSourceSha256",
+        "baseMetadataVersion",
+        "renameDetection",
+        "counts",
+        "totalChanged",
+        "items",
+        "page"
+      ],
+      "additionalProperties": false
+    },
+    "sourceDiffLine": {
+      "type": "object",
+      "properties": {
+        "kind": {
+          "type": "string",
+          "enum": [
+            "context",
+            "added",
+            "removed"
+          ]
+        },
+        "baseLine": {
+          "anyOf": [
+            {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 50000
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "headLine": {
+          "anyOf": [
+            {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 50000
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "text": {
+          "type": "string",
+          "maxLength": 1000
+        },
+        "truncated": {
+          "type": "boolean"
+        },
+        "characters": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 1048576
+        },
+        "missingFinalNewline": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "kind",
+        "baseLine",
+        "headLine",
+        "text",
+        "truncated",
+        "characters",
+        "missingFinalNewline"
+      ],
+      "additionalProperties": false,
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "kind": {
+                "const": "context"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "baseLine": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 50000
+              },
+              "headLine": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 50000
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "kind": {
+                "const": "added"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "baseLine": {
+                "type": "null"
+              },
+              "headLine": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 50000
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "kind": {
+                "const": "removed"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "baseLine": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 50000
+              },
+              "headLine": {
+                "type": "null"
+              }
+            }
+          }
+        }
+      ]
+    },
+    "sourceDiffHunk": {
+      "type": "object",
+      "properties": {
+        "baseStart": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 50001
+        },
+        "baseCount": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 400
+        },
+        "headStart": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 50001
+        },
+        "headCount": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 400
+        },
+        "unchangedBefore": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 50000
+        },
+        "lines": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 400,
+          "items": {
+            "$ref": "#/definitions/sourceDiffLine"
+          }
+        }
+      },
+      "required": [
+        "baseStart",
+        "baseCount",
+        "headStart",
+        "headCount",
+        "unchangedBefore",
+        "lines"
+      ],
+      "additionalProperties": false
+    },
+    "sourceFileDiff": {
+      "type": "object",
+      "description": "One bounded comparison. Hunks are paged; omitted unchanged lines are counted, and the complete patch or both files are separate downloads.",
+      "properties": {
+        "binding": {
+          "type": "object",
+          "properties": {
+            "jobId": {
+              "$ref": "#/definitions/id"
+            },
+            "runId": {
+              "$ref": "#/definitions/id"
+            },
+            "revisionId": {
+              "$ref": "#/definitions/id"
+            }
+          },
+          "required": [
+            "jobId",
+            "runId",
+            "revisionId"
+          ],
+          "additionalProperties": false
+        },
+        "base": {
+          "type": "object",
+          "properties": {
+            "runId": {
+              "$ref": "#/definitions/id"
+            },
+            "revisionId": {
+              "$ref": "#/definitions/id"
+            }
+          },
+          "required": [
+            "runId",
+            "revisionId"
+          ],
+          "additionalProperties": false
+        },
+        "authority": {
+          "const": "recorded-digests",
+          "description": "Status comes from recorded paths and digests; it is not compilation, behavior or acceptance evidence."
+        },
+        "sourceSha256": {
+          "$ref": "#/definitions/sha256"
+        },
+        "metadataVersion": {
+          "$ref": "#/definitions/sha256"
+        },
+        "baseSourceSha256": {
+          "$ref": "#/definitions/sha256"
+        },
+        "baseMetadataVersion": {
+          "$ref": "#/definitions/sha256"
+        },
+        "status": {
+          "type": "string",
+          "enum": [
+            "added",
+            "removed",
+            "modified",
+            "renamed",
+            "unchanged"
+          ]
+        },
+        "baseFile": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/sourceDiffFile"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "headFile": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/sourceDiffFile"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "representation": {
+          "type": "string",
+          "enum": [
+            "text",
+            "identical",
+            "binary",
+            "not-viewable",
+            "too-large",
+            "budget-exceeded"
+          ]
+        },
+        "fallbackReason": {
+          "anyOf": [
+            {
+              "type": "string",
+              "enum": [
+                "declared-binary",
+                "invalid-utf8",
+                "line-too-long"
+              ]
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "baseLines": {
+          "anyOf": [
+            {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 50000
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "headLines": {
+          "anyOf": [
+            {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 50000
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "totalHunks": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 100000
+        },
+        "hunkOffset": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 100000
+        },
+        "nextHunk": {
+          "anyOf": [
+            {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 100000
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "unchangedAfter": {
+          "anyOf": [
+            {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 50000
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "hunks": {
+          "type": "array",
+          "maxItems": 20,
+          "items": {
+            "$ref": "#/definitions/sourceDiffHunk"
+          }
+        },
+        "patchAvailable": {
+          "type": "boolean"
+        },
+        "limits": {
+          "type": "object",
+          "properties": {
+            "maximumFileBytes": {
+              "$ref": "#/definitions/uint64"
+            },
+            "maximumLines": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 1000000
+            },
+            "maximumEdits": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 1000000
+            },
+            "contextLines": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 100
+            },
+            "hunksPerPage": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 100
+            },
+            "rowsPerPage": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 100000
+            },
+            "lineCharacters": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 100000
+            }
+          },
+          "required": [
+            "maximumFileBytes",
+            "maximumLines",
+            "maximumEdits",
+            "contextLines",
+            "hunksPerPage",
+            "rowsPerPage",
+            "lineCharacters"
+          ],
+          "additionalProperties": false
+        }
+      },
+      "required": [
+        "binding",
+        "base",
+        "authority",
+        "sourceSha256",
+        "metadataVersion",
+        "baseSourceSha256",
+        "baseMetadataVersion",
+        "status",
+        "baseFile",
+        "headFile",
+        "representation",
+        "fallbackReason",
+        "baseLines",
+        "headLines",
+        "totalHunks",
+        "hunkOffset",
+        "nextHunk",
+        "unchangedAfter",
+        "hunks",
+        "patchAvailable",
+        "limits"
+      ],
+      "additionalProperties": false,
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "status": {
+                "const": "added"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "baseFile": {
+                "type": "null"
+              },
+              "headFile": {
+                "$ref": "#/definitions/sourceDiffFile"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "status": {
+                "const": "removed"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "baseFile": {
+                "$ref": "#/definitions/sourceDiffFile"
+              },
+              "headFile": {
+                "type": "null"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "status": {
+                "enum": [
+                  "modified",
+                  "renamed",
+                  "unchanged"
+                ]
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "baseFile": {
+                "$ref": "#/definitions/sourceDiffFile"
+              },
+              "headFile": {
+                "$ref": "#/definitions/sourceDiffFile"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "representation": {
+                "const": "text"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "baseLines": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 50000
+              },
+              "headLines": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 50000
+              },
+              "unchangedAfter": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 50000
+              },
+              "patchAvailable": {
+                "type": "boolean"
+              }
+            }
+          },
+          "else": {
+            "properties": {
+              "baseLines": {
+                "type": "null"
+              },
+              "headLines": {
+                "type": "null"
+              },
+              "unchangedAfter": {
+                "type": "null"
+              },
+              "patchAvailable": {
+                "const": false
+              },
+              "totalHunks": {
+                "const": 0
+              },
+              "hunks": {
+                "maxItems": 0
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "representation": {
+                "const": "binary"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "fallbackReason": {
+                "enum": [
+                  "declared-binary",
+                  "invalid-utf8",
+                  "line-too-long"
+                ]
+              }
+            }
+          },
+          "else": {
+            "properties": {
+              "fallbackReason": {
+                "type": "null"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "status": {
+                "enum": [
+                  "renamed",
+                  "unchanged"
+                ]
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "representation": {
+                "const": "identical"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "patchAvailable": {
+                "const": true
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "totalHunks": {
+                "type": "integer",
+                "minimum": 1
+              }
+            }
+          }
+        }
+      ]
+    },
+    "sourceArchive": {
+      "type": "object",
+      "description": "Revision-bound source archive status. A verified label never implies compilation, behavior or acceptance.",
+      "properties": {
+        "binding": {
+          "type": "object",
+          "properties": {
+            "jobId": {
+              "$ref": "#/definitions/id"
+            },
+            "runId": {
+              "$ref": "#/definitions/id"
+            },
+            "revisionId": {
+              "$ref": "#/definitions/id"
+            }
+          },
+          "required": [
+            "jobId",
+            "runId",
+            "revisionId"
+          ],
+          "additionalProperties": false
+        },
+        "sourceSha256": {
+          "$ref": "#/definitions/sha256"
+        },
+        "metadataVersion": {
+          "$ref": "#/definitions/sha256"
+        },
+        "archive": {
+          "type": "object",
+          "properties": {
+            "state": {
+              "type": "string",
+              "enum": [
+                "present",
+                "missing",
+                "too-large"
+              ]
+            },
+            "artifactId": {
+              "anyOf": [
+                {
+                  "$ref": "#/definitions/id"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "sha256": {
+              "anyOf": [
+                {
+                  "$ref": "#/definitions/sha256"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "sizeBytes": {
+              "anyOf": [
+                {
+                  "$ref": "#/definitions/uint64"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "contentHref": {
+              "anyOf": [
+                {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 2048
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "mediaType": {
+              "const": "application/zip"
+            }
+          },
+          "required": [
+            "state",
+            "artifactId",
+            "sha256",
+            "sizeBytes",
+            "contentHref",
+            "mediaType"
+          ],
+          "additionalProperties": false,
+          "allOf": [
+            {
+              "if": {
+                "properties": {
+                  "state": {
+                    "const": "present"
+                  }
+                }
+              },
+              "then": {
+                "properties": {
+                  "artifactId": {
+                    "$ref": "#/definitions/id"
+                  },
+                  "sha256": {
+                    "$ref": "#/definitions/sha256"
+                  },
+                  "sizeBytes": {
+                    "$ref": "#/definitions/uint64"
+                  },
+                  "contentHref": {
+                    "type": "string"
+                  }
+                }
+              },
+              "else": {
+                "properties": {
+                  "artifactId": {
+                    "type": "null"
+                  },
+                  "sha256": {
+                    "type": "null"
+                  },
+                  "sizeBytes": {
+                    "type": "null"
+                  },
+                  "contentHref": {
+                    "type": "null"
+                  }
+                }
+              }
+            }
+          ]
+        },
+        "verification": {
+          "type": "object",
+          "description": "Derived only from a completed archive-verifier operation for this exact digest and revision metadata.",
+          "properties": {
+            "authority": {
+              "const": "archive-verifier"
+            },
+            "state": {
+              "type": "string",
+              "enum": [
+                "not-verified",
+                "running",
+                "verified",
+                "failed",
+                "stale",
+                "missing",
+                "too-large"
+              ]
+            },
+            "operationId": {
+              "anyOf": [
+                {
+                  "$ref": "#/definitions/id"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "verifiedAt": {
+              "anyOf": [
+                {
+                  "$ref": "#/definitions/instant"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "failureCode": {
+              "anyOf": [
+                {
+                  "type": "string",
+                  "enum": [
+                    "ARCHIVE_INVALID",
+                    "ARCHIVE_CHANGED",
+                    "REVISION_MISMATCH",
+                    "REVISION_UNAVAILABLE",
+                    "ARCHIVE_UNAVAILABLE",
+                    "SERVER_STOPPING"
+                  ]
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "previousVerifiedSha256": {
+              "anyOf": [
+                {
+                  "$ref": "#/definitions/sha256"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            }
+          },
+          "required": [
+            "authority",
+            "state",
+            "operationId",
+            "verifiedAt",
+            "failureCode",
+            "previousVerifiedSha256"
+          ],
+          "additionalProperties": false,
+          "allOf": [
+            {
+              "if": {
+                "properties": {
+                  "state": {
+                    "const": "verified"
+                  }
+                }
+              },
+              "then": {
+                "properties": {
+                  "operationId": {
+                    "$ref": "#/definitions/id"
+                  },
+                  "verifiedAt": {
+                    "$ref": "#/definitions/instant"
+                  },
+                  "failureCode": {
+                    "type": "null"
+                  }
+                }
+              },
+              "else": {
+                "properties": {
+                  "verifiedAt": {
+                    "type": "null"
+                  }
+                }
+              }
+            },
+            {
+              "if": {
+                "properties": {
+                  "state": {
+                    "const": "failed"
+                  }
+                }
+              },
+              "then": {
+                "properties": {
+                  "operationId": {
+                    "$ref": "#/definitions/id"
+                  },
+                  "failureCode": {
+                    "enum": [
+                      "ARCHIVE_INVALID",
+                      "ARCHIVE_CHANGED",
+                      "REVISION_MISMATCH",
+                      "REVISION_UNAVAILABLE",
+                      "ARCHIVE_UNAVAILABLE",
+                      "SERVER_STOPPING"
+                    ]
+                  }
+                }
+              },
+              "else": {
+                "properties": {
+                  "failureCode": {
+                    "type": "null"
+                  }
+                }
+              }
+            },
+            {
+              "if": {
+                "properties": {
+                  "state": {
+                    "const": "stale"
+                  }
+                }
+              },
+              "then": {
+                "properties": {
+                  "previousVerifiedSha256": {
+                    "$ref": "#/definitions/sha256"
+                  }
+                }
+              },
+              "else": {
+                "properties": {
+                  "previousVerifiedSha256": {
+                    "type": "null"
+                  }
+                }
+              }
+            },
+            {
+              "if": {
+                "properties": {
+                  "state": {
+                    "enum": [
+                      "not-verified",
+                      "missing",
+                      "too-large",
+                      "stale"
+                    ]
+                  }
+                }
+              },
+              "then": {
+                "properties": {
+                  "operationId": {
+                    "type": "null"
+                  }
+                }
+              }
+            }
+          ]
+        },
+        "build": {
+          "type": "object",
+          "description": "The reconstruction's recorded build contract; never a build performed by this read.",
+          "properties": {
+            "state": {
+              "type": "string",
+              "enum": [
+                "recorded",
+                "not-recorded"
+              ]
+            },
+            "contractSha256": {
+              "anyOf": [
+                {
+                  "$ref": "#/definitions/sha256"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "executableSha256": {
+              "anyOf": [
+                {
+                  "$ref": "#/definitions/sha256"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "executableBytes": {
+              "anyOf": [
+                {
+                  "$ref": "#/definitions/uint64"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            }
+          },
+          "required": [
+            "state",
+            "contractSha256",
+            "executableSha256",
+            "executableBytes"
+          ],
+          "additionalProperties": false,
+          "allOf": [
+            {
+              "if": {
+                "properties": {
+                  "state": {
+                    "const": "recorded"
+                  }
+                }
+              },
+              "then": {
+                "properties": {
+                  "contractSha256": {
+                    "$ref": "#/definitions/sha256"
+                  },
+                  "executableSha256": {
+                    "$ref": "#/definitions/sha256"
+                  },
+                  "executableBytes": {
+                    "$ref": "#/definitions/uint64"
+                  }
+                }
+              },
+              "else": {
+                "properties": {
+                  "executableSha256": {
+                    "type": "null"
+                  },
+                  "executableBytes": {
+                    "type": "null"
+                  }
+                }
+              }
+            }
+          ]
+        },
+        "acceptance": {
+          "type": "string",
+          "enum": [
+            "accepted",
+            "not-evaluated"
+          ]
+        },
+        "git": {
+          "anyOf": [
+            {
+              "type": "object",
+              "properties": {
+                "state": {
+                  "const": "unavailable"
+                },
+                "reason": {
+                  "type": "string",
+                  "enum": [
+                    "not-recorded",
+                    "not-configured"
+                  ]
+                }
+              },
+              "required": [
+                "state",
+                "reason"
+              ],
+              "additionalProperties": false
+            },
+            {
+              "type": "object",
+              "properties": {
+                "state": {
+                  "const": "mapped"
+                },
+                "mapping": {
+                  "$ref": "#/definitions/gitMapping"
+                },
+                "dirty": {
+                  "anyOf": [
+                    {
+                      "type": "boolean"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                }
+              },
+              "required": [
+                "state",
+                "mapping",
+                "dirty"
+              ],
+              "additionalProperties": false
+            }
+          ]
+        }
+      },
+      "required": [
+        "binding",
+        "sourceSha256",
+        "metadataVersion",
+        "archive",
+        "verification",
+        "build",
+        "acceptance",
+        "git"
+      ],
+      "additionalProperties": false
+    },
+    "archiveVerificationRequest": {
+      "type": "object",
+      "description": "The exact archive digest the caller displayed; a different current archive is refused.",
+      "properties": {
+        "archiveSha256": {
+          "$ref": "#/definitions/sha256"
+        }
+      },
+      "required": [
+        "archiveSha256"
+      ],
+      "additionalProperties": false
+    },
+    "workflowLaunch": {
+      "type": "object",
+      "description": "Server-reported launch facts for one registered workflow option. They describe the adapter; admission rechecks capability, limits and readiness.",
+      "properties": {
+        "harnessCapabilityId": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/id"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "mode": {
+          "type": "string",
+          "enum": [
+            "tools",
+            "agent",
+            "evidence-only"
+          ]
+        },
+        "executesBinary": {
+          "type": "boolean"
+        },
+        "contactsAgent": {
+          "type": "boolean"
+        },
+        "requiredTools": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "enum": [
+              "sandbox",
+              "ghidra",
+              "agent-harness",
+              "c-toolchain",
+              "angr"
+            ]
+          },
+          "maxItems": 8,
+          "uniqueItems": true
+        },
+        "input": {
+          "type": "string",
+          "enum": [
+            "none",
+            "accepted-optional",
+            "recorded-required"
+          ]
+        },
+        "limitsAdjustable": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "harnessCapabilityId",
+        "mode",
+        "executesBinary",
+        "contactsAgent",
+        "requiredTools",
+        "input",
+        "limitsAdjustable"
+      ],
+      "additionalProperties": false,
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "mode": {
+                "const": "agent"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "contactsAgent": {
+                "const": true
+              }
+            }
+          },
+          "else": {
+            "properties": {
+              "contactsAgent": {
+                "const": false
+              }
+            }
+          }
+        }
+      ]
+    },
     "storageCategories": {
       "type": "object",
       "description": "Logical regular-file bytes and entry counts by fixed store-layout category.",
@@ -6323,6 +11415,30 @@
           "const": 1
         },
         "kind": {
+          "const": "logRange"
+        },
+        "requestId": {
+          "$ref": "#/definitions/requestId"
+        },
+        "data": {
+          "$ref": "#/definitions/logRange"
+        }
+      },
+      "required": [
+        "apiVersion",
+        "kind",
+        "requestId",
+        "data"
+      ],
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "properties": {
+        "apiVersion": {
+          "const": 1
+        },
+        "kind": {
           "const": "progressPinRequest"
         },
         "data": {
@@ -6568,6 +11684,290 @@
         "apiVersion",
         "kind",
         "requestId",
+        "data"
+      ],
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "properties": {
+        "apiVersion": {
+          "const": 1
+        },
+        "kind": {
+          "const": "functionInventory"
+        },
+        "requestId": {
+          "$ref": "#/definitions/requestId"
+        },
+        "data": {
+          "$ref": "#/definitions/functionInventory"
+        }
+      },
+      "required": [
+        "apiVersion",
+        "kind",
+        "requestId",
+        "data"
+      ],
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "properties": {
+        "apiVersion": {
+          "const": 1
+        },
+        "kind": {
+          "const": "moduleInventory"
+        },
+        "requestId": {
+          "$ref": "#/definitions/requestId"
+        },
+        "data": {
+          "$ref": "#/definitions/moduleInventory"
+        }
+      },
+      "required": [
+        "apiVersion",
+        "kind",
+        "requestId",
+        "data"
+      ],
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "properties": {
+        "apiVersion": {
+          "const": 1
+        },
+        "kind": {
+          "const": "moduleDetail"
+        },
+        "requestId": {
+          "$ref": "#/definitions/requestId"
+        },
+        "data": {
+          "$ref": "#/definitions/moduleDetail"
+        }
+      },
+      "required": [
+        "apiVersion",
+        "kind",
+        "requestId",
+        "data"
+      ],
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "properties": {
+        "apiVersion": {
+          "const": 1
+        },
+        "kind": {
+          "const": "entityDetail"
+        },
+        "requestId": {
+          "$ref": "#/definitions/requestId"
+        },
+        "data": {
+          "$ref": "#/definitions/entityDetail"
+        }
+      },
+      "required": [
+        "apiVersion",
+        "kind",
+        "requestId",
+        "data"
+      ],
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "properties": {
+        "apiVersion": {
+          "const": 1
+        },
+        "kind": {
+          "const": "supportExport"
+        },
+        "requestId": {
+          "$ref": "#/definitions/requestId"
+        },
+        "data": {
+          "$ref": "#/definitions/supportExport"
+        }
+      },
+      "required": [
+        "apiVersion",
+        "kind",
+        "requestId",
+        "data"
+      ],
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "properties": {
+        "apiVersion": {
+          "const": 1
+        },
+        "kind": {
+          "const": "capacity"
+        },
+        "requestId": {
+          "$ref": "#/definitions/requestId"
+        },
+        "data": {
+          "$ref": "#/definitions/capacity"
+        }
+      },
+      "required": [
+        "apiVersion",
+        "kind",
+        "requestId",
+        "data"
+      ],
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "properties": {
+        "apiVersion": {
+          "const": 1
+        },
+        "kind": {
+          "const": "artifacts"
+        },
+        "requestId": {
+          "$ref": "#/definitions/requestId"
+        },
+        "data": {
+          "$ref": "#/definitions/artifacts"
+        }
+      },
+      "required": [
+        "apiVersion",
+        "kind",
+        "requestId",
+        "data"
+      ],
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "properties": {
+        "apiVersion": {
+          "const": 1
+        },
+        "kind": {
+          "const": "sourceSearch"
+        },
+        "requestId": {
+          "$ref": "#/definitions/requestId"
+        },
+        "data": {
+          "$ref": "#/definitions/sourceSearch"
+        }
+      },
+      "required": [
+        "apiVersion",
+        "kind",
+        "requestId",
+        "data"
+      ],
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "properties": {
+        "apiVersion": {
+          "const": 1
+        },
+        "kind": {
+          "const": "sourceDiff"
+        },
+        "requestId": {
+          "$ref": "#/definitions/requestId"
+        },
+        "data": {
+          "$ref": "#/definitions/sourceDiff"
+        }
+      },
+      "required": [
+        "apiVersion",
+        "kind",
+        "requestId",
+        "data"
+      ],
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "properties": {
+        "apiVersion": {
+          "const": 1
+        },
+        "kind": {
+          "const": "sourceFileDiff"
+        },
+        "requestId": {
+          "$ref": "#/definitions/requestId"
+        },
+        "data": {
+          "$ref": "#/definitions/sourceFileDiff"
+        }
+      },
+      "required": [
+        "apiVersion",
+        "kind",
+        "requestId",
+        "data"
+      ],
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "properties": {
+        "apiVersion": {
+          "const": 1
+        },
+        "kind": {
+          "const": "sourceArchive"
+        },
+        "requestId": {
+          "$ref": "#/definitions/requestId"
+        },
+        "data": {
+          "$ref": "#/definitions/sourceArchive"
+        }
+      },
+      "required": [
+        "apiVersion",
+        "kind",
+        "requestId",
+        "data"
+      ],
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "properties": {
+        "apiVersion": {
+          "const": 1
+        },
+        "kind": {
+          "const": "archiveVerificationRequest"
+        },
+        "data": {
+          "$ref": "#/definitions/archiveVerificationRequest"
+        }
+      },
+      "required": [
+        "apiVersion",
+        "kind",
         "data"
       ],
       "additionalProperties": false

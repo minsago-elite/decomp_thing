@@ -145,11 +145,11 @@ export function runPath(basePath: string, jobId: string, runId: string): string 
   return `${jobPath(basePath, jobId)}/runs/${runId}`;
 }
 
-export type RunView = 'overview' | 'activity' | 'evidence';
+export type RunView = 'overview' | 'activity' | 'evidence' | 'logs';
 
 /** Named, read-only views of the same immutable attempt identity. */
 export function runViewPath(basePath: string, jobId: string, runId: string, view: RunView): string {
-  if (view !== 'overview' && view !== 'activity' && view !== 'evidence') return invalidUrl();
+  if (view !== 'overview' && view !== 'activity' && view !== 'evidence' && view !== 'logs') return invalidUrl();
   const path = runPath(basePath, jobId, runId);
   return view === 'overview' ? path : `${path}/${view}`;
 }
@@ -176,6 +176,11 @@ export function sourceDirectoryPath(basePath: string, selected: SourceSelection,
 export function sourceFilePath(basePath: string, selected: SourceSelection, fileId: string, pin?: SourceSnapshotPin): string {
   const path = `${sourceRevisionPath(basePath, selected)}/source-files/${identifier(fileId)}`;
   return pin === undefined ? path : `${path}?${sourceSnapshotQuery(pin)}`;
+}
+
+/** Search document (with a base path) or relative API route (with ''); search.ts owns the query grammar. */
+export function sourceSearchBase(basePath: string, selected: SourceSelection): string {
+  return `${sourceRevisionPath(basePath, selected)}/source-search`;
 }
 
 export function sourceDownloadRoute(selected: SourceSelection, fileId: string, metadataVersion: string): string {

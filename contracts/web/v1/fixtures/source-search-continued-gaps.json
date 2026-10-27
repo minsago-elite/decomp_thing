@@ -1,0 +1,69 @@
+{
+  "apiVersion": 1,
+  "kind": "sourceSearch",
+  "requestId": "request_source_search_5",
+  "data": {
+    "binding": {
+      "jobId": "1234567890abcdef1234567890abcdef",
+      "runId": "run_1",
+      "revisionId": "revision_1"
+    },
+    "authority": "source-input-commitments",
+    "sourceSha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+    "metadataVersion": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+    "query": {
+      "text": "needle",
+      "match": "text",
+      "caseSensitive": true,
+      "directoryId": "root",
+      "path": null
+    },
+    "index": "none",
+    "status": "complete",
+    "stopReason": null,
+    "scope": {
+      "filesInScope": 3,
+      "searchableFiles": 3,
+      "notViewable": 0,
+      "declaredBinary": 0,
+      "tooLarge": 0
+    },
+    "progress": {
+      "scannedFiles": 1,
+      "scannedBytes": "64",
+      "unsearchableText": 0,
+      "unavailableFiles": 0,
+      "remainingFiles": 0
+    },
+    "coverageGaps": {
+      "unsearchableText": 1,
+      "unavailableFiles": 1
+    },
+    "limits": {
+      "maxResults": 50,
+      "maxScannedBytes": "33554432",
+      "deadlineMs": "2000"
+    },
+    "items": [
+      {
+        "fileId": "file_2_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "displayName": "src/b.c",
+        "sha256": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+        "line": "4",
+        "column": "1",
+        "offsetBytes": "30",
+        "lineOffsetBytes": "30",
+        "before": "",
+        "match": "needle",
+        "after": ";",
+        "truncatedBefore": false,
+        "truncatedAfter": false
+      }
+    ],
+    "page": {
+      "limit": 50,
+      "snapshotVersion": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+      "nextCursor": null
+    }
+  }
+}

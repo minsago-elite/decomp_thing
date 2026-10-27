@@ -20,7 +20,7 @@ function observed(text = 'int main() { return 0; }\r\n'): { metadata: RevisionFi
   const size = String(new TextEncoder().encode(text).length);
   const metadata: RevisionFile = { binding: { jobId: selected.jobId, runId: selected.runId, revisionId: selected.revisionId },
     authority: 'source-input-commitments', contentVerification: 'not-performed', implementationDeclaration: 'not-classified', sourceSha256: 'c'.repeat(64), metadataVersion: 'd'.repeat(64), parentDirectoryId: 'root',
-    item: { fileId: selected.fileId, displayName: 'src/é space.c', sizeBytes: size, sha256: 'e'.repeat(64), declaredUtf8Text: true, declaredViewable: true, declaredArchivable: true } };
+    item: { fileId: selected.fileId, displayName: 'src/é space.c', sizeBytes: size, sha256: 'e'.repeat(64), declaredUtf8Text: true, declaredViewable: true, declaredArchivable: true, commitment: 'source-input' } };
   const chunk: SourceChunk = { binding: { ...metadata.binding }, fileId: selected.fileId, sourceSha256: metadata.sourceSha256,
     metadataVersion: metadata.metadataVersion, sha256: metadata.item.sha256, sizeBytes: size, offsetBytes: '0', lengthBytes: size,
     nextOffsetBytes: null, completeFile: true, downloadAvailable: true, representation: 'utf8', fallbackReason: null,
@@ -49,7 +49,7 @@ it('honors zero and undersized runtime capabilities and bounds each explicit ran
   const route = sourceChunkRoute(selected, metadata, { offset: '0', line: '1' }, 4096);
   expect(route).toBe(`/jobs/${selected.jobId}/runs/run_1/revisions/revision_1/source-files/${selected.fileId}/chunk?offset=0&maxBytes=4096&metadataVersion=${metadata.metadataVersion}`);
   expect(route).not.toContain(metadata.item.displayName);
-  expect(() => sourceChunkRoute(selected, metadata, { offset: metadata.item.sizeBytes, line: null }, 4096)).toThrow();
+  expect(() => sourceChunkRoute(selected, metadata, { offset: metadata.item.sizeBytes!, line: null }, 4096)).toThrow();
   expect(() => sourceChunkRoute(selected, metadata, { offset: '0', line: null }, 65537)).toThrow();
   expect(() => sourceChunkRoute(selected, { ...metadata, item: { ...metadata.item, declaredViewable: false } }, { offset: '0', line: null }, 4096)).toThrow();
 });

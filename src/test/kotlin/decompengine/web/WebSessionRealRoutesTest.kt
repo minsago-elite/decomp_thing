@@ -49,7 +49,9 @@ class WebSessionRealRoutesTest {
     }
 
     private fun storageDigest(): Map<String, String> = Files.walk(root).use { paths ->
-        paths.filter { Files.isRegularFile(it) }.toList().associate { file ->
+        // The sensitive-action audit is append-only server evidence (session exchanges are recorded as their
+        // handler exits, possibly after the response); it is not job state a read could change.
+        paths.filter { Files.isRegularFile(it) && !root.relativize(it).startsWith(WebAuditLog.DIRECTORY) }.toList().associate { file ->
             root.relativize(file).toString() to MessageDigest.getInstance("SHA-256").digest(Files.readAllBytes(file)).joinToString("") { "%02x".format(it) }
         }
     }
@@ -211,11 +213,28 @@ class WebSessionRealRoutesTest {
                 Shape("$r/validation-history", head = true, status = 200),
                 Shape("$r/source-catalog", status = 503, code = "SOURCE_CATALOG_UNAVAILABLE"),
                 Shape("$revision/sources", head = true, status = 404, code = "REVISION_NOT_FOUND"),
-                Shape("$revision/source-directories/dir_1", head = true, status = 404, code = "SOURCE_DIRECTORY_NOT_FOUND"),
+                Shape("$revision/source-search?q=needle", head = true, status = 404, code = "REVISION_NOT_FOUND"),
+                Shape("$revision/source-diff?baseRunId=run_1&baseRevisionId=revision_1", head = true, status = 404, code = "REVISION_NOT_FOUND"),
+                Shape("$revision/source-diff/file?baseRunId=run_1&baseRevisionId=revision_1&headFileId=file_0_${"a".repeat(64)}",
+                    head = true, status = 404, code = "REVISION_NOT_FOUND"),
+                Shape("$revision/source-diff/patch?baseRunId=run_1&baseRevisionId=revision_1&headFileId=file_0_${"a".repeat(64)}",
+                    accept = bytes, head = true, status = 404, code = "REVISION_NOT_FOUND"),
+                Shape("$revision/source-archive", head = true, status = 404, code = "REVISION_NOT_FOUND"),
+                Shape("$revision/archive-verifications/operation_1", head = true, status = 404, code = "REVISION_NOT_FOUND"),
+                Shape("$revision/source-directories/dir_1",head = true, status = 404, code = "SOURCE_DIRECTORY_NOT_FOUND"),
                 Shape("$revision/source-files/file_1", head = true, status = 404, code = "SOURCE_FILE_NOT_FOUND"),
                 Shape("$revision/source-files/file_1/chunk", head = true, status = 404, code = "SOURCE_FILE_NOT_FOUND"),
                 Shape("$revision/source-files/file_1/content", accept = bytes, head = true, status = 404, code = "SOURCE_FILE_NOT_FOUND"),
-                Shape("$api/jobs/${job.id}/artifacts/artifact_1/content", accept = bytes, head = true, status = 404, code = "NOT_FOUND"),
+                Shape("$revision/functions", head = true, status = 404, code = "REVISION_NOT_FOUND"),
+                Shape("$revision/modules", head = true, status = 404, code = "REVISION_NOT_FOUND"),
+                Shape("$revision/modules/core", head = true, status = 404, code = "REVISION_NOT_FOUND"),
+                Shape("$revision/functions/fn_1", head = true, status = 404, code = "REVISION_NOT_FOUND"),
+                Shape("$revision/globals/global_1", head = true, status = 404, code = "REVISION_NOT_FOUND"),
+                Shape("$revision/types/type_1", head = true, status = 404, code = "REVISION_NOT_FOUND"),
+                Shape("$revision/functions/_unaddressable", head = true, status = 404, code = "ENTITY_NOT_FOUND"),
+                Shape("$api/jobs/${job.id}/artifacts", head = true, status = 200),
+                Shape("$api/jobs/${job.id}/artifacts/artifact_1", head = true, status = 404, code = "NOT_FOUND"),
+                Shape("$api/jobs/${job.id}/artifacts/artifact_1/content",accept = bytes, head = true, status = 404, code = "NOT_FOUND"),
             )
             fun get(shape: Shape, cookie: String?, method: String = "GET"): HttpResponse<String> {
                 val builder = HttpRequest.newBuilder(URI(origin + shape.path)).timeout(Duration.ofSeconds(5)).header("Accept", shape.accept)

@@ -67,7 +67,7 @@ class WebApiControllerTest {
             assertEquals(StreamingMultipartUpload.MAX_REQUEST_BYTES.toString(), limits.getValue("maxUploadBytes").jsonPrimitive.content)
             assertEquals("30000", limits.getValue("requestDeadlineMs").jsonPrimitive.content)
             assertEquals("120000", limits.getValue("uploadDeadlineMs").jsonPrimitive.content)
-            assertEquals("0", limits.getValue("maxSourceChunkBytes").jsonPrimitive.content)
+            assertEquals("131072", limits.getValue("maxSourceChunkBytes").jsonPrimitive.content)
             assertEquals("0", limits.getValue("maxLogChunkBytes").jsonPrimitive.content)
             assertEquals("50", limits.getValue("defaultPageLimit").jsonPrimitive.content)
             assertEquals("200", limits.getValue("maxPageLimit").jsonPrimitive.content)
@@ -358,6 +358,80 @@ class WebApiControllerTest {
     }
 
     @Test
+    fun `attempt build logs are bounded redacted ranges and the download shares their text`() {
+        val root = createTempDirectory("web-run-log-http-")
+        val job = JobStore(root).createFromUpload("inert.elf", elfFixture())
+        val other = JobStore(root).createFromUpload("other.elf", elfFixture())
+        val run = decompengine.jobs.WorkflowAttemptStore.open(root).use { owner ->
+            val original = (owner.inspect(job.id) as decompengine.jobs.WorkflowJobInspection.Available).snapshot
+            owner.create(job.id, original.version, decompengine.jobs.NewWorkflowAttempt(
+                decompengine.jobs.WorkflowKind.RECONSTRUCT,
+                decompengine.jobs.WorkflowExecutionLimits(60000u, 15000u, 1048576u, 16u),
+            )).attempt
+        }
+        val server = UploadServer("127.0.0.1", 0, root, JobAnalyzer { _, _ -> error("Unexpected analysis") },
+            JobReconstructor { _, _ -> error("Unexpected reconstruction") }, uiMode = WebUiMode.SPA, basePath = "/workbench/",
+            redactionEnvironment = mapOf("API_TOKEN" to "LogCanary0123456789abcdef"))
+        server.start()
+        try {
+            val path = "/workbench/api/v1/jobs/${job.id}/runs/${run.runId}/logs/build"
+            assertError(request(server, path), 401, "SESSION_REQUIRED")
+            val headers = mapOf("Cookie" to establish(server))
+            val missing = assertEnvelopeRaw(request(server, path, headers = headers), "logRange")
+            assertEquals("missing", missing.getValue("state").jsonPrimitive.content)
+            assertError(request(server, "$path/content", headers = headers + ("Accept" to "text/plain")), 404, "NOT_FOUND")
+            val log = Files.createDirectories(root.resolve(job.id).resolve("reports/runs/${run.runId}/source-tree/reports")).resolve("build.log")
+            val storeRoot = root.toAbsolutePath().normalize().toString()
+            Files.writeString(log, (1..300).joinToString("\n") { "cc -c $storeRoot/m$it.c \u001b[31merror\u001b[0m" } + "\n")
+            val tail = assertEnvelopeRaw(request(server, "$path?tail=true&limit=50&search=m299.c", headers = headers), "logRange")
+            assertEquals("available", tail.getValue("state").jsonPrimitive.content)
+            assertEquals("251", tail.getValue("range").jsonObject.getValue("firstLine").jsonPrimitive.content)
+            assertEquals("300", tail.getValue("redactedLines").jsonPrimitive.content)
+            assertEquals(listOf("299"), tail.getValue("search").jsonObject.getValue("matches").jsonArray.map { it.jsonPrimitive.content })
+            val body = tail.toString()
+            assertFalse(body.contains(storeRoot)); assertFalse(body.contains("\\u001b"))
+            val lines = tail.getValue("lines").jsonArray.map { it.jsonObject.getValue("text").jsonPrimitive.content }
+            assertEquals("cc -c [job-store]/m251.c \\e[31merror\\e[0m", lines.first())
+            assertError(request(server, "$path?tail=true&fromLine=2", headers = headers), 422, "VALIDATION_FAILED")
+            assertError(request(server, "$path?pattern=.*", headers = headers), 422, "VALIDATION_FAILED")
+            assertError(request(server, "/workbench/api/v1/jobs/${other.id}/runs/${run.runId}/logs/build", headers = headers), 404, "NOT_FOUND")
+            val download = request(server, "$path/content", headers = headers + ("Accept" to "text/plain"))
+            assertEquals(200, download.statusCode())
+            assertTrue(download.headers().firstValue("Content-Type").orElseThrow().startsWith("text/plain"))
+            assertTrue(download.headers().firstValue("Content-Disposition").orElseThrow().contains("build-${run.runId}.log"))
+            assertFalse(download.body().contains(storeRoot))
+            assertTrue(download.body().contains("# job ${job.id} attempt ${run.runId}"))
+            assertTrue(download.body().contains(lines.first() + "\n"))
+            assertError(request(server, "$path/content", headers = headers + mapOf("Accept" to "text/plain", "Range" to "bytes=0-1")), 400, "UNSUPPORTED_HEADER")
+            Files.writeString(log, "password=hunter2 LogCanary0123456789abcdef /home/redaction-canary/private.c\n")
+            val redacted = assertEnvelopeRaw(request(server, path, headers = headers), "logRange")
+            val safeLine = redacted.getValue("lines").jsonArray.single().jsonObject.getValue("text").jsonPrimitive.content
+            assertEquals("password=[redacted] [redacted] [private-path]", safeLine)
+            assertEquals("1", redacted.getValue("redactedLines").jsonPrimitive.content)
+            val safeDownload = request(server, "$path/content", headers = headers + ("Accept" to "text/plain"))
+            assertEquals(200, safeDownload.statusCode())
+            assertTrue(safeDownload.body().endsWith(safeLine + "\n"))
+            assertEquals(safeDownload.body().toByteArray(Charsets.UTF_8).size.toString(),
+                safeDownload.headers().firstValue("Content-Length").orElseThrow())
+            for (secret in listOf("hunter2", "LogCanary0123456789abcdef", "/home/redaction-canary/private.c")) {
+                assertFalse(safeDownload.body().contains(secret), secret)
+            }
+            Files.write(log, ByteArray(1_000_001) { '\n'.code.toByte() })
+            assertEquals("oversized", assertEnvelopeRaw(request(server, "$path?tail=true&limit=1", headers = headers), "logRange")
+                .getValue("state").jsonPrimitive.content)
+            assertError(request(server, "$path/content", headers = headers + ("Accept" to "text/plain")), 413, "LOG_TOO_LARGE")
+        } finally { server.stop(); root.toFile().deleteRecursively() }
+    }
+
+    /** Envelope for oneOf documents whose field set depends on their state. */
+    private fun assertEnvelopeRaw(response: HttpResponse<String>, kind: String): JsonObject {
+        assertEquals(200, response.statusCode(), response.body())
+        val body = Json.parseToJsonElement(response.body()).jsonObject
+        assertEquals(kind, body.getValue("kind").jsonPrimitive.content)
+        return body.getValue("data").jsonObject
+    }
+
+    @Test
     fun `startup recovery projects durable identity while bootstrap keeps production workflow capability unavailable`() {
         val root = createTempDirectory("web-durable-projection-")
         val job = JobStore(root).createFromUpload("inert.elf", elfFixture())
@@ -411,7 +485,10 @@ class WebApiControllerTest {
             val head = request(server, href, "HEAD", headers = downloadHeaders)
             assertEquals(200, head.statusCode()); assertEquals("", head.body())
             assertEquals(raw.toByteArray().size.toString(), head.headers().firstValue("Content-Length").orElseThrow())
-            assertError(request(server, href, headers = downloadHeaders + ("Range" to "bytes=0-2")), 400, "UNSUPPORTED_HEADER")
+            val partial = request(server, href, headers = downloadHeaders + ("Range" to "bytes=0-2"))
+            assertEquals(206, partial.statusCode()); assertEquals(raw.take(3), partial.body())
+            assertEquals("bytes 0-2/${raw.length}", partial.headers().firstValue("Content-Range").orElseThrow())
+            assertError(request(server, href, headers = downloadHeaders + ("If-Modified-Since" to "Mon, 01 Jan 2024 00:00:00 GMT")), 400, "UNSUPPORTED_HEADER")
             Files.writeString(reportFile, "changed")
             assertError(request(server, href, headers = downloadHeaders), 409, "ARTIFACT_CHANGED")
             val runPath = "/workbench/api/v1/jobs/${job.id}/runs/${run.runId}"

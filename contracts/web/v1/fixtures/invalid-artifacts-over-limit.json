@@ -1,0 +1,61 @@
+{
+  "apiVersion": 1,
+  "kind": "artifacts",
+  "requestId": "request_artifacts_3",
+  "data": {
+    "binding": {
+      "jobId": "1234567890abcdef1234567890abcdef",
+      "runId": null,
+      "revisionId": null
+    },
+    "catalogedFamilies": [
+      "exploration-report",
+      "progress-journal",
+      "source-manifest",
+      "build-contract",
+      "source-archive"
+    ],
+    "unavailableFiles": 1,
+    "items": [
+      {
+        "artifactId": "exploration_0123456789abcdef0123456789abcdef_eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+        "binding": {
+          "jobId": "1234567890abcdef1234567890abcdef",
+          "runId": "run_example_1",
+          "revisionId": null
+        },
+        "displayName": "exploration.json",
+        "mediaType": "application/json",
+        "sizeBytes": "10",
+        "sha256": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+        "contentHref": "/api/v1/jobs/1234567890abcdef1234567890abcdef/artifacts/exploration_0123456789abcdef0123456789abcdef_eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee/content",
+        "role": "raw-evidence",
+        "derivedFromArtifactId": null,
+        "family": "exploration-report",
+        "verification": "not-verified"
+      },
+      {
+        "artifactId": "progress_fedcba9876543210fedcba9876543210_ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+        "binding": {
+          "jobId": "1234567890abcdef1234567890abcdef",
+          "runId": "run_example_2",
+          "revisionId": null
+        },
+        "displayName": "agent-progress.json",
+        "mediaType": "application/json",
+        "sizeBytes": "20",
+        "sha256": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+        "contentHref": "/api/v1/jobs/1234567890abcdef1234567890abcdef/artifacts/progress_fedcba9876543210fedcba9876543210_ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff/content",
+        "role": "raw-evidence",
+        "derivedFromArtifactId": null,
+        "family": "progress-journal",
+        "verification": "not-verified"
+      }
+    ],
+    "page": {
+      "limit": 1,
+      "snapshotVersion": "9999999999999999999999999999999999999999999999999999999999999999",
+      "nextCursor": "cursor_artifacts_2"
+    }
+  }
+}

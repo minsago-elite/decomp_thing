@@ -141,6 +141,8 @@ internal storage optimization and must not merge identity, permissions or histor
 | `GET /api/v1/bootstrap` | `200 bootstrap` | Sanitized capabilities/readiness/build IDs/limits; #166 |
 | `GET /api/v1/jobs` | `200 jobs` | Bounded cursor/filter query; #162 |
 | `GET`, `HEAD /api/v1/recovery` | `200 recovery` | Private, bounded, display-only recovery-file summary; no query parameters |
+| `GET`, `HEAD /api/v1/capacity` | `200 capacity` | Aggregate limits, occupancy and outcome counts; no query; #208/#591 |
+| `GET /api/v1/support-export?scope=server` or `?scope=job&jobId={jobId}` | `200 supportExport` | Explicitly scoped redacted diagnostic export; no default scope; audited; #177/#522 |
 | `GET /api/v1/uploads/{uploadId}` | `200 uploadProgress` | Ephemeral session-bound transfer bytes and publication phase; #169 |
 | `POST /api/v1/jobs` | `201 job`, `Location: J` | Multipart, upload limits, idempotency; #162 |
 | `GET J` | `200 job`, ETag | Snapshot read; #159/#160 |
@@ -161,6 +163,8 @@ internal storage optimization and must not merge identity, permissions or histor
 | `GET R/controls` | `200 attemptControls`, strong run ETag | Read-only cancel/retry/resume eligibility with closed reasons; reserves nothing; #528/#529 |
 | `GET R/snapshot` | `200 snapshot`, ETag | Run state and consistent event watermark; #174 |
 | `GET R/queue-position` | `200 queuePosition` | Approximate sampled position of one queued attempt; no query, counts only; #530 |
+| `GET R/logs/build` | `200 logRange` | Bounded redacted line range of the attempt's build log; `tail`/`fromLine`, `limit` ≤ 500, literal `search`; #523 |
+| `GET R/logs/build/content` | `200 text/plain` attachment | The same redacted lines with a provenance header; no Range/conditional headers; #523 |
 | `GET R/events` | `200 text/event-stream` | Resume with `Last-Event-ID` or `after`, never both; #174 |
 | `GET R/events?transport=poll` | `200 events` | Same retention/cursor semantics, bounded page; #174 |
 | `GET R/reports/{reportId}` | `200 report` | State may be missing/partial/unsupported/unknown; #165 |
@@ -171,12 +175,20 @@ internal storage optimization and must not merge identity, permissions or histor
 | `GET`, `HEAD R/revisions/{revisionId}/source-files/{fileId}` | `200 revisionFile` | Recorded file metadata and opaque parent directory, without requesting its body; #188 |
 | `GET`, `HEAD R/revisions/{revisionId}/source-files/{fileId}/chunk` | `200 sourceChunk` | Digest-verified bounded UTF-8 or hex ranges of a committed input; #490, #545 |
 | `GET`, `HEAD R/revisions/{revisionId}/source-files/{fileId}/content` | `200 application/octet-stream` | Complete authorized input download, at most 8 MiB; #491, #545 |
+| `GET`, `HEAD R/revisions/{revisionId}/functions` | `200 functionInventory` | Bounded, signed, filtered/sorted pages of the manifest-committed program model; explicit model/plan states; [program structure](web-program-structure.md); #534, #536 |
+| `GET`, `HEAD R/revisions/{revisionId}/modules`, `R/revisions/{revisionId}/modules/{moduleId}` | `200 moduleInventory`, `200 moduleDetail` | Recorded totals/diagnostics and module pages; owned-entity pages with revision source links; #535 |
+| `GET`, `HEAD R/revisions/{revisionId}/{functions,globals,types}/{entityId}` | `200 entityDetail` | Bounded entity facts, cross-links and unrecorded fact families; optional `structureVersion` pin; #539, #540 |
 | `GET J/revisions`, `GET V` | `200 revisions`, `200 revision` | Immutable source/acceptance bindings; #165/#199 |
 | `GET V/sources`, `GET V/sources/{fileId}` | `200 files`, `200 file` | Bounded tree/page/read; #165/#188/#189 |
-| `GET V/search` | `200 matches` | Explicit revision and query/byte/result/deadline bounds; #190 |
-| `GET J/artifacts`, `GET J/artifacts/{artifactId}` | `200 artifacts`, `200 artifact` | Optional run/revision filters validated together; #165/#192 |
-| `GET`/`HEAD J/artifacts/{artifactId}/content` | `200` or `206` bytes | Immutable digest binding, contained stream; #164/#192 |
-| `POST V/archive-verifications` | `202 operation` | Explicit bounded integrity verification, no binary execution; #193 |
+| `GET`, `HEAD R/revisions/{revisionId}/source-diff` | `200 sourceDiff` | Changed files against an explicit `baseRunId`/`baseRevisionId` of the same job, from recorded digests; #550 |
+| `GET`, `HEAD R/revisions/{revisionId}/source-diff/file` | `200 sourceFileDiff` | One classified pair (`baseFileId` and/or `headFileId`), bounded hunk pages and explicit binary/oversize/budget states; #550 |
+| `GET`, `HEAD R/revisions/{revisionId}/source-diff/patch` | `200 application/octet-stream` | Complete unified diff of one text comparison, no Range or conditional headers; #550 |
+| `GET`, `HEAD R/revisions/{revisionId}/source-search` | `200 sourceSearch` | Explicit revision and query/byte/result/deadline bounds over canonical inputs; replaces the reserved `V/search`; #547, #548 |
+| `GET`, `HEAD J/artifacts`, `J/artifacts/{artifactId}` | `200 artifacts`, `200 artifact` | Fixed attempt families; optional `runId`, with `revisionId` only together with `runId`; #551 |
+| `GET`/`HEAD J/artifacts/{artifactId}/content` | `200`, `206`, `304` bytes | Digest-bound pinned stream, single byte range, strong ETag preconditions; #552 |
+| `GET`, `HEAD R/revisions/{revisionId}/source-archive` | `200 sourceArchive` | Revision, recorded build, acceptance, archive digest, verification state and Git mapping before download; #554, #556 |
+| `POST R/revisions/{revisionId}/archive-verifications` | `202 operation`, `Location` | Strict `archiveVerificationRequest` with the displayed digest, session/Origin/CSRF, `Idempotency-Key`; no binary execution; replaces the reserved `V/archive-verifications`; #555 |
+| `GET`, `HEAD R/revisions/{revisionId}/archive-verifications/{operationId}` | `200 operation` | `archive.verify` operation state for this listener; #555 |
 | `GET J/repositories` | `200 gitRepositories` | Capability-gated repository summary and latest 20 operations; implemented by #201 |
 | `GET G`, `GET G/worktrees/{worktreeId}` | `200 gitWorkspace` | Capability-gated repository/worktree registry; `GET G` implemented by #201, worktrees #202 |
 | `GET G/{status,diff,history,refs,worktrees,remotes,conflicts}` | Bounded typed Git read | Scoped worktree/ref/object IDs; #202/#204/#207/#210/#211 |
@@ -462,15 +474,49 @@ Reconciliation never executes a binary, model or adapter body.
 
 ### Admission and overload
 
-The server admits at most 16 concurrent requests, with 64 more waiting in a bounded queue. A request that finds
-every worker and queue slot taken is answered immediately, without routing, session lookup or storage access, with
-`429` and the fixed error code `SERVER_BUSY` (`retryable: true`, `retryAfterMs: "30000"`, `Retry-After: 30`,
-`Cache-Control: no-store`, `Connection: close`), in the same error envelope as every other denial. The 30-second guidance
-matches the longest ordinary request deadline, after which a slow request releases its worker. A small responder
-pool (two threads, no queue) produces these answers, so overload never buffers more than the main queue holds. If
-that responder pool is also busy, the connection is closed without a response; clients should treat a reset
-connection like `SERVER_BUSY`. Each admitted request's exchange is closed at a 30-second deadline (120 seconds for
-multipart uploads); the release of a worker pinned by a slow client at that deadline is not yet covered by a test.
+The following request-admission bounds are reported by `GET /api/v1/capacity` (`WebAdmissionLimits`).
+They do **not** cap all accepted TCP connections: the JDK can accept silent sockets before submitting an executor
+task, so neither the executor watchdog nor the listen backlog bounds those sockets. No accepted-connection count
+cap is configured here; that part of #589 remains open, and capacity occupancy is not a socket count.
+
+| Bound | Default | Enforcement |
+| --- | --- | --- |
+| HTTP workers / queued requests | 16 / 64 | Bounded executor (not a bound on pre-dispatch accepted sockets) |
+| Overload responders | 2, no queue | Fixed `429 SERVER_BUSY` without routing, session or storage access |
+| Listen backlog | 64 | Kernel accept queue |
+| Header deadline | 10 s | From worker start through header parsing and header-limit/overload refusal cleanup; interruption aborts blocked socket-channel I/O even when response close is draining an unfinished body. Applies on the responder tier too; not to silent sockets before executor dispatch |
+| Request deadline | 30 s (120 s for multipart uploads) | The exchange is closed: a slow body, handler or response write releases its worker, staged upload and descriptors |
+| Header count / bytes | 100 / 32 KiB | `431 HEADERS_TOO_LARGE`, `Connection: close` |
+| JSON response / request bodies | 1 MiB response; per-route request ceilings (1–4 KiB mutations) | Checked before serialization or parsing |
+| Upload body | 32 MiB | `413 UPLOAD_TOO_LARGE` |
+| Event streams | 16 total, 2 per session, 30 s lifetime | `429 STREAM_LIMIT`; streams hold no file descriptor between polls |
+
+A request that finds every worker and queue slot taken is answered immediately with `429` and the fixed error code
+`SERVER_BUSY` (`retryable: true`, `retryAfterMs: "30000"`, `Retry-After: 30`, `Cache-Control: no-store`,
+`Connection: close`), in the same error envelope as every other denial. The 30-second guidance matches the request
+deadline, after which a slow request releases its worker. If the responder pool is also busy, the connection is closed
+without a response; clients should treat a reset connection like `SERVER_BUSY`. Response bodies are produced in memory
+before writing, so a slow reader holds no storage descriptor while its response is written.
+
+`GET`/`HEAD /api/v1/capacity` (session, no query) returns `capacity`: the limits above, sampled worker/queue/responder/
+stream occupancy, aggregate outcome counts for the listener lifetime (successful, client and server errors, closed
+without response, overload responses and closures, header/request deadline closures, header-limit rejections) and
+`failureReasons` counted by fixed public error code (unknown codes count as `UNCLASSIFIED`). It never contains a path,
+query, header, body, job identity or exception text. The diagnostic log carries the same vocabulary: per-failure
+`web-http-failure` lines, a rate-limited `web-overload` line when overload begins (at most once a minute) and a
+`web-capacity-summary` line at shutdown. `headerDeadlineClosures` includes aborted header-limit and overload refusal
+cleanup as well as unfinished header blocks. Refusal cleanup is checked with incomplete fixed-length and chunked bodies
+while the client peers remain open; executor occupancy, peer EOF and Linux descriptor recovery are asserted.
+
+### Shutdown and resource recovery
+
+Stop publishes cancellation first, then closes the listener (new connections are refused) before it interrupts owned
+workers, so no request can join work that is being stopped. Queued work is persisted as discarded and running work as
+interrupted/failed (never complete); a worker that outlives the grace period keeps storage ownership until it exits,
+and startup recovery marks any abandoned attempt `interrupted`. `WebResourceBaselineTest` repeats workload, slow-client
+and shutdown cycles with fake workers and requires listener/worker/deadline threads, descriptors and upload staging to
+return to the pre-server baseline (heap within 64 MiB); it records the measurements in
+`build/reports/web-resource-baseline/measurements.json`.
 
 ## Bootstrap and capability truth
 
@@ -1072,6 +1118,38 @@ the receipt time (`endedAt`); the provider's own measurement time is not reporte
 `createdAt`. Live context-usage observations are coalesced for display only (one pending snapshot
 per 100 ms window) and never change the acknowledged cursor or persisted evidence.
 
+### Attempt build log ranges
+
+`GET jobs/J/runs/R/logs/build` reads `reports/runs/R/source-tree/reports/build.log` (at most
+8 MiB; larger logs report `oversized`, absent logs `missing`) and returns one contiguous range:
+`tail=true` for the newest lines, `beforeLine=N` for the lines ending just before line N (both fill
+their byte budget backward, so the range always ends at the final or requested line), or
+`fromLine=N` (a position just past the end returns an empty, current range for following), `limit` 1–500 lines (default 200) and at most 256 KiB of text. The
+range states `firstLine`, `lineCount`, `truncatedBefore`/`truncatedAfter` and `byteLimited`, with
+`totalLines`, `totalBytes`, the recording's `sourceSha256`, the attempt state with its start/end
+times and the server `readAt` time. Lines are decoded as UTF-8 with replacement (flagged), cut at
+4,096 characters (flagged) and have C0/C1 controls and bidirectional overrides rewritten as visible
+escapes (`\e`, `\uXXXX`), so terminal sequences and markup reach the browser only as text.
+
+Redaction policy `web-log-v1` replaces the job store, home, temporary and working directories with
+fixed labels and flags each changed line. The optional `search` is a literal substring of at most 128
+characters, never a pattern; it scans the complete redacted, visibly escaped text of the bounded log
+before the 4,096-character display cut and returns the match count and the first 200 line numbers.
+A match beyond that cut is counted even though its text is not displayed in the range or download.
+`GET .../logs/build/content` returns every line exactly as the ranges present them,
+after a provenance header naming the job, attempt, attempt times, source digest, policy, redacted
+line count and export time.
+
+The attempt's Build log view keeps at most 2,000 lines, released from the far end as pages load,
+and renders only rows near its viewport. Following polls for new lines every 3 s only after an
+explicit Follow, stops as soon as the reader scrolls away or filters, and resumes only on request; it
+is suspended while the tab is hidden or offline and ends with the attempt. Client filtering states
+the loaded line range it covered. Whole-log search results and jumps are bound to the recording's
+digest and invalidated on replacement. A replacement observed while following loads its bounded tail,
+not the old recording's append cursor. Deliberate navigation supersedes pending reads; pausing or
+scrolling away also invalidates in-flight follow reads so they cannot evict the paused window.
+Leaving the view aborts reads, clears the follow timer and drops the buffer.
+
 ## Current source catalog metadata
 
 `GET /api/v1/jobs/{jobId}/runs/{runId}/source-catalog` requires the existing private
@@ -1105,7 +1183,7 @@ manifest bytes. File hashes and the `declaredUtf8Text`/`declaredViewable` flags 
 manifest declarations; this read does not verify source bodies, text encoding or
 acceptance. It creates no immutable project revision or release relationship.
 The planned revision-scoped source routes above remain separate work. Bootstrap's
-source chunk limit remains zero until a source text producer is implemented.
+source chunk limit reports the revision chunk reader's enforced 131,072-byte range ceiling.
 
 In-memory controls exercise the 25,000-record capture/page workload, scoped cursor
 refusal, byte-limited continuation and changed capture refusal. They do not qualify
@@ -1151,10 +1229,31 @@ acceptance or release relationship, including when the stored attempt has an acc
 reference. Missing registration returns 404; inconsistent capture returns 409; missing,
 malformed, unsupported or oversized metadata has a fixed unavailable response.
 
-This endpoint lists only the canonical build input set. The observed catalog above
-continues to describe other manifest entries. Reads outside that committed input set,
-UI/HTTP/performance qualification and accepted publication remain open;
-bootstrap source chunk advertising stays zero. In-memory controls cover canonical
+The existing v1 source listing, directory and file-metadata routes default to canonical
+inputs only, retaining the original decimal-string `sizeBytes` semantics. A client may
+explicitly opt into the broader representation by sending exactly one
+`X-Decomp-Source-Inventory: manifest` header on those GET/HEAD routes. Duplicate or
+unknown values are refused with 422. With this opt-in, every other manifest entry
+(for the generated-C profiles: JSON reports and `UNRESOLVED.md`) is listed too, so
+every recorded generated file is reachable. The SPA sends this header; older v1
+servers ignore it and can still return their original input-only responses.
+
+The additive `commitment` field is optional on existing v1 item shapes; omission means
+`source-input` and still requires a decimal `sizeBytes`. `source-input` entries belong
+to `sourceSha256`; negotiated `manifest-digest` entries are bound only by the manifest
+digest (and so by `metadataVersion`), have `sizeBytes: null` because the manifest records
+no size, and never change the source commitment. A manifest-only file-metadata selector
+without negotiation returns 404 rather than changing an existing v1 field type.
+The new diff routes include both kinds of entries without further negotiation.
+Bodies use the same reader, digest check and 8 MiB ceiling; an oversized body returns
+`SOURCE_FILE_TOO_LARGE`. Build logs and progress journals are attempt artifacts in the
+artifact catalog, not source-tree entries. Canonical-input file and directory IDs retain
+their original input-order identity even when manifest-only entries sort before them.
+Manifest-only file selectors follow the canonical-input selector range, independently
+of presentation ordering. A selector is always checked against its complete identity
+digest, never used as a path. Saved input links and their metadata pins survive this
+adapter coverage upgrade without changing the retained revision.
+Accepted publication remains separate; bootstrap advertises the chunk reader's range ceiling. In-memory controls cover canonical
 identity, conflicts, exact large sizes/Unicode, 25,000 commitments, paging and capture
 admission. They do not establish the D0 physical source workload or delivery budgets.
 
@@ -1165,7 +1264,7 @@ admission. They do not establish the D0 physical source workload or delivery bud
 Only `limit` and `cursor` are accepted, with the same default 50, maximum 200 and
 sub-MiB response ceiling. Each page groups immediate children of the selected prefix;
 directories sort first, then files, each in UTF-16 label order. Selecting a directory
-does not recursively fetch its children. Counts include only canonical input files.
+does not recursively fetch its children. Counts include every recorded file below the prefix.
 `emptyDirectories: "not-recorded"` explicitly describes the file-only inventory;
 an unknown directory returns `SOURCE_DIRECTORY_NOT_FOUND`, without asserting physical
 absence. File/directory prefix collisions return a source revision conflict.
@@ -1175,6 +1274,8 @@ They remain stable across sessions and listener restarts for that input set. Fil
 are identical to those in the flat revision source listing. Display labels are single
 components and never become path selectors. A continuation also binds its directory
 and page size; session mismatch is invalid, and changed metadata expires it explicitly.
+Flat and directory continuations also bind the negotiated inventory mode: a cursor
+cannot be transferred between the default input-only and manifest inventories.
 
 The root has a null display label and parent. Other directories include a parent ID,
 depth and breadcrumbs. Breadcrumbs retain the root and at most the last 31 components;
@@ -1240,7 +1341,8 @@ Each chunk currently verifies a complete bounded file before returning its range
 No timing, RSS, physical deep-path or actual HTTP/browser qualification is inferred
 from captured-byte controls. General viewer qualification, all-manifest/log/report
 families, local highlighting and full D0 physical budgets remain open. Bootstrap
-source chunk advertising remains zero pending those gates.
+source chunk advertising reports the enforced 131,072-byte range ceiling; it does not
+qualify those gates.
 
 ### Explicit source download digest observation
 
@@ -1265,8 +1367,8 @@ and preserves it for the existing generation-bound session invalidation observer
 Other statuses or missing, combined and unknown error codes grant no session signal.
 Navigation, metadata refresh and session removal discard the observation and
 cancel its read. Metadata reads still report `contentVerification: not-performed`;
-they do not start this check. The actual source-chunk bootstrap permission stays
-zero. A matching file digest is separate from compilation, behavioral validation,
+they do not start this check. Bootstrap source-chunk advertising reports the
+reader's range ceiling. A matching file digest is separate from compilation, behavioral validation,
 archive verification and accepted reconstruction. The general snapshot artifact
 catalog and its full family/verification requirements remain outstanding.
 
@@ -1274,6 +1376,273 @@ The new controls use only captured byte arrays, synthetic identities, DTOs and
 injected string lookups. Actual source HTTP/browser qualification and physical
 D0 time/memory/workload evidence remain unproved; no new actual context trial is
 introduced by those controls.
+
+### Bounded revision source search
+
+`GET`/`HEAD jobs/J/runs/R/revisions/V/source-search` searches the canonical input set of
+the same persisted candidate used by the revision source routes, through the same private
+read policy and descriptor-pinned source reader. It never reads a path outside that input
+set, another job or run, or a host location: candidates come only from the captured
+manifest/build-contract snapshot, and display labels never select files.
+
+The closed query grammar accepts `q` (required; 1–128 code points, nonblank, one line,
+no C0/C1 controls), `match=text|symbol` (default `text`), `case=sensitive|insensitive`
+(default `sensitive`), `directory` (an opaque directory ID from the directory listing,
+default `root`), `path` (an optional literal substring of the recorded relative path, at
+most 256 code points), `limit` (1–100 results, default 50) and `cursor`. Unknown,
+repeated, malformed percent escapes or invalid UTF-8 values return `422`; an unknown
+directory returns `SOURCE_DIRECTORY_NOT_FOUND`. `text` finds non-overlapping literal
+occurrences within one line. `symbol` requires one C identifier and reports only
+occurrences bounded by non-identifier ASCII characters. Insensitive comparison folds each
+code point independently (`toLowerCase(toUpperCase(c))`), so matched text keeps the
+query's code point count; the path filter uses the same case rule. Matches never span
+an LF; a CR before LF is excluded from context.
+
+Only inputs declared `VIEWABLE` and `UTF8_TEXT` within the 8 MiB reader ceiling are
+read. `scope` partitions the files in the selected directory/path scope into searchable,
+not-viewable, declared-binary and too-large counts. Each read body must match its
+committed size and SHA-256; a mismatch refuses the page with `409
+SOURCE_REVISION_CHANGED`. Bodies that fail the preview reader's UTF-8/256 KiB line rule
+count as `progress.unsearchableText`; unreadable bodies count as
+`progress.unavailableFiles`. Both counts describe the current page only;
+`coverageGaps` carries the same two counts cumulatively from the first page through
+signed continuations, so a final continued page cannot report complete coverage after an
+earlier page skipped a file.
+
+Each page reads at most 32 MiB of bodies (failed reads are charged their committed size; at least one file is always read), stops after
+2,000 ms of elapsed work (checked between files and before every 256 lines or 64 KiB of
+lines, so one line of at most 256 KiB is the largest unit between checks) and returns at most `limit` matches below a 900,000-byte item
+ceiling. `status: "partial"` with `stopReason` `result-limit`, `byte-limit` or
+`deadline` always has a signed `nextCursor`; `status: "complete"` has neither and
+`remainingFiles` is zero. `remainingFiles` counts searchable files not completely
+checked, including a file the page stopped inside. No total match count is computed.
+The cursor binds the session, job, run, revision, exact normalized query and limit,
+captured metadata version, file position, byte offset and cumulative coverage gaps.
+Encoded document queries are limited to 4,096 characters; the SPA refuses a search whose
+encoded text and path filter exceed 3,200 characters, leaving room for any cursor, the limit
+and the API path within the 4,096-character URL ceilings. Another session or query
+returns `400 INVALID_CURSOR`; a changed metadata observation returns `410 CURSOR_EXPIRED`.
+Every page performs a full revision source capture before and after its scan and
+compares their metadata versions, then rechecks the persisted candidate.
+
+Results include the opaque file ID, recorded label and SHA-256, 1-based LF line and
+code point column, exact byte offset of the match and of its line, and at most 80 code
+points of context on each side with explicit truncation flags. There is no persistent
+or cached index (`index: "none"`): offsets always come from bytes verified against the
+selected revision's commitments, so a replaced file cannot yield stale offsets. One
+search is admitted at a time (`429 SOURCE_SEARCH_BUSY`), separately from metadata
+capture admission. Client cancellation abandons the response; the server's elapsed
+deadline and byte budget bound the work it can continue after a disconnect.
+
+The SPA route `jobs/J/runs/R/revisions/V/source-search` keeps the query in its closed
+document URL. Directory pages link to a search scoped to that directory. A search runs
+only on explicit submission or continuation, and results link to
+`source-files/F?sourceSha256=…&metadataVersion=…&byte=<line offset>&line=<line>`, so the
+file view checks the same source and metadata commitments and opens that line. The
+status area distinguishes complete matches, complete searches without matches, coverage
+gaps from skipped or unreadable files, and incomplete pages (including incomplete pages
+without matches) with their stop reason and a continuation control. Navigation,
+refinement and session changes abort the current request and withhold late results.
+Pure Kotlin controls compare results to independent byte-offset truth over Unicode,
+CRLF and markup text, multi-megabyte files and paged continuations, and exercise the
+deadline, byte budget, cursor binding and digest refusal; they do not measure physical
+latency or memory on the D0 workload.
+
+### Bounded revision source diffs
+
+`GET`/`HEAD R/revisions/V/source-diff?baseRunId=B&baseRevisionId=W` compares the
+selected candidate (the head) with another exact persisted candidate of the same job.
+Both selections go through the same retained-candidate, metadata capture and conflict
+checks as the listings; a base outside the job or an unregistered revision is a 404.
+The closed query also admits `limit` (1–200, default 50) and a signed `cursor` bound to
+the session, both revisions and the page size; a changed metadata version of either side
+expires it (`410 CURSOR_EXPIRED`).
+
+Classification uses recorded paths and digests only and reads no body
+(`authority: "recorded-digests"`). A shared path with a different digest or content kind
+is `modified`; paths only in the base or head are `removed` or `added`. A removed and an
+added path with the same digest and content kind are paired, in path order, as `renamed`
+(`renameDetection: "identical-digest"`); a moved file whose bytes also changed stays one
+removal and one addition. `counts` covers all five states; only changed entries are
+listed, ordered by head path (base path for removals). Each side repeats the listing's
+opaque file ID, label, size or null, digest, declarations and commitment.
+
+`source-diff/file` takes the base query plus `baseFileId` and/or `headFileId` naming one
+classified entry (any other pair is `404 SOURCE_DIFF_ENTRY_NOT_FOUND`) and an optional
+`hunk` offset. Renamed or unchanged entries report `identical`. Undeclared viewability
+reports `not-viewable`; a declared binary side reports `binary` with `declared-binary`,
+all without reading bodies. Otherwise both bodies go through the digest-checked source
+reader under one comparison admission (`429 SOURCE_DIFF_BUSY`). Invalid UTF-8 or a line
+over 256 KiB reports `binary` with that fallback reason. Sides over 1 MiB or 50,000
+lines report `too-large`. A line diff with more than 2,000 edits, or longer than 2 s,
+reports `budget-exceeded`. None of these states has hunks.
+
+Text comparisons use a Myers line diff over LF-separated lines, where a missing final
+newline is part of the last line's identity. Hunks have three context lines, merge when
+at most six unchanged lines separate changes, and are split at 128 rows so every row stays
+reachable. A page holds at most 20 hunks, 2,000 rows and 768 KiB of serialized UTF-8 lines
+(including JSON escapes), and always at least one hunk. A 128-row hunk of 1,000-unit lines
+stays below the 1 MiB response ceiling even when every unit escapes to six bytes. `nextHunk` continues it. Continued pages and the
+patch may carry the observed `metadataVersion` and `baseMetadataVersion` pair (the SPA always
+sends it); a changed side returns `410 CURSOR_EXPIRED` before any body read. An offset past the end is
+`416 SOURCE_DIFF_RANGE_INVALID`. Each hunk reports exact 1-based starts and counts per
+side and `unchangedBefore`; the response reports `unchangedAfter`, so omitted unchanged
+ranges are counted. Line text is cut at 1,000 UTF-16 units without splitting a surrogate
+pair, with `truncated` and the full `characters`. The final line reports a missing newline.
+
+`source-diff/patch` (with the same pair, without `hunk`) returns the complete unified
+diff of a text comparison as an inert `application/octet-stream` attachment named
+`<file>.diff`, with `X-Decomp-Diff-Authority`, both source commitments and both metadata
+versions. Patch filename fields end with a tab before the header newline so spaces and
+date-like suffixes remain part of the filename rather than being read as timestamps.
+Other representations are `409 SOURCE_DIFF_NOT_TEXT`, as is an added or removed
+empty file: no line changes, so a unified diff cannot recreate it and `patchAvailable` is
+false. In every case both complete files
+remain available through their own content routes. Comparisons are presentation
+evidence: they do not verify compilation, behavior or accepted reconstruction.
+
+### Source archive status and explicit verification
+
+The generated **source archive** (`source-tree.zip` of one attempt) is a ZIP of the reconstructed
+source tree for independent extraction and rebuild. It is unrelated to the **application JAR**
+that contains the server and this SPA; neither is ever substituted for the other.
+
+`GET R/revisions/V/source-archive` reports, before any download:
+
+- `binding`, `sourceSha256` and `metadataVersion` of the exact persisted candidate;
+- `archive`: `present` with its observed SHA-256, size, catalog `artifactId` and digest-bound
+  `contentHref` (the streamed artifact route), or `missing`/`too-large` (over the 64 MiB verifier
+  limit) with no link;
+- `build`: the reconstruction's recorded build contract digest and recorded executable digest and
+  size (`recorded`), or `not-recorded`. The read never builds anything;
+- `acceptance`: `accepted` only when the attempt's accepted revision is this revision;
+- `git`: `{"state": "unavailable", "reason": "not-recorded"}` until the #205 provenance envelope
+  records a commit. The `mapped` form carries the shared `gitMapping` and `dirty: true|false|null`.
+  Repository metadata (`.git`) is never part of the archive payload; the verifier refuses it;
+- `verification` with `authority: "archive-verifier"`.
+
+`verification.state` is `verified` only when a completed `archive.verify` operation checked
+exactly the current archive digest and revision metadata. That operation uses the existing
+authoritative `WebArchiveEvidence` verifier. The ZIP must extract within its entry, size and depth
+limits, and its payload must equal the current source tree with no `.git` component. The tree
+files must match the manifest, and the recorded build contract must still match the retained
+executable. In addition, the archive's own build contract must be the descriptor that binds this
+candidate's source digest. Nothing is compiled or executed, so `verified` never means successful
+compilation or behavioral fidelity.
+
+The other states are `not-verified`, `running`, `failed` (with `failureCode`), `missing`,
+`too-large` and `stale`. `stale` means a different archive file now replaces a verified one; its
+`previousVerifiedSha256` is reported, and the label is never transferred. The old digest-bound link
+then refuses the new bytes with `409 ARCHIVE_CHANGED`. If only the revision metadata changes while the archive bytes stay the same, the state returns to `not-verified` until the archive is checked again.
+
+`POST R/revisions/V/archive-verifications` takes `{"archiveSha256": "<displayed digest>"}` under the
+JSON mutation boundary (session, Origin, `X-CSRF-Token`) with a 16–128 character `Idempotency-Key`.
+A current archive with a different digest is `409 ARCHIVE_CHANGED`; no archive is
+`404 ARCHIVE_NOT_FOUND`. Every admitted key, including one deduplicated onto an in-flight verification, is bound to the operation it returned. A replayed key returns the original operation with
+`Idempotency-Replayed: true`. The same key with another intent is `409 IDEMPOTENCY_CONFLICT`. A
+verification already queued or running for the same archive and metadata is returned instead of
+starting a second one. At most two run at once (`429 ARCHIVE_VERIFICATION_BUSY`), on one background
+worker. The `202 operation` has `action: "archive.verify"` and null repository, worktree and result
+object. Its `Location` names `archive-verifications/{operationId}`, which reports `queued`,
+`running`, `completed` (verified), `failed` (with a fixed message) or `interrupted`.
+
+Operation records and verified labels live in memory for the listener lifetime, at most 256
+records. After a restart every archive reads as not verified until it is verified again.
+
+The SPA shows this panel on the root directory of each revision. Status is read only after an
+explicit action. The panel lists revision, recorded build, acceptance, digest, size and Git mapping
+before the download link, which is labelled verified or not verified. Verifying is a separate button
+that polls only its own operation (at most 120 one-second reads) and then rereads the status. A real
+HTTP test packages a generated tree, verifies it and downloads the exact bytes. It extracts them with
+an independent ZIP reader, rebuilds them to the recorded executable digest, and shows that truncated,
+replaced, tree-mismatched and `.git`-carrying archives never receive the verified label.
+
+## Attempt artifact catalog and streamed downloads
+
+`GET`/`HEAD /api/v1/jobs/{jobId}/artifacts` lists the fixed artifact families retained for a
+job's attempts through the private session read policy. The families are the exploration
+report (`exploration.json`), progress journal (`agent-progress.json`), source manifest
+(`source-tree/source_tree_manifest.json`), build contract (`source-tree/reports/build_contract.json`)
+and source archive (`source-tree.zip`) under each attempt's own report namespace. Other
+retained files are not cataloged. No request supplies a path: the catalog considers only
+attempts in the job's durable snapshot and only these names, and entries never contain host
+paths. `runId` restricts the catalog to one attempt; `revisionId` is accepted only together
+with `runId`, must equal that attempt's persisted candidate revision, and restricts the
+catalog to the revision-bound source families. Unknown attempts and mismatched revisions
+return 404; other parameters, repeated keys and invalid limits return 422.
+
+Each page inspects at most 200 candidates in attempt creation order and fixed family
+order, returns at most `limit` (default 50, maximum 200) entries and reserves at most 512 MiB
+of descriptor-pinned reads, including optional inventory captures and their repeated input
+and metadata reads. Each read reserves its full declared size before hashing; failed reads
+retain that reservation. A file larger than the whole 512 MiB page budget is counted in
+`unavailableFiles` without reading its body (including the first file), allowing pagination
+to advance. A smaller file that does not fit the remaining budget is deferred to the next
+page. Absent files are not listed. Files that exist but cannot be read consistently are
+also counted in `unavailableFiles`. Detail and content routes retain their 4 GiB artifact ceiling.
+The signed cursor binds the session, job, filters, page size and an attempt-set version;
+another session or filter returns `400 INVALID_CURSOR`, and a changed attempt set or
+candidate revision returns `410 CURSOR_EXPIRED`.
+
+Entries reuse the `artifact` DTO with `family` and `verification`. `sizeBytes` and `sha256`
+are measured from the current bytes during the listing. No independently persisted digest
+exists for these families, so every listed digest is a server observation and the catalog
+never claims byte verification. `verification: "source-inventory-checked"` appears only for
+the source manifest or build contract of a revision-bound attempt when the revision source
+capture confirmed that the source inputs those files record reproduce the persisted
+candidate's source commitment. That check does not cover their other bytes (formatting or
+unrelated fields could differ under the same commitment). Every other entry is
+`not-verified`: an available file with an observed digest. Inventory capture is attempted
+only for manifests/build contracts, never archives. Unavailable captures are cached for
+the request, including negative results. If the shared read budget cannot admit the entire
+capture, the artifact remains `not-verified`; this does not claim corrupt source inputs.
+Inventory reads share the exchange cancellation/deadline boundary and do not hold the job
+service monitor during IO. Detail requests share their 4 GiB read budget with optional capture.
+Neither state verifies compilation, behavior, archive contents or accepted reconstruction.
+The artifact ID is `<family>_<job/run binding>_<sha256>`, so it is stable for the same bytes
+and the existing exploration report descriptor names the same artifact. `GET`/`HEAD
+J/artifacts/{artifactId}` re-hashes the current bytes: missing artifacts return 404 and
+changed bytes return `409 ARTIFACT_CHANGED`.
+
+`GET`/`HEAD J/artifacts/{artifactId}/content` accepts no query and returns an
+`application/octet-stream` attachment whatever the listed media type, with
+`Content-Disposition: attachment; filename="…"; filename*=UTF-8''…`, `no-store`, `nosniff`, frame
+denial and the sandboxed inert CSP. Active content is therefore never served as trusted UI.
+A first pinned pass must reproduce the ID's digest before any header is sent; otherwise
+the response is 409. `ETag` is the strong `"<sha256>"`, and `Accept-Ranges: bytes`,
+`X-Decomp-Artifact-ID` and `X-Decomp-Content-SHA256` repeat that identity. `If-None-Match` uses weak comparison and `If-Match` strong comparison. HEAD performs
+the same verification and returns headers only. `If-None-Match` with the current ETag (or
+`*`) returns 304; a non-matching `If-Match` returns 412. A single `bytes=a-b`, `bytes=a-` or
+`bytes=-n` range returns 206 with `Content-Range`. An unsatisfiable range returns 416 with
+`Content-Range: bytes */<size>`. Multiple ranges or malformed syntax are ignored and return
+the complete 200 representation. `If-Range` honors a range only for the current strong ETag.
+Date preconditions (`If-Modified-Since`, `If-Unmodified-Since`) are refused with
+`400 UNSUPPORTED_HEADER`, because no modification time is part of the identity.
+
+The body is streamed from a second pinned pass in 64 KiB chunks without retaining the file
+in memory. The final chunk is withheld until that pass has also reproduced the digest and
+unchanged file identity. If bytes change, the connection closes short of `Content-Length`,
+so a browser never completes a different file under the listed digest. Each request is
+bounded by the 30 s request deadline. While bytes flow, a download renews it in idle
+intervals of `downloadIdleMs` (120 s), up to one hour. The server admits four concurrent
+artifact reads across catalog, detail and content routes (GET and HEAD), at most two per
+session (`429 DOWNLOAD_LIMIT`), preserving workers for lightweight status/control reads.
+Admission is released on success, failure or cancellation. A client abort, stalled reader,
+deadline or shutdown interrupt closes the exchange and releases descriptors and admission.
+Authorization runs under the job service monitor, but streaming does not hold it, so
+workflow publication, retention and deletion are never blocked by a reader. A deleted file
+ends an in-progress download short of its length.
+
+The attempt evidence view lists the catalog only after an explicit action. It can restrict
+the list to the result revision, pages with explicit controls, shows exact size, SHA-256,
+declared type and revision binding, states that no digest has been validated, and marks
+entries whose source inventory was checked separately from other available files. Downloads use ordinary browser attachment links (`<a download>`),
+never a whole-file JavaScript blob. JVM controls cover family selection, filters, cursor
+binding and expiry, page budgets, verification and change refusal. A real-listener test
+streams a 24 MiB archive with range, precondition, HEAD and change semantics. Other
+real-listener tests abort and run concurrent downloads, checking that admission and file
+descriptors are released, and change bytes during a 48 MiB stream to confirm the download
+never completes. Physical D0 throughput and heap budgets are not measured.
 
 ## SPA recorded source navigation
 
@@ -1301,8 +1670,8 @@ binding, metadata version and opaque parent ID. It neither requires body permiss
 to explain an excluded entry nor requests the selected file's body. The UI labels
 these as commitments, explains unsupported preview/download declarations and the
 8 MiB reader limit, and offers an explicit authorized attachment link when applicable.
-Bootstrap source-chunk advertising stays zero; the UI does not enable text reads
-under that report. A capability from 1 to 3 bytes is also too small for the reader's
+Bootstrap advertises the chunk reader's enforced 131,072-byte range ceiling, so the
+explicit preview below is available; a zero report keeps text reads disabled. A capability from 1 to 3 bytes is also too small for the reader's
 minimum UTF-8 range and remains disabled.
 
 Source reads clear the previous selection before a different request can render,
@@ -1312,11 +1681,32 @@ continuations also retain the observed source/metadata identity across loaded pa
 Failures use fixed recovery copy plus a canonical reference ID, never raw diagnostics.
 Authenticated state owns the views; expiry or logout removes their private metadata.
 
-Pure DTO/path/callback controls cover these bindings, page bounds, opaque URLs,
-obsolete reads and role/size/runtime explanations. They do not qualify actual source
-HTTP/browser navigation, keyboard/layout behavior, physical deep paths, all generated
-manifest/log/report families or D0 timing/memory/workload budgets. Those requirements
-and the original parent acceptance criteria remain open.
+Directory pages link to `jobs/J/runs/R/revisions/V/source-diff`, which first asks for a
+base revision. It reads the head attempt and the first 200 attempts of the job (plus the recorded
+previous attempt when it is older), states whether older attempts exist, loads them only on request, offers
+every other attempt with a result revision, and preselects the recorded parent: the
+attempt whose revision is the head's `inputRevisionId`, otherwise its `previousRunId`.
+The comparison address always carries `baseRunId` and `baseRevisionId`. The changed-file
+list pages explicitly and pins both observed metadata versions across continuations.
+`source-diff/file` renders one bounded hunk page as escaped text in labelled, focusable
+regions, with per-side line numbers, text markers for added and removed rows, omitted
+and truncated counts, explicit paging and the complete patch download. Links to both
+sides open the exact historical file views pinned to the compared commitments, so a later
+accepted revision never replaces them. A file ID that is not recorded in the selected
+revision (for example, a file removed later) shows a fixed explanation with links to the
+revision directory and the comparison chooser.
+
+Route-level component tests cover these bindings, page bounds, opaque URLs, obsolete reads,
+role/size/runtime explanations, every generated family (C, headers, Makefile, JSON reports,
+Markdown, plain logs and binary hex), keyboard line-link navigation with focus return, and
+worker termination when the viewer is left. HTTP tests over real generated trees cover
+diffs, historical stability after a later acceptance and manifest-only entries. The
+packaged-browser `--mode sources` journey drives the installed application by keyboard
+through directories, previews, line links with reload, inert markup, the invalid-UTF-8 hex
+fallback, JSON and Markdown manifest entries, the bundled highlight worker (its URL must be
+the packaged `assets/highlight.worker-*.js`; it exits after one answer and is terminated
+when the viewer is left while it is pending) and the parent comparison with its patch at
+320 px. Physical D0 timing/memory/workload budgets remain open.
 
 ### Bounded source preview consumer
 
@@ -1453,6 +1843,94 @@ Provider reasoning (`agent_thought_chunk`, role `thought`) is private. The journ
 its position, role, completion and `textOmitted: true`; it never buffers, stores, measures or
 commits to its text. Public projection also withholds `contentSha256`/`chunkCharacters` from
 older thought records. The ACP client never requests reasoning and no workflow depends on it.
+
+## Shared redaction, audit and support export
+
+**Redaction (`web-redaction-v1`).** One policy (`WebRedactionPolicy`) is installed on the listener and applied
+where bytes leave the server: every versioned JSON document (success and error envelopes), each live SSE frame
+and polling page (so live and replayed events are identical), legacy JSON, the legacy exploration report download
+and support exports. Persisted failure prose is passed through the same policy before it is stored. It
+replaces values of credential-named environment variables and long opaque configured values with `[redacted]`
+(short generic environment values such as `1` or `development` are deliberately not treated as secrets, because
+substituting them would corrupt public vocabulary). Nonempty credential-named environment values outside
+8–4096 characters are an unsupported configuration: listener policy construction fails with a fixed, secret-free
+error rather than silently excluding a known credential. This includes short passwords/tokens (1–7 characters);
+empty optional values remain allowed. Redacted names and common bounded prose fields that expand beyond their
+public field bound are withheld as a whole (`[redacted]`), never returned as over-limit DTO values.
+The policy also replaces credential syntax (authorization headers, bearer tokens,
+`password=`/`token=`-style assignments, URL user information and well-known token prefixes) and private host
+paths (the storage root, home, temporary, working and Java directories plus the generic per-user and temporary
+directory families) with `[private-path]`. Closed-syntax protocol fields (`*Id`, `*Cursor`, `*Token`, `*Sha256`,
+`version` and similar) keep their exact bytes unless they contain a configured literal, so cursors and ETags stay
+valid. A download is byte-identical when nothing needs redaction. Versioned artifact content
+(`GET J/artifacts/{artifactId}/content`, including the exploration report) is a digest-bound stream of the stored
+bytes the catalog and report descriptors name; it is not rewritten by this policy (integration follow-up). Committed job content (`sourceChunk`, the committed source-tree names in `revisionDirectory`, `revisionSources`, `revisionFile` and `sourceCatalog`, source-file downloads and the exact-byte
+validation output previews in reports) is digest-bound user data, not server configuration, and is served verbatim under job authorization. Progress events
+remain allowlisted projections: journal prose, paths, usage that was not reported and any agent reasoning are never
+requested or displayed (the activity view shows "Not reported").
+
+**Audit.** Every sensitive action is recorded durably in `<store>/.web-audit/` before the request thread
+finishes, including refused and failed requests: `session.start`, `session.end`, `job.upload`, `job.update`,
+`job.delete`, `run.start`, `run.cancel`, `run.recover`, `run.progress-pin`, `agent.preflight`,
+`operator.auth-inspection` and `operator.auth-inspection-cancel` (legacy) and `support.export`. An entry records a sequence, time, the response request
+ID, the actor (`browser_session` with a domain-separated SHA-256 digest of the authorization-owned session
+identity, or `unauthenticated`), the action, the target job/run, an `ifmatch_`-prefixed, domain-separated SHA-256
+commitment to a bounded strong `If-Match` value (never the caller's header bytes), and the server version the
+response reported, the outcome (`accepted`, `replayed`, `rejected` for 4xx, `failed` for 5xx) with its
+status and public error code. Canonical server run IDs (`run_` plus 32 lowercase hexadecimal digits) keep their
+identity; other requested run IDs become `requested_run_`-prefixed domain-separated commitments. Configured-sensitive
+job IDs and result versions are omitted, and configured-sensitive run IDs are committed before append. Closed syntax
+is not treated as proof that caller input is credential-free; raw cookies, CSRF tokens, filenames, request bodies
+and host paths are never intentionally collected. Retention is two fsync'd segments of 2048 entries. Server-wide
+`omittedEntries` counts the rotated prefix plus the returned-window omissions; for a job scope it counts only
+known matching window omissions (rotated job membership is unknown). Rotation or window truncation sets
+`complete:false`, including an empty job scope whose earlier membership is unknown. A torn final append is
+discarded on reopen. Each append is preceded by an fsync'd intent flag; failed/interrupted appends leave sticky
+loss evidence, so restart and later successful appends cannot strengthen the history to complete. The live
+`unrecordedEntries` count is exact for observed failures; after reopening, sticky loss/uncertainty reports a
+lower bound of one, not an invented exact count. This state file remains alongside the segments. Failures before
+even the intent can be made durable (e.g. storage inaccessible) can only be reported by the live process.
+Segment, recovery, rotation and intent operations use no-follow secure directory handles and reject parent
+replacement; filesystem providers without secure handles report incomplete auditing instead of falling back to
+unsafe path opens. Recording failures never throw into the request. Auditing never creates job storage: entries made before the store root exists (session exchanges and refused requests) are held in a bounded 256-entry buffer and written first, in order, once storage appears. Entries are sequenced in recording order, as each handler exits just after its response, so a client that reads the audit immediately after a response may not see that entry yet. New mutation routes are audited by adding their method and
+route to `WebAuditRecorder.versionedAction`.
+
+**Support export.** `GET /api/v1/support-export` requires an explicit scope: `scope=server` (runtime, limits,
+capabilities, recovery inventory and the latest 100 audit entries) or `scope=job&jobId=…` (the job, its latest 50
+attempts and that job's latest 100 audit entries). Any other parameter, a missing scope or a malformed job ID is
+`400 VALIDATION_FAILED`; an unknown job is `404 NOT_FOUND`. The `supportExport` document records `redactionVersion`
+and lists every `omittedSections` entry with a reason: `not-in-scope`, `unavailable` (a section that could not be
+read; its state is unknown), or the sections never exported (`input-binary`, `source-content`, `artifact-content`,
+`progress-events` as `job-content`; `environment`, `host-paths` as `private-configuration`; `credentials`,
+`session-material` as `secret`; `agent-reasoning` as `not-recorded`). The Runtime view previews the document only on
+an explicit request and downloads exactly the previewed bytes; it never issues a second request for the download.
+
+## Artifact identity normalization and snapshot containment
+
+Versioned routes accept only opaque, closed-syntax identities (`jobId`, `runId`, `artifactId`, `fileId`,
+`directoryId`) and never a host path. Legacy routes that still name report files by URL path decode the raw path
+exactly once, per segment, through `WebPublicIdentity`: RFC 3986 percent-decoding (`+` is a literal plus), strict
+UTF-8, and the result must already be the canonical spelling. Empty, `.`/`..`, encoded or literal `/` and `\`, `:`
+(drive and stream separators), NUL and other controls, Unicode format characters (including supplementary code points), non-NFC spellings, a `%` that
+survives decoding (double encoding), Windows device names (`CON`, `NUL`, `COM1`...), trailing dots or spaces,
+segments over 255 bytes and paths over 32 segments are refused with `400 INVALID_REQUEST`; an encoded separator that
+changes the segment count is refused too.
+
+Validation grants nothing by itself. Every report, input, source and archive read opens files through the
+descriptor-pinned `JobStore` containment boundary (`readStableRegularFile`/`hashStableRegularFile`), which opens each
+component without following links, reads only through the pinned descriptor and revalidates every binding after the
+read. It has exactly three outcomes: the bytes of an unchanged admitted file; unavailable (missing, symbolic link,
+special file or outside the namespace), served as a sanitized `404`; or changed during the read (concurrent
+publication, replacement or deletion), served as `409 ARTIFACT_CHANGED`. Every descriptor is closed before either
+refusal is returned. `JobStore.artifactReceipt` streams one file to a size/digest receipt scoped `observed-digest`
+(the digest of the bytes observed now, not a committed digest); `sourceArchiveReceipts` requires two complete bounded
+receipt passes with identical sizes, digests and identities, then revalidates the whole source-tree inventory. This
+also detects persistent in-place writes to files whose first receipt has already completed, not just inode replacement.
+Detected content, publication or deletion changes are conflicts. These are observed receipts, not an atomic filesystem
+snapshot or committed-revision proof. Archive verification consumes these streamed receipts, so the source tree is no
+longer read into memory twice. The v1 exploration report route preserves change conflicts as `409 ARTIFACT_CHANGED`;
+an ordinary missing report still returns the unavailable-report projection.
+The lexical path-returning `WebJobService.resolveArtifact` was removed.
 
 ## Agent preflight and harness readiness
 
@@ -1820,8 +2298,8 @@ the application URL. Directory pages, breadcrumbs, file links, refreshes and lin
 range navigation preserve this pair. Both first-page and continued directory/file
 responses must match it; changed observations clear the displayed source metadata.
 Incomplete, repeated, malformed and foreign query fields are refused before reads.
-A pin by itself does not request source text or enable the preview control. Actual
-bootstrap source-chunk advertising remains zero.
+A pin by itself does not request source text or enable the preview control. Bootstrap
+source-chunk advertising reports the reader's range ceiling.
 
 Metadata requests retain their existing API selectors and authorization. Explicit
 source downloads and digest HEAD observations carry the captured `metadataVersion`

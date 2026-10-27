@@ -77,7 +77,10 @@ class WebArchiveEvidenceTest {
             }
             val sources = WebSourceEvidence(store, listOf(GeneratedCMakeReconstructionProfile.descriptor), reader)
             val archives = WebArchiveEvidence(store, sources, reader)
-            kotlin.test.assertEquals(packed.archiveSha256, archives.read(job.id, reportPrefix = prefix).sha256)
+            val verified = archives.read(job.id, reportPrefix = prefix)
+            kotlin.test.assertEquals(packed.archiveSha256, verified.sha256)
+            kotlin.test.assertEquals(store.readArtifact(job.id, "$prefix/source-tree/source_tree_manifest.json", 1_048_576).sha256,
+                verified.manifestSha256)
             assertTrue(reads.isNotEmpty() && reads.all { it.startsWith("$prefix/") })
             assertFailsWith<Exception> { archives.read(job.id) }
             assertFailsWith<Exception> { archives.read(job.id, reportPrefix = "reports/runs/run_other") }

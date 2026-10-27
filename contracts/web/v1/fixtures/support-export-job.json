@@ -1,0 +1,172 @@
+{
+  "apiVersion": 1,
+  "kind": "supportExport",
+  "requestId": "request_example_1",
+  "data": {
+    "schemaVersion": 1,
+    "exportId": "0e9f6c8a-2d4b-4f61-9a7e-5c3b2a190817",
+    "generatedAt": "2026-09-05T00:00:03Z",
+    "redactionVersion": "web-redaction-v1",
+    "scope": {
+      "kind": "job",
+      "jobId": "1234567890abcdef1234567890abcdef"
+    },
+    "sections": [
+      {
+        "id": "job",
+        "content": {
+          "jobId": "1234567890abcdef1234567890abcdef",
+          "displayFilename": "synthetic.elf",
+          "status": "uploaded",
+          "createdAt": "2026-09-05T00:00:00Z",
+          "updatedAt": "2026-09-05T00:00:00Z",
+          "sizeBytes": "9007199254740993",
+          "binary": {
+            "format": "ELF64",
+            "endianness": "little",
+            "objectType": "EXEC",
+            "machine": "x86-64",
+            "osAbi": "System V",
+            "entryPoint": "0xffffffffffffffff"
+          },
+          "version": "job_version_1",
+          "latestRunId": null,
+          "acceptedRevisionId": null
+        }
+      },
+      {
+        "id": "runs",
+        "content": {
+          "items": [
+            {
+              "runId": "run_example_1",
+              "jobId": "1234567890abcdef1234567890abcdef",
+              "workflow": "reconstruct",
+              "state": "queued",
+              "version": "run_version_1",
+              "createdAt": "2026-09-05T00:00:00Z",
+              "startedAt": null,
+              "endedAt": null,
+              "previousRunId": null,
+              "inputRevisionId": null,
+              "resultRevisionId": null,
+              "acceptance": "not-evaluated",
+              "harnessCapabilityId": "harness_acp",
+              "terminalReason": null,
+              "usage": null,
+              "limits": {
+                "wallClockMs": "60000",
+                "idleMs": "15000",
+                "maxOutputBytes": "1048576",
+                "maxToolCalls": "16"
+              }
+            }
+          ],
+          "omittedRuns": "0"
+        }
+      },
+      {
+        "id": "audit",
+        "content": {
+          "entries": [
+            {
+              "sequence": "7",
+              "recordedAt": "2026-09-05T00:00:02Z",
+              "requestId": "0f3c2b1a-1111-4222-8333-944455556666",
+              "actor": {
+                "kind": "browser_session",
+                "sessionDigest": "abababababababababababababababababababababababababababababababab"
+              },
+              "action": "run.cancel",
+              "target": {
+                "jobId": "1234567890abcdef1234567890abcdef",
+                "runId": "run_example_1",
+                "expectedVersion": "run_version_1",
+                "resultVersion": "run_version_2"
+              },
+              "outcome": "accepted",
+              "status": 202,
+              "reasonCode": null
+            },
+            {
+              "sequence": "8",
+              "recordedAt": "2026-09-05T00:00:02Z",
+              "requestId": null,
+              "actor": {
+                "kind": "unauthenticated",
+                "sessionDigest": null
+              },
+              "action": "run.cancel",
+              "target": {
+                "jobId": "1234567890abcdef1234567890abcdef",
+                "runId": "run_example_1",
+                "expectedVersion": "run_version_1",
+                "resultVersion": null
+              },
+              "outcome": "rejected",
+              "status": 403,
+              "reasonCode": "CSRF_DENIED"
+            }
+          ],
+          "omittedEntries": "6",
+          "unrecordedEntries": "1",
+          "complete": false
+        }
+      }
+    ],
+    "omittedSections": [
+      {
+        "id": "runtime",
+        "reason": "not-in-scope"
+      },
+      {
+        "id": "limits",
+        "reason": "not-in-scope"
+      },
+      {
+        "id": "capabilities",
+        "reason": "not-in-scope"
+      },
+      {
+        "id": "recovery",
+        "reason": "unavailable"
+      },
+      {
+        "id": "input-binary",
+        "reason": "job-content"
+      },
+      {
+        "id": "source-content",
+        "reason": "job-content"
+      },
+      {
+        "id": "artifact-content",
+        "reason": "job-content"
+      },
+      {
+        "id": "progress-events",
+        "reason": "job-content"
+      },
+      {
+        "id": "environment",
+        "reason": "private-configuration"
+      },
+      {
+        "id": "host-paths",
+        "reason": "private-configuration"
+      },
+      {
+        "id": "credentials",
+        "reason": "secret"
+      },
+      {
+        "id": "session-material",
+        "reason": "secret"
+      },
+      {
+        "id": "agent-reasoning",
+        "reason": "not-recorded"
+      }
+    ]
+  }
+}

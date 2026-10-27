@@ -39,6 +39,7 @@ internal class WebSourceCatalogEvidence(
 ) {
     private val profiles = profiles.associateBy { it.id to it.sha256 }
     private val capturing = AtomicBoolean(false)
+    private val searching = AtomicBoolean(false)
 
     init { require(profiles.size in 1..16 && this.profiles.size == profiles.size) }
 
@@ -87,12 +88,103 @@ internal class WebSourceCatalogEvidence(
             revision(reference, manifest, captured) { snapshot ->
                 if (expectedMetadataVersion != null && expectedMetadataVersion != snapshot.metadataVersion) expiredSourceMetadata()
                 val file = selectRevisionSourceFile(snapshot, fileId, purpose)
-                val content = WebRevisionSourceContent(snapshot, fileId, file,
-                    readSource(reference.jobId, reference.runId, file.evidence.path, WebRevisionSourceContent.MAXIMUM_FILE_BYTES))
-                content.requireSame(readSource(reference.jobId, reference.runId, file.evidence.path, WebRevisionSourceContent.MAXIMUM_FILE_BYTES))
+                fun capture() = try {
+                    readSource(reference.jobId, reference.runId, file.evidence.path, WebRevisionSourceContent.MAXIMUM_FILE_BYTES)
+                } catch (_: RepairBudgetExceededException) { sourceFileTooLarge() } // Only manifest-only sizes are unrecorded.
+                val content = WebRevisionSourceContent(snapshot, fileId, file, capture())
+                content.requireSame(capture())
                 content
             }
         }
+
+    /**
+     * One bounded search admission. Metadata is captured before and after the scan; each body is selected only from
+     * that snapshot's canonical inputs and must match its committed size and SHA-256. Missing bodies are reported as
+     * unavailable to the scan; changed bodies or metadata refuse the whole page.
+     */
+    fun search(reference: WebRevisionSourceReference, readSource: (String, String, String, Long) -> StableRegularFile,
+        scan: (WebRevisionSourceSnapshot, (WebRevisionSourceFile) -> ByteArray?) -> JsonObject): JsonObject {
+        if (!searching.compareAndSet(false, true)) {
+            throw WebAccessDenied(429, "SOURCE_SEARCH_BUSY", "Another source search is in progress. Try this search again later.")
+        }
+        try {
+            val before = readRevision(reference)
+            val members = Collections.newSetFromMap(java.util.IdentityHashMap<WebRevisionSourceFile, Boolean>()).apply { addAll(before.files) }
+            val result = scan(before) { file ->
+                check(file in members)
+                val captured = try {
+                    readSource(reference.jobId, reference.runId, file.evidence.path, WebRevisionSourceContent.MAXIMUM_FILE_BYTES)
+                } catch (failure: Exception) {
+                    if (failure is WebAccessDenied || failure is java.util.concurrent.CancellationException || failure is InterruptedException) throw failure
+                    null
+                }
+                captured?.bytes?.copyOf()?.also { bytes ->
+                    if (bytes.size.toLong() != file.sizeBytes || captured.sha256 != file.evidence.sha256 ||
+                        WebExplorationArtifact.sha256(bytes) != file.evidence.sha256) revisionSourceChanged()
+                }
+            }
+            if (readRevision(reference).metadataVersion != before.metadataVersion) revisionSourceChanged()
+            return result
+        } finally { searching.set(false) }
+    }
+
+    /**
+     * Program-structure projection of the selected candidate. A retained projection is reused only for the
+     * same input, manifest and descriptor digests; every read still recaptures those three commitments.
+     */
+    fun <T> readStructure(reference: WebRevisionSourceReference, cache: WebProgramStructureCache,
+        project: (WebProgramStructureIndex, () -> ByteArray) -> T): T {
+        if (!capturing.compareAndSet(false, true)) {
+            throw WebAccessDenied(429, "SOURCE_CATALOG_BUSY", "Another source metadata capture is in progress. Try this read again later.")
+        }
+        try {
+            val root = "reports/runs/${reference.runId}/source-tree"
+            val manifestPath = "$root/source_tree_manifest.json"
+            val descriptorPath = "$root/reports/build_contract.json"
+            canonicalReportSegments(manifestPath)
+            val input = readInput(reference.jobId)
+            val captured = readArtifact(reference.jobId, manifestPath, MAXIMUM_MANIFEST_BYTES)
+            val descriptor = readArtifact(reference.jobId, descriptorPath, MAXIMUM_MANIFEST_BYTES)
+            require(captured.bytes.size.toLong() <= MAXIMUM_MANIFEST_BYTES && descriptor.bytes.size.toLong() <= MAXIMUM_MANIFEST_BYTES)
+            fun evidence(entry: GeneratedFileEvidence, maximum: Int): ByteArray? {
+                val record = try { readArtifact(reference.jobId, "$root/${entry.path}", maximum.toLong()) }
+                    catch (_: RepairBudgetExceededException) { return null }
+                if (record.bytes.size > maximum) return null
+                if (record.sha256 != entry.sha256 || WebExplorationArtifact.sha256(record.bytes) != entry.sha256) revisionSourceChanged()
+                return record.bytes
+            }
+            val key = WebProgramStructureCache.Key(reference.jobId, reference.runId, reference.revisionId,
+                reference.sourceSha256, captured.sha256, descriptor.sha256, input.sha256)
+            val index = cache.get(key) ?: run {
+                val document = OracleJson.parse(captured.bytes, JSON_LIMITS) as? JsonObject
+                    ?: throw IllegalArgumentException("Source catalog manifest is invalid.")
+                val profileId = (document["profileId"] as? JsonPrimitive)?.takeIf { it.isString }?.content
+                val profileSha256 = (document["profileSha256"] as? JsonPrimitive)?.takeIf { it.isString }?.content
+                val profile = profiles[profileId to profileSha256]
+                    ?: throw IllegalArgumentException("Source catalog profile is unavailable.")
+                require(((document["files"] as? JsonArray)?.size ?: Int.MAX_VALUE) <= WebSourceCatalogSnapshot.MAXIMUM_FILES)
+                val manifest = SourceTreeManifestReader.parse(document.toString(), profile)
+                require(manifest.inputSha256 == input.sha256)
+                val descriptorDocument = OracleJson.parse(descriptor.bytes, JSON_LIMITS) as? JsonObject
+                    ?: throw IllegalArgumentException("Source input descriptor is invalid.")
+                val snapshot = parseWebRevisionSourceInputs(reference, manifest, captured.sha256, descriptorDocument, descriptor.sha256)
+                WebProgramStructureBuilder.build(snapshot, profile, manifest, ::evidence).also { cache.put(key, it) }
+            }
+            // Retention pins change the attempt version without changing the candidate; the projection depends
+            // only on the keyed commitments, so it stays valid for the current reference.
+            check(index.reference.copy(attemptVersion = reference.attemptVersion) == reference && index.manifestSha256 == captured.sha256 && index.descriptorSha256 == descriptor.sha256)
+            val result = project(index) {
+                val model = checkNotNull(index.model)
+                val record = readArtifact(reference.jobId, "$root/${model.path}", WebProgramStructureBuilder.MAXIMUM_MODEL_BYTES.toLong())
+                if (record.sha256 != model.sha256 || WebExplorationArtifact.sha256(record.bytes) != model.sha256) revisionSourceChanged()
+                record.bytes
+            }
+            requireSame(descriptor, readArtifact(reference.jobId, descriptorPath, MAXIMUM_MANIFEST_BYTES))
+            requireSame(captured, readArtifact(reference.jobId, manifestPath, MAXIMUM_MANIFEST_BYTES))
+            requireSame(input, readInput(reference.jobId))
+            return result
+        } finally { capturing.set(false) }
+    }
 
     private fun <T> revision(reference: WebRevisionSourceReference, manifest: decompengine.project.SourceTreeManifest,
         captured: StableRegularFile, project: (WebRevisionSourceSnapshot) -> T): T {

@@ -31,7 +31,31 @@ import kotlin.io.path.exists
 import kotlin.io.path.name
 import kotlin.io.path.isRegularFile
 
-class JobStoreException(message: String) : RuntimeException(message)
+open class JobStoreException(message: String) : RuntimeException(message)
+
+/** A contained read saw its file or a path binding change (concurrent publication or deletion). */
+class ArtifactChangedException(message: String) : JobStoreException(message)
+
+/**
+ * A passive, verification-scoped metadata receipt for one contained regular file. [sha256] is the
+ * digest of the bytes observed through the pinned descriptor during this receipt (`observed-digest`);
+ * it is not a committed or accepted digest, and the receipt is valid only for [identity].
+ */
+internal data class ContainedFileReceipt(
+    val relativePath: String,
+    val sizeBytes: Long,
+    val sha256: String,
+    val identity: LinuxFileIdentity,
+) {
+    val verification: String get() = "observed-digest"
+}
+
+/** Matching observed content receipts over one complete revalidated source-tree inventory. */
+internal data class SourceArchiveReceipts(
+    val inventory: Map<String, LinuxFileIdentity>,
+    val files: Map<String, ContainedFileReceipt>,
+    val totalBytes: Long,
+)
 internal class JobListingUnavailableException : IllegalStateException(
     "Job listing is incomplete. Check retained records and store limits.",
 )
@@ -277,8 +301,151 @@ class JobStore internal constructor(
                 parts.size <= 32 && parts.none { it.isBlank() || it == "." || it == ".." }
             }
         ) { "artifact path must be a canonical report path" }
+        return contained("artifact") { readStableRegularFile(root, "$jobId/$relativePath", maximumBytes) }
+    }
+
+    /**
+     * The one containment boundary for job storage reads: every report, input, source and archive
+     * adapter opens files through the descriptor-pinned primitives below and receives exactly one of
+     * three outcomes - the bytes of an unchanged admitted file, [JobStoreException] when no admissible
+     * regular file exists (missing, linked, special or outside the namespace), or
+     * [ArtifactChangedException] when the file or any path binding changed during the read. Every
+     * descriptor is closed before the outcome is returned, including on refusal.
+     */
+    private inline fun <T> contained(subject: String, read: () -> T): T = try {
+        read()
+    } catch (_: decompengine.repair.StableFileChangedException) {
+        throw ArtifactChangedException("$subject changed while it was read")
+    } catch (_: decompengine.repair.StableFileUnavailableException) {
+        throw JobStoreException("$subject is unavailable")
+    } catch (_: IOException) {
+        throw JobStoreException("$subject is unavailable or its path changed")
+    }
+
+    /** Stream one canonical report file through the pinned descriptor to a size/digest receipt. */
+    internal fun artifactReceipt(
+        jobId: String,
+        relativePath: String,
+        maximumBytes: Long,
+        cancellationCheck: () -> Unit = {},
+    ): ContainedFileReceipt {
+        jobDirectory(jobId)
+        requireCanonicalReportPath(relativePath)
+        require(maximumBytes in 1..4L * 1024 * 1024 * 1024) { "receipt read limit is invalid" }
+        val digest = contained("artifact") {
+            decompengine.repair.hashStableRegularFile(root, "$jobId/$relativePath",
+                declaredSize = { size -> if (size > maximumBytes) throw decompengine.repair.RepairBudgetExceededException("artifact exceeds its receipt limit") },
+                readBytes = { _, total -> if (total > maximumBytes) throw decompengine.repair.RepairBudgetExceededException("artifact grew beyond its receipt limit") },
+                cancellationCheck = cancellationCheck)
+        }
+        return ContainedFileReceipt(relativePath, digest.size, digest.sha256, digest.identity)
+    }
+
+    /**
+     * Size/digest receipts for every regular file of one source-tree inventory. Two complete bounded
+     * passes must agree on content and identity, and the inventory must be unchanged afterwards.
+     * This detects in-place writes to already-receipted files as well as publication/deletion. Like
+     * each observed digest, this is an observation, not an atomic filesystem snapshot or a committed
+     * revision; detected changes produce an explicit [ArtifactChangedException].
+     */
+    internal fun sourceArchiveReceipts(
+        jobId: String,
+        layout: ArchiveTransportLayout,
+        reportPrefix: String = "reports",
+        maximumFileBytes: Long = 64L * 1024 * 1024,
+        maximumTotalBytes: Long = 512L * 1024 * 1024,
+        cancellationCheck: () -> Unit = {},
+    ): SourceArchiveReceipts {
+        require(maximumTotalBytes in 1..4L * 1024 * 1024 * 1024 && maximumFileBytes in 1..maximumTotalBytes)
+        val inventory = sourceArchiveInventory(jobId, layout, reportPrefix)
+        fun collectFiles(): Map<String, ContainedFileReceipt> {
+            var total = 0L
+            return inventory.filterValues { it.isRegularFile }.mapValues { (relative, identity) ->
+                cancellationCheck()
+                val receipt = try {
+                    artifactReceipt(jobId, "$reportPrefix/source-tree/$relative",
+                        minOf(maximumFileBytes, maximumTotalBytes - total).coerceAtLeast(1), cancellationCheck)
+                } catch (failure: ArtifactChangedException) { throw failure } catch (_: JobStoreException) {
+                    // It was inventoried a moment ago: its absence now is concurrent deletion, not a missing artifact.
+                    throw ArtifactChangedException("source tree changed while it was inventoried")
+                }
+                if (receipt.identity != identity) throw ArtifactChangedException("source tree changed while it was inventoried")
+                total = Math.addExact(total, receipt.sizeBytes)
+                if (total > maximumTotalBytes) throw decompengine.repair.RepairBudgetExceededException("source tree exceeds its receipt budget")
+                receipt
+            }
+        }
+        val files = collectFiles()
+        // Inode identities alone cannot detect an in-place overwrite after a file's descriptor closes.
+        // Revalidate every size and digest inside this shared producer, not only in an archive consumer.
+        if (collectFiles() != files) throw ArtifactChangedException("source tree changed while its receipts were collected")
+        // The tree was admitted by the first pass: if it can no longer be inventoried (deleted, replaced by a link,
+        // or grown past a bound), that is a concurrent change to this snapshot, not a missing artifact.
+        val after = try { sourceArchiveInventory(jobId, layout, reportPrefix) } catch (failure: ArtifactChangedException) {
+            throw failure
+        } catch (_: JobStoreException) {
+            throw ArtifactChangedException("source tree changed while it was inventoried")
+        } catch (_: IllegalArgumentException) {
+            throw ArtifactChangedException("source tree changed while it was inventoried")
+        }
+        if (after != inventory) throw ArtifactChangedException("source tree changed while it was inventoried")
+        return SourceArchiveReceipts(inventory, files, files.values.sumOf { it.sizeBytes })
+    }
+
+    private fun requireCanonicalReportPath(relativePath: String) {
+        require(relativePath.startsWith("reports/") && relativePath.length <= 4096 &&
+            relativePath.none { it == '\\' || it.code < 32 || it.code == 127 } &&
+            relativePath.split('/').let { parts ->
+                parts.size <= 32 && parts.none { it.isBlank() || it == "." || it == ".." }
+            }
+        ) { "artifact path must be a canonical report path" }
+    }
+
+    /**
+     * Hash or stream one canonical report artifact through pinned descriptors without retaining its body.
+     * [consume] sees bytes before the final identity/metadata revalidation; only a normal return confirms them.
+     */
+    internal fun streamArtifact(
+        jobId: String,
+        relativePath: String,
+        declaredSize: (Long) -> Unit,
+        consume: (ByteArray, Int) -> Unit,
+        cancellationCheck: () -> Unit,
+    ): decompengine.repair.StableFileDigest {
+        jobDirectory(jobId)
+        require(relativePath.startsWith("reports/") && relativePath.length <= 4096 &&
+            relativePath.none { it == '\\' || it.code < 32 || it.code == 127 } &&
+            relativePath.split('/').let { parts -> parts.size <= 32 && parts.none { it.isBlank() || it == "." || it == ".." } }
+        ) { "artifact path must be a canonical report path" }
+        return streamContainedFile(jobId, relativePath, declaredSize, consume, cancellationCheck)
+    }
+
+    /** Catalog inventory reads use the same pinned streaming boundary, including input and failed-read accounting. */
+    internal fun readArtifactInventoryFile(jobId: String, relativePath: String, maximumBytes: Long,
+        reserveBytes: (Long) -> Unit, cancellationCheck: () -> Unit): StableRegularFile {
+        require(maximumBytes in 1 until Int.MAX_VALUE.toLong())
+        val bytes = java.io.ByteArrayOutputStream()
+        val authorize: (Long) -> Unit = { size ->
+            if (size > maximumBytes) throw decompengine.repair.RepairBudgetExceededException("artifact inventory file exceeds its byte limit")
+            reserveBytes(size)
+        }
+        val consume: (ByteArray, Int) -> Unit = { chunk, count -> bytes.write(chunk, 0, count) }
+        val digest = if (relativePath == "input.elf") {
+            jobDirectory(jobId)
+            streamContainedFile(jobId, relativePath, authorize, consume, cancellationCheck)
+        } else streamArtifact(jobId, relativePath, authorize, consume, cancellationCheck)
+        return StableRegularFile(bytes.toByteArray(), digest.sha256, digest.identity)
+    }
+
+    private fun streamContainedFile(jobId: String, relativePath: String, declaredSize: (Long) -> Unit,
+        consume: (ByteArray, Int) -> Unit, cancellationCheck: () -> Unit): decompengine.repair.StableFileDigest {
+        var authorized = -1L
         return try {
-            readStableRegularFile(root, "$jobId/$relativePath", maximumBytes)
+            // Refuse growth before a chunk past the initially authorized size is hashed or consumed, so byte ceilings
+            // and page budgets cannot be exceeded while waiting for the final size revalidation.
+            decompengine.repair.hashStableRegularFile(root, "$jobId/$relativePath", { size -> authorized = size; declaredSize(size) },
+                { _, total -> require(total <= authorized) { "artifact grew while it was read" } },
+                cancellationCheck, consumeBytes = consume)
         } catch (_: IOException) {
             throw JobStoreException("artifact is unavailable or its path changed")
         }
@@ -286,11 +453,7 @@ class JobStore internal constructor(
 
     internal fun readInput(jobId: String): StableRegularFile {
         jobDirectory(jobId)
-        return try {
-            readStableRegularFile(root, "$jobId/input.elf", MAX_INPUT_BYTES.toLong())
-        } catch (_: IOException) {
-            throw JobStoreException("job input is unavailable or its path changed")
-        }
+        return contained("job input") { readStableRegularFile(root, "$jobId/input.elf", MAX_INPUT_BYTES.toLong()) }
     }
 
     /** Exact selected source namespace, using the same pinned-descriptor containment primitive. */
@@ -299,11 +462,7 @@ class JobStore internal constructor(
         require(runId.matches(Regex("[A-Za-z0-9][A-Za-z0-9_-]{0,127}"))) { "source attempt identity is invalid" }
         decompengine.project.requireNormalizedProjectPath(sourcePath, "selected source input")
         require(maximumBytes in 1..8L * 1024 * 1024) { "source input read limit is invalid" }
-        return try {
-            readStableRegularFile(root, "$jobId/reports/runs/$runId/source-tree/$sourcePath", maximumBytes)
-        } catch (_: IOException) {
-            throw JobStoreException("source input is unavailable or its path changed")
-        }
+        return contained("source input") { readStableRegularFile(root, "$jobId/reports/runs/$runId/source-tree/$sourcePath", maximumBytes) }
     }
 
     internal fun sourceArchiveInventory(
@@ -492,7 +651,7 @@ class JobStore internal constructor(
         }
     }
 
-    private companion object {
+    internal companion object {
         const val MAX_STATUS_MESSAGE_CHARACTERS = 500
         const val MAX_INPUT_BYTES = 32 * 1024 * 1024
         const val MAX_METADATA_BYTES = 256 * 1024

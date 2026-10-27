@@ -1,5 +1,6 @@
 import { appCopy as copy } from '../copy/shell';
 import { sourceTitleCopy } from '../copy/sourceTitles';
+import { structureTitles } from '../copy/structureTitles';
 import { message as displayMessage, textMessage } from '../shared/messages';
 import { useLayoutEffect, useMemo, useRef, useState } from 'preact/hooks';
 import { LocationProvider, Route, Router, useLocation } from 'preact-iso/router';
@@ -50,6 +51,7 @@ function Shell({ basePath, identity, recovery, reload, session }: ShellProps) {
   const Run = useMemo(() => lazyRoute(() => import('../routes/Run'), recovery), [recovery]);
   const Runtime = useMemo(() => lazyRoute(() => import('../routes/Runtime'), recovery), [recovery]);
   const Sources = useMemo(() => lazyRoute(() => import('../routes/Sources'), recovery), [recovery]);
+  const Structure = useMemo(() => lazyRoute(() => import('../routes/Structure'), recovery), [recovery]);
   const location = useLocation();
   const main = useRef<HTMLElement>(null);
   const navigation = useRef<HTMLElement>(null);
@@ -77,14 +79,24 @@ function Shell({ basePath, identity, recovery, reload, session }: ShellProps) {
   const isRun = location.path.startsWith(`${basePath}/jobs/`) && /\/runs\/[^/]+$/.test(location.path);
   const isRunActivity = location.path.startsWith(`${basePath}/jobs/`) && /\/runs\/[^/]+\/activity$/.test(location.path);
   const isRunEvidence = location.path.startsWith(`${basePath}/jobs/`) && /\/runs\/[^/]+\/evidence$/.test(location.path);
+  const isRunLogs = location.path.startsWith(`${basePath}/jobs/`) && /\/runs\/[^/]+\/logs$/.test(location.path);
   const isHistory = location.path.startsWith(`${basePath}/jobs/`) && /^[^/]+\/runs$/.test(location.path.slice(`${basePath}/jobs/`.length));
   const isSourceDirectory = new RegExp(`^${basePath}/jobs/[^/]+/runs/[^/]+/revisions/[^/]+/sources/[^/]+$`).test(location.path);
   const isSourceFile = new RegExp(`^${basePath}/jobs/[^/]+/runs/[^/]+/revisions/[^/]+/source-files/[^/]+$`).test(location.path);
+  const isSourceSearch = new RegExp(`^${basePath}/jobs/[^/]+/runs/[^/]+/revisions/[^/]+/source-search$`).test(location.path);
+  const isSourceDiff = new RegExp(`^${basePath}/jobs/[^/]+/runs/[^/]+/revisions/[^/]+/source-diff$`).test(location.path);
+  const isSourceFileDiff = new RegExp(`^${basePath}/jobs/[^/]+/runs/[^/]+/revisions/[^/]+/source-diff/file$`).test(location.path);
+  const structure = new RegExp(`^${basePath}/jobs/[^/]+/runs/[^/]+/revisions/[^/]+/(functions|modules|globals|types)(/[^/]+)?$`).exec(location.path);
+  const structureTitle = !structure ? null : structure[2] === undefined
+    ? (structure[1] === 'functions' ? structureTitles.functions : structure[1] === 'modules' ? structureTitles.modules : null)
+    : ({ functions: structureTitles.function, globals: structureTitles.global, types: structureTitles.type,
+      modules: structureTitles.module } as Record<string, string>)[structure[1] ?? ''] ?? null;
   const pageTitle = atHome ? copy.jobs : location.path === uploadPath ? copy.uploadABinary
     : location.path === runtimePath ? copy.runtimeStatus : isJob ? copy.jobOverview
-      : isRunActivity ? copy.attemptActivity : isRunEvidence ? copy.attemptEvidence
+      : isRunActivity ? copy.attemptActivity : isRunEvidence ? copy.attemptEvidence : isRunLogs ? copy.attemptLogs
         : isRun ? copy.workflowAttempt : isHistory ? copy.attemptHistory
-      : isSourceDirectory ? sourceTitleCopy.title : isSourceFile ? sourceTitleCopy.fileTitle : copy.pageUnavailable;
+      : isSourceDirectory ? sourceTitleCopy.title : isSourceFile ? sourceTitleCopy.fileTitle : isSourceSearch ? sourceTitleCopy.searchTitle
+        : isSourceDiff ? sourceTitleCopy.diffTitle : isSourceFileDiff ? sourceTitleCopy.fileDiffTitle : structureTitle ?? copy.pageUnavailable;
 
   function focusRouteHeading(url: string) {
     const path = new URL(url, window.location.origin).pathname.replace(/\/+$/g, '') || '/';
@@ -191,9 +203,19 @@ function Shell({ basePath, identity, recovery, reload, session }: ShellProps) {
               <Route path={runtimePath} component={Runtime} identity={identity} session={session} basePath={basePath} />
               <Route path={`${basePath}/jobs/:jobId/runs/:runId/revisions/:revisionId/sources/:directoryId`} component={Sources} resource="directory" basePath={basePath} session={session} />
               <Route path={`${basePath}/jobs/:jobId/runs/:runId/revisions/:revisionId/source-files/:fileId`} component={Sources} resource="file" basePath={basePath} session={session} />
+              <Route path={`${basePath}/jobs/:jobId/runs/:runId/revisions/:revisionId/source-search`} component={Sources} resource="search" basePath={basePath} session={session} />
+              <Route path={`${basePath}/jobs/:jobId/runs/:runId/revisions/:revisionId/source-diff`} component={Sources} resource="diff" basePath={basePath} session={session} />
+              <Route path={`${basePath}/jobs/:jobId/runs/:runId/revisions/:revisionId/source-diff/file`} component={Sources} resource="file-diff" basePath={basePath} session={session} />
+              <Route path={`${basePath}/jobs/:jobId/runs/:runId/revisions/:revisionId/functions`} component={Structure} view="functions" basePath={basePath} session={session} />
+              <Route path={`${basePath}/jobs/:jobId/runs/:runId/revisions/:revisionId/modules`} component={Structure} view="modules" basePath={basePath} session={session} />
+              <Route path={`${basePath}/jobs/:jobId/runs/:runId/revisions/:revisionId/modules/:selector`} component={Structure} view="module" basePath={basePath} session={session} />
+              <Route path={`${basePath}/jobs/:jobId/runs/:runId/revisions/:revisionId/functions/:selector`} component={Structure} view="function" basePath={basePath} session={session} />
+              <Route path={`${basePath}/jobs/:jobId/runs/:runId/revisions/:revisionId/globals/:selector`} component={Structure} view="global" basePath={basePath} session={session} />
+              <Route path={`${basePath}/jobs/:jobId/runs/:runId/revisions/:revisionId/types/:selector`} component={Structure} view="type" basePath={basePath} session={session} />
               <Route path={`${basePath}/jobs/:jobId/runs`} component={RunHistory} basePath={basePath} session={session} />
               <Route path={`${basePath}/jobs/:jobId/runs/:runId/activity`} component={Run} view="activity" basePath={basePath} session={session} />
               <Route path={`${basePath}/jobs/:jobId/runs/:runId/evidence`} component={Run} view="evidence" basePath={basePath} session={session} />
+              <Route path={`${basePath}/jobs/:jobId/runs/:runId/logs`} component={Run} view="logs" basePath={basePath} session={session} />
               <Route path={`${basePath}/jobs/:jobId/runs/:runId`} component={Run} basePath={basePath} session={session} />
               <Route path={`${basePath}/jobs/:jobId`} component={Job} basePath={basePath} session={session} />
               <Route default component={NotFound} homePath={homePath} />

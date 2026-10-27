@@ -104,29 +104,100 @@ class WebRevisionFileMetadataTest {
         }
     }
 
+    @Test fun `saved input file and directory links survive an unchanged revision gaining manifest inventory coverage`() {
+        val legacy = makeSnapshot(listOf("Makefile", "src/nested/a.c"))
+        val legacyFileId = fileId(legacy, 1)
+        val legacyDirectoryId = revisionSourceDirectoryId(legacy, "src/nested")
+        val reports = listOf("A/report.json", "src/earlier.json", "src/nested/0.json").map { path ->
+            WebRevisionSourceFile(GeneratedFileEvidence(path, "e".repeat(64), "fixture",
+                roles = setOf(ProjectFileRole.VIEWABLE), contentKind = ProjectContentKind.UTF8_TEXT), null)
+        }
+        // Only the adapter's coverage changes. All persisted metadata and the old URL's pins are identical.
+        val current = WebRevisionSourceSnapshot(legacy.reference, legacy.manifestSha256, legacy.descriptorSha256, legacy.files + reports)
+        assertEquals(legacy.metadataVersion, current.metadataVersion)
+        assertEquals(legacyFileId, current.fileId(current.files.single { it.evidence.path == "src/nested/a.c" }))
+        assertEquals(legacyDirectoryId, revisionSourceDirectoryId(current, "src/nested"))
+        val detail = WebRevisionFileMetadata { _, _, _ -> current }.read(jobId, runId, revisionId, legacyFileId)
+        assertEquals("src/nested/a.c", detail.getValue("item").jsonObject.getValue("displayName").jsonPrimitive.content)
+        assertEquals(legacyDirectoryId, detail.getValue("parentDirectoryId").jsonPrimitive.content)
+        assertSame(legacy.files[1], resolveRevisionSourceFile(current, legacyFileId))
+        val directory = WebRevisionDirectoryPages { _, _, _ -> current }.page("owner", jobId, runId, revisionId, legacyDirectoryId, null, includeManifest = true)
+        assertEquals(legacyDirectoryId, directory.getValue("directoryId").jsonPrimitive.content)
+        assertEquals(legacyDirectoryId, directory.getValue("breadcrumbs").jsonArray.last().jsonObject.getValue("directoryId").jsonPrimitive.content)
+        assertEquals(legacyFileId, directory.getValue("items").jsonArray.last().jsonObject.getValue("fileId").jsonPrimitive.content)
+        for (file in reports) assertSame(file, resolveRevisionSourceFile(current, current.fileId(file)))
+        // An index is never sufficient: a valid digest belonging to a different input index is refused.
+        val forged = legacyFileId.replace("file_1_", "file_0_")
+        assertEquals("SOURCE_FILE_NOT_FOUND", assertFailsWith<WebAccessDenied> { resolveRevisionSourceFile(current, forged) }.code)
+    }
+
+    @Test fun `manifest inventory requires negotiation and cursors cannot switch inventory modes`() {
+        val inputs = makeSnapshot(listOf("Makefile", "src/a.c"))
+        val report = WebRevisionSourceFile(GeneratedFileEvidence("A/report.json", "e".repeat(64), "fixture",
+            roles = setOf(ProjectFileRole.VIEWABLE), contentKind = ProjectContentKind.UTF8_TEXT), null)
+        val snapshot = WebRevisionSourceSnapshot(inputs.reference, inputs.manifestSha256, inputs.descriptorSha256, inputs.files + report)
+        val pages = WebRevisionSourcePages { _, _, _ -> snapshot }
+        val directories = WebRevisionDirectoryPages { _, _, _ -> snapshot }
+        val metadata = WebRevisionFileMetadata { _, _, _ -> snapshot }
+        val legacy = pages.page("owner", jobId, runId, revisionId, null)
+        assertEquals(2, legacy.getValue("totalFiles").jsonPrimitive.int)
+        assertTrue(legacy.getValue("items").jsonArray.all { it.jsonObject.getValue("sizeBytes") != JsonNull })
+        val expanded = pages.page("owner", jobId, runId, revisionId, null, includeManifest = true)
+        assertEquals(3, expanded.getValue("totalFiles").jsonPrimitive.int)
+        assertEquals(JsonNull, expanded.getValue("items").jsonArray.first().jsonObject.getValue("sizeBytes"))
+        val reportId = snapshot.fileId(report)
+        assertEquals("SOURCE_FILE_NOT_FOUND", assertFailsWith<WebAccessDenied> { metadata.read(jobId, runId, revisionId, reportId) }.code)
+        assertEquals(JsonNull, metadata.read(jobId, runId, revisionId, reportId, includeManifest = true).getValue("item").jsonObject.getValue("sizeBytes"))
+        val reportDirectory = revisionSourceDirectoryId(snapshot, "A")
+        assertEquals("SOURCE_DIRECTORY_NOT_FOUND", assertFailsWith<WebAccessDenied> {
+            directories.page("owner", jobId, runId, revisionId, reportDirectory, null)
+        }.code)
+        for (include in listOf(false, true)) {
+            val cursor = pages.page("owner", jobId, runId, revisionId, "limit=1", include).getValue("page").jsonObject.getValue("nextCursor").jsonPrimitive.content
+            assertEquals("INVALID_CURSOR", assertFailsWith<WebAccessDenied> {
+                pages.page("owner", jobId, runId, revisionId, "limit=1&cursor=$cursor", !include)
+            }.code)
+            val directoryCursor = directories.page("owner", jobId, runId, revisionId, "root", "limit=1", include)
+                .getValue("page").jsonObject.getValue("nextCursor").jsonPrimitive.content
+            assertEquals("INVALID_CURSOR", assertFailsWith<WebAccessDenied> {
+                directories.page("owner", jobId, runId, revisionId, "root", "limit=1&cursor=$directoryCursor", !include)
+            }.code)
+        }
+        assertFalse(sourceInventoryIncludesManifest(null))
+        assertTrue(sourceInventoryIncludesManifest(listOf("manifest")))
+        for (header in listOf(emptyList(), listOf("unknown"), listOf("manifest", "manifest"), listOf("manifest,manifest"))) {
+            assertEquals("VALIDATION_FAILED", assertFailsWith<WebAccessDenied> { sourceInventoryIncludesManifest(header) }.code)
+        }
+    }
+
     @Test fun `embedded document classification accepts exact source links and refuses encoded authority`() {
         val base = "/nested/"; val job = "${base}jobs/$jobId"; val run = "$job/runs/$runId"
         val valid = listOf(base, "${base}runtime", "${base}upload", job, "$job/runs", run,
-            "$run/revisions/$revisionId/sources/root", "$run/revisions/$revisionId/source-files/file_0_${"a".repeat(64)}")
+            "$run/revisions/$revisionId/sources/root", "$run/revisions/$revisionId/source-files/file_0_${"a".repeat(64)}",
+            "$run/revisions/$revisionId/functions", "$run/revisions/$revisionId/modules", "$run/revisions/$revisionId/modules/core",
+            "$run/revisions/$revisionId/functions/fn_0000000000401000", "$run/revisions/$revisionId/globals/global_1",
+            "$run/revisions/$revisionId/types/type_${"c".repeat(64)}")
         for (path in valid) {
             assertEquals(path, canonicalSpaDocumentPath(base, path))
             if (path != base) assertEquals(path, canonicalSpaDocumentPath(base, "$path/"))
         }
         for (path in listOf("$run/revisions/$revisionId/sources/../private", "$run/revisions/$revisionId/sources/%2Froot",
             "$run/revisions/$revisionId/source-files/file/a", "$run/revisions/$revisionId/source-files/é.c", "$run/revisions/$revisionId/unknown/root",
-            "$run/revisions/$revisionId/sources/root/extra", "/other/jobs/$jobId/runs/$runId", "${base}api/v1/jobs/$jobId")) {
+            "$run/revisions/$revisionId/sources/root/extra", "/other/jobs/$jobId/runs/$runId", "${base}api/v1/jobs/$jobId",
+            "$run/revisions/$revisionId/globals", "$run/revisions/$revisionId/types", "$run/revisions/$revisionId/functions/a/b",
+            "$run/revisions/$revisionId/modules/core.c", "$run/revisions/$revisionId/functions/%66n")) {
             assertNull(canonicalSpaDocumentPath(base, path))
         }
         // Named attempt views are document routes under both root and nested deployments.
         // These are string-only classifier decisions; no server or browser is constructed.
         for (prefix in listOf("/", "/nested/")) {
             val selected = "${prefix}jobs/$jobId/runs/$runId"
-            for (view in listOf("activity", "evidence")) {
+            for (view in listOf("activity", "evidence", "logs")) {
                 val path = "$selected/$view"
                 assertEquals(path, canonicalSpaDocumentPath(prefix, path))
                 assertEquals(path, canonicalSpaDocumentPath(prefix, "$path/"))
             }
-            for (suffix in listOf("unknown", "Activity", "%61ctivity", "evidence/extra", "activity/../private", "evidence//")) {
+            for (suffix in listOf("unknown", "Activity", "%61ctivity", "evidence/extra", "activity/../private", "evidence//", "logs/build", "Logs")) {
                 assertNull(canonicalSpaDocumentPath(prefix, "$selected/$suffix"))
             }
         }

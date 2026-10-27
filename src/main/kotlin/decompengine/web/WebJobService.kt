@@ -247,7 +247,7 @@ class WebJobService(
     maximumRetainedStorageBytes: Long = WebUploadStorage.DEFAULT_MAXIMUM_BYTES,
     private val failureDiagnostic: (Exception) -> String = { "Workflow failed; inspect its available diagnostics before retrying" },
     progressRetentionIntervalMs: Long? = null,
-    sourceProfiles: List<decompengine.project.ReconstructionProfile> = defaultWebSourceProfiles(),
+    private val sourceProfiles: List<decompengine.project.ReconstructionProfile> = defaultWebSourceProfiles(),
     retentionHolds: List<JobRetentionHold> = emptyList(),
 ) : AutoCloseable {
     private data class Registration(val adapter: DurableWebWorkflowAdapter, val limits: decompengine.jobs.WorkflowExecutionLimits,
@@ -289,6 +289,7 @@ class WebJobService(
     private val uploads = mutableMapOf<Thread, CountDownLatch>()
     private val uploadStorage = WebUploadStorage(store.storageRoot, maximumRetainedStorageBytes)
     private val sourceCatalogEvidence = WebSourceCatalogEvidence(sourceProfiles, ::readSourceCatalogInput, ::readArtifact)
+    private val programStructureCache = WebProgramStructureCache()
 
     /** Internal seam for deterministic publication-failure fixtures; production code never reassigns this. */
     internal var uploadPublisher = decompengine.jobs.StagedJobUpload(store.storageRoot)
@@ -737,7 +738,7 @@ class WebJobService(
     }
 
     @Synchronized
-    private fun revisionSourceReference(jobId: String, runId: String, revisionId: String): WebRevisionSourceReference =
+    internal fun revisionSourceReference(jobId: String, runId: String, revisionId: String): WebRevisionSourceReference =
         when (val inspected = inspectDurableJob(jobId)) {
             is WorkflowJobInspection.Available -> selectWebRevisionSource(inspected.snapshot, jobId, runId, revisionId)
             is WorkflowJobInspection.Unavailable -> throw WebJobServiceException(inspected.diagnostic.code, inspected.diagnostic.message)
@@ -753,6 +754,40 @@ class WebJobService(
             }
         if (revisionSourceReference(jobId, runId, revisionId) != reference) revisionSourceChanged()
         return snapshot
+    }
+
+    /** Optional artifact inventory evidence shares the request budget, deadline and pinned read boundary.
+     * Only short lifecycle/ownership checks take this monitor; input and metadata IO never do.
+     */
+    internal fun readArtifactRevisionSources(jobId: String, runId: String, revisionId: String,
+        budget: WebArtifactReadBudget): WebRevisionSourceSnapshot {
+        val reference = revisionSourceReference(jobId, runId, revisionId)
+        fun read(selectedJobId: String, path: String, maximum: Long): decompengine.repair.StableRegularFile {
+            check(selectedJobId == jobId)
+            budget.cancellationCheck()
+            synchronized(this) { requireInitializedRead(); getAttempt(jobId, runId) }
+            return store.readArtifactInventoryFile(jobId, path, maximum, budget::reserve, budget.cancellationCheck)
+        }
+        val evidence = WebSourceCatalogEvidence(sourceProfiles,
+            { selectedJobId -> read(selectedJobId, "input.elf", decompengine.jobs.JobStore.MAX_INPUT_BYTES.toLong()) }, ::read)
+        val snapshot = evidence.readRevision(reference)
+        budget.cancellationCheck()
+        if (revisionSourceReference(jobId, runId, revisionId) != reference) revisionSourceChanged()
+        return snapshot
+    }
+
+    /** Recorded model/plan projection of the actual persisted candidate, rechecked after projection. */
+    internal fun <T> readProgramStructure(jobId: String, runId: String, revisionId: String,
+        project: (WebProgramStructureIndex, () -> ByteArray) -> T): T {
+        val reference = revisionSourceReference(jobId, runId, revisionId)
+        val result = try { sourceCatalogEvidence.readStructure(reference, programStructureCache, project) }
+            catch (changed: WebAccessDenied) { throw changed }
+            catch (failure: Exception) {
+                if (failure is java.util.concurrent.CancellationException || failure is InterruptedException) throw failure
+                throw WebAccessDenied(503, "PROGRAM_STRUCTURE_UNAVAILABLE", "The revision structure records are unavailable or exceed their limits.")
+            }
+        if (revisionSourceReference(jobId, runId, revisionId) != reference) revisionSourceChanged()
+        return result
     }
 
     /** Generation declarations use the same current-candidate and bounded metadata capture boundary. */
@@ -784,6 +819,21 @@ class WebJobService(
         return content
     }
 
+    /** Bounded literal search over the persisted candidate's canonical inputs; no index or body is retained. */
+    internal fun searchRevisionSources(jobId: String, runId: String, revisionId: String,
+        scan: (WebRevisionSourceSnapshot, (WebRevisionSourceFile) -> ByteArray?) -> kotlinx.serialization.json.JsonObject,
+    ): kotlinx.serialization.json.JsonObject {
+        val reference = revisionSourceReference(jobId, runId, revisionId)
+        val result = try { sourceCatalogEvidence.search(reference, ::readSourceInput, scan) }
+            catch (changed: WebAccessDenied) { throw changed }
+            catch (failure: Exception) {
+                if (failure is java.util.concurrent.CancellationException || failure is InterruptedException) throw failure
+                throw WebAccessDenied(503, "SOURCE_SEARCH_UNAVAILABLE", "The revision sources could not be searched within their limits.")
+            }
+        if (revisionSourceReference(jobId, runId, revisionId) != reference) revisionSourceChanged()
+        return result
+    }
+
     @Synchronized
     private fun readSourceInput(jobId: String, runId: String, path: String, maximumBytes: Long): decompengine.repair.StableRegularFile {
         requireInitializedRead()
@@ -807,7 +857,9 @@ class WebJobService(
         // Canonical build-input commitments, cross-checked with the manifest and build contract digest.
         val sources = try { readRevisionSources(jobId, runId, revisionId) } catch (_: Exception) { unavailable() }
         if (sources.reference.sourceSha256 != candidate.sourceSha256) unavailable()
-        val commitments = sources.files.associate { it.evidence.path to decompengine.git.GitSourceCommitment(it.evidence.sha256, it.sizeBytes) }
+        // Manifest-only entries (reports, notes) are not build inputs and carry no committed size.
+        val commitments = sources.files.filter { it.committedInput }
+            .associate { it.evidence.path to decompengine.git.GitSourceCommitment(it.evidence.sha256, checkNotNull(it.sizeBytes)) }
         return decompengine.git.GitSourceSnapshot(directory, runId, revisionId, candidate.sourceSha256, commitments)
     }
 
@@ -894,16 +946,40 @@ class WebJobService(
         }
     }
 
+    /**
+     * Authorize one fixed attempt artifact under the service monitor, then hash or stream it through pinned
+     * descriptors without holding the monitor, so workflow publication and retention are never blocked by a reader.
+     */
+    internal fun streamRunArtifact(jobId: String, runId: String, artifactPath: String, declaredSize: (Long) -> Unit,
+        consume: (ByteArray, Int) -> Unit, cancellationCheck: () -> Unit): decompengine.repair.StableFileDigest {
+        val relative = "reports/runs/$runId/$artifactPath"
+        canonicalReportSegments(relative)
+        synchronized(this) { requireInitializedRead(); getAttempt(jobId, runId) }
+        return store.streamArtifact(jobId, relative, declaredSize, consume, cancellationCheck)
+    }
+
+    /** Presence only: a regular file at the fixed attempt path. It is never opened or trusted for content. */
     @Synchronized
-    fun resolveArtifact(jobId: String, relativePath: String): Path {
+    internal fun runArtifactPresent(jobId: String, runId: String, artifactPath: String): Boolean {
         requireInitializedRead()
-        val segments = canonicalReportSegments(relativePath)
-        if (segments[1] == "runs") {
-            getAttempt(jobId, segments[2])
-            return store.resolveRunArtifact(jobId, segments[2], segments.drop(3).joinToString("/"))
+        getAttempt(jobId, runId)
+        return try { store.resolveRunArtifact(jobId, runId, artifactPath); true } catch (_: decompengine.jobs.JobStoreException) { false }
+    }
+
+    /** Host root used only to redact display text; it never enters a DTO. */
+    internal val redactionStorageRoot: Path get() = store.storageRoot
+
+    /** The attempt and its recorded build log, or null with an oversized flag; absence is not an error. */
+    internal fun readRunBuildLog(jobId: String, runId: String, maximumBytes: Long): Triple<WorkflowAttempt, decompengine.repair.StableRegularFile?, Boolean> {
+        val attempt = getAttempt(jobId, runId)
+        return try {
+            Triple(attempt, readArtifact(jobId, "reports/runs/$runId/source-tree/reports/build.log", maximumBytes), false)
+        } catch (_: decompengine.repair.RepairBudgetExceededException) {
+            Triple(attempt, null, true)
+        } catch (failure: Exception) {
+            if (failure is InterruptedException || failure is WebJobServiceException) throw failure
+            Triple(attempt, null, false)
         }
-        presentation(jobId) // Validate the record before resolving an explicitly legacy artifact.
-        return store.resolveArtifact(jobId, relativePath)
     }
 
     /** Validate the report namespace and attempt ownership before a bounded retained-descriptor read. */
