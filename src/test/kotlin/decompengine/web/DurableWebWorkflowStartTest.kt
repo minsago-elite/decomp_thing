@@ -152,6 +152,16 @@ class DurableWebWorkflowStartTest {
                 val observed = assertIs<WebSchedulerSnapshot.Available>(service.schedulerSnapshot())
                 assertEquals(1, observed.workerLimit); assertEquals(1, observed.queueCapacity)
                 assertEquals(1, observed.activeWorkers); assertEquals(1, observed.queuedTasks)
+                // The queued attempt has an approximate position; the running attempt is no longer queued.
+                val position = assertIs<WebQueuePosition.Queued>(service.queuePosition(jobs[1].id, second.attempt.runId))
+                assertEquals(1, position.position); assertEquals(1, position.queuedTasks)
+                assertEquals(1, position.activeWorkers); assertEquals(1, position.workerLimit)
+                val document = webQueuePosition(jobs[1].id, second.attempt.runId, position)
+                assertEquals("true", document.getValue("approximate").toString()); assertEquals("\"0\"", document.getValue("ahead").toString())
+                assertFalse(document.toString().contains(jobs[0].id)); assertFalse(document.toString().contains(first.attempt.runId))
+                assertEquals(WorkflowRunState.RUNNING,
+                    assertIs<WebQueuePosition.NotQueued>(service.queuePosition(jobs[0].id, first.attempt.runId)).state)
+                assertCode("RUN_NOT_FOUND") { service.queuePosition(jobs[1].id, first.attempt.runId) }
             } finally { release.countDown() }
         }
     }
@@ -223,7 +233,7 @@ class DurableWebWorkflowStartTest {
                     (service.inspectDurableJob(job.id) as WorkflowJobInspection.Available).snapshot.latestRun!!
                 }
                 assertEquals(WorkflowRunState.FAILED, first.state)
-                assertEquals(if (refused) WorkflowTerminalReason.REFUSED else WorkflowTerminalReason.FAILED, first.terminalReason)
+                assertEquals(if (refused) WorkflowTerminalReason.REFUSED else WorkflowTerminalReason.INFRASTRUCTURE_FAILED, first.terminalReason)
                 assertNull(first.startedAt); assertNull(first.acceptedRevision)
                 val before = state(root, job.id).readBytes()
                 late.single().run()

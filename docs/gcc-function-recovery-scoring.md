@@ -315,3 +315,11 @@ original export lineage, second-worker request, attachment, execution, capture
 and metadata, verifies the measured bounds and all digest joins, and independently
 replays the boundary observation. Ordinary component tests use explicit authored
 operation fixtures and do not establish that live qualification.
+
+The [retained selected production replay](../oracle/gcc/16.2.0/production-function-replay/README.md)
+preserves the successful run at source `202de6b2` and its byte-identical Actions
+checkout. Exact-start precision is 3,269/3,273, recall is 3,269/3,284, and all six
+surviving aliases match at their exact oracle RVAs. Its bounded offline verifier
+checks the original byte commitments and independently rederives these selected
+measurements. Retained bytes do not recreate a live admission; full structural
+scoring, completion and release eligibility remain unavailable.

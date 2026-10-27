@@ -61,4 +61,5 @@ jobs:
           path: |
             build/builtin-contract-qualification
             build/test-results/test
+            build/reports/junit-signatures
             build/reports/tests/test
