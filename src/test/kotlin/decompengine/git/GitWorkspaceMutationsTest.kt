@@ -257,6 +257,44 @@ class GitWorkspaceMutationsTest {
         assertEquals("", raw("diff", "--cached", "--name-only"))
     }
 
+    @Test fun `unstaging deleted descendants never removes unselected staged ancestors`(): Unit {
+        for (format in listOf(GitObjectFormat.SHA1, GitObjectFormat.SHA256)) for (rename in listOf(false, true)) Fixture().use { f ->
+            val service = f.open(GitRepositoryPolicy(defaultBranch = "trunk", objectFormat = format))
+            val repositoryId = service.initialized()
+            val gitDir = f.store.resolve("$jobId/git/repositories/$repositoryId/repository.git")
+            val workTree = gitDir.parent.resolve("worktree")
+            fun raw(vararg args: String) = f.repositories.git("--git-dir=$gitDir", "--work-tree=$workTree", *args, cwd = workTree)
+            val parent = workTree.resolve("component.c")
+            Files.createDirectory(parent)
+            Files.writeString(parent.resolve("child.c"), "int child;\n")
+            f.repositories.commitAll(gitDir, workTree, "directory baseline")
+            if (rename) raw("mv", "component.c/child.c", "moved.c") else Files.delete(parent.resolve("child.c"))
+            Files.delete(parent)
+            Files.writeString(parent, "int replacement;\n")
+            raw("add", "-A", "--", "component.c")
+            val (view, guards) = service.guards(repositoryId)
+            val child = view.ids {
+                if (rename) it.originalPath?.exact == "component.c/child.c" && it.staged == GitIndexChange.RENAMED
+                else it.path.exact == "component.c/child.c" && it.staged == GitIndexChange.DELETED
+            }
+            val ancestor = view.ids { it.path.exact == "component.c" && it.staged == GitIndexChange.ADDED }
+            assertEquals(1, child.size); assertEquals(1, ancestor.size)
+            val before = raw("ls-files", "--stage")
+            assertEquals("SELECTION_OVERLAP", assertFailsWith<ManagedGitException> {
+                service.requestWorkspace(jobId, repositoryId,
+                    GitStageRequest(view.record.worktreeId, guards, child, false), "unstage_ancestor_01")
+            }.code)
+            assertEquals(before, raw("ls-files", "--stage"), "refusal must preserve the unselected ancestor")
+            assertEquals(guards, service.guards(repositoryId).second)
+            assertEquals("int replacement;\n", Files.readString(parent))
+            // Selecting both affected entries is explicit and must still complete.
+            val result = service.run(repositoryId, GitStageRequest(view.record.worktreeId, guards, child + ancestor, false), "unstage_ancestor_02")
+            assertEquals(GitOperationState.COMPLETED, result.state, result.message)
+            assertEquals("", raw("diff", "--cached", "--name-only"))
+            assertEquals("int replacement;\n", Files.readString(parent))
+        }
+    }
+
     @Test fun `commits refuse hidden staged gitlink additions changes deletions and type changes`(): Unit {
         for (format in listOf(GitObjectFormat.SHA1, GitObjectFormat.SHA256)) {
             for (change in listOf("unborn", "added", "modified", "deleted", "to-gitlink", "from-gitlink")) Fixture().use { f ->

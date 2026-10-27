@@ -897,7 +897,7 @@ An incomplete index comparison fails closed with `STATUS_INCOMPLETE`.
 | `WORKTREE_BUSY` (operation failure) | Another Git writer holds the index, HEAD or target-ref lock; nothing is published |
 | `409 WORKTREE_CHANGED` | The work tree or index changed (any status entry, index blob or file stat) |
 | `409 SELECTION_CHANGED` | A selected file identity is no longer in the current status |
-| `409 SELECTION_OVERLAP` | A pathspec would affect unselected descendants, or staging a descendant would remove an unselected tracked ancestor |
+| `409 SELECTION_OVERLAP` | A pathspec would affect unselected descendants, staging a descendant would remove an unselected tracked ancestor, or unstaging a deletion/rename source would remove an unselected staged ancestor |
 | `409 INDEX_CHANGED` | A commit's `selectedFileIds` differ from today's staged set; nothing is swept in or left out |
 | `409 CONFLICTED`, `409 NOTHING_TO_COMMIT` | Unmerged paths exist, or nothing is staged |
 | `422 EXCLUDED_PATH` | The file is excluded by the source-only policy (decided independently of any repository `.gitignore`), is a submodule, or has a non-UTF-8 name |

@@ -128,12 +128,13 @@ internal object GitWorkspaceMutations {
     }
 
     /**
-     * Pathspecs match descendants, and add resolves index file/directory conflicts by removing
-     * tracked ancestors. Neither direction may silently act on an unselected index entry.
+     * Pathspecs match descendants, and both add and reset resolve index file/directory conflicts
+     * by removing ancestors. Neither direction may silently act on an unselected index entry.
      */
     private fun refuseOverlap(observation: GitWorkspaceObservation, selected: List<GitStatusEntry>, stage: Boolean) {
         val chosen = selected.toSet()
-        val paths = selected.mapNotNull { it.path.exact }
+        // Reset also restores rename sources, so protect ancestors of every expanded path.
+        val paths = selected.flatMap { listOfNotNull(it.path.exact, it.originalPath?.exact.takeUnless { stage }) }
         val prefixes = selected.flatMap { listOfNotNull(it.path.exact, it.originalPath?.exact) }.map { "$it/" }
         val overlapping = observation.status.entries.any { entry ->
             val purelyUntracked = entry.untracked && entry.staged == GitIndexChange.NONE && entry.unstaged == GitIndexChange.NONE
@@ -142,8 +143,10 @@ internal object GitWorkspaceMutations {
                 val descendant = listOfNotNull(entry.path.exact, entry.originalPath?.exact).any { path ->
                     prefixes.any { path.startsWith(it) }
                 }
-                // A staged deletion has no remaining index entry; adding below it is safe.
-                val ancestor = stage && entry.staged != GitIndexChange.DELETED && entry.path.exact?.let { path ->
+                // A staged deletion has no remaining index entry. Reset must also protect
+                // unselected staged ancestors that it would remove while restoring a child.
+                val ancestor = (stage || entry.staged != GitIndexChange.NONE) &&
+                    entry.staged != GitIndexChange.DELETED && entry.path.exact?.let { path ->
                     paths.any { it.startsWith("$path/") }
                 } == true
                 descendant || ancestor
