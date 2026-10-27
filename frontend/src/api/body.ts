@@ -7,23 +7,32 @@ export async function boundedBody(response: Response, maxBytes: number, signal: 
     throw new ApiClientError('response_too_large');
   }
   if (response.body === null) return '';
-  // Browsers without readable fetch bodies or TextDecoder still need bounded, strict reads
-  // for the polling fallback (#631): same limit, same fatal UTF-8 decoding.
-  if (response.body === undefined || typeof TextDecoder !== 'function') return bufferedBody(response, maxBytes, signal);
+  // Only engines without readable bodies need a whole-response read. Missing TextDecoder
+  // must not bypass early byte-limit enforcement when a stream is available (#631).
+  if (response.body === undefined) return bufferedBody(response, maxBytes, signal);
   const reader = response.body.getReader();
   const cancel = () => { void reader.cancel().catch(() => undefined); };
   signal.addEventListener('abort', cancel, { once: true });
   if (signal.aborted) cancel();
-  const decoder = new TextDecoder('utf-8', { fatal: true });
+  const decoder = typeof TextDecoder === 'function' ? new TextDecoder('utf-8', { fatal: true }) : null;
   let bytes = 0;
   const parts: string[] = [];
+  const chunks: Uint8Array[] = [];
   try {
     while (true) {
       const next = await reader.read();
       if (next.done) break;
       bytes += next.value.byteLength;
       if (bytes > maxBytes) throw new ApiClientError('response_too_large');
-      try { parts.push(decoder.decode(next.value, { stream: true })); } catch { throw new ApiClientError('invalid_json'); }
+      if (decoder) {
+        try { parts.push(decoder.decode(next.value, { stream: true })); } catch { throw new ApiClientError('invalid_json'); }
+      } else if (next.value.byteLength > 0) chunks.push(next.value);
+    }
+    if (!decoder) {
+      const joined = new Uint8Array(bytes);
+      let offset = 0;
+      for (const chunk of chunks) { joined.set(chunk, offset); offset += chunk.byteLength; }
+      return strictUtf8(joined);
     }
     try { parts.push(decoder.decode()); } catch { throw new ApiClientError('invalid_json'); }
     return parts.join('');
@@ -48,7 +57,7 @@ async function bufferedBody(response: Response, maxBytes: number, signal: AbortS
   return strictUtf8(bytes);
 }
 
-/** RFC 3629 decoding that rejects overlong forms, surrogates and out-of-range scalars. */
+/** Fatal UTF-8 decoding with TextDecoder's initial-BOM handling and RFC 3629 scalar checks. */
 export function strictUtf8(bytes: Uint8Array): string {
   const parts: string[] = [];
   let points: number[] = [];
@@ -67,7 +76,7 @@ export function strictUtf8(bytes: Uint8Array): string {
       point = (point << 6) | (next & 0x3f);
     }
     if (point < minimum || point > 0x10ffff || (point >= 0xd800 && point <= 0xdfff)) throw new ApiClientError('invalid_json');
-    points.push(point);
+    if (index !== 0 || point !== 0xfeff) points.push(point);
     if (points.length === 4096) { parts.push(String.fromCodePoint(...points)); points = []; }
     index += length;
   }
