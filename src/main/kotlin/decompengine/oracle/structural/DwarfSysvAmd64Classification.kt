@@ -113,11 +113,21 @@ object DwarfSysvAmd64Classification {
     fun classify(
         shape: DwarfAbiTypeShape,
         limits: DwarfAbiClassificationLimits = DwarfAbiClassificationLimits(),
-    ): DwarfAbiClassification = Classifier(limits).classify(shape)
+    ): DwarfAbiClassification = classifyWithCheckpoint(shape, limits) {}
+
+    /** Charges every traversal visit to a caller-owned aggregate budget as well as local limits. */
+    internal fun classifyWithCheckpoint(
+        shape: DwarfAbiTypeShape,
+        limits: DwarfAbiClassificationLimits = DwarfAbiClassificationLimits(),
+        checkpoint: () -> Unit,
+    ): DwarfAbiClassification = Classifier(limits, checkpoint).classify(shape)
 
     private class Unsupported(reason: String) : RuntimeException(reason, null, false, false)
 
-    private class Classifier(private val limits: DwarfAbiClassificationLimits) {
+    private class Classifier(
+        private val limits: DwarfAbiClassificationLimits,
+        private val checkpoint: () -> Unit,
+    ) {
         private var steps = 0
         private val evidence = linkedSetOf("sysv-amd64-lp64")
 
@@ -168,6 +178,7 @@ object DwarfSysvAmd64Classification {
         private fun visit(depth: Int) {
             if (depth > limits.maximumDepth) unsupported("type nesting exceeds depth limit")
             if (steps >= limits.maximumTraversalSteps) unsupported("type traversal exceeds work limit")
+            checkpoint()
             steps++
         }
 
