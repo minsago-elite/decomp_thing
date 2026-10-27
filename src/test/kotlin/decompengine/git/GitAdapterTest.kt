@@ -46,6 +46,16 @@ class GitAdapterTest {
         assertFalse(garbage.message.contains("PRIVATE_CANARY"))
     }
 
+    @Test fun `a required process memory ceiling is hard and soft and never falls back when unavailable`(): Unit = GitTestRepositories().use { f ->
+        val echo = fakeGit(f.root.resolve("memory-bound"), "ulimit -Sv; ulimit -Hv; ulimit -c")
+        val invocation = GitInvocation("version", limits = GitExecutionLimits(maxAddressSpaceBytes = 48L * 1024 * 1024))
+        assertEquals(listOf("49152", "49152", "0"), GitCommandRunner(echo, f.environment).run(invocation).text.trim().lines())
+        val unavailable = GitCommandRunner(echo, f.environment, memoryLimiter = null)
+        assertEquals(GitCommandException.Kind.START_FAILED, assertFailsWith<GitCommandException> { unavailable.run(invocation) }.kind)
+        // Ordinary non-import calls do not depend on the optional resource launcher.
+        assertTrue(unavailable.run(GitInvocation("version")).text.isNotBlank())
+    }
+
     @Test fun `argv is passed without a shell and the child environment is fixed`(): Unit = GitTestRepositories().use { f ->
         val marker = f.root.resolve("shell-ran")
         val echo = fakeGit(f.root.resolve("echo"), "for argument in \"\$@\"; do printf '[%s]\\n' \"\$argument\"; done; env | LC_ALL=C sort")
@@ -99,6 +109,76 @@ class GitAdapterTest {
         val failure = assertFailsWith<GitCommandException> { failing.run(GitInvocation("status")) }
         assertEquals(GitCommandException.Kind.FAILED, failure.kind); assertEquals(3, failure.exitCode)
         assertFalse(failure.message!!.contains("PRIVATE_CANARY"))
+    }
+
+    @Test fun `merge diagnostics drain both streams without killing the mutation`(): Unit = GitTestRepositories().use { f ->
+        val published = f.root.resolve("published")
+        val runner = GitCommandRunner(fakeGit(f.root.resolve("merge-output"),
+            "head -c 2097152 /dev/zero; head -c 2097152 /dev/zero >&2; touch '$published'; exit 1"), f.environment)
+        val result = runner.run(GitInvocation("merge", drainDiagnostics = true, allowedExitCodes = setOf(1),
+            limits = GitExecutionLimits(maxStdoutBytes = 4096, maxStderrBytes = 4096)))
+        assertTrue(published.exists()); assertEquals(1, result.exitCode)
+        assertTrue(result.stdoutTruncated); assertEquals(4096, result.stdout.size)
+        assertEquals(4096, result.diagnostic.length)
+        assertFailsWith<IllegalArgumentException> { GitInvocation("status", drainDiagnostics = true) }
+        assertFailsWith<IllegalArgumentException> { GitInvocation("merge", drainDiagnostics = true, truncateStdout = true) }
+        val slow = GitCommandRunner(fakeGit(f.root.resolve("slow-merge"), "sleep 30"), f.environment)
+        assertEquals(GitCommandException.Kind.TIMED_OUT, assertFailsWith<GitCommandException> {
+            slow.run(GitInvocation("merge", drainDiagnostics = true, limits = GitExecutionLimits(Duration.ofMillis(200))))
+        }.kind)
+    }
+
+    @Test fun `large real merge retains conflict index and abort state beyond diagnostic capture`(): Unit = GitTestRepositories().use { f ->
+        val (gitDir, workTree) = f.managed("large-merge")
+        val paths = (0 until 7000).map { "conflict-${it.toString().padStart(5, '0')}-${"p".repeat(64)}.c" }
+        fun write(text: String) { paths.forEach { Files.writeString(workTree.resolve(it), text) } }
+        write("base\n"); val base = f.commitAll(gitDir, workTree, "base")
+        write("ours\n"); val ours = f.commitAll(gitDir, workTree, "ours")
+        f.git("--git-dir=$gitDir", "--work-tree=$workTree", "reset", "--hard", base)
+        write("theirs\n"); val theirs = f.commitAll(gitDir, workTree, "theirs")
+        f.git("--git-dir=$gitDir", "--work-tree=$workTree", "reset", "--hard", ours)
+        assertTrue(GitIntegrations.merge(f.runner, gitDir, workTree, theirs, GitIntegrationStrategy.MERGE,
+            "large integration", GitRepositoryPolicy()))
+        assertTrue(GitIntegrations.mergeInProgress(gitDir))
+        assertEquals(7000, GitIntegrations.conflicts(f.runner, gitDir, workTree).size)
+        GitIntegrations.abort(f.runner, gitDir, workTree)
+        assertFalse(GitIntegrations.mergeInProgress(gitDir))
+        assertTrue(GitIntegrations.conflicts(f.runner, gitDir, workTree).isEmpty())
+        assertEquals(ours, f.git("--git-dir=$gitDir", "rev-parse", "HEAD").trim())
+        paths.forEach { assertEquals("ours\n", Files.readString(workTree.resolve(it))) }
+    }
+
+    @Test fun `workspace guards bind merge parents and unmerged stages even with unchanged files`(): Unit = GitTestRepositories().use { f ->
+        val (gitDir, workTree) = f.managed("merge-guards")
+        val file = workTree.resolve("main.c")
+        Files.writeString(file, "base\n"); val base = f.commitAll(gitDir, workTree, "base")
+        Files.writeString(file, "ours\n"); val ours = f.commitAll(gitDir, workTree, "ours")
+        f.git("--git-dir=$gitDir", "--work-tree=$workTree", "reset", "--hard", base)
+        Files.writeString(file, "remote one\n"); val target = f.commitAll(gitDir, workTree, "remote one")
+        Files.writeString(file, "remote two\n"); val other = f.commitAll(gitDir, workTree, "remote two")
+        val otherBlob = f.git("--git-dir=$gitDir", "rev-parse", "$other:main.c").trim()
+        f.git("--git-dir=$gitDir", "--work-tree=$workTree", "reset", "--hard", ours)
+        assertTrue(GitIntegrations.merge(f.runner, gitDir, workTree, target, GitIntegrationStrategy.MERGE, "merge", GitRepositoryPolicy()))
+        val reviewed = GitRepositoryInspector.inspect(f.runner, gitDir, workTree)
+        val content = Files.readString(file)
+        // Same HEAD, work-tree bytes/stat and index, but a different pending merge parent.
+        Files.writeString(gitDir.resolve("MERGE_HEAD"), "$other\n")
+        val changedParent = GitRepositoryInspector.inspect(f.runner, gitDir, workTree)
+        assertEquals(reviewed.head, changedParent.head); assertEquals(reviewed.status, changedParent.status)
+        assertNotEquals(reviewed.statusDigest, changedParent.statusDigest)
+        Files.writeString(gitDir.resolve("MERGE_HEAD"), "$target\n")
+        f.runner.run(GitInvocation("update-index", listOf("--index-info"), gitDir = gitDir, workTree = workTree,
+            input = "100644 $otherBlob 3\tmain.c\n".toByteArray()))
+        val changedStage = GitRepositoryInspector.inspect(f.runner, gitDir, workTree)
+        assertEquals(content, Files.readString(file))
+        assertNotEquals(reviewed.status.entries.single().conflictStageIdentity, changedStage.status.entries.single().conflictStageIdentity)
+        assertNotEquals(reviewed.statusDigest, changedStage.statusDigest)
+        // Resolving to ours leaves no staged changes; the merge parent must still affect guards.
+        Files.writeString(file, "ours\n"); f.git("--git-dir=$gitDir", "--work-tree=$workTree", "add", "main.c")
+        val resolved = GitRepositoryInspector.inspect(f.runner, gitDir, workTree)
+        assertTrue(resolved.status.entries.isEmpty())
+        Files.writeString(gitDir.resolve("MERGE_HEAD"), "$other\n")
+        assertNotEquals(resolved.statusDigest, GitRepositoryInspector.inspect(f.runner, gitDir, workTree).statusDigest)
     }
 
     @Test fun `branch names are validated by local syntax and check-ref-format`(): Unit = GitTestRepositories().use { f ->
@@ -197,6 +277,108 @@ class GitAdapterTest {
         val wide = GitRepositoryInspector.inspect(f.runner, wideDir, wideTree)
         assertEquals(GitObjectFormat.SHA256, wide.objectFormat); assertEquals(64, wide.head.objectId!!.length)
         assertEquals(wideCommit, wide.head.objectId)
+    }
+
+    @Test fun `symbolic HEAD must name a branch rather than a tag or other namespace`(): Unit = GitTestRepositories().use { f ->
+        val (gitDir, workTree) = f.managed("head-namespace")
+        Files.writeString(workTree.resolve("main.c"), "int main;\n")
+        val commit = f.commitAll(gitDir, workTree, "fixture")
+        f.git("--git-dir=$gitDir", "update-ref", "refs/tags/odd", commit)
+        for (ref in listOf("refs/tags/odd", "refs/tags/missing", "refs/custom/missing")) {
+            f.git("--git-dir=$gitDir", "symbolic-ref", "HEAD", ref)
+            assertEquals("REPOSITORY_UNSUPPORTED", assertFailsWith<GitRepositoryException>(ref) {
+                GitRepositoryInspector.inspect(f.runner, gitDir, workTree)
+            }.code)
+        }
+    }
+
+    @Test fun `bounded refs always retain the attached HEAD without duplicates`(): Unit = GitTestRepositories().use { f ->
+        val (gitDir, workTree) = f.managed("many-refs")
+        Files.writeString(workTree.resolve("main.c"), "int main;\n")
+        val commit = f.commitAll(gitDir, workTree, "fixture")
+        repeat(GitRepositoryInspector.MAX_REFS - 1) { index ->
+            f.git("--git-dir=$gitDir", "update-ref", "refs/heads/a%03d".format(index), commit)
+        }
+        val full = GitRepositoryInspector.inspect(f.runner, gitDir, workTree)
+        assertEquals(GitRepositoryInspector.MAX_REFS, full.refs.size)
+        assertFalse(full.refsTruncated)
+        assertTrue(GitRefObservation("refs/heads/trunk", commit) in full.refs)
+        repeat(8) { index ->
+            f.git("--git-dir=$gitDir", "update-ref", "refs/heads/a%03d".format(GitRepositoryInspector.MAX_REFS - 1 + index), commit)
+        }
+        val bounded = GitRepositoryInspector.inspect(f.runner, gitDir, workTree)
+        assertTrue(bounded.refsTruncated)
+        assertEquals(GitRepositoryInspector.MAX_REFS, bounded.refs.size)
+        assertEquals(1, bounded.refs.count { it == GitRefObservation("refs/heads/trunk", commit) })
+        f.git("--git-dir=$gitDir", "symbolic-ref", "HEAD", "refs/heads/a000")
+        val earlyHead = GitRepositoryInspector.inspect(f.runner, gitDir, workTree)
+        assertTrue(earlyHead.refsTruncated)
+        assertEquals(GitRepositoryInspector.MAX_REFS, earlyHead.refs.size)
+        assertEquals(1, earlyHead.refs.count { it.name == "refs/heads/a000" && it.objectId == commit })
+    }
+
+    @Test fun `status fingerprint is display only and not dirty source identity`(): Unit = GitTestRepositories().use { f ->
+        val (gitDir, workTree) = f.managed("status-display")
+        val source = workTree.resolve("main.c")
+        Files.writeString(source, "int one;\n")
+        val untracked = GitRepositoryInspector.inspect(f.runner, gitDir, workTree)
+        val firstBytes = Files.readAllBytes(source)
+        Files.writeString(source, "int two_different;\n")
+        val editedUntracked = GitRepositoryInspector.inspect(f.runner, gitDir, workTree)
+        assertFalse(firstBytes.contentEquals(Files.readAllBytes(source)))
+        assertTrue(untracked.dirty && editedUntracked.dirty)
+        assertNotEquals(untracked.statusDigest, editedUntracked.statusDigest)
+        // Read cursors observe size/mtime changes, but the fingerprint remains no content identity:
+        // changing bytes while preserving both metadata fields must not be mistaken for proof.
+        val untrackedTime = Files.getLastModifiedTime(source)
+        Files.writeString(source, "int TWO_different;\n")
+        Files.setLastModifiedTime(source, untrackedTime)
+        assertEquals(editedUntracked.statusDigest, GitRepositoryInspector.inspect(f.runner, gitDir, workTree).statusDigest)
+        assertFalse(Files.readAllBytes(source).contentEquals("int two_different;\n".toByteArray()))
+        f.commitAll(gitDir, workTree, "fixture")
+        Files.writeString(source, "int tracked_dirty;\n")
+        val modified = GitRepositoryInspector.inspect(f.runner, gitDir, workTree)
+        val modifiedBytes = Files.readAllBytes(source)
+        Files.writeString(source, "int tracked_dirty_again;\n")
+        val editedModified = GitRepositoryInspector.inspect(f.runner, gitDir, workTree)
+        assertFalse(modifiedBytes.contentEquals(Files.readAllBytes(source)))
+        assertTrue(modified.dirty && editedModified.dirty)
+        assertNotEquals(modified.statusDigest, editedModified.statusDigest)
+        val modifiedTime = Files.getLastModifiedTime(source)
+        Files.writeString(source, "int TRACKED_dirty_again;\n")
+        Files.setLastModifiedTime(source, modifiedTime)
+        assertEquals(editedModified.statusDigest, GitRepositoryInspector.inspect(f.runner, gitDir, workTree).statusDigest)
+        assertFalse(Files.readAllBytes(source).contentEquals("int tracked_dirty_again;\n".toByteArray()))
+    }
+
+    @Test fun `linked roots ancestors worktrees and nested repository metadata are refused`(): Unit = GitTestRepositories().use { f ->
+        val (gitDir, workTree) = f.managed("physical")
+        val linkedRoot = Files.createSymbolicLink(f.root.resolve("linked-root.git"), gitDir)
+        val linkedParent = Files.createSymbolicLink(f.root.resolve("linked-parent"), f.root)
+        val linkedTree = Files.createSymbolicLink(f.root.resolve("linked-worktree"), workTree)
+        for ((directory, tree) in listOf(linkedRoot to workTree, linkedParent.resolve(gitDir.fileName) to workTree, gitDir to linkedTree)) {
+            assertEquals("REPOSITORY_UNSUPPORTED", assertFailsWith<GitRepositoryException> {
+                GitRepositoryInspector.inspect(f.runner, directory, tree)
+            }.code)
+        }
+        assertEquals("REPOSITORY_UNSUPPORTED", assertFailsWith<GitRepositoryException> {
+            GitManagedLayout.prepare(linkedRoot)
+        }.code)
+        for (component in listOf("info", "objects", "refs", "refs/heads", "HEAD", "config", "info/attributes")) {
+            val (directory, tree) = f.managed("linked-${component.replace('/', '-')}")
+            val entry = directory.resolve(component)
+            val target = f.root.resolve("target-${component.replace('/', '-')}")
+            Files.move(entry, target)
+            Files.createSymbolicLink(entry, target)
+            assertEquals("REPOSITORY_UNSUPPORTED", assertFailsWith<GitRepositoryException>(component) {
+                GitRepositoryInspector.inspect(f.runner, directory, tree)
+            }.code)
+        }
+        // Links deeper than fixed layout components must not escape the check either.
+        Files.createSymbolicLink(gitDir.resolve("refs/heads/linked"), f.root)
+        assertEquals("REPOSITORY_UNSUPPORTED", assertFailsWith<GitRepositoryException> {
+            GitRepositoryInspector.inspect(f.runner, gitDir, workTree)
+        }.code)
     }
 
     @Test fun `missing corrupt and unreviewed repositories have distinct outcomes`(): Unit = GitTestRepositories().use { f ->

@@ -7,7 +7,7 @@ import { GitWorkspace } from '../src/git/GitWorkspace';
 
 const transport = vi.hoisted(() => ({
   get: vi.fn<(kind: string, path: string, settings?: { signal?: AbortSignal }) => Promise<unknown>>(),
-  post: vi.fn<(kind: string, path: string, request: string, data: unknown, settings: { csrfToken: string; ifMatch: string; idempotencyKey: string }) => Promise<unknown>>(),
+  post: vi.fn<(kind: string, path: string, request: string, data: unknown, settings: { csrfToken: string; ifMatch: string; idempotencyKey: string; signal?: AbortSignal }) => Promise<unknown>>(),
 }));
 vi.mock('../src/api/client', async load => ({ ...await load<typeof ClientModule>(), createApiClient: () => transport }));
 
@@ -46,6 +46,8 @@ let conflictState: { repositoryId: string; worktreeId: string; mergeInProgress: 
 let conflictReads = 0;
 let divergenceHead: string;
 let operationOverride: (() => unknown) | null = null;
+let provenanceFails = false;
+let jobFails = false;
 
 function status(dirty: boolean) {
   return { repositoryId, worktreeId, repositoryVersion: 'repo_v1', worktreeVersion: 'tree_v1', headState: 'attached', headObjectId: head,
@@ -54,9 +56,15 @@ function status(dirty: boolean) {
     notices: [{ code: dirty ? 'dirty' : 'clean', message: dirty ? 'The work tree has changes.' : 'The work tree is clean.' }], entries, nextCursor: null };
 }
 
+let historyGate: Promise<void> | null = null;
+let unstagedDiffGate: Promise<void> | null = null;
+
 function serve(kind: string, path: string): Promise<unknown> {
+  if (unstagedDiffGate && path.includes('scope=unstaged')) { const gate = unstagedDiffGate; unstagedDiffGate = null; return gate.then(() => serve(kind, path)); }
+  if (historyGate && path.includes('/history?cursor=')) { const gate = historyGate; historyGate = null; return gate.then(() => serve(kind, path)); }
   const [route = '', query = ''] = path.split('?');
-  const data = (() => {
+  let data: unknown;
+  try { data = (() => {
     if (route === `/jobs/${jobId}/repositories`) return { jobId, repositories: listing, operations: [] };
     if (route === `${base}/status`) {
       const cursor = new URLSearchParams(query).get('cursor');
@@ -83,14 +91,20 @@ function serve(kind: string, path: string): Promise<unknown> {
     }
     if (route === `${base}/diff`) {
       const params = new URLSearchParams(query);
-      if (params.get('scope') === 'commit') return { repositoryId, worktreeId, scope: 'commit', commitObjectId: params.get('commit'), parentObjectId: null,
-        complete: true, nextCursor: null, patch: null, files: [{ fileId: 'file_c', path: 'src/main.c', pathEscaped: false, originalPath: null,
-          change: 'added', oldObjectId: null, newObjectId: other, oldMode: '000000', newMode: '100644', binary: false, additions: 3, deletions: 0, newSizeBytes: 40 }] };
+      if (params.get('scope') === 'commit') {
+        const file = (fileId: string, path: string) => ({ fileId, path, pathEscaped: false, originalPath: null,
+          change: 'added', oldObjectId: null, newObjectId: other, oldMode: '000000', newMode: '100644', binary: false, additions: 3, deletions: 0, newSizeBytes: 40 });
+        const second = params.get('cursor') === 'diff_page_2';
+        return { repositoryId, worktreeId, scope: 'commit', commitObjectId: params.get('commit'), parentObjectId: null, complete: true, patch: null,
+          nextCursor: paged && !second ? 'diff_page_2' : null, files: second ? [file('file_d', 'src/second.c')] : [file('file_c', 'src/main.c')] };
+      }
       return { repositoryId, worktreeId, scope: params.get('scope'), commitObjectId: null, parentObjectId: head, complete: true, nextCursor: null,
         files: [{ fileId: params.get('file'), path: 'src/util.c', pathEscaped: false, originalPath: null, change: 'modified', oldObjectId: older,
           newObjectId: other, oldMode: '100644', newMode: '100644', binary: false, additions: 1, deletions: 1, newSizeBytes: 12 }],
         patch: { fileId: params.get('file'), text: '@@ -1 +1 @@\n-int a;\n+int b;\n', truncated: false, binary: false } };
     }
+    if (route === `${base}/provenance/${older}` && provenanceFails) throw new ApiClientError('http_error', { status: 422 });
+    if (route === `/jobs/${jobId}` && jobFails) throw new ApiClientError('timeout');
     if (route === `${base}/provenance/${older}`) return { repositoryId, objectId: older, objectFormat: 'sha1', committedAt: '2026-10-25T00:00:00Z',
       subject: 'Record candidate', refNames: ['refs/tags/v1'], mapping, worktreeDirtyAtCommit: false,
       export: { sha256: 'e'.repeat(64), sizeBytes: 512, files: 1, skippedEntries: 0, verification: 'tree-blob-ids-match' } };
@@ -117,7 +131,7 @@ function serve(kind: string, path: string): Promise<unknown> {
     if (route === `/jobs/${jobId}`) return { jobId, version: 'job_v3' };
     if (route.startsWith(`/jobs/${jobId}/repositories/`) && route.includes('/operations/')) return operation('completed', 'git.attach').data;
     throw new Error(`unexpected ${kind} ${path}`);
-  })();
+  })(); } catch (failure: unknown) { return Promise.reject(failure instanceof Error ? failure : new Error(String(failure))); }
   return Promise.resolve({ data });
 }
 
@@ -135,6 +149,10 @@ beforeEach(() => {
   remoteList = [{ remoteId: 'remote_1', name: 'origin', transport: 'https', display: 'https://git.example.org/team/project.git',
     credential: 'configured', allowed: true, fetchedAt: null, fetchOperationId: null,
     trackingRefs: [{ refId: 'ref_origin_main', name: 'refs/remotes/origin/main', objectId: other }] }];
+  provenanceFails = false;
+  jobFails = false;
+  historyGate = null;
+  unstagedDiffGate = null;
   entries = [entry('file_s', 'src/util.c', 'modified', 'modified'), entry('file_u', 'src/new.c', 'none', 'none', true)];
   historyPages = { first: { entries: [commitSummary(head, 'Work in progress', false)], nextCursor: 'page2' },
     page2: { entries: [commitSummary(older, 'Record candidate', true)], nextCursor: null } };
@@ -143,6 +161,273 @@ beforeEach(() => {
 function mount(capabilities: Capability[] = supported) {
   return render(<GitWorkspace jobId={jobId} basePath="/nested/" session={session} capabilities={capabilities} pollIntervalMs={1} />);
 }
+
+function deferred() {
+  let resolve = () => {};
+  const promise = new Promise<void>(done => { resolve = done; });
+  return { promise, resolve };
+}
+
+it.each(['diff', 'provenance'])('keeps the latest inspection and tag draft when an older %s answers late', async delayed => {
+  const gate = deferred();
+  historyPages.first = { entries: [commitSummary(head, 'Newest', false), commitSummary(older, 'Previous', true)], nextCursor: null };
+  transport.get.mockImplementation(async (kind, path) => {
+    if (path === `${base}/provenance/${head}`) {
+      if (delayed === 'provenance') await gate.promise;
+      return serve(kind, `${base}/provenance/${older}`);
+    }
+    if (delayed === 'diff' && path.includes(`commit=${head}`)) await gate.promise;
+    return serve(kind, path);
+  });
+  transport.post.mockResolvedValueOnce(operation('completed', 'git.tag'));
+  mount();
+  fireEvent.click(await screen.findByRole('button', { name: `Inspect ${head.slice(0, 12)}` }));
+  fireEvent.click(screen.getByRole('button', { name: `Inspect ${older.slice(0, 12)}` }));
+  await screen.findByRole('heading', { name: `Commit ${older.slice(0, 12)}` });
+  fireEvent.input(screen.getByLabelText('Tag name'), { target: { value: 'reviewed-target' } });
+  gate.resolve();
+  await new Promise(resolve => setTimeout(resolve, 20));
+  expect(screen.queryByRole('heading', { name: `Commit ${head.slice(0, 12)}` })).toBeNull();
+  expect(screen.getByLabelText('Tag name')).toHaveProperty('value', 'reviewed-target');
+  expect(screen.getByRole('link', { name: 'Download source export' }).getAttribute('href')).toContain(`/exports/${older}`);
+  fireEvent.click(screen.getByRole('button', { name: 'Tag this commit' }));
+  await waitFor(() => expect(transport.post).toHaveBeenCalledOnce());
+  expect(transport.post.mock.calls[0]?.[3]).toMatchObject({ name: 'reviewed-target', targetObjectId: older });
+});
+
+it('ignores an obsolete inspection failure and resets a tag draft on a deliberate target change', async () => {
+  const gate = deferred();
+  historyPages.first = { entries: [commitSummary(head, 'Newest', false), commitSummary(older, 'Previous', true)], nextCursor: null };
+  transport.get.mockImplementation(async (kind, path) => {
+    if (path.includes(`commit=${head}`)) { await gate.promise; throw new ApiClientError('timeout'); }
+    if (path === `${base}/provenance/${head}`) return serve(kind, `${base}/provenance/${older}`);
+    return serve(kind, path);
+  });
+  mount();
+  fireEvent.click(await screen.findByRole('button', { name: `Inspect ${head.slice(0, 12)}` }));
+  fireEvent.click(screen.getByRole('button', { name: `Inspect ${older.slice(0, 12)}` }));
+  fireEvent.input(await screen.findByLabelText('Tag name'), { target: { value: 'old-target-draft' } });
+  gate.resolve();
+  await new Promise(resolve => setTimeout(resolve, 20));
+  expect(screen.getByRole('status').textContent).toBe('');
+  transport.get.mockImplementation((kind, path) => serve(kind, path === `${base}/provenance/${head}` ? `${base}/provenance/${older}` : path));
+  fireEvent.click(screen.getByRole('button', { name: `Inspect ${head.slice(0, 12)}` }));
+  await screen.findByRole('heading', { name: `Commit ${head.slice(0, 12)}` });
+  expect(screen.getByLabelText('Tag name')).toHaveProperty('value', '');
+});
+
+it.each(['refused request', 'failed operation'])('keeps a tag draft after a %s, refreshes guards and clears only after a successful retry', async failure => {
+  if (failure === 'refused request') transport.post.mockRejectedValueOnce(new ApiClientError('http_error', { status: 409 }));
+  else transport.post.mockResolvedValueOnce(operation('failed', 'git.tag'));
+  transport.post.mockResolvedValueOnce(operation('completed', 'git.tag'));
+  mount();
+  const inspect = async () => {
+    fireEvent.click(await screen.findByRole('button', { name: 'Older commits' }));
+    fireEvent.click(await screen.findByRole('button', { name: `Inspect ${older.slice(0, 12)}` }));
+    return screen.findByLabelText('Tag name');
+  };
+  fireEvent.input(await inspect(), { target: { value: 'keep-my-tag-draft' } });
+  // The refusal still refreshes the reviewed guards; it must not discard the draft with the detail.
+  transport.get.mockImplementation(async (kind, path) => {
+    const result = await serve(kind, path);
+    return kind === 'gitStatus' ? { data: { ...status(true), repositoryVersion: 'repo_v2', worktreeVersion: 'tree_v2' } } : result;
+  });
+  fireEvent.click(screen.getByRole('button', { name: 'Tag this commit' }));
+  await screen.findByText(failure === 'refused request' ? /The server refused Tag this commit/ : /Tag this commit did not complete/);
+  await waitFor(() => expect(transport.get.mock.calls.filter(call => call[0] === 'gitRepositories')).toHaveLength(2));
+  await waitFor(() => expect(screen.queryByLabelText('Tag name')).toBeNull());
+  expect(transport.post).toHaveBeenCalledOnce();
+  expect(await inspect()).toHaveProperty('value', 'keep-my-tag-draft');
+  fireEvent.click(screen.getByRole('button', { name: 'Tag this commit' }));
+  await screen.findByText('Tag this commit: Done.');
+  expect(transport.post).toHaveBeenCalledTimes(2);
+  expect(transport.post.mock.calls[1]?.[3]).toMatchObject({ name: 'keep-my-tag-draft', targetObjectId: older,
+    guards: { repositoryVersion: 'repo_v2', worktreeVersion: 'tree_v2' } });
+  expect(transport.post.mock.calls[1]?.[4]).toMatchObject({ ifMatch: '"tree_v2"' });
+  await waitFor(() => expect(transport.get.mock.calls.filter(call => call[0] === 'gitRepositories')).toHaveLength(3));
+  await waitFor(() => expect(screen.queryByLabelText('Tag name')).toBeNull());
+  expect(await inspect()).toHaveProperty('value', '');
+});
+
+it('retains a tag draft through a manual refresh but discards it after inspecting another target', async () => {
+  historyPages.first = { entries: [commitSummary(head, 'Newest', false), commitSummary(older, 'Previous', true)], nextCursor: null };
+  mount();
+  fireEvent.click(await screen.findByRole('button', { name: `Inspect ${older.slice(0, 12)}` }));
+  fireEvent.input(await screen.findByLabelText('Tag name'), { target: { value: 'same-target-draft' } });
+  fireEvent.click(screen.getByRole('button', { name: 'Refresh repository' }));
+  await waitFor(() => expect(screen.queryByLabelText('Tag name')).toBeNull());
+  fireEvent.click(screen.getByRole('button', { name: `Inspect ${older.slice(0, 12)}` }));
+  expect(await screen.findByLabelText('Tag name')).toHaveProperty('value', 'same-target-draft');
+  fireEvent.click(screen.getByRole('button', { name: `Inspect ${head.slice(0, 12)}` }));
+  await screen.findByRole('heading', { name: `Commit ${head.slice(0, 12)}` });
+  expect(screen.getByLabelText('Tag name')).toHaveProperty('value', '');
+  fireEvent.click(screen.getByRole('button', { name: `Inspect ${older.slice(0, 12)}` }));
+  await screen.findByRole('heading', { name: `Commit ${older.slice(0, 12)}` });
+  expect(screen.getByLabelText('Tag name')).toHaveProperty('value', '');
+});
+
+it('does not reuse a tag draft for the same object in a different repository', async () => {
+  historyPages.first = { entries: [commitSummary(older, 'Previous', true)], nextCursor: null };
+  mount();
+  fireEvent.click(await screen.findByRole('button', { name: `Inspect ${older.slice(0, 12)}` }));
+  fireEvent.input(await screen.findByLabelText('Tag name'), { target: { value: 'old-repository-draft' } });
+  const replacementId = 'repository_' + '4'.repeat(32);
+  listing = [{ ...repository, repositoryId: replacementId }];
+  transport.get.mockImplementation(async (kind, path) => {
+    const result = await serve(kind, path.replace(replacementId, repositoryId)) as { data: Record<string, unknown> };
+    return kind === 'gitRepositories' ? result : { data: { ...result.data, repositoryId: replacementId } };
+  });
+  fireEvent.click(screen.getByRole('button', { name: 'Refresh repository' }));
+  await screen.findByText(replacementId);
+  fireEvent.click(screen.getByRole('button', { name: `Inspect ${older.slice(0, 12)}` }));
+  expect(await screen.findByLabelText('Tag name')).toHaveProperty('value', '');
+  expect(transport.post).not.toHaveBeenCalled();
+});
+
+it('does not clear another target draft when an earlier tag completes', async () => {
+  const gate = deferred();
+  historyPages.first = { entries: [commitSummary(head, 'Newest', false), commitSummary(older, 'Previous', true)], nextCursor: null };
+  transport.get.mockImplementation((kind, path) => serve(kind, path === `${base}/provenance/${head}` ? `${base}/provenance/${older}` : path));
+  transport.post.mockImplementationOnce(async () => { await gate.promise; return operation('completed', 'git.tag'); });
+  mount();
+  fireEvent.click(await screen.findByRole('button', { name: `Inspect ${older.slice(0, 12)}` }));
+  fireEvent.input(await screen.findByLabelText('Tag name'), { target: { value: 'submitted-for-previous' } });
+  fireEvent.click(screen.getByRole('button', { name: 'Tag this commit' }));
+  await waitFor(() => expect(transport.post).toHaveBeenCalledOnce());
+  fireEvent.click(screen.getByRole('button', { name: `Inspect ${head.slice(0, 12)}` }));
+  await screen.findByRole('heading', { name: `Commit ${head.slice(0, 12)}` });
+  fireEvent.input(screen.getByLabelText('Tag name'), { target: { value: 'new-target-draft' } });
+  gate.resolve();
+  await screen.findByText('Tag this commit: Done.');
+  await waitFor(() => expect(transport.get.mock.calls.filter(call => call[0] === 'gitRepositories')).toHaveLength(2));
+  await waitFor(() => expect(screen.queryByLabelText('Tag name')).toBeNull());
+  fireEvent.click(screen.getByRole('button', { name: `Inspect ${head.slice(0, 12)}` }));
+  expect(await screen.findByLabelText('Tag name')).toHaveProperty('value', 'new-target-draft');
+  expect(transport.post.mock.calls[0]?.[3]).toMatchObject({ name: 'submitted-for-previous', targetObjectId: older });
+});
+
+it('explains active worker refusals using fixed local copy without retrying', async () => {
+  entries = [];
+  transport.post.mockRejectedValueOnce(new ApiClientError('http_error', { status: 409, serverCode: 'ACTIVE_RUN' }));
+  mount();
+  fireEvent.click(await screen.findByRole('button', { name: 'Switch to topic' }));
+  await waitFor(() => expect(screen.getByRole('status').textContent).toMatch(/worker.*Wait/i));
+  expect(transport.post).toHaveBeenCalledOnce();
+});
+
+it.each(['import', 'clone'])('admits %s once and never posts after leaving while the initial job read is pending', async action => {
+  listing = [];
+  const gate = deferred();
+  let signal: AbortSignal | undefined;
+  transport.get.mockImplementation(async (kind, path, settings) => {
+    if (kind === 'job') { signal = settings?.signal; await gate.promise; }
+    return serve(kind, path);
+  });
+  const view = mount();
+  fireEvent.input(await screen.findByLabelText(action === 'import' ? 'Repository name' : 'Remote URL'),
+    { target: { value: action === 'import' ? 'local' : 'https://git.example.org/team/project.git' } });
+  const form = screen.getByRole('button', { name: action === 'import' ? 'Import repository' : 'Clone repository' }).closest('form')!;
+  fireEvent.submit(form); fireEvent.submit(form);
+  expect(transport.get.mock.calls.filter(call => call[0] === 'job')).toHaveLength(1);
+  view.unmount();
+  expect(signal?.aborted).toBe(true);
+  gate.resolve();
+  await new Promise(resolve => setTimeout(resolve, 20));
+  expect(transport.post).not.toHaveBeenCalled();
+});
+
+it.each(['import', 'clone'])('stops observing an admitted %s on unmount without sending a server cancellation', async action => {
+  listing = [];
+  const gate = deferred();
+  let signal: AbortSignal | undefined;
+  transport.post.mockResolvedValueOnce(operation('queued', action === 'import' ? 'git.attach' : 'git.clone'));
+  transport.get.mockImplementation(async (kind, path, settings) => {
+    if (kind === 'operation') { signal = settings?.signal; await gate.promise; }
+    return serve(kind, path);
+  });
+  const view = mount();
+  fireEvent.input(await screen.findByLabelText(action === 'import' ? 'Repository name' : 'Remote URL'),
+    { target: { value: action === 'import' ? 'local' : 'https://git.example.org/team/project.git' } });
+  fireEvent.click(screen.getByRole('button', { name: action === 'import' ? 'Import repository' : 'Clone repository' }));
+  await waitFor(() => expect(transport.get.mock.calls.filter(call => call[0] === 'operation')).toHaveLength(1));
+  expect(transport.post.mock.calls[0]?.[4].signal).toBe(signal);
+  view.unmount();
+  expect(signal?.aborted).toBe(true);
+  gate.resolve();
+  await new Promise(resolve => setTimeout(resolve, 20));
+  expect(transport.post).toHaveBeenCalledOnce();
+  expect(transport.get.mock.calls.filter(call => call[0] === 'operation')).toHaveLength(1);
+});
+
+it('offers bounded anchored continuation beyond 2,000 refs without duplicate admission', async () => {
+  entries = [];
+  const gate = deferred();
+  transport.get.mockImplementation(async (kind, path) => {
+    if (kind !== 'gitRefs') return serve(kind, path);
+    const start = Number(new URLSearchParams(path.split('?')[1]).get('cursor') ?? 0);
+    if (start === 2000) await gate.promise;
+    return { data: { repositoryId, nextCursor: start < 2000 ? String(start + 200) : null,
+      refs: Array.from({ length: start === 2000 ? 1 : 200 }, (_, index) => ({ refId: `ref_${start + index}`, kind: 'branch',
+        displayName: `refs/heads/topic${start + index}`, objectId: other, peeledObjectId: null, version: 'v1', current: false })) } };
+  });
+  transport.post.mockResolvedValueOnce(operation('completed', 'git.switch'));
+  const view = mount();
+  // Avoid computing thousands of accessible names in jsdom; these are native, text-labelled buttons.
+  const button = (name: string) => [...view.container.querySelectorAll('button')].find(item => item.textContent === name);
+  await waitFor(() => expect(button('Switch to topic1999')).toBeTruthy());
+  expect(button('Switch to topic2000')).toBeUndefined();
+  expect(screen.getByText(/branch and tag list is incomplete/i)).toBeTruthy();
+  const more = button('More branches and tags')!;
+  fireEvent.click(more); fireEvent.click(more);
+  expect(transport.get.mock.calls.filter(call => call[1].includes('cursor=2000'))).toHaveLength(1);
+  gate.resolve();
+  await waitFor(() => expect(button('Switch to topic2000')).toBeTruthy());
+  expect(button('More branches and tags')).toBeUndefined();
+  fireEvent.click(button('Switch to topic2000')!);
+  await waitFor(() => expect(transport.post).toHaveBeenCalledOnce());
+  expect(transport.post.mock.calls[0]?.[3]).toMatchObject({ refId: 'ref_2000', objectId: other });
+}, 20_000);
+
+it('discards a ref continuation after refresh, including obsolete failures', async () => {
+  const gate = deferred();
+  transport.get.mockImplementation(async (kind, path) => {
+    if (kind !== 'gitRefs') return serve(kind, path);
+    const cursor = new URLSearchParams(path.split('?')[1]).get('cursor');
+    if (cursor === 'last') { await gate.promise; throw new ApiClientError('timeout'); }
+    const page = Number(cursor ?? 0);
+    return { data: { repositoryId, refs: [], nextCursor: page === 9 ? 'last' : String(page + 1) } };
+  });
+  mount();
+  fireEvent.click(await screen.findByRole('button', { name: 'More branches and tags' }));
+  transport.get.mockImplementation(serve);
+  fireEvent.click(screen.getByRole('button', { name: 'Refresh repository' }));
+  await screen.findByRole('button', { name: 'Switch to topic' });
+  gate.resolve();
+  await new Promise(resolve => setTimeout(resolve, 20));
+  expect(screen.getByRole('status').textContent).toBe('');
+  expect(screen.queryByRole('button', { name: 'More branches and tags' })).toBeNull();
+});
+
+it('traverses a 1,001-commit history without omissions, duplicates or mutations', async () => {
+  entries = [];
+  const all = Array.from({ length: 1001 }, (_, index) => commitSummary((index + 1).toString(16).padStart(40, '0'), `Commit number ${index}`, false));
+  historyPages = {};
+  for (let start = 0; start < all.length; start += 20) {
+    historyPages[start === 0 ? 'first' : `history_${start}`] = {
+      entries: all.slice(start, start + 20), nextCursor: start + 20 < all.length ? `history_${start + 20}` : null };
+  }
+  const view = mount();
+  const items = () => view.container.querySelectorAll('ol[aria-label="History"] > li');
+  await waitFor(() => expect(items().length).toBe(20));
+  for (let count = 20; count < all.length; count += 20) {
+    const more = [...view.container.querySelectorAll('button')].find(button => button.textContent === 'Older commits')!;
+    fireEvent.click(more);
+    await waitFor(() => expect(items().length).toBe(Math.min(count + 20, all.length)));
+  }
+  expect([...items()].map(item => item.querySelector('code')?.title)).toEqual(all.map(item => item.objectId));
+  expect(transport.get.mock.calls.filter(call => call[0] === 'gitHistory')).toHaveLength(51);
+  expect(transport.post).not.toHaveBeenCalled();
+}, 20_000);
 
 it('explains unavailable Git without any request and keeps the route usable', () => {
   mount([capability('git', 'unavailable', 'Git 2.20.1 is older than the required 2.36.0.', 'GIT_VERSION_UNSUPPORTED')]);
@@ -336,6 +621,23 @@ it('explains and disables a commit or selection beyond the 200-file request boun
   expect(screen.getByRole('button', { name: 'Unstage selected' })).toHaveProperty('disabled', true);
 }, 20_000);
 
+it('reviews and commits the complete merge index beyond the ordinary 200-file selection bound', async () => {
+  conflictState = { repositoryId, worktreeId, mergeInProgress: true, integration: null, files: [] };
+  entries = Array.from({ length: 201 }, (_, index) => entry(`file_${index}`, `src/f${index}.c`, 'added', 'none'));
+  transport.post.mockResolvedValueOnce(operation('completed', 'git.commit'));
+  mount();
+  await screen.findByLabelText('Commit message');
+  expect(screen.queryByText(/one commit can include at most 200/)).toBeNull();
+  const commitReview = screen.getByRole('list', { name: 'Exactly these staged files will be committed:' });
+  expect(within(commitReview).getAllByRole('listitem')).toHaveLength(201);
+  expect(screen.getByRole('button', { name: 'Commit staged files' })).toHaveProperty('disabled', false);
+  fireEvent.input(screen.getByLabelText('Commit message'), { target: { value: 'Merge all incoming changes' } });
+  fireEvent.click(screen.getByRole('button', { name: 'Commit staged files' }));
+  await waitFor(() => expect(transport.post).toHaveBeenCalledOnce());
+  expect(transport.post.mock.calls[0]?.[3]).toMatchObject({ action: 'git.commit', selectedFileIds: [], reviewedMergeIndex: true,
+    guards: { worktreeVersion: 'tree_v1' } });
+});
+
 it('reviews fetched divergence and offers only reviewed fast-forward or merge, never rebase', async () => {
   transport.post.mockResolvedValueOnce(operation('completed', 'git.merge'));
   mount();
@@ -524,4 +826,142 @@ it('offers cancellation while the first repository is being cloned', async () =>
   expect(transport.post.mock.calls[1]?.slice(1, 4)).toEqual([`/jobs/${jobId}/repositories/${repositoryId}/operations/operation_1/cancel`,
     'gitOperationCancelRequest', { action: 'git.cancel' }]);
   expect(await screen.findByText(/Clone repository did not complete: The clone was cancelled/)).toBeTruthy();
+});
+
+it('lists every file of an inspected commit and drops an older-history page that arrives after a refresh', async () => {
+  paged = true;
+  entries = [];
+  mount();
+  fireEvent.click(await screen.findByRole('button', { name: 'Older commits' }));
+  expect(await screen.findByText('Record candidate')).toBeTruthy();
+  fireEvent.click(screen.getByRole('button', { name: `Inspect ${older.slice(0, 12)}` }));
+  expect(await screen.findByText('src/second.c')).toBeTruthy();
+  expect(screen.getByText('src/main.c')).toBeTruthy();
+  expect(transport.get).toHaveBeenCalledWith('gitDiff', `${base}/diff?scope=commit&commit=${older}&limit=200&cursor=diff_page_2`);
+  // A pending older page must not be appended to history that was read again meanwhile.
+  let open = () => {};
+  historyGate = new Promise<void>(resolve => { open = resolve; });
+  fireEvent.click(screen.getByRole('button', { name: 'Refresh repository' }));
+  await waitFor(() => expect(screen.queryByText('Record candidate')).toBeNull());
+  fireEvent.click(await screen.findByRole('button', { name: 'Older commits' }));
+  fireEvent.click(screen.getByRole('button', { name: 'Refresh repository' }));
+  await waitFor(() => expect(transport.get.mock.calls.filter(call => String(call[1]).includes('/history?limit=20')).length).toBeGreaterThanOrEqual(3));
+  open();
+  await new Promise(resolve => setTimeout(resolve, 50));
+  expect(screen.queryByText('Record candidate')).toBeNull();
+});
+
+it('requests each older history page once and keeps changed files visible when provenance is unavailable', async () => {
+  provenanceFails = true;
+  mount();
+  const olderButton = await screen.findByRole('button', { name: 'Older commits' });
+  fireEvent.click(olderButton); fireEvent.click(olderButton);
+  expect(await screen.findByText('Record candidate')).toBeTruthy();
+  expect(screen.getAllByText('Record candidate')).toHaveLength(1);
+  expect(transport.get.mock.calls.filter(call => String(call[1]).includes('/history?cursor=page2'))).toHaveLength(1);
+  fireEvent.click(screen.getByRole('button', { name: `Inspect ${older.slice(0, 12)}` }));
+  expect(await screen.findByText('src/main.c')).toBeTruthy();
+  expect(screen.getByText(/provenance and source export of this commit are unavailable/)).toBeTruthy();
+  expect(screen.queryByRole('link', { name: 'Download source export' })).toBeNull();
+  expect(screen.getByLabelText('Tag name')).toBeTruthy();
+});
+
+it('reports a failed job read during import instead of stopping silently', async () => {
+  listing = [];
+  jobFails = true;
+  mount();
+  fireEvent.input(await screen.findByLabelText('Repository name'), { target: { value: 'local' } });
+  fireEvent.click(screen.getByRole('button', { name: 'Import repository' }));
+  expect(await screen.findByText(/The server refused Import repository/)).toBeTruthy();
+  expect(transport.post).not.toHaveBeenCalled();
+  expect(screen.getByRole('button', { name: 'Import repository' })).toHaveProperty('disabled', false);
+});
+
+it('shows the selected work tree worker lock before checkout and removal, without blocking reads or ref creation', async () => {
+  entries = [];
+  const notice = { code: 'active-worker', message: 'A worker owns this work tree. Switching and removal wait; refresh after it finishes.' };
+  transport.get.mockImplementation(async (kind, path) => {
+    if (kind === 'gitStatus') return { data: { ...status(false), worktreeId: path.includes(`worktree=${linkedId}`) ? linkedId : worktreeId, notices: [notice] } };
+    return serve(kind, path);
+  });
+  mount();
+  expect(await screen.findByText(notice.message)).toBeTruthy();
+  expect(screen.getByRole('button', { name: 'Switch to topic' })).toHaveProperty('disabled', true);
+  fireEvent.click(screen.getByRole('button', { name: `Show ${linkedId}` }));
+  await waitFor(() => expect(transport.get.mock.calls.some(call => call[1].includes(`worktree=${linkedId}`))).toBe(true));
+  await waitFor(() => expect(screen.getByRole('button', { name: `Show ${linkedId}` })).toHaveProperty('disabled', true));
+  expect(screen.getByRole('button', { name: `Remove ${linkedId}` })).toHaveProperty('disabled', true);
+  expect(screen.getByRole('button', { name: 'Create branch at HEAD' })).toHaveProperty('disabled', false);
+  expect(screen.getByRole('button', { name: 'Older commits' })).toHaveProperty('disabled', false);
+  expect(transport.post).not.toHaveBeenCalled();
+  transport.get.mockImplementation(async (kind, path) => {
+    if (kind === 'gitStatus') return { data: { ...status(false), worktreeId: linkedId } };
+    return serve(kind, path);
+  });
+  fireEvent.click(screen.getByRole('button', { name: 'Refresh repository' }));
+  await waitFor(() => expect(screen.getByRole('button', { name: 'Switch to topic' })).toHaveProperty('disabled', false));
+  expect(screen.getByRole('button', { name: `Remove ${linkedId}` })).toHaveProperty('disabled', false);
+});
+
+it('retains the selected linked tree after a refused removal and prevents tree changes during the mutation', async () => {
+  entries = [];
+  transport.get.mockImplementation(async (kind, path) => {
+    if (kind === 'gitStatus') return { data: { ...status(false), worktreeId: path.includes(`worktree=${linkedId}`) ? linkedId : worktreeId } };
+    return serve(kind, path);
+  });
+  const gate = deferred();
+  transport.post.mockImplementationOnce(async () => { await gate.promise; throw new ApiClientError('http_error', { status: 409 }); });
+  mount();
+  fireEvent.click(await screen.findByRole('button', { name: `Show ${linkedId}` }));
+  await waitFor(() => expect(screen.getByRole('button', { name: `Remove ${linkedId}` })).toHaveProperty('disabled', false));
+  fireEvent.click(screen.getByRole('button', { name: `Remove ${linkedId}` }));
+  await waitFor(() => expect(transport.post).toHaveBeenCalledOnce());
+  expect(screen.getByRole('button', { name: `Show ${worktreeId}` })).toHaveProperty('disabled', true);
+  gate.resolve();
+  await screen.findByText(/The server refused Remove/);
+  await waitFor(() => expect(transport.get.mock.calls.filter(call => call[0] === 'gitRepositories')).toHaveLength(3));
+  expect(screen.getByRole('button', { name: `Show ${linkedId}` })).toHaveProperty('disabled', true);
+  expect(transport.post.mock.calls[0]?.[3]).toMatchObject({ worktreeId: linkedId });
+});
+
+it.each(['diff selection', 'diff refresh', 'history refresh'])('drops obsolete errors after a newer %s', async scenario => {
+  const gate = deferred();
+  let answered = false;
+  transport.get.mockImplementation(async (kind, path) => {
+    if ((scenario.startsWith('diff') && kind === 'gitDiff' && path.includes('scope=unstaged')) ||
+        (scenario === 'history refresh' && kind === 'gitHistory' && path.includes('cursor='))) {
+      await gate.promise; answered = true;
+      throw new ApiClientError('http_error', { status: 409 });
+    }
+    return serve(kind, path);
+  });
+  mount();
+  await screen.findByRole('group', { name: 'Not staged' });
+  if (scenario === 'history refresh') fireEvent.click(screen.getByRole('button', { name: 'Older commits' }));
+  else fireEvent.click(within(screen.getByRole('group', { name: 'Not staged' })).getByRole('button', { name: 'Show diff for src/util.c' }));
+  if (scenario === 'diff selection') {
+    fireEvent.click(within(screen.getByRole('group', { name: 'Staged' })).getByRole('button', { name: 'Show diff for src/util.c' }));
+    await screen.findByText('Staged diff: src/util.c');
+  } else {
+    historyPages.first = { entries: [commitSummary(other, 'New generation', false)], nextCursor: null };
+    fireEvent.click(screen.getByRole('button', { name: 'Refresh repository' }));
+    await screen.findByText('New generation');
+  }
+  gate.resolve();
+  await waitFor(() => expect(answered).toBe(true));
+  expect(screen.getByRole('status').textContent).toBe('');
+});
+
+it('shows only the latest requested diff even when an earlier one answers later', async () => {
+  mount();
+  await screen.findByRole('group', { name: 'Staged' });
+  let open = () => {};
+  unstagedDiffGate = new Promise<void>(resolve => { open = resolve; });
+  fireEvent.click(within(screen.getByRole('group', { name: 'Not staged' })).getByRole('button', { name: 'Show diff for src/util.c' }));
+  fireEvent.click(within(screen.getByRole('group', { name: 'Staged' })).getByRole('button', { name: 'Show diff for src/util.c' }));
+  expect(await screen.findByText('Staged diff: src/util.c')).toBeTruthy();
+  open();
+  await new Promise(resolve => setTimeout(resolve, 50));
+  expect(screen.getByText('Staged diff: src/util.c')).toBeTruthy();
+  expect(screen.queryByText('Not staged diff: src/util.c')).toBeNull();
 });

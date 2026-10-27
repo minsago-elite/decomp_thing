@@ -93,7 +93,8 @@ internal class WebGitOperations(private val repositories: () -> ManagedGitReposi
             "git.push.reconcile" -> setOf("action", "worktreeId", "guards", "pushOperationId")
             else -> invalid()
         }
-        if (body.keys != expected) invalid()
+        val reviewedMergeIndex = action == "git.commit" && body["reviewedMergeIndex"] == JsonPrimitive(true)
+        if (body.keys != expected + if (reviewedMergeIndex) setOf("reviewedMergeIndex") else emptySet()) invalid()
         val worktreeId = id(body["worktreeId"])
         val guards = guards(body["guards"])
         GitOperationAction.entries.singleOrNull { it.wireName == action && it in GitRefRequest.ACTIONS }?.let { kind ->
@@ -150,7 +151,8 @@ internal class WebGitOperations(private val repositories: () -> ManagedGitReposi
         val files = (body["selectedFileIds"] as? JsonArray)?.map { element ->
             text(element).takeIf { it.matches(Regex("file_[0-9a-f]{32}")) } ?: invalid()
         }?.takeIf { it.size in (if (action == "git.commit") 0 else 1)..200 && it.toSet().size == it.size } ?: invalid()
-        val request = if (action == "git.commit") GitCommitRequest(worktreeId, guards, files, text(body["message"]))
+        if (reviewedMergeIndex && files.isNotEmpty()) invalid()
+        val request = if (action == "git.commit") GitCommitRequest(worktreeId, guards, files, text(body["message"]), reviewedMergeIndex)
             else GitStageRequest(worktreeId, guards, files, action == "git.stage")
         return request to guards
     }

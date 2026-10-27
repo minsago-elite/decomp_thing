@@ -17,7 +17,15 @@ const states = { current: 'settled', stale: 'pending', unknown: 'unknown' } as c
  * fast-forward or merge (rebase is never offered), and conflict review with concurrency-checked
  * resolutions, explicit staging and abort. The final commit stays in the commit review.
  */
-export function GitIntegrationPanel({ remotes, conflicts, destination, writable, readDivergence, readConflict, onConflictPage, onAction }: {
+export function GitIntegrationPanel(props: Parameters<typeof IntegrationReviewPanel>[0]) {
+  // File IDs identify a path, not its merge stages. Remount the review owner when the integration
+  // changes, synchronously clearing detail/drafts/checkboxes and isolating pending async reads.
+  // Include the unavailable/no-merge states so abort followed by another merge cannot reuse a review.
+  const identity = JSON.stringify([props.destination, props.conflicts?.mergeInProgress ?? null, props.conflicts?.integration ?? null]);
+  return <IntegrationReviewPanel key={identity} {...props} />;
+}
+
+function IntegrationReviewPanel({ remotes, conflicts, destination, writable, readDivergence, readConflict, onConflictPage, onAction }: {
   remotes: GitRemotes | null; conflicts: GitConflicts | null; writable: boolean;
   /** The work tree, branch and HEAD integration would change; a review of any other one is never shown. */
   destination: { worktreeId: string; headRefName: string | null; headObjectId: string | null };

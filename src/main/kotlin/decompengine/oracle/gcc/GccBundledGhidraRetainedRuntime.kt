@@ -74,7 +74,8 @@ internal class GccBundledGhidraRetainedRuntime private constructor(
     companion object {
         fun open(definition: GccCompilerEngineValidatedContainmentDefinition): GccBundledGhidraRetainedRuntime {
             val runtime = requireNotNull(definition.bundledRuntime) { "retained Ghidra runtime requires a bundled v2 definition" }
-            return open(runtime, definition.artifacts, listOf(definition.outputLease.path), definition.budgets)
+            return open(runtime, definition.artifacts, listOf(definition.outputLease.path), definition.budgets,
+                selectedEngineId = definition.engineId)
         }
 
         fun open(
@@ -82,6 +83,7 @@ internal class GccBundledGhidraRetainedRuntime private constructor(
             artifacts: List<GccCompilerEngineContainmentArtifactIdentity>,
             excludedRoots: List<Path>,
             budgets: GccCompilerEngineContainmentBudgets? = null,
+            selectedEngineId: String? = null,
         ): GccBundledGhidraRetainedRuntime {
             require(excludedRoots.size in 1..16 && excludedRoots.all { it.isAbsolute && it.normalize() == it }) {
                 "bundled Ghidra excluded roots are not bounded canonical paths"
@@ -91,12 +93,16 @@ internal class GccBundledGhidraRetainedRuntime private constructor(
             var nativeProfile: GccRetainedCompilerEngineProfile? = null
             try {
                 if (runtime.invocationVersion == 8) {
+                    require(selectedEngineId in setOf("cc1", "driver")) {
+                        "native call runtime admission requires the selected cc1 or driver operation engine"
+                    }
                     val selectedBudget = requireNotNull(budgets) { "native call runtime admission requires independently bound resource ceilings" }
                     val path = artifacts.single { it.role == GccCompilerEngineContainmentArtifactRole.BENCHMARK_PROFILE }.path
-                    val profile = GccRetainedCompilerEngineProfile.open(path)
+                    val profile = GccRetainedCompilerEngineProfile.open(path, checkNotNull(selectedEngineId))
                     nativeProfile = profile
                     profile.requireDisjoint(excludedRoots + runtime.root)
-                    profile.bindInvocation("cc1", artifacts, selectedBudget, nativeCallObservations = true)
+                    profile.bindInvocation(checkNotNull(selectedEngineId), artifacts, selectedBudget,
+                        bundledRuntime = runtime, nativeCallObservations = true)
                 }
                 deployment.reference.requireCandidate(runtime, artifacts)
                 require(excludedRoots.none { runtime.root.startsWith(it) || it.startsWith(runtime.root) }) {

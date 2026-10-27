@@ -58,7 +58,8 @@ class WebGitControllerTest {
         val service = WebJobService(store, JobAnalyzer { _, _ -> error("Unexpected analysis") }, JobReconstructor { _, _ -> error("Unexpected reconstruction") },
             attemptStoreFactory = { WorkflowAttemptStore.open(it).also { opened -> owner = opened } })
         val admitted: Path = Files.createDirectories(root.resolve("admitted")).toRealPath()
-        val repositories = ManagedGitRepositories(root, availability, service::gitSourceSnapshot,
+        val activeRuns = java.util.concurrent.ConcurrentHashMap<String, Boolean>()
+        val repositories = ManagedGitRepositories(root, availability, service::gitSourceSnapshot, activity = { activeRuns.toMap() },
             remotePolicy = decompengine.git.GitRemotePolicy(admittedRoot = admitted))
         val server: HttpServer = HttpServer.create(InetSocketAddress("127.0.0.1", 0), 0)
         val origin = "http://127.0.0.1:${server.address.port}"
@@ -192,6 +193,19 @@ class WebGitControllerTest {
         return "$collection/$repositoryId" to root.resolve("${job.id}/git/repositories/$repositoryId")
     }
 
+    @Test fun `status reports an active worker without claiming a Git operation is busy`(): Unit = Fixture().use { f ->
+        val (base, _) = f.initialized()
+        f.activeRuns[f.run.runId] = true
+        val held = data(f.read("$base/status"), 200, "gitStatus")
+        assertFalse(held.getValue("busy").jsonPrimitive.boolean)
+        val notice = held.getValue("notices").jsonArray.single { it.jsonObject.getValue("code").jsonPrimitive.content == "active-worker" }.jsonObject
+        assertTrue(notice.getValue("message").jsonPrimitive.content.contains("Switching and removal wait"))
+        assertFalse(held.toString().contains(f.root.toString()))
+        f.activeRuns[f.run.runId] = false
+        val released = data(f.read("$base/status"), 200, "gitStatus")
+        assertFalse(released.getValue("notices").jsonArray.any { it.jsonObject.getValue("code").jsonPrimitive.content == "active-worker" })
+    }
+
     @Test fun `status history diff and refs reads are bounded anchored and path-free`(): Unit = Fixture().use { f ->
         val (base, directory) = f.initialized()
         decompengine.git.GitTestRepositories().use { g ->
@@ -291,7 +305,12 @@ class WebGitControllerTest {
         val stagedIds = reviewed.getValue("entries").jsonArray.map { it.jsonObject }.filter { it.getValue("staged").jsonPrimitive.content != "none" }.map { it.getValue("fileId") }
         val commit = buildJsonObject { put("action", "git.commit"); put("worktreeId", reviewed.getValue("worktreeId")); put("guards", commitGuards)
             put("selectedFileIds", JsonArray(stagedIds)); put("message", "Record snapshot ünïcode") }
-        val commitResponse = change(commit, commitGuards.getValue("worktreeVersion").jsonPrimitive.content, "http_commit_intent_1")
+        val commitVersion = commitGuards.getValue("worktreeVersion").jsonPrimitive.content
+        error(change(JsonObject(commit + ("reviewedMergeIndex" to JsonPrimitive(true))), commitVersion, "http_commit_invalid1"), 422, "VALIDATION_FAILED")
+        error(change(JsonObject(commit + ("reviewedMergeIndex" to JsonPrimitive(false))), commitVersion, "http_commit_invalid2"), 422, "VALIDATION_FAILED")
+        error(change(JsonObject(commit + mapOf("reviewedMergeIndex" to JsonPrimitive(true), "selectedFileIds" to JsonArray(emptyList()))),
+            commitVersion, "http_commit_notmerge"), 422, "VALIDATION_FAILED")
+        val commitResponse = change(commit, commitVersion, "http_commit_intent_1")
         data(commitResponse, 202, "operation")
         val committed = f.awaitOperation(commitResponse.headers().firstValue("Location").orElseThrow())
         assertEquals("completed", committed.getValue("state").jsonPrimitive.content, committed.toString())
@@ -307,6 +326,47 @@ class WebGitControllerTest {
         assertEquals(committed.getValue("operationId"), data(replay, 202, "operation")["operationId"])
         assertEquals("true", replay.headers().firstValue("Idempotency-Replayed").orElseThrow())
         error(f.send(headers = mapOf("Cookie" to f.cookie), target = "$base/operations"), 405)
+    }
+
+    @Test fun `pending merge HTTP commit reviews a large complete index without an oversized selection`(): Unit = Fixture().use { f ->
+        val (base, directory) = f.initialized()
+        decompengine.git.GitTestRepositories().use { g ->
+            val workTree = directory.resolve("worktree")
+            val gitDir = directory.resolve("repository.git")
+            fun raw(vararg args: String, expect: Int = 0) = g.git("--git-dir=$gitDir", "--work-tree=$workTree", *args, expect = expect)
+            raw("add", "-A"); raw("commit", "-q", "-m", "base")
+            val branch = raw("symbolic-ref", "HEAD").trim()
+            raw("switch", "-q", "-c", "incoming")
+            repeat(201) { Files.writeString(workTree.resolve("incoming-$it.c"), "int remote_$it;\n") }
+            Files.writeString(workTree.resolve("src/modules/unit.c"), "int main(void) { return 2; }\n")
+            raw("add", "-A"); raw("commit", "-q", "-m", "incoming")
+            val target = raw("rev-parse", "HEAD").trim()
+            raw("switch", "-q", branch.removePrefix("refs/heads/"))
+            val ours = "int main(void) { return 1; }\n"
+            Files.writeString(workTree.resolve("src/modules/unit.c"), ours)
+            raw("add", "-A"); raw("commit", "-q", "-m", "ours")
+            val before = raw("rev-parse", "HEAD").trim()
+            raw("merge", "--no-edit", "incoming", expect = 1)
+            Files.writeString(workTree.resolve("src/modules/unit.c"), ours); raw("add", "src/modules/unit.c")
+            val status = data(f.read("$base/status?limit=200"), 200, "gitStatus")
+            assertTrue(status.getValue("complete").jsonPrimitive.boolean)
+            assertNotEquals(JsonNull, status.getValue("nextCursor"))
+            val last = data(f.read("$base/status?limit=200&cursor=${status.getValue("nextCursor").jsonPrimitive.content}"), 200, "gitStatus")
+            assertEquals(201, status.getValue("entries").jsonArray.size + last.getValue("entries").jsonArray.size)
+            val guards = buildJsonObject {
+                put("repositoryVersion", status.getValue("repositoryVersion")); put("worktreeVersion", status.getValue("worktreeVersion"))
+                put("expectedHeadObjectId", status.getValue("headObjectId")); put("expectedRefId", JsonNull); put("expectedRefObjectId", JsonNull)
+            }
+            val body = buildJsonObject { put("action", "git.commit"); put("worktreeId", status.getValue("worktreeId")); put("guards", guards)
+                put("selectedFileIds", JsonArray(emptyList())); put("reviewedMergeIndex", true); put("message", "Commit the reviewed merge index") }
+            val response = f.send("POST", body.toString(), f.headers(key = "http_large_merge_commit") +
+                ("If-Match" to "\"${guards.getValue("worktreeVersion").jsonPrimitive.content}\""), "$base/operations")
+            data(response, 202, "operation")
+            val result = f.awaitOperation(response.headers().firstValue("Location").orElseThrow())
+            assertEquals("completed", result.getValue("state").jsonPrimitive.content, result.toString())
+            assertEquals(listOf(before, target), raw("rev-list", "--parents", "-n", "1", "HEAD").trim().split(' ').drop(1))
+            assertEquals("int remote_200;\n", raw("show", "HEAD:incoming-200.c"))
+        }
     }
 
     @Test fun `branches, work trees, provenance and exports over HTTP name exact objects`(): Unit = Fixture().use { f ->
@@ -438,6 +498,88 @@ class WebGitControllerTest {
             error(change(push, "http_push_intent_02"), 404, "NOT_FOUND")
             error(change(mapOf("action" to JsonPrimitive("git.push.reconcile"), "pushOperationId" to JsonPrimitive("operation_${"0".repeat(32)}")),
                 "http_push_intent_03"), 404, "NOT_FOUND")
+        }
+    }
+
+    @Test fun `directory replacements keep workspace status and diff pages usable`(): Unit = Fixture().use { f ->
+        val (base, directory) = f.initialized()
+        decompengine.git.GitTestRepositories().use { g ->
+            val gitDir = directory.resolve("repository.git"); val workTree = directory.resolve("worktree")
+            fun raw(vararg args: String) = g.git("--git-dir=$gitDir", "--work-tree=$workTree", *args, cwd = workTree)
+            val component = Files.createDirectories(workTree.resolve("component.c"))
+            for (name in listOf("a.c", "b.c")) Files.writeString(component.resolve(name), "int original_child_$name;\n")
+            raw("add", "-A"); raw("commit", "-q", "-m", "base")
+            Files.delete(component.resolve("a.c")); Files.delete(component.resolve("b.c")); Files.delete(component)
+            Files.writeString(component, "int replacement;\n")
+            for (scope in listOf("unstaged", "staged")) {
+                if (scope == "staged") raw("add", "-A")
+                val workspace = data(f.read(base), 200, "gitWorkspace")
+                assertEquals(JsonPrimitive(true), workspace["dirty"])
+                val status = data(f.read("$base/status"), 200, "gitStatus")
+                val entries = status.getValue("entries").jsonArray.map { it.jsonObject }
+                assertEquals("deleted", entries.single { it.getValue("path").jsonPrimitive.content == "component.c/a.c" }
+                    .getValue(scope).jsonPrimitive.content)
+                val firstStatus = data(f.read("$base/status?limit=1"), 200, "gitStatus")
+                val statusCursor = firstStatus.getValue("nextCursor").jsonPrimitive.content
+                data(f.read("$base/status?limit=1&cursor=$statusCursor"), 200, "gitStatus")
+                val firstDiff = data(f.read("$base/diff?scope=$scope&limit=1"), 200, "gitDiff")
+                val diffCursor = firstDiff.getValue("nextCursor").jsonPrimitive.content
+                data(f.read("$base/diff?scope=$scope&limit=1&cursor=$diffCursor"), 200, "gitDiff")
+                val diff = data(f.read("$base/diff?scope=$scope"), 200, "gitDiff")
+                val deleted = diff.getValue("files").jsonArray.map { it.jsonObject }
+                    .single { it.getValue("path").jsonPrimitive.content == "component.c/a.c" }
+                val patch = data(f.read("$base/diff?scope=$scope&file=${deleted.getValue("fileId").jsonPrimitive.content}"), 200, "gitDiff")
+                    .getValue("patch").jsonObject
+                assertTrue(patch.getValue("text").jsonPrimitive.content.contains("-int original_child_a.c;"))
+                assertEquals(JsonPrimitive(false), patch["truncated"])
+                Files.writeString(component, "int replacement_changed_for_$scope;\n")
+                error(f.read("$base/status?limit=1&cursor=$statusCursor"), 409, "REF_CHANGED")
+                error(f.read("$base/diff?scope=$scope&limit=1&cursor=$diffCursor"), 409, "REF_CHANGED")
+                assertNotEquals(workspace.getValue("worktreeVersion"), data(f.read(base), 200, "gitWorkspace").getValue("worktreeVersion"))
+            }
+        }
+    }
+
+    @Test fun `history HTTP retains every parent of a 65-parent commit`(): Unit = Fixture().use { f ->
+        val (base, directory) = f.initialized()
+        decompengine.git.GitTestRepositories().use { g ->
+            val gitDir = directory.resolve("repository.git"); val workTree = directory.resolve("worktree")
+            fun raw(vararg args: String) = g.git("--git-dir=$gitDir", "--work-tree=$workTree", *args, cwd = workTree).trim()
+            raw("add", "-A"); raw("commit", "-q", "-m", "base")
+            val tree = raw("rev-parse", "HEAD^{tree}")
+            val parents = (1..65).map { raw("commit-tree", tree, "-m", "parent $it") }
+            val merge = raw("commit-tree", tree, *parents.flatMap { listOf("-p", it) }.toTypedArray(), "-m", "65 parents")
+            val history = data(f.read("$base/history?start=$merge&limit=1"), 200, "gitHistory")
+            val entry = history.getValue("entries").jsonArray.single().jsonObject
+            assertEquals(parents, entry.getValue("parentObjectIds").jsonArray.map { it.jsonPrimitive.content })
+            assertEquals(3200, schema.getValue("gitCommitSummary").jsonObject.getValue("properties").jsonObject
+                .getValue("parentObjectIds").jsonObject.getValue("maxItems").jsonPrimitive.int)
+        }
+    }
+
+    @Test fun `native filename re-edits invalidate status and diff cursors`(): Unit = Fixture().use { f ->
+        val (base, directory) = f.initialized()
+        decompengine.git.GitTestRepositories().use { g ->
+            val gitDir = directory.resolve("repository.git"); val workTree = directory.resolve("worktree")
+            fun raw(vararg args: String) = g.git("--git-dir=$gitDir", "--work-tree=$workTree", *args, cwd = workTree)
+            val native = Path.of(URI(workTree.toUri().toASCIIString() + "a%FF.c"))
+            Files.writeString(native, "int base;\n")
+            Files.writeString(workTree.resolve("z.c"), "int base;\n")
+            raw("add", "-A"); raw("commit", "-q", "-m", "base")
+            Files.writeString(native, "int first;\n")
+            Files.writeString(workTree.resolve("z.c"), "int first;\n")
+            val status = data(f.read("$base/status?limit=1"), 200, "gitStatus")
+            val diff = data(f.read("$base/diff?scope=unstaged&limit=1"), 200, "gitDiff")
+            val statusCursor = status.getValue("nextCursor").jsonPrimitive.content
+            val diffCursor = diff.getValue("nextCursor").jsonPrimitive.content
+            val beforeVersion = status.getValue("worktreeVersion")
+            Files.writeString(native, "int second;\nint more;\n")
+            error(f.read("$base/status?cursor=$statusCursor&limit=1"), 409, "REF_CHANGED")
+            error(f.read("$base/diff?scope=unstaged&cursor=$diffCursor&limit=1"), 409, "REF_CHANGED")
+            val refreshed = data(f.read("$base/status?limit=1"), 200, "gitStatus")
+            assertNotEquals(beforeVersion, refreshed.getValue("worktreeVersion"))
+            assertEquals(status.getValue("entries").jsonArray.single().jsonObject.getValue("fileId"),
+                refreshed.getValue("entries").jsonArray.single().jsonObject.getValue("fileId"))
         }
     }
 

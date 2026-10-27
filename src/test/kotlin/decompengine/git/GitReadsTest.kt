@@ -63,6 +63,52 @@ class GitReadsTest {
         assertEquals(stable, GitRepositoryInspector.inspect(f.runner, gitDir, workTree).statusDigest)
     }
 
+    @Test fun `directory to file replacements keep deleted descendants observable before and after staging`(): Unit = GitTestRepositories().use { f ->
+        val (gitDir, workTree) = f.managed("directory-replacement")
+        f.write(workTree, "component.c/sub/child.c", "int original_child;\n")
+        f.commitAll(gitDir, workTree, "base")
+        Files.delete(workTree.resolve("component.c/sub/child.c"))
+        Files.delete(workTree.resolve("component.c/sub"))
+        Files.delete(workTree.resolve("component.c"))
+        f.write(workTree, "component.c", "int replacement;\n")
+        for (scope in listOf(GitDiffScope.UNSTAGED, GitDiffScope.STAGED)) {
+            if (scope == GitDiffScope.STAGED) f.raw(gitDir, workTree, "add", "-A")
+            val before = GitRepositoryInspector.inspect(f.runner, gitDir, workTree)
+            assertTrue(before.dirty); assertTrue(before.status.complete)
+            val entries = before.status.entries.associateBy { it.path.exact }
+            val child = entries.getValue("component.c/sub/child.c")
+            if (scope == GitDiffScope.UNSTAGED) {
+                assertEquals(GitIndexChange.DELETED, child.unstaged)
+                assertTrue(entries.getValue("component.c").untracked)
+            } else {
+                assertEquals(GitIndexChange.DELETED, child.staged)
+                assertEquals(GitIndexChange.ADDED, entries.getValue("component.c").staged)
+            }
+            val diff = GitReads.diff(f.runner, gitDir, workTree, GitObjectFormat.SHA1, scope, null, null)
+            assertTrue(diff.complete)
+            val deleted = diff.files.single { it.path.exact == "component.c/sub/child.c" }
+            assertEquals(GitIndexChange.DELETED, deleted.change)
+            val patch = GitReads.patch(f.runner, gitDir, workTree, scope, null, null, deleted)
+            assertTrue(patch.text.contains("-int original_child;"), patch.text)
+            assertFalse(patch.truncated)
+            f.write(workTree, "component.c", "int replacement_with_a_longer_name_for_${scope.name};\n")
+            assertNotEquals(before.statusDigest, GitRepositoryInspector.inspect(f.runner, gitDir, workTree).statusDigest)
+        }
+    }
+
+    @Test fun `unobservable descendant errors are not treated as absent files`(): Unit = GitTestRepositories().use { f ->
+        val (gitDir, workTree) = f.managed("unobservable-descendant")
+        f.write(workTree, "component.c/child.c", "int child;\n")
+        f.commitAll(gitDir, workTree, "base")
+        Files.delete(workTree.resolve("component.c/child.c"))
+        Files.delete(workTree.resolve("component.c"))
+        Files.createSymbolicLink(workTree.resolve("component.c"), Path.of("component.c"))
+        // Git may omit paths it cannot lstat, so exercise the observation boundary directly.
+        kotlin.test.assertFailsWith<java.nio.file.FileSystemException> {
+            GitRepositoryInspector.worktreeStat(workTree, workTree.resolve("component.c/child.c"))
+        }
+    }
+
     @Test fun `conflicts are reported per path from a real merge`(): Unit = GitTestRepositories().use { f ->
         val (gitDir, workTree) = f.managed("conflict")
         f.write(workTree, "shared.c", "int base;\n"); f.commitAll(gitDir, workTree, "base")
@@ -257,6 +303,107 @@ class GitReadsTest {
         val patch = GitReads.patch(f.runner, gitDir, workTree, GitDiffScope.UNSTAGED, null, null, conflicted)
         assertTrue(patch.text.startsWith("diff --cc shared.c"), patch.text)
         assertTrue(patch.text.contains("int shared = 1;") && patch.text.contains("int shared = 2;"), patch.text)
+    }
+
+    @Test fun `a subtree exhausting the patch capture cannot hide a selected rename as complete`(): Unit = GitTestRepositories().use { f ->
+        val (gitDir, workTree) = f.managed("rename-after-bound")
+        f.write(workTree, "old.c", (1..30).joinToString("") { "int original_$it = $it;\n" })
+        val base = f.commitAll(gitDir, workTree, "base")
+        f.raw(gitDir, workTree, "mv", "old.c", "znew.c")
+        f.write(workTree, "old.c/huge.c", (1..50_000).joinToString("") { "int unrelated_$it = $it;\n" })
+        f.raw(gitDir, workTree, "add", "--", "old.c/huge.c")
+        fun checkPatch(scope: GitDiffScope, commit: String? = null, parent: String? = null) {
+            val listing = GitReads.diff(f.runner, gitDir, workTree, GitObjectFormat.SHA1, scope, commit, parent)
+            assertTrue(listing.complete)
+            val rename = listing.files.single { it.path.exact == "znew.c" }
+            assertEquals(GitIndexChange.RENAMED, rename.change)
+            val patch = GitReads.patch(f.runner, gitDir, workTree, scope, commit, parent, rename)
+            assertTrue(patch.truncated, "The capture ends before the rename section")
+            assertFalse(patch.binary)
+            assertFalse(patch.text.contains("unrelated_"))
+        }
+        checkPatch(GitDiffScope.STAGED)
+        val commit = f.commitAll(gitDir, workTree, "rename and subtree")
+        checkPatch(GitDiffScope.COMMIT, commit, base)
+    }
+
+    @Test fun `native invalid UTF-8 filenames observe repeated edits without aliasing display paths`(): Unit = GitTestRepositories().use { f ->
+        val (gitDir, workTree) = f.managed("native-version")
+        // The Unix file URI provider accepts exact percent-escaped native bytes, not U+FFFD.
+        val native = Path.of(java.net.URI(workTree.toUri().toASCIIString() + "a%FF.c"))
+        assertTrue(native.toUri().rawPath.endsWith("a%FF.c"))
+        Files.writeString(native, "int base;\n")
+        f.write(workTree, "a\\xff.c", "int distinct;\n")
+        f.commitAll(gitDir, workTree, "base")
+        Files.writeString(native, "int first;\n")
+        val first = GitRepositoryInspector.inspect(f.runner, gitDir, workTree)
+        val entry = first.status.entries.single()
+        assertNull(entry.path.exact)
+        assertContentEquals(byteArrayOf(97, 0xff.toByte(), 46, 99), entry.path.bytes)
+        assertEquals(1L, GitReads.diff(f.runner, gitDir, workTree, GitObjectFormat.SHA1,
+            GitDiffScope.UNSTAGED, null, null).files.single().additions)
+        Files.writeString(native, "int second;\nint more;\n")
+        val second = GitRepositoryInspector.inspect(f.runner, gitDir, workTree)
+        assertNotEquals(first.statusDigest, second.statusDigest)
+        assertEquals(2L, GitReads.diff(f.runner, gitDir, workTree, GitObjectFormat.SHA1,
+            GitDiffScope.UNSTAGED, null, null).files.single().additions)
+        assertEquals(entry.path.fileId("w"), second.status.entries.single().path.fileId("w"))
+        assertNotEquals(entry.path.fileId("w"), GitPath.of("a\\xff.c".toByteArray()).fileId("w"))
+    }
+
+    @Test fun `source diff attributes cannot force binary previews and exact legacy layouts upgrade`(): Unit = GitTestRepositories().use { f ->
+        val (gitDir, workTree) = f.managed("binary-attributes")
+        val attributes = gitDir.resolve("info/attributes")
+        Files.writeString(attributes, GitManagedLayout.LEGACY_ATTRIBUTES)
+        f.write(workTree, ".gitattributes", "table.dat diff\n*.c -diff\n")
+        Files.write(workTree.resolve("table.dat"), byteArrayOf(0, 0xff.toByte(), 1, 10))
+        f.write(workTree, "text.c", "int base;\n")
+        val base = f.commitAll(gitDir, workTree, "base")
+        Files.write(workTree.resolve("table.dat"), byteArrayOf(0, 0xfe.toByte(), 2, 10))
+        f.write(workTree, "text.c", "int changed;\n")
+        f.raw(gitDir, workTree, "add", "-A")
+        // Independently reproduce the old forced-text classification, then audit/migrate it.
+        assertFalse(GitReads.diff(f.runner, gitDir, workTree, GitObjectFormat.SHA1,
+            GitDiffScope.STAGED, null, null).files.single { it.path.exact == "table.dat" }.binary)
+        GitConfigurationAudit.requireManaged(f.runner, gitDir)
+        assertEquals(GitManagedLayout.ATTRIBUTES, Files.readString(attributes))
+        fun checkBinary(scope: GitDiffScope, commit: String? = null, parent: String? = null) {
+            val files = GitReads.diff(f.runner, gitDir, workTree, GitObjectFormat.SHA1, scope, commit, parent).files
+            val binary = files.single { it.path.exact == "table.dat" }
+            assertTrue(binary.binary); assertNull(binary.additions); assertNull(binary.deletions)
+            val patch = GitReads.patch(f.runner, gitDir, workTree, scope, commit, parent, binary)
+            assertTrue(patch.binary); assertEquals("", patch.text); assertFalse(patch.truncated)
+            assertFalse(files.single { it.path.exact == "text.c" }.binary)
+        }
+        checkBinary(GitDiffScope.STAGED)
+        val commit = f.commitAll(gitDir, workTree, "binary change")
+        checkBinary(GitDiffScope.COMMIT, commit, base)
+        Files.write(workTree.resolve("table.dat"), byteArrayOf(0, 0xfd.toByte(), 3, 10))
+        f.write(workTree, "text.c", "int again;\n")
+        checkBinary(GitDiffScope.UNSTAGED)
+        val tampered = GitManagedLayout.LEGACY_ATTRIBUTES + "* diff\n"
+        Files.writeString(attributes, tampered)
+        assertEquals("REPOSITORY_CONFIG_UNTRUSTED", kotlin.test.assertFailsWith<GitRepositoryException> {
+            GitConfigurationAudit.requireManaged(f.runner, gitDir)
+        }.code)
+        assertEquals(tampered, Files.readString(attributes), "Unrecognized layouts must not be rewritten")
+    }
+
+    @Test fun `history preserves more than 64 parents and refuses oversized output explicitly`(): Unit = GitTestRepositories().use { f ->
+        val (gitDir, workTree) = f.managed("many-parents")
+        f.write(workTree, "a.c", "int a;\n")
+        val base = f.commitAll(gitDir, workTree, "base")
+        val tree = f.git("--git-dir=$gitDir", "rev-parse", "$base^{tree}").trim()
+        val parents = (1..65).map { f.git("--git-dir=$gitDir", "commit-tree", tree, "-m", "parent $it").trim() }
+        val merge = f.git("--git-dir=$gitDir", "commit-tree", tree,
+            *parents.flatMap { listOf("-p", it) }.toTypedArray(), "-m", "many parents").trim()
+        assertEquals(parents, GitReads.history(f.runner, gitDir, GitObjectFormat.SHA1, merge, 0, 1).entries.single().parentObjectIds)
+        val message = f.root.resolve("large-message")
+        Files.writeString(message, "x".repeat(GitReads.MAX_HISTORY_BYTES + 1))
+        val large = f.git("--git-dir=$gitDir", "commit-tree", tree, "-F", message.toString()).trim()
+        assertEquals(GitCommandException.Kind.OUTPUT_LIMIT, kotlin.test.assertFailsWith<GitCommandException> {
+            GitReads.history(f.runner, gitDir, GitObjectFormat.SHA1, large, 0, 1)
+        }.kind)
     }
 
     @Test fun `staged diff works on an unborn branch`(): Unit = GitTestRepositories().use { f ->

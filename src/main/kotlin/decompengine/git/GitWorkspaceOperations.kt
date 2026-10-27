@@ -9,11 +9,16 @@ import kotlinx.serialization.json.intOrNull
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 import kotlinx.serialization.json.put
+import java.nio.ByteBuffer
+import java.nio.channels.FileChannel
+import java.nio.file.FileAlreadyExistsException
 import java.nio.file.FileVisitResult
 import java.nio.file.Files
 import java.nio.file.LinkOption.NOFOLLOW_LINKS
 import java.nio.file.Path
 import java.nio.file.SimpleFileVisitor
+import java.nio.file.StandardCopyOption.ATOMIC_MOVE
+import java.nio.file.StandardOpenOption.WRITE
 import java.nio.file.attribute.BasicFileAttributes
 import java.security.MessageDigest
 import java.time.Duration
@@ -37,19 +42,23 @@ data class GitStageRequest(val worktreeId: String, val guards: GitGuards, val fi
 }
 
 /** Commit exactly the reviewed staged set with the server identity. */
-data class GitCommitRequest(val worktreeId: String, val guards: GitGuards, val fileIds: List<String>, val message: String) : GitRepositoryRequest {
+data class GitCommitRequest(val worktreeId: String, val guards: GitGuards, val fileIds: List<String>, val message: String,
+    /** Explicit review of the complete pending-merge index, bound by guards.worktreeVersion. */
+    val reviewedMergeIndex: Boolean = false) : GitRepositoryRequest {
     override val action get() = GitOperationAction.COMMIT
     override val digest get() = GitStorage.sha256("git.commit\n$worktreeId\n${guards.text}\n${fileIds.joinToString(",")}\n" +
-        GitStorage.sha256(message) + "\n")
+        GitStorage.sha256(message) + "\n" + if (reviewedMergeIndex) "reviewed-merge-index\n" else "")
 }
 
 /**
  * A commit operation read back from its durable record. The message is used only by the process
  * that admitted it; the record retains its digest so a keyed replay still matches exactly.
  */
-data class GitRetainedCommit(val worktreeId: String, val guards: GitGuards, val fileIds: List<String>, val messageSha256: String) : GitRepositoryRequest {
+data class GitRetainedCommit(val worktreeId: String, val guards: GitGuards, val fileIds: List<String>, val messageSha256: String,
+    val reviewedMergeIndex: Boolean = false) : GitRepositoryRequest {
     override val action get() = GitOperationAction.COMMIT
-    override val digest get() = GitStorage.sha256("git.commit\n$worktreeId\n${guards.text}\n${fileIds.joinToString(",")}\n$messageSha256\n")
+    override val digest get() = GitStorage.sha256("git.commit\n$worktreeId\n${guards.text}\n${fileIds.joinToString(",")}\n$messageSha256\n" +
+        if (reviewedMergeIndex) "reviewed-merge-index\n" else "")
 }
 
 /**
@@ -120,35 +129,80 @@ internal object GitWorkspaceMutations {
             if (entry.conflict != null) refuse("CONFLICTED", "Resolve conflicted files in the work tree before staging them.")
             if (!applies(entry)) refuse("NOTHING_SELECTED", if (stage) "A selected file has no unstaged change." else "A selected file has no staged change.")
             entry
-        }.also { selected -> refuseOverlap(observation, selected) }
+        }.also { selected -> refuseOverlap(observation, selected, stage) }
     }
 
     /**
-     * Pathspecs match descendants: a selected path (or a rename's original path) that is now a
-     * directory holding other tracked or staged entries would act on those too. Refuse instead.
+     * Pathspecs match descendants, and both add and reset resolve index file/directory conflicts
+     * by removing ancestors. Neither direction may silently act on an unselected index entry.
      */
-    private fun refuseOverlap(observation: GitWorkspaceObservation, selected: List<GitStatusEntry>) {
+    private fun refuseOverlap(observation: GitWorkspaceObservation, selected: List<GitStatusEntry>, stage: Boolean) {
         val chosen = selected.toSet()
+        // Reset also restores rename sources, so protect ancestors of every expanded path.
+        val paths = selected.flatMap { listOfNotNull(it.path.exact, it.originalPath?.exact.takeUnless { stage }) }
         val prefixes = selected.flatMap { listOfNotNull(it.path.exact, it.originalPath?.exact) }.map { "$it/" }
         val overlapping = observation.status.entries.any { entry ->
-            entry !in chosen && !entry.ignored && !entry.untracked && listOfNotNull(entry.path.exact, entry.originalPath?.exact).any { path ->
-                prefixes.any { path.startsWith(it) }
+            val purelyUntracked = entry.untracked && entry.staged == GitIndexChange.NONE && entry.unstaged == GitIndexChange.NONE
+            if (entry in chosen || entry.ignored || purelyUntracked) false
+            else {
+                val descendant = listOfNotNull(entry.path.exact, entry.originalPath?.exact).any { path ->
+                    prefixes.any { path.startsWith(it) }
+                }
+                // A staged deletion has no remaining index entry. Reset must also protect
+                // unselected staged ancestors that it would remove while restoring a child.
+                val ancestor = (stage || entry.staged != GitIndexChange.NONE) &&
+                    entry.staged != GitIndexChange.DELETED && entry.path.exact?.let { path ->
+                    paths.any { it.startsWith("$path/") }
+                } == true
+                descendant || ancestor
             }
         }
-        if (overlapping) refuse("SELECTION_OVERLAP", "A selected path is now a directory containing other changes. Select those entries explicitly or resolve the overlap first.")
+        if (overlapping) refuse("SELECTION_OVERLAP", "A selected path overlaps other tracked changes. Select those entries explicitly or resolve the overlap first.")
     }
 
     /** The reviewed selection must be exactly today's staged set: nothing swept in, nothing left out. */
     fun requireStagedSet(record: GitRepositoryRecord, observation: GitWorkspaceObservation, fileIds: List<String>,
-        worktreeId: String = record.worktreeId, mergeInProgress: Boolean = false) {
+        worktreeId: String = record.worktreeId, mergeInProgress: Boolean = false, reviewedMergeIndex: Boolean = false) {
         // A truncated status can hide staged files beyond its bound; never commit an unreviewable index.
         if (!observation.status.complete) refuse("STATUS_INCOMPLETE", "The status is too large to review completely; the staged set cannot be confirmed.")
         if (observation.status.entries.any { it.conflict != null }) refuse("CONFLICTED", "Resolve conflicted files before committing.")
+        if (reviewedMergeIndex) {
+            if (!mergeInProgress || fileIds.isNotEmpty()) refuse("VALIDATION_FAILED",
+                "A complete-index review requires a pending merge and no individual file selection.")
+            // The caller checked guards against this complete observation. Its worktreeVersion
+            // includes every staged blob and mode; no large ID array or partial merge is needed.
+            return
+        }
         val staged = observation.status.entries.filter { it.staged != GitIndexChange.NONE }.map { it.path.fileId(worktreeId) }.toSet()
         // A pending merge whose resolution matches HEAD is still committed, recording both parents.
         if (staged.isEmpty() && mergeInProgress && fileIds.isEmpty()) return
         if (staged.isEmpty()) refuse("NOTHING_TO_COMMIT", "No changes are staged.")
         if (staged != fileIds.toSet()) refuse("INDEX_CHANGED", "The staged files differ from the reviewed selection. Review the staged diff again.")
+    }
+
+    /**
+     * Status deliberately suppresses submodules, so its staged set alone cannot authorize a
+     * commit. Inspect the complete index comparison (including removed gitlinks) and refuse
+     * unsupported submodule changes, even when the ordinary selected files still match.
+     */
+    fun requireNoStagedGitlinks(runner: GitCommandRunner, gitDir: Path, workTree: Path, headObjectId: String?, index: Path? = null) {
+        val result = runner.run(GitInvocation("diff", listOf("--cached", "--raw", "-z", "--no-abbrev", "--no-renames",
+            "--no-ext-diff", "--no-textconv", "--ignore-submodules=none") + listOfNotNull(headObjectId) + "--",
+            gitDir = gitDir, workTree = workTree, variables = index?.let { mapOf("GIT_INDEX_FILE" to it.toString()) } ?: emptyMap(),
+            truncateStdout = true, limits = COMMIT_LIMITS.copy(maxStdoutBytes = GitReads.MAX_STATUS_BYTES)))
+        if (result.stdoutTruncated) refuse("STATUS_INCOMPLETE", "The staged index comparison is too large to review completely.")
+        // With rename detection disabled, each NUL-delimited header has exactly one path record.
+        val records = GitReads.records(result.stdout)
+        if (records.size % 2 != 0) throw GitRepositoryException("REPOSITORY_CORRUPT", "Git index comparison output is malformed.")
+        for (position in records.indices step 2) {
+            val fields = records[position].toString(Charsets.US_ASCII).split(' ')
+            if (fields.size != 5 || !fields[0].startsWith(':')) {
+                throw GitRepositoryException("REPOSITORY_CORRUPT", "Git index comparison output is malformed.")
+            }
+            if (fields[0] == ":160000" || fields[1] == "160000") {
+                refuse("EXCLUDED_PATH", "Staged submodule changes cannot be committed by the workbench. Remove them from the index before committing source files.")
+            }
+        }
     }
 
     fun validateMessage(message: String) {
@@ -189,52 +243,170 @@ internal object GitWorkspaceMutations {
             input = paths, allowedExitCodes = setOf(0, 1), limits = COMMIT_LIMITS))
     }
 
-    /**
-     * Commit the index with the server identity: hooks and signing are disabled on the command line,
-     * the message comes from a private file and is kept verbatim, and nothing is pushed.
-     */
-    fun commit(runner: GitCommandRunner, gitDir: Path, workTree: Path, messageFile: Path, policy: GitRepositoryPolicy) {
+    /** Git-compatible exclusive locks cover final validation, index capture and ref publication. */
+    fun <T> withCommitLocks(gitDir: Path, staging: Path, operationId: String, block: () -> T): T {
+        val acquired = mutableListOf<Pair<Path, Path>>()
+        try {
+            for (name in listOf("index.lock", "HEAD.lock")) {
+                val file = gitDir.resolve(name)
+                val witness = staging.resolve(name)
+                Files.createFile(witness)
+                FileChannel.open(witness, WRITE, NOFOLLOW_LINKS).use { channel ->
+                    val bytes = ByteBuffer.wrap("decomp-operation:$operationId\n".toByteArray(Charsets.US_ASCII))
+                    while (bytes.hasRemaining()) channel.write(bytes)
+                    channel.force(true)
+                }
+                // Persist the private inode witness before making the lock visible. Recovery
+                // must not depend on lock contents being fully written at process death.
+                GitStorage.forceDirectory(staging)
+                acquired.add(file to witness)
+                try { Files.createLink(file, witness) } catch (_: FileAlreadyExistsException) {
+                    refuse("WORKTREE_BUSY", "Another Git writer holds the index or HEAD lock. Read the current status before trying again.")
+                }
+                GitStorage.forceDirectory(gitDir)
+            }
+            return block()
+        } finally {
+            acquired.asReversed().forEach { (file, witness) ->
+                if (Files.isRegularFile(file, NOFOLLOW_LINKS) && Files.isSameFile(file, witness)) Files.delete(file)
+            }
+        }
+    }
+
+    /** Reclaim proven owned inodes, never a different writer's replacement at the same name. */
+    fun reclaimCommitLocks(gitDir: Path, staging: Path, operationId: String, commonDir: Path = gitDir) {
+        val refNameFile = staging.resolve("ref-name")
+        val privateLock = staging.resolve("ref-lock")
+        if (Files.isRegularFile(refNameFile, NOFOLLOW_LINKS) && Files.isRegularFile(privateLock, NOFOLLOW_LINKS)) {
+            val ref = GitStorage.read(refNameFile, 4096).toString(Charsets.UTF_8)
+            check(GitRefNames.isObservedRefName(ref))
+            val refLock = commonDir.resolve("$ref.lock")
+            // The private hard link proves inode ownership even if the process died while writing
+            // the lock. Never remove a different writer's replacement at the same pathname.
+            if (Files.isRegularFile(refLock, NOFOLLOW_LINKS) && Files.isSameFile(refLock, privateLock)) Files.delete(refLock)
+        }
+        for (name in listOf("index.lock", "HEAD.lock")) {
+            val file = gitDir.resolve(name)
+            if (!Files.isRegularFile(file, NOFOLLOW_LINKS)) continue
+            val witness = staging.resolve(name)
+            if (Files.isRegularFile(witness, NOFOLLOW_LINKS)) {
+                if (Files.isSameFile(file, witness)) Files.delete(file)
+            } else if (Files.size(file) < 256 && Files.readString(file) == "decomp-operation:$operationId\n") {
+                // Compatibility with complete markers left by versions predating inode witnesses.
+                Files.delete(file)
+            }
+        }
+    }
+
+    /** Capture the locked index into an immutable tree and create an unpublished commit. No hooks run. */
+    fun createCommit(runner: GitCommandRunner, gitDir: Path, workTree: Path, messageFile: Path,
+        policy: GitRepositoryPolicy, observation: GitWorkspaceObservation): String {
+        val index = messageFile.parent.resolve("reviewed-index")
+        Files.copy(gitDir.resolve("index"), index)
+        // Validate the actual captured index as well, never a later read of the live index.
+        requireNoStagedGitlinks(runner, gitDir, workTree, observation.head.objectId, index)
+        val tree = runner.run(GitInvocation("write-tree", gitDir = gitDir, workTree = workTree,
+            variables = mapOf("GIT_INDEX_FILE" to index.toString()), limits = COMMIT_LIMITS)).text.trim()
+        check(observation.objectFormat.objectIdOrNull(tree) != null)
         val identity = mapOf("GIT_AUTHOR_NAME" to policy.identityName, "GIT_AUTHOR_EMAIL" to policy.identityEmail,
             "GIT_COMMITTER_NAME" to policy.identityName, "GIT_COMMITTER_EMAIL" to policy.identityEmail)
+        val parents = (listOfNotNull(observation.head.objectId) + GitIntegrations.mergeParents(gitDir, observation.objectFormat))
+            .distinct().flatMap { listOf("-p", it) }
+        val commit = runner.run(GitInvocation("commit-tree", listOf("--no-gpg-sign", tree) + parents +
+            listOf("-F", messageFile.toString()), gitDir = gitDir, variables = identity, limits = COMMIT_LIMITS)).text.trim()
+        return checkNotNull(observation.objectFormat.objectIdOrNull(commit))
+    }
+
+    /**
+     * HEAD.lock pins the symbolic target. Publish using Git's files-backend protocol: exclusively
+     * create the target's .lock, compare its old value under that lock, then atomically rename.
+     * update-ref cannot be used while we own HEAD.lock: it also locks HEAD for branch updates.
+     * A loose ref safely supersedes a packed ref; neither packed-refs nor reflogs are rewritten.
+     */
+    fun publishCommit(runner: GitCommandRunner, gitDir: Path, staging: Path, head: GitHeadObservation,
+        format: GitObjectFormat, commit: String, commonDir: Path = gitDir, published: () -> Unit) {
+        val ref = head.refName
+        // Linked HEAD/index live in their administrative directory, but attached refs belong
+        // to the common repository. A private refs/ shadow would report a commit never published.
+        val target = if (ref == null) gitDir.resolve("HEAD") else commonDir.resolve(ref)
+        val privateLock = staging.resolve("ref-lock")
+        val refLock = if (ref == null) null else {
+            GitStorage.directories(commonDir, *ref.split('/').dropLast(1).toTypedArray())
+            Files.writeString(staging.resolve("ref-name"), ref)
+            Files.createFile(privateLock)
+            val file = target.resolveSibling("${target.fileName}.lock")
+            // Exclusive link creation obeys Git's lock protocol and retains an ownership witness
+            // in staging for restart cleanup, including death halfway through the lock write.
+            try { Files.createLink(file, privateLock) } catch (_: FileAlreadyExistsException) {
+                refuse("WORKTREE_BUSY", "The reviewed branch is locked by another Git writer. Nothing was published.")
+            }
+            file
+        }
+        var moved = false
         try {
-            runner.run(GitInvocation("commit", listOf("-q", "--no-verify", "--no-gpg-sign", "--cleanup=verbatim", "--no-edit",
-                "-F", messageFile.toString()), gitDir = gitDir, workTree = workTree, variables = identity, limits = COMMIT_LIMITS))
-        } catch (failure: GitCommandException) {
-            if (failure.kind == GitCommandException.Kind.FAILED) refuse("COMMIT_FAILED", "Git refused the commit. Read the current status before trying again.")
-            throw failure
+            if (GitRepositoryInspector.head(runner, gitDir, format) != head) {
+                refuse("REF_CHANGED", "The reviewed HEAD changed. Nothing was published; read the current state first.")
+            }
+            val file = refLock ?: Files.createFile(staging.resolve("new-head"))
+            FileChannel.open(file, WRITE, NOFOLLOW_LINKS).use { channel ->
+                val bytes = ByteBuffer.wrap("$commit\n".toByteArray(Charsets.US_ASCII))
+                while (bytes.hasRemaining()) channel.write(bytes)
+                channel.force(true)
+            }
+            Files.move(file, target, ATOMIC_MOVE)
+            moved = true
+            published() // Preserve the known object even if directory forcing or cleanup fails.
+            GitStorage.forceDirectory(target.parent)
+        } finally {
+            if (!moved && refLock != null && Files.isRegularFile(refLock, NOFOLLOW_LINKS) &&
+                Files.isSameFile(refLock, privateLock)) Files.delete(refLock)
         }
     }
 
-    /** Git blob object ID of a file's bytes for the repository's object format. */
-    fun blobId(file: Path, format: GitObjectFormat): String {
-        val digest = MessageDigest.getInstance(if (format == GitObjectFormat.SHA256) "SHA-256" else "SHA-1")
-        digest.update("blob ${Files.size(file)}\u0000".toByteArray(Charsets.US_ASCII))
-        Files.newInputStream(file, NOFOLLOW_LINKS).use { input ->
-            val buffer = ByteArray(64 * 1024)
-            while (true) { val count = input.read(buffer); if (count < 0) break; digest.update(buffer, 0, count) }
-        }
-        return digest.digest().hex()
-    }
+    data class SnapshotCapture(val commitments: Map<String, GitSourceCommitment>, val blobs: Map<String, String>)
 
-    /** `path -> blob ID` of a recorded snapshot as it would be copied (uncopied roots omitted). */
-    fun snapshotBlobs(snapshot: Path, format: GitObjectFormat): Map<String, String>? {
+    /** Both hashes and size come from the same bounded read, never from separate snapshot passes. */
+    fun captureSnapshot(snapshot: Path, format: GitObjectFormat): SnapshotCapture? {
+        if (!Files.isDirectory(snapshot, NOFOLLOW_LINKS)) return null
+        val commitments = sortedMapOf<String, GitSourceCommitment>()
         val blobs = sortedMapOf<String, String>()
+        var bytes = 0L
         var valid = true
-        Files.walkFileTree(snapshot, object : SimpleFileVisitor<Path>() {
+        Files.walkFileTree(snapshot, emptySet(), 65, object : SimpleFileVisitor<Path>() {
             override fun preVisitDirectory(directory: Path, attributes: BasicFileAttributes): FileVisitResult {
                 val relative = snapshot.relativize(directory)
-                return if (directory != snapshot && relative.nameCount == 1 && relative.toString() in GitTrackingPolicy.UNCOPIED_ROOTS)
-                    FileVisitResult.SKIP_SUBTREE else FileVisitResult.CONTINUE
+                if (directory != snapshot && relative.nameCount == 1 && relative.toString() in GitTrackingPolicy.UNCOPIED_ROOTS)
+                    return FileVisitResult.SKIP_SUBTREE
+                if (directory != snapshot && directory.fileName.toString() == ".git") { valid = false; return FileVisitResult.TERMINATE }
+                return FileVisitResult.CONTINUE
             }
             override fun visitFile(file: Path, attributes: BasicFileAttributes): FileVisitResult {
-                if (!attributes.isRegularFile || blobs.size >= GitSourceCopy.MAX_FILES) { valid = false; return FileVisitResult.TERMINATE }
                 val relative = snapshot.relativize(file).joinToString("/")
                 if (snapshot.relativize(file).nameCount == 1 && relative in GitTrackingPolicy.UNCOPIED_ROOTS) return FileVisitResult.CONTINUE
-                blobs[relative] = blobId(file, format)
+                if (!attributes.isRegularFile || file.fileName.toString() == ".git" || blobs.size >= GitSourceCopy.MAX_FILES ||
+                    attributes.size() > GitSourceCopy.MAX_BYTES - bytes) { valid = false; return FileVisitResult.TERMINATE }
+                val sha256 = MessageDigest.getInstance("SHA-256")
+                val blob = MessageDigest.getInstance(if (format == GitObjectFormat.SHA256) "SHA-256" else "SHA-1")
+                blob.update("blob ${attributes.size()}\u0000".toByteArray(Charsets.US_ASCII))
+                var size = 0L
+                Files.newInputStream(file, NOFOLLOW_LINKS).use { input ->
+                    val buffer = ByteArray(64 * 1024)
+                    while (true) {
+                        val count = input.read(buffer)
+                        if (count < 0) break
+                        size += count
+                        if (size > attributes.size()) { valid = false; return FileVisitResult.TERMINATE }
+                        sha256.update(buffer, 0, count); blob.update(buffer, 0, count)
+                    }
+                }
+                if (size != attributes.size()) { valid = false; return FileVisitResult.TERMINATE }
+                bytes += size
+                commitments[relative] = GitSourceCommitment(sha256.digest().hex(), size)
+                blobs[relative] = blob.digest().hex()
                 return FileVisitResult.CONTINUE
             }
         })
-        return blobs.takeIf { valid }
+        return SnapshotCapture(commitments, blobs).takeIf { valid }
     }
 
     /** `path -> blob ID` of a commit's tree; null when it holds anything but regular blobs. */

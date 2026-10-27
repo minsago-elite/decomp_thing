@@ -157,10 +157,13 @@ data class GitExecutionLimits(
     val timeout: Duration = Duration.ofSeconds(30),
     val maxStdoutBytes: Int = 1024 * 1024,
     val maxStderrBytes: Int = 64 * 1024,
+    /** Hard and soft RLIMIT_AS, including mappings; null only for calls not requiring this bound. */
+    val maxAddressSpaceBytes: Long? = null,
 ) {
     init {
         require(!timeout.isNegative && !timeout.isZero && timeout <= Duration.ofMinutes(10))
         require(maxStdoutBytes in 1..64 * 1024 * 1024 && maxStderrBytes in 1..1024 * 1024)
+        require(maxAddressSpaceBytes == null || maxAddressSpaceBytes in 16L * 1024 * 1024..4L * 1024 * 1024 * 1024)
     }
 }
 
@@ -226,14 +229,18 @@ data class GitInvocation(
     val limits: GitExecutionLimits = GitExecutionLimits(),
     /** Bounded standard input, written once and closed; null keeps stdin closed. */
     val input: ByteArray? = null,
-    /** Additional variables from a fixed allowlist (commit identity and dates only). */
+    /** Additional server-owned variables from a fixed allowlist (identity, dates and private index). */
     val variables: Map<String, String> = emptyMap(),
     /** Required by, and only allowed for, the remote transport subcommands. */
     val transport: GitTransportContext? = null,
     val control: GitProcessControl? = null,
+    /** Merge output is diagnostic, not structured data: retain bounded prefixes but drain to exit.
+     * Unlike truncateStdout this never terminates a mutation halfway through index publication. */
+    val drainDiagnostics: Boolean = false,
 ) {
     init {
         require(subcommand in SUBCOMMANDS) { "Git subcommand is not allowlisted" }
+        require(!drainDiagnostics || (subcommand == "merge" && !truncateStdout)) { "Only merge diagnostics may be drained" }
         require(arguments.size <= 256 && arguments.all { it.length <= 4096 && '\u0000' !in it }) { "Git arguments are unbounded" }
         require(gitDir == null || gitDir.isAbsolute) { "Git directory must be absolute" }
         require(workTree == null || (workTree.isAbsolute && gitDir != null)) { "Git work tree requires an absolute path and Git directory" }
@@ -251,17 +258,22 @@ data class GitInvocation(
         val SUBCOMMANDS = setOf(
             "version", "init", "config", "check-ref-format", "rev-parse", "symbolic-ref", "for-each-ref",
             "status", "read-tree", "fsck", "cat-file", "ls-files", "ls-tree", "check-ignore", "update-ref",
-            "log", "diff", "diff-tree", "add", "rm", "reset", "commit", "switch", "worktree", "rev-list",
+            "log", "diff", "diff-tree", "add", "rm", "reset", "commit", "switch", "worktree", "rev-list", "write-tree", "commit-tree",
             "fetch", "push", "ls-remote", "merge", "merge-base", "checkout-index", "check-attr", "hash-object", "update-index",
         )
         val TRANSPORT_SUBCOMMANDS = setOf("fetch", "push", "ls-remote")
         val VARIABLES = setOf("GIT_AUTHOR_NAME", "GIT_AUTHOR_EMAIL", "GIT_AUTHOR_DATE",
-            "GIT_COMMITTER_NAME", "GIT_COMMITTER_EMAIL", "GIT_COMMITTER_DATE")
+            "GIT_COMMITTER_NAME", "GIT_COMMITTER_EMAIL", "GIT_COMMITTER_DATE", "GIT_INDEX_FILE")
     }
 }
 
 /** Runs the one trusted executable without a shell, a TTY, inherited environment or inherited config. */
-class GitCommandRunner internal constructor(val executable: Path, val environment: GitEnvironment) {
+class GitCommandRunner internal constructor(
+    val executable: Path,
+    val environment: GitEnvironment,
+    private val memoryLimiter: Path? = listOf(Path.of("/usr/bin/prlimit"), Path.of("/bin/prlimit"))
+        .firstOrNull { Files.isRegularFile(it) && Files.isExecutable(it) }?.toRealPath(),
+) {
     fun argv(invocation: GitInvocation): List<String> = buildList {
         add(executable.toString())
         add("--no-pager"); add("--no-replace-objects")
@@ -280,14 +292,22 @@ class GitCommandRunner internal constructor(val executable: Path, val environmen
     /** Drain large structured listings without retaining their complete stdout in memory. The
      * consumer runs serially on the stdout reader, and its failures terminate the child. */
     internal fun stream(invocation: GitInvocation, maxBytes: Long, consume: (ByteArray, Int) -> Unit) {
-        require(!invocation.truncateStdout && maxBytes in 1..256L * 1024 * 1024)
+        require(!invocation.truncateStdout && !invocation.drainDiagnostics && maxBytes in 1..256L * 1024 * 1024)
         execute(invocation, StreamOutput(maxBytes, consume))
     }
 
     private class StreamOutput(val maxBytes: Long, val consume: (ByteArray, Int) -> Unit)
 
     private fun execute(invocation: GitInvocation, stream: StreamOutput? = null): GitCommandResult {
-        val builder = ProcessBuilder(argv(invocation))
+        val command = argv(invocation)
+        val boundedCommand = invocation.limits.maxAddressSpaceBytes?.let { bytes ->
+            // Use only the fixed server utility, never repository data or request/PATH lookup.
+            // prlimit applies both limits before exec, and failure never falls back to unbounded Git.
+            val launcher = memoryLimiter ?: throw GitCommandException(GitCommandException.Kind.START_FAILED,
+                "The server cannot enforce the required Git memory bound.")
+            listOf(launcher.toString(), "--as=$bytes:$bytes", "--core=0:0", "--") + command
+        } ?: command
+        val builder = ProcessBuilder(boundedCommand)
             .directory((invocation.workTree ?: invocation.gitDir ?: environment.root).toFile())
             .redirectInput(ProcessBuilder.Redirect.PIPE)
         builder.environment().clear()
@@ -310,7 +330,7 @@ class GitCommandRunner internal constructor(val executable: Path, val environmen
             while (process.isAlive) {
                 stdout.failure?.let { terminate(process); throw it }
                 if (stdout.overflowed && invocation.truncateStdout) break
-                if (stdout.overflowed || stderr.overflowed) {
+                if (!invocation.drainDiagnostics && (stdout.overflowed || stderr.overflowed)) {
                     terminate(process)
                     throw GitCommandException(GitCommandException.Kind.OUTPUT_LIMIT, "Git output exceeded its bound.")
                 }
@@ -335,7 +355,7 @@ class GitCommandRunner internal constructor(val executable: Path, val environmen
             // The readers can still be draining when the process exits, so only their final state
             // decides truncation. Stderr keeps its own limit either way.
             val truncated = stdout.overflowed && invocation.truncateStdout
-            if (stderr.overflowed || (stdout.overflowed && !truncated)) {
+            if (!invocation.drainDiagnostics && (stderr.overflowed || (stdout.overflowed && !truncated))) {
                 throw GitCommandException(GitCommandException.Kind.OUTPUT_LIMIT, "Git output exceeded its bound.")
             }
             val exit = if (truncated) -1 else process.exitValue()
@@ -343,7 +363,7 @@ class GitCommandRunner internal constructor(val executable: Path, val environmen
                 throw GitCommandException(GitCommandException.Kind.FAILED, "Git reported a failure.", exit,
                     diagnostic = stderr.bytes().toString(Charsets.UTF_8))
             }
-            return GitCommandResult(exit, stdout.bytes(), stderr.bytes(), truncated)
+            return GitCommandResult(exit, stdout.bytes(), stderr.bytes(), stdout.overflowed)
         } catch (interrupted: InterruptedException) {
             terminate(process)
             Thread.currentThread().interrupt()
