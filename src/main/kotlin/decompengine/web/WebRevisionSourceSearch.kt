@@ -100,6 +100,14 @@ internal fun invalidSourceSearchCursor(): Nothing = throw WebAccessDenied(400, "
 
 private fun invalidCursor(): Nothing = invalidSourceSearchCursor()
 
+/** The pinned reader requires a positive limit and may read one extra byte to detect growth. */
+internal fun sourceSearchReadReservation(file: WebRevisionSourceFile): Long {
+    require(file.committedInput) { "Source search requires a committed input size." }
+    val committedSize = requireNotNull(file.sizeBytes) { "Source search requires a committed input size." }
+    require(committedSize in 0..WebRevisionSourceContent.MAXIMUM_FILE_BYTES)
+    return maxOf(1L, committedSize) + 1
+}
+
 /**
  * Bounded literal search over the canonical input set of one persisted candidate. There is no retained index:
  * every scanned body is a fresh digest-checked capture, so offsets always describe the committed file bytes.
@@ -112,7 +120,7 @@ internal class WebRevisionSourceSearch(
 ) {
     private val secret = ByteArray(32).also(SecureRandom()::nextBytes)
 
-    init { require(deadlineNanos > 0 && maximumScannedBytes >= WebRevisionSourceContent.MAXIMUM_FILE_BYTES) }
+    init { require(deadlineNanos > 0 && maximumScannedBytes >= WebRevisionSourceContent.MAXIMUM_FILE_BYTES + 1) }
 
     fun search(owner: String, jobId: String, runId: String, revisionId: String, rawQuery: String?): JsonObject {
         val query = WebSourceSearchQuery.parse(rawQuery)
@@ -178,13 +186,15 @@ internal class WebRevisionSourceSearch(
             val file = snapshot.files[fileIndex]
             val from = resumeOffset
             if (expired()) { stop = Stop("deadline", fileIndex, from); break }
-            if (scannedBytes > 0 && scannedBytes + file.sizeBytes!! > maximumScannedBytes) { stop = Stop("byte-limit", fileIndex, from); break }
+            val reservation = sourceSearchReadReservation(file)
+            if (scannedBytes + reservation > maximumScannedBytes) { stop = Stop("byte-limit", fileIndex, from); break }
+            // Reserve the full authorized work before IO; failed revalidation and the overflow probe count too.
+            scannedBytes += reservation
             val bytes = read(file)
             progressed = true; resumeOffset = 0; position++
-            // A read can fail its final revalidation after reading the whole body; charge its committed size either way.
-            if (bytes == null) { unavailable++; scannedBytes += file.sizeBytes; continue }
+            if (bytes == null) { unavailable++; continue }
             check(bytes.size.toLong() == file.sizeBytes)
-            scannedFiles++; scannedBytes += bytes.size
+            scannedFiles++
             if (WebRevisionSourceContent.textFallback(bytes) != null) { unsearchableText++; continue }
             if (from > 0 && from < bytes.size && (bytes[from].toInt() and 0xc0) == 0x80) invalidCursor()
             var lineStart = from
