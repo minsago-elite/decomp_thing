@@ -176,6 +176,7 @@ internal storage optimization and must not merge identity, permissions or histor
 | `GET G/{status,history,diff,refs}` | `200 gitStatus`, `gitHistory`, `gitDiff`, `gitRefs` | Bounded, anchored pages; full object IDs; opaque file IDs; implemented by #202 |
 | `GET G/worktrees` | `200 gitWorktrees` | Primary and linked work trees with owner and HEAD; implemented by #204 |
 | `GET G/provenance/{objectId}`, `GET G/exports/{objectId}` | `200 gitProvenance`, `200 application/zip` | Exact-object provenance envelope and deterministic tree export; implemented by #205 |
+| `GET G/github?remote=&branch=&base=` | `200 gitHubStatus` | Optional GitHub capability: pull requests of a bound remote and a proposed range; implemented by #213 |
 | `GET G/push-preview?remote=&branch=` | `200 gitPushPreview` | What an explicit push would publish, from fetched state; implemented by #212 |
 | `GET G/remotes`, `GET G/audit` | `200 gitRemotes`, `200 gitAudit` | Registered remotes with credential state (never the credential) and tracking refs; audit history; implemented by #207/#209 |
 | `GET G/divergence?tracking=`, `GET G/conflicts`, `GET G/conflicts/{fileId}` | `200 gitDivergence`, `gitConflicts`, `gitConflictFile` | Fetched divergence and offered strategies; unresolved paths with stage objects; bounded conflict text; implemented by #210/#211 |
@@ -1225,6 +1226,122 @@ remote** for an unconfirmed one.
   non-fast-forward;
 - process death after the intent but before Git ran, reconciled as not published;
 - process death after Git pushed, reconciled as confirmed.
+
+### Optional GitHub pull requests
+
+GitHub is an optional capability (#602, #603), off unless the operator passes `--github-config
+<file>`. The file contains:
+
+- `apiUrl`, which must be HTTPS; plain HTTP is accepted only for a loopback test provider;
+- an optional `tokenFile`;
+- a list of bindings from a registered remote's display URL to a GitHub `owner/repository`.
+
+Bootstrap reports `github` as `unavailable` with `GITHUB_UNCONFIGURED`, as `supported` with
+`GITHUB_READ_ONLY` when there is no token, or as `supported` with write access. Local Git and
+remotes never depend on it. The token is read per request and sent only as the `Authorization`
+header to the configured API. It never reaches records, audit, responses or logs. The client
+follows no redirects and bounds response size. It also bounds time, including a deadline for
+receiving the response body after the headers.
+
+`GET G/github?remote=<remoteId>&branch=<head>&base=<base>` reports:
+
+- the access: `unavailable`, `unbound`, `read-only` or `write`;
+- the bound repository;
+- the head branch and the commit last pushed to it, from the remote-tracking ref;
+- when `base` is given, the reviewable commit range;
+- the pull requests whose head is that branch, each tied to its head and base branches and its
+  head commit, with `headMatchesPushed` set to `matches`, `differs` or `unknown`;
+- any unconfirmed creations.
+
+Provider failures do not fail the read; they are reported in `problem` with actionable codes:
+`GITHUB_RATE_LIMITED` (with `retryAfterSeconds`), `GITHUB_UNAUTHORIZED`, `GITHUB_FORBIDDEN`,
+`GITHUB_NOT_FOUND` and `GITHUB_UNREACHABLE`. Only same-repository heads are listed or created;
+forks are not supported. A pull request's review or checks are never build validation or
+reconstruction acceptance. Auto-merge, comments and reviews are outside this capability.
+
+`github.pr.create` names `remoteId`, `headBranch`, `baseBranch`, `title` and `body`. It also
+names `headObjectId` and `baseObjectId`, the tracked commits whose range was reviewed. It is an
+explicit write, refused when:
+
+- the integration is absent, with `GITHUB_UNAVAILABLE`;
+- the remote is unbound, with `GITHUB_NOT_BOUND`;
+- there is no token, with `GITHUB_READ_ONLY`;
+- a branch is not on the remote as last fetched, with `BRANCH_NOT_PUBLISHED`;
+- a reviewed commit no longer matches its remote-tracking ref after a push or fetch, with
+  `REF_CHANGED`;
+- the body exceeds 65,408 bytes, with `SIZE_EXCEEDED` (128 bytes are reserved for the correlation
+  comment);
+- an earlier creation for the same branches is unconfirmed, with `PR_UNCONFIRMED`.
+
+The creation intent is recorded before GitHub is contacted, and every outcome is audited. The
+intent records the canonical API endpoint, GitHub repository contacted and the numbers of pull
+requests that already existed for the head on any base. The presentation listing is limited to
+30 entries; creation preflight and recovery use a separate inventory bounded to ten pages of 30.
+An incomplete preflight refuses creation with `PR_AMBIGUOUS` without sending a POST.
+
+- An open pull request that already exists for the branches is reported as the result, and
+  nothing is written. A duplicate refusal from GitHub during creation is resolved the same way.
+  GitHub reports a duplicate either as `already_exists` or as a `custom` error whose message says
+  a pull request already exists.
+- The body sent to GitHub ends with a hidden comment,
+  `<!-- decomp-workbench-operation: <operationId> -->`, that ties the pull request to its
+  creating operation. Reserved correlation comments copied into the draft are stripped before
+  the server appends its own marker. Conflicting markers in a provider body are ambiguous.
+- Only definite refusals fail the operation: unauthorized, forbidden, not found, validation,
+  read-only, missing credential and rate limited.
+- Any other outcome becomes `recovery-required` with `PR_UNCONFIRMED`. Examples are a dropped
+  connection, a stalled or unreadable response, a server error, or a local audit/completion failure
+  after the external write. The intent stays until audit and operation completion are durable;
+  confirmed intents left by a crash are cleaned up idempotently after restart.
+- `github.pr.reconcile` with `prOperationId` looks in the recorded repository, even if the
+  remote's binding has since changed. A changed API endpoint (or a legacy intent without a
+  recorded endpoint) refuses reconciliation with `PR_UNCONFIRMED` and retains the intent. It
+  never sends current credentials to a previously configured endpoint automatically.
+  Recovery searches every base, because the pull request may have been retargeted, and ignores
+  pull requests that already existed for the head. Only a unique correlation comment confirms
+  creation; a matching title alone is not provenance. It settles the original operation as
+  `completed`, or as `failed` with `PR_NOT_CREATED` only when a complete inventory contains no
+  new pull requests. Unmatched new pull requests, conflicting correlations or an incomplete
+  inventory without a match fail reconciliation with `PR_AMBIGUOUS` and keep the creation
+  unconfirmed. Reconciliation never repeats the write. Push and PR reconciliation share one
+  reserved slot beyond the ordinary 64-operation quota, so a full set of unresolved creations
+  cannot block recovery. Ordinary actions cannot use that slot. Failed reconciliation records
+  may be retired before retry (including after restart), but original records with retained
+  push or PR intents are preserved until their evidence is settled.
+- Completion messages are bounded to the record's 500 characters, so a long provider link never
+  makes the operation record unreadable.
+- A remote with an unconfirmed creation cannot be removed (`PR_UNCONFIRMED`).
+
+The workspace's **GitHub pull requests** panel lists the pull requests and their commit binding.
+It shows the access state and provider problems, and it reviews the repository, branches, commit
+range, title and description before **Create pull request**. It also offers reconciliation of
+uncertain creations. With several remotes, a selector chooses the remote. The reviewed status is
+hidden when the remote, the head branch or either tracked commit changes, for example after a
+push or fetch. A late answer to an older read is discarded. Creation sends exactly the reviewed
+remote, branches and commits.
+
+`GitHubIntegrationTest` runs against a loopback fake with the shape of
+`scripts/web-github-fixture.mjs`. It covers:
+
+- the absent, read-only and rate-limited states;
+- explicit creation tied to the pushed commit, and duplicate resolution;
+- a credential that never appears in storage or provider requests;
+- reconciliation of a dropped creation and of an unreadable creation answer;
+- a stalled response body bounded by the deadline;
+- an older pull request with the same title that is never taken as the result;
+- reconciliation in the recorded repository after the binding changes;
+- refusal to remove a remote with an unconfirmed creation;
+- confirmation by correlation after a title edit or retargeting, and `PR_AMBIGUOUS` for an
+  unidentifiable pull request;
+- an existing open pull request reported without writing, and GitHub's `custom` duplicate error;
+- a long provider link bounded in the record, and a moved reviewed commit refused;
+- page-two correlation and capped inventories, including refusal of an incomplete preflight;
+- copied/conflicting markers and independent same-title pull requests;
+- a restart with a different provider, without querying either provider during refusal;
+- post-response crash/audit failure recovery and confirmed-intent cleanup after restart.
+
+The separate `github-optional` CI lane runs these tests and the fixture's own test with no
+secrets or network credentials (#612).
 
 ### Git workspace view and packaged journey
 

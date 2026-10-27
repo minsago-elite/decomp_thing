@@ -428,6 +428,15 @@ class WebGitControllerTest {
                 "targetObjectId" to tracking.getValue("trackingRefs").jsonArray.single().jsonObject.getValue("objectId"),
                 "strategy" to JsonPrimitive("merge")), "http_merge_intent_02"), 409, "NO_COMMITS")
             error(change(mapOf("action" to JsonPrimitive("git.merge.abort")), "http_abort_intent_01"), 409, "NO_MERGE")
+            // The optional GitHub capability is off unless configured; local Git is unaffected.
+            assertEquals("GITHUB_UNCONFIGURED", capabilities.getValue("github").getValue("reasonCode").jsonPrimitive.content)
+            val hosting = data(f.read("$base/github?remote=${remote.getValue("remoteId").jsonPrimitive.content}&branch=main"), 200, "gitHubStatus")
+            assertEquals("unavailable", hosting.getValue("access").jsonPrimitive.content)
+            assertEquals(0, hosting.getValue("pulls").jsonArray.size)
+            error(change(mapOf("action" to JsonPrimitive("github.pr.create"), "remoteId" to remote.getValue("remoteId"),
+                "headBranch" to JsonPrimitive("main"), "baseBranch" to JsonPrimitive("release"), "title" to JsonPrimitive("Review"),
+                "headObjectId" to JsonPrimitive("1".repeat(40)), "baseObjectId" to JsonPrimitive("2".repeat(40)),
+                "body" to JsonPrimitive("")), "http_github_intent_1"), 503, "GITHUB_UNAVAILABLE")
             // Publication: an unborn branch has nothing to push, and no force or deletion field exists.
             val remoteId = remote.getValue("remoteId").jsonPrimitive.content
             error(f.read("$base/push-preview?remote=$remoteId"), 409, "DETACHED")

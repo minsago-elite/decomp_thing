@@ -2069,6 +2069,8 @@
             "git.conflict.complete",
             "git.rebase",
             "git.clone",
+            "github.pr.create",
+            "github.pr.reconcile",
             "git.init",
             "git.attach",
             "archive.verify",
@@ -7053,6 +7055,308 @@
         "unconfirmedPushOperationId"
       ],
       "additionalProperties": false
+    },
+    "gitHubPullCreate": {
+      "type": "object",
+      "properties": {
+        "action": {
+          "const": "github.pr.create"
+        },
+        "worktreeId": {
+          "$ref": "#/definitions/id"
+        },
+        "guards": {
+          "$ref": "#/definitions/gitGuards"
+        },
+        "remoteId": {
+          "$ref": "#/definitions/id"
+        },
+        "headBranch": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 200
+        },
+        "baseBranch": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 200
+        },
+        "headObjectId": {
+          "$ref": "#/definitions/objectId"
+        },
+        "baseObjectId": {
+          "$ref": "#/definitions/objectId"
+        },
+        "title": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256
+        },
+        "body": {
+          "type": "string",
+          "maxLength": 65536
+        }
+      },
+      "required": [
+        "action",
+        "worktreeId",
+        "guards",
+        "remoteId",
+        "headBranch",
+        "headObjectId",
+        "baseBranch",
+        "baseObjectId",
+        "title",
+        "body"
+      ],
+      "additionalProperties": false
+    },
+    "gitHubPullReconcile": {
+      "type": "object",
+      "properties": {
+        "action": {
+          "const": "github.pr.reconcile"
+        },
+        "worktreeId": {
+          "$ref": "#/definitions/id"
+        },
+        "guards": {
+          "$ref": "#/definitions/gitGuards"
+        },
+        "prOperationId": {
+          "$ref": "#/definitions/id"
+        }
+      },
+      "required": [
+        "action",
+        "worktreeId",
+        "guards",
+        "prOperationId"
+      ],
+      "additionalProperties": false
+    },
+    "gitHubStatus": {
+      "type": "object",
+      "properties": {
+        "repositoryId": {
+          "$ref": "#/definitions/id"
+        },
+        "remoteId": {
+          "$ref": "#/definitions/id"
+        },
+        "access": {
+          "type": "string",
+          "enum": [
+            "unavailable",
+            "unbound",
+            "read-only",
+            "write"
+          ]
+        },
+        "repository": {
+          "anyOf": [
+            {
+              "type": "string",
+              "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,99}/[A-Za-z0-9][A-Za-z0-9._-]{0,99}$"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "headBranch": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 200
+        },
+        "pushedObjectId": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/objectId"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "baseBranch": {
+          "anyOf": [
+            {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 200
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "baseObjectId": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/objectId"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "commitCount": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/uint64"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "commits": {
+          "type": "array",
+          "maxItems": 50,
+          "items": {
+            "type": "object",
+            "properties": {
+              "objectId": {
+                "$ref": "#/definitions/objectId"
+              },
+              "subject": {
+                "type": "string",
+                "maxLength": 200
+              }
+            },
+            "required": [
+              "objectId",
+              "subject"
+            ],
+            "additionalProperties": false
+          }
+        },
+        "pulls": {
+          "type": "array",
+          "maxItems": 30,
+          "items": {
+            "type": "object",
+            "properties": {
+              "number": {
+                "type": "integer",
+                "minimum": 1
+              },
+              "state": {
+                "type": "string",
+                "maxLength": 32
+              },
+              "title": {
+                "type": "string",
+                "maxLength": 256
+              },
+              "url": {
+                "type": "string",
+                "pattern": "^https://",
+                "maxLength": 2048
+              },
+              "headBranch": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 200
+              },
+              "baseBranch": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 200
+              },
+              "headObjectId": {
+                "anyOf": [
+                  {
+                    "$ref": "#/definitions/objectId"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "headMatchesPushed": {
+                "type": "string",
+                "enum": [
+                  "matches",
+                  "differs",
+                  "unknown"
+                ]
+              }
+            },
+            "required": [
+              "number",
+              "state",
+              "title",
+              "url",
+              "headBranch",
+              "baseBranch",
+              "headObjectId",
+              "headMatchesPushed"
+            ],
+            "additionalProperties": false
+          }
+        },
+        "problem": {
+          "anyOf": [
+            {
+              "type": "object",
+              "properties": {
+                "code": {
+                  "$ref": "#/definitions/id"
+                },
+                "message": {
+                  "type": "string",
+                  "maxLength": 300
+                },
+                "retryAfterSeconds": {
+                  "anyOf": [
+                    {
+                      "type": "integer",
+                      "minimum": 0
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                }
+              },
+              "required": [
+                "code",
+                "message",
+                "retryAfterSeconds"
+              ],
+              "additionalProperties": false
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "unconfirmedOperationIds": {
+          "type": "array",
+          "maxItems": 64,
+          "items": {
+            "$ref": "#/definitions/id"
+          }
+        }
+      },
+      "required": [
+        "repositoryId",
+        "remoteId",
+        "access",
+        "repository",
+        "headBranch",
+        "pushedObjectId",
+        "baseBranch",
+        "baseObjectId",
+        "commitCount",
+        "commits",
+        "pulls",
+        "problem",
+        "unconfirmedOperationIds"
+      ],
+      "additionalProperties": false
     }
   },
   "oneOf": [
@@ -8478,6 +8782,70 @@
         },
         "data": {
           "$ref": "#/definitions/gitPushReconcile"
+        }
+      },
+      "required": [
+        "apiVersion",
+        "kind",
+        "data"
+      ],
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "properties": {
+        "apiVersion": {
+          "const": 1
+        },
+        "kind": {
+          "const": "gitHubStatus"
+        },
+        "requestId": {
+          "$ref": "#/definitions/requestId"
+        },
+        "data": {
+          "$ref": "#/definitions/gitHubStatus"
+        }
+      },
+      "required": [
+        "apiVersion",
+        "kind",
+        "requestId",
+        "data"
+      ],
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "properties": {
+        "apiVersion": {
+          "const": 1
+        },
+        "kind": {
+          "const": "gitHubPullCreateRequest"
+        },
+        "data": {
+          "$ref": "#/definitions/gitHubPullCreate"
+        }
+      },
+      "required": [
+        "apiVersion",
+        "kind",
+        "data"
+      ],
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "properties": {
+        "apiVersion": {
+          "const": 1
+        },
+        "kind": {
+          "const": "gitHubPullReconcileRequest"
+        },
+        "data": {
+          "$ref": "#/definitions/gitHubPullReconcile"
         }
       },
       "required": [

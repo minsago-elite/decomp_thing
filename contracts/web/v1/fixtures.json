@@ -934,6 +934,23 @@
     {
       "file": "fixtures/git-push-preview.json",
       "valid": true
+    },
+    {
+      "file": "fixtures/request-github-pr-create.json",
+      "valid": true
+    },
+    {
+      "file": "fixtures/request-github-pr-reconcile.json",
+      "valid": true
+    },
+    {
+      "file": "fixtures/invalid-request-github-pr-merge.json",
+      "valid": false,
+      "reason": "Auto-merge and unsolicited publication are outside the pull request contract."
+    },
+    {
+      "file": "fixtures/github-status.json",
+      "valid": true
     }
   ]
 }

@@ -96,6 +96,11 @@ function serve(kind: string, path: string): Promise<unknown> {
       export: { sha256: 'e'.repeat(64), sizeBytes: 512, files: 1, skippedEntries: 0, verification: 'tree-blob-ids-match' } };
     if (route === `${base}/remotes`) return { repositoryId, configured: true, remotes: remoteList };
     if (route === `${base}/conflicts`) return { offset: 0, totalCount: conflictState.files.length, nextOffset: null, ...conflictState };
+    if (route === `${base}/github`) return { repositoryId, remoteId: new URLSearchParams(query).get('remote'), access: 'write', repository: 'fixture-owner/fixture-repo',
+      headBranch: new URLSearchParams(query).get('branch'), pushedObjectId: head, baseBranch: new URLSearchParams(query).get('base'),
+      baseObjectId: other, commitCount: '1', commits: [{ objectId: head, subject: 'Work in progress' }],
+      pulls: [{ number: 3, state: 'open', title: 'Review the parser', url: 'https://fixture.invalid/fixture-owner/fixture-repo/pull/3',
+        headBranch: 'main', baseBranch: 'release', headObjectId: head, headMatchesPushed: 'matches' }], problem: null, unconfirmedOperationIds: [] };
     if (route === `${base}/push-preview`) return { repositoryId, worktreeId, remoteId: 'remote_1', destination: 'https://git.example.org/team/project.git',
       allowed: true, localRefId: 'ref_main', localRefName: 'refs/heads/main', localObjectId: head,
       remoteBranch: new URLSearchParams(query).get('branch'), expectedRemoteObjectId: older, fetchedAt: '2026-10-25T00:00:00Z', remoteState: 'current',
@@ -502,6 +507,86 @@ it('refuses to offer a non-fast-forward push and asks to reconcile an unconfirme
   await waitFor(() => expect(transport.post).toHaveBeenCalledOnce());
   expect(transport.post.mock.calls[0]?.[3]).toMatchObject({ action: 'git.push.reconcile', pushOperationId: 'operation_9' });
   expect(screen.queryByRole('button', { name: /^Push / })).toBeNull();
+});
+
+it('lists pull requests tied to the pushed commit and creates one only after reviewing its range', async () => {
+  remoteList = [{ ...(remoteList[0] as object), trackingRefs: [{ refId: 'ref_origin_main', name: 'refs/remotes/origin/main', objectId: head },
+    { refId: 'ref_origin_release', name: 'refs/remotes/origin/release', objectId: other }] }];
+  transport.post.mockResolvedValueOnce(operation('completed', 'github.pr.create'));
+  mount([...supported, capability('github', 'supported')]);
+  fireEvent.click(await screen.findByRole('button', { name: 'Check pull requests' }));
+  expect(await screen.findByRole('link', { name: '#3 Review the parser' })).toBeTruthy();
+  expect(screen.getByText(/head matches the last pushed commit/)).toBeTruthy();
+  expect(screen.getByText(/not build validation or reconstruction acceptance/)).toBeTruthy();
+  expect(transport.get).toHaveBeenCalledWith('gitHubStatus', `${base}/github?remote=remote_1&branch=main&base=release`);
+  expect(screen.getByText(/1 commit\(s\) in the range/)).toBeTruthy();
+  fireEvent.input(screen.getByLabelText('Title'), { target: { value: 'Review the parser' } });
+  fireEvent.click(screen.getByRole('button', { name: 'Create pull request' }));
+  await waitFor(() => expect(transport.post).toHaveBeenCalledOnce());
+  expect(transport.post.mock.calls[0]?.slice(2, 4)).toEqual(['gitHubPullCreateRequest', expect.objectContaining({ action: 'github.pr.create',
+    remoteId: 'remote_1', headBranch: 'main', headObjectId: head, baseBranch: 'release', baseObjectId: other, title: 'Review the parser', body: '' })]);
+});
+
+it('reviews pull requests for the chosen remote and drops a review when the remote changes', async () => {
+  const tracking = (name: string) => [{ refId: `ref_${name}_main`, name: `refs/remotes/${name}/main`, objectId: head },
+    { refId: `ref_${name}_release`, name: `refs/remotes/${name}/release`, objectId: other }];
+  remoteList = [{ ...(remoteList[0] as object), trackingRefs: tracking('origin') },
+    { ...(remoteList[0] as object), remoteId: 'remote_2', name: 'upstream', trackingRefs: tracking('upstream') }];
+  transport.post.mockResolvedValueOnce(operation('completed', 'github.pr.create'));
+  mount([...supported, capability('github', 'supported')]);
+  const panel = within(await screen.findByRole('region', { name: 'GitHub pull requests' }));
+  fireEvent.click(panel.getByRole('button', { name: 'Check pull requests' }));
+  expect(await panel.findByRole('button', { name: 'Create pull request' })).toBeTruthy();
+  // Choosing another remote discards the review made for the first one.
+  fireEvent.change(panel.getByLabelText('Remote'), { target: { value: 'remote_2' } });
+  await waitFor(() => expect(panel.queryByRole('button', { name: 'Create pull request' })).toBeNull());
+  fireEvent.click(panel.getByRole('button', { name: 'Check pull requests' }));
+  expect(transport.get).toHaveBeenCalledWith('gitHubStatus', `${base}/github?remote=remote_2&branch=main&base=release`);
+  fireEvent.input(await panel.findByLabelText('Title'), { target: { value: 'Review upstream' } });
+  fireEvent.click(panel.getByRole('button', { name: 'Create pull request' }));
+  await waitFor(() => expect(transport.post).toHaveBeenCalledOnce());
+  expect(transport.post.mock.calls[0]?.[3]).toMatchObject({ action: 'github.pr.create', remoteId: 'remote_2', headBranch: 'main', baseBranch: 'release' });
+});
+
+it('drops a pull request review when a fetch moves the reviewed head', async () => {
+  remoteList = [{ ...(remoteList[0] as object), trackingRefs: [{ refId: 'ref_origin_main', name: 'refs/remotes/origin/main', objectId: head },
+    { refId: 'ref_origin_release', name: 'refs/remotes/origin/release', objectId: other }] }];
+  transport.post.mockResolvedValueOnce(operation('completed', 'git.fetch'));
+  mount([...supported, capability('github', 'supported')]);
+  const panel = within(await screen.findByRole('region', { name: 'GitHub pull requests' }));
+  fireEvent.click(panel.getByRole('button', { name: 'Check pull requests' }));
+  expect(await panel.findByRole('button', { name: 'Create pull request' })).toBeTruthy();
+  // The remote branch moved on the server; the workspace reloads the tracking refs after the fetch.
+  remoteList = [{ ...(remoteList[0] as object), trackingRefs: [{ refId: 'ref_origin_main', name: 'refs/remotes/origin/main', objectId: older },
+    { refId: 'ref_origin_release', name: 'refs/remotes/origin/release', objectId: other }] }];
+  fireEvent.click(screen.getByRole('button', { name: 'Fetch origin' }));
+  await waitFor(() => expect(transport.post).toHaveBeenCalledOnce());
+  // A changed range starts a new review lifetime, so inspect the live panel rather than its old DOM.
+  await waitFor(() => expect(within(screen.getByRole('region', { name: 'GitHub pull requests' }))
+    .queryByRole('button', { name: 'Create pull request' })).toBeNull());
+});
+
+it('drops a pending PR review as soon as the selected worktree changes', async () => {
+  remoteList = [{ ...(remoteList[0] as object), trackingRefs: [{ refId: 'ref_origin_main', name: 'refs/remotes/origin/main', objectId: head },
+    { refId: 'ref_origin_release', name: 'refs/remotes/origin/release', objectId: other }] }];
+  let resolve!: (value: unknown) => void;
+  const pending = new Promise(done => { resolve = done; });
+  transport.get.mockImplementation((kind, path) => kind === 'gitHubStatus' ? pending : serve(kind, path));
+  mount([...supported, capability('github', 'supported')]);
+  fireEvent.click(await screen.findByRole('button', { name: 'Check pull requests' }));
+  fireEvent.click(screen.getByRole('button', { name: `Show ${linkedId}` }));
+  await waitFor(() => expect(screen.queryByRole('button', { name: 'Check pull requests' })).toBeNull());
+  resolve(await serve('gitHubStatus', `${base}/github?remote=remote_1&branch=main&base=release`));
+  await pending;
+  expect(screen.queryByRole('button', { name: 'Create pull request' })).toBeNull();
+  expect(transport.post).not.toHaveBeenCalled();
+});
+
+it('explains an absent GitHub integration without affecting local Git', async () => {
+  mount([...supported, capability('github', 'unavailable', 'No GitHub integration is configured.', 'GITHUB_UNCONFIGURED')]);
+  expect(await screen.findByText(/No GitHub integration is configured/)).toBeTruthy();
+  expect(screen.queryByRole('button', { name: 'Check pull requests' })).toBeNull();
+  expect(screen.getByRole('button', { name: 'Fetch origin' })).toHaveProperty('disabled', false);
 });
 
 it('offers cancellation while the first repository is being cloned', async () => {

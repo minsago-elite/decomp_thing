@@ -537,6 +537,58 @@ jobs:
           if-no-files-found: warn
           path: build/ci-partition-inventory.json
 
+  # Optional GitHub capability (#612): a separate lane against loopback fakes only. It has no
+  # secrets and no network credentials, and the core suite never depends on GitHub.
+  github-optional:
+    needs: frontend
+    env:
+      NPM_CONFIG_CACHE: ${{ github.workspace }}/build/npm-download-cache
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          submodules: recursive
+      - uses: actions/setup-java@v6
+        with:
+          distribution: temurin
+          java-version: "21"
+      - uses: ./.github/actions/setup-gradle-compiler-cache
+        with:
+          cache-read-only: true
+      - name: Cache locked frontend package downloads
+        uses: actions/cache@v6
+        with:
+          path: ${{ github.workspace }}/build/npm-download-cache/_cacache
+          key: frontend-npm-downloads-v1-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('frontend/package-lock.json', 'frontend/package.json', 'frontend/.npmrc', '.node-version', 'scripts/install-frontend-node.sh', 'scripts/frontend-node-sha256.txt') }}
+      - name: Cache reviewed frontend Node downloads
+        uses: actions/cache@v6
+        with:
+          path: ${{ github.workspace }}/build/frontend-node-downloads
+          key: frontend-node-archives-v1-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('scripts/install-frontend-node.sh', 'scripts/frontend-node-sha256.txt', '.node-version', 'frontend/package.json') }}
+      - name: Install pinned build-only frontend toolchain
+        env:
+          DECOMP_FRONTEND_NODE_DOWNLOAD_CACHE: '1'
+        run: |
+          bash scripts/install-frontend-node.sh "$RUNNER_TEMP/frontend-node"
+          echo "$RUNNER_TEMP/frontend-node/bin" >> "$GITHUB_PATH"
+      - name: Exercise the loopback GitHub-shaped provider fixture
+        run: node --test scripts/web-github-fixture-http.test.mjs
+      - name: Run the optional GitHub capability tests without credentials
+        env:
+          GITHUB_TOKEN: ''
+          GH_TOKEN: ''
+        run: ./gradlew --no-daemon test --tests 'decompengine.git.GitHubIntegrationTest'
+      - name: Retain GitHub capability reports
+        uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: github-optional-capability-reports
+          retention-days: 14
+          if-no-files-found: warn
+          path: build/test-results/test/TEST-decompengine.git.GitHubIntegrationTest.xml
+
   bundled-ghidra:
     needs: frontend
     env:
