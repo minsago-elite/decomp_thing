@@ -157,10 +157,13 @@ data class GitExecutionLimits(
     val timeout: Duration = Duration.ofSeconds(30),
     val maxStdoutBytes: Int = 1024 * 1024,
     val maxStderrBytes: Int = 64 * 1024,
+    /** Hard and soft RLIMIT_AS, including mappings; null only for calls not requiring this bound. */
+    val maxAddressSpaceBytes: Long? = null,
 ) {
     init {
         require(!timeout.isNegative && !timeout.isZero && timeout <= Duration.ofMinutes(10))
         require(maxStdoutBytes in 1..64 * 1024 * 1024 && maxStderrBytes in 1..1024 * 1024)
+        require(maxAddressSpaceBytes == null || maxAddressSpaceBytes in 16L * 1024 * 1024..4L * 1024 * 1024 * 1024)
     }
 }
 
@@ -193,7 +196,7 @@ data class GitInvocation(
     val limits: GitExecutionLimits = GitExecutionLimits(),
     /** Bounded standard input, written once and closed; null keeps stdin closed. */
     val input: ByteArray? = null,
-    /** Additional variables from a fixed allowlist (commit identity and dates only). */
+    /** Additional server-owned variables from a fixed allowlist (identity, dates and private index). */
     val variables: Map<String, String> = emptyMap(),
 ) {
     init {
@@ -212,15 +215,20 @@ data class GitInvocation(
         val SUBCOMMANDS = setOf(
             "version", "init", "config", "check-ref-format", "rev-parse", "symbolic-ref", "for-each-ref",
             "status", "read-tree", "fsck", "cat-file", "ls-files", "ls-tree", "check-ignore", "update-ref",
-            "log", "diff", "diff-tree", "add", "rm", "reset", "commit", "switch", "worktree", "rev-list",
+            "log", "diff", "diff-tree", "add", "rm", "reset", "commit", "switch", "worktree", "rev-list", "write-tree", "commit-tree",
         )
         val VARIABLES = setOf("GIT_AUTHOR_NAME", "GIT_AUTHOR_EMAIL", "GIT_AUTHOR_DATE",
-            "GIT_COMMITTER_NAME", "GIT_COMMITTER_EMAIL", "GIT_COMMITTER_DATE")
+            "GIT_COMMITTER_NAME", "GIT_COMMITTER_EMAIL", "GIT_COMMITTER_DATE", "GIT_INDEX_FILE")
     }
 }
 
 /** Runs the one trusted executable without a shell, a TTY, inherited environment or inherited config. */
-class GitCommandRunner internal constructor(val executable: Path, val environment: GitEnvironment) {
+class GitCommandRunner internal constructor(
+    val executable: Path,
+    val environment: GitEnvironment,
+    private val memoryLimiter: Path? = listOf(Path.of("/usr/bin/prlimit"), Path.of("/bin/prlimit"))
+        .firstOrNull { Files.isRegularFile(it) && Files.isExecutable(it) }?.toRealPath(),
+) {
     fun argv(invocation: GitInvocation): List<String> = buildList {
         add(executable.toString())
         add("--no-pager"); add("--no-replace-objects")
@@ -234,7 +242,15 @@ class GitCommandRunner internal constructor(val executable: Path, val environmen
     }
 
     fun run(invocation: GitInvocation): GitCommandResult {
-        val builder = ProcessBuilder(argv(invocation))
+        val command = argv(invocation)
+        val boundedCommand = invocation.limits.maxAddressSpaceBytes?.let { bytes ->
+            // Use only the fixed server utility, never repository data or request/PATH lookup.
+            // prlimit applies both limits before exec, and failure never falls back to unbounded Git.
+            val launcher = memoryLimiter ?: throw GitCommandException(GitCommandException.Kind.START_FAILED,
+                "The server cannot enforce the required Git memory bound.")
+            listOf(launcher.toString(), "--as=$bytes:$bytes", "--core=0:0", "--") + command
+        } ?: command
+        val builder = ProcessBuilder(boundedCommand)
             .directory((invocation.workTree ?: invocation.gitDir ?: environment.root).toFile())
             .redirectInput(ProcessBuilder.Redirect.PIPE)
         builder.environment().clear()

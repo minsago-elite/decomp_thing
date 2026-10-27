@@ -517,8 +517,10 @@ class UploadServer(
     private fun releaseOwnershipIfIdle(): Boolean {
         // Sample service quiescence before taking the lifecycle lock; stopping closes the service to new work.
         val jobsIdle = jobs.isIdle()
+        // A Git worker that outlived its shutdown wait may still be writing staging; keep ownership.
+        val gitIdle = gitRepositories.terminated
         return synchronized(lifecycleLock) {
-            if (stopping && activeRequests == 0 && jobsIdle && streamResources.snapshot().active == 0) {
+            if (stopping && activeRequests == 0 && jobsIdle && gitIdle && streamResources.snapshot().active == 0) {
                 ownership.close()
                 true
             } else false
