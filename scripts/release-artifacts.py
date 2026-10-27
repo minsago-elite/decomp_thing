@@ -237,12 +237,35 @@ def read_composition(composition: Path) -> dict[str, list[str]]:
     return {chunk: sorted(owners) for chunk, owners in sorted(chunks.items())}
 
 
-def check_composition(chunks: dict, manifest: dict) -> None:
+def embedded_ownership(application_jar: bytes, manifest: dict) -> dict:
+    """Read build-generated evidence already hashed into the shipped UI closure."""
+    paths = [item["path"] for item in manifest["files"]
+             if re.fullmatch(r"assets/bundle-ownership-[0-9a-f]{64}\.json", item["path"])]
+    if len(paths) != 1:
+        raise ReleaseError("the shipped UI must contain exactly one embedded bundle ownership anchor; rebuild the frontend")
+    with zipfile.ZipFile(io.BytesIO(application_jar)) as jar:
+        data = jar.read(UI_PREFIX + paths[0])
+    if paths[0] != f"assets/bundle-ownership-{sha256(data)}.json":
+        raise ReleaseError("the embedded bundle ownership anchor has a mismatched content address")
+    anchor = json.loads(data)
+    if not isinstance(anchor, dict) or anchor.get("schemaVersion") != 1 \
+            or not isinstance(anchor.get("lockfileSha256"), str) \
+            or not re.fullmatch(r"[0-9a-f]{64}", anchor["lockfileSha256"]) \
+            or not isinstance(anchor.get("chunkOwners"), dict) \
+            or any(not isinstance(owners, list) or not owners or any(not isinstance(owner, str) for owner in owners)
+                   or owners != sorted(set(owners)) for owners in anchor["chunkOwners"].values()):
+        raise ReleaseError("the embedded bundle ownership anchor is malformed")
+    return anchor
+
+
+def check_composition(chunks: dict, manifest: dict, anchor: dict) -> None:
     """The composition must describe exactly the JavaScript the shipped UI build contains."""
     shipped = {item["path"] for item in manifest["files"] if item["path"].endswith(".js")}
     if set(chunks) != shipped:
         difference = sorted(set(chunks) ^ shipped)[:5]
         raise ReleaseError(f"the bundle composition does not describe the shipped UI build {manifest['buildId']}: {difference}")
+    if chunks != anchor["chunkOwners"]:
+        raise ReleaseError("the browser-module owners differ from the embedded bundle ownership anchor")
 
 
 def frontend_dependencies(lockfile: Path, chunks: dict | None) -> dict:
@@ -318,10 +341,13 @@ def assemble(distributions: Path, output: Path, lockfile: Path, composition: Pat
     if application_jar not in members:
         raise ReleaseError(f"the distribution omits {application_jar}")
     manifest = ui_manifest(members[application_jar].required_data())
+    anchor = embedded_ownership(members[application_jar].required_data(), manifest)
     classpath = launcher_classpath(members, application_jar)
     chunks = read_composition(composition)
-    check_composition(chunks, manifest)
+    check_composition(chunks, manifest, anchor)
     dependencies = frontend_dependencies(lockfile, chunks)
+    if dependencies["lockfileSha256"] != anchor["lockfileSha256"]:
+        raise ReleaseError("the lockfile differs from the embedded bundle ownership anchor")
     if NOTICES not in members:
         raise ReleaseError(f"the distribution omits {NOTICES}")
     check_notices(members[NOTICES].required_data(), dependencies)
@@ -400,6 +426,7 @@ def verify(release: Path, lockfile: Path | None) -> dict:
         if sha256(application_jar) != record["applicationBuildId"]:
             raise ReleaseError("the application JAR differs from the recorded application build ID")
         manifest = ui_manifest(application_jar)
+        anchor = embedded_ownership(application_jar, manifest)
         if manifest != json.loads((release / "ui-manifest.json").read_text()) or manifest["buildId"] != record["uiBuildId"]:
             raise ReleaseError("the embedded UI manifest differs from the release record")
         if members[NOTICES].data != (release / "frontend-THIRD_PARTY_NOTICES.txt").read_bytes():
@@ -408,7 +435,9 @@ def verify(release: Path, lockfile: Path | None) -> dict:
     dependencies = json.loads((release / "frontend-dependencies.json").read_text())
     if not isinstance(dependencies.get("browserModuleOwners"), list) or not isinstance(dependencies.get("chunkOwners"), dict):
         raise ReleaseError("the release was assembled without browser-module owners; notice coverage is unchecked")
-    check_composition(dependencies["chunkOwners"], json.loads((release / "ui-manifest.json").read_text()))
+    check_composition(dependencies["chunkOwners"], json.loads((release / "ui-manifest.json").read_text()), anchor)
+    if dependencies["lockfileSha256"] != anchor["lockfileSha256"]:
+        raise ReleaseError("the recorded lockfile differs from the embedded bundle ownership anchor")
     derived = frontend_dependencies(lockfile, dependencies["chunkOwners"]) if lockfile is not None else None
     owners = sorted({owner for chunk_owners in dependencies["chunkOwners"].values() for owner in chunk_owners} - {"application"})
     if owners != dependencies["browserModuleOwners"] or any(

@@ -19,11 +19,23 @@ SPEC.loader.exec_module(release)
 
 VERSION = "9.9.9"
 ROOT = f"llm_bin_patch-{VERSION}/"
+LOCK = {"packages": {
+    "": {"name": "workbench"},
+    "node_modules/preact": {"version": "10.0.0", "license": "MIT", "integrity": "sha512-x", "resolved": "https://registry.example/preact.tgz"},
+    "node_modules/vite": {"version": "1.0.0", "dev": True},
+}}
 
 
-def application_jar(asset: bytes = b"console.log('ui')\n", tamper: bool = False, extra: bool = False) -> bytes:
+def application_jar(asset: bytes = b"console.log('ui')\n", tamper: bool = False, extra: bool = False,
+                    ownership: bool = True) -> bytes:
     files = [{"path": "assets/index-A.js", "mediaType": "text/javascript; charset=utf-8", "sizeBytes": len(asset),
               "sha256": hashlib.sha256(asset).hexdigest(), "public": True}]
+    anchor = json.dumps({"schemaVersion": 1, "chunkOwners": {"assets/index-A.js": ["application", "preact"]},
+                         "lockfileSha256": hashlib.sha256(json.dumps(LOCK).encode()).hexdigest()}).encode()
+    anchor_path = f"assets/bundle-ownership-{hashlib.sha256(anchor).hexdigest()}.json"
+    if ownership:
+        files.insert(0, {"path": anchor_path, "mediaType": "application/json; charset=utf-8", "sizeBytes": len(anchor),
+                         "sha256": hashlib.sha256(anchor).hexdigest(), "public": True})
     payload = {"schemaVersion": 1, "applicationVersion": VERSION, "entryScript": "assets/index-A.js",
                "entryStyles": [], "files": files}
     build_id = hashlib.sha256((json.dumps(payload, separators=(",", ":")) + "\n").encode()).hexdigest()
@@ -31,6 +43,8 @@ def application_jar(asset: bytes = b"console.log('ui')\n", tamper: bool = False,
     entries = [("decompengine/Main.class", b"\xca\xfe\xba\xbe"),
                ("decompengine/web/ui/asset-manifest.json", manifest),
                ("decompengine/web/ui/assets/index-A.js", asset + (b"//changed" if tamper else b""))]
+    if ownership:
+        entries.append(("decompengine/web/ui/" + anchor_path, anchor))
     if extra:
         entries.append(("decompengine/web/ui/assets/stale.js", b"old"))
     buffer = io.BytesIO()
@@ -74,11 +88,7 @@ class ReleaseArtifactsTest(unittest.TestCase):
         self.addCleanup(temporary.cleanup)
         self.root = Path(temporary.name)
         self.lockfile = self.root / "package-lock.json"
-        self.lockfile.write_text(json.dumps({"packages": {
-            "": {"name": "workbench"},
-            "node_modules/preact": {"version": "10.0.0", "license": "MIT", "integrity": "sha512-x", "resolved": "https://registry.example/preact.tgz"},
-            "node_modules/vite": {"version": "1.0.0", "dev": True},
-        }}))
+        self.lockfile.write_text(json.dumps(LOCK))
         self.composition = self.root / "bundle-composition.json"
         self.composition.write_text(json.dumps([{"chunk": "assets/index-A.js", "owner": "application"}, {"chunk": "assets/index-A.js", "owner": "preact"}]))
 
@@ -165,7 +175,8 @@ class ReleaseArtifactsTest(unittest.TestCase):
         self.composition.unlink()
         with self.assertRaisesRegex(release.ReleaseError, "bundle composition"):
             self.assemble(unnoticed)
-        self.composition.write_text(json.dumps([{"chunk": "assets/index-A.js", "owner": "preact"}]))
+        self.composition.write_text(json.dumps([{"chunk": "assets/index-A.js", "owner": "application"},
+                                                {"chunk": "assets/index-A.js", "owner": "preact"}]))
         output = self.assemble(members())
         dependencies = json.loads((output / "frontend-dependencies.json").read_text())
         dependencies["browserModuleOwners"] = None
@@ -205,6 +216,42 @@ class ReleaseArtifactsTest(unittest.TestCase):
         release.write_checksums(output)
         with self.assertRaisesRegex(release.ReleaseError, "does not describe the shipped UI build"):
             release.verify(output, None)
+
+    def test_coordinated_owner_record_changes_cannot_override_shipped_anchor(self) -> None:
+        output = self.assemble(members())
+        dependencies = json.loads((output / "frontend-dependencies.json").read_text())
+        dependencies["chunkOwners"] = {"assets/index-A.js": ["application"]}
+        dependencies["browserModuleOwners"] = []
+        for package in dependencies["packages"]:
+            package["browserModules"] = False
+        (output / "frontend-dependencies.json").write_text(json.dumps(dependencies))
+        release.write_checksums(output)
+        for lock in (None, self.lockfile):
+            with self.subTest(lockfile=lock), self.assertRaisesRegex(release.ReleaseError, "embedded bundle ownership anchor"):
+                release.verify(output, lock)
+
+    def test_missing_anchor_and_edited_lock_digest_are_refused(self) -> None:
+        with self.assertRaisesRegex(release.ReleaseError, "exactly one embedded bundle ownership anchor"):
+            self.assemble(members(ownership=False))
+        output = self.assemble(members())
+        dependencies = json.loads((output / "frontend-dependencies.json").read_text())
+        dependencies["lockfileSha256"] = "0" * 64
+        (output / "frontend-dependencies.json").write_text(json.dumps(dependencies))
+        release.write_checksums(output)
+        with self.assertRaisesRegex(release.ReleaseError, "recorded lockfile differs from the embedded"):
+            release.verify(output, None)
+
+    def test_same_chunk_relabeling_and_foreign_lockfile_refuse_assembly(self) -> None:
+        self.composition.write_text(json.dumps([{"chunk": "assets/index-A.js", "owner": "application"}]))
+        unnoticed = members()
+        unnoticed["docs/frontend-THIRD_PARTY_NOTICES.txt"] = (b"Notices\n", 0o644)
+        with self.assertRaisesRegex(release.ReleaseError, "embedded bundle ownership anchor"):
+            self.assemble(unnoticed)
+        self.composition.write_text(json.dumps([{"chunk": "assets/index-A.js", "owner": "application"},
+                                                {"chunk": "assets/index-A.js", "owner": "preact"}]))
+        self.lockfile.write_text(self.lockfile.read_text() + "\n")
+        with self.assertRaisesRegex(release.ReleaseError, "lockfile differs from the embedded"):
+            self.assemble(members())
 
     def test_verification_requires_a_package_record_for_every_browser_owner(self) -> None:
         output = self.assemble(members())
