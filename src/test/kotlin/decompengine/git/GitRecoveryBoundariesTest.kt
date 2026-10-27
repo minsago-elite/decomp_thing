@@ -1,9 +1,11 @@
 package decompengine.git
 
 import java.nio.file.Files
+import java.nio.file.LinkOption.NOFOLLOW_LINKS
 import java.nio.file.Path
 import kotlin.test.Test
 import kotlin.test.assertEquals
+import kotlin.test.assertFalse
 import kotlin.test.assertNotNull
 import kotlin.test.assertTrue
 
@@ -109,6 +111,11 @@ class GitRecoveryBoundariesTest {
         }, "partial transfer state was removed") }
     }
 
+    private fun objectStore(gitDir: Path): Map<String, String> = Files.walk(gitDir.resolve("objects")).use { paths ->
+        paths.filter { Files.isRegularFile(it, NOFOLLOW_LINKS) }.toList()
+            .associate { gitDir.relativize(it).toString() to GitSourceCopy.digestOf(it) }
+    }
+
     @Test fun `in-flight fetch cancellation and service restart clean partial packs without replay or lost evidence`() {
         for (cancel in listOf(true, false)) Fixture().use { f ->
             val token = f.repositories.root.resolve("token").also { Files.writeString(it, "synthetic-transfer-secret\n") }
@@ -142,28 +149,35 @@ class GitRecoveryBoundariesTest {
                 f.repositories.git("-C", f.seed.toString(), "commit", "-q", "-m", "Populate the next transfer")
                 f.repositories.git("-C", f.seed.toString(), "push", "-q", "origin", "main")
                 val target = f.repositories.git("-C", f.seed.toString(), "rev-parse", "HEAD").trim()
+                val priorObjects = objectStore(gitDir)
                 val pause = GitHttpsFixture.PartialUpload()
                 server.partialUpload = pause
                 try {
                     val pending = service.requestWorkspace(jobId, repositoryId, sync(GitOperationAction.FETCH, "remoteId" to remoteId), key())
                     assertTrue(pause.started.await(30, java.util.concurrent.TimeUnit.SECONDS), "server sent partial pack bytes")
-                    val packs = gitDir.resolve("objects/pack")
+                    val staging = f.store.resolve("$jobId/git/staging/${pending.operation.operationId}")
+                    val quarantine = staging.resolve("repository.git")
+                    val packs = quarantine.resolve("objects/pack")
                     eventually("client received partial pack bytes") {
                         Files.list(packs).use { paths -> paths.anyMatch { it.fileName.toString().startsWith("tmp_pack_") && Files.size(it) > 0 } }
                     }
                     val fetches = ProcessHandle.current().descendants().use { processes -> processes.filter { process ->
                         val arguments = process.info().arguments().orElse(emptyArray())
-                        "fetch" in arguments && "--git-dir=$gitDir" in arguments
+                        "fetch" in arguments && "--git-dir=$quarantine" in arguments
                     }.toList() }
-                    assertTrue(fetches.isNotEmpty(), "a real managed fetch child is running")
+                    assertTrue(fetches.isNotEmpty(), "a real quarantined fetch child is running")
+                    assertEquals(priorObjects, objectStore(gitDir), "partial transfer must not grow the live object store")
+                    assertEquals(prior, service.remotes(jobId, repositoryId).single().tracking)
                     val children = fetches + fetches.flatMap { it.descendants().use { descendants -> descendants.toList() } }
                     if (cancel) {
                         assertEquals(GitOperationState.CANCELLING, service.cancel(jobId, repositoryId, pending.operation.operationId).state)
                         assertTrue(service.awaitIdle(60_000))
                         assertNoPartialTransfer(gitDir)
+                        assertFalse(Files.exists(staging, NOFOLLOW_LINKS), "cancellation removes the whole quarantine")
                     }
                     service.close()
                     eventually("the fetch and its captured children terminated") { children.none { it.isAlive } }
+                    assertFalse(Files.exists(staging, NOFOLLOW_LINKS), "service shutdown removes the whole quarantine")
                     val requests = server.requests
                     service = f.open(policy)
                     val stopped = service.operation(jobId, repositoryId, pending.operation.operationId)
@@ -172,6 +186,8 @@ class GitRecoveryBoundariesTest {
                     assertEquals(accepted, service.workspace(jobId, repositoryId).observation.head.objectId)
                     assertEquals(evidence, f.evidence(accepted))
                     assertNoPartialTransfer(gitDir)
+                    assertFalse(Files.exists(staging, NOFOLLOW_LINKS), "restart leaves no quarantine state")
+                    assertEquals(priorObjects, objectStore(gitDir), "stopped transfers leave the live object store unchanged")
                     assertTrue(service.awaitIdle(1_000))
                     assertEquals(requests, server.requests, "restart must not replay the fetch")
                 } finally {
