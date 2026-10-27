@@ -120,21 +120,24 @@ export async function qualifyHistory({ fixture, makeTarget, cdp, evaluate, ready
     assert.equal(event.payload.fields.text, undefined);
     assert.equal(event.payload.fields.entries, undefined);
     assert.equal(event.payload.fields.path, undefined);
+    assert.equal(event.payload.fields.taskId, undefined);
+    // The classifier also withholds taskId: plans omit taskId + entries,
+    // file changes omit taskId + path, and other rows omit taskId + path + text.
     if (event.sequence === '1') {
       assert.equal(event.payload.observationKind, 'plan');
       assert.equal(event.payload.fields.entriesTruncated, false);
       assert.equal(event.payload.fields.entryCount, '1');
       assert.equal(event.payload.fields.textOmitted, undefined);
-      assert.equal(event.payload.omittedFieldCount, '1');
+      assert.equal(event.payload.omittedFieldCount, '2');
     } else if (event.sequence === '2') {
       assert.equal(event.payload.observationKind, 'file_change');
       assert.equal(event.payload.fields.change, 'modified');
       assert.equal(event.payload.fields.afterSha256, 'c'.repeat(64));
       assert.equal(event.payload.fields.textOmitted, undefined);
-      assert.equal(event.payload.omittedFieldCount, '1');
+      assert.equal(event.payload.omittedFieldCount, '2');
     } else {
       assert.equal(event.payload.fields.textOmitted, true);
-      assert.equal(event.payload.omittedFieldCount, '2');
+      assert.equal(event.payload.omittedFieldCount, '3');
     }
   }
   assert.ok(!JSON.stringify(polling).includes('Synthetic private'));
