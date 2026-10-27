@@ -53,6 +53,8 @@ export function SourceSearch({ selected, basePath, search }: { selected: SourceS
   try { selection = sourceSearchSelection(search); } catch { selection = null; }
   const request = selection?.request ?? null;
   const directory = selection?.directory ?? 'root';
+  // Bookmarks/history bypass submit(): reserve continuation room before any transport or navigation.
+  const tooLong = request !== null && !sourceSearchFits(directory, request);
   const [text, setText] = useState(request?.q ?? '');
   const [symbol, setSymbol] = useState(request?.match === 'symbol');
   const [exactCase, setExactCase] = useState(request?.caseSensitive ?? true);
@@ -70,14 +72,14 @@ export function SourceSearch({ selected, basePath, search }: { selected: SourceS
   const key = [selected.jobId, selected.runId, selected.revisionId, search, refresh].join('/');
   const [read, setRead] = useState<SourceReadState<SourceSearchPage>>({ key, state: 'loading' });
   useEffect(() => {
-    if (!request) return undefined;
+    if (!request || tooLong) return undefined;
     return beginSourceRead(key, async signal => {
       const response = await client.get('sourceSearch', sourceSearchRoute(selected, directory, request), { signal });
       if (signal.aborted) throw new ApiClientError('aborted');
       return bindSourceSearch(response.data, selected, directory, request);
     }, setRead);
   }, [client, key]);
-  const current = request ? currentSourceRead(read, key) : null;
+  const current = request && !tooLong ? currentSourceRead(read, key) : null;
   const data = current?.state === 'ready' ? current.value : null;
   useEffect(() => {
     if (current && current.state !== 'loading' && moveFocus.current) { moveFocus.current = false; heading.current?.focus(); }
@@ -122,10 +124,11 @@ export function SourceSearch({ selected, basePath, search }: { selected: SourceS
       {formError && <p role="alert">{formError === 'too-long' ? copy.searchTooLong : copy.searchInvalid}</p>}
       <button type="submit" disabled={current?.state === 'loading'}>{copy.searchSubmit}</button>
     </form>
-    {directory !== 'root' && <p>{copy.searchScopeDirectory} <a href={sourceSearchPath(basePath, selected, 'root', request && { ...request, cursor: null })}>{copy.searchAll}</a></p>}
+    {directory !== 'root' && <p>{copy.searchScopeDirectory} <a href={sourceSearchPath(basePath, selected, 'root', request && !tooLong ? { ...request, cursor: null } : null)}>{copy.searchAll}</a></p>}
     <p>{copy.searchBoundary}</p>
     <h2 id="source-search-results" ref={heading} tabIndex={-1}>{copy.searchResults}</h2>
     {!request && <p>{copy.searchPrompt}</p>}
+    {tooLong && <p role="alert">{copy.searchTooLong}</p>}
     {current?.state === 'loading' && <p role="status">{copy.searching}</p>}
     {current?.state === 'failed' && <p role="alert">{sourceReadMessage(current.failure)}</p>}
     {data && request && <>
