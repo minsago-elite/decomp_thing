@@ -28,7 +28,7 @@ it('shows all five workflow states without start controls or alternate-harness s
   const view = render(<WorkflowAvailability runtime={runtime} />);
   expect(view.getAllByRole('heading', { level: 4 }).map(heading => heading.textContent))
     .toEqual(['Exploration', 'Reconstruction', 'Build', 'Validation', 'Repair']);
-  expect(view.getAllByText('Starting this workflow is unavailable in this preview.')).toHaveLength(5);
+  expect(view.getAllByText('The server offers no start option for this workflow.')).toHaveLength(5);
   expect(view.getAllByText('SELECTED_HARNESS_NOT_READY')).toHaveLength(5);
   expect(view.getAllByText('Another harness reports support.')).toHaveLength(5);
   expect(view.getByText(/A supported harness alone does not confirm/)).toBeTruthy();
@@ -58,7 +58,7 @@ it('retains every reported capability and readiness state without inferring job 
     expect(repair.getByText(state)).toBeTruthy();
     expect(view.getByText(/^Last reported server readiness:/).textContent)
       .toBe('Last reported server readiness: ' + readiness[index]);
-    expect(view.getByText(/Job-specific input and revision prerequisites have not been reported/)).toBeTruthy();
+    expect(view.getByText(/Starting also needs this job to have no active attempt/)).toBeTruthy();
     expect(view.queryByRole('button')).toBeNull();
     view.unmount();
   }
@@ -112,7 +112,7 @@ it('preserves every general report state without promoting it to job readiness',
   const workflows = within(view.getByRole('list', { name: 'Workflow availability' }));
   expect(workflows.getAllByText('No capability for this workflow was reported. Its availability is unknown.')).toHaveLength(5);
   expect(workflows.queryByText('supported')).toBeNull();
-  expect(view.getByText(/Job-specific input and revision prerequisites have not been reported/)).toBeTruthy();
+  expect(view.getByText(/Starting also needs this job to have no active attempt/)).toBeTruthy();
   expect(view.queryByRole('button')).toBeNull();
 });
 
@@ -127,5 +127,19 @@ it('renders general report text literally and replaces it when its declared scop
   const repair = within(view.getByRole('heading', { name: 'Repair' }).closest('li')!);
   expect(repair.getByText('Scoped report.')).toBeTruthy();
   expect(repair.getByText('SELECTED_HARNESS_NOT_READY')).toBeTruthy();
+  expect(view.queryByRole('button')).toBeNull();
+});
+
+it('explains per workflow whether a launch option is ready and which prerequisite is missing', () => {
+  const launch = (JSON.parse(readFileSync(resolve(process.cwd(), '../contracts/web/v1/fixtures/bootstrap-workflow-launch.json'), 'utf8')) as { data: Bootstrap }).data;
+  const view = render(<WorkflowAvailability runtime={snapshot(launch.capabilities)} />);
+  const status = (name: string) => within(view.getByRole('heading', { name }).closest('li')!);
+  expect(status('Exploration').getByText(/At least one option for this workflow is ready/)).toBeTruthy();
+  expect(status('Reconstruction').getByText(/At least one option for this workflow is ready/)).toBeTruthy();
+  expect(status('Reconstruction').getByText('HARNESS_NOT_CONFIGURED')).toBeTruthy();
+  expect(status('Repair').getByText(/No option for this workflow is ready to start/)).toBeTruthy();
+  expect(status('Repair').getByText('HARNESS_NOT_CONFIGURED')).toBeTruthy();
+  expect(status('Build').getByText('The server offers no start option for this workflow.')).toBeTruthy();
+  expect(status('Build').getByText('WORKFLOW_NOT_IMPLEMENTED')).toBeTruthy();
   expect(view.queryByRole('button')).toBeNull();
 });
