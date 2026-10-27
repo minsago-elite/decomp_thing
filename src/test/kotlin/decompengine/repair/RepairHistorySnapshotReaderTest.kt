@@ -70,13 +70,37 @@ class RepairHistorySnapshotReaderTest {
         withRevisions { revisions, path ->
             val bytes = ByteArray(16_384) { (it % 127).toByte() }
             path.resolve("graph.json").writeBytes(bytes)
-            val session = session(revisions)
+            val reservations = mutableListOf<Long>()
+            val session = session(revisions, reserveCapture = { reservations.add(it) })
             val read = call(session, "capture", "graph.json", bytes.size.toLong()) as StableRegularFile
             assertContentEquals(bytes, read.bytes)
             assertEquals(sha256(bytes), read.sha256)
+            assertEquals(listOf(bytes.size.toLong()), reservations)
             assertEquals(revisions.identity, LinuxFilesystemSyscalls.identity(revisions.fd))
             val result = readRecordedRepairHistorySnapshot(revisions, {}, {})
             unavailable(result) // Payload is not a canonical graph; borrowing still must not close it.
+            assertEquals(revisions.fd, revisions.whileOpen { it })
+        }
+    }
+
+    @Test
+    fun captureReservationRefusalPrecedesPayloadReadAndRetainsLedgerCharge() {
+        withRevisions { revisions, path ->
+            path.resolve("graph.json").writeText("abc")
+            val refusal = IllegalStateException("capture reservation refused")
+            val reservations = mutableListOf<Long>()
+            var checks = 0
+            val capture = session(revisions, cancel = { checks++ }, reserveCapture = {
+                reservations.add(it)
+                throw refusal
+            })
+            assertSame(refusal, assertFailsWith<IllegalStateException> {
+                call(capture, "capture", "graph.json", 3L)
+            })
+            assertEquals(listOf(3L), reservations)
+            assertEquals(2, checks) // Initial checks only; the stable-reader body callback is not reached.
+            assertEquals(3L, field(field(capture, "ledger")!!, "used"))
+            assertEquals(revisions.identity, LinuxFilesystemSyscalls.identity(revisions.fd))
             assertEquals(revisions.fd, revisions.whileOpen { it })
         }
     }
@@ -329,7 +353,7 @@ class RepairHistorySnapshotReaderTest {
         val root = root()
         Files.createDirectory(root.resolve("reports"))
         root.resolve("reports/not-a-directory").writeText("x")
-        val chain = construct("HistoryDirectoryChain", root, listOf("reports", "not-a-directory"), {})
+        val chain = construct("HistoryDirectoryChain", root, listOf("reports", "not-a-directory"), {}, { _: Long -> })
         assertFails { call(chain, "open") }
         @Suppress("UNCHECKED_CAST")
         val acquired = (field(chain, "held") as List<LinuxDescriptor>).toList()
@@ -1070,14 +1094,17 @@ class RepairHistorySnapshotReaderTest {
         val path = Files.createDirectory(root().resolve("fixture-revisions"))
         LinuxFilesystemSyscalls.openRoot(path).use { body(it, path) }
     }
-    private fun session(revisions: LinuxDescriptor, revalidate: () -> Unit = {}, cancel: () -> Unit = {}): Any =
-        construct("HistoryCaptureSession", revisions, revalidate, cancel)
+    private fun session(revisions: LinuxDescriptor, revalidate: () -> Unit = {}, cancel: () -> Unit = {},
+        reserveCapture: (Long) -> Unit = {}): Any =
+        construct("HistoryCaptureSession", revisions, revalidate, cancel, reserveCapture)
     private fun unavailable(result: RepairHistoryReadResult) {
         assertEquals(RepairHistoryReadStatus.UNAVAILABLE, result.status); assertNull(result.snapshot)
     }
     private fun construct(name: String, vararg arguments: Any): Any =
-        Class.forName("decompengine.repair.$name").declaredConstructors.single().also { it.isAccessible = true }
-            .let { invoke { it.newInstance(*arguments) } }!!
+        Class.forName("decompengine.repair.$name").declaredConstructors.single { constructor ->
+            !constructor.isSynthetic && constructor.parameterCount == arguments.size &&
+                constructor.parameterTypes.zip(arguments).all { (type, argument) -> type.isInstance(argument) }
+        }.also { it.isAccessible = true }.let { invoke { it.newInstance(*arguments) } }!!
     private fun call(target: Any, name: String, vararg arguments: Any): Any? =
         target.javaClass.declaredMethods.single { it.name == name && it.parameterCount == arguments.size }
             .also { it.isAccessible = true }.let { invoke { it.invoke(target, *arguments) } }
