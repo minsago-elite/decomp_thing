@@ -149,13 +149,17 @@ const remoteLoads = [
 ];
 // Scripts can also build URLs for DOM elements, fetch or JSX props, so every absolute or
 // protocol-relative URL literal must name a reviewed inert host: XML namespaces, the
-// non-resolvable .invalid parsing base (RFC 6761) and one documentation link inside a
-// bundled router error message. Anything else fails, whatever code would use it.
+// non-resolvable .invalid parsing base (RFC 6761), the router documentation and three
+// fixed prerequisite issue links rendered as user navigation by WorkflowLaunch (#557).
+// Resource-load syntax above still rejects these URLs; no arbitrary issue/host is allowed.
 const urlLiteral = /(?:https?:)?\/\/[^\s"'`)<>\\]+/gi;
 const inertUrls = [
   url => url.hostname === 'www.w3.org',
   url => url.hostname.endsWith('.invalid'),
   url => url.hostname === 'github.com' && `${url.pathname}${url.hash}` === '/preactjs/preact-iso#locationprovider',
+  url => url.protocol === 'https:' && url.hostname === 'github.com' && url.search === '' && url.hash === ''
+    && ['/minsago-elite/decomp_thing/issues/76', '/minsago-elite/decomp_thing/issues/77',
+      '/minsago-elite/decomp_thing/issues/79'].includes(url.pathname),
 ];
 
 /** Parse the literal as the browser would, so userinfo or an allowed prefix cannot hide the real host. */
