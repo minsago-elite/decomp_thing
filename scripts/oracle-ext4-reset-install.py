@@ -65,6 +65,9 @@ INSTALL_FILES = {
     'scripts/oracle-ext4-reset-mke2fs.conf': 'mke2fs.conf',
 }
 APT_BOUNDARY = 'requires-successful-signature-enforced-workflow-apt-install'
+PACKAGE_ROOT = Path('/var/lib/decomp-oracle-ext4-reset-packages-ci')
+SYSTEM_CONF = Path('/etc/systemd/system.conf')
+KNOWN_SYSTEMD_DRIFT = b'??5?????? c /etc/systemd/system.conf\n'
 
 
 class InstallError(RuntimeError):
@@ -346,6 +349,93 @@ def mkdir_exact(path, mode):
         os.close(parent)
 
 
+def prepare_host_packages():
+    """Restore only the observed hosted-image conffile drift, before any slot.
+
+    This is disposable-host provisioning, not a verification exception or a
+    runtime repair API. Preserve the old file in root custody; require APT to
+    reinstall the *same* authenticated package version and dpkg to verify it
+    cleanly. Unknown drift and interrupted/preexisting setup remain refused.
+    """
+    if os.geteuid() != 0:
+        fail('trusted package preparation requires root')
+    for path in (ROOT, UNIT_FILE, RETENTION_FILE, PACKAGE_ROOT):
+        absent(path)
+    require_root_ancestry(PACKAGE_ROOT.parent)
+    require_root_ancestry(SYSTEM_CONF.parent)
+    for path in ('/usr/bin/dpkg-query', '/usr/bin/dpkg', '/usr/bin/apt-cache',
+                 '/usr/bin/apt-get', '/usr/bin/systemctl'):
+        trusted_executable(path)
+    core = _load_core(Path(__file__).with_name('oracle-ext4-reset.py'))
+    deadline = time.monotonic() + 240
+    query = _run(core, ['/usr/bin/dpkg-query', '-W',
+        '-f=${Package}\t${Version}\t${source:Package}\t${source:Version}\t${Architecture}\t${Status}\n',
+        'systemd'], deadline=deadline)
+    package = parse_package_query(query, 'systemd')
+    verified = _run(core, ['/usr/bin/dpkg', '--verify', 'systemd'], deadline=deadline)
+    if verified not in (b'', KNOWN_SYSTEMD_DRIFT):
+        fail('package preparation refuses unrecognized systemd drift: ' + repr(verified[:1024]))
+    metadata = _run(core, ['/usr/bin/apt-cache', 'show', 'systemd=' + package['version']], deadline=deadline)
+    _, archive_sha = parse_apt_metadata(metadata, package)
+    before = read_regular(SYSTEM_CONF, MAX_CAPTURE, trusted=True)
+    identity = SYSTEM_CONF.lstat()
+    mkdir_exact(PACKAGE_ROOT, 0o700)
+    evidence_fd = os.open(PACKAGE_ROOT, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC)
+    try:
+        receipt = {'schemaVersion': 1, 'package': package,
+                   'beforeSha256': digest(before), 'verifyBeforeSha256': digest(verified),
+                   'aptMetadataSha256': digest(metadata), 'aptArchiveSha256': archive_sha,
+                   'restored': bool(verified)}
+        create_file(evidence_fd, 'intent.json', canonical(receipt))
+        # Never unlink or overwrite an unrecognized file, even after preflight.
+        current = SYSTEM_CONF.lstat()
+        keys = ('st_dev', 'st_ino', 'st_size', 'st_mtime_ns', 'st_ctime_ns', 'st_mode', 'st_uid', 'st_gid', 'st_nlink')
+        if (any(getattr(current, key) != getattr(identity, key) for key in keys) or
+                read_regular(SYSTEM_CONF, MAX_CAPTURE, trusted=True) != before):
+            fail('systemd configuration changed before package preparation')
+        if verified:
+            os.rename(SYSTEM_CONF, PACKAGE_ROOT / 'system.conf.before')
+            os.fsync(evidence_fd)
+            parent_fd = os.open(SYSTEM_CONF.parent, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC)
+            try:
+                os.fsync(parent_fd)
+            finally:
+                os.close(parent_fd)
+            # --force-confnew alone does not replace a modified conffile when
+            # reinstalling the same version. With the exact old file retained,
+            # --force-confmiss installs its authenticated distribution bytes.
+            argv = ['/usr/bin/apt-get',
+                    '-o', 'APT::Get::AllowUnauthenticated=false',
+                    '-o', 'Acquire::AllowInsecureRepositories=false',
+                    '-o', 'Acquire::AllowDowngradeToInsecureRepositories=false',
+                    '-o', 'Acquire::Retries=2', '-o', 'Acquire::http::Timeout=30',
+                    '-o', 'Acquire::https::Timeout=30',
+                    '-o', 'Dpkg::Options::=--force-confmiss',
+                    'install', '-y', '--no-install-recommends', '--reinstall',
+                    'systemd=' + package['version']]
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                fail('package preparation deadline expired')
+            stdout, stderr = core.run_process(argv, timeout=remaining, maximum_output=MAX_CAPTURE)
+            create_file(evidence_fd, 'apt-reinstall.stdout', stdout)
+            create_file(evidence_fd, 'apt-reinstall.stderr', stderr)
+        else:
+            create_file(evidence_fd, 'system.conf.before', before)
+        after = read_regular(SYSTEM_CONF, MAX_CAPTURE, trusted=True)
+        clean = _run(core, ['/usr/bin/dpkg', '--verify', 'systemd'], deadline=deadline)
+        if clean:
+            fail('reinstalled systemd package is not clean: ' + repr(clean[:1024]))
+        if verified:
+            # Apply the restored manager config before creating any fixture
+            # service. This is not a reset-failed/start-limit counter bypass.
+            _run(core, ['/usr/bin/systemctl', 'daemon-reexec'], deadline=deadline)
+        receipt.update(afterSha256=digest(after), verifyAfterSha256=digest(clean))
+        create_file(evidence_fd, 'completed.json', canonical(receipt))
+        return receipt
+    finally:
+        os.close(evidence_fd)
+
+
 def install():
     if os.geteuid() != 0:
         fail('trusted bootstrap requires root')
@@ -464,11 +554,12 @@ def install():
 
 
 def main():
-    if sys.argv[1:] != ['install']:
-        print('only the fixed install action is supported', file=sys.stderr)
+    actions = {'install': install, 'prepare-host-packages': prepare_host_packages}
+    if len(sys.argv) != 2 or sys.argv[1] not in actions:
+        print('only fixed install or prepare-host-packages actions are supported', file=sys.stderr)
         return 64
     try:
-        result = install()
+        result = actions[sys.argv[1]]()
         sys.stdout.buffer.write(canonical(result) + b'\n')
         return 0
     except (InstallError, OSError, ValueError, RuntimeError) as error:

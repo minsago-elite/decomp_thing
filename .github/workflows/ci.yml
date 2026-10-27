@@ -339,6 +339,8 @@ jobs:
             | tee build/issue933-evidence/apt-update.log
           sudo apt-get "${apt_auth_options[@]}" install -y --no-install-recommends \
             e2fsprogs strace util-linux 2>&1 | tee build/issue933-evidence/apt-install.log
+          sudo -n /usr/bin/python3 -I -S scripts/oracle-ext4-reset-install.py prepare-host-packages \
+            > build/issue933-evidence/package-prepare.json
       - name: Check runtime provisioning with isolated inert fixtures
         run: python3 scripts/test-ci-bundled-runtime.py
       - name: Check CI partition routing and report ownership controls

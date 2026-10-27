@@ -126,7 +126,19 @@ retained final evidence and disposal of the ephemeral hosted VM.
 The transaction acquires the production cooperative mount lock, closes the old
 generation gate, moves and unmounts only the authenticated mount, and formats
 through the same pinned loop. The supported e2fsprogs package and its complete
-installed tool closure are recorded. The fixed formatter arguments and config
+installed tool closure are recorded. Before creating any reset fixture, the
+hosted bootstrap may restore the one observed runner-image modification to
+`/etc/systemd/system.conf`. It refuses any other systemd verification output,
+retains the original file and intent under a new root-private package-evidence
+directory, and uses signature-enforced APT to reinstall the exact installed
+systemd version with `--force-confmiss`. It then requires **empty** `dpkg --verify`
+output and reexecutes the manager before any fixture service exists. Interrupted
+or preexisting package setup is refused; there is no automatic rollback or
+blanket configuration exemption. The ordinary installer still rejects any
+modification in every required package. This is disposable-host preparation,
+not a runtime reset/repair authority or mounted qualification result.
+
+The fixed formatter arguments and config
 require its exclusive block open before any discard, zero, or write; a hidden
 namespace mount must cause an actual `EBUSY` refusal. No recursive walk of old
 filesystem contents is used, so sparse logical size and directory depth do not
