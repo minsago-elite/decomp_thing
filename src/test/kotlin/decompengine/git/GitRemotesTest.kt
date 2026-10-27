@@ -292,6 +292,53 @@ class GitRemotesTest {
         }
     }
 
+    private fun rawRef(f: Fixture, bare: Path, namespace: String, command: String, suffix: Int, objectId: String) {
+        val input = "$command refs/$namespace/malformed-".toByteArray() + byteArrayOf(suffix.toByte(), 0) + "$objectId\u0000".toByteArray()
+        f.repositories.runner.run(GitInvocation("update-ref", listOf("--stdin", "-z"), gitDir = bare, input = input))
+    }
+
+    @Test fun `fetch rejects non UTF8 refs before live promotion without conflating valid replacement characters`() {
+        for (seeded in listOf(false, true)) Fixture().use { f ->
+            val bare = f.remote(); f.initialized()
+            val expected = f.repositories.git("-C", bare.toString(), "rev-parse", "refs/heads/main").trim()
+            // U+FFFD itself is valid UTF-8; reject malformed byte sequences, not that character.
+            val valid = "refs/heads/malformed-\uFFFD"
+            f.repositories.git("-C", bare.toString(), "update-ref", valid, expected)
+            sync(GitOperationAction.REMOTE_ADD, "name" to "upstream", "url" to "admitted:upstream.git")
+            val remoteId = service.remotes(jobId, repositoryId).single().record.remoteId
+            if (seeded) assertEquals(GitOperationState.COMPLETED, sync(GitOperationAction.FETCH, "remoteId" to remoteId).state)
+            val live = f.store.resolve("$jobId/git/repositories/$repositoryId/repository.git")
+            fun tree() = Files.walk(live).use { paths -> paths.filter { Files.isRegularFile(it) }.toList()
+                .associate { live.relativize(it).toString() to Files.readAllBytes(it).toList() } }
+            val before = tree()
+            for (suffix in listOf(0xff, 0xfe)) rawRef(f, bare, "heads", "create", suffix, expected)
+            val refused = sync(GitOperationAction.FETCH, "remoteId" to remoteId)
+            assertEquals(GitOperationState.FAILED, refused.state, refused.message)
+            assertEquals("REPOSITORY_UNSUPPORTED", refused.failureCode)
+            assertTrue(refused.message.contains("non-UTF-8"))
+            assertEquals(before, tree(), "Rejected refs must not promote even received objects into live storage")
+            for (suffix in listOf(0xff, 0xfe)) rawRef(f, bare, "heads", "delete", suffix, expected)
+            assertEquals(GitOperationState.COMPLETED, sync(GitOperationAction.FETCH, "remoteId" to remoteId).state)
+            assertTrue(service.remotes(jobId, repositoryId).single().tracking.any { it.name == "refs/remotes/upstream/malformed-\uFFFD" })
+        }
+    }
+
+    @Test fun `clone rejects non UTF8 branch and tag names without publishing a repository`() {
+        for (namespace in listOf("heads", "tags")) Fixture().use { f ->
+            val bare = f.remote()
+            val expected = f.repositories.git("-C", bare.toString(), "rev-parse", "refs/heads/main").trim()
+            rawRef(f, bare, namespace, "create", 0xff, expected)
+            service = f.open()
+            val admission = service.request(jobId, GitCloneRequest("admitted:upstream.git", "origin", null), key())
+            assertTrue(service.awaitIdle(60_000))
+            val refused = service.operation(jobId, admission.operation.repositoryId, admission.operation.operationId)
+            assertEquals(GitOperationState.FAILED, refused.state, refused.message)
+            assertEquals("REPOSITORY_UNSUPPORTED", refused.failureCode)
+            assertTrue(service.listing(jobId).repositories.isEmpty())
+            assertFalse(Files.exists(f.store.resolve("$jobId/git/repositories/${refused.repositoryId}")))
+        }
+    }
+
     @Test fun `remote registration audits recover exactly once across mutation and audit crash windows`() {
         for (action in listOf(GitOperationAction.REMOTE_ADD, GitOperationAction.REMOTE_REMOVE)) {
             for (point in listOf(GitOperationCrashPoint.AFTER_REMOTE_MUTATION, GitOperationCrashPoint.AFTER_REMOTE_AUDIT)) Fixture().use { f ->

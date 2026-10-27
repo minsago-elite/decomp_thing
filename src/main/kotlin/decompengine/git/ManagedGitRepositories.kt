@@ -818,6 +818,7 @@ class ManagedGitRepositories(
                     val code = when (failure) {
                         is GitCommandException -> GitTransports.classify(failure, failure.diagnostic, location.transport).first
                         is GitOperationRefusal -> failure.code
+                        is GitRepositoryException -> failure.code
                         else -> "TRANSFER_FAILED"
                     }
                     GitRemoteStore.audit(directory, GitRemoteStore.auditEntry("fetch", operation.operationId, code.lowercase(), remote, clock.instant()))

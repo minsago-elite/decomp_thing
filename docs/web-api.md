@@ -1149,7 +1149,9 @@ output: `CERTIFICATE_INVALID`, `AUTHENTICATION_REQUIRED`, `HOST_KEY_UNVERIFIED`,
 
 `POST J/repositories` with `git.clone` (`url`, `remoteName`, `branch`) fetches into a fresh managed
 repository in private staging (#592). The repository receives the remote's branches as
-remote-tracking refs plus its tags. It discovers and preserves the remote's object format before
+remote-tracking refs plus its tags. Non-UTF-8 ref names are refused in private staging/quarantine
+before live publication, rather than replacement-decoded into different or colliding identities;
+a literal UTF-8 U+FFFD remains a valid name. It discovers and preserves the remote's object format before
 initialization, including empty SHA-256 repositories, rather than imposing the new-repository
 default. Format discovery uses bounded, server-only protocol capability diagnostics; those never
 enter records, operation progress or client responses. A detached advertised remote HEAD is refused
