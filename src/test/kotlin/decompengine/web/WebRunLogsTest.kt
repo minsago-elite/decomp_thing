@@ -148,6 +148,42 @@ class WebRunLogsTest {
         }
     }
 
+    @Test fun `multiline configured credentials are redacted without losing source line numbering`() {
+        val parts = listOf("-----BEGIN PRIVATE KEY-----", "SyntheticPemBodyCanary0123456789abcdef", "-----END PRIVATE KEY-----")
+        val (jobId, run) = attempt()
+        for (separator in listOf("\n", "\r\n", "\r")) {
+            val secret = parts.joinToString(separator, postfix = separator)
+            val policy = WebRedactionPolicy.create(mapOf("TEST_PRIVATE_KEY" to secret), listOf(secret), emptyList())
+            val protected = WebRunLogs(WebLogRedaction(emptyMap(), policy))
+            // The log format itself is LF/CRLF, independent of the configured secret's newline style.
+            val bytes = ("before\n" + parts.joinToString("\r\n", postfix = "\r\n") + "after\n").toByteArray()
+            val capture = assertNotNull(protected.capture(bytes, sha))
+            assertEquals(5, capture.totalLines)
+            assertEquals(listOf(1L, 2L, 3L, 4L, 5L), capture.allLines().map { it.number })
+            assertEquals("before", capture.line(0).text); assertEquals("after", capture.line(4).text)
+            assertEquals(3, capture.redactedLines)
+            val range = protected.range(jobId, run, capture, false, WebRunLogs.Query(1, false, 500, null), Instant.EPOCH)
+            val download = protected.download(jobId, run, capture, Instant.EPOCH).decodeToString()
+            for (part in parts) {
+                assertFalse(range.toString().contains(part))
+                assertFalse(download.contains(part))
+                assertFalse(capture.allLines().any { it.searchText.contains(part) })
+                val search = protected.range(jobId, run, capture, false, WebRunLogs.Query(1, false, 1, part), Instant.EPOCH)
+                assertEquals("0", search.getValue("search").jsonObject.getValue("matchCount").jsonPrimitive.content)
+            }
+        }
+    }
+
+    @Test fun `unmaskable credential fragments and literal overflow are refused rather than dropped`() {
+        for (secret in listOf("long-credential-line\nshort", "long-credential-line\r\n  \r\nother-long-line")) {
+            assertFailsWith<IllegalArgumentException> {
+                WebRedactionPolicy.create(mapOf("TEST_PRIVATE_KEY" to secret), listOf(secret), emptyList())
+            }
+        }
+        val tooMany = (1..4097).associate { "TEST_TOKEN_$it" to "UniqueCredentialCanary$it" }
+        assertFailsWith<IllegalArgumentException> { WebRedactionPolicy.create(tooMany, emptyList(), emptyList()) }
+    }
+
     @Test fun `downloads share the live redaction and carry provenance`() {
         val (jobId, run) = attempt()
         val capture = assertNotNull(logs.capture("first $root/a.c\n\u001b[1mbold\n".toByteArray(), sha))

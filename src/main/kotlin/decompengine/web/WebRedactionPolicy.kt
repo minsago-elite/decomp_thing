@@ -255,15 +255,24 @@ internal class WebRedactionPolicy private constructor(
             require(named.all { it.length in 8..4096 }) {
                 "nonempty credential-named environment values must contain 8 to 4096 characters"
             }
+            // Logs and retained event prose are projected one line at a time. Register every
+            // nonempty line of multiline credentials too (PEM keys, CRLF or CR configuration),
+            // while keeping the full literal for other adapters. Refuse fragments too short to
+            // mask safely instead of serving a partially protected credential.
+            val fragments = named.flatMap { it.lineSequence().filter(String::isNotEmpty).toList() }
+            require(fragments.all { it.length in 8..4096 }) {
+                "nonempty credential lines must contain 8 to 4096 characters"
+            }
             // Long opaque configured values are secret-shaped regardless of their name. Path lists and
             // prose are left to the path rules; short generic values would corrupt public vocabulary.
             val opaque = sensitiveValues.filter { value ->
                 value.length in 20..4096 && value.none(Char::isWhitespace) && '/' !in value && '\\' !in value &&
                     value.any(Char::isLetter) && value.any(Char::isDigit)
             }
-            val literals = (named + opaque).filter { it.length in 8..4096 }.distinct()
-                .sortedByDescending(String::length).take(4096)
-            require(literals.sumOf { it.length.toLong() } <= 1024 * 1024) { "redaction literals exceed the configured limit" }
+            val literals = (named + fragments + opaque).distinct().sortedByDescending(String::length)
+            require(literals.size <= 4096 && literals.sumOf { it.length.toLong() } <= 1024 * 1024) {
+                "redaction literals exceed the configured limit"
+            }
             val roots = privateRoots.flatMap { root ->
                 val absolute = root.toAbsolutePath().normalize()
                 listOfNotNull(absolute, try {

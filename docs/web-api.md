@@ -703,8 +703,10 @@ escapes (`\e`, `\uXXXX`), so terminal sequences and markup reach the browser onl
 Redaction policy `web-log-v1` replaces the job store, home, temporary and working directories with
 fixed labels and flags each changed line. Before root labeling, the shared `WebRedactionPolicy`
 credential projection masks configured credential literals, quoted/unquoted credential assignments,
-authorization/bearer syntax, URL credentials and known token formats; generic private user/temporary
-paths are masked afterward. Redaction precedes control escaping, display truncation and whole-log
+authorization/bearer syntax, URL credentials and known token formats. Multiline configured secrets
+also register every nonempty line fragment, so PEM bodies remain protected by line-by-line capture
+without changing source line numbers; unmaskably short fragments or literal-capacity overflow are
+refused rather than partially protected. Generic private user/temporary paths are masked afterward. Redaction precedes control escaping, display truncation and whole-log
 search, and the download uses that same capture. Unsupported credential configurations are refused,
 not silently omitted. This is log-boundary adoption of #520's shared policy, not a claim that
 listener-wide DTO/event/export integration is complete. The optional `search` is a literal substring of at most 128
