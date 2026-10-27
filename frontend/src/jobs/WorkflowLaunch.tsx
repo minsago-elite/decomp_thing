@@ -29,12 +29,6 @@ const requirements: Partial<Record<string, string>> = {
   SANDBOX_HELPER_MISSING: copy.requirementSandbox, GHIDRA_MISSING: copy.requirementGhidra,
   PROBE_TIMEOUT: copy.requirementUnknown, PROBE_FAILED: copy.requirementUnknown, PREREQUISITES_UNKNOWN: copy.requirementUnknown,
 };
-// Owning issues for the built-in harness: the harness parity tracker and each workflow's built-in delivery.
-const builtinTracker = 'https://github.com/minsago-elite/decomp_thing/issues/79';
-const builtinIssues: Partial<Record<Workflow, string>> = {
-  reconstruct: 'https://github.com/minsago-elite/decomp_thing/issues/76',
-  repair: 'https://github.com/minsago-elite/decomp_thing/issues/77',
-};
 const toolLabels = {
   sandbox: copy.toolSandbox, ghidra: copy.toolGhidra, 'agent-harness': copy.toolAgentHarness,
   'c-toolchain': copy.toolCToolchain, angr: copy.toolAngr,
@@ -139,10 +133,13 @@ function Requirement({ option, basePath }: { option: LaunchOption; basePath: str
   if (option.state === 'supported' || option.reasonCode === null) return null;
   const workflow = option.workflows[0]!;
   if (option.reasonCode === 'BUILTIN_HARNESS_NOT_INTEGRATED') {
-    const owner = builtinIssues[workflow];
+    // Literal hrefs keep the build's reviewed navigation exception scoped to these anchor props,
+    // not reusable URL constants that could also reach fetch, beacon or resource-loading sinks.
+    const ownerLabel = textMessage(copy.requirementBuiltinWorkflow, { workflow: workflowLabels[workflow] });
     return <p>{textMessage(copy.requirementHeading, { text: textMessage(copy.requirementBuiltin, { workflow: workflowLabels[workflow] }) })}{' '}
-      <a href={builtinTracker} rel="noreferrer">{copy.requirementBuiltinTracker}</a>
-      {owner !== undefined && <>{' '}<a href={owner} rel="noreferrer">{textMessage(copy.requirementBuiltinWorkflow, { workflow: workflowLabels[workflow] })}</a></>}</p>;
+      <a href="https://github.com/minsago-elite/decomp_thing/issues/79" rel="noreferrer">{copy.requirementBuiltinTracker}</a>
+      {workflow === 'reconstruct' && <>{' '}<a href="https://github.com/minsago-elite/decomp_thing/issues/76" rel="noreferrer">{ownerLabel}</a></>}
+      {workflow === 'repair' && <>{' '}<a href="https://github.com/minsago-elite/decomp_thing/issues/77" rel="noreferrer">{ownerLabel}</a></>}</p>;
   }
   const text = requirements[option.reasonCode];
   return text === undefined ? null
