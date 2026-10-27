@@ -699,6 +699,96 @@ class GitIntegrationTest {
         assertEquals("line one\nlocal two\n", Files.readString(f.workTree().resolve("README.md")))
     }
 
+    @Test fun `restart never treats unrelated HEAD or branch movement as the reviewed integration`() {
+        for (strategy in listOf("fast-forward", "merge")) {
+            for (movement in listOf("local-commit", "other-branch", "detached", "target-without-merge")) {
+                if (strategy == "fast-forward" && movement == "target-without-merge") continue
+                Fixture().use { f ->
+                    f.cloned()
+                    // Include an old terminal commit: it must not retire this newer uncertain intent.
+                    f.localCommit("local README\n")
+                    Files.writeString(f.seed.resolve("util.c"), "int incoming = 11;\n"); f.remoteCommit("incoming")
+                    fetch()
+                    val target = trackingObject()
+                    // A fast-forward needs a non-divergent branch; the old local commit stays recorded.
+                    val gitDir = f.store.resolve("$jobId/git/repositories/$repositoryId/repository.git")
+                    if (strategy == "fast-forward") {
+                        f.repositories.git("--git-dir=$gitDir", "--work-tree=${f.workTree()}", "reset", "--hard", "$target^")
+                    }
+                    f.hook = { if (it == GitOperationCrashPoint.AFTER_STAGING) throw SimulatedGitCrash() }
+                    val operation = sync(GitOperationAction.MERGE, merge(strategy))
+                    val evidence = f.store.resolve("$jobId/git/repositories/$repositoryId/integrations/${operation.worktreeId}.json")
+                    service.close()
+                    val args = when (movement) {
+                        "local-commit" -> arrayOf("commit", "--allow-empty", "-m", "unrelated local commit")
+                        "other-branch" -> arrayOf("checkout", "-b", "elsewhere", target)
+                        "detached" -> arrayOf("checkout", "--detach", target)
+                        else -> arrayOf("reset", "--hard", target)
+                    }
+                    f.repositories.git("--git-dir=$gitDir", "--work-tree=${f.workTree()}", *args)
+                    val actual = f.repositories.git("--git-dir=$gitDir", "rev-parse", "HEAD").trim()
+                    f.hook = {}
+                    repeat(2) {
+                        service = f.open()
+                        val recovered = service.operation(jobId, repositoryId, operation.operationId)
+                        assertEquals(GitOperationState.RECOVERY_REQUIRED, recovered.state, "$strategy/$movement: ${recovered.message}")
+                        assertEquals("HEAD_MOVED", recovered.failureCode)
+                        assertEquals(actual, service.workspace(jobId, repositoryId).observation.head.objectId)
+                        assertTrue(Files.exists(evidence), "uncertain integration evidence survives repeated restarts")
+                        assertTrue(service.auditLog(jobId, repositoryId, 100).none { it["operationId"].toString().trim('"') == operation.operationId })
+                        service.close()
+                    }
+                }
+            }
+        }
+    }
+
+    @Test fun `restart publishes exactly one audit receipt for merges conflicts and aborts before retiring evidence`() {
+        for (kind in listOf("fast-forward", "merge", "conflicted", "abort")) Fixture().use { f ->
+            f.cloned()
+            if (kind == "abort") f.conflictOn("README.md")
+            else {
+                if (kind != "fast-forward") f.localCommit("local README\n")
+                Files.writeString(f.seed.resolve(if (kind == "conflicted") "README.md" else "util.c"), "remote incoming\n")
+                f.remoteCommit("incoming"); fetch()
+            }
+            val (view, g) = guards()
+            val integrationBefore = service.conflicts(jobId, repositoryId, null).integration
+            val before = integrationBefore?.headBefore ?: view.observation.head.objectId
+            val target = integrationBefore?.target ?: trackingObject()
+            val evidence = f.store.resolve("$jobId/git/repositories/$repositoryId/integrations/${view.worktreeId}.json")
+            val action = if (kind == "abort") GitOperationAction.MERGE_ABORT else GitOperationAction.MERGE
+            val parameters = if (kind == "abort") emptyMap() else merge(if (kind == "fast-forward") kind else "merge")
+            f.hook = { if (it == GitOperationCrashPoint.AFTER_PUBLISH) throw SimulatedGitCrash() }
+            val operation = sync(action, parameters)
+            assertTrue(service.auditLog(jobId, repositoryId, 100).none { it["operationId"].toString().trim('"') == operation.operationId })
+            assertTrue(Files.exists(evidence))
+            val published = service.workspace(jobId, repositoryId).observation.head.objectId
+            service.close()
+            // A second crash after audit publication but before terminal persistence must not duplicate it.
+            f.hook = { if (it == GitOperationCrashPoint.BEFORE_TERMINAL_PERSIST) throw SimulatedGitCrash() }
+            service = f.open()
+            assertFailsWith<SimulatedGitCrash> { service.operation(jobId, repositoryId, operation.operationId) }
+            assertTrue(Files.exists(evidence))
+            service.close(); f.hook = {}
+            repeat(2) {
+                service = f.open()
+                val recovered = service.operation(jobId, repositoryId, operation.operationId)
+                assertEquals(if (kind == "conflicted") GitOperationState.RECOVERY_REQUIRED else GitOperationState.COMPLETED, recovered.state, recovered.message)
+                val receipt = service.auditLog(jobId, repositoryId, 100).single { it["operationId"].toString().trim('"') == operation.operationId }
+                assertEquals(if (kind == "abort") "merge.abort" else if (kind == "fast-forward") kind else "merge", receipt["action"].toString().trim('"'))
+                assertEquals(if (kind == "conflicted") "conflicted" else "completed", receipt["outcome"].toString().trim('"'))
+                assertEquals("refs/heads/main", receipt["ref"].toString().trim('"'))
+                assertEquals(if (kind == "abort") target else before, receipt["oldObjectId"].toString().trim('"'))
+                assertEquals(if (kind == "conflicted") target else published, receipt["newObjectId"].toString().trim('"'))
+                if (kind != "abort") assertTrue(receipt["destination"].toString().contains("admitted:upstream.git"))
+                assertEquals(kind == "conflicted", Files.exists(evidence))
+                assertEquals(published, service.workspace(jobId, repositoryId).observation.head.objectId)
+                service.close()
+            }
+        }
+    }
+
     @Test fun `symbolic link conflicts remain unsupported even when materialized as plain files`(): Unit = Fixture().use { f ->
         Files.createSymbolicLink(f.seed.resolve("link"), Path.of("base-target")); f.remoteCommit("base link")
         f.cloned()

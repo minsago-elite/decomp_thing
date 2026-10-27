@@ -402,6 +402,7 @@ internal object GitRemoteStore {
      * One audit entry: destination, refs, objects and outcome. It never holds a credential, and it
      * is separate from reconstruction evidence: nothing here accepts or rejects a revision.
      */
+    @Synchronized
     fun audit(directory: Path, entry: JsonObject) {
         val file = directory.resolve(AUDIT)
         if (Files.exists(file, NOFOLLOW_LINKS) && Files.size(file) > MAX_AUDIT_BYTES) {
@@ -411,6 +412,18 @@ internal object GitRemoteStore {
         }
         Files.write(file, (entry.toString() + "\n").toByteArray(), StandardOpenOption.CREATE, StandardOpenOption.APPEND,
             StandardOpenOption.WRITE, StandardOpenOption.DSYNC)
+    }
+
+    /** Integration publication may be reconciled repeatedly after a crash. Atomically publish
+     * the whole bounded window so a torn append cannot duplicate or lose its operation receipt. */
+    @Synchronized
+    fun auditOnce(directory: Path, entry: JsonObject) {
+        val file = directory.resolve(AUDIT)
+        val lines = if (Files.exists(file, NOFOLLOW_LINKS)) Files.readAllLines(file) else emptyList()
+        val operationId = entry.getValue("operationId")
+        if (lines.any { Json.parseToJsonElement(it).jsonObject["operationId"] == operationId }) return
+        val retained = if (Files.exists(file, NOFOLLOW_LINKS) && Files.size(file) > MAX_AUDIT_BYTES) lines.drop(lines.size / 2) else lines
+        GitStorage.replaceAtomically(file, ((retained + entry.toString()).joinToString("\n") + "\n").toByteArray())
     }
 
     fun auditEntries(directory: Path, limit: Int): List<JsonObject> {

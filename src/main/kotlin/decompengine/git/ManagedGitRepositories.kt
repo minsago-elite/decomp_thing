@@ -950,6 +950,19 @@ class ManagedGitRepositories(
         }
     }
 
+    private fun auditMerge(directory: Path, operation: GitOperationRecord, integration: GitIntegrationRecord,
+        conflicted: Boolean, head: String?) {
+        val remote = GitRemoteStore.list(directory, operation.repositoryId).singleOrNull { integration.trackingRef.startsWith(it.trackingPrefix) }
+        GitRemoteStore.auditOnce(directory, GitRemoteStore.auditEntry(integration.strategy.wireName, operation.operationId,
+            if (conflicted) "conflicted" else "completed", remote, integration.startedAt, ref = integration.branch,
+            oldObjectId = integration.headBefore, newObjectId = if (conflicted) integration.target else head))
+    }
+
+    private fun auditAbort(directory: Path, operation: GitOperationRecord, integration: GitIntegrationRecord?) {
+        GitRemoteStore.auditOnce(directory, GitRemoteStore.auditEntry("merge.abort", operation.operationId, "completed", null, operation.createdAt,
+            ref = integration?.branch, oldObjectId = integration?.target, newObjectId = integration?.headBefore))
+    }
+
     private fun executeIntegration(runner: GitCommandRunner, located: Located, operation: GitOperationRecord, request: GitSyncRequest): Pair<String?, String?> {
         val directory = repositoryDirectory(operation.jobId, operation.repositoryId)
         val observation = GitRepositoryInspector.inspect(runner, located.gitDir, located.workTree, located.commonDir)
@@ -959,8 +972,9 @@ class ManagedGitRepositories(
                 val tracking = trackingRef(runner, located, request.parameters["trackingRefId"])
                 val branch = checkNotNull(observation.head.refName)
                 val before = checkNotNull(observation.head.objectId)
-                GitIntegrations.write(directory, GitIntegrationRecord(operation.operationId, located.worktreeId, strategy, branch, before,
-                    tracking.objectId, tracking.name, clock.instant()))
+                val integration = GitIntegrationRecord(operation.operationId, located.worktreeId, strategy, branch, before,
+                    tracking.objectId, tracking.name, clock.instant())
+                GitIntegrations.write(directory, integration)
                 crash(GitOperationCrashPoint.AFTER_STAGING)
                 val message = "Merge ${tracking.name.removePrefix("refs/remotes/")} into ${branch.removePrefix("refs/heads/")}"
                 val conflicted = activity.withStableRuns(located.record.jobId) { runs ->
@@ -975,10 +989,7 @@ class ManagedGitRepositories(
                 }
                 crash(GitOperationCrashPoint.AFTER_PUBLISH)
                 val head = GitRepositoryInspector.head(runner, located.gitDir, located.record.objectFormat).objectId
-                val remote = GitRemoteStore.list(directory, located.record.repositoryId).singleOrNull { tracking.name.startsWith(it.trackingPrefix) }
-                GitRemoteStore.audit(directory, GitRemoteStore.auditEntry(strategy.wireName, operation.operationId,
-                    if (conflicted) "conflicted" else "completed", remote, clock.instant(), ref = branch, oldObjectId = before,
-                    newObjectId = if (conflicted) tracking.objectId else head))
+                auditMerge(directory, operation, integration, conflicted, head)
                 if (conflicted) {
                     val count = GitIntegrations.conflicts(runner, located.gitDir, located.workTree).size
                     null to "The merge stopped with $count conflicted file(s). Resolve and stage them, then commit explicitly, or abort the merge."
@@ -1000,8 +1011,7 @@ class ManagedGitRepositories(
                     GitIntegrations.abort(runner, located.gitDir, located.workTree)
                 }
                 crash(GitOperationCrashPoint.AFTER_PUBLISH)
-                GitRemoteStore.audit(directory, GitRemoteStore.auditEntry("merge.abort", operation.operationId, "completed", null, clock.instant(),
-                    ref = record?.branch, oldObjectId = record?.target, newObjectId = record?.headBefore))
+                auditAbort(directory, operation, record)
                 GitRepositoryInspector.head(runner, located.gitDir, located.record.objectFormat).objectId to
                     "Aborted the merge and restored the branch and work tree to their state before it. Accepted snapshots were not touched."
             }
@@ -1810,24 +1820,50 @@ class ManagedGitRepositories(
         val gitDir = if (operation.worktreeId == record.worktreeId) commonDir else commonDir.resolve("worktrees").resolve(operation.worktreeId)
         val workTree = if (operation.worktreeId == record.worktreeId) directory.resolve(WORK_TREE) else directory.resolve(LINKED_WORK_TREES).resolve(operation.worktreeId)
         val merging = GitIntegrations.mergeInProgress(gitDir)
-        val head = GitRepositoryInspector.head(runner, gitDir, record.objectFormat).objectId
+        val observed = GitRepositoryInspector.head(runner, gitDir, record.objectFormat)
+        val head = observed.objectId
+        fun headMoved() = finish(operation, GitOperationState.RECOVERY_REQUIRED, "HEAD_MOVED",
+            "The retained integration does not prove the current branch and HEAD. Inspect history and recovery evidence before any new request.", head)
         when (request.action) {
             GitOperationAction.MERGE -> {
                 val integration = GitIntegrations.record(directory, operation.worktreeId)?.takeIf { it.operationId == operation.operationId }
+                val sameBranch = observed.state == GitHeadState.ATTACHED && observed.refName?.let {
+                    GitWorkspaceVersions.refId(record.repositoryId, it) } == request.guards.expectedRefId
                 when {
-                    merging -> finish(operation, GitOperationState.RECOVERY_REQUIRED, "MERGE_IN_PROGRESS",
-                        "The server restarted during the merge. Its state is retained: resolve and commit the conflicts, or abort the merge.")
-                    integration == null || head == integration.headBefore -> {
-                        finish(operation, GitOperationState.INTERRUPTED, "INTERRUPTED", "Interrupted by a server restart before the merge changed the branch.")
-                    }
-                    else -> {
+                    integration == null -> if (!merging && sameBranch && head == request.guards.expectedHeadObjectId)
+                        finish(operation, GitOperationState.INTERRUPTED, "INTERRUPTED", "Interrupted by a server restart before the merge started.")
+                        else headMoved()
+                    observed.state != GitHeadState.ATTACHED || observed.refName != integration.branch -> headMoved()
+                    merging -> if (head == integration.headBefore &&
+                        GitIntegrations.mergeParents(gitDir, record.objectFormat) == listOf(integration.target)) {
+                        auditMerge(directory, operation, integration, true, head)
+                        finish(operation, GitOperationState.RECOVERY_REQUIRED, "MERGE_IN_PROGRESS",
+                            "The server restarted during the merge. Its state is retained: resolve and commit the conflicts, or abort the merge.")
+                    } else headMoved()
+                    head == integration.headBefore -> finish(operation, GitOperationState.INTERRUPTED, "INTERRUPTED",
+                        "Interrupted by a server restart before the merge changed the branch.")
+                    GitIntegrations.published(runner, gitDir, integration, observed) -> {
+                        // The audit receipt must be durable before terminal persistence can retire the intent.
+                        auditMerge(directory, operation, integration, false, head)
                         finish(operation, GitOperationState.COMPLETED, null, "The merge finished before the server restarted. It is a new candidate until validated.", head)
+                    }
+                    else -> headMoved()
+                }
+            }
+            GitOperationAction.MERGE_ABORT -> {
+                val integration = GitIntegrations.record(directory, operation.worktreeId)
+                val sameBranch = observed.state == GitHeadState.ATTACHED && observed.refName?.let {
+                    GitWorkspaceVersions.refId(record.repositoryId, it) } == request.guards.expectedRefId
+                when {
+                    !sameBranch || head != (integration?.headBefore ?: request.guards.expectedHeadObjectId) -> headMoved()
+                    merging -> finish(operation, GitOperationState.INTERRUPTED, "INTERRUPTED",
+                        "Interrupted by a server restart before the merge was aborted; it is still in progress.")
+                    else -> {
+                        auditAbort(directory, operation, integration)
+                        finish(operation, GitOperationState.COMPLETED, null, "The merge was aborted before the server restarted.", head)
                     }
                 }
             }
-            GitOperationAction.MERGE_ABORT -> if (merging) finish(operation, GitOperationState.INTERRUPTED, "INTERRUPTED",
-                "Interrupted by a server restart before the merge was aborted; it is still in progress.")
-                else finish(operation, GitOperationState.COMPLETED, null, "The merge was aborted before the server restarted.", head)
             GitOperationAction.CONFLICT_SAVE -> {
                 val entry = GitIntegrations.conflicts(runner, gitDir, workTree)
                     .singleOrNull { it.path.fileId(operation.worktreeId) == request.parameters["fileId"] }
@@ -1969,10 +2005,20 @@ class ManagedGitRepositories(
             if (operation.action == GitOperationAction.MERGE && integration.operationId != operation.operationId) return
             // Wall clocks can coincide or move backwards. Only durable owner state proves that
             // a different terminal commit/abort may clean this evidence during the startup sweep.
-            if (operations(operation.jobId).any { it.operationId == integration.operationId && !it.state.terminal }) return
+            if (operations(operation.jobId).any { !it.state.terminal && it.repositoryId == operation.repositoryId &&
+                    it.worktreeId == operation.worktreeId && (it.operationId == integration.operationId ||
+                        it.action in setOf(GitOperationAction.MERGE_ABORT, GitOperationAction.COMMIT)) }) return
             val record = repositories(operation.jobId).single { it.repositoryId == operation.repositoryId }
             val gitDir = directory.resolve(GIT_DIR).let { if (operation.worktreeId == record.worktreeId) it else it.resolve("worktrees").resolve(operation.worktreeId) }
-            if (!GitIntegrations.mergeInProgress(gitDir)) GitIntegrations.delete(directory, operation.worktreeId)
+            if (GitIntegrations.mergeInProgress(gitDir)) return
+            // Historical terminal commits/aborts must not consume an uncertain newer intent.
+            if (operation.action != GitOperationAction.MERGE) {
+                val observed = GitRepositoryInspector.head(requireRunner(), gitDir, record.objectFormat)
+                if (observed.objectId != operation.resultObjectId || observed.refName != integration.branch) return
+                if (operation.action == GitOperationAction.COMMIT && !GitIntegrations.published(requireRunner(), gitDir, integration, observed)) return
+                if (operation.action == GitOperationAction.MERGE_ABORT && observed.objectId != integration.headBefore) return
+            }
+            GitIntegrations.delete(directory, operation.worktreeId)
         } catch (_: Exception) { /* Terminal state is durable; retry cleanup at the next restart. */ }
     }
 

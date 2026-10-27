@@ -95,6 +95,20 @@ internal object GitIntegrations {
         GitStorage.forceDirectory(gitDir)
     }
 
+    /** Recovery accepts only the exact retained effect, never arbitrary HEAD movement. */
+    fun published(runner: GitCommandRunner, gitDir: Path, integration: GitIntegrationRecord, head: GitHeadObservation): Boolean {
+        if (head.state != GitHeadState.ATTACHED || head.refName != integration.branch || head.objectId == null) return false
+        return when (integration.strategy) {
+            GitIntegrationStrategy.FAST_FORWARD -> head.objectId == integration.target
+            GitIntegrationStrategy.MERGE -> {
+                val parents = runner.run(GitInvocation("rev-list", listOf("--parents", "-n", "1", head.objectId),
+                    gitDir = gitDir, limits = LIMITS)).text.trim().split(' ').drop(1)
+                parents == listOf(integration.headBefore, integration.target)
+            }
+            GitIntegrationStrategy.REBASE -> false
+        }
+    }
+
     fun divergence(runner: GitCommandRunner, commonDir: Path, local: String, tracking: String): GitDivergence {
         val counts = runner.run(GitInvocation("rev-list", listOf("--left-right", "--count", "$local...$tracking"), gitDir = commonDir, limits = LIMITS))
             .text.trim().split(Regex("\\s+"))
