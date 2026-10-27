@@ -95,10 +95,106 @@ class GitAdapterTest {
         assertEquals(GitCommandException.Kind.OUTPUT_LIMIT, assertFailsWith<GitCommandException> {
             noisy.run(GitInvocation("status", limits = GitExecutionLimits(maxStderrBytes = 4096)))
         }.kind)
+        assertEquals(GitCommandException.Kind.OUTPUT_LIMIT, assertFailsWith<GitCommandException> {
+            noisy.run(GitInvocation("status", truncateStdout = true, limits = GitExecutionLimits(maxStderrBytes = 4096)))
+        }.kind)
         val failing = GitCommandRunner(fakeGit(f.root.resolve("failing"), "echo PRIVATE_CANARY >&2; exit 3"), f.environment)
         val failure = assertFailsWith<GitCommandException> { failing.run(GitInvocation("status")) }
         assertEquals(GitCommandException.Kind.FAILED, failure.kind); assertEquals(3, failure.exitCode)
         assertFalse(failure.message!!.contains("PRIVATE_CANARY"))
+    }
+
+    private fun childStopped(pid: Long): Boolean {
+        val stat = Path.of("/proc", pid.toString(), "stat")
+        return try {
+            val text = Files.readString(stat)
+            text[text.lastIndexOf(") ") + 2] in setOf('Z', 'X', 'x')
+        } catch (_: java.io.IOException) {
+            // /proc can vanish after open, yielding ESRCH from read rather than ENOENT.
+            !ProcessHandle.of(pid).map { it.isAlive }.orElse(false)
+        }
+    }
+
+    private fun requireChildStopped(pidFile: Path) {
+        val pid = Files.readString(pidFile).trim().toLong()
+        try {
+            val deadline = System.nanoTime() + Duration.ofSeconds(2).toNanos()
+            while (!childStopped(pid) && System.nanoTime() < deadline) Thread.sleep(5)
+            assertTrue(childStopped(pid), "descendant $pid is still executing after runner returned")
+        } finally {
+            // A regression must not leave the test's own 30-second sleeper behind.
+            if (!childStopped(pid)) ProcessHandle.of(pid).ifPresent { it.destroyForcibly() }
+        }
+    }
+
+    @Test fun `parent exits first with inherited or closed output pipes leaves no executing child`(): Unit = GitTestRepositories().use { f ->
+        for (redirect in listOf("", ">/dev/null 2>&1")) repeat(10) { index ->
+            val pid = f.root.resolve("orphan-${redirect.length}-$index.pid")
+            val runner = GitCommandRunner(fakeGit(f.root.resolve("orphan-${redirect.length}-$index"),
+                "sleep 30 $redirect &\necho \$! > '$pid'\nexit 0"), f.environment)
+            val started = System.nanoTime()
+            try {
+                assertEquals(0, runner.run(GitInvocation("status", limits = GitExecutionLimits(Duration.ofMillis(500)))).exitCode)
+                assertTrue(Duration.ofNanos(System.nanoTime() - started) < Duration.ofSeconds(2))
+            } finally {
+                requireChildStopped(pid)
+            }
+        }
+    }
+
+    @Test fun `timeout output failure and interruption clean the owned group`(): Unit = GitTestRepositories().use { f ->
+        data class Case(val name: String, val body: String, val limits: GitExecutionLimits, val kind: GitCommandException.Kind)
+        for ((name, body, limits, kind) in listOf(
+            Case("timeout", "wait", GitExecutionLimits(Duration.ofMillis(500)), GitCommandException.Kind.TIMED_OUT),
+            Case("output", "head -c 4000000 /dev/zero; wait", GitExecutionLimits(maxStdoutBytes = 4096), GitCommandException.Kind.OUTPUT_LIMIT),
+            Case("stderr", "head -c 4000000 /dev/zero >&2; wait", GitExecutionLimits(maxStderrBytes = 4096), GitCommandException.Kind.OUTPUT_LIMIT),
+        )) {
+            val pid = f.root.resolve("$name.pid")
+            val runner = GitCommandRunner(fakeGit(f.root.resolve(name), "sleep 30 &\necho \$! > '$pid'\n$body"), f.environment)
+            try {
+                assertEquals(kind, assertFailsWith<GitCommandException> {
+                    runner.run(GitInvocation("status", limits = limits))
+                }.kind)
+            } finally { requireChildStopped(pid) }
+        }
+        for (truncate in listOf(false, true)) {
+            val pid = f.root.resolve("terminal-$truncate.pid")
+            val body = if (truncate) "head -c 4000000 /dev/zero; wait" else "exit 3"
+            val runner = GitCommandRunner(fakeGit(f.root.resolve("terminal-$truncate"),
+                "sleep 30 &\necho \$! > '$pid'\n$body"), f.environment)
+            try {
+                if (truncate) {
+                    val result = runner.run(GitInvocation("status", truncateStdout = true,
+                        limits = GitExecutionLimits(maxStdoutBytes = 4096)))
+                    assertTrue(result.stdoutTruncated)
+                    assertEquals(4096, result.stdout.size)
+                } else {
+                    val failure = assertFailsWith<GitCommandException> { runner.run(GitInvocation("status")) }
+                    assertEquals(GitCommandException.Kind.FAILED, failure.kind)
+                    assertEquals(3, failure.exitCode)
+                }
+            } finally { requireChildStopped(pid) }
+        }
+        val pid = f.root.resolve("interrupted.pid")
+        val runner = GitCommandRunner(fakeGit(f.root.resolve("interrupted"), "sleep 30 &\necho \$! > '$pid'\nwait"), f.environment)
+        val failure = java.util.concurrent.atomic.AtomicReference<Throwable?>()
+        val interrupted = java.util.concurrent.atomic.AtomicBoolean()
+        val thread = Thread.ofPlatform().start {
+            try { runner.run(GitInvocation("status")) } catch (caught: Throwable) { failure.set(caught) }
+            interrupted.set(Thread.currentThread().isInterrupted)
+        }
+        try {
+            val deadline = System.nanoTime() + Duration.ofSeconds(5).toNanos()
+            while ((!Files.exists(pid) || Files.size(pid) == 0L) && System.nanoTime() < deadline) Thread.sleep(5)
+            thread.interrupt()
+            thread.join(7000)
+            assertFalse(thread.isAlive)
+            assertEquals(GitCommandException.Kind.INTERRUPTED, (failure.get() as GitCommandException).kind)
+            assertTrue(interrupted.get())
+        } finally {
+            thread.interrupt()
+            requireChildStopped(pid)
+        }
     }
 
     @Test fun `branch names are validated by local syntax and check-ref-format`(): Unit = GitTestRepositories().use { f ->

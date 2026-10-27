@@ -628,16 +628,25 @@ Bootstrap reports `runtime.gitVersion` as the bare numeric version, or `null` wh
 detected, and a `git` capability. The capability is `unavailable` with `GIT_NOT_FOUND`,
 `GIT_VERSION_UNSUPPORTED` or `GIT_PROBE_FAILED`, or `supported` once the managed repository routes
 are served. Every Git endpoint answers `503 CAPABILITY_UNAVAILABLE` with that reason's message when
-Git is unusable. The executable path never leaves the server.
+Git is unusable. The executable path never leaves the server. Process containment requires the
+Linux x86-64/aarch64 LP64 runtime and glibc spawn extensions already used by the application;
+if native containment is unavailable, the startup probe fails closed (`GIT_PROBE_FAILED`).
 
-- **Argument safety.** `ProcessBuilder` receives a separate argv; no shell is involved. Callers
+- **Argument safety.** Native `posix_spawn` receives a separate argv; no shell is involved. Callers
   name one allowlisted subcommand and its arguments. Only the runner adds global options
   (`--no-pager`, `--no-replace-objects`, `--literal-pathspecs` except for `check-ignore`, which
   takes plain names, `-c` overrides, `--git-dir`, `--work-tree`). Arguments are bounded and contain no NUL. Branch names pass a local syntax check
   and then `git check-ref-format refs/heads/<name>`, so a value can never be parsed as an option.
 - **Bounds.** Each call has its own wall-clock limit (30 s by default) and stdout/stderr byte
-  limits (1 MiB and 64 KiB). Exceeding either kills the process and its descendants. Stdin is
-  closed. Captured stderr stays server-side; public errors use fixed messages.
+  limits (1 MiB and 64 KiB). A fresh session/process group is established atomically at spawn.
+  The adapter owns reaping and retains the unreaped leader until group cleanup, so descendants
+  cannot become unowned merely by outliving their direct parent. Normal exit, timeout, overflow,
+  truncation and interruption all kill the owned group **before** reaping; even children with
+  closed output pipes are covered. Nonblocking capture uses no reader threads and shares the
+  command deadline; failures get one additional five-second emergency cleanup budget. Stdin is
+  `/dev/null`. Captured stderr stays server-side; public errors use fixed messages. This is
+  control-plane cleanup for a trusted executable, not a hostile-code sandbox: a process deliberately
+  escaping with `setsid`/`setpgid` needs separate cgroup containment. Imported helpers remain refused.
 - **Environment.** The child receives a fresh environment: `PATH` (the executable's directory,
   `/usr/bin`, `/bin`), a server-owned `HOME` and `XDG_CONFIG_HOME`, `GIT_CONFIG_NOSYSTEM=1`,
   `GIT_CONFIG_GLOBAL` pointing to an empty server-owned file, `GIT_ATTR_NOSYSTEM=1`,
