@@ -1,5 +1,6 @@
 package decompengine.repair
 
+import decompengine.ci.ownedJvmChild
 import decompengine.acp.LinuxFilesystemSyscalls
 import decompengine.acp.AcpExecutionCleanupDisposition
 import decompengine.acp.AcpExecutionEvidenceCompleteness
@@ -5752,7 +5753,7 @@ class ModuleRevisionGraphTest {
             System.getProperty("java.class.path"),
             ModuleRevisionGraphLockProbe::class.java.name,
             project.toString(),
-        ).redirectErrorStream(true).start()
+        ).redirectErrorStream(true).ownedJvmChild().start()
         val reader = process.inputStream.bufferedReader()
         val outputReader = Executors.newSingleThreadExecutor()
         try {
@@ -5789,7 +5790,7 @@ class ModuleRevisionGraphTest {
             System.getProperty("java.class.path"),
             ModuleRevisionGraphLockProbe::class.java.name,
             project.toString(),
-        ).redirectErrorStream(true).start()
+        ).redirectErrorStream(true).ownedJvmChild().start()
         val reader = process.inputStream.bufferedReader()
         val outputReader = Executors.newSingleThreadExecutor()
         try {

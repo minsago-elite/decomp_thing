@@ -83,6 +83,8 @@ import decompengine.repair.BoundedRepairOutput
 import decompengine.repair.CapturedRepairAgentHarness
 import java.io.ByteArrayOutputStream
 import java.io.IOException
+import java.io.InputStream
+import java.io.OutputStream
 import java.nio.ByteBuffer
 import java.nio.charset.CodingErrorAction
 import java.nio.charset.StandardCharsets
@@ -93,6 +95,7 @@ import java.security.MessageDigest
 import java.time.Duration
 import java.util.concurrent.CompletableFuture
 import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicLong
 import java.util.concurrent.atomic.AtomicReference
@@ -1898,6 +1901,8 @@ private class ProductionAcpSandboxExecution(
     private val prefixObservation: RuntimeCopyStatistics.Prefix?,
 ) : AutoCloseable {
     private val boundary: LinuxBubblewrapBoundary
+    val guardianDescriptor: AcpProviderGuardianLaunchDescriptor? =
+        AcpProviderGuardianLaunchDescriptor.claimForLaunch(configuration)
     private val executionCheck: () -> Unit = {
         try {
             if (request.cancellation.isCancellationRequested()) {
@@ -1983,17 +1988,24 @@ private class ProductionAcpSandboxExecution(
                 configuration.executable,
                 configuration.expectedExecutableManifestSha256,
             )
+            val outerMounts = guardianDescriptor?.runtimeMounts ?:
+                (listOf(executableMount) + sandboxConfiguration.agentRuntimeMounts)
+            observePrefix(RuntimeCopyStatistics.Prefix.Phase.VALIDATE) {
+                boundary.validateReadOnlyMounts(outerMounts, executionCheck)
+            }
             val sandboxed = observePrefix(RuntimeCopyStatistics.Prefix.Phase.LAUNCH) { boundary.launch(
                 AcpSandboxLaunch(
-                    command = configuration.command(),
+                    command = guardianDescriptor?.command ?: configuration.command(),
                     environment = configuration.environmentValues(),
                     workingDirectory = sandboxConfiguration.agentWorkingDirectory,
                     resourceLimits = sandboxConfiguration.agentResourceLimits,
                     maximumWallDuration = request.limits.wallClockTimeout,
-                    readOnlyMounts = listOf(executableMount) + sandboxConfiguration.agentRuntimeMounts,
+                    readOnlyMounts = outerMounts,
                     stagingRoots = emptyList(),
                     purpose = AcpSandboxLaunchPurpose.OUTER_AGENT,
-                    emptyDirectories = request.workspaceRoots.map { it.path },
+                    emptyDirectories = request.workspaceRoots.map { it.path } +
+                        listOfNotNull(guardianDescriptor?.let { ACP_PROVIDER_STATE_ROOT }),
+                    guardianDescriptor = guardianDescriptor,
                 ),
                 mergeError = false,
                 cancellationCheck = executionCheck,
@@ -2063,6 +2075,12 @@ private class ProductionAcpSandboxExecution(
         outerProcessOutput,
         executionCheck,
     )
+
+    fun beginGuardianInputAbort(): CompletableFuture<Unit> = running.beginGuardianInputAbort()
+
+    fun requestGuardianTermination(): CompletableFuture<AcpGuardianSignalOutcome> = running.requestGuardianTermination()
+
+    fun boundaryCleanupFacts(): AcpSandboxBoundaryCleanupFacts = running.boundaryCleanupFacts()
 
     override fun close() = observePrefix(RuntimeCopyStatistics.Prefix.Phase.BOUNDARY_CLOSE) { boundary.close() }
 
@@ -2142,7 +2160,13 @@ private class RunningAcpProcess(
     private val requestIds = JsonRpcRequestTracker()
     private val sessionId = AtomicReference<String?>()
     private val closing = AtomicBoolean(false)
+    private val guardianAdmission = Any()
     private val shutdownStarted = AtomicBoolean(false)
+    private val guardianInputAbort = AtomicReference<CompletableFuture<Unit>?>()
+    private val guardianSignal = AtomicReference<CompletableFuture<AcpGuardianSignalOutcome>?>()
+    private val guardianForcedSignal = AtomicReference<CompletableFuture<AcpGuardianSignalOutcome>?>()
+    private val guardianForcedSignalRequested = AtomicBoolean(false)
+    private val guardianIoFinalizationStarted = AtomicBoolean(false)
     private val producedOutput = ProducedOutputBudget(maximumProducedOutputBytes) {
         terminateForOutputLimit(maximumProducedOutputBytes)
     }
@@ -2179,6 +2203,209 @@ private class RunningAcpProcess(
     init {
         process.onExit().thenAccept { exited ->
             if (!closing.get()) fail(AcpProcessExitedFailure(exited.exitValue()))
+        }
+    }
+
+    private fun guardianOwner(): AcpSandboxedProcess = (sandboxed as? AcpSandboxedProcess)?.also {
+        check(it.hasAuthenticatedGuardian) { "ACP execution has no authenticated guardian" }
+    } ?: error("ACP execution has no authenticated guardian")
+
+    fun guardianStdin(): OutputStream {
+        guardianOwner()
+        return process.outputStream
+    }
+
+    /**
+     * Initiates the JDK pipe close on an independent owner. ProcessPipeOutputStream may flush and
+     * wait for its internal writer; this future is never proof of a no-flush descriptor abort.
+     * The cleanup owner must signal independently without awaiting it and retain an unfinished
+     * close as unverified. A raw no-flush pipe requires an explicit lower-boundary redesign.
+     */
+    fun beginGuardianInputAbort(): CompletableFuture<Unit> {
+        guardianOwner()
+        guardianInputAbort.get()?.let { return it }
+        val completion = CompletableFuture<Unit>()
+        if (!guardianInputAbort.compareAndSet(null, completion)) return requireNotNull(guardianInputAbort.get())
+        Thread.ofVirtual().name("decomp-acp-guardian-input-close-${process.pid()}").start {
+            try {
+                process.outputStream.close()
+                completion.complete(Unit)
+            } catch (failure: Throwable) {
+                completion.completeExceptionally(failure)
+            }
+        }
+        return completion
+    }
+
+    /** Signals only the attested gate waiter/guardian pidfd; never closes or locks a Java stream. */
+    fun requestGuardianTermination(): CompletableFuture<AcpGuardianSignalOutcome> {
+        val owner = guardianOwner()
+        guardianSignal.get()?.let { return it }
+        val completion = CompletableFuture<AcpGuardianSignalOutcome>()
+        if (!guardianSignal.compareAndSet(null, completion)) return requireNotNull(guardianSignal.get())
+        Thread.ofVirtual().name("decomp-acp-guardian-signal-${process.pid()}").start {
+            try {
+                completion.complete(if (owner.terminateGuardian()) AcpGuardianSignalOutcome.DELIVERED
+                    else AcpGuardianSignalOutcome.ALREADY_EXITED)
+            } catch (failure: Throwable) {
+                completion.completeExceptionally(failure)
+            }
+        }
+        return completion
+    }
+
+    /** Emergency guardian KILL is independent of stream locks and never proves native cleanup. */
+    fun requestGuardianForcedTermination(): CompletableFuture<AcpGuardianSignalOutcome> {
+        val owner = guardianOwner()
+        guardianForcedSignalRequested.set(true)
+        guardianForcedSignal.get()?.let { return it }
+        val completion = CompletableFuture<AcpGuardianSignalOutcome>()
+        if (!guardianForcedSignal.compareAndSet(null, completion)) return requireNotNull(guardianForcedSignal.get())
+        Thread.ofVirtual().name("decomp-acp-guardian-kill-${process.pid()}").start {
+            try {
+                completion.complete(if (owner.killGuardian()) AcpGuardianSignalOutcome.DELIVERED
+                    else AcpGuardianSignalOutcome.ALREADY_EXITED)
+            } catch (failure: Throwable) {
+                completion.completeExceptionally(failure)
+            }
+        }
+        return completion
+    }
+
+    fun guardianExited(): Boolean = guardianOwner().guardianExited()
+
+    /** Upper cleanup revokes admission first. Existing failure latches are never cleared. */
+    fun markGuardianClosing(): Unit = synchronized(guardianAdmission) {
+        guardianOwner()
+        // Publish expected teardown before an exit callback can classify its process exit.
+        // A liveness sample here could race that callback and invent a cleanup failure.
+        closing.set(true)
+    }
+
+    fun validateGuardianInboundFrame(frame: String): Unit = synchronized(guardianAdmission) {
+        guardianOwner()
+        if (closing.get()) throw AcpProtocolFailure("guardian ACP admission is revoked")
+        validateInboundLine(frame, redactDiagnostic = true)
+    }
+
+    fun validateGuardianOutboundFrame(frame: String): Unit = synchronized(guardianAdmission) {
+        guardianOwner()
+        if (closing.get()) throw AcpProtocolFailure("guardian ACP admission is revoked")
+        try {
+            requestIds.acceptOutbound(validateStrictJsonRpcFrame(frame))
+        } catch (_: Exception) {
+            throw AcpProtocolFailure("guardian ACP outbound frame admission refused")
+        }
+    }
+
+    /**
+     * Called only after upper revocation/signal and the sole router's bounded drain opportunity.
+     * It never reads/closes stdout, starts another reader, closes SDK objects, or waits for the
+     * sandbox boundary. Task 6 combines its own router/receipt proof with later boundary cleanup.
+     */
+    fun finishGuardianIo(timeout: Duration, forcedTermination: Boolean, rootTerminationRequested: Boolean): AcpGuardianIoCompletion {
+        guardianOwner()
+        check(closing.get()) { "guardian cleanup must be marked before I/O finalization" }
+        require(!timeout.isNegative && !timeout.isZero) { "guardian I/O cleanup timeout must be positive" }
+        check(guardianIoFinalizationStarted.compareAndSet(false, true)) { "guardian I/O cleanup is already finalized" }
+        shutdownStarted.set(true)
+        val deadline = MonotonicDeadline(timeout)
+        val stdoutAccountingVerified = stdoutDrainFinished.isDone && stdoutNaturallyDrained.get() &&
+            stdoutOwnership.get() == StdoutOwnership.GUARDIAN_ROUTER_FINISHED && !stdoutClosedForUnblocking.get()
+        if (!stdoutAccountingVerified) {
+            fail(AcpOutputLimitFailure("guardian stdout owner did not finish its accounted EOF drain"))
+        }
+        try {
+            val stderrMillis = deadline.remainingMillis()
+            if (stderrMillis > 0 && !stderrDrainFinished.isDone) {
+                try {
+                    stderrDrainFinished.get(stderrMillis, TimeUnit.MILLISECONDS)
+                } catch (_: java.util.concurrent.TimeoutException) {
+                    // Retain the incomplete owner and its accounting failure below.
+                } catch (_: java.util.concurrent.ExecutionException) {
+                    // This future is normally completion-only; a failed future cannot certify EOF.
+                }
+            }
+            val joinMillis = deadline.remainingMillis()
+            if (joinMillis > 0) stderrThread.join(joinMillis)
+        } catch (interrupted: InterruptedException) {
+            Thread.currentThread().interrupt()
+            fail(AcpOutputLimitFailure("guardian stderr cleanup was interrupted before owner join"))
+        }
+        val stderrComplete = stderrDrainFinished.isDone && !stderrDrainFinished.isCompletedExceptionally &&
+            stderrNaturallyDrained.get() && !stderrThread.isAlive
+        if (!stderrComplete) {
+            fail(AcpOutputLimitFailure("guardian stderr owner did not finish its accounted EOF drain"))
+        }
+        val stderrObservation = when {
+            !stderrComplete -> AcpGuardianStderrObservation.DRAIN_INCOMPLETE
+            stderrCapture.text().isNotEmpty() || stderrCapture.truncated() -> AcpGuardianStderrObservation.NONEMPTY
+            else -> AcpGuardianStderrObservation.EMPTY
+        }
+        fun delivered(future: CompletableFuture<AcpGuardianSignalOutcome>?): Boolean =
+            future != null && future.isDone && !future.isCompletedExceptionally &&
+                future.getNow(AcpGuardianSignalOutcome.ALREADY_EXITED) == AcpGuardianSignalOutcome.DELIVERED
+        return AcpGuardianIoCompletion(
+            diagnostics(
+                forcedTermination || guardianForcedSignalRequested.get(),
+                rootTerminationRequested || delivered(guardianSignal.get()) || delivered(guardianForcedSignal.get()),
+                liveTree().map { it.pid() },
+                sandboxCleanupVerified = false,
+            ),
+            stderrObservation, stdoutAccountingVerified,
+        )
+    }
+
+    fun awaitGuardianExit(timeout: Duration): Boolean {
+        val owner = guardianOwner()
+        val deadline = MonotonicDeadline(timeout)
+        while (!owner.guardianExited()) {
+            if (deadline.hasExpired()) return false
+            Thread.sleep(minOf(5L, deadline.remainingMillis().coerceAtLeast(1)))
+        }
+        return true
+    }
+
+    fun awaitBoundaryCleanup(timeout: Duration) = guardianOwner().awaitCleanup(timeout)
+
+    fun boundaryCleanupFacts(): AcpSandboxBoundaryCleanupFacts = guardianOwner().boundaryCleanupFacts()
+
+    /** One exclusive owner sees ACPP bytes; every raw frame byte remains in the output budget. */
+    fun claimGuardianStdout(): InputStream {
+        guardianOwner()
+        check(stdoutOwnership.compareAndSet(StdoutOwnership.UNCLAIMED, StdoutOwnership.GUARDIAN_ROUTER)) {
+            "ACP stdout already has an active consumer"
+        }
+        return object : InputStream() {
+            private var eof = false
+            private var closed = false
+            private fun observe(count: Int): Int {
+                if (count < 0) {
+                    eof = true
+                    stdoutOwnership.compareAndSet(StdoutOwnership.GUARDIAN_ROUTER, StdoutOwnership.GUARDIAN_ROUTER_FINISHED)
+                    stdoutDrainFinished.complete(Unit)
+                } else if (count > 0) {
+                    producedOutput.record(count)
+                    failure.get()?.takeIf { it is AcpOutputLimitFailure }?.let { throw it }
+                }
+                return count
+            }
+            override fun read(): Int {
+                check(!closed) { "guardian stdout owner is closed" }
+                if (eof) return -1
+                val value = readStdout { stdoutInput.read() }
+                if (value < 0) observe(-1) else observe(1)
+                return value
+            }
+            override fun read(bytes: ByteArray, offset: Int, length: Int): Int {
+                check(!closed) { "guardian stdout owner is closed" }
+                if (eof) return -1
+                return observe(readStdout { stdoutInput.read(bytes, offset, length) })
+            }
+            override fun close() {
+                check(eof) { "guardian stdout cannot be released before its owner observes EOF" }
+                closed = true
+            }
         }
     }
 
@@ -2263,21 +2490,7 @@ private class RunningAcpProcess(
                         fail(terminal)
                         throw terminal
                     }
-                    try {
-                        val validated = validateStrictJsonRpcFrame(line)
-                        validateInboundSession(validated)
-                        requestIds.acceptInbound(validated)?.let(::bindSession)
-                        decodeJsonRpcMessage(line)
-                    } catch (malformed: Exception) {
-                        val detail = malformed.message?.lineSequence()?.firstOrNull()?.take(MAX_PROTOCOL_DIAGNOSTIC_CHARS)
-                        val terminal = AcpMalformedFrameFailure(
-                            "ACP stdout contained malformed JSON-RPC${detail?.let { ": $it" }.orEmpty()}",
-                            malformed,
-                        )
-                        fail(terminal)
-                        throw terminal
-                    }
-                    activity.touch()
+                    validateInboundLine(line)
                     emit(line)
                 } else {
                     frame.write(next)
@@ -2293,6 +2506,27 @@ private class RunningAcpProcess(
             if (observedEof && stdoutNaturallyDrained.get()) stdoutDrainFinished.complete(Unit)
             if (closing.get()) startShutdownStdoutDrain()
         }
+    }
+
+    private fun validateInboundLine(line: String, redactDiagnostic: Boolean = false) {
+        try {
+            val validated = validateStrictJsonRpcFrame(line)
+            validateInboundSession(validated)
+            requestIds.acceptInbound(validated)?.let(::bindSession)
+            decodeJsonRpcMessage(line)
+        } catch (malformed: Exception) {
+            val terminal = if (redactDiagnostic) {
+                AcpMalformedFrameFailure("guardian ACP inbound frame admission refused")
+            } else {
+                val detail = malformed.message?.lineSequence()?.firstOrNull()?.take(MAX_PROTOCOL_DIAGNOSTIC_CHARS)
+                AcpMalformedFrameFailure(
+                    "ACP stdout contained malformed JSON-RPC${detail?.let { ": $it" }.orEmpty()}", malformed,
+                )
+            }
+            fail(terminal)
+            throw terminal
+        }
+        activity.touch()
     }
 
     private fun validateInboundSession(frame: ValidatedJsonRpcFrame) {
@@ -2333,6 +2567,9 @@ private class RunningAcpProcess(
         protocolScope: CoroutineScope?,
         timeout: Duration,
     ): AcpProcessDiagnostics {
+        check((sandboxed as? AcpSandboxedProcess)?.hasAuthenticatedGuardian != true) {
+            "guardian execution requires its upper-owned cleanup path"
+        }
         if (!shutdownStarted.compareAndSet(false, true)) {
             return diagnostics(
                 forcedTermination = false,
@@ -2601,6 +2838,12 @@ private class RunningAcpProcess(
             "ACP aggregate stdout and stderr exceeded the ${maximumBytes}-byte execution limit",
         )
         fail(terminal)
+        val guardian = sandboxed as? AcpSandboxedProcess
+        if (guardian?.hasAuthenticatedGuardian == true) {
+            // Never block the sole router reader in Process.destroy's Java stream closure.
+            requestGuardianForcedTermination()
+            return
+        }
         try {
             sandboxed?.destroyForcibly() ?: process.destroyForcibly()
         } catch (failure: Exception) {
@@ -2777,7 +3020,7 @@ private object StdoutShutdownFacts {
         if (!parts[2].startsWith("finalMs=")) return null
         val final = parts[2].removePrefix("finalMs=")
         if (final != "NOT_ALLOCATED" && !number(final)) return null
-        val owners = setOf("UNCLAIMED", "FRAME_CONSUMER", "SHUTDOWN_DRAIN")
+        val owners = setOf("UNCLAIMED", "FRAME_CONSUMER", "GUARDIAN_ROUTER", "GUARDIAN_ROUTER_FINISHED", "SHUTDOWN_DRAIN")
         val ioCodes = setOf("NONE", "READ_LOCK_BUSY", "FORCED_CLOSED_GUARD", "READ_IO", "CLOSE_IO")
         fun sample(part: String, prefix: String, operations: Set<String>, optional: Boolean): Boolean {
             if (!part.startsWith(prefix)) return false
@@ -2793,7 +3036,7 @@ private object StdoutShutdownFacts {
     }
 }
 
-private enum class StdoutOwnership { UNCLAIMED, FRAME_CONSUMER, SHUTDOWN_DRAIN }
+private enum class StdoutOwnership { UNCLAIMED, FRAME_CONSUMER, GUARDIAN_ROUTER, GUARDIAN_ROUTER_FINISHED, SHUTDOWN_DRAIN }
 
 private class TerminationState(private val rootPid: Long) {
     var anyRequested: Boolean = false

@@ -22,6 +22,7 @@ import decompengine.project.MakeProjectBuilder
 import decompengine.project.ArchivalPackager
 import decompengine.repair.ModuleRevisionAttempt
 import decompengine.repair.ModuleRevisionGraphTest
+import decompengine.repair.RepairProviderReceiptRetentionTest
 import decompengine.repair.TRACE_REPAIR_ACP_RECEIPT_KIND
 import decompengine.repair.ModuleRevisionGraph
 import decompengine.repair.open
@@ -1879,6 +1880,47 @@ class UploadServerTest {
                 .findAll(body).count(), body)
             assertFalse(body.contains(document.json), body)
             assertFalse(body.contains("peer completion summary"), body)
+        }
+    }
+
+    @Test
+    fun `retained provider v6 repair receipt is available only for its actual nonrelease binding`() {
+        withServer { server, dataDir ->
+            val upload = upload(server, "provider-receipt.elf", elfFixture(), acceptJson = true)
+            val jobId = Json.parseToJsonElement(upload.body.decodeToString()).jsonObject["id"].toString().trim('"')
+            val jobDir = dataDir.resolve(jobId)
+            val reports = jobDir.resolve("reports").createDirectories()
+            val revisions = reports.resolve("repair-revisions").createDirectories()
+            val attemptId = "revision_00000001_aaaaaaaaaaaaaaaa"
+            val document = RepairProviderReceiptRetentionTest().receipt(jobDir, attemptId, providerFixture = true)
+            assertEquals(6, document.schemaVersion)
+            assertFalse(document.releaseComplete)
+            revisions.resolve("$attemptId.acp-receipt.json").writeText(document.json)
+            val history = reports.resolve("repair_history.json")
+            fun historyWithVersion(version: Int) = """
+                {"schemaVersion":3,"runs":[],"regressionInputs":[],"iterations":[
+                {"index":1,"failureKind":"compile","prompt":"bounded failure","summary":"","succeeded":false,
+                "retainedRegressionIds":[],"before":null,"after":null,"patches":[],
+                "disposition":"rejected","publicationMode":"acp_release",
+                "revisionId":"$attemptId","parentRevisionId":"baseline","runId":null,
+                "agentInvocation":{"receiptPath":"reports/repair-revisions/$attemptId.acp-receipt.json",
+                "receiptSha256":"${document.sha256}","receiptSchemaVersion":$version,
+                "requestSha256":"${document.requestSha256}","resultChangesSha256":"${document.resultChangesSha256}",
+                "terminalOutcome":"${document.terminalOutcome}","receiptReleaseComplete":false,"assessmentStatus":"rejected"}}]}
+            """.trimIndent()
+            history.writeText(historyWithVersion(6))
+            val valid = request(server, "GET", "/jobs/$jobId")
+            val validBody = valid.body.decodeToString()
+            assertEquals(200, valid.status)
+            assertFalse(validBody.contains("ACP receipt is corrupt"), validBody)
+            assertFalse(validBody.contains("Release-complete ACP evidence"), validBody)
+            assertTrue(validBody.contains("ACP receipt is available but does not establish release completeness."), validBody)
+            assertTrue(validBody.contains("/jobs/$jobId/artifacts/reports/repair-revisions/$attemptId.acp-receipt.json"), validBody)
+            assertFalse(validBody.contains(document.json), validBody)
+            history.writeText(historyWithVersion(2))
+            val forged = request(server, "GET", "/jobs/$jobId").body.decodeToString()
+            assertTrue(forged.contains("ACP receipt is corrupt; release completeness is not established."), forged)
+            assertFalse(forged.contains("Release-complete ACP evidence"), forged)
         }
     }
 

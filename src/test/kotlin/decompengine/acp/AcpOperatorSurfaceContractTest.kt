@@ -3,17 +3,199 @@ package decompengine.acp
 import java.nio.file.Files
 import java.nio.file.Path
 import java.nio.file.attribute.PosixFilePermission
+import java.lang.invoke.MethodType
+import java.lang.reflect.InvocationTargetException
+import java.lang.reflect.Modifier
 import kotlin.io.path.createTempFile
 import kotlin.io.path.readText
 import kotlin.io.path.writeText
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFalse
+import kotlin.test.assertFailsWith
 import kotlin.test.assertNotNull
 import kotlin.test.assertNull
 import kotlin.test.assertTrue
 
 class AcpOperatorSurfaceContractTest {
+    @Test
+    fun `process configuration preserves both c4 JVM constructor descriptors exactly`() {
+        val constructor = "(Ljava/nio/file/Path;Ljava/util/Collection;Ljava/util/Map;ZLjava/util/Collection;" +
+            "Ldecompengine/acp/AcpLifecycleTimeouts;IIILjava/lang/String;" +
+            "Ldecompengine/acp/AcpFilesystemLimits;Ldecompengine/acp/AcpLinuxSandboxConfiguration;" +
+            "Ldecompengine/acp/AcpTerminalExecutionPolicy;Ldecompengine/acp/AcpPermissionDecider;" +
+            "Ldecompengine/acp/AcpSessionPreferences;Ljava/lang/String;"
+        assertEquals(
+            setOf(constructor + ")V", constructor + "ILkotlin/jvm/internal/DefaultConstructorMarker;)V"),
+            AcpProcessConfiguration::class.java.declaredConstructors.map {
+                MethodType.methodType(Void.TYPE, it.parameterTypes).toMethodDescriptorString()
+            }.toSet(),
+        )
+    }
+
+    @Test
+    fun `callable provider methods reject forged replayed wrong owner and wrong purpose permits`() {
+        val bind = AcpProcessConfiguration::class.java.declaredMethods.single {
+            it.name.startsWith("bindProviderTransportPolicy$")
+        }
+        val consume = AcpHarnessFactory::class.java.declaredMethods.single {
+            it.name.startsWith("consumeProviderQualificationPermit$")
+        }
+        assertTrue(Modifier.isPublic(bind.modifiers))
+        assertTrue(Modifier.isPublic(consume.modifiers))
+        assertTrue(AcpProviderQualificationPermit::class.java.isSealed)
+        assertFalse(java.io.Serializable::class.java.isAssignableFrom(AcpProviderQualificationPermit::class.java))
+
+        val permitConstructor = AcpHarnessFactory::class.java.declaredClasses.single {
+            it.simpleName == "FactoryProviderPermit"
+        }.getDeclaredConstructor().apply { isAccessible = true }
+        val forged = permitConstructor.newInstance() as AcpProviderQualificationPermit
+        val configuration = AcpProcessConfiguration(Path.of("/usr/bin/true"))
+        assertReflectedRefusal<IllegalArgumentException> { bind.invoke(configuration, forged) }
+        assertReflectedRefusal<IllegalArgumentException> {
+            consume.invoke(AcpHarnessFactory, forged, configuration, AcpProviderQualificationPurpose.PROCESS_CONFIGURATION)
+        }
+        assertEquals(AcpProviderTransportPolicy.DISABLED, configuration.providerTransportPolicy)
+
+        // Private disabled issuance is inspected only to prove one-use admission; it cannot
+        // create a fixture, endpoint, credential, launcher, or backend authority.
+        val issuer = AcpHarnessFactory::class.java.declaredMethods.single {
+            it.name == "issueDisabledConfigurationPermit"
+        }.apply { isAccessible = true }
+        assertTrue(Modifier.isPrivate(issuer.modifiers))
+        val admitted = AcpProcessConfiguration(Path.of("/usr/bin/true"))
+        val permit = issuer.invoke(AcpHarnessFactory, admitted)
+        bind.invoke(admitted, permit)
+        assertEquals(AcpProviderTransportPolicy.DISABLED, admitted.providerTransportPolicy)
+        assertReflectedRefusal<IllegalStateException> { bind.invoke(admitted, permit) }
+        assertReflectedRefusal<IllegalArgumentException> {
+            consume.invoke(AcpHarnessFactory, permit, admitted, AcpProviderQualificationPurpose.PROCESS_CONFIGURATION)
+        }
+
+        val intended = AcpProcessConfiguration(Path.of("/usr/bin/true"))
+        val wrongOwner = AcpProcessConfiguration(Path.of("/usr/bin/true"))
+        val ownerPermit = issuer.invoke(AcpHarnessFactory, intended)
+        assertReflectedRefusal<IllegalArgumentException> { bind.invoke(wrongOwner, ownerPermit) }
+        assertReflectedRefusal<IllegalArgumentException> { bind.invoke(intended, ownerPermit) }
+        val purposePermit = issuer.invoke(AcpHarnessFactory, intended)
+        assertReflectedRefusal<IllegalArgumentException> {
+            consume.invoke(AcpHarnessFactory, purposePermit, intended, AcpProviderQualificationPurpose.INVOCATION_EVIDENCE)
+        }
+        assertReflectedRefusal<IllegalArgumentException> { bind.invoke(intended, purposePermit) }
+
+        val alreadyPublished = AcpProcessConfiguration(Path.of("/usr/bin/true"))
+        assertEquals(AcpProviderTransportPolicy.DISABLED, alreadyPublished.providerTransportPolicy)
+        assertFailsWith<IllegalStateException> { AcpHarnessFactory.bindProvisionedDisabledProvider(alreadyPublished) }
+    }
+
+    @Test
+    fun `new callable provider surface accepts no arbitrary transport authority`() {
+        val forbiddenTypes = setOf(
+            "java.net.URI", "java.net.URL", "java.net.http.HttpClient", "javax.net.ssl.SSLContext",
+        )
+        val forbiddenNames = listOf("backend", "resolver", "launcher", "boundary", "testmode")
+        listOf(AcpHarnessFactory::class.java, AcpProviderQualificationPermit::class.java,
+            AcpProviderQualificationProfile::class.java).forEach { type ->
+            val callable = type.declaredConstructors.filter { Modifier.isPublic(it.modifiers) } +
+                type.declaredMethods.filter { Modifier.isPublic(it.modifiers) }
+            callable.forEach { method ->
+                assertFalse(forbiddenNames.any { it in method.name.lowercase() }, method.toString())
+                method.parameters.forEach { parameter ->
+                    assertFalse(parameter.type.name in forbiddenTypes, method.toString())
+                    assertFalse(forbiddenNames.any { it in parameter.type.name.lowercase() }, method.toString())
+                    assertFalse(parameter.type.name.startsWith("kotlin.jvm.functions.Function"), method.toString())
+                    assertFalse(parameter.type.name.startsWith("java.util.function."), method.toString())
+                }
+            }
+        }
+        assertTrue(AcpProviderQualificationProfile::class.java.declaredConstructors.filterNot { it.isSynthetic }.all {
+            Modifier.isPrivate(it.modifiers)
+        })
+        assertTrue(AcpHarnessFactory::class.java.declaredMethods.filter { "issue" in it.name }.all {
+            Modifier.isPrivate(it.modifiers)
+        })
+    }
+
+    @Test
+    fun `invocation evidence permits require the factory captured request commitment`() {
+        val consume = AcpHarnessFactory::class.java.declaredMethods.single {
+            it.name.startsWith("consumeProviderQualificationPermit$")
+        }
+        val consumeEvidence = AcpHarnessFactory::class.java.declaredMethods.single {
+            it.name.startsWith("consumeInvocationEvidenceQualificationPermit$")
+        }
+        val permitType = AcpHarnessFactory::class.java.declaredClasses.single {
+            it.simpleName == "FactoryProviderPermit"
+        }
+        val constructor = permitType.getDeclaredConstructor().apply { isAccessible = true }
+        val recordType = AcpHarnessFactory::class.java.declaredClasses.single {
+            it.simpleName == "ProviderPermitRecord"
+        }
+        val recordConstructor = recordType.getDeclaredConstructor(
+            Any::class.java, AcpProviderQualificationPurpose::class.java, String::class.java,
+        ).apply { isAccessible = true }
+        val registryField = AcpHarnessFactory::class.java.getDeclaredField("providerPermits").apply {
+            isAccessible = true
+        }
+        @Suppress("UNCHECKED_CAST")
+        val registry = registryField.get(AcpHarnessFactory) as MutableMap<Any, Any>
+        val consumer = Any()
+        val capturedRequestDigest = "1".repeat(64)
+        fun issued(): Any {
+            val permit = constructor.newInstance()
+            val record = recordConstructor.newInstance(
+                consumer, AcpProviderQualificationPurpose.INVOCATION_EVIDENCE, capturedRequestDigest,
+            )
+            synchronized(registry) { registry[permit] = record }
+            return permit
+        }
+        listOf(null, "", "1".repeat(63), "A".repeat(64)).forEach { invalidExpectation ->
+            assertReflectedRefusal<IllegalArgumentException> {
+                recordConstructor.newInstance(
+                    consumer, AcpProviderQualificationPurpose.INVOCATION_EVIDENCE, invalidExpectation,
+                )
+            }
+        }
+        val forged = constructor.newInstance()
+        assertReflectedRefusal<IllegalArgumentException> {
+            consumeEvidence.invoke(AcpHarnessFactory, forged, consumer, capturedRequestDigest)
+        }
+        val genericBypass = issued()
+        assertReflectedRefusal<IllegalArgumentException> {
+            consume.invoke(AcpHarnessFactory, genericBypass, consumer, AcpProviderQualificationPurpose.INVOCATION_EVIDENCE)
+        }
+        assertReflectedRefusal<IllegalArgumentException> {
+            consumeEvidence.invoke(AcpHarnessFactory, genericBypass, consumer, capturedRequestDigest)
+        }
+        val mismatchedRequest = issued()
+        assertReflectedRefusal<IllegalArgumentException> {
+            consumeEvidence.invoke(AcpHarnessFactory, mismatchedRequest, consumer, "2".repeat(64))
+        }
+        assertReflectedRefusal<IllegalArgumentException> {
+            consumeEvidence.invoke(AcpHarnessFactory, mismatchedRequest, consumer, capturedRequestDigest)
+        }
+        val wrongOwner = issued()
+        assertReflectedRefusal<IllegalArgumentException> {
+            consumeEvidence.invoke(AcpHarnessFactory, wrongOwner, Any(), capturedRequestDigest)
+        }
+        assertReflectedRefusal<IllegalArgumentException> {
+            consumeEvidence.invoke(AcpHarnessFactory, wrongOwner, consumer, capturedRequestDigest)
+        }
+        val valid = issued()
+        assertEquals(
+            AcpProviderQualificationProfile.CREDENTIAL_FREE,
+            consumeEvidence.invoke(AcpHarnessFactory, valid, consumer, capturedRequestDigest),
+        )
+        assertReflectedRefusal<IllegalArgumentException> {
+            consumeEvidence.invoke(AcpHarnessFactory, valid, consumer, capturedRequestDigest)
+        }
+    }
+
+    private inline fun <reified T : Throwable> assertReflectedRefusal(action: () -> Unit) {
+        val failure = assertFailsWith<InvocationTargetException> { action() }
+        assertTrue(failure.cause is T, "expected ${T::class.java.name}, got ${failure.cause}")
+    }
+
     @Test
     fun `checked provisioning template is strict bounded ACP and preserves ordered argv and secret provenance`() {
         val template = Path.of("config/acp-v1.example.json").readText()

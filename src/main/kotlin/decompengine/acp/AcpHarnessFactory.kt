@@ -5,6 +5,7 @@ import decompengine.agent.AgentHarness
 import decompengine.repair.HttpOpenAiCompatibleRepairClient
 import decompengine.repair.RepairClientAgentHarness
 import java.util.Collections
+import java.util.IdentityHashMap
 
 enum class AcpHarnessKind { ACP, LEGACY_OPENAI }
 
@@ -91,6 +92,102 @@ class AcpHarnessSelection internal constructor(
  * through the explicit `ACP_HARNESS=legacy-openai` compatibility selection.
  */
 object AcpHarnessFactory {
+    private class FactoryProviderPermit : AcpProviderQualificationPermit()
+
+    private class ProviderPermitRecord(
+        val consumer: Any,
+        val purpose: AcpProviderQualificationPurpose,
+        val expectedRequestBindingSha256: String?,
+    ) {
+        init {
+            require(
+                if (purpose == AcpProviderQualificationPurpose.INVOCATION_EVIDENCE ||
+                    purpose == AcpProviderQualificationPurpose.DNS_RUNTIME_CONTEXT
+                ) {
+                    expectedRequestBindingSha256?.matches(Regex("[0-9a-f]{64}")) == true
+                } else expectedRequestBindingSha256 == null,
+            ) { "ACP invocation evidence permit requires its factory-owned request commitment" }
+        }
+    }
+
+    private val providerPermits = IdentityHashMap<AcpProviderQualificationPermit, ProviderPermitRecord>()
+
+    /** The only issuer currently used has disabled process-configuration authority. */
+    private fun issueDisabledConfigurationPermit(configuration: AcpProcessConfiguration): AcpProviderQualificationPermit =
+        synchronized(providerPermits) {
+            FactoryProviderPermit().also { permit ->
+                providerPermits[permit] = ProviderPermitRecord(
+                    configuration, AcpProviderQualificationPurpose.PROCESS_CONFIGURATION, null,
+                )
+            }
+        }
+
+    internal fun bindProvisionedDisabledProvider(configuration: AcpProcessConfiguration) {
+        val permit = issueDisabledConfigurationPermit(configuration)
+        try {
+            configuration.bindProviderTransportPolicy(permit)
+        } finally {
+            synchronized(providerPermits) { providerPermits.remove(permit) }
+        }
+    }
+
+    /** Kotlin internal is callable on the JVM, so admission is based on registered identities. */
+    internal fun consumeProviderQualificationPermit(
+        permit: AcpProviderQualificationPermit,
+        consumer: Any,
+        purpose: AcpProviderQualificationPurpose,
+    ): AcpProviderQualificationProfile = synchronized(providerPermits) {
+        val record = consumeProviderPermitRecord(permit, consumer, purpose)
+        require(record.purpose != AcpProviderQualificationPurpose.INVOCATION_EVIDENCE &&
+            record.purpose != AcpProviderQualificationPurpose.DNS_RUNTIME_CONTEXT
+        ) {
+            "ACP invocation evidence permit requires request-bound consumption"
+        }
+        AcpProviderQualificationProfile.CREDENTIAL_FREE
+    }
+
+    internal fun consumeInvocationEvidenceQualificationPermit(
+        permit: AcpProviderQualificationPermit,
+        consumer: Any,
+        requestBindingSha256: String,
+    ): AcpProviderQualificationProfile = synchronized(providerPermits) {
+        val record = consumeProviderPermitRecord(
+            permit, consumer, AcpProviderQualificationPurpose.INVOCATION_EVIDENCE,
+        )
+        require(record.expectedRequestBindingSha256 == requestBindingSha256) {
+            "ACP invocation evidence does not match its factory-owned request commitment"
+        }
+        AcpProviderQualificationProfile.CREDENTIAL_FREE
+    }
+
+    /** No issuer exists until the protected factory/invocation composition is qualified. */
+    internal fun consumeDnsRuntimeContextQualificationPermit(
+        permit: AcpProviderQualificationPermit,
+        consumer: Any,
+        requestBindingSha256: String,
+    ): AcpProviderQualificationProfile = synchronized(providerPermits) {
+        val record = consumeProviderPermitRecord(
+            permit, consumer, AcpProviderQualificationPurpose.DNS_RUNTIME_CONTEXT,
+        )
+        require(record.expectedRequestBindingSha256 == requestBindingSha256) {
+            "ACP DNS runtime context does not match its factory-owned request commitment"
+        }
+        AcpProviderQualificationProfile.CREDENTIAL_FREE
+    }
+
+    private fun consumeProviderPermitRecord(
+        permit: AcpProviderQualificationPermit,
+        consumer: Any,
+        purpose: AcpProviderQualificationPurpose,
+    ): ProviderPermitRecord {
+        // Remove first: a wrong consumer or purpose revokes the presented authority as well.
+        val record = providerPermits.remove(permit)
+        require(record != null && record.consumer === consumer && record.purpose == purpose) {
+            "ACP provider qualification permit is invalid or consumed"
+        }
+        return record
+    }
+
     fun fromEnvironment(environment: Map<String, String> = System.getenv()): AcpHarnessSelection {
         val selected = environment[ACP_HARNESS_ENVIRONMENT] ?: ACP_HARNESS_NAME
         require(selected.isNotBlank()) { "$ACP_HARNESS_ENVIRONMENT must not be blank" }

@@ -1,0 +1,60 @@
+{
+  "schemaVersion": 1,
+  "baselineHead": "c99775815c12370232c8b7053ccba44a82c916ad",
+  "scope": "reviewed source and separate retained controls; not a new integrated143-test run or native qualification",
+  "sources": {
+    "build.gradle.kts": "97073094fa47bc70228b9041f647afb992112d937b5bf6e88ec089b391bd71bb",
+    "scripts/validate-acp-contract.sh": "d03cb790d51f58c07a9647d59f2417176516252f8b4107f761485646cd13faef",
+    "scripts/verify-acp-provider-dns.py": "fe1ffc983a0706950e08eb23eb90ffe5e03a75b21968a4ac45bc2bd05a4bf8f3",
+    "src/main/kotlin/decompengine/acp/AcpAgentHarness.kt": "938d80658e869357b169ecd41d2d504a9917b3cc019d298c37ad4aa8dd3bc30d",
+    "src/test/kotlin/decompengine/acp/AcpAgentHarnessTest.kt": "138a739fca91a46a551ed996592c2425cb213291abe59c73726c25804ac754f1",
+    "src/test/kotlin/decompengine/acp/AcpProviderGuardianBoundaryTest.kt": "611400e9f40c8cb646e4dcdf9bd471df0dd515274726c88eb174df600755bf41",
+    "src/test/kotlin/decompengine/acp/AcpProviderNativeDnsContractTest.kt": "02265536e625494c190c1ac55e4aed87c9ff48fc8dc903742294db10842a89ec",
+    "src/test/kotlin/decompengine/acp/LinuxBubblewrapBoundaryTest.kt": "e7954552ec73b57b3af0644e2449e09a270bbd217172f5b9e8b2b869c06b862a",
+    "src/test/provider-dns/checker/test_verify_acp_provider_dns.py": "14ab0bb992e767561fb2d4ffa691286d1e38552323271539044dfcc8ad9efba9",
+    "src/main/kotlin/decompengine/acp/AcpProviderBroker.kt": "9bcb01a14be5cde023565d864ac1246cce10632dc05bc735f52a39d688b3334a",
+    "src/main/kotlin/decompengine/acp/AcpProviderExecutionEvidence.kt": "b1a65817df6271b1f64bf7230266b4d8d54fe047fbc784bc62917ff5ca7de895",
+    "src/main/kotlin/decompengine/acp/AcpProviderResponseStream.kt": "144688c4af96793bc452c3490339799e38c21c72442423d76c20c6c7eba5f386",
+    "src/test/kotlin/decompengine/acp/AcpProviderBrokerReviewRegressionTest.kt": "645bc7005b2b29ab0d27a7b8a2dc0f5fce89cefb53ebacacf3d3a28b6868996e",
+    "src/test/kotlin/decompengine/acp/AcpProviderBrokerTest.kt": "fdcb9859c1f39c082b985df9cdfeed8c2fb83d888ec497cde56f08a04d64e17e",
+    "src/test/kotlin/decompengine/acp/AcpProviderCredentialFreeTlsFixtureTest.kt": "859f490b5f382c49e04117adfee78d8fd180dd9f88149614f80040055d560b07",
+    "src/test/kotlin/decompengine/acp/AcpProviderExecutionEvidenceV3Test.kt": "70263660d794a5776f0ace1af784b7675d3055ca0622af6fc816c270aac2ca0c",
+    ".github/workflows/acp-contract.yml": "cece48bd801c8ce1128cb606b67e4ac1e0f2cae4da64eade92a1e230977ff8b9",
+    ".github/workflows/ci.yml": "4f41d00f9e62da5cb3c50bed4460f23cd264d3469866d71152a09fdc20605310",
+    "scripts/ci-jdk/test_owned_jdk.py": "8238fc17f484134bba1ad25ae8caae13ec3995fef000ec3b0892671a8efdd2eb",
+    "scripts/ci-owned-jdk.py": "8ee03e5165a709b386774a4382515c1faee358ec29fcabe16d7a8cb6283eb3d1",
+    "src/test/java/decompengine/ci/OwnedJdkFixtureSession.java": "45e59c488b54a3dd6a00eb955eaf0917a7bafcf736fd7fdd960c3e1971d958c6",
+    "src/test/kotlin/decompengine/acp/NativeDnsObserverDiagnosticTest.kt": "548a4e9c359d1d55e52e73aa276fe7c1a282469f2301f27363dce9d9eaf28706",
+    "src/test/resources/META-INF/services/org.junit.platform.launcher.LauncherSessionListener": "ff63732a615be9ccfe0c78f47dd50dd23d1c87a66e3d3bc299926ed476571dba"
+  },
+  "reviews": {
+    ".omo/evidence/provider-security-corrections-composed-sol-review.md": "08f708646ebb7057bf0bfef25392644315026f42ff1f5cd690c56515643976b0",
+    ".omo/evidence/provider-owned-jdk-native-diagnostics-sol-review.md": "8729028cba09052a577609b07b153bf63231678f48547c3c7f39006c8aaade8e"
+  },
+  "historicalComposedFreeze": {
+    "path": "build/provider-review-corrections/composed-freeze.json",
+    "sha256": "e4897cfd695b71116221181f907888aaf0cbe0eaa3178a177d46d3f72cbb9c1f",
+    "current": false
+  },
+  "deadlineDelta": {
+    "path": "build/provider-cleanup-final-wait-delta/delta-freeze.json",
+    "sha256": "33236aa2ac22f9a480ce202394325de5591983cb254bd71af9bb9146204e3975"
+  },
+  "jdkDiagnosticFreeze": {
+    "path": "build/ci-jdk-repair/source-freeze.json",
+    "sha256": "41c7e4cb4eec4985dbb2345b5c4faee1370c719164f0f26cb608b3c50ba9afff"
+  },
+  "retainedVerification": [
+    "143 inert provider controls and24checker controls at historical composed freeze",
+    "7 focused deadline controls at delta;2 new controls fail old predicate",
+    "12 owned-JDK fixture controls",
+    "2 actual offline Gradle Test tasks with actual-worker receipts",
+    "6 pure native-observer diagnostic controls"
+  ],
+  "pending": [
+    "full exact-head Actions",
+    "current automatic review",
+    "held-guardian/native DNS runtime qualification"
+  ],
+  "productionAuthority": false
+}

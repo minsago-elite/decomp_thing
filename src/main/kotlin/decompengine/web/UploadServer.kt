@@ -32,6 +32,7 @@ import decompengine.project.ReconstructionProfile
 import decompengine.project.verifyAcpExecutionReceiptDocument
 import decompengine.repair.TRACE_REPAIR_ACP_RECEIPT_KIND
 import decompengine.repair.TRACE_REPAIR_ACP_TASK_FIELD
+import decompengine.repair.repairAcpReceiptSchemaVersion
 import decompengine.repair.validateRepairHistoryProjection
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonElement
@@ -1044,7 +1045,7 @@ class UploadServer(
                     val verified = verifyAcpExecutionReceiptDocument(
                         bytes, TRACE_REPAIR_ACP_RECEIPT_KIND, TRACE_REPAIR_ACP_TASK_FIELD, receipt.attemptId,
                     )
-                    require(receipt.receiptSchemaVersion == 2)
+                    require(repairAcpReceiptSchemaVersion(bytes) == receipt.receiptSchemaVersion)
                     require(verified.requestSha256 == receipt.requestSha256)
                     require(verified.resultChangesSha256 == receipt.resultChangesSha256)
                     require(verified.terminalOutcome == receipt.terminalOutcome)

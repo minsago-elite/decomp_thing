@@ -4,6 +4,7 @@ import decompengine.acp.ACP_CLIENT_IMPLEMENTATION_NAME
 import decompengine.acp.ACP_CLIENT_IMPLEMENTATION_VERSION
 import decompengine.acp.ACP_KOTLIN_SDK_VERSION
 import decompengine.acp.ACP_STABLE_PROTOCOL_VERSION
+import decompengine.acp.*
 import decompengine.acp.AcpCgroupControllerEvidence
 import decompengine.acp.AcpExecutionEvidenceSnapshot
 import decompengine.acp.AcpFilesystemAuditRecord
@@ -34,6 +35,7 @@ import decompengine.agent.AgentToolEvent
 import decompengine.agent.receiptCommitmentBytes
 import decompengine.oracle.core.OracleJson
 import decompengine.oracle.core.StrictJsonLimits
+import java.time.Duration
 import java.math.BigInteger
 import java.nio.ByteBuffer
 import java.nio.CharBuffer
@@ -42,6 +44,9 @@ import java.nio.charset.CodingErrorAction
 import java.nio.charset.StandardCharsets
 import java.security.MessageDigest
 import java.util.Collections
+import kotlinx.serialization.json.JsonElement
+import kotlinx.serialization.json.JsonPrimitive
+import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonNull
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.booleanOrNull
@@ -215,7 +220,7 @@ internal class BoundedAcpExecutionArtifact private constructor(
     }
 }
 
-/** Immutable schema-v2 evidence for one ACP invocation, before workflow assessment. */
+/** Immutable invocation evidence, retaining schema 2 when provider transport is absent. */
 internal class BoundedAcpExecutionReceiptArtifact private constructor(
     private val request: ArchivedReceiptRequest,
     private val outcome: AgentExecutionOutcome,
@@ -223,6 +228,8 @@ internal class BoundedAcpExecutionReceiptArtifact private constructor(
     private val acp: AcpInvocationEvidenceSnapshot,
 ) {
     val requestSha256: String get() = request.requestSha256
+    private val providerTransport = acp.providerTransportEvidence
+    private val receiptSchemaVersion: Int = if (providerTransport == null) 2 else 6
     private val eventChanges: List<AgentFileChange> =
         events.events.filterIsInstance<ArchivedFileChangeEvent>().map { it.change }
     val terminalOutcome: String = when (outcome) {
@@ -233,7 +240,7 @@ internal class BoundedAcpExecutionReceiptArtifact private constructor(
         is AgentExecutionOutcome.Returned -> agentFileChangeSetSha256(outcome.result.changes)
         is AgentExecutionOutcome.Failed -> agentFileChangeSetSha256(emptyList())
     }
-    val releaseComplete: Boolean = (outcome as? AgentExecutionOutcome.Returned)?.result?.let { result ->
+    val releaseComplete: Boolean = providerTransport == null && (outcome as? AgentExecutionOutcome.Returned)?.result?.let { result ->
         val factory = acp.factoryProvenance ?: return@let false
         val negotiated = acp.negotiatedAgent ?: return@let false
         val diagnostics = acp.diagnostics ?: return@let false
@@ -292,12 +299,13 @@ internal class BoundedAcpExecutionReceiptArtifact private constructor(
             "ACP receipt task identity is invalid"
         }
         val text = buildString {
-            append("{\n  \"schemaVersion\": 2,")
+            append("{\n  \"schemaVersion\": ").append(receiptSchemaVersion).append(',')
             append("\n  \"kind\": ").append(evidenceKind.jsonString()).append(',')
             append("\n  ").append(taskIdentityField.jsonString()).append(": ")
                 .append(taskId.jsonString()).append(',')
             appendReceiptRequest(request)
             appendReceiptProvider(acp)
+            providerTransport?.let { appendReceiptProviderTransport(it) }
             appendReceiptLifecycle(acp, releaseComplete)
             appendReceiptFactory(acp.factoryProvenance)
             appendReceiptProtocolAndAgent(acp)
@@ -321,12 +329,13 @@ internal class BoundedAcpExecutionReceiptArtifact private constructor(
         // the independently bounded event and audit collections collapse to whole-list digests.
         // A compact artifact can never satisfy the release-complete verifier.
         val compact = buildString {
-            append("{\n  \"schemaVersion\": 2,")
+            append("{\n  \"schemaVersion\": ").append(receiptSchemaVersion).append(',')
             append("\n  \"kind\": ").append(evidenceKind.jsonString()).append(',')
             append("\n  ").append(taskIdentityField.jsonString()).append(": ")
                 .append(taskId.jsonString()).append(',')
             appendReceiptRequest(request)
             appendReceiptProvider(acp)
+            providerTransport?.let { appendReceiptProviderTransport(it) }
             appendReceiptLifecycle(acp, releaseComplete = false)
             appendReceiptFactory(acp.factoryProvenance)
             appendReceiptProtocolAndAgent(acp)
@@ -380,7 +389,7 @@ internal data class RenderedAcpReceiptArtifact(
 )
 
 /**
- * A fully rendered, immutable schema-v2 invocation document suitable for immediate persistence.
+ * A fully rendered immutable invocation document suitable for immediate persistence.
  * Workflow assessment is deliberately not part of this value: accepting or rejecting a candidate
  * must never rewrite what the provider invocation actually returned.
  */
@@ -391,7 +400,13 @@ internal class AcpExecutionReceiptDocument private constructor(
     val releaseComplete: Boolean,
     val json: String,
 ) {
-    val schemaVersion: Int = 2
+    // Only the private renderer constructs this document. Reading its fixed bounded header
+    // avoids reparsing an otherwise potentially large artifact just to retain its version.
+    val schemaVersion: Int = when {
+        json.startsWith("{\n  \"schemaVersion\": 2,") -> 2
+        json.startsWith("{\n  \"schemaVersion\": 6,") -> 6
+        else -> error("ACP receipt renderer produced an unsupported schema")
+    }
     val sha256: String = sha256(json.toByteArray(StandardCharsets.UTF_8))
 
     companion object {
@@ -450,9 +465,18 @@ internal fun verifyAcpExecutionReceiptDocument(
 ): VerifiedAcpExecutionReceiptDocument {
     require(bytes.size <= MAXIMUM_ARCHIVED_EVIDENCE_BYTES) { "ACP receipt exceeds its artifact cap" }
     val root = OracleJson.parse(bytes, ACP_RECEIPT_BINDING_JSON_LIMITS).jsonObject
-    val expectedRootFields = ACP_RECEIPT_BINDING_ROOT_FIELDS + taskIdentityField
+    val schemaVersion = root.receiptInt("schemaVersion")
+    require(schemaVersion != 3) {
+        "historical schema-v3 provider receipts are unqualified; policy and authority identities were not independently bound"
+    }
+    require(schemaVersion != 4) {
+        "historical schema-v4 provider receipts are unqualified; launch descriptor identities were not independently bound"
+    }
+    require(schemaVersion != 5) { "historical schema-v5 provider receipts are unqualified; invocation and payload commitments lacked independent witnesses" }
+    require(schemaVersion == 2 || schemaVersion == 6) { "ACP receipt schema is unsupported" }
+    val expectedRootFields = ACP_RECEIPT_BINDING_ROOT_FIELDS + taskIdentityField +
+        if (schemaVersion == 6) setOf("providerTransport") else emptySet()
     require(root.keys == expectedRootFields) { "ACP receipt has missing, extra, or duplicate binding fields" }
-    require(root.receiptInt("schemaVersion") == 2) { "ACP receipt schema is unsupported" }
     require(root.receiptString("kind") == evidenceKind) { "ACP receipt kind is cross-paired" }
     require(root.receiptString(taskIdentityField) == taskId) { "ACP receipt task identity is cross-paired" }
 
@@ -467,8 +491,8 @@ internal fun verifyAcpExecutionReceiptDocument(
 
     val provider = root.receiptObject("provider")
     require(provider.keys == setOf("id", "evidenceSchemaVersion") &&
-        provider.receiptString("id") == "acp" && provider.receiptInt("evidenceSchemaVersion") == 2
-    ) { "receipt is not invocation-bound ACP-v2 evidence" }
+        provider.receiptString("id") == "acp" && provider.receiptInt("evidenceSchemaVersion") == schemaVersion
+    ) { "receipt provider and document schemas differ" }
 
     val lifecycle = root.receiptObject("lifecycle")
     require(lifecycle.keys == ACP_RECEIPT_BINDING_LIFECYCLE_FIELDS) {
@@ -508,6 +532,10 @@ internal fun verifyAcpExecutionReceiptDocument(
             "failed-$kind"
         }
         else -> throw IllegalArgumentException("ACP receipt outcome type is invalid")
+    }
+    if (schemaVersion == 6) {
+        require(!releaseComplete) { "provider fixture receipt cannot claim release completeness" }
+        verifyProviderTransportReceipt(root, request)
     }
     val releaseFacts = if (releaseComplete) {
         require(terminalOutcome == "returned-completed" &&
@@ -2268,3 +2296,460 @@ private const val MAXIMUM_ARCHIVED_EVIDENCE_BYTES = 64 * 1024 * 1024
 private const val MAXIMUM_ARCHIVED_OUTCOME_ISSUES = 4_096
 private const val MAXIMUM_ARCHIVED_OUTCOME_MESSAGE_BYTES = 64 * 1024
 private const val MAXIMUM_ARCHIVED_OUTCOME_ENTITY_IDS = 32_768
+
+/** One closed projection shared by full and compact v6 receipts; no unproved launch/issuance identities. */
+private fun StringBuilder.appendReceiptProviderTransport(evidence: AcpProviderInvocationEvidenceSnapshot) {
+    append("\n  \"providerTransport\": ")
+    append(String(OracleJson.canonicalBytes(providerTransportJson(archiveProviderInvocation(evidence)), PROVIDER_TRANSPORT_JSON_LIMITS), StandardCharsets.UTF_8))
+    append(',')
+}
+
+private fun providerTransportJson(value: AcpProviderArchivedInvocationEvidence): JsonObject = providerObject(
+    "authority" to value.authority, "qualificationProfileSha256" to value.qualificationProfileSha256,
+    "modelSha256" to value.modelSha256, "runtimeAdapter" to value.runtimeAdapter, "reasoning" to value.reasoning,
+    "descriptors" to value.descriptors.let { d -> providerObject(
+        "factoryConfigurationSha256" to d.factoryConfigurationSha256,
+        "qualificationIssuerSha256" to d.qualificationIssuerSha256,
+    ) },
+    "requestBindingSha256" to value.requestBindingSha256,
+    "sessionSha256" to value.sessionSha256,
+    "bounds" to value.bounds.let { b -> providerObject(
+        "maximumRequestBytes" to b.maximumRequestBytes, "maximumResponseBytes" to b.maximumResponseBytes,
+        "maximumHeaderBytes" to b.maximumHeaderBytes, "maximumHeaderFields" to b.maximumHeaderFields,
+        "maximumChunkBytes" to b.maximumChunkBytes, "maximumQueuedChunks" to b.maximumQueuedChunks,
+        "maximumRequests" to b.maximumRequests, "maximumOutputTokens" to b.maximumOutputTokens,
+        "overallTimeoutMillis" to b.overallTimeout.toMillis(), "idleTimeoutMillis" to b.idleTimeout.toMillis(),
+        "cleanupTimeoutMillis" to b.cleanupTimeout.toMillis(), "maximumRetries" to b.maximumRetries,
+        "maximumOutstandingRequests" to b.maximumOutstandingRequests, "maximumQueuedRequests" to b.maximumQueuedRequests,
+    ) },
+    "maximumInvocationOutputTokens" to value.maximumInvocationOutputTokens,
+    "maximumInvocationInputTokens" to value.maximumInvocationInputTokens,
+    "remainingOverallTimeoutMillis" to value.remainingOverallTimeoutMillis,
+    "resources" to value.resources.let { r -> providerObject(
+        "maximumProcesses" to r.maximumProcesses, "maximumOpenFiles" to r.maximumOpenFiles,
+        "maximumAddressSpaceBytes" to r.maximumAddressSpaceBytes, "maximumMemoryBytes" to r.maximumMemoryBytes,
+        "maximumSwapBytes" to r.maximumSwapBytes, "observedMaximumProcesses" to r.observedMaximumProcesses,
+        "observedMaximumOpenFiles" to r.observedMaximumOpenFiles,
+        "observedMaximumAddressSpaceBytes" to r.observedMaximumAddressSpaceBytes,
+        "observedMaximumMemoryBytes" to r.observedMaximumMemoryBytes, "observedMaximumSwapBytes" to r.observedMaximumSwapBytes,
+        "observedTaskPeak" to r.observedTaskPeak, "observationsComplete" to r.observationsComplete,
+        "enforcementVerified" to r.enforcementVerified, "taskHeadroomVerified" to r.taskHeadroomVerified,
+    ) },
+    "wireRequestBytes" to value.wireRequestBytes, "responseBytes" to value.responseBytes,
+    "outputTokens" to value.outputTokens, "inputTokens" to value.inputTokens, "revoked" to value.revoked,
+    "admissionDenial" to value.admissionDenial?.let { providerObject("terminal" to it.terminal) },
+    "requests" to JsonArray(value.requests.map { r -> providerObject(
+        "sequence" to r.sequence, "sessionSha256" to r.sessionSha256,
+        "wireRequestBytes" to r.wireRequestBytes, "responseBytes" to r.responseBytes,
+        "inputTokens" to r.inputTokens, "outputTokens" to r.outputTokens,
+        "admittedOutputTokens" to r.admittedOutputTokens, "terminal" to r.terminal,
+    ) }),
+    "cleanup" to value.cleanup.let { c -> providerObject(
+        "disposition" to c.disposition, "router" to c.router, "broker" to c.broker, "sandbox" to c.sandbox,
+        "admissionSticky" to c.admissionSticky, "guardian" to c.guardian.let { g -> providerObject(
+            "disposition" to g.disposition, "teardownCause" to g.teardownCause,
+            "sigtermSent" to g.sigtermSent, "sigkillSent" to g.sigkillSent, "childExitKind" to g.childExitKind,
+            "childExitStatus" to g.childExitStatus, "childTerminationSignal" to g.childTerminationSignal,
+            "childReaped" to g.childReaped, "finalEchildObserved" to g.finalEchildObserved,
+            "remainingDescendants" to g.remainingDescendants, "cgroupRemoved" to g.cgroupRemoved,
+            "privateStateRemoved" to g.privateStateRemoved, "descriptorsClosed" to g.descriptorsClosed,
+        ) },
+    ) },
+    "credentialFreeFixture" to value.credentialFreeFixture, "releaseComplete" to value.releaseComplete,
+    "adapterQualified" to value.adapterQualified, "providerCostCancellationProven" to value.providerCostCancellationProven,
+)
+
+private fun providerObject(vararg fields: Pair<String, Any?>): JsonObject = JsonObject(linkedMapOf(
+    *fields.map { (key, value) -> key to when (value) {
+        null -> JsonNull
+        is JsonElement -> value
+        is String -> JsonPrimitive(value)
+        is Boolean -> JsonPrimitive(value)
+        is Int -> JsonPrimitive(value)
+        is Long -> JsonPrimitive(value)
+        is Enum<*> -> JsonPrimitive(value.name)
+        else -> error("unsupported provider evidence projection type")
+    } }.toTypedArray(),
+))
+
+/** Reconstruct the bounded immutable contract, then require its exact canonical projection. */
+private fun parseProviderTransport(value: JsonObject): AcpProviderArchivedInvocationEvidence {
+    OracleJson.canonicalBytes(value, PROVIDER_TRANSPORT_JSON_LIMITS)
+    val b = value.transportObject("bounds")
+    val bounds = AcpProviderTransportBounds(b.transportInt("maximumRequestBytes"), b.transportInt("maximumResponseBytes"),
+        b.transportInt("maximumHeaderBytes"), b.transportInt("maximumHeaderFields"), b.transportInt("maximumChunkBytes"),
+        b.transportInt("maximumQueuedChunks"), b.transportInt("maximumRequests"), b.transportInt("maximumOutputTokens"),
+        Duration.ofMillis(b.transportLong("overallTimeoutMillis")), Duration.ofMillis(b.transportLong("idleTimeoutMillis")),
+        Duration.ofMillis(b.transportLong("cleanupTimeoutMillis")))
+    val d = value.transportObject("descriptors")
+    val descriptors = AcpProviderArchivedOwnerEvidence(d.transportString("factoryConfigurationSha256"),
+        d.transportString("qualificationIssuerSha256"))
+    val r = value.transportObject("resources")
+    val resources = AcpProviderExecutionResourceEvidence(r.transportInt("maximumProcesses"), r.transportInt("maximumOpenFiles"),
+        r.transportLong("maximumAddressSpaceBytes"), r.transportLong("maximumMemoryBytes"), r.transportLong("maximumSwapBytes"),
+        r.transportNullableInt("observedMaximumProcesses"), r.transportNullableInt("observedMaximumOpenFiles"),
+        r.transportNullableLong("observedMaximumAddressSpaceBytes"), r.transportNullableLong("observedMaximumMemoryBytes"),
+        r.transportNullableLong("observedMaximumSwapBytes"), r.transportNullableInt("observedTaskPeak"))
+    val c = value.transportObject("cleanup")
+    val g = c.transportObject("guardian")
+    val guardian = AcpProviderGuardianCleanupEvidence(g.transportEnum("disposition"), g.transportEnum("teardownCause"),
+        g.transportBoolean("sigtermSent"), g.transportBoolean("sigkillSent"), g.transportEnum("childExitKind"),
+        g.transportNullableInt("childExitStatus"), g.transportNullableInt("childTerminationSignal"),
+        g.transportBoolean("childReaped"), g.transportBoolean("finalEchildObserved"),
+        g.transportNullableInt("remainingDescendants"), g.transportBoolean("cgroupRemoved"),
+        g.transportBoolean("privateStateRemoved"), g.transportBoolean("descriptorsClosed"))
+    val cleanup = AcpProviderExecutionCleanupEvidence(c.transportEnum("disposition"), c.transportEnum("router"),
+        c.transportEnum("broker"), guardian, c.transportEnum("sandbox"))
+    val rows = value.getValue("requests") as? JsonArray ?: transportInvalid()
+    require(rows.size <= bounds.maximumRequests) { "provider receipt exceeds request bound" }
+    val requests = rows.map { element ->
+        val row = element as? JsonObject ?: transportInvalid()
+        AcpProviderArchivedRequestEvidence(row.transportLong("sequence"), row.transportString("sessionSha256"),
+            row.transportInt("wireRequestBytes"), row.transportLong("responseBytes"),
+            row.transportNullableInt("inputTokens"), row.transportNullableInt("outputTokens"),
+            row.transportInt("admittedOutputTokens"), row.transportEnum("terminal"))
+    }
+    val denial = value.transportNullableObject("admissionDenial")?.let {
+        AcpProviderArchivedDenialEvidence(it.transportEnum("terminal"))
+    }
+    val evidence = AcpProviderArchivedInvocationEvidence(value.transportEnum("authority"), value.transportString("qualificationProfileSha256"),
+        value.transportString("modelSha256"), value.transportEnum("runtimeAdapter"), value.transportEnum("reasoning"),
+        descriptors, value.transportString("requestBindingSha256"),
+        value.transportNullableString("sessionSha256"), bounds,
+        value.transportInt("maximumInvocationOutputTokens"), value.transportNullableLong("maximumInvocationInputTokens"),
+        value.transportLong("remainingOverallTimeoutMillis"), resources, value.transportLong("wireRequestBytes"),
+        value.transportLong("responseBytes"), value.transportLong("outputTokens"), value.transportNullableLong("inputTokens"),
+        value.transportBoolean("revoked"), denial, requests, cleanup)
+    require(value == providerTransportJson(evidence)) { "provider receipt projection has missing, unknown, or inconsistent fields" }
+    evidence.requireQualificationProfile(AcpProviderQualificationProfile.CREDENTIAL_FREE)
+    return evidence
+}
+
+private fun verifyProviderTransportReceipt(root: JsonObject, request: JsonObject) {
+    require(root.transportInt("schemaVersion") == 6 && root.transportObject("provider").transportInt("evidenceSchemaVersion") == 6) {
+        "provider receipt versions differ"
+    }
+    verifyProviderReceiptLegacyShapes(root)
+    val evidence = parseProviderTransport(root.transportObject("providerTransport"))
+    require(evidence.credentialFreeFixture && !evidence.releaseComplete && !evidence.adapterQualified &&
+        !evidence.providerCostCancellationProven && evidence.cleanup.disposition == AcpExecutionCleanupDisposition.VERIFIED
+    ) { "provider receipt is not verified nonrelease fixture evidence" }
+    require(evidence.requestBindingSha256 == request.transportString("requestSha256")) {
+        "provider receipt request commitment differs"
+    }
+    val factory = root.transportObject("factoryProvenance")
+    require(factory.keys == ACP_RECEIPT_BINDING_FACTORY_FIELDS && factory.transportString("harness") == "acp" &&
+        !factory.transportBoolean("deprecated") && factory.transportInt("agentExecutionContractVersion") == AGENT_EXECUTION_CONTRACT_VERSION
+    ) { "provider receipt factory provenance is unsupported" }
+    val provenance = AcpHarnessProvenance("acp", factory.transportString("implementationId"), AGENT_EXECUTION_CONTRACT_VERSION,
+        ACP_STABLE_PROTOCOL_VERSION, ACP_KOTLIN_SDK_VERSION, factory.transportString("configurationSha256"), false)
+    require(factory.transportString("descriptor") == provenance.stableDescriptor &&
+        provenance.configurationSha256 == evidence.descriptors.factoryConfigurationSha256
+    ) { "provider receipt factory commitment differs" }
+    val protocol = root.transportObject("protocol")
+    require(protocol.keys == ACP_RECEIPT_BINDING_PROTOCOL_FIELDS && protocol.transportString("name") == "acp" &&
+        protocol.transportInt("version") == ACP_STABLE_PROTOCOL_VERSION && protocol.transportString("sdkVersion") == ACP_KOTLIN_SDK_VERSION
+    ) { "provider receipt protocol is unsupported" }
+    val client = protocol.transportObject("clientImplementation")
+    require(client == providerObject("name" to ACP_CLIENT_IMPLEMENTATION_NAME, "version" to ACP_CLIENT_IMPLEMENTATION_VERSION)) {
+        "provider receipt client provenance differs"
+    }
+    val lifecycle = root.transportObject("lifecycle")
+    val phase = AcpExecutionLifecyclePhase.entries.singleOrNull { it.name.wireName() == lifecycle.transportString("phaseReached") }
+        ?: transportInvalid()
+    val cleanup = AcpExecutionCleanupDisposition.entries.singleOrNull { it.name.wireName() == lifecycle.transportString("cleanupDisposition") }
+        ?: transportInvalid()
+    require(cleanup != AcpExecutionCleanupDisposition.UNVERIFIED &&
+        (cleanup != AcpExecutionCleanupDisposition.NOT_REQUIRED ||
+            (evidence.cleanup.guardian.disposition == AcpExecutionCleanupDisposition.NOT_REQUIRED &&
+                evidence.cleanup.sandbox == AcpExecutionCleanupDisposition.NOT_REQUIRED)) &&
+        ((evidence.requests.isEmpty() && evidence.admissionDenial == null) ||
+            (phase >= AcpExecutionLifecyclePhase.PROMPT_DISPATCHED &&
+                cleanup == AcpExecutionCleanupDisposition.VERIFIED))
+    ) { "provider receipt invocation lifecycle differs" }
+    require(request.transportInt("contractVersion") == AGENT_EXECUTION_CONTRACT_VERSION &&
+        request.transportString("accessPolicySha256").isSha256() &&
+        request.transportInt("maximumTurns") > 0 && request.transportInt("maximumToolCalls") > 0 &&
+        request.transportLong("maximumOutputBytes") > 0
+    ) { "provider receipt request bounds are invalid" }
+    val outputLimit = request.transportNullableLong("maximumOutputTokens")
+    val inputLimit = request.transportNullableLong("maximumInputTokens")
+    require((outputLimit == null || outputLimit > 0) && (inputLimit == null || inputLimit > 0) &&
+        evidence.maximumInvocationOutputTokens.toLong() == minOf(evidence.bounds.maximumOutputTokens.toLong(), outputLimit ?: Long.MAX_VALUE) &&
+        evidence.maximumInvocationInputTokens == inputLimit
+    ) { "provider receipt invocation token limits differ" }
+    val wallNanos = request.transportPositiveNanos("wallClockTimeoutNanos")
+    request.transportPositiveNanos("idleTimeoutNanos")
+    require(BigInteger.valueOf(evidence.remainingOverallTimeoutMillis).multiply(BigInteger.valueOf(1_000_000)) <= wallNanos) {
+        "provider receipt deadline exceeds enclosing invocation"
+    }
+    val session = root.transportNullableObject("session")
+    if (evidence.sessionSha256 != null) {
+        require(session != null) { "provider receipt session is absent for session-bound transport" }
+        require(session.keys == setOf("harnessId", "sessionId", "resumeReference")) { "provider receipt session fields differ" }
+        session.receiptTextCommitment("harnessId", expected = provenance.implementationId, requireNonEmpty = true)
+        session.receiptTextCommitment("sessionId", requireNonEmpty = true)
+        require(evidence.sessionSha256 == session.transportObject("sessionId").transportString("sha256")) {
+            "provider receipt session commitment differs"
+        }
+    } else {
+        require(session == null) { "provider receipt session is present without session-bound transport" }
+    }
+    val process = root.transportNullableObject("process")
+    require((cleanup == AcpExecutionCleanupDisposition.VERIFIED && process != null) ||
+        (cleanup == AcpExecutionCleanupDisposition.NOT_REQUIRED && process == null)
+    ) { "provider receipt process presence differs from cleanup lifecycle" }
+    process?.let { process ->
+        require(process.keys == PROVIDER_RECEIPT_PROCESS_FIELDS) { "provider receipt process fields differ" }
+        process.receiptTextCommitment("stderr", expected = "")
+        require(process.transportInt("remainingProcessCount") == 0 && process.transportBoolean("sandboxCleanupVerified")) {
+            "provider receipt process cleanup differs"
+        }
+    }
+}
+
+private fun JsonObject.transportValue(field: String): JsonElement = get(field) ?: transportInvalid()
+private fun JsonObject.transportObject(field: String): JsonObject = transportValue(field) as? JsonObject ?: transportInvalid()
+private fun JsonObject.transportNullableObject(field: String): JsonObject? = transportValue(field).let {
+    if (it is JsonNull) null else it as? JsonObject ?: transportInvalid()
+}
+private fun JsonObject.transportString(field: String): String = (transportValue(field) as? JsonPrimitive)
+    ?.takeIf { it.isString }?.contentOrNull ?: transportInvalid()
+private fun JsonObject.transportNullableString(field: String): String? =
+    if (transportValue(field) is JsonNull) null else transportString(field)
+private fun JsonObject.transportLong(field: String): Long = (transportValue(field) as? JsonPrimitive)
+    ?.takeUnless { it.isString }?.longOrNull ?: transportInvalid()
+private fun JsonObject.transportInt(field: String): Int = transportLong(field).also {
+    require(it in Int.MIN_VALUE.toLong()..Int.MAX_VALUE.toLong()) { "provider receipt integer is outside its bound" }
+}.toInt()
+private fun JsonObject.transportNullableLong(field: String): Long? =
+    if (transportValue(field) is JsonNull) null else transportLong(field)
+private fun JsonObject.transportNullableInt(field: String): Int? =
+    if (transportValue(field) is JsonNull) null else transportInt(field)
+private fun JsonObject.transportBoolean(field: String): Boolean = (transportValue(field) as? JsonPrimitive)
+    ?.takeUnless { it.isString }?.booleanOrNull ?: transportInvalid()
+private inline fun <reified T : Enum<T>> JsonObject.transportEnum(field: String): T =
+    enumValues<T>().singleOrNull { it.name == transportString(field) } ?: transportInvalid()
+private fun JsonObject.transportPositiveNanos(field: String): BigInteger {
+    val text = transportString(field)
+    require(text.matches(Regex("[1-9][0-9]{0,27}"))) { "provider receipt timeout is not canonical" }
+    return text.toBigInteger()
+}
+private fun transportInvalid(): Nothing = throw IllegalArgumentException("provider receipt field is missing or malformed")
+private val PROVIDER_TRANSPORT_JSON_LIMITS = StrictJsonLimits(maximumInputBytes = 64 * 1024,
+    maximumCanonicalBytes = 64 * 1024, maximumDepth = 16, maximumNodes = 4096,
+    maximumStringBytes = 128, maximumTotalStringBytes = 16 * 1024)
+private val PROVIDER_RECEIPT_PROCESS_FIELDS = setOf("exitCode", "stderr", "stderrTruncated", "producedOutputBytes",
+    "producedOutputLimitBytes", "outputLimitExceeded", "forcedTermination", "rootTerminationRequested", "remainingProcessCount",
+    "containment", "networkIsolated", "sandboxCleanupVerified")
+
+/** Schema-v3 also closes the historical envelope, including its compact retained prefixes. */
+private fun verifyProviderReceiptLegacyShapes(root: JsonObject) {
+    fun walk(value: JsonElement, path: String) {
+        val textCommitment = path in PROVIDER_RECEIPT_TEXT_PATHS
+        if (textCommitment) {
+            if (value is JsonNull) {
+                require(path in PROVIDER_RECEIPT_NULLABLE_TEXT_PATHS) { "provider receipt is missing a text commitment" }
+                return
+            }
+            require(value is JsonObject) { "provider receipt exposes uncommitted text" }
+        }
+        if (path in PROVIDER_RECEIPT_ARRAY_PATHS) {
+            require(value is JsonArray) { "provider receipt envelope array is malformed" }
+            val bound = when {
+                path == "events/records" -> MAXIMUM_ARCHIVED_AGENT_EVENTS
+                path.startsWith("policyAudits/") -> MAXIMUM_ARCHIVED_POLICY_AUDIT_RECORDS
+                path.startsWith("request/") -> MAXIMUM_ARCHIVED_REQUEST_IDENTIFIERS
+                else -> MAXIMUM_ARCHIVED_EVENT_COMPONENTS
+            }
+            require(value.size <= bound) { "provider receipt envelope array exceeds its bound" }
+            value.forEachIndexed { index, child ->
+                if (path == "events/records") require((child as? JsonObject)?.transportLong("sequence") == index.toLong()) {
+                    "provider receipt event sequence differs"
+                }
+                walk(child, "$path/*")
+            }
+            return
+        }
+        if (value !is JsonObject) {
+            require(value !is JsonArray && (path !in PROVIDER_RECEIPT_OBJECT_PATHS ||
+                (value is JsonNull && path in PROVIDER_RECEIPT_NULLABLE_OBJECT_PATHS))) {
+                "provider receipt envelope object is malformed"
+            }
+            if (!(value is JsonNull && path in PROVIDER_RECEIPT_NULLABLE_OBJECT_PATHS)) verifyProviderReceiptScalar(value, path)
+            return
+        }
+        val expected = if (textCommitment) setOf("sha256", "encodedBytes", "encoding") else when (path) {
+            "request" -> ACP_RECEIPT_BINDING_REQUEST_FIELDS
+            "provider" -> setOf("id", "evidenceSchemaVersion")
+            "lifecycle" -> ACP_RECEIPT_BINDING_LIFECYCLE_FIELDS
+            "factoryProvenance" -> ACP_RECEIPT_BINDING_FACTORY_FIELDS
+            "protocol" -> ACP_RECEIPT_BINDING_PROTOCOL_FIELDS
+            "protocol/clientImplementation" -> setOf("name", "version")
+            "agent" -> setOf("configuredImplementationId", "negotiatedImplementation", "negotiatedCapabilities")
+            "agent/negotiatedImplementation" -> setOf("name", "version", "title")
+            "agent/negotiatedCapabilities" -> setOf("loadSession", "promptImage", "promptAudio", "promptEmbeddedContext", "mcpHttp", "mcpSse", "sessionAdditionalDirectories")
+            "session" -> setOf("harnessId", "sessionId", "resumeReference")
+            "events" -> setOf("maximumRetainedEvents", "observedEventCount", "retainedEventCount", "complete", "truncationReason", "records")
+            "events/records/*" -> when (value.transportString("type")) {
+                "message" -> setOf("sequence", "type", "role", "messageId", "text", "completed")
+                "plan" -> setOf("sequence", "type", "entries")
+                "tool" -> setOf("sequence", "type", "toolCallId", "title", "status", "detailsSha256", "detailCount")
+                "permission" -> setOf("sequence", "type", "requestId", "decision", "selectedOptionId", "reason")
+                "file-change" -> setOf("sequence", "type", "change")
+                "context_usage" -> setOf("sequence", "type", "usedTokens", "contextWindowTokens", "costAmount", "costCurrency")
+                else -> transportInvalid()
+            }
+            "events/records/*/entries/*" -> setOf("id", "description", "status")
+            "outcome" -> setOf("type", "result", "failure")
+            "outcome/result" -> setOf("stopReason", "summary", "changes", "usage")
+            "outcome/failure" -> setOf("kind", "message", "retryable", "detailsSha256", "detailCount")
+            "outcome/result/usage" -> setOf("inputTokens", "outputTokens", "cachedInputTokens", "toolCalls", "wallClockNanos")
+            "outcome/result/changes", "request/workspaceRootIds", "request/contextInputIds" -> ACP_RECEIPT_BINDING_CHANGE_SET_FIELDS
+            "outcome/result/changes/records/*", "events/records/*/change" -> setOf("rootId", "relativePath", "kind", "beforeSha256", "afterSha256", "sizeBytes")
+            "policyAudits" -> setOf("filesystem", "terminal", "permission")
+            "policyAudits/filesystem", "policyAudits/terminal", "policyAudits/permission" -> setOf("maximumRetainedRecords", "recordCount", "aggregateSha256", "records")
+            "policyAudits/filesystem/records/*" -> setOf("sequence", "sessionId", "method", "requestedPathSha256", "policyPath", "outcome", "reason")
+            "policyAudits/filesystem/records/*/policyPath" -> setOf("rootId", "relativePath")
+            "policyAudits/terminal/records/*" -> setOf("sequence", "sessionId", "method", "requestSha256", "terminalIdSha256", "toolCallIdSha256", "outcome", "reason", "networkIsolated", "retainedOutputBytes", "producedOutputBytes", "outputTruncated")
+            "policyAudits/permission/records/*" -> setOf("sequence", "sessionId", "toolCallIdSha256", "offeredOptionCount", "selectedOptionIdSha256", "selectedKind", "outcome", "reason", "authorityExpanded")
+            "process" -> PROVIDER_RECEIPT_PROCESS_FIELDS
+            "sandbox" -> PROVIDER_RECEIPT_SANDBOX_FIELDS
+            "sandbox/outerAgentLimits" -> setOf("maximumProcesses", "maximumOpenFiles", "maximumFileBytes", "maximumAddressSpaceBytes", "maximumCpuSeconds")
+            "sandbox/runtimeClosureLimits" -> setOf("maximumEntries", "maximumUserOwnedFileBytes", "maximumDepth")
+            "sandbox/outerProcessOutput" -> setOf("maximumBytes", "observedBytes", "limitExceeded")
+            else -> transportInvalid()
+        }
+        require(value.keys == expected) { "provider receipt envelope has missing or unknown fields" }
+        if (textCommitment) {
+            require(value.transportString("sha256").isSha256() && value.transportLong("encodedBytes") >= 0 &&
+                value.transportString("encoding") in setOf("utf-8", "jvm-utf16be")
+            ) { "provider receipt text commitment is invalid" }
+            return
+        }
+        if (path == "events/records/*" && value.transportString("type") == "context_usage") {
+            require((value.transportValue("costAmount") is JsonNull) == (value.transportValue("costCurrency") is JsonNull)) {
+                "provider receipt cost observation pair differs"
+            }
+        }
+        if (path in setOf("request/workspaceRootIds", "request/contextInputIds", "outcome/result/changes")) {
+            val rows = value.transportValue("records") as? JsonArray ?: transportInvalid()
+            val observed = value.transportLong("observedCount")
+            require(value.transportInt("retainedCount") == rows.size && observed >= rows.size &&
+                (!value.transportBoolean("complete") || observed == rows.size.toLong())
+            ) { "provider receipt retained count differs" }
+        }
+        if (path == "events") {
+            val rows = value.transportValue("records") as? JsonArray ?: transportInvalid()
+            val observed = value.transportLong("observedEventCount")
+            val complete = value.transportBoolean("complete")
+            require(value.transportInt("maximumRetainedEvents") == MAXIMUM_ARCHIVED_AGENT_EVENTS &&
+                value.transportInt("retainedEventCount") == rows.size && observed >= rows.size &&
+                (if (complete) observed == rows.size.toLong() && value.transportValue("truncationReason") is JsonNull
+                else value.transportValue("truncationReason") !is JsonNull)
+            ) { "provider receipt event completeness differs" }
+        }
+        if (path in setOf("policyAudits/filesystem", "policyAudits/terminal", "policyAudits/permission")) {
+            val rows = value.transportValue("records") as? JsonArray ?: transportInvalid()
+            require(value.transportInt("maximumRetainedRecords") == MAXIMUM_ARCHIVED_POLICY_AUDIT_RECORDS &&
+                value.transportInt("recordCount") in rows.size..MAXIMUM_ARCHIVED_POLICY_AUDIT_RECORDS
+            ) { "provider receipt policy audit count differs" }
+        }
+        value.forEach { (key, child) -> walk(child, "$path/$key") }
+    }
+    root.forEach { (field, value) -> if (field != "providerTransport") walk(value, field) }
+}
+
+private val PROVIDER_RECEIPT_NULLABLE_TEXT_PATHS = setOf("agent/negotiatedImplementation/title", "session/resumeReference",
+    "outcome/result/summary", "events/records/*/selectedOptionId", "events/records/*/reason", "events/records/*/costCurrency",
+    "policyAudits/terminal/records/*/terminalIdSha256", "policyAudits/terminal/records/*/toolCallIdSha256",
+    "policyAudits/permission/records/*/selectedOptionIdSha256")
+private val PROVIDER_RECEIPT_TEXT_PATHS = PROVIDER_RECEIPT_NULLABLE_TEXT_PATHS + setOf("request/objective",
+    "request/workspaceRootIds/records/*", "request/contextInputIds/records/*", "agent/negotiatedImplementation/name",
+    "agent/negotiatedImplementation/version", "session/harnessId", "session/sessionId", "outcome/failure/message",
+    "process/stderr", "process/containment", "sandbox/provider", "sandbox/providerVersion",
+    "events/records/*/messageId", "events/records/*/text", "events/records/*/entries/*/id", "events/records/*/entries/*/description",
+    "events/records/*/toolCallId", "events/records/*/title", "events/records/*/requestId") +
+    setOf("outcome/result/changes/records/*", "events/records/*/change", "policyAudits/filesystem/records/*/policyPath")
+        .flatMap { p -> listOf("$p/rootId", "$p/relativePath") } +
+    listOf("filesystem", "terminal", "permission").map { "policyAudits/$it/records/*/sessionId" } +
+    listOf("filesystem", "terminal").map { "policyAudits/$it/records/*/method" } +
+    setOf("policyAudits/filesystem/records/*/requestedPathSha256", "policyAudits/terminal/records/*/requestSha256",
+        "policyAudits/permission/records/*/toolCallIdSha256")
+private val PROVIDER_RECEIPT_ARRAY_PATHS = setOf("request/workspaceRootIds/records", "request/contextInputIds/records",
+    "events/records", "events/records/*/entries", "outcome/result/changes/records", "policyAudits/filesystem/records",
+    "policyAudits/terminal/records", "policyAudits/permission/records")
+private val PROVIDER_RECEIPT_NULLABLE_OBJECT_PATHS = setOf("agent", "session", "process", "sandbox", "outcome/result",
+    "outcome/failure", "outcome/result/usage", "policyAudits/filesystem/records/*/policyPath", "sandbox/outerProcessOutput")
+private val PROVIDER_RECEIPT_OBJECT_PATHS = PROVIDER_RECEIPT_NULLABLE_OBJECT_PATHS + setOf("request", "provider", "lifecycle",
+    "factoryProvenance", "protocol", "protocol/clientImplementation", "agent/negotiatedImplementation", "agent/negotiatedCapabilities",
+    "events", "events/records/*", "events/records/*/entries/*", "outcome", "outcome/result/changes", "request/workspaceRootIds",
+    "request/contextInputIds", "outcome/result/changes/records/*", "events/records/*/change", "policyAudits", "policyAudits/filesystem",
+    "policyAudits/terminal", "policyAudits/permission", "policyAudits/filesystem/records/*", "policyAudits/terminal/records/*",
+    "policyAudits/permission/records/*", "sandbox/outerAgentLimits", "sandbox/runtimeClosureLimits")
+private val PROVIDER_RECEIPT_SANDBOX_FIELDS = setOf("evidenceSha256", "detailsRetained", "provider", "providerVersion",
+    "providerExecutableSha256", "providerExecutableMode", "resourceLimiterSha256", "scopeSupervisorSha256", "scopeInspectorSha256",
+    "environmentFdOpenerSha256", "policySha256", "networkIsolated", "outerAgentContained", "nestedUserNamespacesDisabled",
+    "newSession", "dieWithParent", "cgroupV2PidsLimited", "cgroupV2MemoryLimited", "cgroupV2CpuLimited", "outerAgentLimits",
+    "runtimeClosureLimits", "securityExecutableCount", "authorityCount", "launchCount", "runtimeMountCount", "terminalAuditCount",
+    "maximumRecordedLaunches", "maximumRecordedRuntimeMounts", "maximumCanonicalMetadataBytes", "outerProcessOutput")
+
+private fun verifyProviderReceiptScalar(value: JsonElement, path: String) {
+    val field = path.substringAfterLast('/')
+    val nullable = field in setOf("exitCode", "beforeSha256", "afterSha256", "sizeBytes", "inputTokens", "outputTokens",
+        "cachedInputTokens", "toolCalls", "wallClockNanos", "truncationReason", "policySha256", "retainedOutputBytes",
+        "producedOutputBytes", "outputTruncated", "selectedKind", "costAmount", "maximumInputTokens", "maximumOutputTokens", "wirePromptSha256")
+    if (value is JsonNull) {
+        require(nullable) { "provider receipt scalar is unexpectedly null" }
+        return
+    }
+    val scalar = value as? JsonPrimitive ?: transportInvalid()
+    if (field in PROVIDER_RECEIPT_BOOLEAN_FIELDS) {
+        require(!scalar.isString && scalar.booleanOrNull != null) { "provider receipt boolean is malformed" }
+        return
+    }
+    val enumValues: Set<String>? = when {
+        path == "lifecycle/phaseReached" -> AcpExecutionLifecyclePhase.entries.mapTo(mutableSetOf()) { it.name.wireName() }
+        path == "lifecycle/cleanupDisposition" -> AcpExecutionCleanupDisposition.entries.mapTo(mutableSetOf()) { it.name.wireName() }
+        path == "outcome/type" -> setOf("returned", "failed")
+        path == "events/records/*/type" -> setOf("message", "plan", "tool", "permission", "file-change", "context_usage")
+        field == "role" -> decompengine.agent.AgentMessageRole.entries.mapTo(mutableSetOf()) { it.name.wireName() }
+        path == "events/records/*/entries/*/status" -> decompengine.agent.AgentPlanStatus.entries.mapTo(mutableSetOf()) { it.name.wireName() }
+        field == "status" -> decompengine.agent.AgentToolStatus.entries.mapTo(mutableSetOf()) { it.name.wireName() }
+        field == "decision" -> decompengine.agent.AgentPermissionDecision.entries.mapTo(mutableSetOf()) { it.name.wireName() }
+        field == "stopReason" -> ACP_RECEIPT_STOP_REASONS
+        field == "kind" && path != "kind" -> if (path == "outcome/failure/kind") ACP_RECEIPT_FAILURE_KINDS else
+            decompengine.agent.AgentFileChangeKind.entries.mapTo(mutableSetOf()) { it.name.wireName() }
+        field == "truncationReason" -> setOf("artifact-byte-limit", "event-count-limit", "component-count-limit", "peer-byte-limit", "invalid-event-sequence")
+        field == "selectedKind" -> setOf("allow-once", "allow-always", "reject-once", "reject-always")
+        path.startsWith("policyAudits/filesystem/") && field == "outcome" -> AcpFilesystemAuditOutcome.entries.mapTo(mutableSetOf()) { it.name.wireName() }
+        path.startsWith("policyAudits/filesystem/") && field == "reason" -> AcpFilesystemAuditReason.entries.mapTo(mutableSetOf()) { it.name.wireName() }
+        path.startsWith("policyAudits/terminal/") && field == "outcome" -> AcpTerminalAuditOutcome.entries.mapTo(mutableSetOf()) { it.name.wireName() }
+        path.startsWith("policyAudits/terminal/") && field == "reason" -> AcpTerminalAuditReason.entries.mapTo(mutableSetOf()) { it.name.wireName() }
+        path.startsWith("policyAudits/permission/") && field == "outcome" -> AcpPermissionAuditOutcome.entries.mapTo(mutableSetOf()) { it.name.wireName() }
+        path.startsWith("policyAudits/permission/") && field == "reason" -> AcpPermissionAuditReason.entries.mapTo(mutableSetOf()) { it.name.wireName() }
+        else -> null
+    }
+    when {
+        enumValues != null -> require(scalar.isString && scalar.content in enumValues) { "provider receipt enum is unsupported" }
+        field.endsWith("Sha256") -> require(scalar.isString && scalar.content.isSha256()) { "provider receipt digest is invalid" }
+        field.endsWith("Nanos") -> require(scalar.isString && scalar.content.matches(Regex("[0-9]{1,28}"))) { "provider receipt duration is malformed" }
+        field == "costAmount" -> {
+            val amount = scalar.content.takeIf { scalar.isString && it.length <= 32 }?.toDoubleOrNull()
+            require(amount != null && amount.isFinite() && amount >= 0 && amount.toString() == scalar.content) {
+                "provider receipt cost observation is malformed"
+            }
+        }
+        path in PROVIDER_RECEIPT_IDENTITY_PATHS || ('/' !in path && path != "schemaVersion") -> require(scalar.isString && scalar.content.length in 1..1024) { "provider receipt identity is malformed" }
+        else -> require(!scalar.isString && scalar.longOrNull?.let { it >= 0 } == true) { "provider receipt number is malformed" }
+    }
+}
+private val PROVIDER_RECEIPT_IDENTITY_PATHS = setOf("provider/id", "factoryProvenance/descriptor", "factoryProvenance/harness",
+    "factoryProvenance/implementationId", "protocol/name", "protocol/sdkVersion", "protocol/clientImplementation/name",
+    "protocol/clientImplementation/version", "agent/configuredImplementationId")
+private val PROVIDER_RECEIPT_BOOLEAN_FIELDS = setOf("releaseComplete", "filesystemAuditComplete", "terminalAuditComplete",
+    "permissionAuditComplete", "deprecated", "complete", "completed", "retryable", "filesystemCapabilityEnabled", "terminalCapabilityEnabled",
+    "loadSession", "promptImage", "promptAudio", "promptEmbeddedContext", "mcpHttp", "mcpSse", "sessionAdditionalDirectories",
+    "stderrTruncated", "outputLimitExceeded", "forcedTermination", "rootTerminationRequested", "networkIsolated", "sandboxCleanupVerified",
+    "authorityExpanded", "outputTruncated", "detailsRetained", "outerAgentContained", "nestedUserNamespacesDisabled", "newSession",
+    "dieWithParent", "cgroupV2PidsLimited", "cgroupV2MemoryLimited", "cgroupV2CpuLimited", "limitExceeded")

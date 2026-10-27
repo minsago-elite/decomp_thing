@@ -299,6 +299,23 @@ class AcpAgentHarnessTest {
     }
 
     @Test
+    fun `invocation evidence retains the exact historical JVM constructor descriptor`() {
+        val descriptors = AcpInvocationEvidenceSnapshot::class.java.declaredConstructors.map { constructor ->
+            constructor.parameterTypes.joinToString(prefix = "(", postfix = ")V", separator = "") { type ->
+                require(!type.isPrimitive && !type.isArray)
+                "L${type.name.replace('.', '/')};"
+            }
+        }.toSet()
+        assertEquals(setOf(
+            "(Ldecompengine/acp/AcpHarnessProvenance;Ldecompengine/acp/AcpExecutionLifecyclePhase;" +
+                "Ldecompengine/acp/AcpExecutionCleanupDisposition;Ldecompengine/acp/AcpNegotiatedAgentEvidence;" +
+                "Ljava/lang/String;Ldecompengine/acp/AcpProcessDiagnostics;Ljava/util/Collection;" +
+                "Ljava/util/Collection;Ljava/util/Collection;Ldecompengine/acp/AcpSandboxEvidence;" +
+                "Ldecompengine/acp/AcpExecutionEvidenceCompleteness;Ldecompengine/acp/AcpExecutionEvidenceSnapshot;)V",
+        ), descriptors)
+    }
+
+    @Test
     fun `stdout owner retains accounted EOF without a second read after teardown`() {
         val bytes = "trailing output already accounted".toByteArray()
         val input = object : java.io.InputStream() {
@@ -618,6 +635,13 @@ class AcpAgentHarnessTest {
         assertTrue(record.length <= 2048)
         assertTrue(record.all { it.code in 32..126 })
         assertEquals(record, validatedStdoutFacts(record))
+        // Provider routing adds two closed ownership states to the base shutdown grammar.
+        for (owner in listOf("GUARDIAN_ROUTER", "GUARDIAN_ROUTER_FINISHED")) {
+            val guardianRecord = record.replace("/UNCLAIMED/", "/$owner/")
+            assertFalse(guardianRecord == record)
+            assertEquals(guardianRecord, validatedStdoutFacts(guardianRecord))
+        }
+        assertNull(validatedStdoutFacts(record.replace("/UNCLAIMED/", "/GUARDIAN_UNKNOWN/")))
         for (invalid in listOf(
             record + " extra=raw-secret", record + " ", record + "/", record.replace("firstMs=100", "firstMs=0100"),
             record.replace("finalMs=41", "finalMs=-1"), record.replace("/UNCLAIMED/", "/raw/path/"),
@@ -1181,7 +1205,7 @@ class AcpAgentHarnessTest {
                 }
             }
         }
-        assertEquals(102, acpTestMethods.size, acpTestMethods.joinToString { it.name })
+        assertEquals(104, acpTestMethods.size, acpTestMethods.joinToString { it.name })
         assertTrue(
             acpTestMethods.all { it.returnType == Void.TYPE },
             acpTestMethods.filter { it.returnType != Void.TYPE }.joinToString {

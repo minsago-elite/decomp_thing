@@ -153,21 +153,23 @@ class GhidraExportLaunchTest {
             val caller = ExportCall {
                 fixture.analyzer(starter::start).analyzeWithDeadline(fixture.input, fixture.work, deadline(5_000))
             }
-            preserveFixtureFailure({
+            val failures = FixtureFailures()
+            try {
                 caller.thread.start()
                 assertTrue(starter.entered.await(2, TimeUnit.SECONDS), "gated worker did not reach its stdin wait")
-                caller.thread.interrupt()
+                caller.interrupt()
                 caller.assertFailure<InterruptedException>()
                 fixture.assertPriorEvidence()
-            }, {
-                starter.release.countDown()
-                caller.thread.join(2_000)
-            }, {
-                starter.assertLateWorkerReaped()
-                fixture.assertPriorEvidence()
-            }, {
-                awaitLaunchPoolIdle()
-            })
+            } catch (failure: Throwable) {
+                failures.record(failure)
+            } finally {
+                failures.attempt { starter.release.countDown() }
+                failures.attempt { caller.thread.join(2_000) }
+                failures.attempt { starter.assertLateWorkerReaped() }
+                failures.attempt { fixture.assertPriorEvidence() }
+                failures.attempt { awaitLaunchPoolIdle() }
+            }
+            failures.finish(listOf(starter), listOf(caller))
         }
 
     @Test
@@ -198,7 +200,8 @@ class GhidraExportLaunchTest {
                 maximumWallMillis = 5_000,
             )
             val rejectedVerifier = ExportCall { verifier.verifyAndGetLibraries(root) {} }
-            preserveFixtureFailure({
+            val failures = FixtureFailures()
+            try {
                 callers.forEach { it.thread.start() }
                 starters.forEach { starter ->
                     assertTrue(starter.entered.await(2, TimeUnit.SECONDS), "both launch slots must be occupied")
@@ -214,27 +217,22 @@ class GhidraExportLaunchTest {
                 assertFalse(unexpectedExportStart.get())
                 assertFalse(unexpectedVerifierStart.get())
                 thirdFixture.assertPriorEvidence()
-            }, {
-                starters.forEach { it.release.countDown() }
-            }, {
-                // Preserve each caller's failure while still attempting the remaining owned joins.
-                preserveFixtureFailure({}, *(callers + rejectedExport + rejectedVerifier).map { caller ->
-                    {
-                        if (caller.thread.isAlive) caller.thread.interrupt()
-                        caller.thread.join(2_000)
-                    }
-                }.toTypedArray())
-            }, {
+            } catch (failure: Throwable) {
+                failures.record(failure)
+            } finally {
+                starters.forEach { starter -> failures.attempt { starter.release.countDown() } }
+                (callers + rejectedExport + rejectedVerifier).forEach { caller ->
+                    failures.attempt { if (caller.thread.isAlive) caller.interrupt() }
+                    failures.attempt { caller.thread.join(2_000) }
+                }
                 // Release every starter even when one assertion fails, then reap every real worker.
-                preserveFixtureFailure({
-                    starters[0].assertLateWorkerReaped()
-                }, {
-                    starters[1].assertLateWorkerReaped()
-                })
-                (fixtures + thirdFixture).forEach { it.assertPriorEvidence() }
-            }, {
-                awaitLaunchPoolIdle()
-            })
+                starters.forEach { starter -> failures.attempt { starter.assertLateWorkerReaped() } }
+                (fixtures + thirdFixture).forEach { fixture ->
+                    failures.attempt { fixture.assertPriorEvidence() }
+                }
+                failures.attempt { awaitLaunchPoolIdle() }
+            }
+            failures.finish(starters, callers + rejectedExport + rejectedVerifier)
         }
 
     @Test
@@ -341,32 +339,109 @@ class GhidraExportLaunchTest {
         val entered = CountDownLatch(1)
         val release = CountDownLatch(1)
         val launched = CompletableFuture<Process>()
+        val startFailure = AtomicReference<Throwable?>()
+        private val startStage = AtomicInteger()
+        private var cleanupStage = 0
+        private var cleanupFailedAt = 0
+        private var stopAttempted = false
+        private var stopCompleted = false
 
         fun start(command: List<String>, work: Path): Process {
-            val process = ProcessBuilder(command).directory(work.toFile()).start()
-            launched.complete(process)
-            assertWorkerReady(process)
-            entered.countDown()
-            awaitIgnoringInterrupts(release)
-            return process
+            try {
+                startStage.set(1)
+                val process = ProcessBuilder(command).directory(work.toFile()).start()
+                launched.complete(process)
+                startStage.set(2)
+                assertWorkerReady(process)
+                startStage.set(3)
+                entered.countDown()
+                awaitIgnoringInterrupts(release)
+                startStage.set(4)
+                return process
+            } catch (failure: Throwable) {
+                startFailure.set(failure)
+                throw failure
+            }
         }
 
         fun assertLateWorkerReaped() {
-            val process = launched.get(2, TimeUnit.SECONDS)
-            preserveFixtureFailure({
-                process.onExit().get(2, TimeUnit.SECONDS)
-                assertFalse(process.isAlive, "late gated worker survived cancellation")
-                assertFalse(ProcessHandle.of(process.pid()).map { it.isAlive }.orElse(false), "late PID remains live")
-            }, {
-                ensureStopped(process)
-            })
+            val failures = FixtureFailures()
+            try {
+                cleanupStage = 1
+                val process = launched.get(2, TimeUnit.SECONDS)
+                try {
+                    cleanupStage = 2
+                    process.onExit().get(2, TimeUnit.SECONDS)
+                    cleanupStage = 3
+                    assertFalse(process.isAlive, "late gated worker survived cancellation")
+                    cleanupStage = 4
+                    assertFalse(ProcessHandle.of(process.pid()).map { it.isAlive }.orElse(false), "late PID remains live")
+                    cleanupStage = 5
+                } catch (failure: Throwable) {
+                    cleanupFailedAt = cleanupStage
+                    failures.record(failure)
+                } finally {
+                    failures.attempt {
+                        stopAttempted = true
+                        ensureStopped(process)
+                        stopCompleted = true
+                    }
+                }
+            } catch (failure: Throwable) {
+                cleanupFailedAt = cleanupStage
+                failures.record(failure)
+            }
+            failures.throwIfFailed()
+        }
+
+        // Only fixture-owned state; no process/environment/output inspection or late signaling.
+        fun state(index: Int): String =
+            "worker=$index,startStage=${startStage.get()},startFailed=${startFailure.get() != null}," +
+                "entered=${entered.count},release=${release.count},handleDone=${launched.isDone}," +
+                "handleCancelled=${launched.isCancelled},handleExceptional=${launched.isCompletedExceptionally}," +
+                "cleanupStage=$cleanupStage,cleanupFailedAt=$cleanupFailedAt," +
+                "stopAttempted=$stopAttempted,stopCompleted=$stopCompleted"
+    }
+
+    /** Keeps the first observed failure and every distinct, finite fixture cleanup failure. */
+    private class FixtureFailures {
+        private var primary: Throwable? = null
+        private val retained = ArrayList<Throwable>()
+
+        fun record(failure: Throwable) {
+            if (retained.any { it === failure }) return
+            retained.add(failure)
+            val first = primary
+            if (first == null) primary = failure else first.addSuppressed(failure)
+        }
+
+        fun attempt(action: () -> Unit) {
+            try { action() } catch (failure: Throwable) { record(failure) }
+        }
+
+        fun throwIfFailed() { primary?.let { throw it } }
+
+        fun finish(workers: List<BlockedStartedWorker>, callers: List<ExportCall>) {
+            if (primary == null) return
+            // Expected caller failures are context only when an assertion/cleanup has failed.
+            workers.forEach { it.startFailure.get()?.let(::record) }
+            callers.forEach { it.failure.get()?.let(::record) }
+            workers.forEachIndexed { index, worker -> record(FixtureState(worker.state(index))) }
+            callers.forEachIndexed { index, caller -> record(FixtureState(caller.state(index))) }
+            throwIfFailed()
         }
     }
+
+    private class FixtureState(message: String) : RuntimeException(message.take(512), null, false, false)
 
     private class ExportCall(operation: () -> Any) {
         val failure = AtomicReference<Throwable?>()
         val elapsedNanos = AtomicLong()
+        private val started = AtomicBoolean()
+        private val completed = AtomicBoolean()
+        private val interruptRequested = AtomicBoolean()
         val thread = Thread {
+            this.started.set(true)
             val started = System.nanoTime()
             try {
                 operation()
@@ -374,8 +449,18 @@ class GhidraExportLaunchTest {
                 failure.set(caught)
             } finally {
                 elapsedNanos.set(System.nanoTime() - started)
+                completed.set(true)
             }
         }
+
+        fun interrupt() {
+            interruptRequested.set(true)
+            thread.interrupt()
+        }
+
+        fun state(index: Int): String =
+            "caller=$index,started=${started.get()},completed=${completed.get()}," +
+                "interruptRequested=${interruptRequested.get()},failurePresent=${failure.get() != null}"
 
         inline fun <reified T : Throwable> assertFailure(maximumMillis: Long = 2_000): T {
             thread.join(maximumMillis - 100)

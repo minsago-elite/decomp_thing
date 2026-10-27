@@ -231,6 +231,77 @@ class ReconstructionAcpEvidenceArchiveVerifierTest {
     }
 
     @Test
+    fun `archive release gate explicitly refuses provider transport and mixed receipt schemas`() {
+        val scratch = Path.of("build/test-tmp").toAbsolutePath().normalize()
+        Files.createDirectories(scratch)
+        val temp = Files.createTempDirectory(scratch, "acp-provider-release-refusal-")
+        try {
+            val baseline = createAgentProject(temp.resolve("baseline"), accepted = true)
+            assertEquals(1, verifyAgentProject(baseline).size)
+            val variants = linkedMapOf<String, Pair<String, (JsonObject) -> JsonObject>>(
+                "v3-document-v2-provider" to ("schema-v2" to { root ->
+                    JsonObject(root + ("schemaVersion" to JsonPrimitive(3)))
+                }),
+                "v2-document-v3-provider" to ("schema-v2" to { root ->
+                    JsonObject(root + ("provider" to JsonObject(root.getValue("provider").jsonObject +
+                        ("evidenceSchemaVersion" to JsonPrimitive(3)))))
+                }),
+                "v3-forged-release-marker" to ("schema-v2" to { root ->
+                    JsonObject(root + mapOf(
+                        "schemaVersion" to JsonPrimitive(3),
+                        "provider" to JsonObject(root.getValue("provider").jsonObject +
+                            ("evidenceSchemaVersion" to JsonPrimitive(3))),
+                        "providerTransport" to JsonObject(emptyMap()),
+                    ))
+                }),
+                "v2-null-provider-transport" to ("provider transport" to { root ->
+                    JsonObject(root + ("providerTransport" to JsonNull))
+                }),
+                "v2-unknown-root-field" to ("fields" to { root ->
+                    JsonObject(root + ("unknownReleaseAuthority" to JsonPrimitive(true)))
+                }),
+                "v2-unknown-provider-field" to ("fields" to { root ->
+                    JsonObject(root + ("provider" to JsonObject(root.getValue("provider").jsonObject +
+                        ("unknownReleaseAuthority" to JsonPrimitive(true)))))
+                }),
+            )
+            for ((name, variant) in variants) {
+                val project = temp.resolve(name)
+                copyTree(baseline, project)
+                rewriteEvidenceAndBindings(project) { text ->
+                    variant.second(Json.parseToJsonElement(text).jsonObject).toString() + "\n"
+                }
+                val failure = assertFailsWith<IllegalArgumentException>(name) { verifyAgentProject(project) }
+                assertTrue(failure.message.orEmpty().contains(variant.first), "$name: ${failure.message}")
+            }
+        } finally {
+            Files.walk(temp).use { paths ->
+                paths.sorted(java.util.Comparator.reverseOrder()).forEach { Files.deleteIfExists(it) }
+            }
+        }
+    }
+
+    @Test
+    fun `archive release gate refuses a provider v3 checkpoint assessment paired with a v2 receipt`() {
+        val scratch = Path.of("build/test-tmp").toAbsolutePath().normalize()
+        Files.createDirectories(scratch)
+        val temp = Files.createTempDirectory(scratch, "acp-provider-checkpoint-refusal-")
+        try {
+            val project = createAgentProject(temp.resolve("project"), accepted = true)
+            assertEquals(1, verifyAgentProject(project).size)
+            rewriteCheckpointAndManifest(project) { checkpoint ->
+                checkpoint.replace("\"executionEvidenceSchemaVersion\": 2", "\"executionEvidenceSchemaVersion\": 3")
+            }
+            val failure = assertFailsWith<IllegalArgumentException> { verifyAgentProject(project) }
+            assertTrue(failure.message.orEmpty().contains("release-complete receipt assessment"), failure.message)
+        } finally {
+            Files.walk(temp).use { paths ->
+                paths.sorted(java.util.Comparator.reverseOrder()).forEach { Files.deleteIfExists(it) }
+            }
+        }
+    }
+
+    @Test
     fun `archive gate rejects checkpoint path and digest ambiguity`() {
         val temp = createTempDirectory("acp-archive-checkpoint-")
         val baseline = createAgentProject(temp.resolve("baseline"), accepted = true)
@@ -694,6 +765,18 @@ class ReconstructionAcpEvidenceArchiveVerifierTest {
         )
         assertEquals(0, ReconstructionAdapters.resolve(profile).build(project, profile).returnCode)
         return project
+    }
+
+    private fun verifyAgentProject(project: Path): List<VerifiedCandidateAcpContribution> {
+        val profile = GeneratedCMakeReconstructionProfile.descriptor
+        val manifest = SourceTreeManifestReader.read(project, profile)
+        return ReconstructionAcpEvidenceArchiveVerifier.verify(
+            project,
+            manifest.files.associate { it.path to sha256(project.resolve(it.path).readBytes()) },
+            manifest.files.associate { it.path to Files.size(project.resolve(it.path)) },
+            manifest,
+            profile,
+        )
     }
 
     private fun rewriteEvidenceAndBindings(project: Path, transform: (String) -> String) {

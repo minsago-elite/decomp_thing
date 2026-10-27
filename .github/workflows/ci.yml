@@ -176,9 +176,10 @@ jobs:
           DECOMP_BROWSER_CHROME: ${{ runner.temp }}/web-test-browser/chrome
           DECOMP_BROWSER_JS_RUNTIME: ${{ runner.temp }}/frontend-node/bin/node
         run: |
-          ./gradlew --no-daemon test --tests 'decompengine.web.BrowserSessionExpiryTest' \
+          python3 -B scripts/ci-owned-jdk.py run --source-profile actions-host-ca-v1 -- ./gradlew --no-daemon test --tests 'decompengine.web.BrowserSessionExpiryTest' \
             installDist distZip distTar verifyPackagedWeb verifyGhidraDistributionArchives \
-            verifyAcpGateHelperDistribution verifyLlvmBehaviorHelperDistribution \
+            verifyAcpGateHelperDistribution verifyAcpProviderGuardianDistribution verifyAcpProviderDnsDistribution \
+            verifyLlvmBehaviorHelperDistribution \
             verifyKotlinBootClasspathDistribution
           web_distribution=("$GITHUB_WORKSPACE"/build/distributions/*.zip)
           test "${#web_distribution[@]}" -eq 1
@@ -243,6 +244,11 @@ jobs:
             build/packaged-browser-*/*.png
             build/reports/tests/test
             build/test-results/test
+            build/ci-jdk-*/provision.*
+            build/ci-jdk-*/scratch.json
+            build/ci-jdk-*/final.json
+            build/ci-jdk-*/receipts
+            build/ci-jdk-*/selections
             build/reports/junit-signatures
 
   kotlin-suite:
@@ -404,7 +410,7 @@ jobs:
           DECOMP_REQUIRE_ORACLE_EXT4_SCRATCH: "true"
           DECOMP_REQUIRE_BUNDLED_GHIDRA_EXECUTION: "true"
           DECOMP_CI_TEST_SHARD: ${{ matrix.test-shard }}
-        run: scripts/ci.sh
+        run: python3 -B scripts/ci-owned-jdk.py run --source-profile actions-host-ca-v1 -- scripts/ci.sh
       - name: Require every source-declared recovery scenario in core reports
         if: always() && matrix.shard == 'core'
         run: >-
@@ -450,6 +456,11 @@ jobs:
             build/test-results/full-suite
             build/reports/tests/test
             build/test-results/test
+            build/ci-jdk-*/provision.*
+            build/ci-jdk-*/scratch.json
+            build/ci-jdk-*/final.json
+            build/ci-jdk-*/receipts
+            build/ci-jdk-*/selections
             build/reports/junit-signatures
             build/web-job-recovery-inventory.json
             build/reports/tests/v3BoundaryFinalStagingIsolated
@@ -562,7 +573,7 @@ jobs:
         run: |
           bash scripts/install-frontend-node.sh "$RUNNER_TEMP/frontend-node"
           echo "$RUNNER_TEMP/frontend-node/bin" >> "$GITHUB_PATH"
-      - name: Verify installed direct-API Ghidra without an external installation
+      - name: Verify direct-API Ghidra and offline bundle contents in one owned context
         env:
           RUN_REAL_GHIDRA: "true"
           RUN_REAL_GHIDRA_CALL_SITES: "true"
@@ -571,7 +582,10 @@ jobs:
         run: |
           unset GHIDRA_HOME
           mkdir -p build/exporter-rendering-v16
-          ./gradlew --no-daemon test \
+          python3 -B scripts/ci-owned-jdk.py run --source-profile actions-host-ca-v1 -- bash -euc '
+            "$@"
+            ./gradlew --no-daemon --offline verifyGhidraDistributionArchives
+          ' -- ./gradlew --no-daemon test \
             --tests decompengine.analysis.BundledGhidraTest \
             --tests decompengine.project.GhidraProgramModelExporterTest \
             --tests decompengine.project.ReferencedDataBytesRealGhidraTest \
@@ -583,8 +597,6 @@ jobs:
             --tests decompengine.mvp.GhidraDecompilerTest \
             --tests decompengine.project.ReconstructionPipelineTest \
             --tests decompengine.web.SourceTreeJobReconstructorTest
-      - name: Verify ZIP and TAR bundle contents and native executable modes
-        run: ./gradlew --no-daemon --offline verifyGhidraDistributionArchives
       - uses: actions/upload-artifact@v7
         if: always()
         with:
@@ -592,6 +604,11 @@ jobs:
           path: |
             build/reports/tests/test
             build/test-results/test
+            build/ci-jdk-*/provision.*
+            build/ci-jdk-*/scratch.json
+            build/ci-jdk-*/final.json
+            build/ci-jdk-*/receipts
+            build/ci-jdk-*/selections
             build/reports/junit-signatures
       - uses: actions/upload-artifact@v7
         if: always()
@@ -659,7 +676,7 @@ jobs:
       - name: Run strict Clang and sanitizer compatibility checks
         env:
           DECOMP_TEST_CLANG: /usr/bin/clang-18
-        run: scripts/validate-clang.sh
+        run: python3 -B scripts/ci-owned-jdk.py run --source-profile actions-host-ca-v1 -- scripts/validate-clang.sh
       - uses: actions/upload-artifact@v7
         if: always()
         with:
@@ -667,5 +684,10 @@ jobs:
           path: |
             build/reports/tests/test
             build/test-results/test
+            build/ci-jdk-*/provision.*
+            build/ci-jdk-*/scratch.json
+            build/ci-jdk-*/final.json
+            build/ci-jdk-*/receipts
+            build/ci-jdk-*/selections
             build/reports/junit-signatures
             build/source-identity-fixture-evidence

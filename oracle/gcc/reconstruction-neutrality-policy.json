@@ -357,6 +357,20 @@
       "fragment": "        val prefix = listOf(compilerPath, \"-std=c11\", \"-O2\", \"-static\", \"-no-pie\", \"-Wall\", \"-Wextra\", \"-Werror\",\n            \"-Wformat=2\", \"-Wl,--build-id=none\")",
       "count": 1,
       "reason": "Installed endpoint build-record authentication checks this complete compiler prefix against the fixed helper recipe before accepting the defining application resource tuple."
+    },
+    {
+      "path": "src/main/kotlin/decompengine/acp/AcpProviderBroker.kt",
+      "rule": "generic-layout",
+      "fragment": "request[\"include\"]?.let {\n            require(it.jsonArray.size <= 1)\n            it.jsonArray.forEach { item -> require(string(item, 27) == \"reasoning.encrypted_content\") }\n        }",
+      "count": 1,
+      "reason": "Validates the Responses request JSON include field as a bounded singleton encrypted-reasoning array; this exact block does not select a reconstructed source directory."
+    },
+    {
+      "path": "src/main/kotlin/decompengine/acp/AcpProviderBroker.kt",
+      "rule": "generic-layout",
+      "fragment": "private val REQUEST_KEYS = setOf(\n    \"model\", \"input\", \"tools\", \"tool_choice\", \"parallel_tool_calls\", \"reasoning\", \"store\", \"stream\", \"include\",\n    \"text\", \"metadata\", \"prompt_cache_key\", \"service_tier\", \"safety_identifier\", \"max_output_tokens\", \"truncation\", \"instructions\",\n)",
+      "count": 1,
+      "reason": "Declares the closed Responses request JSON key allowlist, including the standard include field; this exact declaration does not prescribe reconstructed source layout."
     }
   ],
   "benchmarkCatalog": "oracle/gcc/reconstruction-neutrality-identities.json"

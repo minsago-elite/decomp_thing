@@ -17,11 +17,14 @@ import java.nio.ByteOrder
 import java.security.MessageDigest
 import java.time.Duration
 import java.util.Collections
+import java.util.IdentityHashMap
+import java.util.WeakHashMap
 import java.util.UUID
 import java.util.concurrent.CompletableFuture
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.AtomicLong
 import java.util.concurrent.atomic.AtomicReference
 
 /** Failure-only display data from a closed producer; never execution, identity or cleanup authority. */
@@ -256,6 +259,175 @@ internal enum class AcpSandboxStdinDisposition(internal val protocolArgument: St
     CLOSED_BEFORE_EXEC("closed-before-exec"),
 }
 
+/**
+ * One factory-owned launch commitment. Artifact metadata alone is not launch authority: the exact
+ * configuration must own a single-use factory permit and every executable is pinned again by the
+ * ordinary boundary. There is no operator-selected guardian or alternate launcher constructor.
+ */
+internal class AcpProviderGuardianLaunchDescriptor private constructor(
+    private val configuration: AcpProcessConfiguration,
+    internal val guardianMount: AcpSandboxReadOnlyMount,
+    internal val childMount: AcpSandboxReadOnlyMount,
+    internal val codexMount: AcpSandboxReadOnlyMount,
+    val factoryConfigurationSha256: String,
+    val guardianExecutableSha256: String,
+    val childExecutableSha256: String,
+    val codexExecutableSha256: String,
+) {
+    private val launchClaimed = AtomicBoolean(false)
+    internal val command: List<String> = Collections.unmodifiableList(listOf(
+        ACP_PROVIDER_GUARDIAN_PATH.toString(), "--state-root", ACP_PROVIDER_STATE_ROOT.toString(),
+        "--codex-path", codexMount.destination.toString(), "--",
+    ) + configuration.command())
+    val orderedArgumentsSha256: String = canonicalStringDigest(command, NO_SANDBOX_CHECKPOINT)
+    val privateStateRootSha256: String = sha256(ACP_PROVIDER_STATE_ROOT.toString())
+    val guardianManifestSha256: String get() = requireNotNull(guardianMount.expectedManifestSha256)
+    val childManifestSha256: String get() = requireNotNull(childMount.expectedManifestSha256)
+    val codexManifestSha256: String get() = requireNotNull(codexMount.expectedManifestSha256)
+    internal val runtimeMounts: List<AcpSandboxReadOnlyMount> = Collections.unmodifiableList(
+        (listOf(guardianMount, childMount) + requireNotNull(configuration.sandboxBoundary).agentRuntimeMounts)
+            .distinctBy { it.destination },
+    )
+
+    internal fun requireLaunchAuthority(sandbox: AcpLinuxSandboxConfiguration, launch: AcpSandboxLaunch) {
+        check(isIssued() && launchClaimed.compareAndSet(false, true)) {
+            "ACP provider guardian launch authority is invalid or consumed"
+        }
+        requireLaunchMatches(sandbox, launch)
+    }
+
+    internal fun requireLaunchMatches(sandbox: AcpLinuxSandboxConfiguration, launch: AcpSandboxLaunch) {
+        require(isIssued() && configuration.sandboxBoundary === sandbox && launch.guardianDescriptor === this &&
+            launch.purpose == AcpSandboxLaunchPurpose.OUTER_AGENT && launch.command == command &&
+            launch.readOnlyMounts.size == runtimeMounts.size &&
+            launch.readOnlyMounts.zip(runtimeMounts).all { (left, right) -> left.hasSameMountAuthority(right) } &&
+            launch.stagingRoots.isEmpty() && launch.environment.isEmpty() &&
+            launch.workingDirectory == sandbox.agentWorkingDirectory &&
+            launch.resourceLimits == sandbox.agentResourceLimits &&
+            ACP_PROVIDER_STATE_ROOT in launch.emptyDirectories &&
+            launch.emptyDirectories.filter { it != ACP_PROVIDER_STATE_ROOT }.none {
+                pathsOverlap(it, ACP_PROVIDER_STATE_ROOT)
+            } && launch.stdinDisposition == AcpSandboxStdinDisposition.INHERITED_PIPE
+        ) { "ACP provider guardian launch differs from its factory-owned commitment" }
+        AcpProviderQualificationProfile.CREDENTIAL_FREE.requireSandboxResourceLimits(launch.resourceLimits)
+    }
+
+    private fun isIssued(): Boolean = issuer.isIssued(this)
+
+    private class Issuer {
+        // All maps are instance-private. Kotlin synthetic accessors must never expose them.
+        private val issued = WeakHashMap<AcpProviderGuardianLaunchDescriptor, Boolean>()
+        private val selected = IdentityHashMap<AcpProcessConfiguration, AcpProviderGuardianLaunchDescriptor>()
+        private val claimedConfigurations = WeakHashMap<AcpProcessConfiguration, Boolean>()
+
+        fun isIssued(descriptor: AcpProviderGuardianLaunchDescriptor): Boolean =
+            synchronized(issued) { issued.containsKey(descriptor) }
+
+        fun authenticateAndBind(
+            configuration: AcpProcessConfiguration,
+            artifact: AcpProviderGuardianArtifact,
+            trustedGuardianSha256: String,
+            codexMount: AcpSandboxReadOnlyMount,
+            factoryConfigurationSha256: String,
+            permit: AcpProviderQualificationPermit,
+        ): AcpProviderGuardianLaunchDescriptor {
+            val profile = AcpHarnessFactory.consumeProviderQualificationPermit(
+                permit, configuration, AcpProviderQualificationPurpose.GUARDIAN_LAUNCH_DESCRIPTOR,
+            )
+            val sandbox = requireNotNull(configuration.sandboxBoundary)
+            profile.requireSandboxResourceLimits(sandbox.agentResourceLimits)
+            require(factoryConfigurationSha256.matches(Regex("[0-9a-f]{64}")))
+            require(trustedGuardianSha256.matches(Regex("[0-9a-f]{64}")) &&
+                artifact.executableSha256 == trustedGuardianSha256)
+            require(!configuration.inheritParentEnvironment && configuration.environment.isEmpty()) {
+                "ACP provider guardian owns its cleared child environment"
+            }
+            val childMount = AcpSandboxReadOnlyMount(
+                configuration.executable, configuration.executable,
+                requireNotNull(configuration.expectedExecutableManifestSha256),
+            )
+            require(sandbox.agentRuntimeMounts.any { it.hasSameMountAuthority(codexMount) } &&
+                codexMount.expectedManifestSha256 != null && codexMount.destination != childMount.destination)
+            val guardian = AcpSandboxReadOnlyMount.trustedInternal(
+                artifact.executable, ACP_PROVIDER_GUARDIAN_PATH, artifact.runtimeManifestSha256,
+            )
+            val all = listOf(guardian, childMount) + sandbox.agentRuntimeMounts
+            require(all.groupBy { it.destination }.values.all { group ->
+                group.all { it.hasSameMountAuthority(group.first()) }
+            }) { "ACP provider executable mounts conflict" }
+            fun executableDigest(mount: AcpSandboxReadOnlyMount): String {
+                require(Files.isRegularFile(mount.source, LinkOption.NOFOLLOW_LINKS) &&
+                    Files.isExecutable(mount.source) &&
+                    calculateAcpRuntimeManifestSha256(mount.source) == mount.expectedManifestSha256)
+                return requireNotNull(LinuxFilesystemSyscalls.openAbsolutePathOrNull(mount.source)).use {
+                    sha256(it, sandbox.runtimeClosureLimits.maximumUserOwnedFileBytes)
+                }
+            }
+            // The artifact was authenticated by its owner. Recheck here and once more against the
+            // boundary's pinned descriptor immediately before gate release.
+            require(executableDigest(guardian) == trustedGuardianSha256)
+            val descriptor = AcpProviderGuardianLaunchDescriptor(
+                configuration, guardian, childMount, codexMount, factoryConfigurationSha256,
+                trustedGuardianSha256, executableDigest(childMount), executableDigest(codexMount),
+            )
+            synchronized(selected) {
+                check(!selected.containsKey(configuration) && !claimedConfigurations.containsKey(configuration)) {
+                    "ACP provider guardian is already bound or consumed"
+                }
+                synchronized(issued) { issued[descriptor] = true }
+                selected[configuration] = descriptor
+            }
+            return descriptor
+        }
+
+        fun claimForLaunch(configuration: AcpProcessConfiguration): AcpProviderGuardianLaunchDescriptor? =
+            synchronized(selected) {
+                check(!claimedConfigurations.containsKey(configuration)) {
+                    "ACP provider guardian selection is already consumed"
+                }
+                selected.remove(configuration)?.also { claimedConfigurations[configuration] = true }
+            }
+    }
+    companion object {
+        private val issuer = Issuer()
+
+        internal fun authenticateAndBind(
+            configuration: AcpProcessConfiguration,
+            artifact: AcpProviderGuardianArtifact,
+            trustedGuardianSha256: String,
+            codexMount: AcpSandboxReadOnlyMount,
+            factoryConfigurationSha256: String,
+            permit: AcpProviderQualificationPermit,
+        ): AcpProviderGuardianLaunchDescriptor = issuer.authenticateAndBind(
+            configuration, artifact, trustedGuardianSha256, codexMount, factoryConfigurationSha256, permit,
+        )
+
+        internal fun claimForLaunch(configuration: AcpProcessConfiguration): AcpProviderGuardianLaunchDescriptor? =
+            issuer.claimForLaunch(configuration)
+    }
+}
+
+/** Boundary-only observations; no native child/reap/descriptor cleanup is inferred from them. */
+internal data class AcpSandboxBoundaryCleanupFacts(
+    val observedTaskPeak: Int?,
+    val finalMembershipZero: Boolean,
+    val cgroupRemoved: Boolean,
+    val scopeRemoved: Boolean,
+    val lastTaskPeakObservationNanos: Long? = null,
+    val cgroupIdentitySha256: String? = null,
+)
+
+internal enum class AcpGuardianSignalOutcome { DELIVERED, ALREADY_EXITED }
+
+internal enum class AcpGuardianStderrObservation { EMPTY, NONEMPTY, DRAIN_INCOMPLETE }
+
+/** I/O facts only. Native receipt, router joins and later boundary cleanup remain separate proofs. */
+internal data class AcpGuardianIoCompletion(
+    val diagnostics: AcpProcessDiagnostics,
+    val stderrObservation: AcpGuardianStderrObservation,
+    val stdoutAccountingVerified: Boolean,
+)
+
 internal data class AcpSandboxLaunch(
     val command: List<String>,
     val environment: Map<String, String>,
@@ -268,6 +440,7 @@ internal data class AcpSandboxLaunch(
     /** Private empty namespace anchors, never host binds. Used for ACP session cwd declarations. */
     val emptyDirectories: List<Path> = emptyList(),
     val stdinDisposition: AcpSandboxStdinDisposition = AcpSandboxStdinDisposition.INHERITED_PIPE,
+    internal val guardianDescriptor: AcpProviderGuardianLaunchDescriptor? = null,
 ) {
     init {
         require(!maximumWallDuration.isZero && !maximumWallDuration.isNegative) {
@@ -377,7 +550,10 @@ internal class AcpSandboxedProcess internal constructor(
 ) : AcpContainedProcess {
     private val cleanup = CompletableFuture<Unit>()
     private val rootProcessHandleClosed = AtomicBoolean(false)
+    private val guardianHandle = AtomicReference<LinuxProcessDescriptor?>()
+    private val guardianHandleBound = AtomicBoolean(false)
     internal val scopeIdentity: AcpSandboxScopeIdentity get() = scope.identity
+    internal val hasAuthenticatedGuardian: Boolean get() = guardianHandleBound.get()
 
     init {
         process.onExit().whenComplete { _, _ ->
@@ -429,6 +605,35 @@ internal class AcpSandboxedProcess internal constructor(
         }
     }
 
+    /** The gate waiter execs the guardian without changing pidfd identity. No stream is touched. */
+    internal fun bindGuardianHandle(handle: LinuxProcessDescriptor) {
+        check(guardianHandleBound.compareAndSet(false, true)) { "guardian process handle is already bound" }
+        guardianHandle.set(handle)
+        if (cleanup.isDone) guardianHandle.getAndSet(null)?.close()
+        scope.observeTaskPeak()
+    }
+
+    internal fun terminateGuardian(): Boolean {
+        check(guardianHandleBound.get()) { "sandbox has no authenticated guardian process" }
+        scope.observeTaskPeak()
+        val handle = guardianHandle.get() ?: return false
+        return LinuxFilesystemSyscalls.terminateProcess(handle)
+    }
+
+    internal fun killGuardian(): Boolean {
+        check(guardianHandleBound.get()) { "sandbox has no authenticated guardian process" }
+        val handle = guardianHandle.get() ?: return false
+        return LinuxFilesystemSyscalls.killProcess(handle)
+    }
+
+    internal fun guardianExited(): Boolean {
+        check(guardianHandleBound.get()) { "sandbox has no authenticated guardian process" }
+        val handle = guardianHandle.get() ?: return cleanup.isDone
+        return LinuxFilesystemSyscalls.processExited(handle)
+    }
+
+    internal fun boundaryCleanupFacts(): AcpSandboxBoundaryCleanupFacts = scope.cleanupFacts()
+
     override fun destroy() = signal(force = false)
 
     override fun destroyForcibly() = signal(force = true)
@@ -473,6 +678,8 @@ internal class AcpSandboxedProcess internal constructor(
     fun cleanupSucceeded(): Boolean = cleanup.isDone && !cleanup.isCompletedExceptionally
 
     /** Re-attempts the retained scope/resource proof without erasing the original fatal result. */
+    internal fun bindCleanupDeadline(deadlineNanos: Long) = scope.bindCleanupDeadline(deadlineNanos)
+
     fun retryCleanupProof() {
         scope.requireCleaned()
         cleanupAfterScope()
@@ -481,6 +688,7 @@ internal class AcpSandboxedProcess internal constructor(
     }
 
     private fun closeRootProcessHandle() {
+        guardianHandle.getAndSet(null)?.close()
         if (rootProcessHandleClosed.compareAndSet(false, true)) rootProcessHandle.close()
     }
 }
@@ -522,28 +730,79 @@ internal class LinuxBubblewrapBoundary private constructor(
     }
     private val closed = AtomicBoolean(false)
     private val closeFailure = AtomicReference<AcpCleanupProofFailure?>()
+    // Issuance and close share this guard: a preparation reservation precedes all filesystem IO.
+    private val dnsLeases = Collections.newSetFromMap(IdentityHashMap<ProviderDnsControlLease, Boolean>())
+    private val dnsContexts = Collections.newSetFromMap(IdentityHashMap<AcpProviderDnsRuntimeContext, Boolean>())
+
+    /** No factory issuer calls this until the protected invocation composition is qualified. */
+    internal fun issueProviderDnsRuntimeContext(
+        permit: AcpProviderQualificationPermit,
+        consumer: Any,
+        requestBindingSha256: String,
+        deadlineNanos: Long,
+    ): AcpProviderDnsRuntimeContext {
+        AcpHarnessFactory.consumeDnsRuntimeContextQualificationPermit(permit, consumer, requestBindingSha256)
+        require(requestBindingSha256.matches(Regex("[0-9a-f]{64}"))) { PROVIDER_DNS_CONTEXT_FAILURE }
+        val lease = synchronized(PROVIDER_DNS_CONTEXT_GUARD) {
+            check(!closed.get() && closeFailure.get() == null && dnsLeases.isEmpty() &&
+                providerDnsRemaining(deadlineNanos) > 0L
+            ) {
+                PROVIDER_DNS_CONTEXT_FAILURE
+            }
+            ProviderDnsControlLease(requestBindingSha256, deadlineNanos, configuration.runtimeClosureLimits,
+                forbiddenRuntimeFiles).also(dnsLeases::add)
+        }
+        try {
+            val checkpoint = {
+                lease.requirePreparing()
+                check(!closed.get()) { PROVIDER_DNS_CONTEXT_FAILURE }
+            }
+            requireBoundaryUnchanged(checkpoint)
+            lease.prepare(controlDirectory, checkpoint)
+            return synchronized(PROVIDER_DNS_CONTEXT_GUARD) {
+                check(!closed.get() && closeFailure.get() == null && lease.canTransfer()) {
+                    PROVIDER_DNS_CONTEXT_FAILURE
+                }
+                BoundaryProviderDnsRuntimeContext().also { context ->
+                    PROVIDER_DNS_CONTEXTS[context] = ProviderDnsContextRecord(consumer, requestBindingSha256, lease)
+                    dnsContexts.add(context)
+                }
+            }
+        } catch (failure: Throwable) {
+            lease.preparationFailed(failure is AcpCleanupProofFailure)
+            if (!lease.closeBefore(deadlineNanos)) {
+                AcpProviderDnsProcess.quarantine()
+                closeFailure.compareAndSet(null, AcpCleanupProofFailure("ACP DNS preparation cleanup was not proven"))
+            }
+            throw failure
+        }
+    }
 
     fun validateReadOnlyMounts(
         mounts: Collection<AcpSandboxReadOnlyMount>,
         cancellationCheck: () -> Unit = NO_SANDBOX_CHECKPOINT,
     ) {
         closeFailure.get()?.let { throw it }
+        val statistics = prefixObservation?.statistics(RuntimeCopyStatistics.Prefix.Owner.VALIDATE)
         try {
             cancellationCheck()
-            val pinned = pinMounts(
+            val pinned = observePrefix(RuntimeCopyStatistics.Prefix.Phase.VALIDATION_PINNING) { pinMounts(
                 mounts,
                 configuration.runtimeClosureLimits,
                 forbiddenRuntimeFiles,
                 controlDirectory,
                 cancellationCheck = cancellationCheck,
-            )
+                statistics = statistics,
+            ) }
             try {
-                pinned.forEach { mount ->
-                    cancellationCheck()
-                    mount.requireUnchanged(cancellationCheck)
+                observePrefix(RuntimeCopyStatistics.Prefix.Phase.VALIDATION_RECHECK) {
+                    pinned.forEach { mount ->
+                        cancellationCheck()
+                        mount.requireUnchanged(cancellationCheck, statistics)
+                    }
                 }
             } finally {
-                deletePinnedMounts(pinned)
+                observePrefix(RuntimeCopyStatistics.Prefix.Phase.VALIDATION_DELETE) { deletePinnedMounts(pinned) }
             }
         } catch (failure: AcpCleanupProofFailure) {
             closeFailure.compareAndSet(null, failure)
@@ -691,6 +950,7 @@ internal class LinuxBubblewrapBoundary private constructor(
     ): AcpSandboxedProcess {
         closeFailure.get()?.let { throw it }
         if (closed.get()) throw IOException("ACP sandbox boundary is closed")
+        launch.guardianDescriptor?.requireLaunchAuthority(configuration, launch)
         requireAcpSandboxLaunchPolicy(configuration, launch, mergeError, cancellationCheck)
         // Empty-directory anchors become target-side bubblewrap --dir entries, not host sources.
         launch.stagingRoots.forEach { grant ->
@@ -802,7 +1062,7 @@ internal class LinuxBubblewrapBoundary private constructor(
                 openedRootProcessHandle,
                 verifiedScope,
                 cleanupAfterScope = {
-                    cleanupLaunchResources(launchMounts, createdEnvironment, retainedStagingRoots)
+                    cleanupLaunchResources(launchMounts, createdEnvironment, retainedStagingRoots, verifiedScope::cleanupCheckpoint)
                 },
                 onCleanupProven = { cleaned -> active.remove(cleaned) },
                 onCleanupFailed = { failure -> closeFailure.compareAndSet(null, failure) },
@@ -819,6 +1079,15 @@ internal class LinuxBubblewrapBoundary private constructor(
                 it.mount.destination.toString() == launch.command.firstOrNull()
             } ?: throw IOException("sandbox command executable is not an exact authenticated runtime mount")
             executableMount.requireNativeExecveatTarget(cancellationCheck)
+            launch.guardianDescriptor?.let { descriptor ->
+                executableMount.requireCommittedExecutable(descriptor.guardianExecutableSha256, true, cancellationCheck)
+                listOf(descriptor.childMount to descriptor.childExecutableSha256,
+                    descriptor.codexMount to descriptor.codexExecutableSha256).forEach { (mount, digest) ->
+                    val pinned = launchMounts.single { it.mount.hasSameMountAuthority(mount) }
+                    pinned.requireNativeExecveatTarget(cancellationCheck)
+                    pinned.requireCommittedExecutable(digest, false, cancellationCheck)
+                }
+            }
             var setupWaiter = verifiedScope.requireSetupWaiter(
                 launchGateHelper.setupAttestation(),
                 executableMount.setupAttestation(),
@@ -928,6 +1197,29 @@ internal class LinuxBubblewrapBoundary private constructor(
                     launchCheckpoint(AcpSandboxLaunchStage.DURING_SETUP_ATTESTATION, cancellationCheck)
                 },
             )
+            launch.guardianDescriptor?.let { descriptor ->
+                val handle = LinuxFilesystemSyscalls.openProcessHandle(setupWaiterPid)
+                try {
+                    require(readProcessStartTime(setupWaiterPid, cancellationCheck) == setupWaiter.helperStartTime)
+                    verifiedScope.requireSetupWaiter(
+                        launchGateHelper.setupAttestation(), executableMount.setupAttestation(),
+                        createdEnvironment.setupAttestation(), launch.command, launch.workingDirectory,
+                        launch.stdinDisposition, setupWaiter, cancellationCheck,
+                    )
+                    // Recheck all executable bytes after the final mount attestation and before
+                    // the one-way gate commit, including the separately authenticated children.
+                    executableMount.requireCommittedExecutable(descriptor.guardianExecutableSha256, true, cancellationCheck)
+                    listOf(descriptor.childMount to descriptor.childExecutableSha256,
+                        descriptor.codexMount to descriptor.codexExecutableSha256).forEach { (mount, digest) ->
+                        launchMounts.single { it.mount.hasSameMountAuthority(mount) }
+                            .requireCommittedExecutable(digest, false, cancellationCheck)
+                    }
+                    created.bindGuardianHandle(handle)
+                } catch (failure: Throwable) {
+                    handle.close()
+                    throw failure
+                }
+            }
             if (launch.purpose == AcpSandboxLaunchPurpose.CANDIDATE_VALIDATION) {
                 writableMountClosureSha256 = requireCandidateWritableMountClosure(
                     setupWaiterPid, launch.stagingRoots, cancellationCheck,
@@ -1145,17 +1437,36 @@ internal class LinuxBubblewrapBoundary private constructor(
             }
         }
 
+    @Synchronized
     override fun close() {
-        closed.compareAndSet(false, true)
+        val cleanupDeadline = System.nanoTime() + CLEANUP_TIMEOUT.toNanos()
+        val checkpoint = sandboxCleanupCheckpoint(cleanupDeadline)
+        val trustedControls = trustedControls(busEndpoint)
+        trustedControls.bindCleanupDeadline(cleanupDeadline)
+        val snapshot = active.toList()
+        snapshot.forEach { it.bindCleanupDeadline(cleanupDeadline) }
+        val dnsSnapshot = synchronized(PROVIDER_DNS_CONTEXT_GUARD) {
+            closed.set(true)
+            dnsContexts.forEach { context -> PROVIDER_DNS_CONTEXTS.remove(context) }
+            dnsContexts.clear()
+            dnsLeases.toList().also { leases -> leases.forEach { it.markRevoked() } }
+        }
         val failures = mutableListOf<Throwable>()
         closeFailure.get()?.let(failures::add)
-        val snapshot = active.toList()
+        dnsSnapshot.forEach { lease ->
+            if (!lease.closeBefore(cleanupDeadline)) {
+                AcpProviderDnsProcess.quarantine()
+                failures += IOException("sandbox boundary retains unverified DNS ownership")
+            }
+        }
         snapshot.forEach { process ->
             runCatching { process.destroyForcibly() }.exceptionOrNull()?.let(failures::add)
         }
         snapshot.forEach { process ->
             try {
-                process.awaitCleanup(CLEANUP_TIMEOUT)
+                checkpoint()
+                process.awaitCleanup(Duration.ofNanos((cleanupDeadline - System.nanoTime()).coerceAtLeast(0L)))
+                checkpoint()
                 active.remove(process)
             } catch (failure: Throwable) {
                 failures += failure
@@ -1172,7 +1483,7 @@ internal class LinuxBubblewrapBoundary private constructor(
         }
         unresolvedLaunches.toList().forEach { retained ->
             try {
-                if (retained.retry()) unresolvedLaunches.remove(retained)
+                if (retained.retry(cleanupDeadline)) unresolvedLaunches.remove(retained)
             } catch (failure: Throwable) {
                 failures += failure
             }
@@ -1182,12 +1493,15 @@ internal class LinuxBubblewrapBoundary private constructor(
                 "sandbox boundary retains ${unresolvedLaunches.size} failed-launch cleanup proof(s)",
             )
         }
-        if (active.isEmpty() && unresolvedLaunches.isEmpty()) {
+        if (!trustedControls.closeBefore(cleanupDeadline)) {
+            failures += IOException("sandbox boundary retains unverified trusted-control ownership")
+        }
+        if (active.isEmpty() && unresolvedLaunches.isEmpty() && dnsSnapshot.all { it.isClosed() } && trustedControls.isEmpty()) {
             runCleanupStep(failures, AcpSandboxCleanupStage.RUNTIME_SNAPSHOTS, cleanupHook) {
-                deletePinnedMounts(launcherMounts)
+                deletePinnedMounts(launcherMounts, checkpoint)
             }
             runCleanupStep(failures, AcpSandboxCleanupStage.CONTROL_DIRECTORY, cleanupHook) {
-                controlDirectory.deleteAndProve()
+                controlDirectory.deleteAndProve(checkpoint)
             }
         } else {
             failures += IOException(
@@ -1333,6 +1647,11 @@ internal class LinuxBubblewrapBoundary private constructor(
             cancellationCheck()
             add("--dir")
             add(directory.toString())
+            if (launch.guardianDescriptor != null && directory == ACP_PROVIDER_STATE_ROOT) {
+                add("--chmod")
+                add("0700")
+                add(directory.toString())
+            }
         }
         allMounts.forEach { pinned ->
             cancellationCheck()
@@ -1364,6 +1683,50 @@ internal class LinuxBubblewrapBoundary private constructor(
     }
 
     companion object {
+        private val PROVIDER_DNS_CONTEXT_GUARD = Any()
+        private val PROVIDER_DNS_CONTEXTS =
+            IdentityHashMap<AcpProviderDnsRuntimeContext, ProviderDnsContextRecord>()
+
+        internal fun providerDnsDispatchDeadline(ticket: AcpProviderDnsDispatchTicket): Long =
+            requireProviderDnsTicket(ticket).let { it.lease.dispatchDeadline(it) }
+
+        internal fun bindProviderDnsDispatch(
+            ticket: AcpProviderDnsDispatchTicket,
+            owner: AcpProviderDnsProcess,
+        ): AcpProviderDnsLaunchMaterial = requireProviderDnsTicket(ticket).let { it.lease.bind(it, owner) }
+
+        internal fun completeProviderDnsDispatch(
+            ticket: AcpProviderDnsDispatchTicket,
+            owner: AcpProviderDnsProcess,
+        ): Boolean = requireProviderDnsTicket(ticket).let { it.lease.complete(it, owner) }
+
+        private fun requireProviderDnsTicket(ticket: AcpProviderDnsDispatchTicket): ProviderDnsTicket {
+            require(ticket is ProviderDnsTicket) { PROVIDER_DNS_CONTEXT_FAILURE }
+            return ticket
+        }
+
+        internal fun consumeProviderDnsRuntimeContext(
+            context: AcpProviderDnsRuntimeContext,
+            consumer: Any,
+            requestBindingSha256: String,
+            invocationDeadlineNanos: Long,
+        ): AcpProviderDnsInvocationLease = synchronized(PROVIDER_DNS_CONTEXT_GUARD) {
+            // Remove first: a wrong identity or binding consumes and revokes the presented context.
+            val record = PROVIDER_DNS_CONTEXTS.remove(context)
+                ?: throw IllegalArgumentException(PROVIDER_DNS_CONTEXT_FAILURE)
+            try {
+                require(record.consumer === consumer && record.requestBindingSha256 == requestBindingSha256 &&
+                    record.lease.matchesInvocationDeadline(invocationDeadlineNanos)) {
+                    PROVIDER_DNS_CONTEXT_FAILURE
+                }
+                record.lease.transfer()
+                record.lease
+            } catch (failure: Throwable) {
+                record.lease.markRevoked()
+                throw failure
+            }
+        }
+
         fun prepare(
             configuration: AcpLinuxSandboxConfiguration,
             observer: AcpSandboxCommandObserver? = null,
@@ -1610,8 +1973,10 @@ internal fun requireAcpSandboxLaunchPolicy(
         throw IOException("a Ninja compdb query requires separately captured stdout and stderr")
     }
 
+    launch.guardianDescriptor?.requireLaunchMatches(configuration, launch)
     val trustedProtectedMounts = when (launch.purpose) {
-        AcpSandboxLaunchPurpose.OUTER_AGENT -> configuration.agentRuntimeMounts
+        AcpSandboxLaunchPurpose.OUTER_AGENT -> configuration.agentRuntimeMounts +
+            listOfNotNull(launch.guardianDescriptor?.guardianMount)
         AcpSandboxLaunchPurpose.TERMINAL -> emptyList()
         AcpSandboxLaunchPurpose.NINJA_COMPDB_QUERY -> configuration.ninjaCompdbRuntimeMounts
         AcpSandboxLaunchPurpose.CANDIDATE_VALIDATION -> configuration.validationRuntimeMounts
@@ -1683,13 +2048,15 @@ private class RetainedLaunchCleanup(
     private val environmentFile: SandboxEnvironmentFile?,
     private val retainedStagingRoots: List<RetainedHostStagingRoot>,
 ) {
-    fun retry(): Boolean {
+    fun retry(cleanupDeadline: Long): Boolean {
+        val checkpoint = sandboxCleanupCheckpoint(cleanupDeadline)
+        checkpoint()
         val retainedProcess = process
         if (retainedProcess != null) {
             val controller = scopeController
                 ?: throw AcpCleanupProofFailure("failed launch lost its scope cleanup authority")
             try {
-                controller.requireKilledAndRemovedIfPresent(retainedProcess, rootProcessHandle)
+                controller.requireKilledAndRemovedIfPresent(retainedProcess, rootProcessHandle, cleanupDeadline)
             } catch (failure: Throwable) {
                 throw AcpCleanupProofFailure(
                     "failed launch scope cleanup remains unproven",
@@ -1698,7 +2065,7 @@ private class RetainedLaunchCleanup(
             }
         }
         try {
-            cleanupLaunchResources(launchMounts, environmentFile, retainedStagingRoots)
+            cleanupLaunchResources(launchMounts, environmentFile, retainedStagingRoots, checkpoint)
         } catch (failure: Throwable) {
             throw AcpCleanupProofFailure(
                 "failed launch runtime-snapshot cleanup remains unproven",
@@ -1714,15 +2081,17 @@ private fun cleanupLaunchResources(
     launchMounts: List<PinnedReadOnlyMount>,
     environmentFile: SandboxEnvironmentFile?,
     retainedStagingRoots: List<RetainedHostStagingRoot>,
+    cancellationCheck: () -> Unit = NO_SANDBOX_CHECKPOINT,
 ) {
+    cancellationCheck()
     val failures = mutableListOf<Throwable>()
     try {
-        deletePinnedMounts(launchMounts)
+        deletePinnedMounts(launchMounts, cancellationCheck)
     } catch (failure: Throwable) {
         failures += failure
     }
     try {
-        environmentFile?.closeAndProve()
+        environmentFile?.closeAndProve(cancellationCheck)
     } catch (failure: Throwable) {
         failures += failure
     }
@@ -2556,6 +2925,362 @@ private class RuntimePrivateControlScope private constructor(
     }
 }
 
+private class BoundaryProviderDnsRuntimeContext : AcpProviderDnsRuntimeContext()
+
+private class ProviderDnsContextRecord(
+    val consumer: Any,
+    val requestBindingSha256: String,
+    val lease: ProviderDnsControlLease,
+)
+
+/** Only credential-free resources, digests, deadlines and exact DNS-owner identities are retained. */
+private class ProviderDnsControlLease(
+    private val requestBindingSha256: String,
+    private val invocationDeadlineNanos: Long,
+    limits: AcpRuntimeClosureLimits,
+    forbidden: Set<ForbiddenRuntimeFile>,
+) : AcpProviderDnsInvocationLease() {
+    private val guard = Any()
+    private val revoked = AtomicBoolean()
+    private val resources = ProviderDnsPinnedResources(limits, forbidden, invocationDeadlineNanos, revoked)
+    private val tickets = ArrayList<ProviderDnsTicket>(MAXIMUM_PROVIDER_DNS_DISPATCHES)
+    private var preparing = true
+    private var transferred = false
+    private var closing = false
+    private var closed = false
+    private var cleanupUnverified = false
+
+    fun matchesInvocationDeadline(expected: Long): Boolean = expected == invocationDeadlineNanos
+
+    fun requirePreparing() {
+        check(!revoked.get() && providerDnsRemaining(invocationDeadlineNanos) > 0L) {
+            PROVIDER_DNS_CONTEXT_FAILURE
+        }
+    }
+
+    fun prepare(control: PinnedControlDirectory, checkpoint: () -> Unit) {
+        requirePreparing()
+        resources.prepare(control, checkpoint)
+        synchronized(guard) { preparing = false }
+        requirePreparing()
+    }
+
+    fun preparationFailed(unverified: Boolean) = synchronized(guard) {
+        preparing = false
+        cleanupUnverified = cleanupUnverified || unverified
+    }
+
+    fun canTransfer(): Boolean = synchronized(guard) {
+        !preparing && !transferred && !closing && !closed && !revoked.get() &&
+            !cleanupUnverified && providerDnsRemaining(invocationDeadlineNanos) > 0L
+    }
+
+    fun transfer() = synchronized(guard) {
+        check(canTransfer()) { PROVIDER_DNS_CONTEXT_FAILURE }
+        transferred = true
+    }
+
+    override fun clampDeadline(requestedDeadlineNanos: Long): Long =
+        minOf(requestedDeadlineNanos, invocationDeadlineNanos)
+
+    override fun admitDispatch(requestedDeadlineNanos: Long): AcpProviderDnsDispatchTicket = synchronized(guard) {
+        val deadline = clampDeadline(requestedDeadlineNanos)
+        check(transferred && !preparing && !closing && !closed && !revoked.get() && !cleanupUnverified &&
+            tickets.size < MAXIMUM_PROVIDER_DNS_DISPATCHES && tickets.all { it.verified } &&
+            providerDnsRemaining(deadline) > 0L) { PROVIDER_DNS_CONTEXT_FAILURE }
+        ProviderDnsTicket(this, deadline).also(tickets::add)
+    }
+
+    fun dispatchDeadline(ticket: ProviderDnsTicket): Long = synchronized(guard) {
+        require(tickets.any { it === ticket }) { PROVIDER_DNS_CONTEXT_FAILURE }
+        ticket.admittedDeadlineNanos
+    }
+
+    fun bind(ticket: ProviderDnsTicket, owner: AcpProviderDnsProcess): AcpProviderDnsLaunchMaterial {
+        val material = synchronized(guard) {
+            check(tickets.any { it === ticket } && ticket.owner == null && !ticket.verified &&
+                !preparing && !closing && !closed && !revoked.get() &&
+                providerDnsRemaining(ticket.admittedDeadlineNanos) > 0L) { PROVIDER_DNS_CONTEXT_FAILURE }
+            ticket.owner = owner
+            ticket.binding = true
+            resources.materialFor(ticket.admittedDeadlineNanos, owner)
+        }
+        // Binding only publishes ownership. All material IO belongs to the capped DNS task.
+        try {
+            if (revoked.get()) {
+                owner.cancel()
+                throw IOException(PROVIDER_DNS_CONTEXT_FAILURE)
+            }
+            return material
+        } catch (failure: Throwable) {
+            owner.cancel()
+            throw failure
+        } finally {
+            synchronized(guard) { ticket.binding = false }
+        }
+    }
+
+    fun complete(ticket: ProviderDnsTicket, owner: AcpProviderDnsProcess): Boolean {
+        // The final concrete owner must prove task + timer + late publication + reap + pipes.
+        if (!owner.cleanupVerified()) return false
+        return synchronized(guard) {
+            if (tickets.none { it === ticket } || ticket.owner !== owner || ticket.binding) false
+            else { ticket.verified = true; true }
+        }
+    }
+
+    fun markRevoked() {
+        revoked.set(true)
+        synchronized(guard) {
+            closing = true
+            tickets.forEach { ticket ->
+                if (ticket.owner == null) ticket.verified = true
+            }
+        }
+    }
+
+    fun revoke() {
+        markRevoked()
+        val owners = synchronized(guard) { tickets.mapNotNull { it.owner } }
+        owners.forEach { it.cancel() }
+    }
+
+    override fun closeBefore(cleanupDeadlineNanos: Long): Boolean {
+        revoke()
+        var interrupted = Thread.interrupted()
+        try {
+            while (synchronized(guard) { preparing || tickets.any { it.binding } } &&
+                providerDnsRemaining(cleanupDeadlineNanos) > 0L
+            ) {
+                java.util.concurrent.locks.LockSupport.parkNanos(
+                    minOf(providerDnsRemaining(cleanupDeadlineNanos), TimeUnit.MILLISECONDS.toNanos(1)),
+                )
+                if (Thread.interrupted()) interrupted = true
+            }
+            val owners = synchronized(guard) { tickets.mapNotNull { it.owner } }
+            owners.forEach { owner ->
+                if (owner.closeBefore(cleanupDeadlineNanos) && owner.cleanupVerified()) {
+                    synchronized(guard) {
+                        tickets.filter { it.owner === owner && !it.binding }.forEach { it.verified = true }
+                    }
+                }
+            }
+            val mayRelease = synchronized(guard) {
+                if (closed) return true
+                !preparing && !cleanupUnverified && tickets.all { it.verified && !it.binding }
+            }
+            if (!mayRelease) return unverified()
+            if (!resources.closeBefore(cleanupDeadlineNanos)) return unverified()
+            return synchronized(guard) { closed = true; true }
+        } finally {
+            if (interrupted) Thread.currentThread().interrupt()
+        }
+    }
+
+    override fun isClosed(): Boolean = synchronized(guard) { closed }
+
+    private fun unverified(): Boolean {
+        AcpProviderDnsProcess.quarantine()
+        return false
+    }
+}
+
+private class ProviderDnsTicket(
+    val lease: ProviderDnsControlLease,
+    val admittedDeadlineNanos: Long,
+) : AcpProviderDnsDispatchTicket() {
+    var owner: AcpProviderDnsProcess? = null
+    var verified = false
+    var binding = false
+}
+
+/** A concrete resource holder, not a caller-provided validator or launch callback. */
+private class ProviderDnsPinnedResources(
+    private val limits: AcpRuntimeClosureLimits,
+    private val forbidden: Set<ForbiddenRuntimeFile>,
+    private val deadlineNanos: Long,
+    private val revoked: AtomicBoolean,
+) {
+    private val trees = mutableListOf<PinnedPrivateTree>()
+    private var workingTree: PinnedPrivateTree? = null
+    private var runtimeSnapshot: PrivateRuntimeSnapshot? = null
+    private var helperSnapshot: PrivateRuntimeSnapshot? = null
+    private var runtimeManifest: RuntimeManifest? = null
+    private var helperDescriptor: LinuxDescriptor? = null
+    private var helperDigest: String? = null
+    private var released = false
+    private val cleanupGuard = java.util.concurrent.locks.ReentrantLock()
+    fun materialFor(dispatchDeadlineNanos: Long, owner: AcpProviderDnsProcess): AcpProviderDnsLaunchMaterial =
+        ProviderDnsPinnedLaunchMaterial(this, minOf(dispatchDeadlineNanos, deadlineNanos), owner)
+
+    val jar: Path get() = requireNotNull(helperSnapshot).source
+    val expectedSha256: String get() = requireNotNull(helperDigest)
+    val directory: Path get() = requireNotNull(workingTree).path
+    val javaExecutable: Path get() = requireNotNull(runtimeSnapshot).source.resolve("bin/java")
+    val runtimeManifestSha256: String get() = requireNotNull(runtimeManifest).manifestSha256
+
+    private fun checkpoint(
+        validationDeadlineNanos: Long = deadlineNanos,
+        owner: AcpProviderDnsProcess? = null,
+    ) {
+        check(!revoked.get() && owner?.admissionRevoked() != true &&
+            providerDnsRemaining(minOf(deadlineNanos, validationDeadlineNanos)) > 0L && !released
+        ) {
+            PROVIDER_DNS_CONTEXT_FAILURE
+        }
+    }
+
+    fun prepare(control: PinnedControlDirectory, boundaryCheckpoint: () -> Unit) {
+        val statistics = try { RuntimeCopyStatistics() } catch (_: Throwable) { null }
+        run {
+            val check = { checkpoint(); boundaryCheckpoint() }
+            check()
+            workingTree = control.createChild("dns-").also(trees::add)
+            val helper = packagedProviderDnsHelper()
+            val expected = packagedProviderDnsCommitment()
+            val helperSource = buildRuntimeManifest(helper, limits, forbidden, cancellationCheck = check, statistics = statistics)
+            require(!helperSource.rootDirectory && helperSource.rootIdentity.size in 1..MAXIMUM_PROVIDER_DNS_HELPER_BYTES) {
+                PROVIDER_DNS_CONTEXT_FAILURE
+            }
+            requirePinnedDescriptor(helper, helperSource.rootIdentity).use { descriptor ->
+                require(sha256(descriptor, MAXIMUM_PROVIDER_DNS_HELPER_BYTES, check, statistics) == expected) {
+                    PROVIDER_DNS_CONTEXT_FAILURE
+                }
+            }
+            val runtime = currentProviderDnsRuntime()
+            val originalRuntime = buildRuntimeManifest(runtime, limits, forbidden, cancellationCheck = check, statistics = statistics)
+            require(originalRuntime.rootDirectory && originalRuntime.recursivelyRootOwnedAndImmutable) {
+                PROVIDER_DNS_CONTEXT_FAILURE
+            }
+            runtimeSnapshot = stagePrivateRuntimeSnapshot(runtime, limits, control, check, statistics).also { trees.add(it.container) }
+            helperSnapshot = stagePrivateRuntimeSnapshot(helper, limits, control, check, statistics).also { trees.add(it.container) }
+            require(buildRuntimeManifest(runtime, limits, forbidden, cancellationCheck = check, statistics = statistics) == originalRuntime &&
+                buildRuntimeManifest(helper, limits, forbidden, cancellationCheck = check, statistics = statistics) == helperSource) {
+                PROVIDER_DNS_CONTEXT_FAILURE
+            }
+            hardenPrivateSnapshot(requireNotNull(runtimeSnapshot).container, check)
+            hardenPrivateSnapshot(requireNotNull(helperSnapshot).container, check)
+            val copiedRuntime = buildRuntimeManifestOwned(requireNotNull(runtimeSnapshot).source, limits, forbidden,
+                allowPrivateControlSource = true, cancellationCheck = check,
+                privateSnapshotOwner = requireNotNull(runtimeSnapshot).container.controlKey, statistics = statistics)
+            require(copiedRuntime.rootDirectory) { PROVIDER_DNS_CONTEXT_FAILURE }
+            runtimeManifest = copiedRuntime
+            val copiedHelper = buildRuntimeManifestOwned(jar, limits, forbidden, allowPrivateControlSource = true,
+                cancellationCheck = check, privateSnapshotOwner = requireNotNull(helperSnapshot).container.controlKey, statistics = statistics)
+            val pinnedHelper = requirePinnedDescriptor(jar, copiedHelper.rootIdentity)
+            helperDescriptor = pinnedHelper
+            helperDigest = expected
+            require(copiedHelper.rootIdentity.mode.permissions == 0x124 &&
+                sha256(pinnedHelper, MAXIMUM_PROVIDER_DNS_HELPER_BYTES, check, statistics) == expected &&
+                readIdentity(javaExecutable, check).mode.permissions == 0x16d) { PROVIDER_DNS_CONTEXT_FAILURE }
+            requireCurrent(statistics = statistics)
+        }
+    }
+
+    fun requireCurrent(validationDeadlineNanos: Long = deadlineNanos, owner: AcpProviderDnsProcess? = null, statistics: RuntimeCopyStatistics? = null) {
+        val check = { checkpoint(validationDeadlineNanos, owner) }
+        check()
+        requireNotNull(workingTree).requireRootDirectory().also { descriptor ->
+            require(LinuxFilesystemSyscalls.identity(descriptor.fd).mode.permissions == CONTROL_DIRECTORY_MODE) {
+                PROVIDER_DNS_CONTEXT_FAILURE
+            }
+        }
+        val runtime = requireNotNull(runtimeSnapshot)
+        runtime.container.requireRootDirectory()
+        require(buildRuntimeManifestOwned(runtime.source, limits, forbidden, allowPrivateControlSource = true,
+            cancellationCheck = check, privateSnapshotOwner = runtime.container.controlKey, statistics = statistics) == runtimeManifest) {
+            PROVIDER_DNS_CONTEXT_FAILURE
+        }
+        val helper = requireNotNull(helperSnapshot)
+        helper.container.requireRootDirectory()
+        val descriptor = requireNotNull(helperDescriptor)
+        LinuxFilesystemSyscalls.openPathAtOrNull(helper.container.requireRootDirectory().fd, "root").use { named ->
+            require(named != null && named.identity.key == descriptor.identity.key &&
+                named.identity.mountId == descriptor.identity.mountId && named.identity.mode.permissions == 0x124) {
+                PROVIDER_DNS_CONTEXT_FAILURE
+            }
+        }
+        require(sha256(descriptor, MAXIMUM_PROVIDER_DNS_HELPER_BYTES, check, statistics) == expectedSha256) {
+            PROVIDER_DNS_CONTEXT_FAILURE
+        }
+    }
+
+    fun closeBefore(cleanupDeadlineNanos: Long): Boolean {
+        val acquired = try {
+            cleanupGuard.tryLock(providerDnsRemaining(cleanupDeadlineNanos), TimeUnit.NANOSECONDS)
+        } catch (_: InterruptedException) {
+            Thread.currentThread().interrupt()
+            return false
+        }
+        if (!acquired) return false
+        try {
+            if (released) return true
+            if (trees.isNotEmpty() && providerDnsRemaining(cleanupDeadlineNanos) == 0L) return false
+            return try {
+                helperDescriptor?.close()
+                helperDescriptor = null
+                trees.asReversed().forEach { tree ->
+                    if (providerDnsRemaining(cleanupDeadlineNanos) == 0L) return false
+                    tree.deleteAndProveBefore(cleanupDeadlineNanos)
+                }
+                requirePrivateCleanupDeadline(cleanupDeadlineNanos)
+                released = true
+                true
+            } catch (_: Throwable) { false }
+        } finally { cleanupGuard.unlock() }
+    }
+}
+
+private class ProviderDnsPinnedLaunchMaterial(
+    private val resources: ProviderDnsPinnedResources,
+    private val dispatchDeadlineNanos: Long,
+    private val owner: AcpProviderDnsProcess,
+) : AcpProviderDnsLaunchMaterial() {
+    override val jar: Path get() = resources.jar
+    override val expectedSha256: String get() = resources.expectedSha256
+    override val directory: Path get() = resources.directory
+    override val javaExecutable: Path get() = resources.javaExecutable
+    override val runtimeManifestSha256: String get() = resources.runtimeManifestSha256
+    override fun requireCurrent() = resources.requireCurrent(dispatchDeadlineNanos, owner)
+}
+
+private fun packagedProviderDnsHelper(): Path {
+    val application = Path.of(LinuxBubblewrapBoundary::class.java.protectionDomain.codeSource.location.toURI()).toRealPath()
+    require(Files.isRegularFile(application, LinkOption.NOFOLLOW_LINKS) &&
+        application.fileName.toString().endsWith(".jar") && application.parent.fileName.toString() == "lib") {
+        PROVIDER_DNS_CONTEXT_FAILURE
+    }
+    return application.parent.parent.resolve("libexec/decomp-acp-provider-dns.jar").also { helper ->
+        require(helper == helper.toRealPath()) { PROVIDER_DNS_CONTEXT_FAILURE }
+    }
+}
+
+private fun packagedProviderDnsCommitment(): String {
+    val bytes = LinuxBubblewrapBoundary::class.java.getResourceAsStream("/acp-provider-dns/worker.sha256")?.use {
+        it.readNBytes(66)
+    } ?: throw IOException(PROVIDER_DNS_CONTEXT_FAILURE)
+    require(bytes.size == 65 && bytes.last() == '\n'.code.toByte()) { PROVIDER_DNS_CONTEXT_FAILURE }
+    return bytes.toString(Charsets.US_ASCII).trimEnd('\n').also {
+        require(it.matches(Regex("[0-9a-f]{64}"))) { PROVIDER_DNS_CONTEXT_FAILURE }
+    }
+}
+
+private fun currentProviderDnsRuntime(): Path {
+    require(Runtime.version().feature() == 21) { PROVIDER_DNS_CONTEXT_FAILURE }
+    val runtime = Path.of(System.getProperty("java.home")).toRealPath()
+    val executable = runtime.resolve("bin/java").toRealPath()
+    val running = ProcessHandle.current().info().command().orElseThrow { IOException(PROVIDER_DNS_CONTEXT_FAILURE) }
+    require(executable == Path.of(running).toRealPath() && executable == runtime.resolve("bin/java")) {
+        PROVIDER_DNS_CONTEXT_FAILURE
+    }
+    return runtime
+}
+
+private fun providerDnsRemaining(deadlineNanos: Long): Long = (deadlineNanos - System.nanoTime()).coerceAtLeast(0L)
+private const val MAXIMUM_PROVIDER_DNS_DISPATCHES = 8
+private const val MAXIMUM_PROVIDER_DNS_HELPER_BYTES = 64L * 1024L
+private const val PROVIDER_DNS_CONTEXT_FAILURE = "ACP DNS runtime context is invalid or revoked"
+
 /** A factory-created mode-0700 control directory pinned by parent/name and open descriptors. */
 private class PinnedControlDirectory private constructor(
     val path: Path,
@@ -2676,7 +3401,10 @@ private class PinnedControlDirectory private constructor(
         }
     }
 
-    fun deleteAndProve(): Unit = synchronized(ACTIVE_PRIVATE_CONTROLS) {
+    fun deleteAndProve() = deleteAndProve(NO_SANDBOX_CHECKPOINT)
+
+    fun deleteAndProve(cancellationCheck: () -> Unit): Unit = synchronized(ACTIVE_PRIVATE_CONTROLS) {
+        cancellationCheck()
         if (deleted) {
             cleanupFailure?.let { throw it }
             return
@@ -2684,35 +3412,41 @@ private class PinnedControlDirectory private constructor(
         val priorFailure = cleanupFailure
         try {
             requireCurrent()
-            val mounts = hostPhysicalMounts(NO_SANDBOX_CHECKPOINT)
+            val mounts = hostPhysicalMounts(cancellationCheck)
             requirePrivateControlLocationUnexposed(
-                hostPhysicalLocation(descriptor, mounts, NO_SANDBOX_CHECKPOINT), true, mounts,
-                NO_SANDBOX_CHECKPOINT, privateSnapshotOwner = expectedKey,
+                hostPhysicalLocation(descriptor, mounts, cancellationCheck), true, mounts,
+                cancellationCheck, privateSnapshotOwner = expectedKey,
             )
-            if (mounts != hostPhysicalMounts(NO_SANDBOX_CHECKPOINT)) {
+            if (mounts != hostPhysicalMounts(cancellationCheck)) {
                 throw IOException("host mounts changed during private-control cleanup admission")
             }
             // A failed launch can leave attacker-created residue beside the pinned resources. Drain
             // only this already-authenticated directory through its retained descriptor and the same
             // aggregate entry/byte/depth limits used for private runtime cleanup. A pathname
             // replacement fails requireCurrent() above and is never traversed or removed.
-            deletePrivateTreeContents(descriptor, cleanupLimits)
+            deletePrivateTreeContents(descriptor, cleanupLimits, cancellationCheck)
             val quarantine = ".decomp-acp-control-delete-${UUID.randomUUID()}"
+            cancellationCheck()
             observePrivateControlTransaction(PrivateControlTransactionStage.BEFORE_QUARANTINE)
             LinuxFilesystemSyscalls.renameNoReplace(parent.fd, currentName, quarantine)
             currentName = quarantine
             requireDirectoryDescriptorIdentity(descriptor, expectedKey, expectedMountId, CONTROL_DIRECTORY_MODE)
+            cancellationCheck()
             LinuxFilesystemSyscalls.openDirectoryAt(parent.fd, quarantine).use { selected ->
                 if (selected.identity.key != expectedKey || selected.identity.mountId != expectedMountId) {
                     throw IOException("sandbox control-directory cleanup selected a replacement")
                 }
             }
+            cancellationCheck()
             requireNameAbsent(parent.fd, originalName)
+            cancellationCheck()
             LinuxFilesystemSyscalls.removeDirectory(parent.fd, quarantine)
             if (LinuxFilesystemSyscalls.identity(descriptor.fd).linkCount != 0) {
                 throw IOException("sandbox control-directory descriptor remains linked after cleanup")
             }
+            cancellationCheck()
             requireNameAbsent(parent.fd, quarantine)
+            cancellationCheck()
             requireNameAbsent(parent.fd, originalName)
             observePrivateControlTransaction(PrivateControlTransactionStage.AFTER_UNLINK_PROOF)
             lifecycle = PrivateControlLifecycle.PROVED_DELETED
@@ -2895,28 +3629,59 @@ private class PinnedPrivateTree(
     }
 
     @Synchronized
-    fun deleteAndProve() {
+    fun deleteAndProve() = deleteAndProveBefore(null)
+
+    @Synchronized
+    fun deleteAndProve(cancellationCheck: () -> Unit) = deleteAndProveBefore(null, cancellationCheck)
+
+    @Synchronized
+    fun deleteAndProveBefore(cleanupDeadlineNanos: Long?, cancellationCheck: () -> Unit = NO_SANDBOX_CHECKPOINT) {
         cleanupFailure?.let { throw it }
         if (deleted) return
         try {
+            cancellationCheck()
+            requirePrivateCleanupDeadline(cleanupDeadlineNanos)
             val parentDescriptor = requireCurrentTree()
-            deletePrivateTreeContents(descriptor, cleanupLimits)
+            cancellationCheck()
+            requirePrivateCleanupDeadline(cleanupDeadlineNanos)
+            if (cleanupDeadlineNanos == null) deletePrivateTreeContents(descriptor, cleanupLimits, cancellationCheck)
+            else deletePrivateTreeContentsBefore(descriptor, cleanupLimits, cleanupDeadlineNanos, cancellationCheck)
+            cancellationCheck()
+            requirePrivateCleanupDeadline(cleanupDeadlineNanos)
             val quarantine = ".decomp-acp-runtime-delete-${UUID.randomUUID()}"
             LinuxFilesystemSyscalls.renameNoReplace(parentDescriptor.fd, currentName, quarantine)
             currentName = quarantine
+            cancellationCheck()
+            requirePrivateCleanupDeadline(cleanupDeadlineNanos)
             LinuxFilesystemSyscalls.openDirectoryAt(parentDescriptor.fd, quarantine).use { selected ->
+                cancellationCheck()
+            requirePrivateCleanupDeadline(cleanupDeadlineNanos)
                 if (selected.identity.key != expectedKey || selected.identity.mountId != expectedMountId) {
                     throw IOException("private runtime snapshot cleanup selected a replacement")
                 }
             }
+            cancellationCheck()
+            requirePrivateCleanupDeadline(cleanupDeadlineNanos)
             requireNameAbsent(parentDescriptor.fd, originalName)
+            cancellationCheck()
+            requirePrivateCleanupDeadline(cleanupDeadlineNanos)
             LinuxFilesystemSyscalls.removeDirectory(parentDescriptor.fd, quarantine)
+            cancellationCheck()
+            requirePrivateCleanupDeadline(cleanupDeadlineNanos)
             if (LinuxFilesystemSyscalls.identity(descriptor.fd).linkCount != 0) {
                 throw IOException("private runtime snapshot descriptor remains linked after cleanup")
             }
+            cancellationCheck()
+            requirePrivateCleanupDeadline(cleanupDeadlineNanos)
             requireNameAbsent(parentDescriptor.fd, quarantine)
+            cancellationCheck()
+            requirePrivateCleanupDeadline(cleanupDeadlineNanos)
             requireNameAbsent(parentDescriptor.fd, originalName)
+            cancellationCheck()
+            requirePrivateCleanupDeadline(cleanupDeadlineNanos)
             descriptor.close()
+            cancellationCheck()
+            requirePrivateCleanupDeadline(cleanupDeadlineNanos)
             deleted = true
         } catch (failure: Throwable) {
             val proof = if (failure is AcpCleanupProofFailure) failure else {
@@ -3035,12 +3800,16 @@ private class SandboxEnvironmentFile private constructor(
     }
 
     @Synchronized
-    fun closeAndProve() {
+    fun closeAndProve() = closeAndProve(NO_SANDBOX_CHECKPOINT)
+
+    @Synchronized
+    fun closeAndProve(cancellationCheck: () -> Unit) {
+        cancellationCheck()
         cleanupFailure?.let { throw it }
         if (closed) return
         try {
-            if (linked) unlinkAndProveAnonymous()
-            requireCurrentIdentity()
+            if (linked) unlinkAndProveAnonymous(cancellationCheck)
+            requireCurrentIdentity(cancellationCheck)
             descriptor.close()
             closed = true
         } catch (failure: Throwable) {
@@ -3246,11 +4015,30 @@ private fun removeExactEmptyDirectory(
 }
 
 /** Descriptor-relative bounded cleanup. Budget excess retains the pinned tree and fails closed. */
+internal fun deletePrivateTreeContents(directory: LinuxDescriptor, limits: AcpRuntimeClosureLimits) =
+    deletePrivateTreeContents(directory, limits, NO_SANDBOX_CHECKPOINT)
+
 internal fun deletePrivateTreeContents(
     directory: LinuxDescriptor,
     limits: AcpRuntimeClosureLimits,
+    cancellationCheck: () -> Unit,
 ) {
-    deletePrivateTreeContents(directory, PrivateCleanupBudget(limits), depth = 0)
+    deletePrivateTreeContents(directory, PrivateCleanupBudget(limits, cancellationCheck = cancellationCheck), depth = 0)
+}
+
+private fun deletePrivateTreeContentsBefore(
+    directory: LinuxDescriptor,
+    limits: AcpRuntimeClosureLimits,
+    cleanupDeadlineNanos: Long,
+    cancellationCheck: () -> Unit = NO_SANDBOX_CHECKPOINT,
+) {
+    deletePrivateTreeContents(directory, PrivateCleanupBudget(limits, cleanupDeadlineNanos, cancellationCheck), depth = 0)
+}
+
+private fun requirePrivateCleanupDeadline(cleanupDeadlineNanos: Long?) {
+    if (cleanupDeadlineNanos != null &&
+        (Thread.currentThread().isInterrupted || providerDnsRemaining(cleanupDeadlineNanos) == 0L)
+    ) throw IOException("private runtime cleanup deadline or interruption prevented proof")
 }
 
 private fun deletePrivateTreeContents(
@@ -3258,19 +4046,26 @@ private fun deletePrivateTreeContents(
     budget: PrivateCleanupBudget,
     depth: Int,
 ) {
+    budget.checkpoint()
     budget.enterDirectory(depth)
     LinuxFilesystemSyscalls.chmod(directory, CONTROL_DIRECTORY_MODE)
+    budget.checkpoint()
     val directoryMountId = LinuxFilesystemSyscalls.identity(directory.fd).mountId
+    budget.checkpoint()
     val names = LinuxFilesystemSyscalls.directoryEntryNames(
         directory,
         budget.maximumNamesForOneDirectory(),
     )
+    budget.checkpoint()
     budget.accountNames(names)
     names.sorted().forEach { name ->
+        budget.checkpoint()
         val opened = LinuxFilesystemSyscalls.openPathAtOrNull(directory.fd, name)
             ?: throw IOException("private cleanup entry disappeared before quarantine")
         opened.use { child ->
+            budget.checkpoint()
             budget.accountEntry(child)
+            budget.checkpoint()
             if (child.identity.isSymbolicLink ||
                 (!child.identity.isDirectory && !child.identity.isRegularFile)
             ) throw IOException("private cleanup tree contains a link or special entry")
@@ -3278,22 +4073,31 @@ private fun deletePrivateTreeContents(
                 throw IOException("private cleanup tree crosses a mount boundary")
             }
             requirePrivateCleanupEntryNotActiveControl(child.identity.key)
+            budget.checkpoint()
             val quarantine = ".decomp-acp-entry-delete-${UUID.randomUUID()}"
             LinuxFilesystemSyscalls.renameNoReplace(directory.fd, name, quarantine)
+            budget.checkpoint()
             LinuxFilesystemSyscalls.openPathAtOrNull(directory.fd, quarantine).use { selected ->
+                budget.checkpoint()
                 if (selected == null || selected.identity.key != child.identity.key ||
                     selected.identity.mountId != child.identity.mountId
                 ) throw IOException("private cleanup quarantine selected a replacement entry")
             }
+            budget.checkpoint()
             requireNameAbsent(directory.fd, name)
+            budget.checkpoint()
             if (child.identity.isDirectory) {
                 LinuxFilesystemSyscalls.openDirectoryAt(directory.fd, quarantine).use { childDirectory ->
+                    budget.checkpoint()
                     if (childDirectory.identity.key != child.identity.key ||
                         childDirectory.identity.mountId != child.identity.mountId
                     ) throw IOException("private cleanup directory changed after quarantine")
                     requirePrivateCleanupEntryNotActiveControl(childDirectory.identity.key)
+                    budget.checkpoint()
                     deletePrivateTreeContents(childDirectory, budget, depth + 1)
+                    budget.checkpoint()
                     LinuxFilesystemSyscalls.removeDirectory(directory.fd, quarantine)
+                    budget.checkpoint()
                     if (LinuxFilesystemSyscalls.identity(childDirectory.fd).linkCount != 0) {
                         throw IOException("private cleanup directory remains linked")
                     }
@@ -3303,14 +4107,20 @@ private fun deletePrivateTreeContents(
                     throw IOException("private cleanup file unexpectedly has multiple links")
                 }
                 LinuxFilesystemSyscalls.unlink(directory.fd, quarantine)
+                budget.checkpoint()
                 if (LinuxFilesystemSyscalls.identity(child.fd).linkCount != 0) {
                     throw IOException("private cleanup file remains linked")
                 }
             }
+            budget.checkpoint()
             requireNameAbsent(directory.fd, quarantine)
+            budget.checkpoint()
             requireNameAbsent(directory.fd, name)
+            budget.checkpoint()
         }
+        budget.checkpoint()
     }
+    budget.checkpoint()
 }
 
 private fun requirePrivateCleanupEntryNotActiveControl(key: LinuxFileKey): Unit = synchronized(ACTIVE_PRIVATE_CONTROLS) {
@@ -3319,9 +4129,15 @@ private fun requirePrivateCleanupEntryNotActiveControl(key: LinuxFileKey): Unit 
     }
 }
 
-private class PrivateCleanupBudget(private val limits: AcpRuntimeClosureLimits) {
+private class PrivateCleanupBudget(
+    private val limits: AcpRuntimeClosureLimits,
+    private val cleanupDeadlineNanos: Long? = null,
+    private val cancellationCheck: () -> Unit = NO_SANDBOX_CHECKPOINT,
+) {
     private var entries = 0
     private var bytes = 0L
+
+    fun checkpoint() { cancellationCheck(); requirePrivateCleanupDeadline(cleanupDeadlineNanos) }
 
     fun enterDirectory(depth: Int) {
         if (depth > limits.maximumDepth) {
@@ -3335,7 +4151,7 @@ private class PrivateCleanupBudget(private val limits: AcpRuntimeClosureLimits) 
     }
 
     fun accountNames(names: Collection<String>) {
-        names.forEach { name -> accountBytes(name.toByteArray(Charsets.UTF_8).size.toLong()) }
+        names.forEach { name -> checkpoint(); accountBytes(name.toByteArray(Charsets.UTF_8).size.toLong()) }
     }
 
     fun accountEntry(descriptor: LinuxDescriptor) {
@@ -3353,7 +4169,7 @@ private class PrivateCleanupBudget(private val limits: AcpRuntimeClosureLimits) 
     }
 }
 
-private class SystemdScopeController(
+internal class SystemdScopeController(
     private val supervisor: PinnedSecurityExecutable,
     private val inspector: PinnedSecurityExecutable,
     private val bus: PinnedSystemdBusEndpoint,
@@ -3434,8 +4250,10 @@ private class SystemdScopeController(
     fun requireKilledAndRemovedIfPresent(
         process: Process,
         rootProcessHandle: LinuxProcessDescriptor?,
+        deadline: Long = System.nanoTime() + CLEANUP_TIMEOUT.toNanos(),
     ) {
-        val deadline = System.nanoTime() + CLEANUP_TIMEOUT.toNanos()
+        val checkpoint = sandboxCleanupCheckpoint(deadline)
+        checkpoint()
         var lastFailure: Throwable? = null
         // No request byte has been authorized yet. Terminating the exact Process object first is
         // therefore safe and closes the narrow interval in which cancellation can arrive after
@@ -3454,7 +4272,7 @@ private class SystemdScopeController(
             val iterationFailures = mutableListOf<IOException>()
             rootSignalFailure?.let(iterationFailures::add)
             val before = try {
-                show()
+                show(checkpoint, deadline)
             } catch (failure: IOException) {
                 iterationFailures += failure
                 null
@@ -3472,7 +4290,7 @@ private class SystemdScopeController(
             }
             knownCgroupPath?.let { cgroup ->
                 try {
-                    killPinnedBubblewrapProcesses(cgroup, bubblewrap)
+                    killPinnedBubblewrapProcesses(cgroup, bubblewrap, deadline)
                 } catch (failure: IOException) {
                     iterationFailures += failure
                 }
@@ -3483,13 +4301,13 @@ private class SystemdScopeController(
                 listOf("reset-failed", unitName),
             ).forEach { arguments ->
                 try {
-                    systemctl(inspector, bus, arguments)
+                    systemctl(inspector, bus, arguments, cancellationCheck = checkpoint, cleanupDeadline = deadline)
                 } catch (failure: IOException) {
                     iterationFailures += failure
                 }
             }
             val after = try {
-                show()
+                show(checkpoint, deadline)
             } catch (failure: IOException) {
                 iterationFailures += failure
                 null
@@ -3518,14 +4336,16 @@ private class SystemdScopeController(
                     iterationFailures.first(),
                 ).also { aggregate -> iterationFailures.drop(1).forEach(aggregate::addSuppressed) }
             }
-            Thread.sleep(SCOPE_POLL_MILLIS)
+            checkpoint()
+            Thread.sleep(minOf(SCOPE_POLL_MILLIS, TimeUnit.NANOSECONDS.toMillis((deadline - System.nanoTime()).coerceAtLeast(0L))))
         }
         throw IOException("failed sandbox launch left a scope or cgroup that could not be proven absent", lastFailure)
     }
 
     private fun show(
         cancellationCheck: () -> Unit = NO_SANDBOX_CHECKPOINT,
-    ): Map<String, String> = systemctlShow(inspector, bus, unitName, cancellationCheck)
+        cleanupDeadline: Long? = null,
+    ): Map<String, String> = systemctlShow(inspector, bus, unitName, cancellationCheck, cleanupDeadline)
 
     private fun requireManagerProperties(properties: Map<String, String>): VerifiedScopeManager {
         val runtimeMaxMicros = parseSystemdDurationMicros(properties["RuntimeMaxUSec"])
@@ -3656,7 +4476,46 @@ internal class VerifiedSystemdScope(
     val controllers: AcpCgroupControllerEvidence,
     private val leaderPid: Long,
 ) {
+    private val cleanupEnd = AtomicReference<Long?>(null)
+    internal fun bindCleanupDeadline(deadline: Long) { cleanupEnd.set(deadline) }
+    internal fun cleanupCheckpoint() { cleanupEnd.get()?.let { sandboxCleanupCheckpoint(it)() } }
     val identity: AcpSandboxScopeIdentity = AcpSandboxScopeIdentity(unitName, cgroupPath)
+    private val cgroupDescriptor = LinuxFilesystemSyscalls.openRoot(cgroupPath)
+    private val observedTaskPeak = AtomicLong(-1)
+    private val lastTaskPeakObservationNanos = AtomicLong(-1)
+    private val cgroupIdentitySha256 = cgroupDescriptor.identity.let {
+        sha256("acp-cgroup-v1:${it.key.device}:${it.key.inode}:${it.mountId}")
+    }
+    private val finalMembershipZero = AtomicBoolean(false)
+    private val cgroupRemoved = AtomicBoolean(false)
+    private val scopeRemoved = AtomicBoolean(false)
+
+    /** Kernel cumulative peak for this exact authenticated leaf; a missing reading stays absent. */
+    internal fun observeTaskPeak() {
+        runCatching {
+            val bytes = cgroupDescriptor.whileOpen { directoryFd ->
+                LinuxFilesystemSyscalls.openPathAtOrNull(directoryFd, "pids.peak")?.use { authorized ->
+                    LinuxFilesystemSyscalls.openReadableFrom(authorized).use { readable ->
+                        LinuxFilesystemSyscalls.read(readable, 31, NO_SANDBOX_CHECKPOINT)
+                    }
+                }
+            } ?: return@runCatching
+            val peak = bytes.toString(Charsets.US_ASCII).trim().toLongOrNull() ?: return@runCatching
+            if (peak in 1..Int.MAX_VALUE.toLong()) {
+                observedTaskPeak.accumulateAndGet(peak, ::maxOf)
+                lastTaskPeakObservationNanos.set(System.nanoTime())
+            }
+        }
+    }
+
+    internal fun cleanupFacts(): AcpSandboxBoundaryCleanupFacts {
+        observeTaskPeak()
+        return AcpSandboxBoundaryCleanupFacts(
+            observedTaskPeak.get().takeIf { it >= 0 }?.toInt(), finalMembershipZero.get(),
+            cgroupRemoved.get(), scopeRemoved.get(),
+            lastTaskPeakObservationNanos.get().takeIf { it >= 0 }, cgroupIdentitySha256,
+        )
+    }
 
     /** Proves the fully mounted static helper and its pre-opened target/environment descriptors. */
     fun requireSetupWaiter(
@@ -3792,7 +4651,8 @@ internal class VerifiedSystemdScope(
                 lastFailure = failure
             }
             cancellationCheck()
-            Thread.sleep(SCOPE_POLL_MILLIS)
+            cleanupCheckpoint()
+            Thread.sleep(minOf(SCOPE_POLL_MILLIS, TimeUnit.NANOSECONDS.toMillis((deadline - System.nanoTime()).coerceAtLeast(0L))))
         }
         throw IOException("sandbox did not prove the static gate-helper setup waiter", lastFailure)
     }
@@ -3809,18 +4669,18 @@ internal class VerifiedSystemdScope(
     private fun signalAll(signal: String) {
         val failures = mutableListOf<IOException>()
         try {
-            killPinnedBubblewrapProcesses(cgroupPath, bubblewrap)
+            killPinnedBubblewrapProcesses(cgroupPath, bubblewrap, cleanupEnd.get() ?: (System.nanoTime() + CLEANUP_TIMEOUT.toNanos()))
         } catch (failure: IOException) {
             failures += failure
         }
         try {
-            systemctl(inspector, bus, listOf("kill", "--kill-whom=all", "--signal=$signal", unitName))
+            systemctl(inspector, bus, listOf("kill", "--kill-whom=all", "--signal=$signal", unitName), cancellationCheck = ::cleanupCheckpoint, cleanupDeadline = cleanupEnd.get())
         } catch (failure: IOException) {
             failures += failure
         }
         if (failures.isEmpty()) return
         try {
-            val after = systemctlShow(inspector, bus, unitName)
+            val after = systemctlShow(inspector, bus, unitName, ::cleanupCheckpoint, cleanupEnd.get())
             if (after["LoadState"] == "not-found" &&
                 !Files.exists(cgroupPath, LinkOption.NOFOLLOW_LINKS)
             ) return
@@ -3833,18 +4693,52 @@ internal class VerifiedSystemdScope(
     }
 
     fun requireCleaned() {
-        val deadline = System.nanoTime() + CLEANUP_TIMEOUT.toNanos()
+        val deadline = cleanupEnd.get() ?: (System.nanoTime() + CLEANUP_TIMEOUT.toNanos())
         while (System.nanoTime() < deadline) {
-            val properties = systemctlShow(inspector, bus, unitName)
-            if (properties["LoadState"] == "not-found" && !Files.exists(cgroupPath, LinkOption.NOFOLLOW_LINKS)) return
+            val properties = systemctlShow(inspector, bus, unitName, ::cleanupCheckpoint, cleanupEnd.get())
+            observeTaskPeak()
+            if (properties["LoadState"] == "not-found" && !Files.exists(cgroupPath, LinkOption.NOFOLLOW_LINKS)) {
+                // The exact leaf's absence proves it contains no members. These facts do not
+                // prove native child reaping or receipt delivery.
+                finalMembershipZero.set(true)
+                cgroupRemoved.set(true)
+                scopeRemoved.set(true)
+                cgroupDescriptor.close()
+                return
+            }
             killAll()
-            runCatching { systemctl(inspector, bus, listOf("stop", unitName)) }
-            Thread.sleep(SCOPE_POLL_MILLIS)
+            runCatching { systemctl(inspector, bus, listOf("stop", unitName), cancellationCheck = ::cleanupCheckpoint, cleanupDeadline = deadline) }
+            cleanupCheckpoint()
+            Thread.sleep(minOf(SCOPE_POLL_MILLIS, TimeUnit.NANOSECONDS.toMillis((deadline - System.nanoTime()).coerceAtLeast(0L))))
         }
         val populated = if (Files.exists(cgroupPath.resolve("cgroup.events"))) {
             Files.readString(cgroupPath.resolve("cgroup.events")).contains("populated 1")
         } else false
         throw IOException("sandbox scope cleanup was not proven (populated=$populated)")
+    }
+
+    /** Test fixture already holds its exact leaf's kill capability. This observer
+     * never signals/stops a unit discovered by a later name query. Removal of
+     * the acquired cgroup leaf implies zero membership, not child reaping. */
+    internal fun requireFixtureRemoved(deadline: Long) {
+        val checkpoint = sandboxCleanupCheckpoint(deadline)
+        while (System.nanoTime() < deadline) {
+            checkpoint()
+            val properties = systemctlShow(inspector, bus, unitName, checkpoint, deadline)
+            val absent = !Files.exists(cgroupPath, LinkOption.NOFOLLOW_LINKS)
+            checkpoint()
+            if (properties["LoadState"] == "not-found" && absent) {
+                finalMembershipZero.set(true)
+                cgroupRemoved.set(true)
+                scopeRemoved.set(true)
+                cgroupDescriptor.close()
+                checkpoint()
+                return
+            }
+            Thread.sleep(minOf(SCOPE_POLL_MILLIS,
+                TimeUnit.NANOSECONDS.toMillis((deadline - System.nanoTime()).coerceAtLeast(0L))))
+        }
+        throw IOException("fixture's acquired scope/cgroup removal was not proven")
     }
 }
 
@@ -4016,8 +4910,9 @@ private fun readParentPid(
     ?.toLongOrNull()
     ?: throw IOException("sandbox process parent identity is unavailable")
 
-private fun killPinnedBubblewrapProcesses(cgroupPath: Path, bubblewrap: PinnedSecurityExecutable) {
-    val deadline = System.nanoTime() + CLEANUP_TIMEOUT.toNanos()
+private fun killPinnedBubblewrapProcesses(cgroupPath: Path, bubblewrap: PinnedSecurityExecutable, deadline: Long = System.nanoTime() + CLEANUP_TIMEOUT.toNanos()) {
+    val checkpoint = sandboxCleanupCheckpoint(deadline)
+    checkpoint()
     while (System.nanoTime() < deadline) {
         if (!Files.exists(cgroupPath, LinkOption.NOFOLLOW_LINKS)) return
         val cgroupPids = Files.readAllLines(cgroupPath.resolve("cgroup.procs"))
@@ -4064,12 +4959,13 @@ private fun killPinnedBubblewrapProcesses(cgroupPath: Path, bubblewrap: PinnedSe
                 if (sameProcess) LinuxFilesystemSyscalls.killProcess(handle)
             }
         }
-        Thread.sleep(SCOPE_POLL_MILLIS)
+        checkpoint()
+        Thread.sleep(minOf(SCOPE_POLL_MILLIS, TimeUnit.NANOSECONDS.toMillis((deadline - System.nanoTime()).coerceAtLeast(0L))))
     }
     throw IOException("pinned bubblewrap processes survived ordered pre-release cleanup")
 }
 
-private fun requireExactRlimits(
+internal fun requireExactRlimits(
     pid: Long,
     limits: AcpSandboxResourceLimits,
     cancellationCheck: () -> Unit = NO_SANDBOX_CHECKPOINT,
@@ -4454,6 +5350,21 @@ private class PinnedReadOnlyMount private constructor(
         )
     }
 
+    fun requireCommittedExecutable(
+        expectedSha256: String,
+        staticGuardian: Boolean,
+        cancellationCheck: () -> Unit,
+    ) {
+        if (manifest.rootDirectory || sha256(sourceDescriptor, limits.maximumUserOwnedFileBytes,
+                cancellationCheck) != expectedSha256) {
+            throw IOException("provider executable differs from its factory-owned commitment")
+        }
+        if (staticGuardian) verifyStaticAcpProviderGuardian(
+            readPinnedBytes(sourceDescriptor, MAXIMUM_GATE_HELPER_BYTES, cancellationCheck),
+            expectedSha256, manifest.rootIdentity.mode,
+        )
+    }
+
     fun requireNativeExecveatTarget(cancellationCheck: () -> Unit = NO_SANDBOX_CHECKPOINT) {
         if (manifest.rootDirectory) throw IOException("sandbox command executable must be one regular file")
         cancellationCheck()
@@ -4482,11 +5393,14 @@ private class PinnedReadOnlyMount private constructor(
         requireUnchanged(cancellationCheck)
     }
 
-    fun deleteSnapshot() {
+    fun deleteSnapshot() = deleteSnapshot(NO_SANDBOX_CHECKPOINT)
+
+    fun deleteSnapshot(cancellationCheck: () -> Unit) {
+        cancellationCheck()
         val failures = mutableListOf<Throwable>()
         runCatching { sourceDescriptor.close() }.exceptionOrNull()?.let(failures::add)
         snapshotContainer?.let { container ->
-            runCatching { container.deleteAndProve() }.exceptionOrNull()?.let(failures::add)
+            runCatching { container.deleteAndProve(cancellationCheck) }.exceptionOrNull()?.let(failures::add)
         }
         if (failures.isNotEmpty()) {
             val primary = AcpCleanupProofFailure("pinned sandbox runtime cleanup failed", failures.first())
@@ -4788,7 +5702,10 @@ private fun requireCandidateWritableMountClosure(
         if (mode and 0xf000 != 0x2000) null else linuxDeviceMajor(device) to linuxDeviceMinor(device)
     }
     val digest = CanonicalMetadataDigest(MAXIMUM_SANDBOX_EVIDENCE_BYTES, cancellationCheck)
-    mounts.sortedBy { it.mountPoint.toString() }.forEachIndexed { index, mount ->
+    mounts.sortedWith(object : Comparator<SandboxVisibleMount> {
+        override fun compare(a: SandboxVisibleMount, b: SandboxVisibleMount): Int =
+            a.mountPoint.toString().compareTo(b.mountPoint.toString())
+    }).forEachIndexed { index, mount ->
         cancellationCheck()
         digest.field("mount[$index].path", mount.mountPoint)
         digest.field("mount[$index].id", mount.mountId)
@@ -4937,7 +5854,10 @@ private fun buildRuntimeManifestOwned(
                         }
                     }
                 }
-            }.sortedBy { source.relativize(it).toString() }
+            }.sortedWith(object : Comparator<Path> {
+                override fun compare(a: Path, b: Path): Int =
+                    source.relativize(a).toString().compareTo(source.relativize(b).toString())
+            })
         } else listOf(source)
         val entries = paths.map { path ->
             cancellationCheck()
@@ -5100,11 +6020,16 @@ private fun pinMounts(
     }
 }
 
-private fun deletePinnedMounts(mounts: Collection<PinnedReadOnlyMount>) {
+private fun deletePinnedMounts(mounts: Collection<PinnedReadOnlyMount>) =
+    deletePinnedMounts(mounts, NO_SANDBOX_CHECKPOINT)
+
+private fun deletePinnedMounts(mounts: Collection<PinnedReadOnlyMount>, cancellationCheck: () -> Unit) {
+    cancellationCheck()
     val failures = mutableListOf<Throwable>()
     mounts.forEach { mount ->
         try {
-            mount.deleteSnapshot()
+            cancellationCheck()
+            mount.deleteSnapshot(cancellationCheck)
         } catch (failure: Throwable) {
             failures += failure
         }
@@ -5553,6 +6478,17 @@ private fun probeResourceLimiter(
     REQUIRED_PRLIMIT_OPTIONS.forEach { if (it !in help) throw IOException("resource limiter lacks $it") }
 }
 
+/** Shared static-executable verifier; guardian authentication grants no launch authority. */
+internal fun verifyStaticAcpProviderGuardian(bytes: ByteArray, expectedSha256: String, mode: Int) {
+    try {
+        verifyStaticSandboxGateHelper(bytes, expectedSha256, mode)
+    } catch (_: IOException) {
+        throw IOException("ACP provider guardian artifact integrity check failed")
+    } catch (_: RuntimeException) {
+        throw IOException("ACP provider guardian artifact integrity check failed")
+    }
+}
+
 private fun verifyStaticSandboxGateHelper(
     bytes: ByteArray,
     expectedSha256: String,
@@ -5807,6 +6743,7 @@ private fun systemctlShow(
     bus: PinnedSystemdBusEndpoint,
     unitName: String,
     cancellationCheck: () -> Unit = NO_SANDBOX_CHECKPOINT,
+    cleanupDeadline: Long? = null,
 ): Map<String, String> {
     val result = systemctl(
         inspector,
@@ -5820,6 +6757,7 @@ private fun systemctlShow(
         ),
         allowedExitCodes = setOf(0, 1, 4),
         cancellationCheck = cancellationCheck,
+        cleanupDeadline = cleanupDeadline,
     )
     return result.output.lineSequence()
         .filter { '=' in it }
@@ -5864,6 +6802,7 @@ private fun systemctl(
     arguments: List<String>,
     allowedExitCodes: Set<Int> = setOf(0),
     cancellationCheck: () -> Unit = NO_SANDBOX_CHECKPOINT,
+    cleanupDeadline: Long? = null,
 ): CommandResult {
     cancellationCheck()
     inspector.requireUnchanged(cancellationCheck)
@@ -5871,15 +6810,27 @@ private fun systemctl(
     val builder = ProcessBuilder(listOf(inspector.path.toString(), "--user") + arguments).redirectErrorStream(true)
     builder.environment().clear()
     builder.environment().putAll(bus.controlEnvironment)
-    val process = builder.start()
-    awaitTrustedProcess(process, SYSTEMD_CONTROL_TIMEOUT, cancellationCheck, "systemd scope control")
-    val bytes = process.inputStream.readNBytes(MAXIMUM_PROBE_BYTES + 1)
-    if (process.exitValue() !in allowedExitCodes || bytes.size > MAXIMUM_PROBE_BYTES) {
-        throw IOException("systemd scope control failed safely")
+    val controls = trustedControls(bus)
+    val owner = controls.admit()
+    var process: Process? = null
+    try {
+        process = builder.start()
+        owner.publish(process)
+        awaitTrustedProcess(process, SYSTEMD_CONTROL_TIMEOUT, cancellationCheck, "systemd scope control", cleanupDeadline)
+        val bytes = process.inputStream.readNBytes(MAXIMUM_PROBE_BYTES + 1)
+        if (process.exitValue() !in allowedExitCodes || bytes.size > MAXIMUM_PROBE_BYTES) {
+            throw IOException("systemd scope control failed safely")
+        }
+        inspector.requireUnchanged(cancellationCheck)
+        bus.requireUnchanged(cancellationCheck)
+        return CommandResult(process.exitValue(), bytes.toString(Charsets.UTF_8))
+    } finally {
+        if (process == null) owner.startFailed()
+        owner.finishCall()
+        if (!controls.completeBefore(owner, cleanupDeadline ?: controls.cleanupDeadline() ?: (System.nanoTime() + PROBE_CLEANUP_TIMEOUT.toNanos()))) {
+            throw AcpCleanupProofFailure("trusted systemd control termination and pipes remain unproven")
+        }
     }
-    inspector.requireUnchanged(cancellationCheck)
-    bus.requireUnchanged(cancellationCheck)
-    return CommandResult(process.exitValue(), bytes.toString(Charsets.UTF_8))
 }
 
 private fun awaitTrustedProcess(
@@ -5887,8 +6838,9 @@ private fun awaitTrustedProcess(
     timeout: Duration,
     cancellationCheck: () -> Unit,
     label: String,
+    cleanupDeadline: Long? = null,
 ) {
-    val deadline = System.nanoTime() + timeout.toNanos()
+    val deadline = minOf(System.nanoTime() + timeout.toNanos(), cleanupDeadline ?: Long.MAX_VALUE)
     try {
         while (process.isAlive && System.nanoTime() < deadline) {
             cancellationCheck()
@@ -5899,7 +6851,9 @@ private fun awaitTrustedProcess(
     } catch (failure: Throwable) {
         process.destroyForcibly()
         try {
-            process.waitFor(PROBE_CLEANUP_TIMEOUT.toMillis(), TimeUnit.MILLISECONDS)
+            val remaining = cleanupDeadline?.let { (it - System.nanoTime()).coerceAtLeast(0L) } ?: PROBE_CLEANUP_TIMEOUT.toNanos()
+            if (remaining > 0L && runCatching { cancellationCheck() }.isSuccess)
+                process.waitFor(minOf(PROBE_CLEANUP_TIMEOUT.toNanos(), remaining), TimeUnit.NANOSECONDS)
         } catch (interrupted: InterruptedException) {
             Thread.currentThread().interrupt()
             failure.addSuppressed(interrupted)
@@ -5973,7 +6927,7 @@ private fun pathsOverlap(first: Path, second: Path): Boolean =
 private fun currentUid(): Int =
     (Files.getAttribute(Path.of("/proc/self"), "unix:uid") as Number).toInt()
 
-private fun nprocBackstop(
+internal fun nprocBackstop(
     sandboxMaximum: Int,
     cancellationCheck: () -> Unit = NO_SANDBOX_CHECKPOINT,
 ): Int {
@@ -6645,6 +7599,8 @@ private const val ELF_DT_NEEDED = 1L
 private const val CONTROL_DIRECTORY_MODE = 0x1c0 // 0700
 private const val SANDBOX_ENVIRONMENT_FILE_MODE = 0x180 // 0600
 private val ACP_SANDBOX_GATE_HELPER_PATH = ACP_INTERNAL_SANDBOX_ROOT.resolve("gate-helper")
+private val ACP_PROVIDER_GUARDIAN_PATH = ACP_INTERNAL_SANDBOX_ROOT.resolve("provider-guardian")
+internal val ACP_PROVIDER_STATE_ROOT: Path = Path.of("/tmp/decomp-acp-provider-state")
 private val ACP_SANDBOX_ENVIRONMENT_PATH = ACP_INTERNAL_SANDBOX_ROOT.resolve("environment")
 private const val SANDBOX_GATE_TARGET_FD = 3
 private const val SANDBOX_GATE_ENVIRONMENT_FD = 4
@@ -6659,3 +7615,104 @@ private const val ENVIRONMENT_FD_OPENER_PROBE_OUTPUT = "fd4-ok"
 private const val ENVIRONMENT_FD_OPENER_PROBE_SCRIPT =
     "IFS= read -r -N 6 -u 4 value || exit 120; " +
         "[[ \"\$value\" == fd4-ok ]] || exit 121; printf fd4-ok"
+
+/** A cleanup proof may consume only its caller's single absolute budget. */
+private fun sandboxCleanupCheckpoint(deadlineNanos: Long): () -> Unit = {
+    if (System.nanoTime() >= deadlineNanos) throw IOException("sandbox cleanup deadline expired")
+}
+
+/** Owners retain only exact native process/pipe state, never a boundary, bus, request or callback. */
+private class TrustedControlProcessOwner {
+    private val process = AtomicReference<Process?>()
+    private val startComplete = AtomicBoolean()
+    private val callComplete = AtomicBoolean()
+    private val stopRequested = AtomicBoolean()
+    private val reaperStarted = AtomicBoolean()
+    private val verified = AtomicBoolean()
+    private val finished = java.util.concurrent.CountDownLatch(1)
+    private val reaper = AtomicReference<Thread?>()
+
+    fun publish(child: Process) {
+        check(process.compareAndSet(null, child))
+        startComplete.set(true)
+        if (stopRequested.get()) child.toHandle().destroyForcibly()
+        startReaperIfReady()
+    }
+
+    fun startFailed() { startComplete.set(true); startReaperIfReady() }
+    fun finishCall() { callComplete.set(true); startReaperIfReady() }
+
+    private fun startReaperIfReady() {
+        if (!startComplete.get() || !callComplete.get() || !reaperStarted.compareAndSet(false, true)) return
+        Thread({
+            var complete = false
+            try {
+                process.get()?.let { child ->
+                    child.waitFor()
+                    listOf(child.outputStream, child.inputStream, child.errorStream).forEach { it.close() }
+                    check(!child.isAlive)
+                }
+                complete = true
+            } catch (_: Throwable) {
+                // Keep the exact owner registered when any reaping or pipe proof is missing.
+            } finally {
+                if (complete) {
+                    verified.set(true)
+                }
+                finished.countDown()
+            }
+        }, "decomp-acp-trusted-control-cleanup").also { it.isDaemon = true; reaper.set(it); it.start() }
+    }
+
+    fun closeBefore(deadline: Long): Boolean {
+        stopRequested.set(true)
+        process.get()?.let { child -> if (child.isAlive) child.toHandle().destroyForcibly() }
+        startReaperIfReady()
+        var interrupted = false
+        try {
+            while (!verified.get() && finished.count > 0 && providerDnsRemaining(deadline) > 0L) {
+                try { finished.await(providerDnsRemaining(deadline), TimeUnit.NANOSECONDS) }
+                catch (_: InterruptedException) { interrupted = true }
+            }
+            val worker = reaper.get()
+            while (worker != null && worker.isAlive && providerDnsRemaining(deadline) > 0L) {
+                try { TimeUnit.NANOSECONDS.timedJoin(worker, providerDnsRemaining(deadline)) }
+                catch (_: InterruptedException) { interrupted = true }
+            }
+            return isVerified()
+        } finally { if (interrupted) Thread.currentThread().interrupt() }
+    }
+
+    fun isVerified(): Boolean = (verified.get() && reaper.get()?.isAlive == false).also { proven ->
+        if (proven) synchronized(TRUSTED_CONTROL_OWNERS) { TRUSTED_CONTROL_OWNERS.remove(this) }
+    }
+}
+
+private class TrustedControlProcesses {
+    private val cleanupEnd = AtomicReference<Long?>()
+    fun bindCleanupDeadline(deadline: Long) { cleanupEnd.set(deadline) }
+    fun cleanupDeadline(): Long? = cleanupEnd.get()
+    private val owners = ConcurrentHashMap.newKeySet<TrustedControlProcessOwner>()
+    fun admit(): TrustedControlProcessOwner {
+        val owner = TrustedControlProcessOwner()
+        synchronized(TRUSTED_CONTROL_OWNERS) {
+            check(TRUSTED_CONTROL_OWNERS.size < 64) { "trusted control cleanup capacity exhausted" }
+            TRUSTED_CONTROL_OWNERS.add(owner)
+            owners.add(owner)
+        }
+        return owner
+    }
+    fun completeBefore(owner: TrustedControlProcessOwner, deadline: Long): Boolean =
+        owner.closeBefore(deadline).also { if (it) owners.remove(owner) }
+    fun closeBefore(deadline: Long): Boolean {
+        owners.toList().forEach { completeBefore(it, deadline) }
+        return isEmpty()
+    }
+    fun isEmpty(): Boolean { owners.removeIf { it.isVerified() }; return owners.isEmpty() }
+}
+
+/** Weak endpoint keys avoid retaining unrelated bus metadata; unresolved owners have their own anchor. */
+private val TRUSTED_CONTROL_GROUPS = java.util.WeakHashMap<PinnedSystemdBusEndpoint, TrustedControlProcesses>()
+private val TRUSTED_CONTROL_OWNERS = HashSet<TrustedControlProcessOwner>()
+private fun trustedControls(bus: PinnedSystemdBusEndpoint): TrustedControlProcesses =
+    synchronized(TRUSTED_CONTROL_GROUPS) { TRUSTED_CONTROL_GROUPS.getOrPut(bus) { TrustedControlProcesses() } }
