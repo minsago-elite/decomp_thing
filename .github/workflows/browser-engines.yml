@@ -1,9 +1,17 @@
 name: Browser engine qualification
 
-# Cross-engine packaged smoke and audit (#631, #1791). Dispatched explicitly: it builds the
-# distribution and installs Firefox and WebKit with their host dependencies, which is too costly
-# for every pull request. Each run's report.json records the engine and Playwright versions.
+# Cross-engine packaged smoke and audit (#631, #1791). Qualify changes to the engine driver
+# before merge; unrelated pull requests avoid this additional distribution build. Explicit
+# dispatch remains available. Each report records the engine and Playwright versions.
 on:
+  pull_request:
+    paths:
+      - '.github/workflows/browser-engines.yml'
+      - 'scripts/*browser-engine*.mjs'
+      - 'scripts/packaged-browser-audit.mjs'
+      - 'scripts/packaged-browser-install.py'
+      - 'frontend/src/api/client.ts'
+      - 'frontend/tests/capability-fallbacks.test.tsx'
   workflow_dispatch:
     inputs:
       engines:
@@ -14,14 +22,19 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 jobs:
   engines:
-    name: Packaged journeys in ${{ inputs.engines }}
+    name: Packaged cross-engine journeys
     runs-on: ubuntu-24.04
     timeout-minutes: 45
     env:
       NPM_CONFIG_CACHE: ${{ github.workspace }}/build/npm-download-cache
       PLAYWRIGHT_CORE_VERSION: 1.58.2
+      ENGINES: ${{ github.event_name == 'pull_request' && 'firefox webkit' || inputs.engines }}
     defaults:
       run:
         shell: bash
@@ -53,15 +66,11 @@ jobs:
           bash scripts/install-frontend-node.sh "$RUNNER_TEMP/frontend-node"
           echo "$RUNNER_TEMP/frontend-node/bin" >> "$GITHUB_PATH"
       - name: Validate requested engines
-        env:
-          ENGINES: ${{ inputs.engines }}
         run: |
-          for engine in $ENGINES; do
-            case "$engine" in firefox|webkit|chromium) ;; *) echo "Unsupported engine: $engine" >&2; exit 1 ;; esac
-          done
+          engines="$(node scripts/browser-engine-input.mjs "$ENGINES")"
+          echo "ENGINES=$engines" >> "$GITHUB_ENV"
       - name: Install test-only Playwright and browsers with host dependencies
         env:
-          ENGINES: ${{ inputs.engines }}
           PLAYWRIGHT_BROWSERS_PATH: ${{ runner.temp }}/pw-browsers
         run: |
           npm install --prefix "$RUNNER_TEMP/pw" --no-audit --no-fund --no-save "playwright-core@$PLAYWRIGHT_CORE_VERSION"
@@ -77,7 +86,6 @@ jobs:
           echo "WEB_TEST_ARCHIVE=${web_distribution[0]}" >> "$GITHUB_ENV"
       - name: Run the packaged smoke and audit in each engine
         env:
-          ENGINES: ${{ inputs.engines }}
           PLAYWRIGHT_BROWSERS_PATH: ${{ runner.temp }}/pw-browsers
         run: |
           status=0
