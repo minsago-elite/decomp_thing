@@ -300,7 +300,7 @@ internal object AnalysisNativeIoHelper {
         val compiler = root.obj("compiler")
         compiler.keysExactly("path", "bytes", "sha256", "version", "versionCommand", "result")
         val compilerPath = compiler.string("path")
-        require(Path.of(compilerPath).isAbsolute && compiler.number("bytes") in 1..(512L * 1024 * 1024) &&
+        require(compilerPath == ANALYSIS_IO_RECORDED_COMPILER && compiler.number("bytes") in 1..(512L * 1024 * 1024) &&
             sha256Pattern.matches(compiler.string("sha256")) && compiler.string("version").isNotBlank())
         require(compiler.array("versionCommand").map(::jsonString) == listOf(compilerPath, "--version"))
         verifySuccessfulResult(compiler.obj("result"))
@@ -314,7 +314,7 @@ internal object AnalysisNativeIoHelper {
             "analysis helper build record differs from its fixed static recipe"
         }
         // Build-tree paths are recorded relative to the fixed build-root token, never as host paths.
-        require(arguments == analysisRecordedArguments(Path.of(compilerPath))) {
+        require(arguments == analysisRecordedArguments()) {
             "analysis helper build record names build-host paths instead of its recorded build root"
         }
         val environment = compilation.obj("environment")

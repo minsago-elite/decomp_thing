@@ -19,8 +19,14 @@ class LlvmBehaviorNativeHelperBuildV2Test {
         assertFailsWith<UnsupportedOperationException> { (NATIVE_HELPER_INSTALLED_NAMES as MutableList<String>)[0] = "foreign" }
     }
     @Test fun `actual compiler produces the closed v2 build record and deployment provenance`() = withNativeHelperTestDirectory { root ->
+        // Configurable compilers can live under a developer's home. Keep the actual compiler
+        // execution while measuring this cooperating wrapper, rather than assuming /usr/bin.
+        val compilerExecutable = root.resolve("developer-home/toolchain/cc")
+        Files.createDirectories(compilerExecutable.parent)
+        Files.writeString(compilerExecutable, "#!/bin/sh\nexec '${nativeHelperTestCompiler().toString().replace("'", "'\\''")}' \"\$@\"\n")
+        Files.setPosixFilePermissions(compilerExecutable, PosixFilePermissions.fromString("rwxr-xr-x"))
         val output = Files.createDirectory(root.resolve("output"))
-        LlvmBehaviorNativeHelperBuildV2.build(nativeHelperTestCompiler(), nativeHelperTestSource(), output)
+        LlvmBehaviorNativeHelperBuildV2.build(compilerExecutable, nativeHelperTestSource(), output)
         val source = Files.readAllBytes(output.resolve(NATIVE_HELPER_SOURCE_NAME))
         val build = Files.readAllBytes(output.resolve(NATIVE_HELPER_BUILD_NAME))
         val reference = Files.readAllBytes(output.resolve(NATIVE_HELPER_REFERENCE_NAME))
@@ -30,11 +36,22 @@ class LlvmBehaviorNativeHelperBuildV2Test {
         assertEquals(Files.readAllBytes(nativeHelperTestSource()).toList(), source.toList())
         val record = OracleJson.parseCanonical(build) as JsonObject
         assertEquals(helperStrings(NATIVE_HELPER_ARGUMENT_TEMPLATE), record["argumentTemplate"])
-        // The shipped reference names the private build directory by a fixed token, never by host path.
+        val deployment = OracleJson.parseCanonical(reference) as JsonObject
+        val compiler = deployment.getValue("compiler") as JsonObject
+        assertEquals(JsonPrimitive(NATIVE_HELPER_RECORDED_COMPILER), compiler["path"])
+        assertEquals(JsonPrimitive(Files.size(compilerExecutable)), compiler["bytes"])
+        assertEquals(JsonPrimitive(OracleArtifacts.sha256(Files.readAllBytes(compilerExecutable))), compiler["sha256"])
+        assertEquals(helperStrings(listOf(NATIVE_HELPER_RECORDED_COMPILER, "--version")), compiler["versionCommand"])
+        assertEquals(JsonPrimitive(NATIVE_HELPER_RECORDED_COMPILER), (record.getValue("compiler") as JsonObject)["executable"])
+        assertEquals(helperStrings(nativeHelperRecordedArguments()),
+            (deployment.getValue("compilation") as JsonObject)["arguments"])
+        // The shipped reference and build record must not contain either host directory.
         val referenceText = reference.decodeToString()
         assertTrue(root.toString() !in referenceText && "native-helper-build-" !in referenceText, referenceText)
+        assertTrue(root.toString() !in build.decodeToString())
         val rebuilt = Files.createDirectory(root.resolve("rebuilt"))
-        LlvmBehaviorNativeHelperBuildV2.build(nativeHelperTestCompiler(), nativeHelperTestSource(), rebuilt)
+        val relocatedCompiler = Files.copy(compilerExecutable, root.resolve("relocated-cc"))
+        LlvmBehaviorNativeHelperBuildV2.build(relocatedCompiler, nativeHelperTestSource(), rebuilt)
         for (name in listOf(NATIVE_HELPER_SOURCE_NAME, NATIVE_HELPER_BUILD_NAME, NATIVE_HELPER_REFERENCE_NAME)) {
             assertTrue(Files.readAllBytes(output.resolve(name)).contentEquals(Files.readAllBytes(rebuilt.resolve(name))), name)
         }

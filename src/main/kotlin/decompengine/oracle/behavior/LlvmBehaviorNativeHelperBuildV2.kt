@@ -92,7 +92,7 @@ object LlvmBehaviorNativeHelperBuildV2 {
                         val record = JsonObject(linkedMapOf(
                             "schemaVersion" to JsonPrimitive(2),
                             "kind" to JsonPrimitive("llvm-behavior-native-helper-build-record"),
-                            "compiler" to JsonObject(mapOf("executable" to JsonPrimitive(compiler.toString()), "version" to JsonPrimitive(firstLine))),
+                            "compiler" to JsonObject(mapOf("executable" to JsonPrimitive(NATIVE_HELPER_RECORDED_COMPILER), "version" to JsonPrimitive(firstLine))),
                             "argumentTemplate" to helperStrings(NATIVE_HELPER_ARGUMENT_TEMPLATE),
                             "source" to helperFileRecord(NATIVE_HELPER_SOURCE_NAME, capturedSource),
                             "output" to helperFileRecord(NATIVE_HELPER_NAME, helperBytes),
@@ -108,11 +108,11 @@ object LlvmBehaviorNativeHelperBuildV2 {
                             "helper" to helperFileRecord(NATIVE_HELPER_NAME, helperBytes),
                             "checksum" to helperFileRecord(NATIVE_HELPER_CHECKSUM_NAME, checksum),
                             "buildRecord" to helperFileRecord(NATIVE_HELPER_BUILD_NAME, recordBytes),
-                            "compiler" to JsonObject(linkedMapOf("path" to JsonPrimitive(compiler.toString()),
+                            "compiler" to JsonObject(linkedMapOf("path" to JsonPrimitive(NATIVE_HELPER_RECORDED_COMPILER),
                                 "bytes" to JsonPrimitive(compilerGuard.size), "sha256" to JsonPrimitive(compilerGuard.authenticatedSha256),
-                                "version" to JsonPrimitive(firstLine), "versionCommand" to helperStrings(listOf(compiler.toString(), "--version")),
+                                "version" to JsonPrimitive(firstLine), "versionCommand" to helperStrings(listOf(NATIVE_HELPER_RECORDED_COMPILER, "--version")),
                                 "result" to helperProcessRecord(version))),
-                            "compilation" to JsonObject(linkedMapOf("arguments" to helperStrings(nativeHelperRecordedArguments(compiler.toString())),
+                            "compilation" to JsonObject(linkedMapOf("arguments" to helperStrings(nativeHelperRecordedArguments()),
                                 "environment" to JsonObject(nativeHelperRecordedEnvironment(environment).mapValues { JsonPrimitive(it.value) }),
                                 "workingDirectory" to JsonPrimitive("/"), "result" to helperProcessRecord(compilation))),
                             "claims" to nativeHelperFalseClaims(),
@@ -144,11 +144,14 @@ object LlvmBehaviorNativeHelperBuildV2 {
  * The deployment reference records the private, randomly named compilation directory by this fixed
  * token, so shipped bytes carry no build-host path and stay identical across rebuilds. The token
  * stands for the directory holding the staged source, the output and the `home`/`tmp` scratch.
+ * The compiler's logical location is also relative to this record root (it is not copied there);
+ * the measured size/digest and recipe bindings stay exact. This is not a replayable command.
  */
 internal const val NATIVE_HELPER_RECORDED_BUILD_ROOT = "\${BUILD_ROOT}"
+internal const val NATIVE_HELPER_RECORDED_COMPILER = "$NATIVE_HELPER_RECORDED_BUILD_ROOT/compiler"
 
-internal fun nativeHelperRecordedArguments(compiler: String): List<String> =
-    listOf(compiler) + NATIVE_HELPER_ARGUMENT_TEMPLATE.map {
+internal fun nativeHelperRecordedArguments(): List<String> =
+    listOf(NATIVE_HELPER_RECORDED_COMPILER) + NATIVE_HELPER_ARGUMENT_TEMPLATE.map {
         when (it) {
             "\${SOURCE}" -> "$NATIVE_HELPER_RECORDED_BUILD_ROOT/$NATIVE_HELPER_SOURCE_NAME"
             "\${OUTPUT}" -> "$NATIVE_HELPER_RECORDED_BUILD_ROOT/$NATIVE_HELPER_NAME"

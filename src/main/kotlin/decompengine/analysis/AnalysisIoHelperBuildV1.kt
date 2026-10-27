@@ -97,11 +97,11 @@ object AnalysisIoHelperBuildV1 {
                             "sourceSha256" to JsonPrimitive(sourceGuard.authenticatedSha256),
                             "buildPolicySha256" to JsonPrimitive(policySha256), "helperSha256" to JsonPrimitive(helperSha256),
                             "helperBytes" to JsonPrimitive(helperBytes.size),
-                            "compiler" to JsonObject(linkedMapOf("path" to JsonPrimitive(compiler.toString()),
+                            "compiler" to JsonObject(linkedMapOf("path" to JsonPrimitive(ANALYSIS_IO_RECORDED_COMPILER),
                                 "bytes" to JsonPrimitive(compilerGuard.size), "sha256" to JsonPrimitive(compilerGuard.authenticatedSha256),
-                                "version" to JsonPrimitive(firstLine), "versionCommand" to analysisBuildStrings(versionArguments),
+                                "version" to JsonPrimitive(firstLine), "versionCommand" to analysisBuildStrings(listOf(ANALYSIS_IO_RECORDED_COMPILER, "--version")),
                                 "result" to analysisBuildProcessResult(version))),
-                            "compilation" to JsonObject(linkedMapOf("arguments" to analysisBuildStrings(analysisRecordedArguments(compiler)),
+                            "compilation" to JsonObject(linkedMapOf("arguments" to analysisBuildStrings(analysisRecordedArguments()),
                                 "environment" to JsonObject(analysisRecordedEnvironment(environment).mapValues { JsonPrimitive(it.value) }),
                                 "workingDirectory" to JsonPrimitive("/"), "timeoutMillis" to JsonPrimitive(30000),
                                 "maximumStdoutBytes" to JsonPrimitive(65536), "maximumStderrBytes" to JsonPrimitive(65536),
@@ -151,12 +151,15 @@ object AnalysisIoHelperBuildV1 {
  * shipped record names that directory by this fixed token instead, so the application JAR carries
  * no build-host path and is byte-identical across rebuilds of the same source with the same
  * compiler. The token stands for the per-build directory holding the staged source, the output
- * and the `home`/`tmp` scratch directories; the recipe and compiler identity stay exact.
+ * and the `home`/`tmp` scratch directories. The compiler's logical location is also relative to
+ * this record root (it is not copied there); its measured size/digest and recipe bindings stay exact.
+ * The record is passive provenance, not a command to execute at the logical location.
  */
 internal const val ANALYSIS_IO_RECORDED_BUILD_ROOT = "\${BUILD_ROOT}"
+internal const val ANALYSIS_IO_RECORDED_COMPILER = "$ANALYSIS_IO_RECORDED_BUILD_ROOT/compiler"
 
-internal fun analysisRecordedArguments(compiler: Path): List<String> =
-    listOf(compiler.toString()) + ANALYSIS_IO_COMPILER_ARGUMENTS.map {
+internal fun analysisRecordedArguments(): List<String> =
+    listOf(ANALYSIS_IO_RECORDED_COMPILER) + ANALYSIS_IO_COMPILER_ARGUMENTS.map {
         when (it) {
             "\${SOURCE}" -> "$ANALYSIS_IO_RECORDED_BUILD_ROOT/decomp_analysis_io_helper.c"
             "\${OUTPUT}" -> "$ANALYSIS_IO_RECORDED_BUILD_ROOT/$ANALYSIS_IO_BINARY_NAME"
