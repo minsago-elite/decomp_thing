@@ -484,6 +484,9 @@ def verify_external_inventory(inventory: dict, namespace: dict, checksum: str, i
             text(version["kind"], 128)
             for name in ("name", "providerRequest"):
                 require(version[name] is None or type(version[name]) is str and len(version[name]) <= 16384, "invalid version request string")
+    retained_symbol_populations(inventory, symbols)
+    for key, symbol in symbols.items():
+        version = symbol["version"]
         if key[1] != 0 and symbol["sectionKind"] == "undefined" and symbol["name"] and symbol["binding"] in (1, 2) and symbol["visibility"] == 0 and symbol["type"] in (0, 2, 10):
             identity = {"schemaVersion": 1, "namespace": "elf-static-import-request-v1", "inputSha256": input_sha,
                 "symbolTableSectionIndex": key[0], "symbolIndex": key[1],
@@ -508,12 +511,81 @@ def verify_external_inventory(inventory: dict, namespace: dict, checksum: str, i
     return symbols, relocations, imports
 
 
+def retained_symbol_populations(inventory: dict, symbols: dict) -> None:
+    """Bind every retained symbol/name/version entry to its declared section storage."""
+    sections = {row["index"]: row for row in inventory["sections"]}
+    require(len(sections) == len(inventory["sections"]), "duplicate retained section index")
+    tables = {index: row for index, row in sections.items() if row["type"] == 11}
+    populations = {index: [] for index in tables}
+    versions = {}
+    for section in sections.values():
+        if section["type"] == 0x6fffffff:
+            link = section["link"]
+            require(link in tables and link not in versions, "retained VERSYM table linkage/uniqueness differs")
+            versions[link] = section
+    require(list(symbols) == sorted(symbols), "retained DYNSYM symbols are not ordered")
+    for (table_index, index), symbol in symbols.items():
+        require(table_index in tables, "retained symbol lacks a DYNSYM section")
+        table = tables[table_index]
+        strings = sections.get(table["link"])
+        require(strings is not None and strings["type"] == 3, "retained symbol string offset/linkage differs")
+        assert strings is not None
+        string_size = address(strings["size"])
+        assert string_size is not None
+        require(symbol["nameOffset"] <= 0xffffffff and symbol["nameOffset"] < string_size and
+                (symbol["nameOffset"] != 0 or symbol["name"] == ""), "retained symbol string offset/linkage differs")
+        require(symbol["info"] <= 255 and symbol["other"] <= 255 and symbol["type"] == symbol["info"] & 15 and
+                symbol["binding"] == symbol["info"] >> 4 and symbol["visibility"] == symbol["other"] & 3 and
+                (symbol["binding"] == 0) == (index < table["info"]), "retained DYNSYM local-symbol boundary/encoding differs")
+        populations[table_index].append(index)
+        if index == 0:
+            require(all(symbol[key] == 0 for key in ("nameOffset", "info", "other", "rawSectionIndex", "resolvedSectionIndex")) and
+                    symbol["name"] == "" and symbol["sectionKind"] == "undefined" and
+                    symbol["value"] == symbol["size"] == "0x0", "retained DYNSYM null symbol differs")
+        version, owner = symbol["version"], versions.get(table_index)
+        require((version is not None) == (owner is not None), "retained symbol version presence differs from VERSYM metadata")
+        if version is not None:
+            assert owner is not None
+            require(version["sectionIndex"] == owner["index"] and version["fileOffset"] == owner["offset"] + index * 2 and
+                    version["raw"] <= 65535 and version["index"] == version["raw"] & 0x7fff and
+                    version["hidden"] == bool(version["raw"] & 0x8000) and (index != 0 or version["raw"] == 0),
+                    "retained VERSYM entry ownership/encoding differs")
+    for index, table in tables.items():
+        items = populations[index]
+        require(address(table["entrySize"]) == 24 and address(table["size"]) == len(items) * 24 and
+                1 <= table["info"] <= len(items) and items == list(range(len(items))),
+                "retained DYNSYM section population/width differs")
+        if index in versions:
+            owner = versions[index]
+            require(address(owner["entrySize"]) == 2 and address(owner["size"]) == len(items) * 2,
+                    "retained VERSYM section population/width differs")
+
+
+def retained_dynamic_section(inventory: dict, sections: dict) -> dict:
+    """Require complete section-backed entries from one matching SHT/PT_DYNAMIC pair."""
+    owners = [row for row in sections.values() if row["type"] == 6]
+    programs = [row for row in inventory["programHeaders"] if row["type"] == 2]
+    require(len(owners) == len(programs) == 1, "retained dynamic section/program uniqueness differs")
+    owner, program = owners[0], programs[0]
+    size, file_size, memory_size, start = address(owner["size"]), address(program["fileSize"]), address(program["memorySize"]), address(program["virtualAddress"])
+    assert size is not None and file_size is not None and memory_size is not None and start is not None
+    require(owner["address"] == program["virtualAddress"] and owner["offset"] == address(program["offset"]) and
+            size == file_size <= memory_size and start + memory_size <= (1 << 64) - 1 and
+            address(owner["entrySize"]) == 16 and size == len(inventory["dynamicEntries"]) * 16 and size > 0,
+            "retained dynamic section/program population/width differs")
+    for index, entry in enumerate(inventory["dynamicEntries"]):
+        require(entry["index"] == index and entry["fileOffset"] == owner["offset"] + index * 16,
+                "retained dynamic entry index/file offset differs")
+    return owner
+
+
 def retained_relocation_tables(inventory: dict, sections: dict) -> tuple[bool, dict]:
     """Reconstruct runtime membership/uncertainty, never trusting derived annotations.
 
     Mirrors BoundedElfDynamicBindingsV1's closed tag policy and REL/RELA/JMPREL
     section coverage. This checks retained metadata consistency, not original ELF bytes.
     """
+    dynamic = retained_dynamic_section(inventory, sections)
     known = set(range(35)) | {0x6ffffef5, 0x6ffffff0, 0x6ffffff9, 0x6ffffffa, 0x6ffffffb,
                               0x6ffffffc, 0x6ffffffd, 0x6ffffffe, 0x6fffffff}
     singletons = {2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 17, 18, 19, 20, 23, 35, 36, 37,
@@ -540,6 +612,14 @@ def retained_relocation_tables(inventory: dict, sections: dict) -> tuple[bool, d
     active = [section for section in sections.values() if section["type"] == 11 and address(section["address"]) == tags.get(6)]
     require(len(active) == 1 and active[0]["index"] == inventory["activeSymbolTableSectionIndex"] and
             address(active[0]["entrySize"]) == tags.get(11) == 24, "retained active symbol table differs from raw tags")
+    strings = sections.get(active[0]["link"])
+    require(strings is not None and strings["type"] == 3, "retained dynamic string tags/linkage differ")
+    assert strings is not None
+    string_size = address(strings["size"])
+    assert string_size is not None
+    require(dynamic["link"] == strings["index"] and string_size > 0 and
+            tags.get(5) == address(strings["address"]) and tags.get(10) == string_size,
+            "retained dynamic string tags/linkage differ")
     active_versions = [section for section in sections.values()
                        if section["type"] == 0x6fffffff and section["link"] == inventory["activeSymbolTableSectionIndex"]]
     require((0x6ffffff0 in tags) == bool(active_versions) and

@@ -409,16 +409,17 @@ class ExternalCallComponentEvidenceTest(unittest.TestCase):
                 {"index": index, "name": name, "type": kind, "flags": "0x2", "address": start, "offset": offset,
                  "size": size, "link": link, "info": 0, "alignment": "0x8", "entrySize": width}
                 for index, name, kind, start, offset, size, link, width in (
-                    (1, ".dynsym", 11, "0x0", 0, "0x0", 3, "0x18"),
+                    (1, ".dynsym", 11, "0x7000", 256, "0x30", 3, "0x18"),
                     (2, ".rela.plt", 4, "0x4000", 0, "0x18", 1, "0x18"),
-                    (3, ".dynstr", 3, "0x0", 0, "0x0", 0, "0x0"),
+                    (3, ".dynstr", 3, "0x7100", 512, "0x40", 0, "0x0"),
                     (5, ".rela.dyn", 4, "0x5000", 24, "0x0", 1, "0x18"))], "programHeaders": [{"index": 0, "type": 1,
                 "flags": 6, "offset": "0x0", "virtualAddress": "0x3000", "physicalAddress": "0x3000", "fileSize": "0x8",
                 "memorySize": "0x8", "alignment": "0x1"}], "dynamicEntries": [
                     {"index": index, "fileOffset": index * 16, "tag": hex(tag), "value": hex(value)}
                     for index, (tag, value) in enumerate(((23, 0x4000), (2, 24), (20, 7), (7, 0x5000), (8, 0), (9, 24),
-                                                         (6, 0), (11, 24), (0, 0)))],
-            "dynamicSymbols": [symbol], "relocations": [relocation], "versionRequirements": [], "versionDefinitions": [],
+                                                         (6, 0x7000), (11, 24), (5, 0x7100), (10, 64), (0, 0)))],
+            "dynamicSymbols": [symbol | {"symbolIndex": 0, "locator": "dynsym:1:0", "nameOffset": 0,
+                "name": "", "info": 0, "type": 0, "binding": 0}, symbol], "relocations": [relocation], "versionRequirements": [], "versionDefinitions": [],
             "neededLibraries": ["libexample.so"], "unsupportedReasons": ["dynamic-hash-population-not-reconciled",
                 "runtime-provider-and-interposition-unresolved"]}
         # Dynamic relocation sections need their own file-backed LOAD witnesses;
@@ -432,6 +433,15 @@ class ExternalCallComponentEvidenceTest(unittest.TestCase):
                 "offset": offset, "size": "0xf", "link": 0, "info": 0, "alignment": "0x1", "entrySize": "0x0"})
             inventory["programHeaders"].append({"index": index, "type": 1, "flags": 5, "offset": hex(offset),
                 "virtualAddress": hex(start), "physicalAddress": hex(start), "fileSize": "0xf", "memorySize": "0xf", "alignment": "0x1"})
+        inventory["sections"][0]["info"] = 1
+        inventory["sections"].append({"index": 23, "name": ".dynamic", "type": 6, "flags": "0x2", "address": "0x7200",
+            "offset": 768, "size": "0xb0", "link": 3, "info": 0, "alignment": "0x8", "entrySize": "0x10"})
+        for index, start, offset, size in ((24, 0x7000, 256, 48), (25, 0x7100, 512, 64), (26, 0x7200, 768, 176)):
+            inventory["programHeaders"].append({"index": index, "type": 1, "flags": 4, "offset": hex(offset),
+                "virtualAddress": hex(start), "physicalAddress": hex(start), "fileSize": hex(size),
+                "memorySize": hex(size), "alignment": "0x1"})
+        inventory["programHeaders"].append(inventory["programHeaders"][-1] | {"index": 23, "type": 2})
+        self.sync_dynamic_storage(inventory)
         identity = {"schemaVersion": 1, "namespace": "elf-static-import-request-v1", "inputSha256": input_sha,
             "symbolTableSectionIndex": 1, "symbolIndex": 1, "name": "imported_function", "type": 2, "binding": 1, "visibility": 0,
             "version": None, "weakMayRemainNull": False, "ifuncImplementationUnresolved": False, "runtimeProviderAvailable": False,
@@ -478,6 +488,18 @@ class ExternalCallComponentEvidenceTest(unittest.TestCase):
         self.manifest = self.directory / "evidence.json"
         self.write_payloads()
         self.assertEqual(VERIFY.canonical_bytes(self.report), self.verify()[0])
+
+    @staticmethod
+    def sync_dynamic_storage(inventory: dict) -> None:
+        """Build valid authored tag storage before mutations (never during payload rehash)."""
+        section = next(row for row in inventory["sections"] if row["type"] == 6)
+        size = len(inventory["dynamicEntries"]) * 16
+        section["size"] = hex(size)
+        for index, entry in enumerate(inventory["dynamicEntries"]):
+            entry.update(index=index, fileOffset=section["offset"] + index * 16)
+        for program in inventory["programHeaders"]:
+            if program["index"] in {23, 26}:
+                program.update(fileSize=hex(size), memorySize=hex(size))
 
     def commit(self, message: str) -> None:
         self.git("-c", "user.name=Authored Evidence Test", "-c", "user.email=evidence-test@example.invalid",
@@ -732,6 +754,7 @@ class ExternalCallComponentEvidenceTest(unittest.TestCase):
                     self.report = copy.deepcopy(original)
                     inventory = self.report["dynamicInventory"]
                     inventory["dynamicEntries"].insert(-1, {"index": 7, "fileOffset": 112, "tag": hex(tag), "value": "0x1000"})
+                    self.sync_dynamic_storage(inventory)
                     self.write_payloads()
                     with self.assertRaisesRegex(VERIFY.VerificationError, "unsupported reasons differ"):
                         self.verify()
@@ -773,7 +796,9 @@ class ExternalCallComponentEvidenceTest(unittest.TestCase):
                 inventory["relocations"][0]["dynamicTables"] = ["rela" if kind == 4 else "rel"]
                 self.report["sites"][0]["relocationBinding"]["dynamicTables"] = inventory["relocations"][0]["dynamicTables"]
                 inventory["dynamicEntries"] = [{"index": index, "fileOffset": index * 16, "tag": hex(tag), "value": hex(value)}
-                    for index, (tag, value) in enumerate(((pointer, 0x4000), (size, width), (entry_size, width), (6, 0), (11, 24), (0, 0)))]
+                    for index, (tag, value) in enumerate(((pointer, 0x4000), (size, width), (entry_size, width),
+                                                       (6, 0x7000), (11, 24), (5, 0x7100), (10, 64), (0, 0)))]
+                self.sync_dynamic_storage(inventory)
                 self.write_payloads()
                 self.verify()
                 inventory["dynamicEntries"][1]["value"] = "0x0"
@@ -836,10 +861,10 @@ class ExternalCallComponentEvidenceTest(unittest.TestCase):
             lambda inv: inv["unsupportedReasons"].append("packed-relr-relocations-not-expanded"),
             lambda inv: inv["unsupportedReasons"].append("android-packed-relocations-not-expanded"),
             lambda inv: inv["unsupportedReasons"].append("unclassified-dynamic-tag"),
-            lambda inv: inv["dynamicSymbols"][0].update(info=17),
-            lambda inv: inv["dynamicSymbols"][0].update(other=1),
-            lambda inv: inv["dynamicSymbols"][0].update(rawSectionIndex=4),
-            lambda inv: inv["dynamicSymbols"][0].update(resolvedSectionIndex=4),
+            lambda inv: inv["dynamicSymbols"][1].update(info=17),
+            lambda inv: inv["dynamicSymbols"][1].update(other=1),
+            lambda inv: inv["dynamicSymbols"][1].update(rawSectionIndex=4),
+            lambda inv: inv["dynamicSymbols"][1].update(resolvedSectionIndex=4),
             lambda inv: inv["programHeaders"][0].update(fileSize="0x7"),
             lambda inv: inv["programHeaders"].append(inv["programHeaders"][0] | {"index": 1})]
         for index, change in enumerate(changes):
@@ -879,7 +904,9 @@ class ExternalCallComponentEvidenceTest(unittest.TestCase):
         inventory["dynamicEntries"][4]["value"] = "0x30"
         inventory["sections"].append({"index": 4, "name": ".bss", "type": 8, "flags": "0x2", "address": "0x2fe0", "offset": 0,
             "size": "0x40", "link": 0, "info": 0, "alignment": "0x8", "entrySize": "0x0"})
-        inventory["dynamicSymbols"].append(inventory["dynamicSymbols"][0] | {"symbolIndex": 2, "locator": "dynsym:1:2",
+        inventory["sections"][0]["size"] = "0x48"
+        next(row for row in inventory["programHeaders"] if row["index"] == 24).update(fileSize="0x48", memorySize="0x48")
+        inventory["dynamicSymbols"].append(inventory["dynamicSymbols"][1] | {"symbolIndex": 2, "locator": "dynsym:1:2",
             "name": "copy_storage", "info": 17, "type": 1, "rawSectionIndex": 4, "resolvedSectionIndex": 4,
             "sectionKind": "defined", "value": "0x2fe0", "size": "0x40"})
         for index, kind, slot, symbol in ((1, 5, 0x2fe0, 2), (2, 2, 0x2ff0, 1)):
@@ -907,9 +934,7 @@ class ExternalCallComponentEvidenceTest(unittest.TestCase):
                         {"index": index + 3, "fileOffset": (index + 3) * 16, "tag": hex(tag), "value": hex(value)}
                         for index, (tag, value) in enumerate(((pointer, 0x5000), (size, width * 2),
                                                             (entry_size, width), (count_tag, count)))]
-                    inventory["dynamicSymbols"].insert(0, inventory["dynamicSymbols"][0] | {
-                        "symbolIndex": 0, "locator": "dynsym:1:0", "name": "", "nameOffset": 0,
-                        "info": 0, "type": 0, "binding": 0})
+                    self.sync_dynamic_storage(inventory)
                     # Reverse input order: prefix ordering must derive from section address/index.
                     for index in (1, 0):
                         # A count-one valid prefix may be followed by a non-relative row.
@@ -932,6 +957,7 @@ class ExternalCallComponentEvidenceTest(unittest.TestCase):
                     self.report = copy.deepcopy(original)
                     self.report["dynamicInventory"]["dynamicEntries"].insert(-1,
                         {"index": 8, "fileOffset": 128, "tag": hex(tag), "value": hex(count)})
+                    self.sync_dynamic_storage(self.report["dynamicInventory"])
                     self.write_payloads()
                     if count == 0:
                         self.verify()
@@ -941,20 +967,7 @@ class ExternalCallComponentEvidenceTest(unittest.TestCase):
 
     def test_dynamic_metadata_requires_allocated_uncompressed_uniquely_mapped_storage(self) -> None:
         inventory = self.report["dynamicInventory"]
-        # Include nonempty symbol/string/dynamic tables, not only relocation storage.
-        for name, start, offset, size in ((".dynsym", 0x7000, 256, 48), (".dynstr", 0x7100, 512, 32),
-                                         (".dynamic", 0x7200, 768, 16)):
-            if name == ".dynamic":
-                inventory["sections"].append({"index": 23, "name": name, "type": 6, "flags": "0x2", "address": hex(start),
-                    "offset": offset, "size": hex(size), "link": 3, "info": 0, "alignment": "0x8", "entrySize": "0x10"})
-            else:
-                section = next(row for row in inventory["sections"] if row["name"] == name)
-                section.update(address=hex(start), offset=offset, size=hex(size))
-            index = {".dynsym": 24, ".dynstr": 25, ".dynamic": 26}[name]
-            inventory["programHeaders"].append({"index": index, "type": 1, "flags": 4, "offset": hex(offset),
-                "virtualAddress": hex(start), "physicalAddress": hex(start), "fileSize": hex(size),
-                "memorySize": hex(size), "alignment": "0x1"})
-        next(row for row in inventory["dynamicEntries"] if row["tag"] == "0x6")["value"] = "0x7000"
+        # The baseline includes complete nonempty symbol/string/dynamic storage.
         self.write_payloads()
         self.verify()
         original = copy.deepcopy(self.report)
@@ -997,11 +1010,70 @@ class ExternalCallComponentEvidenceTest(unittest.TestCase):
                     self.write_payloads()
                     with self.assertRaises(VERIFY.VerificationError):
                         self.verify()
-        # Empty tables still require allocated/uncompressed flags, but no LOAD.
+        # An empty DYNSYM is invalid as a population, regardless of storage flags.
         for flags in ("0x0", "0x802"):
             self.report = copy.deepcopy(original)
             section = next(row for row in self.report["dynamicInventory"]["sections"] if row["name"] == ".dynsym")
             section.update(size="0x0", flags=flags)
+            self.write_payloads()
+            with self.assertRaises(VERIFY.VerificationError):
+                self.verify()
+
+    def test_symbol_and_dynamic_populations_require_section_backed_provenance(self) -> None:
+        original = copy.deepcopy(self.report)
+        changes = {
+            "strtab-pointer": lambda inv: next(row for row in inv["dynamicEntries"] if row["tag"] == "0x5").update(value="0x1"),
+            "strtab-size": lambda inv: next(row for row in inv["dynamicEntries"] if row["tag"] == "0xa").update(value="0x0"),
+            "strtab-absent": lambda inv: next(row for row in inv["dynamicEntries"] if row["tag"] == "0x5").update(tag="0x15"),
+            "dynamic-link": lambda inv: next(row for row in inv["sections"] if row["type"] == 6).update(link=1),
+            "dynsym-size": lambda inv: inv["sections"][0].update(size="0x18"),
+            "dynsym-width": lambda inv: inv["sections"][0].update(entrySize="0x10"),
+            "dynsym-no-null": lambda inv: inv["dynamicSymbols"].pop(0),
+            "dynsym-null-value": lambda inv: inv["dynamicSymbols"][0].update(value="0x1"),
+            "dynsym-gap": lambda inv: inv["dynamicSymbols"][1].update(symbolIndex=2),
+            "dynsym-local-boundary": lambda inv: inv["sections"][0].update(info=2),
+            "dynsym-owner": lambda inv: inv["dynamicSymbols"][1].update(tableSectionIndex=3),
+            "name-outside": lambda inv: inv["dynamicSymbols"][1].update(nameOffset=0xffffffff),
+            "name-at-end": lambda inv: inv["dynamicSymbols"][1].update(nameOffset=64),
+            "name-zero": lambda inv: inv["dynamicSymbols"][1].update(nameOffset=0),
+            "pt-empty": lambda inv: next(row for row in inv["programHeaders"] if row["type"] == 2).update(fileSize="0x0"),
+            "pt-duplicate": lambda inv: inv["programHeaders"].append(next(row for row in inv["programHeaders"] if row["type"] == 2) | {"index": 30}),
+            "pt-absent": lambda inv: inv["programHeaders"].remove(next(row for row in inv["programHeaders"] if row["type"] == 2)),
+            "pt-offset": lambda inv: next(row for row in inv["programHeaders"] if row["type"] == 2).update(offset="0x0"),
+            "pt-address": lambda inv: next(row for row in inv["programHeaders"] if row["type"] == 2).update(virtualAddress="0x1"),
+            "pt-memory": lambda inv: next(row for row in inv["programHeaders"] if row["type"] == 2).update(memorySize="0x1"),
+            "sht-empty": lambda inv: next(row for row in inv["sections"] if row["type"] == 6).update(size="0x0"),
+            "sht-width": lambda inv: next(row for row in inv["sections"] if row["type"] == 6).update(entrySize="0x8"),
+            "sht-duplicate": lambda inv: inv["sections"].append(next(row for row in inv["sections"] if row["type"] == 6) | {"index": 30}),
+            "entry-outside": lambda inv: inv["dynamicEntries"][0].update(fileOffset=self.report["inputBytes"] + 100),
+            "entry-gap": lambda inv: inv["dynamicEntries"][0].update(index=1),
+            "entry-missing": lambda inv: inv["dynamicEntries"].pop(0),
+        }
+        for name, change in changes.items():
+            with self.subTest(mutation=name):
+                self.report = copy.deepcopy(original)
+                change(self.report["dynamicInventory"])
+                self.write_payloads()  # Deliberately retain malformed storage while refreshing all payload hashes.
+                with self.assertRaises(VERIFY.VerificationError):
+                    self.verify()
+
+    def test_inactive_dynsym_also_requires_complete_section_population(self) -> None:
+        inventory = self.report["dynamicInventory"]
+        inventory["sections"].append(inventory["sections"][0] | {"index": 4, "name": ".dynsym.inactive",
+            "address": "0x7300", "offset": 1024, "size": "0x18"})
+        inventory["programHeaders"].append({"index": 30, "type": 1, "flags": 4, "offset": "0x400",
+            "virtualAddress": "0x7300", "physicalAddress": "0x7300", "fileSize": "0x18", "memorySize": "0x18", "alignment": "0x1"})
+        inventory["dynamicSymbols"].append(inventory["dynamicSymbols"][0] | {"tableSectionIndex": 4, "locator": "dynsym:4:0"})
+        inventory["unsupportedReasons"] = sorted(inventory["unsupportedReasons"] + ["inactive-dynsym-table-retained"])
+        self.write_payloads()
+        self.verify()  # An independently complete inactive null-only table is valid diagnostic evidence.
+        original = copy.deepcopy(self.report)
+        for change in (lambda inv: inv["sections"][-1].update(size="0x30"),
+                       lambda inv: inv["dynamicSymbols"].pop(),
+                       lambda inv: inv["sections"][-1].update(link=2),
+                       lambda inv: inv["dynamicSymbols"][-1].update(nameOffset=64)):
+            self.report = copy.deepcopy(original)
+            change(self.report["dynamicInventory"])
             self.write_payloads()
             with self.assertRaises(VERIFY.VerificationError):
                 self.verify()
@@ -1011,21 +1083,24 @@ class ExternalCallComponentEvidenceTest(unittest.TestCase):
         inventory["sections"].extend({"index": index, "name": name, "type": kind, "flags": "0x2", "address": "0x0", "offset": 0,
             "size": "0x0", "link": link, "info": 0, "alignment": "0x1", "entrySize": "0x0"}
             for index, name, kind, link in ((6, ".gnu.version", 0x6fffffff, 1), (7, ".gnu.version_r", 0x6ffffffe, 3)))
-        inventory["sections"][6].update(entrySize="0x2", size="0x4")
+        inventory["sections"][7].update(entrySize="0x2", size="0x4")
         inventory["programHeaders"].append({"index": 22, "type": 1, "flags": 4, "offset": "0x0",
             "virtualAddress": "0x0", "physicalAddress": "0x0", "fileSize": "0x4", "memorySize": "0x4", "alignment": "0x1"})
-        inventory["sections"][7].update(address="0x6000", offset=64, size="0x20", info=1)
+        inventory["sections"][8].update(address="0x6000", offset=64, size="0x20", info=1)
         inventory["programHeaders"].append({"index": 1, "type": 1, "flags": 4, "offset": "0x40",
             "virtualAddress": "0x6000", "physicalAddress": "0x6000", "fileSize": "0x20", "memorySize": "0x20", "alignment": "0x1"})
         inventory["dynamicEntries"][-1:-1] = [{"index": index + 8, "fileOffset": (index + 8) * 16, "tag": hex(tag), "value": hex(value)}
             for index, (tag, value) in enumerate(((0x6ffffffe, 0x6000), (0x6fffffff, 1), (0x6ffffff0, 0)))]
-        inventory["dynamicSymbols"][0]["version"] = {"sectionIndex": 6, "fileOffset": 2, "raw": 2, "index": 2, "hidden": False,
+        self.sync_dynamic_storage(inventory)
+        inventory["dynamicSymbols"][0]["version"] = {"sectionIndex": 6, "fileOffset": 0, "raw": 0, "index": 0, "hidden": False,
+            "kind": "local", "name": None, "providerRequest": None}
+        inventory["dynamicSymbols"][1]["version"] = {"sectionIndex": 6, "fileOffset": 2, "raw": 2, "index": 2, "hidden": False,
             "kind": "required-version", "name": "VER_1", "providerRequest": "libexample.so"}
         inventory["versionRequirements"] = [{"sectionIndex": 7, "stringSectionIndex": 3, "recordOffset": 64, "auxiliaryOffset": 80,
             "providerRequest": "libexample.so", "name": "VER_1", "rawIndex": 2, "index": 2, "flags": 0, "hash": 0x5aa821}]
 
         def rehash_identity() -> None:
-            version = self.report["dynamicInventory"]["dynamicSymbols"][0]["version"]
+            version = self.report["dynamicInventory"]["dynamicSymbols"][1]["version"]
             entry = self.report["externalNamespace"]["entries"][0]
             entry["identity"]["version"] = None if version is None else {
                 key: value for key, value in version.items() if key not in {"sectionIndex", "fileOffset"}}
@@ -1037,29 +1112,33 @@ class ExternalCallComponentEvidenceTest(unittest.TestCase):
         rehash_identity()
         self.verify()
         original = copy.deepcopy(self.report)
-        changes = [lambda inv: inv["dynamicSymbols"][0].update(version=None),
-            lambda inv: inv["sections"].append(copy.deepcopy(inv["sections"][6]) | {"index": 8}),
+        changes = [lambda inv: inv["sections"][7].update(size="0x2"),
+            lambda inv: inv["sections"][7].update(size="0x6"),
+            lambda inv: inv["sections"][7].update(entrySize="0x4"),
+            lambda inv: inv["dynamicSymbols"][0]["version"].update(raw=1, index=1, kind="global-unversioned"),
+            lambda inv: inv["dynamicSymbols"][1].update(version=None),
+            lambda inv: inv["sections"].append(copy.deepcopy(inv["sections"][7]) | {"index": 8}),
             lambda inv: inv["dynamicEntries"][-2].update(value="0x1234"),
             lambda inv: inv["dynamicEntries"].pop(-2),
-            lambda inv: inv["dynamicSymbols"][0]["version"].update(fileOffset=0),
-            lambda inv: inv["dynamicSymbols"][0]["version"].update(name=None),
-            lambda inv: inv["dynamicSymbols"][0]["version"].update(providerRequest=None),
-            lambda inv: inv["dynamicSymbols"][0]["version"].update(kind="defined-version"),
-            lambda inv: inv["dynamicSymbols"][0]["version"].update(raw=3),
-            lambda inv: inv["dynamicSymbols"][0]["version"].update(hidden=True),
+            lambda inv: inv["dynamicSymbols"][1]["version"].update(fileOffset=0),
+            lambda inv: inv["dynamicSymbols"][1]["version"].update(name=None),
+            lambda inv: inv["dynamicSymbols"][1]["version"].update(providerRequest=None),
+            lambda inv: inv["dynamicSymbols"][1]["version"].update(kind="defined-version"),
+            lambda inv: inv["dynamicSymbols"][1]["version"].update(raw=3),
+            lambda inv: inv["dynamicSymbols"][1]["version"].update(hidden=True),
             lambda inv: inv["versionRequirements"].clear(),
             lambda inv: inv["versionRequirements"].append(copy.deepcopy(inv["versionRequirements"][0])),
             lambda inv: inv["versionRequirements"][0].update(providerRequest="other.so"),
             lambda inv: inv["versionRequirements"][0].update(rawIndex=3),
-            lambda inv: inv["sections"][0].update(link=9), lambda inv: inv["sections"][6].update(link=9),
-            lambda inv: inv["sections"][6].update(flags="0x0"), lambda inv: inv["sections"][6].update(flags="0x802"),
-            lambda inv: (inv["sections"][6].update(offset=1), inv["dynamicSymbols"][0]["version"].update(fileOffset=3)),
+            lambda inv: inv["sections"][0].update(link=9), lambda inv: inv["sections"][7].update(link=9),
+            lambda inv: inv["sections"][7].update(flags="0x0"), lambda inv: inv["sections"][7].update(flags="0x802"),
+            lambda inv: (inv["sections"][7].update(offset=1), inv["dynamicSymbols"][1]["version"].update(fileOffset=3)),
             lambda inv: inv["programHeaders"].remove(next(row for row in inv["programHeaders"] if row["index"] == 22)),
             lambda inv: next(row for row in inv["programHeaders"] if row["index"] == 22).update(fileSize="0x3"),
             lambda inv: inv["programHeaders"].append(next(row for row in inv["programHeaders"] if row["index"] == 22) | {"index": 23}),
-            lambda inv: inv["sections"][7].update(type=1), lambda inv: inv["sections"][7].update(link=1),
-            lambda inv: inv["sections"][7].update(info=2), lambda inv: inv["sections"][7].update(flags="0x802"),
-            lambda inv: inv["sections"][7].update(offset=4090), lambda inv: inv["sections"][7].update(address="0x6001"),
+            lambda inv: inv["sections"][8].update(type=1), lambda inv: inv["sections"][8].update(link=1),
+            lambda inv: inv["sections"][8].update(info=2), lambda inv: inv["sections"][8].update(flags="0x802"),
+            lambda inv: inv["sections"][8].update(offset=4090), lambda inv: inv["sections"][8].update(address="0x6001"),
             lambda inv: inv["versionRequirements"][0].update(recordOffset=4096),
             lambda inv: inv["versionRequirements"][0].update(auxiliaryOffset=79),
             lambda inv: inv["versionRequirements"][0].update(auxiliaryOffset=81),
@@ -1077,7 +1156,7 @@ class ExternalCallComponentEvidenceTest(unittest.TestCase):
         # Local/global version indices still require the correct VERSYM owner/offset.
         for index, kind in ((0, "local"), (1, "global-unversioned")):
             self.report = copy.deepcopy(original)
-            version = self.report["dynamicInventory"]["dynamicSymbols"][0]["version"]
+            version = self.report["dynamicInventory"]["dynamicSymbols"][1]["version"]
             version.update(raw=index, index=index, kind=kind, name=None, providerRequest=None)
             rehash_identity()
             self.verify()
@@ -1212,6 +1291,7 @@ class ExternalCallComponentEvidenceTest(unittest.TestCase):
             "parentNames": ["PARENT"], "auxiliaryOffsets": [148, 156]}]
         inventory["dynamicEntries"][-1:-1] = [{"index": index + 8, "fileOffset": (index + 8) * 16, "tag": hex(tag), "value": hex(value)}
             for index, (tag, value) in enumerate(((0x6ffffffc, 0x6080), (0x6ffffffd, 1)))]
+        self.sync_dynamic_storage(inventory)
         self.write_payloads()
         self.verify()  # A retained base definition does not turn an unversioned import into a runtime provider.
         original = copy.deepcopy(self.report)
@@ -1254,7 +1334,13 @@ class RetainedExternalEvidenceRegressionTest(unittest.TestCase):
         with tempfile.TemporaryDirectory(prefix="real-driver-", dir=temporary_root) as temporary:
             output = Path(temporary)
             (output / "driver-request.json").write_bytes((directory / "driver-request.json").read_bytes())
-            for mutation, error in (("dynsym-unallocated", "dynamic metadata"), ("jmprel-mapping-disagrees", "dynamic metadata"),
+            for mutation, error in (("strtab-pointer", "dynamic string tags"), ("strtab-size", "dynamic string tags"),
+                                    ("dynsym-storage", "DYNSYM section population"), ("dynsym-name-offset", "symbol string offset"),
+                                    ("pt-dynamic-empty", "dynamic section/program population"),
+                                    ("sht-dynamic-empty", "dynamic section/program population"),
+                                    ("dynamic-entry-outside", "dynamic entry index/file offset"),
+                                    ("versym-storage", "VERSYM section population"),
+                                    ("dynsym-unallocated", "dynamic metadata"), ("jmprel-mapping-disagrees", "dynamic metadata"),
                                     ("packed-relr", "unsupported reasons differ"), ("empty-jmprel", "membership differs"),
                                     ("false-canonical", "noncanonical physical destination"),
                                     ("indirect-canonical", "noncanonical physical destination"),
@@ -1270,7 +1356,22 @@ class RetainedExternalEvidenceRegressionTest(unittest.TestCase):
                                     ("plt-nonexecutable-load", "byte-window ownership")):
                 with self.subTest(mutation=mutation):
                     report, evidence = copy.deepcopy(original_report), copy.deepcopy(original_evidence)
-                    if mutation == "dynsym-unallocated":
+                    if mutation in {"strtab-pointer", "strtab-size"}:
+                        tag, value = (5, "0x1") if mutation == "strtab-pointer" else (10, "0x0")
+                        next(row for row in report["dynamicInventory"]["dynamicEntries"] if int(row["tag"], 16) == tag)["value"] = value
+                    elif mutation == "dynsym-storage":
+                        next(row for row in report["dynamicInventory"]["sections"] if row["type"] == 11)["size"] = "0x18"
+                    elif mutation == "dynsym-name-offset":
+                        next(row for row in report["dynamicInventory"]["dynamicSymbols"] if row["name"] == "strlen")["nameOffset"] = 0xffffffff
+                    elif mutation == "pt-dynamic-empty":
+                        next(row for row in report["dynamicInventory"]["programHeaders"] if row["type"] == 2)["fileSize"] = "0x0"
+                    elif mutation == "sht-dynamic-empty":
+                        next(row for row in report["dynamicInventory"]["sections"] if row["type"] == 6)["size"] = "0x0"
+                    elif mutation == "dynamic-entry-outside":
+                        report["dynamicInventory"]["dynamicEntries"][0]["fileOffset"] = report["inputBytes"] + 100
+                    elif mutation == "versym-storage":
+                        next(row for row in report["dynamicInventory"]["sections"] if row["type"] == 0x6fffffff)["size"] = "0x2"
+                    elif mutation == "dynsym-unallocated":
                         next(row for row in report["dynamicInventory"]["sections"] if row["name"] == ".dynsym")["flags"] = "0x0"
                     elif mutation == "jmprel-mapping-disagrees":
                         inventory = report["dynamicInventory"]
