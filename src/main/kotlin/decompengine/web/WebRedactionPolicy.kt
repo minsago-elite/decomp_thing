@@ -220,8 +220,11 @@ internal class WebRedactionPolicy private constructor(
         private const val CREDENTIAL_KEYS = "api[_-]?key|access[_-]?key|secret[_-]?key|access[_-]?token|refresh[_-]?token|" +
             "auth[_-]?token|client[_-]?secret|password|passwd|passphrase|secret|token"
         private val DOCUMENT_CREDENTIAL_KEY = Regex("(?i)(?:$CREDENTIAL_KEYS|(?:proxy-)?authorization|cookie|set-cookie)")
-        private val URL_USER_INFO =Regex("(?i)\\b([a-z][a-z0-9+.-]{1,31}://)[^/\\s:@\"'<>]{1,256}:[^/\\s@\"'<>]{1,512}@")
+        private val URL_USER_INFO = Regex("(?i)\\b([a-z][a-z0-9+.-]{1,31}://)[^/\\s:@\"'<>]{1,256}(?::[^/\\s@\"'<>]{0,512})?@")
         private val CREDENTIAL_PATTERNS = listOf(
+            // Recorded HTTP cookie headers may carry session secrets unknown to the listener's environment.
+            // Keep the header name but withhold the entire value (including cookie attributes).
+            Regex("(?i)(\\b(?:set-cookie|cookie)[\\t ]*:[\\t ]*)[^\\r\\n]*") to true,
             // Digest carries quoted comma-separated parameters, not one opaque token. Withhold
             // the entire authorization value through the line boundary (also for JSON-like logs).
             Regex("(?i)(?:\\b|(?<=_))((?:proxy-)?authorization[\"']?\\s*[:=][\\t ]*)[^\\r\\n]+") to true,

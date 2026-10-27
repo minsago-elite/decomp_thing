@@ -148,6 +148,34 @@ class WebRunLogsTest {
         }
     }
 
+    @Test fun `recorded session cookie headers and passwordless URL userinfo are redacted end to end`() {
+        val (jobId, run) = attempt()
+        val secrets = listOf(
+            "BuildCookieCanary0123456789",
+            "BuildSetCookieCanary0123456789",
+            "BuildUrlCanary0123456789",
+        )
+        val input = listOf(
+            "Cookie: session=${secrets[0]}",
+            "Set-Cookie: session=${secrets[1]}; Path=/; HttpOnly; SameSite=Strict",
+            "Fetching https://${secrets[2]}@example.com/repo.git",
+        ).joinToString("\n")
+        val capture = assertNotNull(logs.capture(input.toByteArray(), sha))
+        assertEquals(3, capture.redactedLines)
+        val download = logs.download(jobId, run, capture, Instant.EPOCH).decodeToString()
+        val range = logs.range(jobId, run, capture, false, WebRunLogs.Query(1, false, 10, null), Instant.EPOCH)
+        for (secret in secrets) {
+            assertFalse(download.contains(secret))
+            assertFalse(capture.allLines().any { it.text.contains(secret) || it.searchText.contains(secret) })
+            assertFalse(range.toString().contains(secret))
+            assertEquals("0", logs.range(jobId, run, capture, false,
+                WebRunLogs.Query(1, false, 1, secret), Instant.EPOCH)
+                .getValue("search").jsonObject.getValue("matchCount").jsonPrimitive.content)
+        }
+        assertTrue(download.contains("Cookie: [redacted]"))
+        assertTrue(download.contains("Set-Cookie: [redacted]"))
+    }
+
     @Test fun `multiline configured credentials are redacted without losing source line numbering`() {
         val parts = listOf("-----BEGIN PRIVATE KEY-----", "SyntheticPemBodyCanary0123456789abcdef", "-----END PRIVATE KEY-----")
         val (jobId, run) = attempt()
