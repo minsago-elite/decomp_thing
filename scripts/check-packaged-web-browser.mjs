@@ -12,12 +12,18 @@ import { seedLive, qualifyLive } from './packaged-browser-live.mjs';
 import { seedHistory, qualifyHistory } from './packaged-browser-history.mjs';
 import { seedLegacy, qualifyLegacy } from './packaged-browser-legacy.mjs';
 import { qualifyUpgrade, qualifyUpgradeCache } from './packaged-browser-upgrade.mjs';
+import { compareArchiveAssets, fetchArchiveAssets } from './packaged-browser-assets.mjs';
+import { qualifyWorkflow } from './packaged-browser-workflow.mjs';
+import { createArtifactSanitizer, screenshotGuardExpression } from './packaged-browser-artifacts.mjs';
+import { assertBudgets, createPeakTracker, createTransferLedger, evaluateBudgets, processResources, readBaseline } from './web-scale-budgets.mjs';
 
 // Test driver only: the application is launched with a separate Node-free PATH.
 const repo = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const { values } = parseArgs({ options: {
   archive: { type: 'string' },
   'previous-archive': { type: 'string' },
+  'fixture-jar': { type: 'string' },
+  'budget-baseline': { type: 'string' },
   mode: { type: 'string', default: 'public' },
   'work-parent': { type: 'string', default: join(repo, 'build') },
   'keep-workdir': { type: 'boolean', default: false },
@@ -28,11 +34,13 @@ const { values } = parseArgs({ options: {
   help: { type: 'boolean', default: false },
 } });
 if (values.help) {
-  console.log('Usage: node scripts/check-packaged-web-browser.mjs --archive /absolute/distribution.zip --chrome /absolute/chrome --java-home /absolute/jdk [--mode public|session|upload|metadata|history|scale|live|proxy|upgrade|legacy] [--previous-archive /absolute/previous.zip] [--work-parent /absolute/scratch] [--keep-workdir] [--python /absolute/python3] [--no-sandbox]');
+  console.log('Usage: node scripts/check-packaged-web-browser.mjs --archive /absolute/distribution.zip --chrome /absolute/chrome --java-home /absolute/jdk [--mode public|session|upload|metadata|history|scale|live|proxy|upgrade|legacy|workflow|failure] [--previous-archive /absolute/previous.zip] [--fixture-jar /absolute/packaged-web-fixture.jar] [--work-parent /absolute/scratch] [--keep-workdir] [--python /absolute/python3] [--no-sandbox]');
   console.log('public: packaged home/Runtime/recovery; session: public plus local session journey; upload: session plus inert upload and lost-response retry; history: session plus preseeded inert multi-page attempts; scale: session plus 10,000 persisted jobs and keyboard pagination; proxy: real Vite HMR and session journey against packaged JVM; upgrade: previous JVM to current JVM on one origin with an old tab.');
   console.log('legacy: inert legacy HTML/polling with explicit test-owned state edits; no workflow execution.');
   console.log('metadata: session plus one inert header upload/retry, real packaged job metadata, maximum uint64 address, and simulated malformed-response recovery; no workflow execution or upload quota/scale measurement.');
   console.log('live: session plus authored inert job changes and real background listing reads; preserves focused row order and applies new jobs on explicit refresh.');
+  console.log('workflow: the extracted application JAR plus the test-owned fake-engine JAR (--fixture-jar, from gradle packagedWebFixtureJar); upload, explicit start, slow/disconnected activity, restart, retry, disk-full, sources, archive verification and canary checks. The uploaded binary is never analyzed or executed.');
+  console.log('failure: a negative control that fails deliberately after launch and passes only when the failure screenshot, console, sanitized server log, trace and full cleanup are proven.');
   console.log('upgrade requires --previous-archive and distinct manifest builds with the old Runtime chunk absent from --archive. Its previous extraction is always removed before the current extraction, even with --keep-workdir.');
   console.log('Reports/screenshots stay in build/. Owned extraction/profile/socket directories are removed after confirmed shutdown unless --keep-workdir is set. Proxy requires npm ci --ignore-scripts under the pinned Node beforehand.');
   process.exit(0);
@@ -44,7 +52,18 @@ for (const option of ['archive', 'chrome', 'java-home', 'python']) {
   assert.ok(values[option] && isAbsolute(values[option]), `--${option} must name an absolute existing path; see --help`);
   await fs.access(values[option]);
 }
-assert.ok(['public', 'session', 'upload', 'metadata', 'history', 'scale', 'live', 'proxy', 'upgrade', 'legacy'].includes(values.mode), '--mode must be public, session, upload, metadata, history, scale, live, proxy, upgrade or legacy');
+assert.ok(['public', 'session', 'upload', 'metadata', 'history', 'scale', 'live', 'proxy', 'upgrade', 'legacy', 'workflow', 'failure'].includes(values.mode), '--mode must be public, session, upload, metadata, history, scale, live, proxy, upgrade, legacy, workflow or failure');
+if (values.mode === 'workflow') {
+  assert.ok(values['fixture-jar'] && isAbsolute(values['fixture-jar']), 'workflow requires --fixture-jar as an absolute existing JAR path');
+  await fs.access(values['fixture-jar']);
+} else assert.equal(values['fixture-jar'], undefined, '--fixture-jar is only supported with --mode workflow');
+const budgetFixture = { scale: 'dashboard-10000-jobs', workflow: 'fake-engine-workflow' }[values.mode];
+if (values['budget-baseline'] !== undefined) {
+  assert.ok(budgetFixture && isAbsolute(values['budget-baseline']), '--budget-baseline needs scale or workflow mode and an absolute previous report.json');
+}
+const BUDGET_HEAP = '-Xmx512m';
+const peakTracker = createPeakTracker();
+const budgetDocument = JSON.parse(readFileSync(join(repo, 'contracts/web/scale-budgets-v1.json'), 'utf8'));
 if (values.mode === 'upgrade') {
   assert.ok(values['previous-archive'] && isAbsolute(values['previous-archive']), 'upgrade requires --previous-archive as an absolute existing ZIP path');
   await fs.access(values['previous-archive']);
@@ -56,17 +75,10 @@ const chromeBinary = values.chrome;
 await fs.mkdir(join(repo, 'build'), { recursive: true });
 assert.ok((await fs.stat(values['work-parent'])).isDirectory(), '--work-parent must already exist');
 if (values.mode === 'proxy') await fs.access(join(repo, 'frontend/node_modules/vite/bin/vite.js'));
-const sensitiveValues = [];
-const safeDiagnostic = (value) => {
-  let safe = String(value).replaceAll(/#bootstrap=[A-Za-z0-9_-]+/g, '#bootstrap=[redacted]');
-  for (const sensitive of sensitiveValues) if (sensitive) safe = safe.replaceAll(sensitive, '[redacted]');
-  return safe;
-};
-const safeEvidence = (value) => {
-  if (Array.isArray(value)) return value.map(safeEvidence);
-  if (value && typeof value === 'object') return Object.fromEntries(Object.entries(value).map(([key, item]) => [key, safeEvidence(item)]));
-  return typeof value === 'string' ? safeDiagnostic(value) : value;
-};
+// Register the fixture secret before preparation/launch can fail, not only after sign-in.
+const artifactCanary = ['workflow', 'failure'].includes(values.mode) ? `decomp-canary-${randomUUID()}` : null;
+const sensitiveValues = artifactCanary ? [artifactCanary] : [];
+const { safeDiagnostic, safeEvidence } = createArtifactSanitizer(sensitiveValues);
 const delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 async function fileHash(path) {
   const digest = createHash('sha256');
@@ -87,11 +99,16 @@ const installHelper = join(repo, 'scripts/packaged-browser-install.py');
 let cdp;
 let applicationError = '';
 let applicationOutput = '';
+let serverLog = '';
+let launches = 0;
+const ownedProcessIds = new Set();
 let browserError = '';
 let viteError = '';
 const report = { status: 'running', mode: values.mode, testDirectory: root, driverNode: nodeVersion,
   tools: { node: process.execPath, chrome: chromeBinary, javaHome, python: values.python }, requests: {} };
 const launchErrors = new WeakMap();
+const FAILURE_SENTINEL = 'Deliberate packaged failure-artifact control';
+const FAILURE_PROBE = 'packaged failure-artifact console probe';
 console.log(`Evidence directory: ${root}`);
 
 function startOwned(command, args, options) {
@@ -100,17 +117,28 @@ function startOwned(command, args, options) {
   return child;
 }
 
+// Bounded step timeline retained with every report; a failure names its last awaited step.
+const trace = [];
+const traceStart = Date.now();
 async function waitFor(check, label, timeout = 20000) {
+  const step = { label: String(label).slice(0, 200), startedMs: Date.now() - traceStart, endedMs: null, outcome: 'waiting' };
+  if (trace.length < 4000) trace.push(step);
   const deadline = Date.now() + timeout;
-  while (Date.now() < deadline) {
-    for (const child of [application, browser, vite]) {
-      if (child && launchErrors.has(child)) throw launchErrors.get(child);
+  try {
+    while (Date.now() < deadline) {
+      for (const child of [application, browser, vite]) {
+        if (child && launchErrors.has(child)) throw launchErrors.get(child);
+      }
+      const value = await check();
+      if (value) { step.outcome = 'satisfied'; return value; }
+      await delay(75);
     }
-    const value = await check();
-    if (value) return value;
-    await delay(75);
-  }
-  throw new Error(`Timed out waiting for ${label}`);
+    step.outcome = 'timed-out';
+    throw new Error(`Timed out waiting for ${label}`);
+  } catch (error) {
+    if (step.outcome === 'waiting') step.outcome = 'failed';
+    throw error;
+  } finally { step.endedMs = Date.now() - traceStart; }
 }
 
 class Protocol {
@@ -142,7 +170,10 @@ class Protocol {
   call(method, params = {}, sessionId) {
     const id = ++this.sequence;
     return new Promise((resolve, reject) => {
-      const timer = setTimeout(() => { this.pending.delete(id); reject(new Error(`DevTools deadline: ${method}`)); }, 15000);
+      // Name the bounded command so a deadline identifies its step in the trace and report.
+      const detail = method === 'Runtime.evaluate' ? ` (${String(params.expression).replace(/\s+/g, ' ').slice(0, 120)})`
+        : method === 'Page.navigate' ? ` (${new URL(params.url).pathname})` : '';
+      const timer = setTimeout(() => { this.pending.delete(id); reject(new Error(`DevTools deadline: ${method}${detail}`)); }, 15000);
       this.pending.set(id, { resolve, reject, timer });
       this.socket.send(JSON.stringify({ id, method, params, ...(sessionId ? { sessionId } : {}) }));
     });
@@ -232,7 +263,7 @@ async function makeTarget({ cspProbe = false, cacheEnabled = false } = {}) {
   const state = { targetId, sessionId, cspProbe, cacheEnabled, requests: [], responses: [], exceptions: [], requestUrls: new Map(),
     cacheRequests: [], cacheResponses: [], cacheRequestIds: new Set(),
     documentRequests: [], pendingDocumentRequests: new Map(), orphanDocumentResponses: [],
-    cspViolations: [], cspLogEntries: [], cspBlockedRequests: [], cspIssues: [] };
+    cspViolations: [], cspLogEntries: [], cspBlockedRequests: [], cspIssues: [], console: [], log: [], transfers: createTransferLedger() };
   targets.push(state);
   if (!cspProbe) lastTarget = state;
   cdp.on('Network.requestWillBeSent', (event) => {
@@ -266,6 +297,14 @@ async function makeTarget({ cspProbe = false, cacheEnabled = false } = {}) {
     }
     state.responses.push(response);
   }, sessionId);
+  // Encoded transfer sizes give payload budgets the bytes actually received by this page, including
+  // streams that fail, are cancelled or remain open when budgets are evaluated.
+  cdp.on('Network.dataReceived', (event) => {
+    state.transfers.received(event.requestId, state.requestUrls.get(event.requestId), event.encodedDataLength);
+  }, sessionId);
+  cdp.on('Network.loadingFinished', (event) => {
+    state.transfers.finished(event.requestId, state.requestUrls.get(event.requestId), event.encodedDataLength);
+  }, sessionId);
   cdp.on('Network.loadingFailed', (event) => {
     if (event.type === 'Document') {
       const request = state.pendingDocumentRequests.get(event.requestId);
@@ -276,12 +315,18 @@ async function makeTarget({ cspProbe = false, cacheEnabled = false } = {}) {
       blockedReason: event.blockedReason, type: event.type });
   }, sessionId);
   cdp.on('Runtime.exceptionThrown', (event) => state.exceptions.push(event.exceptionDetails.text), sessionId);
+  cdp.on('Runtime.consoleAPICalled', (event) => {
+    if (state.console.length >= 500) return;
+    const text = (event.args ?? []).map((item) => item.value ?? item.description ?? item.type).join(' ');
+    state.console.push({ type: event.type, text: String(text).slice(0, 2000), atMs: Date.now() - traceStart });
+  }, sessionId);
   cdp.on('Runtime.bindingCalled', (event) => {
     if (event.name !== '__decompRecordCspViolation') return;
     try { state.cspViolations.push(JSON.parse(event.payload)); }
     catch { state.cspViolations.push({ malformedPayload: String(event.payload) }); }
   }, sessionId);
   cdp.on('Log.entryAdded', ({ entry }) => {
+    if (state.log.length < 500) state.log.push({ source: entry.source, level: entry.level, text: String(entry.text).slice(0, 2000), url: entry.url ?? null });
     if (/content[- ]security[- ]policy|refused to (?:load|execute|apply|connect|frame)|blocked by[^.]*\bcsp\b/i.test(entry.text)) {
       state.cspLogEntries.push({ source: entry.source, level: entry.level, text: entry.text, url: entry.url ?? null, lineNumber: entry.lineNumber ?? null });
     }
@@ -384,6 +429,8 @@ async function ready(target, expression, label) {
 }
 
 async function capture(target, name) {
+  assert.equal(await evaluate(target, screenshotGuardExpression(sensitiveValues)), true,
+    'Screenshot excluded: uncleared fragment, unavailable page or sensitive content');
   const { data } = await cdp.call('Page.captureScreenshot', { format: 'png' }, target.sessionId);
   await fs.writeFile(join(root, name), Buffer.from(data, 'base64'));
 }
@@ -407,9 +454,25 @@ async function prepareArchive(archivePath) {
   // Gradle uses xargs with its default external echo command while parsing JVM options.
   await fs.symlink('/usr/bin/echo', join(bins, 'echo'));
   const environment = { PATH: bins, JAVA_HOME: javaHome, LANG: 'C.UTF-8' };
+  let fixture = null;
+  if (values.mode === 'workflow') {
+    // The fake engine's production build step compiles a fixed generated C tree; Node remains absent.
+    for (const name of ['make', 'gcc', 'cc', 'as', 'ld', 'find', 'mkdir', 'rm']) {
+      // Resolve from the system directories, not a developer's compiler-cache wrapper PATH.
+      const found = spawnSync('/bin/sh', ['-c', `command -v ${name}`], { encoding: 'utf8', env: { PATH: '/usr/bin:/bin' } });
+      if (found.status === 0) await fs.symlink(await fs.realpath(found.stdout.trim()), join(bins, name));
+    }
+    fixture = { jar: values['fixture-jar'], control: join(work, 'fixture control'), canary: artifactCanary };
+    await fs.mkdir(fixture.control);
+    // A server-side secret: diagnostics and progress redaction must keep it out of every view and log.
+    environment.DECOMP_PACKAGED_FIXTURE_SECRET = fixture.canary;
+  }
+  // Budgeted fixtures run under a fixed heap ceiling so server memory is a property of the application,
+  // not of the host's default JVM ergonomics (which size the heap from physical memory).
+  if (budgetFixture) environment.JAVA_OPTS = BUDGET_HEAP;
   for (const name of ['node', 'npm']) assert.notEqual(spawnSync('/bin/sh', ['-c', `command -v ${name}`], { env: environment }).status, 0);
   const data = join(working, 'untouched jobs');
-  return { ...setup, archivePath, archiveSha256, work, before, working, environment, data };
+  return { ...setup, archivePath, archiveSha256, work, before, working, environment, data, fixture };
 }
 
 function installationIdentity(installation) {
@@ -429,12 +492,21 @@ function recordInstallation(installation) {
 async function launchApplication(installation, port = '0', frontendOrigin) {
   applicationOutput = '';
   applicationError = '';
-  application = startOwned(join(installation.app, 'bin/llm_bin_patch'), ['web', '--ui', values.mode === 'legacy' ? 'legacy' : 'spa', '--host', '127.0.0.1', '--port', port,
-    '--base-path', values.mode === 'legacy' ? '/' : '/nested/', '--data-dir', installation.data, ...(frontendOrigin ? ['--dev-frontend-origin', frontendOrigin] : [])], {
+  launches += 1;
+  serverLog = (serverLog + `--- application launch ${launches} ---\n`).slice(-2097152);
+  // The fake-engine lane runs the same extracted application JAR beside the test-owned fixture JAR.
+  const [command, args] = installation.fixture
+    ? [join(javaHome, 'bin/java'), ['-XX:-UsePerfData', BUDGET_HEAP, '-cp', `${join(installation.app, 'lib')}/*:${installation.fixture.jar}`,
+      'decompengine.web.packaged.PackagedFakeEngineKt', '--port', port, '--base-path', '/nested/', '--data-dir', installation.data,
+      '--control-dir', installation.fixture.control]]
+    : [join(installation.app, 'bin/llm_bin_patch'), ['web', '--ui', values.mode === 'legacy' ? 'legacy' : 'spa', '--host', '127.0.0.1', '--port', port,
+      '--base-path', values.mode === 'legacy' ? '/' : '/nested/', '--data-dir', installation.data, ...(frontendOrigin ? ['--dev-frontend-origin', frontendOrigin] : [])]];
+  application = startOwned(command, args, {
     cwd: installation.working, env: installation.environment, stdio: ['ignore', 'pipe', 'pipe'],
   });
-  application.stdout.on('data', (chunk) => { applicationOutput = (applicationOutput + chunk).slice(-1048576); });
-  application.stderr.on('data', (chunk) => { applicationError = (applicationError + chunk).slice(-1048576); });
+  ownedProcessIds.add(application.pid);
+  application.stdout.on('data', (chunk) => { applicationOutput = (applicationOutput + chunk).slice(-1048576); serverLog = (serverLog + chunk).slice(-2097152); });
+  application.stderr.on('data', (chunk) => { applicationError = (applicationError + chunk).slice(-1048576); serverLog = (serverLog + chunk).slice(-2097152); });
   const origin = await waitFor(() => {
     if (application.exitCode !== null || application.signalCode !== null) throw new Error(`Packaged application exited: ${applicationError}`);
     return applicationOutput.match(/http:\/\/127\.0\.0\.1:\d+/)?.[0];
@@ -485,6 +557,7 @@ try {
   browser = startOwned(chromeBinary, ['--headless=new', '--disable-gpu', ...(values['no-sandbox'] ? ['--no-sandbox'] : []), '--no-first-run', '--no-default-browser-check', '--disable-background-networking', '--disable-extensions', '--disable-default-apps', '--disable-sync', '--remote-debugging-port=0', '--remote-debugging-address=127.0.0.1', `--user-data-dir=${profile}`, 'about:blank'], {
     env: { ...process.env, TMPDIR: browserTmp }, stdio: ['ignore', 'ignore', 'pipe'],
   });
+  ownedProcessIds.add(browser.pid);
   browser.stderr.on('data', (chunk) => { browserError = (browserError + chunk).slice(-1048576); });
   const portFile = await waitFor(async () => {
     if (browser.exitCode !== null || browser.signalCode !== null) throw new Error(`Browser exited: ${browserError}`);
@@ -496,6 +569,37 @@ try {
   report.browser = await cdp.call('Browser.getVersion');
   report.browserSandboxDisabled = values['no-sandbox'];
   report.cspDetectorProbe = await qualifyCspDetector();
+  if (values.mode === 'failure') {
+    // Negative control: exercise the real failure path with a credential on screen-adjacent output.
+    const bootstrapUrl = await waitFor(() => applicationOutput.split(/\s+/).find((part) => part.startsWith(origin + '/nested/#bootstrap=')), 'failure-control bootstrap handoff');
+    sensitiveValues.push(new URL(bootstrapUrl).hash.slice('#bootstrap='.length));
+    const tab = await makeTarget();
+    await cdp.call('Page.navigate', { url: `${origin}/nested/` }, tab.sessionId);
+    await ready(tab, `document.querySelector('h1')?.textContent === 'Your work, with its evidence'`, 'failure-control home');
+    await evaluate(tab, `console.error(${JSON.stringify(`${FAILURE_PROBE} ${artifactCanary}`)})`);
+    await waitFor(() => tab.console.some((entry) => entry.text.includes(FAILURE_PROBE) && entry.text.includes(artifactCanary)), 'failure-control console capture');
+    // Synthetic leak: raw console/log/error/trace must be detected here but redacted in artifacts.
+    serverLog += `failure-control canary: ${artifactCanary}\n`;
+    await waitFor(() => true, `failure-control artifact ${artifactCanary}`);
+    const leaked = await makeTarget();
+    await cdp.call('Page.navigate', { url: `${origin}/nested/` }, leaked.sessionId);
+    await ready(leaked, `document.querySelector('h1')?.textContent === 'Your work, with its evidence'`, 'failure-control canary page');
+    await evaluate(leaked, `document.body.append(document.createTextNode(${JSON.stringify(artifactCanary)}))`);
+    lastTarget = tab; // Keep a safe primary screenshot; the second candidate must be excluded.
+    throw new Error(`${FAILURE_SENTINEL}: ${artifactCanary}`);
+  }
+  if (values.mode === 'workflow') {
+    report.workflow = await qualifyWorkflow({ installation, makeTarget, cdp, evaluate, ready, waitFor, delay, capture,
+      origin, launch: () => launchApplication(installation, new URL(origin).port), stop: () => stop(application),
+      bootstrapUrl: () => applicationOutput.split(/\s+/).find((part) => part.startsWith(origin + '/nested/#bootstrap=')),
+      serverLog: () => serverLog, sensitiveValues, repo, python: values.python, sample: samplePeaks });
+    report.jobDataCreated = true;
+    await samplePeaks('journey end');
+    const pages = targets.filter((target) => !target.cspProbe);
+    report.budgetSamples = peakTracker.samples();
+    await qualifyBudgets({ ...peakTracker.peaks(),
+      apiPayloadBytesTotal: pages.reduce((sum, target) => sum + target.transfers.total((url) => url.includes('/api/v1/')), 0) });
+  }
   if (legacyFixture) {
     const tab = await makeTarget();
     const bootstrapUrl = await waitFor(() => applicationOutput.split(/\s+/).find(part => part.startsWith(origin + '/login#bootstrap=')), 'legacy local bootstrap handoff');
@@ -647,6 +751,23 @@ try {
     assert.ok(presentation.icon.startsWith(`${origin}/nested/assets/ui/`));
     assert.equal(presentation.bodyMargin, '0px');
     assert.equal(presentation.layout, 'grid');
+    report.archiveAssets = compareArchiveAssets(manifest, installation.jarAssets,
+      await fetchArchiveAssets(manifest, `${origin}/nested/assets/ui/`));
+    // The packaged runtime disables source previews, so start the archived highlight worker directly
+    // under the document's real CSP and require one bounded highlighting exchange.
+    const workerAsset = manifest.files.find((entry) => /^assets\/highlight\.worker-.+\.js$/.test(entry.path));
+    assert.ok(workerAsset, 'Expected the source highlight worker in the packaged manifest');
+    const workerUrl = `${origin}/nested/assets/ui/${workerAsset.path}`;
+    const workerReply = await evaluate(home, `new Promise((resolve, reject) => {
+      const worker = new Worker(${JSON.stringify(workerUrl)}, { type: 'module', name: 'packaged-worker-probe' });
+      const timer = setTimeout(() => { worker.terminate(); reject(new Error('Packaged worker deadline')); }, 5000);
+      worker.onmessage = (event) => { clearTimeout(timer); worker.terminate(); resolve(event.data?.type); };
+      worker.onerror = () => { clearTimeout(timer); worker.terminate(); reject(new Error('Packaged worker failed')); };
+      worker.postMessage({ type: 'source-highlight', id: 1, language: 'c', rows: ['int value = 1; /* <img src=x> */'] });
+    })`);
+    assert.equal(workerReply, 'source-highlighted', 'The archived highlight worker did not answer');
+    // Its served bytes were already compared with the archive above; worker requests belong to the worker target.
+    report.archiveWorker = { path: workerAsset.path, moduleWorker: true, response: workerReply, bytesMatchedArchive: true };
     await capture(home, 'home.png');
     await evaluate(home, `document.querySelector('a[href="/nested/upload"]').focus()`);
     await cdp.call('Input.dispatchKeyEvent', { type: 'keyDown', text: '\r', key: 'Enter', code: 'Enter', windowsVirtualKeyCode: 13 }, home.sessionId);
@@ -902,7 +1023,10 @@ try {
     assert.ok(runTab.requests.every(request => ['GET', 'HEAD'].includes(request.method)));
     report.attemptHistory = { navigation: true, directReload: true, missingExplained: true, mutationRequests: 0 };
 
-    if (scaleFixture) report.scale = await qualifyScale({ fixture: scaleFixture, makeTarget, cdp, evaluate, ready, browserOrigin });
+    if (scaleFixture) {
+      report.scale = await qualifyScale({ fixture: scaleFixture, makeTarget, cdp, evaluate, ready, browserOrigin });
+      await qualifyBudgets({ ...report.scale.measurements, ...await processResources(application.pid) });
+    }
     if (liveFixture) {
       report.liveDashboard = await qualifyLive({ fixture: liveFixture, makeTarget, cdp, evaluate, ready, waitFor, browserOrigin });
       report.jobDataCreated = true;
@@ -1037,21 +1161,30 @@ try {
   report.viteError = safeDiagnostic(viteError);
   console.error(safeDiagnostic(error.stack));
   process.exitCode = 1;
-  if (lastTarget && cdp) {
-    try {
-      // Fail closed if the handoff has not been scrubbed. Hide editable fields
-      // before a diagnostic capture, and never capture visible credential text.
-      const safe = await evaluate(lastTarget, `(() => {
-        if (location.hash !== '' || ${JSON.stringify(sensitiveValues)}.some(value => document.body.innerText.includes(value))) return false;
-        document.querySelectorAll('input, textarea, [contenteditable]').forEach(element => { element.style.visibility = 'hidden'; });
-        return true;
-      })()`);
-      if (safe) {
-        await capture(lastTarget, 'failure.png');
-        report.failureScreenshot = 'failure.png';
-      } else report.failureScreenshotSkipped = 'Uncleared fragment or visible handoff credential';
-    } catch {
-      report.failureScreenshotSkipped = 'Attached page unavailable within the bounded DevTools request deadline';
+  if (cdp) {
+    report.failureScreenshots = [];
+    report.failureScreenshotExclusions = [];
+    // Fail closed if the handoff has not been scrubbed. Hide editable fields
+    // before a diagnostic capture, and never capture visible credential text.
+    const candidates = [lastTarget, ...targets.filter((target) => !target.cspProbe && target !== lastTarget)].filter(Boolean).slice(0, 8);
+    for (const [index, target] of candidates.entries()) {
+      const name = index === 0 ? 'failure.png' : `failure-${index}.png`;
+      try {
+        const safe = await evaluate(target, screenshotGuardExpression(sensitiveValues));
+        if (safe === true) {
+          await capture(target, name);
+          report.failureScreenshots.push(name);
+          // The accessible text explains states a screenshot crops; it passed the same credential check.
+          await writeArtifact(name.replace(/\.png$/, '.txt'), safeDiagnostic(await evaluate(target, 'document.body.innerText')).slice(0, 262144));
+          report.failureScreenshots.push(name.replace(/\.png$/, '.txt'));
+          if (index === 0) report.failureScreenshot = name;
+        } else {
+          report.failureScreenshotExclusions.push({ name, reason: 'Uncleared fragment, unavailable page or sensitive content' });
+          if (index === 0) report.failureScreenshotSkipped = 'Uncleared fragment, unavailable page or sensitive content';
+        }
+      } catch {
+        if (index === 0) report.failureScreenshotSkipped = 'Attached page unavailable within the bounded DevTools request deadline';
+      }
     }
   }
 } finally {
@@ -1063,6 +1196,13 @@ try {
     report.cleanupErrors = cleanup.filter((result) => result.status === 'rejected').map((result) => safeDiagnostic(result.reason));
     process.exitCode = 1;
   }
+  // Failure artifacts: every attached page's console/log, the sanitized server log and the step trace.
+  await writeArtifact('console.json', JSON.stringify(safeEvidence(targets.filter((target) => !target.cspProbe).map((target, index) =>
+    ({ target: index, console: target.console, log: target.log, exceptions: target.exceptions }))), null, 2) + '\n');
+  await writeArtifact('server.log', safeDiagnostic(serverLog));
+  await writeArtifact('trace.json', JSON.stringify(safeEvidence(trace), null, 2) + '\n');
+  report.artifacts = ['report.json', 'console.json', 'server.log', 'trace.json', ...(report.failureScreenshots ?? [])];
+  report.lastTraceStep = safeEvidence(trace.at(-1) ?? null);
   report.workRetained = true;
   if (report.shutdownConfirmed && !values['keep-workdir']) {
     try {
@@ -1078,7 +1218,95 @@ try {
       process.exitCode = 1;
     }
   }
-  await fs.writeFile(join(root, 'report.json'), JSON.stringify(report, null, 2) + '\n');
-  console.log(JSON.stringify(report, null, 2));
+  // No owned process, or any descendant still holding an owned directory, may outlive the run.
+  report.residualProcesses = await residualProcesses();
+  if (report.residualProcesses.length > 0) {
+    report.status = 'failed';
+    process.exitCode = 1;
+  }
+  if (values.mode === 'failure') await verifyFailureControl();
+  await fs.writeFile(join(root, 'report.json'), JSON.stringify(safeEvidence(report), null, 2) + '\n');
+  console.log(JSON.stringify(safeEvidence(report), null, 2));
   console.log(`Shutdown ${report.shutdownConfirmed ? 'confirmed' : 'UNCONFIRMED'}. Report: ${join(root, 'report.json')}`);
+}
+
+// Budget peaks are sampled during a journey: page heaps reset on navigation and a restarted JVM
+// starts a new RSS high-water mark, so only maxima retained across samples are comparable.
+async function samplePeaks() {
+  let peakBrowserHeapBytes;
+  for (const target of targets.filter((item) => !item.cspProbe)) {
+    const heap = await cdp.call('Runtime.getHeapUsage', {}, target.sessionId).catch(() => null);
+    if (heap) peakBrowserHeapBytes = Math.max(peakBrowserHeapBytes ?? 0, heap.usedSize);
+  }
+  const server = application && application.exitCode === null && application.signalCode === null ? await processResources(application.pid) : {};
+  peakTracker.observe({ peakBrowserHeapBytes, ...server });
+}
+
+async function qualifyBudgets(measurements) {
+  const baseline = values['budget-baseline'] ? await readBaseline(values['budget-baseline'], budgetFixture) : null;
+  report.budgets = { ...evaluateBudgets(budgetDocument, budgetFixture, measurements, baseline), jvmOptions: BUDGET_HEAP };
+  assertBudgets(report.budgets);
+}
+
+async function writeArtifact(name, text) {
+  try { await fs.writeFile(join(root, name), text); } catch (error) {
+    report.status = 'failed';
+    report.artifactErrors = [...(report.artifactErrors ?? []), `${name}: ${safeDiagnostic(error.message)}`];
+    process.exitCode = 1;
+  }
+}
+
+async function residualProcesses() {
+  const owned = [root, profile, work, browserTmp, report.workDirectory].filter(Boolean);
+  const residual = [];
+  for (const pid of ownedProcessIds) {
+    try { process.kill(pid, 0); residual.push({ pid, reason: 'owned process still exists' }); } catch (error) {
+      if (error.code !== 'ESRCH') residual.push({ pid, reason: `owned process state unknown: ${error.code}` });
+    }
+  }
+  let entries = [];
+  try { entries = await fs.readdir('/proc'); } catch { return residual; }
+  for (const entry of entries) {
+    if (!/^\d+$/.test(entry) || Number(entry) === process.pid) continue;
+    const [cwd, command] = await Promise.all([fs.readlink(`/proc/${entry}/cwd`).catch(() => ''),
+      fs.readFile(`/proc/${entry}/cmdline`).then((bytes) => bytes.toString().replaceAll('\0', ' ')).catch(() => '')]);
+    if (owned.some((path) => cwd.startsWith(path) || command.includes(path))) {
+      residual.push({ pid: Number(entry), reason: 'process references an owned directory', command: safeDiagnostic(command).slice(0, 300) });
+    }
+  }
+  return residual;
+}
+
+/** The control passes only when the deliberate failure produced complete, sanitized, cleaned-up evidence. */
+async function verifyFailureControl() {
+  const read = (name) => fs.readFile(join(root, name), 'utf8');
+  const problems = [];
+  const expect = (condition, problem) => { if (!condition) problems.push(problem); };
+  expect(report.status === 'failed' && String(report.error).includes(FAILURE_SENTINEL), 'the deliberate failure was not the recorded failure');
+  expect(report.failureScreenshot === 'failure.png' && (await fs.stat(join(root, 'failure.png')).then((stat) => stat.size > 0, () => false)), 'no failure screenshot');
+  const consoleText = await read('console.json').catch(() => '');
+  expect(consoleText.includes(FAILURE_PROBE), 'browser console was not captured');
+  const log = await read('server.log').catch(() => '');
+  expect(log.includes('Serving decomp_engine') && log.includes('#bootstrap=[redacted]'), 'sanitized server log is missing');
+  expect(sensitiveValues.length > 0 && sensitiveValues.every((value) => !log.includes(value) && !consoleText.includes(value)), 'server log or console retained a credential');
+  const traceText = await read('trace.json').catch(() => '[]');
+  expect(artifactCanary && [log, consoleText, traceText, report.error].every(text => text.includes('[redacted]') && !text.includes(artifactCanary)),
+    'the fixture canary was not redacted from every injected failure surface');
+  expect(report.failureScreenshotExclusions?.some(entry => entry.name === 'failure-1.png') &&
+    !(await fs.stat(join(root, 'failure-1.png')).then(() => true, () => false)) &&
+    !(await fs.stat(join(root, 'failure-1.txt')).then(() => true, () => false)), 'the canary page was captured as a failure artifact');
+  const steps = JSON.parse(traceText);
+  expect(steps.some((step) => step.label === 'failure-control console capture' && step.outcome === 'satisfied'), 'trace omitted the final step');
+  expect(report.shutdownConfirmed === true && report.workCleanupConfirmed === true && report.workRetained === false, 'owned work was not removed');
+  expect(!(await fs.stat(report.workDirectory).then(() => true, () => false)) && !(await fs.stat(profile).then(() => true, () => false)), 'extraction or profile directory remains');
+  expect(report.residualProcesses.length === 0, 'an owned process remains');
+  report.failureControl = { expectedFailureObserved: problems.length === 0, problems };
+  if (problems.length === 0) {
+    report.status = 'passed';
+    process.exitCode = 0;
+    console.log('Deliberate failure produced screenshot, console, sanitized server log and trace, and cleanup was confirmed.');
+  } else {
+    report.status = 'failed';
+    process.exitCode = 1;
+  }
 }

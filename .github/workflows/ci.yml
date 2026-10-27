@@ -79,8 +79,8 @@ jobs:
           node scripts/generate-web-api.mjs --check
           node --test scripts/generate-web-api.test.mjs scripts/legacy-session.test.mjs \
             | tee "$RUNNER_TEMP/frontend-ci/api-drift-tests.txt"
-      - name: Verify generated large web fixtures
-        run: node --test scripts/web-scale-fixtures.test.mjs | tee "$RUNNER_TEMP/frontend-ci/scale-fixtures-tests.txt"
+      - name: Verify web fixtures, scale budgets, upload readiness and canary artifact controls
+        run: node --test scripts/web-scale-fixtures.test.mjs scripts/web-scale-budgets.test.mjs scripts/packaged-browser-upload.test.mjs scripts/packaged-browser-canary.test.mjs scripts/packaged-browser-artifacts.test.mjs | tee "$RUNNER_TEMP/frontend-ci/scale-fixtures-tests.txt"
       - name: Check frontend freshness diagnostic controls
         timeout-minutes: 1
         run: python3 -B scripts/test-frontend-freshness.py --verbose
@@ -154,15 +154,22 @@ jobs:
           path: ${{ github.workspace }}/build/frontend-node-downloads
           key: frontend-node-archives-v1-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('scripts/install-frontend-node.sh', 'scripts/frontend-node-sha256.txt', '.node-version', 'frontend/package.json') }}
       - name: Install pinned build and browser tools
+        timeout-minutes: 10
         env:
           DECOMP_FRONTEND_NODE_DOWNLOAD_CACHE: '1'
         run: |
           bash scripts/install-frontend-node.sh "$RUNNER_TEMP/frontend-node"
           echo "$RUNNER_TEMP/frontend-node/bin" >> "$GITHUB_PATH"
           python3 scripts/install-web-test-browser.py "$RUNNER_TEMP/web-test-browser"
-          sudo apt-get update
+          # Bound stalled mirrors as in the Kotlin partitions (#1683).
+          apt_acquire_options=(
+            -o Acquire::Retries=2
+            -o Acquire::http::Timeout=30
+            -o Acquire::https::Timeout=30
+          )
+          sudo apt-get "${apt_acquire_options[@]}" --error-on=any update
           mapfile -t web_browser_dependencies < "$RUNNER_TEMP/web-test-browser/deb.deps"
-          sudo apt-get satisfy -y --no-install-recommends "${web_browser_dependencies[@]}"
+          sudo apt-get "${apt_acquire_options[@]}" satisfy -y --no-install-recommends "${web_browser_dependencies[@]}"
           python3 -m pip install --requirement requirements/oracle-generation.txt
       - name: Record browser pin and check driver lifecycle
         run: |
@@ -177,7 +184,7 @@ jobs:
           DECOMP_BROWSER_JS_RUNTIME: ${{ runner.temp }}/frontend-node/bin/node
         run: |
           ./gradlew --no-daemon test --tests 'decompengine.web.BrowserSessionExpiryTest' \
-            installDist distZip distTar verifyPackagedWeb verifyGhidraDistributionArchives \
+            installDist distZip distTar packagedWebFixtureJar verifyPackagedWeb verifyGhidraDistributionArchives \
             verifyAcpGateHelperDistribution verifyLlvmBehaviorHelperDistribution \
             verifyKotlinBootClasspathDistribution
           web_distribution=("$GITHUB_WORKSPACE"/build/distributions/*.zip)
@@ -223,6 +230,18 @@ jobs:
             --archive "$WEB_TEST_ARCHIVE" \
             --chrome "$RUNNER_TEMP/web-test-browser/chrome" --java-home "$JAVA_HOME" \
             --python "$(command -v python3)" --work-parent "$GITHUB_WORKSPACE/build" --mode scale --no-sandbox
+      - name: Prove failure artifacts and cleanup with a deliberate packaged failure
+        run: |
+          node scripts/check-packaged-web-browser.mjs \
+            --archive "$WEB_TEST_ARCHIVE" \
+            --chrome "$RUNNER_TEMP/web-test-browser/chrome" --java-home "$JAVA_HOME" \
+            --python "$(command -v python3)" --work-parent "$RUNNER_TEMP" --mode failure --no-sandbox
+      - name: Run the fake-engine workflow journey, adverse conditions and canary checks
+        run: |
+          node scripts/check-packaged-web-browser.mjs \
+            --archive "$WEB_TEST_ARCHIVE" --fixture-jar "$GITHUB_WORKSPACE/build/packaged-web-fixture/packaged-web-fixture.jar" \
+            --chrome "$RUNNER_TEMP/web-test-browser/chrome" --java-home "$JAVA_HOME" \
+            --python "$(command -v python3)" --work-parent "$GITHUB_WORKSPACE/build" --mode workflow --no-sandbox
       - name: Exercise explicit Vite proxy against the same packaged JVM
         run: |
           node scripts/check-packaged-web-browser.mjs \
@@ -239,7 +258,9 @@ jobs:
           if-no-files-found: warn
           path: |
             build/packaged-web-ci
-            build/packaged-browser-*/report.json
+            build/packaged-browser-*/*.json
+            build/packaged-browser-*/*.log
+            build/packaged-browser-*/*.txt
             build/packaged-browser-*/*.png
             build/reports/tests/test
             build/test-results/test

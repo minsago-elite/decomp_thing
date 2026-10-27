@@ -1,4 +1,4 @@
-import { boundedBody } from './body';
+import { boundedBody, headBodyAbsent } from './body';
 import { apiPath, normalizeBasePath, validateResourceHref } from '../app/paths';
 import { decodeContract, encodeRequest } from './decode';
 import { ApiClientError } from './errors';
@@ -90,8 +90,9 @@ export function createApiClient(options: ClientOptions) {
       if (!headerId || !requestIdPattern.test(headerId)) throw new ApiClientError('invalid_headers');
       requestId = headerId;
       if (sourceHead) {
-        if (!response.ok) throw sourceDigestHeadFailure(response.status, response.body === null, name => response!.headers.get(name));
-        return readSourceDigestHead(response.status, response.body === null, name => response!.headers.get(name), sourceHead);
+        const bodyAbsent = await headBodyAbsent(response, controller.signal);
+        if (!response.ok) throw sourceDigestHeadFailure(response.status, bodyAbsent, name => response!.headers.get(name));
+        return readSourceDigestHead(response.status, bodyAbsent, name => response!.headers.get(name), sourceHead);
       }
       if (!artifact && kind === null && response.status === 204) return undefined;
       if (artifact && response.ok) {

@@ -278,6 +278,16 @@ val verifyPackagedWeb = tasks.register<Exec>("verifyPackagedWeb") {
     }
 }
 
+// Test-owned packaged-browser fake engine. It is launched beside an extracted distribution's
+// unmodified application JAR and is never added to any distribution.
+tasks.register<Jar>("packagedWebFixtureJar") {
+    group = "verification"
+    description = "Builds the test-owned fake-engine launcher used by packaged browser workflow journeys"
+    archiveFileName.set("packaged-web-fixture.jar")
+    destinationDirectory.set(layout.buildDirectory.dir("packaged-web-fixture"))
+    from(sourceSets["test"].output.classesDirs) { include("decompengine/web/packaged/**") }
+}
+
 fun registerOracleJavaExecTask(
     taskName: String,
     taskDescription: String,
