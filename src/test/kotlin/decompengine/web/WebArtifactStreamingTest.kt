@@ -159,13 +159,19 @@ class WebArtifactStreamingTest {
         val first = open(); val second = open()
         assertEquals(200, first.statusCode()); assertEquals(200, second.statusCode())
         first.body().readNBytes(1024); second.body().readNBytes(1024)
-        // The per-session limit refuses a third concurrent body while other session reads continue.
+        // The same heavy-IO admission covers catalog/detail hashing, including bodyless HEAD.
         assertEquals(429, get(fixture, href, octets).statusCode())
-        assertEquals(200, get(fixture, "${fixture.api}/artifacts").statusCode())
+        for (method in listOf("GET", "HEAD")) {
+            assertEquals(429, get(fixture, "${fixture.api}/artifacts", method = method).statusCode())
+            assertEquals(429, get(fixture, href.removeSuffix("/content"), method = method).statusCode())
+        }
+        assertEquals(200, get(fixture, "${fixture.api}/runs").statusCode())
         assertTrue(openDescriptorsTo(file) >= 1)
         first.body().close(); second.body().close()
         waitFor { fixture.server.activeArtifactDownloads() == 0 }
         waitFor { openDescriptorsTo(file) == 0 }
+        assertEquals(200, get(fixture, "${fixture.api}/artifacts").statusCode())
+        assertEquals(200, get(fixture, href.removeSuffix("/content")).statusCode())
         assertContentEquals(archive, get(fixture, href, octets).body())
         waitFor { fixture.server.activeArtifactDownloads() == 0 }
     }

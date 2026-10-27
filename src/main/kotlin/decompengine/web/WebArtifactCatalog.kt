@@ -32,9 +32,23 @@ internal interface WebArtifactStore {
     fun stream(jobId: String, runId: String, path: String, declaredSize: (Long) -> Unit,
         consume: (ByteArray, Int) -> Unit, cancellationCheck: () -> Unit): StableFileDigest
     /** Manifest and build-contract digests that were cross-checked against the persisted candidate, or null. */
-    fun revisionCommitments(jobId: String, runId: String, revisionId: String): Pair<String, String>?
+    fun revisionCommitments(jobId: String, runId: String, revisionId: String, budget: WebArtifactReadBudget): Pair<String, String>?
 }
 
+/** Shared conservative byte reservations include failed reads and optional inventory captures. */
+internal class WebArtifactReadBudget(private val maximumBytes: Long, val cancellationCheck: () -> Unit) {
+    var reservedBytes = 0L
+        private set
+
+    fun reserve(size: Long) {
+        cancellationCheck()
+        require(size >= 0)
+        if (size > maximumBytes - reservedBytes) throw WebArtifactBudgetExceeded()
+        reservedBytes += size
+    }
+}
+
+internal class WebArtifactBudgetExceeded : RuntimeException("artifact request byte budget exhausted")
 internal class WebArtifactTooLarge : RuntimeException("artifact exceeds the catalog byte ceiling")
 
 /** One resolved artifact identity: the attempt, its fixed family and the digest bound into the opaque ID. */
@@ -120,31 +134,36 @@ internal class WebArtifactCatalog(
         } ?: 0
         val items = ArrayList<JsonObject>(filter.limit)
         val commitments = HashMap<String, Pair<String, String>?>()
-        var position = offset; var hashed = 0L; var unavailable = 0
+        val budget = WebArtifactReadBudget(maximumPageHashBytes, cancellationCheck)
+        var position = offset; var unavailable = 0
         // Each page inspects at most 200 candidates, so unavailable counts and work stay bounded too.
         while (position < candidates.size && items.size < filter.limit && position - offset < MAXIMUM_PAGE_CANDIDATES) {
+            cancellationCheck()
             val (attempt, family) = candidates[position]
             if (!store.present(jobId, attempt.runId, family.path)) { position++; continue }
             var size = -1L
-            var consumed = 0L
             val digest = try {
                 store.stream(jobId, attempt.runId, family.path, { declared ->
-                    if (declared > maximumArtifactBytes) throw WebArtifactTooLarge()
-                    // Keep at least one hash per page so every continuation advances.
-                    if (hashed > 0 && hashed + declared > maximumPageHashBytes) throw PageBudget()
+                    // An entry larger than a whole page is explicitly unavailable, not an endless continuation.
+                    if (declared > minOf(maximumArtifactBytes, maximumPageHashBytes)) throw WebArtifactTooLarge()
+                    budget.reserve(declared)
                     size = declared
-                }, { _, count -> consumed += count }, cancellationCheck)
-            } catch (_: PageBudget) { break }
+                }, { _, _ -> }, cancellationCheck)
+            } catch (_: WebArtifactBudgetExceeded) { break }
             catch (failure: Exception) {
-                if (failure is WebAccessDenied || failure is java.util.concurrent.CancellationException) throw failure
-                // A read that fails late still did its hashing work; charge it so unstable files cannot bypass the budget.
-                hashed += consumed; unavailable++; position++; continue
+                if (failure is WebAccessDenied || failure is java.util.concurrent.CancellationException || failure is InterruptedException) throw failure
+                // The complete declared size remains reserved even when the read fails late.
+                unavailable++; position++; continue
             }
             check(digest.size == size)
-            hashed += consumed; position++
+            position++
             val selection = WebArtifactSelection(jobId, attempt, family, digest.sha256)
-            val verified = selection.revisionId?.let { revision ->
-                val recorded = commitments.getOrPut(attempt.runId) { store.revisionCommitments(jobId, attempt.runId, revision) }
+            val verified = selection.revisionId?.takeIf { family == WebArtifactFamily.MANIFEST || family == WebArtifactFamily.CONTRACT }?.let { revision ->
+                // containsKey deliberately caches null: an unavailable capture must not be retried for the next family.
+                if (!commitments.containsKey(attempt.runId)) {
+                    commitments[attempt.runId] = store.revisionCommitments(jobId, attempt.runId, revision, budget)
+                }
+                val recorded = commitments[attempt.runId]
                 when (family) {
                     WebArtifactFamily.MANIFEST -> recorded?.first == digest.sha256
                     WebArtifactFamily.CONTRACT -> recorded?.second == digest.sha256
@@ -174,23 +193,24 @@ internal class WebArtifactCatalog(
     fun detail(jobId: String, artifactId: String, basePath: String, cancellationCheck: () -> Unit = {}): JsonObject {
         val selection = resolveWebArtifact(store, jobId, artifactId)
         if (!store.present(jobId, selection.attempt.runId, selection.family.path)) webArtifactUnavailable()
+        val budget = WebArtifactReadBudget(maximumArtifactBytes, cancellationCheck)
         val digest = try {
             store.stream(jobId, selection.attempt.runId, selection.family.path,
-                { if (it > maximumArtifactBytes) throw WebArtifactTooLarge() }, { _, _ -> }, cancellationCheck)
+                { if (it > maximumArtifactBytes) throw WebArtifactTooLarge(); budget.reserve(it) }, { _, _ -> }, cancellationCheck)
         } catch (failure: Exception) {
-            if (failure is WebAccessDenied || failure is java.util.concurrent.CancellationException) throw failure
+            if (failure is WebAccessDenied || failure is java.util.concurrent.CancellationException || failure is InterruptedException) throw failure
             throw WebAccessDenied(503, "ARTIFACT_UNAVAILABLE", "The artifact could not be read within its limits.")
         }
         if (digest.sha256 != selection.sha256) webArtifactChanged()
-        val verified = selection.revisionId?.let { revision ->
-            val recorded = store.revisionCommitments(jobId, selection.attempt.runId, revision)
+        val verified = selection.revisionId?.takeIf {
+            selection.family == WebArtifactFamily.MANIFEST || selection.family == WebArtifactFamily.CONTRACT
+        }?.let { revision ->
+            val recorded = store.revisionCommitments(jobId, selection.attempt.runId, revision, budget)
             (selection.family == WebArtifactFamily.MANIFEST && recorded?.first == digest.sha256) ||
                 (selection.family == WebArtifactFamily.CONTRACT && recorded?.second == digest.sha256)
         } ?: false
         return webArtifactDescriptor(selection, digest.size, verified, basePath)
     }
-
-    private class PageBudget : RuntimeException()
 
     private fun signature(vararg fields: Any): String {
         val mac = Mac.getInstance("HmacSHA256").apply { init(SecretKeySpec(secret, "HmacSHA256")) }

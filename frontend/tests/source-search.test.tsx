@@ -174,6 +174,28 @@ it('accepts long encoded Unicode searches with continuation room and refuses ove
   expect(new URLSearchParams(window.location.search).get('path')).toBe(unicode.path);
 });
 
+it.each(['root', directory])('refuses oversized bookmarked searches in %s and lets the user shorten them', scope => {
+  // This first-page URL fits the document ceiling but cannot fit a cursor or the prefixed API URL.
+  const query = new URLSearchParams({ q: '😀'.repeat(128), path: '😀'.repeat(scope === 'root' ? 210 : 202),
+    ...(scope === 'root' ? {} : { directory: scope }) }).toString();
+  expect(query.length).toBeLessThan(4096);
+  const parsed = sourceSearchSelection(`?${query}`).request!;
+  expect(sourceSearchFits(scope, parsed)).toBe(false);
+  expect(() => sourceSearchPath('/nested', selected, scope, { ...parsed, cursor })).toThrow(ApiClientError);
+  const local = vi.fn<typeof fetch>(); vi.stubGlobal('fetch', local);
+  mount(`?${query}`);
+  expect(screen.getByRole('alert').textContent).toContain('too long once encoded');
+  expect(local).not.toHaveBeenCalled();
+  expect(screen.queryByRole('button', { name: 'Continue search' })).toBeNull();
+  if (scope !== 'root') expect(screen.getByRole('link', { name: 'Search all recorded inputs instead' }).getAttribute('href')).toBe(base);
+  // The form is retained for correction, not stranded in a loading or invalid-route state.
+  fireEvent.input(screen.getByRole('searchbox', { name: /Search text/u }), { target: { value: 'needle' } });
+  fireEvent.input(screen.getByRole('textbox', { name: /Path contains/u }), { target: { value: 'src' } });
+  fireEvent.click(screen.getByRole('button', { name: 'Search' }));
+  expect(new URLSearchParams(window.location.search).get('q')).toBe('needle');
+  expect(new URLSearchParams(window.location.search).get('path')).toBe('src');
+});
+
 it('keeps coverage gaps from earlier pages on a final continued page', async () => {
   vi.stubGlobal('fetch', vi.fn<typeof fetch>().mockResolvedValueOnce(response(fixture('source-search-continued-gaps'))));
   mount(`?q=needle&cursor=${cursor}`);
@@ -182,4 +204,18 @@ it('keeps coverage gaps from earlier pages on a final continued page', async () 
   expect(screen.queryByText(/All 3 searchable files in scope were checked/u)).toBeNull();
   expect(screen.getByText(/Coverage is incomplete: 2 files in scope were not searched\./u)).toBeTruthy();
   expect(screen.getByText('This is a continued search page. Earlier matches are on previous pages.')).toBeTruthy();
+});
+
+it('qualifies empty continued pages instead of claiming the search found nothing', async () => {
+  const final = fixture('source-search-no-matches');
+  vi.stubGlobal('fetch', vi.fn<typeof fetch>().mockResolvedValueOnce(response(withQuery(final, 'needle')))
+    .mockResolvedValueOnce(response(withQuery(fixture('source-search-incomplete-empty'), 'needle'))));
+  const view = mount(`?q=needle&cursor=${cursor}`);
+  const status = await screen.findByText('No further matches on this continued page. Matches on earlier pages are not repeated here.');
+  expect(status.closest('[data-search-state]')?.getAttribute('data-search-state')).toBe('no-further-matches');
+  expect(screen.queryByText(/No matches in the/u)).toBeNull();
+  view.unmount();
+  mount(`?q=needle&cursor=${cursor}`);
+  expect(await screen.findByText(/No further matches on this page, and the search is still incomplete\./u)).toBeTruthy();
+  expect(screen.queryByText(/No matches yet/u)).toBeNull();
 });

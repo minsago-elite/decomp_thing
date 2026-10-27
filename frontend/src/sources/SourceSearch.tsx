@@ -14,7 +14,8 @@ import { SOURCE_SEARCH_PATH_LIMIT, SOURCE_SEARCH_QUERY_LIMIT, bindSourceSearch, 
 import type { SourceSearchRequest } from './search';
 import { visibleSourceText } from './viewer';
 
-function SearchStatus({ data }: { data: SourceSearchPage }) {
+/** A continued page shows only its own matches, so empty continued pages never claim the whole search found nothing. */
+function SearchStatus({ data, continued }: { data: SourceSearchPage; continued: boolean }) {
   const skipped = sourceSearchSkipped(data);
   const missing = skipped.reduce((total, entry) => total + entry.count, 0);
   const complete = data.status === 'complete';
@@ -22,17 +23,18 @@ function SearchStatus({ data }: { data: SourceSearchPage }) {
   const searched = data.scope.searchableFiles - unread;
   const reason = data.stopReason ? copy.searchStopped[data.stopReason] : '';
   return <div class={`source-search-status ${complete && missing === 0 ? 'source-search-status-complete' : 'source-search-status-incomplete'}`}
-    role="status" data-search-state={complete ? (data.items.length ? 'complete' : 'no-matches') : (data.items.length ? 'partial' : 'partial-empty')}>
+    role="status" data-search-state={complete ? (data.items.length ? 'complete' : continued ? 'no-further-matches' : 'no-matches') : (data.items.length ? 'partial' : 'partial-empty')}>
     {complete
       ? <p><strong>{data.scope.searchableFiles === 0 ? copy.searchNothingSearchable
         : data.items.length ? message(copy.searchCompleteMatches, { count: data.items.length })
+          : continued ? copy.searchNoFurtherMatches
           : unread ? message(copy.searchNoMatchesSearched, { count: searched })
             : message(copy.searchNoMatches, { count: data.scope.searchableFiles })}</strong> {data.scope.searchableFiles > 0 && (unread
           ? message(copy.searchCompleteUnread, { count: unread, total: data.scope.searchableFiles })
           : message(copy.searchComplete, { count: data.scope.searchableFiles }))}</p>
       : <p><strong>{data.items.length
         ? message(copy.searchIncomplete, { reason, count: data.progress.remainingFiles })
-        : message(copy.searchIncompleteEmpty, { reason, count: data.progress.remainingFiles })}</strong></p>}
+        : message(continued ? copy.searchIncompleteNoFurther : copy.searchIncompleteEmpty, { reason, count: data.progress.remainingFiles })}</strong></p>}
     {missing > 0 && <>
       <p><strong>{message(copy.searchSkipped, { count: missing })}</strong></p>
       <ul>{skipped.map(entry => <li key={entry.reason}>{message(copy.searchSkippedReasons[entry.reason], { count: entry.count })}</li>)}</ul>
@@ -51,23 +53,33 @@ export function SourceSearch({ selected, basePath, search }: { selected: SourceS
   try { selection = sourceSearchSelection(search); } catch { selection = null; }
   const request = selection?.request ?? null;
   const directory = selection?.directory ?? 'root';
+  // Bookmarks/history bypass submit(): reserve continuation room before any transport or navigation.
+  const tooLong = request !== null && !sourceSearchFits(directory, request);
   const [text, setText] = useState(request?.q ?? '');
   const [symbol, setSymbol] = useState(request?.match === 'symbol');
   const [exactCase, setExactCase] = useState(request?.caseSensitive ?? true);
   const [path, setPath] = useState(request?.path ?? '');
   const [formError, setFormError] = useState<'invalid' | 'too-long' | null>(null);
+  // The view stays mounted across query navigation so focus intent survives; history moves refresh the fields.
+  const shownSearch = useRef(search);
+  useEffect(() => {
+    if (shownSearch.current === search) return;
+    shownSearch.current = search;
+    setText(request?.q ?? ''); setSymbol(request?.match === 'symbol');
+    setExactCase(request?.caseSensitive ?? true); setPath(request?.path ?? ''); setFormError(null);
+  }, [search]);
   const [refresh, setRefresh] = useState(0);
   const key = [selected.jobId, selected.runId, selected.revisionId, search, refresh].join('/');
   const [read, setRead] = useState<SourceReadState<SourceSearchPage>>({ key, state: 'loading' });
   useEffect(() => {
-    if (!request) return undefined;
+    if (!request || tooLong) return undefined;
     return beginSourceRead(key, async signal => {
       const response = await client.get('sourceSearch', sourceSearchRoute(selected, directory, request), { signal });
       if (signal.aborted) throw new ApiClientError('aborted');
       return bindSourceSearch(response.data, selected, directory, request);
     }, setRead);
   }, [client, key]);
-  const current = request ? currentSourceRead(read, key) : null;
+  const current = request && !tooLong ? currentSourceRead(read, key) : null;
   const data = current?.state === 'ready' ? current.value : null;
   useEffect(() => {
     if (current && current.state !== 'loading' && moveFocus.current) { moveFocus.current = false; heading.current?.focus(); }
@@ -112,14 +124,15 @@ export function SourceSearch({ selected, basePath, search }: { selected: SourceS
       {formError && <p role="alert">{formError === 'too-long' ? copy.searchTooLong : copy.searchInvalid}</p>}
       <button type="submit" disabled={current?.state === 'loading'}>{copy.searchSubmit}</button>
     </form>
-    {directory !== 'root' && <p>{copy.searchScopeDirectory} <a href={sourceSearchPath(basePath, selected, 'root', request && { ...request, cursor: null })}>{copy.searchAll}</a></p>}
+    {directory !== 'root' && <p>{copy.searchScopeDirectory} <a href={sourceSearchPath(basePath, selected, 'root', request && !tooLong ? { ...request, cursor: null } : null)}>{copy.searchAll}</a></p>}
     <p>{copy.searchBoundary}</p>
     <h2 id="source-search-results" ref={heading} tabIndex={-1}>{copy.searchResults}</h2>
     {!request && <p>{copy.searchPrompt}</p>}
+    {tooLong && <p role="alert">{copy.searchTooLong}</p>}
     {current?.state === 'loading' && <p role="status">{copy.searching}</p>}
     {current?.state === 'failed' && <p role="alert">{sourceReadMessage(current.failure)}</p>}
     {data && request && <>
-      <SearchStatus data={data} />
+      <SearchStatus data={data} continued={request.cursor !== null} />
       {request.cursor !== null && <p>{copy.searchContinued}</p>}
       <p>{message(copy.searchLimits, { results: data.limits.maxResults, bytes: data.limits.maxScannedBytes, deadline: data.limits.deadlineMs })}</p>
       {data.items.length > 0 && <>

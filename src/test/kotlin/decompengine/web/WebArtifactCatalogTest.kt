@@ -23,21 +23,27 @@ class WebArtifactCatalogTest {
         val failing = mutableSetOf<Pair<String, String>>()
         val lateFailing = mutableSetOf<Pair<String, String>>()
         var commitments: (String) -> Pair<String, String>? = { null }
+        var inventoryReads = 0
+        var inventoryBytes = 0L
+        var beforeStream: () -> Unit = {}
         override fun attempts(jobId: String) = attempts
         override fun present(jobId: String, runId: String, path: String) = (runId to path) in files
         override fun stream(jobId: String, runId: String, path: String, declaredSize: (Long) -> Unit,
             consume: (ByteArray, Int) -> Unit, cancellationCheck: () -> Unit): StableFileDigest {
+            beforeStream()
             val bytes = files[runId to path] ?: throw JobStoreException("artifact is unavailable")
             declaredSize(bytes.size.toLong())
             if ((runId to path) in failing) throw IllegalArgumentException("stable hash file changed during reading")
-            bytes.toList().chunked(4096).forEach { chunk -> cancellationCheck(); consume(chunk.toByteArray(), chunk.size) }
+            bytes.toList().chunked(4096).forEach { chunk -> cancellationCheck(); hashedBytes += chunk.size; consume(chunk.toByteArray(), chunk.size) }
             // Final revalidation failure after the whole body was hashed.
             if ((runId to path) in lateFailing) throw IllegalArgumentException("stable hash file changed during reading")
-            hashedBytes += bytes.size
             return StableFileDigest(WebExplorationArtifact.sha256(bytes), bytes.size.toLong(),
                 LinuxFileIdentity(LinuxFileKey(1, 1), 0x8180, 1000, 1000, 1, 1, true, false, false))
         }
-        override fun revisionCommitments(jobId: String, runId: String, revisionId: String) = commitments(runId)
+        override fun revisionCommitments(jobId: String, runId: String, revisionId: String, budget: WebArtifactReadBudget): Pair<String, String>? {
+            inventoryReads++
+            return try { budget.reserve(inventoryBytes); commitments(runId) } catch (_: WebArtifactBudgetExceeded) { null }
+        }
     }
 
     private fun items(page: JsonObject) = page.getValue("items").jsonArray.map { it.jsonObject }
@@ -137,6 +143,62 @@ class WebArtifactCatalogTest {
         assertEquals(listOf("run_2"), items(second).map { it.getValue("binding").jsonObject.getValue("runId").jsonPrimitive.content })
     }
 
+    @Test fun `first file larger than a whole page is unavailable without reading even if it would fail late`() {
+        for (lateFailure in listOf(false, true)) {
+            val store = Store(listOf(attempt("run_1", 1), attempt("run_2", 2)), mutableMapOf(
+                ("run_1" to "source-tree.zip") to ByteArray(20_000),
+                ("run_2" to "source-tree.zip") to ByteArray(6_000)))
+            if (lateFailure) store.lateFailing += "run_1" to "source-tree.zip"
+            val catalog = WebArtifactCatalog(store, maximumArtifactBytes = 30_000, maximumPageHashBytes = 10_000)
+            val page = catalog.page("s", jobId, null, "/")
+            assertEquals(1, page.getValue("unavailableFiles").jsonPrimitive.int)
+            assertEquals(listOf("run_2"), items(page).map { it.getValue("binding").jsonObject.getValue("runId").jsonPrimitive.content })
+            assertEquals(6_000L, store.hashedBytes)
+            assertNull(next(page))
+        }
+    }
+
+    @Test fun `archive catalog and detail never request inventory capture`() {
+        val store = Store(listOf(attempt("run_a", 1, "revision_a")), mutableMapOf(
+            ("run_a" to "source-tree.zip") to ByteArray(100)))
+        store.commitments = { error("archives cannot be inventory checked") }
+        val catalog = WebArtifactCatalog(store)
+        val entry = items(catalog.page("s", jobId, null, "/")).single()
+        assertEquals(entry, catalog.detail(jobId, field(entry, "artifactId"), "/"))
+        assertEquals(0, store.inventoryReads)
+    }
+
+    @Test fun `negative inventory results are cached and ancillary reads share the page budget`() {
+        val store = Store(listOf(attempt("run_a", 1, "revision_a")), mutableMapOf(
+            ("run_a" to "source-tree/source_tree_manifest.json") to ByteArray(1_000),
+            ("run_a" to "source-tree/reports/build_contract.json") to ByteArray(1_000),
+            ("run_a" to "source-tree.zip") to ByteArray(6_000)))
+        store.inventoryBytes = 5_000
+        val catalog = WebArtifactCatalog(store, maximumPageHashBytes = 10_000)
+        val page = catalog.page("s", jobId, null, "/")
+        assertEquals(listOf("source-manifest", "build-contract"), items(page).map { field(it, "family") })
+        assertEquals(1, store.inventoryReads) // null is cached for the build contract, not retried.
+        assertEquals(2_000L, store.hashedBytes)
+        val second = catalog.page("s", jobId, "cursor=${next(page)!!}", "/")
+        assertEquals(listOf("source-archive"), items(second).map { field(it, "family") })
+        assertEquals(1, store.inventoryReads)
+    }
+
+    @Test fun `inventory budget exhaustion stays unverified and cancellation is never swallowed`() {
+        val store = Store(listOf(attempt("run_a", 1, "revision_a")), mutableMapOf(
+            ("run_a" to "source-tree/source_tree_manifest.json") to ByteArray(1_000)))
+        store.inventoryBytes = 10_000
+        val catalog = WebArtifactCatalog(store, maximumPageHashBytes = 10_000)
+        val page = catalog.page("s", jobId, null, "/")
+        assertEquals("not-verified", field(items(page).single(), "verification"))
+        store.inventoryBytes = 0
+        store.commitments = { throw java.util.concurrent.CancellationException("capture cancelled") }
+        assertFailsWith<java.util.concurrent.CancellationException> { catalog.page("s", jobId, null, "/") }
+        assertFailsWith<java.util.concurrent.CancellationException> {
+            catalog.detail(jobId, field(items(page).single(), "artifactId"), "/")
+        }
+    }
+
     @Test fun `catalog and detail reads stop when their exchange is cancelled`() {
         val store = Store(listOf(attempt("run_a", 1)), mutableMapOf(("run_a" to "source-tree.zip") to ByteArray(20_000)))
         val catalog = WebArtifactCatalog(store)
@@ -144,6 +206,22 @@ class WebArtifactCatalogTest {
         val cancelled = { throw java.util.concurrent.CancellationException("exchange closed") }
         assertFailsWith<java.util.concurrent.CancellationException> { catalog.page("s", jobId, null, "/", cancelled) }
         assertFailsWith<java.util.concurrent.CancellationException> { catalog.detail(jobId, id, "/", cancelled) }
+    }
+
+    @Test fun `range forwarding reports progress for every verification chunk and withholds the final slice`() {
+        val data = ByteArray(10 * 4096) { it.toByte() }
+        for (range in listOf(WebByteRange(0, 9), WebByteRange(5000, 20000), WebByteRange(0, data.size - 1L), WebByteRange(data.size - 3L, data.size - 1L))) {
+            val written = java.io.ByteArrayOutputStream(); var progress = 0
+            val forwarder = WebRangeForwarder(range, { written.write(it) }, { progress++ })
+            data.toList().chunked(4096).forEachIndexed { index, chunk ->
+                forwarder.accept(chunk.toByteArray(), chunk.size)
+                assertEquals(index + 1, progress, "progress for every chunk of $range")
+            }
+            // Nothing past the range is written, and its last slice waits for verification.
+            assertTrue(written.size() < range.length)
+            assertEquals(range.length, forwarder.finish())
+            assertContentEquals(data.copyOfRange(range.start.toInt(), range.endInclusive.toInt() + 1), written.toByteArray())
+        }
     }
 
     @Test fun `request deadlines are keyed by exchange identity rather than shared attributes`() {
@@ -205,6 +283,42 @@ class WebArtifactCatalogTest {
             while (closed == 0 && System.nanoTime() < waitClose) Thread.onSpinWait()
             assertEquals(1, closed)
         } finally { scheduler.shutdownNow() }
+    }
+
+    @Test fun `blocking catalog and detail callbacks share admission and release it after cancellation`() {
+        val store = Store(listOf(attempt("run_a", 1)), mutableMapOf(("run_a" to "source-tree.zip") to ByteArray(1)))
+        val catalog = WebArtifactCatalog(store)
+        val id = field(items(catalog.page("s", jobId, null, "/")).single(), "artifactId")
+        val entered = java.util.concurrent.CountDownLatch(2)
+        val release = java.util.concurrent.CountDownLatch(1)
+        store.beforeStream = {
+            entered.countDown()
+            check(release.await(5, java.util.concurrent.TimeUnit.SECONDS))
+            throw java.util.concurrent.CancellationException("exchange closed")
+        }
+        val downloads = WebArtifactDownloads(maximum = 2, perSession = 1)
+        val callers = java.util.concurrent.Executors.newFixedThreadPool(2)
+        try {
+            val page = callers.submit {
+                assertFailsWith<java.util.concurrent.CancellationException> {
+                    downloads.admit("a") { catalog.page("a", jobId, null, "/") }
+                }
+            }
+            val detail = callers.submit {
+                assertFailsWith<java.util.concurrent.CancellationException> {
+                    downloads.admit("b") { catalog.detail(jobId, id, "/") }
+                }
+            }
+            assertTrue(entered.await(5, java.util.concurrent.TimeUnit.SECONDS))
+            assertEquals(2, downloads.activeCount())
+            for (session in listOf("a", "c")) {
+                assertEquals(429, assertFailsWith<WebAccessDenied> { downloads.admit(session) { error("must not hash") } }.status)
+            }
+            release.countDown()
+            page.get(5, java.util.concurrent.TimeUnit.SECONDS); detail.get(5, java.util.concurrent.TimeUnit.SECONDS)
+            assertEquals(0, downloads.activeCount())
+            downloads.admit("a") { assertEquals(1, downloads.activeCount()) }
+        } finally { release.countDown(); callers.shutdownNow() }
     }
 
     @Test fun `download admission is bounded per server and session and always released`() {
