@@ -26,7 +26,8 @@ class GitRemotesTest {
         fun open(policy: GitRemotePolicy = GitRemotePolicy(admittedRoot = admitted)) = ManagedGitRepositories(store, GitRuntime.detect(),
             { _, run, revision -> GitSourceSnapshot(snapshot, run, revision, "a".repeat(64), mapOf("src/main.c" to GitSourceCommitment(
                 GitSourceCopy.digestOf(snapshot.resolve("src/main.c")), Files.size(snapshot.resolve("src/main.c"))))) },
-            policy = GitRepositoryPolicy(defaultBranch = "main"), crash = { hook(it) }, remotePolicy = policy).also(opened::add)
+            policy = GitRepositoryPolicy(defaultBranch = "main"), crash = { hook(it) }, remotePolicy = policy)
+            .also { it.recover(listOf("0123456789abcdef0123456789abcdef")); opened += it }
 
         /** A bare remote with two commits on `main` and one on `topic`, populated with raw fixture Git. */
         fun remote(name: String = "upstream", format: String = "sha1"): Path {
