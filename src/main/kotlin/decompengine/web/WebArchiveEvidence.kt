@@ -4,7 +4,9 @@ import decompengine.acp.AcpRuntimeClosureLimits
 import decompengine.acp.LinuxFilesystemSyscalls
 import decompengine.acp.LinuxFileIdentity
 import decompengine.acp.deletePrivateTreeContents
+import decompengine.jobs.ArtifactChangedException
 import decompengine.jobs.JobStore
+import decompengine.jobs.JobStoreException
 import decompengine.oracle.core.OracleJson
 import decompengine.project.ArchivalBundleLimits
 import decompengine.project.ArchivalBundleVerifier
@@ -76,7 +78,7 @@ internal class WebArchiveEvidence(private val store: JobStore, private val sourc
                 ) { "archive payload differs from the current source tree: $relative" }
                 ReadIdentity(observed.sha256, observed.identity)
             }
-            val contractSnapshot = readArtifact(jobId, "$reportPrefix/source-tree/${layout.contractPath}", MAXIMUM_FILE_BYTES)
+            val contractSnapshot = revalidate { readArtifact(jobId, "$reportPrefix/source-tree/${layout.contractPath}", MAXIMUM_FILE_BYTES) }
             requireSame(current.getValue(layout.contractPath), contractSnapshot)
             val parsedContract = OracleJson.parse(contractSnapshot.bytes).jsonObject
             val contract = buildPolicy.parseContract(parsedContract, source.profile)
@@ -90,22 +92,19 @@ internal class WebArchiveEvidence(private val store: JobStore, private val sourc
             }
             // The first pass already admitted this tree. Unavailability or an inventory/budget
             // refusal on revalidation is a concurrent change, not an initially missing artifact.
-            val revalidated = try {
+            val revalidated = revalidate {
                 store.sourceArchiveReceipts(jobId, transport, reportPrefix, MAXIMUM_FILE_BYTES, MAXIMUM_BYTES)
-            } catch (failure: decompengine.jobs.ArtifactChangedException) {
-                throw failure
-            } catch (_: decompengine.jobs.JobStoreException) {
-                throw decompengine.jobs.ArtifactChangedException("archive source tree changed during verification")
-            } catch (_: IllegalArgumentException) {
-                throw decompengine.jobs.ArtifactChangedException("archive source tree changed during verification")
             }
             if (revalidated != receipts) {
-                throw decompengine.jobs.ArtifactChangedException("archive source tree changed during verification")
+                throw ArtifactChangedException("archive source tree changed during verification")
             }
-            require(source.manifestDocument == sources.read(jobId, reportPrefix).manifestDocument) { "archive source revision changed during verification" }
-            requireSame(executable, readArtifact(jobId, "$reportPrefix/source-tree/${layout.artifactPath}", MAXIMUM_BYTES))
-            requireSame(input, store.readInput(jobId))
-            requireSame(identity(archive), readArtifact(jobId, "$reportPrefix/source-tree.zip", MAXIMUM_BYTES))
+            val manifest = revalidate { sources.read(jobId, reportPrefix).manifestDocument }
+            if (source.manifestDocument != manifest) {
+                throw ArtifactChangedException("archive source revision changed during verification")
+            }
+            requireSame(executable, revalidate { readArtifact(jobId, "$reportPrefix/source-tree/${layout.artifactPath}", MAXIMUM_BYTES) })
+            requireSame(input, revalidate { store.readInput(jobId) })
+            requireSame(identity(archive), revalidate { readArtifact(jobId, "$reportPrefix/source-tree.zip", MAXIMUM_BYTES) })
             return WebArchiveSnapshot(archive.bytes, archive.sha256, source.view.copy(archiveSha256 = archive.sha256), source.manifestDocument)
         } finally {
             LinuxFilesystemSyscalls.openRoot(temporary).use { directory ->
@@ -117,8 +116,22 @@ internal class WebArchiveEvidence(private val store: JobStore, private val sourc
 
     private fun identity(snapshot: StableRegularFile): ReadIdentity = ReadIdentity(snapshot.sha256, snapshot.identity)
 
+    /** Only for objects already admitted above; initial missing/invalid input retains its refusal. */
+    private inline fun <T> revalidate(read: () -> T): T = try {
+        read()
+    } catch (failure: ArtifactChangedException) {
+        throw failure
+    } catch (_: JobStoreException) {
+        throw ArtifactChangedException("archive input changed during verification")
+    } catch (_: IllegalArgumentException) {
+        // Includes budget growth and a manifest/source validation that no longer matches admission.
+        throw ArtifactChangedException("archive input changed during verification")
+    }
+
     private fun requireSame(expected: ReadIdentity, current: StableRegularFile) {
-        require(expected.sha256 == current.sha256 && expected.identity == current.identity) { "archive input changed during verification" }
+        if (expected.sha256 != current.sha256 || expected.identity != current.identity) {
+            throw ArtifactChangedException("archive input changed during verification")
+        }
     }
 
     companion object {

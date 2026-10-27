@@ -236,6 +236,57 @@ class WebArtifactContainmentTest {
         } finally { root.toFile().deleteRecursively() }
     }
 
+    @Test fun `growth past file or aggregate budgets during receipt revalidation is a conflict`() {
+        val root = directory("receipt-budget-race")
+        try {
+            val store = JobStore(root)
+            val job = store.createFromUpload("fixture.elf", elfFixture())
+            val tree = Files.createDirectories(root.resolve(job.id).resolve("reports/source-tree"))
+            val first = tree.resolve("a.txt")
+            val second = tree.resolve("b.txt")
+            val layout = ArchiveTransportLayout(emptySet(), emptySet())
+            // Per-file overflow, remaining aggregate allowance, and the exhausted-allowance
+            // accounting check (an initially empty final file grows to one byte).
+            for ((fileLimit, totalLimit, initialSecond, grownFirst, grownSecond) in listOf(
+                listOf(8, 16, 4, 9, 4), listOf(8, 8, 4, 4, 5), listOf(4, 4, 0, 4, 1),
+            )) {
+                fun initial() {
+                    Files.write(first, ByteArray(4))
+                    Files.write(second, ByteArray(initialSecond))
+                }
+                fun grown() {
+                    Files.write(first, ByteArray(grownFirst))
+                    Files.write(second, ByteArray(grownSecond))
+                }
+                grown()
+                assertFailsWith<RepairBudgetExceededException>("initial oversize remains a budget refusal") {
+                    store.sourceArchiveReceipts(job.id, layout,
+                        maximumFileBytes = fileLimit.toLong(), maximumTotalBytes = totalLimit.toLong())
+                }
+                initial()
+                var callbacks = 0
+                store.sourceArchiveReceipts(job.id, layout,
+                    maximumFileBytes = fileLimit.toLong(), maximumTotalBytes = totalLimit.toLong()) { callbacks++ }
+                assertEquals(0, callbacks % 2, "the unchanged passes have matching callback schedules")
+                var calls = 0
+                var changed = false
+                assertFailsWith<ArtifactChangedException> {
+                    store.sourceArchiveReceipts(job.id, layout,
+                        maximumFileBytes = fileLimit.toLong(), maximumTotalBytes = totalLimit.toLong()) {
+                        // Mutate at the second pass's first outer callback, after all first-pass
+                        // descriptors closed. No timing assumptions or callback counts are hardcoded.
+                        if (++calls == callbacks / 2 + 1) {
+                            grown()
+                            changed = true
+                        }
+                    }
+                }
+                assertTrue(changed)
+                assertEquals(0, openDescriptorsUnder(root), "over-budget revalidation closes descriptors")
+            }
+        } finally { root.toFile().deleteRecursively() }
+    }
+
     /** Reads through the same contained primitive as every adapter, with a mid-read hook. */
     private fun containedReadWithHook(root: Path, jobId: String, during: () -> Unit) {
         try {

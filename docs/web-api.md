@@ -1109,9 +1109,13 @@ refusal is returned. `JobStore.artifactReceipt` streams one file to a size/diges
 (the digest of the bytes observed now, not a committed digest); `sourceArchiveReceipts` requires two complete bounded
 receipt passes with identical sizes, digests and identities, then revalidates the whole source-tree inventory. This
 also detects persistent in-place writes to files whose first receipt has already completed, not just inode replacement.
-Detected content, publication or deletion changes are conflicts. These are observed receipts, not an atomic filesystem
-snapshot or committed-revision proof. Archive verification consumes these streamed receipts, so the source tree is no
-longer read into memory twice. The v1 exploration report route preserves change conflicts as `409 ARTIFACT_CHANGED`;
+Detected content, publication or deletion changes are conflicts, including growth beyond the per-file or aggregate
+allowance during the second receipt pass; initially oversized input retains its budget refusal. These are observed
+receipts, not an atomic filesystem snapshot or committed-revision proof. Archive verification consumes these streamed
+receipts, so the source tree is no longer read into memory twice. Later rereads of admitted archive inputs (manifest,
+build contract, executable, uploaded input and ZIP) also return `409 ARTIFACT_CHANGED` for unavailability, over-budget
+growth or identity/digest mismatch, rather than treating a detected change as an initial missing/invalid request.
+The v1 exploration report route preserves change conflicts as `409 ARTIFACT_CHANGED`;
 an ordinary missing report still returns the unavailable-report projection.
 The lexical path-returning `WebJobService.resolveArtifact` was removed.
 

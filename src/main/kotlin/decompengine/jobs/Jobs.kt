@@ -378,7 +378,12 @@ class JobStore internal constructor(
         val files = collectFiles()
         // Inode identities alone cannot detect an in-place overwrite after a file's descriptor closes.
         // Revalidate every size and digest inside this shared producer, not only in an archive consumer.
-        if (collectFiles() != files) throw ArtifactChangedException("source tree changed while its receipts were collected")
+        val revalidated = try { collectFiles() } catch (_: decompengine.repair.RepairBudgetExceededException) {
+            // The first bounded pass admitted these files. Growth beyond either allowance on
+            // revalidation is a changed snapshot; initial oversized input remains a budget refusal.
+            throw ArtifactChangedException("source tree changed while its receipts were collected")
+        }
+        if (revalidated != files) throw ArtifactChangedException("source tree changed while its receipts were collected")
         // The tree was admitted by the first pass: if it can no longer be inventoried (deleted, replaced by a link,
         // or grown past a bound), that is a concurrent change to this snapshot, not a missing artifact.
         val after = try { sourceArchiveInventory(jobId, layout, reportPrefix) } catch (failure: ArtifactChangedException) {
