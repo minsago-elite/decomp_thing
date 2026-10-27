@@ -242,27 +242,28 @@ class ManagedGitRepositories(
     // ---- Reads ----------------------------------------------------------------------------
 
     fun listing(jobId: String): GitRepositoryListing = synchronized(lock) {
-        requireRunner()
-        reconcile(jobId)
+        requireReadable(jobId)
         GitRepositoryListing(repositories(jobId), operations(jobId).sortedWith(
             compareByDescending<GitOperationRecord> { it.createdAt }.thenByDescending { it.operationId }).take(MAX_LISTED_OPERATIONS))
     }
 
     fun operation(jobId: String, repositoryId: String, operationId: String): GitOperationRecord = synchronized(lock) {
-        requireRunner()
-        reconcile(jobId)
+        requireReadable(jobId)
         operations(jobId).singleOrNull { it.operationId == operationId && it.repositoryId == repositoryId }
             ?: throw ManagedGitException("NOT_FOUND", "The repository operation is unavailable.")
     }
 
     fun workspace(jobId: String, repositoryId: String): GitWorkspaceView {
-        val runner = requireRunner()
-        val record = synchronized(lock) {
-            reconcile(jobId)
-            repositories(jobId).singleOrNull { it.repositoryId == repositoryId }
+        val (runner, record) = synchronized(lock) {
+            requireReadable(jobId)
+            val record = repositories(jobId).singleOrNull { it.repositoryId == repositoryId }
                 ?: throw ManagedGitException("NOT_FOUND", "The managed repository is unavailable.")
+            // Startup or mutation admission prepares the runtime; a read must never create it.
+            val prepared = runner ?: throw ManagedGitException("CAPABILITY_UNAVAILABLE",
+                "The server-owned Git runtime has not been prepared.")
+            prepared to record
         }
-        val directory = jobGitDirectory(jobId).resolve("repositories").resolve(record.repositoryId)
+        val directory = root.resolve(jobId).resolve("git/repositories").resolve(record.repositoryId)
         val observation = try {
             GitRepositoryInspector.inspect(runner, directory.resolve(GIT_DIR), directory.resolve(WORK_TREE))
         } catch (failure: GitRepositoryException) {
@@ -274,11 +275,13 @@ class ManagedGitRepositories(
         return GitWorkspaceView(record, observation)
     }
 
-    /** Startup sweep. Each job is also reconciled before its first use by this instance. */
+    /** Startup authority prepares the runtime and recovers retained jobs before serving reads. */
     fun recover(jobIds: Collection<String>) = synchronized(lock) {
         if (availability !is GitAvailability.Available) return@synchronized
+        try { requireRunner() } catch (_: ManagedGitException) { return@synchronized }
         jobIds.filter { it.matches(JOB_ID) && Files.isDirectory(root.resolve(it).resolve("git"), NOFOLLOW_LINKS) }.forEach { jobId ->
-            // An unreadable record must not block startup; that job retries and reports it on first use.
+            // An unreadable record must not block startup. Reads refuse this job without retrying;
+            // recovery can be retried only by another explicit sweep or mutation admission.
             try { reconcile(jobId) } catch (_: Exception) { }
         }
     }
@@ -451,7 +454,7 @@ class ManagedGitRepositories(
     // ---- Recovery -------------------------------------------------------------------------
 
     /**
-     * Reconcile records left by an earlier process before this instance first uses a job. A
+     * Reconcile records left by an earlier process under startup or mutation authority. A
      * published repository whose operation record still says queued/running completed before the
      * restart. Anything else stopped before publication: its private staging tree is removed and
      * the operation becomes `interrupted`, never retried. A staging tree that cannot be removed
@@ -492,6 +495,19 @@ class ManagedGitRepositories(
     }
 
     // ---- Records --------------------------------------------------------------------------
+
+    /** Called under [lock]. Checking read readiness neither creates storage nor retries recovery. */
+    private fun requireReadable(jobId: String) {
+        val current = availability
+        if (current is GitAvailability.Unavailable) throw ManagedGitException("CAPABILITY_UNAVAILABLE", current.message)
+        if (!jobId.matches(JOB_ID) || !Files.isDirectory(root.resolve(jobId), NOFOLLOW_LINKS)) {
+            throw ManagedGitException("NOT_FOUND", "The requested job is unavailable.")
+        }
+        if (jobId !in reconciled && Files.exists(root.resolve(jobId).resolve("git"), NOFOLLOW_LINKS)) {
+            throw ManagedGitException("STORAGE_UNAVAILABLE",
+                "Repository startup recovery has not completed. Preserve storage and inspect the server before retrying recovery.")
+        }
+    }
 
     private fun requireRunner(): GitCommandRunner = when (val current = availability) {
         is GitAvailability.Unavailable -> throw ManagedGitException("CAPABILITY_UNAVAILABLE", current.message)

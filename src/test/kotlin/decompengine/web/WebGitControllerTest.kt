@@ -182,6 +182,48 @@ class WebGitControllerTest {
         error(f.read("${f.collection}/${summary.getValue("repositoryId").jsonPrimitive.content}/operations/operation_${"0".repeat(32)}"), 404, "NOT_FOUND")
     }
 
+    /** Track directories too: empty runtime/staging directory changes are still writes. */
+    private fun storageTree(root: Path): Map<String, List<Byte>?> = Files.walk(root).use { paths ->
+        paths.toList().associate { path -> root.relativize(path).toString() to
+            if (Files.isDirectory(path, java.nio.file.LinkOption.NOFOLLOW_LINKS)) null else Files.readAllBytes(path).toList() }
+    }
+
+    @Test fun `Git GET routes leave fresh and published storage unchanged`(): Unit = Fixture().use { f ->
+        val fresh = storageTree(f.root)
+        data(f.read(), 200, "gitRepositories")
+        error(f.read("${f.collection}/repository_missing"), 404, "NOT_FOUND")
+        error(f.read("${f.collection}/repository_missing/operations/operation_missing"), 404, "NOT_FOUND")
+        assertEquals(fresh, storageTree(f.root))
+        assertFalse(Files.exists(f.root.resolve(".git-runtime")))
+        val admitted = f.send("POST", f.init(), f.headers())
+        val operation = data(admitted, 202, "operation")
+        val location = admitted.headers().firstValue("Location").orElseThrow()
+        assertEquals("completed", f.awaitOperation(location).getValue("state").jsonPrimitive.content)
+        assertTrue(f.repositories.awaitIdle(5_000))
+        val published = storageTree(f.root)
+        repeat(2) {
+            data(f.read(), 200, "gitRepositories")
+            data(f.read("${f.collection}/${operation.getValue("repositoryId").jsonPrimitive.content}"), 200, "gitWorkspace")
+            data(f.read(location), 200, "operation")
+        }
+        assertEquals(published, storageTree(f.root))
+    }
+
+    @Test fun `Git GET routes refuse failed startup recovery without changing retained storage`(): Unit = Fixture().use { f ->
+        val operations = Files.createDirectories(f.root.resolve("${f.job.id}/git/operations"))
+        Files.writeString(operations.resolve("operation_${"0".repeat(32)}.json"), "unreadable record")
+        Files.createDirectories(f.root.resolve("${f.job.id}/git/staging/retained/empty/leaf"))
+        f.repositories.recover(listOf(f.job.id))
+        val before = storageTree(f.root)
+        for (target in listOf(f.collection, "${f.collection}/repository_missing",
+            "${f.collection}/repository_missing/operations/operation_missing")) {
+            val response = f.read(target)
+            error(response, 503, "STORAGE_UNAVAILABLE")
+            assertFalse(response.body().contains(f.root.toString()))
+        }
+        assertEquals(before, storageTree(f.root))
+    }
+
     @Test fun `initial branch bounds count Unicode code points through HTTP`(): Unit = Fixture().use { f ->
         val branch = List(4) { "🚀".repeat(49) }.joinToString("/") + "x"
         assertEquals(200, branch.codePointCount(0, branch.length))

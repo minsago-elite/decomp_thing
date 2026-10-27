@@ -770,8 +770,12 @@ Each operation works in a private staging tree under the job's `git/staging/<ope
 registration record is written inside that tree before one atomic rename publishes it as
 `git/repositories/<repositoryId>`, and an existing name is never replaced. Readers therefore see
 either no repository or a complete one. Nothing is written under `reports/`, so a recorded or
-accepted source snapshot cannot be overwritten. On restart, and before an instance first uses a
-job, non-terminal records are reconciled. A published repository makes its operation
+accepted source snapshot cannot be overwritten. Startup prepares the private Git runtime and
+reconciles retained jobs; explicit mutation admission can also reconcile a job before use.
+GET routes never prepare runtime/storage or retry reconciliation. If startup recovery failed for
+a retained job, reads return `503 STORAGE_UNAVAILABLE` without changing its records or staging;
+only an explicit lifecycle recovery sweep or mutation admission may retry. Non-terminal records
+are reconciled under those authorities. A published repository makes its operation
 `completed`. Otherwise the staging tree is removed and the operation becomes `interrupted` with
 `recoveryRequired: false`. If removal fails, it becomes `recovery-required` and the tree is kept
 for inspection. Reconciliation never repeats work. Replaying the original key reports the
