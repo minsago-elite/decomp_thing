@@ -14,6 +14,7 @@ import { seedLegacy, qualifyLegacy } from './packaged-browser-legacy.mjs';
 import { qualifyUpgrade, qualifyUpgradeCache } from './packaged-browser-upgrade.mjs';
 import { compareArchiveAssets, fetchArchiveAssets } from './packaged-browser-assets.mjs';
 import { qualifyWorkflow } from './packaged-browser-workflow.mjs';
+import { createArtifactSanitizer, screenshotGuardExpression } from './packaged-browser-artifacts.mjs';
 import { assertBudgets, createPeakTracker, createTransferLedger, evaluateBudgets, processResources, readBaseline } from './web-scale-budgets.mjs';
 
 // Test driver only: the application is launched with a separate Node-free PATH.
@@ -74,17 +75,10 @@ const chromeBinary = values.chrome;
 await fs.mkdir(join(repo, 'build'), { recursive: true });
 assert.ok((await fs.stat(values['work-parent'])).isDirectory(), '--work-parent must already exist');
 if (values.mode === 'proxy') await fs.access(join(repo, 'frontend/node_modules/vite/bin/vite.js'));
-const sensitiveValues = [];
-const safeDiagnostic = (value) => {
-  let safe = String(value).replaceAll(/#bootstrap=[A-Za-z0-9_-]+/g, '#bootstrap=[redacted]');
-  for (const sensitive of sensitiveValues) if (sensitive) safe = safe.replaceAll(sensitive, '[redacted]');
-  return safe;
-};
-const safeEvidence = (value) => {
-  if (Array.isArray(value)) return value.map(safeEvidence);
-  if (value && typeof value === 'object') return Object.fromEntries(Object.entries(value).map(([key, item]) => [key, safeEvidence(item)]));
-  return typeof value === 'string' ? safeDiagnostic(value) : value;
-};
+// Register the fixture secret before preparation/launch can fail, not only after sign-in.
+const artifactCanary = ['workflow', 'failure'].includes(values.mode) ? `decomp-canary-${randomUUID()}` : null;
+const sensitiveValues = artifactCanary ? [artifactCanary] : [];
+const { safeDiagnostic, safeEvidence } = createArtifactSanitizer(sensitiveValues);
 const delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 async function fileHash(path) {
   const digest = createHash('sha256');
@@ -435,6 +429,8 @@ async function ready(target, expression, label) {
 }
 
 async function capture(target, name) {
+  assert.equal(await evaluate(target, screenshotGuardExpression(sensitiveValues)), true,
+    'Screenshot excluded: uncleared fragment, unavailable page or sensitive content');
   const { data } = await cdp.call('Page.captureScreenshot', { format: 'png' }, target.sessionId);
   await fs.writeFile(join(root, name), Buffer.from(data, 'base64'));
 }
@@ -466,7 +462,7 @@ async function prepareArchive(archivePath) {
       const found = spawnSync('/bin/sh', ['-c', `command -v ${name}`], { encoding: 'utf8', env: { PATH: '/usr/bin:/bin' } });
       if (found.status === 0) await fs.symlink(await fs.realpath(found.stdout.trim()), join(bins, name));
     }
-    fixture = { jar: values['fixture-jar'], control: join(work, 'fixture control'), canary: `decomp-canary-${randomUUID()}` };
+    fixture = { jar: values['fixture-jar'], control: join(work, 'fixture control'), canary: artifactCanary };
     await fs.mkdir(fixture.control);
     // A server-side secret: diagnostics and progress redaction must keep it out of every view and log.
     environment.DECOMP_PACKAGED_FIXTURE_SECRET = fixture.canary;
@@ -580,9 +576,17 @@ try {
     const tab = await makeTarget();
     await cdp.call('Page.navigate', { url: `${origin}/nested/` }, tab.sessionId);
     await ready(tab, `document.querySelector('h1')?.textContent === 'Your work, with its evidence'`, 'failure-control home');
-    await evaluate(tab, `console.error(${JSON.stringify(FAILURE_PROBE)})`);
-    await waitFor(() => tab.console.some((entry) => entry.text === FAILURE_PROBE), 'failure-control console capture');
-    throw new Error(FAILURE_SENTINEL);
+    await evaluate(tab, `console.error(${JSON.stringify(`${FAILURE_PROBE} ${artifactCanary}`)})`);
+    await waitFor(() => tab.console.some((entry) => entry.text.includes(FAILURE_PROBE) && entry.text.includes(artifactCanary)), 'failure-control console capture');
+    // Synthetic leak: raw console/log/error/trace must be detected here but redacted in artifacts.
+    serverLog += `failure-control canary: ${artifactCanary}\n`;
+    await waitFor(() => true, `failure-control artifact ${artifactCanary}`);
+    const leaked = await makeTarget();
+    await cdp.call('Page.navigate', { url: `${origin}/nested/` }, leaked.sessionId);
+    await ready(leaked, `document.querySelector('h1')?.textContent === 'Your work, with its evidence'`, 'failure-control canary page');
+    await evaluate(leaked, `document.body.append(document.createTextNode(${JSON.stringify(artifactCanary)}))`);
+    lastTarget = tab; // Keep a safe primary screenshot; the second candidate must be excluded.
+    throw new Error(`${FAILURE_SENTINEL}: ${artifactCanary}`);
   }
   if (values.mode === 'workflow') {
     report.workflow = await qualifyWorkflow({ installation, makeTarget, cdp, evaluate, ready, waitFor, delay, capture,
@@ -1159,25 +1163,25 @@ try {
   process.exitCode = 1;
   if (cdp) {
     report.failureScreenshots = [];
+    report.failureScreenshotExclusions = [];
     // Fail closed if the handoff has not been scrubbed. Hide editable fields
     // before a diagnostic capture, and never capture visible credential text.
     const candidates = [lastTarget, ...targets.filter((target) => !target.cspProbe && target !== lastTarget)].filter(Boolean).slice(0, 8);
     for (const [index, target] of candidates.entries()) {
       const name = index === 0 ? 'failure.png' : `failure-${index}.png`;
       try {
-        const safe = await evaluate(target, `(() => {
-          if (location.hash !== '' || ${JSON.stringify(sensitiveValues)}.some(value => document.body.innerText.includes(value))) return false;
-          document.querySelectorAll('input, textarea, [contenteditable]').forEach(element => { element.style.visibility = 'hidden'; });
-          return true;
-        })()`);
-        if (safe) {
+        const safe = await evaluate(target, screenshotGuardExpression(sensitiveValues));
+        if (safe === true) {
           await capture(target, name);
           report.failureScreenshots.push(name);
           // The accessible text explains states a screenshot crops; it passed the same credential check.
           await writeArtifact(name.replace(/\.png$/, '.txt'), safeDiagnostic(await evaluate(target, 'document.body.innerText')).slice(0, 262144));
           report.failureScreenshots.push(name.replace(/\.png$/, '.txt'));
           if (index === 0) report.failureScreenshot = name;
-        } else if (index === 0) report.failureScreenshotSkipped = 'Uncleared fragment or visible handoff credential';
+        } else {
+          report.failureScreenshotExclusions.push({ name, reason: 'Uncleared fragment, unavailable page or sensitive content' });
+          if (index === 0) report.failureScreenshotSkipped = 'Uncleared fragment, unavailable page or sensitive content';
+        }
       } catch {
         if (index === 0) report.failureScreenshotSkipped = 'Attached page unavailable within the bounded DevTools request deadline';
       }
@@ -1221,8 +1225,8 @@ try {
     process.exitCode = 1;
   }
   if (values.mode === 'failure') await verifyFailureControl();
-  await fs.writeFile(join(root, 'report.json'), JSON.stringify(report, null, 2) + '\n');
-  console.log(JSON.stringify(report, null, 2));
+  await fs.writeFile(join(root, 'report.json'), JSON.stringify(safeEvidence(report), null, 2) + '\n');
+  console.log(JSON.stringify(safeEvidence(report), null, 2));
   console.log(`Shutdown ${report.shutdownConfirmed ? 'confirmed' : 'UNCONFIRMED'}. Report: ${join(root, 'report.json')}`);
 }
 
@@ -1285,7 +1289,13 @@ async function verifyFailureControl() {
   const log = await read('server.log').catch(() => '');
   expect(log.includes('Serving decomp_engine') && log.includes('#bootstrap=[redacted]'), 'sanitized server log is missing');
   expect(sensitiveValues.length > 0 && sensitiveValues.every((value) => !log.includes(value) && !consoleText.includes(value)), 'server log or console retained a credential');
-  const steps = JSON.parse(await read('trace.json').catch(() => '[]'));
+  const traceText = await read('trace.json').catch(() => '[]');
+  expect(artifactCanary && [log, consoleText, traceText, report.error].every(text => text.includes('[redacted]') && !text.includes(artifactCanary)),
+    'the fixture canary was not redacted from every injected failure surface');
+  expect(report.failureScreenshotExclusions?.some(entry => entry.name === 'failure-1.png') &&
+    !(await fs.stat(join(root, 'failure-1.png')).then(() => true, () => false)) &&
+    !(await fs.stat(join(root, 'failure-1.txt')).then(() => true, () => false)), 'the canary page was captured as a failure artifact');
+  const steps = JSON.parse(traceText);
   expect(steps.some((step) => step.label === 'failure-control console capture' && step.outcome === 'satisfied'), 'trace omitted the final step');
   expect(report.shutdownConfirmed === true && report.workCleanupConfirmed === true && report.workRetained === false, 'owned work was not removed');
   expect(!(await fs.stat(report.workDirectory).then(() => true, () => false)) && !(await fs.stat(profile).then(() => true, () => false)), 'extraction or profile directory remains');

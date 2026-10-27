@@ -79,8 +79,8 @@ jobs:
           node scripts/generate-web-api.mjs --check
           node --test scripts/generate-web-api.test.mjs scripts/legacy-session.test.mjs \
             | tee "$RUNNER_TEMP/frontend-ci/api-drift-tests.txt"
-      - name: Verify generated large web fixtures, named scale budgets and upload readiness
-        run: node --test scripts/web-scale-fixtures.test.mjs scripts/web-scale-budgets.test.mjs scripts/packaged-browser-upload.test.mjs | tee "$RUNNER_TEMP/frontend-ci/scale-fixtures-tests.txt"
+      - name: Verify web fixtures, scale budgets, upload readiness and canary artifact controls
+        run: node --test scripts/web-scale-fixtures.test.mjs scripts/web-scale-budgets.test.mjs scripts/packaged-browser-upload.test.mjs scripts/packaged-browser-canary.test.mjs scripts/packaged-browser-artifacts.test.mjs | tee "$RUNNER_TEMP/frontend-ci/scale-fixtures-tests.txt"
       - name: Check frontend freshness diagnostic controls
         timeout-minutes: 1
         run: python3 -B scripts/test-frontend-freshness.py --verbose

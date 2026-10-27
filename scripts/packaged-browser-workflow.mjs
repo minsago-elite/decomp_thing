@@ -3,6 +3,7 @@ import { randomUUID } from 'node:crypto';
 import { execFileSync } from 'node:child_process';
 import { promises as fs } from 'node:fs';
 import { join } from 'node:path';
+import { createCanaryTracker, WORKFLOW_CANARY_VIEWS } from './packaged-browser-canary.mjs';
 
 // Kept identical to PackagedFakeReconstruction.LIMITS.
 const LIMITS = { wallClockMs: '180000', idleMs: '180000', maxOutputBytes: '16777216', maxToolCalls: '0' };
@@ -17,6 +18,8 @@ export async function qualifyWorkflow(context) {
   const { installation, makeTarget, cdp, evaluate, ready, waitFor, capture, origin, launch, stop } = context;
   const control = installation.fixture.control;
   const canary = installation.fixture.canary;
+  const canaryTracker = createCanaryTracker(canary);
+  const observeCanary = (target, label) => canaryTracker.observe(target, evaluate, label);
   const data = installation.data;
   const result = { executionOfUploadedBinary: false, engine: 'test-owned fake reconstruction adapter' };
   const tabs = [];
@@ -64,6 +67,7 @@ export async function qualifyWorkflow(context) {
   await ready(main, `document.body.innerText.includes('The server has no upload capacity. Wait or free storage, then retry this file.')`, 'disk-full upload refusal');
   assert.equal(await fs.stat(data).then(async () => (await fs.readdir(data)).filter(name => /^[a-f0-9]{32}$/.test(name)).length, () => 0), 0,
     'A disk-full refusal published a job');
+  await observeCanary(main, 'disk-full upload');
   await context.sample('disk-full upload');
   result.diskFullUpload = { refused: true, jobsPublished: 0, explanation: 'no upload capacity' };
   await fs.rm(join(control, 'disk-full'));
@@ -73,11 +77,13 @@ export async function qualifyWorkflow(context) {
   await ready(main, `document.querySelector('#binary-file') !== null && document.body.innerText.includes('Local session connected.')`, 'upload after storage recovery');
   await choose();
   await ready(main, `document.body.innerText.includes('Selected: ') && [...document.querySelectorAll('button')].some(button => ['Upload binary', 'Retry this upload'].includes(button.textContent) && !button.disabled)`, 'fixture selection');
+  await observeCanary(main, 'selected upload');
   await evaluate(main, `[...document.querySelectorAll('button')].find(button => button.textContent === 'Upload binary' || button.textContent === 'Retry this upload').click()`);
   await ready(main, `/^\\/nested\\/jobs\\/[0-9a-f]{32}$/.test(location.pathname)`, 'uploaded job route');
   const jobId = (await evaluate(main, 'location.pathname')).split('/').at(-1);
   await ready(main, `document.body.innerText.includes(${JSON.stringify(UPLOAD_NAME)})`, 'untrusted filename shown as text');
   assert.deepEqual(await injected(main), { flag: 'undefined', images: 0 }, 'Uploaded filename markup became active');
+  await observeCanary(main, 'uploaded job');
   const version = () => evaluate(main, `fetch('/nested/api/v1/jobs/${jobId}', { headers: { Accept: 'application/json' } }).then(job => job.headers.get('ETag'))`);
   // A duplicate submission repeats the exact request: the same key and the same displayed job version.
   const start = (key, etag) => evaluate(main, `(async () => {
@@ -137,6 +143,7 @@ export async function qualifyWorkflow(context) {
   assert.ok(Math.max(...sequences) > Math.max(...beforeReconnect), `Reconnect delivered no newer observation: ${beforeReconnect} -> ${sequences}`);
   result.liveActivity = { slowStream: true, offlineExplained: true, reconnected: true, newObservationsAfterReconnect: sequences.length - beforeReconnect.length,
     duplicateObservations: 0, observations: sequences.length };
+  await observeCanary(activity, 'live activity');
   await capture(activity, 'workflow-live-activity.png');
 
   // 4. Restart the server mid-attempt. The retained attempt must not claim to still run or to have completed.
@@ -149,6 +156,7 @@ export async function qualifyWorkflow(context) {
   await ready(main, `document.querySelector('h1')?.textContent === 'Workflow attempt' && /interrupted/i.test(document.body.innerText)`, 'interrupted attempt after restart');
   const interrupted = await text(main);
   assert.ok(!/\bRunning\b/.test(interrupted) && !interrupted.includes(sourceBrowse), 'Restarted attempt claimed progress or sources');
+  await observeCanary(main, 'interrupted attempt');
   await context.sample('after restart');
   result.restart = { attemptInterrupted: true, sourcesClaimed: false };
 
@@ -165,6 +173,7 @@ export async function qualifyWorkflow(context) {
   await settled(retryRun, 'completed');
   await cdp.call('Page.navigate', { url: `${origin}${retryHref}` }, main.sessionId);
   await ready(main, `[...document.querySelectorAll('a')].some(a => a.textContent === ${JSON.stringify(sourceBrowse)})`, 'completed retry offers its sources');
+  await observeCanary(main, 'completed retry');
   await context.sample('completed retry');
   result.retry = { throughAttemptControls: true, completed: true };
 
@@ -173,6 +182,7 @@ export async function qualifyWorkflow(context) {
   await ready(main, `[...document.querySelectorAll('main a')].some(a => a.textContent.endsWith('.c') || a.textContent === 'src')`, 'source directory');
   result.sources = await inspectSources(context, main, jobId, retryRun);
   assert.deepEqual(await injected(main), { flag: 'undefined', images: 0 }, 'Generated source markup became active');
+  await observeCanary(main, 'recorded source');
   await context.sample('source inspection');
   await capture(main, 'workflow-source.png');
 
@@ -191,23 +201,22 @@ export async function qualifyWorkflow(context) {
   await ready(main, `/failed/i.test(document.body.innerText) && document.querySelector('h1')?.textContent === 'Workflow attempt'`, 'disk-full attempt failure');
   assert.equal(await evaluate(main, `[...document.querySelectorAll('a')].some(a => a.textContent === ${JSON.stringify(sourceBrowse)})`), false,
     'A disk-full attempt offered sources');
+  await observeCanary(main, 'failed attempt');
   await context.sample('engine disk full');
   result.engineDiskFull = { errno: 'ENOSPC', attemptFailed: true, sourcesOffered: false };
 
   // 8. Canary and untrusted content across live and retained views, storage and logs.
   const leaks = [];
   for (const [index, target] of tabs.entries()) {
-    const view = await evaluate(target, `({ text: document.documentElement.outerHTML, storage: JSON.stringify({ ...localStorage }) + JSON.stringify({ ...sessionStorage }) })`).catch(() => null);
-    if (view && (view.text.includes(canary) || view.storage.includes(canary))) leaks.push(`tab ${index}`);
-    for (const entry of target.console) if (entry.text.includes(canary)) leaks.push(`console ${index}`);
+    await observeCanary(target, `final tab ${index}`);
   }
   if (context.serverLog().includes(canary)) leaks.push('server log');
   for (const name of await listFiles(join(data, jobId))) {
     if ((await fs.readFile(name)).includes(canary)) leaks.push(name.slice(data.length));
   }
   assert.deepEqual(leaks, [], 'The server secret canary escaped redaction');
-  result.canary = { liveViews: true, retainedViews: true, browserStorage: true, serverLog: true, retainedFiles: true, leaks: 0,
-    hostileMarkupInert: true };
+  result.canary = { ...canaryTracker.summary([...WORKFLOW_CANARY_VIEWS, ...tabs.map((_, index) => `final tab ${index}`)]),
+    serverLog: true, retainedFiles: true };
   return result;
 }
 
@@ -224,7 +233,7 @@ async function listFiles(directory) {
 }
 
 async function inspectSources(context, target, jobId, runId) {
-  const { evaluate, ready, cdp } = context;
+  const { evaluate, ready } = context;
   // Descend until a C file is listed, then open it.
   for (let depth = 0; depth < 4; depth++) {
     const fileLink = await evaluate(target, `[...document.querySelectorAll('main a')].find(a => /\\.c$/.test(a.textContent))?.getAttribute('href') ?? null`);
