@@ -32,6 +32,25 @@ export async function seedLive(root) {
   return { root, jobs, input };
 }
 
+// Session establishment legitimately persists audit state even when the dashboard never mutates jobs.
+// Capture it explicitly, rather than ignoring arbitrary hidden storage or weakening the read-only check.
+export async function snapshotLiveAudit(root) {
+  const directory = join(root, '.web-audit');
+  const identity = stat => Object.fromEntries(['dev', 'ino', 'size', 'mtimeMs', 'ctimeMs'].map(key => [key, stat[key]]));
+  const stat = await fs.lstat(directory);
+  assert.ok(stat.isDirectory() && !stat.isSymbolicLink());
+  const names = (await fs.readdir(directory)).sort();
+  assert.deepEqual(names, ['current.jsonl', 'incomplete']);
+  const files = {};
+  for (const name of names) {
+    const path = join(directory, name);
+    const file = await fs.lstat(path);
+    assert.ok(file.isFile() && !file.isSymbolicLink());
+    files[name] = { identity: identity(file), bytes: (await fs.readFile(path)).toString('base64') };
+  }
+  return { identity: identity(stat), files };
+}
+
 export async function qualifyLive({ fixture, makeTarget, cdp, evaluate, ready, waitFor, browserOrigin }) {
   const tab = await makeTarget();
   await cdp.call('Page.bringToFront', {}, tab.sessionId);
@@ -43,7 +62,8 @@ export async function qualifyLive({ fixture, makeTarget, cdp, evaluate, ready, w
   // The running JVM owns these cooperative locks. Inspect metadata only and keep
   // both original files in place throughout the authored fixture updates.
   const ownerLocks = ['.web-owner.lock', '.workflow-owner.lock'];
-  assert.deepEqual((await fs.readdir(fixture.root)).sort(), [...ownerLocks, ...fixture.jobs.map(job => job.id)].sort());
+  assert.deepEqual((await fs.readdir(fixture.root)).sort(), ['.web-audit', ...ownerLocks, ...fixture.jobs.map(job => job.id)].sort());
+  const initialAudit = await snapshotLiveAudit(fixture.root);
   const initialOwners = await Promise.all(ownerLocks.map(name => fs.lstat(join(fixture.root, name))));
   for (const owner of initialOwners) assert.ok(owner.isFile() && !owner.isSymbolicLink());
   const heldPath = '/nested/jobs/' + fixture.jobs[0].id;
@@ -80,7 +100,8 @@ export async function qualifyLive({ fixture, makeTarget, cdp, evaluate, ready, w
   assert.equal(await evaluate(tab, `[...document.querySelectorAll('button')].some(button => button.textContent === 'Resume live updates' && button.getAttribute('aria-pressed') === 'true')`), true);
 
   const finalJobs = [changed, fixture.jobs[1], added];
-  assert.deepEqual((await fs.readdir(fixture.root)).sort(), [...ownerLocks, ...finalJobs.map(job => job.id)].sort());
+  assert.deepEqual((await fs.readdir(fixture.root)).sort(), ['.web-audit', ...ownerLocks, ...finalJobs.map(job => job.id)].sort());
+  assert.deepEqual(await snapshotLiveAudit(fixture.root), initialAudit, 'Read-only dashboard checks changed durable audit state');
   for (const [index, name] of ownerLocks.entries()) {
     const finalOwner = await fs.lstat(join(fixture.root, name));
     assert.ok(finalOwner.isFile() && !finalOwner.isSymbolicLink());
@@ -100,6 +121,6 @@ export async function qualifyLive({ fixture, makeTarget, cdp, evaluate, ready, w
     stateUpdatePreservesRowAndFocus: true, newJobDeferredWithoutReorder: true,
     explicitRefreshAppliesCompleteSnapshot: true, pauseControlOperable: true,
     fixtureMutations: ['one atomic authored job status update', 'one authored inert job publication'],
-    existingOwnerLockPreserved: true, existingWorkflowOwnerLockPreserved: true, jobStorageUnchangedExceptFixtureEdits: true,
+    existingAuditStatePreserved: true, existingOwnerLockPreserved: true, existingWorkflowOwnerLockPreserved: true, jobStorageUnchangedExceptFixtureEdits: true,
     mutationRequests: 0, executionStarted: false };
 }
