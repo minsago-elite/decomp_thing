@@ -15,12 +15,22 @@ const matches = { matches: copy.headMatches, differs: copy.headDiffers, unknown:
  * pushed commit; a review state is never build or reconstruction acceptance. Creation needs an
  * explicit, reviewed request, and an uncertain outcome is reconciled instead of repeated.
  */
-export function GitHubPanel({ capability, remotes, branch, writable, readStatus, onCreate, onReconcile }: {
+interface GitHubPanelProps {
   capability: Capability | undefined; remotes: GitRemotes | null; branch: string | null; writable: boolean;
   readStatus: (remoteId: string, head: string, base: string | null) => Promise<GitHubStatus | null>;
   onCreate: (draft: PullRequestDraft) => Promise<boolean>;
   onReconcile: (prOperationId: string) => Promise<boolean>;
-}) {
+}
+
+export function GitHubPanel(props: GitHubPanelProps) {
+  // A new repository, branch, destination or tracked range starts a new review lifetime.
+  // Unmounting the old lifetime also discards late reads, even after switching away and back.
+  const context = JSON.stringify([props.branch, props.remotes?.repositoryId, props.remotes?.remotes.map(remote =>
+    [remote.remoteId, remote.name, remote.display, remote.trackingRefs.map(ref => [ref.name, ref.objectId])])]);
+  return <GitHubPanelContent key={context} {...props} />;
+}
+
+function GitHubPanelContent({ capability, remotes, branch, writable, readStatus, onCreate, onReconcile }: GitHubPanelProps) {
   const [loaded, setStatus] = useState<GitHubStatus | null>(null);
   const [base, setBase] = useState('');
   const [title, setTitle] = useState('');
@@ -55,7 +65,7 @@ export function GitHubPanel({ capability, remotes, branch, writable, readStatus,
     <h3 id="git-github-title">{copy.title}</h3>
     <p>{copy.note}</p>
     {(remotes?.remotes.length ?? 0) > 1 && <label>{copy.remote} <select value={remote.remoteId}
-      onChange={event => { setRemoteId(event.currentTarget.value); setBase(''); }}>
+      onChange={event => { reads.current++; setStatus(null); setRemoteId(event.currentTarget.value); setBase(''); }}>
       {remotes?.remotes.map(item => <option key={item.remoteId} value={item.remoteId}>{item.name}</option>)}
     </select></label>}
     <button type="button" onClick={() => { void refresh(); }}>{copy.check}</button>
@@ -81,7 +91,7 @@ export function GitHubPanel({ capability, remotes, branch, writable, readStatus,
           .then(done => { if (done) { setTitle(''); setBody(''); void refresh(); } });
       }}>
         <h4>{copy.createTitle}</h4>
-        <label>{copy.base} <select value={chosenBase} onChange={event => { setBase(event.currentTarget.value); setStatus(null); }}>
+        <label>{copy.base} <select value={chosenBase} onChange={event => { reads.current++; setBase(event.currentTarget.value); setStatus(null); }}>
           {bases.map(name => <option key={name} value={name}>{name}</option>)}
         </select></label>
         <dl class="job-facts">

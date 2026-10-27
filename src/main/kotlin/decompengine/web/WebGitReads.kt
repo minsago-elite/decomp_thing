@@ -29,7 +29,7 @@ internal class WebGitReads(private val repositories: () -> ManagedGitRepositorie
             "refs" -> setOf("cursor", "limit")
             "remotes" -> emptySet()
             "divergence" -> setOf("worktree", "tracking")
-            "conflicts" -> setOf("worktree")
+            "conflicts" -> setOf("worktree", "offset")
             "push-preview" -> setOf("worktree", "remote", "branch")
             "github" -> setOf("worktree", "remote", "branch", "base")
             "audit" -> setOf("limit")
@@ -52,7 +52,6 @@ internal class WebGitReads(private val repositories: () -> ManagedGitRepositorie
                 "divergence" -> sendWebApiResponse(exchange, 200, "gitDivergence", divergence(jobId, repositoryId, worktree,
                     query["tracking"]?.takeIf { it.matches(Regex("[A-Za-z0-9][A-Za-z0-9_-]{0,127}")) }
                         ?: throw WebAccessDenied(422, "VALIDATION_FAILED", "tracking must name one remote-tracking ref identity.")))
-                "conflicts" -> sendWebApiResponse(exchange, 200, "gitConflicts", conflicts(jobId, repositoryId, worktree))
                 "github" -> sendWebApiResponse(exchange, 200, "gitHubStatus", github(jobId, repositoryId, worktree,
                     query["remote"]?.takeIf { it.matches(Regex("remote_[0-9a-f]{32}")) }
                         ?: throw WebAccessDenied(422, "VALIDATION_FAILED", "remote must name one registered remote identity."),
@@ -61,6 +60,11 @@ internal class WebGitReads(private val repositories: () -> ManagedGitRepositorie
                     query["remote"]?.takeIf { it.matches(Regex("remote_[0-9a-f]{32}")) }
                         ?: throw WebAccessDenied(422, "VALIDATION_FAILED", "remote must name one registered remote identity."),
                     query["branch"]?.also { if (it.length !in 1..200) throw WebAccessDenied(422, "VALIDATION_FAILED", "branch is 1 to 200 characters.") }))
+                "conflicts" -> sendWebApiResponse(exchange, 200, "gitConflicts", conflicts(jobId, repositoryId, worktree,
+                    query["offset"]?.let { value ->
+                        value.takeIf { it.matches(Regex("0|[1-9][0-9]{0,5}")) }?.toInt()?.takeIf { it <= 200_000 }
+                            ?: throw WebAccessDenied(422, "VALIDATION_FAILED", "offset must be an integer from 0 to 200000.")
+                    } ?: 0))
                 "audit" -> sendWebApiResponse(exchange, 200, "gitAudit", buildJsonObject {
                     put("repositoryId", repositoryId)
                     put("entries", JsonArray(repositories().auditLog(jobId, repositoryId, limit)))
@@ -148,33 +152,14 @@ internal class WebGitReads(private val repositories: () -> ManagedGitRepositorie
             put("mergeInProgress", view.mergeInProgress)
             put("strategies", JsonArray(listOf(
                 strategy("fast-forward", blocked ?: if (ahead > 0) "The branch has $ahead local commit(s), so it cannot be fast-forwarded." else null),
-                strategy("merge", blocked),
+                strategy("merge", blocked ?: if (view.signingRequired) "Policy requires signed commits, and a merge would create an unsigned commit." else null),
                 strategy("rebase", "Rebasing rewrites history and is not supported by the workbench. Use a fast-forward or a merge."))))
         }
     }
 
-    private fun conflictFile(entry: decompengine.git.GitConflictEntry, worktreeId: String) = buildJsonObject {
-        put("fileId", entry.path.fileId(worktreeId)); put("path", entry.path.display); put("pathEscaped", entry.path.exact == null)
-        put("baseObjectId", entry.baseObjectId?.let(::JsonPrimitive) ?: JsonNull)
-        put("oursObjectId", entry.oursObjectId?.let(::JsonPrimitive) ?: JsonNull)
-        put("theirsObjectId", entry.theirsObjectId?.let(::JsonPrimitive) ?: JsonNull)
-    }
-
-    /** `G/conflicts` (#597): the integration and every unresolved path. */
-    private fun conflicts(jobId: String, repositoryId: String, worktree: String?): JsonObject {
-        val view = repositories().conflicts(jobId, repositoryId, worktree)
-        return buildJsonObject {
-            put("repositoryId", repositoryId); put("worktreeId", view.worktreeId); put("mergeInProgress", view.mergeInProgress)
-            put("integration", view.integration?.let { record ->
-                buildJsonObject {
-                    put("operationId", record.operationId); put("strategy", record.strategy.wireName); put("branch", record.branch)
-                    put("headBeforeObjectId", record.headBefore); put("targetObjectId", record.target)
-                    put("trackingRefName", record.trackingRef); put("startedAt", record.startedAt.toString())
-                }
-            } ?: JsonNull)
-            put("files", JsonArray(view.files.map { conflictFile(it, view.worktreeId) }))
-        }
-    }
+    /** `G/conflicts` (#597): count- and encoded-byte-bounded live pages covering every path. */
+    private fun conflicts(jobId: String, repositoryId: String, worktree: String?, offset: Int): JsonObject =
+        webGitConflicts(repositoryId, repositories().conflicts(jobId, repositoryId, worktree, offset))
 
     /** `G/conflicts/{fileId}` (#597): bounded text of each side; binary or large content is honestly unsupported. */
     fun conflictDetail(exchange: HttpExchange, jobId: String, repositoryId: String, fileId: String) {
@@ -184,15 +169,8 @@ internal class WebGitReads(private val repositories: () -> ManagedGitRepositorie
         }
         try {
             val view = repositories().conflictFile(jobId, repositoryId, worktree, fileId)
-            val supported = view.ours != null && view.theirs != null && (view.current != null || view.currentSize == null)
-            sendWebApiResponse(exchange, 200, "gitConflictFile", buildJsonObject {
-                put("repositoryId", repositoryId); put("worktreeId", view.worktreeId); put("file", conflictFile(view.entry, view.worktreeId))
-                put("base", view.base?.let(::JsonPrimitive) ?: JsonNull); put("ours", view.ours?.let(::JsonPrimitive) ?: JsonNull)
-                put("theirs", view.theirs?.let(::JsonPrimitive) ?: JsonNull); put("current", view.current?.let(::JsonPrimitive) ?: JsonNull)
-                put("currentSha256", view.currentSha256); put("currentSizeBytes", view.currentSize?.toString()?.let(::JsonPrimitive) ?: JsonNull)
-                put("supported", supported)
-                put("reason", if (supported) JsonNull else JsonPrimitive("A side is binary, deleted or larger than 256 KiB; resolve this file outside the workbench."))
-            })
+            sendWebApiResponse(exchange, 200, "gitConflictFile",
+                webGitConflictDetail(repositoryId, view, webGitConflictEntry(view.entry, view.worktreeId)))
         } catch (failure: ManagedGitException) { throw webGitDenied(failure) }
     }
 

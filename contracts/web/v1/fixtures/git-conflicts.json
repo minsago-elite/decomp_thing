@@ -6,6 +6,9 @@
     "repositoryId": "repository_example_2",
     "worktreeId": "worktree_example_2",
     "mergeInProgress": true,
+    "offset": 0,
+    "totalCount": 1,
+    "nextOffset": null,
     "integration": {
       "operationId": "operation_example_7",
       "strategy": "merge",

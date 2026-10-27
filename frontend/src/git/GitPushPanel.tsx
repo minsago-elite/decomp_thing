@@ -1,4 +1,4 @@
-import { useState } from 'preact/hooks';
+import { useRef, useState } from 'preact/hooks';
 import { gitPushCopy as copy } from '../copy/git';
 import { textMessage } from '../shared/messages';
 import { StateMark } from '../shared/StateMark';
@@ -19,19 +19,28 @@ export function GitPushPanel({ remotes, branch, writable, readPreview, onPush, o
 }) {
   const [remoteId, setRemoteId] = useState('');
   const [target, setTarget] = useState('');
-  const [preview, setPreview] = useState<GitPushPreview | null>(null);
+  const [received, setPreview] = useState<GitPushPreview | null>(null);
+  const generation = useRef(0);
+  function invalidate() { generation.current++; setPreview(null); }
   const available = remotes?.remotes ?? [];
   const chosen = remoteId || available[0]?.remoteId || '';
   const remoteBranch = target || (branch?.startsWith('refs/heads/') ? branch.slice('refs/heads/'.length) : branch ?? '');
+  // The parent keys this panel by repository/worktree/branch. Also bind installed responses to
+  // the selected destination so remote-list changes cannot expose a mismatched action.
+  const preview = received?.remoteId === chosen && received.remoteBranch === remoteBranch && received.localRefName === branch ? received : null;
   if (available.length === 0 || !branch) return null;
   return <section aria-labelledby="git-push-title">
     <h3 id="git-push-title">{copy.title}</h3>
     <p>{copy.note}</p>
-    <label>{copy.remote} <select value={chosen} onChange={event => { setRemoteId(event.currentTarget.value); setPreview(null); }}>
+    <label>{copy.remote} <select value={chosen} onChange={event => { invalidate(); setRemoteId(event.currentTarget.value); }}>
       {available.map(remote => <option key={remote.remoteId} value={remote.remoteId}>{remote.name}</option>)}
     </select></label>
-    <label>{copy.branch} <input value={remoteBranch} maxLength={200} required onInput={event => { setTarget(event.currentTarget.value); setPreview(null); }} /></label>
-    <button type="button" onClick={() => { void readPreview(chosen, remoteBranch).then(setPreview); }}>{copy.preview}</button>
+    <label>{copy.branch} <input value={remoteBranch} maxLength={200} required onInput={event => { invalidate(); setTarget(event.currentTarget.value); }} /></label>
+    <button type="button" onClick={() => {
+      invalidate();
+      const requested = generation.current;
+      void readPreview(chosen, remoteBranch).then(value => { if (requested === generation.current) setPreview(value); });
+    }}>{copy.preview}</button>
     {preview && <div>
       <dl class="job-facts">
         <dt>{copy.destination}</dt><dd><code>{preview.destination}</code> <code>{preview.remoteBranch}</code></dd>

@@ -155,6 +155,7 @@ object GitRemoteUrls {
             if (directory.parent != root || !Files.isDirectory(directory, NOFOLLOW_LINKS)) {
                 refuse("DESTINATION_NOT_ALLOWED", "No admitted local remote has that name.")
             }
+            requireContainedRepository(directory)
             return GitRemoteLocation(GitTransport.ADMITTED, "file://${directory.toRealPath()}", null, "admitted:$name")
         }
         val scheme = Regex("^([A-Za-z][A-Za-z0-9+.-]*)://").find(raw)?.groupValues?.get(1)?.lowercase()
@@ -191,6 +192,37 @@ object GitRemoteUrls {
         }
     }
 
+    /**
+     * File transport follows repository metadata independently of the admitted directory. Reject
+     * indirect layouts before Git sees them, including links anywhere in objects/refs (not just
+     * the immediate .git entry). Like local import, alternates and linked worktrees are unsupported.
+     * Operator-owned admitted repositories must not be modified concurrently with a transfer.
+     */
+    private fun requireContainedRepository(directory: Path) {
+        fun denied(): Nothing = refuse("DESTINATION_NOT_ALLOWED", "The admitted remote must be a self-contained repository without links, gitfiles or alternates.")
+        try {
+            val dotGit = directory.resolve(".git")
+            val gitDir = when {
+                Files.isDirectory(dotGit, NOFOLLOW_LINKS) -> dotGit
+                Files.exists(dotGit, NOFOLLOW_LINKS) -> denied()
+                else -> directory
+            }
+            if (!Files.isRegularFile(gitDir.resolve("HEAD"), NOFOLLOW_LINKS) ||
+                !Files.isDirectory(gitDir.resolve("objects"), NOFOLLOW_LINKS) || !Files.isDirectory(gitDir.resolve("refs"), NOFOLLOW_LINKS)) denied()
+            for (path in listOf("commondir", "shallow", "objects/info/alternates", "objects/info/http-alternates")) {
+                if (Files.exists(gitDir.resolve(path), NOFOLLOW_LINKS)) denied()
+            }
+            Files.walk(gitDir, 32).use { paths ->
+                var count = 0
+                for (path in paths) {
+                    val attributes = Files.readAttributes(path, java.nio.file.attribute.BasicFileAttributes::class.java, NOFOLLOW_LINKS)
+                    if (++count > 100_000 || attributes.isSymbolicLink || (!attributes.isDirectory && !attributes.isRegularFile) ||
+                        (attributes.isDirectory && gitDir.relativize(path).nameCount >= 32)) denied()
+                }
+            }
+        } catch (_: IOException) { denied() } catch (_: java.io.UncheckedIOException) { denied() }
+    }
+
     private fun ssh(user: String?, host: String, port: Int?, path: String, policy: GitRemotePolicy): GitRemoteLocation {
         if (user != null && (!USER.matches(user) || user.startsWith("-"))) refuse("VALIDATION_FAILED", "The SSH user name is invalid.")
         if (path.startsWith("-") || path.any { it == '\'' || it == '"' || it == '`' || it == '$' || it == ';' }) {
@@ -217,13 +249,25 @@ object GitTransports {
         return "'$text'"
     }
 
-    fun context(location: GitRemoteLocation, policy: GitRemotePolicy): GitTransportContext {
+    fun context(location: GitRemoteLocation, policy: GitRemotePolicy, discoverFormat: Boolean = false): GitTransportContext {
         val protocol = when (location.transport) { GitTransport.HTTPS -> "https"; GitTransport.SSH -> "ssh"; GitTransport.ADMITTED -> "file" }
         val configuration = mutableListOf("protocol.$protocol.allow" to "always")
         val variables = mutableMapOf("GIT_ALLOW_PROTOCOL" to protocol)
+        if (discoverFormat) {
+            configuration += "protocol.version" to "2"
+            // Packet capabilities expose object-format even for an empty remote. This is bounded
+            // stderr only, never a trace file, client progress, HTTP header trace or persisted log.
+            variables["GIT_TRACE_PACKET"] = "1"
+        }
         val secrets = mutableMapOf<String, String>()
         when (location.transport) {
-            GitTransport.ADMITTED -> Unit
+            GitTransport.ADMITTED -> {
+                // Revalidate at each ls-remote/fetch, not only when the registration was created.
+                val current = GitRemoteUrls.parse(location.display, policy)
+                if (current.transport != GitTransport.ADMITTED || current.url != location.url) {
+                    throw GitOperationRefusal("DESTINATION_NOT_ALLOWED", "The admitted remote changed since it was reviewed.")
+                }
+            }
             GitTransport.HTTPS -> {
                 val host = checkNotNull(location.host)
                 val credential = policy.credentials.https(host)
@@ -311,7 +355,15 @@ internal object GitRemoteStore {
     const val MAX_AUDIT_BYTES = 4L * 1024 * 1024
     val NAME = Regex("[A-Za-z0-9][A-Za-z0-9._-]{0,63}")
 
-    fun remoteId(repositoryId: String, name: String) = "remote_" + GitStorage.sha256("git-remote-v1\n$repositoryId\n$name").take(32)
+    /**
+     * Each registration has its own identity: a remote removed and re-created under the same name
+     * is a different remote, so a request reviewed against the old one cannot reach the new one.
+     */
+    fun remoteId(repositoryId: String, name: String, operationId: String) =
+        "remote_" + GitStorage.sha256("git-remote-v2\n$repositoryId\n$name\n$operationId").take(32)
+
+    /** A name that forms valid `refs/remotes/<name>/<branch>` refs (no `..`, `.lock`, leading dot or `HEAD`). */
+    fun validName(name: String) = NAME.matches(name) && name != "HEAD" && GitRefNames.isPlausibleBranchName(name)
 
     fun write(directory: Path, record: GitRemoteRecord) {
         val remotes = GitStorage.directories(directory, REMOTES)
@@ -333,7 +385,7 @@ internal object GitRemoteStore {
                     fun text(name: String) = value.getValue(name).jsonPrimitive.content
                     require(value.getValue("schemaVersion").jsonPrimitive.content == "1" && text("repositoryId") == repositoryId)
                     val name = text("name").also { require(NAME.matches(it)) }
-                    require(text("remoteId") == remoteId(repositoryId, name) && file.fileName.toString() == "${text("remoteId")}.json")
+                    require(text("remoteId") == remoteId(repositoryId, name, text("operationId")) && file.fileName.toString() == "${text("remoteId")}.json")
                     GitRemoteRecord(text("remoteId"), repositoryId, name, GitRemoteLocation(GitTransport.entries.single { it.wireName == text("transport") },
                         text("url"), value["host"]?.takeIf { it != JsonNull }?.jsonPrimitive?.content, text("display")),
                         Instant.parse(text("createdAt")), text("operationId"))
@@ -390,15 +442,24 @@ internal class GitDiskWatch(private val directory: Path, private val maxBytes: L
         val now = System.nanoTime()
         if (now - checkedAt < 500_000_000L) return null
         checkedAt = now
-        var total = 0L
-        try {
-            Files.walk(directory).use { paths ->
-                for (path in paths) {
-                    if (Files.isRegularFile(path, NOFOLLOW_LINKS)) total += Files.size(path)
-                    if (total > maxBytes) return "DISK_LIMIT"
-                }
+        return measure()
+    }
+
+    /** Unthrottled checks fail closed on unreadable storage at an admission boundary. */
+    fun exceeded(): Boolean = bytes(directory) > maxBytes
+    fun remaining(): Long = (maxBytes - bytes(directory)).coerceAtLeast(0)
+
+    private fun measure(): String? = try {
+        if (exceeded()) "DISK_LIMIT" else null
+    } catch (_: IOException) { "DISK_LIMIT" } catch (_: java.io.UncheckedIOException) { "DISK_LIMIT" }
+
+    companion object {
+        fun bytes(directory: Path): Long = Files.walk(directory).use { paths ->
+            var total = 0L
+            for (path in paths) {
+                if (Files.isRegularFile(path, NOFOLLOW_LINKS)) total = Math.addExact(total, Files.size(path))
             }
-        } catch (_: IOException) { /* a file vanished mid-walk; checked again next time */ } catch (_: java.io.UncheckedIOException) { }
-        return null
+            total
+        }
     }
 }

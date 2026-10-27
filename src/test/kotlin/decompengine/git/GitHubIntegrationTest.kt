@@ -63,10 +63,14 @@ class GitHubIntegrationTest {
                     authorization != null && authorization != "Bearer $token" -> reply(401, "{\"message\":\"bad credential\"}")
                     exchange.requestMethod == "GET" -> {
                         val query = exchange.requestURI.rawQuery.orEmpty().split('&').associate { it.substringBefore('=') to java.net.URLDecoder.decode(it.substringAfter('='), Charsets.UTF_8) }
-                        reply(200, JsonArray(pulls.filter { pull ->
+                        val matching = pulls.filter { pull ->
                             (query["head"] == null || query["head"] == "fixture-owner:" + pull.getValue("head").jsonObject.getValue("ref").jsonPrimitive.content) &&
                                 (query["base"] == null || query["base"] == pull.getValue("base").jsonObject.getValue("ref").jsonPrimitive.content)
-                        }).toString())
+                        }
+                        val size = query["per_page"]?.toInt() ?: 30
+                        val page = query["page"]?.toInt() ?: 1
+                        val next = if (matching.size > page * size) mapOf("Link" to "<$url${exchange.requestURI.path}?page=${page + 1}>; rel=\"next\"") else emptyMap()
+                        reply(200, JsonArray(matching.drop((page - 1) * size).take(size)).toString(), next)
                     }
                     exchange.requestMethod == "POST" && authorization == null -> reply(401, "{\"message\":\"Fixture credential required\"}")
                     else -> {
@@ -230,11 +234,112 @@ class GitHubIntegrationTest {
         }
     }
 
-    private fun reconcile(operationId: String): GitOperationRecord {
+    private fun reconciliation(operationId: String): GitSyncRequest {
         val view = service.workspace(jobId, repositoryId)
         val guards = GitGuards(GitWorkspaceVersions.repositoryVersion(view.record, view.observation), GitWorkspaceVersions.worktreeVersion(view.observation),
             view.observation.head.objectId, null, null)
-        return run(GitSyncRequest(GitOperationAction.GITHUB_PR_RECONCILE, view.worktreeId, guards, mapOf("prOperationId" to operationId)))
+        return GitSyncRequest(GitOperationAction.GITHUB_PR_RECONCILE, view.worktreeId, guards, mapOf("prOperationId" to operationId))
+    }
+
+    private fun reconcile(operationId: String): GitOperationRecord = run(reconciliation(operationId))
+
+    /** Seed clone + 63 uncertain creations without 63 provider writes. The service must be closed. */
+    private fun Fixture.fillPullRecoveryQuota(uncertain: GitOperationRecord): Path {
+        val operations = store.resolve("$jobId/git/operations")
+        val intents = store.resolve("$jobId/git/repositories/$repositoryId/pull-intents")
+        val operation = Json.parseToJsonElement(Files.readString(operations.resolve("${uncertain.operationId}.json"))).jsonObject
+        val intent = Json.parseToJsonElement(Files.readString(intents.resolve("${uncertain.operationId}.json"))).jsonObject
+        for (index in 1..62) {
+            val id = "operation_" + index.toString(16).padStart(32, '0')
+            val head = "blocked-$index"
+            Files.writeString(operations.resolve("$id.json"), buildJsonObject {
+                operation.forEach { (name, value) -> put(name, value) }
+                put("operationId", id); put("requestKeySha256", GitStorage.sha256(id))
+                put("request", buildJsonObject {
+                    val request = operation.getValue("request").jsonObject
+                    request.forEach { (name, value) -> put(name, value) }
+                    put("parameters", buildJsonObject {
+                        request.getValue("parameters").jsonObject.forEach { (name, value) -> put(name, value) }
+                        put("headBranch", head)
+                    })
+                })
+            }.toString())
+            Files.writeString(intents.resolve("$id.json"), buildJsonObject {
+                intent.forEach { (name, value) -> put(name, value) }
+                put("operationId", id); put("head", head)
+            }.toString())
+        }
+        assertEquals(64L, Files.list(operations).use { it.count() })
+        assertEquals(63L, Files.list(intents).use { it.count() })
+        return operations
+    }
+
+    @Test fun `full PR recovery quota permits bounded retries but not ordinary admission`(): Unit = Fixture().use { f ->
+        FakeGitHub(token).use { fake ->
+            val config = configuration(fake, f.repositories.root, writable = true)
+            f.cloned(config)
+            fake.failCreate = true
+            val uncertain = run(create())
+            assertEquals(GitOperationState.RECOVERY_REQUIRED, uncertain.state)
+            service.close()
+            val operations = f.fillPullRecoveryQuota(uncertain)
+            service = f.open(config)
+            val request = reconciliation(uncertain.operationId)
+            repeat(3) {
+                val requestsBefore = fake.requests.size
+                assertEquals("QUOTA_EXCEEDED", assertFailsWith<ManagedGitException> {
+                    service.requestWorkspace(jobId, repositoryId, create(), key())
+                }.code)
+                assertEquals(requestsBefore, fake.requests.size, "ordinary admission cannot contact the provider at quota")
+                fake.rateLimited = true
+                val retryKey = key()
+                val admission = service.requestWorkspace(jobId, repositoryId, request, retryKey)
+                assertTrue(service.awaitIdle(60_000))
+                val failed = service.operation(jobId, repositoryId, admission.operation.operationId)
+                assertEquals(GitOperationState.FAILED, failed.state)
+                assertEquals("GITHUB_RATE_LIMITED", failed.failureCode)
+                assertEquals(65L, Files.list(operations).use { it.count() }, "one shared recovery slot, not unbounded overflow")
+                assertTrue(service.requestWorkspace(jobId, repositoryId, request, retryKey).replayed)
+                assertEquals(GitOperationState.RECOVERY_REQUIRED, service.operation(jobId, repositoryId, uncertain.operationId).state)
+                assertEquals(63, service.githubStatus(jobId, repositoryId, null, remoteId(), "feature").unconfirmed.size)
+            }
+            fake.rateLimited = false
+            assertEquals(GitOperationState.COMPLETED, reconcile(uncertain.operationId).state)
+            assertEquals("PR_NOT_CREATED", service.operation(jobId, repositoryId, uncertain.operationId).failureCode)
+            assertEquals(62, service.githubStatus(jobId, repositoryId, null, remoteId(), "feature").unconfirmed.size)
+            assertEquals(1, fake.requests.count { it.startsWith("POST") }, "recovery never retries creation")
+            fake.failCreate = false
+            assertEquals(GitOperationState.COMPLETED, run(create()).state, "settlement frees ordinary capacity")
+            assertTrue(Files.list(operations).use { it.count() } <= 64)
+        }
+    }
+
+    @Test fun `PR reconciliation survives restart after a failed attempt in the reserved slot`(): Unit = Fixture().use { f ->
+        FakeGitHub(token).use { fake ->
+            val config = configuration(fake, f.repositories.root, writable = true)
+            f.cloned(config)
+            fake.dropAfterCreate = true
+            val uncertain = run(create())
+            assertEquals(GitOperationState.RECOVERY_REQUIRED, uncertain.state)
+            service.close()
+            val operations = f.fillPullRecoveryQuota(uncertain)
+            service = f.open(config)
+            fake.rateLimited = true
+            assertEquals("GITHUB_RATE_LIMITED", reconcile(uncertain.operationId).failureCode)
+            assertEquals(65L, Files.list(operations).use { it.count() })
+            service.close(); service = f.open(config)
+            assertEquals(63, service.githubStatus(jobId, repositoryId, null, remoteId(), "feature").unconfirmed.size)
+            assertEquals(GitOperationState.RECOVERY_REQUIRED, service.operation(jobId, repositoryId, uncertain.operationId).state)
+            fake.rateLimited = false; fake.dropAfterCreate = false
+            assertEquals(GitOperationState.COMPLETED, reconcile(uncertain.operationId).state)
+            assertEquals(GitOperationState.COMPLETED, service.operation(jobId, repositoryId, uncertain.operationId).state)
+            assertEquals(62, service.githubStatus(jobId, repositoryId, null, remoteId(), "feature").unconfirmed.size)
+            assertEquals(1, fake.pulls.size)
+            assertEquals(1, fake.requests.count { it.startsWith("POST") })
+            assertEquals(65L, Files.list(operations).use { it.count() })
+            service.close(); service = f.open(config)
+            assertEquals(62, service.githubStatus(jobId, repositoryId, null, remoteId(), "feature").unconfirmed.size)
+        }
     }
 
     private fun closedPull(number: Int, title: String) = buildJsonObject {
@@ -382,6 +487,173 @@ class GitHubIntegrationTest {
             val stale = create().let { it.copy(parameters = it.parameters + ("headObjectId" to "1".repeat(40))) }
             assertEquals("REF_CHANGED", assertFailsWith<ManagedGitException> { service.requestWorkspace(jobId, repositoryId, stale, key()) }.code)
             assertTrue(fake.requests.none { it.startsWith("POST") })
+        }
+    }
+
+    @Test fun `recovery searches page two independently of the presentation limit`(): Unit = Fixture().use { f ->
+        FakeGitHub(token).use { fake ->
+            repeat(30) { fake.pulls += closedPull(it + 1, "Historical review") }
+            f.cloned(configuration(fake, f.repositories.root, writable = true))
+            fake.dropAfterCreate = true
+            val uncertain = run(create())
+            assertEquals("PR_UNCONFIRMED", uncertain.failureCode)
+            assertEquals(30, service.githubStatus(jobId, repositoryId, null, remoteId(), "feature").pulls.size)
+            assertEquals(GitOperationState.COMPLETED, reconcile(uncertain.operationId).state)
+            assertTrue(service.operation(jobId, repositoryId, uncertain.operationId).message.contains("#31"))
+            assertTrue(fake.requests.any { it.contains("page=2") })
+        }
+    }
+
+    @Test fun `a capped recovery inventory never establishes absence`(): Unit = Fixture().use { f ->
+        FakeGitHub(token).use { fake ->
+            f.cloned(configuration(fake, f.repositories.root, writable = true))
+            fake.failCreate = true
+            val uncertain = run(create())
+            repeat(301) { number -> fake.pulls += kotlinx.serialization.json.JsonObject(closedPull(number + 1, "Other") +
+                ("body" to kotlinx.serialization.json.JsonPrimitive(GitHubCorrelation.comment("another_$number")))) }
+            val client = GitHubClient(configuration(fake, f.repositories.root, writable = true))
+            val inventory = client.inventory(GitHubBinding("admitted:upstream.git", "fixture-owner", "fixture-repo"), "feature")
+            assertEquals(300, inventory.pulls.size); assertFalse(inventory.complete)
+            val attempt = reconcile(uncertain.operationId)
+            assertEquals("PR_AMBIGUOUS", attempt.failureCode)
+            assertEquals(GitOperationState.RECOVERY_REQUIRED, service.operation(jobId, repositoryId, uncertain.operationId).state)
+            assertEquals(1, service.githubStatus(jobId, repositoryId, null, remoteId(), "feature").unconfirmed.size)
+        }
+    }
+
+    @Test fun `an incomplete preflight inventory refuses creation without posting`(): Unit = Fixture().use { f ->
+        FakeGitHub(token).use { fake ->
+            repeat(301) { fake.pulls += closedPull(it + 1, "History") }
+            f.cloned(configuration(fake, f.repositories.root, writable = true))
+            assertEquals("PR_AMBIGUOUS", run(create()).failureCode)
+            assertTrue(fake.requests.none { it.startsWith("POST") })
+            assertTrue(service.githubStatus(jobId, repositoryId, null, remoteId(), "feature").unconfirmed.isEmpty())
+        }
+    }
+
+    @Test fun `a copied body marker cannot shadow the creating operation`(): Unit = Fixture().use { f ->
+        FakeGitHub(token).use { fake ->
+            f.cloned(configuration(fake, f.repositories.root, writable = true))
+            fake.dropAfterCreate = true
+            val uncertain = run(create().copy(content = "Copied review" + GitHubCorrelation.comment("old_operation")))
+            assertEquals("PR_UNCONFIRMED", uncertain.failureCode)
+            val body = fake.pulls.single().getValue("body").jsonPrimitive.content
+            assertFalse(body.contains("old_operation"))
+            assertEquals(uncertain.operationId, GitHubCorrelation.find(body))
+            assertEquals(GitOperationState.COMPLETED, reconcile(uncertain.operationId).state)
+        }
+    }
+
+    @Test fun `legacy conflicting markers preserve uncertainty`(): Unit = Fixture().use { f ->
+        FakeGitHub(token).use { fake ->
+            f.cloned(configuration(fake, f.repositories.root, writable = true))
+            fake.dropAfterCreate = true
+            val uncertain = run(create())
+            val pull = fake.pulls.single()
+            fake.pulls[0] = kotlinx.serialization.json.JsonObject(pull + ("body" to kotlinx.serialization.json.JsonPrimitive(
+                GitHubCorrelation.comment("old_operation") + pull.getValue("body").jsonPrimitive.content)))
+            assertEquals("PR_AMBIGUOUS", reconcile(uncertain.operationId).failureCode)
+            assertEquals(GitOperationState.RECOVERY_REQUIRED, service.operation(jobId, repositoryId, uncertain.operationId).state)
+        }
+    }
+
+    @Test fun `an independent same-title creation is ambiguous rather than attributed to this operation`(): Unit = Fixture().use { f ->
+        FakeGitHub(token).use { fake ->
+            f.cloned(configuration(fake, f.repositories.root, writable = true))
+            fake.failCreate = true
+            val uncertain = run(create())
+            fake.pulls += openPull(1, "Review the feature")
+            assertEquals("PR_AMBIGUOUS", reconcile(uncertain.operationId).failureCode)
+            assertEquals(GitOperationState.RECOVERY_REQUIRED, service.operation(jobId, repositoryId, uncertain.operationId).state)
+        }
+    }
+
+    @Test fun `restart with a different API endpoint refuses recovery without contacting either provider`(): Unit = Fixture().use { f ->
+        FakeGitHub(token).use { original -> FakeGitHub(token).use { replacement ->
+            val config = configuration(original, f.repositories.root, writable = true)
+            f.cloned(config)
+            original.dropAfterCreate = true
+            val uncertain = run(create())
+            val originalRequests = original.requests.size
+            service.close(); service = f.open(configuration(replacement, f.repositories.root, writable = true))
+            assertEquals("PR_UNCONFIRMED", assertFailsWith<ManagedGitException> { reconcile(uncertain.operationId) }.code)
+            assertTrue(replacement.requests.isEmpty()); assertEquals(originalRequests, original.requests.size)
+            assertEquals(GitOperationState.RECOVERY_REQUIRED, service.operation(jobId, repositoryId, uncertain.operationId).state)
+            service.close(); service = f.open(config)
+            assertEquals(GitOperationState.COMPLETED, reconcile(uncertain.operationId).state)
+            assertEquals(1, original.pulls.size)
+        } }
+    }
+
+    @Test fun `API identity is canonical across equivalent configured endpoints`() {
+        val config = GitHubConfiguration(URI("https://API.GITHUB.COM:443/api/v3/"), null, emptyList())
+        assertEquals("https://api.github.com/api/v3", config.apiIdentity)
+    }
+
+    @Test fun `audit failure after provider success retains a reconcilable intent`(): Unit = Fixture().use { f ->
+        FakeGitHub(token).use { fake ->
+            f.cloned(configuration(fake, f.repositories.root, writable = true))
+            val audit = f.store.resolve("$jobId/git/repositories/$repositoryId/audit.jsonl")
+            f.hook = { point -> if (point == GitOperationCrashPoint.AFTER_STAGING) {
+                Files.deleteIfExists(audit); Files.createDirectory(audit)
+            } }
+            val uncertain = run(create())
+            assertEquals(1, fake.pulls.size)
+            assertEquals("PR_UNCONFIRMED", uncertain.failureCode)
+            assertEquals(GitOperationState.RECOVERY_REQUIRED, uncertain.state)
+            assertEquals(1, service.githubStatus(jobId, repositoryId, null, remoteId(), "feature").unconfirmed.size)
+            Files.delete(audit); f.hook = {}
+            service.close(); service = f.open(configuration(fake, f.repositories.root, writable = true))
+            assertEquals(GitOperationState.COMPLETED, reconcile(uncertain.operationId).state)
+            assertEquals(1, fake.pulls.size)
+        }
+    }
+
+    @Test fun `crash after provider success retains the intent until durable completion`(): Unit = Fixture().use { f ->
+        FakeGitHub(token).use { fake ->
+            val config = configuration(fake, f.repositories.root, writable = true)
+            f.cloned(config)
+            f.hook = { if (it == GitOperationCrashPoint.AFTER_PUBLISH) throw SimulatedGitCrash() }
+            val first = service.requestWorkspace(jobId, repositoryId, create(), key())
+            assertTrue(service.awaitIdle(60_000)); assertEquals(1, fake.pulls.size)
+            f.hook = {}; service.close(); service = f.open(config)
+            assertEquals(GitOperationState.RECOVERY_REQUIRED, service.operation(jobId, repositoryId, first.operation.operationId).state)
+            assertEquals(GitOperationState.COMPLETED, reconcile(first.operation.operationId).state)
+            assertTrue(service.githubStatus(jobId, repositoryId, null, remoteId(), "feature").unconfirmed.isEmpty())
+        }
+    }
+
+    @Test fun `restart cleans a confirmed intent left after durable completion`(): Unit = Fixture().use { f ->
+        FakeGitHub(token).use { fake ->
+            val config = configuration(fake, f.repositories.root, writable = true)
+            f.cloned(config)
+            f.hook = { if (it == GitOperationCrashPoint.BEFORE_PUBLISH) throw SimulatedGitCrash() }
+            val first = service.requestWorkspace(jobId, repositoryId, create(), key())
+            assertTrue(service.awaitIdle(60_000))
+            val intent = f.store.resolve("$jobId/git/repositories/$repositoryId/pull-intents/${first.operation.operationId}.json")
+            assertTrue(Files.exists(intent))
+            f.hook = {}; service.close(); service = f.open(config)
+            assertEquals(GitOperationState.COMPLETED, service.operation(jobId, repositoryId, first.operation.operationId).state)
+            assertFalse(Files.exists(intent))
+            assertTrue(service.githubStatus(jobId, repositoryId, null, remoteId(), "feature").unconfirmed.isEmpty())
+            assertEquals(1, fake.pulls.size)
+        }
+    }
+
+    @Test fun `a created pull request is confirmed by its correlation after it is retargeted`(): Unit = Fixture().use { f ->
+        FakeGitHub(token).use { fake ->
+            f.cloned(configuration(fake, f.repositories.root, writable = true))
+            fake.dropAfterCreate = true
+            val uncertain = run(create())
+            assertEquals("PR_UNCONFIRMED", uncertain.failureCode, uncertain.message)
+            fake.dropAfterCreate = false
+            // A collaborator retargets the pull request to another base before reconciliation.
+            val created = fake.pulls.single()
+            fake.pulls[0] = kotlinx.serialization.json.JsonObject(created + ("base" to buildJsonObject { put("ref", "release") }))
+            val reconciled = reconcile(uncertain.operationId)
+            assertEquals(GitOperationState.COMPLETED, reconciled.state, reconciled.message)
+            assertTrue(reconciled.message.contains("#1"), reconciled.message)
+            assertEquals(GitOperationState.COMPLETED, service.operation(jobId, repositoryId, uncertain.operationId).state)
         }
     }
 }

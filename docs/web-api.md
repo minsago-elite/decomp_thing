@@ -946,7 +946,12 @@ A remote URL is checked before Git runs. The server refuses:
   `DESTINATION_NOT_ALLOWED`;
 - SSH hosts or paths that could be read as options, with `VALIDATION_FAILED`.
 
-An admitted remote is displayed by its name, never by its host path.
+An admitted remote is displayed by its name, never by its host path. It must be a self-contained
+bare repository or ordinary checkout with a real `.git` directory. Gitfiles, linked worktrees,
+shallow repositories, object alternates and links/special files anywhere in Git metadata are
+refused with `DESTINATION_NOT_ALLOWED`, including at transfer time after registration. Admission
+scans at most 100,000 metadata entries and 32 levels. The root is operator-owned; do not modify
+admitted repository metadata concurrently with a transfer.
 
 Credentials never leave the server. For HTTPS, Git receives an `Authorization` header for that
 remote's origin only, through `GIT_CONFIG_*` environment variables. It never appears in argv,
@@ -962,30 +967,42 @@ output: `CERTIFICATE_INVALID`, `AUTHENTICATION_REQUIRED`, `HOST_KEY_UNVERIFIED`,
 
 | Action | Body fields | Effect |
 | --- | --- | --- |
-| `git.remote.add` | `name`, `url` | Registers a policy-checked remote (at most eight) in a server record; repository configuration is never written |
-| `git.remote.remove` | `remoteId` | Deletes the remote and its remote-tracking refs; local branches and commits are unchanged |
+| `git.remote.add` | `name`, `url` | Registers a policy-checked remote (at most eight) in a server record; repository configuration is never written. The name must form valid `refs/remotes/<name>/` refs. Each registration has its own `remoteId`, so a remote removed and re-created under the same name is a different remote that stale requests cannot reach |
+| `git.remote.remove` | `remoteId` | Deletes the remote and every one of its remote-tracking refs; local branches and commits are unchanged |
 | `git.fetch` | `remoteId` | Fetches branches into `refs/remotes/<name>/` only: no tags, no `FETCH_HEAD`, no submodules, no work tree, and nothing is merged or checked out |
 
 `POST J/repositories` with `git.clone` (`url`, `remoteName`, `branch`) fetches into a fresh managed
 repository in private staging (#592). The repository receives the remote's branches as
-remote-tracking refs plus its tags. Then the server creates the default or named branch, checks it
-out within the checkout bound and registers the remote. The repository is published only when it
+remote-tracking refs plus its tags. It discovers and preserves the remote's object format before
+initialization, including empty SHA-256 repositories, rather than imposing the new-repository
+default. Format discovery uses bounded, server-only protocol capability diagnostics; those never
+enter records, operation progress or client responses. A detached advertised remote HEAD is refused
+with `REPOSITORY_UNSUPPORTED` unless the request explicitly selects a branch; it is never treated as
+an empty repository or silently replaced with an unborn default branch. An advertised default branch
+outside the workbench's naming policy is refused with `VALIDATION_FAILED` before initialization or
+fetch, with guidance to select a supported branch explicitly; it is never replaced by the configured
+default. Then the server creates the default or named branch, checks it out within the checkout bound
+and registers the remote. The repository is published only when it
 is complete; a failure or cancellation removes the staging tree. Hooks, filters, submodules and
 LFS stay inert, and objects are verified with `fsck`.
 
 Every transfer is bounded:
 
 - by elapsed time, at most ten minutes;
-- by repository bytes, which are checked while Git runs, so an overrun stops with `TRANSFER_LIMIT`;
+- by repository bytes, checked while Git runs and unconditionally at admission, so an overrun stops with `TRANSFER_LIMIT`. Clone budgets checkout expansion against the remaining bytes and checks the complete staging tree immediately before publication. Fetch receives into operation-owned quarantine with a read-only alternate to existing managed objects, budgeting existing plus quarantined bytes; rejected objects and refs never enter the live store. Admitted immutable objects are promoted without replacing local objects, then tracking refs publish with bounded compare-and-swap transactions; a branch namespace transition (for example `topic` to `topic/sub`) first prunes only obsolete conflicting tracking refs because Git's files backend cannot delete and recreate those names in one transaction;
 - by output.
 
 The operation's `progress` reports Git's own phase and percent while it runs (#594).
 `POST G/operations/{id}/cancel` with `{"action": "git.cancel"}` and the operation version in
 `If-Match` stops a queued or running fetch or clone. The operation shows `cancelling` and then ends
-`cancelled`. Partial packs are removed, and local branches, the work tree and accepted snapshots are
-never touched. Git updates each remote-tracking ref only after its pack is complete, so a fetch
-interrupted by a restart leaves refs unchanged or fully updated. It becomes `interrupted` and is
-never repeated. Progress is exposed through the durable operation resource. It is not yet published
+`cancelled`. Transfer staging (including complete but unadmitted packs) is removed, and local
+branches, the work tree and accepted snapshots are never touched. Tracking-ref publication runs
+only after object admission. Ordinarily refs are unchanged or fully updated; a namespace transition
+interrupted between its prune and publication transactions can also leave obsolete conflicting refs
+pruned without their replacements. A fresh explicit fetch safely refreshes that tracking state,
+including after restart; no automatic retry runs. A restart between object promotion and ref publication
+may retain already-admitted objects within the byte cap; it never promotes an oversized quarantine.
+The operation becomes `interrupted` and is never repeated automatically. Progress is exposed through the durable operation resource. It is not yet published
 on the shared job event stream, which is still run-scoped.
 
 `GET G/remotes` lists each remote with:
@@ -1026,8 +1043,9 @@ work tree's branch with one remote-tracking ref, using fetched state only. It re
 - the remote's freshness: `current`, `stale` (fetched more than an hour ago) or `unknown` (never
   fetched);
 - each strategy and whether it is available. `fast-forward` needs no local commits. `merge` needs
-  remote commits to integrate. `rebase` is never available, because history rewriting is not
-  supported and nothing ever force-updates a remote.
+  remote commits to integrate, and it is unavailable when policy requires signed commits, because
+  it would create an unsigned commit. `rebase` is never available, because history rewriting is
+  not supported and nothing ever force-updates a remote.
 
 Integration is the separate, reviewed `git.merge` action (#596). Its fields are `trackingRefId`,
 `targetObjectId` and `strategy` (`fast-forward` or `merge`), plus the full guards. The server
@@ -1039,31 +1057,51 @@ refuses:
 - a tracking ref that moved since review with `REF_CHANGED`;
 - a merge already in progress with `MERGE_IN_PROGRESS`;
 - nothing to integrate with `NOTHING_TO_INTEGRATE`, and a fast-forward over local commits with
-  `FAST_FORWARD_UNAVAILABLE`.
+  `FAST_FORWARD_UNAVAILABLE`;
+- a `merge` when policy requires signed commits with `SIGNING_UNAVAILABLE`; a fast-forward creates
+  no commit and stays available.
 
-Git runs with hooks, signing, autostash and rerere off, under the server identity. The base and
+Git runs with hooks, signing, autostash and rerere off, under the server identity. It never
+overwrites an ignored local file, such as experiment output, with an incoming tracked one. Git
+refuses instead (`MERGE_REFUSED`) and nothing changes. The base and
 target are recorded before Git runs. A clean merge or fast-forward returns the new HEAD. It is a new
 source candidate: it is never mapped to or accepted as an existing revision, and it needs the normal
 validation.
 
 A merge that stops with conflicts leaves Git's merge state in place (#597):
 
-- `GET G/conflicts` names the integration (branch, pre-merge HEAD, target and tracking ref) and every
-  unresolved path with its base, ours and theirs blob IDs.
+- `GET G/conflicts?offset=0` names the integration (branch, pre-merge HEAD, target and tracking ref)
+  and returns up to 200 unresolved paths with their base, ours and theirs blob IDs. Pages also
+  obey the encoded UTF-8 response byte budget, including JSON escaping and envelope overhead;
+  `nextOffset` advances by the number actually returned, not a fixed page size. `offset`,
+  `totalCount` and nullable `nextOffset` expose all live pages without silently omitting paths.
+  List and detail path labels are at most 1,024 characters: longer escaped names end with
+  `... [truncated; file_<identity>]` and set `pathEscaped: true`. A label is not a filesystem
+  identity; the full-byte-derived opaque `fileId` still selects the exact file for detail,
+  save and completion. Distinct long names therefore remain individually accessible.
+  Offsets are navigation, not snapshot cursors: the index may change between reads; every save
+  and completion independently revalidates the file identity and digest. Mutations return the UI
+  to the first page. Conflict-list failures do not hide the explicit merge-abort action.
 - `GET G/conflicts/{fileId}` returns each side and the current file as text, with the current
   file's SHA-256 (or `absent`) as its concurrency token. A side that is binary, deleted or larger
-  than 256 KiB is reported with `supported: false` and a reason, never as an editable file.
+  than 256 KiB is reported with `supported: false` and a reason, never as an editable file. The
+  token is computed by streaming, and completion reads at most one byte beyond the bound, so a
+  large file is never loaded.
 
 These actions resolve or end the merge:
 
 - `git.conflict.save` writes one conflicted file. Its `resolution` is `ours`, `theirs` or `base`,
   or `text` with `content`. Its `expectedSha256` must still match the file, so a newer worker or
   user change is never overwritten (`CONTENT_CHANGED`). Only policy-admitted plain files inside the
-  work tree can be written, and nothing is staged.
+  work tree can be written, and nothing is staged. The file keeps its permissions, so an
+  executable script stays executable.
 - `git.conflict.complete` (#598) stages exactly the reviewed `files`, each with the digest it was
-  reviewed at. A file that still has conflict markers is refused with `UNRESOLVED_MARKERS`. The
-  final commit stays the explicit `git.commit` review: it lists every staged file and creates the
-  merge commit.
+  reviewed at. A file that still has conflict markers is refused with `UNRESOLVED_MARKERS`. Markers
+  are detected at the file's effective `conflict-marker-size` attribute and at Git's default width
+  of 7. The final commit stays the explicit `git.commit` review: it lists every staged file and
+  creates the merge commit. When the resolution matches the current commit, nothing is staged. The
+  commit then takes an empty `selectedFileIds` and still records the merge with both parents.
+  Outside a merge, an empty selection is `NOTHING_TO_COMMIT`.
 - `git.merge.abort` runs `merge --abort`, which restores the branch and the work tree that the
   clean-work-tree precondition guaranteed. Accepted snapshots and audit entries are untouched.
 
@@ -1088,12 +1126,23 @@ The workspace's **Integrate remote changes** panel works through these steps:
    reviewed.
 4. Offer **Abort merge**.
 
+A divergence review is shown only while its work tree, branch and HEAD are still the destination.
+A late answer to an older read is discarded. If a save is refused or fails, the edited resolution
+stays in the editor, and only the concurrency token is refreshed.
+
 `GitIntegrationTest` covers:
 
 - divergence from fetched state only, the refusals, and a fast-forward to an unmapped candidate;
 - a real conflict that is reviewed, refused while it has markers or a stale digest, saved, staged
   and committed as a two-parent merge;
-- abort, and restart with Git's merge state retained or not yet created.
+- abort, and restart with Git's merge state retained or not yet created;
+- ignored local output that survives a refused fast-forward;
+- a merge resolved to the current tree that is committed with both parents;
+- an executable file that stays executable through a saved resolution;
+- signing policy, which refuses merges and keeps fast-forwards;
+- wide conflict markers set by attribute;
+- the streamed content digest, and an oversized conflict refused at completion without being
+  loaded.
 
 ### Explicit publication and push reconciliation
 
@@ -1119,21 +1168,45 @@ work tree's branch from fetched state. It reports:
 
 At execution, `ls-remote` rechecks the remote itself, and a remote that moved is refused before
 anything is sent. The server then records a push intent and runs `git push --porcelain` of exactly
-`localObjectId:refs/heads/<branch>` without `+` or `--force`, with hooks, signing, tag following
-and submodule recursion off. The remote therefore rejects any non-fast-forward itself, and that
-rejection is reported as `NON_FAST_FORWARD` or `PUSH_REJECTED`. Ref deletion and force pushes are
-unavailable; any future support needs its own scope and expected-object protection. Credentials,
+`localObjectId:refs/heads/<branch>` without `+`, with hooks, signing, tag following and submodule
+recursion off. The push carries `--force-with-lease=refs/heads/<branch>:<expectedRemoteObjectId>`,
+with an empty expectation for a new branch. The remote therefore applies the update only while the
+branch still names the reviewed object or is still absent. A change between the `ls-remote` check
+and the push, including a deletion, is refused as `REMOTE_CHANGED` and never recreates or overwrites
+anything. The lease never makes a non-fast-forward possible, because admission already requires
+the reviewed expected object to be an ancestor of `localObjectId`. Explicit remote rejections are
+reported as `NON_FAST_FORWARD` or `PUSH_REJECTED`. Ref deletion and force pushes are unavailable;
+any future support needs its own scope and expected-object protection. Credentials,
 authentication failures and rejections surface only as the fixed transport codes.
 
-A push whose outcome is unknown never claims publication (#601). This happens when the transfer
-fails after starting or the server restarts while it runs. The operation becomes
-`recovery-required` with `PUSH_UNCONFIRMED`, and its intent blocks retries and removal of that
-remote. `git.push.reconcile` with `pushOperationId` reads the remote and settles the original
-operation:
+A push whose outcome is unknown never claims publication (#601). This happens when:
 
-- `completed` when the remote branch names the pushed commit;
+- the transfer fails after starting;
+- the server restarts while it runs;
+- Git reports a `[remote failure]` (the remote did not report the update), a missing status or an
+  unrecognized status.
+
+An explicit `[rejected]` or `[remote rejected]`, or a known authentication/credential or host
+verification failure before publication, is a definite refusal. Write authentication failures keep
+the fixed transport guidance even when anonymous reads succeed. Other transfer failures remain
+unconfirmed. An unknown outcome makes the operation `recovery-required` with `PUSH_UNCONFIRMED`,
+and its intent blocks retries and removal of that remote. For a known outcome, the intent is
+removed only after both its audit and operation result are durable, so a crash or storage failure
+in between still leaves a reconcilable record. `git.push.reconcile` with
+`pushOperationId` reads the remote and settles the original operation:
+
+- `completed` when the remote branch names the pushed commit (an operation already recorded as
+  completed keeps its record);
 - `failed` with `PUSH_NOT_PUBLISHED` when it still names the expected object;
 - `failed` with `PUSH_SUPERSEDED` when it names something else.
+
+Reconciliation retains the original intent until its audit and its own completed operation are
+durable. A restart after completion finishes leftover cleanup without re-observing the remote or
+changing either recorded outcome. If auditing failed, reconciliation remains available. Original
+push records with retained intents cannot be retired, even if already settled. One bounded recovery
+slot beyond the ordinary 64-operation quota keeps reconciliation available when unresolved pushes
+fill that quota; other actions cannot consume it, and failed reconciliation attempts can be retired
+before retry without discarding unresolved evidence.
 
 The repository audit records the destination, ref, old and new objects and outcome of every push
 start, publication, rejection, unconfirmed state and reconciliation. It never accepts or rejects a
@@ -1201,8 +1274,10 @@ explicit write, refused when:
 - an earlier creation for the same branches is unconfirmed, with `PR_UNCONFIRMED`.
 
 The creation intent is recorded before GitHub is contacted, and every outcome is audited. The
-intent records the GitHub repository contacted and the numbers of pull requests that already
-existed for those branches.
+intent records the canonical API endpoint, GitHub repository contacted and the numbers of pull
+requests that already existed for the head on any base. The presentation listing is limited to
+30 entries; creation preflight and recovery use a separate inventory bounded to ten pages of 30.
+An incomplete preflight refuses creation with `PR_AMBIGUOUS` without sending a POST.
 
 - An open pull request that already exists for the branches is reported as the result, and
   nothing is written. A duplicate refusal from GitHub during creation is resolved the same way.
@@ -1210,18 +1285,29 @@ existed for those branches.
   a pull request already exists.
 - The body sent to GitHub ends with a hidden comment,
   `<!-- decomp-workbench-operation: <operationId> -->`, that ties the pull request to its
-  creating operation.
+  creating operation. Reserved correlation comments copied into the draft are stripped before
+  the server appends its own marker. Conflicting markers in a provider body are ambiguous.
 - Only definite refusals fail the operation: unauthorized, forbidden, not found, validation,
   read-only, missing credential and rate limited.
 - Any other outcome becomes `recovery-required` with `PR_UNCONFIRMED`. Examples are a dropped
-  connection, a stalled or unreadable response, or a server error.
+  connection, a stalled or unreadable response, a server error, or a local audit/completion failure
+  after the external write. The intent stays until audit and operation completion are durable;
+  confirmed intents left by a crash are cleaned up idempotently after restart.
 - `github.pr.reconcile` with `prOperationId` looks in the recorded repository, even if the
-  remote's binding has since changed. It ignores pull requests that already existed. It matches
-  by the correlation comment, which survives a title edit, and otherwise by the title digest. It
-  settles the original operation as `completed`, or as `failed` with `PR_NOT_CREATED` when no new
-  pull request exists, and it never repeats the write. When new pull requests exist but none can
-  be identified, the reconciliation fails with `PR_AMBIGUOUS`, and the creation stays
-  unconfirmed.
+  remote's binding has since changed. A changed API endpoint (or a legacy intent without a
+  recorded endpoint) refuses reconciliation with `PR_UNCONFIRMED` and retains the intent. It
+  never sends current credentials to a previously configured endpoint automatically.
+  Recovery searches every base, because the pull request may have been retargeted, and ignores
+  pull requests that already existed for the head. Only a unique correlation comment confirms
+  creation; a matching title alone is not provenance. It settles the original operation as
+  `completed`, or as `failed` with `PR_NOT_CREATED` only when a complete inventory contains no
+  new pull requests. Unmatched new pull requests, conflicting correlations or an incomplete
+  inventory without a match fail reconciliation with `PR_AMBIGUOUS` and keep the creation
+  unconfirmed. Reconciliation never repeats the write. Push and PR reconciliation share one
+  reserved slot beyond the ordinary 64-operation quota, so a full set of unresolved creations
+  cannot block recovery. Ordinary actions cannot use that slot. Failed reconciliation records
+  may be retired before retry (including after restart), but original records with retained
+  push or PR intents are preserved until their evidence is settled.
 - Completion messages are bounded to the record's 500 characters, so a long provider link never
   makes the operation record unreadable.
 - A remote with an unconfirmed creation cannot be removed (`PR_UNCONFIRMED`).
@@ -1245,10 +1331,14 @@ remote, branches and commits.
 - an older pull request with the same title that is never taken as the result;
 - reconciliation in the recorded repository after the binding changes;
 - refusal to remove a remote with an unconfirmed creation;
-- confirmation by correlation after a title edit, and `PR_AMBIGUOUS` for an unidentifiable pull
-  request;
+- confirmation by correlation after a title edit or retargeting, and `PR_AMBIGUOUS` for an
+  unidentifiable pull request;
 - an existing open pull request reported without writing, and GitHub's `custom` duplicate error;
-- a long provider link bounded in the record, and a moved reviewed commit refused.
+- a long provider link bounded in the record, and a moved reviewed commit refused;
+- page-two correlation and capped inventories, including refusal of an incomplete preflight;
+- copied/conflicting markers and independent same-title pull requests;
+- a restart with a different provider, without querying either provider during refusal;
+- post-response crash/audit failure recovery and confirmed-intent cleanup after restart.
 
 The separate `github-optional` CI lane runs these tests and the fixture's own test with no
 secrets or network credentials (#612).

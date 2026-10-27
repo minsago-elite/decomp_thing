@@ -29,11 +29,11 @@ class GitRemotesTest {
             policy = GitRepositoryPolicy(defaultBranch = "main"), crash = { hook(it) }, remotePolicy = policy).also(opened::add)
 
         /** A bare remote with two commits on `main` and one on `topic`, populated with raw fixture Git. */
-        fun remote(name: String = "upstream"): Path {
+        fun remote(name: String = "upstream", format: String = "sha1"): Path {
             val bare = admitted.resolve("$name.git")
-            repositories.git("init", "-q", "--bare", "--initial-branch=main", bare.toString())
+            repositories.git("init", "-q", "--bare", "--initial-branch=main", "--object-format=$format", bare.toString())
             val work = Files.createDirectories(repositories.root.resolve("$name seed"))
-            repositories.git("init", "-q", "--initial-branch=main", work.toString())
+            repositories.git("init", "-q", "--initial-branch=main", "--object-format=$format", work.toString())
             Files.writeString(work.resolve("README.md"), "remote\n")
             repositories.git("-C", work.toString(), "add", "-A"); repositories.git("-C", work.toString(), "commit", "-q", "-m", "one")
             Files.writeString(work.resolve("util.c"), "int util;\n")
@@ -112,6 +112,52 @@ class GitRemotesTest {
         refusedUrl("TRANSPORT_UNSUPPORTED", "admitted:upstream.git", GitRemotePolicy(allowedHosts = setOf("git.example.org")))
     }
 
+    @Test fun `admitted clone and fetch refuse indirect Git directories objects and refs`(): Unit = Fixture().use { f ->
+        val outside = f.repositories.root.resolve("outside.git")
+        f.repositories.git("init", "-q", "--bare", outside.toString())
+        val gitfile = Files.createDirectories(f.admitted.resolve("gitfile"))
+        Files.writeString(gitfile.resolve(".git"), "gitdir: $outside\n")
+        val linked = Files.createDirectories(f.admitted.resolve("linked"))
+        Files.createSymbolicLink(linked.resolve(".git"), outside)
+        val objects = f.remote("objects")
+        GitStorage.deleteTree(objects.resolve("objects"))
+        Files.createSymbolicLink(objects.resolve("objects"), outside.resolve("objects"))
+        val refs = f.remote("refs")
+        GitStorage.deleteTree(refs.resolve("refs"))
+        Files.createSymbolicLink(refs.resolve("refs"), outside.resolve("refs"))
+        val alternate = f.remote("alternate")
+        Files.writeString(alternate.resolve("objects/info/alternates"), outside.resolve("objects").toString() + "\n")
+        val httpAlternate = f.remote("http-alternate")
+        Files.writeString(httpAlternate.resolve("objects/info/http-alternates"), "https://unreviewed.invalid/objects\n")
+        val common = f.remote("common")
+        Files.writeString(common.resolve("commondir"), outside.toString() + "\n")
+        val loose = f.remote("loose")
+        val shard = Files.createDirectories(loose.resolve("objects/aa"))
+        Files.createSymbolicLink(shard.resolve("b".repeat(38)), outside.resolve("HEAD"))
+        val names = listOf("gitfile", "linked", "objects.git", "refs.git", "alternate.git", "http-alternate.git", "common.git", "loose.git")
+        service = f.open()
+        for (name in names) {
+            assertEquals("DESTINATION_NOT_ALLOWED", assertFailsWith<ManagedGitException>(name) {
+                service.request(jobId, GitCloneRequest("admitted:$name", "origin", null), key())
+            }.code)
+        }
+        f.initialized()
+        for (name in names) refused("DESTINATION_NOT_ALLOWED", GitOperationAction.REMOTE_ADD, "name" to "origin", "url" to "admitted:$name")
+        // A regular non-bare .git directory remains supported, unlike gitfiles and linked .git.
+        val mutable = f.remote("mutable")
+        val ordinary = f.admitted.resolve("ordinary")
+        Files.move(f.repositories.root.resolve("mutable seed"), ordinary)
+        val policy = GitRemotePolicy(admittedRoot = f.admitted)
+        assertEquals(GitTransport.ADMITTED, parse("admitted:ordinary", policy).transport)
+        val reviewed = parse("admitted:mutable.git", policy)
+        assertEquals(GitOperationState.COMPLETED, sync(GitOperationAction.REMOTE_ADD, "name" to "origin", "url" to reviewed.display).state)
+        val remoteId = service.remotes(jobId, repositoryId).single().record.remoteId
+        Files.writeString(mutable.resolve("objects/info/alternates"), outside.resolve("objects").toString() + "\n")
+        refused("DESTINATION_NOT_ALLOWED", GitOperationAction.FETCH, "remoteId" to remoteId)
+        assertEquals("DESTINATION_NOT_ALLOWED", assertFailsWith<GitOperationRefusal> { GitTransports.context(reviewed, policy) }.code)
+        assertTrue(service.remotes(jobId, repositoryId).single().tracking.isEmpty())
+    }
+
     @Test fun `credentials stay in the child environment and SSH always verifies host keys`(): Unit = Fixture().use { f ->
         val token = f.repositories.root.resolve("token")
         Files.writeString(token, "canary-secret-7f3a\n")
@@ -183,6 +229,68 @@ class GitRemotesTest {
         assertTrue(service.workspace(jobId, repositoryId).observation.refs.none { it.name.startsWith("refs/remotes/") })
     }
 
+    @Test fun `fetch publishes both directions of tracking ref namespace transitions`() {
+        for (reverse in listOf(false, true)) Fixture().use { f ->
+            val remote = f.remote()
+            val old = if (reverse) "topic/sub" else "topic"
+            val next = if (reverse) "topic" else "topic/sub"
+            if (reverse) {
+                f.repositories.git("-C", remote.toString(), "branch", "-m", "topic", old)
+            }
+            f.initialized()
+            assertEquals(GitOperationState.COMPLETED, sync(GitOperationAction.REMOTE_ADD, "name" to "origin", "url" to "admitted:upstream.git").state)
+            val remoteId = service.remotes(jobId, repositoryId).single().record.remoteId
+            assertEquals(GitOperationState.COMPLETED, sync(GitOperationAction.FETCH, "remoteId" to remoteId).state)
+            val before = service.workspace(jobId, repositoryId).observation
+            f.repositories.git("-C", remote.toString(), "branch", "-m", old, next)
+            repeat(2) {
+                val operation = sync(GitOperationAction.FETCH, "remoteId" to remoteId)
+                assertEquals(GitOperationState.COMPLETED, operation.state, operation.message)
+                assertEquals(setOf("refs/remotes/origin/main", "refs/remotes/origin/$next"),
+                    service.remotes(jobId, repositoryId).single().tracking.map { it.name }.toSet())
+                val after = service.workspace(jobId, repositoryId).observation
+                assertEquals(before.head, after.head)
+                assertEquals(GitWorkspaceVersions.worktreeVersion(before), GitWorkspaceVersions.worktreeVersion(after))
+                assertEquals(before.refs.filter { !it.name.startsWith("refs/remotes/") }, after.refs.filter { !it.name.startsWith("refs/remotes/") })
+            }
+        }
+    }
+
+    @Test fun `fetch retries safely after interruption between namespace prune and publication`() {
+        for (reverse in listOf(false, true)) Fixture().use { f ->
+            val remote = f.remote()
+            val old = if (reverse) "topic/sub" else "topic"
+            val next = if (reverse) "topic" else "topic/sub"
+            if (reverse) f.repositories.git("-C", remote.toString(), "branch", "-m", "topic", old)
+            f.initialized()
+            assertEquals(GitOperationState.COMPLETED, sync(GitOperationAction.REMOTE_ADD, "name" to "origin", "url" to "admitted:upstream.git").state)
+            val remoteId = service.remotes(jobId, repositoryId).single().record.remoteId
+            assertEquals(GitOperationState.COMPLETED, sync(GitOperationAction.FETCH, "remoteId" to remoteId).state)
+            val before = service.workspace(jobId, repositoryId).observation
+            f.repositories.git("-C", remote.toString(), "branch", "-m", old, next)
+            val live = f.store.resolve("$jobId/git/repositories/$repositoryId/repository.git")
+            val quarantine = f.repositories.root.resolve("interrupted-quarantine.git")
+            val policy = GitRemotePolicy(admittedRoot = f.admitted)
+            assertFailsWith<IllegalStateException> {
+                GitTransfers.fetchQuarantined(f.repositories.runner, live, quarantine, GitObjectFormat.SHA1,
+                    parse("admitted:upstream.git", policy), "origin", policy, 1024 * 1024, GitProcessControl()) {
+                    throw IllegalStateException("Simulated process loss after namespace prune")
+                }
+            }
+            assertEquals(listOf("refs/remotes/origin/main"), service.remotes(jobId, repositoryId).single().tracking.map { it.name })
+            service.close()
+            service = f.open()
+            val operation = sync(GitOperationAction.FETCH, "remoteId" to remoteId)
+            assertEquals(GitOperationState.COMPLETED, operation.state, operation.message)
+            assertEquals(setOf("refs/remotes/origin/main", "refs/remotes/origin/$next"),
+                service.remotes(jobId, repositoryId).single().tracking.map { it.name }.toSet())
+            val after = service.workspace(jobId, repositoryId).observation
+            assertEquals(before.head, after.head)
+            assertEquals(GitWorkspaceVersions.worktreeVersion(before), GitWorkspaceVersions.worktreeVersion(after))
+            assertEquals(before.refs.filter { !it.name.startsWith("refs/remotes/") }, after.refs.filter { !it.name.startsWith("refs/remotes/") })
+        }
+    }
+
     @Test fun `clone publishes a complete managed repository from an admitted remote`(): Unit = Fixture().use { f ->
         f.remote()
         service = f.open()
@@ -203,6 +311,118 @@ class GitRemotesTest {
         assertEquals("origin", service.remotes(jobId, repositoryId).single().record.name)
         assertFalse(Files.exists(f.repositories.root.resolve("hook-ran")))
         assertTrue(Files.list(f.store.resolve("$jobId/git/staging")).use { it.count() } == 0L)
+    }
+
+    @Test fun `clone refuses detached remote HEAD without an explicit branch instead of publishing unborn main`() {
+        for (format in listOf("sha1", "sha256")) Fixture().use { f ->
+            val remote = f.remote(format = format)
+            val expected = f.repositories.git("-C", remote.toString(), "rev-parse", "refs/heads/topic").trim()
+            f.repositories.git("-C", remote.toString(), "update-ref", "--no-deref", "HEAD", expected)
+            f.repositories.git("-C", remote.toString(), "branch", "-D", "main")
+            service = f.open()
+            val clone = service.request(jobId, GitCloneRequest("admitted:upstream.git", "origin", null), key())
+            assertTrue(service.awaitIdle(60_000))
+            val result = service.operation(jobId, clone.operation.repositoryId, clone.operation.operationId)
+            assertEquals(GitOperationState.FAILED, result.state, result.message)
+            assertEquals("REPOSITORY_UNSUPPORTED", result.failureCode)
+            assertTrue(result.message.contains("detached"))
+            assertFalse(Files.exists(f.store.resolve("$jobId/git/repositories/${result.repositoryId}")))
+            assertEquals(0L, Files.list(f.store.resolve("$jobId/git/staging")).use { it.count() })
+            // The refusal is actionable: selecting a real branch publishes that branch and bytes.
+            val explicit = service.request(jobId, GitCloneRequest("admitted:upstream.git", "origin", "topic"), key())
+            assertTrue(service.awaitIdle(60_000))
+            val completed = service.operation(jobId, explicit.operation.repositoryId, explicit.operation.operationId)
+            assertEquals(GitOperationState.COMPLETED, completed.state, completed.message)
+            val view = service.workspace(jobId, completed.repositoryId)
+            assertEquals("refs/heads/topic", view.observation.head.refName)
+            assertEquals(expected, view.observation.head.objectId)
+            assertEquals("int util;\n", Files.readString(f.store.resolve("$jobId/git/repositories/${completed.repositoryId}/worktree/util.c")))
+        }
+    }
+
+    @Test fun `clone refuses an unsupported advertised branch instead of substituting the configured default`() {
+        for (format in listOf("sha1", "sha256")) for (fallbackExists in listOf(false, true)) Fixture().use { f ->
+            val remote = f.remote(format = format)
+            val branch = "b".repeat(201) // Valid Git ref, but beyond the workbench's branch-name bound.
+            f.repositories.git("check-ref-format", "refs/heads/$branch")
+            assertFalse(GitRefNames.isPlausibleBranchName(branch))
+            val expected = f.repositories.git("-C", remote.toString(), "rev-parse", "refs/heads/topic").trim()
+            f.repositories.git("-C", remote.toString(), "branch", branch, expected)
+            f.repositories.git("-C", remote.toString(), "symbolic-ref", "HEAD", "refs/heads/$branch")
+            if (fallbackExists) {
+                val fallback = f.repositories.git("-C", remote.toString(), "rev-parse", "$expected^").trim()
+                assertFalse(expected == fallback)
+                f.repositories.git("-C", remote.toString(), "update-ref", "refs/heads/main", fallback)
+            } else f.repositories.git("-C", remote.toString(), "branch", "-D", "main")
+            service = f.open()
+            val clone = service.request(jobId, GitCloneRequest("admitted:upstream.git", "origin", null), key())
+            assertTrue(service.awaitIdle(60_000))
+            val result = service.operation(jobId, clone.operation.repositoryId, clone.operation.operationId)
+            assertEquals(GitOperationState.FAILED, result.state, "$format fallbackExists=$fallbackExists: ${result.message}")
+            assertEquals("VALIDATION_FAILED", result.failureCode)
+            assertTrue(result.message.contains("branch"))
+            assertTrue(result.message.contains("explicitly"))
+            assertTrue(service.listing(jobId).repositories.isEmpty())
+            assertFalse(Files.exists(f.store.resolve("$jobId/git/repositories/${result.repositoryId}")))
+            assertEquals(0L, Files.list(f.store.resolve("$jobId/git/staging")).use { it.count() })
+            // Reopen does not turn the refusal into success; an explicit supported branch recovers.
+            service.close()
+            service = f.open()
+            assertEquals(GitOperationState.FAILED, service.operation(jobId, result.repositoryId, result.operationId).state)
+            val explicit = service.request(jobId, GitCloneRequest("admitted:upstream.git", "origin", "topic"), key())
+            assertTrue(service.awaitIdle(60_000))
+            val completed = service.operation(jobId, explicit.operation.repositoryId, explicit.operation.operationId)
+            assertEquals(GitOperationState.COMPLETED, completed.state, completed.message)
+            val view = service.workspace(jobId, completed.repositoryId)
+            assertEquals("refs/heads/topic", view.observation.head.refName)
+            assertEquals(expected, view.observation.head.objectId)
+            assertEquals(expected, completed.resultObjectId)
+            assertEquals("int util;\n", Files.readString(f.store.resolve("$jobId/git/repositories/${completed.repositoryId}/worktree/util.c")))
+            assertEquals(0L, Files.list(f.store.resolve("$jobId/git/staging")).use { it.count() })
+        }
+    }
+
+    @Test fun `clone discovers SHA256 rather than imposing the default including empty remotes`() {
+        for (empty in listOf(false, true)) Fixture().use { f ->
+            if (empty) f.repositories.git("init", "-q", "--bare", "--initial-branch=main", "--object-format=sha256", f.admitted.resolve("upstream.git").toString())
+            else {
+                val bare = f.remote(format = "sha256")
+                val tip = f.repositories.git("--git-dir=$bare", "rev-parse", "HEAD").trim()
+                // Packet diagnostics exceed their retained tail; capability capture stays bounded
+                // and must not lose the early object-format line or reject a large advertisement.
+                repeat(300) { Files.writeString(bare.resolve("refs/heads/branch$it"), "$tip\n") }
+            }
+            service = f.open() // New repositories default to SHA-1, but clones preserve the remote format.
+            val clone = service.request(jobId, GitCloneRequest("admitted:upstream.git", "origin", null), key())
+            assertTrue(service.awaitIdle(60_000))
+            val result = service.operation(jobId, clone.operation.repositoryId, clone.operation.operationId)
+            assertEquals(GitOperationState.COMPLETED, result.state, result.message)
+            repositoryId = result.repositoryId
+            val view = service.workspace(jobId, repositoryId)
+            assertEquals(GitObjectFormat.SHA256, view.record.objectFormat)
+            assertEquals(GitObjectFormat.SHA256, view.observation.objectFormat)
+            if (empty) assertNull(view.observation.head.objectId) else assertEquals(64, view.observation.head.objectId?.length)
+            assertEquals(GitOperationState.COMPLETED, sync(GitOperationAction.FETCH,
+                "remoteId" to service.remotes(jobId, repositoryId).single().record.remoteId).state)
+        }
+    }
+
+    @Test fun `HTTPS clone discovers and preserves SHA256 with server-only diagnostics`(): Unit = Fixture().use { f ->
+        val bare = f.remote(format = "sha256")
+        GitHttpsFixture(f.admitted, f.repositories.root.resolve("https sha256"), null, null).use { server ->
+            val policy = GitRemotePolicy(allowedHosts = setOf("localhost"), credentials = GitCredentialStore(listOf(
+                GitCredential.Https("localhost", "bot", f.repositories.root.resolve("token").also { Files.writeString(it, "inert-token") }, server.certificate))))
+            service = f.open(policy)
+            val clone = service.request(jobId, GitCloneRequest(server.url(bare.fileName.toString()), "origin", null), key())
+            assertTrue(service.awaitIdle(60_000))
+            val result = service.operation(jobId, clone.operation.repositoryId, clone.operation.operationId)
+            assertEquals(GitOperationState.COMPLETED, result.state, result.message)
+            repositoryId = result.repositoryId
+            assertEquals(GitObjectFormat.SHA256, service.workspace(jobId, repositoryId).record.objectFormat)
+            assertFalse(result.message.contains("packet:") || result.message.contains("object-format="))
+            assertEquals(GitOperationState.COMPLETED, sync(GitOperationAction.FETCH,
+                "remoteId" to service.remotes(jobId, repositoryId).single().record.remoteId).state)
+        }
     }
 
     @Test fun `https transfers verify certificates, use server credentials, and stop on cancel and bounds`(): Unit = Fixture().use { f ->
@@ -242,7 +462,39 @@ class GitRemotesTest {
             assertEquals(GitOperationState.COMPLETED, cloned.state, cloned.message)
             repositoryId = cloned.repositoryId
             assertEquals("configured", service.remotes(jobId, repositoryId).single().credential)
-            val fetched = sync(GitOperationAction.FETCH, "remoteId" to service.remotes(jobId, repositoryId).single().record.remoteId)
+            val remoteId = service.remotes(jobId, repositoryId).single().record.remoteId
+            val gitDir = f.store.resolve("$jobId/git/repositories/$repositoryId/repository.git")
+            val beforeCancel = GitDiskWatch.bytes(gitDir)
+            // Keep Git alive behind a stalled response and cross the on-disk budget. Ending
+            // before releasing the server proves the periodic watchdog, not the final gate, ran.
+            service.close()
+            service = f.open(policy(ca = true, limits = GitTransferLimits(maxRepositoryBytes = 128 * 1024)))
+            server.stall = CountDownLatch(1)
+            val (limitView, limitGuards) = guards()
+            val diskAdmission = service.requestWorkspace(jobId, repositoryId, GitSyncRequest(GitOperationAction.FETCH,
+                limitView.worktreeId, limitGuards, mapOf("remoteId" to remoteId)), key())
+            val diskStaging = f.store.resolve("$jobId/git/staging/${diskAdmission.operation.operationId}")
+            val deadline = System.nanoTime() + java.util.concurrent.TimeUnit.SECONDS.toNanos(10)
+            while (!Files.isDirectory(diskStaging.resolve("repository.git/objects")) && System.nanoTime() < deadline) Thread.sleep(10)
+            assertTrue(Files.isDirectory(diskStaging.resolve("repository.git/objects")))
+            Files.write(diskStaging.resolve("watchdog-padding"), ByteArray(128 * 1024))
+            assertTrue(service.awaitIdle(60_000))
+            assertEquals("TRANSFER_LIMIT", service.operation(jobId, repositoryId, diskAdmission.operation.operationId).failureCode)
+            assertEquals(beforeCancel, GitDiskWatch.bytes(gitDir))
+            assertFalse(Files.exists(diskStaging))
+            server.stall?.countDown(); server.stall = null
+            server.stall = CountDownLatch(1)
+            val (view, guards) = guards()
+            val fetchAdmission = service.requestWorkspace(jobId, repositoryId, GitSyncRequest(GitOperationAction.FETCH,
+                view.worktreeId, guards, mapOf("remoteId" to remoteId)), key())
+            Thread.sleep(500)
+            service.cancel(jobId, repositoryId, fetchAdmission.operation.operationId)
+            assertTrue(service.awaitIdle(60_000))
+            assertEquals(GitOperationState.CANCELLED, service.operation(jobId, repositoryId, fetchAdmission.operation.operationId).state)
+            assertEquals(beforeCancel, GitDiskWatch.bytes(gitDir))
+            assertEquals(0L, Files.list(f.store.resolve("$jobId/git/staging")).use { it.count() })
+            server.stall?.countDown(); server.stall = null
+            val fetched = sync(GitOperationAction.FETCH, "remoteId" to remoteId)
             assertEquals(GitOperationState.COMPLETED, fetched.state, fetched.message)
             // Nothing persisted by the server holds the credential.
             Files.walk(f.store).use { paths ->
@@ -269,12 +521,184 @@ class GitRemotesTest {
         service.close()
         val pack = f.store.resolve("$jobId/git/repositories/$repositoryId/repository.git/objects/pack/tmp_pack_partial")
         Files.writeString(pack, "partial")
+        val quarantine = f.store.resolve("$jobId/git/staging/${admission.operation.operationId}/repository.git/objects")
+        Files.createDirectories(quarantine)
+        Files.write(quarantine.resolve("completed-but-unadmitted-object"), ByteArray(256 * 1024))
         service = f.open()
         val reconciled = service.operation(jobId, repositoryId, admission.operation.operationId)
         assertEquals(GitOperationState.INTERRUPTED, reconciled.state, reconciled.message)
         assertFalse(Files.exists(pack))
+        assertFalse(Files.exists(quarantine))
         assertTrue(service.remotes(jobId, repositoryId).single().tracking.isEmpty())
         // The explicit retry is a new operation; nothing was repeated automatically.
         assertEquals(GitOperationState.COMPLETED, sync(GitOperationAction.FETCH, "remoteId" to remoteId).state)
+    }
+
+    @Test fun `remote names form valid refs, registrations have their own identity and removal deletes every tracking ref`(): Unit = Fixture().use { f ->
+        val bare = f.remote()
+        // Many branches on the remote: removal must not stop at a display bound.
+        val seed = f.repositories.root.resolve("upstream seed")
+        (1..210).forEach { f.repositories.git("-C", seed.toString(), "branch", "b%03d".format(it)) }
+        f.repositories.git("-C", seed.toString(), "push", "-q", bare.toString(), "--all")
+        service = f.open()
+        val invalid = listOf("release..mirror", "mirror.lock", ".hidden", "HEAD")
+        for (name in invalid) assertEquals("VALIDATION_FAILED", assertFailsWith<ManagedGitException>(name) {
+            service.request(jobId, GitCloneRequest("admitted:upstream.git", name, null), "clone_key_${name.hashCode().toUInt()}_0000")
+        }.code)
+        f.initialized()
+        for (name in invalid) refused("VALIDATION_FAILED", GitOperationAction.REMOTE_ADD, "name" to name, "url" to "admitted:upstream.git")
+        sync(GitOperationAction.REMOTE_ADD, "name" to "upstream", "url" to "admitted:upstream.git")
+        val first = service.remotes(jobId, repositoryId).single().record.remoteId
+        assertEquals(GitOperationState.COMPLETED, sync(GitOperationAction.FETCH, "remoteId" to first).state)
+        val gitDir = f.store.resolve("$jobId/git/repositories/$repositoryId/repository.git")
+        assertEquals(212, f.repositories.git("--git-dir=$gitDir", "for-each-ref", "refs/remotes/upstream/").lines().count { it.isNotBlank() })
+        assertEquals(GitOperationState.COMPLETED, sync(GitOperationAction.REMOTE_REMOVE, "remoteId" to first).state)
+        assertEquals("", f.repositories.git("--git-dir=$gitDir", "for-each-ref", "refs/remotes/").trim())
+        // A re-created remote with the same name is a different registration: a stale request cannot reach it.
+        sync(GitOperationAction.REMOTE_ADD, "name" to "upstream", "url" to "admitted:upstream.git")
+        val second = service.remotes(jobId, repositoryId).single().record.remoteId
+        assertTrue(first != second)
+        refused("NOT_FOUND", GitOperationAction.FETCH, "remoteId" to first)
+        refused("NOT_FOUND", GitOperationAction.REMOTE_REMOVE, "remoteId" to first)
+    }
+
+    @Test fun `rejected fetches discard received objects and a subsequent small fetch recovers`(): Unit = Fixture().use { f ->
+        val bare = f.remote()
+        f.initialized()
+        sync(GitOperationAction.REMOTE_ADD, "name" to "upstream", "url" to "admitted:upstream.git")
+        val remoteId = service.remotes(jobId, repositoryId).single().record.remoteId
+        assertEquals(GitOperationState.COMPLETED, sync(GitOperationAction.FETCH, "remoteId" to remoteId).state)
+        val gitDir = f.store.resolve("$jobId/git/repositories/$repositoryId/repository.git")
+        val originalRefs = service.remotes(jobId, repositoryId).single().tracking
+        val localFile = f.repositories.root.resolve("local-only.c").also { Files.writeString(it, "int local_only_canary;\n") }
+        val localObject = f.repositories.git("--git-dir=$gitDir", "hash-object", "-w", localFile.toString()).trim()
+        val originalBytes = GitDiskWatch.bytes(gitDir)
+        val seed = f.repositories.root.resolve("upstream seed")
+        val oldTip = f.repositories.git("-C", seed.toString(), "rev-parse", "HEAD").trim()
+        val payload = ByteArray(2 * 1024 * 1024).also { java.util.Random(1760).nextBytes(it) }
+        Files.write(seed.resolve("large.c"), payload)
+        f.repositories.git("-C", seed.toString(), "add", "-A")
+        f.repositories.git("-C", seed.toString(), "commit", "-q", "-m", "large source")
+        f.repositories.git("-C", seed.toString(), "push", "-q", bare.toString(), "main")
+        service.close()
+        service = f.open(GitRemotePolicy(admittedRoot = f.admitted, limits = GitTransferLimits(maxRepositoryBytes = 128 * 1024)))
+        repeat(2) {
+            val result = sync(GitOperationAction.FETCH, "remoteId" to remoteId)
+            assertEquals("TRANSFER_LIMIT", result.failureCode, result.message)
+            assertEquals(originalBytes, GitDiskWatch.bytes(gitDir))
+            assertEquals(originalRefs, service.remotes(jobId, repositoryId).single().tracking)
+            assertEquals(0L, Files.list(f.store.resolve("$jobId/git/staging")).use { it.count() })
+        }
+        // Replace the oversized branch with a small forward update; old local objects survive.
+        f.repositories.git("-C", seed.toString(), "reset", "--hard", oldTip)
+        Files.writeString(seed.resolve("small.c"), "int small;\n")
+        f.repositories.git("-C", seed.toString(), "add", "-A")
+        f.repositories.git("-C", seed.toString(), "commit", "-q", "-m", "small source")
+        f.repositories.git("--git-dir=$bare", "update-ref", "refs/heads/main", oldTip)
+        f.repositories.git("-C", seed.toString(), "push", "-q", bare.toString(), "main")
+        assertEquals(GitOperationState.COMPLETED, sync(GitOperationAction.FETCH, "remoteId" to remoteId).state)
+        assertTrue(GitDiskWatch.bytes(gitDir) <= 128 * 1024)
+        assertEquals("commit", f.repositories.git("--git-dir=$gitDir", "cat-file", "-t", oldTip).trim())
+        assertEquals("int local_only_canary;", f.repositories.git("--git-dir=$gitDir", "cat-file", "-p", localObject).trim())
+        assertFalse(Files.exists(gitDir.resolve("objects/info/alternates")))
+    }
+
+    @Test fun `fetch budgets the existing checkout and repository metadata not just Git objects`(): Unit = Fixture().use { f ->
+        val bare = f.remote()
+        val seed = f.repositories.root.resolve("upstream seed")
+        Files.writeString(seed.resolve("large.c"), "x".repeat(64 * 1024))
+        f.repositories.git("-C", seed.toString(), "add", "-A")
+        f.repositories.git("-C", seed.toString(), "commit", "-q", "-m", "compressible checkout")
+        f.repositories.git("-C", seed.toString(), "push", "-q", bare.toString(), "main")
+        val cap = 128L * 1024
+        service = f.open(GitRemotePolicy(admittedRoot = f.admitted, limits = GitTransferLimits(maxRepositoryBytes = cap)))
+        val clone = service.request(jobId, GitCloneRequest("admitted:upstream.git", "origin", null), key())
+        assertTrue(service.awaitIdle(60_000))
+        val cloned = service.operation(jobId, clone.operation.repositoryId, clone.operation.operationId)
+        assertEquals(GitOperationState.COMPLETED, cloned.state, cloned.message)
+        repositoryId = cloned.repositoryId
+        val directory = f.store.resolve("$jobId/git/repositories/$repositoryId")
+        val gitDir = directory.resolve("repository.git")
+        val originalBytes = GitDiskWatch.bytes(gitDir)
+        val originalRefs = service.remotes(jobId, repositoryId).single().tracking
+        Files.write(seed.resolve("new.c"), ByteArray(72 * 1024).also { java.util.Random(593).nextBytes(it) })
+        f.repositories.git("-C", seed.toString(), "add", "-A")
+        f.repositories.git("-C", seed.toString(), "commit", "-q", "-m", "fits objects but not entire repository")
+        f.repositories.git("-C", seed.toString(), "push", "-q", bare.toString(), "main")
+        val result = sync(GitOperationAction.FETCH, "remoteId" to service.remotes(jobId, repositoryId).single().record.remoteId)
+        assertEquals("TRANSFER_LIMIT", result.failureCode, result.message)
+        assertEquals(originalBytes, GitDiskWatch.bytes(gitDir))
+        assertEquals(originalRefs, service.remotes(jobId, repositoryId).single().tracking)
+        assertTrue(GitDiskWatch.bytes(directory) <= cap)
+        assertEquals("x".repeat(64 * 1024), Files.readString(directory.resolve("worktree/large.c")))
+    }
+
+    @Test fun `quarantine final admission rejects a completed pack without touching live objects or refs`(): Unit = Fixture().use { f ->
+        val bare = f.remote()
+        val seed = f.repositories.root.resolve("upstream seed")
+        Files.write(seed.resolve("large.c"), ByteArray(512 * 1024).also { java.util.Random(593).nextBytes(it) })
+        f.repositories.git("-C", seed.toString(), "add", "-A")
+        f.repositories.git("-C", seed.toString(), "commit", "-q", "-m", "large source")
+        f.repositories.git("-C", seed.toString(), "push", "-q", bare.toString(), "main")
+        val (live, _) = f.repositories.managed("quarantine destination")
+        val originalBytes = GitDiskWatch.bytes(live)
+        val quarantine = f.repositories.root.resolve("quarantine.git")
+        val policy = GitRemotePolicy(admittedRoot = f.admitted)
+        assertEquals("TRANSFER_LIMIT", assertFailsWith<GitOperationRefusal> {
+            // Disable periodic checks deliberately: only the final, unthrottled gate can reject.
+            GitTransfers.fetchQuarantined(f.repositories.runner, live, quarantine, GitObjectFormat.SHA1,
+                parse("admitted:upstream.git", policy), "origin", policy, 128 * 1024, GitProcessControl())
+        }.code)
+        assertTrue(GitDiskWatch.bytes(quarantine) > 128 * 1024)
+        assertEquals(originalBytes, GitDiskWatch.bytes(live))
+        assertTrue(GitTransfers.allTrackingRefs(f.repositories.runner, live, GitObjectFormat.SHA1, "origin").isEmpty())
+    }
+
+    @Test fun `clone budgets compressible checkout expansion and all publication metadata`(): Unit = Fixture().use { f ->
+        val bare = f.remote()
+        val seed = f.repositories.root.resolve("upstream seed")
+        Files.writeString(seed.resolve("large.c"), "x".repeat(512 * 1024))
+        f.repositories.git("-C", seed.toString(), "add", "-A")
+        f.repositories.git("-C", seed.toString(), "commit", "-q", "-m", "compressible source")
+        f.repositories.git("-C", seed.toString(), "push", "-q", bare.toString(), "main")
+        service = f.open(GitRemotePolicy(admittedRoot = f.admitted, limits = GitTransferLimits(maxRepositoryBytes = 128 * 1024)))
+        val clone = service.request(jobId, GitCloneRequest("admitted:upstream.git", "origin", null), "clone_expansion_0001")
+        assertTrue(service.awaitIdle(60_000))
+        val result = service.operation(jobId, clone.operation.repositoryId, clone.operation.operationId)
+        assertEquals("TRANSFER_LIMIT", result.failureCode, result.message)
+        assertTrue(service.listing(jobId).repositories.isEmpty())
+        assertEquals(0L, Files.list(f.store.resolve("$jobId/git/staging")).use { it.count() })
+
+        // A successful tiny checkout can still cross the cap when its registration is written.
+        // Inject extra bytes at the publication crash point to exercise the unconditional gate.
+        service.close()
+        f.hook = { point -> if (point == GitOperationCrashPoint.BEFORE_PUBLISH) {
+            val staging = f.store.resolve("$jobId/git/staging")
+            val operationDir = Files.list(staging).use { it.findFirst().orElseThrow() }
+            Files.write(operationDir.resolve("publication-padding"), ByteArray(128 * 1024))
+        } }
+        service = f.open(GitRemotePolicy(admittedRoot = f.admitted, limits = GitTransferLimits(maxRepositoryBytes = 128 * 1024)))
+        val finalGate = service.request(jobId, GitCloneRequest("admitted:upstream.git", "origin", "topic"), "clone_metadata_00001")
+        assertTrue(service.awaitIdle(60_000))
+        assertEquals("TRANSFER_LIMIT", service.operation(jobId, finalGate.operation.repositoryId, finalGate.operation.operationId).failureCode)
+        assertTrue(service.listing(jobId).repositories.isEmpty())
+        assertEquals(0L, Files.list(f.store.resolve("$jobId/git/staging")).use { it.count() })
+    }
+
+    @Test fun `the size bound is enforced after a transfer that finishes between checks`(): Unit = Fixture().use { f ->
+        f.remote()
+        service = f.open(GitRemotePolicy(admittedRoot = f.admitted, limits = GitTransferLimits(maxRepositoryBytes = 2048)))
+        val clone = service.request(jobId, GitCloneRequest("admitted:upstream.git", "origin", null), "clone_key_limit_0001")
+        assertTrue(service.awaitIdle(60_000))
+        assertEquals("TRANSFER_LIMIT", service.operation(jobId, clone.operation.repositoryId, clone.operation.operationId).failureCode)
+        assertTrue(service.listing(jobId).repositories.isEmpty())
+        service.close()
+        f.initialized()
+        sync(GitOperationAction.REMOTE_ADD, "name" to "upstream", "url" to "admitted:upstream.git")
+        service.close()
+        service = f.open(GitRemotePolicy(admittedRoot = f.admitted, limits = GitTransferLimits(maxRepositoryBytes = 2048)))
+        val fetched = sync(GitOperationAction.FETCH, "remoteId" to service.remotes(jobId, repositoryId).single().record.remoteId)
+        assertEquals("TRANSFER_LIMIT", fetched.failureCode, fetched.message)
+        assertTrue(service.remotes(jobId, repositoryId).single().tracking.isEmpty())
     }
 }

@@ -44,8 +44,15 @@ data class GitHubConfiguration(val apiUrl: URI, val tokenFile: Path?, val bindin
         require(apiUrl.scheme == "https" || (apiUrl.scheme == "http" && apiUrl.host in setOf("127.0.0.1", "localhost"))) {
             "The GitHub API URL must use HTTPS (plain HTTP only for a loopback test provider)."
         }
-        require(apiUrl.rawQuery == null && apiUrl.rawFragment == null && apiUrl.rawUserInfo == null)
+        require(apiUrl.host != null && apiUrl.rawQuery == null && apiUrl.rawFragment == null && apiUrl.rawUserInfo == null)
+        require(apiUrl.toASCIIString().length <= 2048) { "The GitHub API URL exceeds its storage bound." }
         require(bindings.size <= 32 && bindings.map { it.remote }.toSet().size == bindings.size)
+    }
+    /** Stable endpoint identity; recovery never redirects current credentials to an old provider. */
+    val apiIdentity: String get() {
+        val port = apiUrl.port.takeUnless { it == -1 || (apiUrl.scheme == "https" && it == 443) || (apiUrl.scheme == "http" && it == 80) } ?: -1
+        val origin = URI(apiUrl.scheme.lowercase(), null, apiUrl.host.lowercase(), port, null, null, null).toASCIIString()
+        return origin + apiUrl.normalize().rawPath.trimEnd('/')
     }
     val writable: Boolean get() = tokenFile != null
     fun binding(remote: GitRemoteRecord): GitHubBinding? = bindings.singleOrNull { it.remote == remote.location.display }
@@ -81,8 +88,13 @@ object GitHubCorrelation {
     /** Bytes reserved in a body for the comment. */
     const val RESERVED_BYTES = 128
     fun comment(operationId: String) = "\n\n<!-- decomp-workbench-operation: $operationId -->"
-    fun find(body: String?): String? = body?.let { PATTERN.find(it)?.groupValues?.get(1) }
+    /** Draft content is not provenance. Remove copied markers before appending our own. */
+    fun draft(body: String): String = PATTERN.replace(body, "")
+    /** Conflicting markers are ambiguous, not proof that this operation was absent. */
+    fun find(body: String?): String? = body?.let { PATTERN.findAll(it).map { match -> match.groupValues[1] }.toSet().singleOrNull() }
 }
+
+data class GitHubPullInventory(val pulls: List<GitHubPull>, val complete: Boolean)
 
 class GitHubException(val code: String, message: String, val retryAfterSeconds: Long? = null) : Exception(message)
 
@@ -98,8 +110,8 @@ class GitHubClient(private val configuration: GitHubConfiguration,
         }
     }
 
-    private fun send(method: String, path: String, body: JsonObject? = null, write: Boolean = false): Pair<Int, kotlinx.serialization.json.JsonElement?> {
-        val builder = HttpRequest.newBuilder(URI("${configuration.apiUrl}$path")).timeout(Duration.ofSeconds(20))
+    private fun send(method: String, path: String, body: JsonObject? = null, write: Boolean = false): Triple<Int, kotlinx.serialization.json.JsonElement?, Boolean> {
+        val builder = HttpRequest.newBuilder(URI("${configuration.apiIdentity}$path")).timeout(Duration.ofSeconds(20))
             .header("Accept", "application/vnd.github+json").header("X-GitHub-Api-Version", "2022-11-28")
         val token = token()
         if (write && token == null) throw GitHubException("GITHUB_READ_ONLY", "The GitHub integration is read-only: no token is configured on the server.")
@@ -137,7 +149,8 @@ class GitHubClient(private val configuration: GitHubConfiguration,
             status == 403 -> throw GitHubException("GITHUB_FORBIDDEN", "The server's GitHub credential lacks permission for this repository.")
             status == 404 -> throw GitHubException("GITHUB_NOT_FOUND", "GitHub has no such repository or branch, or the credential cannot see it.")
         }
-        return status to parsed
+        val hasNext = response.headers().allValues("Link").any { Regex("rel=\"?next\"?", RegexOption.IGNORE_CASE).containsMatchIn(it) }
+        return Triple(status, parsed, hasNext)
     }
 
     private fun pull(value: kotlinx.serialization.json.JsonElement): GitHubPull = try { parsePull(value) } catch (failure: GitHubException) {
@@ -164,13 +177,28 @@ class GitHubClient(private val configuration: GitHubConfiguration,
     fun definiteRefusal(code: String) = code in setOf("GITHUB_UNAUTHORIZED", "GITHUB_FORBIDDEN", "GITHUB_NOT_FOUND",
         "GITHUB_VALIDATION_FAILED", "GITHUB_READ_ONLY", "GITHUB_CREDENTIAL_UNAVAILABLE", "GITHUB_RATE_LIMITED")
 
-    /** Pull requests whose head is [head] in the bound repository (same-repository heads only). */
-    fun pulls(binding: GitHubBinding, head: String, base: String? = null): List<GitHubPull> {
+    private fun pullPage(binding: GitHubBinding, head: String, base: String?, page: Int): Pair<List<GitHubPull>, Boolean> {
         fun encode(value: String) = URLEncoder.encode(value, Charsets.UTF_8)
-        val query = "state=all&head=${encode("${binding.owner}:$head")}" + (base?.let { "&base=${encode(it)}" } ?: "")
-        val (status, body) = send("GET", "${binding.path}/pulls?$query")
+        val query = "state=all&head=${encode("${binding.owner}:$head")}&per_page=30&page=$page" + (base?.let { "&base=${encode(it)}" } ?: "")
+        val (status, body, hasNext) = send("GET", "${binding.path}/pulls?$query")
         if (status != 200 || body !is JsonArray) throw GitHubException("GITHUB_RESPONSE_INVALID", "GitHub returned an unexpected pull request listing.")
-        return body.take(30).map(::pull).filter { it.headRef == head }
+        // A full page requires another read even if the provider omitted its pagination header.
+        return body.take(30).map(::pull).filter { it.headRef == head } to (!hasNext && body.size < 30)
+    }
+
+    /** Presentation is bounded to one page; it is never used as evidence of absence. */
+    fun pulls(binding: GitHubBinding, head: String, base: String? = null): List<GitHubPull> = pullPage(binding, head, base, 1).first
+
+    /** Recovery inventory: at most 300 objects / ten requests. Never follow provider-supplied URLs. */
+    fun inventory(binding: GitHubBinding, head: String, base: String? = null, maxPages: Int = 10): GitHubPullInventory {
+        require(maxPages in 1..10)
+        val listed = mutableListOf<GitHubPull>()
+        for (page in 1..maxPages) {
+            val (pulls, complete) = pullPage(binding, head, base, page)
+            listed += pulls
+            if (complete) return GitHubPullInventory(listed.distinctBy { it.number }, true)
+        }
+        return GitHubPullInventory(listed.distinctBy { it.number }, false)
     }
 
     /** Create one pull request. A duplicate is reported as `GITHUB_PR_EXISTS` so the caller reconciles it. */

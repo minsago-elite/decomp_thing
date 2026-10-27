@@ -20,7 +20,8 @@ import javax.net.ssl.SSLContext
  * without any network. Nothing here is used by production code.
  */
 internal class GitHttpsFixture(private val projectRoot: Path, private val work: Path,
-    private val username: String? = null, private val password: String? = null) : AutoCloseable {
+    private val username: String? = null, private val password: String? = null,
+    private val authenticateWritesOnly: Boolean = false) : AutoCloseable {
     @Volatile var stall: CountDownLatch? = null
     /** Pause only after sending actual pack bytes, not at discovery or before a transfer starts. */
     class PartialUpload {
@@ -58,7 +59,9 @@ internal class GitHttpsFixture(private val projectRoot: Path, private val work: 
             requests++
             try {
                 stall?.await(60, TimeUnit.SECONDS)
-                if (username != null) {
+                val receiving = exchange.requestURI.path.endsWith("/git-receive-pack") ||
+                    exchange.requestURI.rawQuery == "service=git-receive-pack"
+                if (username != null && (!authenticateWritesOnly || receiving)) {
                     val expected = "Basic " + Base64.getEncoder().encodeToString("$username:$password".toByteArray())
                     if (exchange.requestHeaders.getFirst("Authorization") != expected) {
                         exchange.responseHeaders.set("WWW-Authenticate", "Basic realm=\"fixture\"")
