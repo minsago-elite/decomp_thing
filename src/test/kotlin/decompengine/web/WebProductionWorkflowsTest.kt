@@ -550,6 +550,33 @@ class WebProductionWorkflowsTest {
         assertEquals("unavailable", reported.getValue("workflow-reconstruct-agent-legacy-openai").getValue("state").jsonPrimitive.content)
         assertEquals(WebAgentPreflight.REASON_FAILED, reported.getValue("workflow-reconstruct-agent-legacy-openai").getValue("reasonCode").jsonPrimitive.content)
         assertEquals("HARNESS_NOT_CONFIGURED", reported.getValue("workflow-reconstruct-agent-acp").getValue("reasonCode").jsonPrimitive.content)
+        val failedFacts = assertNotNull(failed.prerequisites)
+        assertEquals(WebAgentPreflight.REASON_FAILED, failedFacts.harness(WebAgentHarness.LEGACY_OPENAI).reasonCode)
+        assertEquals(passive.prerequisites!!.harnesses[WebAgentHarness.ACP], failedFacts.harnesses[WebAgentHarness.ACP])
+        assertEquals(passive.prerequisites!!.sandbox, failedFacts.sandbox)
+        assertEquals(passive.reasonCode, failed.reasonCode, "the independent sandbox failure must be retained")
+        val store = JobStore(root.resolve("jobs")); val job = store.createFromUpload("failed-preflight.elf", elfFixture())
+        service(store, options).use { service ->
+            service.initializeExistingStorage()
+            val request = NewWorkflowAttempt(WorkflowKind.RECONSTRUCT, WebWorkflowDefaults.RECONSTRUCT_AGENT,
+                harnessCapabilityId = "agent-legacy-openai")
+            val before = version(service, job.id)
+            assertCode("WORKFLOW_PREREQUISITE_UNAVAILABLE") {
+                service.requestDurableStart(job.id, before, request, "failed_preflight_start", failedFacts)
+            }
+            assertEquals(before, version(service, job.id)); assertEquals(0, engines.calls.get())
+            // Record one inert failed attempt with the same selected harness, then refuse recovery under the failed inspection.
+            engines.reconstructBody = { _, _, _ -> error("inert generation failure") }
+            val prior = service.requestDurableStart(job.id, before, request, "before_failed_inspection", passive.prerequisites).attempt
+            assertEquals(WorkflowRunState.FAILED, prior.state)
+            val calls = engines.calls.get()
+            val after = version(service, job.id)
+            assertCode("WORKFLOW_PREREQUISITE_UNAVAILABLE") {
+                service.requestDurableRecovery(job.id, prior.runId, prior.version, WorkflowRecoveryMode.RETRY, null,
+                    "failed_preflight_retry", failedFacts)
+            }
+            assertEquals(after, version(service, job.id)); assertEquals(calls, engines.calls.get())
+        }
         // An inspection of a different configuration says nothing about the current agent.
         val foreign = passive.withAgentInspection(WebAgentPreflightSnapshot("failed", "inspection_2", WebAgentPreflight.REASON_FAILED, "other_configuration"))
         assertTrue(foreign.prerequisites!!.agent.available)
@@ -871,7 +898,7 @@ class WebProductionWorkflowsTest {
         assertEquals(WorkflowRecoveryMode.RETRY, retried.recovery?.mode)
         assertEquals(failed.scope, retried.scope)
         assertEquals(60_000uL, retried.configuration?.reconstruction?.maxContextCharacters)
-        assertEquals(listOf(60_000, 60_000), engines.contexts, "retry raised the explicitly bounded context budget")
+        assertEquals(listOf<Int?>(60_000, 60_000), engines.contexts, "retry raised the explicitly bounded context budget")
         assertEquals("b".repeat(64), retried.configuration?.harness?.configurationSha256)
         assertEquals("b".repeat(64), webRun(retried).getValue("configuration").jsonObject
             .getValue("harness").jsonObject.getValue("configurationSha256").jsonPrimitive.content)

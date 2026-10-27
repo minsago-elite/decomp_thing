@@ -119,8 +119,8 @@ internal data class WebHarnessReadiness(
         return if (snapshot.status == "failed") folded.withFailedAgentFact() else folded
     }
 
-    private fun withFailedAgentFact(): WebHarnessReadiness = prerequisites?.takeIf { it.agent.available }?.let { facts ->
-        copy(prerequisites = facts.copy(agent = FAILED_AGENT))
+    private fun withFailedAgentFact(): WebHarnessReadiness = prerequisites?.let { facts ->
+        copy(prerequisites = facts.withFailedAgentInspection())
     } ?: this
 
     /**
@@ -136,13 +136,15 @@ internal data class WebHarnessReadiness(
 
     private fun failedInspection() = WebHarnessReadiness("unavailable", WebAgentPreflight.REASON_FAILED,
         "The last operator inspection could not start the configured agent. Inspect the agent configuration and retry.",
-        prerequisites = prerequisites?.let { facts ->
-            // The inspection starts only the environment-selected harness; other harnesses keep their own facts.
-            val selected = facts.harnesses.entries.singleOrNull { it.value.selected }?.key
-            facts.copy(agent = PREFLIGHT_FAILED, harnesses = facts.harnesses.mapValues { (harness, value) ->
-                if (harness == selected) value.copy(prerequisite = PREFLIGHT_FAILED) else value
-            })
-        })
+        prerequisites = prerequisites?.withFailedAgentInspection())
+}
+
+/** A failed inspection updates its selected harness even when another prerequisite already failed. */
+private fun WebWorkflowPrerequisites.withFailedAgentInspection(): WebWorkflowPrerequisites {
+    val selected = harnesses.entries.singleOrNull { it.value.selected }?.key
+    return copy(agent = PREFLIGHT_FAILED, harnesses = harnesses.mapValues { (harness, value) ->
+        if (harness == selected) value.copy(prerequisite = PREFLIGHT_FAILED) else value
+    })
 }
 
 /** Atomically expires queued work or retains an admitted callback until its final exit. */
