@@ -153,15 +153,17 @@ class WebRunLogsTest {
         val secrets = listOf(
             "BuildCookieCanary0123456789",
             "BuildSetCookieCanary0123456789",
+            "BuildJsonCookieCanary0123456789",
             "BuildUrlCanary0123456789",
         )
         val input = listOf(
             "Cookie: session=${secrets[0]}",
             "Set-Cookie: session=${secrets[1]}; Path=/; HttpOnly; SameSite=Strict",
-            "Fetching https://${secrets[2]}@example.com/repo.git",
+            "{\"Cookie\": \"session=${secrets[2]}\"}",
+            "Fetching https://${secrets[3]}@example.com/repo.git",
         ).joinToString("\n")
         val capture = assertNotNull(logs.capture(input.toByteArray(), sha))
-        assertEquals(3, capture.redactedLines)
+        assertEquals(4, capture.redactedLines)
         val download = logs.download(jobId, run, capture, Instant.EPOCH).decodeToString()
         val range = logs.range(jobId, run, capture, false, WebRunLogs.Query(1, false, 10, null), Instant.EPOCH)
         for (secret in secrets) {
@@ -174,6 +176,7 @@ class WebRunLogsTest {
         }
         assertTrue(download.contains("Cookie: [redacted]"))
         assertTrue(download.contains("Set-Cookie: [redacted]"))
+        assertTrue(download.contains("{\"Cookie\": [redacted]"))
     }
 
     @Test fun `multiline configured credentials are redacted without losing source line numbering`() {

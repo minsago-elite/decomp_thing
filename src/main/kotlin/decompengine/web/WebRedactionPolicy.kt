@@ -224,7 +224,7 @@ internal class WebRedactionPolicy private constructor(
         private val CREDENTIAL_PATTERNS = listOf(
             // Recorded HTTP cookie headers may carry session secrets unknown to the listener's environment.
             // Keep the header name but withhold the entire value (including cookie attributes).
-            Regex("(?i)(\\b(?:set-cookie|cookie)[\\t ]*:[\\t ]*)[^\\r\\n]*") to true,
+            Regex("(?i)(\\b(?:set-cookie|cookie)[\"']?[\\t ]*:[\\t ]*)[^\\r\\n]*") to true,
             // Digest carries quoted comma-separated parameters, not one opaque token. Withhold
             // the entire authorization value through the line boundary (also for JSON-like logs).
             Regex("(?i)(?:\\b|(?<=_))((?:proxy-)?authorization[\"']?\\s*[:=][\\t ]*)[^\\r\\n]+") to true,
