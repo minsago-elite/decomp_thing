@@ -16,8 +16,11 @@ internal fun requireNoWebApiQuery(exchange: HttpExchange) {
 /**
  * Kinds whose payload is committed job content rather than server-produced text: source bytes and the
  * committed source tree's own names, whose contract requires exact, unique and ordered spellings.
+ * Search context/query echoes and diff lines also carry byte/character positions in that content;
+ * redacting their text independently would invalidate those commitments and client validation.
  */
-private val committedContentKinds = setOf("sourceChunk", "revisionDirectory", "revisionSources", "revisionFile", "sourceCatalog")
+private val committedContentKinds = setOf("sourceChunk", "revisionDirectory", "revisionSources", "revisionFile", "sourceCatalog",
+    "sourceSearch", "sourceFileDiff")
 
 /** The public projection of one response payload under [policy]. */
 internal fun publicWebApiData(kind: String, data: JsonElement, policy: WebRedactionPolicy): JsonElement =

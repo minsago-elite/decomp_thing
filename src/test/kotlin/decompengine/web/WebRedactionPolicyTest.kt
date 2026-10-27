@@ -158,6 +158,21 @@ class WebRedactionPolicyTest {
             .let { (it as kotlinx.serialization.json.JsonArray)[0].jsonObject.getValue("displayName").jsonPrimitive.content })
     }
 
+    @Test fun `source search and diff projections preserve committed text positions and query echoes`() {
+        val committed = buildJsonObject {
+            put("query", buildJsonObject { put("text", "/tmp/example"); put("path", "token=one.c") })
+            put("before", "token=one "); put("match", "/tmp/example"); put("after", " $canary")
+            put("text", "/tmp/example password=hunter2"); put("characters", 29)
+            put("column", "11"); put("offsetBytes", "10")
+        }
+        for (kind in listOf("sourceSearch", "sourceFileDiff")) {
+            assertSame(committed, publicWebApiData(kind, committed, policy), kind)
+        }
+        // This exemption is confined to authorized committed source; diagnostics are still redacted.
+        assertFalse(publicWebApiData("report", committed, policy).toString().contains(canary))
+        assertFalse(publicWebApiData("error", committed, policy).toString().contains("/tmp/example"))
+    }
+
     @Test fun `redacted near-limit names remain bounded without truncating secret replacements`() {
         val filename = "shortish9".repeat(28) + ".c"
         assertEquals(254, filename.length)
