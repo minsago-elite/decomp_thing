@@ -4,6 +4,8 @@ import { resolve } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { decodeContract, decodeResponse, encodeRequest } from '../src/api/decode';
 import { ApiClientError } from '../src/api/errors';
+import type { Schema } from '../src/api/schema-types';
+import { validateSchema } from '../src/api/validate';
 import { parseBoundedJson } from '../src/api/json';
 import type { ResponseOf, Run } from '../src/api/generated';
 
@@ -28,6 +30,24 @@ function mismatchContract(page = 1) {
 }
 
 describe('generated v1 contract pipeline', () => {
+  it('keeps configured producer responses readable by the frozen parent v1 configuration decoder', () => {
+    // Frozen verbatim from parent 5ef442822f7eb0680790aba295c5ec17c45b3e4c; shared id/harness refs are unchanged.
+    const legacy = JSON.parse(readFileSync(resolve(root, 'compatibility/pre-reconstruction-configuration.schema.json'), 'utf8')) as Schema;
+    for (const name of ['run-configured-agent', 'run-configured-legacy', 'run-legacy-without-digest']) {
+      const document = decodeContract(fixture(name), { mode: 'producer' });
+      if (document.kind !== 'run' || !document.data.configuration) throw Error('Expected configured run fixture');
+      const configuration = document.data.configuration;
+      expect(configuration.profileId).toBeNull();
+      const projected = validateSchema(configuration, legacy, true) as Record<string, unknown>;
+      expect(projected.profileId).toBeNull();
+      expect(projected).not.toHaveProperty('reconstruction');
+      // This field omission is the actual old-client failure, even with additive-response projection.
+      const { profileId: omitted, ...withoutPlaceholder } = configuration;
+      expect(omitted).toBeNull();
+      expect(() => validateSchema(withoutPlaceholder, legacy, true)).toThrow(ApiClientError);
+      expect(decodeContract(fixture(name), { mode: 'response' })).toEqual(document);
+    }
+  });
   it('accepts the pre-reconstruction v1 admission record without inferring a profile', () => {
     const text = fixture('legacy-run-before-reconstruction');
     for (const mode of ['producer', 'response'] as const) {

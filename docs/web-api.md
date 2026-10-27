@@ -615,8 +615,10 @@ in `configuration.reconstruction`: `profileId`, the profile's `profileSha256` an
 `maxContextCharacters` the run used (the default when none was requested; null for
 evidence-only). The agent reconstructor runs with that recorded budget. Earlier v1
 servers instead reported the always-null `configuration.profileId` placeholder. Consumers
-accept that shape without inferring a profile or budget; a non-null legacy placeholder or
-malformed reconstruction record is still refused. Durable storage decodes the earlier shape
+accept that shape without inferring a profile or budget. New servers also retain the always-null
+`configuration.profileId` alongside the additive `reconstruction` facts, so older clients can
+still decode run details, run lists and snapshots. A non-null legacy placeholder or malformed
+reconstruction record is still refused. Durable storage decodes the earlier shape
 as unrecorded reconstruction provenance while preserving the rest of the admission record.
 Recovery also preserves an explicitly lowered scope, revalidating it against the current
 option; it never silently raises that budget to the default. A scope no longer approved by

@@ -1146,7 +1146,7 @@
         "harness"
       ],
       "additionalProperties": false,
-      "oneOf": [
+      "anyOf": [
         {
           "properties": {
             "reconstruction": {
