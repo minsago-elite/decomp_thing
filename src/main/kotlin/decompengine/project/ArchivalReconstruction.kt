@@ -344,7 +344,7 @@ class GhidraHeadlessProgramModelAnalyzer private constructor(
             val memoryMonitor = CompletableFuture.runAsync({
                 try {
                     while (process.isAlive) {
-                        val observed = residentBytes(process)
+                        val observed = processTree.residentBytes()
                         peakResidentBytes.accumulateAndGet(observed, ::maxOf)
                         if (observed > limits.maximumResidentBytes) {
                             memoryExceeded.set(true)
@@ -615,21 +615,6 @@ class GhidraHeadlessProgramModelAnalyzer private constructor(
             limits.maximumProgramModelBytes, limits.maximumResidentBytes, deadline)
     }
 
-    private fun residentBytes(process: Process): Long {
-        val handles = process.toHandle().descendants().toList() + process.toHandle()
-        return handles.distinctBy { it.pid() }.sumOf { handle ->
-            runCatching {
-                Files.readAllLines(Path.of("/proc/${handle.pid()}/status"))
-                    .firstOrNull { it.startsWith("VmRSS:") }
-                    ?.split(Regex("\\s+"))
-                    ?.getOrNull(1)
-                    ?.toLong()
-                    ?.let { Math.multiplyExact(it, 1024L) }
-                    ?: 0L
-            }.getOrDefault(0L)
-        }
-    }
-
     companion object {
         private val EXPORT_PROCESS_LAUNCH = BoundedAnalysisProcessLaunch()
         private val MODEL_ACQUISITION = BoundedProgramModelAcquisitionProcess()
@@ -696,6 +681,50 @@ internal class ExportProcessTree(
     private val observedHandles = LinkedHashSet<ProcessHandle>()
     private var observationFailure: Throwable? = null
 
+    /** Monitoring and cleanup share identities, limits and sticky observation failures. */
+    fun residentBytes(): Long {
+        val handles = synchronized(this) {
+            // A monitor queued behind termination must not change a cached absence proof.
+            // terminate() has already made the final bounded observations in that case.
+            if (result == null) observe("while monitoring resident memory")
+            observationFailure?.let { throw it }
+            listOfNotNull(rootHandle) + observedHandles.toList()
+        }
+        return handles.distinctBy { it.pid() }.sumOf { handle ->
+            runCatching {
+                Files.readAllLines(Path.of("/proc/${handle.pid()}/status"))
+                    .firstOrNull { it.startsWith("VmRSS:") }
+                    ?.split(Regex("\\s+"))
+                    ?.getOrNull(1)
+                    ?.toLong()
+                    ?.let { Math.multiplyExact(it, 1024L) }
+                    ?: 0L
+            }.getOrDefault(0L)
+        }
+    }
+
+    // Called only under this inventory's monitor/termination lock. Retain each yielded
+    // identity before any later stream error, including observations made before cleanup.
+    private fun observe(stage: String) {
+        try {
+            val root = rootHandle ?: process.toHandle().also { rootHandle = it }
+            descendantObservation(root) { handle ->
+                if (!observedHandles.contains(handle)) {
+                    if (observedHandles.size + 1 >= MAXIMUM_RETAINED_HANDLES) {
+                        throw IllegalStateException("Ghidra export process inventory exceeded $MAXIMUM_RETAINED_HANDLES retained handles")
+                    }
+                    // ProcessHandle equality, not PID alone, distinguishes reused identities.
+                    // Only never-observed descendants remain outside this retained inventory.
+                    observedHandles.add(handle)
+                }
+            }
+        } catch (failure: Throwable) {
+            if (observationFailure == null) observationFailure = GhidraAnalysisException(
+                "Ghidra export process observation failed $stage", failure,
+            ) else if (observationFailure !== failure) observationFailure?.addSuppressed(failure)
+        }
+    }
+
     @Synchronized
     fun terminate(): ExportProcessCleanupResult {
         var interrupted = Thread.interrupted()
@@ -713,27 +742,6 @@ internal class ExportProcessTree(
         result?.let { return it }
         val started = terminationStartedNanos ?: nanoTime().also { terminationStartedNanos = it }
         val graceNanos = gracefulTermination.toNanos()
-        fun observe(stage: String) {
-            try {
-                val root = rootHandle ?: process.toHandle().also { rootHandle = it }
-                descendantObservation(root) { handle ->
-                    if (!observedHandles.contains(handle)) {
-                        if (observedHandles.size + 1 >= MAXIMUM_RETAINED_HANDLES) {
-                            throw IllegalStateException("Ghidra export process inventory exceeded $MAXIMUM_RETAINED_HANDLES retained handles")
-                        }
-                        // Retain by ProcessHandle identity/equality rather than PID alone: a reused
-                        // PID with a different process identity must remain separately observable.
-                        // Insert incrementally so a later stream failure does not discard this handle.
-                        // Never-observed or reparented descendants remain outside this inventory.
-                        observedHandles.add(handle)
-                    }
-                }
-            } catch (failure: Throwable) {
-                if (observationFailure == null) observationFailure = GhidraAnalysisException(
-                    "Ghidra export process observation failed $stage", failure,
-                ) else if (observationFailure !== failure) observationFailure?.addSuppressed(failure)
-            }
-        }
         fun knownHandles(): List<ProcessHandle> = observedHandles.toList()
         fun aliveOrUnknown(): Boolean {
             var alive = false
