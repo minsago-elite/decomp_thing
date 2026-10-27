@@ -4,10 +4,18 @@
 
 The model-to-native identity comes only from the listing assessment's unique matched entry mapping. The projection retains every model function as an entity and every native listing function not consumed by a unique match in a separate `nativeOnlyFunctions` partition. It recomputes candidate sets, mapping states, and paired external/thunk flags from the supplied typed rows, then checks the complete listing and inference scan totals. Listing parameter ordinals and HighFunction parameter indices, category indices, and high slots remain separate raw channels; there is no positional join between them.
 
-The only currently recoverable candidate dimensions are:
+## Baseline candidate contract
+
+The original projection contract, before the formal-root extension below, was:
 
 - `function.calling-convention`: known only when the raw convention state is `named-resolved`, both its raw name and resolved model alias resolve to the same entry in the supplied target descriptor, and the function is uniquely mapped and not a thunk.
 - `function.variadic`: known only when the HighFunction observation completed validly, its formal and local counts both equal its observed parameter population (checked directly as well as through the claimed agreement flag), and its `varArgs` bit agrees with the listing bit on a uniquely mapped non-thunk function.
+- Prototype, return ABI class, and parameter ABI classes remain `recovered-unknown`. The separate listing and inference observation payloads carry selected raw prototype and parameter fields, including the return type ordinal and each parameter's explicit hidden-return flag. This projection is not a replacement for the original typed observation streams. A return type being present is not evidence that it is a hidden return.
+
+## Formal-root classification extension
+
+The current projection retains the calling-convention and variadic rules above and extends the baseline as follows:
+
 - `function.return-abi-class` and `function.parameter-abi-class`: a candidate is emitted only for a uniquely matched, ordinary function with no custom storage, forced-indirect role, or automatic parameter role, and only from its exact `return-formal` or `parameter-formal` listing graph root. The listing validator joins that root to the exact formal datatype occurrence and ordinal; this does not join listing parameters to HighFunction positions. A capture-local `type-token:<sha256>` names the root occurrence for the candidate and does not claim canonical source-type identity. The complete root graph must have a supported layout and the target/data organization must match the explicitly supported SysV AMD64 ELF LP64 profile. Eligibility also requires the captured language `x86:LE:64:default` and compiler spec `gcc`; a caller-supplied AMD64 descriptor cannot make another captured architecture or compiler profile eligible. The classifier reuses the closed `DwarfSysvAmd64Classification` algorithm. Missing, incomplete, ambiguous, unsupported, custom-storage, forced-indirect, automatic `this`, and hidden-role cases remain `recovered-unknown`.
 - `function.prototype` remains `recovered-unknown`: the capture does not establish a canonical recovered source signature. The HighFunction stream declares its formal/effective relation unavailable, so its type roots are retained separately and are not joined to listing slots. Listing formal roots may still produce ABI class candidates because their own exact ordinal/role relationship is validated. The separate listing and inference payloads retain raw fields, including the return type ordinal and each HighFunction parameter's explicit hidden-return flag. A return type's presence never stands in for the `isHiddenReturn` flag.
 
