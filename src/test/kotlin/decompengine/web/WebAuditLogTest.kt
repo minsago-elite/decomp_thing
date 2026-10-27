@@ -77,7 +77,11 @@ class WebAuditLogTest {
             assertEquals((7L..10L).toList(), page.entries.map { it.sequence })
             assertEquals(6, page.omittedBefore)
             assertEquals(listOf(9L, 10L), log.read(limit = 2).entries.map { it.sequence })
+            assertEquals(8, log.read(limit = 2).omittedBefore)
             assertFalse(log.read(limit = 2).complete)
+            assertFalse(page.complete, "a rotated history is not complete")
+            assertEquals(2, log.read(jobId = job, limit = 2).omittedBefore, "scoped count excludes the unknown global prefix")
+            assertFalse(log.read(jobId = "f".repeat(32)).complete, "rotated job membership is unknown")
             assertEquals(11, WebAuditLog(root, clock, segmentEntries = 3).cancel()?.sequence)
         } finally { root.toFile().deleteRecursively() }
     }
@@ -123,7 +127,28 @@ class WebAuditLogTest {
             val page = log.read()
             assertEquals(listOf(1L, 2L), page.entries.map { it.sequence })
             assertEquals(1, page.unrecordedEntries)
-            assertEquals(listOf(1L, 2L), WebAuditLog(root, clock).read().entries.map { it.sequence }, "reopen reads every entry")
+            val reopened = WebAuditLog(root, clock)
+            assertEquals(listOf(1L, 2L), reopened.read().entries.map { it.sequence }, "reopen reads every entry")
+            assertEquals(1, reopened.read().unrecordedEntries)
+            assertFalse(reopened.read().complete, "restart must not erase known append loss")
+            assertEquals(3, reopened.cancel()?.sequence)
+            assertFalse(WebAuditLog(root, clock).read().complete, "later success cannot erase loss")
+        } finally { root.toFile().deleteRecursively() }
+    }
+
+    @Test fun `failure of the first append remains visible in exported pages after restart`() {
+        val root = root("first-failure")
+        try {
+            val failing = WebAuditLog(root, clock, append = { _, _ -> throw java.io.IOException("append failed") })
+            assertNull(failing.cancel())
+            assertEquals(1, failing.read().unrecordedEntries)
+            val reopened = WebAuditLog(root, clock)
+            val page = reopened.read()
+            assertTrue(page.entries.isEmpty())
+            assertEquals("1", page.toJson().getValue("unrecordedEntries").toString().trim('"'))
+            assertFalse(page.complete)
+            assertEquals(1, reopened.cancel()?.sequence)
+            assertFalse(WebAuditLog(root, clock).read().complete, "recovery must retain the loss marker")
         } finally { root.toFile().deleteRecursively() }
     }
 
@@ -146,17 +171,122 @@ class WebAuditLogTest {
         } finally { parent.toFile().deleteRecursively() }
     }
 
+    @Test fun `pending overflow remains known after a record flush and restart`() {
+        assertPendingOverflowSurvivesRestart(flushOnRead = false)
+    }
+
+    @Test fun `pending overflow remains known after a read flush and restart`() {
+        assertPendingOverflowSurvivesRestart(flushOnRead = true)
+    }
+
+    private fun assertPendingOverflowSurvivesRestart(flushOnRead: Boolean) {
+        val parent = root("pending-overflow")
+        val store = parent.resolve("jobs")
+        try {
+            val log = WebAuditLog(store, clock)
+            repeat(WebAuditLog.MAXIMUM_PENDING_ENTRIES) { assertEquals((it + 1).toLong(), log.cancel()?.sequence) }
+            assertNull(log.cancel(), "overflow must be dropped rather than grow the buffer")
+            assertEquals(1, log.read().unrecordedEntries)
+            assertFalse(Files.exists(store), "even overflow must not create job storage")
+            Files.createDirectory(store)
+            val retained = WebAuditLog.MAXIMUM_PENDING_ENTRIES + if (flushOnRead) 0 else 1
+            if (flushOnRead) log.read(limit = WebAuditLog.MAXIMUM_READ_ENTRIES)
+            else assertEquals(retained.toLong(), log.cancel()?.sequence)
+            for (reader in listOf(log, WebAuditLog(store, clock))) {
+                val page = reader.read(limit = WebAuditLog.MAXIMUM_READ_ENTRIES)
+                assertEquals((1L..retained.toLong()).toList(), page.entries.map { it.sequence })
+                assertEquals(0, page.omittedBefore)
+                assertEquals(1, page.unrecordedEntries, "flush and restart must preserve known overflow")
+                assertFalse(page.complete, "an uncapped history must remain incomplete after loss")
+                val exported = reader.read(limit = 100)
+                assertEquals(100, exported.entries.size)
+                assertEquals((retained - 100).toLong(), exported.omittedBefore)
+                assertEquals("1", exported.toJson().getValue("unrecordedEntries").toString().trim('"'))
+                assertFalse(exported.complete)
+            }
+            assertEquals("1", Files.readString(store.resolve(".web-audit/incomplete")))
+            val reopened = WebAuditLog(store, clock)
+            assertEquals(retained.toLong() + 1, reopened.cancel()?.sequence)
+            assertEquals(1, WebAuditLog(store, clock).read().unrecordedEntries,
+                "later successful records must not clear the loss marker")
+            assertFalse(WebAuditLog(store, clock).read(limit = WebAuditLog.MAXIMUM_READ_ENTRIES).complete)
+        } finally { parent.toFile().deleteRecursively() }
+    }
+
     @Test fun `new audit directories and segments are made durable before a record is reported`() {
         val root = root("dirsync")
         try {
             val synced = mutableListOf<String>()
             val log = WebAuditLog(root, clock, segmentEntries = 2, syncDirectory = { synced += root.relativize(it).toString() })
             log.cancel()
-            assertEquals(listOf("", WebAuditLog.DIRECTORY), synced, "store root after creating .web-audit, then the new segment")
+            assertEquals(listOf("", WebAuditLog.DIRECTORY, WebAuditLog.DIRECTORY), synced,
+                "store root, durable intent file, then new segment")
             synced.clear(); log.cancel()
-            assertEquals(emptyList(), synced, "appending to an existing segment needs no directory sync")
-            log.cancel()
-            assertEquals(listOf(WebAuditLog.DIRECTORY, WebAuditLog.DIRECTORY), synced, "rotation, then the recreated segment")
+            assertEquals(emptyList(), synced, "existing intent and segment need file syncs only")
+            synced.clear(); log.cancel()
+            assertEquals(List(2) { WebAuditLog.DIRECTORY }, synced, "rotation, then recreated segment")
+        } finally { root.toFile().deleteRecursively() }
+    }
+
+    @Test fun `capped export windows count their omissions even without rotation`() {
+        val root = root("window")
+        try {
+            val log = WebAuditLog(root, clock)
+            repeat(110) { log.cancel() }
+            val page = log.read(limit = 100)
+            assertEquals((11L..110L).toList(), page.entries.map { it.sequence })
+            assertEquals(10, page.omittedBefore)
+            assertEquals("10", page.toJson().getValue("omittedEntries").toString().trim('"'))
+            assertFalse(page.complete)
+        } finally { root.toFile().deleteRecursively() }
+    }
+
+    @Test fun `audit parent replacement is rejected for writes reads repair and rotation`() {
+        for (symlink in listOf(false, true)) {
+            val root = root("replacement")
+            try {
+                val log = WebAuditLog(root, clock, segmentEntries = 1)
+                assertEquals(1, log.cancel()?.sequence)
+                val directory = root.resolve(WebAuditLog.DIRECTORY)
+                Files.move(directory, root.resolve("original"))
+                val other = Files.createDirectory(root.resolve("other"))
+                if (symlink) Files.createSymbolicLink(directory, other) else Files.createDirectory(directory)
+                assertNull(log.cancel(), "replacement must not receive an append or rotation")
+                assertFalse(log.read().complete)
+                assertFalse(Files.exists(directory.resolve("current.jsonl")))
+                assertFalse(Files.exists(other.resolve("current.jsonl")))
+            } finally { root.toFile().deleteRecursively() }
+        }
+    }
+
+    @Test fun `directory handles prevent parent rebinding during an append`() {
+        val root = root("race")
+        try {
+            val other = Files.createDirectory(root.resolve("other"))
+            val log = WebAuditLog(root, clock, append = { channel, buffer ->
+                val directory = root.resolve(WebAuditLog.DIRECTORY)
+                Files.move(directory, root.resolve("original"))
+                Files.createSymbolicLink(directory, other)
+                while (buffer.hasRemaining()) channel.write(buffer)
+            })
+            assertNull(log.cancel())
+            assertFalse(log.read().complete)
+            assertFalse(Files.exists(other.resolve("current.jsonl")))
+            assertFalse(Files.exists(other.resolve("incomplete")))
+            assertTrue(Files.readString(root.resolve("original/current.jsonl")).contains("run.cancel"))
+        } finally { root.toFile().deleteRecursively() }
+    }
+
+    @Test fun `a surviving durable intent reports uncertainty before any append on reopen`() {
+        val root = root("intent")
+        try {
+            WebAuditLog(root, clock).cancel()
+            Files.writeString(root.resolve(".web-audit/incomplete"), "1")
+            val reopened = WebAuditLog(root, clock)
+            assertEquals(1, reopened.read().unrecordedEntries)
+            assertFalse(reopened.read().complete)
+            assertEquals(2, reopened.cancel()?.sequence)
+            assertFalse(WebAuditLog(root, clock).read().complete)
         } finally { root.toFile().deleteRecursively() }
     }
 

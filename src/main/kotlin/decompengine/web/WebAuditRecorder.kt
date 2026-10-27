@@ -1,12 +1,14 @@
 package decompengine.web
 
 import com.sun.net.httpserver.HttpExchange
+import java.security.MessageDigest
 
 /**
  * Records one audit entry around each sensitive HTTP action, including refused and failed
  * requests. Attribution, target identity and outcome come only from the authorization-owned
  * session, the canonical route and the response the server actually sent: request bodies,
- * filenames and header values other than strong versions are never inspected.
+ * filenames and raw requested versions are never persisted. Requested versions are
+ * domain-separated commitments, since even a syntactically valid precondition can be a credential.
  */
 internal class WebAuditRecorder(
     private val access: LocalWebAccess,
@@ -40,14 +42,22 @@ internal class WebAuditRecorder(
             val replayed = headers.getFirst("Idempotency-Replayed") == "true"
             val location = headers.getFirst("Location")?.let(::locationTarget)
             val outcome = if (thrown && status < 400) WebAuditOutcome.FAILED else WebAuditOutcome.of(status, replayed)
+            val policy = WebRedactionPolicy.of(exchange)
+            // Route syntax alone is not provenance: an unknown run ID can be a session token.
+            // Keep server-generated identities, commit other requested IDs, and never append
+            // configured-sensitive target/version bytes even when they fit opaque syntax.
+            val jobId = (target.jobId ?: location?.first)?.takeUnless(policy::leaks)
+            val runId = (target.runId ?: location?.second)?.let { value ->
+                if (SERVER_RUN.matches(value) && !policy.leaks(value)) value else runCommitment(value)
+            }
             log.record(
                 actor = sessionId?.let(WebAuditActor::browserSession) ?: WebAuditActor.UNAUTHENTICATED,
                 action = action,
                 target = WebAuditTarget(
-                    jobId = target.jobId ?: location?.first,
-                    runId = target.runId ?: location?.second,
-                    expectedVersion = strongVersion(exchange.requestHeaders["If-Match"]),
-                    resultVersion = if (status < 400) strongVersion(headers["ETag"]) else null,
+                    jobId = jobId,
+                    runId = runId,
+                    expectedVersion = strongVersion(exchange.requestHeaders["If-Match"])?.let(::versionCommitment),
+                    resultVersion = if (status < 400) strongVersion(headers["ETag"])?.takeUnless(policy::leaks) else null,
                 ),
                 outcome = outcome,
                 status = status,
@@ -66,6 +76,14 @@ internal class WebAuditRecorder(
     }
 
     companion object {
+        /** A commitment, not validation that caller-controlled bytes identify a server version. */
+        internal fun versionCommitment(value: String): String = commitment("if-match", "ifmatch_", value)
+        internal fun runCommitment(value: String): String = commitment("requested-run", "requested_run_", value)
+        private fun commitment(domain: String, prefix: String, value: String): String = prefix + MessageDigest.getInstance("SHA-256")
+            .digest("decomp-web-audit-$domain-v1\u0000$value".toByteArray(Charsets.UTF_8))
+            .joinToString("") { "%02x".format(it) }
+
+        private val SERVER_RUN = Regex("run_[a-f0-9]{32}")
         private val LOCATION = Regex("/(?:api/v1/)?jobs/([a-f0-9]{32})(?:/runs/([A-Za-z0-9][A-Za-z0-9_-]{0,127}))?$")
         private val JOB = Regex("[a-f0-9]{32}")
         private val RUN = Regex("[A-Za-z0-9][A-Za-z0-9_-]{0,127}")
