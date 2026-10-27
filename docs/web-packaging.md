@@ -422,10 +422,15 @@ tasks to regenerate them from the final build outputs, then verify the installat
 ```
 
 Every Gradle invocation that reaches `jar`, including a focused `test` run, currently
-rebuilds the native helpers and rewrites the application JAR and distribution
-archives with new digests even when the source is unchanged
-([#1790](https://github.com/minsago-elite/decomp_thing/issues/1790)). Record JAR/ZIP
-identities after the final invocation and run browser checks against that archive.
+rebuilds the native helpers and changes the application JAR digest even when the
+source is unchanged ([#1789](https://github.com/minsago-elite/decomp_thing/issues/1789);
+[#1790](https://github.com/minsago-elite/decomp_thing/issues/1790) was closed as its
+duplicate). A focused `test` run refreshes `installDist`, but does not by itself
+rebuild `distZip` or `distTar`: an existing archive can still contain the earlier
+JAR. After the last focused test, run the distribution verification command above
+(which depends on both archive tasks), then record the resulting JAR/ZIP identities
+and run browser checks against that exact archive. Do not infer that an older ZIP
+matches the current installed JAR merely because both came from unchanged source.
 
 These checks cover their distribution/HTTP contracts. The
 [fixture investigation guide](web-workflow-fixtures.md#investigating-a-packaged-browser-failure)

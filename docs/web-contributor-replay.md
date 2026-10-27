@@ -53,7 +53,9 @@ expected output.
 | Browser: rerun | The same driver from a 35-character checkout of the same commit, with the same ZIP, Chrome, Node and Python | Pass for `session` and `metadata`. No sandbox flag was needed; shutdown and cleanup were confirmed. | 69 s |
 | Actions artifacts | `gh run download 40194447686 --name frontend-verification` / `packaged-web-verification` / `packaged-browser-expiry-test-reports` | Pass: master run for `244fb547`, 2.1 MB in total, containing five packaged-browser report directories plus JVM/expiry XML and receipts. No model credential was used. | — |
 
-Browser-tested identities. These belong to the final Gradle invocation; see #1790 below.
+Browser-tested identities. These identify the archive supplied to the browser and
+its embedded JAR, not necessarily the installed JAR after later focused tests; see
+the [resource/reference identity rule](web-packaging.md#keep-resources-and-runtime-references-together).
 
 | Artifact | SHA-256 / identity |
 |---|---|
@@ -80,7 +82,7 @@ four documents and `frontend/README.md` resolve.
 - The fixture guide did not say that `dev:fixtures` uses a strict port. It now documents `DECOMP_DEV_PORT` and warns that a page on 5173 may come from another server.
 - The fixture guide used `build/web-test-browser/chrome` without the install step. The step is now shown.
 - Packaging now states the checkout path length limit that Chrome's socket imposes on the browser driver.
-- Packaging now states that every Gradle invocation that reaches `jar` produces new JAR/ZIP digests ([#1790](https://github.com/minsago-elite/decomp_thing/issues/1790), filed from this replay). The native-helper build records contain random scratch names and the absolute checkout path.
+- Packaging now states that every Gradle invocation that reaches `jar` changes the application JAR digest. ZIP/TAR digests change only when those archive tasks run; a focused `test` refreshes the installed distribution but can leave older archives in place. The native-helper build records contain random scratch names and the absolute checkout path ([#1790](https://github.com/minsago-elite/decomp_thing/issues/1790), filed from this replay and closed as a duplicate of [#1789](https://github.com/minsago-elite/decomp_thing/issues/1789)).
 
 ## Not executed
 
