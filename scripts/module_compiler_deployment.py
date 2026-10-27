@@ -11,6 +11,7 @@ from pathlib import Path
 import re
 import stat
 import sys
+from typing import TypedDict
 import uuid
 
 MAXIMUM_ENTRIES = 128
@@ -22,6 +23,13 @@ CHUNK_BYTES = 64 * 1024
 
 class DeploymentError(ValueError):
     pass
+
+
+class SourcePin(TypedDict):
+    source: str
+    name: str
+    bytes: int
+    sha256: str
 
 
 def _fail(message: str) -> None:
@@ -60,6 +68,7 @@ def _stat_path(path: Path) -> os.stat_result:
 
 def _open_regular(path: Path, expected_size: int | None = None) -> tuple[int, os.stat_result]:
     parent_fd = _open_directory(path.parent)
+    descriptor: int | None = None
     try:
         descriptor = os.open(path.name, os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW | os.O_NONBLOCK,
                              dir_fd=parent_fd)
@@ -72,7 +81,7 @@ def _open_regular(path: Path, expected_size: int | None = None) -> tuple[int, os
             _fail(f"deployment input name changed while opening: {path}")
         return descriptor, info
     except BaseException:
-        if "descriptor" in locals():
+        if descriptor is not None:
             os.close(descriptor)
         raise
     finally:
@@ -100,10 +109,10 @@ def _hash_descriptor(descriptor: int, expected_size: int | None = None) -> tuple
     return total, digest.hexdigest(), after
 
 
-def _source_pins(sources: list[Path]) -> list[dict[str, object]]:
+def _source_pins(sources: list[Path]) -> list[SourcePin]:
     if not 1 <= len(sources) <= MAXIMUM_ENTRIES:
         _fail("module worker deployment entry count exceeds its fixed bound")
-    result = []
+    result: list[SourcePin] = []
     seen_paths: set[Path] = set()
     seen_names: set[str] = set()
     total = 0
@@ -218,7 +227,7 @@ def _stage_directory(parent_fd: int, name: str, display_path: Path, *,
     return descriptor, info
 
 
-def _verify_staged(parent_fd: int, stage_name: str, stage: Path, pins: list[dict[str, object]],
+def _verify_staged(parent_fd: int, stage_name: str, stage: Path, pins: list[SourcePin],
                    manifest: dict[str, object], expected_owner: tuple[int, int] | None = None) -> None:
     stage_fd, stage_before = _stage_directory(parent_fd, stage_name, stage, expected_owner=expected_owner)
     try:

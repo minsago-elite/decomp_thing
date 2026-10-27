@@ -1,4 +1,5 @@
 decompengine.project.ContainedModuleCompilationLiveTest
+decompengine.project.ContainedModuleCompilerWorkerTest
 decompengine.project.SourceTreeTest
 decompengine.project.ReconstructionAcpEvidenceArchiveVerifierTest
 decompengine.oracle.fulltree.ContainedCommandTerminalResourceLiveTest

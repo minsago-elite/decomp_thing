@@ -20,6 +20,7 @@ import zipfile
 ROOT = Path(__file__).resolve().parents[1]
 sys_path = ROOT / "scripts/module_compiler_deployment.py"
 SPEC = importlib.util.spec_from_file_location("module_compiler_deployment", sys_path)
+assert SPEC is not None
 DEPLOYMENT = importlib.util.module_from_spec(SPEC)
 assert SPEC.loader is not None
 SPEC.loader.exec_module(DEPLOYMENT)

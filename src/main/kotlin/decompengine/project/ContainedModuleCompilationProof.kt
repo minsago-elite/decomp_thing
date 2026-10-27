@@ -217,11 +217,15 @@ internal object ContainedModuleCompilationProof {
     private fun verifyRuntimeClosure(closure: JsonObject, runtime: ContainedModuleCompilationRuntimeConfiguration.Declaration,
         request: ContainedModuleCompilerRequest, command: KotlinContainedCommandRequest, requestPath: Path, run: Path,
         control: Path, lease: FullTreeDiskScratchEvidence, attachment: JsonObject, execution: JsonObject) {
-        closure.exact(RUNTIME_FIELDS, "runtime closure")
+        val ownedExecutable = closure["provider"] == JsonPrimitive("kotlin-lease-contained-command-runtime-owned-executable-v1")
+        closure.exact(RUNTIME_FIELDS + if (ownedExecutable) setOf("baseRuntimeProvider", "executableAliases") else emptySet(), "runtime closure")
+        if (ownedExecutable) require(closure.text("baseRuntimeProvider") == "kotlin-lease-contained-command-runtime-v5") {
+            "module compiler executable alias must retain the v5 base runtime"
+        }
         require(sha256(bytes(closure)) == attachment.text("runtimeClosureSha256")) {
             "module compiler runtime closure digest differs from its attachment"
         }
-        require(closure.text("provider") == "kotlin-lease-contained-command-runtime-v5" &&
+        require((ownedExecutable || closure.text("provider") == "kotlin-lease-contained-command-runtime-v5") &&
             closure.text("configurationSha256") == runtime.isolation.canonicalSha256 &&
             closure.text("deploymentClosureSha256") == runtime.configurationSha256 &&
             closure.text("keeperEntryPoint") == KotlinContainedCommandKeeper::class.java.name &&
@@ -237,7 +241,9 @@ internal object ContainedModuleCompilationProof {
         )) })
         require(closure["runtimeMounts"] == mounts) { "module compiler runtime mounts differ from their ordered configuration" }
         val inputs = closure.arrayField("readOnlyInputs")
-        require(inputs.size == 2) { "module compiler runtime requires exactly its private request and configured compiler" }
+        require(inputs.size == if (ownedExecutable) 3 else 2) {
+            "module compiler runtime requires exactly its private request, configured compiler and declared executable snapshot"
+        }
         val requestInput = inputs[0] as? JsonObject ?: throw IllegalArgumentException("module compiler request input must be an object")
         val compilerInput = inputs[1] as? JsonObject ?: throw IllegalArgumentException("module compiler executable input must be an object")
         fun input(path: Path, size: Long, digest: String) = JsonObject(mapOf("path" to JsonPrimitive(path.toString()),
@@ -250,6 +256,16 @@ internal object ContainedModuleCompilationProof {
         require(compilerBytes in 1..512L * 1024 * 1024 &&
             compilerInput == input(runtime.compilerExecutable, compilerBytes, runtime.compilerSha256)) {
             "module compiler retained executable differs from its configured identity or size bound"
+        }
+        if (ownedExecutable) {
+            val snapshotPath = requestPath.parent.resolve("compiler")
+            require(compilerBytes <= 64L * 1024 * 1024 && inputs[2] == input(snapshotPath, compilerBytes, runtime.compilerSha256)) {
+                "module compiler executable snapshot differs from its exact private path or configured pin"
+            }
+            require(closure.arrayField("executableAliases") == JsonArray(listOf(JsonObject(mapOf(
+                "source" to JsonPrimitive(snapshotPath.toString()),
+                "destination" to JsonPrimitive(runtime.compilerExecutable.toString()),
+            ))))) { "module compiler executable alias differs from its pinned snapshot and configured destination" }
         }
         require(closure.text("controlDirectory") == control.toString() && closure.text("writableRoot") == run.toString()) {
             "module compiler runtime paths differ from the disk lease"

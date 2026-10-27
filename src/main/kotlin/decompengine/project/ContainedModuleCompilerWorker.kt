@@ -62,6 +62,8 @@ object ContainedModuleCompilerWorker {
         try {
             verifySnapshotInventory(request)
             request.inputs.forEach { input -> pinned += PinnedCompilerInput.open(request.snapshotRoot, input, currentUid) }
+            // The controller binds its authenticated owned executable snapshot at this exact
+            // runtime path. Scratch stays noexec; no foreign namespace UID becomes trusted.
             StableControlFile.open(request.compilerPath, MAXIMUM_COMPILER_BYTES, "pinned module compiler").use { compiler ->
                 compiler.requireSingleLink("pinned module compiler")
                 require(compiler.authenticatedSha256 == request.compilerSha256) { "module compiler executable digest differs" }

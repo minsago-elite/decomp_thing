@@ -77,7 +77,11 @@ worker deployment before the hosted child manifest and compiled inventory consum
 it. Each invocation must revalidate the same exact deployment; unchanged re-entry
 is not permission to overwrite it. The descriptor-relative staging verifier rejects
 changed sources, incomplete/extra/substituted members, links, and altered published
-permissions or ownership. Resource generation uses the reproducible native-helper
+permissions or ownership. Every member's UID and GID must match the frozen stage's
+owner, which is itself checked against the read-only manifest owner. Matching bytes,
+mode and link count alone do not authenticate member ownership. Consistent modeled
+foreign-UID and foreign-GID controls must refuse without repairing published state.
+Resource generation uses the reproducible native-helper
 records described in [web-packaging.md](web-packaging.md#reproducible-application-jar),
 so rebuilding identical inputs does not silently change that frozen application JAR.
 These are the focused #1808/#1789 prerequisites, reused from PR #1813 rather than
@@ -89,3 +93,24 @@ links; the shell also rejects dangling inventory/case links before invoking Grad
 or acquiring owned runtime state. Existing evidence is preserved, not cleaned or
 reinterpreted as a new attempt. Isolated staging/freshness/routing fixtures do not
 replace the required exact-source, configured Make/Ninja hosted qualification.
+
+The qualification at `8a714d3522358fdb80b7904f0934b649daa149f5` failed:
+104 tests, 91 failures, zero skips. All 91 failures contain the pinned compiler's
+foreign non-root owner lease refusal. Five Make cells failed at initial/baseline
+compilation and all five Ninja cells were not started; reconciled coverage is null,
+not success. Issue #1827 owns the authenticated host-to-user-namespace compiler
+ownership handoff. A host-root compiler can appear as an unmapped owner in the
+contained namespace; accepting UID 65534, removing the lease guard, or merely
+checking a read-only mount is not a safe correction. The staged-member owner fix
+alone does not solve this compiler admission failure. Parent #1727's host-side owned
+compiler snapshot and read-only same-path executable alias are integrated separately;
+the intermediate output-tree copy is superseded because leased scratch stays noexec.
+The owned-executable runtime provider retains `baseRuntimeProvider` v5 and all FD
+request/resource/admission fields. Proof v2 checks the exact three ordered inputs
+(private request, configured compiler, private `compiler` snapshot), identical compiler
+pins, the 64 MiB snapshot bound and the single exact alias. Old no-alias v5 bytes and
+historical replay semantics remain unchanged. Rehashed alias/path/pin/population/provider
+substitutions must refuse. This candidate handoff still needs complete current-source
+hosted qualification; local worker positives do not close #1827. Parent #1727's separate
+off-snapshot compiler-read integrity finding also remains a blocker; FD controls cannot
+clear it.
