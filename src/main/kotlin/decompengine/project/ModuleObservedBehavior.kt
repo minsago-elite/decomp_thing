@@ -144,17 +144,37 @@ object ModuleObservedBehavior {
 
 internal data class ObservationDocument(val inputSha256: String, val cases: List<ModuleObservedCase>)
 
+internal data class ModuleObservationSelection(
+    val document: ObservationDocument,
+    val cases: List<ModuleObservedCase>,
+)
+
 internal fun selectModuleObservedBehavior(observed: String?, module: PlannedModule, model: RecoveredProgramModel): String {
     val unavailable = "Module observed behavior unavailable: no cases with recovered-function trace attribution were supplied."
     if (observed == null) return unavailable
     val unscoped = "Module observed behavior unavailable: legacy or opaque exploration is unscoped; no module attribution can be inferred."
+    val selection = selectModuleObservationCases(observed, module, model) ?: return unscoped
+    if (selection.cases.isEmpty()) return "Module observed behavior unavailable: no supplied traced case intersects this module's recovered functions."
+    return "Non-authoritative observed prompt evidence; producer-supplied trace attribution is not an authenticated oracle, " +
+        "module-only output attribution, coverage proof, or behavioral equivalence. Outputs describe each whole execution.\n" +
+        OracleJson.canonicalBytes(ModuleObservedBehavior.envelope(selection.document.inputSha256, selection.cases), ModuleObservedBehavior.limits)
+            .decodeToString()
+}
+
+/** Validate the complete raw corpus before selecting any whole module-relevant cases. */
+internal fun selectModuleObservationCases(
+    observed: String, module: PlannedModule, model: RecoveredProgramModel,
+): ModuleObservationSelection? {
     val root = try {
         ModuleObservedBehavior.parseObject(observed)
     } catch (failure: IllegalArgumentException) {
         if (ModuleObservedBehavior.KIND in observed) throw failure
-        return unscoped
+        return null
     }
-    if ((root["kind"] as? JsonPrimitive)?.content != ModuleObservedBehavior.KIND) return unscoped
+    require(!ModuleObservationRetention.claimsSelection(root)) {
+        "retained module observation selections are not raw producer corpora"
+    }
+    if ((root["kind"] as? JsonPrimitive)?.content != ModuleObservedBehavior.KIND) return null
     val document = ModuleObservedBehavior.decode(root)
     require(document.inputSha256 == model.inputSha256) { "module observations belong to a different input" }
     val knownFunctions = model.functions.map { it.id }.toSet()
@@ -164,11 +184,7 @@ internal fun selectModuleObservedBehavior(observed: String?, module: PlannedModu
     }
     val owned = module.functionIds.toSet()
     val selected = document.cases.filter { case -> case.attribution.functionIds.any { it in owned } }
-    if (selected.isEmpty()) return "Module observed behavior unavailable: no supplied traced case intersects this module's recovered functions."
-    return "Non-authoritative observed prompt evidence; producer-supplied trace attribution is not an authenticated oracle, " +
-        "module-only output attribution, coverage proof, or behavioral equivalence. Outputs describe each whole execution.\n" +
-        OracleJson.canonicalBytes(ModuleObservedBehavior.envelope(document.inputSha256, selected), ModuleObservedBehavior.limits)
-            .decodeToString()
+    return ModuleObservationSelection(document, java.util.List.copyOf(selected))
 }
 
 private fun requireObservationIdentifier(value: String) {
