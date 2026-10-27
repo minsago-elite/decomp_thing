@@ -14,13 +14,19 @@ See `gh issue view 918` for the authoritative checklist. This PR does not close 
 - Added `StableCppNameCandidateTable` as a pure deterministic function over typed source-anchor identity candidates, lexical scopes, linkage classes, owners, module IDs and canonical source paths.
 - Generated identifiers use a legal fixed prefix, sanitized bounded stem, and full SHA-256 digest. Scope and explicit owner participate in the digest; module owner participates for internal linkage. Canonical report rows bind module and path so placement changes remain visible.
 - The table freezes all entries before lookup, rejects duplicate/unknown identity candidates and duplicate generated names, records sanitized-stem collision groups, and emits a canonical report marked `authority: none` and `status: candidate-only`.
-- Inputs and outputs have hard entity, UTF-8, scope-depth, canonical-byte and JSON-node bounds. Scope lists are copied through a bounded iterator before any scan; oversized scope/name inputs fail before unbounded traversal or encoding allocation.
+- Inputs and outputs have hard entity, UTF-8, scope-depth, canonical-byte and JSON-node bounds. Entity and scope lists are copied through bounded iterators before validation; validation, report budgeting and generation all use the same entity snapshot. Caller-reported list sizes cannot bypass entity limits or substitute unvalidated rows during generation. Oversized scope/name inputs fail before unbounded traversal or encoding allocation.
 - No production adapter or emission path consumes this candidate table. The supplied identity candidates are not authenticated semantic identities.
 
 ## Verification evidence
 - Command: `./gradlew test --tests decompengine.project.StableCppNameCandidateTableTest`
 - Result: `BUILD SUCCESSFUL`; all 9 focused tests passed, including order permutation, sanitization collisions, owner/scope requirements, scope and module moves, duplicate/unknown identities, output and Unicode limits, adversarial unbounded scope iterator, and authored multi-translation-unit fixtures.
 - The command also passed the frontend toolchain/build/resource checks and compiled JUnit signature guard (1,728 classes; 4,481 annotated methods).
+
+### Review remediation verification
+- Added two adversarial caller-list regressions: an underreported, endless iterator must stop before consuming an entity over the configured limit; a list that changes between traversals must not substitute an unvalidated source path.
+- Focused Kotlin 2.4.0/JDK 21 compilation and JUnit Platform execution of `StableCppNameCandidateTableTest`, reusing dependency classes from the original exact PR head `56fda2387b806b9cbe728939cb442caab59c0b71`: the original implementation fails both new tests (9 pass, 2 fail); the corrected implementation passes all 11 tests, with no skips or aborts.
+- Local reproduction harness and logs: `.worktrees/review-remediation/evidence/prs/1817/focused-kotlin.py`, `focused-baseline.log`, `focused-fixed.log`; run `python3 .worktrees/review-remediation/evidence/prs/1817/focused-kotlin.py fixed` from the repository root.
+- `git diff --check` passed. Kotlin LSP executables/tools are unavailable in this session; focused compiler checks were used instead. This short local check does not replace hosted Gradle qualification.
 
 ## Current boundary (truthful, no fabrication)
 - This is a pure candidate-only implementation slice; no authenticated semantic-identity input, production integration, generated source, contained run, deterministic production repetition, or independent archive verification is claimed.

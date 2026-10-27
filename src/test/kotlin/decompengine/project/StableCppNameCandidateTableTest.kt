@@ -193,6 +193,49 @@ class StableCppNameCandidateTableTest {
     }
 
     @Test
+    fun `entity count is bounded by traversal even when caller size underreports`() {
+        var consumed = 0
+        val endless = object : AbstractList<StableCppNameCandidateInput>() {
+            override val size: Int get() = 0
+            override fun get(index: Int): StableCppNameCandidateInput =
+                input("entity:$index", "f", StableCppNameEntityKind.FUNCTION)
+
+            override fun iterator(): Iterator<StableCppNameCandidateInput> = object : Iterator<StableCppNameCandidateInput> {
+                override fun hasNext(): Boolean = true
+                override fun next(): StableCppNameCandidateInput {
+                    check(consumed < 2) { "candidate traversal exceeded the entity bound" }
+                    return get(consumed++)
+                }
+            }
+        }
+
+        val failure = assertFailsWith<IllegalArgumentException> {
+            StableCppNameCandidateTable.build(endless, StableCppNameCandidateLimits(maximumEntities = 2))
+        }
+        assertEquals("C++ name candidate count exceeds its bound", failure.message)
+        assertEquals(2, consumed, "refuse the extra element before consuming it")
+    }
+
+    @Test
+    fun `candidate generation uses the same snapshot that was validated`() {
+        val validated = input("validated", "safe", StableCppNameEntityKind.FUNCTION)
+        val replacement = input("replacement", "unvalidated", StableCppNameEntityKind.FUNCTION,
+            path = "../outside.cpp")
+        var traversals = 0
+        val changing = object : AbstractList<StableCppNameCandidateInput>() {
+            override val size: Int get() = 1
+            override fun get(index: Int): StableCppNameCandidateInput = replacement
+            override fun iterator(): Iterator<StableCppNameCandidateInput> =
+                listOf(if (traversals++ == 0) validated else replacement).iterator()
+        }
+
+        val actual = StableCppNameCandidateTable.build(changing)
+        val expected = StableCppNameCandidateTable.build(listOf(validated))
+        assertContentEquals(expected.canonicalBytes, actual.canonicalBytes)
+        assertEquals(1, traversals, "never re-read the caller list after validation")
+    }
+
+    @Test
     fun `scope depth is bounded before caller list traversal and names are length checked`() {
         val endless = object : AbstractList<StableCppNameScopeComponent>() {
             override val size: Int get() = 0
