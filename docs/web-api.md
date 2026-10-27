@@ -144,14 +144,18 @@ internal storage optimization and must not merge identity, permissions or histor
 | `GET /api/v1/uploads/{uploadId}` | `200 uploadProgress` | Ephemeral session-bound transfer bytes and publication phase; #169 |
 | `POST /api/v1/jobs` | `201 job`, `Location: J` | Multipart, upload limits, idempotency; #162 |
 | `GET J` | `200 job`, ETag | Snapshot read; #159/#160 |
-| `PATCH J` | `200 job` | Allowlisted label/archive metadata, If-Match and idempotency; #173 |
-| `DELETE J` | `202 operation` | Reviewed retention/deletion policy and If-Match; #172 |
+| `PATCH J` | `200 job`, strong ETag | Strict `jobOrganizationRequest` (only `label`, `archived`), session/Origin/CSRF, job If-Match and idempotency; changes no evidence; #510 |
+| `DELETE J` | `202 operation`, `Location: J/operations/{operationId}` | Strict `jobDeletionRequest` (`confirmJobId`), session/Origin/CSRF, job If-Match, idempotency; refused with `409 RETENTION_PROTECTED` while protected; #507/#508 |
+| `GET J/deletion-preview` | `200 jobDeletionPreview` | Read-only dry run: affected storage categories, protections, finality; #506/#511 |
+| `GET J/operations/{operationId}` | `200 operation` | Durable `job.delete` audit/progress record, readable after the job is gone; #508 |
+| `GET /api/v1/storage` | `200 storageSummary` | Read-only tolerant logical-byte accounting by category; #506 |
+| `GET /api/v1/storage/maintenance-preview` | `200 maintenancePreview` | Read-only dry run of real maintenance; never writes or starts work; #506 |
 | `GET J/runs`, `GET R` | `200 runs`, `200 run` | Bounded attempts or durable attempt snapshot; #160 |
 | `GET R/progress-pin` | `200 progressPin`, strong run ETag | Current per-attempt journal pin; #172 |
 | `PUT R/progress-pin` | `200 progressPin`, original result on keyed replay | Strict `progressPinRequest`, session/Origin/CSRF, run If-Match and idempotency; #172/#177 |
 | `GET /agent/preflight` | `200 agentPreflight` | Last explicit agent inspection result; never starts the agent; #493 |
 | `POST /agent/preflight` | `202 agentPreflight`, `409` while one runs | Strict `agentPreflightRequest` (`{"action":"inspect"}`), session/Origin/CSRF; starts one single-flight `preflight(WEB)`; #493 |
-| `POST J/runs` | `202 run`, `Location: R` | `workflowStart` request, capability/limits/input checks, job If-Match; #163 |
+| `POST J/runs` | `202 run`, `Location: R` | `workflowStart` request, explicit option, server-approved limits, input policy and fresh readiness checks, job If-Match; #163/#478 |
 | `POST R/cancel` | `202 run` or `200 run` if already terminal | Closed `workflowCancel` request, idempotent recorded intent, run If-Match; #163 |
 | `POST R/recover` | `202 run`, `Location` of a new attempt | Closed `recover` request; explicit `retry` or capability-gated `resume`; run If-Match and idempotency; #486 |
 | `GET R/controls` | `200 attemptControls`, strong run ETag | Read-only cancel/retry/resume eligibility with closed reasons; reserves nothing; #528/#529 |
@@ -173,11 +177,12 @@ internal storage optimization and must not merge identity, permissions or histor
 | `GET J/artifacts`, `GET J/artifacts/{artifactId}` | `200 artifacts`, `200 artifact` | Optional run/revision filters validated together; #165/#192 |
 | `GET`/`HEAD J/artifacts/{artifactId}/content` | `200` or `206` bytes | Immutable digest binding, contained stream; #164/#192 |
 | `POST V/archive-verifications` | `202 operation` | Explicit bounded integrity verification, no binary execution; #193 |
-| `GET G`, `GET G/worktrees/{worktreeId}` | `200 gitWorkspace` | Capability-gated repository/worktree registry; #200/#202 |
+| `GET J/repositories` | `200 gitRepositories` | Capability-gated repository summary and latest 20 operations; implemented by #201 |
+| `GET G`, `GET G/worktrees/{worktreeId}` | `200 gitWorkspace` | Capability-gated repository/worktree registry; `GET G` implemented by #201, worktrees #202 |
 | `GET G/{status,diff,history,refs,worktrees,remotes,conflicts}` | Bounded typed Git read | Scoped worktree/ref/object IDs; #202/#204/#207/#210/#211 |
-| `POST J/repositories` | `202 operation` | Explicit init/attach/clone, validated configuration; #201/#209 |
+| `POST J/repositories` | `202 operation` | Strict `gitRepositoryInit`/`gitRepositoryAttach`, session/Origin/CSRF, job If-Match and idempotency; init/attach implemented by #201, clone #209 |
 | `POST G/operations` | `202 operation` | Named action, selected IDs, guards, idempotency; #203–#212 |
-| `GET G/operations/{operationId}` | `200 operation` | Durable outcome/recovery state; #209 |
+| `GET G/operations/{operationId}` | `200 operation` | Durable outcome/recovery state; init/attach operations implemented by #201, others #209 |
 | `POST G/operations/{operationId}/cancel` | `202 operation` or terminal `200` | Explicit cancellation, optimistic guard; #209 |
 
 Schemas cover representative `session`, `bootstrap`, `job(s)`, `run`, `snapshot`, `events`,
@@ -193,8 +198,9 @@ filter, sort, admission snapshot and last key. New inserts cannot appear midway 
 snapshot or duplicate prior rows. Removed entries may be absent, and deletion is not repaired by
 offset shifting. Expired snapshots return `410 CURSOR_EXPIRED` with guidance to refresh. Supported
 job filters are bounded display-name search (256 characters), exact known status, inclusive
-`createdAfter` and exclusive `createdBefore` RFC3339 instants, and `sort=newest`
-(default) or `sort=oldest` creation/identity ordering. Cursors cannot be reused across
+`createdAfter` and exclusive `createdBefore` RFC3339 instants, `sort=newest`
+(default) or `sort=oldest` creation/identity ordering, and `archived=exclude` (default),
+`all` or `only`. The search also matches a job's display label. Cursors cannot be reused across
 resources, revisions or filters. Counts are optional and explicitly exact/estimated/unknown;
 absence of a total never prevents page navigation.
 
@@ -220,13 +226,23 @@ publication returns a recovery failure without a success location. A scheduler
 refusal that was durably recorded returns its failed run; another scheduling
 exception requires reconciliation through the job and retained key.
 
-Production durable adapters remain unregistered, and bootstrap continues to
-report them unavailable. Without registered adapters or retained keyed starts,
-POST retains the existing 405 response without consuming a body. A retained
+The SPA server registers production durable adapters for exploration, agent
+reconstruction, evidence-only reconstruction and repair; see
+[production workflow adapters](#production-workflow-adapters-and-restart-reconciliation).
+Admission rechecks the selected option's runtime prerequisites against a fresh
+readiness snapshot after any keyed replay: a missing or undetermined
+prerequisite returns `503 CAPABILITY_UNAVAILABLE` with its fixed reason message
+and records nothing. The harness is an explicit choice: `harnessCapabilityId`
+must name one registered option for the workflow (or null where the option has
+none) and never falls back to another option. Limits must equal the advertised
+defaults or, for options whose launch facts set `limitsAdjustable`, lower one or
+more fields; a raised field returns 503. An input revision is refused with 422
+`INPUT_REVISION_UNAVAILABLE` unless the option's `input` policy admits it, and an
+option that requires a recorded revision returns 422 `INPUT_REVISION_REQUIRED`
+when none is selected. Servers without registrations (the legacy UI and inert
+embeddings) keep the existing 405 response without consuming a body. A retained
 receipt keeps the route available for authenticated read-only replay after
-registrations are removed; it does not enable fresh work. Injected inert
-adapters qualify transport/storage behavior, not runtime readiness or upstream
-model/binary execution and accepted-publication integration.
+registrations are removed; it does not enable fresh work.
 
 The reserved cancellation transport has a closed `workflowCancel` data object:
 exactly `{"action":"cancel"}`, bounded to 1024 bytes. The fixture wrapper is not
@@ -261,9 +277,9 @@ diagnostic preservation, guards, strict JSON, actor isolation, revocation,
 capacity and publication faults. Service/storage restart coverage retains the
 same listener's in-memory authorization service. It does not establish replay by
 a new session after a full listener restart. These authored methods await their
-own Actions qualification; browser and production-adapter/runtime qualification
-remain unfinished. Bootstrap continues to report workflows unavailable, and
-fresh starts without registrations or retained start receipts retain 405.
+own Actions qualification; browser and live model/binary runtime qualification
+remain unfinished. Fresh starts on a server without registrations or retained
+start receipts retain 405.
 
 The recovery transport accepts only the closed `recover` data object (not its
 fixture wrapper), bounded to 1024 bytes: `mode` is `retry` or `resume`, and
@@ -377,6 +393,73 @@ Retry/resume create a distinct run referencing the previous attempt and preserve
 Restart marks abandoned active attempts interrupted and reconciles committed publication journals;
 it never silently launches execution or duplicates accepted publication.
 
+### Production workflow adapters and restart reconciliation
+
+Each adapter reuses the CLI implementation: `explore` is wired to the existing
+automatic explorer but production dispatch is disabled pending helper ownership
+and cancellation qualification (#71); `reconstruct`
+runs archival reconstruction with the bundled Ghidra analyzer and either the
+configured agent harness (ACP or the deprecated legacy adapter selected by
+`ACP_HARNESS`) or the explicit agent-free evidence-only profile, with no
+credential-based fallback between them; `repair` copies the selected recorded
+revision's retained source tree into the new attempt and runs the secure repair
+runtime there, so the selected revision's evidence is never modified.
+
+Every adapter runs its body on an owned child thread and enforces the attempt's
+recorded limits: wall-clock time, idle time (no new output or agent progress),
+the byte total of the attempt's own report directory and, where metered, agent
+tool calls (identities are distinct within each agent invocation and summed across
+invocations; a returned receipt reporting more calls raises the count). Limits are
+checked again when a body finishes between samples. A breach or cancellation
+interrupts the child, and the adapter does not return while that child thread is
+alive. Exploration's angr and strings helpers still have an ownership gap: a
+leader can fork a pipe-holding child and exit between descendant samples, leaving
+cancellation blocked on an unobserved writer. Observed-descendant cleanup does
+not fix this race. Production exploration is therefore refused at admission and
+at direct adapter execution; the explicit inert test seam qualifies only executor
+and service controls, not process cleanup. Breaches in enabled adapters record
+`LIMIT_EXHAUSTED`; cancellation and shutdown keep their existing `CANCELLED` and
+`PROCESS_INTERRUPTED` outcomes. Repair's tool-call ceiling is structural (five
+iterations, each one agent invocation bounded at 256 tool calls), so its limits
+are fixed. Usage records wall-clock time and, for agent reconstruction, tool
+calls and any returned token counts. Report paths stay internal.
+
+Reconstruction and repair record a candidate whenever a canonical source digest
+exists: the schema-3 build contract's `sourceRevisionSha256`, or the repair
+graph's published head. The revision identifier is derived from the digest, so
+one identifier can never name different sources. A candidate is never
+acceptance. Production repair acceptance publication is **disabled** pending a
+qualified workflow-owned, bounded, read-only attestation of installed canonical
+sources, retained blobs and receipt bodies, including binary/profile/corpus and
+invocation bindings (#478). The recorded repair-history reader is diagnostic
+metadata only and must never authorize acceptance, even for a recorded accepted
+head or baseline. The explicit test-only publication seam exercises service/store
+integration with inert graphs; it is not production acceptance evidence. The
+service publication infrastructure rechecks the persisted candidate, versions and
+that the attempt is still the latest before recording any trusted reference.
+
+Production options declare no checkpoint policy yet, so `POST R/recover` and
+`GET R/controls` report resume as `RESUME_UNSUPPORTED`; an explicit retry starts a
+fresh linked attempt with the predecessor's own option and recorded (possibly
+lowered) limits; recovery never raises them. A new recovery command passes the same
+runtime-prerequisite admission as a fresh start, including the bounded sandbox check
+at submission, while a keyed replay stays read-only. A repair retry
+re-resolves the predecessor's recorded input revision (accepted or completed
+candidate) and copies its retained source afresh; if that revision is no longer
+retained, retry is refused with `INPUT_UNVERIFIED`.
+
+Startup recovery keeps its existing transitions and then reconciles. Queued
+attempts become `interrupted` with no `startedAt`: they never executed. Active
+attempts become `interrupted` with their `startedAt` and partial evidence. Neither
+is resumed or re-executed. Completed production repair candidates remain
+unpublished until qualified attestation exists; existing acceptances are never
+repeated or replaced. Registered trusted publication adapters (currently inert
+test controls) share the recovery operation's admitted inventory, aggregate read
+and retention allowances, and cancellation checkpoints, including final mutation
+rechecks. A limit or cancellation after recovery changes began retains outcome
+uncertainty; an earlier durable acceptance is not rolled back or repeated.
+Reconciliation never executes a binary, model or adapter body.
+
 ### Admission and overload
 
 The server admits at most 16 concurrent requests, with 64 more waiting in a bounded queue. A request that finds
@@ -408,6 +491,48 @@ also retain every decimal digit, including values above JavaScript's exact integ
 range. Missing metadata is labelled not reported. A reported zero stays zero;
 the view assigns it no unlimited or unsupported meaning. Reports without an
 assigned workflow stay in the general capability section.
+
+Workflow capabilities name one launchable option each (`workflow-explore-tools`,
+`workflow-reconstruct-agent`, `workflow-reconstruct-evidence-only`,
+`workflow-repair-agent`). Their `launch` object carries the server's launch
+facts: the `harnessCapabilityId` a start must submit, the execution `mode`
+(`tools`, `agent` or `evidence-only`), whether the option executes the uploaded
+binary or contacts the configured agent, its required tools, its input-revision
+policy (`none`, `accepted-optional` or `recorded-required`) and whether its
+`limits` are adjustable. For a launch option, `limits` are the server-approved
+defaults and, when adjustable, per-field ceilings. `agentContractVersion` is
+reported exactly for options that contact an agent. `supported` means every
+declared prerequisite (sandbox helpers, bundled Ghidra, a configured agent
+harness, qualified exploration helper ownership and, for repair, a
+production-qualified contained repair validator) was
+established by the current readiness observation. Workflow prerequisites follow the
+same passive rule as harness readiness: a page load reads configuration and file
+metadata only (helper executability, bundled Ghidra presence) and launches no
+helper. Otherwise-qualified options that execute the binary report `unknown` with
+`SANDBOX_HELPER_UNCHECKED` ("checked when this workflow starts") unless a recent
+explicit agent preflight already checked the helpers. Starting a workflow is itself
+an explicit operator action: when the selected option needs the sandbox, its other
+prerequisites hold and the helpers are unchecked, `POST J/runs` runs the same
+bounded helper check (at most five seconds) before admission; a keyed replay still
+returns its recorded run whatever the check reports. It needs no configured agent and no prior
+preflight. A failed or timed-out check refuses the start, with
+`503 CAPABILITY_UNAVAILABLE` and its fixed reason message; nothing is recorded.
+Evidence-only reconstruction needs only Ghidra presence. Production exploration
+reports `unavailable` / `EXPLORATION_HELPERS_UNQUALIFIED` when readiness facts are
+present, even if sandbox inspection succeeded. It refuses fresh starts and retries
+without recording a new attempt, skips the unnecessary helper probe, and refuses
+direct execution before starting an engine or worker. No environment flag opens
+this qualification gate. A missing readiness snapshot remains `unknown` and also
+cannot authorize execution. Until the secure repair runtime's validator
+qualification gate opens, repair reports
+`REPAIR_VALIDATOR_UNQUALIFIED` and is refused at admission. A missing prerequisite
+is `unavailable` with its fixed reason code, and a probe that did not finish makes
+the option `unknown`. Workflows without a production adapter (`build`,
+`validate`) are reported `unsupported` with `WORKFLOW_NOT_IMPLEMENTED`. Every
+other capability has `launch: null`. `launch` is optional within v1: an older
+producer omits it, and clients treat absence like null (no launch facts, no start
+control). Launch facts describe adapters; admission
+rechecks registration, limits, input and readiness.
 
 These are report-level observations, separate from an individual attempt's
 recorded limits and job-specific admission. Displaying them performs no new
@@ -545,6 +670,11 @@ Status/diff snapshots carry repository/worktree versions plus observed HEAD/ref 
 Commit, stage, branch changes, integration and push require those versions and expected object
 IDs under the same repository/worktree lock as execution. A changed ref or dirty source snapshot
 requires `409 REF_CHANGED`/`WORKTREE_BUSY`, with a fresh review; no implicit overwrite/stash/reset.
+The adapter's `statusDigest` is only a display-status fingerprint of bounded porcelain output and
+HEAD, not either version, a content digest or an optimistic-concurrency/provenance guard. Further
+edits to an already-untracked or modified file, non-HEAD ref changes and edits beyond the output
+bound may leave it unchanged. Mutation services must separately bind a content-sensitive snapshot
+and revalidate it under their execution lock; truncated display status cannot establish that guard.
 Push names the remote/ref registration, exact local object and reviewed expected remote object
 (`null` means expected absent). The server rechecks remote state and enforces the expected value
 at the remote ref-update boundary; no unchecked force update. Automatic fetch, background push,
@@ -558,6 +688,242 @@ new candidates and return through existing validation before becoming accepted r
 operation records intent, guards, stage/outcome, safe diagnostics and recovery requirements. A
 restart never silently repeats a remote write; reconcile the exact refs and durable intent before
 offering an explicit recovery action. Credentials and raw transport diagnostics stay server-side.
+
+### Managed repository identity mapping
+
+Each identity below has one owner, and relationships are recorded, never inferred from equal
+bytes, names or timestamps (#568). The server stores Git records under the job's private
+storage. Paths never appear in a DTO.
+
+| Relationship | Recorded by | Meaning and limits |
+| --- | --- | --- |
+| job → repository | Repository registration (`jobId`, `repositoryId`) | One managed repository per job source workspace, created only by an explicit init or attach operation |
+| repository → worktree | Registration (`worktreeId`) | One registered work tree; neither branch name nor directory is its identity |
+| worktree → run attempt, source revision | Registration (`runId`, `candidateRevisionId`) | The candidate snapshot the work tree was materialized from; `null` for an imported history |
+| source revision → Git object ID | `gitMapping` | Created only by an explicit commit after the commit tree is checked against the revision's source bytes |
+| Git object ID → archive digest | `gitMapping.sourceSha256`, `archiveArtifactId` | The archive is verified against the same source bytes, never against the object ID |
+| revision → acceptance | `gitMapping.acceptance`, `acceptanceArtifactId` | Copied from canonical validation evidence only |
+
+Object IDs are opaque lowercase hexadecimal strings whose length comes from the repository's
+observed `objectFormat` (`git rev-parse --show-object-format`): 40 for SHA-1, 64 for SHA-256.
+Unknown formats are readable but cannot be used for writes. `GitObjectFormat` is the only parser;
+no code converts an ID to a number or accepts an abbreviation. HEAD is reported as
+`headState`: `attached` (names an existing branch, with `headRefId` and `headObjectId`), `unborn`
+(names a branch without a commit, so both IDs are `null`) or `detached` (an object without a
+branch). `headRefName` is display text. No code path assumes a `master` or `main` branch; the
+initial branch of a new repository is configured policy, and imported repositories keep their own.
+
+A commit records source state. A commit, branch, tag or clean work tree never means build or
+behavior validation, candidate selection or acceptance; `gitMapping.acceptance` comes from canonical
+evidence alone. Every `gitWorkspace` reports `trackingPolicy: "source-only-v1"` (below).
+
+### Source-only tracking policy
+
+Managed repositories track reconstructed source, not job state (#569). The server writes the rules
+below to the repository's private `info/exclude`. Nothing is added to the work tree, so source
+bytes and file names stay exactly as the snapshot recorded them. The top-level `build` output root
+of a snapshot is not copied into the work tree, which matches the archive transport layout.
+
+| Category | Excluded patterns |
+| --- | --- |
+| Original binaries | `/input.elf`, `*.elf`, `*.bin`, `*.exe`, `*.dll`, `*.so`, `*.so.*`, `*.dylib`, `*.a`, `*.lib`, `*.o`, `*.obj`, `*.out` |
+| Credentials | `.env`, `.env.*`, `*.pem`, `*.key`, `*.p12`, `*.pfx`, `id_rsa*`, `id_ecdsa*`, `id_ed25519*`, `.netrc`, `.git-credentials`, `.npmrc`, `.pypirc`, `*.token`, `credentials.json` |
+| Job databases and runtime state | `job.json`, `workflow-state.json`, `*.sqlite`, `*.sqlite3`, `*.db`, `*.db-journal`, `*.db-wal`, `.upload-*/`, `.job-metadata-*`, `.git-runtime/` |
+| Private transcripts | `/transcripts/`, `/sessions/`, `*.transcript`, `*.jsonl`, `*.ndjson` |
+| Native build output | `/build/`, `/out/`, `cmake-build-*/`, `CMakeFiles/`, `CMakeCache.txt`, `cmake_install.cmake`, `build.ninja`, `.ninja_deps`, `.ninja_log`, `compile_commands.json`, `*.d`, `*.gcda`, `*.gcno` |
+| Transient evidence | `/reports/`, `/evidence/`, `*.log`, `*.tmp`, `*.swp`, `/tmp/`, `/.tmp/` |
+
+The patterns never match C/C++ sources, headers, CMake or Make descriptions, README files or
+`source_tree_manifest.json`. `GitTrackingPolicy` holds the same list, and its tests check both
+directions against real `git check-ignore` results.
+
+`info/exclude` only makes excluded files look ignored. Git gives a `.gitignore` in source content
+higher precedence, so a pattern such as `!secret.key` would re-include a credential. The policy is
+therefore enforced on its own terms. `GitTrackingPolicy.excluded` evaluates paths with
+`check-ignore --no-index` in a server-owned scratch repository whose only ignore source is the
+policy, so no repository file can override it. Staging refuses any path it excludes.
+
+### Server-owned Git adapter
+
+The `decompengine.git` adapter uses the system `git` executable, not a library (#570). Git is an
+optional runtime prerequisite. At startup the first absolute `git` on the server's `PATH`
+is resolved to its real path and probed with `git version`. Versions older than 2.36.0
+(needed for `GIT_CONFIG_GLOBAL` and repository ownership checks) are unsupported.
+Bootstrap reports `runtime.gitVersion` as the bare numeric version, or `null` when none is
+detected, plus `git` and `git-import` capabilities. `git` is `unavailable` with `GIT_NOT_FOUND`,
+`GIT_VERSION_UNSUPPORTED` or `GIT_PROBE_FAILED`, and `supported` when the managed repository
+routes below are served. Every Git endpoint answers `503 CAPABILITY_UNAVAILABLE` with that reason's message when
+Git is unusable. The executable path never leaves the server.
+
+- **Argument safety.** `ProcessBuilder` receives a separate argv; no shell is involved. Callers
+  name one allowlisted subcommand and its arguments. Only the runner adds global options
+  (`--no-pager`, `--no-replace-objects`, `--literal-pathspecs` except for `check-ignore`, which
+  takes plain names, `-c` overrides, `--git-dir`, `--work-tree`). Arguments are bounded and contain no NUL. Branch names pass a local syntax check
+  and then `git check-ref-format refs/heads/<name>`, so a value can never be parsed as an option.
+- **Bounds.** Each call has its own wall-clock limit (30 s by default) and stdout/stderr byte
+  limits (1 MiB and 64 KiB). Exceeding either kills the process and its descendants. Stdin is
+  closed. Captured stderr stays server-side; public errors use fixed messages.
+- **Environment.** The child receives a fresh environment: `PATH` (the executable's directory,
+  `/usr/bin`, `/bin`), a server-owned `HOME` and `XDG_CONFIG_HOME`, `GIT_CONFIG_NOSYSTEM=1`,
+  `GIT_CONFIG_GLOBAL` pointing to an empty server-owned file, `GIT_ATTR_NOSYSTEM=1`,
+  `GIT_TERMINAL_PROMPT=0`, empty `GIT_ASKPASS`/`SSH_ASKPASS`, `GIT_NO_REPLACE_OBJECTS=1`,
+  `GIT_OPTIONAL_LOCKS=0`, `GIT_PROTOCOL_FROM_USER=0`, `GIT_CEILING_DIRECTORIES` and a C/UTC locale.
+  The runtime directories live in `<job store>/.git-runtime` and must be empty.
+- **Command-line configuration.** These values outrank any repository configuration:
+  `core.hooksPath` (an empty server-owned directory), `core.fsmonitor=false`,
+  `core.untrackedCache=false`, empty `core.askPass` and `credential.helper`,
+  `core.sshCommand=false`, `core.symlinks=false`, `core.autocrlf=false`, `core.protectNTFS`/`HFS`,
+  empty `core.attributesFile`/`core.excludesFile`, `protocol.allow=never`, no submodule recursion
+  (`submodule.recurse`, `fetch.recurseSubmodules`, `push.recurseSubmodules`), no automatic
+  gc/maintenance, no signing, an empty `init.templateDir`, `safe.bareRepository=explicit` and
+  `transfer.fsckObjects=true`. `safe.directory` is never set, so Git's ownership check stays strict.
+- **Inert repository content.** Only configuration can name an executable: filter, diff and merge
+  drivers, credential helpers, fsmonitor, pagers, aliases and includes. Before any command runs in
+  a managed repository, its `config` is read with `git config --file … --no-includes` and must
+  contain only server-written keys (`core.repositoryformatversion`, `core.filemode`,
+  `core.bare=true`, `core.ignorecase`, `core.precomposeunicode`, `core.logallrefupdates`,
+  `extensions.objectformat`, `user.*`). Otherwise the read fails with `REPOSITORY_CONFIG_UNTRUSTED`.
+  Before config is read, the repository root and its ancestors must be non-linked directories;
+  a no-follow metadata walk rejects links and special files, including linked `info`, nested refs
+  and loose object storage. The walk is bounded to 100,000 entries and 20 seconds (exhaustion is
+  `REPOSITORY_UNAVAILABLE`). The registered worktree root/ancestors must also be non-linked.
+  These checks do not replace admission: D8.2 must select registered storage under a trusted
+  managed root, isolate imported content (including shared writable inodes), validate the object
+  graph and enforce ownership/locking against concurrent filesystem replacement. Inspection is
+  not an arbitrary-host-path admission API or a race-safe source snapshot.
+  Alternates, `commondir` and shallow files are `REPOSITORY_UNSUPPORTED`. Hooks never run because
+  of the empty `core.hooksPath`. Attribute files can name a filter, but no driver exists. Built-in
+  conversions need no driver (`text`/`eol` line endings, `ident`, `working-tree-encoding`), so
+  every managed Git directory carries a server-owned `info/attributes`, which has the highest
+  attribute precedence: `* -text !eol -crlf -ident -filter !working-tree-encoding`. The audit
+  refuses a repository whose file differs, so checkout and status always see the exact blob bytes. Submodule paths stay empty gitlinks. No command fetches
+  or contacts a remote. No exceptions exist yet. Any future hook, filter, submodule or helper
+  support needs its own reviewed design and capability.
+- **States.** A read reports `unborn`, `attached`, `detached`, `dirty` and the object format,
+  without assuming a branch name. Symbolic HEAD must name a valid `refs/heads/...` branch;
+  other namespaces are `REPOSITORY_UNSUPPORTED`, not attached or unborn branches. Ref display is
+  bounded to 200 entries with explicit truncation; attached HEAD's matching ref is retained within
+  that bound even if it sorts after the other refs. A missing or linked repository is `REPOSITORY_UNSUPPORTED`. A ref
+  that does not resolve, or a non-commit HEAD, is `REPOSITORY_CORRUPT`. Bounded failures are
+  `REPOSITORY_UNAVAILABLE`.
+
+`GitAdapterTest` uses real temporary repositories under the Gradle temporary directory, including
+paths with spaces and non-ASCII characters, SHA-1 and SHA-256 formats and a non-`main` branch. It
+also uses fake executables for missing, old, slow, noisy and failing Git. Tripwire hooks,
+fsmonitor and filter scripts show that nothing in repository content runs. This covers the
+adapter boundary only.
+
+### Managed repository initialization, import and recovery
+
+`GET J/repositories`, `POST J/repositories`, `GET G` and `GET G/operations/{operationId}` are
+served when the `git` capability is `supported` (#571-#573). Each of them returns `503
+CAPABILITY_UNAVAILABLE` with the capability's reason message when Git is missing or too old.
+They follow the shared session rules. A read discloses repository facts only after the job
+resolves, and never runs a write, fetch or checkout. The POST uses the shared mutation boundary
+(session, Origin, JSON and CSRF) before any body or service read. It also needs one strong job
+`If-Match`, one 16-128 character `Idempotency-Key`, no query and a strict body of at most 2048
+bytes:
+
+- `{"action":"git.init","runId":…,"revisionId":…,"initialBranch":null|"name"}` copies the recorded
+  `source-tree` snapshot of that attempt's candidate into a new work tree. `initialBranch` must
+  pass `check-ref-format`; `null` selects the server's configured default branch.
+- `{"action":"git.attach","sourceName":"name"}` imports one repository that the operator placed
+  directly under the server's import root (`web --git-import-root <directory>`). The value is a
+  single validated name, never a path. Without a configured root, `git-import` is `unavailable`
+  (`GIT_IMPORT_UNCONFIGURED`) and the request is refused with 503.
+
+An admitted request returns `202 operation`, a `Location` for `G/operations/{operationId}` and a
+strong ETag. The operation is durably recorded as `queued` before any work starts. Replaying the
+same key returns the original operation with `Idempotency-Replayed: true`, even with a stale
+guard; the key lookup precedes the fresh job-version check. A key reused with a different body
+is `409 IDEMPOTENCY_CONFLICT`. A stale job guard is `412`, and a missing one `428`. A job that
+already has a repository is `409 REPOSITORY_EXISTS`, and one with a queued or running operation
+is `409 WORKTREE_BUSY`. Exhausted capacity is `429`. An unknown run or revision, an invalid
+branch or an import name with no admitted repository is `422`. A refused request creates no
+operation record.
+
+Initialization copies regular files byte for byte, preserving executable bits. It omits the
+top-level `build` root and refuses links, special files and nested `.git` entries. Every file is
+re-hashed on both sides after the copy. The managed Git directory is a bare repository with the
+server's configuration: identity from configured policy, `user.useConfigOnly`, the source-only
+`info/exclude` and nothing else. No file is staged and no commit is created, so the workspace
+reads as an `unborn` branch with untracked files (`dirty: true`). Its `candidateRevisionId`
+names the copied revision.
+
+Import validates the admitted directory as data. A `.git` directory is a non-bare repository,
+and `HEAD`/`objects`/`refs` at the top level is a bare one. A `.git` file or link, alternates,
+`commondir`, a shallow file, format version above 1, or an extension other than `objectFormat`,
+`worktreeConfig`, `noop` and `preciousObjects` (for example reftable or partial clone) gives
+`REPOSITORY_UNSUPPORTED`. The repository configuration is read only with `git config --file …
+--no-includes`. A fresh managed repository then receives the object store (without
+`objects/info`), the branch and tag refs (loose and packed) and HEAD. Every branch or tag must be
+a valid full ref name, such as `refs/tags/HEAD`; one that cannot be imported fails the import
+instead of being dropped. Selected symbolic refs are resolved as bounded inert data (at most 16
+steps), including targets in omitted namespaces, and stored as full object IDs; HEAD retains its
+branch name. Cyclic or excessive symbolic chains give `REPOSITORY_UNSUPPORTED`.
+Object copying pins every source ancestor with descriptor-relative no-follow directory opens.
+The shared Linux filesystem boundary opens leaves with `O_PATH`, authenticates regular-file type
+on the pinned descriptor, then reopens that exact inode with `O_NONBLOCK` for reading. A raced-in
+FIFO cannot block an import waiting for a writer, and links cannot redirect reads. Copies stream
+at most 512 MiB into newly created regular files (at most 100,000 object-store files and directories
+combined). Unsupported native/default-filesystem/procfs boundaries fail closed as
+`REPOSITORY_UNSUPPORTED`; there is no pathname-copy fallback. Imported HEAD, packed refs and
+loose refs (including symbolic-ref targets) use the same pinned-ancestor, regular-type-authenticated
+nonblocking read boundary, with their existing 4 KiB/4 MiB metadata limits and cancellation checks.
+A metadata entry replaced by a link or special file is refused rather than blocking the worker.
+Configuration, hooks, `info/`, the index, reflogs, remotes, notes, replace refs, worktrees, submodule repositories and
+uncommitted working-tree changes are not copied. A full `git fsck` must succeed, which re-hashes
+every object against its ID (integrity errors give `REPOSITORY_CORRUPT`). Verification runs with
+a hard and soft 512 MiB process address-space ceiling, including mappings and inflation of
+packed, dangling and historical objects, before checkout quotas run. This requires the server's
+fixed `/usr/bin/prlimit` or `/bin/prlimit` utility; missing/unstartable containment fails closed as
+`REPOSITORY_UNAVAILABLE`, never an unbounded retry. Fatal/resource exits give
+`REPOSITORY_UNSUPPORTED` rather than claiming proven corruption. No core dump is allowed.
+Before checkout, `ls-tree -r -t -l` of the HEAD tree must fit the work-tree quotas: 20,000 leaf
+entries, 20,000 directories and 512 MiB of declared blob bytes. Tree paths count once per prefix;
+inert gitlinks also count as directories. This bounds directory expansion as well as repeated or
+highly compressed blobs before `read-tree` creates anything.
+The HEAD commit is then checked out with `read-tree --reset -u` under the server configuration and
+the neutral `info/attributes`. No hook, filter, fsmonitor or submodule recursion can run, and no
+attribute conversion can rewrite bytes. Attached, detached and unborn HEADs
+are preserved and reported as such, and SHA-256 repositories keep their format. Failed
+validation becomes a `failed` operation with a fixed path-free message. The imported directory
+itself is only read.
+
+Each operation works in a private staging tree under the job's `git/staging/<operationId>`. The
+registration record is written inside that tree before one atomic rename publishes it as
+`git/repositories/<repositoryId>`, and an existing name is never replaced. Readers therefore see
+either no repository or a complete one. Nothing is written under `reports/`, so a recorded or
+accepted source snapshot cannot be overwritten. On restart, and before an instance first uses a
+job, non-terminal records are reconciled. A published repository makes its operation
+`completed`. Otherwise the staging tree is removed and the operation becomes `interrupted` with
+`recoveryRequired: false`. If removal fails, it becomes `recovery-required` and the tree is kept
+for inspection. Reconciliation never repeats work. Replaying the original key reports the
+interrupted operation, and a new key starts a fresh, explicit initialization.
+
+Shutdown interrupts the Git worker. Copy and cleanup loops stop at their next step, and Git
+processes are killed. The listener releases store ownership only after the worker has actually
+stopped. A worker that outlives the bounded wait keeps the store owned, so a replacement listener
+cannot reconcile staging that is still being written.
+
+`GET J/repositories` returns `gitRepositories`: the job's repository summary (at most one) and
+its latest 20 operations. `GET G` returns `gitWorkspace` from a fresh bounded inspection. Its
+`worktreeVersion` doubles as its ETag and changes with any observed status or HEAD change.
+`repositoryVersion` changes with refs, and `refId` is stable per repository and ref name.
+`mapping` stays `null` until an explicit commit records a validated source mapping (#203).
+
+`ManagedGitRepositoriesTest` covers byte-exact initialization (spaces, non-ASCII names, executable
+bits), the ignore policy against real `git status --ignored`, the absence of commits, replay and
+conflicts, refused requests that leave no record, linked snapshots, and unusable Git. It also
+covers every crash point (after the running record, after staging, before publication and after
+publication), with recovery checked on a new instance. Import is checked on a hostile repository
+whose filters, fsmonitor, hooks, hooksPath, includes and submodule never run, and whose bytes are
+unchanged. Bare/detached, unborn, SHA-256, corrupt, alternates, gitfile, partial-clone, plain and
+linked sources are checked as well. `WebGitControllerTest` covers the HTTP contract: bootstrap
+capability states, guards, strict bodies, path-free responses and the unavailable answers. The
+job page's minimal Git panel (`GitRepositoryPanel`) shows availability, the observed HEAD and a
+single initialization action from the latest attempt's candidate. The full Git UI belongs to
+#583.
 
 ## Legacy compatibility
 
@@ -1122,9 +1488,125 @@ that the agent started, but a result for another configuration cannot make that 
 running, cancelled or mismatched agent observations leave agent readiness unproven. These fields
 do not establish that any job can start work; unavailable workflow adapters remain unavailable.
 
+## Job organization, retention and deletion
+
+Issues: [#172](https://github.com/minsago-elite/decomp_thing/issues/172) (#506–#509) and
+[#173](https://github.com/minsago-elite/decomp_thing/issues/173) (#510–#512).
+
+**Organization (`PATCH J`).** The body may contain only `label` (1–120 printable characters
+without surrounding spaces, or `null` to clear) and `archived` (boolean); at least one is
+required and anything else is refused before a write. The values live in a separate
+`organization.json` beside `job.json`, so the uploaded input, `job.json`, workflow state and
+every report keep their exact bytes and hashes. `job` responses gain optional `label` and
+`archived` fields (older producers omit them). The public version includes them only once they
+differ from the default, so unorganized jobs keep their previous version. A replay of the same
+key and request returns the current job with `Idempotency-Replayed: true`; a different request
+under the key is `409 IDEMPOTENCY_CONFLICT`, a stale guard `412`. Up to 64 receipts are kept per
+job and a receipt younger than 24 hours is never evicted (`429 ORGANIZATION_RECEIPT_CAPACITY`).
+Archiving only hides the job from the default `GET /jobs` view (`archived=exclude`); it is
+unrelated to source-archive export and removes nothing.
+
+**Retention policy.** Jobs are never deleted automatically (`automaticJobDeletion: false`).
+Explicit deletion and every maintenance preview evaluate the same fixed protections under the
+service monitor: a nonterminal attempt (`ACTIVE_ATTEMPT`), a worker that still owns the job
+(`OWNED_WORKER`), completed output awaiting publication (`PUBLICATION_PENDING`), a pinned
+progress journal (`PINNED_EVIDENCE`), an artifact or source download still being delivered
+(`DOWNLOAD_IN_PROGRESS`, held by a per-request lease), an upload measuring storage
+(`STORAGE_BUSY`), uncertain publication (`RECOVERY_REQUIRED`), and any registered
+`JobRetentionHold`. The server registers the managed Git repositories as a hold (#509) with
+source `git`. It reports these reasons:
+
+- `GIT_OPERATION_ACTIVE`: a repository operation is queued or running and owns its staging and
+  records.
+- `GIT_UNCOMMITTED_CHANGES`: a managed work tree has uncommitted changes. A fresh
+  initialization has no commit yet. While its work tree still holds exactly the recorded candidate
+  source it was copied from, it contains no user work, so it does not hold deletion. Any added,
+  modified or deleted file does hold it; `build/` output is excluded, as it is from the copy.
+- `GIT_UNPUSHED_COMMITS`: a local branch/tag tip or detached HEAD is contained by no remote-tracking
+  ref. A repository without remote-tracking refs retains all committed history: absence of a remote
+  does not prove that work was pushed. An unchanged unborn initialization still has no commit to retain.
+  Annotated tags are peeled for containment; uninspectable tag targets retain the repository conservatively.
+- `GIT_STATE_UNAVAILABLE`: a repository could not be inspected, so it is retained.
+
+Git admission takes the job service's lock before the Git service's lock, and deletion decides
+under the same lock. A job whose deletion was admitted therefore refuses new Git work with `410`,
+and an admitted Git operation is always visible to the next deletion check. A hold that throws fails closed
+(`RETENTION_HOLD_UNAVAILABLE`). A refused `DELETE` is `409 RETENTION_PROTECTED` with one error
+`details` entry (pointer `/protections/N`, protection code, recovery message) per reason.
+
+These holds and admission locks cover retention and active-operation coordination only. They
+are not a backup/restore protocol or qualification of managed Git history/worktree recovery.
+The backup participation acceptance criterion in #509 and its parent #172 remains open until
+implementation and backup/restore evidence are supplied; deletion protection alone does not
+complete either issue.
+
+**Deletion (`DELETE J`).** The body repeats the reviewed job identity
+(`{"confirmJobId": "<jobId>"}`; a mismatch is `422`). The key lookup precedes all other checks,
+so an exact replay returns the original operation (`Idempotency-Replayed: true`) even after the
+job is gone. Order of effects: a durable intent record in `.job-deletions/<operationId>.json`;
+an atomic no-replace rename of the job directory to `.job-deletions/<operationId>.removing`,
+after which the job is absent from every listing and lookup; a descriptor-relative purge that
+opens every entry with `O_NOFOLLOW`, unlinks symbolic and hard links as names without opening
+their targets, and refuses mount crossings and foreign owners; and a terminal record. Retained
+job-collection snapshots are retired so continuation cursors report expiry instead of showing
+a deleted row. The purge has a five-second budget per request; an unfinished pass stays
+`running` and resumes during periodic maintenance (SPA mode) or at the next startup, before any
+request is admitted. If a process stopped after the intent but before the rename, startup marks
+the operation `failed` (`INTERRUPTED_BEFORE_REMOVAL`) and the job is retained unchanged; nothing
+is deleted that was not detached. Cleanup that meets an entry outside owned storage (a mount, or any descendant whose owner
+differs from the job root) stops with `recoveryRequired: true`, preserves the remaining bytes and
+keeps the tombstone, since the job was already detached. Only one purge pass runs per operation,
+and maintenance rotates through pending operations so one failing purge cannot starve the rest.
+A collection snapshot whose scan overlapped a deletion is discarded and collected again. Removed bytes are charged only after an unlink succeeds, so retries never inflate the audit
+count. A keyed upload retry whose original job was deleted is refused with `410 RESOURCE_GONE`
+before its body is read, rather than recreating storage behind the tombstone; upload again with
+a new key. The maintenance preview checks its five-second and 64 MiB budgets before every
+journal read and holds the service monitor only for that read.
+
+The operation record keeps the job identity, a domain-separated session digest, request
+digests, times, outcome and the removed byte/entry counts; it never keeps the filename, label,
+binary facts or contents. Up to 1024 records are retained and a record is evicted only once
+it is older than 24 hours (`tombstoneRetentionMs`). While a record exists, reads of the job and
+its children (`GET J`, runs, reports, progress, the event stream before headers) return
+`410 RESOURCE_GONE`; afterwards they return `404`. There is no undo: `undoAvailable` is always
+false and a deleted job cannot be restored by the server.
+
+**Storage failures.** If the intent record or the rename fails (disk full, read-only, permission)
+the response is `503 STORAGE_UNAVAILABLE` and the job and its metadata are unchanged. An
+organization write uses temp file, fsync, atomic rename and directory fsync; a failure before
+the rename is `503 STORAGE_UNAVAILABLE` with the previous record intact, and a failure after it
+is `503 STORAGE_UNCONFIRMED` (refresh before editing again). Later deletion record updates that
+fail leave the earlier valid record; resume re-derives the state from the detached directory.
+
+**Accounting and dry run.** `GET /storage` scans the owned root with no-follow secure
+directory streams (200,000 entries, five seconds) and reports logical regular-file bytes and
+entry counts for `originalInputs`, `reports`, `sourceSnapshots`, `logs` (progress journals and
+logs), `archives` (`*.zip`, `*.tar*`), `metadata`, `temporary` (staging, temp files, pending
+purges) and `other`; an incomplete scan sets `complete: false` and its totals are lower bounds.
+`GET /storage/maintenance-preview` lists what maintenance would really do now: terminal,
+unpinned progress journals past the 24-hour threshold (bytes the replacement would reclaim,
+computed with the same pure function maintenance uses) and pending deletion purges, plus the
+protected jobs. It reads only; no journal, record or job is modified and no workflow starts.
+
+**Browser.** These five kinds are decoded only by lazily loaded routes; the generator emits
+their schema to `generated-schema-lazy.ts`, which those routes register with
+`registerContractExtension`, and strips schema annotations from the runtime bundle. Another
+tab is told about a deletion or organization edit through a deployment-scoped
+`BroadcastChannel` hint that carries no job or session material; open job, attempt and
+history views re-read and show the deletion, and the dashboard reads a fresh first page.
+
+Verification: `WebJobLifecycleTest` (real HTTP): organization bytes/hashes unchanged, replay,
+conflict, stale guard, archive filtering; strict body and authorization; read-only job
+directory; active/pinned/download/hold protections and fail-closed holds; deletion with
+escaping symbolic and hard links, tombstone `410`s, replay and audit record contents;
+interrupted purge resumed after restart and a crash between intent and rename; disk-full and
+read-only journals; storage categories and a dry run that leaves journal bytes unchanged.
+Frontend: `job-lifecycle.test.tsx` and `job-deletion-reconciliation.test.tsx`. Repository
+workspace holds and packaged-browser deletion journeys remain outstanding.
+
 ## Implemented progress-pin policy endpoint
 
-`GET` and `PUT /api/v1/jobs/{jobId}/runs/{runId}/progress-pin` are available under the configured deployment prefix. This pin protects only the selected persisted progress journal. It does not pin the full job, source revisions, reports or downloaded evidence. Unpinning neither resets the retention deadline nor restores removed history; SPA periodic progress maintenance is enabled by default; legacy mode keeps it disabled.
+`GET` and `PUT /api/v1/jobs/{jobId}/runs/{runId}/progress-pin` are available under the configured deployment prefix. This pin protects only the selected persisted progress journal. It does not pin the full job, source revisions, reports or downloaded evidence. A pinned journal does, however, prevent deletion of its whole job (`PINNED_EVIDENCE`); see [job organization, retention and deletion](#job-organization-retention-and-deletion). Unpinning neither resets the retention deadline nor restores removed history; SPA periodic progress maintenance is enabled by default; legacy mode keeps it disabled.
 
 GET requires a local session and returns `{jobId, runId, version, pinned}` in a `progressPin` envelope, with an ETag for the current run version and `Cache-Control: no-store`. Conditional read headers are rejected. The `progressPinRequest` wire body for PUT is exactly `{pinned: boolean}`, at most 1024 bytes, with duplicate JSON keys and unknown fields rejected. Authorization precedes body parsing. PUT requires the existing same-origin JSON mutation policy, cookie session, CSRF token, one strong If-Match version and one 16–128 character idempotency key. Caller-supplied actors, query parameters and extra conditional headers are rejected.
 

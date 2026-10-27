@@ -12,6 +12,7 @@ const files = [
   'contracts/web/v1/contract.schema.json',
   'frontend/src/api/generated.ts',
   'frontend/src/api/generated-schema.ts',
+  'frontend/src/api/generated-schema-lazy.ts',
 ];
 
 function check(root, expectedStatus = 0) {

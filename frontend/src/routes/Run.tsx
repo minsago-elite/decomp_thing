@@ -19,9 +19,10 @@ import { useSession } from '../session/useSession';
 import { receive } from '../shared/receiptTime';
 import type { Received } from '../shared/receiptTime';
 import { MetadataReceipt } from '../shared/MetadataReceipt';
-import { canRetainMetadata, metadataFailureKind } from '../shared/retainMetadata';
+import { canRetainMetadata, isDeletedJob, metadataFailureKind } from '../shared/retainMetadata';
 import { attemptOutcomeCopy as outcomeCopy, stopOutcomeCopy } from '../copy/attemptOutcome';
 import { QueuePosition } from '../jobs/QueuePosition';
+import { onLibraryChange } from '../jobs/libraryChannel';
 
 function Details({ jobId, runId, basePath, session, view, navigation }: {
   jobId: string; runId: string; basePath: string; session: BrowserSession; view: RunView; navigation?: ValidationNavigation;
@@ -33,6 +34,7 @@ function Details({ jobId, runId, basePath, session, view, navigation }: {
   const { data: observation, error, loading } = stored.binding === binding ? stored : { data: null, error: '', loading: true };
   const run = observation?.value;
   const [refresh, setRefresh] = useState(0);
+  useEffect(() => onLibraryChange(basePath, () => setRefresh(value => value + 1)), [basePath]);
   useEffect(() => {
     const controller = new AbortController();
     setStored(previous => ({ binding, data: previous.binding === binding ? previous.data : null, error: '', loading: true }));
@@ -45,7 +47,7 @@ function Details({ jobId, runId, basePath, session, view, navigation }: {
     }).catch((failure: unknown) => {
       if (!controller.signal.aborted) setStored(previous => ({ binding,
         data: previous.binding === binding && canRetainMetadata(failure) ? previous.data : null,
-        error: withApiFailureReference({
+        error: withApiFailureReference(isDeletedJob(failure) ? copy.thisJobWasDeleted : {
           session: copy.reconnectToReadThisAttempt, denied: copy.attemptAccessDenied,
           missing: copy.thisAttemptIsUnavailableForThisJob, unsupported: copy.incompatibleAttemptResponse,
           unverified: copy.attemptMetadataCouldNotBeVerified,

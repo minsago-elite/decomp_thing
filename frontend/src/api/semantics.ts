@@ -369,6 +369,10 @@ export function checkSemantics(document: ContractDocument, basePath = '/'): void
       const { limits, capabilities, apiVersions } = document.data;
       requireValue(limits.defaultPageLimit <= limits.maxPageLimit);
       requireValue(new Set(capabilities.map((item) => item.id)).size === capabilities.length);
+      // An agent contract version is reported exactly for launch options that contact an agent;
+      // older v1 producers omit launch, which means no launch facts were reported.
+      requireValue(capabilities.every((item) => item.launch == null
+        || item.launch.contactsAgent === (item.agentContractVersion !== null)));
       if (!apiVersions.includes(1)) throw new ApiClientError('unsupported_contract');
       try {
         requireValue(document.data.basePath === `${normalizeBasePath(basePath)}/`);
@@ -444,7 +448,11 @@ export function checkSemantics(document: ContractDocument, basePath = '/'): void
       break;
     }
     case 'gitWorkspace': {
-      const { objectFormat, headObjectId, refs, mapping, repositoryId } = document.data;
+      const { objectFormat, headObjectId, refs, mapping, repositoryId, headState, headRefId, headRefName } = document.data;
+      const expected = { attached: [true, true, true], unborn: [true, false, false], detached: [false, true, false] }[headState];
+      requireValue(expected[0] === (headRefName !== null) && expected[1] === (headObjectId !== null) && expected[2] === (headRefId !== null));
+      if (headRefId !== null) requireValue(refs.some((ref) => ref.refId === headRefId && ref.objectId === headObjectId && ref.displayName === headRefName));
+      requireValue(new Set(refs.map((ref) => ref.refId)).size === refs.length);
       const length = objectFormat === 'sha1' ? 40 : objectFormat === 'sha256' ? 64 : undefined;
       const ids = [headObjectId, ...refs.map((ref) => ref.objectId)];
       if (mapping) {

@@ -164,6 +164,97 @@
       ],
       "additionalProperties": false
     },
+    "workflowLaunch": {
+      "type": "object",
+      "description": "Server-reported launch facts for one registered workflow option. They describe the adapter; admission rechecks capability, limits and readiness.",
+      "properties": {
+        "harnessCapabilityId": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/id"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "mode": {
+          "type": "string",
+          "enum": [
+            "tools",
+            "agent",
+            "evidence-only"
+          ]
+        },
+        "executesBinary": {
+          "type": "boolean"
+        },
+        "contactsAgent": {
+          "type": "boolean"
+        },
+        "requiredTools": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "enum": [
+              "sandbox",
+              "ghidra",
+              "agent-harness",
+              "c-toolchain",
+              "angr"
+            ]
+          },
+          "maxItems": 8,
+          "uniqueItems": true
+        },
+        "input": {
+          "type": "string",
+          "enum": [
+            "none",
+            "accepted-optional",
+            "recorded-required"
+          ]
+        },
+        "limitsAdjustable": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "harnessCapabilityId",
+        "mode",
+        "executesBinary",
+        "contactsAgent",
+        "requiredTools",
+        "input",
+        "limitsAdjustable"
+      ],
+      "additionalProperties": false,
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "mode": {
+                "const": "agent"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "contactsAgent": {
+                "const": true
+              }
+            }
+          },
+          "else": {
+            "properties": {
+              "contactsAgent": {
+                "const": false
+              }
+            }
+          }
+        }
+      ]
+    },
     "capability": {
       "type": "object",
       "properties": {
@@ -228,6 +319,16 @@
               "type": "null"
             }
           ]
+        },
+        "launch": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/workflowLaunch"
+            },
+            {
+              "type": "null"
+            }
+          ]
         }
       },
       "required": [
@@ -239,7 +340,32 @@
         "agentContractVersion",
         "limits"
       ],
-      "additionalProperties": false
+      "additionalProperties": false,
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "launch": {
+                "type": "object"
+              }
+            },
+            "required": [
+              "launch"
+            ]
+          },
+          "then": {
+            "properties": {
+              "workflows": {
+                "minItems": 1,
+                "maxItems": 1
+              },
+              "limits": {
+                "$ref": "#/definitions/executionLimits"
+              }
+            }
+          }
+        }
+      ]
     },
     "bootstrap": {
       "type": "object",
@@ -429,6 +555,23 @@
               "type": "null"
             }
           ]
+        },
+        "label": {
+          "anyOf": [
+            {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 120
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Display-only label (1-120 characters); never changes identity, run configuration or evidence. Optional for older producers."
+        },
+        "archived": {
+          "type": "boolean",
+          "description": "Organization only: hidden from the default library view. Unrelated to source-archive export. Optional for older producers."
         }
       },
       "required": [
@@ -1931,12 +2074,13 @@
           "$ref": "#/definitions/version"
         },
         "objectFormat": {
-          "type": "string",
-          "enum": [
-            "sha1",
-            "sha256",
-            "unknown"
-          ]
+          "$ref": "#/definitions/gitObjectFormat"
+        },
+        "origin": {
+          "$ref": "#/definitions/gitRepositoryOrigin"
+        },
+        "trackingPolicy": {
+          "const": "source-only-v1"
         },
         "headObjectId": {
           "anyOf": [
@@ -1952,6 +2096,26 @@
           "anyOf": [
             {
               "$ref": "#/definitions/id"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "headState": {
+          "type": "string",
+          "enum": [
+            "attached",
+            "detached",
+            "unborn"
+          ]
+        },
+        "headRefName": {
+          "anyOf": [
+            {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 1024
             },
             {
               "type": "null"
@@ -1995,8 +2159,12 @@
         "repositoryVersion",
         "worktreeVersion",
         "objectFormat",
+        "origin",
+        "trackingPolicy",
         "headObjectId",
         "headRefId",
+        "headState",
+        "headRefName",
         "candidateRevisionId",
         "dirty",
         "refs",
@@ -4909,6 +5077,607 @@
         }
       ]
     },
+    "storageCategories": {
+      "type": "object",
+      "description": "Logical regular-file bytes and entry counts by fixed store-layout category.",
+      "properties": {
+        "originalInputs": {
+          "$ref": "#/definitions/storageTally"
+        },
+        "reports": {
+          "$ref": "#/definitions/storageTally"
+        },
+        "sourceSnapshots": {
+          "$ref": "#/definitions/storageTally"
+        },
+        "logs": {
+          "$ref": "#/definitions/storageTally"
+        },
+        "archives": {
+          "$ref": "#/definitions/storageTally"
+        },
+        "metadata": {
+          "$ref": "#/definitions/storageTally"
+        },
+        "temporary": {
+          "$ref": "#/definitions/storageTally"
+        },
+        "other": {
+          "$ref": "#/definitions/storageTally"
+        }
+      },
+      "required": [
+        "originalInputs",
+        "reports",
+        "sourceSnapshots",
+        "logs",
+        "archives",
+        "metadata",
+        "temporary",
+        "other"
+      ],
+      "additionalProperties": false
+    },
+    "storageTally": {
+      "type": "object",
+      "properties": {
+        "bytes": {
+          "$ref": "#/definitions/uint64"
+        },
+        "entries": {
+          "$ref": "#/definitions/uint64"
+        }
+      },
+      "required": [
+        "bytes",
+        "entries"
+      ],
+      "additionalProperties": false
+    },
+    "retentionProtection": {
+      "type": "object",
+      "properties": {
+        "code": {
+          "type": "string",
+          "pattern": "^[A-Z][A-Z0-9_]{0,63}$"
+        },
+        "source": {
+          "type": "string",
+          "pattern": "^[a-z][a-z0-9-]{0,47}$"
+        },
+        "message": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 200
+        }
+      },
+      "required": [
+        "code",
+        "source",
+        "message"
+      ],
+      "additionalProperties": false
+    },
+    "jobOrganizationChange": {
+      "type": "object",
+      "description": "Allowlisted PATCH J body; at least one field. A null label clears it.",
+      "properties": {
+        "label": {
+          "anyOf": [
+            {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 120,
+              "pattern": "^[^\\x00-\\x20\\x7f](?:[^\\x00-\\x1f\\x7f\\u2028\\u2029]*[^\\x00-\\x20\\x7f])?$"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "archived": {
+          "type": "boolean"
+        }
+      },
+      "additionalProperties": false,
+      "allOf": [
+        {
+          "if": {
+            "required": [
+              "label"
+            ]
+          },
+          "then": {},
+          "else": {
+            "required": [
+              "archived"
+            ]
+          }
+        }
+      ]
+    },
+    "jobDeletionRequest": {
+      "type": "object",
+      "description": "DELETE J body. The client repeats the job identity it reviewed; the route, If-Match and session select everything else.",
+      "properties": {
+        "confirmJobId": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{32}$"
+        }
+      },
+      "required": [
+        "confirmJobId"
+      ],
+      "additionalProperties": false
+    },
+    "jobDeletionPreview": {
+      "type": "object",
+      "description": "Read-only per-job dry run of deletion: affected storage, protections and finality.",
+      "properties": {
+        "jobId": {
+          "$ref": "#/definitions/id"
+        },
+        "version": {
+          "$ref": "#/definitions/version"
+        },
+        "displayFilename": {
+          "type": "string",
+          "maxLength": 255
+        },
+        "label": {
+          "anyOf": [
+            {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 120,
+              "pattern": "^[^\\x00-\\x20\\x7f](?:[^\\x00-\\x1f\\x7f\\u2028\\u2029]*[^\\x00-\\x20\\x7f])?$"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "attemptCount": {
+          "$ref": "#/definitions/uint64"
+        },
+        "pinnedAttemptCount": {
+          "$ref": "#/definitions/uint64"
+        },
+        "storage": {
+          "$ref": "#/definitions/storageCategories"
+        },
+        "totalBytes": {
+          "$ref": "#/definitions/uint64"
+        },
+        "storageComplete": {
+          "type": "boolean"
+        },
+        "protections": {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/retentionProtection"
+          },
+          "maxItems": 32
+        },
+        "deletable": {
+          "type": "boolean"
+        },
+        "finality": {
+          "const": "permanent"
+        },
+        "undoAvailable": {
+          "const": false
+        },
+        "tombstoneRetentionMs": {
+          "$ref": "#/definitions/uint64"
+        }
+      },
+      "required": [
+        "jobId",
+        "version",
+        "displayFilename",
+        "label",
+        "attemptCount",
+        "pinnedAttemptCount",
+        "storage",
+        "totalBytes",
+        "storageComplete",
+        "protections",
+        "deletable",
+        "finality",
+        "undoAvailable",
+        "tombstoneRetentionMs"
+      ],
+      "additionalProperties": false,
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "deletable": {
+                "const": true
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "protections": {
+                "maxItems": 0
+              }
+            }
+          },
+          "else": {
+            "properties": {
+              "protections": {
+                "minItems": 1
+              }
+            }
+          }
+        }
+      ]
+    },
+    "storageSummary": {
+      "type": "object",
+      "description": "Read-only, tolerant logical-byte accounting of the owned job root. Partial totals are lower bounds.",
+      "properties": {
+        "sampledAt": {
+          "$ref": "#/definitions/instant"
+        },
+        "accounting": {
+          "const": "logical-bytes"
+        },
+        "complete": {
+          "type": "boolean"
+        },
+        "scannedEntries": {
+          "$ref": "#/definitions/uint64"
+        },
+        "uninspectedEntries": {
+          "$ref": "#/definitions/uint64"
+        },
+        "jobCount": {
+          "$ref": "#/definitions/uint64"
+        },
+        "categories": {
+          "$ref": "#/definitions/storageCategories"
+        },
+        "totalBytes": {
+          "$ref": "#/definitions/uint64"
+        },
+        "pendingDeletions": {
+          "$ref": "#/definitions/uint64"
+        },
+        "pendingDeletionBytes": {
+          "$ref": "#/definitions/uint64"
+        }
+      },
+      "required": [
+        "sampledAt",
+        "accounting",
+        "complete",
+        "scannedEntries",
+        "uninspectedEntries",
+        "jobCount",
+        "categories",
+        "totalBytes",
+        "pendingDeletions",
+        "pendingDeletionBytes"
+      ],
+      "additionalProperties": false,
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "complete": {
+                "const": true
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "uninspectedEntries": {
+                "const": "0"
+              }
+            }
+          }
+        }
+      ]
+    },
+    "maintenanceAction": {
+      "type": "object",
+      "properties": {
+        "action": {
+          "enum": [
+            "progress-journal-expiry",
+            "deletion-resume"
+          ]
+        },
+        "jobId": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/id"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "runId": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/id"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "bytes": {
+          "$ref": "#/definitions/uint64"
+        },
+        "schedule": {
+          "enum": [
+            "periodic",
+            "startup",
+            "not-scheduled"
+          ]
+        }
+      },
+      "required": [
+        "action",
+        "jobId",
+        "runId",
+        "bytes",
+        "schedule"
+      ],
+      "additionalProperties": false
+    },
+    "maintenancePreview": {
+      "type": "object",
+      "description": "Dry run of the maintenance the server performs. Computing it writes nothing and starts no workflow.",
+      "properties": {
+        "sampledAt": {
+          "$ref": "#/definitions/instant"
+        },
+        "dryRun": {
+          "const": true
+        },
+        "complete": {
+          "type": "boolean"
+        },
+        "policy": {
+          "type": "object",
+          "properties": {
+            "automaticJobDeletion": {
+              "const": false
+            },
+            "periodicMaintenance": {
+              "type": "boolean"
+            },
+            "terminalProgressRetentionMs": {
+              "$ref": "#/definitions/uint64"
+            },
+            "deletionTombstoneRetentionMs": {
+              "$ref": "#/definitions/uint64"
+            }
+          },
+          "required": [
+            "automaticJobDeletion",
+            "periodicMaintenance",
+            "terminalProgressRetentionMs",
+            "deletionTombstoneRetentionMs"
+          ],
+          "additionalProperties": false
+        },
+        "actions": {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/maintenanceAction"
+          },
+          "maxItems": 200
+        },
+        "omittedActions": {
+          "$ref": "#/definitions/uint64"
+        },
+        "affectedJobs": {
+          "$ref": "#/definitions/uint64"
+        },
+        "reclaimableBytes": {
+          "$ref": "#/definitions/uint64"
+        },
+        "protectedJobs": {
+          "type": "array",
+          "maxItems": 200,
+          "items": {
+            "type": "object",
+            "properties": {
+              "jobId": {
+                "$ref": "#/definitions/id"
+              },
+              "protections": {
+                "type": "array",
+                "items": {
+                  "$ref": "#/definitions/retentionProtection"
+                },
+                "minItems": 1,
+                "maxItems": 32
+              }
+            },
+            "required": [
+              "jobId",
+              "protections"
+            ],
+            "additionalProperties": false
+          }
+        },
+        "omittedProtectedJobs": {
+          "$ref": "#/definitions/uint64"
+        }
+      },
+      "required": [
+        "sampledAt",
+        "dryRun",
+        "complete",
+        "policy",
+        "actions",
+        "omittedActions",
+        "affectedJobs",
+        "reclaimableBytes",
+        "protectedJobs",
+        "omittedProtectedJobs"
+      ],
+      "additionalProperties": false
+    },
+    "gitRepositoryInit": {
+      "type": "object",
+      "properties": {
+        "action": {
+          "const": "git.init"
+        },
+        "runId": {
+          "$ref": "#/definitions/id"
+        },
+        "revisionId": {
+          "$ref": "#/definitions/id"
+        },
+        "initialBranch": {
+          "anyOf": [
+            {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 200
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "action",
+        "runId",
+        "revisionId",
+        "initialBranch"
+      ],
+      "additionalProperties": false
+    },
+    "gitRepositoryAttach": {
+      "type": "object",
+      "properties": {
+        "action": {
+          "const": "git.attach"
+        },
+        "sourceName": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$"
+        }
+      },
+      "required": [
+        "action",
+        "sourceName"
+      ],
+      "additionalProperties": false
+    },
+    "gitRepositorySummary": {
+      "type": "object",
+      "properties": {
+        "repositoryId": {
+          "$ref": "#/definitions/id"
+        },
+        "worktreeId": {
+          "$ref": "#/definitions/id"
+        },
+        "operationId": {
+          "$ref": "#/definitions/id"
+        },
+        "origin": {
+          "$ref": "#/definitions/gitRepositoryOrigin"
+        },
+        "objectFormat": {
+          "$ref": "#/definitions/gitObjectFormat"
+        },
+        "trackingPolicy": {
+          "const": "source-only-v1"
+        },
+        "createdAt": {
+          "$ref": "#/definitions/instant"
+        },
+        "runId": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/id"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "candidateRevisionId": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/id"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "repositoryId",
+        "worktreeId",
+        "operationId",
+        "origin",
+        "objectFormat",
+        "trackingPolicy",
+        "createdAt",
+        "runId",
+        "candidateRevisionId"
+      ],
+      "additionalProperties": false
+    },
+    "gitRepositories": {
+      "type": "object",
+      "properties": {
+        "jobId": {
+          "$ref": "#/definitions/id"
+        },
+        "repositories": {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/gitRepositorySummary"
+          },
+          "maxItems": 1
+        },
+        "operations": {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/operation"
+          },
+          "maxItems": 20
+        }
+      },
+      "required": [
+        "jobId",
+        "repositories",
+        "operations"
+      ],
+      "additionalProperties": false
+    },
+    "gitRepositoryOrigin": {
+      "type": "string",
+      "enum": [
+        "initialized",
+        "imported"
+      ]
+    },
+    "gitObjectFormat": {
+      "type": "string",
+      "enum": [
+        "sha1",
+        "sha256",
+        "unknown"
+      ]
+    },
     "queuePosition": {
       "oneOf": [
         {
@@ -5554,30 +6323,6 @@
           "const": 1
         },
         "kind": {
-          "const": "queuePosition"
-        },
-        "requestId": {
-          "$ref": "#/definitions/requestId"
-        },
-        "data": {
-          "$ref": "#/definitions/queuePosition"
-        }
-      },
-      "required": [
-        "apiVersion",
-        "kind",
-        "requestId",
-        "data"
-      ],
-      "additionalProperties": false
-    },
-    {
-      "type": "object",
-      "properties": {
-        "apiVersion": {
-          "const": 1
-        },
-        "kind": {
           "const": "progressPinRequest"
         },
         "data": {
@@ -5817,6 +6562,206 @@
         },
         "data": {
           "$ref": "#/definitions/attemptControls"
+        }
+      },
+      "required": [
+        "apiVersion",
+        "kind",
+        "requestId",
+        "data"
+      ],
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "properties": {
+        "apiVersion": {
+          "const": 1
+        },
+        "kind": {
+          "const": "jobDeletionPreview"
+        },
+        "requestId": {
+          "$ref": "#/definitions/requestId"
+        },
+        "data": {
+          "$ref": "#/definitions/jobDeletionPreview"
+        }
+      },
+      "required": [
+        "apiVersion",
+        "kind",
+        "requestId",
+        "data"
+      ],
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "properties": {
+        "apiVersion": {
+          "const": 1
+        },
+        "kind": {
+          "const": "storageSummary"
+        },
+        "requestId": {
+          "$ref": "#/definitions/requestId"
+        },
+        "data": {
+          "$ref": "#/definitions/storageSummary"
+        }
+      },
+      "required": [
+        "apiVersion",
+        "kind",
+        "requestId",
+        "data"
+      ],
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "properties": {
+        "apiVersion": {
+          "const": 1
+        },
+        "kind": {
+          "const": "maintenancePreview"
+        },
+        "requestId": {
+          "$ref": "#/definitions/requestId"
+        },
+        "data": {
+          "$ref": "#/definitions/maintenancePreview"
+        }
+      },
+      "required": [
+        "apiVersion",
+        "kind",
+        "requestId",
+        "data"
+      ],
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "properties": {
+        "apiVersion": {
+          "const": 1
+        },
+        "kind": {
+          "const": "jobOrganizationRequest"
+        },
+        "data": {
+          "$ref": "#/definitions/jobOrganizationChange"
+        }
+      },
+      "required": [
+        "apiVersion",
+        "kind",
+        "data"
+      ],
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "properties": {
+        "apiVersion": {
+          "const": 1
+        },
+        "kind": {
+          "const": "jobDeletionRequest"
+        },
+        "data": {
+          "$ref": "#/definitions/jobDeletionRequest"
+        }
+      },
+      "required": [
+        "apiVersion",
+        "kind",
+        "data"
+      ],
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "properties": {
+        "apiVersion": {
+          "const": 1
+        },
+        "kind": {
+          "const": "gitRepositories"
+        },
+        "requestId": {
+          "$ref": "#/definitions/requestId"
+        },
+        "data": {
+          "$ref": "#/definitions/gitRepositories"
+        }
+      },
+      "required": [
+        "apiVersion",
+        "kind",
+        "requestId",
+        "data"
+      ],
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "properties": {
+        "apiVersion": {
+          "const": 1
+        },
+        "kind": {
+          "const": "gitRepositoryInitRequest"
+        },
+        "data": {
+          "$ref": "#/definitions/gitRepositoryInit"
+        }
+      },
+      "required": [
+        "apiVersion",
+        "kind",
+        "data"
+      ],
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "properties": {
+        "apiVersion": {
+          "const": 1
+        },
+        "kind": {
+          "const": "gitRepositoryAttachRequest"
+        },
+        "data": {
+          "$ref": "#/definitions/gitRepositoryAttach"
+        }
+      },
+      "required": [
+        "apiVersion",
+        "kind",
+        "data"
+      ],
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "properties": {
+        "apiVersion": {
+          "const": 1
+        },
+        "kind": {
+          "const": "queuePosition"
+        },
+        "requestId": {
+          "$ref": "#/definitions/requestId"
+        },
+        "data": {
+          "$ref": "#/definitions/queuePosition"
         }
       },
       "required": [

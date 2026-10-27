@@ -1,6 +1,7 @@
 package decompengine.web
 
 import decompengine.jobs.Job
+import decompengine.jobs.WorkflowAcceptanceReference
 import decompengine.jobs.WorkflowAttempt
 import decompengine.jobs.WorkflowCandidate
 import decompengine.jobs.WorkflowExecutionLimits
@@ -15,8 +16,17 @@ import java.nio.file.Path
 /** Trusted adapter contract: the implementation must enforce every declared limit and stop its children before returning. */
 interface DurableWebWorkflowAdapter {
     val workflow: WorkflowKind
+    /** Server default. With [limitsAdjustable], also the per-field ceiling a request may lower but never raise. */
     val limits: WorkflowExecutionLimits
     val harnessCapabilityId: String? get() = null
+    val limitsAdjustable: Boolean get() = false
+    /** Runtime prerequisites checked again at admission; inert adapters have none. */
+    val requirements: Set<WebWorkflowRequirement> get() = emptySet()
+    val input: DurableWebWorkflowInput get() = DurableWebWorkflowInput.ACCEPTED_OPTIONAL
+    /** Public launch facts, or null for an inert registration that does not describe itself. */
+    val launch: DurableWebWorkflowLaunch? get() = null
+    /** Read-only acceptance attestation for a completed candidate; never executes work. */
+    val publication: DurableWebWorkflowPublication? get() = null
     /** Null means checkpoint resume is unsupported; explicit retry remains a separate new attempt. */
     val checkpoints: DurableWebWorkflowCheckpointPolicy? get() = null
     fun execute(context: DurableWebWorkflowContext): DurableWebWorkflowOutcome
@@ -52,22 +62,74 @@ enum class DurableWebWorkflowCheckpointRefusal(val code: String) {
     CLEANUP_UNVERIFIED("CLEANUP_UNVERIFIED"),
 }
 
+
+/** What an attempt may start from. Paths are resolved by the service, never by the caller. */
+enum class DurableWebWorkflowInput {
+    /** Only the uploaded binary; a selected revision is refused. */
+    NONE,
+    /** The uploaded binary, optionally with the job's current accepted revision. */
+    ACCEPTED_OPTIONAL,
+    /** One revision recorded by this job: its accepted revision or a completed attempt's candidate. */
+    RECORDED_REQUIRED,
+}
+
+enum class WebWorkflowRequirement(val wireName: String) {
+    SANDBOX("sandbox"), GHIDRA("ghidra"), AGENT_HARNESS("agent-harness"), REPAIR_VALIDATOR("repair-validator"),
+    EXPLORATION_HELPER_OWNERSHIP("exploration-helper-ownership"),
+}
+
+enum class DurableWebWorkflowMode(val wireName: String) { TOOLS("tools"), AGENT("agent"), EVIDENCE_ONLY("evidence-only") }
+
+/** Facts the launch form shows; they describe the adapter, they never authorize admission. */
+data class DurableWebWorkflowLaunch(
+    val mode: DurableWebWorkflowMode,
+    val executesBinary: Boolean,
+    val contactsAgent: Boolean,
+    val requiredTools: List<String>,
+) {
+    init {
+        require(contactsAgent == (mode == DurableWebWorkflowMode.AGENT)) { "agent contact must match the declared mode" }
+        require(requiredTools.size <= 8 && requiredTools.distinct() == requiredTools && requiredTools.all { it in LAUNCH_TOOLS })
+    }
+    companion object { val LAUNCH_TOOLS = setOf("sandbox", "ghidra", "agent-harness", "c-toolchain", "angr") }
+}
+
+/** Trusted, bounded and read-only: verify retained canonical evidence for a completed candidate. */
+fun interface DurableWebWorkflowPublication {
+    fun verify(context: DurableWebWorkflowPublicationContext): WorkflowAcceptanceReference?
+}
+
+/** Verifiers must reserve each capture before reading and checkpoint between bounded read units. */
+data class DurableWebWorkflowPublicationContext(
+    val job: Job, val attempt: WorkflowAttempt, val reportsDirectory: Path,
+    val checkpoint: () -> Unit = { if (Thread.currentThread().isInterrupted) throw InterruptedException("Publication interrupted") },
+    val reserveCapture: (Long) -> Unit = {},
+)
+
 /**
  * Internal execution context. Paths are never transport DTO fields. A recovery attempt records its
  * mode/checkpoint in [WorkflowAttempt.recovery]; [predecessorReportsDirectory] is present only for resume.
+ * [inputSourceTree] is the selected recorded revision's retained source for adapters that require one.
  */
 data class DurableWebWorkflowContext(val job: Job, val attempt: WorkflowAttempt, val reportsDirectory: Path,
-    val predecessorReportsDirectory: Path? = null)
+    val predecessorReportsDirectory: Path? = null, val inputSourceTree: Path? = null)
 
 sealed interface DurableWebWorkflowOutcome {
-    data class Completed(val candidate: WorkflowCandidate? = null, val usage: WorkflowUsage? = null) : DurableWebWorkflowOutcome
+    data class Completed(val candidate: WorkflowCandidate? = null, val usage: WorkflowUsage? = null,
+        val reason: WorkflowTerminalReason = WorkflowTerminalReason.COMPLETED) : DurableWebWorkflowOutcome {
+        init { require(reason in setOf(WorkflowTerminalReason.COMPLETED, WorkflowTerminalReason.NO_CHANGES)) }
+    }
     data class Failed(val reason: WorkflowTerminalReason = WorkflowTerminalReason.FAILED,
         val candidate: WorkflowCandidate? = null, val usage: WorkflowUsage? = null) : DurableWebWorkflowOutcome {
         init { require(reason in setOf(WorkflowTerminalReason.FAILED, WorkflowTerminalReason.REFUSED, WorkflowTerminalReason.LIMIT_EXHAUSTED, WorkflowTerminalReason.TIMED_OUT)) }
     }
 }
 
-data class DurableWebWorkflowRequest(val workflow: WorkflowKind, val inputRevisionId: String? = null, val previousRunId: String? = null)
+/** Attempt counts by restart disposition after startup reconciliation, and acceptances it recorded. */
+data class WebStartupReconciliation(val dispositions: Map<decompengine.jobs.WorkflowRecoveryDisposition, Int>, val publishedAcceptances: Int)
+
+data class DurableWebWorkflowRequest(val workflow: WorkflowKind, val inputRevisionId: String? = null, val previousRunId: String? = null,
+    val harnessCapabilityId: String? = null)
 
 /** A durable command result, including an explicitly refused scheduler outcome; never acceptance evidence. */
 internal data class DurableWebWorkflowStartResult(val attempt: WorkflowAttempt, val replayed: Boolean)
@@ -82,7 +144,8 @@ sealed interface DurableWebWorkflowAdmission {
 data class WebReportContext(val reportsDirectory: Path, val artifactPrefix: String = "reports", val runId: String? = null)
 data class WebJobDiagnostic(val jobId: String, val code: String, val message: String)
 data class WebJobPresentation(val job: Job, val snapshot: WorkflowJobSnapshot?, val reports: WebReportContext,
-    val diagnostics: List<WorkflowStoreDiagnostic> = emptyList(), val legacyInterrupted: Boolean = false)
+    val diagnostics: List<WorkflowStoreDiagnostic> = emptyList(), val legacyInterrupted: Boolean = false,
+    val organization: decompengine.jobs.JobOrganization = decompengine.jobs.JobOrganization.DEFAULT)
 sealed interface WebJobInspection {
     data class Available(val presentation: WebJobPresentation) : WebJobInspection
     data class Unavailable(val diagnostic: WebJobDiagnostic) : WebJobInspection

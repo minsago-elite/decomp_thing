@@ -22,6 +22,7 @@ internal class WebApiController(
     clock: Clock = Clock.systemUTC(),
     private val harnessReadiness: WebHarnessReadinessProjector = WebHarnessReadinessProjector(),
     private val agentPreflight: WebAgentPreflight = WebAgentPreflight { error("No agent preflight is configured.") },
+    private val git: WebGitCapability = WebGitCapability.detect(),
 ) {
     private val prefix = "${assets.basePath}api/v1/"
     private val applicationBuildId = applicationBuildId()
@@ -30,10 +31,15 @@ internal class WebApiController(
     private val sessions = WebSessionController(access)
     private val uploadProgress = WebUploadProgress()
     private val progressPins = WebProgressPinController(access, jobs, jobMutations)
-    private val workflowStarts = WebWorkflowStartController(jobs, jobMutations, assets.basePath)
+    private val workflowStarts = WebWorkflowStartController(jobs, jobMutations, assets.basePath) { request ->
+        webAdmissionPrerequisites(jobs.durableRegistrations(), request, readiness().prerequisites, harnessReadiness::inspectSandbox)
+    }
     private val cancellations = WebCancellationController(jobMutations, assets.basePath)
-    private val recoveries = WebRecoveryController(jobs, jobMutations, assets.basePath)
+    private val recoveries = WebRecoveryController(jobs, jobMutations, assets.basePath) { workflow, harness ->
+        webAdmissionPrerequisites(jobs.durableRegistrations(), workflow, harness, readiness().prerequisites, harnessReadiness::inspectSandbox)
+    }
     private val agentPreflights = WebAgentPreflightController(access, agentPreflight, assets.basePath)
+    private val gitRoutes = WebGitController(access, jobs, jobMutations, git, assets.basePath)
     private val runPages = WebRunPages { jobId ->
         when (val inspection = jobs.inspectDurableJob(jobId)) {
             is decompengine.jobs.WorkflowJobInspection.Available -> inspection.snapshot
@@ -48,14 +54,38 @@ internal class WebApiController(
     private val revisionValidationReports = WebRevisionValidationReports(jobs::readRecordedValidationReport)
     private val eventStream = WebEventStream(access, streamResources, progressPages, read = { jobId, runId ->
         readWebProgress(jobs, jobId, runId).second
-    }, clock = clock)
+    }, clock = clock, deleted = { jobId -> jobs.deletedJob(jobId) != null })
     private val jobPages = WebJobPages(jobs::collectionRecords, checkpointedSource = jobs::collectionRecordsWithProgress)
+    private val lifecycle = WebJobLifecycleController(access, jobs, jobMutations, assets.basePath, jobPages::invalidate)
+
+    // One private resource pattern per line, so independent route additions merge cleanly.
+    private val privateResources = listOf(
+        "(?:jobs|uploads)/[^/]+",
+        "jobs/[^/]+/runs",
+        "jobs/[^/]+/runs/[^/]+",
+        "jobs/[^/]+/runs/[^/]+/reports/(?:exploration|revision-validation)",
+        "jobs/[^/]+/runs/[^/]+/validation-history",
+        "jobs/[^/]+/runs/[^/]+/source-catalog",
+        "jobs/[^/]+/runs/[^/]+/revisions/[^/]+/sources",
+        "jobs/[^/]+/runs/[^/]+/revisions/[^/]+/source-directories/[^/]+",
+        "jobs/[^/]+/runs/[^/]+/revisions/[^/]+/source-files/[^/]+(?:/(?:chunk|content))?",
+        "jobs/[^/]+/runs/[^/]+/snapshot",
+        "jobs/[^/]+/runs/[^/]+/events",
+        "jobs/[^/]+/runs/[^/]+/progress-pin",
+        "jobs/[^/]+/runs/[^/]+/cancel",
+        "jobs/[^/]+/runs/[^/]+/recover",
+        "jobs/[^/]+/runs/[^/]+/controls",
+        "jobs/[^/]+/artifacts/[^/]+/content",
+        "jobs/[^/]+/runs/[^/]+/queue-position",
+        "jobs/[^/]+/repositories(?:/[^/]+(?:/operations/[^/]+)?)?",
+        "jobs/[^/]+/(?:deletion-preview|operations/[^/]+)",
+    ).map(::Regex)
 
     fun route(exchange: HttpExchange): Boolean {
         val path = exchange.requestURI.rawPath
         if (!path.startsWith("${assets.basePath}api/")) return false
         val resource = path.removePrefix(prefix)
-        if (!path.startsWith(prefix) || !(resource in setOf("session", "bootstrap", "jobs", "recovery", "agent/preflight") || resource.matches(Regex("(?:jobs|uploads)/[^/]+|jobs/[^/]+/runs(?:/[^/]+(?:/reports/(?:exploration|revision-validation)|/validation-history|/source-catalog|/revisions/[^/]+/(?:sources|source-directories/[^/]+|source-files/[^/]+(?:/(?:chunk|content))?)|/snapshot|/events|/progress-pin|/cancel|/recover|/controls|/queue-position)?)?|jobs/[^/]+/artifacts/[^/]+/content")))) {
+        if (!path.startsWith(prefix) || !(resource in setOf("session", "bootstrap", "jobs", "recovery", "agent/preflight", "storage", "storage/maintenance-preview") || privateResources.any { resource.matches(it) })) {
             try {
                 val policy = if (exchange.requestMethod in setOf("POST", "PUT", "PATCH", "DELETE")) {
                     WebEndpointPolicy.jsonMutation(exchange.requestMethod)
@@ -121,6 +151,7 @@ internal class WebApiController(
                         throw WebAccessDenied(400, "UNSUPPORTED_HEADER", "This bounded artifact endpoint does not support Range or conditional requests.")
                     }
                     val parts = resource.split('/')
+                    jobs.downloadLease(parts[1]).use {
                     val bytes = WebExplorationArtifact.read(jobs, parts[1], parts[3])
                     webApiHeaders(exchange, UUID.randomUUID().toString())
                     exchange.responseHeaders.set("Content-Type", "application/octet-stream")
@@ -133,8 +164,16 @@ internal class WebApiController(
                             exchange.responseBody.use { it.write(bytes) }
                         }
                     } finally { exchange.close() }
+                    }
                 }
                 resource == "agent/preflight" -> agentPreflights.handle(exchange)
+                resource.matches(Regex("jobs/[^/]+/repositories(?:/[^/]+(?:/operations/[^/]+)?)?")) -> gitRoutes.handle(exchange, resource.split('/'))
+                resource == "storage" || resource == "storage/maintenance-preview" -> lifecycle.storage(exchange, resource != "storage")
+                resource.matches(Regex("jobs/[^/]+/deletion-preview")) -> lifecycle.deletionPreview(exchange, resource.split('/')[1])
+                resource.matches(Regex("jobs/[^/]+/operations/[^/]+")) -> {
+                    val parts = resource.split('/')
+                    lifecycle.operation(exchange, parts[1], parts[3])
+                }
                 resource.matches(Regex("jobs/[^/]+/runs/[^/]+/cancel")) -> {
                     val parts = resource.split('/')
                     cancellations.handle(exchange, parts[1], parts[3])
@@ -206,7 +245,7 @@ internal class WebApiController(
                         val query = WebSourceChunkQuery.parse(exchange.requestURI.rawQuery)
                         val content = jobs.readRevisionSourceFile(parts[1], parts[3], parts[5], parts[7], WebSourceReadPurpose.PREVIEW, query.metadataVersion)
                         sendWebApiResponse(exchange, 200, "sourceChunk", content.chunk(query))
-                    } else {
+                    } else jobs.downloadLease(parts[1]).use {
                         val metadataVersion = parseWebSourceDownloadVersion(exchange.requestURI.rawQuery)
                         if (!acceptsWebMediaType(exchange, "application/octet-stream")) {
                             throw WebAccessDenied(406, "NOT_ACCEPTABLE", "This endpoint returns application/octet-stream.")
@@ -309,11 +348,18 @@ internal class WebApiController(
                     requireJsonAccept(exchange)
                     sendWebApiResponse(exchange, 200, "bootstrap", bootstrap(credentials))
                 }
+                exchange.requestMethod == "PATCH" -> lifecycle.patch(exchange, resource.removePrefix("jobs/"))
+                exchange.requestMethod == "DELETE" -> lifecycle.delete(exchange, resource.removePrefix("jobs/"))
                 else -> {
+                    if (exchange.requestMethod != "GET") {
+                        access.authorize(exchange, WebEndpointPolicy.transport(setOf("GET", "PATCH", "DELETE")))
+                    }
                     access.authorize(exchange, WebEndpointPolicy.privateRead())
                     requireNoWebApiQuery(exchange)
                     requireJsonAccept(exchange)
-                    val value = webJob(jobs.presentation(resource.removePrefix("jobs/")))
+                    val selected = resource.removePrefix("jobs/")
+                    if (jobs.deletedJob(selected) != null) throw WebAccessDenied(410, "RESOURCE_GONE", "This job was deleted. Only its deletion record is retained.")
+                    val value = webJob(jobs.presentation(selected))
                     val etag = "\"${value.getValue("version").let { (it as JsonPrimitive).content }}\""
                     exchange.responseHeaders.set("ETag", etag)
                     if (exchange.requestHeaders.getFirst("If-None-Match") == etag) {
@@ -339,13 +385,18 @@ internal class WebApiController(
             if (failure.code == "RECOVERY_REQUIRED" && uncertain != null && uncertain.jobId.matches(Regex("[a-f0-9]{32}"))) {
                 exchange.responseHeaders.set("Location", "${assets.basePath}api/v1/jobs/${uncertain.jobId}")
                 access.sendDenied(exchange, WebAccessDenied(409, "RECOVERY_REQUIRED", publicWebDiagnosticMessage(failure.code)))
+            } else if (failure.code == "UPLOAD_KEY_RETIRED") {
+                access.sendDenied(exchange, WebAccessDenied(410, "RESOURCE_GONE", "The job created with this upload key was deleted. Upload again with a new key."))
+            } else if (failure.code in setOf("JOB_NOT_FOUND", "RUN_NOT_FOUND") && deletedJobResource(resource)) {
+                access.sendDenied(exchange, WebAccessDenied(410, "RESOURCE_GONE", "This job was deleted. Only its deletion record is retained."))
             } else {
                 val status = if (failure.code in setOf("JOB_NOT_FOUND", "RUN_NOT_FOUND")) 404 else if (failure.code == "ARTIFACT_CHANGED") 409 else 503
                 access.sendDenied(exchange, WebAccessDenied(status, if (status == 404) "NOT_FOUND" else publicWebDiagnosticCode(failure.code),
                     publicWebDiagnosticMessage(failure.code)))
             }
         } catch (_: JobStoreException) {
-            access.sendDenied(exchange, WebAccessDenied(404, "NOT_FOUND", "The requested job is unavailable."))
+            access.sendDenied(exchange, if (deletedJobResource(resource)) WebAccessDenied(410, "RESOURCE_GONE", "This job was deleted. Only its deletion record is retained.")
+                else WebAccessDenied(404, "NOT_FOUND", "The requested job is unavailable."))
         } catch (_: Exception) {
             if (exchange.responseCode != -1) exchange.close()
             else access.sendDenied(exchange, WebAccessDenied(500, "INTERNAL_ERROR", "The request could not be completed."))
@@ -362,15 +413,8 @@ internal class WebApiController(
         put("readiness", "degraded")
         put("sessionExpiresAt", credentials.session.expiresAt.toString())
         put("csrfToken", credentials.csrfToken)
-        put("capabilities", JsonArray(listOf(buildJsonObject {
-            put("id", "workflows")
-            put("state", "unavailable")
-            put("reasonCode", "PREVIEW_UNAVAILABLE")
-            put("message", "Workflow actions are unavailable in this preview.")
-            put("workflows", JsonArray(emptyList()))
-            put("agentContractVersion", JsonNull)
-            put("limits", JsonNull)
-        }, harnessCapability())))
+        val readiness = readiness()
+        put("capabilities", JsonArray(webWorkflowCapabilities(jobs.durableRegistrations(), readiness) + harnessCapability(readiness) + git.capabilities()))
         // Configured ceilings for the API profile; unavailable resources remain
         // unavailable until their adapters enforce these limits and are enabled.
         put("limits", buildJsonObject {
@@ -399,15 +443,17 @@ internal class WebApiController(
                 "aarch64", "arm64" -> "aarch64"
                 else -> "unknown"
             })
-            put("gitVersion", JsonNull)
+            put("gitVersion", git.versionJson())
             put("scheduler", webSchedulerSnapshot(jobs.schedulerSnapshot()))
             put("progressRetention", webProgressRetentionStatus(jobs.progressRetentionStatus()))
         })
     }
 
     // Configuration-only and cached: reports whether a harness is selectable, never that a workflow can run.
-    private fun harnessCapability(): JsonObject {
-        val readiness = harnessReadiness.current().withAgentInspection(agentPreflight.snapshot())
+    // Passive on page load: helper checks fold in only from a recent explicit operator inspection.
+    private fun readiness(): WebHarnessReadiness = harnessReadiness.current().withAgentInspection(agentPreflight.snapshot())
+
+    private fun harnessCapability(readiness: WebHarnessReadiness): JsonObject {
         return buildJsonObject {
             put("id", "harness")
             put("state", readiness.state)
@@ -416,7 +462,14 @@ internal class WebApiController(
             put("workflows", JsonArray(emptyList()))
             put("agentContractVersion", JsonNull)
             put("limits", JsonNull)
+            put("launch", JsonNull)
         }
+    }
+
+    /** Reached only after a handler authorized the session and a service read found no job. */
+    private fun deletedJobResource(resource: String): Boolean {
+        val jobId = Regex("jobs/([0-9a-f]{32})(?:/.*)?").matchEntire(resource)?.groupValues?.get(1) ?: return false
+        return try { jobs.deletedJob(jobId) != null } catch (_: Exception) { false }
     }
 
     private fun singleUploadHeader(exchange: HttpExchange, name: String): String? {

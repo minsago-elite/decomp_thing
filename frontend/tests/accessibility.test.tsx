@@ -140,3 +140,44 @@ it('has no automated WCAG A/AA violations when a job read fails', async () => {
   await settle();
   expect(await violations()).toEqual([]);
 });
+
+// Job lifecycle controls (#510, #511, #512) and storage accounting (#506).
+for (const [name, preview] of [['deletable', 'job-deletion-preview'], ['protected', 'job-deletion-preview-protected']] as const) {
+  it(`has no automated WCAG A/AA violations with a ${name} deletion review open`, async () => {
+    responses.jobDeletionPreview = () => fixture(preview);
+    try {
+      const auth = await session();
+      history.replaceState(null, '', `/nested/jobs/${jobId}`);
+      render(<App basePath="/nested" session={auth} />);
+      fireEvent.click(await screen.findByRole('button', { name: 'Review what would be deleted' }));
+      expect(await screen.findByText('Source snapshots')).toBeTruthy();
+      if (name === 'deletable') fireEvent.input(screen.getByLabelText(/Type the file name/), { target: { value: 'synthetic.elf' } });
+      await settle();
+      expect(await violations()).toEqual([]);
+    } finally { delete responses.jobDeletionPreview; }
+  });
+}
+
+it('has no automated WCAG A/AA violations on a deleted job', async () => {
+  transport.get.mockImplementation(() => Promise.reject(new ApiClientError('http_error', { status: 410, serverCode: 'RESOURCE_GONE' })));
+  const auth = await session();
+  history.replaceState(null, '', `/nested/jobs/${jobId}`);
+  render(<App basePath="/nested" session={auth} />);
+  expect(await screen.findByText(/This job was deleted/)).toBeTruthy();
+  await settle();
+  expect(await violations()).toEqual([]);
+});
+
+it('has no automated WCAG A/AA violations with storage and the maintenance preview read', async () => {
+  responses.storageSummary = () => fixture('storage-summary');
+  responses.maintenancePreview = () => fixture('maintenance-preview');
+  try {
+    const auth = await session();
+    history.replaceState(null, '', '/nested/runtime');
+    render(<App basePath="/nested" session={auth} />);
+    fireEvent.click(await screen.findByRole('button', { name: 'Read storage and maintenance preview' }));
+    expect(await screen.findByText('Maintenance preview (dry run)')).toBeTruthy();
+    await settle();
+    expect(await violations()).toEqual([]);
+  } finally { delete responses.storageSummary; delete responses.maintenancePreview; }
+});

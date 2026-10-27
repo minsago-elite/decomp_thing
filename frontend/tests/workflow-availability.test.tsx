@@ -16,7 +16,7 @@ function snapshot(capabilities: Capability[] = []): RuntimeSnapshot {
 
 function capability(state: Capability['state'], workflows: Capability['workflows'] = ['repair']): Capability {
   return { id: 'harness_acp', state, reasonCode: 'SELECTED_HARNESS_NOT_READY',
-    message: 'The selected harness cannot start this workflow.', workflows, agentContractVersion: 1, limits: null };
+    message: 'The selected harness cannot start this workflow.', workflows, agentContractVersion: 1, limits: null, launch: null };
 }
 
 it('shows all five workflow states without start controls or alternate-harness selection', () => {
@@ -86,7 +86,7 @@ it('replaces obsolete reports when the authenticated runtime snapshot changes', 
 
 it('retains the server preview refusal without assigning an undeclared workflow', () => {
   const preview: Capability = { id: 'workflows', state: 'unavailable', reasonCode: 'PREVIEW_UNAVAILABLE',
-    message: 'Workflow actions are unavailable in this preview.', workflows: [], agentContractVersion: null, limits: null };
+    message: 'Workflow actions are unavailable in this preview.', workflows: [], agentContractVersion: null, limits: null, launch: null };
   const view = render(<WorkflowAvailability runtime={snapshot([preview, capability('unsupported')])} />);
   const general = within(view.getByRole('list', { name: 'General capability reports' }));
   expect(general.getByText('workflows')).toBeTruthy();
