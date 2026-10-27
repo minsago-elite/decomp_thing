@@ -4,6 +4,8 @@ import decompengine.acp.LinuxFileIdentity
 import decompengine.acp.LinuxFilesystemSyscalls
 import decompengine.acp.permissions
 import decompengine.oracle.fulltree.ContainedCommandOperationDeadline
+import decompengine.oracle.fulltree.OracleNativeLibraries
+import decompengine.oracle.fulltree.isolatedObservationJvmTemporaryArguments
 import decompengine.oracle.core.DescriptorBoundAtomicStateFile
 import decompengine.oracle.core.OracleArtifacts
 import decompengine.oracle.core.OracleJson
@@ -39,6 +41,11 @@ import decompengine.oracle.fulltree.calculateFullTreeObservationRuntimeManifestS
 import java.nio.file.Path
 
 private object GCC_BUNDLED_PREPARED_OPERATION_PERMIT
+
+/** Native code comes only from the authenticated read-only Java runtime, never noexec scratch. */
+internal fun gccIndependentMachineCallJvmArguments(controlPath: Path, nativeDirectory: Path): List<String> =
+    listOf("-XX:+DisableAttachMechanism", "-Duser.home=${controlPath.resolve("state")}") +
+        isolatedObservationJvmTemporaryArguments(controlPath, nativeDirectory)
 
 internal fun requireGccFullExportBindingMatchesOperation(
     binding: GccDriverStructuralFullExportBindingV2,
@@ -1014,12 +1021,12 @@ internal class GccBundledPreparedOperation internal constructor(
             calculateFullTreeObservationRuntimeManifestSha256(runtime))
         val unit = "decomp-machine-calls-${requestSha.take(32)}.scope"
         val command = listOf(configuration.javaExecutable.toString(),
-            "-Xmx${minOf(intent.budgets.maximumResidentBytes / (1024 * 1024) * 3 / 4, 3072)}m",
-            "-XX:+DisableAttachMechanism", "-Duser.home=${controlPath.resolve("state")}",
-            "-Djava.io.tmpdir=${controlPath.resolve("tmp")}", "-cp",
-            inputs.classPathEntries.indices.joinToString(java.io.File.pathSeparator) {
-                controlPath.resolve("runtime/classpath-$it.jar").toString()
-            }, IndependentMachineCallWorkerV1::class.java.name, requestPath.toString(), requestSha)
+            "-Xmx${minOf(intent.budgets.maximumResidentBytes / (1024 * 1024) * 3 / 4, 3072)}m") +
+            gccIndependentMachineCallJvmArguments(controlPath,
+                configuration.javaRuntime.destination.resolve(OracleNativeLibraries.relativeDirectory)) + listOf("-cp",
+                inputs.classPathEntries.indices.joinToString(java.io.File.pathSeparator) {
+                    controlPath.resolve("runtime/classpath-$it.jar").toString()
+                }, IndependentMachineCallWorkerV1::class.java.name, requestPath.toString(), requestSha)
         try {
             return StableControlFile.open(request.richFile.path, request.richFile.bytes, "independent rich ELF").use { rich ->
                 StableControlFile.open(request.canonicalOracle.path, request.canonicalOracle.bytes,
