@@ -1408,7 +1408,7 @@ class AcpAgentHarnessTest {
                 harness.execute(fixture.request, events::add)
             }
 
-            assertEquals(AgentFailureKind.CONFIGURATION, failure.failure.kind, case.label)
+            assertEquals(AgentFailureKind.CONFIGURATION, failure.failure.kind, safeCleanupFailureContext(case.label, failure))
             assertEquals("original artifact\n", fixture.source.readText(), case.label)
             assertTrue(events.isEmpty(), case.label)
             val invocation = assertIs<AcpInvocationEvidenceSnapshot>(failure.receipt?.providerEvidence)
@@ -1535,7 +1535,7 @@ class AcpAgentHarnessTest {
                 harness.execute(fixture.request, events::add)
             }
 
-            assertEquals(case.expectedKind, failure.failure.kind, case.label)
+            assertEquals(case.expectedKind, failure.failure.kind, safeCleanupFailureContext(case.label, failure))
             assertEquals("original artifact\n", fixture.source.readText(), case.label)
             assertTrue(events.isEmpty(), case.label)
             assertFalse(failure.stackTraceToString().contains("setter-secret-canary"), case.label)

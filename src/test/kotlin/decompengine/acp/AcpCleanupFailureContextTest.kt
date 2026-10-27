@@ -46,11 +46,11 @@ class AcpCleanupFailureContextTest {
             assertTrue(context.contains("stdoutFacts=$record"))
             assertFalse(context.contains(raw))
         }
-        val cases = listOf("unknown-response-id", "duplicate-response-id", "late-response-id",
+        val cases = listOf("setter error", "setter timeout", "absent mode capability", "unknown-response-id", "duplicate-response-id", "late-response-id",
             "contaminated-prompt", "missing-jsonrpc-prompt", "wrong-jsonrpc-prompt", "numeric-jsonrpc-prompt", "result-and-error-prompt")
         val identified = cases.map { label ->
             val context = safeCleanupFailureContext(label, failure)
-            assertTrue(context.contains("mode=$label kind=RESOURCE_EXHAUSTED"))
+            assertTrue(context.contains("mode=${label.replace(' ', '-')} kind=RESOURCE_EXHAUSTED"))
             assertTrue(context.contains("recordedPhase=PROMPT_COMPLETED"))
             assertTrue(safeCleanupFailureContext("$label $raw", failure).contains("mode=UNKNOWN"))
             context.substringBefore(" kind=")
