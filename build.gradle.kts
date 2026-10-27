@@ -1556,6 +1556,13 @@ private fun configureOracleTestRuntime(testTask: Test) {
     val testInstalledGhidra = providers.environmentVariable("RUN_REAL_GHIDRA").orNull == "true" ||
         providers.environmentVariable("RUN_REAL_GHIDRA_CALL_SITES").orNull == "true" ||
         providers.environmentVariable("RUN_REAL_GHIDRA_NATIVE_CALLS").orNull == "true"
+    if (providers.environmentVariable("RUN_REAL_GHIDRA_PURE_RENDERING").orNull == "true") {
+        require(providers.environmentVariable("RUN_REAL_GHIDRA").orNull == "true") {
+            "native rendering parity requires installed bundled Ghidra execution"
+        }
+        testTask.outputs.upToDateWhen { false }
+        testTask.outputs.cacheIf("native rendering parity must execute") { false }
+    }
     if (testInstalledGhidra) testTask.dependsOn("installDist")
     testTask.dependsOn(generateAcpGateHelperChecksum)
     testTask.dependsOn(generateLlvmBehaviorHelperChecksum)
@@ -1667,6 +1674,48 @@ tasks.register<Test>("realAngrQualification") {
         }
         Files.createDirectories(temporaryRoot.toPath())
     }
+}
+
+// JUnit can silently omit expression-bodied Kotlin tests with non-void JVM returns.
+// Inspect compiled metadata before every root Test route; do not alter selection or worker bounds.
+val junitSignatureEvidence = layout.buildDirectory.dir("reports/junit-signatures")
+val junitSignatureCompiler = javaToolchains.compilerFor {
+    languageVersion.set(JavaLanguageVersion.of(21))
+}
+val verifyJunitSignatureGuard = tasks.register<Exec>("verifyJunitSignatureGuard") {
+    group = "verification"
+    description = "Exercises compiled JUnit signature validation with real authored javac fixtures"
+    inputs.files("scripts/check-junit-signatures.py", "scripts/test-junit-signatures.py")
+    outputs.file(junitSignatureEvidence.map { it.file("controls.json") })
+    outputs.upToDateWhen { false }
+    timeout.set(Duration.ofMinutes(2))
+    doFirst {
+        commandLine("python3", "-B", "scripts/test-junit-signatures.py",
+            "--javac", junitSignatureCompiler.get().executablePath.asFile.absolutePath,
+            "--work-root", layout.buildDirectory.dir("junit-signature-controls").get().asFile.absolutePath,
+            "--report", junitSignatureEvidence.get().file("controls.json").asFile.absolutePath)
+    }
+}
+val verifyCompiledJunitSignatures = tasks.register<Exec>("verifyCompiledJunitSignatures") {
+    group = "verification"
+    description = "Rejects non-void ordinary JUnit methods before discovery can silently omit them"
+    dependsOn(tasks.named("testClasses"), verifyJunitSignatureGuard)
+    inputs.file("scripts/check-junit-signatures.py")
+    inputs.files(sourceSets["test"].output.classesDirs)
+    outputs.file(junitSignatureEvidence.map { it.file("compiled-signatures.json") })
+    outputs.upToDateWhen { false }
+    timeout.set(Duration.ofMinutes(2))
+    doFirst {
+        // Java's NO-SOURCE output directory need not exist; at least one compiled root is mandatory.
+        val roots = sourceSets["test"].output.classesDirs.files.filter { it.exists() }.sortedBy { it.absolutePath }
+        require(roots.isNotEmpty()) { "No root-project compiled test classes exist for JUnit signature verification" }
+        commandLine(listOf("python3", "-B", "scripts/check-junit-signatures.py",
+            "--report", junitSignatureEvidence.get().file("compiled-signatures.json").asFile.absolutePath) +
+            roots.flatMap { listOf("--class-root", it.absolutePath) })
+    }
+}
+tasks.withType<Test>().configureEach {
+    dependsOn(verifyCompiledJunitSignatures)
 }
 
 tasks.test {

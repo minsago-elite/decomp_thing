@@ -32,6 +32,7 @@ internal class WebApiController(
     private val progressPins = WebProgressPinController(access, jobs, jobMutations)
     private val workflowStarts = WebWorkflowStartController(jobs, jobMutations, assets.basePath)
     private val cancellations = WebCancellationController(jobMutations, assets.basePath)
+    private val recoveries = WebRecoveryController(jobs, jobMutations, assets.basePath)
     private val agentPreflights = WebAgentPreflightController(access, agentPreflight, assets.basePath)
     private val runPages = WebRunPages { jobId ->
         when (val inspection = jobs.inspectDurableJob(jobId)) {
@@ -54,7 +55,7 @@ internal class WebApiController(
         val path = exchange.requestURI.rawPath
         if (!path.startsWith("${assets.basePath}api/")) return false
         val resource = path.removePrefix(prefix)
-        if (!path.startsWith(prefix) || !(resource in setOf("session", "bootstrap", "jobs", "recovery", "agent/preflight") || resource.matches(Regex("(?:jobs|uploads)/[^/]+|jobs/[^/]+/runs(?:/[^/]+(?:/reports/(?:exploration|revision-validation)|/validation-history|/source-catalog|/revisions/[^/]+/(?:sources|source-directories/[^/]+|source-files/[^/]+(?:/(?:chunk|content))?)|/snapshot|/events|/progress-pin|/cancel)?)?|jobs/[^/]+/artifacts/[^/]+/content")))) {
+        if (!path.startsWith(prefix) || !(resource in setOf("session", "bootstrap", "jobs", "recovery", "agent/preflight") || resource.matches(Regex("(?:jobs|uploads)/[^/]+|jobs/[^/]+/runs(?:/[^/]+(?:/reports/(?:exploration|revision-validation)|/validation-history|/source-catalog|/revisions/[^/]+/(?:sources|source-directories/[^/]+|source-files/[^/]+(?:/(?:chunk|content))?)|/snapshot|/events|/progress-pin|/cancel|/recover|/controls|/queue-position)?)?|jobs/[^/]+/artifacts/[^/]+/content")))) {
             try {
                 val policy = if (exchange.requestMethod in setOf("POST", "PUT", "PATCH", "DELETE")) {
                     WebEndpointPolicy.jsonMutation(exchange.requestMethod)
@@ -137,6 +138,18 @@ internal class WebApiController(
                 resource.matches(Regex("jobs/[^/]+/runs/[^/]+/cancel")) -> {
                     val parts = resource.split('/')
                     cancellations.handle(exchange, parts[1], parts[3])
+                }
+                resource.matches(Regex("jobs/[^/]+/runs/[^/]+/recover")) -> {
+                    val parts = resource.split('/')
+                    recoveries.handle(exchange, parts[1], parts[3])
+                }
+                resource.matches(Regex("jobs/[^/]+/runs/[^/]+/controls")) -> {
+                    access.authorize(exchange, WebEndpointPolicy.privateRead())
+                    requireNoWebApiQuery(exchange); requireJsonAccept(exchange)
+                    val parts = resource.split('/')
+                    val controls = jobs.attemptControls(parts[1], parts[3])
+                    exchange.responseHeaders.set("ETag", "\"${controls.attempt.version}\"")
+                    sendWebApiResponse(exchange, 200, "attemptControls", controls.toJson())
                 }
                 resource.matches(Regex("jobs/[^/]+/runs/[^/]+/progress-pin")) -> {
                     val parts = resource.split('/')
@@ -272,6 +285,12 @@ internal class WebApiController(
                     requireJsonAccept(exchange)
                     sendWebApiResponse(exchange, 200, "runs", runPages.page(session.sessionId, resource.split('/')[1], exchange.requestURI.rawQuery))
                 }
+                resource.matches(Regex("jobs/[^/]+/runs/[^/]+/queue-position")) -> {
+                    access.authorize(exchange, WebEndpointPolicy.privateRead())
+                    requireNoWebApiQuery(exchange); requireJsonAccept(exchange)
+                    val parts = resource.split('/')
+                    sendWebApiResponse(exchange, 200, "queuePosition", webQueuePosition(parts[1], parts[3], jobs.queuePosition(parts[1], parts[3])))
+                }
                 resource.matches(Regex("jobs/[^/]+/runs/[^/]+")) -> {
                     access.authorize(exchange, WebEndpointPolicy.privateRead())
                     requireNoWebApiQuery(exchange); requireJsonAccept(exchange)
@@ -388,7 +407,7 @@ internal class WebApiController(
 
     // Configuration-only and cached: reports whether a harness is selectable, never that a workflow can run.
     private fun harnessCapability(): JsonObject {
-        val readiness = harnessReadiness.current().withAgentInspection(agentPreflight.snapshot().status)
+        val readiness = harnessReadiness.current().withAgentInspection(agentPreflight.snapshot())
         return buildJsonObject {
             put("id", "harness")
             put("state", readiness.state)

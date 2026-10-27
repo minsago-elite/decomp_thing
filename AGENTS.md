@@ -23,6 +23,7 @@
 - Do not request review from the Codex code review bot; it is added automatically when a commit is pushed to a ready pull request.
 - Do not merge a pull request while required CI checks fail or are pending, or until all Codex code review bot reviews are resolved.
 - For privileged commands on local hosts, use `doas` instead of `sudo`.
+- Any of this may be waived or overridden by an explicit user request.
 
 ## Repository Sanity Checks
 
