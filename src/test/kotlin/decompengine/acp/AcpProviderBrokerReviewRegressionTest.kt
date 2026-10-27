@@ -198,14 +198,14 @@ class AcpProviderBrokerReviewRegressionTest {
         assertTrue(body.all { it == 0.toByte() })
     }
 
-    @Test fun `held raw close delays completion then discards bearer body receiver and retired owner`() {
+    @Test fun `held raw close delays completion then discards bearer body receiver and retired owner`() = withIdleFixtureBackend { backend ->
         val receiver = Receiver()
         val body = "synthetic body".toByteArray()
         val wire = BasicClassicHttpRequest("POST", URI("https://chatgpt.com/backend-api/codex/responses")).also {
             it.setHeader("Authorization", "Bearer synthetic-only")
             it.entity = ByteArrayEntity(body, ContentType.APPLICATION_JSON)
         }
-        val authority = authority()
+        val authority = requireNotNull(field(backend, "authority"))
         val type = Class.forName("decompengine.acp.ProviderHttpAttempt")
         val owner = type.declaredConstructors.single().also { it.isAccessible = true }
             .newInstance(authority, System.nanoTime() + TimeUnit.SECONDS.toNanos(1), wire, body, receiver)
@@ -234,8 +234,7 @@ class AcpProviderBrokerReviewRegressionTest {
         assertNull((field(owner, "receiver") as AtomicReference<*>).get())
         type.getDeclaredMethod("attach", java.util.concurrent.Future::class.java).also { it.isAccessible = true }
             .invoke(owner, CompletableFuture.completedFuture(Unit))
-        val backendType = Class.forName("decompengine.acp.CoreAcpProviderBackend")
-        val backend = backendType.declaredConstructors.single().also { it.isAccessible = true }.newInstance(authority)
+        val backendType = backend.javaClass
         @Suppress("UNCHECKED_CAST") val owners = field(backend, "owners") as MutableList<Any>
         owners.add(owner)
         val snapshot = backendType.getDeclaredMethod("cleanupSnapshot").also { it.isAccessible = true }
@@ -245,20 +244,19 @@ class AcpProviderBrokerReviewRegressionTest {
         assertTrue((backend as AcpProviderBrokerTestBackend).closeWithin(Duration.ofSeconds(1)))
     }
 
-    @Test fun `terminal rejected owner releases wire secrets while cleanup counts remain exact`() {
+    @Test fun `terminal rejected owner releases wire secrets while cleanup counts remain exact`() = withIdleFixtureBackend { backend ->
         val body = "synthetic rejected body".toByteArray()
         val wire = BasicClassicHttpRequest("POST", URI("https://chatgpt.com/backend-api/codex/responses")).also {
             it.setHeader("Authorization", "Bearer synthetic-only")
             it.entity = ByteArrayEntity(body, ContentType.APPLICATION_JSON)
         }
-        val authority = authority()
+        val authority = requireNotNull(field(backend, "authority"))
         val type = Class.forName("decompengine.acp.ProviderHttpAttempt")
         val constructor = type.declaredConstructors.single().also { it.isAccessible = true }
         val owner = if (constructor.parameterCount == 5) constructor.newInstance(authority, System.nanoTime() + TimeUnit.SECONDS.toNanos(1), wire, body, Receiver())
             else constructor.newInstance(authority, Duration.ofSeconds(1), wire, Receiver())
         type.getDeclaredMethod("notSubmitted").also { it.isAccessible = true }.invoke(owner)
-        val backendType = Class.forName("decompengine.acp.CoreAcpProviderBackend")
-        val backend = backendType.declaredConstructors.single().also { it.isAccessible = true }.newInstance(authority)
+        val backendType = backend.javaClass
         @Suppress("UNCHECKED_CAST") val owners = field(backend, "owners") as MutableList<Any>
         owners.add(owner)
         try {
@@ -398,6 +396,40 @@ class AcpProviderBrokerReviewRegressionTest {
 
     private fun credentialRetentionBody() =
         """{"model":"gpt-6.1-sol","input":[{"role":"user","content":"fixture"}],"reasoning":{"effort":"low"},"store":false,"stream":true}""".toByteArray()
+
+    @Test fun `production named-host authority refuses concrete backend before dispatch`() {
+        val constructor = Class.forName("decompengine.acp.CoreAcpProviderBackend")
+            .declaredConstructors.single().also { it.isAccessible = true }
+        val failure = assertFailsWith<InvocationTargetException> { constructor.newInstance(authority()) }
+        assertEquals(AcpProviderTerminalKind.UNSUPPORTED_OPERATION, assertIs<AcpProviderBrokerFailure>(failure.cause).kind)
+    }
+
+    /** Test-local trusted fixture composition only, matching the TLS fixture's private permit setup.
+     * No listener, resolver or HTTP request is started; production admission remains unavailable. */
+    private fun withIdleFixtureBackend(control: (AcpProviderBrokerTestBackend) -> Unit) {
+        val consumer = Any()
+        val permitType = Class.forName("decompengine.acp.AcpHarnessFactory\$FactoryProviderPermit")
+        val permit = permitType.getDeclaredConstructor().also { it.isAccessible = true }
+            .newInstance() as AcpProviderQualificationPermit
+        val recordType = Class.forName("decompengine.acp.AcpHarnessFactory\$ProviderPermitRecord")
+        val record = recordType.declaredConstructors.single { it.parameterCount == 3 }.also { it.isAccessible = true }
+            .newInstance(consumer, AcpProviderQualificationPurpose.FIXTURE_POLICY, null)
+        val registryField = AcpHarnessFactory::class.java.getDeclaredField("providerPermits").also { it.isAccessible = true }
+        @Suppress("UNCHECKED_CAST")
+        val registry = registryField.get(AcpHarnessFactory) as MutableMap<AcpProviderQualificationPermit, Any>
+        synchronized(registry) { registry[permit] = record }
+        val policy = AcpProviderTransportPolicy.CredentialFreeFixture.issue(permit, consumer, 18443)
+        val request = AgentExecutionRequest("idle fixture cleanup control",
+            listOf(AgentWorkspaceRoot("fixture", Path.of(System.getProperty("user.dir")))),
+            accessPolicy = AgentAccessPolicy(emptyList()))
+        val broker = AcpProviderBroker.openForCredentialFreeQualification(policy, consumer, request, Duration.ofSeconds(5))
+        try {
+            control(field(broker, "backend") as AcpProviderBrokerTestBackend)
+        } finally {
+            broker.close()
+            assertEquals(AcpProviderBrokerCleanup.VERIFIED, broker.snapshot().cleanup)
+        }
+    }
 
     private fun field(owner: Any, name: String): Any? = owner.javaClass.getDeclaredField(name).also { it.isAccessible = true }.get(owner)
     private fun byteStreamBacking(stream: ByteArrayOutputStream): ByteArray {
