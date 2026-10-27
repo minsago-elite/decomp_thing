@@ -131,8 +131,11 @@ class ChatGptPlanRepairClient(
                 val error = readBodyAsync(response.body(), ERROR_BODY_BYTES, deadline, invocation.cancellation, exchange)
                 throw providerFailure("ChatGPT Responses request", response.statusCode(), error)
             }
-            val contentType = response.headers().firstValue("Content-Type").orElse("")
-            if (!contentType.lowercase().startsWith("text/event-stream")) {
+            // Some Responses transports omit Content-Type despite returning a valid SSE body.
+            // In that case the bounded parser below still requires a completed Responses stream.
+            val contentType = response.headers().firstValue("Content-Type").orElse(null)
+            val mediaType = contentType?.substringBefore(';')?.trim()
+            if (mediaType != null && !mediaType.equals("text/event-stream", ignoreCase = true)) {
                 response.body().close()
                 throw AgentExecutionException(AgentFailure(AgentFailureKind.PROTOCOL, "ChatGPT Responses request did not return an event stream"))
             }
