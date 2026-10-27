@@ -82,6 +82,21 @@ describe('log viewer', () => {
     expect(screen.getByText('11 matching lines among loaded lines 1–500. Lines that are not loaded were not searched.')).toBeTruthy();
   });
 
+  it('brings loaded filter results into view when filtering from the end of a long window', async () => {
+    transport.get.mockResolvedValueOnce({ data: range(1, 500, 500, { attempt: running }) });
+    mount(); await flush();
+    const viewport = screen.getByRole('region', { name: 'Build log lines' });
+    expect(viewport.scrollTop).toBeGreaterThan(0);
+    fireEvent.input(screen.getByLabelText('Find in loaded lines'), { target: { value: 'line 49' } });
+    expect(screen.getByText('11 matching lines among loaded lines 1–500. Lines that are not loaded were not searched.')).toBeTruthy();
+    expect(viewport.scrollTop).toBe(0);
+    expect(screen.getByText('line 49')).toBeTruthy();
+    expect(rows()).toHaveLength(11);
+    fireEvent.input(screen.getByLabelText('Find in loaded lines'), { target: { value: '' } });
+    expect(screen.getByText('line 1')).toBeTruthy();
+    expect(rows().length).toBeLessThan(60);
+  });
+
   it('follows deliberately, stops when the reader scrolls away and resumes only on request', async () => {
     vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
     transport.get.mockResolvedValueOnce({ data: range(1, 30, 30, { attempt: running }) });

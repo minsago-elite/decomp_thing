@@ -219,7 +219,12 @@ export function LogViewer({ jobId, runId, basePath }: { jobId: string; runId: st
       <p role="status">{ended ? copy.ended : follow === 'scrolled' ? copy.pausedScrolled : follow === 'off' ? copy.paused
         : !availability.visible || !availability.online ? copy.hidden : copy.following}</p>
       <div class="log-search">
-        <label>{copy.find}<input value={find} maxLength={128} onInput={event => { setFind(event.currentTarget.value); pause(follow === 'on' ? 'scrolled' : follow); }} /></label>
+        <label>{copy.find}<input value={find} maxLength={128} onInput={event => {
+          pause(follow === 'on' ? 'scrolled' : follow);
+          // Filtering changes row indices; the previous scroll position may be past every match.
+          pendingScroll.current = buffer.firstLine;
+          setFind(event.currentTarget.value);
+        }} /></label>
         <p>{find ? displayMessage(copy.findScope, { count: displayed.length, first: buffer.firstLine.toString(), last: lastLine(buffer).toString() }) : copy.findEmpty}</p>
         <form onSubmit={event => {
           event.preventDefault();
