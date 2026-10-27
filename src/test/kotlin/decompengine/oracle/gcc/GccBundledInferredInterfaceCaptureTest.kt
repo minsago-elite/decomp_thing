@@ -44,6 +44,45 @@ class GccBundledInferredInterfaceCaptureTest {
     }
 
     @Test
+    fun `v9 and v10 rendered results preserve qualifier receipt contract without issuing live evidence`() {
+        for (globalTypes in listOf(false, true)) fixture { f ->
+            val runtime = if (globalTypes) RUNTIME.copy(globalTypeCollectorSha256 = GLOBAL_TYPE_COLLECTOR,
+                globalTypeRuntimeIdentitySha256 = GLOBAL_TYPE_IDENTITY) else RUNTIME
+            if (globalTypes) {
+                val listing = f.listingObject()
+                f.write(listing = listing.with("records", JsonArray(listing.getValue("records").jsonArray.mapIndexed { index, row ->
+                    if (index == 9) row.jsonObject.with("entry", address(3, 0x400090uL)) else row
+                })))
+                f.writeGlobalTypeObservations(runtime)
+            }
+            val snapshot = f.capture(runtime = runtime)
+            val intent = OracleJson.canonicalBytes(obj("operationId" to "a".repeat(64)))
+            val execution = "authored execution receipt".toByteArray()
+            val assessment = "authored export-assessment.json".toByteArray()
+            val binding = "authored binding".toByteArray()
+            val result = OracleJson.parseCanonical(GccBundledInterfaceCliResultV1.renderResult(snapshot,
+                intent, execution, assessment, binding, f.root.resolve("journal"), f.root, f.root.resolve("output"),
+                JsonObject(emptyMap()))).jsonObject
+            // Exact unchanged v9 qualifier contract, not an opt-in live test or a weakened receipt join.
+            val v9Keys = setOf("provider", "schemaVersion", "complete", "authoritativeOracleEvidence", "productionInterfacesAdmitted",
+                "scored", "releaseEligible", "completeObservedNativeCensus", "interfaceAuthority", "operationId", "requestSha256", "journal",
+                "programModel", "programModelSha256", "programModelBytes", "outputTreeManifest", "outputTreeManifestSha256",
+                "listingObservations", "listingObservationsSha256", "listingManifest", "listingManifestSha256",
+                "inferredObservations", "inferredObservationsSha256", "inferredManifest", "inferredManifestSha256",
+                "interfaceBinding", "interfaceBindingSha256", "executionReceiptSha256", "assessmentReceiptSha256", "capturedBytes",
+                "operationWallTime", "scratchDisposition")
+            assertEquals(v9Keys + if (globalTypes) setOf("globalTypeObservations", "globalTypeObservationsSha256") else emptySet(), result.keys)
+            assertEquals(JsonPrimitive(if (globalTypes) "gcc-bundled-cli-global-type-observation-result-v1"
+                else "gcc-bundled-cli-interface-observation-result-v1"), result["provider"])
+            assertEquals(JsonPrimitive(OracleArtifacts.sha256(execution)), result["executionReceiptSha256"])
+            assertEquals(JsonPrimitive(OracleArtifacts.sha256(assessment)), result["assessmentReceiptSha256"])
+            for (flag in listOf("complete", "authoritativeOracleEvidence", "productionInterfacesAdmitted", "scored", "releaseEligible"))
+                assertEquals(JsonPrimitive(false), result[flag])
+            assertUnregistered(GccBundledInterfaceOperation(snapshot, intent, execution, assessment))
+        }
+    }
+
+    @Test
     fun `complete owned bytes retain all nine dispositions both populations and ambiguous mapping`() {
         fixture { f ->
             val captured = f.capture()
@@ -450,7 +489,7 @@ class GccBundledInferredInterfaceCaptureTest {
                 obj("recordKind" to "type-node", "scopeKind" to "defined-data", "dataOrdinal" to 0, "id" to 0,
                     "kind" to "integer", "nativeClass" to "ghidra.program.model.data.IntegerDataType", "childCount" to 0,
                     "alignment" to 4, "alignedLength" to 4, "length" to 4, "notYetDefined" to false,
-                    "undefined" to false, "zeroLength" to false, "expansion" to "captured", "details" to obj()),
+                    "undefined" to false, "zeroLength" to false, "expansion" to "terminal", "details" to obj("signed" to true)),
                 obj("recordKind" to "type-root", "dataOrdinal" to 0, "rootNode" to 0),
             )
             val bytes = rows.joinToString("\n", postfix = "\n") {

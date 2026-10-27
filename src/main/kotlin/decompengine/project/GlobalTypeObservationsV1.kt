@@ -107,14 +107,9 @@ object GlobalTypeObservationsV1 {
         var unresolved = 0L
         var referenceSection = false
         var currentDataOrdinal = -1L
-        var graphRoots = 0L
         val spaces = arrayListOf<JsonObject>()
         val dataKeys = HashSet<String>()
-        val nodeIds = HashSet<Pair<Long, Long>>()
-        val rootIds = HashSet<Long>()
-        val graphEdgeKeys = HashSet<String>()
-        val edgeTargets = arrayListOf<Triple<Long, Long, Long?>>()
-        val roots = arrayListOf<Pair<Long, Long>>()
+        val graph = DefinedDataGraph(limits, checkpoint)
         var headerSeen = false
         openObservations().use { source ->
             val input = BufferedInputStream(DigestInputStream(source, digest), 65536)
@@ -153,6 +148,7 @@ object GlobalTypeObservationsV1 {
                             "recordKind", "symbolExternal", "symbolGlobal", "symbolName", "symbolSource", "symbolType", "typePathCaptureKey")
                         val ordinal = row.number("dataOrdinal")
                         require(ordinal == dataCount && ordinal < expectedData) { "defined data ordinals are incomplete or unordered" }
+                        graph.begin(ordinal)
                         currentDataOrdinal = ordinal
                         val key = row.string("captureKey")
                         val index = row.number("addressSpaceIndex").toInt()
@@ -168,7 +164,6 @@ object GlobalTypeObservationsV1 {
                         requireNullableBoolean(row, "symbolExternal")
                         require(row.string("typePathCaptureKey").let { it.isNotEmpty() && it.toByteArray(Charsets.UTF_8).size <= limits.maximumStringBytes })
                         dataCount++
-                        graphRoots++
                         consume(row)
                     }
                     "type-node" -> {
@@ -177,11 +172,10 @@ object GlobalTypeObservationsV1 {
                         require(row.string("scopeKind") == "defined-data")
                         val ordinal = row.number("dataOrdinal")
                         require(ordinal in 0 until dataCount && ordinal == currentDataOrdinal)
-                        val id = row.number("id")
-                        require(id in 0..Int.MAX_VALUE.toLong() && nodeIds.add(ordinal to id))
                         require(row.string("kind").isNotEmpty() && row.string("nativeClass").isNotEmpty() &&
-                            row.number("childCount") in 0..4096 && row.number("alignment") in -1..Int.MAX_VALUE.toLong() &&
+                            row.number("alignment") in -1..Int.MAX_VALUE.toLong() &&
                             row.number("alignedLength") in -1..Int.MAX_VALUE.toLong() && row.number("length") in -1..Int.MAX_VALUE.toLong())
+                        graph.node(row)
                         require(++typeNodes <= limits.maximumGraphNodes)
                         consume(row)
                     }
@@ -191,26 +185,14 @@ object GlobalTypeObservationsV1 {
                         require(row.string("scopeKind") == "defined-data")
                         val ordinal = row.number("dataOrdinal")
                         require(ordinal in 0 until dataCount && ordinal == currentDataOrdinal)
-                        val source = row.number("source")
-                        val edgeOrdinal = row.number("ordinal")
-                        require(source >= 0 && edgeOrdinal >= 0)
-                        val target = when (val value = row["target"]) {
-                            JsonNull -> null
-                            is JsonPrimitive -> value.content.toLongOrNull() ?: fail("type edge target must be an integer or null")
-                            else -> fail("type edge target must be an integer or null")
-                        }
-                        require(target == null || target >= 0)
-                        require(graphEdgeKeys.add("$ordinal:$source:$edgeOrdinal"))
-                        edgeTargets.add(Triple(ordinal, source, target))
+                        graph.edge(row)
                         require(++typeEdges <= limits.maximumGraphEdges)
                         consume(row)
                     }
                     "type-root" -> {
                         row.fields("dataOrdinal", "recordKind", "rootNode")
                         require(!referenceSection && row.number("dataOrdinal") == currentDataOrdinal)
-                        val root = row.number("rootNode")
-                        require(root >= 0 && rootIds.add(currentDataOrdinal))
-                        roots.add(currentDataOrdinal to root)
+                        graph.root(row)
                         typeRoots++
                         consume(row)
                     }
@@ -219,11 +201,14 @@ object GlobalTypeObservationsV1 {
                         require(!referenceSection && row.number("dataOrdinal") == currentDataOrdinal)
                         val name = row.string("enumeratorName")
                         require(name.isNotEmpty() && name.toByteArray(Charsets.UTF_8).size <= limits.maximumStringBytes)
-                        require(row.number("value") == row.string("valueBits").toULong(16).toLong())
+                        graph.enumMember(name)
+                        val bits = row.string("valueBits")
+                        require(bits.matches(Regex("[a-f0-9]{16}")) && row.number("value") == bits.toULong(16).toLong())
                         require(++enumMembers <= limits.maximumGraphEdges)
                         consume(row)
                     }
                     "function-global-reference" -> {
+                        graph.finish()
                         referenceSection = true
                         row.fields("dataCaptureKey", "functionId", "operandIndex", "recordKind", "referenceAddress", "targetAddress")
                         require(row.string("functionId") in functionIds)
@@ -236,6 +221,7 @@ object GlobalTypeObservationsV1 {
                         consume(row)
                     }
                     "function-global-reference-unresolved" -> {
+                        graph.finish()
                         referenceSection = true
                         row.fields("functionId", "operandIndex", "reason", "recordKind", "referenceAddress", "targetAddress")
                         require(row.string("functionId") in functionIds)
@@ -253,15 +239,80 @@ object GlobalTypeObservationsV1 {
             require(totalBytes == expectedBytes) { "global/type observation byte count differs" }
             require(MessageDigest.isEqual(digest.digest(), expectedSha256.hexBytes())) { "global/type observation digest differs" }
         }
-        require(dataCount == expectedData && typeRoots == expectedData && rootIds.size.toLong() == expectedData) {
+        graph.finish()
+        require(dataCount == expectedData && typeRoots == expectedData) {
             "defined-data census or per-entity type-root conservation failed"
         }
-        require(roots.all { (ordinal, root) -> (ordinal to root) in nodeIds } &&
-            edgeTargets.all { (ordinal, source, target) -> (ordinal to source) in nodeIds &&
-                (target == null || (ordinal to target) in nodeIds) }) { "type graph contains a dangling node reference" }
         require(spaces.size == expectedSpaces && expectedFunctions == functionIds.size.toLong())
         return GlobalTypeObservationSummaryV1(totalBytes, expectedSha256, dataCount, expectedFunctions,
             typeNodes, typeEdges, enumMembers, references, unresolved)
+    }
+
+    /**
+     * Explicit data-scope adapter to the shared typed DFS validator. These synthetic listing
+     * coordinates are private validation state only: neither wire schema nor consumer rows change,
+     * and data ordinals never become function identities. Each entity owns exactly one subtree/root.
+     */
+    private class DefinedDataGraph(limits: GlobalTypeObservationLimitsV1, checkpoint: () -> Unit) {
+        private val validator = NativeInterfaceTypeGraphValidatorV1(NativeInferredInterfaceObservationLimitsV1(
+            maximumFunctions = maxOf(1, limits.maximumDefinedData), maximumRoots = limits.maximumDefinedData,
+            maximumGraphNodes = limits.maximumGraphNodes, maximumGraphEdges = limits.maximumGraphEdges,
+        ), checkpoint)
+        private var ordinal = -1L
+        private var rootSeen = false
+        private var expectedEnumMembers = 0
+        private var enumMembers = 0
+        private var previousEnumName: String? = null
+
+        fun begin(next: Long) {
+            finish()
+            ordinal = next
+            rootSeen = false
+            expectedEnumMembers = 0
+            enumMembers = 0
+            previousEnumName = null
+        }
+
+        private fun scoped(raw: JsonObject): JsonObject {
+            require(ordinal >= 0 && raw.number("dataOrdinal") == ordinal && raw.string("scopeKind") == "defined-data")
+            return JsonObject((raw - setOf("dataOrdinal", "scopeKind")) + mapOf(
+                "channel" to JsonPrimitive("listing"), "functionOrdinal" to JsonPrimitive(ordinal)))
+        }
+
+        fun node(raw: JsonObject) {
+            require(!rootSeen) { "type nodes cannot follow their data root" }
+            validator.node(scoped(raw))
+        }
+
+        fun edge(raw: JsonObject) {
+            require(!rootSeen) { "type edges cannot follow their data root" }
+            validator.edge(scoped(raw))
+        }
+
+        fun root(raw: JsonObject) {
+            require(ordinal >= 0 && !rootSeen && raw.number("dataOrdinal") == ordinal)
+            val (_, node) = validator.root(JsonObject(mapOf(
+                "recordKind" to JsonPrimitive("type-root"), "channel" to JsonPrimitive("listing"),
+                "functionOrdinal" to JsonPrimitive(ordinal), "role" to JsonPrimitive("defined-data"),
+                "slot" to JsonPrimitive(0), "listingTypeOrdinal" to JsonNull, "node" to raw.getValue("rootNode"),
+            )))
+            requireNotNull(node) { "defined data must have a typed root" }
+            expectedEnumMembers = if (node.kind == "enum") InferredWireV1.integer(node.details.getValue("enumeratorCount")) else 0
+            require(expectedEnumMembers in 0..4096)
+            rootSeen = true
+        }
+
+        fun enumMember(name: String) {
+            require(rootSeen && enumMembers < expectedEnumMembers) { "enum member has no direct enum root or exceeds its census" }
+            require(previousEnumName?.let { it < name } != false) { "enum member names repeat or are unordered" }
+            previousEnumName = name
+            enumMembers++
+        }
+
+        fun finish() {
+            validator.finish()
+            require(ordinal < 0 || (rootSeen && enumMembers == expectedEnumMembers)) { "defined data omits its root or enum members" }
+        }
     }
 
     private data class Header(val first: Long, val second: Long, val third: Int, val fourth: List<JsonObject>)
@@ -290,6 +341,8 @@ object GlobalTypeObservationsV1 {
                 space.number("type") >= 0 && space.number("sizeBits") in 1..128 &&
                 space.number("addressableUnitSize") in 1..Int.MAX_VALUE.toLong())
             require(space.string("name").toByteArray(Charsets.UTF_8).size <= limits.maximumStringBytes)
+            space.boolean("overlay")
+            space.boolean("signedOffsets")
             space
         }
         return Header(dataCount, functionCount, rawSpaces.size, spaces)

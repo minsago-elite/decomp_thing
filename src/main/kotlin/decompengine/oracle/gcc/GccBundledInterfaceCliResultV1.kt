@@ -125,8 +125,15 @@ internal object GccBundledInterfaceCliResultV1 {
         operation.requireCurrent()
         require(binding.contentEquals(this.binding(operation))) { "interface binding belongs to another live capture" }
         listOf(journal, run, output).forEach { require(it.isAbsolute && it.normalize() == it) }
-        val snapshot = operation.snapshot
-        val intent = OracleJson.parseCanonical(operation.intentBytes).jsonObject
+        return renderResult(operation.snapshot, operation.intentBytes, operation.executionReceiptBytes,
+            operation.assessmentReceiptBytes, binding, journal, run, output, operationWallTime)
+    }
+
+    /** Presentation only: rendering authored bytes cannot issue a factory-owned operation or binding. */
+    internal fun renderResult(snapshot: GccBundledInferredInterfaceSnapshot, intentBytes: ByteArray,
+        executionReceiptBytes: ByteArray, assessmentReceiptBytes: ByteArray, binding: ByteArray,
+        journal: Path, run: Path, output: Path, operationWallTime: JsonObject): ByteArray {
+        val intent = OracleJson.parseCanonical(intentBytes).jsonObject
         val globalTypes = snapshot.globalTypeObservationsBytes != null
         val resultFields = mapOf(
             "provider" to JsonPrimitive(if (globalTypes) "gcc-bundled-cli-global-type-observation-result-v1" else "gcc-bundled-cli-interface-observation-result-v1"), "schemaVersion" to JsonPrimitive(1),
@@ -134,7 +141,7 @@ internal object GccBundledInterfaceCliResultV1 {
             "productionInterfacesAdmitted" to JsonPrimitive(false), "scored" to JsonPrimitive(false), "releaseEligible" to JsonPrimitive(false),
             "completeObservedNativeCensus" to JsonPrimitive(true),
             "interfaceAuthority" to JsonPrimitive("unavailable-raw-recovery-only"),
-            "operationId" to intent.getValue("operationId"), "requestSha256" to JsonPrimitive(OracleArtifacts.sha256(operation.intentBytes)),
+            "operationId" to intent.getValue("operationId"), "requestSha256" to JsonPrimitive(OracleArtifacts.sha256(intentBytes)),
             "journal" to JsonPrimitive(journal.toString()),
             "programModel" to JsonPrimitive(run.resolve("reports/program_model.json").toString()),
             "programModelSha256" to JsonPrimitive(snapshot.model.programModelSha256),
@@ -151,7 +158,8 @@ internal object GccBundledInterfaceCliResultV1 {
             "inferredManifestSha256" to JsonPrimitive(OracleArtifacts.sha256(snapshot.inferredManifestBytes)),
             "interfaceBinding" to JsonPrimitive(output.resolve(BINDING_NAME).toString()),
             "interfaceBindingSha256" to JsonPrimitive(OracleArtifacts.sha256(binding)),
-            "executionReceiptSha256" to JsonPrimitive(OracleArtifacts.sha256(operation.executionReceiptBytes)),
+            "executionReceiptSha256" to JsonPrimitive(OracleArtifacts.sha256(executionReceiptBytes)),
+            "assessmentReceiptSha256" to JsonPrimitive(OracleArtifacts.sha256(assessmentReceiptBytes)),
             "capturedBytes" to JsonPrimitive(snapshot.capturedBytes), "operationWallTime" to operationWallTime,
             "scratchDisposition" to JsonPrimitive("retained; complete raw observed census; ABI scoring and cold recovery unavailable"),
         ) + (if (globalTypes) mapOf(
