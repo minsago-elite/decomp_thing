@@ -144,6 +144,29 @@ class GitAdapterTest {
             "job-runtime-state", "private-transcripts", "native-build-output", "transient-evidence")))
     }
 
+    @Test fun `pending workflow state and all database sidecars remain excluded despite negations`(): Unit = GitTestRepositories().use { f ->
+        val (gitDir, workTree) = f.managed("runtime-sidecars")
+        val excluded = listOf("workflow-state.pending.json", "state/workflow-state.pending.json") +
+            listOf("sqlite", "sqlite3", "db").flatMap { extension ->
+                listOf("", "-journal", "-wal", "-shm").map { sidecar -> "state/calls.$extension$sidecar" }
+            }
+        val retained = listOf("src/workflow-state.pending.json.c", "src/calls.sqlite-wal.c", "include/calls.db-shm.h",
+            "source_tree_manifest.json", "CMakeLists.txt", "docs/database.md")
+        Files.writeString(workTree.resolve(".gitignore"), excluded.joinToString("") { "!/$it\n" })
+        (excluded + retained).forEach { path ->
+            Files.createDirectories(workTree.resolve(path).parent)
+            Files.writeString(workTree.resolve(path), "fixture\n")
+        }
+        // Demonstrate that the managed repository's ignore result is not the admission decision.
+        assertEquals(1, f.runner.run(GitInvocation("check-ignore", listOf("--no-index", "--") + excluded,
+            gitDir = gitDir, workTree = workTree, allowedExitCodes = setOf(0, 1))).exitCode)
+        assertEquals(excluded.toSet(), GitTrackingPolicy.excluded(f.runner, excluded + retained))
+        // The presentation rules still cover the same categories when not overridden in-tree.
+        Files.delete(workTree.resolve(".gitignore"))
+        assertEquals(excluded.toSet(), f.runner.run(GitInvocation("check-ignore", listOf("--") + excluded + retained,
+            gitDir = gitDir, workTree = workTree)).text.lineSequence().filter { it.isNotEmpty() }.toSet())
+    }
+
     @Test fun `repository ignore files cannot re-include policy exclusions`(): Unit = GitTestRepositories().use { f ->
         val (gitDir, workTree) = f.managed("negated")
         Files.writeString(workTree.resolve(".gitignore"), "!secret.key\n!*.elf\n!/build/\n")

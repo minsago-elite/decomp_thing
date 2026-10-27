@@ -603,7 +603,7 @@ of a snapshot is not copied into the work tree, which matches the archive transp
 | --- | --- |
 | Original binaries | `/input.elf`, `*.elf`, `*.bin`, `*.exe`, `*.dll`, `*.so`, `*.so.*`, `*.dylib`, `*.a`, `*.lib`, `*.o`, `*.obj`, `*.out` |
 | Credentials | `.env`, `.env.*`, `*.pem`, `*.key`, `*.p12`, `*.pfx`, `id_rsa*`, `id_ecdsa*`, `id_ed25519*`, `.netrc`, `.git-credentials`, `.npmrc`, `.pypirc`, `*.token`, `credentials.json` |
-| Job databases and runtime state | `job.json`, `workflow-state.json`, `*.sqlite`, `*.sqlite3`, `*.db`, `*.db-journal`, `*.db-wal`, `.upload-*/`, `.job-metadata-*`, `.git-runtime/` |
+| Job databases and runtime state | `job.json`, `workflow-state.json`, `workflow-state.pending.json`, `*.sqlite`, `*.sqlite-journal`, `*.sqlite-wal`, `*.sqlite-shm`, `*.sqlite3`, `*.sqlite3-journal`, `*.sqlite3-wal`, `*.sqlite3-shm`, `*.db`, `*.db-journal`, `*.db-wal`, `*.db-shm`, `.upload-*/`, `.job-metadata-*`, `.git-runtime/` |
 | Private transcripts | `/transcripts/`, `/sessions/`, `*.transcript`, `*.jsonl`, `*.ndjson` |
 | Native build output | `/build/`, `/out/`, `cmake-build-*/`, `CMakeFiles/`, `CMakeCache.txt`, `cmake_install.cmake`, `build.ninja`, `.ninja_deps`, `.ninja_log`, `compile_commands.json`, `*.d`, `*.gcda`, `*.gcno` |
 | Transient evidence | `/reports/`, `/evidence/`, `*.log`, `*.tmp`, `*.swp`, `/tmp/`, `/.tmp/` |
