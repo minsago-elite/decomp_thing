@@ -124,19 +124,27 @@ private fun <T> unwrap(result: BoundedWorkflowResult<T>): BoundedWorkflowResult<
     return result
 }
 
-internal class ExploreWorkflowAdapter(private val engines: WebWorkflowEngines, private val executor: BoundedWorkflowExecutor) : DurableWebWorkflowAdapter {
+internal class ExploreWorkflowAdapter(
+    private val engines: WebWorkflowEngines,
+    private val executor: BoundedWorkflowExecutor,
+    // Inert executor/service controls only; production registrations never opt in (#71).
+    private val allowTestOnlyExecution: Boolean = false,
+) : DurableWebWorkflowAdapter {
     override val workflow = WorkflowKind.EXPLORE
     // No production checkpoint policy yet (no agent-session journal reconciliation), so POST R/recover
     // reports resume as RESUME_UNSUPPORTED; an explicit retry always starts a fresh linked attempt.
     override val checkpoints: DurableWebWorkflowCheckpointPolicy? = null
     override val limits = WebWorkflowDefaults.EXPLORE
     override val limitsAdjustable = true
-    override val requirements = setOf(WebWorkflowRequirement.SANDBOX)
+    override val requirements = if (allowTestOnlyExecution) setOf(WebWorkflowRequirement.SANDBOX)
+        else setOf(WebWorkflowRequirement.SANDBOX, WebWorkflowRequirement.EXPLORATION_HELPER_OWNERSHIP)
     override val input = DurableWebWorkflowInput.NONE
     override val launch = DurableWebWorkflowLaunch(DurableWebWorkflowMode.TOOLS, executesBinary = true, contactsAgent = false,
         requiredTools = listOf("sandbox", "angr"))
 
     override fun execute(context: DurableWebWorkflowContext): DurableWebWorkflowOutcome {
+        // Also fence direct dispatch and any already-admitted attempt: readiness alone is not a gate.
+        if (!allowTestOnlyExecution) return DurableWebWorkflowOutcome.Failed(WorkflowTerminalReason.REFUSED)
         val meter = WorkflowExecutionMeter(context.reportsDirectory, toolCallsMetered = false)
         // Completed samples are progress: a long healthy exploration writes its report only at the end.
         val (result, usage) = executor.run(context.attempt.limits, meter) {
