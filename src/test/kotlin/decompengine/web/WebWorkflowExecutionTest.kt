@@ -1,8 +1,12 @@
 package decompengine.web
 
 import decompengine.jobs.WorkflowExecutionLimits
+import decompengine.testing.RecoveryMatrixEvidence
+import decompengine.testing.recoveryMatrixTempDirectory
+import org.junit.jupiter.api.AfterEach
+import org.junit.jupiter.api.BeforeEach
 import org.junit.jupiter.api.Test
-import org.junit.jupiter.api.io.TempDir
+import org.junit.jupiter.api.extension.ExtendWith
 import java.nio.file.Files
 import java.nio.file.Path
 import kotlin.test.assertEquals
@@ -10,9 +14,15 @@ import kotlin.test.assertIs
 import kotlin.test.assertNull
 
 /** Filesystem-only controls: no workflow, helper, binary or agent is dispatched. */
+@ExtendWith(RecoveryMatrixEvidence::class)
 class WebWorkflowExecutionTest {
-    @TempDir
-    lateinit var root: Path
+    private lateinit var root: Path
+
+    @BeforeEach
+    fun createFixture() { root = recoveryMatrixTempDirectory("workflow-meter-") }
+
+    @AfterEach
+    fun removeFixture() { root.toFile().deleteRecursively() }
 
     @Test
     fun `output metering distinguishes absent output from an invalid reports root`() {
