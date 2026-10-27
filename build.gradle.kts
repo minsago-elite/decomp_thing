@@ -1,3 +1,8 @@
+import java.nio.channels.FileChannel
+import java.nio.file.StandardCopyOption
+import java.nio.file.StandardOpenOption
+import java.util.concurrent.CompletableFuture
+import java.util.jar.JarOutputStream
 import java.io.File
 import java.io.ByteArrayOutputStream
 import java.nio.ByteBuffer
@@ -376,6 +381,25 @@ fun sha256(path: java.nio.file.Path): String {
         }
     }
     return digest.digest().joinToString("") { byte -> "%02x".format(byte) }
+}
+
+/** Publish complete files without truncating inodes held by an already-running JVM/shell. */
+fun publishInstalledFileAtomically(source: Path, target: Path) {
+    require(Files.isRegularFile(source, LinkOption.NOFOLLOW_LINKS))
+    Files.createDirectories(target.parent)
+    require(Files.isDirectory(target.parent, LinkOption.NOFOLLOW_LINKS))
+    require(!Files.isSymbolicLink(target))
+    val expected = sha256(source)
+    val temporary = Files.createTempFile(target.parent, ".install-", ".tmp")
+    try {
+        Files.copy(source, temporary, StandardCopyOption.REPLACE_EXISTING,
+            StandardCopyOption.COPY_ATTRIBUTES)
+        check(sha256(temporary) == expected && sha256(source) == expected) { "installation source changed during staging" }
+        FileChannel.open(temporary, StandardOpenOption.WRITE).use { it.force(true) }
+        Files.move(temporary, target, StandardCopyOption.ATOMIC_MOVE,
+            StandardCopyOption.REPLACE_EXISTING)
+        FileChannel.open(target.parent, StandardOpenOption.READ).use { it.force(true) }
+    } finally { Files.deleteIfExists(temporary) }
 }
 
 fun littleEndianUnsignedShort(bytes: ByteArray, offset: Int): Int =
@@ -1437,9 +1461,78 @@ tasks.named<JavaExec>("run") {
 }
 
 tasks.named<Sync>("installDist") {
+    val appJar = tasks.named<Jar>("jar")
+    val launcherName = project.extensions.getByType<org.gradle.api.plugins.JavaApplication>().applicationName
+    val protectedPaths = setOf("lib/${appJar.get().archiveFileName.get()}", "bin/$launcherName", "bin/$launcherName.bat")
+    inputs.property("atomicApplicationPublicationVersion", 1)
+    preserve { protectedPaths.forEach { include(it) } }
+    eachFile { if (relativePath.pathString in protectedPaths) exclude() }
     doLast {
+        val sourceJar = appJar.get().archiveFile.get().asFile.toPath()
+        JarFile(sourceJar.toFile(), false).use { jar ->
+            check(jar.getEntry("decompengine/project/ProgramModelJson.class") != null) { "application JAR is incomplete" }
+        }
+        publishInstalledFileAtomically(sourceJar, destinationDir.resolve("lib/${sourceJar.fileName}").toPath())
+        val scripts = requireNotNull(tasks.named<org.gradle.jvm.application.tasks.CreateStartScripts>("startScripts").get().outputDir).toPath()
+        listOf(launcherName, "$launcherName.bat").forEach { name ->
+            publishInstalledFileAtomically(scripts.resolve(name), destinationDir.resolve("bin/$name").toPath())
+        }
         destinationDir.resolve("libexec/ghidra").walkTopDown().filter { it.isFile }.forEach { file ->
             check(file.setLastModified(315532800000L)) { "Could not normalize installed Ghidra timestamp: $file" }
+        }
+    }
+}
+
+val verifyAtomicApplicationPublication = tasks.register("verifyAtomicApplicationPublication") {
+    group = "verification"
+    description = "Proves that a JVM can load a late class from its original JAR after an atomic installation update"
+    doLast {
+        val fixture = Files.createTempDirectory(layout.buildDirectory.get().asFile.toPath(), "atomic-install-test-")
+        val compiler = javaToolchains.compilerFor { languageVersion.set(JavaLanguageVersion.of(21)) }.get().executablePath.asFile
+        val launcher = javaToolchains.launcherFor { languageVersion.set(JavaLanguageVersion.of(21)) }.get().executablePath.asFile
+        fun makeJar(version: String): Path {
+            val root = Files.createDirectories(fixture.resolve(version))
+            val classes = Files.createDirectories(root.resolve("classes"))
+            val holder = root.resolve("Holder.java").toFile().apply { writeText(
+                "package race; public class Holder { public static void main(String[] args) throws Exception { " +
+                    "System.out.println(\"ready\"); System.out.flush(); System.in.read(); " +
+                    "System.out.println(Class.forName(\"race.Late\").getMethod(\"value\").invoke(null)); }}") }
+            val late = root.resolve("Late.java").toFile().apply { writeText(
+                "package race; public class Late { public static String value() { return \"$version\"; } " +
+                    "public static void main(String[] args) { System.out.println(value()); }}") }
+            val compile = ProcessBuilder(compiler.absolutePath, "-d", classes.toString(), holder.absolutePath, late.absolutePath)
+                .redirectErrorStream(true).start()
+            val output = compile.inputStream.bufferedReader().readText()
+            check(compile.waitFor(30, TimeUnit.SECONDS) && compile.exitValue() == 0) { output }
+            val jar = root.resolve("application.jar")
+            JarOutputStream(Files.newOutputStream(jar)).use { stream ->
+                Files.walk(classes).use { paths -> paths.filter { Files.isRegularFile(it) }.sorted().forEach { file ->
+                    stream.putNextEntry(JarEntry(classes.relativize(file).toString()))
+                    Files.copy(file, stream); stream.closeEntry()
+                } }
+                stream.putNextEntry(JarEntry("version.txt")); stream.write(version.repeat(1000).toByteArray()); stream.closeEntry()
+            }
+            return jar
+        }
+        val oldJar = makeJar("old")
+        val newJar = makeJar("new")
+        val installed = fixture.resolve("installed/application.jar")
+        publishInstalledFileAtomically(oldJar, installed)
+        val process = ProcessBuilder(launcher.absolutePath, "-cp", installed.toString(), "race.Holder")
+            .redirectErrorStream(true).start()
+        try {
+            val reader = process.inputStream.bufferedReader()
+            check(CompletableFuture.supplyAsync { reader.readLine() }.get(10, TimeUnit.SECONDS) == "ready")
+            publishInstalledFileAtomically(newJar, installed)
+            process.outputStream.write(10); process.outputStream.flush(); process.outputStream.close()
+            check(process.waitFor(10, TimeUnit.SECONDS) && process.exitValue() == 0)
+            check(reader.readLine() == "old") { "running JVM lost its original late-loaded class" }
+            val fresh = ProcessBuilder(launcher.absolutePath, "-cp", installed.toString(), "race.Late").redirectErrorStream(true).start()
+            val value = fresh.inputStream.bufferedReader().readText().trim()
+            check(fresh.waitFor(10, TimeUnit.SECONDS) && fresh.exitValue() == 0 && value == "new")
+            check(sha256(installed) == sha256(newJar))
+        } finally {
+            if (process.isAlive) process.destroyForcibly().waitFor(5, TimeUnit.SECONDS)
         }
     }
 }
@@ -1593,6 +1686,7 @@ val verifyKotlinBootClasspathDistribution = tasks.register("verifyKotlinBootClas
 }
 
 tasks.named("check") {
+    dependsOn(verifyAtomicApplicationPublication)
     dependsOn(testFrontendAssetManifest)
     dependsOn(verifyPackagedWeb)
     dependsOn(verifyAcpGateHelperDistribution)
