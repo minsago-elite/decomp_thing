@@ -119,9 +119,8 @@ internal data class WebHarnessReadiness(
         return if (snapshot.status == "failed") folded.withFailedAgentFact() else folded
     }
 
-    private fun withFailedAgentFact(): WebHarnessReadiness = prerequisites?.takeIf { it.agent.available }?.let { facts ->
-        copy(prerequisites = facts.copy(agent = FAILED_AGENT))
-    } ?: this
+    private fun withFailedAgentFact(): WebHarnessReadiness =
+        copy(prerequisites = failedInspection().prerequisites)
 
     /**
      * Folds the last explicit agent preflight into a configured harness. Bootstrap never starts the

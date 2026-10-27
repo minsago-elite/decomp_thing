@@ -58,6 +58,25 @@ class WebHarnessReadinessTest {
     }
 
     @Test
+    fun `failed inspection blocks only the selected harness even when sandbox readiness already failed`() {
+        val missing = WebPrerequisite(false, "SANDBOX_HELPER_MISSING", "Sandbox helpers are unavailable.")
+        val facts = WebWorkflowPrerequisites(WebPrerequisite.AVAILABLE, missing, WebPrerequisite.AVAILABLE,
+            harnesses = mapOf(WebAgentHarness.ACP to WebHarnessFacts(WebPrerequisite.AVAILABLE, null, selected = true),
+                WebAgentHarness.LEGACY_OPENAI to WebHarnessFacts(WebPrerequisite.AVAILABLE, null)))
+        val readiness = WebHarnessReadiness("unavailable", missing.reasonCode, missing.message,
+            configurationIdentity = "current-config", prerequisites = facts)
+        val failed = readiness.withAgentInspection(WebAgentPreflightSnapshot("failed", "inspection_1",
+            WebAgentPreflight.REASON_FAILED, "current-config"))
+        assertEquals(readiness.state, failed.state); assertEquals(readiness.reasonCode, failed.reasonCode)
+        assertEquals(missing, failed.prerequisites?.sandbox)
+        assertEquals(WebAgentPreflight.REASON_FAILED, failed.prerequisites?.agent?.reasonCode)
+        assertEquals(WebAgentPreflight.REASON_FAILED, failed.prerequisites?.harness(WebAgentHarness.ACP)?.reasonCode)
+        assertTrue(failed.prerequisites!!.harness(WebAgentHarness.LEGACY_OPENAI).available)
+        assertEquals(readiness, readiness.withAgentInspection(WebAgentPreflightSnapshot("failed", "inspection_2",
+            WebAgentPreflight.REASON_FAILED, "other-config")))
+    }
+
+    @Test
     fun `a hung probe is bounded by the deadline and reported as a timeout`() {
         val release = CountDownLatch(1)
         val projector = WebHarnessReadinessProjector(probe = { release.await(); WebHarnessReadiness("supported", null, "") }, timeoutMillis = 100)
