@@ -316,7 +316,8 @@ harness (see the README), and `doctor --workflow web` checks the web workflow's 
 - the build identities from **Runtime status** (application version, UI build, server build);
 - the output of `doctor --tools-only`;
 - the launcher command you used, with private paths replaced;
-- the **first line** of any startup error.
+- the **first line** of any startup error, only after reviewing it and replacing private paths, hostnames and sensitive
+  values with placeholders. Taking only the first line does **not** sanitize it; omit the text if you cannot safely redact it.
 
 Do **not** attach:
 
