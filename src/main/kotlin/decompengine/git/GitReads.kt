@@ -365,6 +365,10 @@ object GitReads {
         if (path == null || (file.originalPath != null && file.originalPath.exact == null)) throw ManagedGitException("PATCH_UNAVAILABLE",
             "This file name is not valid UTF-8, so its patch cannot be read through the workbench. Its listing entry stays exact.")
         val paths = listOfNotNull(file.originalPath?.exact, path)
+        // Imported historical trees need not be checked out, so either side of a rename can
+        // exceed argv bounds even when the listing and the current work tree are valid.
+        if (paths.any { it.length > GitInvocation.MAX_ARGUMENT_LENGTH }) throw ManagedGitException("PATCH_UNAVAILABLE",
+            "This file name exceeds the patch reader's argument bound. Its listing entry stays exact.")
         val (command, selection) = comparison(scope, commit, parent)
         // Path filters are not record selectors (a path can now be a directory with other changes),
         // so the patch is read with full blob IDs and only the section for this exact record is kept.

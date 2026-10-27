@@ -848,7 +848,10 @@ unbounded retry.
   modes, line counts and a binary flag (`-` counts mean binary). The new blob's size comes from
   `cat-file --batch-check` without reading the content. `file=<fileId>` returns that file alone
   with a unified patch of at most 128 KiB, flagged `truncated` when cut. Binary files never
-  render content. Managed `info/attributes` restores automatic binary detection with `!diff`,
+  render content. Text patches whose current or original path is invalid UTF-8 or exceeds the
+  runner's 4,096 UTF-16-code-unit argument bound return `422 PATCH_UNAVAILABLE`; the exact listing
+  identity and display entry remain available, including for trees never checked out at HEAD.
+  Managed `info/attributes` restores automatic binary detection with `!diff`,
   overriding source-controlled forced-text/binary/driver attributes. The exact previous managed
   attributes layout is atomically upgraded on audit; unrecognized layouts are rejected without
   rewriting them. No source or index bytes change during that upgrade. Abbreviated object IDs

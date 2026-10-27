@@ -307,6 +307,46 @@ class WebGitControllerTest {
         }
     }
 
+    @Test fun `historical paths beyond the argument bound stay listed but patches are explicitly unavailable`(): Unit = Fixture().use { f ->
+        val (base, directory) = f.initialized()
+        decompengine.git.GitTestRepositories().use { g ->
+            val gitDir = directory.resolve("repository.git"); val workTree = directory.resolve("worktree")
+            fun raw(vararg args: String) = g.git("--git-dir=$gitDir", "--work-tree=$workTree", *args, cwd = workTree).trim()
+            raw("add", "-A"); raw("commit", "-q", "-m", "ordinary HEAD")
+            val head = raw("rev-parse", "HEAD")
+            val blob = raw("rev-parse", "HEAD:src/modules/unit.c")
+            val path = List(17) { "d".repeat(250) }.joinToString("/") + "/f.c"
+            assertTrue(path.length > 4096 && path.length < 16384)
+            val tree = g.treeWithFile(gitDir, path, blob)
+            val historical = raw("commit-tree", tree, "-m", "long historical path")
+            val renamedTree = g.treeWithFile(gitDir, "short.c", blob)
+            val renamed = raw("commit-tree", renamedTree, "-p", historical, "-m", "rename historical path")
+            raw("update-ref", "refs/heads/historical", renamed)
+            for (commit in listOf(historical, renamed)) {
+                val query = "$base/diff?scope=commit&commit=$commit"
+                val listing = data(f.read(query), 200, "gitDiff")
+                val file = listing.getValue("files").jsonArray.single().jsonObject
+                assertEquals(JsonPrimitive(true), listing["complete"])
+                assertEquals(JsonNull, listing["patch"])
+                assertEquals(if (commit == historical) path else "short.c", file.getValue("path").jsonPrimitive.content)
+                assertEquals(if (commit == historical) JsonNull else JsonPrimitive(path), file["originalPath"])
+                assertEquals(if (commit == historical) "added" else "renamed", file.getValue("change").jsonPrimitive.content)
+                val response = f.read("$query&file=${file.getValue("fileId").jsonPrimitive.content}")
+                error(response, 422, "PATCH_UNAVAILABLE")
+                assertFalse(response.body().contains(directory.toString()))
+                assertEquals(file, data(f.read(query), 200, "gitDiff").getValue("files").jsonArray.single().jsonObject)
+            }
+            // Ordinary HEAD and its positive patch still work; the oversized tree was never checked out.
+            val ordinary = data(f.read("$base/diff?scope=commit&commit=$head"), 200, "gitDiff")
+                .getValue("files").jsonArray.map { it.jsonObject }.single { it.getValue("path").jsonPrimitive.content == "src/modules/unit.c" }
+            val patch = data(f.read("$base/diff?scope=commit&commit=$head&file=${ordinary.getValue("fileId").jsonPrimitive.content}"), 200, "gitDiff")
+                .getValue("patch").jsonObject
+            assertTrue(patch.getValue("text").jsonPrimitive.content.contains("+int main(void)"))
+            assertEquals(head, raw("rev-parse", "HEAD"))
+            assertFalse(Files.exists(workTree.resolve("short.c")))
+        }
+    }
+
     @Test fun `history HTTP retains every parent of a 65-parent commit`(): Unit = Fixture().use { f ->
         val (base, directory) = f.initialized()
         decompengine.git.GitTestRepositories().use { g ->

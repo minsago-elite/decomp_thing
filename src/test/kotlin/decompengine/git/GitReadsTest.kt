@@ -48,6 +48,33 @@ class GitReadsTest {
         assertEquals(14, Files.readAllLines(limits).size, "No unbounded child may run when enforcement is unavailable")
     }
 
+    @Test fun `historical patch paths respect the runner argument boundary for current and original names`(): Unit = GitTestRepositories().use { f ->
+        val (gitDir, workTree) = f.managed("historical-path-bound")
+        f.write(workTree, "short.c", "int historical;\n")
+        f.commitAll(gitDir, workTree, "ordinary HEAD")
+        val blob = f.raw(gitDir, workTree, "rev-parse", "HEAD:short.c").trim()
+        val prefix = List(16) { "d".repeat(240) }.joinToString("/", postfix = "/")
+        for (length in listOf(4096, 4097)) {
+            val path = prefix + "f".repeat(length - prefix.length)
+            val tree = f.treeWithFile(gitDir, path, blob)
+            val commit = f.raw(gitDir, workTree, "commit-tree", tree, "-m", "historical $length").trim()
+            val file = GitReads.diff(f.runner, gitDir, null, GitObjectFormat.SHA1, GitDiffScope.COMMIT, commit, null).files.single()
+            assertEquals(path, file.path.exact)
+            if (length == 4096) {
+                assertTrue(GitReads.patch(f.runner, gitDir, null, GitDiffScope.COMMIT, commit, null, file).text.contains("+int historical;"))
+                GitInvocation("diff", listOf(path)) // The unchanged inclusive runner limit accepts this name.
+            } else {
+                for (selected in listOf(file, file.copy(path = GitPath.of("short.c".toByteArray()), originalPath = file.path))) {
+                    val failure = kotlin.test.assertFailsWith<ManagedGitException> {
+                        GitReads.patch(f.runner, gitDir, null, GitDiffScope.COMMIT, commit, null, selected)
+                    }
+                    assertEquals("PATCH_UNAVAILABLE", failure.code)
+                }
+                kotlin.test.assertFailsWith<IllegalArgumentException> { GitInvocation("diff", listOf(path)) }
+            }
+        }
+    }
+
     private fun GitTestRepositories.write(workTree: Path, name: String, text: String) {
         val file = workTree.resolve(name)
         Files.createDirectories(file.parent)

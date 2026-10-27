@@ -201,7 +201,7 @@ data class GitInvocation(
 ) {
     init {
         require(subcommand in SUBCOMMANDS) { "Git subcommand is not allowlisted" }
-        require(arguments.size <= 256 && arguments.all { it.length <= 4096 && '\u0000' !in it }) { "Git arguments are unbounded" }
+        require(arguments.size <= 256 && arguments.all { it.length <= MAX_ARGUMENT_LENGTH && '\u0000' !in it }) { "Git arguments are unbounded" }
         require(gitDir == null || gitDir.isAbsolute) { "Git directory must be absolute" }
         require(workTree == null || (workTree.isAbsolute && gitDir != null)) { "Git work tree requires an absolute path and Git directory" }
         require(allowedExitCodes.isNotEmpty() && allowedExitCodes.all { it in 0..255 })
@@ -212,6 +212,7 @@ data class GitInvocation(
     }
 
     companion object {
+        const val MAX_ARGUMENT_LENGTH = 4096
         val SUBCOMMANDS = setOf(
             "version", "init", "config", "check-ref-format", "rev-parse", "symbolic-ref", "for-each-ref",
             "status", "read-tree", "fsck", "cat-file", "ls-files", "ls-tree", "check-ignore", "update-ref",
