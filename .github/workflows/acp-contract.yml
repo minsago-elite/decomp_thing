@@ -66,4 +66,5 @@ jobs:
           path: |
             build/reports/tests/test
             build/test-results/test
+            build/reports/junit-signatures
             build/acp-contract-qualification

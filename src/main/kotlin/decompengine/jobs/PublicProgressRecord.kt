@@ -74,8 +74,15 @@ internal fun publicProgressRecord(record: JsonObject, allowMissingKind: Boolean 
     var omitted = 0
     fun omit() { omitted = Math.addExact(omitted, 1) }
     var withheldText = false
+    // Provider reasoning is private: older journals may hold its commitments or sizes, which are withheld.
+    val privateReasoning = record["role"].let { it is JsonPrimitive && it.isString && it.content == "thought" }
+    val reasoningMeasurements = setOf("contentSha256", "chunkCharacters")
     val fields = buildJsonObject {
         for ((key, value) in record) when {
+            privateReasoning && key in reasoningMeasurements -> {
+                omit()
+                withheldText = true
+            }
             key in metadata -> Unit
             key == "replayOmittedFields" -> {
                 omitted = Math.addExact(omitted, replayOmissionCount(value))
@@ -116,7 +123,7 @@ internal fun publicProgressRecord(record: JsonObject, allowMissingKind: Boolean 
             }
             else -> omit()
         }
-        if (withheldText) put("textOmitted", true)
+        if (withheldText || privateReasoning) put("textOmitted", true)
     }
     val writerId = record["runId"]?.let { text(it, 128).also { value -> require(value.matches(id)) { "invalid observation writer identity" } } }
     val workflow = record["workflow"]?.let { value ->
