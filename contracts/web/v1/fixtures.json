@@ -229,6 +229,15 @@
       "valid": true
     },
     {
+      "file": "fixtures/request-git-merge-index-commit.json",
+      "valid": true
+    },
+    {
+      "file": "fixtures/invalid-git-merge-index-selection.json",
+      "valid": false,
+      "reason": "Complete pending-merge index reviews cannot also select individual file IDs."
+    },
+    {
       "file": "fixtures/request-git-push.json",
       "valid": true
     },

@@ -407,11 +407,14 @@ export function GitWorkspace({ jobId, basePath, session, capabilities, pollInter
           {diff.patch.truncated && <p>{copy.truncated}</p>}
         </section>}
       </section>
-      {groups.staged.length > MAX_SELECTION && <p role="alert">{textMessage(copy.commitTooLarge, { max: MAX_SELECTION, count: groups.staged.length })}</p>}
+      {groups.staged.length > MAX_SELECTION && !loaded.conflicts?.mergeInProgress &&
+        <p role="alert">{textMessage(copy.commitTooLarge, { max: MAX_SELECTION, count: groups.staged.length })}</p>}
       <CommitForm staged={groups.staged} parent={statusData.headObjectId} merging={loaded.conflicts?.mergeInProgress ?? false}
-        disabled={!writable || !statusData.complete || groups.conflicted.length > 0 || groups.staged.length > MAX_SELECTION}
+        disabled={!writable || !statusData.complete || groups.conflicted.length > 0 ||
+          (groups.staged.length > MAX_SELECTION && !loaded.conflicts?.mergeInProgress)}
         onCommit={message => act('gitCommitRequest', copy.commitAction, guarded => ({ action: 'git.commit', worktreeId, guards: guarded,
-          selectedFileIds: groups.staged.map(entry => entry.fileId), message }))} />
+          ...(loaded.conflicts?.mergeInProgress ? { selectedFileIds: [], reviewedMergeIndex: true as const }
+            : { selectedFileIds: groups.staged.map(entry => entry.fileId) }), message }))} />
       <section aria-labelledby="git-history-title">
         <h3 id="git-history-title">{copy.history}</h3>
         {loaded.history?.entries.length ? <ol aria-label={copy.history}>{loaded.history.entries.map(entry => <li key={entry.objectId}>

@@ -2391,6 +2391,10 @@
           "minItems": 0,
           "uniqueItems": true
         },
+        "reviewedMergeIndex": {
+          "description": "Explicitly commit the complete pending-merge index reviewed at guards.worktreeVersion; selectedFileIds must be empty.",
+          "const": true
+        },
         "message": {
           "type": "string",
           "minLength": 1,
@@ -2403,6 +2407,12 @@
         "guards",
         "selectedFileIds",
         "message"
+      ],
+      "allOf": [
+        {
+          "if": { "required": ["reviewedMergeIndex"] },
+          "then": { "properties": { "selectedFileIds": { "maxItems": 0 } } }
+        }
       ],
       "additionalProperties": false
     },

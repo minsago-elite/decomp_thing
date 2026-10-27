@@ -1254,7 +1254,7 @@ class ManagedGitRepositories(
                     "Policy requires signed commits, but this server has no signing capability. Nothing was committed.")
                 GitWorkspaceMutations.checkGuards(located.record, observation, request.guards)
                 GitWorkspaceMutations.requireStagedSet(located.record, observation, request.fileIds, located.worktreeId,
-                    mergeInProgress = GitIntegrations.mergeInProgress(located.gitDir))
+                    mergeInProgress = GitIntegrations.mergeInProgress(located.gitDir), reviewedMergeIndex = request.reviewedMergeIndex)
             }
             is GitRefRequest -> validateRef(runner, located, observation, request)
             is GitSyncRequest -> validateSync(runner, located, observation, request)
@@ -1952,6 +1952,7 @@ class ManagedGitRepositories(
                 put("worktreeId", request.worktreeId); put("guards", encodeGuards(request.guards))
                 put("fileIds", kotlinx.serialization.json.JsonArray(request.fileIds.map(::JsonPrimitive)))
                 put("messageSha256", GitStorage.sha256(request.message))
+                if (request.reviewedMergeIndex) put("reviewedMergeIndex", true)
             }
             is GitRefRequest -> buildJsonObject {
                 put("worktreeId", request.worktreeId); put("guards", encodeGuards(request.guards))
@@ -1962,6 +1963,7 @@ class ManagedGitRepositories(
                 put("worktreeId", request.worktreeId); put("guards", encodeGuards(request.guards))
                 put("fileIds", kotlinx.serialization.json.JsonArray(request.fileIds.map(::JsonPrimitive)))
                 put("messageSha256", request.messageSha256)
+                if (request.reviewedMergeIndex) put("reviewedMergeIndex", true)
             }
             is GitSyncRequest -> buildJsonObject {
                 put("worktreeId", request.worktreeId); put("guards", encodeGuards(request.guards))
@@ -2003,7 +2005,9 @@ class ManagedGitRepositories(
                     decodeGuards(request.getValue("guards").jsonObject), request.nullableText("name"), request.nullableText("refId"),
                     request.nullableText("objectId"), request.nullableText("runId"))
                 GitOperationAction.COMMIT -> GitRetainedCommit(request.text("worktreeId"), decodeGuards(request.getValue("guards").jsonObject),
-                    fileIds(request), request.text("messageSha256"))
+                    fileIds(request), request.text("messageSha256"), request["reviewedMergeIndex"].let {
+                        require(it == null || it == JsonPrimitive(true)); it != null
+                    })
                 GitOperationAction.CLONE -> GitCloneRequest(request.text("url"), request.text("remoteName"), request.nullableText("branch"))
                 else -> {
                     require(action in GitSyncRequest.ACTIONS)

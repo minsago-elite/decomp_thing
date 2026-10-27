@@ -329,6 +329,23 @@ it('explains and disables a commit or selection beyond the 200-file request boun
   expect(screen.getByRole('button', { name: 'Unstage selected' })).toHaveProperty('disabled', true);
 }, 20_000);
 
+it('reviews and commits the complete merge index beyond the ordinary 200-file selection bound', async () => {
+  conflictState = { repositoryId, worktreeId, mergeInProgress: true, integration: null, files: [] };
+  entries = Array.from({ length: 201 }, (_, index) => entry(`file_${index}`, `src/f${index}.c`, 'added', 'none'));
+  transport.post.mockResolvedValueOnce(operation('completed', 'git.commit'));
+  mount();
+  await screen.findByLabelText('Commit message');
+  expect(screen.queryByText(/one commit can include at most 200/)).toBeNull();
+  const commitReview = screen.getByRole('list', { name: 'Exactly these staged files will be committed:' });
+  expect(within(commitReview).getAllByRole('listitem')).toHaveLength(201);
+  expect(screen.getByRole('button', { name: 'Commit staged files' })).toHaveProperty('disabled', false);
+  fireEvent.input(screen.getByLabelText('Commit message'), { target: { value: 'Merge all incoming changes' } });
+  fireEvent.click(screen.getByRole('button', { name: 'Commit staged files' }));
+  await waitFor(() => expect(transport.post).toHaveBeenCalledOnce());
+  expect(transport.post.mock.calls[0]?.[3]).toMatchObject({ action: 'git.commit', selectedFileIds: [], reviewedMergeIndex: true,
+    guards: { worktreeVersion: 'tree_v1' } });
+});
+
 it('reviews fetched divergence and offers only reviewed fast-forward or merge, never rebase', async () => {
   transport.post.mockResolvedValueOnce(operation('completed', 'git.merge'));
   mount();

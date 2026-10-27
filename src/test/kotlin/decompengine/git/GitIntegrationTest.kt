@@ -287,6 +287,55 @@ class GitIntegrationTest {
         }.code)
     }
 
+    @Test fun `complete index review commits large merges without splitting incoming changes`(): Unit = Fixture().use { f ->
+        f.cloned()
+        f.localCommit("local README\n")
+        repeat(201) { Files.writeString(f.seed.resolve("incoming-$it.c"), "int remote_$it;\n") }
+        Files.writeString(f.seed.resolve("README.md"), "remote README\n"); f.remoteCommit("large remote change"); fetch()
+        assertEquals(GitOperationState.COMPLETED, sync(GitOperationAction.MERGE, merge("merge")).state)
+        val conflict = service.conflicts(jobId, repositoryId, null).files.single().path.fileId(service.workspace(jobId, repositoryId).worktreeId)
+        val detail = service.conflictFile(jobId, repositoryId, null, conflict)
+        assertEquals(GitOperationState.COMPLETED, sync(GitOperationAction.CONFLICT_SAVE, mapOf("fileId" to conflict,
+            "expectedSha256" to detail.currentSha256, "resolution" to "ours")).state)
+        val saved = service.conflictFile(jobId, repositoryId, null, conflict)
+        assertEquals(GitOperationState.COMPLETED, sync(GitOperationAction.CONFLICT_COMPLETE, content = "$conflict ${saved.currentSha256}\n").state)
+        val (view, reviewedGuards) = guards()
+        val ids = view.observation.status.entries.filter { it.staged != GitIndexChange.NONE }.map { it.path.fileId(view.worktreeId) }
+        assertEquals(201, ids.size)
+        assertEquals("INDEX_CHANGED", assertFailsWith<ManagedGitException> {
+            service.requestWorkspace(jobId, repositoryId, GitCommitRequest(view.worktreeId, reviewedGuards, ids.take(200), "partial"), key())
+        }.code)
+        assertEquals("VALIDATION_FAILED", assertFailsWith<ManagedGitException> {
+            service.requestWorkspace(jobId, repositoryId, GitCommitRequest(view.worktreeId, reviewedGuards, ids.take(1), "ambiguous", true), key())
+        }.code)
+        val request = GitCommitRequest(view.worktreeId, reviewedGuards, emptyList(), "Review complete merge index", true)
+        val gitDir = f.store.resolve("$jobId/git/repositories/$repositoryId/repository.git")
+        Files.writeString(f.workTree().resolve("incoming-0.c"), "changed after review\n")
+        f.repositories.git("--git-dir=$gitDir", "--work-tree=${f.workTree()}", "add", "incoming-0.c")
+        assertEquals("WORKTREE_CHANGED", assertFailsWith<ManagedGitException> {
+            service.requestWorkspace(jobId, repositoryId, request, key())
+        }.code)
+        Files.writeString(f.workTree().resolve("incoming-0.c"), "int remote_0;\n")
+        f.repositories.git("--git-dir=$gitDir", "--work-tree=${f.workTree()}", "add", "incoming-0.c")
+        val (_, fresh) = guards()
+        val accepted = request.copy(guards = fresh)
+        val replayKey = key()
+        val admitted = service.requestWorkspace(jobId, repositoryId, accepted, replayKey)
+        assertTrue(service.awaitIdle(60_000))
+        val result = service.operation(jobId, repositoryId, admitted.operation.operationId)
+        assertEquals(GitOperationState.COMPLETED, result.state, result.message)
+        val parents = f.repositories.git("--git-dir=$gitDir", "rev-list", "--parents", "-n", "1", checkNotNull(result.resultObjectId)).trim().split(' ')
+        assertEquals(3, parents.size)
+        repeat(201) { assertEquals("int remote_$it;\n", f.repositories.git("--git-dir=$gitDir", "show", "HEAD:incoming-$it.c")) }
+        service.close(); service = f.open()
+        val replay = service.requestWorkspace(jobId, repositoryId, accepted, replayKey)
+        assertTrue(replay.replayed); assertEquals(result.operationId, replay.operation.operationId)
+        val (clean, cg) = guards()
+        assertEquals("VALIDATION_FAILED", assertFailsWith<ManagedGitException> {
+            service.requestWorkspace(jobId, repositoryId, GitCommitRequest(clean.worktreeId, cg, emptyList(), "not a merge", true), key())
+        }.code)
+    }
+
     @Test fun `saving a resolution keeps an executable file executable`(): Unit = Fixture().use { f ->
         f.cloned()
         val script = f.seed.resolve("run.sh")

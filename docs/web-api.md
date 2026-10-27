@@ -778,8 +778,9 @@ refusals.
 
 `POST G/operations` accepts `git.stage`, `git.unstage` and `git.commit` (#576, #577). The body
 holds the target `worktreeId`, the full `guards` taken from the reviewed status and the exact
-`selectedFileIds`; a commit also carries its `message`. Bodies are strict JSON of at most 64 KiB
-and never contain a path or pathspec. `If-Match` must name the guarded `worktreeVersion`, and an
+`selectedFileIds`; a commit also carries its `message`. A pending merge may instead explicitly
+review its complete index with `reviewedMergeIndex: true` and empty `selectedFileIds` (see below).
+Bodies are strict JSON of at most 1 MiB and never contain a path or pathspec. `If-Match` must name the guarded `worktreeVersion`, and an
 `Idempotency-Key` is required. Keyed replay returns the original operation. The response is
 `202 operation`, already terminal for most local actions, with the durable operation at
 `Location`.
@@ -1097,9 +1098,15 @@ These actions resolve or end the merge:
   reviewed at. A file that still has conflict markers is refused with `UNRESOLVED_MARKERS`. Markers
   are detected at the file's effective `conflict-marker-size` attribute and at Git's default width
   of 7. The final commit stays the explicit `git.commit` review: it lists every staged file and
-  creates the merge commit. When the resolution matches the current commit, nothing is staged. The
-  commit then takes an empty `selectedFileIds` and still records the merge with both parents.
-  Outside a merge, an empty selection is `NOTHING_TO_COMMIT`.
+  creates the merge commit. The UI submits `reviewedMergeIndex: true` with empty `selectedFileIds`
+  after listing the **complete** staged set, including automatically staged nonconflicting incoming
+  changes. This explicit pending-merge-only mode is bound to `guards.worktreeVersion` (every staged
+  blob and mode) and refuses incomplete status, unresolved conflicts, moved guards or a nonempty
+  file selection. It needs no oversized ID array and never suggests splitting a merge into partial
+  commits to fit the ordinary 200-file limit. The ordinary selected-file commit limit is unchanged.
+  When the resolution matches the current commit, nothing is staged; either this mode or the legacy
+  empty `selectedFileIds` merge request still records both parents. Outside a merge, an ordinary empty
+  selection is `NOTHING_TO_COMMIT`, and `reviewedMergeIndex` is refused.
 - `git.merge.abort` runs `merge --abort`, which restores the branch and the work tree that the
   clean-work-tree precondition guaranteed. Accepted snapshots and audit entries are untouched.
 
