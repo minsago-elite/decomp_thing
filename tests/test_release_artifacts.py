@@ -216,6 +216,33 @@ class ReleaseArtifactsTest(unittest.TestCase):
         with self.assertRaisesRegex(release.ReleaseError, "outside the recorded runtime set"):
             release.verify(output, None)
 
+    def test_archive_paths_are_canonical_before_root_stripping(self) -> None:
+        for bad in ("../../escape-marker.txt", "./alias.txt", "nested//alias.txt", "nested/../alias.txt",
+                    "nested\\escape.txt", "C:/escape.txt", "/absolute.txt", "control\nname.txt"):
+            with self.subTest(path=bad):
+                unsafe = members()
+                unsafe[bad] = (b"never extract", 0o644)
+                directory = self.root / f"unsafe-{len(list(self.root.glob('unsafe-*')))}"
+                write_distributions(directory, unsafe)
+                for reader, suffix in ((release.read_zip, "zip"), (release.read_tar, "tar")):
+                    with self.subTest(format=suffix), self.assertRaisesRegex(release.ReleaseError, "noncanonical path"):
+                        reader(directory / f"llm_bin_patch-{VERSION}.{suffix}")
+                with self.assertRaisesRegex(release.ReleaseError, "noncanonical path"):
+                    self.assemble(unsafe)
+        # Directory entries must not bypass the same check by being ignored early.
+        for suffix, reader in (("zip", release.read_zip), ("tar", release.read_tar)):
+            path = self.root / f"unsafe-dir.{suffix}"
+            if suffix == "zip":
+                with zipfile.ZipFile(path, "w") as archive:
+                    archive.writestr(ROOT + "../../escape/", b"")
+            else:
+                with tarfile.open(path, "w") as archive:
+                    info = tarfile.TarInfo(ROOT + "../../escape/")
+                    info.type = tarfile.DIRTYPE
+                    archive.addfile(info)
+            with self.assertRaisesRegex(release.ReleaseError, "noncanonical path"):
+                reader(path)
+
     def test_source_is_unknown_unless_explicitly_asserted(self) -> None:
         output = self.assemble(members())
         source = json.loads((output / "release-record.json").read_text())["source"]

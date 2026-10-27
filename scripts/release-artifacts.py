@@ -86,10 +86,19 @@ def digest_stream(stream, keep: bool) -> tuple[int, str, bytes | None]:
     return size, digest.hexdigest(), b"".join(chunks) if keep else None
 
 
+def check_member_path(name: str, directory: bool = False) -> None:
+    """Reject aliases/traversal before ignoring directories or stripping the install root."""
+    path = name[:-1] if directory and name.endswith("/") else name
+    if not path or "\\" in path or ":" in path or any(
+            part in ("", ".", "..") for part in path.split("/")) or any(ord(char) < 32 for char in path):
+        raise ReleaseError("a distribution member has a noncanonical path")
+
+
 def read_zip(path: Path) -> dict[str, Member]:
     members: dict[str, Member] = {}
     with zipfile.ZipFile(path) as archive:
         for entry in archive.infolist():
+            check_member_path(entry.orig_filename, entry.is_dir())
             if entry.is_dir():
                 continue
             if entry.filename in members:
@@ -104,6 +113,7 @@ def read_tar(path: Path) -> dict[str, Member]:
     members: dict[str, Member] = {}
     with tarfile.open(path) as archive:
         for entry in archive:
+            check_member_path(entry.name, entry.isdir())
             if entry.isdir():
                 continue
             if not entry.isfile():
@@ -161,6 +171,8 @@ def compare_archives(zip_members, tar_members) -> None:
 
 def strip_root(members: dict[str, Member], version: str) -> dict[str, Member]:
     root = f"{NAME}-{version}/"
+    for name in members:
+        check_member_path(name)
     if any(not name.startswith(root) for name in members):
         raise ReleaseError(f"a distribution member is outside {root}")
     return {name[len(root):]: value for name, value in members.items()}
