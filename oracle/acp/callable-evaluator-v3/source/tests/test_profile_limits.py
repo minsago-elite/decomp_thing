@@ -323,7 +323,7 @@ class ProfileLimits(unittest.TestCase):
 
     def simulate(self, *, output=b'ok', limit=None, clock=None, cleanup_failure=False,
                  wrapper=0, proof_kind='complete', admission=True, setup_failure=False, provisioning=False, late_cleanup_wait=False, late_absence=False, cleanup_prework=0.0,
-                 metadata_failure=None, census_failure=None, synthetic_completion=False):
+                 metadata_failure=None, census_failure=None, synthetic_completion=False, pidfd_failure=None):
         import worker_exec_proof as parser
         declared_profile_sha=contract.load_profile_with_digest()[1]
         stack = ExitStack(); self.addCleanup(stack.close)
@@ -338,8 +338,10 @@ class ProfileLimits(unittest.TestCase):
         popen = stack.enter_context(patch.object(runtime.subprocess,'Popen',return_value=process))
         self.last_popen = popen
         lifetime=work/'authored-launcher-handle';lifetime.write_bytes(b'public mocked lifetime')
-        stack.enter_context(patch.object(runtime.os,'pidfd_open',side_effect=lambda pid:os.open(lifetime,os.O_RDONLY)))
-        stack.enter_context(patch.object(runtime,'_kill_launcher',side_effect=lambda fd:now.__setitem__(0,now[0]+cleanup_prework)))
+        stack.enter_context(patch.object(runtime.os,'pidfd_open',side_effect=pidfd_failure if pidfd_failure is not None
+            else lambda pid:os.open(lifetime,os.O_RDONLY)))
+        if pidfd_failure is None:
+            stack.enter_context(patch.object(runtime,'_kill_launcher',side_effect=lambda fd:now.__setitem__(0,now[0]+cleanup_prework)))
         stack.enter_context(patch.object(runtime,'_kill_owned_scope'))
         if setup_failure:
             popen.side_effect = OSError('mocked launch refusal')
@@ -351,6 +353,7 @@ class ProfileLimits(unittest.TestCase):
         self.last_census_deadlines=[]
         def census(leader,start,deadline):
             self.last_census_deadlines.append(deadline)
+            if start is None:raise RuntimeError('owned launcher start identity is unknown')
             if census_failure is not None:raise census_failure
             return [{'pid':123}] if cleanup_failure else []
         stack.enter_context(patch.object(runtime,'owned_processes',side_effect=census))
@@ -605,6 +608,26 @@ class ProfileLimits(unittest.TestCase):
         result=caught.exception.bounded_result
         self.assertFalse(result['cleanupVerified']); self.assertIsNone(result['exitCode'])
         self.assertFalse(result['workerExecVerified'])
+
+    def test_pidfd_acquisition_failure_still_waits_for_direct_child_without_numeric_signal(self):
+        for failure in (OSError(24,'authored descriptor exhaustion'),OSError(38,'authored unsupported pidfd')):
+            with self.subTest(errno=failure.errno):
+                # Exercise the real unavailable-handle refusal, not the simulator's
+                # successful kill seam. No numeric PID or session kill is allowed.
+                with patch.object(runtime.os,'kill',side_effect=AssertionError('no numeric PID signal')), \
+                        patch.object(runtime.os,'killpg',side_effect=AssertionError('no numeric session signal')), \
+                        patch.object(runtime,'_kill_launcher',wraps=runtime._kill_launcher) as killing, \
+                        self.assertRaises(OSError) as caught:
+                    self.simulate(pidfd_failure=failure)
+                killing.assert_called_once_with(None)
+                self.assertIs(failure,caught.exception)
+                result=failure.bounded_result
+                self.assertTrue(result['launcherCreated']);self.assertFalse(result['launcherPidIdentityVerified'])
+                self.assertEqual([5.0],self.last_process.waits)
+                self.assertTrue(result['rootReaped'])
+                self.assertFalse(result['scopeAdmitted']);self.assertFalse(result['finalAbsenceVerified'])
+                self.assertFalse(result['cleanupVerified']);self.assertTrue(result['infrastructureFailure'])
+                self.assertIsNone(result['exitCode']);self.assertFalse(runtime.worker_execution_complete(result))
 
     def test_cleanup_wait_receives_only_remaining_absolute_window(self):
         result=self.simulate(cleanup_prework=2.0)
