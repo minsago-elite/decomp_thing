@@ -88,14 +88,120 @@ internal object GitTransfers {
             gitDir = gitDir, limits = limits(policy), transport = GitTransports.context(location, policy), control = control))
     }
 
-    /** The branch the remote's HEAD names, or null when it has none. */
-    fun remoteHead(runner: GitCommandRunner, location: GitRemoteLocation, policy: GitRemotePolicy, control: GitProcessControl): String? {
+    /**
+     * Receive objects and refs in operation-owned storage. The sole alternate is the managed
+     * object store (read-only); neither a stopped process nor a rejected final pack can grow it.
+     * Only after admission do immutable objects move into the live store and CAS ref transactions
+     * publish the tracking changes. Files-backend namespace transitions first prune obsolete
+     * conflicting refs; a stopped publication can be completed by an explicit fetch retry.
+     * Restart reconciliation removes the quarantine.
+     */
+    fun fetchQuarantined(runner: GitCommandRunner, live: Path, quarantine: Path, format: GitObjectFormat,
+        location: GitRemoteLocation, name: String, policy: GitRemotePolicy, remainingBytes: Long, control: GitProcessControl,
+        afterNamespacePrune: () -> Unit = {}): Int {
+        val before = allTrackingRefs(runner, live, format, name).associate { it.name to it.objectId }
+        runner.run(GitInvocation("init", listOf("--quiet", "--bare", "--object-format=${format.wireName}", quarantine.toString())))
+        Files.writeString(quarantine.resolve("objects/info/alternates"), live.resolve("objects").toString() + "\n")
+        for ((ref, objectId) in before) {
+            val path = quarantine.resolve(ref)
+            GitStorage.directories(quarantine, *quarantine.relativize(path.parent).map { it.toString() }.toTypedArray())
+            Files.writeString(path, "$objectId\n")
+        }
+        fetch(runner, quarantine, location, name, policy, control)
+        val after = allTrackingRefs(runner, quarantine, format, name).associate { it.name to it.objectId }
+        // Include quarantine metadata and all final object files, even on a very fast transfer.
+        if (GitDiskWatch(quarantine, remainingBytes) { false }.exceeded()) {
+            throw GitOperationRefusal("TRANSFER_LIMIT", "The fetch exceeded the repository size bound. Its quarantined objects and refs were not accepted.")
+        }
+        control.stop()?.let { reason -> throw GitCommandException(GitCommandException.Kind.STOPPED, "The fetch was stopped.", stopReason = reason) }
+        val changed = (before.keys + after.keys).filter { before[it] != after[it] }
+        // Git's files backend cannot prepare a create of a/b while a exists (or vice versa),
+        // even if the same transaction deletes a. Prune only obsolete namespace blockers first.
+        // Both phases use CAS; no surviving ref, local branch or checkout is removed. A crash
+        // between phases leaves a safely pruned tracking namespace that the next fetch refreshes.
+        val creates = java.util.TreeSet(after.keys - before.keys)
+        val blockers = before.keys.filter { ref ->
+            ref !in after && (creates.ceiling("$ref/")?.startsWith("$ref/") == true ||
+                generateSequence(ref.substringBeforeLast('/', "")) { it.substringBeforeLast('/', "") }
+                    .takeWhile { it.isNotEmpty() }.any { it in creates })
+        }.toSet()
+        val prune = refTransaction(before.filterKeys { it in blockers }, emptyMap())
+        val transaction = refTransaction(before - blockers, after)
+        val promoted = mutableListOf<Path>()
+        var publishingRefs = false
+        try {
+            val objects = quarantine.resolve("objects")
+            Files.walk(objects).use { paths ->
+                for (file in paths.filter { Files.isRegularFile(it, NOFOLLOW_LINKS) }.toList()) {
+                    val relative = objects.relativize(file)
+                    if (relative.getName(0).toString() == "info") continue // Never publish the alternate.
+                    val target = live.resolve("objects").resolve(relative)
+                    GitStorage.directories(live.resolve("objects"), *relative.parent.map { it.toString() }.toTypedArray())
+                    if (!Files.exists(target, NOFOLLOW_LINKS)) {
+                        Files.move(file, target) // No replacement of a pre-existing/local object.
+                        promoted.add(target)
+                    }
+                }
+            }
+            publishingRefs = true
+            if (blockers.isNotEmpty()) {
+                runner.run(GitInvocation("update-ref", listOf("--stdin"), gitDir = live, input = prune))
+                afterNamespacePrune()
+            }
+            runner.run(GitInvocation("update-ref", listOf("--stdin"), gitDir = live, input = transaction))
+        } catch (failure: Exception) {
+            // Never remove objects after an uncertain ref publication. They were already admitted
+            // within the cap; reconciliation may observe committed refs even if output was lost.
+            if (!publishingRefs) promoted.forEach { Files.deleteIfExists(it) }
+            throw failure
+        }
+        return changed.size
+    }
+
+    private fun refTransaction(before: Map<String, String>, after: Map<String, String>): ByteArray {
+        val transaction = buildString {
+            append("start\n")
+            for (ref in before.keys + after.keys) {
+                val old = before[ref]
+                val next = after[ref]
+                if (old == next) continue
+                when {
+                    next == null -> append("delete $ref $old\n")
+                    old == null -> append("create $ref $next\n")
+                    else -> append("update $ref $next $old\n")
+                }
+            }
+            append("prepare\ncommit\n")
+        }.toByteArray()
+        if (transaction.size > 4 * 1024 * 1024) throw GitOperationRefusal("TRANSFER_LIMIT", "The fetch changed more refs than one bounded transaction can publish.")
+        return transaction
+    }
+
+    data class Advertisement(val branch: String?, val format: GitObjectFormat, val headObjectId: String?)
+
+    /** Discover the remote's format before init, including empty SHA-256 repositories. */
+    fun advertisement(runner: GitCommandRunner, location: GitRemoteLocation, policy: GitRemotePolicy, control: GitProcessControl): Advertisement {
+        val capability = java.util.concurrent.atomic.AtomicReference<String?>()
+        val formatLine = Regex("ls-remote< object-format=([a-z0-9]+)\\s*$")
         val result = runner.run(GitInvocation("ls-remote", listOf("--symref", "--", location.url, "HEAD"),
-            limits = GitExecutionLimits(Duration.ofSeconds(60), 64 * 1024, 64 * 1024), transport = GitTransports.context(location, policy),
-            control = control))
-        return result.text.lineSequence().firstNotNullOfOrNull { line ->
+            limits = GitExecutionLimits(Duration.ofSeconds(60), 64 * 1024, 64 * 1024),
+            transport = GitTransports.context(location, policy, discoverFormat = true),
+            control = GitProcessControl(stop = control.stop, progress = { line ->
+                // Capture the capability before a large advertisement displaces the bounded tail.
+                // This listener is private: no packet diagnostics become operation progress.
+                formatLine.find(line)?.groupValues?.get(1)?.let { capability.compareAndSet(null, it) }
+            })))
+        val branch = result.text.lineSequence().firstNotNullOfOrNull { line ->
             Regex("^ref: refs/heads/([^\t]+)\tHEAD$").matchEntire(line)?.groupValues?.get(1)
         }
+        // SHA-1 is the protocol default when an older server lacks object-format. A detached
+        // SHA-256 HEAD also identifies its format through its full advertised object ID.
+        val headId = result.text.lineSequence().map { it.substringBefore('\t') }
+            .firstOrNull { id -> GitObjectFormat.SHA1.objectIdOrNull(id) != null || GitObjectFormat.SHA256.objectIdOrNull(id) != null }
+        val format = capability.get()?.let(GitObjectFormat::fromGit)
+            ?: if (headId?.length == GitObjectFormat.SHA256.hexLength) GitObjectFormat.SHA256 else GitObjectFormat.SHA1
+        if (format == GitObjectFormat.UNKNOWN) throw GitOperationRefusal("REPOSITORY_UNSUPPORTED", "The remote uses an unsupported object format.")
+        return Advertisement(branch, format, headId)
     }
 
     /** Partial pack files a stopped transfer can leave behind; refs are only updated after a complete pack. */
@@ -110,6 +216,17 @@ internal object GitTransfers {
             entries.filter { it.fileName.toString().startsWith("incoming-") || it.fileName.toString().startsWith("tmp_objdir") }
                 .forEach { GitStorage.deleteTree(it) }
         }
+    }
+
+    /** Every remote-tracking ref of one remote, for deletion; a listing past its bound is refused, never truncated. */
+    fun allTrackingRefs(runner: GitCommandRunner, gitDir: Path, format: GitObjectFormat, name: String): List<GitRefEntry> {
+        val result = runner.run(GitInvocation("for-each-ref", listOf("--format=%(objectname)%00%(refname)", "refs/remotes/$name/"),
+            gitDir = gitDir, truncateStdout = true, limits = GitExecutionLimits(Duration.ofSeconds(60), 8 * 1024 * 1024, 64 * 1024)))
+        if (result.stdoutTruncated) throw GitRepositoryException("REPOSITORY_UNSUPPORTED", "The remote has more tracking refs than the workbench can enumerate.")
+        return result.text.lineSequence().filter { it.isNotEmpty() }.map { line ->
+            val parts = line.split('\u0000')
+            GitRefEntry(parts[1], format.objectIdOrNull(parts[0]) ?: throw GitRepositoryException("REPOSITORY_CORRUPT", "A tracking ref is invalid."), null)
+        }.toList()
     }
 
     /** Remote-tracking refs of one remote, for display and divergence. */

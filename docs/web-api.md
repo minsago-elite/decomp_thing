@@ -944,7 +944,12 @@ A remote URL is checked before Git runs. The server refuses:
   `DESTINATION_NOT_ALLOWED`;
 - SSH hosts or paths that could be read as options, with `VALIDATION_FAILED`.
 
-An admitted remote is displayed by its name, never by its host path.
+An admitted remote is displayed by its name, never by its host path. It must be a self-contained
+bare repository or ordinary checkout with a real `.git` directory. Gitfiles, linked worktrees,
+shallow repositories, object alternates and links/special files anywhere in Git metadata are
+refused with `DESTINATION_NOT_ALLOWED`, including at transfer time after registration. Admission
+scans at most 100,000 metadata entries and 32 levels. The root is operator-owned; do not modify
+admitted repository metadata concurrently with a transfer.
 
 Credentials never leave the server. For HTTPS, Git receives an `Authorization` header for that
 remote's origin only, through `GIT_CONFIG_*` environment variables. It never appears in argv,
@@ -960,30 +965,42 @@ output: `CERTIFICATE_INVALID`, `AUTHENTICATION_REQUIRED`, `HOST_KEY_UNVERIFIED`,
 
 | Action | Body fields | Effect |
 | --- | --- | --- |
-| `git.remote.add` | `name`, `url` | Registers a policy-checked remote (at most eight) in a server record; repository configuration is never written |
-| `git.remote.remove` | `remoteId` | Deletes the remote and its remote-tracking refs; local branches and commits are unchanged |
+| `git.remote.add` | `name`, `url` | Registers a policy-checked remote (at most eight) in a server record; repository configuration is never written. The name must form valid `refs/remotes/<name>/` refs. Each registration has its own `remoteId`, so a remote removed and re-created under the same name is a different remote that stale requests cannot reach |
+| `git.remote.remove` | `remoteId` | Deletes the remote and every one of its remote-tracking refs; local branches and commits are unchanged |
 | `git.fetch` | `remoteId` | Fetches branches into `refs/remotes/<name>/` only: no tags, no `FETCH_HEAD`, no submodules, no work tree, and nothing is merged or checked out |
 
 `POST J/repositories` with `git.clone` (`url`, `remoteName`, `branch`) fetches into a fresh managed
 repository in private staging (#592). The repository receives the remote's branches as
-remote-tracking refs plus its tags. Then the server creates the default or named branch, checks it
-out within the checkout bound and registers the remote. The repository is published only when it
+remote-tracking refs plus its tags. It discovers and preserves the remote's object format before
+initialization, including empty SHA-256 repositories, rather than imposing the new-repository
+default. Format discovery uses bounded, server-only protocol capability diagnostics; those never
+enter records, operation progress or client responses. A detached advertised remote HEAD is refused
+with `REPOSITORY_UNSUPPORTED` unless the request explicitly selects a branch; it is never treated as
+an empty repository or silently replaced with an unborn default branch. An advertised default branch
+outside the workbench's naming policy is refused with `VALIDATION_FAILED` before initialization or
+fetch, with guidance to select a supported branch explicitly; it is never replaced by the configured
+default. Then the server creates the default or named branch, checks it out within the checkout bound
+and registers the remote. The repository is published only when it
 is complete; a failure or cancellation removes the staging tree. Hooks, filters, submodules and
 LFS stay inert, and objects are verified with `fsck`.
 
 Every transfer is bounded:
 
 - by elapsed time, at most ten minutes;
-- by repository bytes, which are checked while Git runs, so an overrun stops with `TRANSFER_LIMIT`;
+- by repository bytes, checked while Git runs and unconditionally at admission, so an overrun stops with `TRANSFER_LIMIT`. Clone budgets checkout expansion against the remaining bytes and checks the complete staging tree immediately before publication. Fetch receives into operation-owned quarantine with a read-only alternate to existing managed objects, budgeting existing plus quarantined bytes; rejected objects and refs never enter the live store. Admitted immutable objects are promoted without replacing local objects, then tracking refs publish with bounded compare-and-swap transactions; a branch namespace transition (for example `topic` to `topic/sub`) first prunes only obsolete conflicting tracking refs because Git's files backend cannot delete and recreate those names in one transaction;
 - by output.
 
 The operation's `progress` reports Git's own phase and percent while it runs (#594).
 `POST G/operations/{id}/cancel` with `{"action": "git.cancel"}` and the operation version in
 `If-Match` stops a queued or running fetch or clone. The operation shows `cancelling` and then ends
-`cancelled`. Partial packs are removed, and local branches, the work tree and accepted snapshots are
-never touched. Git updates each remote-tracking ref only after its pack is complete, so a fetch
-interrupted by a restart leaves refs unchanged or fully updated. It becomes `interrupted` and is
-never repeated. Progress is exposed through the durable operation resource. It is not yet published
+`cancelled`. Transfer staging (including complete but unadmitted packs) is removed, and local
+branches, the work tree and accepted snapshots are never touched. Tracking-ref publication runs
+only after object admission. Ordinarily refs are unchanged or fully updated; a namespace transition
+interrupted between its prune and publication transactions can also leave obsolete conflicting refs
+pruned without their replacements. A fresh explicit fetch safely refreshes that tracking state,
+including after restart; no automatic retry runs. A restart between object promotion and ref publication
+may retain already-admitted objects within the byte cap; it never promotes an oversized quarantine.
+The operation becomes `interrupted` and is never repeated automatically. Progress is exposed through the durable operation resource. It is not yet published
 on the shared job event stream, which is still run-scoped.
 
 `GET G/remotes` lists each remote with:
