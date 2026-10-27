@@ -46,7 +46,7 @@ def entries(path: pathlib.Path) -> dict[str, bytes]:
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    parser = argparse.ArgumentParser(description=(__doc__ or "Verify application JAR reproducibility.").splitlines()[0])
     parser.add_argument("--gradle-arg", action="append", default=[], help="extra Gradle argument, e.g. --offline")
     options = parser.parse_args()
 
