@@ -77,7 +77,7 @@ jobs:
       - name: Verify API drift and legacy callback controls
         run: |
           node scripts/generate-web-api.mjs --check
-          node --test scripts/generate-web-api.test.mjs scripts/legacy-session.test.mjs \
+          node --test scripts/generate-web-api.test.mjs scripts/legacy-session.test.mjs scripts/packaged-browser-history.test.mjs \
             | tee "$RUNNER_TEMP/frontend-ci/api-drift-tests.txt"
       - name: Verify generated large web fixtures
         run: node --test scripts/web-scale-fixtures.test.mjs | tee "$RUNNER_TEMP/frontend-ci/scale-fixtures-tests.txt"
