@@ -1284,9 +1284,12 @@ class WebJobService(
         if (!decision.registration.admits(predecessor.limits)) {
             throw WebJobServiceException("WORKFLOW_LIMITS_UNAVAILABLE", "The attempt's recorded limits are no longer server-approved.")
         }
+        // Recovery has no caller scope control: preserve an explicit lowering rather than silently
+        // raising its context budget back to the option default. Revalidate it against the current option.
+        val scope = predecessor.scope
         val request = NewWorkflowAttempt(predecessor.workflow, predecessor.limits, predecessor.inputRevisionId,
             decision.registration.harnessCapabilityId, predecessor.runId, recovery = decision.recovery,
-            configuration = webAttemptConfiguration(decision.registration.adapter, prerequisites))
+            configuration = webAttemptConfiguration(decision.registration.adapter, prerequisites, scope), scope = scope)
         val job = store.get(jobId)
         val admitted = publishStart(jobId) {
             owner.createIdempotent(jobId, view.snapshot.version, request, requestKey, expectedRunVersion)

@@ -831,10 +831,26 @@ class WebProductionWorkflowsTest {
         val failed = service(store, adapters(engines)).use { service ->
             service.initializeExistingStorage()
             service.requestDurableStart(job.id, version(service, job.id), NewWorkflowAttempt(WorkflowKind.RECONSTRUCT,
-                WebWorkflowDefaults.RECONSTRUCT_AGENT, harnessCapabilityId = "agent-acp"), "retry_config_initial",
+                WebWorkflowDefaults.RECONSTRUCT_AGENT, harnessCapabilityId = "agent-acp",
+                scope = WorkflowReconstructionScope(60_000uL)), "retry_config_initial",
                 harnessPrerequisites(acp = ACP_PROVENANCE)).attempt
         }
         assertEquals(WorkflowRunState.FAILED, failed.state)
+        assertEquals(60_000uL, failed.configuration?.reconstruction?.maxContextCharacters)
+        // A changed option must refuse the recorded scope, not silently reset it to a new default.
+        val agent = adapters(engines)[1]
+        val tighter = object : DurableWebWorkflowAdapter by agent {
+            override val reconstruction = assertNotNull(agent.reconstruction).copy(defaultContextCharacters = 50_000)
+        }
+        service(store, listOf(tighter)).use { service ->
+            service.initializeExistingStorage()
+            assertCode("RECONSTRUCTION_SCOPE_UNAVAILABLE") {
+                service.requestDurableRecovery(job.id, failed.runId, failed.version, WorkflowRecoveryMode.RETRY,
+                    null, "retry_scope_refused", harnessPrerequisites(acp = ACP_PROVENANCE))
+            }
+            assertEquals(1, engines.calls.get(), "a refused scope executed an engine")
+            assertEquals(1, service.presentation(job.id).snapshot!!.attempts.size)
+        }
         val changed = ACP_PROVENANCE.copy(configurationSha256 = "b".repeat(64),
             stableDescriptor = ACP_PROVENANCE.stableDescriptor.replace("a".repeat(64), "b".repeat(64)))
         val retried = service(store, adapters(engines)).use { service ->
@@ -853,6 +869,9 @@ class WebProductionWorkflowsTest {
         assertEquals(WorkflowRunState.COMPLETED, retried.state)
         assertEquals(failed.runId, retried.previousRunId)
         assertEquals(WorkflowRecoveryMode.RETRY, retried.recovery?.mode)
+        assertEquals(failed.scope, retried.scope)
+        assertEquals(60_000uL, retried.configuration?.reconstruction?.maxContextCharacters)
+        assertEquals(listOf(60_000, 60_000), engines.contexts, "retry raised the explicitly bounded context budget")
         assertEquals("b".repeat(64), retried.configuration?.harness?.configurationSha256)
         assertEquals("b".repeat(64), webRun(retried).getValue("configuration").jsonObject
             .getValue("harness").jsonObject.getValue("configurationSha256").jsonPrimitive.content)
@@ -862,6 +881,7 @@ class WebProductionWorkflowsTest {
             assertEquals(failed.configuration, retained.getValue(failed.runId).configuration)
             assertEquals(retried.configuration, retained.getValue(retried.runId).configuration)
             assertEquals(retried.recovery, retained.getValue(retried.runId).recovery)
+            assertEquals(retried.scope, retained.getValue(retried.runId).scope)
             val replay = service.requestDurableRecovery(job.id, failed.runId, failed.version, WorkflowRecoveryMode.RETRY,
                 null, "retry_config_success", harnessPrerequisites(acp = ACP_PROVENANCE))
             assertTrue(replay.replayed); assertEquals(retried.configuration, replay.attempt.configuration)

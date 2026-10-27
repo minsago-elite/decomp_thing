@@ -618,6 +618,9 @@ servers instead reported the always-null `configuration.profileId` placeholder. 
 accept that shape without inferring a profile or budget; a non-null legacy placeholder or
 malformed reconstruction record is still refused. Durable storage decodes the earlier shape
 as unrecorded reconstruction provenance while preserving the rest of the admission record.
+Recovery also preserves an explicitly lowered scope, revalidating it against the current
+option; it never silently raises that budget to the default. A scope no longer approved by
+the option refuses recovery as `503 CAPABILITY_UNAVAILABLE` before admitting any successor.
 
 ### Module progress and retained plans
 
