@@ -1,5 +1,8 @@
 package decompengine.jobs
 
+import decompengine.oracle.core.OracleJson
+import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.JsonPrimitive
 import java.nio.file.Files
 import kotlin.io.path.writeBytes
 import kotlin.test.*
@@ -53,6 +56,9 @@ class JobDeletionStoreTest {
             val finished = store.record(current, store.purge(current, { true }))
             assertEquals(JobDeletionState.COMPLETED, finished.state)
             assertEquals(expected, finished.removedBytes, "the audit count equals the bytes that existed")
+            assertTrue(finished.removedCountsExact)
+            val reopened = JobDeletionStore(root).also { it.load() }
+            assertEquals(finished, reopened.get(finished.operationId), "completed exact accounting survives restart")
         } finally {
             Files.walk(root).use { paths -> paths.forEach { runCatching { java.nio.file.Files.setPosixFilePermissions(it, java.nio.file.attribute.PosixFilePermissions.fromString("rwx------")) } } }
             root.toFile().deleteRecursively()
@@ -69,7 +75,10 @@ class JobDeletionStoreTest {
             })
             store.load()
             val running = store.detach(store.admit(job.id, digest, "1".repeat(64), "2".repeat(64)))
-            assertTrue(store.purge(running, { true }).complete)
+            val pass = store.purge(running, { true })
+            assertTrue(pass.complete)
+            assertTrue(pass.bytes > 0)
+            assertTrue(pass.entries > 0)
             assertFalse(Files.exists(root.resolve(job.id)))
             val reopened = JobDeletionStore(root).also { it.load() }
             val persisted = assertNotNull(reopened.get(running.operationId))
@@ -77,6 +86,66 @@ class JobDeletionStoreTest {
             val reconciled = reopened.reconcileBeforePurge(persisted)
             assertEquals(JobDeletionState.COMPLETED, reconciled.state)
             assertEquals(reconciled.operationId, reopened.deleted(job.id)?.operationId, "the tombstone survives")
+            assertFalse(reconciled.removedCountsExact, "unrecorded removals must not become exact zero totals")
+            assertEquals(0, reconciled.removedBytes)
+            assertEquals(0, reconciled.removedEntries)
+            assertEquals(reconciled, JobDeletionStore(root).also { it.load() }.get(running.operationId),
+                "the uncertainty is durable even after completion")
+        } finally { root.toFile().deleteRecursively() }
+    }
+
+    @Test fun `a partial unrecorded purge preserves durable counts as lower bounds after restart`() {
+        val root = Files.createTempDirectory("job-deletion-store-")
+        try {
+            val job = JobStore(root).createFromUpload("inert.elf", elfFixture())
+            // Only regular files, so every completed unlink contributes positive bytes and one entry.
+            repeat(8) { root.resolve("${job.id}/extra-$it.bin").writeBytes(ByteArray(100)) }
+            val expected = Files.walk(root.resolve(job.id)).use { paths ->
+                paths.filter { Files.isRegularFile(it) }.mapToLong { Files.size(it) }.sum()
+            }
+            val store = JobDeletionStore(root).also { it.load() }
+            val running = store.detach(store.admit(job.id, digest, "1".repeat(64), "2".repeat(64)))
+            fun oneEntry(operation: JobDeletionOperation): JobDeletionStore.PurgeResult {
+                var checks = 0
+                return store.purge(operation, { ++checks == 1 }).also {
+                    assertFalse(it.complete); assertTrue(it.bytes > 0); assertEquals(1, it.entries)
+                }
+            }
+            val recorded = store.record(running, oneEntry(running))
+            val lost = oneEntry(recorded) // Crash before record() can save this pass.
+            val reopened = JobDeletionStore(root).also { it.load() }
+            val persisted = assertNotNull(reopened.get(running.operationId))
+            assertEquals(recorded.removedBytes, persisted.removedBytes)
+            assertEquals(recorded.removedEntries, persisted.removedEntries)
+            assertFalse(persisted.removedCountsExact)
+            val recovered = reopened.reconcileBeforePurge(persisted)
+            val completed = reopened.record(recovered, reopened.purge(recovered, { true }))
+            assertEquals(JobDeletionState.COMPLETED, completed.state)
+            assertEquals(expected - lost.bytes, completed.removedBytes)
+            assertFalse(completed.removedCountsExact)
+            assertEquals(completed, JobDeletionStore(root).also { it.load() }.get(completed.operationId))
+        } finally { root.toFile().deleteRecursively() }
+    }
+
+    @Test fun `legacy accounting is conservative and the new exactness field is strictly decoded`() {
+        val root = Files.createTempDirectory("job-deletion-store-")
+        try {
+            val job = JobStore(root).createFromUpload("inert.elf", elfFixture())
+            val store = JobDeletionStore(root).also { it.load() }
+            val running = store.detach(store.admit(job.id, digest, "1".repeat(64), "2".repeat(64)))
+            val completed = store.record(running, store.purge(running, { true }))
+            assertTrue(completed.removedCountsExact)
+            val json = completed.toJson()
+            assertEquals(completed, JobDeletionOperation.decode(OracleJson.canonicalBytes(json, JobDeletionOperation.LIMITS)))
+            val legacy = JsonObject((json - "removedCountsExact") + ("schemaVersion" to JsonPrimitive(1)))
+            assertFalse(JobDeletionOperation.decode(OracleJson.canonicalBytes(legacy, JobDeletionOperation.LIMITS)).removedCountsExact)
+            for (invalid in listOf(JsonObject(json - "removedCountsExact"),
+                JsonObject(json + ("removedCountsExact" to JsonPrimitive("true"))),
+                JsonObject(json + ("removedCountsExact" to JsonPrimitive(1))))) {
+                assertFails {
+                    JobDeletionOperation.decode(OracleJson.canonicalBytes(invalid, JobDeletionOperation.LIMITS))
+                }
+            }
         } finally { root.toFile().deleteRecursively() }
     }
 

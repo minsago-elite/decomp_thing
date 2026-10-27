@@ -1183,7 +1183,15 @@ journal read and holds the service monitor only for that read.
 
 The operation record keeps the job identity, a domain-separated session digest, request
 digests, times, outcome and the removed byte/entry counts; it never keeps the filename, label,
-binary facts or contents. Up to 1024 records are retained and a record is evicted only once
+binary facts or contents. Journal schema v2 also persists `removedCountsExact`. Reloaded
+unfinished operations conservatively treat their saved counts as lower bounds: a purge may
+have removed entries before its count update reached disk. Legacy v1 records are also treated
+as lower bounds, including terminal records whose earlier recovery may have lost counts.
+The completed public operation message explicitly says "at least" and "exact totals are
+unknown after interrupted cleanup" in these cases; it never presents recovered zero counters
+as exact totals. Completion and the deletion tombstone remain authoritative even when totals
+are unknown. Uninterrupted v2 completion retains exact accounting across restart.
+Up to 1024 records are retained and a record is evicted only once
 it is older than 24 hours (`tombstoneRetentionMs`). While a record exists, reads of the job and
 its children (`GET J`, runs, reports, progress, the event stream before headers) return
 `410 RESOURCE_GONE`; afterwards they return `404`. There is no undo: `undoAvailable` is always
@@ -1217,7 +1225,9 @@ Verification: `WebJobLifecycleTest` (real HTTP): organization bytes/hashes uncha
 conflict, stale guard, archive filtering; strict body and authorization; read-only job
 directory; active/pinned/download/hold protections and fail-closed holds; deletion with
 escaping symbolic and hard links, tombstone `410`s, replay and audit record contents;
-interrupted purge resumed after restart and a crash between intent and rename; disk-full and
+interrupted purge resumed after restart and a crash between intent and rename; complete and
+partial unrecorded purges with accepted/running records and truthful operation messages;
+disk-full and
 read-only journals; storage categories and a dry run that leaves journal bytes unchanged.
 Frontend: `job-lifecycle.test.tsx` and `job-deletion-reconciliation.test.tsx`. Repository
 workspace holds and packaged-browser deletion journeys remain outstanding.

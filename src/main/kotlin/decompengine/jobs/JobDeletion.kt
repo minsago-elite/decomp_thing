@@ -7,6 +7,7 @@ import decompengine.oracle.core.StrictJsonLimits
 import kotlinx.serialization.json.JsonNull
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
+import kotlinx.serialization.json.booleanOrNull
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
@@ -48,6 +49,8 @@ data class JobDeletionOperation(
     val removedBytes: Long,
     val removedEntries: Long,
     val failureCode: String?,
+    /** False when a restart may have lost an unrecorded purge pass; counts are then lower bounds. */
+    val removedCountsExact: Boolean = true,
 ) {
     init {
         require(operationId.matches(OPERATION_ID) && jobId.matches(JOB_IDENTITY))
@@ -59,11 +62,12 @@ data class JobDeletionOperation(
     }
 
     internal fun toJson(): JsonObject = buildJsonObject {
-        put("schemaVersion", 1); put("operationId", operationId); put("jobId", jobId); put("state", state.name)
+        put("schemaVersion", 2); put("operationId", operationId); put("jobId", jobId); put("state", state.name)
         put("revision", revision); put("createdAt", createdAt.toString())
         put("endedAt", endedAt?.toString()?.let(::JsonPrimitive) ?: JsonNull)
         put("actorDigest", actorDigest); put("keyDigest", keyDigest); put("requestDigest", requestDigest)
         put("removedBytes", removedBytes.toString()); put("removedEntries", removedEntries.toString())
+        put("removedCountsExact", removedCountsExact)
         put("failureCode", failureCode?.let(::JsonPrimitive) ?: JsonNull)
     }
 
@@ -74,16 +78,22 @@ data class JobDeletionOperation(
 
         internal fun decode(bytes: ByteArray): JobDeletionOperation {
             val value = OracleJson.parse(bytes, LIMITS).jsonObject
-            require(value.keys == setOf("schemaVersion", "operationId", "jobId", "state", "revision", "createdAt", "endedAt",
-                "actorDigest", "keyDigest", "requestDigest", "removedBytes", "removedEntries", "failureCode")) { "deletion record fields are invalid" }
+            val version = value.getValue("schemaVersion").jsonPrimitive.also { require(!it.isString) }.content
+            require(version == "1" || version == "2")
+            val fields = setOf("schemaVersion", "operationId", "jobId", "state", "revision", "createdAt", "endedAt",
+                "actorDigest", "keyDigest", "requestDigest", "removedBytes", "removedEntries", "failureCode")
+            require(value.keys == if (version == "2") fields + "removedCountsExact" else fields) { "deletion record fields are invalid" }
+            // Legacy records could already have completed after losing purge counts. Never infer exactness.
+            val exact = version == "2" && value.getValue("removedCountsExact").jsonPrimitive.let {
+                require(!it.isString); requireNotNull(it.booleanOrNull)
+            }
             fun text(name: String) = value.getValue(name).jsonPrimitive.also { require(it.isString) }.content
             fun optional(name: String) = value.getValue(name).takeUnless { it == JsonNull }?.let { text(name) }
             fun count(name: String) = text(name).also { require(it.matches(Regex("0|[1-9][0-9]{0,18}"))) }.toLong()
-            require(value.getValue("schemaVersion").jsonPrimitive.let { !it.isString && it.content == "1" })
             return JobDeletionOperation(text("operationId"), text("jobId"), JobDeletionState.valueOf(text("state")),
                 requireNotNull(value.getValue("revision").jsonPrimitive.also { require(!it.isString) }.longOrNull),
                 Instant.parse(text("createdAt")), optional("endedAt")?.let(Instant::parse), text("actorDigest"), text("keyDigest"),
-                text("requestDigest"), count("removedBytes"), count("removedEntries"), optional("failureCode"))
+                text("requestDigest"), count("removedBytes"), count("removedEntries"), optional("failureCode"), exact)
         }
     }
 }
@@ -136,7 +146,10 @@ internal class JobDeletionStore(
                     throw WorkflowStoreException("CORRUPT_DELETION_RECORD", "A deletion record is invalid; preserve the deletion journal before retrying.", cause = failure)
                 }
                 require(record.operationId == id)
-                records[id] = record
+                // A purge may have unlinked entries after the last durable count update, even if
+                // only ACCEPTED survived. Completed v2 records, unlike unfinished ones, are exact
+                // when their writer says so. Preserve durable counts as lower bounds on recovery.
+                records[id] = if (record.state.terminal) record else record.copy(removedCountsExact = false)
             }
         }
         loaded = true

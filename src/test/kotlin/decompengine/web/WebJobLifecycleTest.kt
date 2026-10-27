@@ -174,7 +174,7 @@ class WebJobLifecycleTest {
         }
     }
 
-    @Test fun `collection still refuses an unjournaled missing or corrupt captured job`() = Fixture().start().use { f ->
+    @Test fun `collection still refuses an unjournaled missing or corrupt captured job`(): Unit = Fixture().start().use { f ->
         val missing = f.store.createFromUpload("missing.elf", elfFixture())
         val captured = f.service.collectionRecords()
         f.root.resolve(missing.id).toFile().deleteRecursively()
@@ -428,6 +428,40 @@ class WebJobLifecycleTest {
             val failed = f.service.deletedJob(retained)
             assertNull(failed, "an interrupted-before-removal record is not a tombstone")
             data(f.delete(retained, "delete_key_after_restart"), "operation", 202)
+        }
+    }
+
+    @Test fun `recovered operation reads disclose unknown totals for complete and partial unrecorded purges`() {
+        for (persistRunning in listOf(false, true)) for (completePass in listOf(false, true)) {
+            val root = Files.createTempDirectory("web-job-lifecycle-accounting-")
+            try {
+                val job = JobStore(root).createFromUpload("inert.elf", elfFixture())
+                repeat(8) { root.resolve("${job.id}/extra-$it.bin").writeBytes(ByteArray(100)) }
+                val journal = JobDeletionStore(root, faults = JobDeletionFaults { point ->
+                    if (!persistRunning && point == JobDeletionFaultPoint.AFTER_DETACH) throw java.io.IOException("disk full")
+                }).also { it.load() }
+                val digest = "0".repeat(64)
+                val running = journal.detach(journal.admit(job.id, digest, "1".repeat(64), "2".repeat(64)))
+                var checks = 0
+                val pass = journal.purge(running, { completePass || ++checks == 1 })
+                assertEquals(completePass, pass.complete)
+                assertTrue(pass.bytes > 0); assertTrue(pass.entries > 0)
+                // Simulate process loss before record(): neither the partial nor complete pass is saved.
+                Fixture(root).start().use { f ->
+                    val operation = data(f.read("/jobs/${job.id}/operations/${running.operationId}"), "operation")
+                    assertEquals("completed", operation.getValue("state").jsonPrimitive.content)
+                    val message = operation.getValue("message").jsonPrimitive.content
+                    assertTrue(message.contains("at least "), message)
+                    assertTrue(message.contains("exact totals are unknown after interrupted cleanup"), message)
+                    assertTrue(message.contains("cannot be undone"), message)
+                    assertFalse(message.contains("deleted (0 bytes in 0 entries)"), message)
+                    error(f.read("/jobs/${job.id}"), 410, "RESOURCE_GONE")
+                    val completed = assertNotNull(f.service.deletedJob(job.id))
+                    assertFalse(completed.removedCountsExact)
+                    val durable = JobDeletionStore(root).also { it.load() }
+                    assertEquals(completed, durable.get(completed.operationId))
+                }
+            } finally { root.toFile().deleteRecursively() }
         }
     }
 

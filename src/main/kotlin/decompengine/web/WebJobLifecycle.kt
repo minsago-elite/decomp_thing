@@ -115,8 +115,13 @@ internal fun webOperation(operation: JobDeletionOperation): JsonObject = buildJs
     put("message", when (operation.state) {
         JobDeletionState.ACCEPTED -> "Deletion is recorded and waiting to remove the job."
         JobDeletionState.RUNNING -> "The job is removed from the library. Its stored files are being purged; cleanup resumes after a restart."
-        JobDeletionState.COMPLETED -> "The job and its stored files were permanently deleted (${operation.removedBytes} bytes in " +
-            "${operation.removedEntries} entries). This cannot be undone; only this deletion record is retained."
+        JobDeletionState.COMPLETED -> {
+            val accounting = if (operation.removedCountsExact) "${operation.removedBytes} bytes in ${operation.removedEntries} entries"
+                else "at least ${operation.removedBytes} bytes in at least ${operation.removedEntries} entries recorded; " +
+                    "exact totals are unknown after interrupted cleanup"
+            "The job and its stored files were permanently deleted ($accounting). " +
+                "This cannot be undone; only this deletion record is retained."
+        }
         JobDeletionState.FAILED -> when (operation.failureCode) {
             "INTERRUPTED_BEFORE_REMOVAL" -> "Deletion was interrupted before the job was removed. The job is retained unchanged; review it and delete again if needed."
             "CLEANUP_CONTAINMENT" -> "The job was removed from the library, but cleanup stopped at an entry outside its owned storage (a mount, link target or foreign file). Remaining bytes were preserved; inspect storage."
