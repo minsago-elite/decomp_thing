@@ -145,6 +145,10 @@ function Comparison({ selected, basePath, query, version, onRoute }: {
   const candidates = runs && runs !== 'failed' ? runs.items.filter((run: Run, position, all) => run.resultRevisionId !== null
     && !(run.runId === selected.runId && run.resultRevisionId === selected.revisionId)
     && all.findIndex(other => other.runId === run.runId) === position) : [];
+  // A bookmark can name a revision beyond the loaded attempt pages (or an older revision of a listed run).
+  // Keep that exact submitted identity until an equivalent candidate arrives; never substitute a newer result.
+  const unlistedBaseline = query.baseline && !candidates.some(run => run.runId === query.baseline!.runId
+    && run.resultRevisionId === query.baseline!.revisionId) ? query.baseline : null;
   const data = read.state === 'ready' ? read.value : null;
   const offset = query.compareCursor ? Number(query.compareCursor.split('_')[1]) : 0;
   const side = (value: Measure | null) => value === null ? copy.notRecorded
@@ -171,6 +175,8 @@ function Comparison({ selected, basePath, query, version, onRoute }: {
       }}>
         <label>{copy.baseline}<select name="baseline" value={choice} required onChange={event => setChoice(event.currentTarget.value)}>
           <option value="">{copy.chooseBaseline}</option>
+          {unlistedBaseline && <option value={baselineChoice}>
+            {textMessage(copy.baselineOption, { run: unlistedBaseline.runId, revision: unlistedBaseline.revisionId })}</option>}
           {candidates.map(run => <option key={run.runId} value={`${run.runId}/${run.resultRevisionId}`}>
             {textMessage(copy.baselineOption, { run: run.runId, revision: run.resultRevisionId ?? '' })}</option>)}
         </select></label>
@@ -181,6 +187,7 @@ function Comparison({ selected, basePath, query, version, onRoute }: {
     {read.state === 'loading' && query.baseline && <p role="status">{structureCopy.loading}</p>}
     {read.state === 'failed' && <p role="alert">{structureReadMessage(read.failure)}</p>}
     {data && <>
+      <p>{copy.baseline}: <bdi>{textMessage(copy.baselineOption, { run: data.baseline.binding.runId, revision: data.baseline.binding.revisionId })}</bdi></p>
       <p role="status"><strong>{copy.compatibility[data.compatibility.state]}</strong></p>
       <div class="structure-table"><table>
         <caption>{copy.checksTitle}</caption>

@@ -3,9 +3,10 @@ import { resolve } from 'node:path';
 import { fireEvent, render, screen, waitFor, within } from '@testing-library/preact';
 import { beforeEach, expect, it, vi } from 'vitest';
 import type * as ClientModule from '../src/api/client';
-import type { Bootstrap, StructureNeighborhood } from '../src/api/generated';
+import type { Bootstrap, RevisionFile, StructureNeighborhood } from '../src/api/generated';
 import { graphCopy as copy } from '../src/copy/graph';
 import { structureCopy } from '../src/copy/structure';
+import { sourceCopy } from '../src/copy/sources';
 import { App } from '../src/app/App';
 import { createBrowserSession } from '../src/session/session';
 import { ApiClientError } from '../src/api/errors';
@@ -104,6 +105,40 @@ it('inspects nodes and relationships by keyboard with links to entity detail, so
     expect(within(details).queryByRole('link', { name: /Open the called function/ })).toBeNull();
     fireEvent.click(screen.getByRole('button', { name: 'Inspect fn_missing' }));
     expect(within(details).getByText(copy.unrecordedNote)).toBeTruthy();
+  } finally { auth.dispose(); }
+});
+
+it.each([
+  { view: 'calls', inspect: 'Inspect helper', link: copy.links.source },
+  { view: 'calls', inspect: 'Inspect main to fn_missing', link: copy.links.source },
+  { view: 'modules', inspect: 'Inspect core', link: copy.links.source },
+  { view: 'modules', inspect: 'Inspect core', link: copy.links.header },
+  { view: 'modules', inspect: 'Inspect core to util', link: copy.links.source },
+])('refuses metadata drift when following a $view source link from $inspect ($link)', async ({ view, inspect, link }) => {
+  const auth = await session();
+  const graph = view === 'calls' ? calls : fixture<StructureNeighborhood>('structure-neighborhood-modules');
+  const source = fixture<RevisionFile>('revision-file-root');
+  let fileId = '';
+  transport.get.mockImplementation(kind => Promise.resolve({ data: kind === 'structureNeighborhood' ? graph : {
+    ...source, binding: selected, sourceSha256: graph.sourceSha256, metadataVersion: '9'.repeat(64),
+    item: { ...source.item, fileId },
+  } }));
+  history.replaceState(null, '', `${revision}/graph?view=${view}&focus=${view === 'calls' ? 'fn_0000000000401000' : 'core'}&depth=${graph.query.depth}`);
+  try {
+    render(<App basePath="/nested" session={auth} />);
+    fireEvent.click(await screen.findByRole('button', { name: inspect, exact: true }));
+    const details = screen.getByRole('region', { name: copy.selectionTitle });
+    const sourceLink = within(details).getByRole('link', { name: new RegExp(`^${link}:`) });
+    const url = new URL(sourceLink.getAttribute('href')!, location.origin);
+    fileId = url.pathname.split('/').at(-1)!;
+    expect(url.searchParams.get('sourceSha256')).toBe(graph.sourceSha256);
+    expect(url.searchParams.get('metadataVersion')).toBe(graph.metadataVersion);
+    fireEvent.click(sourceLink);
+    await waitFor(() => expect(location.pathname).toBe(`${revision}/source-files/${fileId}`));
+    expect((await screen.findByRole('alert')).textContent).toContain(sourceCopy.expired);
+    expect(location.search).toBe(`?sourceSha256=${graph.sourceSha256}&metadataVersion=${graph.metadataVersion}`);
+    expect(transport.get.mock.calls.some(([kind]) => kind === 'revisionFile')).toBe(true);
+    expect(transport.get.mock.calls.every(([kind]) => ['structureNeighborhood', 'revisionFile'].includes(kind))).toBe(true);
   } finally { auth.dispose(); }
 });
 

@@ -109,7 +109,7 @@ function Selected({ data, response, selection, selected, basePath, query }: {
     ? <li><a href={apiPath(basePath, structureRecordRoute(selected, kind, version))} download="">{label}</a>{' '}
       ({message(copy.evidenceRecord, { path: <bdi>{value.path}</bdi>, sha256: <code>{value.sha256}</code> })})</li> : null;
   const source = (label: string, path: string | null, fileId: string | null) => path === null ? null
-    : <li>{fileId ? <a href={sourceFilePath(basePath, selected, fileId)}>{label}: <bdi>{path}</bdi></a>
+    : <li>{fileId ? <a href={sourceFilePath(basePath, selected, fileId, response)}>{label}: <bdi>{path}</bdi></a>
       : <>{label}: <bdi>{path}</bdi> ({copy.noSourceFile})</>}</li>;
   const entity = (node: StructureGraphNode, label: string) => node.kind === 'function' && node.selector
     ? <li><a href={structureItemPath(basePath, selected, 'functions', node.selector, version)}>{label}: <bdi>{nodeLabel(node)}</bdi></a></li> : null;

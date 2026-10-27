@@ -163,6 +163,62 @@ it('lists older attempts on request instead of treating the newest page as every
   } finally { auth.dispose(); }
 });
 
+it('retains a bookmarked older baseline across reload, paginated listing and Back/Forward', async () => {
+  const auth = await session();
+  const cursor = `${'a'.repeat(64)}_50_${'b'.repeat(32)}`;
+  const newest: Runs = { ...runs, items: [run, ...Array.from({ length: 49 }, (_, index) => ({
+    ...run, runId: `run_recent_${index}`, resultRevisionId: null,
+  }))], page: { ...runs.page, nextCursor: cursor } };
+  const older: Runs = { ...runs, items: runs.items.filter(item => item.runId === 'run_1' || item.runId === 'run_5') };
+  transport.get.mockImplementation((kind, path) => {
+    const result = path.includes('baselineRunId=run_5') ? incompatible : comparison;
+    return Promise.resolve({ data: kind === 'structureScorecard' ? card : kind === 'run' ? run
+      : kind === 'runs' ? (path.includes('cursor=') ? older : newest)
+        : { ...result, structureVersion: card.structureVersion, current: { ...result.current, structureVersion: card.structureVersion } } });
+  });
+  history.replaceState(null, '', `${revision}/scorecard?baselineRunId=run_1&baselineRevisionId=revision_1`);
+  const expectBaseline = async (value: string) => {
+    const select = await screen.findByRole('combobox', { name: copy.baseline });
+    await waitFor(() => expect(select).toHaveProperty('value', value), { timeout: 1000 });
+    const [runId, revisionId] = value.split('/');
+    const option = within(select).getByRole('option', { name: `${runId} (revision ${revisionId})` });
+    expect(option).toHaveProperty('selected', true);
+    expect(within(select).getAllByRole('option').filter(item => item.getAttribute('value') === value)).toHaveLength(1);
+    return select;
+  };
+  try {
+    let view = render(<App basePath="/nested" session={auth} />);
+    await screen.findByText(copy.compatibility.compatible);
+    await expectBaseline('run_1/revision_1');
+    // Reload the bookmark before fetching the older page: the URL identity must still have an option.
+    view.unmount();
+    view = render(<App basePath="/nested" session={auth} />);
+    await screen.findByText(copy.compatibility.compatible);
+    await expectBaseline('run_1/revision_1');
+    // Search-only navigation to a different unloaded baseline and browser Back/Forward do not remount.
+    history.pushState(null, '', `${revision}/scorecard?baselineRunId=run_5&baselineRevisionId=revision_5`);
+    dispatchEvent(new PopStateEvent('popstate'));
+    await screen.findByText(copy.compatibility.incompatible);
+    await expectBaseline('run_5/revision_5');
+    history.back();
+    await screen.findByText(copy.compatibility.compatible);
+    await expectBaseline('run_1/revision_1');
+    history.forward();
+    await screen.findByText(copy.compatibility.incompatible);
+    await expectBaseline('run_5/revision_5');
+    fireEvent.click(screen.getByRole('button', { name: copy.showOlderAttempts }));
+    await waitFor(() => expect(screen.queryByRole('button', { name: copy.showOlderAttempts })).toBeNull());
+    const select = await expectBaseline('run_5/revision_5');
+    expect(within(select).getAllByRole('option').map(option => option.getAttribute('value')))
+      .toEqual(['', 'run_1/revision_1', 'run_5/revision_5']);
+    fireEvent.change(select, { target: { value: 'run_1/revision_1' } });
+    fireEvent.click(screen.getByRole('button', { name: copy.compare }));
+    await screen.findByText(copy.compatibility.compatible);
+    await expectBaseline('run_1/revision_1');
+    view.unmount();
+  } finally { auth.dispose(); }
+});
+
 it('keeps inventory navigation after a changed pinned scorecard and refreshes to current records', async () => {
   const auth = await session();
   transport.get.mockImplementation((kind, path) => kind === 'structureScorecard' && path.includes('structureVersion=')
