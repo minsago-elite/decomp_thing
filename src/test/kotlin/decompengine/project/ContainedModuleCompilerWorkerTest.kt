@@ -125,6 +125,107 @@ class ContainedModuleCompilerWorkerTest {
         assertTrue(result.stderrBytes > 0)
     }
 
+    @Test
+    fun `synchronized transient header shadow header and sidecar changes refuse a successful compiler`() = withRoot { root ->
+        for (kind in listOf("header", "shadow", "sidecar")) {
+            val parent = Files.createDirectory(root.resolve(kind))
+            val realCompiler = stageCompiler(parent)
+            val sidecar = if (kind == "sidecar") precompiledHeader(parent, realCompiler) else null
+            val ready = parent.resolve("ready")
+            val proceed = parent.resolve("proceed")
+            val compiled = parent.resolve("compiled")
+            val restored = parent.resolve("restored")
+            val shim = script(realCompiler.parent.resolve("shim"), """
+                wait_for() {
+                    tries=0
+                    while [ ! -e "${'$'}1" ]; do
+                        tries=${'$'}((tries + 1))
+                        [ "${'$'}tries" -le 1000 ] || exit 125
+                        /usr/bin/sleep 0.01
+                    done
+                }
+                printf ready > '$ready'
+                wait_for '$proceed'
+                '$realCompiler' "${'$'}@"
+                status=${'$'}?
+                printf compiled > '$compiled'
+                wait_for '$restored'
+                exit "${'$'}status"
+            """.trimIndent())
+            val source = """
+                #include "modules/alpha.h"
+                #if __has_include("modules/transient.h")
+                #include "modules/transient.h"
+                #endif
+                #ifdef TRANSIENT_PCH
+                #pragma message("transient-sidecar-consumed")
+                #endif
+                int alpha(void) { return 7; }
+            """.trimIndent() + "\n"
+            val fixture = fixture(parent.resolve("run"), compiler = shim, source = source)
+            // The shadow search directory exists before the first inventory/watch registration.
+            Files.createDirectories(fixture.request.snapshotRoot.resolve("src/modules/modules"))
+            val relative = when (kind) {
+                "header" -> "include/modules/transient.h"
+                "shadow" -> "src/modules/modules/alpha.h"
+                else -> "include/modules/alpha.h.gch"
+            }
+            val transient = fixture.request.snapshotRoot.resolve(relative)
+            val execution = launch(fixture) {
+                try {
+                    await(ready)
+                    // A pragma message is a note (not a -Werror diagnostic). Require its retained
+                    // marker below to prove each transient compiler-search input was consumed.
+                    if (sidecar != null) Files.copy(sidecar, transient)
+                    else Files.writeString(transient, "#pragma message(\"transient-$kind-consumed\")\nint alpha(void);\n")
+                    Files.writeString(proceed, "go")
+                    await(compiled)
+                    Files.delete(transient)
+                } finally {
+                    // A failed assertion/setup must not strand a gated native child when the
+                    // worker is torn down. The shim also has its own finite wait ceiling.
+                    Files.writeString(proceed, "go")
+                    Files.writeString(restored, "restored")
+                }
+            }
+            assertEquals(0, execution.exitCode, execution.stderr)
+            val result = ContainedModuleCompilerResult.parse(execution.stdout)
+            result.requireBinding(fixture.request)
+            assertEquals(0, result.exitCode, "$kind compiler must have succeeded before refusal")
+            assertEquals("input-changed", result.outcome)
+            assertEquals(null, result.objectSha256)
+            assertTrue(Files.size(fixture.request.outputDirectory.resolve("module.o")) >= 52)
+            assertTrue(Files.readString(fixture.request.outputDirectory.resolve("compiler.stderr"))
+                .contains("transient-$kind-consumed"), "$kind was not consumed by the compiler")
+            assertFalse(Files.exists(transient))
+            verifyLogs(fixture, result)
+        }
+    }
+
+    private fun precompiledHeader(parent: Path, compiler: Path): Path {
+        val header = Files.writeString(parent.resolve("pch.h"), "#define TRANSIENT_PCH 1\nint alpha(void);\n")
+        val output = parent.resolve("pch.gch")
+        val diagnostics = parent.resolve("pch.log")
+        val process = ProcessBuilder(compiler.toString(), "-B${compiler.parent}/", "-std=c11", "-g", "-Wall", "-Wextra", "-Werror",
+            "-x", "c-header", header.toString(), "-o", output.toString())
+            .redirectErrorStream(true).redirectOutput(diagnostics.toFile()).start()
+        process.outputStream.close()
+        try {
+            assertTrue(process.waitFor(10, TimeUnit.SECONDS), "sidecar fixture compilation timed out")
+            assertTrue(Files.size(diagnostics) <= 65536)
+            assertEquals(0, process.exitValue(), Files.readString(diagnostics))
+        } finally {
+            if (process.isAlive) { process.destroyForcibly(); process.waitFor(5, TimeUnit.SECONDS) }
+        }
+        return output
+    }
+
+    private fun await(path: Path) {
+        val deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(10)
+        while (!Files.exists(path) && System.nanoTime() < deadline) Thread.sleep(10)
+        assertTrue(Files.exists(path), "compiler handshake timed out: $path")
+    }
+
     private data class Fixture(val root: Path, val request: ContainedModuleCompilerRequest)
     private data class Execution(val exitCode: Int, val stdout: ByteArray, val stderr: String)
 
@@ -150,7 +251,7 @@ class ContainedModuleCompilerWorkerTest {
         return Fixture(root, request)
     }
 
-    private fun launch(fixture: Fixture): Execution {
+    private fun launch(fixture: Fixture, duringExecution: () -> Unit = {}): Execution {
         val root = fixture.root
         val requestFile = root.resolve("request.json")
         Files.write(requestFile, fixture.request.canonicalBytes)
@@ -171,7 +272,12 @@ class ContainedModuleCompilerWorkerTest {
         }.start()
         process.outputStream.close()
         try {
+            var callbackFailure: Throwable? = null
+            try { duringExecution() } catch (failure: Throwable) { callbackFailure = failure }
+            // Give the worker's bounded native command its normal cleanup opportunity even
+            // when a synchronization callback failed, before deleting the fixture tree.
             assertTrue(process.waitFor(40, TimeUnit.SECONDS), "module compiler test worker timed out")
+            callbackFailure?.let { throw it }
             assertTrue(Files.size(stdout) <= ContainedModuleCompilerResult.MAXIMUM_RESULT_BYTES)
             assertTrue(Files.size(stderr) <= 64 * 1024)
             return Execution(process.exitValue(), Files.readAllBytes(stdout), Files.readString(stderr))

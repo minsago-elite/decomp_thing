@@ -40,6 +40,14 @@ jobs:
       - uses: ./.github/actions/setup-gradle-compiler-cache
         with:
           cache-read-only: true
+      - name: Verify ACP quota cleanup routing
+        run: python3 scripts/test-acp-quota-cleanup-routing.py
+      - name: Verify qualification exit routing and closed case reconciliation
+        run: |
+          python3 scripts/test-module-compilation-qualification-routing.py
+          python3 scripts/test-reconcile-module-compilation-hosted-cases.py
+      - name: Verify qualification freshness before Gradle prepares test outputs
+        run: bash scripts/test-module-compilation-qualification-preflight.sh
       - name: Install pinned frontend build toolchain
         run: |
           bash scripts/install-frontend-node.sh "$GITHUB_WORKSPACE/build/module-compilation-qualification/node"
@@ -53,8 +61,6 @@ jobs:
         run: bash scripts/test-module-compile-ext4-scratch-profile.sh
       - name: Verify frozen module deployment task re-entry
         run: python3 scripts/test-module-compiler-deployment.py
-      - name: Verify hosted report freshness ordering
-        run: python3 scripts/test-module-compilation-qualification-freshness.py
       - name: Prepare existing root-owned Java and ABI runtime
         run: bash scripts/ci-prepare-oracle-runtime.sh
       - name: Prepare existing user-session sandbox services

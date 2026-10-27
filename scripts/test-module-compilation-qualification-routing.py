@@ -166,14 +166,21 @@ class ModuleCompilationQualificationRoutingTest(unittest.TestCase):
         self.assertLessEqual(settings.keys(), {
             "MOCK_PREREQUISITES_EXIT", "MOCK_PREPARE_EXIT", "MOCK_CONFIGURATION_EXIT", "MOCK_LIVE_EXIT",
             "MOCK_RECONCILIATION_EXIT", "MOCK_CLEANUP_EXIT", "MOCK_XML_EXIT", "MOCK_INVENTORY", "MOCK_REPORTS",
-            "DANGLING_INVENTORY_SYMLINK",
+            "DANGLING_INVENTORY_SYMLINK", "DANGLING_OUTPUT_SYMLINK",
         })
         checkout, binaries = self.make_fixture()
         dangling_inventory = settings.pop("DANGLING_INVENTORY_SYMLINK", False)
-        inventory = checkout / "build/module-compilation-qualification/compiled-live-tests.json"
-        if dangling_inventory:
-            inventory.parent.mkdir(parents=True, exist_ok=True)
-            inventory.symlink_to("missing-inventory-target.json")
+        dangling_output = settings.pop("DANGLING_OUTPUT_SYMLINK", None)
+        stale_paths = {
+            "reports": "build/test-results/moduleCompilationLiveQualification",
+            "cases": "build/reports/contained-module-compilation-live/cases",
+        }
+        self.assertIn(dangling_output, (None, *stale_paths))
+        stale = checkout / (stale_paths[dangling_output] if dangling_output else
+                            "build/module-compilation-qualification/compiled-live-tests.json")
+        if dangling_inventory or dangling_output:
+            stale.parent.mkdir(parents=True, exist_ok=True)
+            stale.symlink_to("missing-target")
         call_log = checkout / "mock-calls.jsonl"
         env = dict(os.environ)
         for key in tuple(env):
@@ -194,10 +201,10 @@ class ModuleCompilationQualificationRoutingTest(unittest.TestCase):
         result = subprocess.run(["/bin/bash", "scripts/qualify-contained-module-compilation.sh"], cwd=checkout,
                                 env=env, capture_output=True, text=True, timeout=15, check=False)
         receipt_path = checkout / "build/module-compilation-qualification/qualification-exit.json"
-        if dangling_inventory:
+        if dangling_inventory or dangling_output:
             self.assertNotEqual(0, result.returncode, result.stdout + result.stderr)
-            self.assertTrue(inventory.is_symlink())
-            self.assertFalse((inventory.parent / "missing-inventory-target.json").exists())
+            self.assertTrue(stale.is_symlink())
+            self.assertFalse((stale.parent / "missing-target").exists())
             self.assertFalse(call_log.exists(), "stale-path refusal must precede all Gradle/operator commands")
             self.assertFalse(receipt_path.exists(), "preflight refusal occurs before the owned run lifecycle")
             return result, None, []
@@ -274,6 +281,18 @@ class ModuleCompilationQualificationRoutingTest(unittest.TestCase):
         self.assertEqual([], calls)
         self.assertIn("refusing to reuse compiler qualification inventory or reports",
                       result.stderr)
+
+    def test_dangling_report_symlink_is_refused_before_any_owned_run_commands(self):
+        result, receipt, calls = self.run_scenario(DANGLING_OUTPUT_SYMLINK="reports")
+        self.assertIsNone(receipt)
+        self.assertEqual([], calls)
+        self.assertIn("refusing to reuse compiler qualification inventory or reports", result.stderr)
+
+    def test_dangling_case_symlink_is_refused_before_any_owned_run_commands(self):
+        result, receipt, calls = self.run_scenario(DANGLING_OUTPUT_SYMLINK="cases")
+        self.assertIsNone(receipt)
+        self.assertEqual([], calls)
+        self.assertIn("refusing to reuse compiler qualification inventory or reports", result.stderr)
 
     def test_successful_live_tests_do_not_hide_reconciliation_failure(self):
         self.assert_status(self.run_scenario(MOCK_RECONCILIATION_EXIT=31), phase="complete",

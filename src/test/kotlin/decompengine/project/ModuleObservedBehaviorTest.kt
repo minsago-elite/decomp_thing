@@ -8,6 +8,7 @@ import decompengine.exploration.CoverageReport
 import decompengine.exploration.ExplorationReport
 import decompengine.exploration.ModuleObservationAttributor
 import decompengine.exploration.writeModuleObservations
+import decompengine.oracle.core.OracleJson
 import java.nio.file.Files
 import java.nio.file.Path
 import kotlin.io.path.createDirectories
@@ -17,13 +18,16 @@ import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
 import kotlin.test.assertFalse
+import kotlin.test.assertNotEquals
 import kotlin.test.assertTrue
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.JsonNull
 import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonObject
+import kotlinx.serialization.json.jsonPrimitive
 
 class ModuleObservedBehaviorTest {
     private val inputSha256 = "1".repeat(64)
@@ -170,6 +174,192 @@ class ModuleObservedBehaviorTest {
         Files.createSymbolicLink(root.resolve(ModuleObservedBehavior.FILE_NAME), target.toAbsolutePath())
         assertFailsWith<IllegalArgumentException> { ReconstructionExplorationInput.read(root, 10000) }
     }
+
+    @Test
+    fun `retained observations preserve small raw bytes and distinguish current and historical replay`() {
+        val raw = encoded(listOf(case("owned-case", "owned", "é")))
+        val exact = raw + " ".repeat(MAXIMUM_RETAINED_MODULE_OBSERVATION_BYTES - raw.toByteArray().size)
+        for (observed in listOf(null, "opaque legacy evidence", "opaque module-observation-retention-v1 note",
+            "{\"note\":\"module-observation-retention-v1\"}", raw, exact)) {
+            assertEquals(observed, ModuleObservationRetention.retain(retentionRequest(observed)))
+            for (legacy in listOf(false, true)) {
+                assertEquals(observed, ModuleObservationRetention.replay(observed, module, model, legacy))
+            }
+        }
+        val historicalMention = "opaque ${ModuleObservationRetention.KIND} note"
+        assertEquals(historicalMention, ModuleObservationRetention.replay(historicalMention, module, model, legacy = true))
+        assertFailsWith<IllegalArgumentException> {
+            ModuleObservationRetention.replay(historicalMention, module, model, legacy = false)
+        }
+        val largerPadded = exact + " "
+        val retained = requireNotNull(ModuleObservationRetention.retain(retentionRequest(largerPadded)))
+        assertTrue(retained.toByteArray().size < MAXIMUM_RETAINED_MODULE_OBSERVATION_BYTES)
+        assertEquals(selectModuleObservedBehavior(largerPadded, module, model), selectModuleObservedBehavior(
+            ModuleObservationRetention.replay(retained, module, model, legacy = false), module, model))
+        assertFailsWith<IllegalArgumentException> { ModuleObservationRetention.replay(retained, module, model, legacy = true) }
+        assertFailsWith<IllegalArgumentException> {
+            ModuleObservationRetention.retain(retentionRequest("opaque " + "x".repeat(MAXIMUM_RETAINED_MODULE_OBSERVATION_BYTES)))
+        }
+    }
+
+    @Test
+    fun `oversized corpus retains only whole selected cases with explicit raw provenance`() {
+        val raw = largeCorpus()
+        assertTrue(raw.toByteArray().size in (MAXIMUM_RETAINED_MODULE_OBSERVATION_BYTES + 1)..ModuleObservedBehavior.MAXIMUM_BYTES)
+        val retained = requireNotNull(ModuleObservationRetention.retain(retentionRequest(raw)))
+        val wrapper = Json.parseToJsonElement(retained).jsonObject
+        assertEquals(JsonPrimitive("module-selected"), wrapper["scope"])
+        assertEquals(JsonPrimitive(false), wrapper["originalCorpusRetained"])
+        assertEquals(JsonPrimitive(module.id), wrapper["moduleId"])
+        assertEquals(JsonArray(listOf(JsonPrimitive("owned"))), wrapper["functionIds"])
+        assertEquals(JsonObject(mapOf("sha256" to JsonPrimitive(sha256(raw.toByteArray())),
+            "bytes" to JsonPrimitive(raw.toByteArray().size), "caseCount" to JsonPrimitive(22))), wrapper["sourceCorpus"])
+        val selected = wrapper.getValue("selected").jsonObject.getValue("cases").jsonArray
+        assertEquals(listOf("owned-case", "shared-case"), selected.map { it.jsonObject.getValue("caseId").jsonPrimitive.content })
+        assertEquals(JsonArray(listOf(JsonPrimitive("other"), JsonPrimitive("owned"))),
+            selected[1].jsonObject.getValue("functionIds"))
+        assertFalse(retained.contains("unrelated-"))
+        val replayed = ModuleObservationRetention.replay(retained, module, model, legacy = false)
+        assertEquals(selectModuleObservedBehavior(raw, module, model), selectModuleObservedBehavior(replayed, module, model))
+
+        val changedRaw = largeCorpus("cd")
+        val changed = Json.parseToJsonElement(requireNotNull(ModuleObservationRetention.retain(retentionRequest(changedRaw)))).jsonObject
+        assertNotEquals(wrapper["sourceCorpus"], changed["sourceCorpus"])
+        assertEquals(wrapper["selected"], changed["selected"])
+        assertEquals(selectModuleObservedBehavior(raw, module, model), selectModuleObservedBehavior(changedRaw, module, model))
+        // Missing original bytes cannot authenticate a well-formed source digest declaration.
+        val source = wrapper.getValue("sourceCorpus").jsonObject
+        val changedDeclaredDigest = JsonObject(wrapper + ("sourceCorpus" to JsonObject(source +
+            ("sha256" to JsonPrimitive("f".repeat(64))))))
+        assertEquals(replayed, ModuleObservationRetention.replay(canonical(changedDeclaredDigest), module, model, legacy = false))
+    }
+
+    @Test
+    fun `empty selected corpus stays distinct from absent evidence and unrelated invalid IDs still fail`() {
+        val raw = encoded(largeUnrelatedCases())
+        val retained = requireNotNull(ModuleObservationRetention.retain(retentionRequest(raw)))
+        val replayed = ModuleObservationRetention.replay(retained, module, model, legacy = false)
+        assertEquals(0, ModuleObservedBehavior.parse(requireNotNull(replayed)).cases.size)
+        assertEquals(selectModuleObservedBehavior(raw, module, model), selectModuleObservedBehavior(replayed, module, model))
+        assertNotEquals(selectModuleObservedBehavior(null, module, model), selectModuleObservedBehavior(replayed, module, model))
+        val bad = encoded(largeUnrelatedCases() + case("unknown-case", "unknown"))
+        assertFailsWith<IllegalArgumentException> { ModuleObservationRetention.retain(retentionRequest(bad)) }
+    }
+
+    @Test
+    fun `closed retained wrapper rejects identity scope field and selected population substitutions`() {
+        val retained = requireNotNull(ModuleObservationRetention.retain(retentionRequest(largeCorpus())))
+        val value = Json.parseToJsonElement(retained).jsonObject
+        assertEquals(selectModuleObservedBehavior(largeCorpus(), module, model), selectModuleObservedBehavior(
+            ModuleObservationRetention.replay(retained, module, model, legacy = false), module, model))
+        fun reject(changed: JsonObject) {
+            val bytes = canonical(changed)
+            assertFailsWith<IllegalArgumentException> { ModuleObservationRetention.replay(bytes, module, model, legacy = false) }
+        }
+        for (key in value.keys) reject(JsonObject(value - key))
+        reject(JsonObject(value + ("extra" to JsonPrimitive(true))))
+        for ((key, replacement) in listOf(
+            "kind" to JsonPrimitive(ModuleObservationRetention.KIND + "-future"),
+            "provider" to JsonPrimitive("other"), "schemaVersion" to JsonPrimitive(2),
+            "scope" to JsonPrimitive("complete-corpus"), "originalCorpusRetained" to JsonPrimitive(true),
+            "inputSha256" to JsonPrimitive("3".repeat(64)), "moduleId" to JsonPrimitive("other-module"),
+            "functionIds" to JsonArray(listOf(JsonPrimitive("other"))),
+            "functionIds" to JsonArray(listOf(JsonPrimitive("owned"), JsonPrimitive("owned"))),
+        )) reject(JsonObject(value + (key to replacement)))
+        val source = value.getValue("sourceCorpus").jsonObject
+        fun sourceChange(changed: JsonObject) = reject(JsonObject(value + ("sourceCorpus" to changed)))
+        for (key in source.keys) sourceChange(JsonObject(source - key))
+        sourceChange(JsonObject(source + ("extra" to JsonPrimitive(1))))
+        for (bad in listOf(JsonNull, JsonPrimitive("NOT_A_DIGEST"), JsonPrimitive(1))) {
+            sourceChange(JsonObject(source + ("sha256" to bad)))
+        }
+        for (bad in listOf(JsonPrimitive(0), JsonPrimitive(MAXIMUM_RETAINED_MODULE_OBSERVATION_BYTES),
+            JsonPrimitive(ModuleObservedBehavior.MAXIMUM_BYTES + 1), JsonPrimitive("600000"), JsonPrimitive(600000.5), JsonNull)) {
+            sourceChange(JsonObject(source + ("bytes" to bad)))
+        }
+        for (bad in listOf(JsonPrimitive(1), JsonPrimitive(1025), JsonPrimitive(-1), JsonPrimitive("22"), JsonPrimitive(true))) {
+            sourceChange(JsonObject(source + ("caseCount" to bad)))
+        }
+        reject(JsonObject(value + ("selected" to ModuleObservedBehavior.envelope(inputSha256,
+            listOf(case("other-only", "other"))))))
+        reject(JsonObject(value + ("selected" to ModuleObservedBehavior.envelope("3".repeat(64),
+            listOf(case("owned-case", "owned"))))))
+        assertFailsWith<IllegalArgumentException> {
+            ModuleObservationRetention.replay(value.toString(), module, model, legacy = false)
+        }
+        assertFailsWith<IllegalArgumentException> {
+            ModuleObservationRetention.replay(retained.dropLast(2), module, model, legacy = false)
+        }
+        assertFailsWith<IllegalArgumentException> { ModuleObservationRetention.replay(retained, module, model, legacy = true) }
+        assertFailsWith<IllegalArgumentException> { ModuleObservationRetention.requireRawInput(retained) }
+        assertFailsWith<IllegalArgumentException> { selectModuleObservedBehavior(retained, module, model) }
+        val escaped = retained.replace(ModuleObservationRetention.KIND, "module-observed-behavior-selectio\\u006e")
+            .replace("module-observation-retention-v1", "module-observation-retention-v\\u0031")
+        assertFalse(ModuleObservationRetention.KIND in escaped || "module-observation-retention-v1" in escaped)
+        assertEquals(value, Json.parseToJsonElement(escaped).jsonObject)
+        assertFailsWith<IllegalArgumentException> { ModuleObservationRetention.requireRawInput(escaped) }
+        for (legacy in listOf(false, true)) {
+            assertFailsWith<IllegalArgumentException> { ModuleObservationRetention.replay(escaped, module, model, legacy) }
+        }
+        val root = directory()
+        root.resolve(ModuleObservedBehavior.FILE_NAME).writeText(retained)
+        assertFailsWith<IllegalArgumentException> { ReconstructionExplorationInput.read(root, 4096) }
+    }
+
+    @Test
+    fun `whole wrapper byte bound includes provenance and compact small inputs retain their original bytes`() {
+        fun cases(characters: Int, includeUnrelated: Boolean): List<ModuleObservedCase> {
+            require(characters in 0..32 * 1024)
+            var remaining = characters
+            val args = List(32) { "x".repeat(minOf(remaining, 1024)).also { remaining -= it.length } }
+            val selected = List(5) { index -> ModuleObservedCase("owned-$index",
+                ModuleObservationAttribution(listOf("owned"), traceSha256), if (index == 0) args else emptyList(),
+                "00".repeat(16384), 0, "11".repeat(16384), "22".repeat(16384)) }
+            return selected + if (includeUnrelated) listOf(ModuleObservedCase("unrelated-boundary",
+                ModuleObservationAttribution(listOf("other"), traceSha256), emptyList(), "", 0, "33".repeat(16384), "")) else emptyList()
+        }
+        val baseRaw = encoded(cases(0, includeUnrelated = true))
+        val baseRetained = requireNotNull(ModuleObservationRetention.retain(retentionRequest(baseRaw)))
+        val additional = MAXIMUM_RETAINED_MODULE_OBSERVATION_BYTES - baseRetained.toByteArray().size
+        assertTrue(additional in 1 until 32 * 1024)
+        val exactRaw = encoded(cases(additional, includeUnrelated = true))
+        val exact = requireNotNull(ModuleObservationRetention.retain(retentionRequest(exactRaw)))
+        assertEquals(MAXIMUM_RETAINED_MODULE_OBSERVATION_BYTES, exact.toByteArray().size)
+        assertEquals(selectModuleObservedBehavior(exactRaw, module, model), selectModuleObservedBehavior(
+            ModuleObservationRetention.replay(exact, module, model, legacy = false), module, model))
+        val overRaw = encoded(cases(additional + 1, includeUnrelated = true))
+        val overSelection = requireNotNull(selectModuleObservationCases(overRaw, module, model))
+        val exactObject = Json.parseToJsonElement(exact).jsonObject
+        val expectedOver = JsonObject(exactObject + mapOf(
+            "selected" to ModuleObservedBehavior.envelope(inputSha256, overSelection.cases),
+            "sourceCorpus" to JsonObject(mapOf("sha256" to JsonPrimitive(sha256(overRaw.toByteArray())),
+                "bytes" to JsonPrimitive(overRaw.toByteArray().size), "caseCount" to JsonPrimitive(6))),
+        ))
+        assertEquals(MAXIMUM_RETAINED_MODULE_OBSERVATION_BYTES + 1, canonical(expectedOver).toByteArray().size)
+        assertFailsWith<IllegalArgumentException> { ModuleObservationRetention.retain(retentionRequest(overRaw)) }
+
+        val compactBase = ModuleObservedBehavior.envelope(inputSha256, cases(0, includeUnrelated = false)).toString()
+        val compactAdditional = MAXIMUM_RETAINED_MODULE_OBSERVATION_BYTES - compactBase.toByteArray().size
+        assertTrue(compactAdditional in 1..32 * 1024)
+        val compact = ModuleObservedBehavior.envelope(inputSha256, cases(compactAdditional, includeUnrelated = false)).toString()
+        assertEquals(MAXIMUM_RETAINED_MODULE_OBSERVATION_BYTES, compact.toByteArray().size)
+        assertTrue(canonical(ModuleObservedBehavior.parseObject(compact)).toByteArray().size > MAXIMUM_RETAINED_MODULE_OBSERVATION_BYTES)
+        assertEquals(compact, ModuleObservationRetention.retain(retentionRequest(compact)))
+        assertEquals(compact, ModuleObservationRetention.replay(compact, module, model, legacy = false))
+    }
+
+    private fun retentionRequest(observed: String?) = ModuleReconstructionRequest(module, model, "", "", "",
+        emptyMap(), Path.of("unused-retention-workspace"), observedBehavior = observed)
+
+    private fun largeUnrelatedCases(hex: String = "ab") = List(20) { index -> ModuleObservedCase("unrelated-$index",
+        ModuleObservationAttribution(listOf("other"), traceSha256), emptyList(), "", 0, hex.repeat(16384), "") }
+
+    private fun largeCorpus(hex: String = "ab") = encoded(listOf(case("owned-case", "owned", "selected"),
+        ModuleObservedCase("shared-case", ModuleObservationAttribution(listOf("owned", "other"), traceSha256),
+            listOf("shared whole execution"), "41", 7, "42", "43")) + largeUnrelatedCases(hex))
+
+    private fun canonical(value: JsonObject): String = OracleJson.canonicalBytes(value, ModuleObservedBehavior.limits).decodeToString()
+    private fun encoded(cases: List<ModuleObservedCase>): String = canonical(ModuleObservedBehavior.envelope(inputSha256, cases))
 
     private fun case(id: String, functionId: String, argument: String? = null) = ModuleObservedCase(
         id, ModuleObservationAttribution(listOf(functionId), traceSha256), listOfNotNull(argument), "", 0, "", "",

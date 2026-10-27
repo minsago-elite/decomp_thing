@@ -21,14 +21,14 @@ REPORT_RELATIVE = Path("build/test-results/moduleCompilationLiveQualification")
 class ModuleCompilationQualificationFreshnessTest(unittest.TestCase):
     def test_production_test_task_uses_a_preparation_prerequisite(self) -> None:
         source = INIT.read_text(encoding="utf-8")
-        preflight = source.partition("tasks.register('moduleCompilationLiveQualificationFreshness')")[2].partition(
+        preflight = source.partition("tasks.register('moduleCompilerLivePreflight')")[2].partition(
             "tasks.register('moduleCompilationLiveQualification', Test)"
         )[0]
         test_task = source.partition("tasks.register('moduleCompilationLiveQualification', Test)")[2].partition(
             "\n        }"
         )[0]
         self.assertIn("Files.exists(reports, LinkOption.NOFOLLOW_LINKS)", preflight)
-        self.assertIn("dependsOn tasks.named('moduleCompilationLiveQualificationFreshness')", test_task)
+        self.assertIn("tasks.named('moduleCompilerLivePreflight')", test_task)
         self.assertNotIn("refusing existing hosted compiler test reports", test_task)
         self.assertIn('moduleCompilationLiveQualification', QUALIFIER.read_text(encoding="utf-8"))
 

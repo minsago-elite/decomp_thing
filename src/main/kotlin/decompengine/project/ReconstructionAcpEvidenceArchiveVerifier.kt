@@ -226,13 +226,14 @@ internal object ReconstructionAcpEvidenceArchiveVerifier {
                     ) {
                         "pre-dispatch fallback prompt budget differs from the reconstruction profile or reconstructor identity: $moduleId"
                     }
-                    val request = promptInputs.request(moduleId, projectDir, checkpoint.preDispatchObservedBehavior)
+                    val legacy = checkpoint.reconstructorIdentity.endsWith(":v3")
+                    val request = promptInputs.requestFromRetainedObservation(moduleId, projectDir,
+                        checkpoint.preDispatchObservedBehavior, legacy)
                         .copy(compilationCheckpointVersion = checkpoint.schemaVersion.toInt())
                     require(request.module.sourcePath == source.path &&
                         (request.module.functionIds + request.module.globalIds).sorted() == source.entityIds) {
                         "pre-dispatch fallback differs from the retained module plan: $moduleId"
                     }
-                    val legacy = checkpoint.reconstructorIdentity.endsWith(":v3")
                     val prompt = modulePromptEvidence(request, legacy = legacy).text
                     require(prompt.length.toLong() == checkpoint.promptCharacters &&
                         sha256(prompt.toByteArray(StandardCharsets.UTF_8)) == checkpoint.promptSha256 &&

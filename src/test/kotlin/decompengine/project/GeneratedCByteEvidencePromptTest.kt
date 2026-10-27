@@ -89,7 +89,7 @@ class GeneratedCByteEvidencePromptTest {
     }
 
     private fun request(model: RecoveredProgramModel) = ModuleReconstructionRequest(
-        PlannedModule("m", "src/m.c", "include/m.h", emptyList(), model.globals.map { it.id }, boundaryEvidence = emptyList()),
+        PlannedModule("m", "src/modules/m.c", "include/modules/m.h", emptyList(), model.globals.map { it.id }, boundaryEvidence = emptyList()),
         model, "", "", "", emptyMap(), Path.of("build"))
     @Test fun `current null and cutoff have distinct completeness labels and commitments`() {
         val base = RecoveredProgramModel(4, "fixture", emptyList(),

@@ -160,6 +160,11 @@ internal class ProfileModulePromptInputs(
         )
     }
 
+    fun requestFromRetainedObservation(
+        moduleId: String, projectDir: java.nio.file.Path, observedBehavior: String?, legacy: Boolean,
+    ): ModuleReconstructionRequest = request(moduleId, projectDir,
+        ModuleObservationRetention.replay(observedBehavior, modules.getValue(moduleId), model, legacy))
+
     fun fingerprint(request: ModuleReconstructionRequest, legacy: Boolean = false,
         compilerPolicyId: String = adapter.compilation.id): String {
         if (!legacy) return selectedModuleInputFingerprint(request, compilerPolicyId)

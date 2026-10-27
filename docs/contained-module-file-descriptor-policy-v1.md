@@ -69,3 +69,23 @@ The finite policy is not a universal-fit or peak-use claim. Unsupported host
 capacity or runtime pressure must fail with owned cleanup, without retries at
 progressively larger limits. Issue #1786 and its broader parent requirements
 remain open until their full applicable evidence is available.
+
+### Qualification staging and freshness
+
+The qualifier invokes Gradle more than once: preparation freezes the installed
+worker deployment before the hosted child manifest and compiled inventory consume
+it. Each invocation must revalidate the same exact deployment; unchanged re-entry
+is not permission to overwrite it. The descriptor-relative staging verifier rejects
+changed sources, incomplete/extra/substituted members, links, and altered published
+permissions or ownership. Resource generation uses the reproducible native-helper
+records described in [web-packaging.md](web-packaging.md#reproducible-application-jar),
+so rebuilding identical inputs does not silently change that frozen application JAR.
+These are the focused #1808/#1789 prerequisites, reused from PR #1813 rather than
+merging the rest of that child branch.
+
+Report freshness is checked in a separate Gradle prerequisite before `Test` prepares
+its outputs. Both that guard and the earlier shell admission reject dangling report
+links; the shell also rejects dangling inventory/case links before invoking Gradle
+or acquiring owned runtime state. Existing evidence is preserved, not cleaned or
+reinterpreted as a new attempt. Isolated staging/freshness/routing fixtures do not
+replace the required exact-source, configured Make/Ninja hosted qualification.
