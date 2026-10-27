@@ -247,7 +247,10 @@ def _verify_staged(parent_fd: int, stage_name: str, stage: Path, pins: list[dict
                     _fail(f"worker deployment member owner differs from its frozen stage: {name}")
                 size, digest, after = _hash_descriptor(descriptor, int(pin["bytes"]))
                 named = os.stat(name, dir_fd=stage_fd, follow_symlinks=False)
-                if _version(after) != _version(named) or size != pin["bytes"] or digest != pin["sha256"]:
+                # Bind hashing to the exact metadata admitted above, not just
+                # to _hash_descriptor's later initial snapshot and final name.
+                if (_version(after) != _version(before) or _version(after) != _version(named) or
+                        size != pin["bytes"] or digest != pin["sha256"]):
                     _fail(f"worker deployment member differs from its source pin: {name}")
             finally:
                 os.close(descriptor)

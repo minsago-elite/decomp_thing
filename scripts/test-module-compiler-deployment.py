@@ -151,6 +151,51 @@ class DeploymentFixture(unittest.TestCase):
                         self.prepare()
                 self.assertEqual(frozen, self.snapshot(), "refusal must not rewrite the frozen deployment")
 
+    def test_member_metadata_transition_after_admission_refuses_without_repair(self) -> None:
+        self.prepare()
+        frozen = self.snapshot()
+        identity = (self.stage / "000-app.jar").stat()
+        real_stat, real_fstat = os.stat, os.fstat
+
+        # Admit the real read-only, stage-owned member once, then model a
+        # metadata change immediately before _hash_descriptor's first fstat.
+        # Hash the actual unchanged bytes; all later descriptor/name observations
+        # agree on the changed version. No privileged chown or timing is needed.
+        for field, value in (("st_uid", identity.st_uid + 1),
+                             ("st_gid", identity.st_gid + 1),
+                             ("st_mode", identity.st_mode | 0o200),
+                             ("st_nlink", 2),
+                             ("st_mtime_ns", identity.st_mtime_ns + 1),
+                             ("st_ctime_ns", identity.st_ctime_ns + 1)):
+            with self.subTest(field=field):
+                observations = 0
+
+                def changed_version(info):
+                    fields = {name: getattr(info, name) for name in dir(info) if name.startswith("st_")}
+                    fields[field] = value
+                    return SimpleNamespace(**fields)
+
+                def observe_descriptor(descriptor):
+                    nonlocal observations
+                    info = real_fstat(descriptor)
+                    if (info.st_dev, info.st_ino) != (identity.st_dev, identity.st_ino):
+                        return info
+                    observations += 1
+                    return info if observations == 1 else changed_version(info)
+
+                def observe_name(*args, **kwargs):
+                    info = real_stat(*args, **kwargs)
+                    if observations >= 2 and (info.st_dev, info.st_ino) == (identity.st_dev, identity.st_ino):
+                        return changed_version(info)
+                    return info
+
+                with mock.patch.object(DEPLOYMENT.os, "fstat", side_effect=observe_descriptor), \
+                        mock.patch.object(DEPLOYMENT.os, "stat", side_effect=observe_name):
+                    with self.assertRaisesRegex(DEPLOYMENT.DeploymentError, "differs from its source pin"):
+                        self.prepare()
+                self.assertEqual(3, observations, "exercise admission, hash-before and hash-after snapshots")
+                self.assertEqual(frozen, self.snapshot(), "refusal must not rewrite the frozen deployment")
+
     def test_changed_source_hash_refuses_and_preserves_prepared_manifest(self) -> None:
         self.prepare()
         original = self.snapshot()
