@@ -54,6 +54,20 @@ internal class GitTestRepositories : AutoCloseable {
         return git("--git-dir=$gitDir", "rev-parse", "HEAD").trim()
     }
 
+    /** Build historical tree objects without checking out paths that may exceed filesystem limits. */
+    fun treeWithFile(gitDir: Path, path: String, blobObjectId: String): String {
+        var objectId = blobObjectId
+        var mode = "100644"
+        val input = root.resolve("tree-object")
+        for (name in path.split('/').asReversed()) {
+            val objectBytes = objectId.chunked(2).map { it.toInt(16).toByte() }.toByteArray()
+            Files.write(input, "$mode $name\u0000".toByteArray(Charsets.UTF_8) + objectBytes)
+            objectId = git("--git-dir=$gitDir", "hash-object", "-t", "tree", "-w", input.toString()).trim()
+            mode = "40000"
+        }
+        return objectId
+    }
+
     /** Executable script that leaves [marker] behind if anything ever runs it. */
     fun tripwire(name: String, marker: Path): Path {
         val script = root.resolve(name)

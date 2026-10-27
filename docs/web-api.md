@@ -621,6 +621,10 @@ higher precedence, so a pattern such as `!secret.key` would re-include a credent
 therefore enforced on its own terms. `GitTrackingPolicy.excluded` evaluates paths with
 `check-ignore --no-index` in a server-owned scratch repository whose only ignore source is the
 policy, so no repository file can override it. Staging refuses any path it excludes.
+Startup or mutation-owned runtime preparation creates this policy repository before reads. Workspace
+reads only use the prepared policy; missing policy storage is unavailable, not silently recreated.
+A completed recovery sweep can leave a worktree conflict available for read-only inspection; viewing
+it does not retry recovery. After operator repair, sweep explicitly before reviewing new guards.
 
 ### Server-owned Git adapter
 
@@ -773,8 +777,12 @@ Each operation works in a private staging tree under the job's `git/staging/<ope
 registration record is written inside that tree before one atomic rename publishes it as
 `git/repositories/<repositoryId>`, and an existing name is never replaced. Readers therefore see
 either no repository or a complete one. Nothing is written under `reports/`, so a recorded or
-accepted source snapshot cannot be overwritten. On restart, and before an instance first uses a
-job, non-terminal records are reconciled. A published repository makes its operation
+accepted source snapshot cannot be overwritten. Startup prepares the private Git runtime and
+reconciles retained jobs; explicit mutation admission can also reconcile a job before use.
+GET routes never prepare runtime/storage or retry reconciliation. If startup recovery failed for
+a retained job, reads return `503 STORAGE_UNAVAILABLE` without changing its records or staging;
+only an explicit lifecycle recovery sweep or mutation admission may retry. Non-terminal records
+are reconciled under those authorities. A published repository makes its operation
 `completed`. Otherwise the staging tree is removed and the operation becomes `interrupted` with
 `recoveryRequired: false`. If removal fails, it becomes `recovery-required` and the tree is kept
 for inspection. Reconciliation never repeats work. Replaying the original key reports the
@@ -810,6 +818,10 @@ single initialization action from the latest attempt's candidate. The full Git U
 They accept only their listed query parameters, each at most once. `limit` is 1-200 and defaults
 to 50, and pages also stop early at a 256 KiB rendering budget. No read runs a hook, filter,
 textconv, external diff tool or submodule command, and no read refreshes the index with a lock.
+Every GitReads child also has a hard and soft 512 MiB address-space ceiling, including raw/numstat
+comparisons, selected patches and object-size reads. Enforcement is fail-closed; a missing limiter
+or an allocation failure returns an explicit repository-unavailable/corrupt error, never an
+unbounded retry.
 
 - `status` (`gitStatus`) parses `git status --porcelain=v2 -z --untracked-files=all
   --ignored=matching --find-renames` byte by byte. Each entry reports its `staged` and `unstaged`
@@ -819,13 +831,15 @@ textconv, external diff tool or submodule command, and no read refreshes the ind
   `notices` explain the current state and its available next steps: clean, dirty, unborn,
   detached, conflicted, busy (a queued or running operation) and incomplete (status output
   exceeded 4 MiB). The read itself stays usable in every one of those states. The cursor is bound to
-  `worktreeVersion`; once anything observable changes, a later page answers `409 REF_CHANGED`.
+  `worktreeVersion` plus all listed paths/states, including ignored entries; observable listing
+  changes cause a later page to answer `409 REF_CHANGED`.
 - `worktreeVersion` now digests HEAD plus every non-ignored status entry. That includes the
   entry's index blob and the work-tree file's size and modification time, so re-editing an
   already modified file or re-staging different content changes it. Native invalid-UTF-8 names
   are observed using their exact filesystem bytes, not their escaped display names. Observation
   errors other than a missing file fail explicitly rather than supplying a stable placeholder.
-  Ignored files never change this version.
+  Ignored files never change this version. This is a bounded read fingerprint, not a source-content
+  identity: edits preserving size/mtime or beyond the status output bound may leave it unchanged.
 - `history` (`gitHistory`) lists commits from an exact `start` object (default HEAD; an unborn
   branch has none). The output is NUL-delimited `git log` with full object IDs, all parents (merges
   included), author, timestamps and a 200-character subject with an explicit truncation flag.
@@ -844,7 +858,10 @@ textconv, external diff tool or submodule command, and no read refreshes the ind
   modes, line counts and a binary flag (`-` counts mean binary). The new blob's size comes from
   `cat-file --batch-check` without reading the content. `file=<fileId>` returns that file alone
   with a unified patch of at most 128 KiB, flagged `truncated` when cut. Binary files never
-  render content. Managed `info/attributes` restores automatic binary detection with `!diff`,
+  render content. Text patches whose current or original path is invalid UTF-8 or exceeds the
+  runner's 4,096 UTF-16-code-unit argument bound return `422 PATCH_UNAVAILABLE`; the exact listing
+  identity and display entry remain available, including for trees never checked out at HEAD.
+  Managed `info/attributes` restores automatic binary detection with `!diff`,
   overriding source-controlled forced-text/binary/driver attributes. The exact previous managed
   attributes layout is atomically upgraded on audit; unrecognized layouts are rejected without
   rewriting them. No source or index bytes change during that upgrade. Abbreviated object IDs
@@ -1100,8 +1117,13 @@ repository again. The view has these parts:
 - **History.** History pages with **Older commits**. Each commit shows whether it is mapped to a
   reconstruction revision and that revision's acceptance. A mapped commit links to the recorded
   source revision and attempt. Inspecting a commit shows its files, provenance, export digest and
-  verification, and offers the export download and a tag form.
-- **Branches and work trees.** Branches show their exact object IDs. Switching is disabled, with
+  verification, and offers the export download and a tag form. Changed files and immutable-target
+  tagging appear as soon as the diff pages arrive; optional provenance/export has a separate pending
+  or unavailable state and cannot delay them. Obsolete export results cannot replace a new selection.
+- **Branches and work trees.** Branches show their exact object IDs. The current marker comes from
+  the selected tree's HEAD, not the repository-scoped primary-tree ref marker. Branches checked out
+  elsewhere are labelled explicitly and cannot be switched to or deleted; the selected current
+  branch has no switch-self/delete controls. Switching is disabled, with
   the reason shown, while the work tree has changes, status is incomplete or an operation is running.
   The `active-worker` status notice projects the backend lease for the selected work tree: any active
   attempt holds the primary tree, while only the owning attempt holds a linked tree. Switching and
