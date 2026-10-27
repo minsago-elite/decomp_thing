@@ -70,6 +70,13 @@ it('describes every server option and allows an explicit choice only among suppo
   expect(screen.queryByText(/workflow-build/)).toBeNull();
 });
 
+it('labels omitted older-server harness facts as not reported without inferring provenance', () => {
+  mount({ capabilities: fixture<Bootstrap>('legacy-bootstrap-before-configuration').capabilities });
+  expect(screen.getAllByText('This server did not report harness provenance for this option.')).toHaveLength(2);
+  expect(screen.queryByText(/Agent harness: acp/)).toBeNull();
+  expect(transport.post).not.toHaveBeenCalled();
+});
+
 it('starts from server defaults with one guarded keyed request and opens the recorded attempt', async () => {
   let answer!: (value: unknown) => void;
   transport.post.mockImplementation(() => new Promise(resolve => { answer = resolve; }));

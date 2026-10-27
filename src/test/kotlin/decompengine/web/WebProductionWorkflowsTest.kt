@@ -484,7 +484,7 @@ class WebProductionWorkflowsTest {
         assertTrue(legacyFacts.prerequisite.available); assertTrue(legacyFacts.selected)
         val provenance = assertNotNull(legacyFacts.provenance)
         assertEquals("legacy-openai-compatible", provenance.implementationId); assertTrue(provenance.deprecated)
-        assertNull(provenance.configurationSha256)
+        assertTrue(assertNotNull(provenance.configurationSha256).matches(Regex("[0-9a-f]{64}")))
         assertFalse(legacy.toString().contains("legacy-private-key") || legacy.toString().contains("example.invalid"))
         val unsupported = WebHarnessReadinessProjector.harnessFacts(mapOf("ACP_HARNESS" to "direct"))
         assertEquals("HARNESS_UNSUPPORTED", unsupported.getValue(WebAgentHarness.ACP).prerequisite.reasonCode)
@@ -582,6 +582,74 @@ class WebProductionWorkflowsTest {
                 WebWorkflowDefaults.RECONSTRUCT_AGENT, harnessCapabilityId = "agent-acp"), "configured_reconstruct_2",
                 harnessPrerequisites(acp = ACP_PROVENANCE))
             assertTrue(replay.replayed); assertEquals(second.configuration, replay.attempt.configuration)
+        }
+    }
+
+    @Test
+    fun `real legacy settings survive restart and changed settings bind only new admissions`() = withRoot { root ->
+        val environment = mapOf("ACP_HARNESS" to "legacy-openai", "BASE_URL" to "https://first.invalid/v1",
+            "API_KEY" to "legacy-secret-canary", "MODEL" to "first-model", "REASONING_EFFORT" to "medium")
+        val job = JobStore(root).createFromUpload("legacy-configuration.elf", elfFixture())
+        val engines = FakeEngines()
+        val adapter = ReconstructWorkflowAdapter(engines, FAST, WebReconstructionMode.AGENT, WebAgentHarness.LEGACY_OPENAI, emptyList())
+        val request = NewWorkflowAttempt(WorkflowKind.RECONSTRUCT, WebWorkflowDefaults.RECONSTRUCT_AGENT,
+            harnessCapabilityId = "agent-legacy-openai")
+        val retained = mutableListOf<WorkflowAttempt>()
+        var firstExpected = ""
+        val settings = listOf(environment, environment + ("BASE_URL" to "https://second.invalid/v1"),
+            environment + ("MODEL" to "second-model"), environment + ("REASONING_EFFORT" to "high"))
+        settings.forEachIndexed { index, current ->
+            val facts = WebHarnessReadinessProjector.harnessFacts(current).getValue(WebAgentHarness.LEGACY_OPENAI)
+            assertTrue(facts.prerequisite.available)
+            val provenance = assertNotNull(facts.provenance)
+            engines.resolvedDescriptor = provenance.stableDescriptor
+            // Reopen both durable stores as on a server restart, using only inert execution engines.
+            service(JobStore(root), listOf(adapter)).use { service ->
+                service.initializeExistingStorage()
+                val expected = version(service, job.id)
+                if (index == 0) firstExpected = expected
+                val attempt = service.requestDurableStart(job.id, expected, request, "legacy_config_start_$index",
+                    harnessPrerequisites(acp = null, legacy = provenance)).attempt
+                assertEquals(WorkflowRunState.COMPLETED, attempt.state)
+                val recorded = assertNotNull(attempt.configuration?.harness)
+                assertEquals(provenance.configurationSha256, recorded.configurationSha256)
+                assertEquals(provenance.stableDescriptor, engines.harnesses.last()?.expectedDescriptor)
+                val dto = webRun(attempt).getValue("configuration").jsonObject.getValue("harness").jsonObject
+                assertEquals(recorded.configurationSha256, dto.getValue("configurationSha256").jsonPrimitive.content)
+                retained.forEach { earlier ->
+                    assertNotEquals(earlier.configuration, attempt.configuration)
+                    assertEquals(earlier.configuration,
+                        service.presentation(job.id).snapshot!!.attempts.single { it.runId == earlier.runId }.configuration)
+                }
+                retained += attempt
+                val replay = service.requestDurableStart(job.id, firstExpected, request, "legacy_config_start_0",
+                    harnessPrerequisites(acp = null, legacy = provenance))
+                assertTrue(replay.replayed); assertEquals(retained.first().configuration, replay.attempt.configuration)
+                assertFalse(dto.toString().contains("legacy-secret-canary") || dto.toString().contains(".invalid"))
+            }
+        }
+        assertEquals(settings.size, engines.harnesses.size, "a replay or restart executed extra work")
+    }
+
+    @Test
+    fun `changed real legacy settings refuse execution before agent work`() = withRoot { root ->
+        val environment = mapOf("ACP_HARNESS" to "legacy-openai", "BASE_URL" to "https://first.invalid/v1",
+            "API_KEY" to "legacy-secret-canary", "MODEL" to "first-model")
+        val admitted = WebHarnessReadinessProjector.harnessFacts(environment).getValue(WebAgentHarness.LEGACY_OPENAI).provenance!!
+        val changed = decompengine.acp.AcpHarnessFactory.fromEnvironment(environment + ("MODEL" to "second-model")).provenance
+        val engines = FakeEngines().apply {
+            resolvedDescriptor = changed.stableDescriptor
+            reconstructBody = { _, _, _ -> throw AssertionError("agent work ran after a legacy configuration change") }
+        }
+        val store = JobStore(root); val job = store.createFromUpload("legacy-changed.elf", elfFixture())
+        val adapter = ReconstructWorkflowAdapter(engines, FAST, WebReconstructionMode.AGENT, WebAgentHarness.LEGACY_OPENAI, emptyList())
+        service(store, listOf(adapter)).use { service ->
+            service.initializeExistingStorage()
+            val attempt = service.requestDurableStart(job.id, version(service, job.id), NewWorkflowAttempt(WorkflowKind.RECONSTRUCT,
+                WebWorkflowDefaults.RECONSTRUCT_AGENT, harnessCapabilityId = "agent-legacy-openai"), "legacy_changed_start1",
+                harnessPrerequisites(acp = null, legacy = admitted)).attempt
+            assertEquals(WorkflowRunState.FAILED, attempt.state)
+            assertEquals(WorkflowTerminalReason.REFUSED, attempt.terminalReason)
         }
     }
 

@@ -22,6 +22,17 @@ it('shows the exact admission record, including harness provenance, as recorded 
   expect(section.getByText(/is not the configuration and does not prove that an agent session ran/)).toBeTruthy();
 });
 
+it('shows a legacy public-settings digest without claiming ACP protocol or SDK provenance', () => {
+  const recorded = run('run-configured-legacy');
+  render(<RecordedConfiguration run={recorded} />);
+  const section = within(screen.getByRole('region', { name: 'Recorded configuration' }));
+  expect(section.getByText('legacy-openai-compatible')).toBeTruthy();
+  expect(section.getByText('e64b5d550f80dbc059dae755de0c0383f6da7c6b0a45adf516fc32c1e090f7c9')).toBeTruthy();
+  expect(section.getByText('Deprecated (retained for compatibility)')).toBeTruthy();
+  expect(section.queryByText('0.30.1')).toBeNull();
+  expect(section.queryByText(/example.invalid|legacy-key/)).toBeNull();
+});
+
 it('keeps an attempt without a record distinct from one that never contacts an agent', () => {
   const { unmount } = render(<RecordedConfiguration run={run('run-completed-unaccepted')} />);
   expect(screen.getByText(/recorded before admission configuration was retained/)).toBeTruthy();
@@ -31,6 +42,14 @@ it('keeps an attempt without a record distinct from one that never contacts an a
     ...evidence.configuration!, optionId: 'workflow-reconstruct-evidence-only', mode: 'evidence-only', contactsAgent: false, harness: null,
   } }} />);
   expect(screen.getByText('No agent harness: this attempt never contacts an agent.')).toBeTruthy();
+});
+
+it('labels omitted older-server configuration as not recorded rather than inventing one', () => {
+  const older = (decodeContract(fixture('legacy-run-before-configuration'), { mode: 'response' }) as { data: Run }).data;
+  expect(older.configuration).toBeUndefined();
+  render(<RecordedConfiguration run={older} />);
+  expect(screen.getByText(/recorded before admission configuration was retained/)).toBeTruthy();
+  expect(screen.queryByText('No agent harness: this attempt never contacts an agent.')).toBeNull();
 });
 
 it('refuses a recorded harness that disagrees with the harness the attempt submitted', () => {

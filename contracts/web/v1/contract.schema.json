@@ -246,9 +246,7 @@
         "contactsAgent",
         "requiredTools",
         "input",
-        "limitsAdjustable",
-        "harness",
-        "reconstruction"
+        "limitsAdjustable"
       ],
       "additionalProperties": false,
       "allOf": [
@@ -1024,9 +1022,6 @@
               },
               "sdkVersion": {
                 "type": "null"
-              },
-              "configurationSha256": {
-                "type": "null"
               }
             }
           },
@@ -1324,8 +1319,7 @@
         "harnessCapabilityId",
         "terminalReason",
         "usage",
-        "limits",
-        "configuration"
+        "limits"
       ],
       "additionalProperties": false,
       "allOf": [

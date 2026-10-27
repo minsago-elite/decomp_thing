@@ -2,6 +2,22 @@
   "schema": "contract.schema.json",
   "fixtures": [
     {
+      "file": "fixtures/legacy-run-before-configuration.json",
+      "valid": true
+    },
+    {
+      "file": "fixtures/legacy-runs-before-configuration.json",
+      "valid": true
+    },
+    {
+      "file": "fixtures/legacy-snapshot-before-configuration.json",
+      "valid": true
+    },
+    {
+      "file": "fixtures/legacy-bootstrap-before-configuration.json",
+      "valid": true
+    },
+    {
       "file": "fixtures/session.json",
       "valid": true
     },
@@ -777,6 +793,18 @@
     {
       "file": "fixtures/run-configured-agent.json",
       "valid": true
+    },
+    {
+      "file": "fixtures/run-configured-legacy.json",
+      "valid": true
+    },
+    {
+      "file": "fixtures/run-legacy-without-digest.json",
+      "valid": true
+    },
+    {
+      "file": "fixtures/invalid-run-legacy-protocol.json",
+      "valid": false
     },
     {
       "file": "fixtures/invalid-launch-agent-without-harness.json",

@@ -282,7 +282,7 @@ class ReconstructionCliTest {
         assertTrue(!strategy.reconstructor.cacheIdentity().contains("factory-unbound"))
         assertEquals(
             "agent-harness-v1:legacy-openai:contract-1:acp-none:sdk-none:" +
-                "implementation-legacy-openai-compatible:configuration-none:deprecated",
+                "implementation-legacy-openai-compatible:configuration-dd717430f0b3a8c1cb7dffc593dca057df544cb2ca0c6bf10107c4f7f7751fef:deprecated",
             strategy.harnessProvenance,
         )
     }

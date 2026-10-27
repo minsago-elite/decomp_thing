@@ -462,8 +462,10 @@ request, preflight, provider selection or workflow action.
 
 ### Harness options
 
-Each agent option names exactly one harness in `launch.harness` (null for
-non-agent options): its `kind`, the `implementationId` and `protocolVersion` the
+New servers name exactly one harness for each agent option in `launch.harness`
+(null for non-agent options). This additive v1 response field is optional on the
+wire; omission by an older server means provenance was not reported, not that
+another harness may be inferred. When present, it describes its `kind`, the `implementationId` and `protocolVersion` the
 harness factory resolved from the operator's configuration (null when that
 configuration did not resolve), whether it is `deprecated`, and the `operations`
 (workflows) this server registers for it. Harnesses are probed independently with
@@ -473,7 +475,7 @@ appears in bootstrap.
 | Harness | Option identity suffix | Reported when | Notes |
 | --- | --- | --- | --- |
 | `acp` | `-agent-acp` | Always (ACP is the default) | `unavailable` with `HARNESS_NOT_CONFIGURED`, `HARNESS_CONFIGURATION_INVALID`, `HARNESS_UNSUPPORTED` or `AGENT_PREFLIGHT_FAILED` until configured and resolvable |
-| `legacy-openai` | `-agent-legacy-openai` | Only when the operator explicitly selected `ACP_HARNESS=legacy-openai` | Deprecated; retained for compatibility and records no agent protocol provenance |
+| `legacy-openai` | `-agent-legacy-openai` | Only when the operator explicitly selected `ACP_HARNESS=legacy-openai` | Deprecated; records a non-secret settings digest but no ACP protocol or SDK provenance |
 | `builtin` | `-agent-builtin` | Always, beside each ACP agent option | `unsupported` with `BUILTIN_HARNESS_NOT_INTEGRATED`: no workflow runs the built-in harness yet (#79, #76, #77), so it has no registration and is never admitted |
 
 The `harnessCapabilityId` of an agent option is always `agent-<kind>`. Admission
@@ -499,7 +501,20 @@ later configuration change is recorded only on a new attempt, and a keyed replay
 returns the original record. It is not part of the caller's start intent. When work
 begins, the adapter resolves the harness again and refuses the attempt (`failed`,
 `REFUSED`) before any agent work if the resolution differs from the record.
-Attempts recorded before this field existed report `configuration: null`.
+Attempts recorded before this field existed report `configuration: null` from new
+servers. This additive v1 response field may also be omitted by older servers;
+consumers treat both cases as not recorded, never as an evidence-only configuration.
+Present records retain the full schema and harness-identity validation.
+
+For the deprecated legacy adapter, the versioned canonical digest binds the effective
+chat-completions endpoint, exact model and normalized reasoning effort. It excludes
+`API_KEY` entirely (including hashes of its value); credential rotation is not a
+configuration or account-identity claim. `BASE_URL` must be a non-secret routing URL
+without user-info, query or fragment; the factory refuses those components rather
+than hashing potential embedded credentials or silently omitting execution settings.
+Keep credentials only in `API_KEY`, never in the endpoint path or model. New legacy
+selections always have a digest; historical null-digest records remain readable and
+are never rewritten. Neither kind of record qualifies a real provider invocation.
 
 ### Reconstruction scope
 

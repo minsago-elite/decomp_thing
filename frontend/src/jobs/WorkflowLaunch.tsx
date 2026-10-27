@@ -170,7 +170,8 @@ function OptionFacts({ option }: { option: LaunchOption }) {
       ? textMessage(copy.contactsAgent, { version: option.agentContractVersion ?? '?' })
       : copy.doesNotContactAgent}</p>
     {launch.requiredTools.length > 0 && <p>{textMessage(copy.requiredTools, { tools: launch.requiredTools.map(tool => toolLabels[tool]).join(', ') })}</p>}
-    {launch.harness && <HarnessFactList harness={launch.harness} />}
+    {launch.harness ? <HarnessFactList harness={launch.harness} />
+      : launch.contactsAgent && <p>{copy.harnessFactsNotReported}</p>}
     {launch.mode === 'evidence-only' && <p>{copy.evidenceOnlyLimitations}</p>}
   </>;
 }
