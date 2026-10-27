@@ -646,7 +646,12 @@ outcome. These are reported build facts, not current-source verification or acce
 candidate retained after an unfinished build or failed packaging is `stopped` with
 `candidate-recorded`; a completed build alone never completes publication. Reconstruction records generation start (`modules`, 0 of N) before the first module, so a long first module shows generation active. `lastGeneratedModuleId` names the most recently finished module while others are still generating (the progress record names a module only after it finishes); `plan` carries the recorded plan digest and module count;
 `unresolved` lists up to 100 planned modules the generation record reports as unresolved,
-with the total and the archive's unresolved entity count.
+with the total and the archive's unresolved entity count. Module outcomes are interpreted
+only for confidence report schema 2 with generation-budget evidence schema 1, with exactly
+one `accepted` or `unresolved` row per planned module. Missing/unsupported versions,
+unknown outcomes or malformed/incomplete rows leave the module count unknown (`null`),
+never a claim that all modules were accepted. These remain reported generation facts,
+not validation or acceptance authority.
 
 `recovery` explains, for a failed, cancelled or interrupted attempt with a recorded plan and
 configuration, how each current reconstruction option relates to it: `compatible` (same
