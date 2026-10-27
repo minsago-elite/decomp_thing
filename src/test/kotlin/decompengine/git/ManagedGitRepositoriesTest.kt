@@ -118,6 +118,29 @@ class ManagedGitRepositoriesTest {
         }.code)
     }
 
+    @Test fun `retention protects commits without remotes and detached or tag-only unpushed work`(): Unit = Fixture().use { f ->
+        val service = f.open()
+        val completed = service.settle(service.request(jobId, GitRepositoryRequest.Init("run_1", "revision_1", null), "retention_request_0001"))
+        val directory = f.repositoryDirectory(completed.repositoryId)
+        val gitDir = directory.resolve("repository.git")
+        val workTree = directory.resolve("worktree")
+        fun codes() = service.retentionHolds(jobId).map { it.code }
+        assertTrue(codes().isEmpty(), "unchanged unborn initialization contains no user commits")
+        val baseline = f.repositories.commitAll(gitDir, workTree, "local baseline")
+        assertEquals(listOf("GIT_UNPUSHED_COMMITS"), codes(), "absence of a remote is not proof of a push")
+        f.repositories.git("--git-dir=$gitDir", "update-ref", "refs/remotes/origin/trunk", baseline)
+        assertTrue(codes().isEmpty(), "a clean commit contained by a remote-tracking ref is retained elsewhere")
+        f.repositories.git("--git-dir=$gitDir", "--work-tree=$workTree", "checkout", "-q", "--detach", baseline)
+        Files.writeString(workTree.resolve("new.c"), "int unpushed;\n")
+        val detached = f.repositories.commitAll(gitDir, workTree, "detached work")
+        assertEquals(listOf("GIT_UNPUSHED_COMMITS"), codes(), "detached commits are still user work")
+        f.repositories.git("--git-dir=$gitDir", "tag", "-a", "keep", "-m", "keep detached work", detached)
+        f.repositories.git("--git-dir=$gitDir", "--work-tree=$workTree", "checkout", "-q", "trunk")
+        assertEquals(listOf("GIT_UNPUSHED_COMMITS"), codes(), "tag-only history must not be discarded")
+        f.repositories.git("--git-dir=$gitDir", "tag", "-d", "keep")
+        assertTrue(codes().isEmpty())
+    }
+
     @Test fun `a retained snapshot that no longer matches its commitments is never published`(): Unit {
         for (change in listOf("modify", "delete")) Fixture().use { f ->
             if (change == "modify") f.write("src/main file.c", "int main(void) { return 1; }\r\n")
@@ -147,9 +170,15 @@ class ManagedGitRepositoriesTest {
             service.request(jobId, GitRepositoryRequest.Attach("source"), "import_unconfigured_1")
         }.code)
         assertTrue(service.listing(jobId).operations.isEmpty())
-        val completed = service.settle(service.request(jobId, GitRepositoryRequest.Init("run_1", "revision_1", "功能/branch"), "unicode_branch_key01"))
+        // 200 code points, with each path component below the filesystem's byte limit.
+        val branch = List(4) { "🚀".repeat(49) }.joinToString("/") + "x"
+        assertEquals("VALIDATION_FAILED", assertFailsWith<ManagedGitException> {
+            service.request(jobId, GitRepositoryRequest.Init("run_1", "revision_1", branch + "x"), "unicode_too_long_key")
+        }.code)
+        assertTrue(service.listing(jobId).operations.isEmpty())
+        val completed = service.settle(service.request(jobId, GitRepositoryRequest.Init("run_1", "revision_1", branch), "unicode_branch_key01"))
         assertEquals(GitOperationState.COMPLETED, completed.state)
-        assertEquals("refs/heads/功能/branch", service.workspace(jobId, completed.repositoryId).observation.head.refName)
+        assertEquals("refs/heads/$branch", service.workspace(jobId, completed.repositoryId).observation.head.refName)
     }
 
     @Test fun `unusable Git refuses every operation explicitly`(): Unit = Fixture().use { f ->
@@ -367,6 +396,158 @@ class ManagedGitRepositoriesTest {
             assertEquals("REPOSITORY_UNSUPPORTED", assertFailsWith<GitOperationFailure> {
                 GitImportObjectCopy.copy(source, Files.createDirectory(g.root.resolve("linked root target")))
             }.code)
+        }
+    }
+
+    @Test fun `object copy refuses a FIFO substituted after stat without a writer and honors interruption`() {
+        GitTestRepositories().use { g ->
+            for (interrupt in listOf(false, true)) {
+                val source = Files.createDirectory(g.root.resolve("fifo source $interrupt"))
+                // An empty regular file and FIFO both report size zero: size alone is not a type check.
+                val objectFile = Files.writeString(source.resolve("object"), "")
+                val target = Files.createDirectory(g.root.resolve("fifo target $interrupt"))
+                val outcome = java.util.concurrent.atomic.AtomicReference<Throwable>()
+                val replaced = java.util.concurrent.CountDownLatch(1)
+                val copier = Thread {
+                    try {
+                        GitImportObjectCopy.copy(source, target) { relative: Path ->
+                            if (relative.toString() == "object") {
+                                Files.delete(objectFile)
+                                val mkfifo = ProcessBuilder("/usr/bin/mkfifo", objectFile.toString()).start()
+                                try {
+                                    check(mkfifo.waitFor(2, java.util.concurrent.TimeUnit.SECONDS) && mkfifo.exitValue() == 0)
+                                } finally { if (mkfifo.isAlive) mkfifo.destroyForcibly() }
+                                if (interrupt) Thread.currentThread().interrupt()
+                                replaced.countDown()
+                            }
+                        }
+                    } catch (failure: Throwable) { outcome.set(failure) }
+                }.apply { isDaemon = true; start() }
+                try {
+                    assertTrue(replaced.await(5, java.util.concurrent.TimeUnit.SECONDS))
+                    copier.join(2_000)
+                    assertFalse(copier.isAlive, "a FIFO replacement must not require a writer to release the import worker")
+                    if (interrupt) assertTrue(outcome.get() is java.io.InterruptedIOException, outcome.get().toString())
+                    else assertEquals("REPOSITORY_UNSUPPORTED", (outcome.get() as? GitOperationFailure)?.code)
+                    assertFalse(Files.exists(target.resolve("object"), NOFOLLOW_LINKS), "no destination is created for a special file")
+                } finally { copier.interrupt() }
+            }
+        }
+    }
+
+    @Test fun `history metadata refuses writer-free FIFO replacement and interruption at every read site`() {
+        for (name in listOf("HEAD", "packed-refs", "refs/heads/main", "refs/remotes/origin/main")) {
+            for (interrupt in listOf(false, true)) GitTestRepositories().use { g ->
+                val source = g.root.resolve("source")
+                g.git("init", "-q", "--bare", "--initial-branch=main", source.toString())
+                val file = source.resolve(name)
+                Files.createDirectories(file.parent)
+                if (name != "HEAD") Files.writeString(file, if (name == "packed-refs") "" else "a".repeat(40) + "\n")
+                if (name.startsWith("refs/remotes/")) Files.writeString(source.resolve("refs/heads/main"), "ref: $name\n")
+                val layout = GitRepositoryImport.layout(g.runner, source)
+                val target = g.root.resolve("target")
+                g.git("init", "-q", "--bare", target.toString())
+                val originalHead = Files.readAllBytes(target.resolve("HEAD"))
+                val outcome = java.util.concurrent.atomic.AtomicReference<Throwable>()
+                val replaced = java.util.concurrent.CountDownLatch(1)
+                val worker = Thread {
+                    try {
+                        GitRepositoryImport.copyHistory(layout, target, beforeMetadataOpen = { opened ->
+                            if (opened == file) {
+                                Files.delete(file)
+                                makeFifo(file)
+                                if (interrupt) Thread.currentThread().interrupt()
+                                replaced.countDown()
+                            }
+                        })
+                    } catch (failure: Throwable) { outcome.set(failure) }
+                }.apply { isDaemon = true; start() }
+                try {
+                    assertTrue(replaced.await(5, java.util.concurrent.TimeUnit.SECONDS), name)
+                    worker.join(2_000)
+                    assertFalse(worker.isAlive, "$name replacement must terminate without a FIFO writer")
+                    if (interrupt) assertTrue(outcome.get() is java.io.InterruptedIOException, outcome.get().toString())
+                    else assertEquals("REPOSITORY_UNSUPPORTED", (outcome.get() as? GitOperationFailure)?.code, name)
+                    assertContentEquals(originalHead, Files.readAllBytes(target.resolve("HEAD")), name)
+                } finally { worker.interrupt() }
+            }
+        }
+    }
+
+    @Test fun `imported FIFO metadata fails without publication and permits worker shutdown`() {
+        for (name in listOf("HEAD", "packed-refs", "refs/heads/main", "refs/remotes/origin/main")) {
+            val (f, importRoot) = importFixture()
+            f.use {
+                val source = importRoot.resolve("metadata")
+                f.repositories.git("init", "-q", "--initial-branch=main", source.toString())
+                val gitDir = source.resolve(".git")
+                val file = gitDir.resolve(name)
+                Files.createDirectories(file.parent)
+                Files.deleteIfExists(file)
+                makeFifo(file)
+                if (name.startsWith("refs/remotes/")) Files.writeString(gitDir.resolve("refs/heads/main"), "ref: $name\n")
+                val service = f.open()
+                val admission = service.request(jobId, GitRepositoryRequest.Attach("metadata"), "import_metadata_key_0001")
+                assertTrue(service.awaitIdle(5_000), name)
+                val failed = service.operation(jobId, admission.operation.repositoryId, admission.operation.operationId)
+                assertEquals(GitOperationState.FAILED, failed.state, name)
+                assertEquals("REPOSITORY_UNSUPPORTED", failed.failureCode, name)
+                assertTrue(service.listing(jobId).repositories.isEmpty())
+                assertFalse(f.repositoryDirectory(failed.repositoryId).exists())
+                assertFalse(f.store.resolve(jobId).resolve("git/staging/${failed.operationId}").exists())
+                service.close()
+                assertTrue(service.terminated, name)
+            }
+        }
+    }
+
+    @Test fun `metadata reads retain byte bounds and refuse links while pinning renamed ancestors`() {
+        GitTestRepositories().use { g ->
+            val directory = Files.createDirectory(g.root.resolve("metadata"))
+            val file = Files.writeString(directory.resolve("HEAD"), "inside")
+            assertEquals("inside", GitImportMetadata.read(file, 6).toString(Charsets.UTF_8))
+            assertEquals("REPOSITORY_UNSUPPORTED", assertFailsWith<GitOperationFailure> { GitImportMetadata.read(file, 5) }.code)
+            val outside = Files.createDirectory(g.root.resolve("outside"))
+            Files.writeString(outside.resolve("HEAD"), "outside")
+            assertEquals("inside", GitImportMetadata.read(file, 6) {
+                Files.move(directory, g.root.resolve("pinned"))
+                Files.createSymbolicLink(directory, outside)
+            }.toString(Charsets.UTF_8))
+            assertEquals("REPOSITORY_UNSUPPORTED", assertFailsWith<GitOperationFailure> { GitImportMetadata.read(file, 4096) }.code)
+            val leaf = g.root.resolve("leaf")
+            Files.createSymbolicLink(leaf, outside.resolve("HEAD"))
+            assertEquals("REPOSITORY_UNSUPPORTED", assertFailsWith<GitOperationFailure> { GitImportMetadata.read(leaf, 4096) }.code)
+            assertContentEquals(byteArrayOf(), GitImportMetadata.read(Files.write(g.root.resolve("empty"), byteArrayOf()), 0))
+        }
+    }
+
+    private fun makeFifo(path: Path) {
+        val process = ProcessBuilder("/usr/bin/mkfifo", path.toString()).start()
+        try {
+            check(process.waitFor(2, java.util.concurrent.TimeUnit.SECONDS) && process.exitValue() == 0)
+        } finally { if (process.isAlive) process.destroyForcibly() }
+    }
+
+    @Test fun `an imported FIFO object store fails without publication or a lingering worker`() {
+        val (f, importRoot) = importFixture()
+        f.use {
+            val source = importRoot.resolve("fifo")
+            f.repositories.git("init", "-q", "--initial-branch=main", source.toString())
+            val mkfifo = ProcessBuilder("/usr/bin/mkfifo", source.resolve(".git/objects/fifo").toString()).start()
+            try {
+                assertTrue(mkfifo.waitFor(2, java.util.concurrent.TimeUnit.SECONDS) && mkfifo.exitValue() == 0)
+            } finally { if (mkfifo.isAlive) mkfifo.destroyForcibly() }
+            val service = f.open()
+            val admission = service.request(jobId, GitRepositoryRequest.Attach("fifo"), "import_fifo_key_0001")
+            assertTrue(service.awaitIdle(5_000))
+            val failed = service.operation(jobId, admission.operation.repositoryId, admission.operation.operationId)
+            assertEquals(GitOperationState.FAILED, failed.state)
+            assertEquals("REPOSITORY_UNSUPPORTED", failed.failureCode)
+            assertTrue(service.listing(jobId).repositories.isEmpty())
+            assertFalse(f.repositoryDirectory(failed.repositoryId).exists())
+            assertFalse(f.store.resolve(jobId).resolve("git/staging/${failed.operationId}").exists())
+            service.close()
+            assertTrue(service.terminated)
         }
     }
 

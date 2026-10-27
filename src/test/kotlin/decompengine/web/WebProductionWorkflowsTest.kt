@@ -56,7 +56,7 @@ class WebProductionWorkflowsTest {
         fun outcome(limits: WorkflowExecutionLimits, body: (Path) -> Unit): DurableWebWorkflowOutcome {
             engines.exploreBody = { reports -> running.set(true); try { body(reports) } finally { running.set(false) } }
             val reports = Files.createTempDirectory(root, "reports-")
-            val result = ExploreWorkflowAdapter(engines, FAST).execute(context(root, reports, limits))
+            val result = ExploreWorkflowAdapter(engines, FAST, allowTestOnlyExecution = true).execute(context(root, reports, limits))
             assertFalse(running.get(), "the explore child was still running after its adapter returned")
             return result
         }
@@ -90,9 +90,9 @@ class WebProductionWorkflowsTest {
         // No report is written until the end; only per-sample progress shows activity.
         engines.exploreBody = { reports -> repeat(15) { Thread.sleep(20); engines.activity() }; reports.resolve("exploration.json").writeText("{}") }
         val limits = WorkflowExecutionLimits(60_000uL, 100uL, 1_048_576uL, 0uL)
-        assertIs<DurableWebWorkflowOutcome.Completed>(ExploreWorkflowAdapter(engines, FAST).execute(context(root, root.resolve("active"), limits)))
+        assertIs<DurableWebWorkflowOutcome.Completed>(ExploreWorkflowAdapter(engines, FAST, allowTestOnlyExecution = true).execute(context(root, root.resolve("active"), limits)))
         engines.exploreBody = { reports -> Thread.sleep(300); reports.resolve("exploration.json").writeText("{}") }
-        assertLimitExhausted(ExploreWorkflowAdapter(engines, FAST).execute(context(root, root.resolve("idle"), limits)))
+        assertLimitExhausted(ExploreWorkflowAdapter(engines, FAST, allowTestOnlyExecution = true).execute(context(root, root.resolve("idle"), limits)))
     }
 
     @Test
@@ -101,15 +101,15 @@ class WebProductionWorkflowsTest {
         engines.exploreBody = { Thread.sleep(100) }
         // The default 250 ms poll never samples while this body runs.
         val sparse = BoundedWorkflowExecutor()
-        val wall = ExploreWorkflowAdapter(engines, sparse).execute(context(root, root.resolve("wall"),
+        val wall = ExploreWorkflowAdapter(engines, sparse, allowTestOnlyExecution = true).execute(context(root, root.resolve("wall"),
             WorkflowExecutionLimits(10uL, 10uL, 1_048_576uL, 0uL)))
         assertLimitExhausted(wall)
-        val idle = ExploreWorkflowAdapter(engines, sparse).execute(context(root, root.resolve("idle"),
+        val idle = ExploreWorkflowAdapter(engines, sparse, allowTestOnlyExecution = true).execute(context(root, root.resolve("idle"),
             WorkflowExecutionLimits(60_000uL, 10uL, 1_048_576uL, 0uL)))
         assertLimitExhausted(idle)
         // Output written before returning is activity of unknown time, so it cannot prove idleness.
         engines.exploreBody = { reports -> Thread.sleep(100); reports.resolve("exploration.json").writeText("{}") }
-        assertIs<DurableWebWorkflowOutcome.Completed>(ExploreWorkflowAdapter(engines, sparse).execute(context(root, root.resolve("active"),
+        assertIs<DurableWebWorkflowOutcome.Completed>(ExploreWorkflowAdapter(engines, sparse, allowTestOnlyExecution = true).execute(context(root, root.resolve("active"),
             WorkflowExecutionLimits(60_000uL, 10uL, 1_048_576uL, 0uL))))
     }
 
@@ -134,6 +134,77 @@ class WebProductionWorkflowsTest {
         val completed = assertIs<DurableWebWorkflowOutcome.Completed>(agent.execute(context(root, root.resolve("counted"), WebWorkflowDefaults.RECONSTRUCT_AGENT)))
         assertEquals(5uL, completed.usage?.toolCalls); assertEquals(7uL, completed.usage?.inputTokens)
         assertLimitExhausted(agent.execute(context(root, root.resolve("bounded"), WebWorkflowDefaults.RECONSTRUCT_AGENT.copy(maxToolCalls = 4uL))))
+    }
+
+    @Test
+    fun `production exploration gate never dispatches an immediate-exit pipe-holding helper`() = withRoot { root ->
+        val pids = root.resolve("helper-pids")
+        val engines = FakeEngines().apply {
+            exploreBody = {
+                // Regression fixture: no delay between forking the pipe writer and leader exit.
+                // If dispatch regresses, do not collect its pipes here (that is the known #71 hang).
+                val process = ProcessBuilder("/bin/sh", "-c", "sleep 300 & echo \"\$\$ \$!\" > '$pids'; exit 0").start()
+                try { assertTrue(process.waitFor(2, TimeUnit.SECONDS)) }
+                finally { process.destroyForcibly() }
+            }
+        }
+        try {
+            val registrations = productionDurableWebWorkflows(emptyMap(), emptyList(), engines, FAST)
+            val adapter = registrations.single { it.workflow == WorkflowKind.EXPLORE }
+            assertTrue(WebWorkflowRequirement.EXPLORATION_HELPER_OWNERSHIP in adapter.requirements)
+            val ready = WebWorkflowPrerequisites.UNCHECKED
+            val facts = WebHarnessReadiness("supported", null, "ready", prerequisites = ready)
+            val reported = webWorkflowCapabilities(registrations, facts).associateBy { it.getValue("id").jsonPrimitive.content }
+            assertEquals("unavailable", reported.getValue("workflow-explore-tools").getValue("state").jsonPrimitive.content)
+            assertEquals("EXPLORATION_HELPERS_UNQUALIFIED", reported.getValue("workflow-explore-tools").getValue("reasonCode").jsonPrimitive.content)
+            assertEquals("supported", reported.getValue("workflow-reconstruct-evidence-only").getValue("state").jsonPrimitive.content)
+            val outcome = assertIs<DurableWebWorkflowOutcome.Failed>(adapter.execute(context(root, root.resolve("direct"), adapter.limits)))
+            assertEquals(WorkflowTerminalReason.REFUSED, outcome.reason)
+            val request = NewWorkflowAttempt(WorkflowKind.EXPLORE, adapter.limits)
+            val unchecked = ready.copy(sandbox = WebPrerequisite(false, "SANDBOX_HELPER_UNCHECKED", "unchecked", unknown = true))
+            assertEquals(unchecked, webAdmissionPrerequisites(registrations, request, unchecked) { error("unqualified option probed helpers") })
+            val store = JobStore(root.resolve("jobs")); val job = store.createFromUpload("gate.elf", elfFixture())
+            service(store, registrations).use { service ->
+                service.initializeExistingStorage()
+                val before = version(service, job.id)
+                for ((index, prerequisites) in listOf(ready, unchecked, null).withIndex()) {
+                    assertCode("WORKFLOW_PREREQUISITE_UNAVAILABLE") {
+                        service.requestDurableStart(job.id, before, request, "exploration_gate_$index", prerequisites)
+                    }
+                    assertEquals(before, version(service, job.id), "refusal recorded an attempt")
+                }
+            }
+            assertEquals(0, engines.calls.get())
+            assertFalse(Files.exists(pids), "production gate launched the fast-exit helper")
+        } finally {
+            // Only needed if the regression fails: terminate exactly the inert fixture's recorded child.
+            if (Files.exists(pids)) pids.readText().trim().split(' ').last().toLong().let { pid ->
+                ProcessHandle.of(pid).ifPresent { it.destroyForcibly() }
+            }
+        }
+    }
+
+    @Test
+    fun `production exploration retry rechecks the ownership gate after an inert predecessor`() = withRoot { root ->
+        val store = JobStore(root.resolve("jobs")); val job = store.createFromUpload("retry-gate.elf", elfFixture())
+        val engines = FakeEngines().apply { exploreBody = { error("inert predecessor") } }
+        val predecessor = service(store, adapters(engines)).use { service ->
+            service.initializeExistingStorage()
+            service.requestDurableStart(job.id, version(service, job.id), NewWorkflowAttempt(WorkflowKind.EXPLORE,
+                WebWorkflowDefaults.EXPLORE), "inert_exploration_first").attempt
+        }
+        assertEquals(WorkflowRunState.FAILED, predecessor.state)
+        val calls = engines.calls.get()
+        service(store, productionDurableWebWorkflows(emptyMap(), emptyList(), engines, FAST)).use { service ->
+            service.initializeExistingStorage()
+            val before = version(service, job.id)
+            assertCode("WORKFLOW_PREREQUISITE_UNAVAILABLE") {
+                service.requestDurableRecovery(job.id, predecessor.runId, predecessor.version, WorkflowRecoveryMode.RETRY,
+                    null, "production_exploration_retry", WebWorkflowPrerequisites.UNCHECKED)
+            }
+            assertEquals(before, version(service, job.id))
+        }
+        assertEquals(calls, engines.calls.get(), "retry dispatched the unqualified engine")
     }
 
     @Test
@@ -230,7 +301,7 @@ class WebProductionWorkflowsTest {
             val until = System.nanoTime() + 50_000_000; while (System.nanoTime() < until) Thread.onSpinWait(); childStopped.set(true)
         } }
         val caller = Thread {
-            try { ExploreWorkflowAdapter(engines, FAST).execute(context(root, root.resolve("reports"), WebWorkflowDefaults.EXPLORE)) }
+            try { ExploreWorkflowAdapter(engines, FAST, allowTestOnlyExecution = true).execute(context(root, root.resolve("reports"), WebWorkflowDefaults.EXPLORE)) }
             catch (failure: Throwable) { observed.set(failure); assertTrue(childStopped.get(), "returned before its child stopped") }
         }
         caller.start(); assertTrue(started.await(5, TimeUnit.SECONDS))
@@ -727,7 +798,7 @@ class WebProductionWorkflowsTest {
     }
 
     private fun adapters(engines: WebWorkflowEngines, acceptTestOnly: Boolean = false): List<DurableWebWorkflowAdapter> = listOf(
-        ExploreWorkflowAdapter(engines, FAST),
+        ExploreWorkflowAdapter(engines, FAST, allowTestOnlyExecution = true),
         ReconstructWorkflowAdapter(engines, FAST, WebReconstructionMode.AGENT, "agent-acp", emptyList()),
         ReconstructWorkflowAdapter(engines, FAST, WebReconstructionMode.EVIDENCE_ONLY, EVIDENCE_ONLY_CAPABILITY, emptyList()),
         RepairWorkflowAdapter(engines, FAST, "agent-acp", acceptTestOnly),

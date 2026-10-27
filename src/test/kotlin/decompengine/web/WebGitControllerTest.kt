@@ -191,6 +191,20 @@ class WebGitControllerTest {
         error(f.read("${f.collection}/${summary.getValue("repositoryId").jsonPrimitive.content}/operations/operation_${"0".repeat(32)}"), 404, "NOT_FOUND")
     }
 
+    @Test fun `initial branch bounds count Unicode code points through HTTP`(): Unit = Fixture().use { f ->
+        val branch = List(4) { "🚀".repeat(49) }.joinToString("/") + "x"
+        assertEquals(200, branch.codePointCount(0, branch.length))
+        assertTrue(branch.length > 200)
+        error(f.send("POST", f.init(branch + "x"), f.headers()), 422, "VALIDATION_FAILED")
+        assertEquals(JsonArray(emptyList()), data(f.read(), 200, "gitRepositories")["operations"])
+        val admitted = f.send("POST", f.init(branch), f.headers())
+        val operation = data(admitted, 202, "operation")
+        val completed = f.awaitOperation(admitted.headers().firstValue("Location").orElseThrow())
+        assertEquals("completed", completed.getValue("state").jsonPrimitive.content, completed.toString())
+        val workspace = data(f.read("${f.collection}/${operation.getValue("repositoryId").jsonPrimitive.content}"), 200, "gitWorkspace")
+        assertEquals("refs/heads/$branch", workspace.getValue("headRefName").jsonPrimitive.content)
+    }
+
     @Test fun `authorization guards and strict bodies precede any repository operation`(): Unit = Fixture().use { f ->
         val body = f.init()
         error(f.send(), 401)
@@ -330,6 +344,9 @@ class WebGitControllerTest {
         val repository = f.root.resolve(job.id).resolve("git/repositories").resolve(operation.getValue("repositoryId").jsonPrimitive.content)
         val gitDir = Files.list(repository).use { entries -> entries.filter { Files.exists(it.resolve("HEAD")) && Files.isDirectory(it.resolve("objects")) }.toList().single() }
         val workTree = Files.list(repository).use { entries -> entries.filter { Files.exists(it.resolve("unit.c")) }.toList().single() }
+        // Import strips remote configuration/tracking refs. That absence never proves a safe push.
+        assertEquals(listOf("GIT_UNPUSHED_COMMITS"), retentionCodes(f.delete("delete_git_no_remote_01", job.id)))
+        assertTrue(Files.exists(repository), "unpushed imported history must survive a deletion request")
         // A remote-tracking ref that does not contain the branch tip: the newest commit is unpushed.
         git("--git-dir=$gitDir", "update-ref", "refs/remotes/origin/main", "HEAD~1")
         assertEquals(listOf("GIT_UNPUSHED_COMMITS"), retentionCodes(f.delete("delete_git_unpushed_01", job.id)))

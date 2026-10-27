@@ -407,8 +407,9 @@ it never silently launches execution or duplicates accepted publication.
 
 ### Production workflow adapters and restart reconciliation
 
-Each adapter reuses the CLI implementation: `explore` runs the existing
-automatic explorer against the uploaded binary in the sandbox; `reconstruct`
+Each adapter reuses the CLI implementation: `explore` is wired to the existing
+automatic explorer but production dispatch is disabled pending helper ownership
+and cancellation qualification (#71); `reconstruct`
 runs archival reconstruction with the bundled Ghidra analyzer and either the
 configured agent harness (ACP or the deprecated legacy adapter selected by
 `ACP_HARNESS`) or the explicit agent-free evidence-only profile, with no
@@ -422,9 +423,13 @@ the byte total of the attempt's own report directory and, where metered, agent
 tool calls (identities are distinct within each agent invocation and summed across
 invocations; a returned receipt reporting more calls raises the count). Limits are
 checked again when a body finishes between samples. A breach or cancellation
-interrupts the child, which kills and awaits its helper process trees (including
-exploration's angr and strings helpers), and the adapter does not return while the
-child is alive. Breaches record
+interrupts the child, and the adapter does not return while that child thread is
+alive. Exploration's angr and strings helpers still have an ownership gap: a
+leader can fork a pipe-holding child and exit between descendant samples, leaving
+cancellation blocked on an unobserved writer. Observed-descendant cleanup does
+not fix this race. Production exploration is therefore refused at admission and
+at direct adapter execution; the explicit inert test seam qualifies only executor
+and service controls, not process cleanup. Breaches in enabled adapters record
 `LIMIT_EXHAUSTED`; cancellation and shutdown keep their existing `CANCELLED` and
 `PROCESS_INTERRUPTED` outcomes. Repair's tool-call ceiling is structural (five
 iterations, each one agent invocation bounded at 256 tool calls), so its limits
@@ -544,21 +549,28 @@ policy (`none`, `accepted-optional` or `recorded-required`) and whether its
 defaults and, when adjustable, per-field ceilings. `agentContractVersion` is
 reported exactly for options that contact an agent. `supported` means every
 declared prerequisite (sandbox helpers, bundled Ghidra, a configured agent
-harness and, for repair, a production-qualified contained repair validator) was
+harness, qualified exploration helper ownership and, for repair, a
+production-qualified contained repair validator) was
 established by the current readiness observation. Workflow prerequisites follow the
 same passive rule as harness readiness: a page load reads configuration and file
 metadata only (helper executability, bundled Ghidra presence) and launches no
-helper. Options that execute the binary therefore report `unknown` with
+helper. Otherwise-qualified options that execute the binary report `unknown` with
 `SANDBOX_HELPER_UNCHECKED` ("checked when this workflow starts") unless a recent
 explicit agent preflight already checked the helpers. Starting a workflow is itself
 an explicit operator action: when the selected option needs the sandbox, its other
 prerequisites hold and the helpers are unchecked, `POST J/runs` runs the same
 bounded helper check (at most five seconds) before admission; a keyed replay still
 returns its recorded run whatever the check reports. It needs no configured agent and no prior
-preflight. Only a failed or timed-out check refuses the start, with
+preflight. A failed or timed-out check refuses the start, with
 `503 CAPABILITY_UNAVAILABLE` and its fixed reason message; nothing is recorded.
-Evidence-only reconstruction needs only Ghidra presence. Until the secure repair
-runtime's validator qualification gate opens, repair reports
+Evidence-only reconstruction needs only Ghidra presence. Production exploration
+reports `unavailable` / `EXPLORATION_HELPERS_UNQUALIFIED` when readiness facts are
+present, even if sandbox inspection succeeded. It refuses fresh starts and retries
+without recording a new attempt, skips the unnecessary helper probe, and refuses
+direct execution before starting an engine or worker. No environment flag opens
+this qualification gate. A missing readiness snapshot remains `unknown` and also
+cannot authorize execution. Until the secure repair runtime's validator
+qualification gate opens, repair reports
 `REPAIR_VALIDATOR_UNQUALIFIED` and is refused at admission. A missing prerequisite
 is `unavailable` with its fixed reason code, and a probe that did not finish makes
 the option `unknown`. Workflows without a production adapter (`build`,
@@ -704,6 +716,11 @@ Status/diff snapshots carry repository/worktree versions plus observed HEAD/ref 
 Commit, stage, branch changes, integration and push require those versions and expected object
 IDs under the same repository/worktree lock as execution. A changed ref or dirty source snapshot
 requires `409 REF_CHANGED`/`WORKTREE_BUSY`, with a fresh review; no implicit overwrite/stash/reset.
+The adapter's `statusDigest` is only a display-status fingerprint of bounded porcelain output and
+HEAD, not either version, a content digest or an optimistic-concurrency/provenance guard. Further
+edits to an already-untracked or modified file, non-HEAD ref changes and edits beyond the output
+bound may leave it unchanged. Mutation services must separately bind a content-sensitive snapshot
+and revalidate it under their execution lock; truncated display status cannot establish that guard.
 Push names the remote/ref registration, exact local object and reviewed expected remote object
 (`null` means expected absent). The server rechecks remote state and enforces the expected value
 at the remote ref-update boundary; no unchecked force update. Automatic fetch, background push,
@@ -812,6 +829,14 @@ Git is unusable. The executable path never leaves the server.
   contain only server-written keys (`core.repositoryformatversion`, `core.filemode`,
   `core.bare=true`, `core.ignorecase`, `core.precomposeunicode`, `core.logallrefupdates`,
   `extensions.objectformat`, `user.*`). Otherwise the read fails with `REPOSITORY_CONFIG_UNTRUSTED`.
+  Before config is read, the repository root and its ancestors must be non-linked directories;
+  a no-follow metadata walk rejects links and special files, including linked `info`, nested refs
+  and loose object storage. The walk is bounded to 100,000 entries and 20 seconds (exhaustion is
+  `REPOSITORY_UNAVAILABLE`). The registered worktree root/ancestors must also be non-linked.
+  These checks do not replace admission: D8.2 must select registered storage under a trusted
+  managed root, isolate imported content (including shared writable inodes), validate the object
+  graph and enforce ownership/locking against concurrent filesystem replacement. Inspection is
+  not an arbitrary-host-path admission API or a race-safe source snapshot.
   Alternates, `commondir` and shallow files are `REPOSITORY_UNSUPPORTED`. Hooks never run because
   of the empty `core.hooksPath`. Attribute files can name a filter, but no driver exists. Built-in
   conversions need no driver (`text`/`eol` line endings, `ident`, `working-tree-encoding`), so
@@ -821,7 +846,10 @@ Git is unusable. The executable path never leaves the server.
   or contacts a remote. No exceptions exist yet. Any future hook, filter, submodule or helper
   support needs its own reviewed design and capability.
 - **States.** A read reports `unborn`, `attached`, `detached`, `dirty` and the object format,
-  without assuming a branch name. A missing or linked repository is `REPOSITORY_UNSUPPORTED`. A ref
+  without assuming a branch name. Symbolic HEAD must name a valid `refs/heads/...` branch;
+  other namespaces are `REPOSITORY_UNSUPPORTED`, not attached or unborn branches. Ref display is
+  bounded to 200 entries with explicit truncation; attached HEAD's matching ref is retained within
+  that bound even if it sorts after the other refs. A missing or linked repository is `REPOSITORY_UNSUPPORTED`. A ref
   that does not resolve, or a non-commit HEAD, is `REPOSITORY_CORRUPT`. Bounded failures are
   `REPOSITORY_UNAVAILABLE`.
 
@@ -879,9 +907,16 @@ a valid full ref name, such as `refs/tags/HEAD`; one that cannot be imported fai
 instead of being dropped. Selected symbolic refs are resolved as bounded inert data (at most 16
 steps), including targets in omitted namespaces, and stored as full object IDs; HEAD retains its
 branch name. Cyclic or excessive symbolic chains give `REPOSITORY_UNSUPPORTED`.
-Object copying pins source directories with secure directory streams, refuses links at actual
-opens, and streams at most 512 MiB into newly created regular files (at most 100,000 object-store
-files and directories combined). A provider without secure directory streams is unsupported.
+Object copying pins every source ancestor with descriptor-relative no-follow directory opens.
+The shared Linux filesystem boundary opens leaves with `O_PATH`, authenticates regular-file type
+on the pinned descriptor, then reopens that exact inode with `O_NONBLOCK` for reading. A raced-in
+FIFO cannot block an import waiting for a writer, and links cannot redirect reads. Copies stream
+at most 512 MiB into newly created regular files (at most 100,000 object-store files and directories
+combined). Unsupported native/default-filesystem/procfs boundaries fail closed as
+`REPOSITORY_UNSUPPORTED`; there is no pathname-copy fallback. Imported HEAD, packed refs and
+loose refs (including symbolic-ref targets) use the same pinned-ancestor, regular-type-authenticated
+nonblocking read boundary, with their existing 4 KiB/4 MiB metadata limits and cancellation checks.
+A metadata entry replaced by a link or special file is refused rather than blocking the worker.
 Configuration, hooks, `info/`, the index, reflogs, remotes, notes, replace refs, worktrees, submodule repositories and
 uncommitted working-tree changes are not copied. A full `git fsck` must succeed, which re-hashes
 every object against its ID (integrity errors give `REPOSITORY_CORRUPT`). Verification runs with
@@ -1965,8 +2000,10 @@ source `git`. It reports these reasons:
   initialization has no commit yet. While its work tree still holds exactly the recorded candidate
   source it was copied from, it contains no user work, so it does not hold deletion. Any added,
   modified or deleted file does hold it; `build/` output is excluded, as it is from the copy.
-- `GIT_UNPUSHED_COMMITS`: a branch tip is contained by no remote-tracking ref. A repository without
-  remote-tracking refs has nothing to push to.
+- `GIT_UNPUSHED_COMMITS`: a local branch/tag tip or detached HEAD is contained by no remote-tracking
+  ref. A repository without remote-tracking refs retains all committed history: absence of a remote
+  does not prove that work was pushed. An unchanged unborn initialization still has no commit to retain.
+  Annotated tags are peeled for containment; uninspectable tag targets retain the repository conservatively.
 - `GIT_STATE_UNAVAILABLE`: a repository could not be inspected, so it is retained.
 
 Git admission takes the job service's lock before the Git service's lock, and deletion decides

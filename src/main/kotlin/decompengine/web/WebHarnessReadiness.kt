@@ -38,13 +38,18 @@ internal data class WebWorkflowPrerequisites(
     /** The secure repair runtime's contained candidate validator; part of no harness readiness. */
     val repairValidator: WebPrerequisite = WebPrerequisite.AVAILABLE,
 ) {
-    /** Agent first: its configuration is the most specific operator action. */
+    /** Static qualification gates precede runtime checks: probing cannot establish process ownership. */
     fun unmet(requirements: Set<WebWorkflowRequirement>): WebPrerequisite? = listOf(
+        WebWorkflowRequirement.EXPLORATION_HELPER_OWNERSHIP to EXPLORATION_HELPERS_UNQUALIFIED,
         WebWorkflowRequirement.AGENT_HARNESS to agent, WebWorkflowRequirement.SANDBOX to sandbox,
         WebWorkflowRequirement.GHIDRA to ghidra, WebWorkflowRequirement.REPAIR_VALIDATOR to repairValidator,
     ).firstOrNull { (requirement, fact) -> requirement in requirements && !fact.available }?.second
 
     companion object {
+        // Descendant sampling loses fast-exiting leaders' reparented pipe writers (#71). No runtime
+        // readiness result or environment flag can qualify this production execution option.
+        private val EXPLORATION_HELPERS_UNQUALIFIED = WebPrerequisite(false, "EXPLORATION_HELPERS_UNQUALIFIED",
+            "Exploration helper ownership and cancellation are not yet qualified for production use, so exploration cannot run on this server.")
         /** In-process callers without a runtime probe (inert fixtures). The HTTP path always supplies a snapshot. */
         val UNCHECKED = WebWorkflowPrerequisites(WebPrerequisite.AVAILABLE, WebPrerequisite.AVAILABLE, WebPrerequisite.AVAILABLE)
     }
