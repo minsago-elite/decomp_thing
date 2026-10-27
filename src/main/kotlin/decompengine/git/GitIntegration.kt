@@ -32,7 +32,11 @@ data class GitIntegrationRecord(
 )
 
 /** One unresolved path with its stage blobs (#597). */
-data class GitConflictEntry(val path: GitPath, val baseObjectId: String?, val oursObjectId: String?, val theirsObjectId: String?)
+data class GitConflictEntry(val path: GitPath, val baseObjectId: String?, val oursObjectId: String?, val theirsObjectId: String?,
+    val modes: Set<String> = setOf("100644")) {
+    // core.symlinks=false materializes a link as a plain file: filesystem type alone is not enough.
+    val plainFile: Boolean get() = modes.all { it == "100644" || it == "100755" }
+}
 
 /** Divergence of a local branch from one remote-tracking ref (#595). */
 data class GitDivergence(val ahead: Long, val behind: Long, val mergeBase: String?)
@@ -84,7 +88,10 @@ internal object GitIntegrations {
         val identity = mapOf("GIT_AUTHOR_NAME" to policy.identityName, "GIT_AUTHOR_EMAIL" to policy.identityEmail,
             "GIT_COMMITTER_NAME" to policy.identityName, "GIT_COMMITTER_EMAIL" to policy.identityEmail)
         val mode = if (strategy == GitIntegrationStrategy.FAST_FORWARD) listOf("--ff-only") else listOf("--no-ff", "-m", message)
+        // --no-overwrite-ignore: ignored local output (experiment results, builds) is never replaced
+        // by an incoming tracked file; Git refuses instead and nothing changes.
         val result = runner.run(GitInvocation("merge", listOf("-q", "--no-verify", "--no-gpg-sign", "--no-edit", "--no-stat", "--no-log",
+            "--no-overwrite-ignore",
             "--no-squash", "--no-signoff", "--no-autostash", "--no-rerere-autoupdate", "--no-progress") + mode + listOf(target),
             gitDir = gitDir, workTree = workTree, variables = identity, allowedExitCodes = setOf(0, 1, 2, 128), limits = LIMITS))
         if (result.exitCode == 0) return false
@@ -97,19 +104,39 @@ internal object GitIntegrations {
         if (result.exitCode != 0) throw GitOperationRefusal("ABORT_REFUSED", "Git could not abort the merge. Inspect the work tree before any new request.")
     }
 
-    /** Every unmerged path with the blob of each stage that exists. */
+    /** Every unmerged path with the blob and type of each stage that exists. Parse NUL records
+     * incrementally: 6,000 ordinary conflicts already exceed the normal 1 MiB capture ceiling.
+     * Checkout admits at most 100,000 files per tree and a 32 MiB tree listing. Three stages over
+     * the two trees' path union fit within 256 MiB; no full stdout/string copy is retained. */
     fun conflicts(runner: GitCommandRunner, gitDir: Path, workTree: Path): List<GitConflictEntry> {
-        val result = runner.run(GitInvocation("ls-files", listOf("-u", "-z"), gitDir = gitDir, workTree = workTree, limits = LIMITS))
-        val stages = LinkedHashMap<String, MutableMap<Int, String>>()
-        for (record in result.stdout.toString(Charsets.ISO_8859_1).split('\u0000')) {
-            if (record.isEmpty()) continue
-            val (meta, path) = record.split('\t', limit = 2).takeIf { it.size == 2 }?.let { it[0] to it[1] } ?: continue
-            val parts = meta.split(' ')
-            if (parts.size != 3) continue
-            stages.getOrPut(path) { mutableMapOf() }[parts[2].toInt()] = parts[1]
+        val stages = LinkedHashMap<String, MutableMap<Int, Pair<String, String>>>()
+        val pending = java.io.ByteArrayOutputStream()
+        fun invalid(): Nothing = GitWorkspaceMutations.refuse("REPOSITORY_UNSUPPORTED", "The conflict index exceeds its supported listing bounds.")
+        fun accept() {
+            val record = pending.toString(Charsets.ISO_8859_1)
+            pending.reset()
+            val split = record.indexOf('\t')
+            if (split < 0) invalid()
+            val path = record.substring(split + 1)
+            val parts = record.substring(0, split).split(' ')
+            if (path.isEmpty() || parts.size != 3 || parts[2] !in setOf("1", "2", "3")) invalid()
+            if (path !in stages && stages.size >= 200_000) invalid()
+            stages.getOrPut(path) { mutableMapOf() }[parts[2].toInt()] = parts[0] to parts[1]
         }
+        runner.stream(GitInvocation("ls-files", listOf("-u", "-z"), gitDir = gitDir, workTree = workTree, limits = LIMITS),
+            256L * 1024 * 1024) { chunk, count ->
+            for (index in 0 until count) {
+                if (chunk[index] == 0.toByte()) accept()
+                else {
+                    if (pending.size() >= 64 * 1024) invalid()
+                    pending.write(chunk[index].toInt())
+                }
+            }
+        }
+        if (pending.size() != 0) invalid()
         return stages.map { (path, byStage) ->
-            GitConflictEntry(GitPath.of(path.toByteArray(Charsets.ISO_8859_1)), byStage[1], byStage[2], byStage[3])
+            GitConflictEntry(GitPath.of(path.toByteArray(Charsets.ISO_8859_1)), byStage[1]?.second, byStage[2]?.second, byStage[3]?.second,
+                byStage.values.map { it.first }.toSet())
         }
     }
 
@@ -120,15 +147,77 @@ internal object GitIntegrations {
         return utf8(runner.run(GitInvocation("cat-file", listOf("blob", objectId), gitDir = gitDir, limits = LIMITS)).stdout)
     }
 
+    /**
+     * A work-tree file as text, reading at most one byte beyond the bound, so an oversized file is
+     * reported as unsupported without ever being loaded. An absent file is empty text.
+     */
+    fun fileText(file: Path): String? {
+        if (!Files.isRegularFile(file, NOFOLLOW_LINKS)) return ""
+        val bytes = Files.newInputStream(file, NOFOLLOW_LINKS).use { it.readNBytes(MAX_TEXT_BYTES + 1) }
+        return utf8(bytes)
+    }
+
+    /** Publish only captured reviewed bytes, never ask Git to reopen mutable work-tree paths. */
+    fun stageReviewed(runner: GitCommandRunner, gitDir: Path, workTree: Path, format: GitObjectFormat,
+        files: List<Pair<GitPath, GitConflictFiles.Observation>>) {
+        val zero = "0".repeat(checkNotNull(format.hexLength))
+        val indexInfo = buildString {
+            for ((path, current) in files) {
+                val name = checkNotNull(path.exact)
+                // Remove every unmerged stage, then add the captured stage-zero blob (or keep deleted).
+                append("0 $zero\t$name\u0000")
+                if (current.size != null) {
+                    val blob = runner.run(GitInvocation("hash-object", listOf("-w", "--stdin"), gitDir = gitDir,
+                        input = checkNotNull(current.text).toByteArray(Charsets.UTF_8), limits = LIMITS)).text.trim()
+                    format.requireObjectId(blob)
+                    append("${current.mode} $blob\t$name\u0000")
+                }
+            }
+        }.toByteArray(Charsets.UTF_8)
+        runner.run(GitInvocation("update-index", listOf("-z", "--index-info"), gitDir = gitDir, workTree = workTree,
+            input = indexInfo, limits = LIMITS))
+    }
+
     fun utf8(bytes: ByteArray): String? = if (bytes.size > MAX_TEXT_BYTES || bytes.any { it == 0.toByte() }) null else try {
         Charsets.UTF_8.newDecoder().onMalformedInput(CodingErrorAction.REPORT).onUnmappableCharacter(CodingErrorAction.REPORT)
             .decode(ByteBuffer.wrap(bytes)).toString()
     } catch (_: Exception) { null }
 
-    /** Digest of a work-tree file's current bytes, or `absent`; the concurrency token of a resolution. */
-    fun contentDigest(file: Path): String =
-        if (!Files.isRegularFile(file, NOFOLLOW_LINKS)) "absent" else GitStorage.sha256(Files.readAllBytes(file))
+    /**
+     * Digest of a work-tree file's current bytes, or `absent`; the concurrency token of a resolution.
+     * Streamed with a bounded buffer, so an unsupported large file is never loaded to digest it.
+     */
+    fun contentDigest(file: Path): String {
+        if (!Files.isRegularFile(file, NOFOLLOW_LINKS)) return "absent"
+        val digest = java.security.MessageDigest.getInstance("SHA-256")
+        Files.newInputStream(file, NOFOLLOW_LINKS).use { input ->
+            val buffer = ByteArray(64 * 1024)
+            while (true) { val count = input.read(buffer); if (count < 0) break; digest.update(buffer, 0, count) }
+        }
+        return digest.digest().joinToString("") { "%02x".format(it) }
+    }
 
-    /** A conflict marker at a line start means the file is not resolved yet. */
-    fun hasMarkers(text: String): Boolean = text.lineSequence().any { it.startsWith("<<<<<<< ") || it.startsWith(">>>>>>> ") || it == "=======" }
+    const val DEFAULT_MARKER_SIZE = 7
+
+    /** The `conflict-marker-size` attribute in effect for [path]; Git's default when unset or invalid. */
+    fun markerSize(runner: GitCommandRunner, gitDir: Path, workTree: Path, path: String): Int {
+        val result = runner.run(GitInvocation("check-attr", listOf("-z", "conflict-marker-size", "--", path), gitDir = gitDir,
+            workTree = workTree, limits = LIMITS))
+        val value = result.stdout.toString(Charsets.UTF_8).split('\u0000').getOrNull(2)
+        return value?.toIntOrNull()?.takeIf { it > 0 } ?: DEFAULT_MARKER_SIZE
+    }
+
+    /**
+     * A conflict marker at a line start means the file is not resolved yet. Markers of the effective
+     * [size] and of Git's default width are both detected.
+     */
+    fun hasMarkers(text: String, size: Int = DEFAULT_MARKER_SIZE): Boolean = text.lineSequence().any { line ->
+        setOf(size, DEFAULT_MARKER_SIZE).any { width ->
+            // Compare against the bounded line, never allocate an attribute-controlled marker string.
+            width > 0 && line.length >= width && (
+                listOf('<', '>', '|').any { marker ->
+                    (line.length == width || line[width] == ' ') && (0 until width).all { line[it] == marker }
+                } || (line.length == width && line.all { it == '=' }))
+        }
+    }
 }

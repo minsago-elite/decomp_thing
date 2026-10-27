@@ -167,7 +167,7 @@ data class GitRepositoryPolicy(
 class ManagedGitException(val code: String, message: String) : RuntimeException(message)
 
 /** Crash points for recovery tests; a crash leaves records and staging exactly as a process death would. */
-enum class GitOperationCrashPoint { AFTER_RUNNING, AFTER_STAGING, BEFORE_PUBLISH, AFTER_PUBLISH }
+enum class GitOperationCrashPoint { AFTER_RUNNING, AFTER_STAGING, BEFORE_PUBLISH, AFTER_PUBLISH, BEFORE_TERMINAL_PERSIST, AFTER_TERMINAL_PERSIST }
 internal class SimulatedGitCrash : Error("simulated process death")
 
 /**
@@ -255,8 +255,8 @@ class ManagedGitRepositories(
                     throw IllegalArgumentException("workspace requests use requestWorkspace")
                 is GitCloneRequest -> {
                     refusing { GitRemoteUrls.parse(request.url, remotePolicy) }
-                    if (!GitRemoteStore.NAME.matches(request.remoteName)) {
-                        throw ManagedGitException("VALIDATION_FAILED", "A remote name is 1 to 64 letters, digits, '.', '_' or '-'.")
+                    if (!GitRemoteStore.validName(request.remoteName)) {
+                        throw ManagedGitException("VALIDATION_FAILED", "A remote name is 1 to 64 letters, digits, '.', '_' or '-' that form valid Git ref names.")
                     }
                     request.branch?.let { branch ->
                         try { GitRefNames.requireBranchName(runner, branch) } catch (_: IllegalArgumentException) {
@@ -330,9 +330,9 @@ class ManagedGitRepositories(
         live(operation)
     }
 
-    private fun transferControl(operationId: String, directory: Path): GitProcessControl {
+    private fun transferControl(operationId: String, directory: Path, maxBytes: Long = remotePolicy.limits.maxRepositoryBytes): GitProcessControl {
         val flag = synchronized(lock) { cancellations[operationId] } ?: java.util.concurrent.atomic.AtomicBoolean()
-        val watch = GitDiskWatch(directory, remotePolicy.limits.maxRepositoryBytes) { flag.get() }
+        val watch = GitDiskWatch(directory, maxBytes) { flag.get() }
         return GitProcessControl(stop = watch::stop, progress = { line -> GitProgress.parse(line)?.let { progress[operationId] = it } })
     }
 
@@ -561,6 +561,13 @@ class ManagedGitRepositories(
                 if (Files.exists(target, NOFOLLOW_LINKS) || repositories(queued.jobId).isNotEmpty()) {
                     throw GitOperationFailure("PUBLICATION_CONFLICT", "A repository already occupies this job's publication location; nothing was overwritten.")
                 }
+                // Include checkout, index, registration and audit bytes, not just transferred objects.
+                if (queued.request is GitCloneRequest) {
+                    if (cancelledBeforeStart(queued.operationId)) throw GitOperationFailure("CANCELLED", "The clone was cancelled before publication.")
+                    if (GitDiskWatch(staging, remotePolicy.limits.maxRepositoryBytes) { false }.exceeded()) {
+                        throw GitOperationFailure("TRANSFER_LIMIT", "The clone exceeded the repository size bound. Nothing was published.")
+                    }
+                }
                 // rename(2) of a directory onto a missing name; an existing target was refused above.
                 Files.move(staging, target, ATOMIC_MOVE)
                 published = true
@@ -623,31 +630,41 @@ class ManagedGitRepositories(
             throw GitOperationFailure(refusal.code, refusal.message ?: "The remote is not allowed.")
         }
         val gitDir = staging.resolve(GIT_DIR)
-        runner.run(GitInvocation("init", listOf("--quiet", "--bare", "--initial-branch=${policy.defaultBranch}",
-            "--object-format=${policy.objectFormat.wireName}", gitDir.toString())))
-        configureManaged(runner, gitDir)
+        val watch = GitDiskWatch(staging, remotePolicy.limits.maxRepositoryBytes) { false }
         val control = transferControl(operation.operationId, staging)
-        val remoteHead = GitTransfers.remoteHead(runner, location, remotePolicy, control)
+        val advertisement = GitTransfers.advertisement(runner, location, remotePolicy, control)
+        // A detached advertised HEAD is not an empty remote and must not silently become unborn
+        // on our configured default branch. This clone path materializes branches only.
+        if (request.branch == null && advertisement.branch == null && advertisement.headObjectId != null) {
+            throw GitOperationFailure("REPOSITORY_UNSUPPORTED", "The remote HEAD is detached. Select a branch explicitly to clone it.")
+        }
+        // An advertised branch that exceeds our naming policy is not an absent branch. Refuse
+        // it instead of substituting a default that could be unborn or point to different source.
+        val branch = request.branch ?: advertisement.branch ?: policy.defaultBranch
+        try { GitRefNames.requireBranchName(runner, branch) } catch (_: IllegalArgumentException) {
+            throw GitOperationFailure("VALIDATION_FAILED", "The remote's default branch name cannot be used by the workbench. Select a supported branch explicitly to clone it.")
+        }
+        runner.run(GitInvocation("init", listOf("--quiet", "--bare", "--initial-branch=${policy.defaultBranch}",
+            "--object-format=${advertisement.format.wireName}", gitDir.toString())))
+        configureManaged(runner, gitDir)
         GitTransfers.fetch(runner, gitDir, location, request.remoteName, remotePolicy, control, tags = true)
+        if (watch.exceeded()) throw GitOperationFailure("TRANSFER_LIMIT", "The clone exceeded the repository size bound. Nothing was published.")
         GitConfigurationAudit.requireManaged(runner, gitDir)
         GitRepositoryImport.verify(runner, gitDir)
         val format = GitRepositoryInspector.objectFormat(runner, gitDir)
-        val branch = request.branch ?: remoteHead?.takeIf { GitRefNames.isPlausibleBranchName(it) } ?: policy.defaultBranch
-        try { GitRefNames.requireBranchName(runner, branch) } catch (_: IllegalArgumentException) {
-            throw GitOperationFailure("VALIDATION_FAILED", "The remote's default branch name cannot be used by the workbench.")
-        }
         val tip = GitRefOperations.refObject(runner, gitDir, format, "refs/remotes/${request.remoteName}/$branch")
         if (tip == null && request.branch != null) throw GitOperationFailure("REMOTE_REF_NOT_FOUND", "The remote has no branch named ${request.branch}.")
         runner.run(GitInvocation("symbolic-ref", listOf("HEAD", "refs/heads/$branch"), gitDir = gitDir))
         val workTree = GitStorage.directories(staging, WORK_TREE)
         tip?.let { objectId ->
             GitRefOperations.createRef(runner, gitDir, "refs/heads/$branch", objectId, "BRANCH_EXISTS")
-            GitRepositoryImport.requireCheckoutBounds(runner, gitDir, objectId, importLimits)
+            GitRepositoryImport.requireCheckoutBounds(runner, gitDir, objectId, importLimits, repositoryBudget = watch.remaining())
             runner.run(GitInvocation("read-tree", listOf("--reset", "-u", objectId), gitDir = gitDir, workTree = workTree,
-                limits = GitExecutionLimits(java.time.Duration.ofMinutes(2), 1024 * 1024, 64 * 1024)))
+                limits = GitExecutionLimits(java.time.Duration.ofMinutes(2), 1024 * 1024, 64 * 1024), control = control))
         }
+        if (watch.exceeded()) throw GitOperationFailure("TRANSFER_LIMIT", "The clone exceeded the repository size bound. Nothing was published.")
         val observation = GitRepositoryInspector.inspect(runner, gitDir, workTree)
-        val remote = GitRemoteRecord(GitRemoteStore.remoteId(operation.repositoryId, request.remoteName), operation.repositoryId,
+        val remote = GitRemoteRecord(GitRemoteStore.remoteId(operation.repositoryId, request.remoteName, operation.operationId), operation.repositoryId,
             request.remoteName, location, clock.instant(), operation.operationId)
         GitRemoteStore.write(staging, remote)
         writeFetchState(staging, remote.remoteId, operation.operationId)
@@ -722,7 +739,7 @@ class ManagedGitRepositories(
             GitOperationAction.REMOTE_ADD -> {
                 requireRepositoryGuard(located, observation, request.guards)
                 val name = request.text("name")
-                if (!GitRemoteStore.NAME.matches(name) || name == "HEAD") {
+                if (!GitRemoteStore.validName(name)) {
                     GitWorkspaceMutations.refuse("VALIDATION_FAILED", "A remote name is 1 to 64 letters, digits, '.', '_' or '-'.")
                 }
                 val existing = GitRemoteStore.list(directory, located.record.repositoryId)
@@ -916,7 +933,8 @@ class ManagedGitRepositories(
     }
 
     data class GitDivergenceView(val worktreeId: String, val localRef: String, val localObjectId: String, val tracking: GitRefEntry,
-        val remote: GitRemoteRecord?, val fetchedAt: Instant?, val divergence: GitDivergence, val mergeInProgress: Boolean)
+        val remote: GitRemoteRecord?, val fetchedAt: Instant?, val divergence: GitDivergence, val mergeInProgress: Boolean,
+        val signingRequired: Boolean = false)
 
     /** Divergence of the work tree's branch from one remote-tracking ref, from fetched state only (#595). */
     fun divergence(jobId: String, repositoryId: String, worktreeId: String?, trackingRefId: String): GitDivergenceView {
@@ -934,24 +952,27 @@ class ManagedGitRepositories(
             GitDivergenceView(located.worktreeId, local, checkNotNull(head.objectId), tracking, remote,
                 remote?.let { fetchState(directory, it.remoteId)?.first },
                 GitIntegrations.divergence(runner, located.commonDir, checkNotNull(head.objectId), tracking.objectId),
-                GitIntegrations.mergeInProgress(located.gitDir))
+                GitIntegrations.mergeInProgress(located.gitDir), policy.requireSignedCommits)
         }
     }
 
     data class GitConflictView(val worktreeId: String, val integration: GitIntegrationRecord?, val mergeInProgress: Boolean,
-        val files: List<GitConflictEntry>)
+        val files: List<GitConflictEntry>, val offset: Int, val totalCount: Int, val nextOffset: Int?)
 
     data class GitConflictFileView(val worktreeId: String, val entry: GitConflictEntry, val base: String?, val ours: String?,
         val theirs: String?, val current: String?, val currentSha256: String, val currentSize: Long?)
 
-    /** The work tree's unresolved paths and the integration that produced them (#597). */
-    fun conflicts(jobId: String, repositoryId: String, worktreeId: String?): GitConflictView {
+    /** A bounded live page of unresolved paths (#597). Mutations always revalidate file identities
+     * and digests; page offsets are navigation, not a claim of a stable index snapshot. */
+    fun conflicts(jobId: String, repositoryId: String, worktreeId: String?, offset: Int = 0): GitConflictView {
+        require(offset in 0..200_000)
         val runner = requireRunner()
         val located = locate(jobId, repositoryId, worktreeId)
         return refusing {
             val merging = GitIntegrations.mergeInProgress(located.gitDir)
+            val files = GitIntegrations.conflicts(runner, located.gitDir, located.workTree)
             GitConflictView(located.worktreeId, if (merging) GitIntegrations.record(repositoryDirectory(jobId, repositoryId), located.worktreeId) else null,
-                merging, GitIntegrations.conflicts(runner, located.gitDir, located.workTree).take(200))
+                merging, files.drop(offset).take(200), offset, files.size, (offset + 200).takeIf { it < files.size })
         }
     }
 
@@ -962,12 +983,11 @@ class ManagedGitRepositories(
         return refusing {
             val entry = GitIntegrations.conflicts(runner, located.gitDir, located.workTree).singleOrNull { it.path.fileId(located.worktreeId) == fileId }
                 ?: GitWorkspaceMutations.refuse("NOT_FOUND", "The file is not an unresolved conflict in this work tree.")
-            val file = entry.path.exact?.let(located.workTree::resolve)
-            val bytes = file?.takeIf { Files.isRegularFile(it, NOFOLLOW_LINKS) && Files.size(it) <= GitIntegrations.MAX_TEXT_BYTES }?.let(Files::readAllBytes)
+            val path = entry.path.exact ?: GitWorkspaceMutations.refuse("UNSUPPORTED_CONFLICT", "This file name is not valid UTF-8.")
+            val current = GitConflictFiles.observe(located.workTree, path)
             fun stage(objectId: String?) = objectId?.let { GitIntegrations.blobText(runner, located.commonDir, it) }
             GitConflictFileView(located.worktreeId, entry, stage(entry.baseObjectId), stage(entry.oursObjectId), stage(entry.theirsObjectId),
-                bytes?.let(GitIntegrations::utf8), file?.let(GitIntegrations::contentDigest) ?: "absent",
-                file?.takeIf { Files.isRegularFile(it, NOFOLLOW_LINKS) }?.let(Files::size))
+                current.text.takeIf { entry.plainFile }, current.sha256, current.size)
         }
     }
 
@@ -979,6 +999,8 @@ class ManagedGitRepositories(
 
     /** Work-tree path of a conflict, refusing names the workbench cannot write safely. */
     private fun conflictPath(runner: GitCommandRunner, located: Located, entry: GitConflictEntry): Path {
+        if (!entry.plainFile) GitWorkspaceMutations.refuse("UNSUPPORTED_CONFLICT",
+            "This conflict includes a symbolic link or another non-plain index type. Resolve it outside the workbench, or abort the merge.")
         val path = entry.path.exact ?: GitWorkspaceMutations.refuse("UNSUPPORTED_CONFLICT", "This file name is not valid UTF-8; resolve it outside the workbench.")
         if (GitTrackingPolicy.excluded(runner, listOf(path)).isNotEmpty()) {
             GitWorkspaceMutations.refuse("EXCLUDED_PATH", "This conflicted file is excluded by the source-only policy and cannot be resolved here.")
@@ -1010,13 +1032,16 @@ class ManagedGitRepositories(
                     ?: GitWorkspaceMutations.refuse("VALIDATION_FAILED", "The strategy is fast-forward or merge.")
                 if (strategy == GitIntegrationStrategy.REBASE) GitWorkspaceMutations.refuse("STRATEGY_UNSUPPORTED",
                     "Rebasing rewrites history and is not supported by the workbench. Use a fast-forward or a merge.")
+                // A merge creates a commit, which the policy would require signed; a fast-forward creates none.
+                if (strategy == GitIntegrationStrategy.MERGE && policy.requireSignedCommits) GitWorkspaceMutations.refuse("SIGNING_UNAVAILABLE",
+                    "Policy requires signed commits, but this server has no signing capability. A fast-forward is still possible when available.")
                 if (merging) GitWorkspaceMutations.refuse("MERGE_IN_PROGRESS", "A merge is already in progress. Resolve and commit it, or abort it, first.")
                 if (observation.head.state == GitHeadState.UNBORN) GitWorkspaceMutations.refuse("NO_COMMITS",
                     "The branch has no commits yet. Commit first, or clone the remote into a new repository.")
                 if (observation.head.state != GitHeadState.ATTACHED) GitWorkspaceMutations.refuse("DETACHED",
                     "The work tree is not on a branch. Switch to the branch you want to integrate into first.")
                 val entries = relevant(observation)
-                if (entries.any { it.conflict != null || it.staged != GitIndexChange.NONE || it.unstaged != GitIndexChange.NONE }) {
+                if (!observation.status.complete || entries.any { it.untracked || it.conflict != null || it.staged != GitIndexChange.NONE || it.unstaged != GitIndexChange.NONE }) {
                     GitWorkspaceMutations.refuse("WORKTREE_DIRTY", "The work tree has uncommitted changes. Commit them, or unstage and keep them, before integrating.")
                 }
                 val tracking = trackingRef(runner, located, request.parameters["trackingRefId"])
@@ -1033,9 +1058,10 @@ class ManagedGitRepositories(
                 if (!merging) GitWorkspaceMutations.refuse("NO_MERGE", "No merge is in progress in this work tree.")
             }
             GitOperationAction.CONFLICT_SAVE -> {
+                requireNoLease(located)
                 if (!merging) GitWorkspaceMutations.refuse("NO_MERGE", "No merge is in progress in this work tree.")
                 val entry = conflictFor(runner, located, request.parameters["fileId"])
-                val file = conflictPath(runner, located, entry)
+                conflictPath(runner, located, entry)
                 when (request.parameters["resolution"]) {
                     "text" -> {
                         val text = request.content ?: GitWorkspaceMutations.refuse("VALIDATION_FAILED", "A text resolution needs its content.")
@@ -1050,18 +1076,22 @@ class ManagedGitRepositories(
                     }
                     else -> GitWorkspaceMutations.refuse("VALIDATION_FAILED", "The resolution is ours, theirs, base or text.")
                 }
-                if (GitIntegrations.contentDigest(file) != request.parameters["expectedSha256"]) GitWorkspaceMutations.refuse("CONTENT_CHANGED",
+                if (GitConflictFiles.observe(located.workTree, checkNotNull(entry.path.exact)).sha256 != request.parameters["expectedSha256"]) GitWorkspaceMutations.refuse("CONTENT_CHANGED",
                     "The file changed since it was reviewed (another tab or a worker wrote it). Read it again; nothing was overwritten.")
             }
             GitOperationAction.CONFLICT_COMPLETE -> {
+                requireNoLease(located)
                 if (!merging) GitWorkspaceMutations.refuse("NO_MERGE", "No merge is in progress in this work tree.")
                 for ((fileId, sha256) in completionList(request)) {
-                    val file = conflictPath(runner, located, conflictFor(runner, located, fileId))
-                    if (GitIntegrations.contentDigest(file) != sha256) GitWorkspaceMutations.refuse("CONTENT_CHANGED",
+                    val entry = conflictFor(runner, located, fileId)
+                    conflictPath(runner, located, entry)
+                    val current = GitConflictFiles.observe(located.workTree, checkNotNull(entry.path.exact))
+                    if (current.sha256 != sha256) GitWorkspaceMutations.refuse("CONTENT_CHANGED",
                         "A file changed since it was reviewed. Read it again before marking it resolved.")
-                    val text = if (Files.isRegularFile(file, NOFOLLOW_LINKS)) GitIntegrations.utf8(Files.readAllBytes(file)) else ""
+                    val text = current.text
                     if (text == null) GitWorkspaceMutations.refuse("UNSUPPORTED_CONFLICT", "A reviewed file is binary or too large to resolve in the workbench.")
-                    if (GitIntegrations.hasMarkers(text)) GitWorkspaceMutations.refuse("UNRESOLVED_MARKERS",
+                    val size = GitIntegrations.markerSize(runner, located.gitDir, located.workTree, checkNotNull(conflictFor(runner, located, fileId).path.exact))
+                    if (GitIntegrations.hasMarkers(text, size)) GitWorkspaceMutations.refuse("UNRESOLVED_MARKERS",
                         "A reviewed file still contains conflict markers. Finish resolving it first.")
                 }
             }
@@ -1082,7 +1112,16 @@ class ManagedGitRepositories(
                     tracking.objectId, tracking.name, clock.instant()))
                 crash(GitOperationCrashPoint.AFTER_STAGING)
                 val message = "Merge ${tracking.name.removePrefix("refs/remotes/")} into ${branch.removePrefix("refs/heads/")}"
-                val conflicted = GitIntegrations.merge(runner, located.gitDir, located.workTree, tracking.objectId, strategy, message, policy)
+                val conflicted = activity.withStableRuns(located.record.jobId) { runs ->
+                    requireNoLease(located, runs)
+                    crash(GitOperationCrashPoint.BEFORE_PUBLISH)
+                    requireNoLease(located)
+                    // A workflow can have written and finished before exclusion was acquired.
+                    // Recheck the reviewed guards and all integration prerequisites under it.
+                    validateIntegration(runner, located,
+                        GitRepositoryInspector.inspect(runner, located.gitDir, located.workTree, located.commonDir), request)
+                    GitIntegrations.merge(runner, located.gitDir, located.workTree, tracking.objectId, strategy, message, policy)
+                }
                 crash(GitOperationCrashPoint.AFTER_PUBLISH)
                 val head = GitRepositoryInspector.head(runner, located.gitDir, located.record.objectFormat).objectId
                 val remote = GitRemoteStore.list(directory, located.record.repositoryId).singleOrNull { tracking.name.startsWith(it.trackingPrefix) }
@@ -1093,15 +1132,23 @@ class ManagedGitRepositories(
                     val count = GitIntegrations.conflicts(runner, located.gitDir, located.workTree).size
                     null to "The merge stopped with $count conflicted file(s). Resolve and stage them, then commit explicitly, or abort the merge."
                 } else {
-                    GitIntegrations.delete(directory, located.worktreeId)
                     head to (if (strategy == GitIntegrationStrategy.FAST_FORWARD) "Fast-forwarded ${branch.removePrefix("refs/heads/")}." else "Created a merge commit.") +
                         " The result is a new source candidate: it is not validated or accepted until existing checks run."
                 }
             }
             GitOperationAction.MERGE_ABORT -> {
                 val record = GitIntegrations.record(directory, located.worktreeId)
-                GitIntegrations.abort(runner, located.gitDir, located.workTree)
-                GitIntegrations.delete(directory, located.worktreeId)
+                crash(GitOperationCrashPoint.AFTER_STAGING)
+                activity.withStableRuns(located.record.jobId) { runs ->
+                    requireNoLease(located, runs)
+                    crash(GitOperationCrashPoint.BEFORE_PUBLISH)
+                    requireNoLease(located)
+                    // Abort must not discard a newer resolution from a now-finished workflow.
+                    validateIntegration(runner, located,
+                        GitRepositoryInspector.inspect(runner, located.gitDir, located.workTree, located.commonDir), request)
+                    GitIntegrations.abort(runner, located.gitDir, located.workTree)
+                }
+                crash(GitOperationCrashPoint.AFTER_PUBLISH)
                 GitRemoteStore.audit(directory, GitRemoteStore.auditEntry("merge.abort", operation.operationId, "completed", null, clock.instant(),
                     ref = record?.branch, oldObjectId = record?.target, newObjectId = record?.headBefore))
                 GitRepositoryInspector.head(runner, located.gitDir, located.record.objectFormat).objectId to
@@ -1109,7 +1156,7 @@ class ManagedGitRepositories(
             }
             GitOperationAction.CONFLICT_SAVE -> {
                 val entry = conflictFor(runner, located, request.parameters["fileId"])
-                val file = conflictPath(runner, located, entry)
+                conflictPath(runner, located, entry)
                 val bytes = when (request.parameters["resolution"]) {
                     "text" -> checkNotNull(request.content).toByteArray()
                     else -> {
@@ -1117,17 +1164,40 @@ class ManagedGitRepositories(
                         checkNotNull(GitIntegrations.blobText(runner, located.commonDir, objectId)).toByteArray()
                     }
                 }
-                Files.createDirectories(file.parent)
-                GitStorage.replaceAtomically(file, bytes)
-                null to "Saved the resolution of ${entry.path.display}. It is not staged; mark it resolved when the review is complete."
+                crash(GitOperationCrashPoint.AFTER_STAGING)
+                // Workflow admission and final digest/publication share the activity owner's lock.
+                activity.withStableRuns(located.record.jobId) { runs ->
+                    requireNoLease(located, runs)
+                    GitConflictFiles.replace(located.workTree, checkNotNull(entry.path.exact),
+                        checkNotNull(request.parameters["expectedSha256"]), bytes) {
+                        crash(GitOperationCrashPoint.BEFORE_PUBLISH)
+                        requireNoLease(located)
+                    }
+                }
+                null to "Saved the resolution of ${entry.path.fileId(located.worktreeId)}. It is not staged; mark it resolved when the review is complete."
             }
             GitOperationAction.CONFLICT_COMPLETE -> {
-                val ids = completionList(request).map { it.first }.toSet()
-                val entries = observation.status.entries.filter { it.conflict != null && it.path.fileId(located.worktreeId) in ids }
-                if (entries.size != ids.size) GitWorkspaceMutations.refuse("SELECTION_CHANGED", "A reviewed file is no longer conflicted. Read the conflicts again.")
-                GitWorkspaceMutations.stage(runner, located.gitDir, located.workTree, entries)
+                val count = activity.withStableRuns(located.record.jobId) { runs ->
+                    requireNoLease(located, runs)
+                    val reviewed = completionList(request).map { (fileId, sha256) ->
+                        val entry = conflictFor(runner, located, fileId)
+                        conflictPath(runner, located, entry)
+                        val path = checkNotNull(entry.path.exact)
+                        val current = GitConflictFiles.observe(located.workTree, path)
+                        if (current.sha256 != sha256) GitWorkspaceMutations.refuse("CONTENT_CHANGED", "A file changed since review. Nothing was staged.")
+                        val text = current.text ?: GitWorkspaceMutations.refuse("UNSUPPORTED_CONFLICT", "A reviewed file is binary or too large.")
+                        if (GitIntegrations.hasMarkers(text, GitIntegrations.markerSize(runner, located.gitDir, located.workTree, path))) {
+                            GitWorkspaceMutations.refuse("UNRESOLVED_MARKERS", "A reviewed file still contains conflict markers. Nothing was staged.")
+                        }
+                        entry.path to current
+                    }
+                    crash(GitOperationCrashPoint.BEFORE_PUBLISH)
+                    requireNoLease(located)
+                    GitIntegrations.stageReviewed(runner, located.gitDir, located.workTree, located.record.objectFormat, reviewed)
+                    reviewed.size
+                }
                 val remaining = GitIntegrations.conflicts(runner, located.gitDir, located.workTree).size
-                null to "Staged ${entries.size} resolved file(s); $remaining conflict(s) remain. Commit explicitly when the review is complete."
+                null to "Staged $count resolved file(s); $remaining conflict(s) remain. Commit explicitly when the review is complete."
             }
             else -> error("not an integration request")
         }
@@ -1141,7 +1211,7 @@ class ManagedGitRepositories(
             GitOperationAction.REMOTE_ADD -> {
                 val location = GitRemoteUrls.parse(request.text("url"), remotePolicy)
                 val name = request.text("name")
-                val remote = GitRemoteRecord(GitRemoteStore.remoteId(operation.repositoryId, name), operation.repositoryId, name, location,
+                val remote = GitRemoteRecord(GitRemoteStore.remoteId(operation.repositoryId, name, operation.operationId), operation.repositoryId, name, location,
                     clock.instant(), operation.operationId)
                 GitRemoteStore.write(directory, remote)
                 GitRemoteStore.audit(directory, GitRemoteStore.auditEntry("remote.add", operation.operationId, "completed", remote, clock.instant()))
@@ -1149,7 +1219,7 @@ class ManagedGitRepositories(
             }
             GitOperationAction.REMOTE_REMOVE -> {
                 val remote = remoteFor(located, request.parameters["remoteId"])
-                GitTransfers.trackingRefs(runner, located.commonDir, located.record.objectFormat, remote.name).forEach { ref ->
+                GitTransfers.allTrackingRefs(runner, located.commonDir, located.record.objectFormat, remote.name).forEach { ref ->
                     GitRefOperations.deleteRef(runner, located.commonDir, ref.name, ref.objectId)
                 }
                 GitRemoteStore.delete(directory, remote.remoteId)
@@ -1162,18 +1232,23 @@ class ManagedGitRepositories(
             GitOperationAction.FETCH -> {
                 val remote = remoteFor(located, request.parameters["remoteId"])
                 val location = allowedLocation(remote)
-                val before = GitTransfers.trackingRefs(runner, located.commonDir, located.record.objectFormat, remote.name).associate { it.name to it.objectId }
-                try {
-                    GitTransfers.fetch(runner, located.commonDir, location, remote.name, remotePolicy, transferControl(operation.operationId, located.commonDir))
-                } catch (failure: GitCommandException) {
-                    GitTransfers.removePartialPacks(located.commonDir)
-                    val (code, _) = GitTransports.classify(failure, failure.diagnostic, location.transport)
+                val staging = GitStorage.directories(root.resolve(operation.jobId).resolve("git"), "staging", operation.operationId)
+                // The cap covers the entire managed repository, including primary/linked
+                // checkouts and records. Reserve space for the success audit/fetch-state writes.
+                val remaining = (remotePolicy.limits.maxRepositoryBytes - GitDiskWatch.bytes(directory) - 4096).coerceAtLeast(0)
+                val changed = try {
+                    GitTransfers.fetchQuarantined(runner, located.commonDir, staging.resolve(GIT_DIR), located.record.objectFormat,
+                        location, remote.name, remotePolicy, remaining, transferControl(operation.operationId, staging, remaining))
+                } catch (failure: Exception) {
+                    val code = when (failure) {
+                        is GitCommandException -> GitTransports.classify(failure, failure.diagnostic, location.transport).first
+                        is GitOperationRefusal -> failure.code
+                        else -> "TRANSFER_FAILED"
+                    }
                     GitRemoteStore.audit(directory, GitRemoteStore.auditEntry("fetch", operation.operationId, code.lowercase(), remote, clock.instant()))
                     throw failure
                 }
-                val after = GitTransfers.trackingRefs(runner, located.commonDir, located.record.objectFormat, remote.name).associate { it.name to it.objectId }
                 writeFetchState(directory, remote.remoteId, operation.operationId)
-                val changed = (before.keys + after.keys).count { before[it] != after[it] }
                 GitRemoteStore.audit(directory, GitRemoteStore.auditEntry("fetch", operation.operationId, "completed", remote, clock.instant(),
                     detail = "$changed remote-tracking refs changed"))
                 null to "Fetched ${remote.name}: $changed remote-tracking ref(s) changed. Nothing was merged or checked out."
@@ -1348,7 +1423,8 @@ class ManagedGitRepositories(
                 if (policy.requireSignedCommits) GitWorkspaceMutations.refuse("SIGNING_UNAVAILABLE",
                     "Policy requires signed commits, but this server has no signing capability. Nothing was committed.")
                 GitWorkspaceMutations.checkGuards(located.record, observation, request.guards)
-                GitWorkspaceMutations.requireStagedSet(located.record, observation, request.fileIds, located.worktreeId)
+                GitWorkspaceMutations.requireStagedSet(located.record, observation, request.fileIds, located.worktreeId,
+                    mergeInProgress = GitIntegrations.mergeInProgress(located.gitDir))
             }
             is GitRefRequest -> validateRef(runner, located, observation, request)
             is GitSyncRequest -> validateSync(runner, located, observation, request)
@@ -1362,8 +1438,7 @@ class ManagedGitRepositories(
      * the job, and a linked one to the attempt that owns it. Checkout or removal never replaces
      * files under a running worker.
      */
-    private fun requireNoLease(located: Located) {
-        val runs = activity.runs(located.record.jobId)
+    private fun requireNoLease(located: Located, runs: Map<String, Boolean> = activity.runs(located.record.jobId)) {
         val held = if (located.primary) runs.any { it.value } else located.ownerRunId?.let { runs[it] } == true
         if (held) GitRefOperations.refuse("ACTIVE_RUN", "A workflow attempt is running against this work tree. Wait for it to finish; nothing was changed.")
     }
@@ -1513,8 +1588,6 @@ class ManagedGitRepositories(
                     crash(GitOperationCrashPoint.AFTER_STAGING)
                     GitWorkspaceMutations.commit(runner, located.gitDir, located.workTree, messageFile, policy)
                     crash(GitOperationCrashPoint.AFTER_PUBLISH)
-                    // A commit that concludes a merge ends its integration record.
-                    if (!GitIntegrations.mergeInProgress(located.gitDir)) GitIntegrations.delete(repositoryDirectory(queued.jobId, queued.repositoryId), located.worktreeId)
                     val after = GitRepositoryInspector.inspect(runner, located.gitDir, located.workTree, located.commonDir)
                     result = checkNotNull(after.head.objectId)
                     if (recordMapping(runner, located, result, after.dirty) == null) {
@@ -1796,9 +1869,10 @@ class ManagedGitRepositories(
     }
 
     /**
-     * A remote intent after a restart (#594). A fetch updates each remote-tracking ref only after
-     * its pack is complete, so refs are unchanged or fully updated; partial packs are removed and
-     * the fetch becomes `interrupted`. Registration changes complete when their record is present
+     * A remote intent after a restart (#594). A fetch updates remote-tracking refs only after
+     * admission. A namespace transition may have pruned obsolete conflicting refs before the
+     * remaining CAS publication; an explicit retry refreshes that state. Partial packs are removed
+     * and the fetch becomes `interrupted`. Registration changes complete when their record is present
      * (add) or absent (remove).
      */
     private fun reconcileSync(jobId: String, operation: GitOperationRecord, request: GitSyncRequest): GitOperationRecord {
@@ -1809,7 +1883,7 @@ class ManagedGitRepositories(
             GitOperationAction.FETCH -> {
                 try { GitTransfers.removePartialPacks(directory.resolve(GIT_DIR)) } catch (_: Exception) { }
                 finish(operation, GitOperationState.INTERRUPTED, "INTERRUPTED",
-                    "Interrupted by a server restart. Remote-tracking refs are unchanged or fully updated; fetch again to refresh them.")
+                    "Interrupted by a server restart. Remote-tracking refs may have been updated or obsolete refs pruned; fetch again to refresh them.")
             }
             GitOperationAction.REMOTE_ADD -> if (remotes.any { it.name == request.parameters["name"] })
                 finish(operation, GitOperationState.COMPLETED, null, "The remote was registered before the server restarted.")
@@ -1849,22 +1923,35 @@ class ManagedGitRepositories(
                     merging -> finish(operation, GitOperationState.RECOVERY_REQUIRED, "MERGE_IN_PROGRESS",
                         "The server restarted during the merge. Its state is retained: resolve and commit the conflicts, or abort the merge.")
                     integration == null || head == integration.headBefore -> {
-                        GitIntegrations.delete(directory, operation.worktreeId)
                         finish(operation, GitOperationState.INTERRUPTED, "INTERRUPTED", "Interrupted by a server restart before the merge changed the branch.")
                     }
                     else -> {
-                        GitIntegrations.delete(directory, operation.worktreeId)
                         finish(operation, GitOperationState.COMPLETED, null, "The merge finished before the server restarted. It is a new candidate until validated.", head)
                     }
                 }
             }
             GitOperationAction.MERGE_ABORT -> if (merging) finish(operation, GitOperationState.INTERRUPTED, "INTERRUPTED",
                 "Interrupted by a server restart before the merge was aborted; it is still in progress.")
-                else { GitIntegrations.delete(directory, operation.worktreeId); finish(operation, GitOperationState.COMPLETED, null, "The merge was aborted before the server restarted.", head) }
+                else finish(operation, GitOperationState.COMPLETED, null, "The merge was aborted before the server restarted.", head)
             GitOperationAction.CONFLICT_SAVE -> {
-                val saved = GitIntegrations.conflicts(runner, gitDir, workTree).singleOrNull { it.path.fileId(operation.worktreeId) == request.parameters["fileId"] }
-                    ?.path?.exact?.let { GitIntegrations.contentDigest(workTree.resolve(it)) }
-                if (saved != null && saved == request.contentSha256) finish(operation, GitOperationState.COMPLETED, null, "The resolution was saved before the server restarted.")
+                val entry = GitIntegrations.conflicts(runner, gitDir, workTree)
+                    .singleOrNull { it.path.fileId(operation.worktreeId) == request.parameters["fileId"] }
+                val saved = entry?.path?.exact?.let { GitConflictFiles.observe(workTree, it).sha256 }
+                // Side choices have no request content digest. Their unchanged conflict stages
+                // retain the immutable blob selected for publication, without changing replay identity.
+                val expected = when (request.parameters["resolution"]) {
+                    "text" -> request.contentSha256
+                    else -> {
+                        val objectId = when (request.parameters["resolution"]) {
+                            "ours" -> entry?.oursObjectId
+                            "theirs" -> entry?.theirsObjectId
+                            "base" -> entry?.baseObjectId
+                            else -> null
+                        }
+                        objectId?.let { GitIntegrations.blobText(runner, commonDir, it) }?.let(GitStorage::sha256)
+                    }
+                }
+                if (saved != null && saved == expected) finish(operation, GitOperationState.COMPLETED, null, "The resolution was saved before the server restarted.")
                 else finish(operation, GitOperationState.INTERRUPTED, "INTERRUPTED", "Interrupted by a server restart; read the file again before saving.")
             }
             else -> finish(operation, GitOperationState.INTERRUPTED, "INTERRUPTED",
@@ -1908,7 +1995,8 @@ class ManagedGitRepositories(
                     val pushId = (operation.request as GitSyncRequest).parameters.getValue("pushOperationId")!!
                     GitPushes.delete(repositoryDirectory(jobId, operation.repositoryId), pushId)
                 }
-                if (operation.state.terminal || operation.operationId in active) continue
+                if (operation.state.terminal) { retireIntegration(operation); continue }
+                if (operation.operationId in active) continue
                 val staging = directory.resolve("staging").resolve(operation.operationId)
                 if (operation.action.workspace) {
                     persist(directory, reconcileWorkspace(jobId, operation))
@@ -1972,7 +2060,30 @@ class ManagedGitRepositories(
 
     private fun persist(directory: Path, operation: GitOperationRecord) {
         val operations = GitStorage.directories(directory, "operations")
+        if (operation.action.workspace && operation.state.terminal) crash(GitOperationCrashPoint.BEFORE_TERMINAL_PERSIST)
         GitStorage.replaceAtomically(operations.resolve("${operation.operationId}.json"), encode(operation).toByteArray())
+        if (operation.action.workspace && operation.state.terminal) crash(GitOperationCrashPoint.AFTER_TERMINAL_PERSIST)
+        retireIntegration(operation)
+    }
+
+    /** Evidence is retired only after its terminal operation is durable, including during recovery.
+     * A restart retries this idempotent cleanup for already-terminal records as well. */
+    private fun retireIntegration(operation: GitOperationRecord) {
+        if (!(operation.state == GitOperationState.COMPLETED && operation.action in setOf(GitOperationAction.MERGE,
+                GitOperationAction.MERGE_ABORT, GitOperationAction.COMMIT) ||
+                operation.state == GitOperationState.INTERRUPTED && operation.action == GitOperationAction.MERGE)) return
+        try {
+            val directory = repositoryDirectory(operation.jobId, operation.repositoryId)
+            val integration = GitIntegrations.record(directory, operation.worktreeId) ?: return
+            // Never let an older completed merge retire the evidence of a newer integration.
+            if (operation.action == GitOperationAction.MERGE && integration.operationId != operation.operationId) return
+            // Wall clocks can coincide or move backwards. Only durable owner state proves that
+            // a different terminal commit/abort may clean this evidence during the startup sweep.
+            if (operations(operation.jobId).any { it.operationId == integration.operationId && !it.state.terminal }) return
+            val record = repositories(operation.jobId).single { it.repositoryId == operation.repositoryId }
+            val gitDir = directory.resolve(GIT_DIR).let { if (operation.worktreeId == record.worktreeId) it else it.resolve("worktrees").resolve(operation.worktreeId) }
+            if (!GitIntegrations.mergeInProgress(gitDir)) GitIntegrations.delete(directory, operation.worktreeId)
+        } catch (_: Exception) { /* Terminal state is durable; retry cleanup at the next restart. */ }
     }
 
     /**
