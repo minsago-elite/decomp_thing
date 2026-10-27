@@ -11,6 +11,7 @@ import decompengine.mvp.MvpPatchWorkflow
 import decompengine.mvp.BinaryRunnerService
 import decompengine.acp.AcpHarnessFactory
 import decompengine.acp.AcpPreflightWorkflow
+import decompengine.project.ReconstructionIncompleteException
 import decompengine.project.ArchivalReconstructionService
 import decompengine.project.BoundedLlmModuleReconstructor
 import decompengine.project.EvidenceModuleReconstructor
@@ -117,6 +118,11 @@ private fun runReconstruct(args: List<String>) {
             ArchivalReconstructionService(
                 GhidraHeadlessProgramModelAnalyzer.bundled(), strategy.reconstructor, progress = progress,
             ).reconstruct(binary, output)
+        } catch (failure: ReconstructionIncompleteException) {
+            progress.phase(AgentWorkflowPhase.UNRESOLVED)
+            System.err.println(failure.message)
+            progress.close()
+            kotlin.system.exitProcess(1)
         } catch (failure: Exception) {
             progress.phase(AgentWorkflowPhase.FAILED)
             throw failure

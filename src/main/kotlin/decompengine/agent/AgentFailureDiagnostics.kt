@@ -16,5 +16,5 @@ internal fun safeAgentFailureDiagnostic(failure: AgentFailure): String = buildSt
 internal val SAFE_AGENT_DIAGNOSTIC_CODES = setOf(
     "connection-timeout", "connection-failed", "dns-failed", "tls-failed", "io-failed", "transport-failed",
     "interrupted", "rate-limited", "http-client-error", "http-server-error", "stream-incomplete",
-    "stream-failed", "invalid-patch-json", "invalid-patch-set", "no-source-changes", "wall-deadline",
+    "stream-failed", "incompatible-media-type", "invalid-patch-json", "invalid-patch-set", "no-source-changes", "wall-deadline",
 )

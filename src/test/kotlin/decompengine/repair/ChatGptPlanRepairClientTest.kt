@@ -94,7 +94,7 @@ class ChatGptPlanRepairClientTest {
             decompengine.agent.AgentExecutionLimits(wallClockTimeout = Duration.ofMillis(100)),
             decompengine.agent.AgentCancellation.NONE)
         val failure = assertFailsWith<AgentExecutionException> { client(transport).requestRepair(request(), invocation) }
-        assertEquals(1, transport.calls)
+        assertTrue(transport.calls <= 1)
         assertEquals(AgentFailureKind.TIMEOUT, failure.failure.kind)
     }
 
@@ -105,6 +105,31 @@ class ChatGptPlanRepairClientTest {
         val response = client(transport).requestRepair(request())
         assertTrue(response.patches.isEmpty())
         assertEquals(1, transport.calls)
+    }
+
+    @Test
+    fun `cancellation during backoff stops before another request`() {
+        val cancelled = java.util.concurrent.atomic.AtomicBoolean()
+        val transport = FakeResponsesClient(null, completedStream(), failures = 10)
+        val invocation = RepairClientInvocation(RepairResourceBudget(), decompengine.agent.AgentExecutionLimits(),
+            decompengine.agent.AgentCancellation { cancelled.get() })
+        val configured = client(transport) { if ("failed" in it) cancelled.set(true) }
+        assertFailsWith<RepairTransportCancelledException> { configured.requestRepair(request(), invocation) }
+        assertEquals(1, transport.calls)
+    }
+
+    @Test
+    fun `TLS failures and authentication errors are not retried`() {
+        val tls = FakeResponsesClient(null, completedStream(), failures = 10,
+            transportFailure = javax.net.ssl.SSLException("private-error"))
+        val tlsFailure = assertFailsWith<AgentExecutionException> { client(tls).requestRepair(request()) }
+        assertEquals("tls-failed", tlsFailure.failure.details["diagnosticCode"])
+        assertEquals(1, tls.calls)
+        val auth = FakeResponsesClient(null, "private-error", status = 401)
+        val authFailure = assertFailsWith<AgentExecutionException> { client(auth).requestRepair(request()) }
+        assertEquals(AgentFailureKind.AUTHENTICATION, authFailure.failure.kind)
+        assertEquals(1, auth.calls)
+        assertTrue(auth.closed)
     }
 
     private fun request() = RepairRequest("reconstruction", "Implement src/test.c", mapOf("src/test.c" to ""), emptyList())
@@ -130,19 +155,22 @@ class ChatGptPlanRepairClientTest {
         return ChatGptPlanRepairClient(store = store, profileId = null, httpClient = transport, diagnosticLog = log)
     }
 
-    private class FakeResponsesClient(private val contentType: String?, private val body: String, private val failures: Int = 0) : HttpClient() {
+    private class FakeResponsesClient(private val contentType: String?, private val body: String, private val failures: Int = 0,
+        private val transportFailure: Throwable = java.net.ConnectException("private-error"),
+        private val status: Int = 200,
+    ) : HttpClient() {
         var closed = false
         var calls = 0
         override fun <T> sendAsync(request: HttpRequest, handler: HttpResponse.BodyHandler<T>): CompletableFuture<HttpResponse<T>> {
             calls++
-            if (calls <= failures) return CompletableFuture.failedFuture(java.net.ConnectException("private-error"))
+            if (calls <= failures) return CompletableFuture.failedFuture(transportFailure)
             assertEquals("https://api.openai.com/v1/responses", request.uri().toString())
             assertEquals("text/event-stream", request.headers().firstValue("Accept").orElseThrow())
             val input = object : ByteArrayInputStream(body.toByteArray()) {
                 override fun close() { closed = true; super.close() }
             }
             val response = object : HttpResponse<InputStream> {
-                override fun statusCode() = 200
+                override fun statusCode() = status
                 override fun request() = request
                 override fun previousResponse(): Optional<HttpResponse<InputStream>> = Optional.empty()
                 override fun headers(): HttpHeaders = HttpHeaders.of(

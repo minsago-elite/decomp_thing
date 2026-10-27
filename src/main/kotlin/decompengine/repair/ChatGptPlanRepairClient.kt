@@ -127,7 +127,9 @@ class ChatGptPlanRepairClient(
                     !Thread.currentThread().isInterrupted && !invocation.cancellation.isCancellationRequested() &&
                     System.nanoTime() < deadline
                 log("request=$requestId attempt=$attempt failed ${safeAgentFailureDiagnostic(failure.failure)} retry=$retry elapsedMillis=${TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - started)}")
-                if (!retry) throw failure
+                if (!retry) throw AgentExecutionException(AgentFailure(failure.failure.kind, failure.failure.message,
+                    retryable = failure.failure.retryable, session = failure.failure.session,
+                    details = failure.failure.details + ("attempts" to attempt.toString())), failure)
                 retryDelay(attempt, deadline, invocation.cancellation)
             }
         }
@@ -162,7 +164,8 @@ class ChatGptPlanRepairClient(
             val mediaType = contentType?.substringBefore(';')?.trim()
             if (mediaType != null && !mediaType.equals("text/event-stream", ignoreCase = true)) {
                 response.body().close()
-                throw AgentExecutionException(AgentFailure(AgentFailureKind.PROTOCOL, "ChatGPT Responses request did not return an event stream"))
+                throw AgentExecutionException(AgentFailure(AgentFailureKind.PROTOCOL, "ChatGPT Responses request did not return an event stream",
+                    details = mapOf("diagnosticCode" to "incompatible-media-type")))
             }
             val text = readEventStreamAsync(
                 response.body(),

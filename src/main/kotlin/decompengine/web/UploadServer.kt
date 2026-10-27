@@ -80,6 +80,9 @@ class SourceTreeJobReconstructor(
                     strategy.reconstructor,
                     progress = progress,
                 ).reconstruct(job.binaryPath, reportsDir)
+            } catch (failure: decompengine.project.ReconstructionIncompleteException) {
+                progress.phase(AgentWorkflowPhase.UNRESOLVED)
+                throw failure
             } catch (failure: Exception) {
                 progress.phase(AgentWorkflowPhase.FAILED)
                 throw failure

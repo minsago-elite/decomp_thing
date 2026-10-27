@@ -267,6 +267,10 @@ data class ArchivalReconstructionResult(
     val bundle: ArchivalBundle,
 )
 
+class ReconstructionIncompleteException(val unresolvedModules: Int, val totalModules: Int, val outputDir: Path) :
+    IllegalStateException("reconstruction incomplete: $unresolvedModules/$totalModules modules unresolved; " +
+        "see ${outputDir.resolve("reconstruction.json")} and ${outputDir.resolve("source-tree/reports/modules")}")
+
 class ArchivalReconstructionService(
     private val analyzer: ProgramModelAnalyzer,
     private val reconstructor: ModuleReconstructor = EvidenceModuleReconstructor(),
@@ -295,7 +299,7 @@ class ArchivalReconstructionService(
             maximumDependencyEdges = profile.budgets.plannerMaximumDependencyEdges,
             maximumWorkUnits = profile.budgets.plannerMaximumWorkUnits,
         )
-        SourceTreeGenerator.generate(
+        val manifest = SourceTreeGenerator.generate(
             model,
             project,
             planner = planner,
@@ -306,6 +310,27 @@ class ArchivalReconstructionService(
         ) { completed, total, module ->
             moduleTotal = total
             progressPath.writeText("{\"phase\":\"modules\",\"completed\":$completed,\"total\":$total,\"module\":\"$module\"}\n")
+        }
+        if (reconstructor.requiresExecutionEvidenceForCheckpointReuse() && manifest.unresolvedImplementationIds.isNotEmpty()) {
+            val unresolvedModules = manifest.files.filter {
+                ProjectFileRole.MODULE_IMPLEMENTATION in it.roles && it.acceptedImplementation != true
+            }
+            outputDir.resolve("reconstruction.json").writeText(kotlinx.serialization.json.buildJsonObject {
+                put("schemaVersion", kotlinx.serialization.json.JsonPrimitive(1))
+                put("status", kotlinx.serialization.json.JsonPrimitive("incomplete"))
+                put("moduleCount", kotlinx.serialization.json.JsonPrimitive(moduleTotal))
+                put("unresolvedModuleCount", kotlinx.serialization.json.JsonPrimitive(unresolvedModules.size))
+                put("unresolvedEntityCount", kotlinx.serialization.json.JsonPrimitive(manifest.unresolvedImplementationIds.size))
+                put("sourceTree", kotlinx.serialization.json.JsonPrimitive("source-tree"))
+                put("moduleReports", kotlinx.serialization.json.JsonPrimitive("source-tree/reports/modules"))
+                put("unresolvedSources", kotlinx.serialization.json.JsonArray(unresolvedModules.map {
+                    kotlinx.serialization.json.JsonPrimitive(it.path)
+                }))
+            }.toString() + "\n")
+            progressPath.writeText("{\"phase\":\"unresolved\",\"completed\":$moduleTotal,\"total\":$moduleTotal," +
+                "\"unresolvedModules\":${unresolvedModules.size}}\n")
+            progress.phase(AgentWorkflowPhase.UNRESOLVED)
+            throw ReconstructionIncompleteException(unresolvedModules.size, moduleTotal, outputDir)
         }
         progress.phase(AgentWorkflowPhase.BUILD_VALIDATING)
         val build = MakeProjectBuilder.build(

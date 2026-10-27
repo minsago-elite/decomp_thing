@@ -40,6 +40,19 @@ or `llm_bin_patch repair ... --harness chatgpt-plan` for captured repair. For we
 local state under `~/.config/decomp_engine`; `DECOMP_CHATGPT_TOKEN_STORE` can select another absolute private directory.
 `chatgpt status`, `chatgpt use <account-id>`, and `chatgpt logout [--account <id>]` manage saved accounts.
 
+Reconstruction writes module starts, HTTP status, attempt counts, safe failure causes, elapsed time, and
+acceptance outcomes to stderr. Capture it with `2>reconstruction.log` when troubleshooting. Module reports
+under `source-tree/reports/modules/` retain failure classifications; `agent-progress.json` retains task outcomes.
+Tokens, prompts, source bodies, raw server errors, and arbitrary exception messages are excluded from these diagnostics.
+Eligible transient failures receive at most three attempts sharing the original wall deadline; cancellation,
+authentication/TLS failures, malformed streams, and explicit no-change responses are not retried automatically.
+An empty patch set means no source changes were proposed, rather than malformed protocol data.
+
+If agent-backed modules remain unresolved, the CLI exits with status 1 and writes an `incomplete` summary to
+`reconstruction.json`, preserving partial source and `source-tree/UNRESOLVED.md` without packaging placeholders.
+After an exporter upgrade, use a fresh output directory: old analysis checkpoints remain bound to their original
+exporter and must not be mixed with new typed signature evidence.
+
 ### Docker qualification profile
 
 Host-native execution under a dedicated service UID is the primary supported ACP deployment. Compose exposes an
