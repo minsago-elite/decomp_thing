@@ -16,7 +16,6 @@ import java.net.URISyntaxException
 import java.nio.file.Files
 import java.nio.file.LinkOption.NOFOLLOW_LINKS
 import java.nio.file.Path
-import java.nio.file.StandardOpenOption
 import java.time.Duration
 import java.time.Instant
 import java.util.Base64
@@ -396,40 +395,85 @@ internal object GitRemoteStore {
         }
     }
 
-    fun delete(directory: Path, remoteId: String) { Files.deleteIfExists(directory.resolve(REMOTES).resolve("$remoteId.json")) }
+    fun delete(directory: Path, remoteId: String) {
+        if (Files.deleteIfExists(directory.resolve(REMOTES).resolve("$remoteId.json"))) GitStorage.forceDirectory(directory.resolve(REMOTES))
+    }
+
+    private const val PENDING_AUDIT = "remote-audit-pending"
+
+    private fun pendingFile(directory: Path, operationId: String): Path {
+        require(operationId.matches(Regex("operation_[0-9a-f]{32}")))
+        return directory.resolve(PENDING_AUDIT).resolve("$operationId.json")
+    }
+
+    /** Durable write-ahead evidence retains the destination even after a registration is deleted. */
+    fun prepareAudit(directory: Path, entry: JsonObject) {
+        val operationId = entry.getValue("operationId").jsonPrimitive.content
+        GitStorage.directories(directory, PENDING_AUDIT)
+        GitStorage.forceDirectory(directory)
+        GitStorage.replaceAtomically(pendingFile(directory, operationId), entry.toString().toByteArray())
+    }
+
+    fun hasPendingAudit(directory: Path, operationId: String): Boolean = Files.exists(pendingFile(directory, operationId), NOFOLLOW_LINKS)
+
+    fun pendingAudit(directory: Path, operationId: String): JsonObject? {
+        val file = pendingFile(directory, operationId)
+        if (!Files.exists(file, NOFOLLOW_LINKS)) return null
+        return Json.parseToJsonElement(GitStorage.read(file, 16 * 1024).toString(Charsets.UTF_8)).jsonObject.also {
+            require(it.getValue("operationId").jsonPrimitive.content == operationId)
+        }
+    }
+
+    /** Only discard the intent after its terminal operation record has been durably published. */
+    fun clearPendingAudit(directory: Path, operationId: String) {
+        if (Files.deleteIfExists(pendingFile(directory, operationId))) GitStorage.forceDirectory(directory.resolve(PENDING_AUDIT))
+    }
+
+    /** Idempotent completion, including a crash after audit publication but before operation completion. */
+    @Synchronized
+    fun auditOnce(directory: Path, entry: JsonObject) {
+        val retained = auditLines(directory)
+        val operationId = entry.getValue("operationId")
+        val action = entry.getValue("action")
+        val matches = retained.map { Json.parseToJsonElement(it).jsonObject }.filter {
+            it["operationId"] == operationId && it["action"] == action
+        }
+        require(matches.size <= 1) { "Remote audit completion has duplicate retained evidence" }
+        val existing = matches.singleOrNull()
+        if (existing != null) {
+            require(existing == entry) { "Remote audit completion conflicts with retained evidence" }
+            return
+        }
+        writeAudit(directory, retained, entry)
+    }
 
     /**
      * One audit entry: destination, refs, objects and outcome. It never holds a credential, and it
      * is separate from reconstruction evidence: nothing here accepts or rejects a revision.
      */
     @Synchronized
-    fun audit(directory: Path, entry: JsonObject) {
+    fun audit(directory: Path, entry: JsonObject) = writeAudit(directory, auditLines(directory), entry)
+
+    private fun auditLines(directory: Path): List<String> {
         val file = directory.resolve(AUDIT)
-        if (Files.exists(file, NOFOLLOW_LINKS) && Files.size(file) > MAX_AUDIT_BYTES) {
-            // Keep the newest half; the audit stays bounded and append-only within its window.
-            val lines = Files.readAllLines(file)
-            GitStorage.replaceAtomically(file, (lines.drop(lines.size / 2).joinToString("\n") + "\n").toByteArray())
-        }
-        Files.write(file, (entry.toString() + "\n").toByteArray(), StandardOpenOption.CREATE, StandardOpenOption.APPEND,
-            StandardOpenOption.WRITE, StandardOpenOption.DSYNC)
+        if (!Files.exists(file, NOFOLLOW_LINKS)) return emptyList()
+        return GitStorage.read(file, MAX_AUDIT_BYTES.toInt() + 64 * 1024).toString(Charsets.UTF_8).lineSequence().filter { it.isNotEmpty() }.toList()
     }
 
-    /** Integration publication may be reconciled repeatedly after a crash. Atomically publish
-     * the whole bounded window so a torn append cannot duplicate or lose its operation receipt. */
-    @Synchronized
-    fun auditOnce(directory: Path, entry: JsonObject) {
-        val file = directory.resolve(AUDIT)
-        val lines = if (Files.exists(file, NOFOLLOW_LINKS)) Files.readAllLines(file) else emptyList()
-        val operationId = entry.getValue("operationId")
-        if (lines.any { Json.parseToJsonElement(it).jsonObject["operationId"] == operationId }) return
-        val retained = if (Files.exists(file, NOFOLLOW_LINKS) && Files.size(file) > MAX_AUDIT_BYTES) lines.drop(lines.size / 2) else lines
-        GitStorage.replaceAtomically(file, ((retained + entry.toString()).joinToString("\n") + "\n").toByteArray())
+    private fun writeAudit(directory: Path, lines: List<String>, entry: JsonObject) {
+        // Atomic replacement prevents a torn JSONL append from hiding the next recovered entry.
+        var retained = lines
+        var bytes = ((retained + entry.toString()).joinToString("\n") + "\n").toByteArray()
+        while (bytes.size > MAX_AUDIT_BYTES && retained.isNotEmpty()) {
+            retained = retained.drop((retained.size / 2).coerceAtLeast(1))
+            bytes = ((retained + entry.toString()).joinToString("\n") + "\n").toByteArray()
+        }
+        require(bytes.size <= MAX_AUDIT_BYTES)
+        GitStorage.replaceAtomically(directory.resolve(AUDIT), bytes)
     }
 
     fun auditEntries(directory: Path, limit: Int): List<JsonObject> {
-        val file = directory.resolve(AUDIT)
-        if (!Files.isRegularFile(file, NOFOLLOW_LINKS)) return emptyList()
-        return Files.readAllLines(file).asReversed().asSequence().mapNotNull { line ->
+        return auditLines(directory).asReversed().asSequence().mapNotNull { line ->
             try { Json.parseToJsonElement(line).jsonObject } catch (_: Exception) { null }
         }.take(limit).toList()
     }

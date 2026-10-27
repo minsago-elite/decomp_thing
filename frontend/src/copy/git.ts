@@ -69,6 +69,7 @@ export const gitCopy = {
   commitDetail: 'Commit {object}',
   commitIncomplete: 'This commit changes more files than the workbench lists; the list above is incomplete.',
   provenance: 'Provenance',
+  provenanceLoading: 'Reading provenance and source export…',
   provenanceUnavailable: 'The provenance and source export of this commit are unavailable, for example because its tree exceeds the export bound. Its changed files are listed above.',
   exportDigest: 'Source export SHA-256: {sha}',
   exportVerified: 'Export verified against the commit tree’s blob IDs.',
@@ -82,6 +83,7 @@ export const gitCopy = {
   moreRefs: 'More branches and tags',
   refsChanged: 'Branches and tags could not be continued. Refresh the repository to read the list again.',
   current: 'current',
+  checkedOutElsewhere: 'checked out in another work tree',
   switchAction: 'Switch to {name}',
   deleteAction: 'Delete {name}',
   dirtySwitch: 'Switching needs a clean work tree: commit or unstage changes first. Nothing is stashed or discarded.',
@@ -123,6 +125,8 @@ export const gitRemotesCopy = {
   cloneTitle: 'Clone from a remote',
   cloneAction: 'Clone repository',
   cloneRemoteName: 'Remote name for the source',
+  cloneBranch: 'Branch to check out (optional)',
+  cloneBranchHelp: 'Leave blank to use the remote’s default branch. If that default is detached or unsupported, enter a supported branch name and retry.',
   cloneHelp: 'Cloning copies branches and tags into an isolated managed repository. Hooks, filters, submodules and LFS stay inert, and nothing is validated or accepted.',
 } as const;
 

@@ -26,7 +26,8 @@ class GitRemotesTest {
         fun open(policy: GitRemotePolicy = GitRemotePolicy(admittedRoot = admitted)) = ManagedGitRepositories(store, GitRuntime.detect(),
             { _, run, revision -> GitSourceSnapshot(snapshot, run, revision, "a".repeat(64), mapOf("src/main.c" to GitSourceCommitment(
                 GitSourceCopy.digestOf(snapshot.resolve("src/main.c")), Files.size(snapshot.resolve("src/main.c"))))) },
-            policy = GitRepositoryPolicy(defaultBranch = "main"), crash = { hook(it) }, remotePolicy = policy).also(opened::add)
+            policy = GitRepositoryPolicy(defaultBranch = "main"), crash = { hook(it) }, remotePolicy = policy)
+            .also { it.recover(listOf("0123456789abcdef0123456789abcdef")); opened += it }
 
         /** A bare remote with two commits on `main` and one on `topic`, populated with raw fixture Git. */
         fun remote(name: String = "upstream", format: String = "sha1"): Path {
@@ -288,6 +289,121 @@ class GitRemotesTest {
             assertEquals(before.head, after.head)
             assertEquals(GitWorkspaceVersions.worktreeVersion(before), GitWorkspaceVersions.worktreeVersion(after))
             assertEquals(before.refs.filter { !it.name.startsWith("refs/remotes/") }, after.refs.filter { !it.name.startsWith("refs/remotes/") })
+        }
+    }
+
+    private fun rawRef(f: Fixture, bare: Path, namespace: String, command: String, suffix: Int, objectId: String) {
+        val input = "$command refs/$namespace/malformed-".toByteArray() + byteArrayOf(suffix.toByte(), 0) + "$objectId\u0000".toByteArray()
+        f.repositories.runner.run(GitInvocation("update-ref", listOf("--stdin", "-z"), gitDir = bare, input = input))
+    }
+
+    @Test fun `fetch rejects non UTF8 refs before live promotion without conflating valid replacement characters`() {
+        for (seeded in listOf(false, true)) Fixture().use { f ->
+            val bare = f.remote(); f.initialized()
+            val expected = f.repositories.git("-C", bare.toString(), "rev-parse", "refs/heads/main").trim()
+            // U+FFFD itself is valid UTF-8; reject malformed byte sequences, not that character.
+            val valid = "refs/heads/malformed-\uFFFD"
+            f.repositories.git("-C", bare.toString(), "update-ref", valid, expected)
+            sync(GitOperationAction.REMOTE_ADD, "name" to "upstream", "url" to "admitted:upstream.git")
+            val remoteId = service.remotes(jobId, repositoryId).single().record.remoteId
+            if (seeded) assertEquals(GitOperationState.COMPLETED, sync(GitOperationAction.FETCH, "remoteId" to remoteId).state)
+            val live = f.store.resolve("$jobId/git/repositories/$repositoryId/repository.git")
+            fun tree() = Files.walk(live).use { paths -> paths.filter { Files.isRegularFile(it) }.toList()
+                .associate { live.relativize(it).toString() to Files.readAllBytes(it).toList() } }
+            val before = tree()
+            for (suffix in listOf(0xff, 0xfe)) rawRef(f, bare, "heads", "create", suffix, expected)
+            val refused = sync(GitOperationAction.FETCH, "remoteId" to remoteId)
+            assertEquals(GitOperationState.FAILED, refused.state, refused.message)
+            assertEquals("REPOSITORY_UNSUPPORTED", refused.failureCode)
+            assertTrue(refused.message.contains("non-UTF-8"))
+            assertEquals(before, tree(), "Rejected refs must not promote even received objects into live storage")
+            for (suffix in listOf(0xff, 0xfe)) rawRef(f, bare, "heads", "delete", suffix, expected)
+            assertEquals(GitOperationState.COMPLETED, sync(GitOperationAction.FETCH, "remoteId" to remoteId).state)
+            assertTrue(service.remotes(jobId, repositoryId).single().tracking.any { it.name == "refs/remotes/upstream/malformed-\uFFFD" })
+        }
+    }
+
+    @Test fun `clone rejects non UTF8 branch and tag names without publishing a repository`() {
+        for (namespace in listOf("heads", "tags")) Fixture().use { f ->
+            val bare = f.remote()
+            val expected = f.repositories.git("-C", bare.toString(), "rev-parse", "refs/heads/main").trim()
+            rawRef(f, bare, namespace, "create", 0xff, expected)
+            service = f.open()
+            val admission = service.request(jobId, GitCloneRequest("admitted:upstream.git", "origin", null), key())
+            assertTrue(service.awaitIdle(60_000))
+            val refused = service.operation(jobId, admission.operation.repositoryId, admission.operation.operationId)
+            assertEquals(GitOperationState.FAILED, refused.state, refused.message)
+            assertEquals("REPOSITORY_UNSUPPORTED", refused.failureCode)
+            assertTrue(service.listing(jobId).repositories.isEmpty())
+            assertFalse(Files.exists(f.store.resolve("$jobId/git/repositories/${refused.repositoryId}")))
+        }
+    }
+
+    @Test fun `remote registration audits recover exactly once across mutation and audit crash windows`() {
+        for (action in listOf(GitOperationAction.REMOTE_ADD, GitOperationAction.REMOTE_REMOVE)) {
+            for (point in listOf(GitOperationCrashPoint.AFTER_REMOTE_MUTATION, GitOperationCrashPoint.AFTER_REMOTE_AUDIT)) Fixture().use { f ->
+                f.remote(); f.initialized()
+                val original = if (action == GitOperationAction.REMOTE_REMOVE) {
+                    assertEquals(GitOperationState.COMPLETED, sync(GitOperationAction.REMOTE_ADD, "name" to "upstream", "url" to "admitted:upstream.git").state)
+                    service.remotes(jobId, repositoryId).single().record
+                } else null
+                val parameters = if (original == null) mapOf("name" to "upstream", "url" to "admitted:upstream.git")
+                    else mapOf("remoteId" to original.remoteId)
+                val (view, guard) = guards()
+                f.hook = { if (it == point) throw SimulatedGitCrash() }
+                val admission = service.requestWorkspace(jobId, repositoryId, GitSyncRequest(action, view.worktreeId, guard, parameters), key())
+                assertTrue(service.awaitIdle(60_000))
+                val operationId = admission.operation.operationId
+                assertEquals(action == GitOperationAction.REMOTE_ADD, service.remotes(jobId, repositoryId).isNotEmpty())
+                fun entries() = service.auditLog(jobId, repositoryId, 100).filter { it["operationId"] == kotlinx.serialization.json.JsonPrimitive(operationId) }
+                assertEquals(if (point == GitOperationCrashPoint.AFTER_REMOTE_AUDIT) 1 else 0, entries().size)
+                service.close(); f.hook = {}; service = f.open()
+                repeat(2) {
+                    val recovered = service.operation(jobId, repositoryId, operationId)
+                    assertEquals(GitOperationState.COMPLETED, recovered.state, recovered.message)
+                    val entry = entries().single()
+                    assertEquals(kotlinx.serialization.json.JsonPrimitive(if (original == null) "remote.add" else "remote.remove"), entry["action"])
+                    assertEquals(kotlinx.serialization.json.JsonPrimitive("completed"), entry["outcome"])
+                    assertEquals(kotlinx.serialization.json.JsonPrimitive("admitted:upstream.git"), entry["destination"])
+                    assertEquals(kotlinx.serialization.json.JsonPrimitive(original?.remoteId ?: service.remotes(jobId, repositoryId).single().record.remoteId), entry["remoteId"])
+                    assertNull(GitRemoteStore.pendingAudit(f.store.resolve("$jobId/git/repositories/$repositoryId"), operationId))
+                    service.close(); service = f.open()
+                }
+            }
+        }
+    }
+
+    @Test fun `failed remote audit writes retain recovery ownership until publication succeeds`() {
+        for (action in listOf(GitOperationAction.REMOTE_ADD, GitOperationAction.REMOTE_REMOVE)) Fixture().use { f ->
+            f.remote(); f.initialized()
+            val original = if (action == GitOperationAction.REMOTE_REMOVE) {
+                sync(GitOperationAction.REMOTE_ADD, "name" to "upstream", "url" to "admitted:upstream.git")
+                service.remotes(jobId, repositoryId).single().record
+            } else null
+            val directory = f.store.resolve("$jobId/git/repositories/$repositoryId")
+            val audit = directory.resolve(GitRemoteStore.AUDIT)
+            val backup = directory.resolve("audit-retained")
+            f.hook = { if (it == GitOperationCrashPoint.AFTER_REMOTE_MUTATION) {
+                if (Files.exists(audit)) Files.move(audit, backup)
+                Files.createDirectory(audit) // Real storage error after the registration changed.
+            } }
+            val parameters = if (original == null) arrayOf("name" to "upstream", "url" to "admitted:upstream.git")
+                else arrayOf("remoteId" to original.remoteId)
+            val failed = sync(action, *parameters)
+            assertEquals(GitOperationState.RECOVERY_REQUIRED, failed.state)
+            assertEquals("AUDIT_RECOVERY_REQUIRED", failed.failureCode)
+            assertNotNull(GitRemoteStore.pendingAudit(directory, failed.operationId))
+            service.close(); f.hook = {}; service = f.open()
+            assertEquals(GitOperationState.RECOVERY_REQUIRED, service.operation(jobId, repositoryId, failed.operationId).state)
+            refused("WORKTREE_BUSY", GitOperationAction.REMOTE_ADD, "name" to "other", "url" to "admitted:upstream.git")
+            Files.delete(audit)
+            if (Files.exists(backup)) Files.move(backup, audit)
+            service.recover(listOf(jobId))
+            assertEquals(GitOperationState.COMPLETED, service.operation(jobId, repositoryId, failed.operationId).state)
+            val entries = service.auditLog(jobId, repositoryId, 100).filter { it["operationId"] == kotlinx.serialization.json.JsonPrimitive(failed.operationId) }
+            assertEquals(1, entries.size)
+            assertEquals(kotlinx.serialization.json.JsonPrimitive("admitted:upstream.git"), entries.single()["destination"])
+            assertNull(GitRemoteStore.pendingAudit(directory, failed.operationId))
         }
     }
 

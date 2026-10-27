@@ -151,7 +151,10 @@ object GitReads {
     const val MAX_HISTORY_BYTES = 128 * 1024
     const val MAX_DIFF_FILES = 2000
     const val MAX_SUBJECT = 200
-    private val LIMITS = GitExecutionLimits(Duration.ofSeconds(30), MAX_STATUS_BYTES, 16 * 1024)
+    // Output/time caps do not constrain allocations while inflating or comparing historical blobs.
+    // Apply the same fail-closed child address-space ceiling as import verification to every read.
+    private val LIMITS = GitExecutionLimits(Duration.ofSeconds(30), MAX_STATUS_BYTES, 16 * 1024,
+        maxAddressSpaceBytes = 512L * 1024 * 1024)
     private val DIFF_OPTIONS = listOf("--no-ext-diff", "--no-textconv", "--no-color", "--ignore-submodules=all", "-M")
 
     /** Split NUL-terminated records at the byte level so arbitrary path bytes survive. */
@@ -364,6 +367,10 @@ object GitReads {
         if (path == null || (file.originalPath != null && file.originalPath.exact == null)) throw ManagedGitException("PATCH_UNAVAILABLE",
             "This file name is not valid UTF-8, so its patch cannot be read through the workbench. Its listing entry stays exact.")
         val paths = listOfNotNull(file.originalPath?.exact, path)
+        // Imported historical trees need not be checked out, so either side of a rename can
+        // exceed argv bounds even when the listing and the current work tree are valid.
+        if (paths.any { it.length > GitInvocation.MAX_ARGUMENT_LENGTH }) throw ManagedGitException("PATCH_UNAVAILABLE",
+            "This file name exceeds the patch reader's argument bound. Its listing entry stays exact.")
         val (command, selection) = comparison(scope, commit, parent)
         // Path filters are not record selectors (a path can now be a directory with other changes),
         // so the patch is read with full blob IDs and only the section for this exact record is kept.

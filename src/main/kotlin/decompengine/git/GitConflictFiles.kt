@@ -1,8 +1,11 @@
 package decompengine.git
 
+import decompengine.acp.LinuxDescriptor
+import decompengine.acp.LinuxFilesystemSyscalls
 import java.io.ByteArrayOutputStream
 import java.io.IOException
 import java.nio.ByteBuffer
+import java.nio.channels.FileChannel
 import java.nio.file.Files
 import java.nio.file.LinkOption.NOFOLLOW_LINKS
 import java.nio.file.NoSuchFileException
@@ -83,9 +86,38 @@ internal object GitConflictFiles {
             if (executable) "100755" else "100644")
     }
 
-    /** Prepare privately, then recheck the digest under the workflow lease boundary before publishing. */
-    fun replace(workTree: Path, path: String, expected: String, bytes: ByteArray, beforePublish: () -> Unit) {
-        withParent(workTree, path) { directory, name ->
+    /** Pin the same directory used for both secure rename and fsync. Never reopen a mutable
+     * pathname to flush: a renamed ancestor must not redirect durability to another directory. */
+    private fun <T> withDurableParent(workTree: Path, path: String,
+        block: (SecureDirectoryStream<Path>, Path, LinuxDescriptor) -> T): T {
+        val relative = Path.of(path)
+        if (relative.isAbsolute || relative.nameCount == 0 || relative.any { it.toString() in setOf("", ".", "..") }) unsupported()
+        val absolute = workTree.toAbsolutePath().normalize().resolve(relative)
+        var pinned: LinuxDescriptor? = null
+        try {
+            LinuxFilesystemSyscalls.requireSupported(workTree)
+            pinned = LinuxFilesystemSyscalls.openRoot(absolute.root)
+            for (part in absolute.parent) {
+                val next = LinuxFilesystemSyscalls.openDirectoryAt(checkNotNull(pinned).fd, part.toString())
+                checkNotNull(pinned).close()
+                pinned = next
+            }
+            Files.newDirectoryStream(LinuxFilesystemSyscalls.descriptorPath(checkNotNull(pinned))).use { directory ->
+                if (directory !is SecureDirectoryStream<Path>) unsupported()
+                return block(directory, absolute.fileName, checkNotNull(pinned))
+            }
+        } catch (_: IOException) { unsupported() }
+        catch (_: UnsupportedOperationException) { unsupported() }
+        finally { pinned?.close() }
+    }
+
+    internal enum class DurabilityPoint { PREPARED_FILE, PUBLISHED_DIRECTORY }
+
+    /** Prepare and force privately, then recheck the digest under the workflow lease boundary.
+     * A successful return follows fsync of the exact directory in which the rename occurred. */
+    fun replace(workTree: Path, path: String, expected: String, bytes: ByteArray,
+        afterSync: (DurabilityPoint) -> Unit = {}, beforePublish: () -> Unit) {
+        withDurableParent(workTree, path) { directory, name, pinned ->
             val permissions = try {
                 directory.getFileAttributeView(name, PosixFileAttributeView::class.java, NOFOLLOW_LINKS)?.readAttributes()?.permissions()
             } catch (_: NoSuchFileException) { null }
@@ -94,11 +126,15 @@ internal object GitConflictFiles {
                 directory.newByteChannel(temporary, setOf(StandardOpenOption.CREATE_NEW, StandardOpenOption.WRITE, NOFOLLOW_LINKS)).use { channel ->
                     val buffer = ByteBuffer.wrap(bytes)
                     while (buffer.hasRemaining()) channel.write(buffer)
+                    if (permissions != null) directory.getFileAttributeView(temporary, PosixFileAttributeView::class.java, NOFOLLOW_LINKS).setPermissions(permissions)
+                    (channel as? FileChannel ?: unsupported()).force(true)
                 }
-                if (permissions != null) directory.getFileAttributeView(temporary, PosixFileAttributeView::class.java, NOFOLLOW_LINKS).setPermissions(permissions)
+                afterSync(DurabilityPoint.PREPARED_FILE)
                 beforePublish()
                 if (observe(directory, name).sha256 != expected) changed()
                 directory.move(temporary, directory, name)
+                LinuxFilesystemSyscalls.synchronize(pinned)
+                afterSync(DurabilityPoint.PUBLISHED_DIRECTORY)
             } finally { try { directory.deleteFile(temporary) } catch (_: NoSuchFileException) { } }
         }
     }

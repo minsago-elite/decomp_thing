@@ -196,6 +196,8 @@ data class GitWorkspaceObservation(
      */
     val statusDigest: String,
     val status: GitStatusSnapshot = GitStatusSnapshot(emptyList(), true),
+    /** Exact bounded content/mode commitments for non-ignored status paths, not stat metadata. */
+    val contentFingerprints: Map<GitPath, String> = emptyMap(),
 )
 
 object GitRepositoryInspector {
@@ -286,6 +288,8 @@ object GitRepositoryInspector {
             val (refs, truncated) = refs(runner, gitDir, format, head)
             val status = GitReads.status(runner, gitDir, workTree)
             val relevant = status.entries.filter { !it.ignored }
+            val content = linkedMapOf<GitPath, String>()
+            val budget = GitWorkspaceContent.Budget()
             val digest = MessageDigest.getInstance("SHA-256").apply {
                 update("git-workspace-status-v3\n${head.state.wireName}\n${head.refName ?: ""}\n${head.objectId ?: ""}\n${status.complete}\n".toByteArray())
                 // Identical resolved trees can have different merge parents. Bind them even once
@@ -301,7 +305,8 @@ object GitRepositoryInspector {
                 for (entry in relevant) {
                     update(entry.path.bytes); update(0)
                     update("${entry.originalPath?.display ?: ""}\u0000${entry.staged}\u0000${entry.unstaged}\u0000${entry.untracked}\u0000${entry.conflict}\u0000${entry.indexObjectId ?: ""}\u0000${entry.indexMode ?: ""}\u0000${entry.worktreeMode ?: ""}\u0000${entry.conflictStageIdentity ?: ""}\u0000".toByteArray())
-                    // Re-editing an already modified file changes no status code; its size and time do.
+                    // Re-editing an already modified file need not change its status, size or time.
+                    // Bind content as well; metadata alone cannot authorize staging reviewed bytes.
                     val stat = try {
                         // URI percent escapes preserve native filename bytes on Unix, unlike a
                         // lossy UTF-8 String. Other providers must fail rather than hash a stable
@@ -312,6 +317,7 @@ object GitRepositoryInspector {
                                 if (it == '/'.code.toByte()) "/" else "%%%02X".format(it.toInt() and 0xff)
                             }))
                         if (!file.normalize().startsWith(root) || file.normalize() == root) throw IllegalArgumentException()
+                        content[entry.path] = GitWorkspaceContent.fingerprint(root, file, budget)
                         worktreeStat(root, file)
                     } catch (_: Exception) {
                         throw GitRepositoryException("REPOSITORY_UNAVAILABLE", "A work-tree file could not be observed exactly.")
@@ -319,7 +325,7 @@ object GitRepositoryInspector {
                     update("${stat?.size() ?: -1}\u0000${stat?.lastModifiedTime()?.toInstant() ?: ""}\n".toByteArray())
                 }
             }.digest().joinToString("") { "%02x".format(it) }
-            return GitWorkspaceObservation(format, head, refs, truncated, relevant.isNotEmpty() || !status.complete, digest, status)
+            return GitWorkspaceObservation(format, head, refs, truncated, relevant.isNotEmpty() || !status.complete, digest, status, content)
         } catch (failure: GitCommandException) {
             throw GitRepositoryException(if (failure.kind == GitCommandException.Kind.FAILED) "REPOSITORY_CORRUPT" else "REPOSITORY_UNAVAILABLE",
                 "The repository could not be read within its bounds.")
