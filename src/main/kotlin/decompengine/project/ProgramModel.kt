@@ -22,6 +22,8 @@ data class RecoveredFunction(
     val referencedGlobals: Set<String> = emptySet(),
     val strings: Set<String> = emptySet(),
     val status: RecoveryStatus = RecoveryStatus.RECOVERED,
+    /** Exact listing references to function entry points; these are not call edges. */
+    val functionReferences: Set<String> = emptySet(),
 )
 
 data class RecoveredGlobal(
@@ -78,7 +80,7 @@ data class RecoveredProgramModel(
               "prototype": "${function.prototype.json()}",
               ${statusFields(function.status)},
               "calls": [${function.calls.sorted().joinToString(", ") { "\"${it.json()}\"" }}],
-              "referencedGlobals": [${function.referencedGlobals.sorted().joinToString(", ") { "\"${it.json()}\"" }}],
+              ${if (function.functionReferences.isEmpty()) "" else "\"functionReferences\": [${function.functionReferences.sorted().joinToString(", ") { "\"${it.json()}\"" }}],\n              "}"referencedGlobals": [${function.referencedGlobals.sorted().joinToString(", ") { "\"${it.json()}\"" }}],
               "strings": [${function.strings.sorted().joinToString(", ") { "\"${it.json()}\"" }}],
               "decompiledC": ${function.decompiledC?.let { "\"${it.json()}\"" } ?: "null"}
             }""".trimIndent().prependIndent("    ")
@@ -142,6 +144,7 @@ object ProgramModelJson {
                     prototype = item.string("prototype"),
                     decompiledC = item["decompiledC"]?.jsonPrimitive?.contentOrNull,
                     calls = item.stringSet("calls"),
+                    functionReferences = if ("functionReferences" in item) item.stringSet("functionReferences") else emptySet(),
                     referencedGlobals = item.stringSet("referencedGlobals"),
                     strings = item.stringSet("strings"),
                     status = readExtractionStatus(item, schemaVersion),

@@ -103,7 +103,7 @@ class DeterministicModulePlanner(
         }
         val complexity = MutablePlannerComplexity(entityCount, maximumWorkUnits)
         val dependencyEdges = model.functions.fold(0L) { total, function ->
-            Math.addExact(total, Math.addExact(function.calls.size.toLong(), function.referencedGlobals.size.toLong()))
+            Math.addExact(total, Math.addExact(Math.addExact(function.calls.size.toLong(), function.functionReferences.size.toLong()), function.referencedGlobals.size.toLong()))
         }
         require(dependencyEdges <= maximumDependencyEdges) {
             "module planning requires $dependencyEdges dependency edges; limit=$maximumDependencyEdges"
@@ -179,7 +179,7 @@ class DeterministicModulePlanner(
         val modules = grouped.map { (id, members) ->
             val referencedModules = sortedSetOf<String>()
             members.forEach { function ->
-                function.calls.forEach { calledId ->
+                (function.calls + function.functionReferences).forEach { calledId ->
                     complexity.moduleGraphVisits++
                     functionOwner[calledId]?.takeIf { it != id }?.let(referencedModules::add)
                 }

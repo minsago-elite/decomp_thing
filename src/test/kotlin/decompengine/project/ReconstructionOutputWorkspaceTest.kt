@@ -9,6 +9,25 @@ import kotlin.test.*
 
 class ReconstructionOutputWorkspaceTest {
     @Test
+    fun `changed exporter preserves old capture and matching exporter keeps resumable analysis`() {
+        val root = createTempDirectory("exporter-rollover-")
+        val input = root.resolve("input").apply { writeText("a") }
+        val oldHash = "a".repeat(64)
+        val newHash = "b".repeat(64)
+        ReconstructionOutputWorkspace.open(root, input).use { workspace ->
+            root.resolve("analysis/reports/program_model.json.export").createDirectories()
+                .resolve("state.json").writeText("{\"exporterSha256\":\"$oldHash\"}")
+            root.resolve("analysis/marker").writeText("prior capture")
+            assertFalse(workspace.preserveIncompatibleAnalysis(oldHash))
+            assertTrue(workspace.preserveIncompatibleAnalysis(newHash))
+            assertFalse(root.resolve("analysis").exists())
+            val prior = root.resolve(".analysis-history").listDirectoryEntries().single()
+            assertEquals("prior capture", prior.resolve("marker").readText())
+            assertFalse(workspace.preserveIncompatibleAnalysis(newHash))
+        }
+    }
+
+    @Test
     fun `different binaries preserve active results and switch back to original receipt paths`() {
         val base = createTempDirectory("input-workspaces-")
         val root = base.resolve("output")

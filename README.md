@@ -81,6 +81,12 @@ checking its checkpoints, preserving path-bound receipts. Interrupted switches r
 record; conflicting or malformed state is refused without overwriting either copy. Per-run histories stay shared
 at the output root so runs across inputs can be monitored and replayed together.
 
+Exact listing references to function entry points are retained separately from calls in the optional
+`functionReferences` model field (omitted when empty). They expose typed dependency declarations when a module
+takes another function's address. They do not establish call edges or a scored recovery assessment.
+When the bundled exporter changes, the CLI preserves incompatible analysis under `.analysis-history/` before
+recapturing; this history also follows the input when switching binaries.
+
 Failed compiler diagnostics are retained privately under `.compiler-feedback/` and supplied only to a correction
 attempt whose input, profile, source bytes, and transitive interface context still match. These diagnostic artifacts
 can contain snippets of the candidate source; they are not echoed into the general event log and do not authorize

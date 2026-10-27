@@ -38,6 +38,19 @@ import kotlinx.serialization.json.jsonPrimitive
 
 class SourceTreeTest {
     @Test
+    fun `address taken functions expose typed dependency interfaces without call edges`() {
+        val model = RecoveredProgramModel(inputSha256 = "references", functions = listOf(
+            RecoveredFunction("a", "start_entry", 1UL, "int start_entry(void)", functionReferences = setOf("b")),
+            RecoveredFunction("b", "worker_entry", 2UL, "int worker_entry(int value)"),
+        ))
+        val project = createTempDirectory("source-function-references-")
+        SourceTreeGenerator.generate(model, project)
+        assertTrue(project.resolve("include/modules/worker.h").readText().contains("int worker_entry(int value);"))
+        assertTrue(project.resolve("src/modules/start.c").readText().contains("modules/worker.h"))
+        assertTrue(model.functions.first().calls.isEmpty())
+    }
+
+    @Test
     fun `typed prototypes retain scalar and pointer parameters in generated headers`() {
         val function = oneModuleModel().functions.single().copy(
             prototype = "int parse_input(char *input, const char *suffix, uint count)",

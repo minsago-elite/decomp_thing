@@ -207,7 +207,17 @@ private class TypedReader(
             val status = readExtractionStatus("program model function status")
             expectField("calls")
             val calls = readStringSet("program model function calls", limits.maximumIdentifierCodePoints)
-            expectField("referencedGlobals")
+            requireToken(parser.nextToken(), JsonToken.FIELD_NAME, "function reference field is missing")
+            val functionReferences = if (parser.currentName() == "functionReferences") {
+                chargeCurrentField("functionReferences")
+                readStringSet("program model function references", limits.maximumIdentifierCodePoints).also {
+                    if (it.isEmpty()) modelFail("empty functionReferences must be omitted")
+                    expectField("referencedGlobals")
+                }
+            } else {
+                chargeCurrentField("referencedGlobals")
+                emptySet()
+            }
             val referencedGlobals = readStringSet(
                 "program model function referencedGlobals",
                 limits.maximumIdentifierCodePoints,
@@ -227,6 +237,7 @@ private class TypedReader(
                 referencedGlobals,
                 strings,
                 status,
+                functionReferences,
             )
         }
         return Collections.unmodifiableList(result)
@@ -320,6 +331,10 @@ private class TypedReader(
 
     private fun expectField(expected: String) {
         requireToken(parser.nextToken(), JsonToken.FIELD_NAME, "program model field $expected is missing")
+        chargeCurrentField(expected)
+    }
+
+    private fun chargeCurrentField(expected: String) {
         val actual = parser.currentName()
         budget.chargeNode("field $expected")
         budget.chargeString(actual, MAXIMUM_FIELD_NAME_CODE_POINTS, allowEmpty = false, "program model field name")
@@ -502,6 +517,10 @@ private class ExactCanonicalModelComparator(private val expected: ByteArray) {
             if (model.schemaVersion == 2) ascii(",\n      \"recoveryAssessment\": \"unassessed\"")
             ascii(",\n      \"calls\": [")
             stringSet(function.calls)
+            if (function.functionReferences.isNotEmpty()) {
+                ascii("],\n      \"functionReferences\": [")
+                stringSet(function.functionReferences)
+            }
             ascii("],\n      \"referencedGlobals\": [")
             stringSet(function.referencedGlobals)
             ascii("],\n      \"strings\": [")

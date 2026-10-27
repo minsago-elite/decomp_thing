@@ -28,6 +28,31 @@ internal class ReconstructionOutputWorkspace private constructor(
 ) : AutoCloseable {
     private var closed = false
 
+    /** Preserve incompatible captures before a fresh isolated analysis; never bless old exporter evidence. */
+    fun preserveIncompatibleAnalysis(exporterSha256: String): Boolean {
+        require(HASH.matches(exporterSha256))
+        val analysis = root.resolve("analysis")
+        if (!Files.exists(analysis, NOFOLLOW_LINKS)) return false
+        require(Files.isDirectory(analysis, NOFOLLOW_LINKS))
+        val reports = analysis.resolve("reports")
+        if (!Files.exists(reports, NOFOLLOW_LINKS)) return false
+        require(Files.isDirectory(reports, NOFOLLOW_LINKS))
+        val export = reports.resolve("program_model.json.export")
+        if (!Files.exists(export, NOFOLLOW_LINKS)) return false
+        require(Files.isDirectory(export, NOFOLLOW_LINKS))
+        val state = readObject(export.resolve("state.json")) ?: return false
+        val previous = state["exporterSha256"]?.jsonPrimitive?.content ?: return false
+        require(HASH.matches(previous)) { "invalid prior analysis exporter identity" }
+        if (previous == exporterSha256) return false
+        val history = root.resolve(".analysis-history")
+        if (!Files.exists(history, NOFOLLOW_LINKS)) Files.createDirectory(history)
+        require(Files.isDirectory(history, NOFOLLOW_LINKS))
+        Files.move(analysis, history.resolve("$previous-${UUID.randomUUID()}"), ATOMIC_MOVE)
+        sync(history)
+        sync(root)
+        return true
+    }
+
     private fun activate() {
         recoverSwitch()
         val archiveEntries = presentEntries(root)
@@ -152,7 +177,7 @@ internal class ReconstructionOutputWorkspace private constructor(
         internal const val ACTIVE = ".reconstruction-active-input.json"
         internal const val SWITCH = ".reconstruction-input-switch.json"
         internal const val CACHE = "input-cache"
-        internal val ENTRIES = listOf("analysis", "source-tree", "source-tree.zip", "reconstruction.json", "reconstruction_progress.json", "exploration.json", ModuleCompilerFeedbackStore.DIRECTORY)
+        internal val ENTRIES = listOf("analysis", ".analysis-history", "source-tree", "source-tree.zip", "reconstruction.json", "reconstruction_progress.json", "exploration.json", ModuleCompilerFeedbackStore.DIRECTORY)
         private val HASH = Regex("[0-9a-f]{64}")
         private val KEY = Regex("[0-9a-f]{64}|unidentified-[0-9a-f-]{36}")
         private val OWNERS = mutableSetOf<Any>()

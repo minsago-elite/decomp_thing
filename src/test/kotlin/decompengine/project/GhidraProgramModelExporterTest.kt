@@ -173,6 +173,10 @@ class GhidraProgramModelExporterTest {
 
         val first = analyzer.analyze(binary, work)
         assertEquals(2, first.schemaVersion)
+        val startup = first.functions.single { it.name == "_start" }
+        val main = first.functions.single { it.name == "main" }
+        assertTrue(main.id in startup.functionReferences, "startup must retain the address of main")
+        assertTrue(main.id !in startup.calls, "address taking must not invent a call edge")
         val twice = first.functions.single { it.name == "twice" }
         assertTrue(twice.prototype.contains("int ") && !twice.prototype.endsWith("(void)"))
         val numericPointerReferences = first.functions.flatMap { function ->

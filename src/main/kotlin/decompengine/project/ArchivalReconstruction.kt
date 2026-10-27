@@ -286,6 +286,12 @@ class ArchivalReconstructionService(
         outputDir.createDirectories()
         ReconstructionOutputWorkspace.open(outputDir, binaryPath).use { workspace ->
         progress.diagnostic("active reconstruction inputSha256=${workspace.inputSha256}")
+        if (analyzer is GhidraHeadlessProgramModelAnalyzer) {
+            val exporter = javaClass.getResourceAsStream("/ghidra_scripts/ExportProgramModel.java")!!.use { it.readBytes() }
+            if (workspace.preserveIncompatibleAnalysis(sha256(exporter))) {
+                progress.diagnostic("preserved previous analysis capture; exporter changed, recapturing")
+            }
+        }
         progress.phase(AgentWorkflowPhase.ANALYZING)
         val model = analyzer.analyze(binaryPath, outputDir.resolve("analysis"))
         require(!model.inputSha256.matches(Regex("[0-9a-f]{64}")) || model.inputSha256 == workspace.inputSha256) {

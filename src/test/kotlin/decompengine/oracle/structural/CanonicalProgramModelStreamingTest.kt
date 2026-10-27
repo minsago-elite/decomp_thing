@@ -13,6 +13,23 @@ import kotlin.test.assertTrue
 
 class CanonicalProgramModelStreamingTest {
     @Test
+    fun `function references retain canonical parity and bounds without changing calls`() {
+        val old = ProgramModelJson.readCanonical(resourceBytes())
+        val model = old.copy(functions = old.functions.map {
+            it.copy(functionReferences = setOf("fn_a", "fn_b", "fn_c"))
+        })
+        val bytes = model.toJson().toByteArray()
+        assertEquals(model, ProgramModelJson.readCanonical(bytes))
+        assertEquals(model, CanonicalProgramModelStreaming.readCanonical(bytes).model)
+        assertEquals(old.functions.first().calls, model.functions.first().calls)
+        assertFailsWith<StructuralRecoveryV1Exception> {
+            CanonicalProgramModelStreaming.readCanonical(bytes,
+                CanonicalProgramModelStreamingLimits(maximumReferencesPerFunction = 2))
+        }
+        assertContentEquals(resourceBytes(), model.copy(functions = old.functions).toJson().toByteArray())
+    }
+
+    @Test
     fun `schema two keeps completed extraction and unknown types unassessed with reader parity`() {
         val historical = ProgramModelJson.readCanonical(resourceBytes())
         val model = historical.copy(schemaVersion = 2,

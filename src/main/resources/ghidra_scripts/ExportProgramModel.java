@@ -907,6 +907,7 @@ public class ExportProgramModel extends GhidraScript {
         boolean includeDecompiledC
     ) throws Exception {
         Set<String> callIds = new TreeSet<>();
+        Set<String> functionReferences = new TreeSet<>();
         Set<String> referencedGlobals = new TreeSet<>();
         Set<String> strings = new TreeSet<>();
         String failure = null;
@@ -929,6 +930,11 @@ public class ExportProgramModel extends GhidraScript {
                 for (Reference reference : instruction.getReferencesFrom()) {
                     Address target = reference.getToAddress();
                     if (!target.isMemoryAddress()) continue;
+                    Function referencedFunction = currentProgram.getFunctionManager().getFunctionAt(target);
+                    if (referencedFunction != null && !referencedFunction.isExternal() &&
+                        !reference.getReferenceType().isCall()) {
+                        functionReferences.add(functionId(referencedFunction));
+                    }
                     Data data = currentProgram.getListing().getDataContaining(target);
                     if (data != null && data.hasStringValue() && data.getValue() != null) {
                         strings.add(data.getValue().toString());
@@ -1035,6 +1041,9 @@ public class ExportProgramModel extends GhidraScript {
         output.append("      \"extractionStatus\": ").append(json(status)).append(",\n");
         output.append("      \"recoveryAssessment\": \"unassessed\",\n");
         output.append("      \"calls\": ["); appendStrings(output, callIds); output.append("],\n");
+        if (!functionReferences.isEmpty()) {
+            output.append("      \"functionReferences\": ["); appendStrings(output, functionReferences); output.append("],\n");
+        }
         output.append("      \"referencedGlobals\": ["); appendStrings(output, referencedGlobals); output.append("],\n");
         output.append("      \"strings\": ["); appendStrings(output, strings); output.append("],\n");
         output.append("      \"decompiledC\": ").append(json(source)).append("\n");

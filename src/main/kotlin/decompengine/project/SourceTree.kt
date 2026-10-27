@@ -292,7 +292,7 @@ class BoundedLlmModuleReconstructor(
         val localGlobals = request.module.globalIds.map { id -> request.model.globals.single { it.id == id } }
         val functionEvidence = localFunctions.joinToString("\n\n") { function ->
             "${function.id} @ 0x${function.address.toString(16)}\nprototype: ${function.prototype}\n" +
-                "calls: ${function.calls.sorted()}\nglobals: ${function.referencedGlobals.sorted()}\n" +
+                "calls: ${function.calls.sorted()}\nfunction references (not calls): ${function.functionReferences.sorted()}\nglobals: ${function.referencedGlobals.sorted()}\n" +
                 "strings: ${function.strings.sorted()}\ndecompilation:\n${function.decompiledC ?: "<unavailable>"}"
         }
         val globalEvidence = localGlobals.joinToString("\n") { global ->
@@ -725,7 +725,7 @@ object SourceTreeGenerator {
         val dependenciesByModule = plan.modules.associate { module -> module.id to
             module.functionIds.flatMap { id ->
                 val function = functionById.getValue(id)
-                function.calls.mapNotNull(functionOwners::get) + function.referencedGlobals.mapNotNull(globalOwners::get)
+                (function.calls + function.functionReferences).mapNotNull(functionOwners::get) + function.referencedGlobals.mapNotNull(globalOwners::get)
             }.filter { it != module.id }.distinct().sorted()
         }
         val headerHashes = headers.mapValues { sha256(it.value.toByteArray()) }
@@ -1110,7 +1110,7 @@ object SourceTreeGenerator {
         }
         if (module.globalIds.isNotEmpty()) append('\n')
         val owner = plan.modules.flatMap { candidate -> candidate.functionIds.map { it to candidate.id } }.toMap()
-        val externallyCalled = model.functions.flatMap { caller -> caller.calls.filter { called -> owner[called] != owner[caller.id] } }.toSet()
+        val externallyCalled = model.functions.flatMap { caller -> (caller.calls + caller.functionReferences).filter { called -> owner[called] != owner[caller.id] } }.toSet()
         module.functionIds.map { id -> model.functions.single { it.id == id } }
             .filter { it.id in externallyCalled || safeCName(it.name) in setOf("main", "decomp_engine_main") }
             .forEach { function ->
@@ -1122,7 +1122,7 @@ object SourceTreeGenerator {
     private fun renderPrivateHeader(module: PlannedModule, model: RecoveredProgramModel, plan: ModulePlan): String = buildString {
         val guard = "DECOMP_MODULE_${module.id.uppercase()}_INTERNAL_H"
         val owner = plan.modules.flatMap { candidate -> candidate.functionIds.map { it to candidate.id } }.toMap()
-        val externallyCalled = model.functions.flatMap { caller -> caller.calls.filter { called -> owner[called] != owner[caller.id] } }.toSet()
+        val externallyCalled = model.functions.flatMap { caller -> (caller.calls + caller.functionReferences).filter { called -> owner[called] != owner[caller.id] } }.toSet()
         append("#ifndef $guard\n#define $guard\n\n#include \"modules/${module.id}.h\"\n\n")
         module.functionIds.map { id -> model.functions.single { it.id == id } }
             .filterNot { it.id in externallyCalled || safeCName(it.name) in setOf("main", "decomp_engine_main") }
@@ -1798,7 +1798,7 @@ object SourceTreeGenerator {
         val functions = module.functionIds.sorted().joinToString("\n") { id ->
             val item = model.functions.single { it.id == id }
             listOf(item.id, item.name, item.address.toString(), item.prototype, item.status.name, item.decompiledC.orEmpty(),
-                item.calls.sorted().joinToString(","), item.referencedGlobals.sorted().joinToString(","), item.strings.sorted().joinToString(",")).joinToString("|")
+                item.calls.sorted().joinToString(","), item.functionReferences.sorted().joinToString(","), item.referencedGlobals.sorted().joinToString(","), item.strings.sorted().joinToString(",")).joinToString("|")
         }
         val globals = module.globalIds.sorted().joinToString("\n") { id -> model.globals.single { it.id == id }.toString() }
         val types = module.typeIds.sorted().joinToString("\n") { id -> model.types.single { it.id == id }.toString() }
