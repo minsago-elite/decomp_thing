@@ -37,10 +37,12 @@ class NativeInferredInterfaceCollectorRealTest {
         checkNotNull(javaClass.getResourceAsStream("/nativeinterfaces/NativeInferredFailureDiagnosticsControls.java"))
             .use { Files.copy(it, failureControls) }
         val collector = repository.resolve("ghidra-bridge/src/main/java/ExportInferredInterfacesV1.java")
+        val globalCollector = repository.resolve("ghidra-bridge/src/main/java/ExportGlobalTypeObservationsV1.java")
         val listingCollector = repository.resolve("ghidra-bridge/src/main/java/ExportNativeInterfacesV1.java")
         val typeGraph = repository.resolve("ghidra-bridge/src/main/java/NativeInterfaceTypeGraphV1.java")
         val callCollector = repository.resolve("ghidra-bridge/src/main/java/ExportNativeCallsV1.java")
         val exporter = repository.resolve("src/main/resources/ghidra_scripts/ExportProgramModel.java")
+        val phaseRoute = repository.resolve("ghidra-bridge/src/main/java/BundledExportPhaseRoute.java")
         val dispatch = repository.resolve("ghidra-bridge/src/main/java/RunBundledExports.java")
         val worker = repository.resolve("ghidra-bridge/src/main/java/decompengine/ghidra/BundledGhidraWorker.java")
         val nativeDecompiler = release.resolve("Ghidra/Features/Decompiler/os/linux_x86_64/decompile")
@@ -51,7 +53,7 @@ class NativeInferredInterfaceCollectorRealTest {
         val javaProperties = listOf("-Djava.io.tmpdir=$temporary", "-Djna.tmpdir=$temporary", "-Duser.home=$home", "-Djava.awt.headless=true", "-XX:-UsePerfData")
         run(root, listOf(javaBin.resolve("javac").toString()) + javaProperties.map { "-J$it" } +
             listOf("-proc:none", "-cp", classpath, "-d", classes.toString()) +
-            listOf(source, graphControls, failureControls, collector, listingCollector, typeGraph, callCollector, exporter, dispatch, worker).map(Path::toString),
+            listOf(source, graphControls, failureControls, collector, listingCollector, globalCollector, typeGraph, callCollector, exporter, phaseRoute, dispatch, worker).map(Path::toString),
             "compile-controls", Duration.ofSeconds(45))
         run(root, listOf(javaBin.resolve("java").toString(), "-Xmx1g") + javaProperties +
             listOf("-cp", "$classes${System.getProperty("path.separator")}$classpath", "NativeInferredInterfaceControls",

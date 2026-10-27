@@ -3,6 +3,7 @@ import com.google.gson.JsonObject;
 import com.google.gson.JsonParser;
 import ghidra.GhidraApplicationLayout;
 import ghidra.app.script.GhidraState;
+import ghidra.app.cmd.disassemble.DisassembleCommand;
 import ghidra.framework.Application;
 import ghidra.framework.HeadlessGhidraApplicationConfiguration;
 import ghidra.program.database.ProgramDB;
@@ -31,6 +32,7 @@ import ghidra.program.model.listing.Variable;
 import ghidra.program.model.listing.VariableStorage;
 import ghidra.program.model.pcode.Varnode;
 import ghidra.program.model.symbol.SourceType;
+import ghidra.program.model.symbol.RefType;
 import ghidra.program.util.DefaultLanguageService;
 import ghidra.util.task.TaskMonitor;
 import ghidra.util.task.TaskMonitorAdapter;
@@ -77,6 +79,7 @@ public final class NativeInterfaceCollectorControls {
             assertNativeControls(program, functions);
             JsonObject document = exportTwice(program, functions);
             assertCapture(program, functions, document);
+            globalTypeCapture(program);
             cancelledCollection(program);
             changingProgramCollection(program, functions.get("mixed_parameters"));
             Files.writeString(root.resolve("verified-controls.txt"),
@@ -157,6 +160,15 @@ public final class NativeInterfaceCollectorControls {
             inner.setThunkedFunction(external);
             Function outer = createFunction(program, functions, "thunk_outer", 0x1070);
             outer.setThunkedFunction(inner);
+            program.getListing().createData(address(program, 0x1100), IntegerDataType.dataType);
+            require(new DisassembleCommand(start, null, false).applyTo(program, MONITOR), "authored instruction missing");
+            program.getReferenceManager().addMemoryReference(start, address(program, 0x1101), RefType.READ,
+                SourceType.USER_DEFINED, 0);
+            program.getReferenceManager().addMemoryReference(start, address(program, 0x1180), RefType.READ,
+                SourceType.USER_DEFINED, 1);
+            require(program.getListing().getDataContaining(address(program, 0x1180)) != null &&
+                program.getListing().getDefinedDataContaining(address(program, 0x1180)) == null,
+                "undefined-memory control does not distinguish the listing accessors");
         } finally {
             program.endTransaction(transaction, true);
         }
@@ -393,6 +405,28 @@ public final class NativeInterfaceCollectorControls {
             equal(node.get("size").getAsInt(), varnodes[index].getSize(), "ordered varnode size");
         }
         return nextType;
+    }
+
+    private static void globalTypeCapture(Program program) throws Exception {
+        String modelSha = sha256(model);
+        long modification = program.getModificationNumber();
+        Path first = root.resolve("global-types.ndjson");
+        Path second = root.resolve("global-types-repeat.ndjson");
+        ExportGlobalTypeObservationsV1.collect(program, MONITOR,
+            new String[] {model.toString(), first.toString(), sha256(input), sha256(modelSource), ARCHIVE_SHA});
+        ExportGlobalTypeObservationsV1.collect(program, MONITOR,
+            new String[] {model.toString(), second.toString(), sha256(input), sha256(modelSource), ARCHIVE_SHA});
+        require(Arrays.equals(Files.readAllBytes(first), Files.readAllBytes(second)), "global/type bytes are not deterministic");
+        require(program.getModificationNumber() == modification && sha256(model).equals(modelSha),
+            "global/type collector changed program or model");
+        List<JsonObject> rows = Files.readAllLines(first).stream()
+            .map(line -> JsonParser.parseString(line).getAsJsonObject()).toList();
+        require(rows.get(0).get("functionCount").getAsInt() == 9, "global census omitted external function");
+        require(rows.stream().filter(r -> text(r, "recordKind").equals("function-global-reference")).count() == 1,
+            "defined interior data target was not resolved exactly once");
+        require(rows.stream().filter(r -> text(r, "recordKind").equals("function-global-reference-unresolved") &&
+            text(r, "reason").equals("no-defined-data-containing-target")).count() == 1,
+            "undefined memory target must remain an unresolved observation");
     }
 
     private static void cancelledCollection(Program program) throws Exception {

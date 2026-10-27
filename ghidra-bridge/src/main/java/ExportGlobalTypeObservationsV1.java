@@ -3,6 +3,7 @@ import ghidra.program.model.data.DataType;
 import ghidra.program.model.listing.Data;
 import ghidra.program.model.listing.DataIterator;
 import ghidra.program.model.listing.Function;
+import ghidra.program.model.listing.FunctionIterator;
 import ghidra.program.model.listing.Instruction;
 import ghidra.program.model.listing.InstructionIterator;
 import ghidra.program.model.listing.Listing;
@@ -169,12 +170,19 @@ public final class ExportGlobalTypeObservationsV1 {
                 long references = 0;
                 int functions = 0;
                 HashSet<String> functionIds = new HashSet<>();
-                var functionIterator = program.getFunctionManager().getFunctions(true);
+                // getFunctions excludes externals, but getFunctionCount and the independently
+                // validated listing include them. Merge both bounded inventories in address order.
+                TreeMap<Address, Function> functionInventory = new TreeMap<>();
+                inventory(program.getFunctionManager().getFunctions(true), false, functionInventory,
+                    expectedFunctions, work, graphBudget[0], monitor);
+                inventory(program.getFunctionManager().getExternalFunctions(), true, functionInventory,
+                    expectedFunctions, work, graphBudget[0], monitor);
+                if (functionInventory.size() != expectedFunctions)
+                    throw new IllegalStateException("function census omitted functions during global reference capture");
                 Address previousFunction = null;
-                while (functionIterator.hasNext()) {
+                for (Function function : functionInventory.values()) {
                     monitor.checkCancelled();
                     chargeWork(work, graphBudget[0].steps(), monitor);
-                    Function function = Objects.requireNonNull(functionIterator.next(), "function iterator returned null");
                     if (++functions > expectedFunctions || functions > MAXIMUM_FUNCTIONS) throw new IllegalStateException("function census grew during global reference capture");
                     String functionId = "fn_" + String.format("%016x", function.getEntryPoint().getOffset());
                     if (!functionIds.add(functionId)) throw new IllegalStateException("function owner IDs collide across address spaces");
@@ -212,7 +220,7 @@ public final class ExportGlobalTypeObservationsV1 {
                                     reference.getOperandIndex(), "non-memory-target", spaceIndices));
                                 continue;
                             }
-                            Data target = listing.getDataContaining(reference.getToAddress());
+                            Data target = listing.getDefinedDataContaining(targetAddress);
                             if (target == null) {
                                 writeRecord(writer, firstRecord, unresolvedReference(functionId, instruction.getAddress(), targetAddress,
                                     reference.getOperandIndex(), "no-defined-data-containing-target", spaceIndices));
@@ -242,6 +250,21 @@ public final class ExportGlobalTypeObservationsV1 {
             if (!complete) Files.deleteIfExists(staging);
         }
         if (bytes <= 0 || bytes > maximumBytes) throw new IllegalStateException("global/type sidecar byte bound exceeded");
+    }
+
+    private static void inventory(FunctionIterator iterator, boolean external, Map<Address, Function> functions,
+            int expectedFunctions, long[] work, NativeInterfaceTypeGraphV1.Budget graphBudget,
+            TaskMonitor monitor) throws Exception {
+        while (iterator.hasNext()) {
+            chargeWork(work, graphBudget.steps(), monitor);
+            if (functions.size() >= expectedFunctions || functions.size() >= MAXIMUM_FUNCTIONS)
+                throw new IllegalStateException("function inventory exceeds its bound");
+            Function function = Objects.requireNonNull(iterator.next(), "function iterator returned null");
+            if (function.isExternal() != external)
+                throw new IllegalStateException("function iterator changed its coverage");
+            if (functions.put(function.getEntryPoint(), function) != null)
+                throw new IllegalStateException("duplicate function entry during global reference capture");
+        }
     }
 
     private static Path canonical(String value) throws IOException {
