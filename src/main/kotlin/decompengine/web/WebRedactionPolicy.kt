@@ -215,11 +215,11 @@ internal class WebRedactionPolicy private constructor(
         /** A same-origin URL path (optionally with a query): what basePath and *Href fields carry. */
         private val ROUTE_SYNTAX = Regex("/(?:[A-Za-z0-9._~!$&'()*+,;=:@%-]+/?)*(?:\\?[A-Za-z0-9._~!$&'()*+,;=:@%/?-]*)?")
         private const val CREDENTIAL_KEYS = "api[_-]?key|access[_-]?key|secret[_-]?key|access[_-]?token|refresh[_-]?token|" +
-            "auth[_-]?token|client[_-]?secret|password|passwd|passphrase|secret|token"
-        private val DOCUMENT_CREDENTIAL_KEY = Regex("(?i)(?:$CREDENTIAL_KEYS|(?:proxy-)?authorization|cookie|set-cookie)")
+            "auth[_-]?token|client[_-]?secret|password|passwd|passphrase|secret|token|(?:proxy-)?authorization"
+        private val DOCUMENT_CREDENTIAL_KEY = Regex("(?i)(?:$CREDENTIAL_KEYS|cookie|set-cookie)")
         private val URL_USER_INFO =Regex("(?i)\\b([a-z][a-z0-9+.-]{1,31}://)[^/\\s:@\"'<>]{1,256}:[^/\\s@\"'<>]{1,512}@")
         private val CREDENTIAL_PATTERNS = listOf(
-            Regex("(?i)\\b((?:proxy-)?authorization\\s*[:=]\\s*)(?:basic|bearer|token|digest)\\s+[^\\s,;\"'<>]+") to true,
+            Regex("(?i)\\b((?:proxy-)?authorization[\"']?\\s*[:=]\\s*)(?:basic|bearer|token|digest)\\s+[^\\s,;\"'<>]+") to true,
             Regex("(?i)\\b(bearer\\s+)[A-Za-z0-9._~+/=-]{8,}") to true,
             // Consume escaped quotes and the full bounded input, including unterminated previews.
             // Possessive repetition avoids recursive backtracking on long/escape-heavy credentials.

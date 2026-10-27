@@ -81,6 +81,26 @@ class WebRedactionPolicyTest {
         assertEquals("password=[redacted]\npublic note", policy.text("password=\"unfinished\npublic note"))
     }
 
+    @Test fun `quoted authorization headers embedded in report strings conceal complete credentials`() {
+        val credential = "dXNlcjpwYXNz"
+        for (header in listOf(
+            "\"Authorization\": \"Basic $credential\"",
+            "'Proxy-Authorization': 'Basic $credential'",
+            "\"Authorization\": Basic $credential",
+            "Authorization: \"Bearer $credential\"",
+            "\"Authorization\": \"Digest username=alpha, response=bravo charlie\"",
+        )) {
+            val report = "request headers: {$header}"
+            val safe = policy.text(report)
+            assertFalse(safe.contains(credential) || safe.contains("alpha") || safe.contains("bravo") || safe.contains("charlie"), safe)
+            assertTrue(safe.contains("[redacted]"), safe)
+            assertEquals(safe, policy.text(safe))
+            assertEquals(safe, policy.json(buildJsonObject { put("note", report) }).jsonObject.getValue("note").jsonPrimitive.content)
+            val downloaded = Json.parseToJsonElement(policy.document(buildJsonObject { put("note", report) }.toString().toByteArray()).decodeToString()).jsonObject
+            assertEquals(safe, downloaded.getValue("note").jsonPrimitive.content)
+        }
+    }
+
     @Test fun `redaction is stable when reapplied and never leaves a configured literal`() {
         val inputs = listOf("Authorization: Bearer $canary", "x${canary}y /home/a/b token=$canary", "[redacted]X")
         for (input in inputs) {

@@ -244,6 +244,8 @@ class WebSensitiveBoundaryTest {
             server.start()
             val origin = "http://127.0.0.1:${server.serverPort}"
             val headers = legacySessionHeaders(server)
+            // Session auditing finishes after its response; complete setup before measuring upload storage.
+            awaitAudit(server, 1)
             val boundary = "legacy_boundary"
             val payload = "--$boundary\r\nContent-Disposition: form-data; name=\"binary\"; filename=\"legacy-$canary.elf\"\r\n\r\n".toByteArray() +
                 elfFixture() + "\r\n--$boundary--\r\n".toByteArray()
@@ -265,13 +267,14 @@ class WebSensitiveBoundaryTest {
                 assertEquals(200, page.statusCode(), path)
                 assertFalse(page.body().contains(canary), path)
                 assertTrue(page.body().contains("legacy-[redacted].elf"), path)
-                assertTrue(page.body().contains("window.legacySession"), "trusted session script is unchanged")
+                assertTrue(page.body().contains("<script>$LEGACY_SESSION_SCRIPT</script>"), "trusted session script is byte-identical")
             }
 
             val reports = Files.createDirectories(root.resolve(jobId).resolve("reports"))
             Files.writeString(reports.resolve("exploration.json"), buildJsonObject {
                 put(canary, "public property value")
                 put("password", "alpha bravo charlie")
+                put("headers", "request headers: {\"Authorization\": \"Basic dXNlcjpwYXNz\"}")
                 put("note", "token $canary at /home/someone/x")
                 put("escaped", """password="alpha\"bravo"""")
                 put("long", "token='${"x".repeat(4096)}'")
@@ -287,7 +290,8 @@ class WebSensitiveBoundaryTest {
             val publicReport = Json.parseToJsonElement(report.body()).jsonObject
             assertEquals("public property value", publicReport.getValue("[redacted]").jsonPrimitive.content)
             assertEquals("[redacted]", publicReport.getValue("password").jsonPrimitive.content)
-            assertFalse(report.body().contains("bravo") || report.body().contains("charlie"))
+            assertFalse(report.body().contains("bravo") || report.body().contains("charlie") || report.body().contains("dXNlcjpwYXNz"))
+            assertTrue(publicReport.getValue("headers").jsonPrimitive.content.contains("[redacted]"))
             assertEquals("token [redacted] at [private-path]", publicReport.getValue("note").jsonPrimitive.content)
             assertEquals("password=[redacted]", publicReport.getValue("escaped").jsonPrimitive.content)
             assertEquals("token=[redacted]", publicReport.getValue("long").jsonPrimitive.content)
