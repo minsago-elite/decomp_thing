@@ -2275,9 +2275,10 @@ class ManagedGitRepositories(
 
     private fun persist(directory: Path, operation: GitOperationRecord) {
         val operations = GitStorage.directories(directory, "operations")
-        if (operation.action.workspace && operation.state.terminal) crash(GitOperationCrashPoint.BEFORE_TERMINAL_PERSIST)
+        // Publication operations have the same durable completion boundary as workspace writes.
+        if (operation.state.terminal) crash(GitOperationCrashPoint.BEFORE_TERMINAL_PERSIST)
         GitStorage.replaceAtomically(operations.resolve("${operation.operationId}.json"), encode(operation).toByteArray())
-        if (operation.action.workspace && operation.state.terminal) crash(GitOperationCrashPoint.AFTER_TERMINAL_PERSIST)
+        if (operation.state.terminal) crash(GitOperationCrashPoint.AFTER_TERMINAL_PERSIST)
         retireIntegration(operation)
     }
 
