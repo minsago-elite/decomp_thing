@@ -1061,9 +1061,12 @@ def verify_external_bindings(evidence: dict, request: dict, report: dict, source
         require(classification in {"direct-call", "indirect-call"} and (classification == "direct-call") == (target is not None),
                 "physical call classification/target differs")
         location = base + address(site["instructionRva"])
+        instruction_length = integer(site["instructionLength"], 1, 15)
         require(location <= (1 << 64) - 1 and re.fullmatch(r"(?:[0-9a-f]{2}){1,15}", site["instructionBytes"]) is not None and
-                len(site["instructionBytes"]) == 2 * integer(site["instructionLength"], 1, 15) and
-                address(site["returnAddress"]) == location + site["instructionLength"], "invalid source instruction coordinates")
+                len(site["instructionBytes"]) == 2 * instruction_length and
+                address(site["returnAddress"]) == location + instruction_length, "invalid source instruction coordinates")
+        require((relocation_index.code_window_length(location) or 0) >= instruction_length,
+                "source call instruction lacks uniquely owned executable file-backed bytes")
         status = site["compositionDisposition"]
         require(status in EXTERNAL_STATUSES and site["targetBindingDisposition"] in EXTERNAL_STATUSES, "unknown external disposition")
         caller = canonical_by_id.get(site["callerCanonicalId"])

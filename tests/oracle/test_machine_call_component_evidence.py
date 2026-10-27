@@ -581,6 +581,15 @@ class ExternalCallComponentEvidenceTest(unittest.TestCase):
                 with self.assertRaises(VERIFY.VerificationError):
                     self.verify()
 
+    def test_source_call_instruction_requires_executable_owned_file_bytes(self) -> None:
+        original = copy.deepcopy(self.report)
+        section = next(row for row in self.report["dynamicInventory"]["sections"] if row["name"] == ".text")
+        section["flags"] = "0x2"  # Keep source hashes/metadata internally consistent but drop execute ownership.
+        self.write_payloads()
+        with self.assertRaisesRegex(VERIFY.VerificationError, "source call instruction lacks uniquely owned executable"):
+            self.verify()
+        self.report = original
+
     def test_external_sites_namespace_nested_authority_and_population_are_bound(self) -> None:
         original = copy.deepcopy(self.report)
         changes = [lambda: self.report["sites"].clear(), lambda: self.report["sites"].append(copy.deepcopy(self.report["sites"][0])),
