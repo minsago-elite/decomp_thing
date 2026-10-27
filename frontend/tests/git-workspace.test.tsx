@@ -472,7 +472,9 @@ it('drops a pull request review when a fetch moves the reviewed head', async () 
     { refId: 'ref_origin_release', name: 'refs/remotes/origin/release', objectId: other }] }];
   fireEvent.click(screen.getByRole('button', { name: 'Fetch origin' }));
   await waitFor(() => expect(transport.post).toHaveBeenCalledOnce());
-  await waitFor(() => expect(panel.queryByRole('button', { name: 'Create pull request' })).toBeNull());
+  // A changed range starts a new review lifetime, so inspect the live panel rather than its old DOM.
+  await waitFor(() => expect(within(screen.getByRole('region', { name: 'GitHub pull requests' }))
+    .queryByRole('button', { name: 'Create pull request' })).toBeNull());
 });
 
 it('explains an absent GitHub integration without affecting local Git', async () => {
