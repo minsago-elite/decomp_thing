@@ -323,7 +323,8 @@ class ProfileLimits(unittest.TestCase):
 
     def simulate(self, *, output=b'ok', limit=None, clock=None, cleanup_failure=False,
                  wrapper=0, proof_kind='complete', admission=True, setup_failure=False, provisioning=False, late_cleanup_wait=False, late_absence=False, cleanup_prework=0.0,
-                 metadata_failure=None, census_failure=None, synthetic_completion=False, pidfd_failure=None):
+                 metadata_failure=None, census_failure=None, synthetic_completion=False, pidfd_failure=None,
+                 cleanup_wait_failure=None, nonblocking_failure=None):
         import worker_exec_proof as parser
         declared_profile_sha=contract.load_profile_with_digest()[1]
         stack = ExitStack(); self.addCleanup(stack.close)
@@ -334,6 +335,9 @@ class ProfileLimits(unittest.TestCase):
         process = Process(wrapper); self.last_process=process; now=[100.0]
         if late_cleanup_wait:
             process.wait_hook=lambda count,timeout: now.__setitem__(0,now[0]+6.0) if count==2 else None
+        if cleanup_wait_failure is not None:
+            def wait_failure(count,timeout):raise cleanup_wait_failure
+            process.wait_hook=wait_failure
         blocks = {process.stdout.fileno():[output,b''],process.stderr.fileno():[b'err',b'']}
         popen = stack.enter_context(patch.object(runtime.subprocess,'Popen',return_value=process))
         self.last_popen = popen
@@ -361,9 +365,16 @@ class ProfileLimits(unittest.TestCase):
             stack.enter_context(patch.object(runtime,'kill_exact'))
             stack.enter_context(patch.object(runtime.time,'sleep'))
         stack.enter_context(patch.object(runtime.selectors,'DefaultSelector',return_value=Selector()))
-        stack.enter_context(patch.object(runtime.os,'set_blocking'))
+        self.last_pipe_nonblocking={};self.last_pipe_reads=[];self.last_pipe_mode_attempts=[]
+        def nonblocking(fd,blocking):
+            self.last_pipe_mode_attempts.append((fd,blocking))
+            if nonblocking_failure is not None:raise nonblocking_failure
+            self.last_pipe_nonblocking[fd]=blocking
+        stack.enter_context(patch.object(runtime.os,'set_blocking',side_effect=nonblocking))
         def read(fd,size):
             if fd in blocks:
+                self.assertIs(self.last_pipe_nonblocking.get(fd),False,'never read a blocking capture pipe')
+                self.last_pipe_reads.append((fd,size))
                 return blocks[fd].pop(0) if blocks[fd] else b''
             return _READ_OWNED_FILE(fd,size)
         stack.enter_context(patch.object(runtime.os,'read',side_effect=read))
@@ -628,6 +639,37 @@ class ProfileLimits(unittest.TestCase):
                 self.assertFalse(result['scopeAdmitted']);self.assertFalse(result['finalAbsenceVerified'])
                 self.assertFalse(result['cleanupVerified']);self.assertTrue(result['infrastructureFailure'])
                 self.assertIsNone(result['exitCode']);self.assertFalse(runtime.worker_execution_complete(result))
+
+    def test_pidfd_failure_and_timed_out_wait_never_drain_blocking_pipes(self):
+        failure=OSError(24,'authored pidfd exhaustion')
+        wait_failure=runtime.subprocess.TimeoutExpired('authored launcher',5)
+        with self.assertRaises(OSError) as caught:
+            self.simulate(pidfd_failure=failure,cleanup_wait_failure=wait_failure)
+        self.assertIs(failure,caught.exception)
+        self.assertEqual([5.0],self.last_process.waits)
+        self.assertEqual([(100010,False),(100011,False)],self.last_pipe_mode_attempts)
+        self.assertEqual([100010,100011],[fd for fd,_ in self.last_pipe_reads])
+        result=failure.bounded_result
+        self.assertFalse(result['rootReaped']);self.assertFalse(result['cleanupVerified'])
+        self.assertFalse(result['finalAbsenceVerified']);self.assertTrue(result['infrastructureFailure'])
+        self.assertIsNone(result['exitCode']);self.assertFalse(runtime.worker_execution_complete(result))
+        self.assertEqual(b'ok',result['stdout']);self.assertEqual(b'err',result['stderr'])
+
+    def test_early_drain_skips_reads_when_nonblocking_setup_refuses(self):
+        for mode_failure in (OSError(9,'authored invalid pipe'),ValueError('authored closed pipe')):
+            with self.subTest(error=type(mode_failure).__name__):
+                failure=OSError(38,'authored unsupported pidfd')
+                with self.assertRaises(OSError) as caught:
+                    self.simulate(pidfd_failure=failure,
+                        cleanup_wait_failure=runtime.subprocess.TimeoutExpired('authored launcher',5),
+                        nonblocking_failure=mode_failure)
+                self.assertIs(failure,caught.exception)
+                self.assertEqual([(100010,False),(100011,False)],self.last_pipe_mode_attempts)
+                self.assertEqual([],self.last_pipe_reads)
+                result=failure.bounded_result
+                self.assertEqual(b'',result['stdout']);self.assertEqual(b'',result['stderr'])
+                self.assertFalse(result['cleanupVerified']);self.assertIsNone(result['exitCode'])
+                self.assertFalse(runtime.worker_execution_complete(result))
 
     def test_cleanup_wait_receives_only_remaining_absolute_window(self):
         result=self.simulate(cleanup_prework=2.0)

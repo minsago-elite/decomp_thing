@@ -2294,8 +2294,12 @@ def _run_scoped(argv, cwd, environment, stdin, bounds, *, provisioning, runtime_
         if process is not None:
             for label, stream in [('stdout', process.stdout), ('stderr', process.stderr)]:
                 try:
-                    # One nonblocking bounded drain retains partial wrapper behavior on failure.
-                    block = os.read(stream.fileno(), supervisor['captureReadBytes'])
+                    # Early post-Popen failures can precede normal capture setup.
+                    # Establish nonblocking mode here too, or skip this diagnostic
+                    # drain on refusal; a bounded wait must not lead to blocking IO.
+                    descriptor = stream.fileno()
+                    os.set_blocking(descriptor, False)
+                    block = os.read(descriptor, supervisor['captureReadBytes'])
                     available = max(0, output_limit - len(captured[label]))
                     captured[label].extend(block[:available])
                     if len(block) > available:
