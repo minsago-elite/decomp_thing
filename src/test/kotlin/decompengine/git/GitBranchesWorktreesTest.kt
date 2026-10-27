@@ -283,6 +283,60 @@ class GitBranchesWorktreesTest {
         assertEquals(base, service.workspace(jobId, repositoryId).observation.head.objectId)
     }
 
+    @Test fun `linked attached and detached commits publish to the correct HEAD without shadow refs`() {
+        for (attached in listOf(true, false)) Fixture().use { f ->
+            val base = f.prepare()
+            val primary = service.workspace(jobId, repositoryId).worktreeId
+            val branch = "linked-commit".takeIf { attached }
+            val linked = run(GitRefRequest(GitOperationAction.WORKTREE_ADD, primary, guards().second,
+                objectId = base, name = branch)).worktreeId
+            val path = f.store.resolve("$jobId/git/repositories/$repositoryId/worktrees/$linked")
+            val admin = f.gitDir().resolve("worktrees/$linked")
+            Files.writeString(path.resolve("src/new.c"), "int linked_commit;\n")
+            val (view, g) = guards(linked)
+            assertEquals(GitOperationState.COMPLETED, run(GitStageRequest(linked, g,
+                view.observation.status.entries.filter { it.untracked }.map { it.path.fileId(linked) }, true)).state)
+            val (staged, stagedGuards) = guards(linked)
+            val operation = run(GitCommitRequest(linked, stagedGuards, staged.observation.status.entries
+                .filter { it.staged != GitIndexChange.NONE }.map { it.path.fileId(linked) }, "linked publication"))
+            assertEquals(GitOperationState.COMPLETED, operation.state, operation.message)
+            val commit = assertNotNull(operation.resultObjectId)
+            assertNotEquals(base, commit)
+            assertEquals(commit, f.raw("rev-parse", "HEAD", worktree = path, gitDir = admin).trim())
+            if (attached) assertEquals(commit, f.raw("rev-parse", "refs/heads/$branch").trim())
+            assertFalse(Files.exists(admin.resolve("refs/heads/linked-commit")), "Never publish a private shadow branch")
+            assertFalse(Files.exists(admin.resolve("index.lock")))
+            assertFalse(Files.exists(admin.resolve("HEAD.lock")))
+            assertEquals(base, service.workspace(jobId, repositoryId).observation.head.objectId)
+            assertFalse(service.workspace(jobId, repositoryId, linked).observation.dirty)
+        }
+    }
+
+    @Test fun `linked commit restart preserves an unproven common branch lock`(): Unit = Fixture().use { f ->
+        val base = f.prepare()
+        val primary = service.workspace(jobId, repositoryId).worktreeId
+        val linked = run(GitRefRequest(GitOperationAction.WORKTREE_ADD, primary, guards().second,
+            objectId = base, name = "locked-linked")).worktreeId
+        val path = f.store.resolve("$jobId/git/repositories/$repositoryId/worktrees/$linked")
+        Files.writeString(path.resolve("src/new.c"), "int interrupted_linked;\n")
+        val (view, g) = guards(linked)
+        run(GitStageRequest(linked, g, view.observation.status.entries.filter { it.untracked }.map { it.path.fileId(linked) }, true))
+        val (staged, stagedGuards) = guards(linked)
+        f.hook = { if (it == GitOperationCrashPoint.AFTER_STAGING) throw SimulatedGitCrash() }
+        val admission = service.requestWorkspace(jobId, repositoryId, GitCommitRequest(linked, stagedGuards,
+            staged.observation.status.entries.filter { it.staged != GitIndexChange.NONE }.map { it.path.fileId(linked) }, "interrupted linked"), "linked_lock_crash_01")
+        assertTrue(service.awaitIdle(60_000)); service.close(); f.hook = {}
+        val lock = f.gitDir().resolve("refs/heads/locked-linked.lock")
+        Files.writeString(lock, "another writer\n")
+        service = f.open()
+        val recovered = service.operation(jobId, repositoryId, admission.operation.operationId)
+        assertEquals(GitOperationState.RECOVERY_REQUIRED, recovered.state)
+        assertEquals("COMMIT_LOCKS_REQUIRE_REVIEW", recovered.failureCode)
+        assertEquals("another writer\n", Files.readString(lock))
+        assertEquals(base, service.workspace(jobId, repositoryId).observation.head.objectId)
+        assertEquals(base, service.workspace(jobId, repositoryId, linked).observation.head.objectId)
+    }
+
     @Test fun `switches keep ignored files, refuse option-like names and provenance sees every ref`(): Unit = Fixture().use { f ->
         val base = f.prepare()
         val worktree = service.workspace(jobId, repositoryId).worktreeId

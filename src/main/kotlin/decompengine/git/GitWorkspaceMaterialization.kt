@@ -28,18 +28,26 @@ internal object GitSourceCopy {
     const val MAX_BYTES = 512L * 1024 * 1024
     private const val MAX_DEPTH = 64
 
-    /** Returns `relative path -> SHA-256` of every copied file. */
-    fun copy(source: Path, target: Path, uncopiedRoots: Set<String> = GitTrackingPolicy.UNCOPIED_ROOTS): Map<String, String> {
+    /** Directories created in a work tree; charged before each is created, like files. */
+    const val MAX_DIRECTORIES = 20_000
+
+    /** Returns `relative path -> SHA-256` of every copied file. [maxDirectories] is lowered only by tests. */
+    fun copy(source: Path, target: Path, uncopiedRoots: Set<String> = GitTrackingPolicy.UNCOPIED_ROOTS,
+        maxDirectories: Int = MAX_DIRECTORIES): Map<String, String> {
         if (!Files.isDirectory(source, NOFOLLOW_LINKS)) unavailable()
         val digests = sortedMapOf<String, String>()
         var bytes = 0L
+        var directories = 0
         Files.walkFileTree(source, emptySet(), MAX_DEPTH + 1, object : SimpleFileVisitor<Path>() {
             override fun preVisitDirectory(directory: Path, attributes: BasicFileAttributes): FileVisitResult {
+                GitStorage.checkInterrupted()
                 val relative = source.relativize(directory)
                 if (relative.nameCount > MAX_DEPTH || attributes.isSymbolicLink) unsupported()
                 if (directory != source) {
                     if (relative.nameCount == 1 && relative.toString() in uncopiedRoots) return FileVisitResult.SKIP_SUBTREE
                     if (directory.fileName.toString() == ".git") unsupported()
+                    // Empty directories cost inodes too; their breadth is bounded before any is created.
+                    if (++directories > maxDirectories) unsupported()
                     Files.createDirectory(target.resolve(relative.toString()))
                 }
                 return FileVisitResult.CONTINUE
@@ -58,6 +66,7 @@ internal object GitSourceCopy {
                         val buffer = ByteArray(64 * 1024)
                         var total = 0L
                         while (true) {
+                            GitStorage.checkInterrupted()
                             val count = input.read(buffer)
                             if (count < 0) break
                             total += count
@@ -77,6 +86,7 @@ internal object GitSourceCopy {
         })
         // The snapshot must be unchanged after the copy; the work tree must hold exactly those bytes.
         for ((relative, expected) in digests) {
+            GitStorage.checkInterrupted()
             if (digestOf(source.resolve(relative)) != expected || digestOf(target.resolve(relative)) != expected) unavailable()
         }
         return digests
@@ -90,7 +100,7 @@ internal object GitSourceCopy {
         val digest = MessageDigest.getInstance("SHA-256")
         Files.newInputStream(file, NOFOLLOW_LINKS).use { input ->
             val buffer = ByteArray(64 * 1024)
-            while (true) { val count = input.read(buffer); if (count < 0) break; digest.update(buffer, 0, count) }
+            while (true) { GitStorage.checkInterrupted(); val count = input.read(buffer); if (count < 0) break; digest.update(buffer, 0, count) }
         }
         return digest.digest().hex()
     }
@@ -102,8 +112,15 @@ internal object GitSourceCopy {
 }
 
 /** Bounds on the work tree an imported HEAD would expand to. */
-data class GitCheckoutLimits(val maxFiles: Int = 20_000, val maxBytes: Long = 512L * 1024 * 1024) {
-    init { require(maxFiles in 1..100_000 && maxBytes in 1..4L * 1024 * 1024 * 1024) }
+data class GitCheckoutLimits(
+    val maxFiles: Int = 20_000,
+    val maxBytes: Long = 512L * 1024 * 1024,
+    val maxDirectories: Int = 20_000,
+) {
+    init {
+        require(maxFiles in 1..100_000 && maxBytes in 1..4L * 1024 * 1024 * 1024)
+        require(maxDirectories in 1..100_000)
+    }
 }
 
 /** Layout of a repository found under the operator-admitted import root. */
@@ -117,8 +134,6 @@ internal data class ImportedRepositoryLayout(val gitDir: Path, val bare: Boolean
  */
 internal object GitRepositoryImport {
     private val NAME = Regex("[A-Za-z0-9][A-Za-z0-9._-]{0,127}")
-    private const val MAX_OBJECT_FILES = 100_000
-    private const val MAX_OBJECT_BYTES = 512L * 1024 * 1024
     private const val MAX_REFS = 10_000
     private const val MAX_PACKED_REFS_BYTES = 4 * 1024 * 1024
     private val ALLOWED_EXTENSIONS = setOf("objectformat", "worktreeconfig", "noop", "preciousobjects")
@@ -164,9 +179,22 @@ internal object GitRepositoryImport {
         return ImportedRepositoryLayout(gitDir, bare, format)
     }
 
-    /** Copy objects, branch/tag refs and HEAD into an already initialized managed Git directory. */
-    fun copyHistory(layout: ImportedRepositoryLayout, managedGitDir: Path) {
-        copyObjects(layout.gitDir.resolve("objects"), managedGitDir.resolve("objects"))
+    /**
+     * Copy objects, branch/tag refs and HEAD into an already initialized managed Git directory.
+     * [maxRefEntries] bounds reference files and directories together and is lowered only by tests.
+     * [beforeMetadataOpen] is an internal deterministic metadata replacement-race test seam.
+     */
+    fun copyHistory(layout: ImportedRepositoryLayout, managedGitDir: Path, maxRefEntries: Int = MAX_REFS,
+        beforeMetadataOpen: (Path) -> Unit = {}) {
+        GitImportObjectCopy.copy(layout.gitDir.resolve("objects"), managedGitDir.resolve("objects"))
+        val packed = layout.gitDir.resolve("packed-refs")
+        val packedBytes = if (Files.exists(packed, NOFOLLOW_LINKS)) GitImportMetadata.read(packed, MAX_PACKED_REFS_BYTES, beforeMetadataOpen) else byteArrayOf()
+        val retainedPacked = filterPackedRefs(packedBytes, layout.objectFormat)
+        // Resolve using all source namespaces, but publish only branches/tags. In particular a
+        // symbolic branch may point at a packed remote-tracking ref which is not itself imported.
+        val packedIds = packedBytes.toString(Charsets.UTF_8).lineSequence()
+            .filter { it.isNotEmpty() && !it.startsWith("#") && !it.startsWith("^") }
+            .associate { it.substringAfter(' ') to it.substringBefore(' ') }
         var refs = 0
         for (namespace in listOf("heads", "tags")) {
             val root = layout.gitDir.resolve("refs").resolve(namespace)
@@ -175,56 +203,35 @@ internal object GitRepositoryImport {
             Files.walkFileTree(root, emptySet(), 32, object : SimpleFileVisitor<Path>() {
                 override fun preVisitDirectory(directory: Path, attributes: BasicFileAttributes): FileVisitResult {
                     if (attributes.isSymbolicLink || !attributes.isDirectory) unsupported("The repository references are not ordinary files.")
+                    GitStorage.checkInterrupted()
+                    // Directories, empty ones included, are charged against the reference quota before creation.
+                    if (++refs > maxRefEntries) unsupported("The repository has too many references.")
                     GitStorage.directories(managedGitDir.resolve("refs").resolve(namespace),
                         *root.relativize(directory).map { it.toString() }.filter { it.isNotEmpty() }.toTypedArray())
                     return FileVisitResult.CONTINUE
                 }
                 override fun visitFile(file: Path, attributes: BasicFileAttributes): FileVisitResult {
-                    if (!attributes.isRegularFile || attributes.isSymbolicLink || ++refs > MAX_REFS) unsupported("The repository references are not ordinary files.")
+                    GitStorage.checkInterrupted()
+                    if (!attributes.isRegularFile || attributes.isSymbolicLink) unsupported("The repository references are not ordinary files.")
+                    if (++refs > maxRefEntries) unsupported("The repository has too many references.")
                     val name = "refs/$namespace/" + root.relativize(file).joinToString("/")
                     if (name.endsWith(".lock")) return FileVisitResult.CONTINUE
                     if (!validRefName(name)) unsupported("A repository reference has an unsupported name.")
-                    val content = GitStorage.read(file, 4096).toString(Charsets.UTF_8)
-                    if (!validRefContent(content, layout.objectFormat)) corrupt("A repository reference does not contain a full object ID.")
-                    Files.writeString(managedGitDir.resolve(name), content, CREATE_NEW, WRITE)
+                    val content = GitImportMetadata.read(file, 4096, beforeMetadataOpen).toString(Charsets.UTF_8)
+                    val objectId = resolveRef(layout, name, content, packedIds, beforeMetadataOpen)
+                    Files.writeString(managedGitDir.resolve(name), "$objectId\n", CREATE_NEW, WRITE)
                     return FileVisitResult.CONTINUE
                 }
                 override fun visitFileFailed(file: Path, failure: IOException): FileVisitResult = unsupported("The repository references could not be read.")
             })
         }
-        val packed = layout.gitDir.resolve("packed-refs")
-        if (Files.exists(packed, NOFOLLOW_LINKS)) {
-            Files.write(managedGitDir.resolve("packed-refs"), filterPackedRefs(GitStorage.read(packed, MAX_PACKED_REFS_BYTES), layout.objectFormat))
-        }
-        val head = GitStorage.read(layout.gitDir.resolve("HEAD"), 4096).toString(Charsets.UTF_8)
+        if (packedBytes.isNotEmpty()) Files.write(managedGitDir.resolve("packed-refs"), retainedPacked)
+        val head = GitImportMetadata.read(layout.gitDir.resolve("HEAD"), 4096, beforeMetadataOpen).toString(Charsets.UTF_8)
         val symbolic = head.removePrefix("ref: ").removeSuffix("\n").takeIf { head.startsWith("ref: ") }
         if (symbolic != null) {
             if (!symbolic.startsWith("refs/heads/") || !validRefName(symbolic)) unsupported("HEAD names an unsupported reference.")
         } else if (layout.objectFormat.objectIdOrNull(head.removeSuffix("\n")) == null) corrupt("HEAD is neither a branch nor a full object ID.")
         GitStorage.replaceAtomically(managedGitDir.resolve("HEAD"), head.toByteArray(Charsets.UTF_8))
-    }
-
-    private fun copyObjects(source: Path, target: Path) {
-        var files = 0; var bytes = 0L
-        Files.walkFileTree(source, emptySet(), 4, object : SimpleFileVisitor<Path>() {
-            override fun preVisitDirectory(directory: Path, attributes: BasicFileAttributes): FileVisitResult {
-                if (attributes.isSymbolicLink) unsupported("The repository object store contains links.")
-                val relative = source.relativize(directory)
-                if (relative.toString() == "info") return FileVisitResult.SKIP_SUBTREE
-                if (relative.nameCount > 0) GitStorage.directories(target, *relative.map { it.toString() }.toTypedArray())
-                return FileVisitResult.CONTINUE
-            }
-            override fun visitFile(file: Path, attributes: BasicFileAttributes): FileVisitResult {
-                if (!attributes.isRegularFile || attributes.isSymbolicLink) unsupported("The repository object store contains links or special files.")
-                if (++files > MAX_OBJECT_FILES || attributes.size() > MAX_OBJECT_BYTES - bytes) unsupported("The repository exceeds the import size limits.")
-                bytes += attributes.size()
-                val name = file.fileName.toString()
-                if (name.startsWith("tmp_") || name.endsWith(".lock")) return FileVisitResult.CONTINUE
-                Files.copy(file, target.resolve(source.relativize(file).toString()), NOFOLLOW_LINKS)
-                return FileVisitResult.CONTINUE
-            }
-            override fun visitFileFailed(file: Path, failure: IOException): FileVisitResult = unsupported("The repository object store could not be read.")
-        })
     }
 
     /** Keep the header, branch and tag records and their peeled lines; drop every other namespace. */
@@ -263,31 +270,50 @@ internal object GitRepositoryImport {
         !name.endsWith("/") && !name.endsWith(".") &&
         name.split('/').all { it.isNotEmpty() && !it.startsWith(".") && !it.endsWith(".lock") }
 
-    private fun validRefContent(content: String, format: GitObjectFormat): Boolean {
-        val value = content.removeSuffix("\n")
-        if (value.contains('\n')) return false
-        return format.objectIdOrNull(value) != null || (value.startsWith("ref: refs/") && validRefName(value.removePrefix("ref: ")))
+    /** Bounded data-only symref resolution, including targets in intentionally omitted namespaces. */
+    private fun resolveRef(layout: ImportedRepositoryLayout, name: String, content: String, packedIds: Map<String, String>,
+        beforeMetadataOpen: (Path) -> Unit): String {
+        val seen = mutableSetOf(name)
+        var value = content.removeSuffix("\n")
+        repeat(16) {
+            GitStorage.checkInterrupted()
+            layout.objectFormat.objectIdOrNull(value)?.let { return it }
+            val target = value.removePrefix("ref: ")
+            if (!value.startsWith("ref: ") || !validRefName(target)) corrupt("A repository reference does not contain a full object ID.")
+            if (!seen.add(target)) unsupported("The repository contains cyclic symbolic references.")
+            val file = layout.gitDir.resolve(target)
+            value = if (Files.exists(file, NOFOLLOW_LINKS)) GitImportMetadata.read(file, 4096, beforeMetadataOpen).toString(Charsets.UTF_8).removeSuffix("\n")
+                else packedIds[target] ?: corrupt("A symbolic repository reference has no target.")
+        }
+        unsupported("The repository's symbolic references exceed the import depth limit.")
     }
 
     /**
      * Full object verification: every object is re-hashed against its ID and everything reachable
      * from the copied refs must be present. `--connectivity-only` would not detect altered blobs.
+     * Compressed file size and HEAD checkout quotas do not bound inflation of dangling, historical
+     * or packed objects. The child therefore has a hard address-space budget before it reads any.
      */
-    fun verify(runner: GitCommandRunner, managedGitDir: Path) {
+    fun verify(runner: GitCommandRunner, managedGitDir: Path, maxAddressSpaceBytes: Long = 512L * 1024 * 1024) {
         try {
             runner.run(GitInvocation("fsck", listOf("--full", "--no-dangling", "--no-progress"), gitDir = managedGitDir,
-                limits = GitExecutionLimits(Duration.ofMinutes(2), 1024 * 1024, 64 * 1024)))
+                limits = GitExecutionLimits(Duration.ofMinutes(2), 1024 * 1024, 64 * 1024, maxAddressSpaceBytes)))
         } catch (failure: GitCommandException) {
+            // Git's fatal allocation failure is 128; a resource-related signal can also end it.
+            // These exits cannot establish corruption, and must never trigger an unbounded retry.
+            if (failure.kind == GitCommandException.Kind.FAILED && failure.exitCode in setOf(128, 137, 139)) {
+                unsupported("The repository could not be verified within the import memory budget.")
+            }
             if (failure.kind == GitCommandException.Kind.FAILED) corrupt("The repository is missing objects or contains invalid objects.")
             throw GitOperationFailure("REPOSITORY_UNAVAILABLE", "The repository could not be verified within its bounds.")
         }
     }
 
-    /** Sum the recursive tree's entries and declared blob sizes; refuse before any byte is checked out. */
+    /** Bound files, directory prefixes and declared blob bytes before checkout creates anything. */
     fun requireCheckoutBounds(runner: GitCommandRunner, gitDir: Path, objectId: String, limits: GitCheckoutLimits,
         repositoryBudget: Long = Long.MAX_VALUE) {
         val listing = try {
-            runner.run(GitInvocation("ls-tree", listOf("-r", "-l", "-z", "--full-tree", objectId), gitDir = gitDir,
+            runner.run(GitInvocation("ls-tree", listOf("-r", "-t", "-l", "-z", "--full-tree", objectId), gitDir = gitDir,
                 limits = GitExecutionLimits(Duration.ofMinutes(2), 32 * 1024 * 1024, 64 * 1024)))
         } catch (failure: GitCommandException) {
             when (failure.kind) {
@@ -297,12 +323,18 @@ internal object GitRepositoryImport {
             }
         }
         var files = 0
+        var directories = 0
         var bytes = 0L
         for (entry in listing.text.split('\u0000')) {
             if (entry.isEmpty()) continue
             val fields = entry.substringBefore('\t').split(' ').filter { it.isNotEmpty() }
             if (fields.size != 4 || '\t' !in entry) corrupt("The repository's HEAD tree could not be read.")
-            if (++files > limits.maxFiles) tooLarge()
+            // -t includes each tree path once, even when multiple leaves share that prefix.
+            // Inert gitlinks also create empty directories, so charge them to both entry quotas.
+            if (fields[1] == "tree" || fields[1] == "commit") {
+                if (++directories > limits.maxDirectories) tooLarge()
+            }
+            if (fields[1] != "tree" && ++files > limits.maxFiles) tooLarge()
             if (fields[1] == "blob") {
                 val size = fields[3].toLongOrNull()?.takeIf { it >= 0 } ?: corrupt("The repository's HEAD tree could not be read.")
                 if (size > repositoryBudget - bytes) throw GitOperationFailure("TRANSFER_LIMIT",

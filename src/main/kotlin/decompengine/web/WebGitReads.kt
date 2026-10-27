@@ -203,7 +203,7 @@ internal class WebGitReads(private val repositories: () -> ManagedGitRepositorie
             put("entries", JsonArray(page.entries.map { entry ->
                 buildJsonObject {
                     put("objectId", entry.objectId)
-                    put("parentObjectIds", JsonArray(entry.parentObjectIds.take(64).map(::JsonPrimitive)))
+                    put("parentObjectIds", JsonArray(entry.parentObjectIds.map(::JsonPrimitive)))
                     put("authorName", entry.authorName); put("authorEmail", entry.authorEmail)
                     put("authoredAt", entry.authoredAt.toString()); put("committedAt", entry.committedAt.toString())
                     put("subject", entry.subject); put("subjectTruncated", entry.subjectTruncated)

@@ -163,6 +163,10 @@
       "valid": true
     },
     {
+      "file": "fixtures/git-history-many-parents.json",
+      "valid": true
+    },
+    {
       "file": "fixtures/git-diff.json",
       "valid": true
     },
@@ -888,6 +892,114 @@
     {
       "file": "fixtures/git-audit.json",
       "valid": true
+    },
+    {
+      "file": "fixtures/attempt-controls-retry.json",
+      "valid": true
+    },
+    {
+      "file": "fixtures/attempt-controls-resume.json",
+      "valid": true
+    },
+    {
+      "file": "fixtures/attempt-controls-running.json",
+      "valid": true
+    },
+    {
+      "file": "fixtures/attempt-controls-superseded.json",
+      "valid": true
+    },
+    {
+      "file": "fixtures/run-retry.json",
+      "valid": true
+    },
+    {
+      "file": "fixtures/run-resume.json",
+      "valid": true
+    },
+    {
+      "file": "fixtures/invalid-attempt-controls-available-reason.json",
+      "valid": false
+    },
+    {
+      "file": "fixtures/invalid-attempt-controls-resume-scope.json",
+      "valid": false
+    },
+    {
+      "file": "fixtures/invalid-attempt-controls-terminal-cancel.json",
+      "valid": false
+    },
+    {
+      "file": "fixtures/invalid-attempt-controls-superseded-retry.json",
+      "valid": false
+    },
+    {
+      "file": "fixtures/invalid-attempt-controls-retry-resume-reason.json",
+      "valid": false
+    },
+    {
+      "file": "fixtures/invalid-run-recovery-without-predecessor.json",
+      "valid": false
+    },
+    {
+      "file": "fixtures/invalid-run-retry-checkpoint.json",
+      "valid": false
+    },
+    {
+      "file": "fixtures/invalid-run-resume-without-checkpoint.json",
+      "valid": false
+    },
+    {
+      "file": "fixtures/invalid-recover-mode.json",
+      "valid": false
+    },
+    {
+      "file": "fixtures/invalid-recover-caller-workspace.json",
+      "valid": false
+    },
+    {
+      "file": "fixtures/request-recover-resume.json",
+      "valid": true
+    },
+    {
+      "file": "fixtures/queue-position-queued.json",
+      "valid": true
+    },
+    {
+      "file": "fixtures/queue-position-not-queued.json",
+      "valid": true
+    },
+    {
+      "file": "fixtures/queue-position-unavailable.json",
+      "valid": true
+    },
+    {
+      "file": "fixtures/invalid-queue-position-ahead.json",
+      "valid": false
+    },
+    {
+      "file": "fixtures/invalid-queue-position-exact.json",
+      "valid": false
+    },
+    {
+      "file": "fixtures/invalid-queue-position-identities.json",
+      "valid": false
+    },
+    {
+      "file": "fixtures/invalid-queue-position-queued-state.json",
+      "valid": false
+    },
+    {
+      "file": "fixtures/run-timed-out.json",
+      "valid": true
+    },
+    {
+      "file": "fixtures/run-infrastructure-failed.json",
+      "valid": true
+    },
+    {
+      "file": "fixtures/invalid-run-interrupted-timed-out.json",
+      "valid": false
     }
   ]
 }
