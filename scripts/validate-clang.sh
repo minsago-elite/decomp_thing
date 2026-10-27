@@ -16,10 +16,15 @@ case "$clang_executable" in
   *) clang_executable=$(command -v "$clang_executable") ;;
 esac
 
-validation_root=$(mktemp -d /tmp/decomp-clang-ci.XXXXXX)
+for command in python3 timeout; do
+  command -v "$command" >/dev/null || { echo "missing Clang validation command: $command" >&2; exit 1; }
+done
+validation_parent="$PWD/build"
+mkdir -p "$validation_parent"
+validation_root=$(mktemp -d "$validation_parent/decomp-clang-ci.XXXXXX")
 cleanup() {
   case "$validation_root" in
-    /tmp/decomp-clang-ci.*) rm -rf -- "$validation_root" ;;
+    "$validation_parent"/decomp-clang-ci.*) rm -rf -- "$validation_root" ;;
     *) echo "refusing to remove unexpected Clang validation path: $validation_root" >&2 ;;
   esac
 }
@@ -29,6 +34,32 @@ trap cleanup EXIT
 
 strict_flags=(-std=c11 -O1 -g -Wall -Wextra -Wformat -Wformat-security -Werror)
 sanitizer_flags=(-std=c11 -O1 -g -fno-omit-frame-pointer -fsanitize=address,undefined)
+
+run_sanitizer() {
+  local fixture=$1
+  local status diagnostics
+  if ASAN_OPTIONS=detect_leaks=0:halt_on_error=1 \
+    UBSAN_OPTIONS=halt_on_error=1 \
+    python3 -I -B scripts/run-clang-sanitizer.py "$validation_root/$fixture" \
+    >"$validation_root/$fixture.stdout" 2>"$validation_root/$fixture.stderr"; then
+    echo "Clang sanitizers did not reject the $fixture fixture" >&2
+    return 1
+  else
+    status=$?
+  fi
+  case "$status" in
+    124|125|126|127|137|153)
+      echo "Clang sanitizer invocation incomplete for $fixture: status $status" >&2
+      return 1 ;;
+  esac
+  for diagnostics in "$validation_root/$fixture.stdout" "$validation_root/$fixture.stderr"; do
+    if (($(wc -c <"$diagnostics") > 1048576)); then
+      echo "Clang diagnostic output exceeded 1 MiB: $diagnostics" >&2
+      return 1
+    fi
+  done
+  return 0
+}
 
 if [[ ! -f benchmarks/fixtures/c-vul/src/01_out_of_bounds_write.c ]]; then
   echo "Clang validation requires the initialized benchmarks/fixtures/c-vul submodule" >&2
@@ -65,26 +96,14 @@ grep -F "used uninitialized" "$validation_root/uninitialized.log" >/dev/null
 "$clang_executable" "${sanitizer_flags[@]}" \
   benchmarks/fixtures/c-vul/src/01_out_of_bounds_write.c \
   -o "$validation_root/out-of-bounds"
-if ASAN_OPTIONS=detect_leaks=0:halt_on_error=1 \
-  UBSAN_OPTIONS=halt_on_error=1 \
-  "$validation_root/out-of-bounds" \
-  >"$validation_root/out-of-bounds.stdout" 2>"$validation_root/out-of-bounds.stderr"; then
-  echo "Clang sanitizers did not reject the out-of-bounds fixture" >&2
-  exit 1
-fi
+run_sanitizer out-of-bounds
 grep -F "ERROR: AddressSanitizer: stack-buffer-overflow" \
   "$validation_root/out-of-bounds.stderr" >/dev/null
 
 "$clang_executable" "${sanitizer_flags[@]}" \
   benchmarks/fixtures/c-vul/src/07_null_pointer_deref.c \
   -o "$validation_root/null-dereference"
-if ASAN_OPTIONS=detect_leaks=0:halt_on_error=1 \
-  UBSAN_OPTIONS=halt_on_error=1 \
-  "$validation_root/null-dereference" \
-  >"$validation_root/null-dereference.stdout" 2>"$validation_root/null-dereference.stderr"; then
-  echo "Clang sanitizers did not reject the null-dereference fixture" >&2
-  exit 1
-fi
+run_sanitizer null-dereference
 grep -F "runtime error: member access within null pointer" \
   "$validation_root/null-dereference.stderr" >/dev/null
 

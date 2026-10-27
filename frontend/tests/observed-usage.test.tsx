@@ -16,6 +16,7 @@ it('preserves exact large reported counters with units, source and unknown measu
   expect(screen.getByText(/Source: agent execution receipt retained by writer writer_usage/)).toBeTruthy();
   expect(screen.getByText(/Provider measurement time: Not reported/)).toBeTruthy();
   expect(screen.getByText(/not cumulative attempt totals/)).toBeTruthy();
+  expect(screen.getByText('2026-09-05 00:00:00 UTC')).toHaveProperty('dateTime', '2026-09-05T00:00:00Z');
 });
 it('keeps absent usage unknown and does not expose an unsupported monetary estimate', () => {
   show({ reportedCostAmount: '123.45', reportedCostCurrency: 'USD' });
@@ -50,3 +51,11 @@ it.each([
   ['PT0S', '0'], ['PT0.010000000S', '0.01'], ['PT9223372036854775807S', '9223372036854775807'],
   ['PT', null], ['PT-1S', null], ['1', null], ['PT1.1234567890S', null], ['P1D', null],
 ])('converts supported duration text exactly (%s)', (source, expected) => { expect(durationSeconds(source)).toBe(expected); });
+
+it('rejects trailing line terminators in reported duration text', () => {
+  for (const duration of ['PT0S', 'PT1H2M3.000000001S', 'PT9223372036854775807S']) {
+    for (const suffix of ['\n', '\r', '\r\n', '\u2028', '\u2029']) {
+      expect(durationSeconds(duration + suffix)).toBeNull();
+    }
+  }
+});

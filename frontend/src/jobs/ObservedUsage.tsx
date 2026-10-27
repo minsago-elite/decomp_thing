@@ -1,10 +1,13 @@
+import { observedUsageCopy as copy } from '../copy/attempt';
+import { message as displayMessage } from '../shared/messages';
+import { formatExactTimestamp } from './metadataFormat';
 import type { ProgressObservation } from '../api/generated';
 
 /** Convert the producer's nonnegative H/M/S duration subset without floating-point rounding. */
 export function durationSeconds(value: string): string | null {
   if (value.length > 128) return null;
   const parts = /^PT(?:(0|[1-9][0-9]{0,18})H)?(?:(0|[1-9][0-9]{0,18})M)?(?:(0|[1-9][0-9]{0,18})(?:\.([0-9]{1,9}))?S)?$/.exec(value);
-  if (!parts || !parts.slice(1).some(part => part !== undefined)) return null;
+  if (!parts || parts[0] !== value || !parts.slice(1).some(part => part !== undefined)) return null;
   const whole = BigInt(parts[1] ?? '0') * 3600n + BigInt(parts[2] ?? '0') * 60n + BigInt(parts[3] ?? '0');
   const fraction = (parts[4] ?? '').replace(/0+$/, '');
   return `${whole}${fraction ? `.${fraction}` : ''}`;
@@ -17,24 +20,24 @@ export function ObservedUsage({ observation, occurredAt, sequence }: { observati
   const context = observation.observationKind === 'context_usage';
   if (!context && observation.observationKind !== 'agent_finished') return null;
   return <details>
-    <summary>{context ? 'Context usage' : 'Agent outcome and usage'} for sequence {sequence}</summary>
-    <p>Source: {context ? 'provider context report' : 'agent execution receipt'} retained by writer {observation.writerId}. Journal recorded at <time dateTime={occurredAt}>{occurredAt}</time>. Provider measurement time: Not reported.</p>
-    <p>These observations are not cumulative attempt totals and do not establish validation, acceptance or a stop decision.</p>
+    <summary>{displayMessage(context ? copy.contextSummary : copy.agentSummary, { sequence })}</summary>
+    <p>{displayMessage(copy.source, { source: context ? copy.contextReport : copy.agentReceipt, writer: observation.writerId, time: <time dateTime={occurredAt} title={occurredAt}>{formatExactTimestamp(occurredAt)}</time> })}</p>
+    <p>{copy.theseObservationsAreNotCumulativeAttemptTotalsAndDoNot}</p>
     {context ? <dl class="job-facts">
-      <dt>Context used (tokens)</dt><dd>{fields.contextUsedTokens ?? 'Not reported'}</dd>
-      <dt>Context window (tokens)</dt><dd>{fields.contextWindowTokens ?? 'Not reported'}</dd>
+      <dt>{copy.contextUsedTokens}</dt><dd>{fields.contextUsedTokens ?? copy.notReported}</dd>
+      <dt>{copy.contextWindowTokens}</dt><dd>{fields.contextWindowTokens ?? copy.notReported}</dd>
     </dl> : <>
       <dl class="job-facts">
-        <dt>Reported stop reason</dt><dd>{fields.stopReason ?? 'Not reported'}</dd>
-        <dt>Failure classification</dt><dd>{fields.failureKind ?? 'Not reported'}</dd>
-        <dt>Input (tokens)</dt><dd>{fields.inputTokens ?? 'Not reported'}</dd>
-        <dt>Output (tokens)</dt><dd>{fields.outputTokens ?? 'Not reported'}</dd>
-        <dt>Cached input (tokens)</dt><dd>{fields.cachedInputTokens ?? 'Not reported'}</dd>
-        <dt>Tool calls (count)</dt><dd>{fields.toolCalls ?? 'Not reported'}</dd>
-        <dt>Wall-clock duration (seconds)</dt><dd>{fields.wallClock === undefined ? 'Not reported' : duration ?? 'Unavailable: unsupported duration format'}</dd>
+        <dt>{copy.reportedStopReason}</dt><dd>{fields.stopReason ?? copy.notReported}</dd>
+        <dt>{copy.failureClassification}</dt><dd>{fields.failureKind ?? copy.notReported}</dd>
+        <dt>{copy.inputTokens}</dt><dd>{fields.inputTokens ?? copy.notReported}</dd>
+        <dt>{copy.outputTokens}</dt><dd>{fields.outputTokens ?? copy.notReported}</dd>
+        <dt>{copy.cachedInputTokens}</dt><dd>{fields.cachedInputTokens ?? copy.notReported}</dd>
+        <dt>{copy.toolCallsCount}</dt><dd>{fields.toolCalls ?? copy.notReported}</dd>
+        <dt>{copy.wallClockDurationSeconds}</dt><dd>{fields.wallClock === undefined ? copy.notReported : duration ?? copy.unavailableUnsupportedDurationFormat}</dd>
       </dl>
-      <p>Stop reasons and failure classifications describe this agent receipt; the attempt's durable outcome is shown separately.</p>
+      <p>{copy.stopReasonsAndFailureClassificationsDescribeThisAgentReceiptThe}</p>
     </>}
-    <p>Cost estimate unavailable: no configured pricing basis is supplied. Queue position and worker resource measurements are not reported here.</p>
+    <p>{copy.costEstimateUnavailableNoConfiguredPricingBasisIsSuppliedQueue}</p>
   </details>;
 }

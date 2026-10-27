@@ -35,6 +35,12 @@ and revision-validation producer version 2. A future producer version must gain 
 support; an explicit unavailable/unsupported report may carry its version without a summary.
 These client checks validate contract consistency, not the authenticity of execution or acceptance.
 
+Run lifecycle semantics follow the durable store in single-attempt documents, history items and
+progress snapshots. Terminal reasons must match their state; running and completed attempts need
+a recorded start, while queued attempts have none. Cancelling, failed, cancelled and interrupted
+attempts may have no start timestamp when termination precedes execution. The shared Python
+verifier and frontend contract tests exercise all state/reason pairs and both start alternatives.
+
 `createApiClient({basePath})` uses same-origin `/api/v1` URLs, credentials, JSON negotiation and
 `X-Request-ID` correlation. It exposes typed `get`, `post`, `upload` and `deleteSession` calls. `get`/`post`
 return the entire typed response envelope. HTTP errors expose `ApiClientError` with a local `code`,
@@ -50,6 +56,33 @@ workflow. Body reads enforce actual byte counts and strict UTF-8, release reader
 and abort/cancel pending reads at the deadline. Redirects and arbitrary origins are rejected.
 The client does not persist session material, generate mutation intent, or infer endpoint
 capabilities from its available schema types.
+
+`readArtifactText(artifact, {jobId, runId}, {signal})` reads one observed JSON artifact through
+the existing private content endpoint. It checks exact attempt identity, raw-evidence role,
+deployment/resource URL, the one-MiB ceiling, actual UTF-8 byte length and SHA-256 before
+returning text. It shares the request deadline, cancellation, same-origin/no-redirect policy,
+correlated error handling and session-failure observer. The hash identifies observed bytes;
+it does not validate their claims. It never retries, persists bytes or submits a workflow.
+
+The exploration case viewer uses that read only after a deliberate button press. It supports
+the existing unversioned candidate/observation layout, bounded to 1,000 candidates, 256 arguments
+per candidate and 64 reported sources. Duplicate/foreign observation identities, unsupported
+record fields, invalid hex and inconsistent signatures are refused. Missing observations remain
+explicitly missing. At most 20 case rows, 32 arguments of the selected case, 160 code points per
+text preview and 128 bytes per binary preview are rendered; truncation and exact retained scope
+are visible. Filters use reported source strings and never infer seed/regression provenance.
+This producer does not record timeout/launch-failure categories, so the viewer leaves those
+classifications unreported. Full outcome-contract and producer qualification remain required.
+
+Exploration summaries label the fixed producer score as an uncalibrated breadth heuristic.
+The accessible signature table names exit-code/stdout/stderr signatures and uses the reported
+expanded distinct-signature count as the reference population for new signatures. Zero totals
+and contradictory summary/heuristic-record totals, including totals larger than either the
+reported input count or retained candidate count, make the combined denominator unavailable;
+no percentage or program-coverage estimate is calculated. Original exact count strings remain
+visible. The baseline signature count is absent from the summary adapter, and no branch,
+statement, function or complete-behavior denominator is inferred. Report/job/attempt/revision
+identities and the existing observed-artifact download remain attached to the same report.
 
 The `recovery` response carries a bounded display-only recovery-file inventory from
 private `GET /recovery`. Counts and observed bytes do not authorize cleanup or source
@@ -96,6 +129,15 @@ publication. Upload views use a 120-second deadline, keep File bytes in memory, 
 bounded key/filename/size ticket in tab sessionStorage for explicit retries after reload. The view uses a fresh X-Upload-ID and polls the session-bound uploadProgress endpoint
 for actual request bytes received, independently of its durable retry key. Unknown
 Content-Length leaves the percentage indeterminate while preserving the byte count.
+
+Attempt controls read `attemptControls` from `GET R/controls` only on an explicit click. Cancel
+(`workflowCancelRequest`) and recovery (`recoverRequest`) send that read's run version as If-Match
+and a fresh request key. One bounded command (identities, version, key, expected input; no
+credentials) is retained in tab sessionStorage before sending and cleared only after a definite
+answer. Lost acknowledgements, uncertain publication and denied access keep it; reload offers an
+explicit replay with the same key and body and never sends anything automatically. A cancel
+response is reported by its current state, so a completion that won the race is not shown as
+cancelled; retry and resume require a new attempt linked to the predecessor.
 
 `createSseDecoder(basePath)` incrementally decodes the application's SSE frames. It yields
 one validated WebEvent at a time and retains at most one bounded unfinished frame. It checks

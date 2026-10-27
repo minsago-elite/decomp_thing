@@ -177,14 +177,7 @@ class HttpOpenAiCompatibleRepairClient(
     private val reasoningEffort = reasoningEffort?.trim()?.takeIf { it.isNotEmpty() }
 
     init {
-        require(apiKey.isNotBlank()) { "API_KEY must not be blank" }
-        require(model.isNotBlank()) { "MODEL must not be blank" }
-        require(baseUrl.scheme in setOf("http", "https") && !baseUrl.host.isNullOrBlank()) {
-            "BASE_URL must be an absolute HTTP(S) URL"
-        }
-        require(this.reasoningEffort == null || this.reasoningEffort in SUPPORTED_REASONING_EFFORTS) {
-            "REASONING_EFFORT must be one of ${SUPPORTED_REASONING_EFFORTS.joinToString(", ")}"
-        }
+        validateConfiguration(apiKey, model, baseUrl, this.reasoningEffort)
     }
 
     override fun requestRepair(request: RepairRequest): RepairResponse = requestRepair(
@@ -482,6 +475,27 @@ class HttpOpenAiCompatibleRepairClient(
     }
 
     companion object {
+        /** The same argument validation as construction, without allocating an HTTP client. */
+        internal fun validateEnvironment(environment: Map<String, String>) {
+            validateConfiguration(
+                apiKey = environment["API_KEY"].orEmpty(),
+                model = environment["MODEL"].orEmpty(),
+                baseUrl = URI.create(environment["BASE_URL"].orEmpty()),
+                reasoningEffort = environment["REASONING_EFFORT"]?.trim()?.takeIf { it.isNotEmpty() },
+            )
+        }
+
+        private fun validateConfiguration(apiKey: String, model: String, baseUrl: URI, reasoningEffort: String?) {
+            require(apiKey.isNotBlank()) { "API_KEY must not be blank" }
+            require(model.isNotBlank()) { "MODEL must not be blank" }
+            require(baseUrl.scheme in setOf("http", "https") && !baseUrl.host.isNullOrBlank()) {
+                "BASE_URL must be an absolute HTTP(S) URL"
+            }
+            require(reasoningEffort == null || reasoningEffort in SUPPORTED_REASONING_EFFORTS) {
+                "REASONING_EFFORT must be one of ${SUPPORTED_REASONING_EFFORTS.joinToString(", ")}"
+            }
+        }
+
         fun fromEnvironment(environment: Map<String, String> = System.getenv()): HttpOpenAiCompatibleRepairClient =
             HttpOpenAiCompatibleRepairClient(
                 apiKey = environment["API_KEY"].orEmpty(),
@@ -1708,11 +1722,21 @@ class TraceGuidedRepairLoop private constructor(
         require(corpus.inputs == regressionInputs) { "retained regression corpus changed during validation" }
         val snapshot = graph.snapshot
         val sources = graph.candidateSources(attempt)
+        val invocation = graph.validationInvocation(attempt)
         val request = RepairCandidateValidationRequest(projectDir, sources, repairCandidateSourceSha256(sources),
             snapshot.profileId, snapshot.profileSha256, snapshot.indexSha256, originalBinary, corpus.inputs, corpus.sha256,
-            reportsDir, label, resourceBudget, activeDeadlineNanos, cancellation)
+            reportsDir, label, resourceBudget, activeDeadlineNanos, cancellation, invocation)
         progress?.state(graph, decompengine.agent.AgentWorkflowPhase.BUILD_VALIDATING, attempt?.id)
-        val outcome = validationStrategy.validateCandidate(request)
+        val outcome = try {
+            validationStrategy.validateCandidate(request)
+        } catch (failure: Exception) {
+            retainRepairValidationDiagnostic(failure, invocation,
+                request.reportsDir.resolve("${request.label}.validation.json"),
+                request.reportsDir.resolve("${request.label}.validation-failure.json")) { publication ->
+                graph.recordValidationDiagnostic(invocation, publication)
+            }
+            throw failure
+        }
         checkRunBudget()
         val proof = outcome.proof
         require(proof.sourceRevisionSha256 == request.sourceRevisionSha256 && proof.profileSha256 == request.profileSha256 &&
@@ -1723,12 +1747,15 @@ class TraceGuidedRepairLoop private constructor(
             "validation proof lacks original binary identity"
         })
         val logPath = reportsDir.resolve("$label.validation.json")
-        if (!allowTestOnlyValidation) {
-            require(sha256(readStableRepairFile(reportsDir, logPath.fileName.toString(), resourceBudget.maximumProjectionBytes)) == proof.evidenceSha256) {
+        val receiptBytes = if (!allowTestOnlyValidation) {
+            val bytes = readStableRepairFile(reportsDir, logPath.fileName.toString(), resourceBudget.maximumProjectionBytes)
+            require(sha256(bytes) == proof.evidenceSha256) {
                 "validation receipt bytes differ from the registered provider proof"
             }
-        }
-        return when (outcome) {
+            bytes.size.toLong()
+        } else null
+        var diffArtifact: RepairValidationPublishedArtifact? = null
+        val assessment = when (outcome) {
             is RepairCandidateValidationOutcome.CompileFailed -> RepairAssessment.CompileError(outcome.failure, logPath, proof)
             is RepairCandidateValidationOutcome.CompileValid -> RepairAssessment.CompileOnly(proof, logPath)
             is RepairCandidateValidationOutcome.BehaviorChecked -> {
@@ -1752,11 +1779,23 @@ class TraceGuidedRepairLoop private constructor(
                 else {
                     val diff = StructuredDiffBuilder.from(report.id, report.cases)
                     val path = reportsDir.resolve("${report.id}.diff.json")
-                    writeRepairEvidenceAtomically(path, diff.toJson())
+                    val payload = diff.toJson()
+                    writeRepairEvidenceAtomically(path, payload)
+                    diffArtifact = repairValidationPublishedTextArtifact(path, payload)
                     RepairAssessment.BehaviorError(diff, path, proof)
                 }
             }
         }
+        if (receiptBytes != null) {
+            val observed = when (outcome) {
+                is RepairCandidateValidationOutcome.CompileFailed -> RepairValidationObservedOutcome.COMPILE_FAILED
+                is RepairCandidateValidationOutcome.CompileValid -> RepairValidationObservedOutcome.COMPILE_VALID
+                is RepairCandidateValidationOutcome.BehaviorChecked -> RepairValidationObservedOutcome.BEHAVIOR_CHECKED
+            }
+            graph.recordValidationObservation(invocation, proof, observed,
+                RepairValidationPublishedArtifact(logPath, proof.evidenceSha256, receiptBytes), diffArtifact)
+        }
+        return assessment
     }
 
     private fun prepareProjectState(graph: ModuleRevisionGraph, additions: Collection<ProcessInput>): RetainedRegressionCorpus {

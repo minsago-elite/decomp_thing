@@ -1,8 +1,12 @@
 package decompengine.doctor
 
 import decompengine.acp.AcpPreflightWorkflow
+import decompengine.renderDoctorUsageError
+import decompengine.runDoctorCliAction
 import decompengine.project.ReconstructionProfiles
 import java.nio.file.Path
+import java.io.ByteArrayOutputStream
+import java.io.PrintStream
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
@@ -13,6 +17,223 @@ import kotlin.test.assertTrue
 
 class DoctorInvocationTest {
     private val defaultOutput = Path.of("caller-selected-output")
+
+    @Test
+    fun `tools only terminal output uses producer facts without reading private inventories or diagnostics`() {
+        val toolOutputBytes = ByteArrayOutputStream()
+        val toolDiagnosticBytes = ByteArrayOutputStream()
+        val toolOutput = PrintStream(toolOutputBytes, true, Charsets.UTF_8)
+        val toolDiagnostic = PrintStream(toolDiagnosticBytes, true, Charsets.UTF_8)
+        val opaque = object : AbstractCollection<String>() {
+            override val size: Int get() = error("tools-only must not inspect private inventory size")
+            override fun iterator(): Iterator<String> = error("tools-only must not iterate private inventories")
+        }
+        val privatePath = "/work/synthetic-private-path-value"
+        val rawDiagnostic = "PRIVATE $privatePath a\uD800b\nAuthorization: Basic synthetic-wire-value"
+        for (passed in listOf(true, false)) {
+            val checks = DoctorToolKind.entries.filter { it != DoctorToolKind.UNKNOWN }.map { kind ->
+                DoctorCheck(rawDiagnostic, passed, rawDiagnostic).withToolsOnlyKind(kind)
+            } + DoctorCheck("Java", passed, rawDiagnostic)
+            val original = DoctorReport(checks)
+            val projected = DoctorDiagnostics(emptyList()).report(original)
+            assertEquals(checks.map { it.toolsOnlyKind }, projected.checks.map { it.toolsOnlyKind })
+            assertEquals(if (passed) 0 else 1,
+                runDoctorCliAction(opaque, toolOutput, toolDiagnostic, toolsOnly = true) { projected })
+            val text = toolOutputBytes.toString(Charsets.UTF_8) + toolDiagnosticBytes.toString(Charsets.UTF_8)
+            assertFalse(text.contains(privatePath) || text.contains("PRIVATE") || text.contains("synthetic-wire-value"))
+            assertFalse(text.contains("a?b") || text.contains('\uD800'))
+            assertEquals(checks.size, text.lineSequence().count { it.startsWith(if (passed) "[ok]" else "[failed]") })
+            assertTrue(text.contains("tool check ${checks.size}:"), "untyped names must not become public categories")
+            assertEquals(checks, original.checks)
+            assertTrue(original.checks.first().detail.contains(privatePath))
+            if (passed) {
+                assertEquals("", toolDiagnosticBytes.toString())
+                assertTrue(text.contains("Environment check passed (${checks.size} checks)"))
+            } else {
+                assertEquals("", toolOutputBytes.toString())
+                assertTrue(text.contains("[failed] output directory: Choose an existing writable directory with --output."))
+                assertTrue(text.contains("[failed] C compiler: Install the selected C compiler and ensure it is executable."))
+                assertTrue(text.contains("[failed] Ghidra: Reinstall the complete application distribution and verify its Java runtime."))
+                assertTrue(text.contains("Environment check failed (${checks.size} check(s))"))
+            }
+            toolOutputBytes.reset(); toolDiagnosticBytes.reset()
+        }
+        assertEquals(1, runDoctorCliAction(opaque, toolOutput, toolDiagnostic, toolsOnly = true) {
+            throw IllegalArgumentException(rawDiagnostic, IllegalStateException("PRIVATE cause"))
+        })
+        assertEquals("", toolOutputBytes.toString())
+        assertEquals("doctor failed: Tool checks stopped before completion. Verify the selected profile, tools and output directory.\n",
+            toolDiagnosticBytes.toString(Charsets.UTF_8))
+        toolDiagnosticBytes.reset()
+        assertEquals(2, runDoctorCliAction(opaque, toolOutput, toolDiagnostic, toolsOnly = true) {
+            throw DoctorDiagnosticAdmissionException()
+        })
+        assertEquals("", toolOutputBytes.toString() + toolDiagnosticBytes.toString())
+        for (failure in listOf(InterruptedException(rawDiagnostic), java.util.concurrent.CancellationException(rawDiagnostic),
+            AssertionError(rawDiagnostic))) {
+            val thrown = assertFailsWith<Throwable> {
+                runDoctorCliAction(opaque, toolOutput, toolDiagnostic, toolsOnly = true) { throw failure }
+            }
+            assertSame(failure, thrown)
+            assertEquals("", toolOutputBytes.toString() + toolDiagnosticBytes.toString())
+        }
+        assertEquals(0, runDoctorCliAction(emptyList(), toolOutput, toolDiagnostic) {
+            DoctorReport(listOf(DoctorCheck("public dynamic", true, "public diagnostic").withToolsOnlyKind(DoctorToolKind.OUTPUT)))
+        })
+        assertTrue(toolOutputBytes.toString().contains("[ok] public dynamic: public diagnostic\n"))
+    }
+
+    @Test
+    fun `complete doctor frames conceal private line endings and usage bridges with unchanged outcomes`() {
+        val output = ByteArrayOutputStream()
+        val diagnostic = ByteArrayOutputStream()
+        for (passed in listOf(true, false)) {
+            val report = DoctorReport(listOf(DoctorCheck("LLM connectivity", passed, "visible")))
+            val checks = report.checks.toList()
+            val row = "[${if (passed) "ok" else "failed"}] LLM connectivity: visible\n"
+            val total = if (passed) "Environment check passed (1 checks)\n"
+                else "Environment check failed (1 check(s)); resolve each [failed] item above.\n"
+            assertEquals(if (passed) 0 else 1,
+                runDoctorCliAction(listOf(row, total), PrintStream(output), PrintStream(diagnostic)) { report })
+            val text = output.toString() + diagnostic.toString()
+            assertFalse(text.contains(row) || text.contains(total))
+            assertTrue(text.contains("[redacted]") && text.endsWith("\n"))
+            assertEquals(checks, report.checks)
+            output.reset(); diagnostic.reset()
+        }
+        for ((values, expected) in listOf(
+            listOf("doctor failed: visible\n") to "[redacted]\n",
+            listOf("doctor failed: visible\n", "[redacted]\n") to "\n",
+            listOf("\u0000\n") to "",
+        )) {
+            assertEquals(1, runDoctorCliAction(values, PrintStream(output), PrintStream(diagnostic)) {
+                throw IllegalStateException("visible")
+            })
+            assertEquals("", output.toString())
+            assertEquals(expected, diagnostic.toString())
+            diagnostic.reset()
+        }
+        for (value in listOf("visible\nusage:", "[--profile <id>]\n   or:", "[--auth-methods]\n")) {
+            assertEquals(2, renderDoctorUsageError("visible", false, listOf(value), PrintStream(diagnostic)))
+            val text = diagnostic.toString()
+            assertFalse(text.contains(value))
+            assertTrue(text.endsWith("\n"))
+            diagnostic.reset()
+        }
+        val privatePath = "PRIVATE\u0000DIRECTORY"
+        val invalidPath = assertFailsWith<IllegalArgumentException> { Path.of(privatePath) }
+        assertEquals(2, renderDoctorUsageError(requireNotNull(invalidPath.message), false,
+            listOf(privatePath), PrintStream(diagnostic)))
+        assertFalse(diagnostic.toString().contains("PRIVATE") || diagnostic.toString().contains("DIRECTORY"))
+        assertTrue(diagnostic.toString().contains("usage: llm_bin_patch doctor"))
+        diagnostic.reset()
+        val markerAndNewline = "… [preview truncated]\n"
+        assertEquals(1, runDoctorCliAction(listOf(markerAndNewline), PrintStream(output), PrintStream(diagnostic)) {
+            throw IllegalStateException("visible ".repeat(1000))
+        })
+        val text = diagnostic.toString()
+        assertFalse(text.contains(markerAndNewline))
+        assertTrue(text.endsWith("\n"))
+    }
+
+    @Test
+    fun `doctor terminal reports redact formatted fields after cleanup with correct exit status`() {
+        val output = ByteArrayOutputStream()
+        val diagnostic = ByteArrayOutputStream()
+        val values = listOf("private-credential", "[ok] project: visible")
+        var closed = false
+        fun afterCleanup(bytes: ByteArrayOutputStream) = object : PrintStream(bytes) {
+            override fun print(value: String?) {
+                assertTrue(closed, "diagnostics must follow action cleanup")
+                super.print(value)
+            }
+        }
+        val status = runDoctorCliAction(values, afterCleanup(output), afterCleanup(diagnostic)) {
+            try {
+                DoctorReport(listOf(DoctorCheck("project", true, "visible"),
+                    DoctorCheck("private-credential", false, "Authorization: Basic synthetic-wire-value")))
+            } finally {
+                closed = true
+            }
+        }
+        assertTrue(closed)
+        assertEquals(1, status)
+        val text = output.toString() + diagnostic.toString()
+        assertFalse(text.contains("private-credential") || text.contains("synthetic-wire-value"))
+        assertFalse(text.contains("[ok] project: visible"))
+        output.reset(); diagnostic.reset()
+        assertEquals(0, runDoctorCliAction(emptyList(), PrintStream(output), PrintStream(diagnostic)) {
+            DoctorReport(listOf(DoctorCheck("public", true, "available")))
+        })
+        assertTrue(output.toString().contains("Environment check passed (1 checks)"))
+        assertEquals("", diagnostic.toString())
+        output.reset(); diagnostic.reset()
+        val cause = IllegalStateException("private cause chain")
+        assertEquals(1, runDoctorCliAction(values, PrintStream(output), PrintStream(diagnostic)) {
+            throw IllegalStateException("private-credential", cause)
+        })
+        assertEquals("", output.toString())
+        assertFalse(diagnostic.toString().contains("private-credential") || diagnostic.toString().contains("private cause chain"))
+        output.reset(); diagnostic.reset()
+        assertEquals(2, renderDoctorUsageError("unknown option private-credential", false, values, PrintStream(diagnostic)))
+        assertTrue(diagnostic.toString().contains("usage: llm_bin_patch doctor"))
+        assertFalse(diagnostic.toString().contains("private-credential"))
+        val cancelled = java.util.concurrent.CancellationException("private cancellation")
+        assertSame(cancelled, assertFailsWith<java.util.concurrent.CancellationException> {
+            runDoctorCliAction(emptyList(), PrintStream(output), PrintStream(diagnostic)) { throw cancelled }
+        })
+        val fatal = AssertionError("private fatal error")
+        assertSame(fatal, assertFailsWith<AssertionError> {
+            runDoctorCliAction(emptyList(), PrintStream(output), PrintStream(diagnostic)) { throw fatal }
+        })
+    }
+
+    @Test
+    fun `doctor terminal admission withholds rejected inventories and tools only usage never enumerates them`() {
+        val output = ByteArrayOutputStream()
+        val diagnostic = ByteArrayOutputStream()
+        var actions = 0
+        val oversized = object : AbstractCollection<String>() {
+            override val size: Int = 4097
+            override fun iterator(): Iterator<String> = error("oversized inventory must not be iterated")
+        }
+        for (values in listOf(oversized, listOf("x".repeat(1024 * 1024 + 1)))) {
+            assertEquals(2, runDoctorCliAction(values, PrintStream(output), PrintStream(diagnostic)) {
+                actions++
+                DoctorReport(emptyList())
+            })
+        }
+        assertEquals(0, actions)
+        assertEquals("", output.toString() + diagnostic.toString())
+        assertEquals(2, runDoctorCliAction(emptyList(), PrintStream(output), PrintStream(diagnostic)) {
+            throw DoctorDiagnosticAdmissionException()
+        })
+        assertEquals("", output.toString() + diagnostic.toString())
+        val opaque = object : AbstractCollection<String>() {
+            override val size: Int get() = error("tools-only must not enumerate ambient values")
+            override fun iterator(): Iterator<String> = error("tools-only must not iterate ambient values")
+        }
+        assertEquals(2, renderDoctorUsageError("private unknown argument", true, opaque, PrintStream(diagnostic)))
+        assertFalse(diagnostic.toString().contains("private unknown argument"))
+        assertTrue(diagnostic.toString().contains("usage: llm_bin_patch doctor"))
+        diagnostic.reset()
+        val wasInterrupted = Thread.interrupted()
+        try {
+            Thread.currentThread().interrupt()
+            assertFailsWith<InterruptedException> {
+                runDoctorCliAction(emptyList(), PrintStream(output), PrintStream(diagnostic)) {
+                    actions++
+                    DoctorReport(emptyList())
+                }
+            }
+            assertTrue(Thread.currentThread().isInterrupted)
+            assertEquals(0, actions)
+            assertEquals("", output.toString() + diagnostic.toString())
+        } finally {
+            Thread.interrupted()
+            if (wasInterrupted) Thread.currentThread().interrupt()
+        }
+    }
 
     @Test
     fun `empty arguments preserve caller output and default selections`() {

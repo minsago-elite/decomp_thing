@@ -2,13 +2,13 @@
 
 Issue #1052 owns the cc1 source archive boundary. The focused verifier at
 `scripts/verify-gcc-reconstruction-archive.py` consumes two accepted archive
-outputs, authenticates the checked `compiler-engines-exporter13.json` control plane, and
+outputs, authenticates the checked `compiler-engines-exporter17.json` control plane, and
 writes one bounded JSON receipt:
 
 ```sh
 mkdir -p build/cc1-source-archive/tmp
 TMPDIR="$PWD/build/cc1-source-archive/tmp" python3 -B scripts/verify-gcc-reconstruction-archive.py \
-  --profile oracle/gcc/16.2.0/compiler-engines-exporter13.json \
+  --profile oracle/gcc/16.2.0/compiler-engines-exporter17.json \
   --engine cc1 \
   --archive build/cc1-source-archive/cc1-reconstruction.zip \
   --repeat-archive build/cc1-source-archive/cc1-reconstruction-repeat.zip \

@@ -24,7 +24,14 @@ jobs:
         shell: bash
     steps:
       - uses: actions/checkout@v7
+      - name: Cache reviewed frontend Node downloads
+        uses: actions/cache@v6
+        with:
+          path: ${{ github.workspace }}/build/frontend-node-downloads
+          key: frontend-node-archives-v1-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('scripts/install-frontend-node.sh', 'scripts/frontend-node-sha256.txt', '.node-version', 'frontend/package.json') }}
       - name: Install pinned build-only frontend toolchain
+        env:
+          DECOMP_FRONTEND_NODE_DOWNLOAD_CACHE: '1'
         run: |
           bash scripts/install-frontend-node.sh "$RUNNER_TEMP/frontend-node"
           echo "$RUNNER_TEMP/frontend-node/bin" >> "$GITHUB_PATH"
@@ -33,6 +40,8 @@ jobs:
           python-version: "3.12"
           cache: pip
           cache-dependency-path: requirements/oracle-generation.txt
+      - name: Check reconstruction neutrality before dependent builds
+        run: python3 -B scripts/check-generic-leakage.py
       - name: Cache locked frontend package downloads
         uses: actions/cache@v6
         with:
@@ -70,12 +79,23 @@ jobs:
           retention-days: 14
           if-no-files-found: warn
           path: build/callable-evaluator-v3-static-ci
+      - name: Verify bounded archival cleanup controls
+        timeout-minutes: 1
+        run: python3 -B scripts/test-archival-diagnostics.py --verbose
+      - name: Verify bounded sanitizer invocation controls
+        timeout-minutes: 1
+        run: python3 -B scripts/test-clang-sanitizer.py --verbose
       - name: Validate versioned web contract fixtures
         run: python3 contracts/web/v1/verify.py | tee "$RUNNER_TEMP/frontend-ci/contracts.txt"
-      - name: Reject generated API contract drift
+      - name: Validate ACP required-case metadata controls
+        timeout-minutes: 1
+        run: |
+          python3 -B contracts/acp/v1/verify.py definition
+          python3 -B scripts/test-acp-release-manifest.py --verbose
+      - name: Verify API drift and legacy callback controls
         run: |
           node scripts/generate-web-api.mjs --check
-          node --test scripts/generate-web-api.test.mjs \
+          node --test scripts/generate-web-api.test.mjs scripts/legacy-session.test.mjs \
             | tee "$RUNNER_TEMP/frontend-ci/api-drift-tests.txt"
       - name: Verify generated large web fixtures
         run: node --test scripts/web-scale-fixtures.test.mjs | tee "$RUNNER_TEMP/frontend-ci/scale-fixtures-tests.txt"
@@ -133,9 +153,8 @@ jobs:
         with:
           distribution: temurin
           java-version: "21"
-      - uses: gradle/actions/setup-gradle@v6
+      - uses: ./.github/actions/setup-gradle-compiler-cache
         with:
-          cache-provider: basic
           cache-read-only: ${{ github.ref != 'refs/heads/master' }}
       - name: Cache locked frontend package downloads
         uses: actions/cache@v6
@@ -147,7 +166,14 @@ jobs:
           python-version: "3.12"
           cache: pip
           cache-dependency-path: requirements/oracle-generation.txt
+      - name: Cache reviewed frontend Node downloads
+        uses: actions/cache@v6
+        with:
+          path: ${{ github.workspace }}/build/frontend-node-downloads
+          key: frontend-node-archives-v1-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('scripts/install-frontend-node.sh', 'scripts/frontend-node-sha256.txt', '.node-version', 'frontend/package.json') }}
       - name: Install pinned build and browser tools
+        env:
+          DECOMP_FRONTEND_NODE_DOWNLOAD_CACHE: '1'
         run: |
           bash scripts/install-frontend-node.sh "$RUNNER_TEMP/frontend-node"
           echo "$RUNNER_TEMP/frontend-node/bin" >> "$GITHUB_PATH"
@@ -235,6 +261,7 @@ jobs:
             build/packaged-browser-*/*.png
             build/reports/tests/test
             build/test-results/test
+            build/reports/junit-signatures
 
   kotlin-suite:
     needs: frontend
@@ -251,7 +278,9 @@ jobs:
           - shard: oracle
             test-shard: core-oracle
           - shard: live
-            test-shard: live
+            test-shard: live-rest
+          - shard: live-fulltree
+            test-shard: live-fulltree
     steps:
       - uses: actions/checkout@v7
         with:
@@ -261,23 +290,37 @@ jobs:
         with:
           distribution: temurin
           java-version: "21"
-      - uses: gradle/actions/setup-gradle@v6
+      - uses: ./.github/actions/setup-gradle-compiler-cache
+        id: gradle-cache
         with:
-          cache-provider: basic
           cache-read-only: ${{ github.ref != 'refs/heads/master' }}
       - name: Cache locked frontend package downloads
         uses: actions/cache@v6
         with:
           path: ${{ github.workspace }}/build/npm-download-cache/_cacache
           key: frontend-npm-downloads-v1-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('frontend/package-lock.json', 'frontend/package.json', 'frontend/.npmrc', '.node-version', 'scripts/install-frontend-node.sh', 'scripts/frontend-node-sha256.txt') }}
+      - name: Cache reviewed frontend Node downloads
+        uses: actions/cache@v6
+        with:
+          path: ${{ github.workspace }}/build/frontend-node-downloads
+          key: frontend-node-archives-v1-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('scripts/install-frontend-node.sh', 'scripts/frontend-node-sha256.txt', '.node-version', 'frontend/package.json') }}
       - name: Install pinned build-only frontend toolchain
+        env:
+          DECOMP_FRONTEND_NODE_DOWNLOAD_CACHE: '1'
         run: |
           bash scripts/install-frontend-node.sh "$RUNNER_TEMP/frontend-node"
           echo "$RUNNER_TEMP/frontend-node/bin" >> "$GITHUB_PATH"
       - name: Install sandbox host prerequisites
+        timeout-minutes: 10
         run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends \
+          # Bound stalled mirrors without changing required packages or test budgets.
+          apt_acquire_options=(
+            -o Acquire::Retries=2
+            -o Acquire::http::Timeout=30
+            -o Acquire::https::Timeout=30
+          )
+          sudo apt-get "${apt_acquire_options[@]}" --error-on=any update
+          sudo apt-get "${apt_acquire_options[@]}" install -y --no-install-recommends \
             bubblewrap \
             binutils \
             build-essential \
@@ -299,6 +342,9 @@ jobs:
       - name: Check pinned Goose archive acquisition controls
         if: matrix.shard == 'core'
         run: python3 scripts/test-goose-archive-download.py
+      - name: Check pinned Codex ACP archive acquisition controls
+        if: matrix.shard == 'core'
+        run: python3 scripts/test-codex-acp-archive-download.py
       - name: Check recovery scenario coverage controls
         if: matrix.shard == 'core'
         run: python3 scripts/test-web-job-recovery-inventory.py
@@ -338,6 +384,12 @@ jobs:
         if: matrix.shard == 'live'
         continue-on-error: true
         run: scripts/ci-qualify-goose-acp.sh
+      - name: Cache verified pinned Codex ACP archive
+        uses: actions/cache@v6
+        if: matrix.shard == 'live' && steps.goose-initialize.outcome == 'success'
+        with:
+          path: ${{ github.workspace }}/build/acp-codex-compatibility/download-cache/codex-acp-0.16.0-x86_64-unknown-linux-gnu.tar.gz
+          key: codex-acp-archive-v1-${{ runner.os }}-${{ runner.arch }}-0a9ad6c31ec9b2b87dccb7e9da3faf5d387e74470d24dbced75a160ed7b22d06
       - name: Qualify pinned credential-free codex-acp authentication boundary
         if: matrix.shard == 'live' && steps.goose-initialize.outcome == 'success'
         run: scripts/ci-qualify-codex-acp.sh
@@ -416,6 +468,7 @@ jobs:
             build/test-results/full-suite
             build/reports/tests/test
             build/test-results/test
+            build/reports/junit-signatures
             build/web-job-recovery-inventory.json
             build/reports/tests/v3BoundaryFinalStagingIsolated
             build/test-results/v3BoundaryFinalStagingIsolated
@@ -444,6 +497,26 @@ jobs:
         with:
           name: kotlin-${{ matrix.shard }}-acp-codex-authentication-evidence
           path: build/acp-codex-compatibility/results
+      # One successful core partition publishes per default-branch revision.
+      # Other partitions and every PR restore only; dependency caches stay separate.
+      - name: Bound compiler cache publication to one GiB
+        id: compiler-cache-size
+        if: github.event_name == 'push' && github.ref == 'refs/heads/master' && matrix.shard == 'core'
+        run: |
+          if test -d "$GITHUB_WORKSPACE/build/ci-compiler-cache"; then
+            cache_bytes="$(du --summarize --bytes "$GITHUB_WORKSPACE/build/ci-compiler-cache" | cut -f1)"
+            printf 'Compiler cache bytes: %s (publication limit: 1073741824)\n' "$cache_bytes"
+            if test "$cache_bytes" -le 1073741824; then
+              echo 'publish=true' >> "$GITHUB_OUTPUT"
+            fi
+          fi
+      - name: Publish refreshed compiler outputs after successful qualification
+        if: github.event_name == 'push' && github.ref == 'refs/heads/master' && matrix.shard == 'core' && steps.compiler-cache-size.outputs.publish == 'true'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
+        with:
+          path: ${{ github.workspace }}/build/ci-compiler-cache
+          key: ${{ steps.gradle-cache.outputs.compiler-cache-key }}
+
 
   kotlin:
     runs-on: ubuntu-24.04
@@ -488,16 +561,22 @@ jobs:
         with:
           distribution: temurin
           java-version: "21"
-      - uses: gradle/actions/setup-gradle@v6
+      - uses: ./.github/actions/setup-gradle-compiler-cache
         with:
-          cache-provider: basic
           cache-read-only: ${{ github.ref != 'refs/heads/master' }}
       - name: Cache locked frontend package downloads
         uses: actions/cache@v6
         with:
           path: ${{ github.workspace }}/build/npm-download-cache/_cacache
           key: frontend-npm-downloads-v1-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('frontend/package-lock.json', 'frontend/package.json', 'frontend/.npmrc', '.node-version', 'scripts/install-frontend-node.sh', 'scripts/frontend-node-sha256.txt') }}
+      - name: Cache reviewed frontend Node downloads
+        uses: actions/cache@v6
+        with:
+          path: ${{ github.workspace }}/build/frontend-node-downloads
+          key: frontend-node-archives-v1-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('scripts/install-frontend-node.sh', 'scripts/frontend-node-sha256.txt', '.node-version', 'frontend/package.json') }}
       - name: Install pinned build-only frontend toolchain
+        env:
+          DECOMP_FRONTEND_NODE_DOWNLOAD_CACHE: '1'
         run: |
           bash scripts/install-frontend-node.sh "$RUNNER_TEMP/frontend-node"
           echo "$RUNNER_TEMP/frontend-node/bin" >> "$GITHUB_PATH"
@@ -506,8 +585,10 @@ jobs:
           RUN_REAL_GHIDRA: "true"
           RUN_REAL_GHIDRA_CALL_SITES: "true"
           RUN_REAL_GHIDRA_NATIVE_CALLS: "true"
+          RUN_REAL_GHIDRA_PURE_RENDERING: "true"
         run: |
           unset GHIDRA_HOME
+          mkdir -p build/exporter-rendering-v16
           ./gradlew --no-daemon test \
             --tests decompengine.analysis.BundledGhidraTest \
             --tests decompengine.project.GhidraProgramModelExporterTest \
@@ -529,6 +610,14 @@ jobs:
           path: |
             build/reports/tests/test
             build/test-results/test
+            build/reports/junit-signatures
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: bundled-ghidra-rendering-parity
+          path: |
+            build/exporter-rendering-v16/native/equality-*/baseline-unoptimized/reports
+            build/exporter-rendering-v16/native/equality-*/candidate-pure/reports
 
   archival-ghidra:
     needs: frontend
@@ -539,6 +628,13 @@ jobs:
           submodules: recursive
       - uses: docker/setup-buildx-action@v4
       - run: scripts/validate-archival-docker.sh
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: archival-build-diagnostics
+          retention-days: 14
+          if-no-files-found: warn
+          path: build/archival-ci-diagnostics/*.jsonl
 
   clang:
     needs: frontend
@@ -553,16 +649,22 @@ jobs:
         with:
           distribution: temurin
           java-version: "21"
-      - uses: gradle/actions/setup-gradle@v6
+      - uses: ./.github/actions/setup-gradle-compiler-cache
         with:
-          cache-provider: basic
           cache-read-only: ${{ github.ref != 'refs/heads/master' }}
       - name: Cache locked frontend package downloads
         uses: actions/cache@v6
         with:
           path: ${{ github.workspace }}/build/npm-download-cache/_cacache
           key: frontend-npm-downloads-v1-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('frontend/package-lock.json', 'frontend/package.json', 'frontend/.npmrc', '.node-version', 'scripts/install-frontend-node.sh', 'scripts/frontend-node-sha256.txt') }}
+      - name: Cache reviewed frontend Node downloads
+        uses: actions/cache@v6
+        with:
+          path: ${{ github.workspace }}/build/frontend-node-downloads
+          key: frontend-node-archives-v1-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('scripts/install-frontend-node.sh', 'scripts/frontend-node-sha256.txt', '.node-version', 'frontend/package.json') }}
       - name: Install pinned build-only frontend toolchain
+        env:
+          DECOMP_FRONTEND_NODE_DOWNLOAD_CACHE: '1'
         run: |
           bash scripts/install-frontend-node.sh "$RUNNER_TEMP/frontend-node"
           echo "$RUNNER_TEMP/frontend-node/bin" >> "$GITHUB_PATH"
@@ -583,4 +685,5 @@ jobs:
           path: |
             build/reports/tests/test
             build/test-results/test
+            build/reports/junit-signatures
             build/source-identity-fixture-evidence

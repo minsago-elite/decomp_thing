@@ -180,6 +180,36 @@ class DurableWebWorkflowTest {
     }
 
     @Test
+    fun `budget timeout infrastructure and cancellation stop outcomes stay distinct`() = withRoot { root ->
+        val store = JobStore(root)
+        val job = store.createFromUpload("outcomes.elf", elfFixture())
+        val outcomes = ArrayDeque(listOf<() -> DurableWebWorkflowOutcome>(
+            { DurableWebWorkflowOutcome.Failed(WorkflowTerminalReason.LIMIT_EXHAUSTED) },
+            { DurableWebWorkflowOutcome.Failed(WorkflowTerminalReason.TIMED_OUT) },
+            { throw IllegalStateException("PRIVATE adapter diagnostic") },
+            { DurableWebWorkflowOutcome.Failed() },
+        ))
+        service(store, listOf(adapter { outcomes.removeFirst()() })).use { service ->
+            service.initializeExistingStorage()
+            var previous: String? = null
+            val reasons = (1..4).map {
+                val started = assertIs<DurableWebWorkflowAdmission.Started>(service.startDurable(job.id, version(service, job.id),
+                    DurableWebWorkflowRequest(WorkflowKind.RECONSTRUCT, previousRunId = previous)))
+                previous = started.runId
+                val attempt = service.getAttempt(job.id, started.runId)
+                assertEquals(WorkflowRunState.FAILED, attempt.state)
+                val wire = webRun(attempt)
+                assertFalse(wire.toString().contains("PRIVATE"))
+                wire.getValue("terminalReason").jsonPrimitive.content
+            }
+            assertEquals(listOf("LIMIT_EXHAUSTED", "TIMED_OUT", "INFRASTRUCTURE_FAILED", "FAILED"), reasons)
+        }
+        // A cancellation is not a workflow outcome; an adapter cannot report one or report infrastructure failure itself.
+        assertFailsWith<IllegalArgumentException> { DurableWebWorkflowOutcome.Failed(WorkflowTerminalReason.CANCELLED) }
+        assertFailsWith<IllegalArgumentException> { DurableWebWorkflowOutcome.Failed(WorkflowTerminalReason.INFRASTRUCTURE_FAILED) }
+    }
+
+    @Test
     fun `durable retries retain reports outcomes and exact input without accepting successful candidates`() = withRoot { root ->
         val store = JobStore(root)
         val job = store.createFromUpload("fixture.elf", elfFixture())
@@ -355,9 +385,10 @@ class DurableWebWorkflowTest {
         val good = store.createFromUpload("good.elf", elfFixture())
         val bad = store.createFromUpload("bad.elf", elfFixture())
         val path = root.resolve(bad.id).resolve("job.json")
-        path.writeText("PRIVATE_SECRET_SENTINEL {")
         service(store).use { service ->
             service.initializeExistingStorage()
+            // Already-running reads isolate later corruption; startup itself requires complete validation.
+            path.writeText("PRIVATE_SECRET_SENTINEL {")
             val inspections = service.listInspections()
             assertEquals(2, inspections.size)
             assertEquals(good.id, inspections.filterIsInstance<WebJobInspection.Available>().single().presentation.job.id)

@@ -17,7 +17,7 @@ internal class RepairHistorySnapshot internal constructor(
     val pending: RepairRecordedAttempt?,
     retainedCases: List<RepairRecordedIdentity>,
 ) {
-    val viewSchemaVersion: Int get() = 3
+    val viewSchemaVersion: Int get() = 5
     val qualification: RepairRecordedQualification get() = RepairRecordedQualification.RECORDED_METADATA_ONLY
     val runs: List<RepairRecordedRun> = immutableRecordedList(runs)
     val attempts: List<RepairRecordedAttempt> = immutableRecordedList(attempts)
@@ -30,6 +30,7 @@ internal data class RepairRecordedHistorySelection(
     val casePageNumber: Int = 1,
     val expectedGraphSha256: String? = null,
     val evidenceAttempt: String? = null,
+    val evidenceRun: String? = null,
 ) {
     init {
         require(pageNumber > 0 && casePageNumber > 0) { "Recorded history page is invalid." }
@@ -39,12 +40,14 @@ internal data class RepairRecordedHistorySelection(
         require(evidenceAttempt == null || ATTEMPT_REFERENCE.matches(evidenceAttempt)) {
             "Recorded evidence selection is invalid."
         }
-        require((pageNumber == 1 && casePageNumber == 1 && evidenceAttempt == null) || expectedGraphSha256 != null) {
+        require(evidenceRun == null || ATTEMPT_REFERENCE.matches(evidenceRun)) { "Recorded run selection is invalid." }
+        require(evidenceRun == null || evidenceAttempt == null) { "Select one recorded evidence owner." }
+        require((pageNumber == 1 && casePageNumber == 1 && evidenceAttempt == null && evidenceRun == null) || expectedGraphSha256 != null) {
             "Continued history selection requires the recorded graph identity."
         }
     }
 
-    val isDefault: Boolean get() = pageNumber == 1 && casePageNumber == 1 && expectedGraphSha256 == null && evidenceAttempt == null
+    val isDefault: Boolean get() = pageNumber == 1 && casePageNumber == 1 && expectedGraphSha256 == null && evidenceAttempt == null && evidenceRun == null
 
     private companion object {
         val GRAPH_DIGEST = Regex("[0-9a-f]{64}")
@@ -52,7 +55,8 @@ internal data class RepairRecordedHistorySelection(
     }
 }
 
-internal fun parseRecordedRepairSelection(page: String?, cases: String?, graph: String?, evidence: String? = null): RepairRecordedHistorySelection {
+internal fun parseRecordedRepairSelection(page: String?, cases: String?, graph: String?, evidence: String? = null,
+    runEvidence: String? = null): RepairRecordedHistorySelection {
     fun number(value: String?): Int {
         if (value == null) return 1
         require(value.isNotEmpty() && value.length <= 10 && value[0] in '1'..'9' && value.all { it in '0'..'9' }) {
@@ -60,7 +64,7 @@ internal fun parseRecordedRepairSelection(page: String?, cases: String?, graph: 
         }
         return requireNotNull(value.toIntOrNull()) { "Recorded history page is invalid." }
     }
-    return RepairRecordedHistorySelection(number(page), number(cases), graph, evidence)
+    return RepairRecordedHistorySelection(number(page), number(cases), graph, evidence, runEvidence)
 }
 
 internal enum class RepairRecordedSelectionProblem { UNAVAILABLE, CHANGED, OUT_OF_RANGE }
@@ -88,11 +92,16 @@ internal class RepairRecordedHistoryPage private constructor(
         snapshot.attempts.subList(attemptStart, attemptEnd) +
             listOfNotNull(snapshot.pending.takeIf { selection.pageNumber == 1 }))
     val runs: List<RepairRecordedRun> = immutableRecordedList(snapshot.runs.subList(runStart, runEnd))
-    val evidenceAttempts: List<RepairRecordedAttempt> = selection.evidenceAttempt?.let { reference ->
+    val evidenceAttempts: List<RepairRecordedAttempt> = if (selection.evidenceRun != null) emptyList() else selection.evidenceAttempt?.let { reference ->
         val attempt = attempts.singleOrNull { it.identity.value == reference }
             ?: throw RepairRecordedSelectionFailure(RepairRecordedSelectionProblem.OUT_OF_RANGE)
         immutableRecordedList(listOf(attempt))
     } ?: attempts
+    val evidenceRuns: List<RepairRecordedRun> = selection.evidenceRun?.let { reference ->
+        val run = runs.singleOrNull { it.identity.value == reference }
+            ?: throw RepairRecordedSelectionFailure(RepairRecordedSelectionProblem.OUT_OF_RANGE)
+        immutableRecordedList(listOf(run))
+    } ?: emptyList()
     val earlierAttempts: Int get() = attemptStart
     val newerAttempts: Int get() = snapshot.attempts.size - attemptEnd
     val earlierRuns: Int get() = runStart
@@ -215,6 +224,7 @@ internal class RepairRecordedAttempt internal constructor(
     val before: RepairRecordedEvidence?,
     val after: RepairRecordedEvidence?,
     val corpusSha256: String? = null,
+    val validationObservation: RepairRecordedValidationObservation? = null,
 ) {
     val retainedCases: List<RepairRecordedIdentity> = immutableRecordedList(retainedCases)
 }
@@ -233,8 +243,53 @@ internal data class RepairRecordedRun internal constructor(
     val deadlineEpochMillis: Long,
     val rollbackFailureAttempt: RepairRecordedIdentity?,
     val rollbackResolution: RepairRollbackState?,
+    val validationDiagnostic: RepairRecordedValidationDiagnostic? = null,
+    val baselineValidationObservation: RepairRecordedValidationObservation? = null,
 ) {
     val remainingAttempts: Int get() = maximumAttempts - attemptedCount
+}
+
+/** Opaque references and commitments only; this capture does not read either artifact. */
+internal data class RepairRecordedValidationDiagnostic internal constructor(
+    val invocationSha256: String,
+    val candidate: RepairRecordedIdentity,
+    val sourceRevisionSha256: String,
+    val profileSha256: String,
+    val indexSha256: String,
+    val regressionCorpusSha256: String,
+    val runtimeSha256: String,
+    val receipt: RepairRecordedArtifactReference,
+    val receiptSha256: String,
+    val receiptBytes: Long,
+    val diagnostic: RepairRecordedArtifactReference,
+    val diagnosticSha256: String,
+    val diagnosticBytes: Int,
+    val failureKind: RepairValidationFailureKind,
+    val cleanupVerified: Boolean,
+    val context: RepairRecordedValidationContext? = null,
+)
+
+internal data class RepairRecordedValidationObservedArtifact internal constructor(
+    val artifact: RepairRecordedArtifactReference,
+    val sha256: String,
+    val bytes: Long,
+)
+
+/** Bound graph configuration used only to check retained validation metadata. */
+internal data class RepairRecordedValidationContext(val profileId: String, val budget: RepairResourceBudget)
+
+/** The canonical run checked the invocation relation; private report paths are withheld. */
+internal data class RepairRecordedValidationObservation internal constructor(
+    val invocationSha256: String,
+    val candidate: RepairRecordedIdentity,
+    val proof: RepairValidationProof,
+    val outcome: RepairValidationObservedOutcome,
+    val primary: RepairRecordedValidationObservedArtifact,
+    val diff: RepairRecordedValidationObservedArtifact?,
+    val context: RepairRecordedValidationContext? = null,
+    val expectedObservationsSha256: String? = null,
+) {
+    val comparisonPolicy: String get() = "exact-bytes-v1"
 }
 
 /** Input only; the byte facade copies each admitted payload before parsing it. */

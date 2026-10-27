@@ -8,6 +8,145 @@ import kotlin.io.path.fileSize
 import kotlin.test.*
 
 class AgentProgressJournalTest {
+
+    @Test
+    fun `historical replay withholds old prose while preserving typed facts and commitments`() {
+        val record = buildJsonObject {
+            put("sequence", 19); put("runId", "writer-1"); put("workflow", "repair")
+            put("time", "2026-10-18T00:00:00Z"); put("kind", "message"); put("agentSequence", 7)
+            put("taskId", "PRIVATE_TASK"); put("workflowRunId", "PRIVATE_RUN")
+            put("revisionId", "PRIVATE_REVISION"); put("path", "/PRIVATE_ROOT/input")
+            put("text", "Authorization: [redacted] old-private-tail")
+            put("entries", buildJsonArray { add(buildJsonObject { put("text", "PRIVATE_PLAN") }) })
+            put("future_PRIVATE_FIELD", "PRIVATE_VALUE")
+            put("taskIdSha256", "a".repeat(64)); put("workflowRunIdSha256", "b".repeat(64))
+            put("revisionIdSha256", "c".repeat(64)); put("requestSha256", "d".repeat(64))
+            put("inputTokens", 11); put("contextWindowTokens", "9007199254740993")
+            put("reportedCostAmount", "-0.0"); put("reportedCostCurrency", "USD")
+            put("phase", "provisional"); put("role", "assistant"); put("completed", true)
+            put("validationPending", true); put("textOmitted", false); put("entriesTruncated", false)
+        }
+        val expected = buildJsonObject {
+            put("sequence", 19); put("runId", "writer-1"); put("workflow", "repair")
+            put("time", "2026-10-18T00:00:00Z"); put("kind", "message"); put("agentSequence", 7)
+            put("taskIdSha256", "a".repeat(64)); put("workflowRunIdSha256", "b".repeat(64))
+            put("revisionIdSha256", "c".repeat(64)); put("requestSha256", "d".repeat(64))
+            put("inputTokens", 11); put("contextWindowTokens", "9007199254740993")
+            put("reportedCostAmount", "-0.0"); put("reportedCostCurrency", "USD")
+            put("phase", "provisional"); put("role", "assistant"); put("completed", true)
+            put("validationPending", true); put("textOmitted", true); put("entriesTruncated", false)
+            put("replayOmittedFields", 7)
+        }
+        val replay = replayProgressRecord(record)
+        assertEquals(expected, replay)
+        assertEquals(replay, replayProgressRecord(replay))
+        assertEquals(publicProgressRecord(record), publicProgressRecord(replay))
+        assertTrue(record.toString().contains("old-private-tail"))
+        for (privateText in listOf("PRIVATE_", "old-private-tail", "Authorization", "[redacted]")) {
+            assertFalse(replay.toString().contains(privateText))
+        }
+        assertFalse("acceptedRevisionSha256" in replay)
+    }
+
+    @Test
+    fun `historical replay bounds fields and omission counts without inventing legacy metadata`() {
+        val sparse = buildJsonObject { put("sequence", 0) }
+        assertEquals(sparse, replayProgressRecord(sparse))
+        val maximal = buildJsonObject {
+            put("sequence", 0)
+            repeat(127) { put("private-$it", "PRIVATE_VALUE") }
+        }
+        assertEquals(buildJsonObject { put("sequence", 0); put("replayOmittedFields", 127) }, replayProgressRecord(maximal))
+        assertFailsWith<IllegalArgumentException> {
+            replayProgressRecord(JsonObject(maximal + ("one-more" to JsonPrimitive("PRIVATE_VALUE"))))
+        }
+        val base = buildJsonObject { put("sequence", 0); put("kind", "message") }
+        for (invalid in listOf(JsonPrimitive(-1), JsonPrimitive("1"), JsonPrimitive(true), JsonObject(emptyMap()))) {
+            assertFailsWith<IllegalArgumentException> {
+                replayProgressRecord(JsonObject(base + ("replayOmittedFields" to invalid)))
+            }
+        }
+        val maximum = JsonObject(base + ("replayOmittedFields" to JsonPrimitive(Int.MAX_VALUE)))
+        assertEquals(maximum, replayProgressRecord(maximum))
+        assertEquals(maximum, replayProgressRecord(replayProgressRecord(maximum)))
+        for (record in listOf(JsonObject(maximum + ("text" to JsonPrimitive("PRIVATE_VALUE"))),
+            JsonObject(base + mapOf("text" to JsonPrimitive("PRIVATE_VALUE"), "replayOmittedFields" to JsonPrimitive(Int.MAX_VALUE))))) {
+            assertFailsWith<ArithmeticException> { replayProgressRecord(record) }
+        }
+        for ((key, value) in listOf("requestSha256" to JsonPrimitive("PRIVATE_INVALID_DIGEST"),
+            "inputTokens" to JsonPrimitive("1e3"), "completed" to JsonPrimitive("true"),
+            "reportedCostAmount" to JsonPrimitive("-0.1"), "reportedCostAmount" to JsonPrimitive("NaN"),
+            "reportedCostAmount" to JsonPrimitive("Infinity"), "reportedCostAmount" to JsonPrimitive("-0.00"))) {
+            assertFailsWith<IllegalArgumentException> { replayProgressRecord(JsonObject(base + (key to value))) }
+        }
+        for (key in listOf("time", "wallClock")) {
+            val failure = assertFailsWith<IllegalArgumentException> {
+                replayProgressRecord(JsonObject(base + (key to JsonPrimitive("PRIVATE_INVALID_TIME"))))
+            }
+            assertFalse(failure.message.orEmpty().contains("PRIVATE_INVALID_TIME"))
+            assertNull(failure.cause)
+        }
+        val unknown = replayProgressRecord(JsonObject(base + mapOf(
+            "workflow" to JsonPrimitive("PRIVATE_WORKFLOW"), "kind" to JsonPrimitive("PRIVATE_KIND"),
+            "role" to JsonPrimitive("PRIVATE_ROLE"))))
+        assertEquals("unknown", unknown.getValue("workflow").jsonPrimitive.content)
+        assertEquals("unknown", unknown.getValue("kind").jsonPrimitive.content)
+        assertEquals(1, unknown.getValue("replayOmittedFields").jsonPrimitive.int)
+        assertFalse(unknown.toString().contains("PRIVATE"))
+    }
+
+    @Test
+    fun `complete configured diagnostic secrets survive format matching only as masked coverage`() {
+        for (secret in listOf("top secret", "top,secret", "top;secret", "top\nsecret", "top\u0001 secret")) {
+            for (redactor in listOf(ProgressRedactor(listOf(secret)), ProgressRedactor(emptyList(), listOf(secret)))) {
+                for (prefix in listOf("password=", "Bearer ", "Authorization: Basic ")) {
+                    val safe = redactor.text(prefix + secret + "; public tail")
+                    assertFalse(safe.contains("top"))
+                    assertFalse(safe.contains("secret"))
+                    assertTrue(safe.contains("public tail"))
+                }
+            }
+        }
+        val cases = listOf("ababa" to "aba", "aaaaaa" to "aa", "abc" to "abc", "ab" to "abcd",
+            "😀😀" to "😀", "a\uD800b\uD800" to "\uD800")
+        for ((source, literal) in cases) {
+            val starts = IntArray(source.length + 1)
+            val ends = IntArray(source.length + 1)
+            ProgressLiteralSecret(literal).markCoverage(source, starts, ends)
+            val expected = BooleanArray(source.length)
+            for (position in 0..source.length - literal.length) if (source.startsWith(literal, position)) {
+                for (offset in literal.indices) expected[position + offset] = true
+            }
+            var active = 0
+            for (index in source.indices) {
+                active += starts[index] - ends[index]
+                assertEquals(expected[index], active > 0)
+            }
+        }
+        val labelAndValue = ProgressRedactor(listOf("Bearer", "top secret"))
+        val safe = labelAndValue.text("Bearer top secret; public")
+        assertFalse(safe.contains("Bearer"))
+        assertFalse(safe.contains("top"))
+        assertFalse(safe.contains("secret"))
+        assertTrue(safe.contains("public"))
+        val token = "unconfigured-private-credential"
+        for (separator in listOf('\u000b', '\u000c', '\r')) {
+            for (prefix in listOf("Bearer$separator", "Authorization:${separator}Basic$separator", "password=$separator")) {
+                assertFalse(ProgressRedactor(emptyList()).text("before; $prefix$token; public").contains(token))
+            }
+        }
+        val raw = "Bearer\u000cfirst; Bearer\u000bsecond"
+        val cursor = OriginalCredentialSpanCursor(raw, Regex("(?i)(bearer\\s+)[^\\s,;]+"), true)
+        for (value in listOf("first", "second")) {
+            assertTrue(cursor.advance())
+            val rawStart = raw.indexOf(value)
+            val expectedStart = raw.substring(0, rawStart).replace(Regex("[\\p{Cntrl}&&[^\\n\\t]]"), "").length
+            assertEquals(expectedStart, cursor.start)
+            assertEquals(expectedStart + value.length, cursor.end)
+        }
+        assertFalse(cursor.advance())
+    }
+
     @Test
     fun `indexed literal redaction preserves bounded replacement and UTF16 matching`(): Unit {
         val sources = mutableListOf("")
@@ -88,7 +227,7 @@ class AgentProgressJournalTest {
             // Incomplete chunks publish only a commitment, never an invalid raw preview.
             identities.forEachIndexed { index, text ->
                 task.event(AgentMessageEvent((2 * identities.size + index).toLong(), "content-$index",
-                    AgentMessageRole.THOUGHT, text))
+                    AgentMessageRole.SYSTEM, text))
             }
         }
         val messages = assertNotNull(AgentProgressJournal.read(root)).getValue("events").jsonArray
@@ -111,20 +250,22 @@ class AgentProgressJournalTest {
         val marker = "[oversized text omitted]"
         val redactor = ProgressRedactor(listOf("q"))
         val largeToken = "q".repeat(2000)
-        // A later Bearer/field rule would collapse the expanded token again. Budget the
-        // intermediate result too, rather than allocating through every configured secret.
-        assertEquals(marker, redactor.text("Bearer $largeToken"))
-        assertEquals(marker, redactor.text("api_key=$largeToken"))
-        val exact = "Bearer " + "q".repeat(1637) + "1234567"
+        // Budget literal replacement work even when no credential format consumes the input.
+        assertEquals(marker, redactor.text("plain: $largeToken"))
+        val exact = "plain: " + "q".repeat(1637) + "1234567"
         // 7 prefix + 1637 ten-character replacements + 7 suffix = 16384 exactly.
-        assertEquals("Bearer [redacted]", redactor.text(exact))
+        val exactReplacement = "plain: " + "[redacted]".repeat(1637) + "1234567"
+        assertEquals(16_384, exactReplacement.length)
+        assertEquals(exactReplacement, redactor.text(exact, 16_384))
         assertEquals(marker, redactor.text(exact + "8"))
-        // Basic credentials are consumed by the earlier rule, preserving its normal result.
+        // Format masking consumes credentials before literal replacement can expand them.
         assertEquals("Authorization: [redacted]", redactor.text("Authorization: Basic $largeToken"))
+        assertEquals("Bearer [redacted]", redactor.text("Bearer $largeToken"))
+        assertEquals("api_key=[redacted]", redactor.text("api_key=$largeToken"))
         assertEquals("Bearer [redacted]", redactor.text("Bearer ordinary-token"))
         val privateMarker = ProgressRedactor(listOf("q", marker))
-        assertEquals("", privateMarker.text("Bearer $largeToken"))
-        assertEquals("", privateMarker.text("api_key=$largeToken"))
+        assertEquals("", privateMarker.text("plain: $largeToken"))
+        assertEquals("", privateMarker.text(exact + "8"))
         assertRawRedactionBudgetAdmission()
     }
 
@@ -621,7 +762,11 @@ class AgentProgressJournalTest {
                 "revision-2", "attempt-2", "a".repeat(64)))
         }
         val events = AgentProgressJournal.read(root)!!.getValue("events").jsonArray.map { it.jsonObject }
-        val firstRun = events.filter { it["workflowRunId"]?.jsonPrimitive?.content == "[redacted]" }
+        val commitment = java.security.MessageDigest.getInstance("SHA-256").digest("private-run".toByteArray(Charsets.UTF_8))
+            .joinToString("") { "%02x".format(it) }
+        val firstRun = events.filter { it["workflowRunIdSha256"]?.jsonPrimitive?.content == commitment }
+        assertEquals(5, firstRun.size)
+        assertTrue(firstRun.all { "workflowRunId" !in it && it.getValue("replayOmittedFields").jsonPrimitive.int > 0 })
         assertEquals(1, firstRun.map { it.getValue("workflowRunIdSha256") }.distinct().size)
         assertEquals(setOf("task_started", "plan", "agent_finished", "workflow_run_state"), firstRun.map { it.getValue("kind").jsonPrimitive.content }.toSet())
         assertEquals(listOf("provisional", "exhausted", "accepted"), events.filter {
@@ -760,6 +905,34 @@ class AgentProgressJournalTest {
     }
 
     @Test
+    fun `configured literals cannot erase credential indicators before format masking`() {
+        val credential = "UNREGISTERED-CREDENTIAL-7Z"
+        val cases = listOf(
+            "Bearer" to "Bearer $credential",
+            "earer" to "Bearer $credential",
+            "Authorization" to "Authorization: Bearer $credential",
+            "api_key" to "api_key=$credential",
+            "api" to "api-key=$credential",
+            "access_token" to "access_token=$credential",
+            "password" to "password=$credential",
+            "secret" to "secret=$credential",
+            "ghp_" to "ghp_$credential",
+            "sk-" to "sk-$credential",
+            "github_pat_" to "github_pat_$credential",
+        )
+        for ((literal, input) in cases) {
+            val safe = ProgressRedactor(listOf(literal)).text("before; $input; after")
+            assertFalse(safe.contains(credential), "credential survived configured literal $literal")
+            assertFalse(safe.contains(literal), "configured literal survived redaction")
+            assertTrue(safe.startsWith("before; "))
+            assertTrue(safe.endsWith("; after"))
+            assertTrue(safe.contains("[redacted]"))
+        }
+        assertEquals("", ProgressRedactor(listOf("Bearer", "[redacted]", "[unredactable text omitted]"))
+            .text("Bearer $credential"))
+    }
+
+    @Test
     fun `basic authorization credentials are removed without a configured token`() {
         val token = "c3ludGhldGljOnNlbnRpbmVsIQ=="
         val redactor = ProgressRedactor(emptyList())
@@ -880,7 +1053,7 @@ class AgentProgressJournalTest {
         AgentProgressJournal(root, "repair", maximumQueuedEvents = 1024).use { journal ->
             val task = journal.beginTask("streamed-hash-task", request(root))
             cases.forEachIndexed { index, text ->
-                task.event(AgentMessageEvent(index.toLong(), "case-$index", AgentMessageRole.THOUGHT, text))
+                task.event(AgentMessageEvent(index.toLong(), "case-$index", AgentMessageRole.SYSTEM, text))
             }
         }
         val messages = assertNotNull(AgentProgressJournal.read(root)).getValue("events").jsonArray
@@ -891,6 +1064,40 @@ class AgentProgressJournalTest {
             assertEquals(cases[index].length, record.getValue("chunkCharacters").jsonPrimitive.int)
             assertFalse("text" in record)
         }
+    }
+
+    @Test
+    fun `private reasoning is neither retained measured nor committed`(): Unit {
+        val parent = Files.createDirectories(java.nio.file.Path.of("build/test-tmp/progress-reasoning").toAbsolutePath())
+        val root = createTempDirectory(parent, "journal-")
+        AgentProgressJournal(root, "repair", maximumQueuedEvents = 1024).use { journal ->
+            val task = journal.beginTask("reasoning-task", request(root))
+            task.event(AgentMessageEvent(0, "reasoning", AgentMessageRole.THOUGHT, "PRIVATE_REASONING_PREFIX "))
+            task.event(AgentMessageEvent(1, "reasoning", AgentMessageRole.THOUGHT, "PRIVATE_REASONING_TAIL", completed = true))
+            task.event(AgentMessageEvent(2, "answer", AgentMessageRole.ASSISTANT, "public answer", completed = true))
+        }
+        val journal = assertNotNull(AgentProgressJournal.read(root))
+        assertFalse(journal.toString().contains("PRIVATE_REASONING"))
+        val messages = journal.getValue("events").jsonArray.map { it.jsonObject }
+            .filter { it["kind"]?.jsonPrimitive?.content == "message" }
+        assertEquals(3, messages.size)
+        messages.take(2).forEach { record ->
+            assertEquals("thought", record.getValue("role").jsonPrimitive.content)
+            assertTrue(record.getValue("textOmitted").jsonPrimitive.boolean)
+            listOf("text", "contentSha256", "chunkCharacters", "messageIdSha256").forEach { assertFalse(it in record, it) }
+        }
+        assertTrue(messages[1].getValue("completed").jsonPrimitive.boolean)
+        assertEquals("public answer", messages[2].getValue("text").jsonPrimitive.content)
+        assertEquals(AgentProgressJournal.displayCommitment("public answer"), messages[2].getValue("contentSha256").jsonPrimitive.content)
+        // Records written before this policy keep their sequence, but public replay withholds the measurements.
+        val legacy = buildJsonObject {
+            put("sequence", 4); put("kind", "message"); put("role", "thought"); put("text", "PRIVATE_REASONING")
+            put("contentSha256", "a".repeat(64)); put("chunkCharacters", 17); put("completed", true)
+        }
+        val public = publicProgressRecord(legacy)
+        assertEquals(setOf("role", "completed", "textOmitted"), public.fields.keys)
+        assertEquals(3, public.omittedFieldCount)
+        assertTrue(public.fields.getValue("textOmitted").jsonPrimitive.boolean)
     }
 
     private fun request(root: java.nio.file.Path) = AgentExecutionRequest(

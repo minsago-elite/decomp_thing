@@ -52,7 +52,7 @@ class AcpAuthenticationInventory private constructor(
             val ids = HashSet<String>()
             val redactor = ProgressRedactor(sensitiveValues)
             val fragments = AuthenticationPreviewFragments(sensitiveValues)
-            fun preview(text: String, limit: Int) = fragments.conceal(redactor.text(text, limit))
+            fun preview(text: String, limit: Int) = fragments.concealUntrusted(redactor.text(text, limit))
             methods.forEach { method ->
                 if (method.id.value.isBlank() || method.id.value.toByteArray().size > 256 || !ids.add(method.id.value)) {
                     throw AcpProtocolFailure("ACP authentication inventory contains an invalid or duplicate method ID")

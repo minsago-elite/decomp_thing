@@ -7,6 +7,9 @@ import decompengine.repair.validateRepairHistoryProjection
 import decompengine.repair.RepairRecordedHistoryPage
 import decompengine.repair.RepairRecordedHistorySelection
 import decompengine.repair.RepairRecordedReceiptCheck
+import decompengine.repair.RepairRecordedIdentity
+import decompengine.repair.RepairRecordedValidationObservation
+import decompengine.repair.RepairValidationObservedOutcome
 import decompengine.repair.recordedRepairSummary
 import decompengine.repair.recordedRepairEvidenceLabel
 import decompengine.repair.recordedRepairAssuranceLabel
@@ -151,6 +154,10 @@ internal fun renderDashboardDocument(jobs: List<Job>, diagnostics: List<WebJobDi
                   cancelAuthButton.disabled = false;
                   status.textContent = 'Inspecting advertised methods…';
                 }
+              }
+              if (observed.status !== 'inspecting' && !validInspectionId(authInspectionId)) {
+                status.textContent = 'Authentication inspection is unavailable. Check ACP configuration and cleanup.';
+                return;
               }
               inventory = observed;
               if (inventory.status === 'inspecting' && status.textContent.startsWith(
@@ -586,16 +593,118 @@ internal fun renderRecordedRepairHistory(job: Job, view: RecordedRepairHistoryVi
             RepairEvidenceArtifactState.CORRUPT -> RepairRecordedReceiptCheck.CORRUPT
             else -> RepairRecordedReceiptCheck.UNAVAILABLE
         })
-    fun link(label: String, historyPage: Int, casePage: Int, evidenceAttempt: String? = null): String {
+    fun link(label: String, historyPage: Int, casePage: Int, evidenceAttempt: String? = null, evidenceRun: String? = null,
+        validationPage: Int = 1): String {
         val parameters = buildList {
             view.runId?.let { add("runId=" + URLEncoder.encode(it, StandardCharsets.UTF_8)) }
             add("historyPage=$historyPage")
             add("historyCasesPage=$casePage")
             add("historyGraph=${snapshot.graphSha256}")
             evidenceAttempt?.let { add("historyEvidence=" + URLEncoder.encode(it, StandardCharsets.UTF_8)) }
+            evidenceRun?.let { add("historyRunEvidence=" + URLEncoder.encode(it, StandardCharsets.UTF_8)) }
+            if (validationPage != 1) add("historyValidationPage=$validationPage")
         }.joinToString("&")
         val target = "/jobs/${job.id}?$parameters"
         return "<a href=\"${target.escapeHtml()}\">$label</a>"
+    }
+    fun normalCases(cases: RecordedRepairValidationCasePage?, owner: RepairRecordedIdentity, isRun: Boolean): String {
+        fun caseLink(label: String, target: Int) = link(label, page.selection.pageNumber, page.selection.casePageNumber,
+            evidenceAttempt = owner.value.takeUnless { isRun }, evidenceRun = owner.value.takeIf { isRun }, validationPage = target)
+        if (cases == null || cases.state == RecordedRepairValidationCaseState.UNAVAILABLE)
+            return "<p>Case comparisons are unavailable; no completed case outcomes are inferred.</p>"
+        if (cases.state == RecordedRepairValidationCaseState.CORRUPT)
+            return "<p>Case comparison evidence is corrupt or inconsistent.</p>"
+        if (cases.state == RecordedRepairValidationCaseState.OUT_OF_RANGE)
+            return "<p>Recorded validation case page is out of range. ${caseLink("Show first validation case page", 1)}</p>"
+        fun preview(label: String, value: RecordedRepairValidationPreview?): String {
+            if (value == null) return ""
+            if (value.totalBytes == 0L) return "<p>$label: empty output (0 bytes).</p>"
+            val bound = if (value.truncated) "Showing first ${value.prefixBytes} of ${value.totalBytes} bytes; preview truncated."
+                else "Showing all ${value.totalBytes} bytes; preview complete."
+            val text = value.text?.let { "<p>Escaped UTF-8 prefix (${value.textBytes} bytes).</p><pre>${it.escapeHtml()}</pre>" }
+                ?: "<p>This prefix is not valid UTF-8; use the exact hexadecimal bytes below.</p>"
+            val suffix = if (value.textBytes != null && value.textBytes < value.prefixBytes)
+                "<p>An incomplete UTF-8 character at the preview boundary is shown only in hexadecimal.</p>" else ""
+            return "<details><summary>$label byte preview</summary><p>$bound</p>$text$suffix" +
+                "<p>Exact byte prefix (hexadecimal).</p><pre>${value.hex.escapeHtml()}</pre></details>"
+        }
+        val counts = cases.matchedCount?.let { "Recorded byte comparisons: $it matched; ${cases.inputCount - it} mismatched. " }.orEmpty()
+        val rows = cases.cases.joinToString("") { value ->
+            val outcome = when (value.outcome) {
+                RecordedRepairValidationCaseOutcome.MATCHED -> "Matched"
+                RecordedRepairValidationCaseOutcome.MISMATCH -> "Mismatch"
+                RecordedRepairValidationCaseOutcome.COMPILE_FAILED -> "Not compared: compilation failed"
+                RecordedRepairValidationCaseOutcome.COMPILE_ONLY -> "Not compared: compile-only validation"
+            }
+            fun equal(flag: Boolean?) = when (flag) { true -> "Same"; false -> "Different"; null -> "Not compared" }
+            fun stream(flag: Boolean?, first: Long?, second: Long?, original: RecordedRepairValidationPreview?,
+                rebuilt: RecordedRepairValidationPreview?): String = equal(flag) +
+                (if (first == null || second == null) "" else "<br>Original: $first B; rebuilt: $second B") +
+                preview("Original", original) + preview("Rebuilt", rebuilt)
+            "<tr><th scope=\"row\">${value.ordinal}. <code>${value.identity.value.escapeHtml()}</code></th>" +
+                "<td>$outcome</td><td>${equal(value.exitCodeMatches)}</td>" +
+                "<td>${stream(value.stdoutMatches, value.originalStdoutBytes, value.rebuiltStdoutBytes,
+                    value.originalStdoutPreview, value.rebuiltStdoutPreview)}</td>" +
+                "<td>${stream(value.stderrMatches, value.originalStderrBytes, value.rebuiltStderrBytes,
+                    value.originalStderrPreview, value.rebuiltStderrPreview)}</td></tr>"
+        }
+        val table = if (rows.isEmpty()) "<p>No input cases are recorded.</p>" else
+            "<div class=\"table-wrap\" role=\"region\" aria-label=\"Recorded validation case comparisons\" tabindex=\"0\">" +
+                "<table><caption>Recorded exact-byte comparisons</caption><thead><tr><th scope=\"col\">Case</th>" +
+                "<th scope=\"col\">Comparison</th><th scope=\"col\">Exit code</th><th scope=\"col\">Standard output</th>" +
+                "<th scope=\"col\">Standard error</th></tr></thead><tbody>$rows</tbody></table></div>"
+        val navigation = buildList {
+            if (cases.pageNumber > 1) add(caseLink("Previous validation cases", cases.pageNumber - 1))
+            if (cases.pageNumber < cases.totalPages) add(caseLink("More validation cases", cases.pageNumber + 1))
+        }.joinToString(" · ")
+        val mismatchNavigation = buildList {
+            cases.firstMismatchPage?.takeIf { it != cases.pageNumber }?.let { add(caseLink("First page with a mismatch", it)) }
+            cases.previousMismatchPage?.let { add(caseLink("Previous page with a mismatch", it)) }
+            cases.nextMismatchPage?.let { add(caseLink("Next page with a mismatch", it)) }
+        }.joinToString(" · ")
+        return "<p>$counts Validation case page ${cases.pageNumber} of ${cases.totalPages} (at most 20 cases). " +
+            "Comparisons describe retained bytes; missing observations are not skipped or successful executions.</p>" +
+            "<p>Comparison uses every retained byte without normalization. Previews show at most 128 bytes per stream; " +
+            "text escapes backslashes, line endings, tabs and control characters. Previews do not change the full-byte comparison.</p>$table" +
+            (if (navigation.isEmpty()) "" else "<nav aria-label=\"Recorded validation case pages\">$navigation</nav>") +
+            (if (mismatchNavigation.isEmpty()) "" else "<nav aria-label=\"Validation mismatch pages\">$mismatchNavigation</nav>")
+    }
+    fun normalEvidence(binding: RepairRecordedValidationObservation?, owner: RepairRecordedIdentity,
+        isRun: Boolean = false, offerRunLink: Boolean = false): String {
+        if (binding == null) return ""
+        val chosen = if (isRun) page.selection.evidenceRun == owner.value else page.selection.evidenceAttempt == owner.value
+        if (!chosen) return if (offerRunLink) "<p>" + link("Inspect baseline validation evidence",
+            page.selection.pageNumber, page.selection.casePageNumber, evidenceRun = owner.value) + "</p>" else ""
+        val detail = view.validationObservations[owner]
+        if (detail?.primaryState == RepairEvidenceArtifactState.CORRUPT)
+            return "<p>Recorded validation receipt is corrupt or does not match this assessment.</p>"
+        val target = view.targets[binding.primary.artifact]
+        if (detail?.primaryState != RepairEvidenceArtifactState.AVAILABLE || target == null)
+            return "<p>Recorded validation receipt is unavailable for this assessment.</p>"
+        val operation = when (binding.outcome) {
+            RepairValidationObservedOutcome.COMPILE_FAILED -> "Compilation failed"
+            RepairValidationObservedOutcome.COMPILE_VALID -> "Compilation checked"
+            RepairValidationObservedOutcome.BEHAVIOR_CHECKED -> "Behavior checked"
+        }
+        val derived = binding.diff?.let { diff ->
+            val diffTarget = view.targets[diff.artifact]
+            when {
+                detail.diffState == RepairEvidenceArtifactState.CORRUPT -> "<br>Derived diff is corrupt or changed."
+                detail.diffState == RepairEvidenceArtifactState.AVAILABLE && diffTarget != null ->
+                    "<br><a href=\"${artifactHref(job, diffTarget)}\">Open retained derived diff</a>"
+                else -> "<br>Derived diff is unavailable."
+            }
+        }.orEmpty()
+        return "<p>Recorded validation: $operation · Receipt records ${detail.completedCasePairs} of ${detail.inputCount} completed case pairs." +
+            "<br>Comparison policy: exact bytes (v1)." +
+            "<br>Source snapshot: <code>${binding.proof.sourceRevisionSha256.escapeHtml()}</code> · " +
+            "<code>${binding.candidate.value.escapeHtml()}</code>" +
+            "<br><a href=\"${artifactHref(job, target)}\">Open retained primary validation receipt</a>$derived</p>" +
+            if (binding.candidate.rawIdentityWithheld || owner.rawIdentityWithheld ||
+                binding.diff != null && (detail.diffState != RepairEvidenceArtifactState.AVAILABLE ||
+                    view.targets[binding.diff.artifact] == null))
+                "<p>Required recorded diff or identity evidence is unavailable; case comparisons are withheld.</p>"
+            else normalCases(detail.casePage, owner, isRun)
     }
     val visible = page.attempts
     val items = visible.joinToString("") { attempt ->
@@ -608,7 +717,8 @@ internal fun renderRecordedRepairHistory(job: Job, view: RecordedRepairHistoryVi
                 else references.joinToString("", "<ul class=\"repair-case-references\">", "</ul>") {
                     "<li><code>${it.value.escapeHtml()}</code></li>" }
         val omittedCases = attempt.retainedCases.size - references.size
-        val inspectEvidence = if (attempt.before?.artifact != null || attempt.after?.artifact != null || attempt.invocation != null) {
+        val inspectEvidence = if (attempt.before?.artifact != null || attempt.after?.artifact != null || attempt.invocation != null ||
+            attempt.validationObservation != null) {
             if (page.selection.evidenceAttempt == attempt.identity.value)
                 "<p>Inspecting this iteration's evidence. " + link("Show page evidence", page.selection.pageNumber,
                     page.selection.casePageNumber) + "</p>"
@@ -622,6 +732,7 @@ internal fun renderRecordedRepairHistory(job: Job, view: RecordedRepairHistoryVi
           <p>Rollback: ${decompengine.repair.recordedRepairRollbackLabel(attempt.rollback).escapeHtml()}</p>
           <p>Evidence assurance: ${assurance(attempt).escapeHtml()}</p>
           $inspectEvidence${evidence("Before", attempt.before)}${evidence("After", attempt.after)}
+          ${normalEvidence(attempt.validationObservation, attempt.identity)}
           <p class="regressions"><b>Retained regression cases:</b> ${attempt.retainedCases.size}</p>
           $cases${if (omittedCases > 0) "<p>$omittedCases case references omitted from this page.</p>" else ""}
         </div></article>""".trimIndent()
@@ -631,8 +742,29 @@ internal fun renderRecordedRepairHistory(job: Job, view: RecordedRepairHistoryVi
             "<br>Rollback failure attempt: <code>${attempt.value.escapeHtml()}</code> · " +
                 requireNotNull(run.rollbackResolution).name.lowercase().replace('_', '-').escapeHtml()
         }.orEmpty()
+        val diagnostic = run.validationDiagnostic?.let { binding ->
+            val detail = view.validationDiagnostics[run.identity]
+            val inspect = link("Inspect run validation evidence", page.selection.pageNumber,
+                page.selection.casePageNumber, evidenceRun = run.identity.value)
+            when {
+                page.selection.evidenceRun != run.identity.value -> "<br>$inspect"
+                detail?.state == RepairEvidenceArtifactState.AVAILABLE -> {
+                    val position = detail.inputIndex?.let { " · Producer corpus position ${it + 1} of ${detail.inputCount}" }.orEmpty()
+                    "<br>Validation diagnostic: ${requireNotNull(detail.reason).replace('-', ' ').escapeHtml()} · " +
+                        "${requireNotNull(detail.phase).replace('-', ' ').escapeHtml()}$position" +
+                        "<br>Source snapshot: <code>${binding.sourceRevisionSha256.escapeHtml()}</code> · " +
+                        "<code>${binding.candidate.value.escapeHtml()}</code>" +
+                        view.targets[binding.diagnostic]?.let { "<br><a href=\"${artifactHref(job, it)}\">Open retained diagnostic</a>" }.orEmpty() +
+                        "<br>Producer observation only; unobserved case outcomes remain unknown."
+                }
+                detail?.state == RepairEvidenceArtifactState.CORRUPT -> "<br>Validation diagnostic is corrupt or does not match this invocation."
+                else -> "<br>Validation diagnostic is unavailable for this invocation."
+            }
+        }.orEmpty()
         "<p class=\"repair-run\">Repair run: ${repairRunLabel(run.status.name.lowercase()).escapeHtml()} · " +
-            "${run.attemptedCount}/${run.maximumAttempts} attempts · <code>${run.identity.value.escapeHtml()}</code>$failure</p>"
+            "${run.attemptedCount}/${run.maximumAttempts} attempts · <code>${run.identity.value.escapeHtml()}</code>$failure$diagnostic</p>" +
+            normalEvidence(run.baselineValidationObservation, run.identity, isRun = true,
+                offerRunLink = run.validationDiagnostic == null)
     }
     val failures = snapshot.attempts.count { it.rollback?.failureCode != null } +
         if (snapshot.pending?.rollback?.failureCode != null) 1 else 0

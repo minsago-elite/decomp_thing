@@ -1138,17 +1138,9 @@ class AcpAgentHarness(
         options: List<SessionConfigOption>,
         configuredPrefix: List<AcpSessionConfigPreference>,
     ) {
-        configuredPrefix.forEachIndexed { index, preference ->
-            val matches = options.filter { it.id.value == preference.id }
-            if (matches.size != 1) throw safeSessionPreferenceSetterFailure("configOption", index)
-            val applied = matches.single()
-            val consistent = when (val requested = preference.value) {
-                is AcpSessionConfigValue.Select ->
-                    applied is SessionConfigOption.Select && applied.currentValue.value == requested.valueId
-                is AcpSessionConfigValue.BooleanValue ->
-                    applied is SessionConfigOption.BooleanOption && applied.currentValue == requested.value
-            }
-            if (!consistent) throw safeSessionPreferenceSetterFailure("configOption", index)
+        requireAppliedSessionConfigPreferences(options, configuredPrefix,
+            configuration.environment.values.map { it.value }, configuration.sessionPreferences.privateIdentifiers()) { index ->
+            safeSessionPreferenceSetterFailure("configOption", index)
         }
     }
 
@@ -1173,16 +1165,9 @@ class AcpAgentHarness(
             operation = operation,
         )
     } catch (failure: JsonRpcException) {
-        throw AgentExecutionException(
-            AgentFailure(
-                AgentFailureKind.PROTOCOL,
-                "ACP session preference setter was rejected",
-                details = buildMap {
-                    put("preference", kind)
-                    index?.let { put("preferenceIndex", it.toString()) }
-                    put("rpcCode", failure.code.toString())
-                },
-            ),
+        throw sessionPreferenceSetterFailure(
+            kind, index, configuration.environment.values.map { it.value },
+            configuration.sessionPreferences.privateIdentifiers(), rpcCode = failure.code.toString(),
         )
     } catch (_: AcpExpectedError) {
         throw safeSessionPreferenceSetterFailure(kind, index)
@@ -1193,15 +1178,9 @@ class AcpAgentHarness(
     private fun safeSessionPreferenceSetterFailure(
         kind: String,
         index: Int?,
-    ): AgentExecutionException = AgentExecutionException(
-        AgentFailure(
-            AgentFailureKind.PROTOCOL,
-            "ACP session preference setter returned an invalid response",
-            details = buildMap {
-                put("preference", kind)
-                index?.let { put("preferenceIndex", it.toString()) }
-            },
-        ),
+    ): AgentExecutionException = sessionPreferenceSetterFailure(
+        kind, index, configuration.environment.values.map { it.value },
+        configuration.sessionPreferences.privateIdentifiers(),
     )
 
     @OptIn(UnstableApi::class)
@@ -1291,19 +1270,19 @@ class AcpAgentHarness(
     private fun rejectSessionPreference(
         kind: String, index: Int?, reason: String, choices: Sequence<String>? = null,
     ): Nothing {
-        val message = "ACP configured session preference was not advertised by the exact session/new response"
+        val values = configuration.environment.values.map { it.value }
+        val privatePreferences = configuration.sessionPreferences.privateIdentifiers()
         val preview = choices?.let {
-            val values = configuration.environment.values.map { value -> value.value }
-            val suffix = " Advertised choice previews: " + previewSessionChoices(it, values,
-                configuration.sessionPreferences.privateIdentifiers())
-            // The fixed label is appended after the helper's own collision scan; recheck the complete diagnostic.
-            val sensitive = values + configuration.sessionPreferences.privateIdentifiers()
-            if (sensitive.any { value -> value.isNotEmpty() && (message + suffix).contains(value) }) "" else suffix
+            previewSessionChoices(it, values, privatePreferences).takeIf(String::isNotEmpty)
+                ?.let { hint -> " Advertised choice previews: $hint" }
         }.orEmpty()
         throw AgentExecutionException(
             AgentFailure(
                 AgentFailureKind.CONFIGURATION,
-                "ACP configured session preference was not advertised by the exact session/new response" + preview,
+                redactedSessionPreferenceDiagnostic(
+                    "ACP configured session preference was not advertised by the exact session/new response",
+                    preview, values, privatePreferences,
+                ),
                 details = buildMap {
                     put("preference", kind)
                     index?.let { put("preferenceIndex", it.toString()) }
@@ -3230,6 +3209,12 @@ internal data class WorkspaceSnapshotLimits(
 internal class WorkspaceSnapshotLimitExceeded(val dimension: String) : RuntimeException()
 internal class WorkspaceSnapshotInvalidEntry(val reason: String) : RuntimeException()
 
+/** Snapshot admission follows the broker's single-link regular-file policy before capture work. */
+internal fun <T> withSingleLinkWorkspaceSnapshotFile(linkCount: Int, capture: () -> T): T {
+    if (linkCount != 1) throw WorkspaceSnapshotInvalidEntry("unsupported-link-count")
+    return capture()
+}
+
 internal class WorkspaceSnapshotBudget(
     private val cancellation: AgentCancellation,
     private val wallDeadline: MonotonicDeadline,
@@ -3343,11 +3328,13 @@ internal class WorkspaceSnapshot private constructor(
                     val identity = entry.identity
                     if (identity.isSymbolicLink) throw WorkspaceSnapshotInvalidEntry("symbolic-link")
                     if (identity.isRegularFile) {
-                        val path = AgentWorkspacePath(rootId, relative)
-                        if (path !in states) {
-                            budget.file()
-                            val anchor = Path.of("/proc/self/fd/${roots.getValue(rootId).fd}")
-                            states[path] = hashFile(anchor, relative, budget, identity)
+                        withSingleLinkWorkspaceSnapshotFile(identity.linkCount) {
+                            val path = AgentWorkspacePath(rootId, relative)
+                            if (path !in states) {
+                                budget.file()
+                                val anchor = Path.of("/proc/self/fd/${roots.getValue(rootId).fd}")
+                                states[path] = hashFile(anchor, relative, budget, identity)
+                            }
                         }
                     } else if (identity.isDirectory) {
                         if (recursive) LinuxFilesystemSyscalls.openDirectoryAt(parent.fd, name).use { directory ->

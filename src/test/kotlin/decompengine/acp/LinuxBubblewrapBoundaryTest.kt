@@ -45,6 +45,9 @@ class LinuxBubblewrapBoundaryTest {
         for (phase in listOf("CHECKPOINT", "CONTROL_ADMISSION", "REFRESH")) {
             LinuxFilesystemSyscalls.MountMetadataPollScratch(scriptedManifestPollHandle(-203)).use { scratch ->
                 val check = newMountEventCheck(scratch)
+                recordMountAdmissionFacts(check, 12, 2, true, false)
+                val admitted = phase != "CHECKPOINT"
+                if (admitted) markMountAdmissionComplete(check)
                 var calls = 0
                 val unchanged = scriptedManifestMountPoll(scratch) { buffer ->
                     calls++; buffer.setShort(6, 8); 0
@@ -63,10 +66,18 @@ class LinuxBubblewrapBoundaryTest {
                 assertTrue(message.contains("generation=" +
                     if (phase == "REFRESH") "MISMATCH_ALREADY_OBSERVED" else "NOT_EVALUATED"))
                 assertTrue(message.endsWith("outcome=EVENT rc=2147483647 revents=32778 errno=NA"))
+                val admission = "mount-admission-v1 stage=${if (admitted) "ADMITTED" else "CONSTRUCTING"} " +
+                    "initialMounts=12 initialControls=2 owner=true initialFast=false"
+                assertEquals(admission, mountCheckField(diagnostic, "admissionContext"))
+                assertEquals(1, first.suppressed.size)
+                markMountAdmissionComplete(check)
+                recordMountAdmissionFacts(check, 99, 99, false, true)
                 scratch.close() // Any additional poll would now throw, not reproduce the event.
                 val sticky = assertFailsWith<IOException> { requireMountEventUnchanged(check, "REFRESH") }
                 assertEquals(first.message, sticky.message)
                 assertTrue(mountDiagnostic(sticky) === diagnostic)
+                assertEquals(admission, mountCheckField(mountDiagnostic(sticky), "admissionContext"))
+                assertEquals(1, sticky.suppressed.size)
                 assertEquals(2, calls)
                 assertTrue(mountCheckField(check, "firstEventDiagnostic") === diagnostic)
             }
@@ -77,6 +88,7 @@ class LinuxBubblewrapBoundaryTest {
     fun `mount query diagnostics preserve primary cleanup and nonsticky unavailable facts`() {
         LinuxFilesystemSyscalls.MountMetadataPollScratch(scriptedManifestPollHandle(-204)).use { scratch ->
             val check = newMountEventCheck(scratch)
+            recordMountAdmissionFacts(check, 7, 0, false, true)
             var calls = 0
             for (events in listOf(16, 32, 65535)) {
                 val failure = assertFailsWith<IOException> {
@@ -89,6 +101,10 @@ class LinuxBubblewrapBoundaryTest {
                 assertTrue(requireNotNull(mountDiagnostic(failure).message).endsWith(
                     "outcome=INVALID_DESCRIPTOR rc=1 revents=$events errno=NA"))
                 assertTrue(requireNotNull(mountDiagnostic(failure).message).contains("phase=CONTROL_ADMISSION "))
+                assertEquals("mount-admission-v1 stage=${if (events == 16) "CONSTRUCTING" else "ADMITTED"} " +
+                    "initialMounts=7 initialControls=0 owner=false initialFast=true",
+                    mountCheckField(mountDiagnostic(failure), "admissionContext"))
+                markMountAdmissionComplete(check)
                 val cleanup = AcpCleanupProofFailure("authored later cleanup failure")
                 failure.addSuppressed(cleanup)
                 assertTrue(failure.suppressed[1] === cleanup)
@@ -104,6 +120,8 @@ class LinuxBubblewrapBoundaryTest {
             assertEquals(Int.MIN_VALUE, syscall.errno)
             assertTrue(requireNotNull(mountDiagnostic(syscall).message).endsWith(
                 "outcome=SYSCALL_ERROR rc=-2147483648 revents=NA errno=-2147483648"))
+            assertEquals("mount-admission-v1 stage=ADMITTED initialMounts=7 initialControls=0 owner=false initialFast=true",
+                mountCheckField(mountDiagnostic(syscall), "admissionContext"))
             val cause = IOException("authored private cause text")
             val primary = IOException("authored private query text", cause)
             val observed = try {
@@ -132,6 +150,7 @@ class LinuxBubblewrapBoundaryTest {
             val check = newMountEventCheck(scratch)
             val failure = assertFailsWith<IOException> { admitMountObservation(check, (1L shl 32) or 10L, "REFRESH") }
             val diagnostic = mountDiagnostic(failure)
+            assertEquals(null, mountCheckField(diagnostic, "admissionContext")) // No authored admission facts.
             val text = requireNotNull(diagnostic.message)
             assertTrue(text.length <= 512 && text.all { it.code in 32..126 })
             assertEquals(null, diagnostic.cause)
@@ -202,6 +221,15 @@ class LinuxBubblewrapBoundaryTest {
 
     private fun mountCheckField(check: Any, name: String): Any? =
         check.javaClass.getDeclaredField(name).apply { isAccessible = true }.get(check)
+
+    private fun recordMountAdmissionFacts(check: Any, mounts: Int, controls: Int, owner: Boolean, fast: Boolean) {
+        invokePrivate(check, check.javaClass.getDeclaredMethod("recordAdmissionFacts", java.lang.Integer.TYPE,
+            java.lang.Integer.TYPE, java.lang.Boolean.TYPE, java.lang.Boolean.TYPE), mounts, controls, owner, fast)
+    }
+
+    private fun markMountAdmissionComplete(check: Any) {
+        invokePrivate(check, check.javaClass.getDeclaredMethod("markAdmissionComplete"))
+    }
 
     private fun mountDiagnostic(failure: Throwable): Throwable = failure.suppressed.single {
         it.javaClass.name == "decompengine.acp.RuntimePrivateControlScope\$MountEventDiagnostic"
@@ -3328,8 +3356,9 @@ class LinuxBubblewrapBoundaryTest {
             },
         )
         try {
-            assertFailsWith<IOException> { boundary.launch(probeLaunch(listOf("netns")), true) {} }
-            assertTrue(mutated.get())
+            val failure = assertFailsWith<IOException> { boundary.launch(probeLaunch(listOf("netns")), true) {} }
+            val mutationObserved = mutated.get()
+            assertTrue(mutationObserved, if (mutationObserved) null else targetMutationFailureContext(failure))
             assertTrue(boundary.evidence(null).launches.isEmpty())
         } finally {
             boundary.close()

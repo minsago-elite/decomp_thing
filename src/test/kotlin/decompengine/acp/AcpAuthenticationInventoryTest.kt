@@ -7,6 +7,122 @@ import kotlin.test.*
 import kotlinx.serialization.json.*
 
 class AcpAuthenticationInventoryTest {
+    @Test fun `public identifiers survive shared characters while delimited private fragments are withheld`() {
+        val privateValues = listOf("/fixture/auth/config.json", "fixture-credential", "legacy-transport-must-not-run")
+        val exposed = AcpAuthenticationInventory.capture(listOf(AuthMethod.AgentAuth(
+            AuthMethodId("operator-login"), "Public login", "Use your account")), privateValues).methods.single()
+        assertEquals("operator-login", exposed.idPreview)
+        assertEquals("Public login", exposed.namePreview)
+        assertEquals("Use your account", exposed.descriptionPreview)
+        val concealed = AcpAuthenticationInventory.capture(listOf(AuthMethod.AgentAuth(
+            AuthMethodId("method-r"), "prefix roo", "prefix r\u200bo\u0301o")), listOf("root")).methods.single()
+        assertEquals("", concealed.idPreview)
+        assertEquals("", concealed.namePreview)
+        assertEquals("", concealed.descriptionPreview)
+    }
+
+    @Test fun `short fragment search exhaustion withholds unchecked text within its fixed work budget`() {
+        val filter = AuthenticationPreviewFragments(listOf("abcdefghij"), maximumSearchUnits = 8)
+        assertEquals("", filter.concealUntrusted("ace"))
+        assertEquals("", filter.concealUntrusted("Public login"))
+        val ordinary = AuthenticationPreviewFragments(listOf("abcdefghij"))
+        assertEquals("Public login", ordinary.concealUntrusted("Public login"))
+        assertFailsWith<IllegalArgumentException> {
+            AuthenticationPreviewFragments(emptyList(), maximumSearchUnits = 64L * 1024 * 1024 + 1)
+        }
+    }
+
+    @Test fun `short private values cannot hide behind format or combining characters`() {
+        for (secret in listOf("root", "api", "key", "ab")) {
+            for (invisible in listOf("\u200b", "\u2060", "\u0301", "\u20dd")) {
+                val obfuscated = secret.chunked(1).joinToString(invisible)
+                val method = AcpAuthenticationInventory.capture(listOf(AuthMethod.AgentAuth(
+                    AuthMethodId(obfuscated), obfuscated, obfuscated)), listOf(secret)).methods.single()
+                assertEquals(obfuscated, method.id)
+                assertEquals("", method.idPreview)
+                assertEquals("", method.namePreview)
+                assertEquals("", method.descriptionPreview)
+                assertEquals("agent", method.variant)
+                assertFalse(method.loginSupported)
+            }
+        }
+    }
+
+    @Test fun `one to seven unit private fragments are withheld in every advertised field`() {
+        val secret = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz"
+        for (length in 1..7) {
+            for (start in 0..secret.length - length) {
+                val fragment = secret.substring(start, start + length)
+                val method = AcpAuthenticationInventory.capture(listOf(AuthMethod.AgentAuth(
+                    AuthMethodId(fragment), fragment, fragment)), listOf(secret)).methods.single()
+                assertEquals(fragment, method.id)
+                assertEquals("", method.idPreview)
+                assertEquals("", method.namePreview)
+                assertEquals("", method.descriptionPreview)
+            }
+        }
+        val pieces = secret.chunked(7)
+        val inventory = AcpAuthenticationInventory.capture(pieces.map { piece ->
+            AuthMethod.AgentAuth(AuthMethodId(piece), piece, piece)
+        }, listOf(secret))
+        assertEquals(pieces, inventory.methods.map { it.id })
+        assertTrue(inventory.methods.all {
+            it.idPreview.isEmpty() && it.namePreview.isEmpty() && it.descriptionPreview.orEmpty().isEmpty()
+        })
+    }
+
+    @Test fun `overlapping peer text can retain only a safe fixed redaction marker`() {
+        val method = AcpAuthenticationInventory.capture(listOf(AuthMethod.AgentAuth(
+            AuthMethodId("root"), "route root", "prefix root")), listOf("root")).methods.single()
+        assertEquals("root", method.id)
+        assertEquals("[redacted]", method.idPreview)
+        assertEquals("[redacted]", method.namePreview)
+        assertEquals("[redacted]", method.descriptionPreview)
+        val markerCollision = AcpAuthenticationInventory.capture(listOf(AuthMethod.AgentAuth(
+            AuthMethodId("[redacted]"), "[redacted]", "[redacted]")), listOf("re\u200bdacted")).methods.single()
+        assertEquals("", markerCollision.idPreview)
+        assertEquals("", markerCollision.namePreview)
+        assertEquals("", markerCollision.descriptionPreview)
+    }
+
+    @Test fun `invisible supplementary and private control units cannot bypass preview withholding`() {
+        val secret = "\u200b\u0301\u20dd\ud83d\udd11"
+        for (fragment in listOf("\u200b", "\u0301", "\u20dd", "\ud83d\udd11")) {
+            val method = AcpAuthenticationInventory.capture(listOf(AuthMethod.AgentAuth(
+                AuthMethodId("public$fragment"), fragment, "prefix$fragment")), listOf(secret)).methods.single()
+            assertEquals("public$fragment", method.id)
+            assertEquals("", method.idPreview)
+            assertEquals("", method.namePreview)
+            assertEquals("", method.descriptionPreview)
+        }
+        val unrelated = AcpAuthenticationInventory.capture(listOf(AuthMethod.AgentAuth(
+            AuthMethodId("public"), "Public login", "Use your account")), listOf(secret)).methods.single()
+        assertEquals("public", unrelated.idPreview)
+        assertEquals("Public login", unrelated.namePreview)
+        assertEquals("Use your account", unrelated.descriptionPreview)
+        val blank = AcpAuthenticationInventory.capture(listOf(AuthMethod.AgentAuth(
+            AuthMethodId("public"), "Public login", "Use\tyour account")), listOf(" ", "\t", "\n")).methods.single()
+        assertEquals("public", blank.idPreview)
+        assertEquals("Public login", blank.namePreview)
+        assertEquals("", blank.descriptionPreview)
+    }
+
+    @Test fun `blank private values preserve unrelated previews while withholding blank controls`() {
+        val filter = AuthenticationPreviewFragments(listOf(" ", "\t", "\n"))
+        assertEquals("Public login", filter.concealUntrusted("Public login"))
+        assertEquals("", filter.concealUntrusted(" "))
+        assertEquals("", filter.concealUntrusted("Use\tyour account"))
+    }
+
+    @Test fun `supplementary invisible private code points cannot bypass preview withholding`() {
+        // U+E0100 is a supplementary non-spacing mark; U+E0001 is a supplementary format character.
+        for (invisible in listOf("\udb40\udd00", "\udb40\udc01")) {
+            val filter = AuthenticationPreviewFragments(listOf(invisible))
+            assertEquals("", filter.concealUntrusted(invisible))
+            assertEquals("Public login", filter.concealUntrusted("Public login"))
+        }
+    }
+
     @Test fun `long private fragments are withheld at every alignment in operator previews`() {
         val secret = "0123456789abcdefghijklmnopqrstuvwxyzABCD"
         val fragments = listOf(secret.dropLast(1), secret.drop(1)) +

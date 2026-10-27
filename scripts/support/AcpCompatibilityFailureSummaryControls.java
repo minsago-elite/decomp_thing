@@ -75,16 +75,44 @@ public final class AcpCompatibilityFailureSummaryControls {
         var witnessSummary = summary(receipt(AcpExecutionLifecyclePhase.SANDBOX_LAUNCH,
             AcpExecutionCleanupDisposition.UNVERIFIED, null, witnessed), null);
         require(witnessSummary.contains(closedWitness) && witnessSummary.contains("private-control-checkpoint"));
+        var admissionConstructor = type.getDeclaredConstructor(phase, outcome, Integer.class, Integer.class, Integer.class, String.class);
+        admissionConstructor.setAccessible(true);
+        var constructing = "mount-admission-v1 stage=CONSTRUCTING initialMounts=12 initialControls=2 owner=true initialFast=false";
+        var admitted = "mount-admission-v1 stage=ADMITTED initialMounts=7 initialControls=0 owner=false initialFast=true";
+        for (var admission : new String[] { null, constructing, admitted, "PRIVATE /PRIVATE/path", "x".repeat(257), admitted + "\nPRIVATE" }) {
+            var diagnostic = (Throwable) admissionConstructor.newInstance(enumValue(phase, "CHECKPOINT"),
+                enumValue(outcome, "EVENT"), 1, 10, null, admission);
+            var bounded = summary(null, diagnostic);
+            require(bounded.contains(closedWitness));
+            if (constructing.equals(admission) || admitted.equals(admission)) require(bounded.contains(admission));
+            else require(!bounded.contains("mount-admission-v1"));
+        }
         results.put("attestedClosedMountWitnessPreserved", "PASS");
         var chain = new java.io.IOException("PRIVATE-long-chain");
         for (var index = 0; index < 100; index++) chain = new java.io.IOException("PRIVATE-long-chain", chain);
         require(summary(null, chain).split(" -> ", -1).length == 8);
         results.put("longCauseGraphBounded", "PASS");
         if (results.size() != 7) throw new AssertionError("unexpected summary control inventory");
+        var capturedContext = new java.io.IOException("PRIVATE-captured-context");
+        capturedContext.setStackTrace(new StackTraceElement[] {
+            new StackTraceElement("decompengine.acp.RuntimePrivateControlScope$MountEventCheck", "eventFailure", "PRIVATE-file", 1),
+            new StackTraceElement("decompengine.acp.RuntimePrivateControlScope$MountEventCheck", "requireUnchanged", "PRIVATE-file", 2),
+            new StackTraceElement("decompengine.acp.RuntimePrivateControlScope", "requireMountsUnchanged", "PRIVATE-file", 3),
+            new StackTraceElement("decompengine.acp.RuntimePrivateControlScope", "checkpoint", "PRIVATE-file", 4),
+            new StackTraceElement("decompengine.acp.RuntimePrivateControlScope", "requireDescriptor", "PRIVATE-file", 5),
+            new StackTraceElement("decompengine.acp.LinuxBubblewrapBoundaryKt", "stagePrivateRuntimeSnapshot", "PRIVATE-file", 6),
+            new StackTraceElement("decompengine.acp.LinuxBubblewrapBoundaryKt", "pinMounts", "PRIVATE-file", 7),
+            new StackTraceElement("decompengine.acp.LinuxBubblewrapBoundaryKt", "buildRuntimeManifestOwned", "PRIVATE-file", 8)
+        });
+        var capturedSummary = summary(null, capturedContext);
+        require(capturedSummary.contains("io[mount-event,mount-check,private-control-checkpoint,descriptor-revalidation,runtime-snapshot,mount-pinning]"));
+        require(!capturedSummary.contains("runtime-manifest"));
+        results.put("distinctCapturedStageLabelsRetainOriginalPrefixAndBoundDisclosure", "PASS");
+        if (results.size() != 8) throw new AssertionError("unexpected expanded summary control inventory");
         System.out.write(AcpCompatibilityJson.encode(Map.of(
             "schema", "decomp-engine-acp-failure-summary-controls", "schemaVersion", 1,
             "scope", "authored-data-only", "actualPreflightQualified", false, "controls", results)));
-        System.err.println("ACP failure summary controls: 7 PASS; authored data only; no preflight qualification");
+        System.err.println("ACP failure summary controls: 8 PASS; authored data only; no preflight qualification");
     }
 
     private static Object enumValue(Class<?> type, String name) {

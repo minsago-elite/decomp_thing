@@ -84,6 +84,11 @@ setter responses carry no selected-state field in ACP v1; for config options, th
 SDK state installed from it must both preserve the complete configured prefix before the next setter or prompt is
 allowed.
 
+Rejected setter RPCs and invalid setter responses screen the complete rendered diagnostic, including fixed wording,
+against the full configured environment and all private preference identifiers, including preferences not yet applied.
+They retain their protocol failure kind, preference category/index and numeric RPC code when present. Peer error text
+is not copied into these setter diagnostics; a screened nonblank indicator is used if ordinary wording is unsafe.
+
 Provision the components in this order:
 
 1. Create a dedicated, uncompromised service account. Enable and start its user systemd manager, ensure its live
@@ -144,6 +149,8 @@ Provision the components in this order:
    The configuration stores the source name and provenance, never the value; `inheritParentEnvironment` must remain
    `false`, and no ambient environment is serialized or forwarded. Once a secret binding is configured, preflight
    resolves and forwards that exact variable to the agent even though it never creates a session or sends a prompt.
+   This is a non-provider agent binding, not a provider credential channel; follow the
+   [provider credential ownership boundary](#provider-credentials-and-current-availability) below.
    Host-native execution can export that one name. Compose requires the same explicit one-name opt-in rather than an
    ambient environment file:
 
@@ -152,6 +159,33 @@ Provision the components in this order:
    docker compose --profile acp-host run --rm --no-deps \
      -e ACP_AGENT_SECRET llm-bin-patch doctor --workflow all --output /output
    ```
+
+### Provider credentials and current availability
+
+The production outer-agent namespace currently has no network access. Its
+credential-free checkpoints cover the boundaries in the table below. Positive
+provider-backed sessions require the separately qualified transport owned by
+[#238](https://github.com/minsago-elite/decomp_thing/issues/238), which remains
+unavailable in this deployment contract.
+
+That transport requires an operator-owned broker/relay to keep provider
+credentials outside the agent, analyzed program, candidate build and terminal
+children. The agent receives an admitted invocation/session-bound model channel;
+its channel identity, destination policy, bounds, cancellation and revocation
+must be qualified together. Authentication and session lifecycle remain with
+[#70](https://github.com/minsago-elite/decomp_thing/issues/70).
+
+The explicit `provenance: "secret"` environment binding above forwards the named
+value to the agent during initialize. It therefore cannot carry a provider
+credential for the brokered transport contract. The strict schema-v2
+[provisioning parser](../src/main/kotlin/decompengine/acp/AcpHarnessProvisioning.kt)
+accepts `schemaVersion`, `implementationId`, `agent`, `session` and `sandbox` at
+the root; there is no provider-policy or broker-channel setting in this document.
+Changing an environment value, a permission answer or the Compose network cannot
+qualify the missing transport. Provider reachability, an advertised auth method
+and a successful initialize each retain their own limited evidence scope.
+
+### Running the provisioned preflight
 
 Perform the real credential-free initialize preflight before any workflow:
 
@@ -199,6 +233,122 @@ artifact digests, and structured production-harness evidence. Receipts bind clie
 and capabilities, elapsed time, containment/tool hashes, resource limits, output accounting, lifecycle boundary,
 complete policy-audit counts, terminal outcome, and cleanup result. A skip is not accepted in either lane.
 
+### Pinned required cases and unsupported capability policy
+
+The release versions and archive commitments above identify the two implementations for this matrix. The
+classification below is the required-case definition, not evidence that a positive agent workflow succeeded.
+`Required` applies to both pins. Missing authentication, provider access or a required capability leaves a case
+unqualified; it does not turn that case into an unsupported exemption or a successful skip.
+
+| Case | Goose `1.46.0`: requirement and retained checkpoint coverage | `codex-acp` `0.16.0`: requirement and retained checkpoint coverage |
+|---|---|---|
+| Initialize | Required; stable ACP v1 initialize is covered by the credential-free checkpoint. | Required; stable ACP v1 initialize is covered by the credential-free checkpoint. |
+| Advertised capabilities | Required; the checkpoint records negotiation. Capabilities needed by each positive workflow still need qualification. | Required; the authentication-boundary verifier checks the pinned advertisement. Positive workflow capability use still needs qualification. |
+| Session creation | Required; a successful session is unqualified and is not attempted by the initialize-only checkpoint. | Required; a successful session is unqualified. The retained `session/new` authentication-required rejection is a negative boundary, not session creation. |
+| Prompt streaming | Required; unqualified. No model prompt is sent by the credential-free checkpoint. | Required; unqualified. No model prompt is sent by the authentication-boundary checkpoint. |
+| Authorized file edits | Required; unqualified. The initialize-only checkpoint exposes no workspace. | Required; unqualified. An unchanged empty workspace and empty audit do not prove an authorized edit. |
+| Permission handling | Required; unqualified. A positive task must exercise the standard permission policy. | Required; unqualified. No permission request or grant occurs in the authentication-boundary checkpoint. |
+| Cancellation | Required; unqualified for an active real-agent turn. Initialize-only shutdown is not turn cancellation. | Required; unqualified for an active real-agent turn. Authentication-required shutdown is not turn cancellation. |
+| Clean shutdown | Required; the credential-free initialize boundary is covered. Shutdown after a positive session/workflow remains unqualified. | Required; the credential-free authentication boundary is covered. Shutdown after a positive session/workflow remains unqualified. |
+| Reconstruction | Required; unqualified. Use the standard factory/workflow and production validators. | Required; unqualified. Use the standard factory/workflow and production validators. |
+| Repair | Required; unqualified. Use the standard factory/workflow and production validators. | Required; unqualified. Use the standard factory/workflow and production validators. |
+
+No agent-specific unsupported waiver is defined for those ten required cases. A required case that cannot run must
+retain its unsupported, authentication-required or failure outcome and continue to block complete qualification.
+The credential-free Codex rejection must not be counted as a positive required session, edit, reconstruction or
+repair result. Positive runs require a separately qualified provider/authentication environment; this table
+adds no permission, credential, network route or execution authority.
+
+Optional capability advertisement is a separate classification:
+
+| Optional advertised feature | Goose `1.46.0` | `codex-acp` `0.16.0` |
+|---|---|---|
+| Audio prompts | No support classification is locked by the initialize-only verifier; inspect the qualified negotiation before use. | Unsupported by the pinned advertisement: the verifier requires `promptAudio=false`. |
+| MCP over SSE | No support classification is locked by the initialize-only verifier; inspect the qualified negotiation before use. | Unsupported by the pinned advertisement: the verifier requires `mcpSse=false`. |
+| Additional session directories | No support classification is locked by the initialize-only verifier; inspect the qualified negotiation before use. | Unsupported by the pinned advertisement: the verifier requires `sessionAdditionalDirectories=false`. |
+
+These optional exclusions do not waive a required case. The
+[Codex boundary verifier](../scripts/support/AcpCompatibilityAuthenticationProbe.java) checks those exact false
+flags; the [Goose initialize verifier](../scripts/support/AcpCompatibilityPreflight.java) records negotiation
+without locking those optional values. An untested optional feature is not inferred unsupported or usable.
+Production reconstruction and repair continue to use protocol/capability handling, with no agent-name branch
+added for this matrix. Keep the pins, required-case definition and actual qualified outcomes distinct when
+reviewing an agent, SDK, runtime or provider-policy change; the complete current matrix must be qualified again.
+
+### Machine-readable required-case and result bindings
+
+[`contracts/acp/v1/required-cases.json`](../contracts/acp/v1/required-cases.json) records the same two pins and ten
+required cases per agent. It binds the client version, SDK artifact/reported version and stable protocol. The
+ordinary CI metadata check compares these declarations with the existing Gradle dependency, wire corpus and
+hash-locked agent scripts. It runs only authored data controls; it does not launch an agent or supply a real matrix.
+
+The [metadata verifier](../contracts/acp/v1/verify.py) has four modes:
+
+```bash
+python3 -B contracts/acp/v1/verify.py definition
+# RELEASE_COMMIT is the exact 40-character source commit being qualified.
+mkdir -p ./build/acp-release-bindings
+python3 -B contracts/acp/v1/verify.py template --release-commit "$RELEASE_COMMIT" \
+  > ./build/acp-release-bindings/results.json
+python3 -B contracts/acp/v1/verify.py inspect \
+  --release-commit "$RELEASE_COMMIT" --definition-sha256 "$DEFINITION_SHA256" \
+  --manifest ./build/acp-release-bindings/results.json
+python3 -B contracts/acp/v1/verify.py verify \
+  --release-commit "$RELEASE_COMMIT" --definition-sha256 "$DEFINITION_SHA256" \
+  --manifest ./build/acp-release-bindings/results.json
+```
+
+The release consumer must obtain `RELEASE_COMMIT` and `DEFINITION_SHA256` from its trusted release inputs. The
+digest commits to the exact definition bytes from that release, including whitespace. A branch name, abbreviated
+commit or zero placeholder is refused. Historical consumers may pass the retained definition with `--definition`;
+changing a definition is a new qualification input, not a migration of old results into current evidence.
+
+`template` writes all twenty cases as `UNQUALIFIED`, with null runtime/provider policy and no artifacts. These
+unknowns must remain explicit until evidence exists. `inspect` validates the metadata and lists blocking cases;
+its successful exit means the declarations are well formed. `verify` also requires every required case to have a
+positive binding and exits unsuccessfully for missing, failing, skipped, unsupported, authentication-required or
+observation-only results. A retained failure may have null runtime/provider policy; the context digest binds those
+unknowns and the report lists incomplete contexts. A positive binding requires both exact contexts. Neither mode
+requests a run, fetches an artifact, reads its payload or grants execution,
+credential or network authority. Both inspection reports always say `releaseQualified=false` and
+`artifactPayloadsIndependentlyVerified=false`, even for a structurally complete authored manifest.
+
+The version-one result document has the following closed fields:
+
+| Object | Required fields and meaning |
+|---|---|
+| Root | `schemaVersion=1`, `scope=acp-required-case-result-bindings`, exact `releaseCommit`, `definitionSha256`, identical `client`/`sdk`/`protocolVersion`, both `agents`, and `artifacts`. |
+| Agent | Exact definition `pin`, `runtime`, `providerPolicy`, and exactly one result for each required case. |
+| Runtime | `implementation`, exact `version`, `os`, `architecture`, and `containmentPolicy` with `id`, `version`, and `sha256`. |
+| Provider policy | `id`, exact `version`, `sha256`, and `mode` (`credential-free`, `brokered`, or `unavailable`). A positive required-case result requires the brokered policy. |
+| Case result | `caseId`, `outcome`, and an `artifact` identifier; only `UNQUALIFIED` uses a null reference. Negative outcomes remain negative. |
+| Artifact | Unique `id`, exact `agentId`, covered `cases`, `scope`, matching `sourceCommit` and `contextSha256`, plus `repository`, `runId`, `runAttempt`, immutable `artifactId`, `bytes`, and full-object `sha256`. |
+
+`contextSha256` is SHA-256 of the ASCII JSON produced with sorted keys, compact separators and ASCII escaping for
+this object: `{releaseCommit, definitionSha256, client, sdk, protocolVersion, agent, runtime, providerPolicy}`.
+Here `agent` is the exact pin object. The verifier's `context_digest` implements that encoding. Each artifact must
+match its agent's full version context and source commit. References across agents/cases, unused artifacts,
+conflicting declarations of the same repository/artifact identity, unknown fields and duplicate JSON keys are
+refused. Repository identity comparisons ignore ASCII casing. Inputs are bounded to one MiB; metadata and exception
+details are not echoed on refusal.
+
+Artifact scopes are `positive-required-case`, `negative-required-case`, `credential-free-initialize`, and
+`credential-free-authentication-boundary`. A `PASS` binding requires the positive scope. A non-null provider policy
+on a credential-free artifact must itself have mode `credential-free`; brokered or unavailable labels are refused.
+Credential-free artifacts
+can retain only initialization, advertisement and their own shutdown boundary; the authentication-boundary scope
+also permits the attempted session-creation case. They cannot bind edits, prompts, permission grants, cancellation,
+reconstruction or repair. `OBSERVED` and `AUTH_REQUIRED` preserve these narrower outcomes and block completeness;
+credential-free shutdown does not substitute for shutdown after a positive workflow.
+
+These are declarations and integrity references, not independent attestations of payload contents. The release
+consumer must independently authenticate the producer and exact checkout, retain and hash the actual immutable
+objects, verify their case/outcome and runtime/provider-policy evidence, and enforce all remaining oracle,
+validation, event, lineage and cleanup gates. A hash supplied beside an unverified `PASS` cannot establish any of
+those facts. No completed release result manifest is supplied by this definition or its authored controls. The
+existing positive-agent/provider and full release requirements remain open; updating metadata alone never proves
+the required rerun after a version or policy change.
+
 This is still not the complete compatibility matrix from issue #67. Neither lane proves a successful real-agent
 session, prompt streaming, authorized edit, permission handling, cancellation, or reconstruction/repair smoke. Those
 credentialed cases remain required before B1/B2 can close. The scripted Python fake agent remains a hostile
@@ -235,7 +385,12 @@ configuration diagnostic and preference index. Diagnostics preview at most four 
 and four values, redact configured environment values, and truncate each preview to 48 characters
 plus a truncation marker. These previews are display text, not selectors. The exact initial session advertisement remains a
 separate required authority check: later updates cannot authorize a choice absent from it. Existing
-post-response checks still verify the complete applied preference prefix. This does not make peer
+post-response checks verify both the returned list and installed SDK list: every applied prefix
+value must still be current and uniquely selectable in that replacement inventory. A later setter
+cannot retain an earlier `currentValue` while removing or duplicating that value's advertised choice.
+The original typed response-consistency failures are preserved; this additional freshness refusal
+uses the same private, bounded current-inventory diagnostic and the original preference index.
+This does not make peer
 inventory changes atomic with an RPC or supply an interactive configuration UI.
 
 ## Process and wire boundary
@@ -248,10 +403,23 @@ launch. At most four invocations run at once, with one active invocation per pri
 holds at most 64 waiting invocations overall and eight per workspace. Eligible waiters run in FIFO order; a waiter
 whose workspace is already active cannot prevent another workspace from using a free global slot.
 
+Capacity is reserved before the first caller observer runs, including when a global slot is free.
+The active count includes these unused reservations until fresh cancellation/deadline observations
+commit a permit or release its capacity. A waiter that acquires the fair mutex reserves an eligible
+slot before refreshing observations; admission does not depend on finding an uncontended probe.
+A bounded ingress token covers initial mutex contenders, waiting work and active/quarantined slots:
+at most the active-plus-queued limits combined may be held. The waiting limits still charge only
+queued work, so a busy workspace with a full waiting queue cannot consume an independent free slot.
+
 Waiting consumes the original execution wall-clock budget and has a separate 30-second maximum.
+Every missed initial lock polling slice checks explicit cancellation and the request deadline before
+starting another wait. Cancellation and request expiry can leave that initial wait without acquiring
+the mutex or consuming the full queue deadline.
+
 Caller-provided cancellation/deadline observers run outside the shared scheduler lock. Initial lock
-acquisition uses bounded polling slices, and elapsed observer/lock time is checked against the queue
-deadline before admission, even if capacity is available. Observer callbacks must still return promptly:
+acquisition uses fair interruptible bounded polling slices, and elapsed observer/lock time is checked
+against the original queue deadline before admission, even if capacity is available. Cancellation and
+request expiry are observed before reporting an initial capacity or quarantine refusal. Observer callbacks must still return promptly:
 the scheduler cannot preempt arbitrary caller code, and a blocked eligible FIFO head can delay later
 waiters. A blocked workspace observer does not hold the mutex needed for other eligible work, state
 inspection or permit release. Cancellation and
@@ -263,7 +431,10 @@ continue using the existing ACP cancellation, terminal teardown, and process con
 The admission slot covers the full contained invocation through cleanup and final change capture. A failed process
 cleanup proof retains its slot and workspace reservation for the application process lifetime; another harness
 instance cannot turn an unresolved process into fresh capacity. Such a workspace is unavailable for further turns,
-and no new invocation is admitted when all global slots are retained. Operators must resolve the process/cgroup
+and no new invocation is admitted when all global slots are retained. Quarantine invalidates unused
+same-workspace reservations before publication, ordered atomically against final permit grant.
+Unused reservations release their ingress and active capacity without asserting process cleanup;
+a granted permit retains both until verified cleanup. Operators must resolve the process/cgroup
 failure before restarting the application; this mechanism does not certify cleanup merely because a JVM exits.
 
 Workspace grouping uses the exact normalized primary path already present in the request. Captured repairs use a
@@ -319,7 +490,12 @@ listener. The workflow store also retains `.workflow-owner.lock`; the two files
 serve distinct ownership layers. Same-JVM web owners use the canonical existing
 store path to reject contenders before opening another lock channel (see the
 [JDK FileLock platform notes](https://docs.oracle.com/en/java/javase/21/docs/api/java.base/java/nio/channels/FileLock.html)).
-A missing root initially has in-process web exclusion only; creating it upgrades
+A missing root is keyed by resolving its nearest existing ancestor and appending
+the missing names. A stable parent alias therefore uses the same key after root
+creation. Only known absence permits walking to a parent; an indeterminate lookup
+must resolve or fail instead of selecting an unverified lexical key. Discovery
+does not create storage. A missing root initially has in-process web exclusion only;
+creating it upgrades
 to the cross-JVM lock before application work. Neither lock file is deleted or
 replaced as a stale-lock cleanup operation. A pathname, PID or leftover lock file
 alone never proves that another writer is absent. Provisioning/durability of
@@ -338,12 +514,15 @@ ancestor confirmation on retry and byte-identical prior evidence. Their bounded
 fixture receipt records the runtime, filesystem provider and observed filesystem
 types; source edits alone do not qualify a host or filesystem.
 
-Current server initialization then reconciles private upload stages and calls
-`WorkflowAttemptStore.recoverAll`. Malformed individual legacy/workflow records
-remain unavailable for inspection; they do not authorize guessed repairs or
-analysis replay. Unknown/unsafe upload staging and store-wide recovery refusals
-fail initialization. Legacy active statuses are projected as interrupted using
-workflow recovery state while the original `job.json` remains unchanged.
+Production server initialization uses `WorkflowAttemptStore.recoverForStartup`.
+It validates every bounded legacy/workflow record and prepares recovery replacements
+before confirming directories, reconciling private upload stages or publishing recovery
+state. Malformed startup records, incomplete reads, exhausted limits and unknown/unsafe
+staging refuse initialization; they do not authorize guessed repairs or analysis replay.
+After initialization, newly unavailable records retain isolated diagnostic rows for
+runtime inspection. Legacy active statuses are projected as interrupted using workflow
+recovery state while the original `job.json` remains unchanged. The separate explicit
+`recoverAll` operation retains its per-record inspection contract.
 
 The separate low-level `JobStore.recoverInterruptedJobs` legacy API retains its
 4,096-entry, 64 MiB aggregate metadata and 256 KiB per-record bounds. It completes
@@ -521,6 +700,19 @@ overflow refusal or dropping, as described by the [JDK HttpServer contract](http
 This setting covers connections waiting to be accepted; it does not cap already accepted connections,
 idle keep-alive connections, request duration, or stored uploads. Those bounds remain required under #71.
 
+The stop-reason mapping assertion retains a bounded header projection of the
+prelaunch observation already attached to its mapped failure. It reports only
+support status, first observed phase/kind, elapsed/remaining samples and last
+entered/returned phases. The assertion does not resample, traverse arbitrary
+causes, render phase/leaf payloads or invoke another operation. Missing, ambiguous,
+oversized or foreign records and malformed selected headers remain unavailable.
+The unused phase/leaf payload is not validated or rendered. The pure
+assertion controls cover that projection and private-text omission. Production
+budgets, native observations, launch/refusal/cleanup policy and every original
+stop-reason assertion are unchanged. A later passing mapping case cannot explain
+an earlier launch timeout or prove its cleanup; full prelaunch diagnosis remains
+open.
+
 The public `AcpAgentHarness` has no uncontained production mode. Before it starts an ACP agent it verifies an explicit
 Linux boundary made from digest-pinned, canonical, root-owned `bubblewrap`, `prlimit`, `systemd-run`, `systemctl`, and
 `bash` executables plus a digest/manifest-pinned static gate helper. Absence, replacement, an unsupported platform, a missing user systemd bus, or inability to create and
@@ -658,6 +850,13 @@ visited entries, 4,096 unique regular files, 8 MiB per file and 64 MiB total has
 RESOURCE_EXHAUSTED and a bounded phase/limit diagnostic; no partial change set is returned. These observation limits
 do not establish aggregate staged-storage/inode quotas, descriptor-bound inventory completeness or concurrent-workflow
 resource accounting. Those broader #63/#71 requirements and stress qualification remain open.
+
+Workspace snapshots admit regular files only when their observed link count is exactly one,
+matching the filesystem broker's read/replacement policy. Other link counts fail with
+`WORKSPACE_VIOLATION` and `unsupported-link-count` before the file-budget/hash callback runs.
+This applies to both initial and final snapshots, including aliases whose names are all
+allowlisted. Existing descriptor/path revalidation, metadata comparisons and mutation authority
+checks still apply to admitted files.
 
 Event consumers are trusted in-process callbacks and must be non-blocking and return promptly. Prompt-update callbacks
 are isolated from lifecycle polling, but post-response message-completion and file-change callbacks run synchronously
@@ -870,13 +1069,84 @@ An SDK upgrade is intentional work, not an automated version-range update. A cha
 1. confirm that the SDK still identifies protocol v1 as stable and keeps v2 opt-in;
 2. review the official v1 schema and release notes for wire or capability changes, including the opt-in v1
    additional-directory, usage, and message-id fields;
-3. update the Gradle coordinate and `ACP_KOTLIN_SDK_VERSION` together;
+3. update the Gradle coordinate, `ACP_KOTLIN_SDK_VERSION`, Java probe/evidence pins,
+   `contracts/acp/v1/required-cases.json` and pinning tests together, as identified
+   in the source-owner table below;
 4. review and run the versioned golden corpus, operator preference exchanges, scripted subprocess
    tests and full test suite; and
 5. keep v2 disabled until a project issue explicitly adopts it after it becomes stable.
 
 The lifecycle wrapper remains necessary even when SDK internals change: executable selection, OS process ownership,
 stderr retention, resource deadlines, cancellation polling, and process-tree cleanup belong to the host application.
+
+### Qualifying an agent or runtime change
+
+Qualification belongs to an exact combination of client, SDK/protocol, agent,
+runtime closure, host, workflow and provider policy. Retain the old combination's
+results with their original identities. An upgrade needs a new result for every
+required case in the [two-agent matrix](#pinned-required-cases-and-unsupported-capability-policy).
+The current pins are SDK `0.30.1`, stable protocol `1`, Goose `1.46.0` and
+`codex-acp` `0.16.0`; these identify the checked contract rather than a claim
+about the newest upstream release.
+
+| Changed input | Owning source and review obligation |
+|---|---|
+| Client SDK/protocol | Update the exact Gradle dependency and [`AcpProcessConfiguration.kt`](../src/main/kotlin/decompengine/acp/AcpProcessConfiguration.kt) together with the hard-coded SDK evidence fields in [`AcpCompatibilityPreflight.java`](../scripts/support/AcpCompatibilityPreflight.java) and both the provenance check and evidence field in [`AcpCompatibilityAuthenticationProbe.java`](../scripts/support/AcpCompatibilityAuthenticationProbe.java). Review all v1 serializer/capability changes and the scoped optional-v1 opt-ins. |
+| SDK pin assertions and current documentation | Review the literal SDK assertions in [`AcpAgentHarnessTest`](../src/test/kotlin/decompengine/acp/AcpAgentHarnessTest.kt) and [`AcpOperatorSurfaceContractTest`](../src/test/kotlin/decompengine/acp/AcpOperatorSurfaceContractTest.kt), plus the artifact/reported-version fields in the wire corpus and its golden test below. Update current setup/recovery version references; retain historical evidence with its original pins. |
+| Wire contract | Review the versioned [`wire-contract.json`](../src/test/resources/acp/v1/wire-contract.json) and [`AcpV1WireContractGoldenTest`](../src/test/kotlin/decompengine/acp/AcpV1WireContractGoldenTest.kt). Every changed message needs an explained compatibility result; a changed golden file alone supplies no runtime result. |
+| Independent agent/archive | Review the exact release URL/version, archive/member digests and target metadata in [`ci-qualify-goose-acp.sh`](../scripts/ci-qualify-goose-acp.sh) or [`ci-qualify-codex-acp.sh`](../scripts/ci-qualify-codex-acp.sh), plus the corresponding Java probe and acquisition controls. Preserve archive-layout and member verification. |
+| Machine-readable case and result bindings | Update the exact client, SDK artifact/reported version, stable protocol and agent version/archive size/digest pins in [`required-cases.json`](../contracts/acp/v1/required-cases.json) together with their build/wire/probe/script owners. Review the declaration and [`verify.py`](../contracts/acp/v1/verify.py) schema/scope rules plus [`test-acp-release-manifest.py`](../scripts/test-acp-release-manifest.py) when cases or metadata semantics change. The ordinary CI source-pin and data controls must pass. Retain old definition bytes/digests and result identities; a changed definition requires a new digest and fresh source/context-bound results. |
+| Executable/runtime/helper | Re-provision the reviewed immutable executable/runtime/helper commitments at their final paths, and bind the actual host architecture and containment prerequisites. Keep the existing ownership, mode, resource and cleanup checks. |
+| Factory/session configuration | Review the schema version, canonical factory commitment, ordered argv, explicit environment provenance and advertised preferences. A changed identity must pass [session reconciliation](acp-session-recovery.md#conversation-decisions). |
+| Provider/auth policy | Qualify the broker/channel and advertised auth lifecycle under their owning contracts. Provider credentials stay in the operator broker; the current network-free checkpoints cannot establish a positive model session. |
+
+Use this order for an upgrade proposal:
+
+1. Record the old and proposed exact combination, the intended workflows and the
+   upstream compatibility changes. Keep stable-v1 default negotiation and its
+   explicit v2 boundary. Preserve historical evidence instead of rewriting its
+   identities to the new pins.
+2. Review all affected source owners in the table together. Keep the required
+   case definition, optional capability observations and actual outcomes
+   separate. An untested optional feature remains unknown; a missing required
+   capability remains a blocking outcome for that required case.
+   Update the versioned declaration with any changed literal pins or required
+   cases, then require its ordinary metadata check and data controls. Bind new
+   results to the exact new definition digest and current runtime/provider-policy
+   context; changing metadata cannot requalify retained results from an old combination.
+3. Obtain current-source normal Actions evidence for wire serialization,
+   provisioning, advertised preferences, filesystem/terminal/permission
+   enforcement, lifecycle, recovery and packaging. Bind the actual checkout and
+   compiled tree, test selection, raw reports, exact artifact hashes and every
+   failure/skip/truncation. Required checks need fresh execution evidence;
+   retained old reports keep their original source identity.
+4. Obtain the applicable exact-pin credential-free agent checkpoints. Their
+   initialize/authentication-required results retain the limited scopes above.
+   Complete all required positive session, streaming, edit, permission,
+   cancellation, reconstruction and repair cases through the standard factory,
+   admitted provider/auth environment and production validators. Preserve failed,
+   unsupported and cleanup-unverified outcomes; an agent stop reason cannot
+   promote a revision or waive a required result.
+5. Audit persisted identity and recovery against the changed combination before
+   continuing a stored conversation. Retain accepted source and old session
+   evidence, quarantine incompatible identities, and keep unknown process cleanup
+   blocked. Recreating a conversation requires its explicit recorded policy.
+6. Record the release decision against the complete required result population.
+   The machine-readable manifest owned by
+   [#770](https://github.com/minsago-elite/decomp_thing/issues/770) must bind the
+   client/SDK/schema, agent/runtime/provider-policy versions, exact release
+   commits and immutable result artifacts. That manifest and full
+   [#72](https://github.com/minsago-elite/decomp_thing/issues/72) release
+   qualification remain open; this procedure supplies no missing result rows.
+
+Retain any previously qualified distribution, provisioning and identity-bound
+evidence with its original qualification scope for rollback. Record an absent
+qualified rollback combination in the release decision. A rollback selects its
+recorded combination and follows
+the same session/accepted-source reconciliation rules. Reusing a directory name,
+changing a version string or deleting a journal cannot establish compatibility
+or resolve unknown cleanup. The source, runtime and provider trust boundaries
+continue to apply throughout the upgrade.
 
 ### Operator authentication inventory
 
@@ -886,13 +1156,21 @@ Names/descriptions are bounded before redacted previews are retained. Removable 
 characters are normalized in both preview input and private values before literal and credential-pattern
 matching, so later stripping cannot reconstruct a secret. Raw input/private-value limits still apply
 before normalization.
-Authentication ID/name/description previews also pass a bounded private-fragment filter after
-redaction and truncation. Non-overlapping eight-UTF-16-unit blocks from normalized private values
-are indexed (at most 131,072 entries under the existing 1 MiB allowance). Every contiguous private
-fragment of at least 15 units contains one such block; a matching preview is withheld as an empty
-string. Some shorter matches are conservatively withheld too. Ordinary full-value redaction remains
-in place; arbitrary fragments below this threshold are not claimed to be confidential. The private
-index is local to inventory capture and is never serialized. Full-payload commitments remain unchanged. Truncation preserves UTF-16
+Authentication ID/name/description previews also conceal normalized private values and delimited
+private fragments after redaction and truncation. The existing 4096-value and 1,048,576-unit input
+bounds apply before filtering or duplicate suppression. Short normalized private values match
+anywhere; one-to-seven-unit letter/number tokens are checked against the complete normalized private
+values, including fragments split across methods/fields and format/combining insertions. Private
+invisible units are withheld too. Existing eight-unit blocks retain the guarantee for every contiguous
+private fragment of at least 15 units. A shared character alone does not classify an otherwise
+unrelated identifier as private: public advertised identifiers still have useful redacted previews.
+Two 65,536-bit indexes prefilter character membership. Short-token searches charge at most 64 Mi
+private-value units per capture, with a 4096-entry cache; exhaustion withholds unchecked text.
+A literal fixed `[redacted]` marker is reduced to that constant alone, unless it contains a normalized
+whole private value. Arbitrary encodings and undelimited short substrings inside unrelated words
+are outside this matching guarantee. Exact IDs remain private inventory data, never public selection
+authority. The separate long-fragment diagnostic projector retains its existing policy.
+The private index is local to capture and never serialized. Full-payload commitments remain unchanged. Truncation preserves UTF-16
 surrogate pairs. Redaction checks its 16,384-unit working-text limit after every replacement, before
 another replacement can expand inserted markers; exceeding it produces an omission marker. A single
 replacement can transiently allocate up to ten times that limit. The complete SDK-serialized
@@ -1028,6 +1306,12 @@ if a replacement marker or formatting recreates any private ID, it withholds the
 an empty string. A fixed replacement cannot be safe for arbitrary configured identifiers. This
 does not change exact-match selection for admitted redaction configurations. The separate allowance
 of at most 130 identifiers of 256 characters is independent of the environment redaction budget.
+The complete rejection message is checked after adding labels, boolean-choice text and hint
+boundaries, for both initial advertisements and current-inventory failures. Unsafe hints can be
+withheld while retaining a separately redacted base message. If all readable output is withheld,
+a bounded, dynamically selected nonblank indicator preserves the typed failure contract without
+using an unchecked fixed fallback. Failure kind, reason and preference-index fields remain unchanged;
+message redaction does not widen selection authority or send a setter request.
 Environment redaction admits at most 4,096 supplied values and 1,048,576 UTF-16 code units in total
 before blank filtering or de-duplication; raw duplicates and blank text count toward those limits.
 Over-budget configuration uses the existing fixed redaction-limit rejection. Each preview replacement

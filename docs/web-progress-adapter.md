@@ -266,6 +266,18 @@ entry counts remain observation metadata. Missing plan counts or entry metadata
 read **Not recorded**, not zero. Message and plan text remain withheld pending a
 producer public-visibility contract.
 
+The **More correlation references** disclosure reads only the selected row's
+already loaded observation. It exposes the workflow-run identity, reported
+accepted source, message identity, permission request, message chunk and changed
+file digests. Each is shown with its own label; equal digests do not collapse
+different reference dimensions. Missing or malformed SHA-256 values read **Not
+recorded**. Expanding adds at most six rows; closing the disclosure releases
+those rows. No request, cursor movement or evidence link is introduced.
+These are observation references, separate from the attempt's durable acceptance
+and revision. Existing monetary-estimate withholding and public-prose policy are
+unchanged. Actual expanded browser/screen-reader and physical D0 qualification
+remain outstanding.
+
 The packaged history journey additionally verifies local category/task filtering,
 no additional polling requests while filtering a paused page, restoration of all
 200 rows, exact attempt links, expandable correlation references and 320-pixel
@@ -727,3 +739,103 @@ Private bootstrap reports optional `runtime.progressRetention`: whether periodic
 Production HTTP tests seed expired, pinned and recent inert histories, verify actual default expiry and private counters, and check that workflow metadata and protected journals are preserved. A legacy-mode fixture verifies that old progress is retained. The packaged history fixture now uses recent timestamps so its replay/pin journey intentionally stays within the production retention window; separate production tests exercise expiry. Browser qualification verifies the Runtime explanation and process-local sampled counters.
 
 All 298 selected JVM tests, 342 frontend tests, lint/typechecked bundle, 49 valid/41 invalid contract fixtures and distZip pass. The [retained production manifest and browser report](evidence/web-production-retention-20260908/manifest.json) verify default expiry, protection, private status, packaged Runtime/pin/replay behavior, and confirmed shutdown/cleanup. Preliminary frontend and date-fixture errors were corrected before final verification; their scope is recorded in the manifest.
+
+## Live context-usage display coalescing
+
+The activity consumer checks every streamed observation and updates its bounded
+position before scheduling display work. Consecutive live `context_usage` records
+publish the first display snapshot immediately and retain only the latest complete
+snapshot for the next 100 ms display window. All checked rows remain in the
+existing 200-record page; this does not merge, discard or rewrite journal events.
+The latest snapshot carries its original browser receipt time, rather than the
+later display callback time. Provider measurement time remains unreported.
+
+Polling pages, replayed duplicates, non-usage records and the full-page boundary
+display immediately. Agent outcomes therefore do not wait behind a metric timer.
+Pause, background suspension and teardown flush a pending snapshot only while its
+position and private transport/job/attempt binding are still current. Reset or
+access-denial clearing invalidates that snapshot; cancelled callbacks cannot
+restore it. One display timer and one pending snapshot are retained, with no
+second event queue, request, retry, cursor, provider or acceptance authority.
+
+The scheduling controls use frozen DTOs and injected synchronous callbacks to
+check burst coalescing, unchanged records and receipt time, immediate barriers,
+pause flushing, reset/scope invalidation and late cancelled callbacks. Existing
+streaming, replay, capacity, focus, source and monetary-withholding behavior keeps
+its original regression methods. Physical browser burst/render qualification and
+the broader resource-accounting and measurement-provenance scope remain separate
+requirements.
+
+Additional in-memory activity-consumer controls drive the existing mock SSE
+transport through the real view. They check a 100-observation context burst
+before and after its display window, original receipt time and focus, unchanged
+provided evidence and monetary withholding, pause flushing, reset invalidation,
+and immediate publication of a full 200-record page with the exact continuation
+cursor. The existing fake clock and mock transport are reused; no network,
+listener, provider or native browser process is started. These controls address
+the rendered consumer path, while physical browser burst performance and broader
+resource/measurement qualification remain outstanding.
+
+
+Job and attempt metadata refreshes retain only the last checked response for the
+same transport, deployment path and requested identities. A transient read
+failure leaves those details explicitly labelled as potentially outdated and
+keeps independent attempt panels and their current filters mounted. Retry remains
+one explicit safe GET; refreshing metadata does not restart activity or read
+independent evidence. A new transport, session/identity selection, access denial,
+missing record, malformed/unsupported response, corrupt storage or mismatched
+response binding clears the prior details. The retained snapshot establishes no
+current readiness, workflow result or acceptance authority. In-memory consumer
+controls cover pending refresh, transient failure/recovery, panel/focus continuity,
+refusals, navigation and late responses; full D11 browser and accessibility
+qualification remains outstanding.
+
+Metadata read failures use distinct fixed recovery messages for session loss,
+access denial, a missing record, an incompatible response format and unverifiable
+metadata. Raw server text and codes never become presentation copy; the existing
+canonical correlation-ID filter is retained. Unsupported formats and unverified
+metadata clear old details rather than presenting a transient-server-failure
+snapshot. The rendered refusal controls include both distinct response-format
+failures, for sixteen new physical in-memory cases across the two routes.
+
+
+Attempt-history pages retain checked rows only for the same private transport,
+deployment path, job and continuation cursor. A pending refresh or transient
+failure of that same read labels the retained rows as potentially outdated.
+Changing page/scope, invalidating the saved query, losing access, an expired cursor,
+an incompatible/malformed response, corrupt metadata or a mismatched page/attempt
+job binding clears those rows. Every returned attempt must match the requested
+job before the page is displayed.
+
+A failed safe page read offers an explicit retry of that exact page and cursor;
+it never starts or repeats workflow work. Refresh history and First page keep
+returning to the first page, including recovery from expired/invalid cursors.
+Recovery messages use fixed local copy and the existing sanitized reference-ID
+projection. In-memory view controls cover same-page retention and focus, continuation
+retry, hard refusals, both response-binding levels, invalid-query recovery and
+late responses after deployment rebinding. These controls add no physical browser
+or provider/native trial; full route/panel, form and accessibility qualification
+remains outstanding.
+
+
+Generic `JOB_STORAGE_UNAVAILABLE` responses are also unverifiable metadata, since
+the public adapter uses that fixed code for unrecognized persisted-storage
+classifications. Job, attempt and history refreshes clear retained content for
+that response instead of treating its HTTP 503 as a transient outage. Dedicated
+in-memory route controls cover all three consumers and the sanitized reference.
+
+The live burst control delivers the first context observation and the pending
+observations at different fake-clock times within one display window, then checks
+the latest observation's exact receipt time separately from the first receipt and
+render time. The reset control captures the actual cancelled display callback and
+invokes it after reset. It keeps the new snapshot unresolved while checking that
+neither cleanup nor that late callback restores old rows, so a fast fresh response
+cannot hide an incorrect stale publication. These remain mock transport/fake-clock
+controls, with no physical browser or native/provider trial.
+
+
+Stored-record byte/inspection limit refusals (`STORE_LIMIT`) and uncertain
+publication quarantine (`RECOVERY_REQUIRED`) also invalidate retained job, attempt
+and history metadata. The metadata read path can emit both fixed classifications;
+neither is a transient HTTP 503 outage. Six additional mock route controls cover
+the two classifications across all three consumers without starting native work.

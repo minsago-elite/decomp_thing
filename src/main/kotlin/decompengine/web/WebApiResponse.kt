@@ -39,3 +39,7 @@ internal fun webApiHeaders(exchange: HttpExchange, requestId: String) {
     exchange.responseHeaders.set("Cache-Control", "no-store")
     exchange.applyWebSecurityHeaders()
 }
+
+/** HEAD has no JSON body; retain only the two trusted session-invalidating denial codes. */
+internal fun headWebSessionErrorCode(method: String, status: Int, code: String): String? =
+    code.takeIf { method == "HEAD" && status == 401 && it in setOf("SESSION_REQUIRED", "SESSION_EXPIRED") }

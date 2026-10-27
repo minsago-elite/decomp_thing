@@ -8,11 +8,11 @@ on:
   workflow_dispatch:
     inputs:
       qualification:
-        description: "Explicit native runtime measurement; never approves a production profile"
+        description: "Explicit observation or qualification; never approves a production profile"
         type: choice
         required: true
         default: native-runtime-measurement
-        options: [native-runtime-measurement]
+        options: [native-runtime-measurement, produced-program-observation, produced-program-bwrap-observation, runtime-capture-host-preflight]
       listener_continuity:
         description: "Opt in to schema-v3 kernel listener continuity; never authenticates the responder or approves a runtime"
         type: boolean
@@ -34,11 +34,17 @@ jobs:
         with:
           distribution: temurin
           java-version: "21"
-      - uses: gradle/actions/setup-gradle@v6
+      - uses: ./.github/actions/setup-gradle-compiler-cache
         with:
-          cache-provider: basic
           cache-read-only: ${{ github.ref != 'refs/heads/master' }}
+      - name: Cache reviewed frontend Node downloads
+        uses: actions/cache@v6
+        with:
+          path: ${{ github.workspace }}/build/frontend-node-downloads
+          key: frontend-node-archives-v1-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('scripts/install-frontend-node.sh', 'scripts/frontend-node-sha256.txt', '.node-version', 'frontend/package.json') }}
       - name: Install pinned build-only frontend toolchain
+        env:
+          DECOMP_FRONTEND_NODE_DOWNLOAD_CACHE: '1'
         run: |
           bash scripts/install-frontend-node.sh "$RUNNER_TEMP/frontend-node"
           echo "$RUNNER_TEMP/frontend-node/bin" >> "$GITHUB_PATH"
@@ -207,6 +213,11 @@ jobs:
           python3 scripts/check-behavior-corpus-evidence.py \
             --corpus oracle/llvm/22.1.6/behavior-corpus.json \
             --evidence oracle/llvm/22.1.6/behavior-corpus-evidence.json
+      - name: Verify checked supplemental produced-program corpus evidence
+        run: |
+          python3 -B -m oracle.llvm.behavior_corpus_bwrap --verify-pair \
+            oracle/llvm/22.1.6/behavior-corpus-bwrap-v1.json \
+            oracle/llvm/22.1.6/behavior-corpus-bwrap-v1-evidence.json
       - name: Run non-authoritative Python compatibility regressions
         run: |
           python3 -m unittest \
@@ -214,7 +225,15 @@ jobs:
             tests.oracle.test_llvm_oracle_profiles \
             tests.oracle.test_gcc_oracle_artifacts \
             tests.oracle.test_function_recovery_oracle_generation \
-            tests.oracle.test_behavior_corpus -v
+            tests.oracle.test_behavior_corpus \
+            tests.oracle.test_behavior_corpus_bwrap \
+            tests.oracle.test_behavior_corpus_bwrap_evidence \
+            tests.oracle.test_behavior_corpus_bwrap_normalization \
+            tests.oracle.test_behavior_corpus_bwrap_loader \
+            tests.oracle.test_behavior_storage_lease \
+            tests.oracle.test_behavior_corpus_bwrap_seccomp \
+            tests.oracle.test_behavior_corpus_bwrap_limits \
+            tests.oracle.test_behavior_snapshot_collection -v
       - uses: actions/upload-artifact@v7
         if: always()
         with:
@@ -222,6 +241,7 @@ jobs:
           path: |
             build/reports/tests/test
             build/test-results/test
+            build/reports/junit-signatures
 
   native-runtime-measurement:
     if: github.event_name == 'workflow_dispatch' && inputs.qualification == 'native-runtime-measurement'
@@ -706,3 +726,237 @@ jobs:
           path: |
             build/nrm-live/evidence
             build/nrm-live/raw-oci
+
+  produced-program-reference-observation:
+    # Explicit compatibility qualification only. Historical runtime provisioning is
+    # a prerequisite, never a stock-runtime fallback or a skipped passing result.
+    if: github.event_name == 'workflow_dispatch' && inputs.qualification == 'produced-program-observation'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    permissions:
+      contents: read
+    env:
+      GRADLE_USER_HOME: ${{ github.workspace }}/build/issue97-live/gradle-home
+      DOCKER_CONFIG: ${{ github.workspace }}/build/issue97-live/docker-config
+      XDG_CACHE_HOME: ${{ github.workspace }}/build/issue97-live/cache
+      XDG_CONFIG_HOME: ${{ github.workspace }}/build/issue97-live/config
+      XDG_DATA_HOME: ${{ github.workspace }}/build/issue97-live/data
+      JAVA_TOOL_OPTIONS: -Djava.io.tmpdir=${{ github.workspace }}/build/issue97-live/tmp -Djna.tmpdir=${{ github.workspace }}/build/issue97-live/tmp -Duser.home=${{ github.workspace }}/build/issue97-live/home -XX:-UsePerfData -XX:+DisableAttachMechanism
+      TMPDIR: ${{ github.workspace }}/build/issue97-live/tmp
+      PYTHONDONTWRITEBYTECODE: "1"
+    steps:
+      - uses: actions/checkout@v7
+      - name: Create repository-owned observation paths
+        run: |
+          install -d -m 0700 build/issue97-live/tmp build/issue97-live/home \
+            build/issue97-live/docker-config build/issue97-live/evidence
+      - name: Require the exact historical control client
+        run: |
+          test -x /usr/bin/docker || { echo 'Unsupported host: pinned Docker client absent'; exit 1; }
+          echo 'e45381109c685311cf84c5e33a1aca7da81d6b55c0f9aed74091fc08c3a94f13  /usr/bin/docker' \
+            | sha256sum --check --strict
+          # Full engine, image, cgroup and helper identities are checked by the
+          # generic runner. A different build/tag/version is not a substitute.
+      - uses: actions/setup-java@v6
+        with:
+          distribution: temurin
+          java-version: "21"
+      - uses: gradle/actions/setup-gradle@v6
+        with:
+          cache-provider: basic
+          cache-read-only: true
+      - name: Install pinned build-only frontend toolchain
+        run: |
+          bash scripts/install-frontend-node.sh "$GITHUB_WORKSPACE/build/issue97-live/frontend-node"
+          echo "$GITHUB_WORKSPACE/build/issue97-live/frontend-node/bin" >> "$GITHUB_PATH"
+      - name: Fetch authenticated locked Clang artifacts
+        run: |
+          bash scripts/ci-fetch-llvm-release-artifacts.sh \
+            ./gradlew --no-daemon fetchLlvmReleaseArtifacts \
+            --args="$GITHUB_WORKSPACE/build/issue97-live/artifacts"
+      - name: Run pure compatibility contract controls
+        run: python3 -B -m unittest tests.oracle.test_llvm_oracle_profiles.ProducedProgramObservationTest -v
+      - name: Observe locked Clang compilation and exact produced-program execution
+        env:
+          HOME: ${{ github.workspace }}/build/issue97-live/home
+        run: |
+          python3 -B -m oracle.llvm.produced_program \
+            --artifact-root "$GITHUB_WORKSPACE/build/issue97-live/artifacts" \
+            --temporary-root "$GITHUB_WORKSPACE/build/issue97-live/tmp" \
+            --container-runtime /usr/bin/docker \
+            --json-output "$GITHUB_WORKSPACE/build/issue97-live/evidence/produced-program-observation.json"
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: llvm-produced-program-compatibility-observation
+          path: build/issue97-live/evidence
+          if-no-files-found: warn
+
+  produced-program-bwrap-observation:
+    # Supplemental reference profile (issue 97): stock ubuntu-24.04 plus bubblewrap, no historical OCI image,
+    # pinned Docker client, subordinate IDs or cgroup delegation. Separate from the historical job above.
+    if: github.event_name == 'workflow_dispatch' && inputs.qualification == 'produced-program-bwrap-observation'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    permissions:
+      contents: read
+    env:
+      GRADLE_USER_HOME: ${{ github.workspace }}/build/issue97-bwrap/gradle-home
+      XDG_CACHE_HOME: ${{ github.workspace }}/build/issue97-bwrap/cache
+      XDG_CONFIG_HOME: ${{ github.workspace }}/build/issue97-bwrap/config
+      XDG_DATA_HOME: ${{ github.workspace }}/build/issue97-bwrap/data
+      JAVA_TOOL_OPTIONS: -Djava.io.tmpdir=${{ github.workspace }}/build/issue97-bwrap/tmp -Djna.tmpdir=${{ github.workspace }}/build/issue97-bwrap/tmp -Duser.home=${{ github.workspace }}/build/issue97-bwrap/home
+      TMPDIR: ${{ github.workspace }}/build/issue97-bwrap/tmp
+      PYTHONDONTWRITEBYTECODE: "1"
+    steps:
+      - uses: actions/checkout@v7
+      - name: Create repository-owned observation paths
+        run: install -d -m 0700 build/issue97-bwrap/tmp build/issue97-bwrap/home build/issue97-bwrap/evidence
+      - name: Install bubblewrap and allow unprivileged user namespaces
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends bubblewrap binutils
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0 || true
+          bwrap --unshare-all --die-with-parent --ro-bind /usr /usr --symlink usr/lib /lib --symlink usr/lib64 /lib64 \
+            --symlink usr/bin /bin /usr/bin/true
+      - uses: actions/setup-java@v6
+        with:
+          distribution: temurin
+          java-version: "21"
+      - uses: gradle/actions/setup-gradle@v6
+        with:
+          cache-provider: basic
+          cache-read-only: true
+      - name: Install pinned build-only frontend toolchain
+        run: |
+          bash scripts/install-frontend-node.sh "$GITHUB_WORKSPACE/build/issue97-bwrap/frontend-node"
+          echo "$GITHUB_WORKSPACE/build/issue97-bwrap/frontend-node/bin" >> "$GITHUB_PATH"
+      - name: Fetch authenticated locked Clang artifacts
+        run: |
+          bash scripts/ci-fetch-llvm-release-artifacts.sh \
+            ./gradlew --no-daemon fetchLlvmReleaseArtifacts \
+            --args="$GITHUB_WORKSPACE/build/issue97-bwrap/artifacts"
+      - name: Run pure supplemental-profile controls
+        run: python3 -B -m unittest tests.oracle.test_produced_program_bwrap -v
+      - name: Observe locked Clang compilation and exact produced-program execution under bubblewrap
+        env:
+          HOME: ${{ github.workspace }}/build/issue97-bwrap/home
+        run: |
+          python3 -B -m oracle.llvm.produced_program_bwrap \
+            --artifact-root "$GITHUB_WORKSPACE/build/issue97-bwrap/artifacts" \
+            --temporary-root "$GITHUB_WORKSPACE/build/issue97-bwrap/tmp" \
+            --json-output "$GITHUB_WORKSPACE/build/issue97-bwrap/evidence/produced-program-observation.json"
+      - name: Verify the retained observation offline
+        run: |
+          python3 -B -m oracle.llvm.produced_program_bwrap \
+            --verify-observation "$GITHUB_WORKSPACE/build/issue97-bwrap/evidence/produced-program-observation.json"
+      - name: Run generic bubblewrap corpus backend controls, including live aggregate-bound controls
+        env:
+          BEHAVIOR_CORPUS_BWRAP_LIVE: "1"
+        run: |
+          python3 -B -m unittest \
+            tests.oracle.test_behavior_corpus_bwrap \
+            tests.oracle.test_behavior_corpus_bwrap_normalization \
+            tests.oracle.test_behavior_corpus_bwrap_loader \
+            tests.oracle.test_behavior_storage_lease \
+            tests.oracle.test_behavior_corpus_bwrap_seccomp \
+            tests.oracle.test_behavior_corpus_bwrap_limits \
+            tests.oracle.test_behavior_snapshot_collection -v
+      - name: Run the supplemental bubblewrap behavior corpus through the generic backend
+        env:
+          HOME: ${{ github.workspace }}/build/issue97-bwrap/home
+        run: |
+          python3 -B -m oracle.llvm.behavior_corpus_bwrap --run \
+            --artifact-root "$GITHUB_WORKSPACE/build/issue97-bwrap/artifacts" \
+            --temporary-root "$GITHUB_WORKSPACE/build/issue97-bwrap/tmp" \
+            --json-output "$GITHUB_WORKSPACE/build/issue97-bwrap/evidence/behavior-corpus-bwrap-v1-report.json"
+      - name: Replay the retained corpus report offline
+        run: |
+          python3 -B -m oracle.llvm.behavior_corpus_bwrap --verify-pair \
+            oracle/llvm/22.1.6/behavior-corpus-bwrap-v1.json \
+            "$GITHUB_WORKSPACE/build/issue97-bwrap/evidence/behavior-corpus-bwrap-v1-report.json"
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: llvm-produced-program-bwrap-observation
+          path: build/issue97-bwrap/evidence
+          if-no-files-found: warn
+
+  runtime-capture-host-preflight:
+    # Temporary NEW-GENERATION candidate, not a supported baseline; runner expiry2027-04-17.
+    if: github.event_name == 'workflow_dispatch' && inputs.qualification == 'runtime-capture-host-preflight'
+    runs-on: ubuntu-22.04
+    timeout-minutes: 3
+    permissions:
+      contents: read
+    env:
+      HOME: ${{ github.workspace }}/build/issue97-host-inspect/home
+      TMPDIR: ${{ github.workspace }}/build/issue97-host-inspect/tmp
+      XDG_CACHE_HOME: ${{ github.workspace }}/build/issue97-host-inspect/cache
+      XDG_CONFIG_HOME: ${{ github.workspace }}/build/issue97-host-inspect/config
+      XDG_DATA_HOME: ${{ github.workspace }}/build/issue97-host-inspect/share
+      XDG_RUNTIME_DIR: ${{ github.workspace }}/build/issue97-host-inspect/run
+      PYTHONDONTWRITEBYTECODE: '1'
+    steps:
+      - name: Allocate owned state and fetch exact public inspection source
+        shell: bash --noprofile --norc -euo pipefail {0}
+        run: |
+          /usr/bin/timeout --kill-after=2s 43s /bin/bash --noprofile --norc -euo pipefail <<'SOURCE_BOOTSTRAP'
+          umask 077
+          [[ "$GITHUB_SHA" =~ ^[0-9a-f]{40}$ ]]
+          root="$GITHUB_WORKSPACE/build/issue97-host-inspect"
+          test ! -e "$root"
+          mkdir -p "$root/"{home,tmp,cache,config,share,run,artifacts}
+          mkdir -p "$GITHUB_WORKSPACE/oracle/llvm" "$GITHUB_WORKSPACE/.github/workflows"
+          for required_tool in /usr/bin/prlimit /usr/bin/stat; do
+            if [[ ! -x "$required_tool" ]]; then
+              printf 'SOURCE_BOOTSTRAP_REFUSED: REQUIRED_TOOL_UNAVAILABLE %s\n' "$required_tool" >&2
+              exit 78
+            fi
+          done
+          bounded_source_file() {
+            [[ -f "$1" && ! -L "$1" ]] || { printf 'SOURCE_BOOTSTRAP_REFUSED: SOURCE_FILE_KIND\n' >&2; exit 78; }
+            local source_bytes
+            source_bytes="$(/usr/bin/stat --printf='%s' -- "$1")"
+            [[ "$source_bytes" =~ ^[0-9]{1,6}$ && "$source_bytes" -gt 0 && "$source_bytes" -le 524288 ]] || \
+              { printf 'SOURCE_BOOTSTRAP_REFUSED: SOURCE_FILE_SIZE\n' >&2; exit 78; }
+          }
+          # Anonymous exact-commit PUBLIC source only; no auth, config, retries or branch fallback.
+          /usr/bin/prlimit --fsize=524288:524288 -- \
+            /usr/bin/env -i PATH=/usr/bin:/bin HOME="$root/home" TMPDIR="$root/tmp" LANG=C LC_ALL=C \
+            /usr/bin/curl --disable --fail --silent --show-error --location --max-redirs 3 \
+              --proto '=https' --proto-redir '=https' --connect-timeout 5 --max-time 18 --max-filesize 524288 \
+              "https://raw.githubusercontent.com/minsago-elite/decomp_thing/$GITHUB_SHA/oracle/llvm/capture_reference_runtime.py" \
+              --output "$GITHUB_WORKSPACE/oracle/llvm/capture_reference_runtime.py"
+          bounded_source_file "$GITHUB_WORKSPACE/oracle/llvm/capture_reference_runtime.py"
+          printf '%s  %s\n' \
+            36165fa3344000ea5965e56cb0c24075e9b1594b12ff3a885eb1f23d8b93cef7 \
+            "$GITHUB_WORKSPACE/oracle/llvm/capture_reference_runtime.py" | /usr/bin/sha256sum --check --strict
+          /usr/bin/prlimit --fsize=524288:524288 -- \
+            /usr/bin/env -i PATH=/usr/bin:/bin HOME="$root/home" TMPDIR="$root/tmp" LANG=C LC_ALL=C \
+            /usr/bin/curl --disable --fail --silent --show-error --location --max-redirs 3 \
+              --proto '=https' --proto-redir '=https' --connect-timeout 5 --max-time 18 --max-filesize 524288 \
+              "https://raw.githubusercontent.com/minsago-elite/decomp_thing/$GITHUB_SHA/.github/workflows/llvm-oracle-model.yml" \
+              --output "$GITHUB_WORKSPACE/.github/workflows/llvm-oracle-model.yml"
+          bounded_source_file "$GITHUB_WORKSPACE/.github/workflows/llvm-oracle-model.yml"
+          # Actual source/bootstrap tool hashes are UNQUALIFIED observations, not host approval.
+          printf 'status=public-source-bootstrap-unqualified\ncommit=%s\n' "$GITHUB_SHA" \
+            > "$root/artifacts/source-bootstrap.txt"
+          /usr/bin/sha256sum "$GITHUB_WORKSPACE/oracle/llvm/capture_reference_runtime.py" \
+            "$GITHUB_WORKSPACE/.github/workflows/llvm-oracle-model.yml" \
+            /usr/bin/curl /usr/bin/env /bin/bash /usr/bin/timeout /usr/bin/sha256sum /usr/bin/prlimit /usr/bin/stat \
+            >> "$root/artifacts/source-bootstrap.txt"
+          SOURCE_BOOTSTRAP
+      - name: Observe read-only host facts (UNQUALIFIED, never a capture or target run)
+        shell: bash --noprofile --norc -euo pipefail {0}
+        run: |
+          root="$GITHUB_WORKSPACE/build/issue97-host-inspect"
+          timeout --kill-after=2s 88s python3 -I -B -X "pycache_prefix=$root/cache/python" \
+            oracle/llvm/capture_reference_runtime.py --root "$root" --inspect-host
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: llvm-reference-host-UNQUALIFIED-${{ github.run_id }}-${{ github.run_attempt }}
+          retention-days: 7
+          if-no-files-found: error
+          path: build/issue97-host-inspect/artifacts/

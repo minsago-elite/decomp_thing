@@ -849,10 +849,16 @@ class UploadServerTest {
         val dataDir = createTempDirectory("web-stop-signal-order-")
         val server = UploadServer("127.0.0.1", 0, dataDir)
         server.start()
+        val serviceMonitor = UploadServer::class.java.getDeclaredField("jobs").apply { isAccessible = true }.get(server)
         val stopThread = Thread { server.stop() }
         try {
             synchronized(server.lifecycleMonitor()) {
-                stopThread.start()
+                synchronized(serviceMonitor) {
+                    stopThread.start()
+                    assertTrue(awaitBlocked(stopThread), "cleanup must wait for the held service monitor")
+                    assertTrue(server.jobServiceStopping(),
+                        "the stop signal must be visible before service-monitor cleanup")
+                }
                 assertTrue(awaitBlockedIn("decompengine.web.UploadServer", "stop"),
                     "stop() should wait on the lifecycle lock while it is held")
                 // The job service must already be signalled while stop() is still blocked:
@@ -966,6 +972,47 @@ class UploadServerTest {
             val job = decompengine.jobs.JobStore(dataDir).get(id)
             assertEquals("failed", job.status)
             assertEquals("[oversized text omitted]", job.statusMessage)
+        } finally {
+            server.stop()
+        }
+    }
+
+    @Test
+    fun `configured credential indicators cannot expose background diagnostic values in storage`() {
+        val dataDir = createTempDirectory(
+            Files.createDirectories(Path.of("build", "progress-credential-indicator-tests")), "web-",
+        )
+        val credentials = listOf("unknown-bearer-value", "unknown-api-value", "unknown-password-value", "unknown-token-value")
+        val diagnostic = "Provider refused; Bearer ${credentials[0]}; api_key=${credentials[1]}; " +
+            "password=${credentials[2]}; ghp_${credentials[3]}; end"
+        val server = UploadServer("127.0.0.1", 0, dataDir,
+            analyzer = JobAnalyzer { _, _ -> error(diagnostic) },
+            reconstructor = JobReconstructor { _, _ -> error(diagnostic) },
+            executor = Executor { it.run() }, sensitiveValues = listOf("Bearer", "api_key", "password", "ghp_"))
+        server.start()
+        try {
+            val uploaded = upload(server, "diagnostic.elf", elfFixture(), acceptJson = true)
+            val id = Json.parseToJsonElement(uploaded.body.decodeToString()).jsonObject.getValue("id").toString().trim('"')
+            for (workflow in listOf("explore", "reconstruct")) {
+                assertEquals(303, request(server, "POST", "/jobs/$id/$workflow", followRedirects = false).status)
+                val job = decompengine.jobs.JobStore(dataDir).get(id)
+                assertEquals("failed", job.status)
+                assertTrue(job.statusMessage!!.startsWith("Provider refused; "))
+                assertTrue(job.statusMessage!!.endsWith("; end"))
+                val persisted = dataDir.resolve(id).resolve("job.json").readBytes().decodeToString()
+                val api = request(server, "GET", "/api/jobs/$id").body.decodeToString()
+                val page = request(server, "GET", "/jobs/$id").body.decodeToString()
+                for (text in listOf(persisted, api, page)) {
+                    credentials.forEach { assertFalse(text.contains(it)) }
+                    assertFalse(text.contains(diagnostic))
+                }
+                assertTrue(persisted.contains("[redacted]"))
+                assertFalse(api.contains("status_message"))
+                assertFalse(api.contains("Provider refused"))
+                assertFalse(page.contains("Provider refused"))
+                assertFalse(page.contains("[redacted]"))
+                assertTrue(page.contains("Stored diagnostic details are withheld"))
+            }
         } finally {
             server.stop()
         }
@@ -1193,8 +1240,10 @@ class UploadServerTest {
             val event = item.jsonObject
             assertEquals(index.toString(), event.getValue("sequence").toString())
             assertEquals("true", event.getValue("textOmitted").toString())
-            assertEquals(if (index == 3) "3" else "2", event.getValue("presentationOmittedFields").toString())
-            assertEquals("\"${"a".repeat(64)}\"", event.getValue("contentSha256").toString())
+            // Provider reasoning also withholds its content commitment (#517).
+            assertEquals(if (index == 0 || index == 3) "3" else "2", event.getValue("presentationOmittedFields").toString())
+            if (index == 0) assertFalse("contentSha256" in event)
+            else assertEquals("\"${"a".repeat(64)}\"", event.getValue("contentSha256").toString())
         }
         assertEquals("1", rows[4].jsonObject.getValue("entryCount").toString())
         assertEquals("9223372036854775807", rows[5].jsonObject.getValue("inputTokens").toString())

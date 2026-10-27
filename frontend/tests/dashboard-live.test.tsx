@@ -54,12 +54,12 @@ it('defers the whole changed snapshot while a row is focused and applies it on e
   expect(order()).toEqual(['live-1.elf', 'live-2.elf']);
   expect(document.activeElement).toBe(focused);
   expect(within(focused.closest('li')!).getByText('Uploaded')).toBeTruthy();
-  expect(screen.queryByText('Failed')).toBeNull();
+  expect(within(screen.getByRole('list', { name: 'Uploaded jobs' })).queryByText('Failed')).toBeNull();
   expect(screen.getByText(/The displayed rows are an earlier snapshot/)).toBeTruthy();
   expect(transport.get).toHaveBeenCalledTimes(2);
   fireEvent.click(screen.getByRole('button', { name: 'Refresh jobs' })); await flush();
   expect(order()).toEqual(['live-3.elf', 'live-2.elf', 'live-1.elf']);
-  expect(screen.getByText('Failed')).toBeTruthy();
+  expect(within(screen.getByRole('link', { name: 'live-2.elf' }).closest('li')!).getByText('Failed')).toBeTruthy();
   expect(screen.queryByText(/New or changed jobs are available/)).toBeNull();
   expect(document.activeElement).toBe(screen.getByRole('heading', { name: 'Job results' }));
 });
@@ -157,4 +157,76 @@ it('clears private rows and the retained first page after a denied live read', a
   await tick(120_000); expect(transport.get).toHaveBeenCalledTimes(2);
   fireEvent.click(screen.getByRole('button', { name: 'Refresh jobs' })); await flush();
   expect(order()).toEqual(['live-2.elf']); expect(screen.queryByText('live-1.elf')).toBeNull();
+});
+
+
+it('returns a cached first page with its original receipt and no extra request', async () => {
+  vi.setSystemTime(0);
+  vi.spyOn(performance, 'now').mockImplementation(() => Date.now());
+  transport.get.mockResolvedValueOnce(page([job(1)], 'next_page')).mockResolvedValueOnce(page([job(2)]));
+  const view = render(<Dashboard basePath="" />); await flush();
+  const firstAt = screen.getByLabelText('Displayed job library').querySelector<HTMLElement>('[data-received-at]')?.getAttribute('data-received-at');
+  await tick(20_000);
+  fireEvent.click(screen.getByRole('button', { name: 'Next page' })); await flush();
+  expect(order()).toEqual(['live-2.elf']);
+  expect(screen.getByLabelText('Displayed job library').querySelector<HTMLElement>('[data-received-at]')?.getAttribute('data-received-at')).not.toBe(firstAt);
+  await tick(20_000);
+  fireEvent.click(screen.getByRole('button', { name: 'Previous page' })); await flush();
+  expect(order()).toEqual(['live-1.elf']);
+  expect(screen.getByLabelText('Displayed job library').querySelector<HTMLElement>('[data-received-at]')?.getAttribute('data-received-at')).toBe(firstAt);
+  expect(screen.getByLabelText('Displayed job library').textContent).toContain('about 40 seconds ago');
+  expect(transport.get).toHaveBeenCalledTimes(2);
+  expect(document.activeElement).toBe(screen.getByRole('heading', { name: 'Job results' }));
+  view.unmount(); expect(vi.getTimerCount()).toBe(0);
+});
+
+it('keeps the earlier receipt when a focused row defers a newer library response', async () => {
+  vi.setSystemTime(0);
+  vi.spyOn(performance, 'now').mockImplementation(() => Date.now());
+  const latest = page([job(2), job(1)], 'new_cursor');
+  transport.get.mockResolvedValueOnce(page([job(1)], 'old_cursor')).mockResolvedValueOnce(latest).mockResolvedValueOnce(latest);
+  const view = render(<Dashboard basePath="" />); await flush();
+  const receipt = screen.getByLabelText('Displayed job library').querySelector<HTMLElement>('[data-received-at]');
+  const at = receipt?.getAttribute('data-received-at');
+  const focused = screen.getByRole('link', { name: 'live-1.elf' }); focused.focus();
+  await tick();
+  expect(order()).toEqual(['live-1.elf']);
+  expect(document.activeElement).toBe(focused);
+  expect(screen.getByLabelText('Displayed job library').querySelector<HTMLElement>('[data-received-at]')).toBe(receipt);
+  expect(receipt?.getAttribute('data-received-at')).toBe(at);
+  expect(screen.getByLabelText('Displayed job library').textContent).toContain('about 30 seconds ago');
+  expect(transport.get).toHaveBeenCalledTimes(2);
+  fireEvent.click(screen.getByRole('button', { name: 'Refresh jobs' })); await flush();
+  expect(order()).toEqual(['live-2.elf', 'live-1.elf']);
+  expect(screen.getByLabelText('Displayed job library').querySelector<HTMLElement>('[data-received-at]')?.getAttribute('data-received-at')).not.toBe(at);
+  expect(screen.getByLabelText('Displayed job library').textContent).toContain('less than 10 seconds ago');
+  expect(transport.get).toHaveBeenCalledTimes(3);
+  view.unmount();
+  // Settle pending paint tasks; leaked intervals and later API reads must still fail.
+  await tick(120_000);
+  expect(transport.get).toHaveBeenCalledTimes(3);
+  expect(vi.getTimerCount()).toBe(0);
+});
+
+it('ages a retained empty library after failure and removes its receipt after denial', async () => {
+  vi.setSystemTime(0);
+  vi.spyOn(performance, 'now').mockImplementation(() => Date.now());
+  transport.get.mockResolvedValueOnce(page([])).mockRejectedValueOnce(new ApiClientError('timeout'))
+    .mockRejectedValueOnce(new ApiClientError('http_error', { status: 403 }));
+  const view = render(<Dashboard basePath="" />); await flush();
+  const at = screen.getByLabelText('Displayed job library').querySelector<HTMLElement>('[data-received-at]')?.getAttribute('data-received-at');
+  await tick(20_000);
+  fireEvent.click(screen.getByRole('button', { name: 'Refresh jobs' })); await flush();
+  expect(screen.getByLabelText('Displayed job library').querySelector<HTMLElement>('[data-received-at]')?.getAttribute('data-received-at')).toBe(at);
+  expect(screen.getByLabelText('Displayed job library').textContent).toContain('about 20 seconds ago');
+  expect(screen.getByRole('alert').textContent).toContain('previous library snapshot was empty');
+  expect(transport.get).toHaveBeenCalledTimes(2);
+  fireEvent.click(screen.getByRole('button', { name: 'Refresh jobs' })); await flush();
+  expect(screen.queryByLabelText('Displayed job library')).toBeNull();
+  expect(transport.get).toHaveBeenCalledTimes(3);
+  view.unmount();
+  // Settle pending paint tasks; leaked intervals and later API reads must still fail.
+  await tick(120_000);
+  expect(transport.get).toHaveBeenCalledTimes(3);
+  expect(vi.getTimerCount()).toBe(0);
 });

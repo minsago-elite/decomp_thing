@@ -24,5 +24,9 @@ case "${DECOMP_CI_TEST_SHARD:-full}" in
       -PciTestShard=core-oracle -PisolateV3BoundaryTests=true
     ;;
   live) ./gradlew --no-daemon verifyReconstructionNeutrality test "-PciTestShard=$DECOMP_CI_TEST_SHARD" ;;
+  live-fulltree|live-rest)
+    ./gradlew --no-daemon verifyReconstructionNeutrality test \
+      -PciTestShard=live "-PciLivePackagePartition=${DECOMP_CI_TEST_SHARD#live-}"
+    ;;
   *) echo "unsupported DECOMP_CI_TEST_SHARD" >&2; exit 2 ;;
 esac

@@ -10,6 +10,8 @@ zero digest with a value measured during trusted provisioning. The credential-fr
 argv, disables parent-environment inheritance, and bounds protocol, filesystem, process, memory, CPU, file, and
 runtime-closure use. Optional secret provenance is configured explicitly as described in the complete procedure at
 [docs/acp-v1-client.md](docs/acp-v1-client.md#operator-provisioning-and-preflight).
+Those bindings forward non-provider agent secrets; they do not provision provider connectivity. Provider credentials
+remain outside the agent under the [broker ownership boundary](docs/acp-v1-client.md#provider-credentials-and-current-availability).
 
 ```bash
 ./gradlew installDist
@@ -117,7 +119,8 @@ For a non-Docker angr installation, set `ANGR_PYTHON` to the Python executable t
 
 An early embedded SPA preview is available with `web --ui spa`; it serves the
 public shell and runtime view while job/workflow parity is developed. The default
-remains the existing workbench. See [packaging and preview usage](docs/web-packaging.md).
+remains the existing workbench. See the [workbench user guide](docs/workbench-user-guide.md) for launch, sessions and
+what the preview can do today, and [packaging and preview usage](docs/web-packaging.md) for building it.
 
 Ghidra 12.1.3 is a hash-locked, bundled dependency. `installDist`, ZIP/TAR distributions and Docker include its Java libraries, processor data, native decompiler and licenses. An application-owned JVM worker links directly to the Ghidra APIs; no separate Ghidra installation, `GHIDRA_HOME`, or runtime download is used. The first build downloads the pinned 569 MB archive into the Gradle cache. See [bundled Ghidra](docs/bundled-ghidra.md) for offline builds and verification.
 

@@ -26,6 +26,17 @@ plugins {
 group = "dev.decompengine"
 version = "0.1.0"
 
+// Reuse compilation only. Qualification results must be produced by this build.
+allprojects {
+    tasks.configureEach {
+        if (this !is org.gradle.api.tasks.compile.JavaCompile &&
+            this !is org.jetbrains.kotlin.gradle.tasks.KotlinCompile
+        ) {
+            outputs.doNotCacheIf("Only JVM compilation outputs may use the build cache") { true }
+        }
+    }
+}
+
 kotlin {
     jvmToolchain(21)
 }
@@ -81,7 +92,7 @@ val frontendInstall = tasks.register<Exec>("frontendInstall") {
 
 val frontendBuild = tasks.register<Exec>("frontendBuild") {
     group = "build"
-    description = "Type-checks and builds the pinned Preact application from current frontend inputs"
+    description = "Type-checks, lints and builds the pinned Preact application from current frontend inputs"
     dependsOn(frontendInstall)
     inputs.files(fileTree(frontendDirectory) {
         include("src/**", "tests/**", "dev/**", "public/**", "scripts/**", "index.html", "*config.*", "package*.json", ".npmrc")
@@ -94,6 +105,11 @@ val frontendBuild = tasks.register<Exec>("frontendBuild") {
     outputs.files(layout.buildDirectory.file("frontend/bundle-report.json"),
         layout.buildDirectory.file("frontend/bundle-composition.json"))
     frontendNpm("run", "build")
+}
+
+// Reject frontend validation failures before Kotlin work when both already belong to the graph.
+listOf("compileKotlin", "compileTestKotlin").forEach { taskName ->
+    tasks.named(taskName) { mustRunAfter(frontendBuild) }
 }
 
 val generateFrontendAssetManifest = tasks.register<Exec>("generateFrontendAssetManifest") {
@@ -1540,6 +1556,13 @@ private fun configureOracleTestRuntime(testTask: Test) {
     val testInstalledGhidra = providers.environmentVariable("RUN_REAL_GHIDRA").orNull == "true" ||
         providers.environmentVariable("RUN_REAL_GHIDRA_CALL_SITES").orNull == "true" ||
         providers.environmentVariable("RUN_REAL_GHIDRA_NATIVE_CALLS").orNull == "true"
+    if (providers.environmentVariable("RUN_REAL_GHIDRA_PURE_RENDERING").orNull == "true") {
+        require(providers.environmentVariable("RUN_REAL_GHIDRA").orNull == "true") {
+            "native rendering parity requires installed bundled Ghidra execution"
+        }
+        testTask.outputs.upToDateWhen { false }
+        testTask.outputs.cacheIf("native rendering parity must execute") { false }
+    }
     if (testInstalledGhidra) testTask.dependsOn("installDist")
     testTask.dependsOn(generateAcpGateHelperChecksum)
     testTask.dependsOn(generateLlvmBehaviorHelperChecksum)
@@ -1653,6 +1676,48 @@ tasks.register<Test>("realAngrQualification") {
     }
 }
 
+// JUnit can silently omit expression-bodied Kotlin tests with non-void JVM returns.
+// Inspect compiled metadata before every root Test route; do not alter selection or worker bounds.
+val junitSignatureEvidence = layout.buildDirectory.dir("reports/junit-signatures")
+val junitSignatureCompiler = javaToolchains.compilerFor {
+    languageVersion.set(JavaLanguageVersion.of(21))
+}
+val verifyJunitSignatureGuard = tasks.register<Exec>("verifyJunitSignatureGuard") {
+    group = "verification"
+    description = "Exercises compiled JUnit signature validation with real authored javac fixtures"
+    inputs.files("scripts/check-junit-signatures.py", "scripts/test-junit-signatures.py")
+    outputs.file(junitSignatureEvidence.map { it.file("controls.json") })
+    outputs.upToDateWhen { false }
+    timeout.set(Duration.ofMinutes(2))
+    doFirst {
+        commandLine("python3", "-B", "scripts/test-junit-signatures.py",
+            "--javac", junitSignatureCompiler.get().executablePath.asFile.absolutePath,
+            "--work-root", layout.buildDirectory.dir("junit-signature-controls").get().asFile.absolutePath,
+            "--report", junitSignatureEvidence.get().file("controls.json").asFile.absolutePath)
+    }
+}
+val verifyCompiledJunitSignatures = tasks.register<Exec>("verifyCompiledJunitSignatures") {
+    group = "verification"
+    description = "Rejects non-void ordinary JUnit methods before discovery can silently omit them"
+    dependsOn(tasks.named("testClasses"), verifyJunitSignatureGuard)
+    inputs.file("scripts/check-junit-signatures.py")
+    inputs.files(sourceSets["test"].output.classesDirs)
+    outputs.file(junitSignatureEvidence.map { it.file("compiled-signatures.json") })
+    outputs.upToDateWhen { false }
+    timeout.set(Duration.ofMinutes(2))
+    doFirst {
+        // Java's NO-SOURCE output directory need not exist; at least one compiled root is mandatory.
+        val roots = sourceSets["test"].output.classesDirs.files.filter { it.exists() }.sortedBy { it.absolutePath }
+        require(roots.isNotEmpty()) { "No root-project compiled test classes exist for JUnit signature verification" }
+        commandLine(listOf("python3", "-B", "scripts/check-junit-signatures.py",
+            "--report", junitSignatureEvidence.get().file("compiled-signatures.json").asFile.absolutePath) +
+            roots.flatMap { listOf("--class-root", it.absolutePath) })
+    }
+}
+tasks.withType<Test>().configureEach {
+    dependsOn(verifyCompiledJunitSignatures)
+}
+
 tasks.test {
     // The authenticated model boundary returns a real 512 MiB array in the largest ordinary test.
     maxHeapSize = "2g"
@@ -1662,6 +1727,21 @@ tasks.test {
         "core", "core-main", "core-oracle" -> useJUnitPlatform { excludeTags("ci-live") }
         "live" -> useJUnitPlatform { includeTags("ci-live") }
         else -> error("unsupported ciTestShard: $shard")
+    }
+    val livePackagePartition = providers.gradleProperty("ciLivePackagePartition").orNull
+    if (livePackagePartition != null) {
+        require(shard == "live") { "ciLivePackagePartition requires ciTestShard=live" }
+        filter {
+            when (livePackagePartition) {
+                "fulltree" -> includeTestsMatching("decompengine.oracle.fulltree.*")
+                "rest" -> {
+                    includeTestsMatching("*")
+                    excludeTestsMatching("decompengine.oracle.fulltree.*")
+                }
+                else -> error("unsupported ciLivePackagePartition: $livePackagePartition")
+            }
+            isFailOnNoMatchingTests = true
+        }
     }
     // A package and its complement partition future classes without a hand-maintained inventory.
     when (shard) {

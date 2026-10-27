@@ -1,0 +1,169 @@
+{
+  "apiVersion": 1,
+  "kind": "revisionDirectory",
+  "requestId": "request_directory_1",
+  "data": {
+    "binding": {
+      "jobId": "job_1",
+      "runId": "run_1",
+      "revisionId": "revision_1"
+    },
+    "authority": "source-input-commitments",
+    "sourceSha256": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+    "metadataVersion": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+    "items": [
+      {
+        "fileId": "file_0_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "displayName": "leaf.c",
+        "sizeBytes": "0",
+        "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "declaredUtf8Text": true,
+        "declaredViewable": true,
+        "kind": "file"
+      }
+    ],
+    "page": {
+      "nextCursor": null,
+      "snapshotVersion": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+      "limit": 50
+    },
+    "directoryId": "directory_60",
+    "parentDirectoryId": "directory_59",
+    "displayName": "\u00e9 space 60",
+    "depth": 60,
+    "breadcrumbs": [
+      {
+        "directoryId": "root",
+        "displayName": null
+      },
+      {
+        "directoryId": "directory_30",
+        "displayName": "\u00e9 space 30"
+      },
+      {
+        "directoryId": "directory_31",
+        "displayName": "\u00e9 space 31"
+      },
+      {
+        "directoryId": "directory_32",
+        "displayName": "\u00e9 space 32"
+      },
+      {
+        "directoryId": "directory_33",
+        "displayName": "\u00e9 space 33"
+      },
+      {
+        "directoryId": "directory_34",
+        "displayName": "\u00e9 space 34"
+      },
+      {
+        "directoryId": "directory_35",
+        "displayName": "\u00e9 space 35"
+      },
+      {
+        "directoryId": "directory_36",
+        "displayName": "\u00e9 space 36"
+      },
+      {
+        "directoryId": "directory_37",
+        "displayName": "\u00e9 space 37"
+      },
+      {
+        "directoryId": "directory_38",
+        "displayName": "\u00e9 space 38"
+      },
+      {
+        "directoryId": "directory_39",
+        "displayName": "\u00e9 space 39"
+      },
+      {
+        "directoryId": "directory_40",
+        "displayName": "\u00e9 space 40"
+      },
+      {
+        "directoryId": "directory_41",
+        "displayName": "\u00e9 space 41"
+      },
+      {
+        "directoryId": "directory_42",
+        "displayName": "\u00e9 space 42"
+      },
+      {
+        "directoryId": "directory_43",
+        "displayName": "\u00e9 space 43"
+      },
+      {
+        "directoryId": "directory_44",
+        "displayName": "\u00e9 space 44"
+      },
+      {
+        "directoryId": "directory_45",
+        "displayName": "\u00e9 space 45"
+      },
+      {
+        "directoryId": "directory_46",
+        "displayName": "\u00e9 space 46"
+      },
+      {
+        "directoryId": "directory_47",
+        "displayName": "\u00e9 space 47"
+      },
+      {
+        "directoryId": "directory_48",
+        "displayName": "\u00e9 space 48"
+      },
+      {
+        "directoryId": "directory_49",
+        "displayName": "\u00e9 space 49"
+      },
+      {
+        "directoryId": "directory_50",
+        "displayName": "\u00e9 space 50"
+      },
+      {
+        "directoryId": "directory_51",
+        "displayName": "\u00e9 space 51"
+      },
+      {
+        "directoryId": "directory_52",
+        "displayName": "\u00e9 space 52"
+      },
+      {
+        "directoryId": "directory_53",
+        "displayName": "\u00e9 space 53"
+      },
+      {
+        "directoryId": "directory_54",
+        "displayName": "\u00e9 space 54"
+      },
+      {
+        "directoryId": "directory_55",
+        "displayName": "\u00e9 space 55"
+      },
+      {
+        "directoryId": "directory_56",
+        "displayName": "\u00e9 space 56"
+      },
+      {
+        "directoryId": "directory_57",
+        "displayName": "\u00e9 space 57"
+      },
+      {
+        "directoryId": "directory_58",
+        "displayName": "\u00e9 space 58"
+      },
+      {
+        "directoryId": "directory_59",
+        "displayName": "\u00e9 space 59"
+      },
+      {
+        "directoryId": "directory_60",
+        "displayName": "\u00e9 space 60"
+      }
+    ],
+    "omittedAncestors": 29,
+    "emptyDirectories": "not-recorded",
+    "sourceFileCount": 1,
+    "totalChildren": 1
+  }
+}

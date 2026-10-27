@@ -53,7 +53,8 @@ class WebApiControllerTest {
             assertTrue(first.getValue("uiBuildId").jsonPrimitive.content.matches(Regex("[0-9a-f]{64}")))
             assertEquals("/workbench/", first.getValue("basePath").jsonPrimitive.content)
             assertEquals("degraded", first.getValue("readiness").jsonPrimitive.content)
-            val capability = first.getValue("capabilities").jsonArray.single().jsonObject
+            val capability = first.getValue("capabilities").jsonArray.map { it.jsonObject }
+                .single { it.getValue("id").jsonPrimitive.content == "workflows" }
             assertEquals("unavailable", capability.getValue("state").jsonPrimitive.content)
             assertTrue(capability.getValue("workflows").jsonArray.isEmpty())
             val limits = first.getValue("limits").jsonObject
@@ -242,7 +243,7 @@ class WebApiControllerTest {
         server.start()
         try {
             val path = "/workbench/api/v1/jobs/${job.id}/runs/${run.runId}"
-            for (suffix in listOf("snapshot", "events")) assertError(request(server, "$path/$suffix"), 401, "SESSION_REQUIRED")
+            for (suffix in listOf("snapshot", "events", "queue-position")) assertError(request(server, "$path/$suffix"), 401, "SESSION_REQUIRED")
             val cookie = establish(server); val headers = mapOf("Cookie" to cookie)
             assertError(request(server, "$path/events", headers = headers + ("Origin" to "https://invalid.example")), 403, "ORIGIN_DENIED")
             assertError(request(server, "$path/snapshot", "POST", "{}", headers), 405, "METHOD_NOT_ALLOWED")
@@ -251,6 +252,18 @@ class WebApiControllerTest {
             assertError(request(server, "$path/events?transport=poll", headers = headers + ("Last-Event-ID" to "fixture_cursor")), 400, "UNSUPPORTED_HEADER")
             assertError(request(server, "$path/events?transport=stream", headers = headers), 422, "VALIDATION_FAILED")
             val before = Files.readString(journalFile)
+            // The queue sample names only the selected attempt and never a host diagnostic.
+            val queue = request(server, "$path/queue-position", headers = headers)
+            assertEquals(200, queue.statusCode())
+            val queueBody = Json.parseToJsonElement(queue.body()).jsonObject
+            assertEquals("queuePosition", queueBody.getValue("kind").jsonPrimitive.content)
+            val queueData = queueBody.getValue("data").jsonObject
+            assertEquals(job.id, queueData.getValue("jobId").jsonPrimitive.content)
+            assertEquals(run.runId, queueData.getValue("runId").jsonPrimitive.content)
+            assertTrue(queueData.getValue("state").jsonPrimitive.content in setOf("queued", "not-queued", "unavailable"))
+            assertFalse(queue.body().contains(other.id)); assertFalse(queue.body().contains(root.toString()))
+            assertError(request(server, "$path/queue-position?detail=host", headers = headers), 400, "VALIDATION_FAILED")
+            assertError(request(server, "/workbench/api/v1/jobs/${other.id}/runs/${run.runId}/queue-position", headers = headers), 404, "NOT_FOUND")
             val snapshot = assertEnvelope(request(server, "$path/snapshot", headers = headers), 200, "snapshot")
             assertEquals("2", snapshot.getValue("progress").jsonObject.getValue("nextSequence").jsonPrimitive.content)
             assertEquals("observations", snapshot.getValue("progress").jsonObject.getValue("authority").jsonPrimitive.content)
@@ -290,9 +303,26 @@ class WebApiControllerTest {
             val otherCookie = establish(server)
             assertError(request(server, "$path/events?cursor=$through", headers = mapOf("Cookie" to otherCookie)), 400, "INVALID_CURSOR")
             decompengine.jobs.AgentProgressJournal(reports, "reconstruct").use { }
-            val appended = assertEnvelope(request(server, "$path/events?cursor=$through", headers = headers), 200, "events")
-            assertEquals("2", appended.getValue("items").jsonArray.single().jsonObject.getValue("sequence").jsonPrimitive.content)
-            val journal = Json.parseToJsonElement(Files.readString(journalFile)).jsonObject
+            // Owned replay removes the private fields, so the original byte-bound anchor changed.
+            val rewritten = request(server, "$path/events?cursor=$through", headers = headers)
+            assertError(rewritten, 410, "EVENT_GAP")
+            val rewrittenRecovery = Json.parseToJsonElement(rewritten.body()).jsonObject
+                .getValue("error").jsonObject.getValue("recovery").jsonObject
+            assertEquals(through, rewrittenRecovery.getValue("requestedCursor").jsonPrimitive.content)
+            assertEquals("$path/snapshot", rewrittenRecovery.getValue("snapshotHref").jsonPrimitive.content)
+            val refreshed = assertEnvelope(request(server, "$path/snapshot", headers = headers), 200, "snapshot")
+            val replayFirst = assertEnvelope(request(server,
+                "$path/events?limit=1&cursor=${refreshed.getValue("oldestCursor").jsonPrimitive.content}", headers = headers), 200, "events")
+            assertEquals("0", replayFirst.getValue("items").jsonArray.single().jsonObject.getValue("sequence").jsonPrimitive.content)
+            val retainedFirstCursor = replayFirst.getValue("nextCursor").jsonPrimitive.content
+            val appended = assertEnvelope(request(server, "$path/events?cursor=$retainedFirstCursor", headers = headers), 200, "events")
+            assertEquals(listOf("1", "2"), appended.getValue("items").jsonArray.map {
+                it.jsonObject.getValue("sequence").jsonPrimitive.content
+            })
+            assertFalse((replayFirst.toString() + appended.toString()).contains("PRIVATE_HTTP_"))
+            val rewrittenBytes = Files.readString(journalFile)
+            assertFalse(rewrittenBytes.contains("PRIVATE_HTTP_"))
+            val journal = Json.parseToJsonElement(rewrittenBytes).jsonObject
             Files.writeString(journalFile, JsonObject(journal + mapOf(
                 "historyDropped" to JsonPrimitive(1), "truncated" to JsonPrimitive(true),
                 "events" to kotlinx.serialization.json.JsonArray(journal.getValue("events").jsonArray.drop(1)),
@@ -303,10 +333,10 @@ class WebApiControllerTest {
                     })
                 },
             )).toString())
-            val gapResponse = request(server, "$path/events?cursor=$firstCursor", headers = headers)
+            val gapResponse = request(server, "$path/events?cursor=$retainedFirstCursor", headers = headers)
             assertError(gapResponse, 410, "EVENT_GAP")
             val recovery = Json.parseToJsonElement(gapResponse.body()).jsonObject.getValue("error").jsonObject.getValue("recovery").jsonObject
-            assertEquals(firstCursor, recovery.getValue("requestedCursor").jsonPrimitive.content)
+            assertEquals(retainedFirstCursor, recovery.getValue("requestedCursor").jsonPrimitive.content)
             assertEquals("$path/snapshot", recovery.getValue("snapshotHref").jsonPrimitive.content)
             assertEquals(job.id, recovery.getValue("jobId").jsonPrimitive.content)
             val fresh = assertEnvelope(request(server, "$path/snapshot", headers = headers), 200, "snapshot")

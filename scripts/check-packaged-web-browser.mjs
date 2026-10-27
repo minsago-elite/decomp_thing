@@ -7,7 +7,7 @@ import { createServer as createHttpServer } from 'node:http';
 import { fileURLToPath } from 'node:url';
 import { parseArgs } from 'node:util';
 import { qualifyUpload, qualifyUploadFailures, qualifyMeasuredUpload } from './packaged-browser-upload.mjs';
-import { seedScale, qualifyScale } from './packaged-browser-scale.mjs';
+import { seedScale, qualifyScale, dashboardFiltersWithSnapshot } from './packaged-browser-scale.mjs';
 import { seedLive, qualifyLive } from './packaged-browser-live.mjs';
 import { seedHistory, qualifyHistory } from './packaged-browser-history.mjs';
 import { seedLegacy, qualifyLegacy } from './packaged-browser-legacy.mjs';
@@ -811,12 +811,12 @@ try {
     })()`);
     await evaluate(authenticated, `[...document.querySelectorAll('button')].find(button => button.textContent === 'Apply filters').click()`);
     await ready(authenticated, `document.body.innerText.includes('No jobs match these filters.')`, 'filtered empty job library');
-    assert.equal(await evaluate(authenticated, 'location.search'), '?search=absent+fixture');
+    assert.equal(dashboardFiltersWithSnapshot(await evaluate(authenticated, 'location.search')), '?search=absent+fixture');
     await cdp.call('Page.reload', {}, authenticated.sessionId);
     await ready(authenticated, `document.body.innerText.includes('Local session connected.') && document.body.innerText.includes('No jobs match these filters.')`, 'saved job filters after reload');
     await evaluate(authenticated, `[...document.querySelectorAll('button')].find(button => button.textContent === 'Reset filters').click()`);
     await ready(authenticated, `document.body.innerText.includes('${libraryText}')`, 'reset job library');
-    assert.equal(await evaluate(authenticated, 'location.search'), '');
+    assert.equal(dashboardFiltersWithSnapshot(await evaluate(authenticated, 'location.search')), '');
     report.dashboard = { emptyLibrary: !populated, populatedLibrary: populated, noMatches: true, filtersSurviveReload: true, resetFilters: true };
     if (historyFixture) {
       const row = await evaluate(authenticated, `(() => {
@@ -857,7 +857,7 @@ try {
       return { text: section.innerText, values: Array.from(section.querySelectorAll('dd')).map(node => node.textContent), sampledAt: section.querySelector('time')?.dateTime };
     })()`);
     assert.deepEqual(scheduler.values, ['running', '0', '2', '0', '32']);
-    assert.ok(scheduler.text.includes('approximate aggregate observations') && scheduler.text.includes('queue position and start time are not reported'));
+    assert.ok(scheduler.text.includes('approximate aggregate observations') && scheduler.text.includes('own approximate queue position is shown on its attempt page'));
     assert.ok(Number.isFinite(Date.parse(scheduler.sampledAt)));
     const retention = await evaluate(authenticated, `(() => {
       const section = document.querySelector('section[aria-labelledby="retention-title"]');

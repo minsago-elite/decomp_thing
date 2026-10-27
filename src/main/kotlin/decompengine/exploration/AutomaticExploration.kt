@@ -1,6 +1,7 @@
 package decompengine.exploration
 
 import decompengine.assessment.HeuristicScoreInterpretation
+import decompengine.project.writeProjectEvidenceAtomically
 import decompengine.validation.ProcessInput
 import decompengine.validation.SandboxRunner
 import kotlinx.serialization.json.Json
@@ -328,9 +329,24 @@ data class CoverageReport(
 }
 
 class OutputCoverageMeasurer(private val sandbox: SandboxRunner = SandboxRunner()) {
-    fun measure(binaryPath: Path, baseline: List<CandidateInput>, expanded: List<CandidateInput>): CoverageReport {
-        val baselineObservations = observe(binaryPath, baseline)
-        val expandedObservations = observe(binaryPath, expanded)
+    fun measure(binaryPath: Path, baseline: List<CandidateInput>, expanded: List<CandidateInput>): CoverageReport =
+        measure(binaryPath, baseline, expanded, capture = null)
+
+    internal fun measure(
+        binaryPath: Path,
+        baseline: List<CandidateInput>,
+        expanded: List<CandidateInput>,
+        retainFailure: (ExplorationFailureRecord) -> Unit,
+    ): CoverageReport = measure(binaryPath, baseline, expanded, ExplorationFailureCapture(baseline, expanded, retainFailure))
+
+    private fun measure(
+        binaryPath: Path,
+        baseline: List<CandidateInput>,
+        expanded: List<CandidateInput>,
+        capture: ExplorationFailureCapture?,
+    ): CoverageReport {
+        val baselineObservations = observe(binaryPath, baseline, ExplorationSamplePhase.BASELINE, capture)
+        val expandedObservations = observe(binaryPath, expanded, ExplorationSamplePhase.EXPANDED, capture)
         return CoverageReport(
             baselineCount = baseline.size,
             expandedCount = expanded.size,
@@ -340,18 +356,28 @@ class OutputCoverageMeasurer(private val sandbox: SandboxRunner = SandboxRunner(
         )
     }
 
-    private fun observe(binaryPath: Path, inputs: List<CandidateInput>): List<CandidateObservation> = inputs.map { candidate ->
-        val output = sandbox.run(binaryPath, candidate.toProcessInput())
-        val stdoutHex = output.stdout.toHex()
-        val stderrHex = output.stderr.toHex()
-        CandidateObservation(
-            candidateId = candidate.id,
-            signature = "${output.exitCode}:$stdoutHex:$stderrHex",
-            exitCode = output.exitCode,
-            stdoutHex = stdoutHex,
-            stderrHex = stderrHex,
-            networkIsolated = output.networkIsolated,
-        )
+    private fun observe(
+        binaryPath: Path,
+        inputs: List<CandidateInput>,
+        phase: ExplorationSamplePhase,
+        capture: ExplorationFailureCapture?,
+    ): List<CandidateObservation> = inputs.mapIndexed { index, candidate ->
+        try {
+            val output = sandbox.run(binaryPath, candidate.toProcessInput())
+            val stdoutHex = output.stdout.toHex()
+            val stderrHex = output.stderr.toHex()
+            CandidateObservation(
+                candidateId = candidate.id,
+                signature = "${output.exitCode}:$stdoutHex:$stderrHex",
+                exitCode = output.exitCode,
+                stdoutHex = stdoutHex,
+                stderrHex = stderrHex,
+                networkIsolated = output.networkIsolated,
+            ).also { capture?.completed(phase, it) }
+        } catch (failure: Exception) {
+            if (capture != null) capture.failed(phase, index, failure)
+            throw failure
+        }
     }
 }
 
@@ -403,13 +429,23 @@ class AutomaticExplorer(
 ) {
     fun explore(binaryPath: Path, seedInputs: List<CandidateInput>, reportsDir: Path): ExplorationReport {
         require(seedInputs.isNotEmpty()) { "at least one seed input is required" }
-        val generated = seedInputs + angrExplorer.generate(binaryPath) + staticHints.generate(binaryPath)
-        val expanded = (generated + mutations.expand(generated))
+        val expanded = proposeExplorationInputs(seedInputs,
+            angr = { angrExplorer.generate(binaryPath) },
+            staticHints = { staticHints.generate(binaryPath) },
+            mutate = mutations::expand,
+            retainFailure = { failure ->
+                reportsDir.createDirectories()
+                writeProjectEvidenceAtomically(reportsDir.resolve("exploration.json"), failure.toJson())
+            })
             .distinctBy(CandidateInput::contentKey)
             .take(maxCandidates)
-        val coverageReport = coverage.measure(binaryPath, seedInputs, expanded)
+        val reportPath = reportsDir.resolve("exploration.json")
+        val coverageReport = coverage.measure(binaryPath, seedInputs, expanded) { failure ->
+            reportsDir.createDirectories()
+            writeProjectEvidenceAtomically(reportPath, failure.toJson())
+        }
         val confidence = ConfidenceScorer.score(expanded, coverageReport, sandboxed = true)
-        val reportPath = reportsDir.createDirectories().resolve("exploration.json")
+        reportsDir.createDirectories()
         val report = ExplorationReport(expanded, coverageReport, confidence, reportPath, angrExplorer.diagnostics)
         reportPath.writeText(report.toJson())
         return report

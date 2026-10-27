@@ -3,6 +3,7 @@ package decompengine.oracle.gcc
 import decompengine.acp.LinuxFilesystemSyscalls
 import decompengine.oracle.core.OracleArtifacts
 import decompengine.oracle.core.OracleJson
+import decompengine.oracle.fulltree.ContainedCommandOperationDeadline
 import decompengine.project.GeneratedCMakeReconstructionProfile
 import decompengine.project.RecoveredFunction
 import decompengine.project.RecoveredProgramModel
@@ -13,6 +14,9 @@ import kotlin.test.Test
 import kotlin.test.assertContentEquals
 import kotlin.test.assertEquals
 import kotlin.test.assertFails
+import kotlin.test.assertFailsWith
+import kotlin.test.assertSame
+import kotlin.test.assertTrue
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 
@@ -91,8 +95,78 @@ class GccBundledPlannerOutputCaptureTest {
         }
     }
 
+    @Test
+    fun `planner capture checkpoints preserve exact descriptor and assessment commitments`() = fixture { root, request, model ->
+        LinuxFilesystemSyscalls.openAbsolutePathOrNull(root)!!.use { run ->
+            LinuxFilesystemSyscalls.openDirectoryAt(run.fd, CONTROL).use { control ->
+                val baseline = GccBundledPlannerOutputCapture.capture(run, CONTROL, control.identity, request, model, 4, 0)
+                val stages = mutableSetOf<String>()
+                val checked = GccBundledPlannerOutputCapture.capture(run, CONTROL, control.identity, request, model, 4, 0) { stages += it }
+                assertContentEquals(baseline.planBytes, checked.planBytes)
+                assertContentEquals(baseline.canonicalBytes, checked.canonicalBytes)
+                assertTrue("reading planner output file" in stages)
+                assertTrue("before opening program model JSON parser" in stages)
+                assertTrue("before planner plan validation" in stages)
+                assertTrue("after module plan ownership" in stages)
+                assertTrue("before returning captured planner output" in stages)
+            }
+        }
+    }
+
+    @Test
+    fun `planner capture refuses expired handoffs without changing any producer evidence`() = fixture { root, request, model ->
+        val names = listOf("module_plan.json", "planner-output.json", "contained-command.stdout", "contained-command.stderr")
+        val before = names.associateWith { Files.readAllBytes(request.outputDirectory.resolve(it)) }
+        LinuxFilesystemSyscalls.openAbsolutePathOrNull(root)!!.use { run ->
+            LinuxFilesystemSyscalls.openDirectoryAt(run.fd, CONTROL).use { control ->
+                for (target in listOf("before planner output capture", "reading planner output file", "before planner assessment",
+                    "before opening program model JSON parser", "before planner plan validation", "after module plan ownership",
+                    "before returning captured planner output")) {
+                    var now = 0L
+                    val deadline = ContainedCommandOperationDeadline(2_000) { now }
+                    var reached = false
+                    val failure = assertFailsWith<IllegalStateException> {
+                        GccBundledPlannerOutputCapture.capture(run, CONTROL, control.identity, request, model, 4, 0) { stage ->
+                            if (stage == target) { reached = true; now = 2_000_000_000L }
+                            deadline.requireCurrent()
+                        }
+                    }
+                    assertTrue(reached, target)
+                    assertTrue(failure.message.orEmpty().contains("deadline expired or clock regressed"), target)
+                    for (name in names) assertContentEquals(before.getValue(name), Files.readAllBytes(request.outputDirectory.resolve(name)))
+                }
+            }
+        }
+    }
+
+    @Test
+    fun `descriptor capture checks the admitted deadline between bounded read requests`() = fixture { root, _, _ ->
+        val bytes = ByteArray(2 * 64 * 1024 + 1) { (it % 251).toByte() }
+        val path = Files.write(root.resolve("large.capture"), bytes)
+        LinuxFilesystemSyscalls.openAbsolutePathOrNull(root)!!.use { directory ->
+            var calls = 0
+            val complete = GccBoundExportFiles(bytes.size.toLong()) { calls++ }.read(directory, "large.capture", bytes.size)
+            assertContentEquals(bytes, complete)
+            assertTrue(calls >= 5, "the input must require at least three bounded reads plus admission/verification")
+            var now = 0L
+            val deadline = ContainedCommandOperationDeadline(2_000) { now }
+            var checked = 0
+            val failure = assertFailsWith<IllegalStateException> {
+                GccBoundExportFiles(bytes.size.toLong()) {
+                    if (++checked == 3) now = 2_000_000_000L
+                    deadline.requireCurrent()
+                }.read(directory, "large.capture", bytes.size)
+            }
+            assertEquals(3, checked)
+            assertTrue(failure.message.orEmpty().contains("deadline expired or clock regressed"))
+            assertContentEquals(bytes, Files.readAllBytes(path))
+        }
+    }
+
     private fun fixture(action: (Path, GccBundledPlannerRequest, ByteArray) -> Unit) {
-        val root = Files.createTempDirectory("gcc-planner-capture-").toRealPath()
+        val scratch = Path.of("build/test-tmp").toAbsolutePath().normalize()
+        Files.createDirectories(scratch)
+        val root = Files.createTempDirectory(scratch, "gcc-planner-capture-").toRealPath()
         try {
             val privateMode = PosixFilePermissions.asFileAttribute(PosixFilePermissions.fromString("rwx------"))
             val control = Files.createDirectory(root.resolve(CONTROL), privateMode)

@@ -53,6 +53,19 @@ import java.util.concurrent.ArrayBlockingQueue
 import java.util.concurrent.Executor
 import kotlin.io.path.pathString
 
+/** Classify document paths only; the shell still enforces its existing method and asset policy. */
+internal fun canonicalSpaDocumentPath(base: String, path: String): String? {
+    val id = "[A-Za-z0-9][A-Za-z0-9_-]{0,127}"
+    return when (path) {
+        base, "${base}runtime", "${base}upload" -> path
+        base.removeSuffix("/").ifEmpty { "/" } -> base
+        "${base}runtime/" -> "${base}runtime"
+        "${base}upload/" -> "${base}upload"
+        else -> path.takeIf { it.startsWith("${base}jobs/") &&
+            it.removePrefix("${base}jobs/").matches(Regex("[0-9a-f]{32}(?:/runs(?:/$id(?:/(?:activity|evidence)|/revisions/$id/(?:sources|source-files)/$id)?)?)?/?")) }?.removeSuffix("/")
+    }
+}
+
 fun interface JobAnalyzer {
     fun analyze(job: Job, reportsDir: Path)
 }
@@ -199,10 +212,12 @@ class UploadServer(
     private val requestDiagnosticOutput: (String) -> Unit = System.err::println,
     // Test-owned clocks exercise expiry through the real HTTP/browser path; production uses the system clock.
     webAccessClock: WebAccessClock? = null,
+    private val startupCancellation: () -> Boolean = { false },
 ) {
     init {
         require(listenBacklog in 1..4096) { "HTTP listen backlog must be between 1 and 4096" }
         require(requestShutdownTimeoutMs in 0..5000) { "HTTP request shutdown wait must be between zero and five seconds" }
+        check(!Thread.currentThread().isInterrupted && !startupCancellation()) { "Web server startup cancelled" }
     }
     private val diagnosticRedactor = ProgressRedactor(sensitiveValues)
     private val authenticationInspectionLock = Any()
@@ -244,6 +259,7 @@ class UploadServer(
         throw failure
     }
     private val store = JobStore(dataDir)
+    private val admittedSourceProfiles = sourceProfiles.toList()
     private val jobs = WebJobService(store, analyzer, reconstructor, executor,
         attemptStoreFactory = { root ->
             // Storage creation is the upgrade point: claim the cross-JVM web lock as the root appears.
@@ -251,8 +267,9 @@ class UploadServer(
             WorkflowAttemptStore.open(root)
         },
         progressRetentionIntervalMs = if (uiMode == WebUiMode.SPA) 1000 else null,
-        shutdownTimeoutMs = 5000, failureDiagnostic = { diagnostic(it, "Background operation failed") })
-    private val sourceEvidence = WebSourceEvidence(store, sourceProfiles, jobs::readArtifact)
+        shutdownTimeoutMs = 5000, failureDiagnostic = { diagnostic(it, "Background operation failed") },
+        sourceProfiles = admittedSourceProfiles)
+    private val sourceEvidence = WebSourceEvidence(store, admittedSourceProfiles, jobs::readArtifact)
     private val archiveEvidence = WebArchiveEvidence(store, sourceEvidence, jobs::readArtifact)
     private val access = LocalWebAccess(LocalWebAccessConfiguration(webOrigin(host, server.address.port), basePath,
         setOfNotNull(devFrontendOrigin)), webAccessClock ?: SystemWebAccessClock,
@@ -260,11 +277,38 @@ class UploadServer(
     private val jobMutations = WebJobMutationBoundary(access, jobs)
     private val legacySessions = WebSessionController(access)
     internal val streamResources = WebStreamResources()
-    private val api = spaAssets?.let { WebApiController(access, it, jobs, jobMutations, streamResources) }
+    private val harnessReadiness = WebHarnessReadinessProjector()
+    private val agentPreflight = WebAgentPreflight(configurationIdentity = {
+        (authenticationInspector as? WebObservedAuthenticationInspector)?.configurationIdentity()
+    }) { cancellation ->
+        check(withActiveRequest {
+            authenticationInspector(decompengine.agent.AgentCancellation {
+                stopRequested.get() || cancellation.isCancellationRequested()
+            })
+            val selectedConfiguration =
+                (authenticationInspector as? WebObservedAuthenticationInspector)?.configurationIdentity()
+            if (selectedConfiguration != null && !stopRequested.get() && !cancellation.isCancellationRequested()) {
+                harnessReadiness.inspect()
+            }
+        }) { "Server is stopping" }
+    }
+    private val api = spaAssets?.let { WebApiController(access, it, jobs, jobMutations, streamResources,
+        harnessReadiness = harnessReadiness, agentPreflight = agentPreflight) }
+    // A request that finds every worker and queue slot taken is answered by this tiny pool with a stable 429
+    // instead of a reset connection. It has no queue, so overload still never buffers more than the main pool does;
+    // when it too is busy the rejection propagates and the dispatcher closes the connection, as before.
+    private val overloadResponders = ThreadPoolExecutor(
+        2, 2, 0, TimeUnit.MILLISECONDS, java.util.concurrent.SynchronousQueue(),
+        { task -> Thread(task, OVERLOAD_RESPONDER_THREAD).apply { isDaemon = true } },
+        ThreadPoolExecutor.AbortPolicy(),
+    )
     private val requestExecutor = ThreadPoolExecutor(
         16, 16, 0, TimeUnit.MILLISECONDS, ArrayBlockingQueue(64),
         { task -> Thread(task, "decomp-web-http").apply { isDaemon = true } },
-        ThreadPoolExecutor.AbortPolicy(),
+        { task, executor ->
+            if (executor.isShutdown) throw java.util.concurrent.RejectedExecutionException("web request executor is shut down")
+            overloadResponders.execute(task)
+        },
     )
     private val requestDeadlines = ScheduledThreadPoolExecutor(1) { task ->
         Thread(task, "decomp-web-deadline").apply { isDaemon = true }
@@ -292,7 +336,7 @@ class UploadServer(
             }
         }
         try {
-            jobs.initializeExistingStorage()
+            jobs.initializeExistingStorage(startupRecoveryLimitsForWeb(uiMode)) { stopRequested.get() || startupCancellation() }
         } catch (failure: Throwable) {
             stopRequested.set(true)
             stopping = true
@@ -316,6 +360,12 @@ class UploadServer(
         }
         server.executor = requestExecutor
         server.createContext("/") { exchange ->
+            if (Thread.currentThread().name == OVERLOAD_RESPONDER_THREAD) {
+                // Admitted only to be refused: no routing, no deadline, no session or storage access.
+                exchange.responseHeaders.set("Connection", "close")
+                access.sendDenied(exchange, WebAccessDenied(429, "SERVER_BUSY", "The workbench is handling its maximum number of requests. Retry shortly."))
+                return@createContext
+            }
             val upload = exchange.requestMethod == "POST" &&
                 exchange.requestHeaders.getFirst("Content-Type")?.startsWith("multipart/form-data", true) == true
             val deadline = requestDeadlines.schedule({ exchange.close() }, if (upload) 120 else 30, TimeUnit.SECONDS)
@@ -332,7 +382,7 @@ class UploadServer(
                 try {
                     // Recovery never rewrites historical metadata here; startup must not report
                     // success when a cancellation signal or a late interrupt preceded the listener.
-                    check(!stopRequested.get() && !Thread.currentThread().isInterrupted) { "Web server startup cancelled" }
+                    check(!stopRequested.get() && !startupCancellation() && !Thread.currentThread().isInterrupted) { "Web server startup cancelled" }
                     server.start()
                     started = true
                 } catch (failure: Exception) {
@@ -353,8 +403,10 @@ class UploadServer(
 
     /** Publish cancellation before waiting for lifecycle work; stop completes resource cleanup. */
     internal fun requestStop() {
+        jobs.signalShutdown()
         stopRequested.set(true)
         authenticationInspectionCancellation.set(true)
+        agentPreflight.requestStop()
         jobs.beginShutdown()
     }
 
@@ -373,8 +425,7 @@ class UploadServer(
         // Signal recovery and the job service even while start or a queued callback holds
         // lifecycleLock through filesystem operations: no queued operation may begin and no
         // completion may be published after the stop signal is observable.
-        stopRequested.set(true)
-        jobs.beginShutdown()
+        requestStop()
         val callerWasInterrupted = Thread.currentThread().isInterrupted
         val inspection = synchronized(lifecycleLock) {
             stopping = true
@@ -393,7 +444,10 @@ class UploadServer(
         server.stop(delaySeconds)
         if (!streamsClosed && !streamResources.shutdown()) System.err.println("Event stream shutdown did not complete cleanly.")
         requestExecutor.shutdownNow()
+        overloadResponders.shutdownNow()
         requestDeadlines.shutdownNow()
+        harnessReadiness.close()
+        agentPreflight.close()
         access.close()
         jobs.close()
         var inspectionWaitInterrupted = false
@@ -709,15 +763,15 @@ class UploadServer(
     }
 
     private fun renderJobDashboard(exchange: HttpExchange) {
-        val inspections = jobs.listInspections()
+        val rows = jobs.dashboardRows()
         val recovery = try {
             jobs.recoveryInventory()
         } catch (failure: WebJobServiceException) {
             if (failure.code == "RECOVERY_INSPECTION_BUSY") null else throw failure
         }
         exchange.sendHtml(200, renderDashboardDocument(
-            inspections.filterIsInstance<WebJobInspection.Available>().map { it.presentation.job },
-            inspections.filterIsInstance<WebJobInspection.Unavailable>().map { it.diagnostic },
+            rows.jobs,
+            rows.unavailable,
             recovery,
         ))
     }
@@ -729,14 +783,7 @@ class UploadServer(
             return
         }
         val base = assets.basePath
-        val canonical = when (path) {
-            base, "${base}runtime", "${base}upload" -> path
-            base.removeSuffix("/").ifEmpty { "/" } -> base
-            "${base}runtime/" -> "${base}runtime"
-            "${base}upload/" -> "${base}upload"
-            else -> path.takeIf { it.startsWith("${base}jobs/") &&
-                it.removePrefix("${base}jobs/").matches(Regex("[0-9a-f]{32}(?:/runs(?:/[A-Za-z0-9][A-Za-z0-9_-]{0,127})?)?/?")) }?.removeSuffix("/")
-        }
+        val canonical = canonicalSpaDocumentPath(base, path)
         if (canonical != null) {
             if (path != canonical && exchange.requestMethod in setOf("GET", "HEAD")) {
                 val query = exchange.requestURI.rawQuery?.let { "?$it" }.orEmpty()
@@ -826,7 +873,7 @@ class UploadServer(
         val repairEvidenceStates = repairHistory?.let { history -> artifacts?.let {
             repairEvidenceArtifactStates(jobId, reports, history, it)
         } }
-        val recordedView = if (legacyOnly) null else recordedRepairEvidenceView(jobId, reports, recorded, artifacts, page)
+        val recordedView = if (legacyOnly) null else recordedRepairEvidenceView(jobId, reports, recorded, artifacts, page, query.validationCasePageNumber)
         exchange.sendHtml(200, renderJobDocument(view.job, reports, view.diagnostics, source.getOrNull(), source.isFailure,
             progressSnapshot = progress,
             explorationReport = readLegacyJsonReport(jobId, reports, LegacyJsonReport.EXPLORATION),
@@ -841,7 +888,7 @@ class UploadServer(
     /** Links need the same checked listing; receipt integrity is checked per canonical attempt. */
     private fun recordedRepairEvidenceView(jobId: String, context: WebReportContext,
         recorded: decompengine.repair.RepairHistoryReadResult, artifacts: List<WebArtifactSummary>?,
-        page: decompengine.repair.RepairRecordedHistoryPage?): RecordedRepairHistoryView {
+        page: decompengine.repair.RepairRecordedHistoryPage?, validationCasePageNumber: Int = 1): RecordedRepairHistoryView {
         val snapshot = recorded.snapshot?.takeIf { recorded.status == decompengine.repair.RepairHistoryReadStatus.RECORDED }
             ?: return RecordedRepairHistoryView(recorded, runId = context.runId)
         val selected = requireNotNull(page)
@@ -850,10 +897,10 @@ class UploadServer(
             recordedRepairEvidenceTarget(reference, snapshot, context, artifacts)?.let { reference to it }
         }.toMap()
         val captured = mutableMapOf<String, Result<ByteArray>>()
-        var remainingWorkBytes = 64L * 1024 * 1024
+        var remainingWorkBytes = MAXIMUM_RECORDED_REPAIR_EVIDENCE_REQUEST_BYTES
         var readAttempts = 0
-        fun readOnce(target: String): Result<ByteArray> = captured.getOrPut(target) {
-            val reserved = minOf(MAX_REPAIR_EVIDENCE_PRESENTATION_BYTES, remainingWorkBytes)
+        fun readOnce(target: String, maximumBytes: Long = MAX_REPAIR_EVIDENCE_PRESENTATION_BYTES): Result<ByteArray> = captured.getOrPut(target) {
+            val reserved = recordedRepairEvidenceReadReservation(maximumBytes, remainingWorkBytes)
             if (reserved == 0L || readAttempts >= 128) Result.failure(IllegalStateException("Repair evidence presentation allowance exhausted"))
             else {
                 // Bound calls and captured payloads. Failed reads retain their full reservation.
@@ -865,7 +912,32 @@ class UploadServer(
                 }
             }
         }
-        val evidence = targets.mapValues { (_, target) ->
+        val normalBindings = buildList {
+            if (selected.selection.evidenceAttempt != null) selected.evidenceAttempts.forEach { attempt ->
+                attempt.validationObservation?.let { add(attempt.identity to it) }
+            }
+            selected.evidenceRuns.forEach { run -> run.baselineValidationObservation?.let { add(run.identity to it) } }
+        }
+        val observations = normalBindings.associate { (owner, binding) ->
+            val primary = targets[binding.primary.artifact]?.let { readOnce(it, binding.primary.bytes).getOrNull() }
+            val diff = binding.diff?.let { artifact -> targets[artifact.artifact]?.let { readOnce(it, artifact.bytes).getOrNull() } }
+            owner to checkedRecordedRepairValidationObservation(binding, primary, diff, validationCasePageNumber)
+        }
+        val observedArtifactStates = buildMap {
+            normalBindings.forEach { (owner, binding) ->
+                val detail = observations.getValue(owner)
+                put(binding.primary.artifact, detail.primaryState)
+                binding.diff?.let { put(it.artifact, detail.diffState ?: RepairEvidenceArtifactState.UNAVAILABLE) }
+            }
+        }
+        val genericReferences = buildSet {
+            selected.evidenceAttempts.forEach { attempt ->
+                attempt.before?.artifact?.let(::add); attempt.after?.artifact?.let(::add)
+                attempt.invocation?.artifact?.let(::add)
+            }
+        }
+        val evidence = targets.filterKeys { it in genericReferences }.mapValues { (reference, target) ->
+            observedArtifactStates[reference]?.let { return@mapValues it }
             val bytes = readOnce(target).getOrElse { return@mapValues RepairEvidenceArtifactState.UNAVAILABLE }
             if (target.endsWith(".json") && runCatching { decompengine.oracle.core.OracleJson.parse(bytes) }.isFailure)
                 RepairEvidenceArtifactState.CORRUPT else RepairEvidenceArtifactState.AVAILABLE
@@ -889,7 +961,15 @@ class UploadServer(
             }
             attempt.identity to state
         }
-        return RecordedRepairHistoryView(recorded, targets, evidence, receipts, selected, context.runId)
+        val diagnostics = selected.evidenceRuns.mapNotNull { run ->
+            run.validationDiagnostic?.let { binding ->
+                val primary = targets[binding.receipt]?.let { readOnce(it, binding.receiptBytes).getOrNull() }
+                val diagnostic = targets[binding.diagnostic]?.let { readOnce(it, binding.diagnosticBytes.toLong()).getOrNull() }
+                run.identity to checkedRecordedRepairValidationDiagnostic(binding, primary, diagnostic)
+            }
+        }.toMap()
+        return RecordedRepairHistoryView(recorded, targets, evidence, receipts, selected, context.runId, diagnostics, observations,
+            validationCasePageNumber)
     }
 
     private data class RepairReceiptExpectation(
@@ -1029,9 +1109,10 @@ class UploadServer(
             exchange.sendUntrustedAttachment(200, verified.bytes, "application/zip", "source-tree.zip")
             return
         }
-        val artifact = jobs.readArtifact(jobId, relativePath, MAX_ARTIFACT_BYTES)
+        val limit = if (isProgressJournalArtifact(relativePath)) AgentProgressJournal.MAXIMUM_READ_BYTES.toLong() else MAX_ARTIFACT_BYTES
+        val artifact = jobs.readArtifact(jobId, relativePath, limit)
         val name = Path.of(relativePath).fileName
-        exchange.sendUntrustedAttachment(200, artifact.bytes, contentType(name), name.toString())
+        exchange.sendUntrustedAttachment(200, progressArtifactProjection(relativePath, artifact.bytes), contentType(name), name.toString())
     }
 
     private fun decode(value: String): String = URLDecoder.decode(value, StandardCharsets.UTF_8)
@@ -1043,6 +1124,7 @@ class UploadServer(
 }
 
 private const val MAX_UPLOAD_BYTES = 32L * 1024 * 1024
+private const val OVERLOAD_RESPONDER_THREAD = "decomp-web-overload"
 
 private fun encodeJob(job: Job): String = Json.encodeToString(JsonElement.serializer(), legacyJobPresentation(job))
 
@@ -1078,6 +1160,61 @@ internal fun handleAuthorizedUploadRequest(
             exchange.sendHtml(409, renderUploadPublicationUncertainPage(uncertain.jobId))
         }
     }
+}
+
+/** Pure lifecycle coordinator: registration precedes the same single construction and start. */
+internal fun <T : Any> startWebServerLifecycle(
+    registerShutdown: (() -> Unit) -> (() -> Unit), create: (() -> Boolean) -> T,
+    start: (T) -> Unit, stop: (T) -> Unit,
+): T {
+    val stopping = java.util.concurrent.atomic.AtomicBoolean(false)
+    val published = java.util.concurrent.atomic.AtomicReference<T>()
+    val removeHook = registerShutdown {
+        stopping.set(true)
+        published.get()?.let(stop)
+    }
+    fun cancelled() = stopping.get() || Thread.currentThread().isInterrupted
+    try {
+        check(!cancelled()) { "Web server startup cancelled" }
+        val server = create(::cancelled)
+        published.set(server)
+        check(!cancelled()) { "Web server startup cancelled" }
+        start(server)
+        check(!cancelled()) { "Web server startup cancelled" }
+        return server
+    } catch (failure: Throwable) {
+        var removeFailure: Throwable? = null
+        var stopFailure: Throwable? = null
+        try { removeHook() } catch (problem: Throwable) { removeFailure = problem }
+        published.get()?.let { server -> try { stop(server) } catch (problem: Throwable) { stopFailure = problem } }
+        if (removeFailure == null && stopFailure == null) throw failure
+        // Never grow a retained primary failure's suppression list. Cleanup diagnostics own a fresh wrapper.
+        val incomplete = try {
+            IllegalStateException("Web startup cleanup did not complete; preserve storage before retrying.", failure).also { wrapper ->
+                removeFailure?.let { if (it !== failure) wrapper.addSuppressed(it) }
+                stopFailure?.let { if (it !== failure) wrapper.addSuppressed(it) }
+            }
+        } catch (_: Throwable) { throw failure }
+        throw incomplete
+    }
+}
+
+/** CLI factory form makes constructor recovery observe shutdown before the server exists. */
+internal fun startWebServerWithShutdownHook(create: (() -> Boolean) -> UploadServer): UploadServer {
+    val runtime = Runtime.getRuntime()
+    return startWebServerLifecycle(registerShutdown = { action ->
+        val hook = Thread({
+            try { action() } catch (_: Exception) {
+                System.err.println("Web shutdown did not complete cleanly; recovery is required")
+            }
+        }, "decomp-web-shutdown")
+        runtime.addShutdownHook(hook)
+        val remove: () -> Unit = {
+            try { runtime.removeShutdownHook(hook) } catch (_: IllegalStateException) { }
+            Unit
+        }
+        remove
+    }, create = create, start = { it.start() }, stop = { it.stop() })
 }
 
 /** CLI lifecycle: allow owned workers to record interruption before the JVM exits. */

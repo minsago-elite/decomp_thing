@@ -137,6 +137,9 @@ object BwrapCapability {
         cache.clear()
     }
 
+    /** Explicit operator observation; never reads or seeds the execution capability cache. */
+    internal fun inspectJsonStatusSupported(bwrapPath: Path): Boolean = probeJsonStatus(bwrapPath)
+
     private fun probe(bwrapPath: Path, timeoutPath: Path): Boolean {
         if (!bwrapPath.exists() || !timeoutPath.exists()) return false
         val command = listOf(

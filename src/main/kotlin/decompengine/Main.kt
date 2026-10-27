@@ -4,10 +4,16 @@ import decompengine.exploration.AutomaticExplorer
 import decompengine.exploration.CandidateInput
 import decompengine.exploration.CandidateSource
 import decompengine.doctor.Doctor
+import decompengine.doctor.DoctorDiagnosticAdmissionException
+import decompengine.doctor.DoctorDiagnostics
+import decompengine.doctor.DoctorReport
+import decompengine.doctor.DoctorToolKind
 import decompengine.doctor.parseDoctorInvocation
-import decompengine.mvp.MvpPatchException
+import decompengine.doctor.requireDoctorActive
 import decompengine.mvp.MvpPatchOptions
 import decompengine.mvp.MvpPatchWorkflow
+import decompengine.mvp.MvpArtifactRedactor
+import decompengine.mvp.MvpPatchException
 import decompengine.mvp.BinaryRunnerService
 import decompengine.acp.AcpHarnessFactory
 import decompengine.project.GeneratedCMakeReconstructionProfile
@@ -28,6 +34,10 @@ import decompengine.repair.SecureRepairRuntime
 import decompengine.validation.ProcessInput
 import decompengine.web.UploadServer
 import decompengine.web.WebUiMode
+import java.io.PrintStream
+import java.nio.ByteBuffer
+import java.nio.CharBuffer
+import java.nio.charset.CodingErrorAction
 import java.nio.file.Files
 import java.nio.file.LinkOption
 import java.nio.file.Path
@@ -45,16 +55,28 @@ fun main(args: Array<String>) {
         "reconstruct" -> runReconstruct(args.drop(1))
         "gcc-engine-plan" -> runGccEnginePlan(args.drop(1))
         "gcc-engine-full-export" -> runGccEngineFullExport(args.drop(1))
+        "gcc-engine-runtime-diagnostic" -> runGccEngineCommand(args.drop(1), fullRecoveryExport = true, runtimeDiagnostics = true)
         "gcc-engine-native-calls" -> runGccEngineCommand(args.drop(1), fullRecoveryExport = false, nativeCallObservations = true)
         "llvm-native-runtime-measurement" -> runLlvmNativeRuntimeMeasurement(args.drop(1))
         "web" -> runWeb(args.drop(1))
         null, "help", "--help", "-h" -> printHelp()
         else -> {
-            System.err.println("unknown command: ${args.first()}")
+            val exitCode = renderUnknownCommand(args.first(), System.getenv().values)
             printHelp()
-            kotlin.system.exitProcess(2)
+            kotlin.system.exitProcess(exitCode)
         }
     }
+}
+
+/** Reject an unknown selector without exposing its raw argument before workflow dispatch. */
+internal fun renderUnknownCommand(
+    command: String,
+    sensitiveValues: Collection<String>,
+    output: PrintStream = System.err,
+): Int {
+    val redactor = cliDiagnosticRedactor(sensitiveValues) ?: return 2
+    printWorkflowCliLine("unknown command", command, redactor, output)
+    return 2
 }
 
 private fun runRecordedRepairHistory(args: List<String>) {
@@ -109,26 +131,32 @@ private fun runGccEngineFullExport(args: List<String>) {
     runGccEngineCommand(args, fullRecoveryExport = true)
 }
 
-private fun runGccEngineCommand(args: List<String>, fullRecoveryExport: Boolean, nativeCallObservations: Boolean = false) {
+private fun runGccEngineCommand(args: List<String>, fullRecoveryExport: Boolean,
+    runtimeDiagnostics: Boolean = false, nativeCallObservations: Boolean = false) {
     val options = try {
-        decompengine.oracle.gcc.GccBundledCliOptions.parse(args, fullRecoveryExport, nativeCallObservations)
+        decompengine.oracle.gcc.GccBundledCliOptions.parse(args, fullRecoveryExport = fullRecoveryExport,
+            runtimeDiagnostics = runtimeDiagnostics, nativeCallObservations = nativeCallObservations)
     } catch (failure: IllegalArgumentException) {
         System.err.println(failure.message)
         val command = when {
             nativeCallObservations -> "gcc-engine-native-calls"
+            runtimeDiagnostics -> "gcc-engine-runtime-diagnostic"
             fullRecoveryExport -> "gcc-engine-full-export"
             else -> "gcc-engine-plan"
         }
-        val engines = decompengine.oracle.gcc.GccBundledCliOptions.engineArgumentUsage(fullRecoveryExport, nativeCallObservations)
         val resumeOption = if (fullRecoveryExport || nativeCallObservations) "" else " [--resume-after-checkpoint <multiple-of-512>]"
-        System.err.println("usage: llm_bin_patch $command <$engines> <stripped-binary> " +
+        val engines = decompengine.oracle.gcc.GccBundledCliOptions.engineUsage(fullRecoveryExport = fullRecoveryExport,
+            runtimeDiagnostics = runtimeDiagnostics, nativeCallObservations = nativeCallObservations)
+        System.err.println("usage: llm_bin_patch $command $engines <stripped-binary> " +
             "--profile <file> --ghidra-archive <file> --output <empty-private-directory> --scratch <provisioned-mount>$resumeOption")
         kotlin.system.exitProcess(2)
     }
     val result = decompengine.oracle.gcc.GccBundledCliCommand.run(options, args)
     println("engine: ${options.engineId}")
     println("operation result: $result")
-    if (nativeCallObservations) {
+    if (runtimeDiagnostics) {
+        println("Diagnostic execution journal retained; no qualification, scoring, or release authority is emitted.")
+    } else if (nativeCallObservations) {
         println("Native call observations and model provenance are retained in the result; structural scoring remains unavailable.")
     } else if (fullRecoveryExport) {
         println("Full model provenance is recorded in the result; structural scoring remains unavailable and scratch is retained.")
@@ -179,32 +207,73 @@ private fun runReconstruct(args: List<String>) {
     }
     if (binary == null || output == null) reconstructUsageError("reconstruct requires an input binary and output directory")
     val environment = System.getenv()
-    withReconstructionCliProgress(output, environment.values) { progress ->
-        val strategy = try {
-            selectReconstructionStrategy(evidenceOnly, maximumContext, harnessOverride, environment, progress, profile)
-        } catch (e: IllegalArgumentException) {
-            progress.phase(AgentWorkflowPhase.FAILED)
-            progress.close()
-            reconstructUsageError(e.message ?: "invalid harness configuration")
+    val exitCode = runReconstructionCliAction(environment.values) { redactor ->
+        withReconstructionCliProgress(output, environment.values) { progress ->
+            val strategy = try {
+                selectReconstructionStrategy(evidenceOnly, maximumContext, harnessOverride, environment, progress, profile)
+            } catch (e: IllegalArgumentException) {
+                progress.phase(AgentWorkflowPhase.FAILED)
+                progress.close()
+                reconstructUsageError(e.message ?: "invalid harness configuration")
+            }
+            renderWorkflowProvenance(WorkflowCliCommand.RECONSTRUCT, strategy.harnessProvenance, redactor)
+            val result = try {
+                ArchivalReconstructionService(
+                    GhidraHeadlessProgramModelAnalyzer.bundled(), strategy.reconstructor,
+                    profile = strategy.profile, progress = progress,
+                ).reconstruct(binary, output)
+            } catch (failure: Exception) {
+                progress.phase(AgentWorkflowPhase.FAILED)
+                throw failure
+            }
+            renderReconstructionSuccess(result.projectDir.toString(), result.bundle.archivePath.toString(),
+                result.bundle.archiveSha256, environment.values)
         }
-        println(
-            strategy.harnessProvenance?.let { "harness provenance: $it" }
-                ?: "harness: none (evidence-only)",
-        )
-        val result = try {
-            ArchivalReconstructionService(
-                GhidraHeadlessProgramModelAnalyzer.bundled(), strategy.reconstructor,
-                profile = strategy.profile, progress = progress,
-            ).reconstruct(binary, output)
-        } catch (failure: Exception) {
-            progress.phase(AgentWorkflowPhase.FAILED)
-            throw failure
-        }
-        println("source tree: ${result.projectDir}")
-        println("archive: ${result.bundle.archivePath}")
-        println("archive sha256: ${result.bundle.archiveSha256}")
-        println("recovery accuracy: unassessed; see the source tree's confidence and unresolved reports")
     }
+    if (exitCode != 0) kotlin.system.exitProcess(exitCode)
+}
+
+/** Only the archive producer's computed SHA is public; every other field receives full projection. */
+internal fun renderReconstructionSuccess(
+    projectDirectory: String,
+    archivePath: String,
+    archiveSha256: String,
+    sensitiveValues: Collection<String>,
+    output: PrintStream = System.out,
+) {
+    val text = MvpArtifactRedactor(sensitiveValues, 16_384L).projectTerminated {
+        append("source tree: ").append(projectDirectory).append("\n")
+        append("archive: ").append(archivePath).append("\n")
+        append("archive sha256: ").appendSha256(archiveSha256).append("\n")
+        append("recovery accuracy: unassessed; see the source tree's confidence and unresolved reports\n")
+    }
+    if (!admitCliEncoding(text, output)) throw MvpPatchException("reconstruction display encoding is not admitted")
+    output.print(text)
+}
+
+/** Catch ordinary failures after owned progress closes; raw exception chains stay off stderr. */
+internal fun runReconstructionCliAction(
+    sensitiveValues: Collection<String>,
+    output: PrintStream = System.err,
+    action: (ProgressRedactor) -> Unit,
+): Int {
+    val redactor = cliDiagnosticRedactor(sensitiveValues) ?: return 1
+    return try {
+        action(redactor)
+        0
+    } catch (failure: Exception) {
+        if (failure is InterruptedException) Thread.currentThread().interrupt()
+        renderWorkflowFailure(WorkflowCliCommand.RECONSTRUCT, failure.message ?: failure.javaClass.simpleName, redactor, output)
+        1
+    }
+}
+
+/** An unadmitted secret inventory cannot safely select diagnostic or replacement text. */
+private fun cliDiagnosticRedactor(sensitiveValues: Collection<String>): ProgressRedactor? = try {
+    ProgressRedactor(sensitiveValues)
+} catch (failure: Exception) {
+    if (failure is InterruptedException) Thread.currentThread().interrupt()
+    null
 }
 
 internal data class ReconstructionStrategy(
@@ -245,8 +314,7 @@ internal fun selectReconstructionStrategy(
 }
 
 private fun reconstructUsageError(message: String): Nothing {
-    System.err.println(message)
-    System.err.println("usage: llm_bin_patch reconstruct <binary> --output <directory> [--profile generated-c-make-v1|generated-c-ninja-v1] [--evidence-only] [--max-context-chars <count>] [--harness acp|legacy-openai]")
+    renderWorkflowUsageError(WorkflowCliCommand.RECONSTRUCT, message, System.getenv().values)
     kotlin.system.exitProcess(2)
 }
 
@@ -335,50 +403,259 @@ private fun runRepair(args: List<String>) {
         }
     }
     if (original == null || project == null) repairUsageError("repair requires an original binary and project directory")
-    val reportsDir = reports ?: project.resolve("reports")
-    val regressionInputs = if (exploreInputs) {
-        val exploration = AutomaticExplorer().explore(
-            original,
-            listOf(CandidateInput("seed_default", CandidateSource.SEED)),
-            reportsDir,
-        )
-        println(
-            "exploration retained ${exploration.candidates.size} regression input(s) across " +
-                "${exploration.coverage.expandedSignatures.size} observed output signature(s)",
-        )
-        exploration.candidates.map(CandidateInput::toProcessInput)
-    } else {
-        listOf(ProcessInput("default"))
-    }
-    val redactor = ProgressRedactor(System.getenv().values)
-    val result = try {
-        SecureRepairRuntime.open(
-            RepairRuntimeConfiguration(
-                profileId = "generated-c-make-v1",
-                historyPath = reportsDir.resolve("repair_history.json"),
-                harnessOverride = harnessOverride,
-            ),
-        ).use { runtime ->
-            System.err.println("repair harness: ${redactor.text(runtime.harnessProvenance)}")
+    val originalBinary: Path = original
+    val projectDirectory: Path = project
+    val reportsDir = decompengine.repair.repairReportsDirectory(projectDirectory, reports)
+    val environment = System.getenv()
+    val exitCode = runRepairCliAction(environment.values) { redactor ->
+        val regressionInputs = if (exploreInputs) {
+            val exploration = AutomaticExplorer().explore(
+                originalBinary,
+                listOf(CandidateInput("seed_default", CandidateSource.SEED)),
+                reportsDir,
+            )
+            renderRepairExplorationSummary(exploration.candidates.size, exploration.coverage.expandedSignatures.size, redactor)
+            exploration.candidates.map(CandidateInput::toProcessInput)
+        } else {
+            listOf(ProcessInput("default"))
+        }
+        val configuration = prepareRepairCliConfiguration(reportsDir.resolve("repair_history.json"), harnessOverride)
+        val result = SecureRepairRuntime.open(configuration).use { runtime ->
+            renderWorkflowProvenance(WorkflowCliCommand.REPAIR, runtime.harnessProvenance, redactor, System.err)
             RepairCliProgress(reportsDir).use {
-                runtime.runRepair(project, original, regressionInputs, reportsDir, maxIterations)
+                runtime.runRepair(projectDirectory, originalBinary, regressionInputs, reportsDir, maxIterations)
             }
         }
-    } catch (failure: IllegalArgumentException) {
-        repairUsageError(redactor.text(failure.message ?: "invalid repair configuration"))
-    } catch (failure: Exception) {
-        System.err.println("repair unavailable or failed: ${redactor.text(failure.message ?: failure.javaClass.simpleName)}")
-        kotlin.system.exitProcess(1)
+        renderRepairPresentation(presentRepairOutcome(result), environment.values)
     }
-    val presentation = presentRepairOutcome(result)
-    presentation.lines.forEach(::println)
-    if (presentation.exitCode != 0) kotlin.system.exitProcess(presentation.exitCode)
+    if (exitCode != 0) kotlin.system.exitProcess(exitCode)
+}
+
+/** Only validation of the CLI's data-only configuration can produce a usage failure. */
+internal fun prepareRepairCliConfiguration(historyPath: Path, harnessOverride: String?): RepairRuntimeConfiguration = try {
+    RepairRuntimeConfiguration(
+        profileId = "generated-c-make-v1",
+        historyPath = historyPath,
+        harnessOverride = harnessOverride,
+    )
+} catch (failure: IllegalArgumentException) {
+    throw RepairCliConfigurationException(failure)
+}
+
+internal class RepairCliConfigurationException(cause: IllegalArgumentException) : RuntimeException(cause.message, cause)
+
+/** Admit diagnostics before preparation, and keep raw exploration/runtime failures off stderr. */
+internal fun runRepairCliAction(
+    sensitiveValues: Collection<String>,
+    output: PrintStream = System.err,
+    action: (ProgressRedactor) -> Int,
+): Int {
+    val redactor = cliDiagnosticRedactor(sensitiveValues) ?: return 1
+    return try {
+        action(redactor)
+    } catch (failure: RepairCliConfigurationException) {
+        renderWorkflowUsageError(WorkflowCliCommand.REPAIR, failure.message ?: "invalid repair configuration", redactor, output)
+    } catch (failure: Exception) {
+        if (failure is InterruptedException) Thread.currentThread().interrupt()
+        renderWorkflowFailure(WorkflowCliCommand.REPAIR, failure.message ?: failure.javaClass.simpleName, redactor, output)
+        1
+    }
+}
+
+/** A refused display cannot expose a partial result or rewrite the durable typed outcome. */
+internal fun renderRepairPresentation(
+    presentation: RepairCliPresentation,
+    sensitiveValues: Collection<String>,
+    output: PrintStream = System.out,
+): Int {
+    val text = try {
+        require(presentation.exitCode in 0..2 && presentation.lines.size <= 32)
+        val redactor = MvpArtifactRedactor(sensitiveValues, 16_384L)
+        val fragments = redactor.forLogLines()
+        var count = 0
+        val projected = fragments.project {
+            for (line in presentation.lines) {
+                require(count++ < 32)
+                require('\n' !in line && '\r' !in line)
+                append(line).append("\n")
+            }
+        }
+        require(projected.count { it == '\n' } == count) { "complete repair line framing could not be retained" }
+        redactor.text(projected).also {
+            require(it.count { unit -> unit == '\n' } == count) { "complete repair line framing could not be retained" }
+            require(admitCliEncoding(it, output)) { "repair display encoding is not admitted" }
+        }
+    } catch (failure: Exception) {
+        if (failure is InterruptedException) Thread.currentThread().interrupt()
+        return 1
+    }
+    output.print(text)
+    return presentation.exitCode
+}
+
+internal fun renderRepairExplorationSummary(
+    candidateCount: Int,
+    signatureCount: Int,
+    redactor: ProgressRedactor,
+    output: PrintStream = System.out,
+) {
+    require(candidateCount >= 0 && signatureCount >= 0)
+    printProjectedCliFrame("exploration retained $candidateCount regression input(s) across $signatureCount observed output signature(s)\n",
+        16_384, output, redactor::text)
 }
 
 private fun repairUsageError(message: String): Nothing {
-    System.err.println(message)
-    System.err.println("usage: llm_bin_patch repair <original-binary> <project-dir> [--reports <directory>] [--max-iterations <count>] [--explore] [--harness acp|legacy-openai]")
+    renderRepairUsageError(message, System.getenv().values)
     kotlin.system.exitProcess(2)
+}
+
+/** Admit the inventory and mask private diagnostics while retaining the compiled command grammar. */
+internal fun renderRepairUsageError(
+    message: String,
+    sensitiveValues: Collection<String>,
+    output: PrintStream = System.err,
+): Int = renderWorkflowUsageError(WorkflowCliCommand.REPAIR, message, sensitiveValues, output)
+
+internal enum class WorkflowCliCommand(val usage: String, val failurePrefix: String) {
+    RECONSTRUCT(
+        "usage: llm_bin_patch reconstruct <binary> --output <directory> [--profile generated-c-make-v1|generated-c-ninja-v1] [--evidence-only] [--max-context-chars <count>] [--harness acp|legacy-openai]",
+        "reconstruction failed",
+    ),
+    PATCH(
+        "usage: llm_bin_patch patch <input-elf> --output <directory> [--yes] [--profile generated-c-make-v1|generated-c-ninja-v1] [--harness acp|legacy-openai]",
+        "patch failed",
+    ),
+    REPAIR(
+        "usage: llm_bin_patch repair <original-binary> <project-dir> [--reports <directory>] [--max-iterations <count>] [--explore] [--harness acp|legacy-openai]",
+        "repair unavailable or failed",
+    ),
+}
+
+internal fun renderWorkflowUsageError(
+    command: WorkflowCliCommand,
+    message: String,
+    sensitiveValues: Collection<String>,
+    output: PrintStream = System.err,
+): Int {
+    val redactor = cliDiagnosticRedactor(sensitiveValues) ?: return 2
+    return renderWorkflowUsageError(command, message, redactor, output)
+}
+
+/** Reuse the admitted immutable inventory after a workflow action, including failure paths. */
+private fun renderWorkflowUsageError(
+    command: WorkflowCliCommand,
+    message: String,
+    redactor: ProgressRedactor,
+    output: PrintStream,
+): Int {
+    val usage = command.usage
+    if (message.length > 16_384 - usage.length - 2) return 2
+    // The enum's compiled help is public syntax. Project the complete frame to conceal
+    // private diagnostic text and boundary matches, then restore only that known suffix.
+    // Confirm the private prefix is stable after restoration; otherwise withhold it.
+    val suffix = "\n$usage\n"
+    val projectedSuffix = redactor.text(suffix, 16_384)
+    var prefix = message
+    repeat(2) {
+        if (prefix.length > 16_384 - suffix.length) return@repeat
+        val projected = redactor.text(prefix + suffix, 16_384)
+        if (projectedSuffix.isEmpty() || !projected.endsWith(projectedSuffix)) return@repeat
+        val next = projected.dropLast(projectedSuffix.length)
+        if (next == prefix) {
+            val display = next + suffix
+            if (admitCliEncoding(display, output)) output.print(display)
+            else if (admitCliEncoding("$usage\n", output)) output.print("$usage\n")
+            return 2
+        }
+        prefix = next
+    }
+    if (admitCliEncoding("$usage\n", output)) output.print("$usage\n")
+    return 2
+}
+
+internal fun renderWorkflowFailure(
+    command: WorkflowCliCommand,
+    message: String,
+    redactor: ProgressRedactor,
+    output: PrintStream = System.err,
+    configuration: Boolean = false,
+) {
+    val prefix = if (configuration) "configuration error" else command.failurePrefix
+    printWorkflowCliLine(prefix, message, redactor, output)
+}
+
+internal fun renderWorkflowProvenance(
+    command: WorkflowCliCommand,
+    provenance: String?,
+    redactor: ProgressRedactor,
+    output: PrintStream = System.out,
+) {
+    if (provenance == null) {
+        require(command == WorkflowCliCommand.RECONSTRUCT) { "workflow harness provenance is required" }
+        printWorkflowCliLine("harness", "none (evidence-only)", redactor, output)
+    } else {
+        val prefix = if (command == WorkflowCliCommand.REPAIR) "repair harness" else "harness provenance"
+        printWorkflowCliLine(prefix, provenance, redactor, output)
+    }
+}
+
+private fun printWorkflowCliLine(prefix: String, message: String, redactor: ProgressRedactor, output: PrintStream) {
+    // Omit oversized detail before allocating the frame; a truncated raw prefix could expose a secret fragment.
+    val detail = if (message.length > 16_384 - prefix.length - 3) redactor.text(message, 0) else message
+    printProjectedCliFrame("$prefix: $detail\n", 512, output, redactor::text)
+}
+
+/** Every caller supplies a complete frame and an already admitted private projection. */
+private fun printProjectedCliFrame(
+    frame: String,
+    previewCharacters: Int,
+    output: PrintStream,
+    project: (String, Int) -> String,
+) {
+    var preview = project(frame, previewCharacters)
+    // Truncation or replacement can consume the terminator. Reproject each restored
+    // newline, and emit only a complete safe line. Persistent conflicts withhold detail.
+    repeat(2) {
+        if (preview.endsWith("\n")) {
+            if (admitCliEncoding(preview, output)) output.print(preview)
+            return
+        }
+        preview = project("$preview\n", 16_384)
+    }
+    if (!preview.endsWith("\n")) preview = project("\n", 16_384)
+    if (preview.endsWith("\n") && admitCliEncoding(preview, output)) output.print(preview)
+}
+
+/** Replacement or a codec alias must not reconstruct private text after projection. */
+private fun admitCliEncoding(text: String, output: PrintStream): Boolean {
+    if (text.length > 16_384) return false
+    if (text.isEmpty()) return true
+    return try {
+        val charset = output.charset()
+        val encoder = charset.newEncoder().onMalformedInput(CodingErrorAction.REPORT)
+            .onUnmappableCharacter(CodingErrorAction.REPORT)
+        val capacity = minOf(16_384.0, maxOf(1.0,
+            kotlin.math.ceil(text.length * encoder.maxBytesPerChar().toDouble()))).toInt()
+        val input = CharBuffer.wrap(text)
+        val encoded = ByteBuffer.allocate(capacity)
+        if (!encoder.encode(input, encoded, true).isUnderflow || input.hasRemaining() ||
+            !encoder.flush(encoded).isUnderflow) return false
+        encoded.flip()
+        val decoder = charset.newDecoder().onMalformedInput(CodingErrorAction.REPORT)
+            .onUnmappableCharacter(CodingErrorAction.REPORT)
+        val decoded = CharBuffer.allocate(text.length)
+        if (!decoder.decode(encoded, decoded, true).isUnderflow || encoded.hasRemaining() ||
+            !decoder.flush(decoded).isUnderflow) return false
+        decoded.flip()
+        decoded.toString() == text
+    } catch (failure: Exception) {
+        if (failure is InterruptedException) {
+            Thread.currentThread().interrupt()
+            throw failure
+        }
+        if (failure is java.util.concurrent.CancellationException) throw failure
+        false
+    }
 }
 
 private fun runPatch(args: List<String>) {
@@ -417,28 +694,44 @@ private fun runPatch(args: List<String>) {
         }
     }
     if (input == null || output == null) patchUsageError("patch requires an input ELF and output directory")
-    val strategy = try {
-        selectPatchStrategy(harnessOverride, System.getenv())
-    } catch (failure: IllegalArgumentException) {
-        patchUsageError(failure.message ?: "invalid harness configuration")
-    }
-    println("harness provenance: ${strategy.harnessProvenance}")
-    try {
+    val environment = System.getenv()
+    val exitCode = runPatchCliAction(environment.values) { redactor ->
+        val strategy = try {
+            selectPatchStrategy(harnessOverride, environment)
+        } catch (failure: IllegalArgumentException) {
+            patchUsageError(failure.message ?: "invalid harness configuration")
+        }
+        renderWorkflowProvenance(WorkflowCliCommand.PATCH, strategy.harnessProvenance, redactor)
         MvpPatchWorkflow(
             harness = strategy.harness,
-            environment = System.getenv(),
+            environment = environment,
             harnessProvenance = strategy.harnessProvenance,
         ).run(MvpPatchOptions(input, output, assumeYes), profile)
-    } catch (failure: IllegalArgumentException) {
-        System.err.println("configuration error: ${failure.message}"); kotlin.system.exitProcess(2)
-    } catch (failure: MvpPatchException) {
-        System.err.println("patch failed: ${failure.message}"); kotlin.system.exitProcess(1)
+    }
+    if (exitCode != 0) kotlin.system.exitProcess(exitCode)
+}
+
+/** Preserve patch usage status while withholding raw ordinary-exception chains at the CLI. */
+internal fun runPatchCliAction(
+    sensitiveValues: Collection<String>,
+    output: PrintStream = System.err,
+    action: (ProgressRedactor) -> Unit,
+): Int {
+    val redactor = cliDiagnosticRedactor(sensitiveValues) ?: return 2
+    return try {
+        action(redactor)
+        0
+    } catch (failure: Exception) {
+        if (failure is InterruptedException) Thread.currentThread().interrupt()
+        val configuration = failure is IllegalArgumentException
+        renderWorkflowFailure(WorkflowCliCommand.PATCH, failure.message ?: failure.javaClass.simpleName,
+            redactor, output, configuration)
+        if (configuration) 2 else 1
     }
 }
 
 private fun patchUsageError(message: String): Nothing {
-    System.err.println(message)
-    System.err.println("usage: llm_bin_patch patch <input-elf> --output <directory> [--yes] [--profile generated-c-make-v1|generated-c-ninja-v1] [--harness acp|legacy-openai]")
+    renderWorkflowUsageError(WorkflowCliCommand.PATCH, message, System.getenv().values)
     kotlin.system.exitProcess(2)
 }
 
@@ -498,30 +791,92 @@ private fun runnerUsageError(message: String): Nothing {
 }
 
 private fun runDoctor(args: List<String>) {
-    val defaultOutput = Path.of(System.getenv("OUTPUT_DIR") ?: if (Files.isDirectory(Path.of("/output"))) "/output" else "output")
+    val environment = System.getenv()
     val invocation = try {
+        val defaultOutput = Path.of(environment["OUTPUT_DIR"] ?: if (Files.isDirectory(Path.of("/output"))) "/output" else "output")
         parseDoctorInvocation(args, defaultOutput)
     } catch (failure: IllegalArgumentException) {
-        doctorUsageError(failure.message ?: "invalid doctor configuration")
+        doctorUsageError(failure.message ?: "invalid doctor configuration", "--tools-only" in args)
     }
-    val report = Doctor().inspect(invocation.options, invocation.profile)
-    report.checks.forEach { check ->
-        val stream = if (check.passed) System.out else System.err
-        stream.println("[${if (check.passed) "ok" else "failed"}] ${check.name}: ${check.detail}")
+    val sensitiveValues = if (invocation.options.toolsOnly) emptyList() else environment.values
+    val exitCode = runDoctorCliAction(sensitiveValues, toolsOnly = invocation.options.toolsOnly) {
+        Doctor(environment = environment, sensitiveValues = sensitiveValues).inspect(invocation.options, invocation.profile)
+    }
+    if (exitCode != 0) kotlin.system.exitProcess(exitCode)
+}
+
+/** Doctor reports and escaping ordinary failures share the admitted terminal redactor. */
+internal fun runDoctorCliAction(
+    sensitiveValues: Collection<String>,
+    output: PrintStream = System.out,
+    diagnostic: PrintStream = System.err,
+    toolsOnly: Boolean = false,
+    action: () -> DoctorReport,
+): Int {
+    val redactor = try {
+        DoctorDiagnostics(if (toolsOnly) emptyList() else sensitiveValues)
+    } catch (_: DoctorDiagnosticAdmissionException) {
+        return 2
+    }
+    requireDoctorActive()
+    val report = try {
+        action()
+    } catch (failure: Exception) {
+        requireDoctorActive(failure)
+        if (failure is DoctorDiagnosticAdmissionException) return 2
+        val detail = if (toolsOnly) {
+            "Tool checks stopped before completion. Verify the selected profile, tools and output directory."
+        } else redactor.text(failure.message ?: failure.javaClass.simpleName, 4096)
+        printProjectedCliFrame("doctor failed: $detail\n", 4096, diagnostic, redactor::text)
+        return 1
+    }
+    requireDoctorActive()
+    report.checks.forEachIndexed { index, check ->
+        requireDoctorActive()
+        val stream = if (check.passed) output else diagnostic
+        val kind = check.toolsOnlyKind ?: DoctorToolKind.UNKNOWN
+        val name = if (toolsOnly) {
+            if (kind == DoctorToolKind.UNKNOWN) "${kind.label} ${index + 1}" else kind.label
+        } else redactor.text(check.name, 4096)
+        val detail = if (toolsOnly) {
+            if (check.passed) "Check passed." else kind.remediation
+        } else redactor.text(check.detail, 4096)
+        printProjectedCliFrame("[${if (check.passed) "ok" else "failed"}] $name: $detail\n", 4096, stream, redactor::text)
         stream.flush()
     }
     if (!report.passed) {
-        System.err.println("Environment check failed (${report.checks.count { !it.passed }} check(s)); resolve each [failed] item above.")
-        kotlin.system.exitProcess(1)
+        printProjectedCliFrame("Environment check failed (${report.checks.count { !it.passed }} check(s)); resolve each [failed] item above.\n", 4096, diagnostic, redactor::text)
+        return 1
     }
-    println("Environment check passed (${report.checks.size} checks)")
-    System.out.flush()
+    printProjectedCliFrame("Environment check passed (${report.checks.size} checks)\n", 4096, output, redactor::text)
+    output.flush()
+    return 0
 }
 
-private fun doctorUsageError(message: String): Nothing {
-    System.err.println(message)
-    System.err.println("usage: llm_bin_patch doctor --tools-only [--output <directory>] [--profile <id>]")
-    System.err.println("   or: llm_bin_patch doctor [--output <directory>] [--profile <id>] [--harness acp|legacy-openai] [--workflow all|patch|reconstruct|repair|web] [--auth-methods]")
+internal fun renderDoctorUsageError(
+    message: String,
+    toolsOnly: Boolean,
+    sensitiveValues: Collection<String>,
+    output: PrintStream = System.err,
+): Int {
+    val redactor = try {
+        DoctorDiagnostics(if (toolsOnly) emptyList() else sensitiveValues)
+    } catch (_: DoctorDiagnosticAdmissionException) {
+        return 2
+    }
+    val usage = "usage: llm_bin_patch doctor --tools-only [--output <directory>] [--profile <id>]\n" +
+        "   or: llm_bin_patch doctor [--output <directory>] [--profile <id>] [--harness acp|legacy-openai] [--workflow all|patch|reconstruct|repair|web] [--auth-methods]\n"
+    val detail = when {
+        toolsOnly -> "invalid doctor configuration; check the options below"
+        message.length > 16_384 - usage.length - 1 -> redactor.text(message, 0)
+        else -> message
+    }
+    printProjectedCliFrame("$detail\n$usage", 16_384, output, redactor::text)
+    return 2
+}
+
+private fun doctorUsageError(message: String, toolsOnly: Boolean): Nothing {
+    renderDoctorUsageError(message, toolsOnly, if (toolsOnly) emptyList() else System.getenv().values)
     kotlin.system.exitProcess(2)
 }
 
@@ -575,12 +930,14 @@ private fun runWeb(args: List<String>) {
     }
     require(port in 0..65535) { "--port must be between 0 and 65535 (0 selects an available port)" }
     val server = try {
-        UploadServer(host, port, dataDir, uiMode = uiMode, basePath = basePath, devFrontendOrigin = devFrontendOrigin, listenBacklog = listenBacklog)
+        decompengine.web.startWebServerWithShutdownHook { cancellation ->
+            UploadServer(host, port, dataDir, uiMode = uiMode, basePath = basePath, devFrontendOrigin = devFrontendOrigin,
+                listenBacklog = listenBacklog, startupCancellation = cancellation)
+        }
     } catch (_: java.net.BindException) {
         System.err.println("Cannot bind web server to $host:$port. Check --host or choose an unused --port.")
         kotlin.system.exitProcess(2)
     }
-    decompengine.web.startWebServerWithShutdownHook(server)
     val urlHost = if (':' in host && !host.startsWith('[')) "[$host]" else host
     println("Serving decomp_engine ${uiMode.name.lowercase()} UI on http://$urlHost:${server.serverPort}$basePath")
     val bootstrap = server.issueBrowserBootstrap()
@@ -602,8 +959,9 @@ private fun printHelp() {
           llm_bin_patch explore <binary> --reports <directory> [--arg <value>] [--stdin <value>]
           llm_bin_patch reconstruct <binary> --output <directory> [--profile generated-c-make-v1|generated-c-ninja-v1] [--evidence-only] [--max-context-chars <count>] [--harness acp|legacy-openai]
           llm_bin_patch gcc-engine-plan <cc1|lto1> <stripped-binary> --profile <file> --ghidra-archive <file> --output <empty-private-directory> --scratch <provisioned-mount>
-          llm_bin_patch gcc-engine-full-export <cc1> <stripped-binary> --profile <file> --ghidra-archive <file> --output <empty-private-directory> --scratch <provisioned-mount>
-          llm_bin_patch gcc-engine-native-calls <cc1> <stripped-binary> --profile <file> --ghidra-archive <file> --output <empty-private-directory> --scratch <provisioned-mount>
+          llm_bin_patch gcc-engine-runtime-diagnostic cc1 <stripped-binary> --profile <file> --ghidra-archive <file> --output <empty-private-directory> --scratch <provisioned-mount>
+          llm_bin_patch gcc-engine-full-export <cc1|driver> <stripped-binary> --profile <file> --ghidra-archive <file> --output <empty-private-directory> --scratch <provisioned-mount>
+          llm_bin_patch gcc-engine-native-calls <cc1|driver> <stripped-binary> --profile <file> --ghidra-archive <file> --output <empty-private-directory> --scratch <provisioned-mount>
           llm_bin_patch llvm-native-runtime-measurement [--listener-continuity] <oci-layout> <fixed-client> <empty-config> <private-socket> <fresh-output>
           llm_bin_patch web [--host 127.0.0.1] [--port 8000] [--listen-backlog 64] [--data-dir .decomp_engine/jobs] [--ui legacy|spa] [--base-path /] [--dev-frontend-origin http://127.0.0.1:5173]
 
@@ -615,6 +973,7 @@ private fun printHelp() {
           Doctor's --profile selects generated-c-make-v1 (default) or generated-c-ninja-v1.
           Reconstruction's --evidence-only mode is agent-free and cannot be combined with --harness.
           gcc-engine-plan requires contained execution and retains scratch plus linked evidence; results remain incomplete and release-ineligible.
+          gcc-engine-runtime-diagnostic retains a diagnostic execution journal without qualification, scoring, or release authority.
           gcc-engine-full-export runs a fresh contained full-recovery export and emits an authenticated structural profile binding; it does not score or certify structural truth.
           gcc-engine-native-calls retains native call observations alongside an unchanged full model; results remain unscored and release-ineligible.
           --resume-after-checkpoint <multiple-of-512> interrupts and resumes within this process; it is not cold recovery.

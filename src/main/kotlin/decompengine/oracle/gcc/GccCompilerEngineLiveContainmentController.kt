@@ -1253,6 +1253,101 @@ internal fun parseBootClassPathManifest(
     })
 }
 
+/** Fixed ABI library sources and loader destinations for the existing contained worker. */
+internal fun gccSystemLibraryLocations(architecture: String): List<Pair<Path, Path>> {
+    val abi = when (architecture) {
+        "amd64", "x86_64" -> "x86_64-linux-gnu"
+        "aarch64", "arm64" -> "aarch64-linux-gnu"
+        else -> liveContainmentFail("GCC host has no fixed system-library ABI mapping")
+    }
+    return listOf("/lib/$abi", "/lib64", "/usr/lib/$abi", "/usr/lib64").map { name ->
+        val source = Path.of(name)
+        // AArch64's interpreter lives directly under /lib. Mount the same authenticated
+        // ABI directory there and at its separate /usr/lib multiarch search location.
+        val destination = if (abi == "aarch64-linux-gnu" && name == "/lib/$abi") Path.of("/lib") else source
+        source to destination
+    }
+}
+
+/** Resolve and validate every source and the required interpreter before manifest capture. */
+internal fun <T> withGccSystemLibrarySources(
+    architecture: String,
+    resolveDirectory: (Path) -> Path?,
+    symbolicLinkTarget: (Path) -> Path?,
+    isDirectory: (Path) -> Boolean,
+    isRegularFile: (Path) -> Boolean,
+    capture: (List<Pair<Path, Path>>) -> T,
+): T {
+    val sources = gccSystemLibraryLocations(architecture).mapNotNull { (candidate, destination) ->
+        resolveDirectory(candidate)?.let { source ->
+            if (listOf(Path.of("/lib"), Path.of("/usr/lib")).any { it.startsWith(source) }) {
+                liveContainmentFail("GCC system-library source resolves to an unsupported whole-library root")
+            }
+            source to destination
+        }
+    }
+    val interpreter = when (architecture) {
+        "amd64", "x86_64" -> Path.of("/lib64/ld-linux-x86-64.so.2")
+        "aarch64", "arm64" -> Path.of("/lib/ld-linux-aarch64.so.1")
+        else -> liveContainmentFail("GCC host has no fixed system-library ABI mapping")
+    }
+    val interpreterSource = mountedGccInterpreterSource(interpreter, sources, symbolicLinkTarget, isDirectory)
+    if (interpreterSource == null || !isRegularFile(interpreterSource)) {
+        liveContainmentFail("GCC system-library interpreter layout is unsupported")
+    }
+    return capture(sources)
+}
+
+/** Walk link components in destination space; host canonical parents can mean different paths. */
+private fun mountedGccInterpreterSource(
+    interpreter: Path,
+    sources: List<Pair<Path, Path>>,
+    symbolicLinkTarget: (Path) -> Path?,
+    isDirectory: (Path) -> Boolean,
+): Path? {
+    fun sourceAt(destination: Path): Path? = sources.singleOrNull { destination.startsWith(it.second) }
+        ?.let { (source, mount) -> source.resolve(mount.relativize(destination)) }
+
+    val root = Path.of("/")
+    var directory = root
+    val remaining = ArrayDeque<Path>()
+    interpreter.forEach { remaining.addLast(it) }
+    var steps = 0
+    var links = 0
+    while (remaining.isNotEmpty()) {
+        if (++steps > 256) return null
+        val component = remaining.removeFirst()
+        when (component.toString()) {
+            "", "." -> continue
+            ".." -> { directory = directory.parent ?: root; continue }
+        }
+        val destination = directory.resolve(component)
+        val source = sourceAt(destination)
+        if (source == null) {
+            // Only ancestors of a selected destination exist as synthetic directories.
+            if (sources.none { (_, mount) -> mount.startsWith(destination) }) return null
+            directory = destination
+            continue
+        }
+        val target = symbolicLinkTarget(source)
+        if (target == null) {
+            if (remaining.isNotEmpty() && !isDirectory(source)) return null
+            directory = destination
+            continue
+        }
+        if (++links > 40 || target.toString().isEmpty()) return null
+        if (target.isAbsolute) directory = root
+        val components = ArrayList<Path>()
+        for (part in target) {
+            if (components.size + remaining.size >= 256) return null
+            components.add(part)
+        }
+        // Do not normalize away parent components before their preceding links are resolved.
+        components.asReversed().forEach { remaining.addFirst(it) }
+    }
+    return sourceAt(directory)
+}
+
 internal fun deriveRuntimeConfiguration(
     definition: GccCompilerEngineValidatedContainmentDefinition,
     classPath: List<FullTreeFunctionObservationClassPathEntry>,
@@ -1273,13 +1368,18 @@ internal fun deriveRuntimeConfiguration(
                 calculateFullTreeObservationRuntimeManifestSha256(source)
             },
         )
-    val systemMounts = FIXED_SYSTEM_LIBRARY_DESTINATIONS.mapNotNull { destination ->
-        if (!Files.isDirectory(destination, LinkOption.NOFOLLOW_LINKS) && !Files.isDirectory(destination)) {
-            null
-        } else {
-            val source = destination.toRealPath()
-            runtimeMount(source, destination)
-        }
+    val systemMounts = withGccSystemLibrarySources(
+        System.getProperty("os.arch"),
+        resolveDirectory = { directory ->
+            if (!Files.isDirectory(directory, LinkOption.NOFOLLOW_LINKS) && !Files.isDirectory(directory)) {
+                null
+            } else directory.toRealPath()
+        },
+        symbolicLinkTarget = { if (Files.isSymbolicLink(it)) Files.readSymbolicLink(it) else null },
+        isDirectory = { Files.isDirectory(it, LinkOption.NOFOLLOW_LINKS) },
+        isRegularFile = { Files.isRegularFile(it, LinkOption.NOFOLLOW_LINKS) },
+    ) { sources ->
+        sources.map { (source, destination) -> runtimeMount(source, destination) }
     }
     if (systemMounts.isEmpty()) liveContainmentFail("GCC host has no fixed system-library runtime mounts")
     val uid = definition.outputLease.uid
@@ -1326,6 +1426,9 @@ internal fun deriveRuntimeConfiguration(
 private fun requireSupportedCheckpoint(
     definition: GccCompilerEngineValidatedContainmentDefinition,
 ): KotlinSystemdCgroupBootResources {
+    if ((definition.bundledRuntime?.processorCount ?: 1) != 1) {
+        liveContainmentFail("parallel runtime requires the contained command launcher; the BOOT-only controller admits one CPU")
+    }
     if (
         definition.runKind == GccCompilerEngineContainmentRunKind.RESUMED ||
         definition.analysisState.mode != GccCompilerEngineAnalysisStateMode.FRESH_EMPTY
@@ -1562,8 +1665,6 @@ private const val ROLLBACK_MARKER_FILE = "rollback-pre-attachment.json"
 private val SHA256 = Regex("[0-9a-f]{64}")
 private val PRIVATE_RUN_DIRECTORY = Regex("\\.function-observation-run-[0-9a-f]{32}")
 private val KOTLIN_RUNTIME_DESTINATION = Path.of("/decomp-runtime/java")
-private val FIXED_SYSTEM_LIBRARY_DESTINATIONS = listOf("/lib", "/lib64", "/usr/lib", "/usr/lib64")
-    .map(Path::of)
 private val CLASSPATH_MANIFEST_FIELDS = setOf("schemaVersion", "provider", "entries")
 private val CLASSPATH_ENTRY_FIELDS = setOf("path", "bytes", "sha256")
 private val CLASSPATH_JSON_LIMITS = StrictJsonLimits(

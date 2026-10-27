@@ -107,6 +107,94 @@ class AcpAgentHarnessTest {
     }
 
     @Test
+    fun `durable session failure context retains only bounded owned facts and the original receipt`() {
+        val phaseType = Class.forName("decompengine.acp.RuntimePrivateControlScope\$MountEventPhase")
+        val outcomeType = Class.forName("decompengine.acp.RuntimePrivateControlScope\$MountEventOutcome")
+        val diagnosticType = Class.forName("decompengine.acp.RuntimePrivateControlScope\$MountEventDiagnostic")
+        val constructor = diagnosticType.getDeclaredConstructor(phaseType, outcomeType, java.lang.Integer::class.java,
+            java.lang.Integer::class.java, java.lang.Integer::class.java, String::class.java).apply { isAccessible = true }
+        for (phase in DurableSessionPhase.entries) {
+            for (stage in listOf("CONSTRUCTING", "ADMITTED")) {
+                val admission = "mount-admission-v1 stage=$stage initialMounts=12 initialControls=2 owner=true initialFast=false"
+                val witness = constructor.newInstance(
+                    phaseType.enumConstants.single { (it as Enum<*>).name == "CHECKPOINT" },
+                    outcomeType.enumConstants.single { (it as Enum<*>).name == "EVENT" }, 1, 10, null, admission) as Throwable
+                val native = java.io.IOException("PRIVATE-cause /PRIVATE/path").apply { addSuppressed(witness) }
+                val originalSuppressed = native.suppressed
+                val facts = AgentFailure(AgentFailureKind.UNAVAILABLE, "PRIVATE-failure", details = mapOf("PRIVATE" to "PRIVATE"))
+                val outcome = AgentExecutionOutcome.Failed(facts)
+                val evidence = AcpInvocationEvidenceSnapshot(
+                    null, AcpExecutionLifecyclePhase.REQUEST_BOUND, AcpExecutionCleanupDisposition.UNVERIFIED,
+                    null, null, null, emptyList(), emptyList(), emptyList(), null,
+                    AcpExecutionEvidenceCompleteness(false, false, false), null,
+                )
+                val receipt = AgentExecutionReceipt(AgentExecutionRequestBinding(AGENT_EXECUTION_CONTRACT_VERSION,
+                    "a".repeat(64), "b".repeat(64)), outcome, evidence, native)
+                var calls = 0
+                var original: AgentExecutionException? = null
+                val asserted = assertFailsWith<AssertionError> {
+                    withDurableSessionFailureContext(phase) {
+                        calls++
+                        try { receipt.requireResult() } catch (failure: AgentExecutionException) {
+                            original = failure
+                            throw failure
+                        }
+                    }
+                }
+                assertEquals(1, calls)
+                val retained = assertNotNull(original)
+                assertSame(retained, asserted.cause)
+                assertSame(receipt, retained.receipt)
+                assertSame(facts, retained.failure)
+                assertSame(native, retained.cause)
+                assertSame(outcome, receipt.outcome)
+                assertSame(evidence, receipt.providerEvidence)
+                assertSame(native, receipt.failureCause)
+                assertContentEquals(originalSuppressed, native.suppressed)
+                assertTrue(retained.suppressed.isEmpty())
+                val context = asserted.message.orEmpty()
+                assertTrue(context.startsWith(phase.label + " [phase=REQUEST_BOUND;kind=UNAVAILABLE;cleanup=UNVERIFIED"), context)
+                assertTrue(requireNotNull(contextMountWitness().message) in context, context)
+                assertTrue(admission in context, context)
+                assertFalse("PRIVATE" in context || "/" in context, context)
+                assertTrue(context.length <= 4096 && context.all { it.code in 32..126 })
+            }
+        }
+    }
+
+    @Test
+    fun `durable session context never retries and preserves unexpected or unrenderable failures`() {
+        for (phase in DurableSessionPhase.entries) {
+            val returned = Any()
+            var calls = 0
+            assertSame(returned, withDurableSessionFailureContext(phase) { calls++; returned })
+            assertEquals(1, calls)
+            val unexpected = listOf(java.io.IOException("PRIVATE"), InterruptedException("PRIVATE"),
+                java.util.concurrent.CancellationException("PRIVATE"), AssertionError("PRIVATE"))
+            for (original in unexpected) {
+                calls = 0
+                val thrown = assertFailsWith<Throwable> {
+                    withDurableSessionFailureContext(phase) { calls++; throw original }
+                }
+                assertSame(original, thrown)
+                assertEquals(1, calls)
+            }
+            val opaque = object : java.io.IOException("PRIVATE") {
+                override fun getStackTrace(): Array<StackTraceElement> = throw AssertionError("PRIVATE-rendering")
+            }
+            val original = AgentExecutionException(AgentFailure(AgentFailureKind.UNAVAILABLE, "PRIVATE"), opaque)
+            calls = 0
+            val thrown = assertFailsWith<AgentExecutionException> {
+                withDurableSessionFailureContext(phase) { calls++; throw original }
+            }
+            assertSame(original, thrown)
+            assertSame(opaque, thrown.cause)
+            assertTrue(thrown.suppressed.isEmpty())
+            assertEquals(1, calls)
+        }
+    }
+
+    @Test
     fun `session preference failure context retains only the existing closed mount witness`() {
         val cause = java.io.IOException("PRIVATE-message /PRIVATE/path").apply {
             stackTrace = arrayOf(StackTraceElement("decompengine.acp.PRIVATE-class", "PRIVATE-method", "PRIVATE-file", 123))
@@ -120,6 +208,25 @@ class AcpAgentHarnessTest {
         assertTrue("mount-event-v1 phase=CHECKPOINT generation=NOT_EVALUATED outcome=EVENT rc=1 revents=10 errno=NA" in context, context)
         assertFalse("PRIVATE" in context || "/" in context, context)
         assertTrue(context.length <= 4096 && context.all { it.code in 32..126 })
+        val phase = Class.forName("decompengine.acp.RuntimePrivateControlScope\$MountEventPhase")
+        val outcome = Class.forName("decompengine.acp.RuntimePrivateControlScope\$MountEventOutcome")
+        val type = Class.forName("decompengine.acp.RuntimePrivateControlScope\$MountEventDiagnostic")
+        val constructor = type.getDeclaredConstructor(phase, outcome, java.lang.Integer::class.java,
+            java.lang.Integer::class.java, java.lang.Integer::class.java, String::class.java).apply { isAccessible = true }
+        val constructing = "mount-admission-v1 stage=CONSTRUCTING initialMounts=12 initialControls=2 owner=true initialFast=false"
+        val admitted = "mount-admission-v1 stage=ADMITTED initialMounts=7 initialControls=0 owner=false initialFast=true"
+        for (admission in listOf(null, constructing, admitted, "PRIVATE /PRIVATE/path", "x".repeat(257), admitted + "\nPRIVATE")) {
+            val diagnostic = constructor.newInstance(
+                phase.enumConstants.single { (it as Enum<*>).name == "CHECKPOINT" },
+                outcome.enumConstants.single { (it as Enum<*>).name == "EVENT" }, 1, 10, null, admission) as Throwable
+            val bounded = sessionPreferencePhaseFailureContext("known-case", AgentExecutionException(
+                decompengine.agent.AgentFailure(AgentFailureKind.CONFIGURATION, "PRIVATE"), diagnostic), null)
+            assertTrue(requireNotNull(contextMountWitness().message) in bounded, bounded)
+            if (admission == constructing || admission == admitted) assertTrue(requireNotNull(admission) in bounded, bounded)
+            else assertFalse("mount-admission-v1" in bounded, bounded)
+            assertFalse("PRIVATE" in bounded || "/" in bounded, bounded)
+            assertTrue(bounded.length <= 4096 && bounded.all { it.code in 32..126 })
+        }
     }
 
     @Test
@@ -683,6 +790,60 @@ class AcpAgentHarnessTest {
             assertTrue(context.contains("facts=NOT_AVAILABLE"))
             assertFalse(context.contains(raw))
         }
+
+        // Already-retained observations only: no process, filesystem or timing trial.
+        val prefix = assertNotNull(RuntimeCopyStatistics.Prefix.create { longArrayOf(12L, 0L) })
+        prefix.start(RuntimeCopyStatistics.Prefix.Phase.LAUNCH_PINNING)
+        prefix.failureCurrent(RuntimeCopyStatistics.Prefix.Failure.TIMEOUT)
+        prefix.finish(RuntimeCopyStatistics.Prefix.Phase.LAUNCH_PINNING, false)
+        val observation = assertNotNull(prefix.failureDiagnostic())
+        val original = assertNotNull(observation.message)
+        val timeout = AgentFailure(AgentFailureKind.TIMEOUT, raw)
+        val cause = AgentExecutionException(timeout, java.io.IOException(raw)).apply { addSuppressed(observation) }
+        val receipt = AgentExecutionReceipt(AgentExecutionRequestBinding(AGENT_EXECUTION_CONTRACT_VERSION, "a".repeat(64), "b".repeat(64)),
+            AgentExecutionOutcome.Failed(timeout), evidence, cause)
+        val retainedOutcome = receipt.outcome
+        val context = safeStopFailureContext("stop-refusal", receipt)
+        assertTrue(context.contains("prefix=supported=true,first=LAUNCH_PINNING,kind=TIMEOUT,elapsedNs=12,remainingNs=0,lastEntered=LAUNCH_PINNING,lastReturned=ENTRY"), context)
+        assertTrue(context.contains("cleanup=UNVERIFIED"))
+        assertTrue(context.length <= 3072)
+        assertFalse(context.contains(raw))
+        assertSame(cause, receipt.failureCause)
+        assertSame(observation, cause.suppressed.single())
+        assertEquals(original, observation.message)
+        assertSame(retainedOutcome, receipt.outcome)
+        assertSame(timeout, assertIs<AgentExecutionOutcome.Failed>(receipt.outcome).failure)
+
+        var foreignMessageReads = 0
+        val foreign = object : java.io.IOException() {
+            override val message: String get() { foreignMessageReads++; error(raw) }
+        }
+        for (diagnostics in listOf(
+            arrayOf(java.io.IOException(raw)),
+            arrayOf(java.io.IOException(original.replace("firstObservedFailure=LAUNCH_PINNING", "firstObservedFailure=$raw"))),
+            arrayOf(java.io.IOException(original.replace("failureElapsedNs=12", "failureElapsedNs=9223372036854775808"))),
+            arrayOf(java.io.IOException(original.replace("failureRemainingNs=0", "failureRemainingNs=00"))),
+            arrayOf(java.io.IOException("x".repeat(8193))),
+            arrayOf(IllegalStateException(original)),
+            arrayOf(foreign),
+            arrayOf(observation, java.io.IOException(original)),
+            Array(5) { java.io.IOException(original) },
+        )) {
+            val rejected = AgentExecutionException(timeout).apply { diagnostics.forEach(::addSuppressed) }
+            val untrusted = AgentExecutionReceipt(receipt.requestBinding, receipt.outcome, evidence, rejected)
+            val rejectedContext = safeStopFailureContext("stop-refusal", untrusted)
+            assertTrue(rejectedContext.contains("prefix=NOT_AVAILABLE"), rejectedContext)
+            assertFalse(rejectedContext.contains(raw))
+        }
+        assertEquals(0, foreignMessageReads)
+        val nested = AgentExecutionException(timeout, java.io.IOException(raw).apply { addSuppressed(observation) })
+        assertTrue(safeStopFailureContext("stop-refusal", AgentExecutionReceipt(receipt.requestBinding, receipt.outcome, evidence, nested)).contains("prefix=NOT_AVAILABLE"))
+        val unregistered = java.io.IOException(raw).apply { addSuppressed(observation) }
+        assertTrue(safeStopFailureContext("stop-refusal", AgentExecutionReceipt(receipt.requestBinding, receipt.outcome, evidence, unregistered)).contains("prefix=NOT_AVAILABLE"))
+        val tailed = AgentExecutionException(timeout).apply { addSuppressed(java.io.IOException(original + raw)) }
+        val projected = safeStopFailureContext("stop-refusal", AgentExecutionReceipt(receipt.requestBinding, receipt.outcome, evidence, tailed))
+        assertTrue(projected.contains("prefix=supported=true,first=LAUNCH_PINNING"))
+        assertFalse(projected.contains(raw), "unselected phase/leaf text is never rendered")
     }
 
     private fun stdoutFactsCall(name: String, vararg arguments: Any?): Any? {
@@ -747,7 +908,8 @@ class AcpAgentHarnessTest {
             val directCause = (retainedCause as? AgentExecutionException)?.cause
             val fields = listOf("ACP_STOP_V1", "mode=$safeMode", "kind=${failure?.kind?.name ?: "NOT_FAILED"}",
                 "phase=${evidence?.phaseReached?.name ?: "UNKNOWN"}", "cleanup=${evidence?.cleanupDisposition?.name ?: "UNKNOWN"}",
-                "cause=${causeCode(retainedCause)}/${causeCode(directCause)}", "facts=$facts")
+                "cause=${causeCode(retainedCause)}/${causeCode(directCause)}", "facts=$facts",
+                "prefix=${retainedPrefixFailureContext(retainedCause as? AgentExecutionException)}")
             val output = StringBuilder(512)
             for ((index, field) in fields.withIndex()) {
                 if (field.any { it.code !in 32..126 } || output.length + field.length + (if (index == 0) 0 else 1) > 3072) return@runCatching "ACP_STOP_V1 DIAGNOSTIC_UNAVAILABLE"
@@ -757,6 +919,27 @@ class AcpAgentHarnessTest {
             output.toString()
         }.getOrDefault("ACP_STOP_V1 DIAGNOSTIC_UNAVAILABLE")
     }
+
+    /** Project only a closed header from an existing mapped wrapper; never traverse its cause graph,
+     * render phase/leaf payloads, resample a clock or interpret these observations as cleanup proof. */
+    private fun retainedPrefixFailureContext(mapped: AgentExecutionException?): String = runCatching {
+        val diagnostics = mapped?.suppressed ?: return@runCatching "NOT_AVAILABLE"
+        if (diagnostics.size > 4) return@runCatching "NOT_AVAILABLE"
+        val candidates = diagnostics.filter { it.javaClass == java.io.IOException::class.java }.mapNotNull {
+            it.message?.takeIf { text -> text.length <= 8192 && text.startsWith("acp-prelaunch-prefix-observation-v1;") }
+        }
+        if (candidates.size != 1) return@runCatching "NOT_AVAILABLE"
+        val phase = "(?:" + RuntimeCopyStatistics.Prefix.Phase.entries.joinToString("|") { it.name } + "|unobserved)"
+        val kind = "(?:" + RuntimeCopyStatistics.Prefix.Failure.entries.joinToString("|") { it.name } + "|unobserved)"
+        val number = "(?:-1|0|[1-9][0-9]{0,18})"
+        val header = Regex("\\Aacp-prelaunch-prefix-observation-v1;supported=(true|false);" +
+            "firstObservedFailure=($phase),kind=($kind),failureElapsedNs=($number),failureRemainingNs=($number);" +
+            "lastEntered=($phase);lastReturned=($phase);states=0-unseen/1-active/2-returned/3-threw;")
+        val fields = header.find(candidates.single())?.groupValues ?: return@runCatching "NOT_AVAILABLE"
+        if (fields[4].toLongOrNull() == null || fields[5].toLongOrNull() == null) return@runCatching "NOT_AVAILABLE"
+        "supported=${fields[1]},first=${fields[2]},kind=${fields[3]},elapsedNs=${fields[4]},remainingNs=${fields[5]}," +
+            "lastEntered=${fields[6]},lastReturned=${fields[7]}"
+    }.getOrDefault("NOT_AVAILABLE")
 
     private fun stdoutControlField(control: Pair<Class<*>, Any>, name: String): Any =
         control.first.getDeclaredField(name).apply { isAccessible = true }.get(control.second)
@@ -998,7 +1181,7 @@ class AcpAgentHarnessTest {
                 }
             }
         }
-        assertEquals(100, acpTestMethods.size, acpTestMethods.joinToString { it.name })
+        assertEquals(102, acpTestMethods.size, acpTestMethods.joinToString { it.name })
         assertTrue(
             acpTestMethods.all { it.returnType == Void.TYPE },
             acpTestMethods.filter { it.returnType != Void.TYPE }.joinToString {
@@ -2139,7 +2322,28 @@ class AcpAgentHarnessTest {
                     releaseCallback.await()
                 }
             }
-            assertTrue(callbackEntered.await(10, TimeUnit.SECONDS), "fixture never delivered an event")
+            val callbackObserved = callbackEntered.await(10, TimeUnit.SECONDS)
+            if (!callbackObserved) {
+                // Observe only an already completed future; keep the existing waits and wall budget.
+                val completed = execution.isDone
+                var completedWithoutCallback = false
+                var completionFailure: Throwable? = null
+                if (completed) {
+                    try {
+                        execution.get()
+                        completedWithoutCallback = true
+                    } catch (wrapped: ExecutionException) {
+                        completionFailure = wrapped.cause ?: wrapped
+                    } catch (cancelled: java.util.concurrent.CancellationException) {
+                        completionFailure = cancelled
+                    }
+                }
+                val invocation = (completionFailure as? AgentExecutionException)?.receipt?.providerEvidence as? AcpInvocationEvidenceSnapshot
+                assertTrue(callbackObserved, "fixture never delivered an event; completed=$completed " +
+                    "completedWithoutCallback=$completedWithoutCallback " +
+                    "invocation=${invocation?.summaryForTest() ?: "unavailable"} " +
+                    "cause=${boundedPreparationCauseForTest(completionFailure)}")
+            }
 
             val failure = try {
                 execution.get(10, TimeUnit.SECONDS)
@@ -2540,7 +2744,13 @@ class AcpAgentHarnessTest {
             val authorityReceipt = authorityHarness.executeReceipt(
                 authorityFixture.request.withCancellation(authorityCancellation),
             )
-            val authorityResult = assertIs<AgentExecutionOutcome.Returned>(authorityReceipt.outcome).result
+            val authorityResult = assertIs<AgentExecutionOutcome.Returned>(
+                authorityReceipt.outcome,
+                "rootCheckpoint=$rootCheckpoint " +
+                    "failureKind=${(authorityReceipt.outcome as? AgentExecutionOutcome.Failed)?.failure?.kind} " +
+                    "${(authorityReceipt.providerEvidence as? AcpInvocationEvidenceSnapshot)?.summaryForTest()} " +
+                    "cause=${boundedPreparationCauseForTest(authorityReceipt.failureCause)}",
+            ).result
             val authorityEvidence = assertIs<AcpInvocationEvidenceSnapshot>(authorityReceipt.providerEvidence)
             assertTrue(authorityCancellationObserved.get(), "actual filesystem authority checkpoint was not reached")
             assertEquals(AgentStopReason.CANCELLED, authorityResult.stopReason)
@@ -2765,8 +2975,12 @@ class AcpAgentHarnessTest {
         val fixture = fixture(wallMillis = 15_000, idleMillis = 3_000)
         val continuation = continuation(fixture)
         val request = fixture.request.withContinuation(continuation)
-        harness("session-persistence", sentinel = "expect-new").executeReceipt(request).requireResult()
-        val restored = harness("session-persistence", sentinel = "expect-load").executeReceipt(request).requireResult()
+        withDurableSessionFailureContext(DurableSessionPhase.NEW) {
+            harness("session-persistence", sentinel = "expect-new").executeReceipt(request).requireResult()
+        }
+        val restored = withDurableSessionFailureContext(DurableSessionPhase.LOAD) {
+            harness("session-persistence", sentinel = "expect-load").executeReceipt(request).requireResult()
+        }
         assertTrue(restored.summary.orEmpty().contains("session/load"))
         assertEquals("fixture-session", restored.session?.resumeReference)
         decompengine.agent.AgentSessionJournal.open(continuation).use { journal ->
@@ -2851,6 +3065,23 @@ class AcpAgentHarnessTest {
             ),
         )
 
+    private enum class DurableSessionPhase(val label: String) {
+        NEW("durable-session-new"), LOAD("durable-session-load"),
+    }
+
+    // Same operation exactly once. Rendering failure must leave the original typed failure intact.
+    private fun <T> withDurableSessionFailureContext(phase: DurableSessionPhase, operation: () -> T): T = try {
+        operation()
+    } catch (failure: AgentExecutionException) {
+        val context = try {
+            sessionPreferencePhaseFailureContext(phase.label, failure,
+                failure.receipt?.providerEvidence as? AcpInvocationEvidenceSnapshot)
+        } catch (_: Throwable) {
+            throw failure
+        }
+        throw AssertionError(context, failure)
+    }
+
     // Failure-only context: fixed labels/sites and an existing closed scalar mount witness.
     // Stack/suppressed accessors snapshot arrays; inspected entries and rendered output are bounded.
     private fun sessionPreferencePhaseFailureContext(
@@ -2865,6 +3096,8 @@ class AcpAgentHarnessTest {
         val witness = Regex("mount-event-v1 phase=(CHECKPOINT|CONTROL_ADMISSION|REFRESH) " +
             "generation=(NOT_EVALUATED|MISMATCH_ALREADY_OBSERVED) outcome=(EVENT|INVALID_DESCRIPTOR|SYSCALL_ERROR) " +
             "rc=(NA|-?[0-9]{1,10}) revents=(NA|[0-9]{1,5}) errno=(NA|-?[0-9]{1,10})")
+        val admission = Regex("mount-admission-v1 stage=(CONSTRUCTING|ADMITTED) " +
+            "initialMounts=[0-9]{1,10} initialControls=[0-9]{1,10} owner=(true|false) initialFast=(true|false)")
         val pending = java.util.ArrayDeque<Throwable>()
         val seen = ArrayList<Throwable>(8)
         pending.add(failure)
@@ -2911,6 +3144,11 @@ class AcpAgentHarnessTest {
             if (observed.javaClass.name == "decompengine.acp.RuntimePrivateControlScope\$MountEventDiagnostic") {
                 observed.message?.takeIf { it.length <= 512 && witness.matches(it) }?.let {
                     append(";witness=").append(it)
+                    val admissionRecord = try {
+                        (observed.javaClass.getDeclaredField("admissionContext").apply { isAccessible = true }.get(observed) as? String)
+                            ?.takeIf { value -> value.length <= 256 && admission.matches(value) }
+                    } catch (_: Throwable) { null }
+                    if (admissionRecord != null) append(";admission=").append(admissionRecord)
                 }
             }
             observed.cause?.let { if (pending.size < 16) pending.add(it) }
@@ -3351,6 +3589,9 @@ class AcpAgentHarnessTest {
         failure: AgentExecutionException? = null,
         events: Collection<AgentExecutionEvent> = emptyList(),
     ) {
+        // Keep every assertion and process observation below unchanged; enrich only its message.
+        @Suppress("NAME_SHADOWING")
+        val context = if (failure == null) context else safeCleanupFailureContext(context, failure)
         val invocation = failure?.receipt?.providerEvidence as? AcpInvocationEvidenceSnapshot
         if (failure != null) {
             assertNotNull(invocation, "$context invocation evidence")

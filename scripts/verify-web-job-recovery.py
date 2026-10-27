@@ -33,7 +33,13 @@ SUITES = tuple("decompengine." + name for name in (
     "jobs.StagedJobUploadTest",
     "jobs.UploadStagingRecoveryTest",
     "jobs.WorkflowAttemptStoreTest",
+    "jobs.WorkflowCancellationReceiptTest",
+    "jobs.WorkflowStartReceiptTest",
+    "web.DurableWebWorkflowStartTest",
+    "web.WebWorkflowStartControllerTest",
     "web.WebJobServiceTest",
+    "web.WebAttemptCancellationTest",
+    "web.WebCancellationControllerTest",
     "web.UploadServerShutdownTest",
     "web.WebApiControllerTest",
 ))

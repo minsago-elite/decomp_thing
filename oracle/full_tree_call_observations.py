@@ -102,8 +102,15 @@ def _parent_subprogram(die: Any) -> Any | None:
 
 def _target(die: Any, dwarf: Any, image_base: int, executable_ranges: tuple[tuple[int, int], ...], helpers: tuple[Any, Any, Any]) -> dict[str, Any]:
     BaseAddressEntry, RangeEntry, describe_form_class = helpers
-    has_target = "DW_AT_call_target" in die.attributes
-    has_clobbered_target = "DW_AT_call_target_clobbered" in die.attributes
+    # GCC's pre-DWARF5 extension uses distinct attribute names. Resolve the
+    # original reference key rather than mutating the DIE's attribute table;
+    # abstract_origin on other DIE kinds is not a call-target declaration.
+    gnu_site = die.tag == "DW_TAG_GNU_call_site"
+    origin_key = "DW_AT_abstract_origin" if gnu_site else "DW_AT_call_origin"
+    target_key = "DW_AT_GNU_call_site_target" if gnu_site else "DW_AT_call_target"
+    clobbered_key = "DW_AT_GNU_call_site_target_clobbered" if gnu_site else "DW_AT_call_target_clobbered"
+    has_target = target_key in die.attributes
+    has_clobbered_target = clobbered_key in die.attributes
     target_evidence = (
         "call-target-and-clobbered-expressions" if has_target and has_clobbered_target
         else "call-target-expression" if has_target
@@ -111,7 +118,7 @@ def _target(die: Any, dwarf: Any, image_base: int, executable_ranges: tuple[tupl
         else "none"
     )
     proven_function_ids: list[str] = []
-    target_attribute = die.attributes.get("DW_AT_call_target")
+    target_attribute = die.attributes.get(target_key)
     if target_attribute is not None and isinstance(target_attribute.value, (bytes, bytearray, list, tuple)):
         from elftools.dwarf.dwarf_expr import DWARFExprParser  # type: ignore[import-untyped]
 
@@ -120,7 +127,7 @@ def _target(die: Any, dwarf: Any, image_base: int, executable_ranges: tuple[tupl
             address = int(operations[0].args[0])
             if _in_executable_range(address, image_base, executable_ranges):
                 proven_function_ids = [f"function-rva-{hex(address - image_base)}"]
-    origin_attribute = die.attributes.get("DW_AT_call_origin")
+    origin_attribute = die.attributes.get(origin_key)
     if origin_attribute is None:
         return {
             "aliases": [],
@@ -132,7 +139,7 @@ def _target(die: Any, dwarf: Any, image_base: int, executable_ranges: tuple[tupl
             "targetEvidence": target_evidence,
         }
     try:
-        origin = die.get_DIE_from_attribute("DW_AT_call_origin")
+        origin = die.get_DIE_from_attribute(origin_key)
         names = sorted(
             _dwarf_names(
                 origin,

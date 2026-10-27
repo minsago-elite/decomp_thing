@@ -7,6 +7,15 @@ import decompengine.repair.*
 
 private val SAFE_REPAIR_ARTIFACT_SEGMENT = Regex("[A-Za-z0-9._-]{1,160}")
 
+internal const val MAXIMUM_RECORDED_REPAIR_EVIDENCE_REQUEST_BYTES = 64L * 1024 * 1024
+
+/** Explicit bound receipts may exceed the generic presentation limit, within the shared allowance. */
+internal fun recordedRepairEvidenceReadReservation(requestedBytes: Long, remainingBytes: Long): Long {
+    require(requestedBytes in 0..MAXIMUM_RECORDED_REPAIR_EVIDENCE_REQUEST_BYTES &&
+        remainingBytes in 0..MAXIMUM_RECORDED_REPAIR_EVIDENCE_REQUEST_BYTES)
+    return minOf(requestedBytes, remainingBytes)
+}
+
 enum class RepairEvidenceArtifactState { AVAILABLE, UNAVAILABLE, CORRUPT }
 
 /** Receipt integrity is per persisted invocation, even if several records name the same path. */
@@ -57,20 +66,32 @@ internal const val MAXIMUM_VISIBLE_RECORDED_REPAIR_ATTEMPTS = 100
 internal fun visibleRecordedRepairAttempts(snapshot: RepairHistorySnapshot): List<RepairRecordedAttempt> =
     RepairRecordedHistoryPage.select(snapshot, RepairRecordedHistorySelection(), MAXIMUM_VISIBLE_RECORDED_REPAIR_ATTEMPTS).attempts
 
-internal data class RecordedRepairHistoryQuery(val runId: String?, val selection: RepairRecordedHistorySelection)
+internal data class RecordedRepairHistoryQuery(val runId: String?, val selection: RepairRecordedHistorySelection,
+    val validationCasePageNumber: Int = 1) {
+    init {
+        require(validationCasePageNumber > 0 && (validationCasePageNumber == 1 ||
+            selection.expectedGraphSha256 != null && (selection.evidenceAttempt != null || selection.evidenceRun != null))) {
+            "Recorded validation case selection is invalid."
+        }
+    }
+}
 internal fun parseRecordedRepairHistoryQuery(raw: String?): RecordedRepairHistoryQuery {
     if (raw == null) return RecordedRepairHistoryQuery(null, RepairRecordedHistorySelection())
     require(raw.isNotEmpty() && raw.length <= 512) { "Recorded history query is invalid." }
     val values = linkedMapOf<String, String>()
     for (part in raw.split('&')) {
         val pair = part.split('=', limit = 2)
-        require(pair.size == 2 && pair[0] in setOf("runId", "historyPage", "historyCasesPage", "historyGraph", "historyEvidence") &&
+        require(pair.size == 2 && pair[0] in setOf("runId", "historyPage", "historyCasesPage", "historyGraph", "historyEvidence", "historyRunEvidence", "historyValidationPage") &&
             values.put(pair[0], pair[1]) == null) { "Recorded history query is invalid." }
     }
     val run = values["runId"]
     require(run == null || run.matches(Regex("[A-Za-z0-9][A-Za-z0-9_-]{0,127}"))) { "Recorded history query is invalid." }
+    val validationPage = values["historyValidationPage"]?.let { value ->
+        require(value.matches(Regex("[1-9][0-9]{0,9}"))) { "Recorded validation case page is invalid." }
+        requireNotNull(value.toIntOrNull()) { "Recorded validation case page is invalid." }
+    } ?: 1
     return RecordedRepairHistoryQuery(run, parseRecordedRepairSelection(
-        values["historyPage"], values["historyCasesPage"], values["historyGraph"], values["historyEvidence"]))
+        values["historyPage"], values["historyCasesPage"], values["historyGraph"], values["historyEvidence"], values["historyRunEvidence"]), validationPage)
 }
 
 internal data class RecordedRepairHistoryView(
@@ -80,6 +101,9 @@ internal data class RecordedRepairHistoryView(
     val receiptStates: Map<RepairRecordedIdentity, RepairEvidenceArtifactState> = emptyMap(),
     val page: RepairRecordedHistoryPage? = null,
     val runId: String? = null,
+    val validationDiagnostics: Map<RepairRecordedIdentity, RecordedRepairValidationDiagnosticView> = emptyMap(),
+    val validationObservations: Map<RepairRecordedIdentity, RecordedRepairValidationObservationView> = emptyMap(),
+    val validationCasePageNumber: Int = 1,
 )
 
 internal fun recordedRepairArtifactReferences(snapshot: RepairHistorySnapshot): Set<RepairRecordedArtifactReference> =
@@ -94,6 +118,13 @@ internal fun recordedRepairArtifactReferences(snapshot: RepairHistorySnapshot,
             attempt.before?.artifact?.let(::add)
             attempt.after?.artifact?.let(::add)
             attempt.invocation?.artifact?.let(::add)
+            if (page.selection.evidenceAttempt != null) attempt.validationObservation?.let {
+                add(it.primary.artifact); it.diff?.artifact?.let(::add)
+            }
+        }
+        page.evidenceRuns.forEach { run ->
+            run.validationDiagnostic?.let { binding -> add(binding.receipt); add(binding.diagnostic) }
+            run.baselineValidationObservation?.let { add(it.primary.artifact); it.diff?.artifact?.let(::add) }
         }
     }
 }
@@ -110,7 +141,7 @@ internal fun recordedRepairLogicalArtifactPath(target: String, reports: WebRepor
     if (logical.length > 4096 || parts.size !in 2..32 ||
         parts.any { it == "." || it == ".." || !SAFE_REPAIR_ARTIFACT_SEGMENT.matches(it) }) return null
     if (logical == "reports/repair_history.json") return null
-    if (parts[1] == "repair-revisions" &&
+    if (parts[1] == "repair-revisions" && !validationObservationReceiptPath(logical) && !validationObservationDiffPath(logical) &&
         (parts.size != 3 || !Regex("revision_[0-9]{8}_[0-9a-f]{16}\\.acp-receipt\\.json").matches(parts[2]))) return null
     return logical
 }

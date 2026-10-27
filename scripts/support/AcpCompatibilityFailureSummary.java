@@ -15,6 +15,10 @@ final class AcpCompatibilityFailureSummary {
         "outcome=(EVENT|INVALID_DESCRIPTOR|SYSCALL_ERROR) " +
         "rc=(NA|-?[0-9]{1,10}) revents=(NA|[0-9]{1,5}) errno=(NA|-?[0-9]{1,10})"
     );
+    private static final Pattern MOUNT_ADMISSION = Pattern.compile(
+        "mount-admission-v1 stage=(CONSTRUCTING|ADMITTED) " +
+        "initialMounts=[0-9]{1,10} initialControls=[0-9]{1,10} owner=(true|false) initialFast=(true|false)"
+    );
 
     private AcpCompatibilityFailureSummary() {}
 
@@ -68,13 +72,19 @@ final class AcpCompatibilityFailureSummary {
                 var message = current.getMessage();
                 if (message != null && message.length() <= 512 && MOUNT_WITNESS.matcher(message).matches()) {
                     witness = message;
+                    try {
+                        var field = current.getClass().getDeclaredField("admissionContext");
+                        field.setAccessible(true);
+                        if (field.get(current) instanceof String admission && admission.length() <= 256 &&
+                            MOUNT_ADMISSION.matcher(admission).matches()) witness += "; " + admission;
+                    } catch (Throwable unavailable) { /* Preserve the original scalar witness. */ }
                 }
             }
-            var sites = new ArrayList<String>(2);
+            var sites = new ArrayList<String>(6);
             var stack = current.getStackTrace();
-            for (var index = 0; index < Math.min(32, stack.length) && sites.size() < 2; index++) {
+            for (var index = 0; index < Math.min(32, stack.length) && sites.size() < 6; index++) {
                 var site = siteLabel(stack[index]);
-                if (site != null) sites.add(site);
+                if (site != null && !sites.contains(site)) sites.add(site);
             }
             causes.add(witness == null ? typeLabel(current) + "[" + String.join(",", sites) + "]" : witness);
             if (current.getCause() != null && pending.size() < 16) pending.add(current.getCause());
@@ -112,11 +122,17 @@ final class AcpCompatibilityFailureSummary {
     }
 
     private static String siteLabel(StackTraceElement frame) {
-        return switch (frame.getClassName() + "#" + frame.getMethodName()) {
+        var siteClass = frame.getClassName();
+        var siteMethod = frame.getMethodName();
+        if (siteClass == null || siteMethod == null || siteClass.length() > 96 || siteMethod.length() > 64) return null;
+        return switch (siteClass + "#" + siteMethod) {
             case "decompengine.acp.RuntimePrivateControlScope#checkpoint" -> "private-control-checkpoint";
             case "decompengine.acp.RuntimePrivateControlScope#requireMountsUnchanged",
                  "decompengine.acp.RuntimePrivateControlScope$MountEventCheck#requireUnchanged" -> "mount-check";
             case "decompengine.acp.RuntimePrivateControlScope#requireDescriptor" -> "descriptor-revalidation";
+            case "decompengine.acp.LinuxBubblewrapBoundaryKt#buildRuntimeManifestOwned" -> "runtime-manifest";
+            case "decompengine.acp.LinuxBubblewrapBoundaryKt#stagePrivateRuntimeSnapshot" -> "runtime-snapshot";
+            case "decompengine.acp.LinuxBubblewrapBoundaryKt#pinMounts" -> "mount-pinning";
             case "decompengine.acp.RuntimePrivateControlScope#currentRoot" -> "root-identity";
             case "decompengine.acp.RuntimePrivateControlScope#requireRootUnexposed" -> "private-control-coverage";
             case "decompengine.acp.LinuxBubblewrapBoundaryKt#requirePrivateControlRegistryHealthy" -> "registry-health";

@@ -81,6 +81,14 @@ const entry = vite['index.html'];
 if (!entry || entry.isEntry !== true || !entry.file?.endsWith('.js')) {
   throw new Error('Vite manifest has no index.html JavaScript entry');
 }
+const bootstrapEntries = Object.values(vite).filter(chunk => chunk.name === 'display-preferences-bootstrap');
+const displayBootstrap = bootstrapEntries[0];
+if (bootstrapEntries.length !== 1 || !displayBootstrap || displayBootstrap.isEntry !== true || !displayBootstrap.file?.endsWith('.js') ||
+    displayBootstrap.file === entry.file ||
+    ['imports', 'dynamicImports', 'css', 'assets'].some(key => displayBootstrap[key] !== undefined &&
+      (!Array.isArray(displayBootstrap[key]) || displayBootstrap[key].length !== 0))) {
+  throw new Error('Vite manifest needs a standalone display preference bootstrap entry');
+}
 for (const value of Object.values(vite)) {
   if (!byPath.get(value.file)?.public) throw new Error('Vite manifest names an absent/private resource');
   for (const path of [...(value.css ?? []), ...(value.assets ?? [])]) {

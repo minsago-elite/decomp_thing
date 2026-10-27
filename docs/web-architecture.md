@@ -244,7 +244,7 @@ capability, not on core local Git availability (#200–#215).
 | Server state | Kotlin job/attempt/revision/event/operation stores | Browser holds bounded snapshots/pages, reconciles by identity/version, and never infers acceptance from a completed progress bar |
 | URL state | Router plus typed parse/serialize helpers | Job, run, immutable revision/file, repository/worktree, selected tab, shareable filters/sort/cursor; back/forward restores the same scope |
 | Transient view state | Local hooks/reducers; feature context only when shared | Dialog visibility, dirty form draft, selected rows, expanded nodes and request lifecycle; clear or reconcile on identity change |
-| Persisted preferences | Small versioned localStorage record | Theme, density, wrapping and pane preferences only; bounded values with validation and reset; unavailable storage is recoverable |
+| Persisted preferences | Small versioned localStorage record | Theme, reduced motion, density, wrapping and pane preferences only; bounded values with validation and reset; unavailable storage is recoverable |
 
 Tokens, sessions, CSRF material, source/log bodies, private prompts and job/workflow
 truth never enter localStorage. In-flight request deduplication and AbortController
@@ -323,3 +323,170 @@ shutdown behavior for the same fixture on both alternatives, along with migratio
 cost and unchanged API/asset/trust contracts. Adoption of a SPA, Git views or a
 larger route count alone is insufficient. Keep transport replaceable through the
 HTTP/service split rather than preemptively replacing the server (#158/#208).
+
+## Route and contract extension workflow
+
+This recipe follows the current checked-in implementation. The earlier baseline
+and design decisions above retain their historical scope. Start an extension by
+checking its current server capability and owning acceptance criteria; schema types
+alone do not establish a working endpoint. The current job overview provides a
+worked read-only path through the layers:
+
+| Layer | Existing example |
+|---|---|
+| UI route and lifetime | [`App.tsx`](../frontend/src/app/App.tsx), [`paths.ts`](../frontend/src/app/paths.ts) and [`Job.tsx`](../frontend/src/routes/Job.tsx) |
+| Decoded transport | [`client.ts`](../frontend/src/api/client.ts), [`decode.ts`](../frontend/src/api/decode.ts) and the [client boundary](../frontend/src/api/README.md) |
+| Public DTO and HTTP dispatch | [`WebPublicProjection.kt`](../src/main/kotlin/decompengine/web/WebPublicProjection.kt) and [`WebApiController.kt`](../src/main/kotlin/decompengine/web/WebApiController.kt) |
+| Packaged deep link | `routeSpaPreview` in [`UploadServer.kt`](../src/main/kotlin/decompengine/web/UploadServer.kt) |
+
+### Add a route and its accessible view
+
+1. Define the view's job/run/revision scope and supported capability first. Choose
+   loading, empty, denied, stale, unsupported, partial and failed presentations that
+   preserve unavailable facts. A completed attempt and an accepted reconstruction
+   retain their different meanings.
+2. Add a route module under `frontend/src/routes/` and register it in `App.tsx`.
+   Follow the existing lazy-route boundary for a substantial feature. Update the
+   page title, active navigation/breadcrumbs and route-heading focus. `ViewBoundary`
+   supplies the scoped render-error state; the shell announces route loading and
+   focuses the committed `h1`, including after lazy loading.
+3. Extend the appropriate closed helper in `paths.ts` and its input tests. For a
+   new top-level route, extend `appPath`'s route union and runtime allowlist together.
+   Use job/run helpers for those identities. Preserve the validated deployment
+   prefix, opaque identifier grammar and exactly-once query encoding. URL state
+   owns shareable filters/tabs/cursors and must survive back/forward.
+4. Extend the JVM's recognized shell-route set for a new deep link. Test direct
+   GET/HEAD and nested prefixes, canonical redirects and unknown paths. Keep asset
+   and API dispatch before shell fallback so an unknown API/asset retains its error.
+   A frontend router entry alone cannot make a packaged deep link available.
+5. Build the view from typed props and small feature-owned hooks/transforms. Use
+   a labeled section and one route `h1`, named native links/buttons, associated
+   form labels, an announced pending state and a useful alert/recovery action.
+   Keep keyboard focus on the user's current control during background updates.
+   Exercise keyboard activation and focus order in meaningful component/browser
+   checks; a snapshot of markup alone cannot establish usability.
+
+### Extend a DTO through both boundaries
+
+Edit [`contracts/web/v1/contract.schema.json`](../contracts/web/v1/contract.schema.json)
+and representative positive/negative fixtures together. Keep explicit envelope
+kind/version, required/null/unknown distinctions, string/collection/byte limits and
+cross-field identity rules. Unsigned counters, addresses and opaque identities stay
+lossless strings. Use the generator's reviewed schema subset and update semantic
+checks when a relationship changes.
+
+```sh
+python3 contracts/web/v1/verify.py
+npm --prefix frontend run api:generate
+npm --prefix frontend run api:check
+```
+
+Use the [pinned repository-local setup](web-packaging.md#repository-local-frontend-setup-and-rebuilds)
+and [fixture generation workflow](web-workflow-fixtures.md#generating-and-selecting-development-fixtures)
+for these commands. Generation owns `generated.ts` and `generated-schema.ts`; keep
+handwritten decoding/view behavior in its own modules. Check the generated diff
+and the source-schema hash. Consumer decoding discards unknown fields, while
+producer/request checks reject them. Unknown kinds/versions and invalid known
+fields retain their typed failure outcomes.
+
+On the JVM, add an explicit bounded public projection and the authorized
+controller/service path. `WebPublicProjection.kt` shows how job DTOs omit private
+persistence paths and raw status diagnostics. Resolve server-owned identities,
+take the appropriate consistent snapshot, and serialize only the contract fields.
+Preserve shared session/Origin checks, bounded request parsing, sanitized errors,
+cache policy and request correlation. Advertise a capability only when its actual
+service and required validation are registered. An unavailable operation stays
+unavailable throughout its view and mutation controls.
+
+The existing read in `Job.tsx` illustrates the frontend call shape:
+
+```ts
+const response = await client.get('job', `/jobs/${jobId}`, {
+  signal: controller.signal,
+});
+```
+
+Here `client` comes from `usePrivateTransport(basePath)` and `controller` belongs
+to the current effect. Validate the selected identifier and require the response's
+job identity to match before publishing it. A TypeScript cast cannot replace
+decoding. API paths are relative to `/api/v1`; the client applies the deployment
+prefix. Surface the bounded `ApiClientError` code/status and opaque failure
+reference using the existing error helpers.
+
+### Adapt observations without adding acceptance authority
+
+Use [`WebProgressObservation.kt`](../src/main/kotlin/decompengine/web/WebProgressObservation.kt)
+as the server projection example: it binds retained observations to job/run/cursor,
+retains omission facts and bounds the serialized event. On the frontend,
+[`ActivityRow.tsx`](../frontend/src/jobs/ActivityRow.tsx) classifies a decoded event
+and renders a view; it does not need network access. Keep similar event-to-view
+transforms pure and handle every supported discriminator and unknown/omitted fact.
+
+[`eventStream.ts`](../frontend/src/api/eventStream.ts) owns one bounded connection,
+schema/identity checks and cancellation. The consuming feature owns its bounded
+rows, acknowledged cursor, duplicate/order checks, retention-gap snapshot and
+explicit reconnect policy. [`Activity.tsx`](../frontend/src/jobs/Activity.tsx)
+illustrates that separation with decimal-string sequences compared through
+`BigInt`. Advance position only after accepting the selected event. Preserve
+producer omissions, replay gaps and stale snapshots visibly. A progress message,
+timestamp or Git object does not supply source acceptance or validation evidence.
+
+### State, cancellation, rendering and storage
+
+Server stores own durable job/run/source/acceptance truth. The router owns selected
+identities and shareable URL state; feature hooks own bounded response snapshots,
+in-flight requests and transient controls. Follow `Job.tsx`'s private subtree key
+of session generation plus selected job, and include the relevant run/revision and
+query selection in a new feature's lifetime. `usePrivateTransport` participates in
+the shared session failure/invalidation boundary.
+
+Create an `AbortController` for each read lifetime, pass its signal into the
+client/stream and abort on selection change or unmount. Guard response publication
+and final loading/error updates against obsolete requests, including a response
+that resolves after abort. Clear or mark old data stale on identity/session/server
+changes. Transport abort ends a read; workflow cancellation requires its separate
+explicit authorized command. A render retry, navigation or reconnect never
+reissues a mutation. The API client performs one fetch per call.
+
+Render validated user/project strings through ordinary Preact text children, as
+the existing `<h2>{job.displayFilename}</h2>` does. Apply the bounded text adapter
+for source/log/report bodies; use validated resource links and attachment policy
+for downloads. Keep raw HTML, executable Markdown, arbitrary URL schemes, scripts
+and uploaded modules outside rendering. Display public failure references instead
+of raw exception stacks, response bodies or host/configuration details.
+
+Keep session/CSRF/provider/Git credentials in their existing server or page-local
+owners. Local storage is reserved by the design for small validated, versioned
+non-secret preferences; it cannot become a job/source/log/prompt cache. The current
+[`uploadRecovery.ts`](../frontend/src/jobs/uploadRecovery.ts) has one explicit
+tab/deployment-scoped sessionStorage exception: a versioned upload-intent ticket
+with key, filename, size and creation time, bounded to 2,048 stored characters and
+24 hours. It retains neither File bytes nor session credentials and requires
+explicit reconciliation. Preserve that narrow contract instead of generalizing
+it into a private response cache or mutation retry mechanism.
+
+### Verify the behavior at its owning layer
+
+| Change | Meaningful controls to add or extend |
+|---|---|
+| Route/path | `paths.test.ts` and `app.test.tsx`: root/nested URLs, direct/back/forward navigation, invalid/encoded identities, loading focus and missing resources. |
+| DTO/transport | `api-contract.test.ts`, `api-client.test.ts` and the JVM `WebPublicProjectionTest`/`WebApiControllerTest`: schema drift, invalid/unknown fields, exact large values, selected identity, authorization and bounded sanitized errors. |
+| Request lifetime | Controlled late old/new responses, abort during body reads, unmount and session generation change; the old result cannot replace the new selection. |
+| Events/view | `event-stream.test.ts`, `activity-stream.test.tsx` and `WebProgressObservationTest`: split frames, duplicate/reordered observations, wrong identity, gaps/omissions, bounded rows and cursor recovery. |
+| Accessible/private view | Native role/name/keyboard queries, pending/empty/denied/partial/error states, safe untrusted text and shared-session invalidation; use `private-session-rejection.test.tsx` as the latter seam. |
+| Storage | `upload-recovery.test.ts`: unavailable/full/malformed/expired storage and explicit reconciliation preserve the original intent without a background write/retry. |
+
+Focused frontend checks can select the corresponding existing files, for example:
+
+```sh
+npm --prefix frontend test -- tests/paths.test.ts tests/app.test.tsx \
+  tests/api-contract.test.ts tests/api-client.test.ts tests/event-stream.test.ts
+npm --prefix frontend run typecheck
+npm --prefix frontend run lint
+```
+
+Use [the fixture/browser investigation guide](web-workflow-fixtures.md) for the
+separate JVM, packaged-browser and exact-run Actions layers. Record actual source,
+counts/skips and artifacts at each layer. Fixture HTTP, component and contract
+results keep their stated scope; packaged access, accessibility, workflow and
+release acceptance require their own full evidence.

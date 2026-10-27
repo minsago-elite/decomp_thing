@@ -187,6 +187,12 @@ private inline fun <T> measuredCopyOperation(
     action: () -> T,
 ): T = if (statistics == null) action() else statistics.measure(operation, action)
 
+/** Keep the existing read buffer bound and permit only one byte beyond the remaining allowance. */
+internal fun boundedDescriptorReadRequest(maximumBytes: Int, consumed: Long, bufferBytes: Int): Long {
+    require(maximumBytes >= 0 && consumed >= 0 && consumed <= maximumBytes.toLong() && bufferBytes > 0)
+    return minOf(bufferBytes.toLong(), maximumBytes.toLong() - consumed + 1L)
+}
+
 /**
  * The small Linux descriptor/syscall surface used by the ACP filesystem and process boundaries.
  *
@@ -686,7 +692,7 @@ internal object LinuxFilesystemSyscalls {
         while (true) {
             cancellationCheck()
             val count = retryOnInterrupted("read authorized filesystem entry") {
-                libc.read(descriptor.fd, buffer, NativeLong(BUFFER_BYTES.toLong())).toLong()
+                libc.read(descriptor.fd, buffer, NativeLong(boundedDescriptorReadRequest(maximumBytes, total, BUFFER_BYTES))).toLong()
             }
             if (count == 0L) break
             if (count < 0L) throw syscallFailure("read authorized filesystem entry")
@@ -726,6 +732,7 @@ internal object LinuxFilesystemSyscalls {
         openReadableFrom(authorized).use { readable ->
             Memory(BUFFER_BYTES.toLong()).use { buffer ->
                 var total = 0L
+                var copyBuffer: ByteArray? = null
                 while (true) {
                     measuredCopyOperation(statistics, RuntimeCopyStatistics.Operation.CHECK) { cancellationCheck() }
                     val count = measuredCopyOperation(statistics, RuntimeCopyStatistics.Operation.READ) {
@@ -739,7 +746,14 @@ internal object LinuxFilesystemSyscalls {
                     total = Math.addExact(total, count)
                     if (total > maximumBytes) throw LinuxResourceLimitException()
                     measuredCopyOperation(statistics, RuntimeCopyStatistics.Operation.WRITE) {
-                        output.write(buffer.getByteArray(0, count.toInt()))
+                        val length = count.toInt()
+                        val previous = copyBuffer
+                        // Preserve small-file allocation size; a later larger short read grows once
+                        // to the fixed read bound. No payload array is allocated for EOF/refusal.
+                        val bytes = if (previous != null && previous.size >= length) previous
+                            else ByteArray(if (previous == null) length else BUFFER_BYTES).also { copyBuffer = it }
+                        buffer.read(0, bytes, 0, length)
+                        output.write(bytes, 0, length)
                     }
                     statistics?.written(count)
                     measuredCopyOperation(statistics, RuntimeCopyStatistics.Operation.CHECK) { cancellationCheck() }

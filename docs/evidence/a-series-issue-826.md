@@ -1,8 +1,15 @@
-# A-series issue #826 — Tracker: Enforce remaining planning, generation and validation profile budgets — evidence boundary
+# A-series issue #826 — Historical budget evidence snapshot
 
 - Milestone: A8: Reconstruct a Buildable GCC Driver Source Tree
-- Worktree: `/home/june/a-series-wt/issue-826` (branch `a-series-issue-826`, based on `origin/master`)
-- Status: NOT YET QUALIFIED — this file records the current evidence boundary only; it does not claim production qualification.
+- Evidence scope: historical source inspection and issue excerpt; this file is not live project status.
+- Status: parent #826 remains open for its full production qualification boundary.
+
+The excerpt and investigator notes below predate the completed planning, generation,
+build and archive budget-accounting slices. The planning receipt is documented in
+[Semantic planning budget evidence](../semantic-planning-budget-evidence.md).
+The current [parent contract](https://github.com/minsago-elite/decomp_thing/issues/826)
+retains the open production behavior-validation work in #1061. The historical
+unchecked rows and source-line observations below do not override that live status.
 
 ## Outcome (from issue)
 Tracker: Enforce remaining planning, generation and validation profile budgets
@@ -15,12 +22,12 @@ See `gh issue view 826` for the authoritative checklist. This PR does not close 
 - Inspected the `origin/master` worktree for existing implementation, tests and retained checkpoints.
 - Recorded only what is currently evidenced; unresolved behavior remains explicitly unclaimed.
 
-## Current boundary (truthful, no fabrication)
+## Historical boundary
 - No new production behavior is claimed by this file.
 - Qualification evidence (contained runs, deterministic repetitions, independent archive verification, authority boundaries) is still required before #826 can close.
 - Parent checkpoints and dependency contracts referenced by the issue retain their own scope and verification requirements.
 
-## Source excerpt (authoritative issue body, truncated)
+## Historical issue excerpt (truncated; use the live contract for current status)
 ```markdown
 ## Coordination tracker
 
@@ -71,12 +78,12 @@ Reuse the implementation and retained checkpoints in #84; complete or verify onl
 
 ```
 
-## Limitations / next steps
+## Historical limitations and next steps
 - Attach focused execution evidence (exact commands, commits, artifacts, budgets) in a follow-up before claiming #826.
 - Keep implementation slices minimal and file-scoped (`docs/evidence/a-series-issue-826.md` only) so parallel A-series PRs do not conflict.
 - Distinguish draft implementation, merged behavior and production qualification per the issue's evidence requirements.
 
-## Investigator brief (explore agent, worktree /home/june/a-series-wt/issue-826)
+## Historical investigator brief
 - Contracts: `ReconstructionBudgets` (export/planner/module/context/build/archive) + `ReconstructionHostSafetyLimits.requireAllows()` + immutable profile identity in `project/ReconstructionProfile.kt`.
 - Wiring to audit per boundary: `ArchivalReconstruction.kt` (export/planner/build/archive), `DeterministicModulePlanner.kt` (work-unit charging), `SourceTree.kt` (context budget), `GeneratedCModuleValidation.kt` (build wall-clock/output cap), `ArchivalAudit.kt` (archive entry/byte bounds).
 - Carve-outs: `Doctor.kt:297-298` reads full output then unbounded `waitFor()` — no timeout, output cap, budget charge, or cancellation propagation (owned by #1057). Generation/planning/validation/publication consume+record + admission/exhaustion rejection evidence still absent as a single boundary inventory; export/context checks cannot substitute. Split children: #1057 Doctor, #1058 planning, #1059 generation, #1060 build, #1061 validation, #1062 archive.

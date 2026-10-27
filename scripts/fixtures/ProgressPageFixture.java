@@ -14,6 +14,7 @@ class ProgressPageFixture {
         Job job = new Job("fixture", "display fixture", "analyzing", "2026-09-05T00:00:00Z",
             "2026-09-05T00:00:00Z", null, header.length, root.resolve("input"),
             ElfMetadataReader.INSTANCE.read(header));
-        Files.writeString(root.resolve("page.html"), WebViewsKt.renderJob(job, null, false));
+        Files.writeString(root.resolve("page.html"), WebViewsKt.renderJob(job, null, java.util.List.of(), null, false,
+            null, null, null, null, null, null, null));
     }
 }
