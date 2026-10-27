@@ -129,7 +129,7 @@ internal class WebGitController(
         return when (text(body["action"])) {
             "git.init" -> {
                 if (body.keys != setOf("action", "runId", "revisionId", "initialBranch")) invalid()
-                val branch = body["initialBranch"].let { if (it == JsonNull) null else text(it).takeIf { name -> name.length in 1..200 } ?: invalid() }
+                val branch = body["initialBranch"].let { if (it == JsonNull) null else text(it).takeIf { name -> name.codePointCount(0, name.length) in 1..200 } ?: invalid() }
                 GitRepositoryRequest.Init(id(body["runId"]), id(body["revisionId"]), branch)
             }
             "git.attach" -> {

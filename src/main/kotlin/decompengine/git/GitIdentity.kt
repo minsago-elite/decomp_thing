@@ -40,7 +40,7 @@ object GitRefNames {
 
     /** Bounded syntax that excludes control/whitespace characters and option or revision syntax. */
     fun isPlausibleBranchName(name: String): Boolean =
-        name.length in 1..MAX_BRANCH_CHARACTERS && !name.startsWith("-") && name != "HEAD" && name != "@" &&
+        name.codePointCount(0, name.length) in 1..MAX_BRANCH_CHARACTERS && !name.startsWith("-") && name != "HEAD" && name != "@" &&
             name.none { it.isWhitespace() || it.isISOControl() || it in "~^:?*[\\" } &&
             !name.contains("..") && !name.contains("@{") && !name.contains("//") &&
             !name.startsWith("/") && !name.endsWith("/") && !name.endsWith(".") && !name.endsWith(".lock") &&
