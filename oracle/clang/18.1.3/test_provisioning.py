@@ -6124,6 +6124,28 @@ class RecipeAndCandidateBindingTests(unittest.TestCase):
                              [[path, "--version"] for _, path in provision.FRONTEND_DRIVER_ROOTS])
             self.assertFalse(args.output.exists())
 
+    def test_provenance_archives_both_loader_java_helpers_exactly_once(self):
+        with self.temporary_directory() as temp, self.offline_packaging_fixture(Path(temp)) as (args, _):
+            helpers = {
+                "aLoaderOwnedStatxDirectSha256": "src/main/java/decompengine/acp/LinuxOwnedStatxDirect.java",
+                "aLoaderOwnedMountPollDirectSha256": "src/main/java/decompengine/acp/LinuxOwnedMountPollDirect.java",
+            }
+            expected = {key: (ROOT / path).read_bytes() for key, path in helpers.items()}
+            self.assertEqual(provision._package_provenance_unqualified(args), 0)
+            with tarfile.open(args.output) as archive:
+                names = archive.getnames()
+                recipe = json.loads(archive.extractfile("build-record.json").read())["recipe"]
+                for key, path in helpers.items():
+                    with self.subTest(helper=path):
+                        name = "recipe/" + path
+                        self.assertEqual(names.count(name), 1)
+                        member = archive.getmember(name)
+                        self.assertTrue(member.isfile())
+                        self.assertEqual(member.size, len(expected[key]))
+                        payload = archive.extractfile(member).read()
+                        self.assertEqual(payload, expected[key])
+                        self.assertEqual(provision.sha256(payload), recipe[key])
+
     def test_provenance_archives_captured_metadata_after_validated_path_replacement(self):
         with self.temporary_directory() as temp, self.offline_packaging_fixture(Path(temp)) as (args, candidate):
             originals = {"build-record.json": args.record.read_bytes(),

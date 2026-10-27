@@ -6642,6 +6642,7 @@ def _package_provenance_unqualified(args: argparse.Namespace) -> int:
     )
     expected_artifacts = [
         RECIPE_FILES["aLoaderControlSupportSha256"], RECIPE_FILES["aLoaderSchemasSha256"], RECIPE_FILES["aLoaderLinuxFilesystemSha256"],
+        RECIPE_FILES["aLoaderOwnedStatxDirectSha256"], RECIPE_FILES["aLoaderOwnedMountPollDirectSha256"],
         RECIPE_FILES["aLoaderArtifactsSha256"], RECIPE_FILES["aLoaderJsonSha256"], RECIPE_FILES["aLoaderSnapshotSha256"], RECIPE_FILES["hostTransportSha256"], RECIPE_FILES["hostJournalSha256"], RECIPE_FILES["gradleBuildSha256"], RECIPE_FILES["gradleSettingsSha256"], RECIPE_FILES["gradlePropertiesSha256"], RECIPE_FILES["gradleWrapperPropertiesSha256"], RECIPE_FILES["gradleWrapperSha256"], RECIPE_FILES["gradleLauncherSha256"],
         candidate, patch_audit, args.acquisition / "downloads",
         args.record, args.probe_report, args.loader_report, args.negative_report,
@@ -6768,7 +6769,8 @@ def _package_provenance_pinned(args, contract, record, captured, candidate, patc
                         elif source in (RECIPE_FILES["hostWorkerSha256"], RECIPE_FILES["hostPolicySha256"],
                                          RECIPE_FILES["hostEnvironmentRecipeSha256"]):
                             arcname = "host-execution/" + source.name
-                        elif source in (RECIPE_FILES["aLoaderControlSupportSha256"], RECIPE_FILES["aLoaderSchemasSha256"], RECIPE_FILES["aLoaderLinuxFilesystemSha256"], RECIPE_FILES["aLoaderArtifactsSha256"], RECIPE_FILES["aLoaderJsonSha256"], RECIPE_FILES["aLoaderSnapshotSha256"], RECIPE_FILES["hostTransportSha256"], RECIPE_FILES["hostJournalSha256"], RECIPE_FILES["gradleBuildSha256"], RECIPE_FILES["gradleSettingsSha256"], RECIPE_FILES["gradlePropertiesSha256"], RECIPE_FILES["gradleWrapperPropertiesSha256"], RECIPE_FILES["gradleWrapperSha256"], RECIPE_FILES["gradleLauncherSha256"]):
+                        elif source in (RECIPE_FILES["aLoaderOwnedStatxDirectSha256"], RECIPE_FILES["aLoaderOwnedMountPollDirectSha256"],
+                                         RECIPE_FILES["aLoaderControlSupportSha256"], RECIPE_FILES["aLoaderSchemasSha256"], RECIPE_FILES["aLoaderLinuxFilesystemSha256"], RECIPE_FILES["aLoaderArtifactsSha256"], RECIPE_FILES["aLoaderJsonSha256"], RECIPE_FILES["aLoaderSnapshotSha256"], RECIPE_FILES["hostTransportSha256"], RECIPE_FILES["hostJournalSha256"], RECIPE_FILES["gradleBuildSha256"], RECIPE_FILES["gradleSettingsSha256"], RECIPE_FILES["gradlePropertiesSha256"], RECIPE_FILES["gradleWrapperPropertiesSha256"], RECIPE_FILES["gradleWrapperSha256"], RECIPE_FILES["gradleLauncherSha256"]):
                             arcname = "recipe/" + source.relative_to(ROOT).as_posix()
                         elif source == RECIPE_FILES["aLoaderSha256"]:
                             arcname = "src/main/kotlin/decompengine/oracle/fulltree/FullTreeGenericTemplateFrontendProfileV1.kt"
