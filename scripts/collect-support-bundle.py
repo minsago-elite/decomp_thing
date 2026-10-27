@@ -167,24 +167,44 @@ def request_lines(log: Path) -> str:
     return "".join(f"{line}\n" for line in lines[-1000:])
 
 
+def scalar_facts(source: object, fields: tuple[str, ...]) -> dict:
+    """Project known scalar fields; never copy nested objects or extension fields verbatim."""
+    if not isinstance(source, dict):
+        return {}
+    return {key: source[key] for key in fields if key in source
+            and (source[key] is None or type(source[key]) in (str, int, bool))}
+
+
 def runtime(reply: Path) -> dict:
     document = json.loads(reply.read_text())
     data = document.get("data", document) if isinstance(document, dict) else None
     # POST /api/v1/session returns only the CSRF token and expiry; the facts are in /api/v1/bootstrap.
     if not isinstance(data, dict) or not isinstance(data.get("applicationBuildId"), str) or "runtime" not in data:
         raise BundleError("--runtime-json must be a saved GET /api/v1/bootstrap reply; a session reply has no runtime facts")
-    capabilities = [{key: capability.get(key) for key in ("id", "state", "reasonCode")}
-                    for capability in data.get("capabilities", []) if isinstance(capability, dict)]
-    source = data.get("runtime") or {}
+    raw_capabilities = data.get("capabilities", [])
+    capabilities = [scalar_facts(capability, ("id", "state", "reasonCode"))
+                    for capability in raw_capabilities if isinstance(capability, dict)] if isinstance(raw_capabilities, list) else []
+    source = data.get("runtime")
+    if not isinstance(source, dict):
+        raise BundleError("--runtime-json bootstrap runtime must be an object")
     return {
-        "applicationBuildId": data.get("applicationBuildId"),
-        "uiBuildId": data.get("uiBuildId"),
-        "apiVersions": data.get("apiVersions"),
-        "basePath": data.get("basePath"),
-        "readiness": data.get("readiness"),
+        **scalar_facts(data, ("applicationBuildId", "uiBuildId", "basePath", "readiness")),
+        "apiVersions": [version for version in data.get("apiVersions", [])
+                        if type(version) is int and 0 <= version <= 1_000_000]
+                       if isinstance(data.get("apiVersions"), list) else [],
         "capabilities": capabilities,
-        "limits": data.get("limits"),
-        "runtime": {key: source.get(key) for key in ("javaVersion", "osName", "architecture", "gitVersion", "scheduler", "progressRetention")},
+        "limits": scalar_facts(data.get("limits"), (
+            "requestDeadlineMs", "uploadDeadlineMs", "downloadIdleMs", "maxJsonBytes", "maxUploadBytes",
+            "maxSourceChunkBytes", "maxLogChunkBytes", "maxEventCount", "maxEventBytes",
+            "terminalEventRetentionMs", "defaultPageLimit", "maxPageLimit")),
+        "runtime": {
+            **scalar_facts(source, ("javaVersion", "osName", "architecture", "gitVersion")),
+            "scheduler": scalar_facts(source.get("scheduler"), (
+                "sampledAt", "state", "reasonCode", "source", "approximate", "lifecycle",
+                "activeWorkers", "workerLimit", "queuedTasks", "queueCapacity")),
+            "progressRetention": scalar_facts(source.get("progressRetention"), (
+                "enabled", "sampledAt", "examined", "expired", "failures", "lastFailureCode")),
+        },
     }
 
 

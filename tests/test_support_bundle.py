@@ -116,6 +116,43 @@ class SupportBundleTest(unittest.TestCase):
         self.assertEqual("/", runtime["basePath"])
         self.assertEqual([{"id": "workflows", "state": "unavailable", "reasonCode": "PREVIEW_UNAVAILABLE"}], runtime["capabilities"])
 
+    def test_nested_runtime_objects_keep_only_known_scalar_facts(self) -> None:
+        document = json.loads(self.reply.read_text())
+        data = document["data"]
+        data["uiBuildId"] = {"customer-confidential-build": "private-project"}
+        data["apiVersions"] = [1, {"customer-confidential-version": "private-project"}, True]
+        data["capabilities"][0]["state"] = {"customer-confidential-state": "private-project"}
+        data["limits"]["customer-confidential-limit"] = "private-project"
+        data["limits"]["maxJsonBytes"] = {"customer-confidential-object": "private-project"}
+        data["runtime"]["scheduler"] = {
+            "state": "available", "activeWorkers": "1", "workerLimit": "2",
+            "customer-confidential-worker": "private-project"}
+        data["runtime"]["progressRetention"] = {
+            "enabled": True, "examined": "3", "lastFailureCode": None,
+            "customer-confidential-retention": "private-project"}
+        self.reply.write_text(json.dumps(document))
+        output = self.collect()
+        text = (output / "runtime.json").read_text()
+        self.assertNotIn("customer-confidential", text)
+        self.assertNotIn("private-project", text)
+        facts = json.loads(text)
+        self.assertNotIn("uiBuildId", facts)
+        self.assertEqual([1], facts["apiVersions"])
+        self.assertNotIn("state", facts["capabilities"][0])
+        self.assertEqual({"maxUploadBytes": "33554432"}, facts["limits"])
+        self.assertEqual({"state": "available", "activeWorkers": "1", "workerLimit": "2"},
+                         facts["runtime"]["scheduler"])
+        self.assertEqual({"enabled": True, "examined": "3", "lastFailureCode": None},
+                         facts["runtime"]["progressRetention"])
+
+    def test_non_object_runtime_is_refused_without_retaining_a_bundle(self) -> None:
+        for malformed in (None, "customer-confidential-runtime", []):
+            with self.subTest(runtime=malformed):
+                self.reply.write_text(json.dumps({"applicationBuildId": "a" * 64, "runtime": malformed}))
+                with self.assertRaisesRegex(bundle_module.BundleError, "runtime must be an object"):
+                    self.collect()
+                self.assertEqual([], list((self.root / "out").iterdir()))
+
     def test_a_session_reply_is_refused_because_it_lacks_runtime_facts(self) -> None:
         self.reply.write_text(json.dumps({"requestId": "r", "data": {"csrfToken": "csrf-secret-value-0123456789", "expiresAt": "2026"}}))
         with self.assertRaisesRegex(bundle_module.BundleError, "bootstrap"):

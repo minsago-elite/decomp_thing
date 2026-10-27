@@ -117,7 +117,7 @@ python3 scripts/collect-support-bundle.py \
 | `doctor.txt` | `doctor --tools-only` status and summary lines only. Host paths and secret-looking environment values are replaced. Pass `--no-doctor` to skip it. |
 | `storage.json` | Job-directory, file, directory and byte counts, pending records, which of the two owner locks (`.web-owner.lock`, `.workflow-owner.lock`) exist, and a count of `workflow-state.json` schema versions (integers, or `invalid`/`unreadable` for damaged records). No names, job IDs or contents. |
 | `requests.txt` | The last 1,000 `web-http-failure` lines of the given log. Every other line, including the session link and stack traces, is dropped. |
-| `runtime.json` | From a saved `GET /api/v1/bootstrap` reply: build IDs, readiness, capability IDs, states and reason codes, limits and runtime facts. The CSRF token, session expiry and server instance ID are dropped. |
+| `runtime.json` | From a saved `GET /api/v1/bootstrap` reply: build IDs, readiness, capability IDs, states and reason codes, limits and runtime facts. Limits, scheduler and retention objects are projected to known scalar fields, not copied wholesale; unknown fields and unexpected nested values are dropped. The CSRF token, session expiry and server instance ID are dropped. |
 | `README.txt` | What was included and what was excluded. |
 
 The collector never reads binaries, `job.json`, reports, sources or archives, and never copies
