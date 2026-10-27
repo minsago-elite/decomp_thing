@@ -227,7 +227,12 @@ it('releases every stream reader, deadline and listener on one still-live signal
   harness = instrument();
   const baseline = harness.snapshot();
   let cancelled = 0;
-  const fetch = vi.fn(() => Promise.resolve(eventStreamResponse(() => { cancelled += 1; })));
+  const bodies: ReadableStream<Uint8Array>[] = [];
+  const fetch = vi.fn(() => {
+    const response = eventStreamResponse(() => { cancelled += 1; });
+    bodies.push(response.body!);
+    return Promise.resolve(response);
+  });
   const stream = createEventStream({ basePath: '/nested', fetch });
   const rounds = 60;
   // Every subscription shares one long-lived page signal that is never aborted, so a listener a
@@ -238,10 +243,13 @@ it('releases every stream reader, deadline and listener on one still-live signal
     const first = await subscription.next();
     expect(first.done).toBe(false);
     await subscription.return(undefined); // Unsubscribe at the yielded event.
+    // Cancellation alone does not release a reader lock; retain each body to check both.
+    expect(bodies.at(-1)!.locked).toBe(false);
   }
   await new Promise(resolve => setTimeout(resolve, 10));
   expect(fetch).toHaveBeenCalledTimes(rounds);
   expect(cancelled).toBe(rounds);
+  expect(bodies.every(body => !body.locked)).toBe(true);
   expect(page.signal.aborted).toBe(false);
   expect(harness.snapshot()).toEqual(baseline);
 });

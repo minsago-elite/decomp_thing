@@ -27,12 +27,22 @@ producing a failure state.
 
 | Capability | Detection | Fallback | Evidence |
 | --- | --- | --- | --- |
-| Streamed event delivery (readable `fetch` body) | `ReadableStream`, `TextDecoder` and `Response.prototype.body` present | Activity polls `events?transport=poll` every 2.5 s from the start and says it is using periodic refresh. A server that answers the stream with 406/415/501, a stream limit, or repeated transient failures switches to the same polling at runtime. Without a readable body or `TextDecoder`, API responses are read whole with `arrayBuffer()` under the same byte limit and strict UTF-8 decoding (`api/body.ts`). | `capability-fallbacks.test.tsx`, `activity-stream.test.tsx` |
+| Streamed event delivery (readable `fetch` body) | `ReadableStream`, `TextDecoder` and `Response.prototype.body` present | Activity polls `events?transport=poll` every 2.5 s from the start and says it is using periodic refresh. A server that answers the stream with 406/415/501, a stream limit, or repeated transient failures switches to the same polling at runtime. API responses still enforce the byte limit while reading a stream even without `TextDecoder`, using a strict UTF-8 decoder after the bounded read. Only engines without readable bodies use `arrayBuffer()`: the declared length is checked before reading and the actual byte limit afterwards, but the browser must buffer that response whole (`api/body.ts`). | `capability-fallbacks.test.tsx`, `activity-stream.test.tsx` |
 | Clipboard write | `navigator.clipboard.writeText` in a secure context | The copy action is replaced by guidance to select the displayed text or download the complete input. A write that fails at runtime reports its failure, and the download remains. | `capability-fallbacks.test.tsx` |
 | File download | Native `<a download>` with a non-empty name (`download=""` would be taken over by the router) | Source and evidence attachments are served with `Content-Disposition: attachment`, so a browser that ignores the attribute still saves the file. The validation page export is an in-memory `data:` link and relies on `download`, which all three engines support; no further fallback is implemented. | `accessibility.test.tsx`, packaged audit keyboard download |
 | Module worker (source highlighting) | Worker construction inside the explicit highlight action | Highlighting reports "unavailable" and the complete text stays plain; nothing else depends on the worker. | `source-highlight-operation.test.ts` |
 | Broadcast session invalidation | `BroadcastChannel` | Without it, other tabs learn about sign-out at their next authenticated read (401) instead of immediately. | `session-tabs.test.ts` |
 | Local preference storage | `localStorage` access | Display preferences apply to the tab only and say they could not be saved. | `display-preferences.test.tsx` |
+
+## Retention evidence boundary (#624)
+
+`frontend/tests/retention-leaks.test.tsx` exercises repeated navigation and 60 stream
+subscriptions on a still-live signal. It checks listener/timer/channel baselines, response-body
+cancellation and released reader locks. This is structural jsdom evidence, not a measurement of
+retained JavaScript heap or detached buffers. The production-bundle heap traces on the agreed
+browser/machine profile required by #219 have not been collected here. #624 remains open pending
+that qualification and coverage of the dependent graph/source features; this harness alone does
+not establish its full acceptance criterion.
 
 ## Offline and sensitive-data policy (#632)
 
