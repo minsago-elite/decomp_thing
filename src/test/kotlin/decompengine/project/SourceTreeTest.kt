@@ -38,6 +38,29 @@ import kotlinx.serialization.json.jsonPrimitive
 
 class SourceTreeTest {
     @Test
+    fun `typed prototypes retain scalar and pointer parameters in generated headers`() {
+        val function = oneModuleModel().functions.single().copy(
+            prototype = "int parse_input(char *input, const char *suffix, uint count)",
+            decompiledC = null,
+        )
+        assertEquals("int parse_input(char *input, const char *suffix, unsigned int count)", normalizedPrototype(function))
+        val project = createTempDirectory("source-typed-parameters-")
+        SourceTreeGenerator.generate(oneModuleModel().copy(functions = listOf(function)), project)
+        assertTrue(project.resolve("src/modules/parse_internal.h").readText().contains(
+            "int parse_input(char *input, const char *suffix, unsigned int count);"))
+        val compilation = GeneratedCModuleValidation.validate(project, "src/modules/parse.c",
+            GeneratedCMakeReconstructionProfile.descriptor)
+        assertTrue(compilation.passed)
+        project.resolve("src/modules/parse.c").writeText("int parse_input(void) { return 17; }\n")
+        assertFalse(GeneratedCModuleValidation.validate(project, "src/modules/parse.c",
+            GeneratedCMakeReconstructionProfile.descriptor).passed)
+        assertEquals("uint64_t parse_input(uint64_t value)", normalizedPrototype(function.copy(
+            prototype = "undefined8 parse_input(undefined8 value)")))
+        assertEquals("int parse_input(void)", normalizedPrototype(function.copy(
+            prototype = "int parse_input(void); int injected(void)")))
+    }
+
+    @Test
     fun `captured source inference reconstructs modules and rejects unauthorized edits`() {
         for (scenario in listOf("valid", "unauthorized", "invalid-c", "empty")) {
             val unauthorized = scenario == "unauthorized"

@@ -31,7 +31,7 @@ internal data class ModuleCompilationEvidence(
 
 /** Generated-C policy is kept beside the explicit generated-C profile. */
 internal object GeneratedCModuleValidation {
-    const val POLICY_ID = "generated-c-module-validation-v2"
+    const val POLICY_ID = "generated-c-module-validation-v3"
 
     fun command(profile: ReconstructionProfile, sourcePath: String): List<String> {
         val configuration = ProjectBuildConfiguration(
@@ -40,8 +40,20 @@ internal object GeneratedCModuleValidation {
             cFlags = profile.adapterConfiguration["compiler-flags"]
                 ?: error("reconstruction profile must declare its compiler flags"),
         )
+        val implementation = profile.layout.declaration("module-implementation")
+        val template = implementation.pathTemplate
+        val prefix = template.substringBefore("{module}")
+        val suffix = template.substringAfter("{module}")
+        require("{module}" in template && sourcePath.startsWith(prefix) && sourcePath.endsWith(suffix))
+        val module = sourcePath.substring(prefix.length, sourcePath.length - suffix.length)
+        require(implementation.materialize(mapOf("module" to module)) == sourcePath)
+        val headers = listOf(
+            profile.layout.declaration("shared-interface").materialize(),
+            profile.layout.declaration("module-interface").materialize(mapOf("module" to module)),
+            profile.layout.declaration("module-private-interface").materialize(mapOf("module" to module)),
+        )
         return listOf(configuration.compilerExecutable) + configuration.cFlags +
-            listOf("-c", sourcePath, "-o", "/dev/null")
+            headers.flatMap { listOf("-include", it) } + listOf("-c", sourcePath, "-o", "/dev/null")
     }
 
     fun validate(projectDir: Path, sourcePath: String, profile: ReconstructionProfile): ModuleCompilationEvidence {

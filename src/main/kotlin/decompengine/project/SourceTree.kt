@@ -1903,7 +1903,15 @@ internal fun normalizedPrototype(function: RecoveredFunction): String {
     val rawReturn = raw.substringBefore(function.name).trim()
     val decompiledReturn = function.decompiledC?.trimStart()?.substringBefore(function.name)?.trim()?.substringAfterLast('\n')?.trim()
     val returnType = decompiledReturn?.takeIf(::portableReturnType) ?: rawReturn.takeIf(::portableReturnType) ?: "int"
-    return "$returnType $name(void)"
+    // Parameters come from the exported typed prototype, never from display C.
+    val match = Regex("^.*?\\b${Regex.escape(function.name)}\\s*\\(([^()]*)\\)\\s*$").matchEntire(raw)
+    val parameters = match?.groupValues?.get(1)?.trim().orEmpty()
+    val safeParameters = parameters.split(',').map(String::trim).takeIf { values ->
+        values.size <= 256 && values.all { parameter ->
+            parameter == "..." || parameter.matches(Regex("[A-Za-z_][A-Za-z0-9_ \\t*]*"))
+        } && ("..." !in values || values.last() == "..." && values.size > 1)
+    }?.joinToString(", ")?.takeIf(String::isNotBlank) ?: "void"
+    return "$returnType $name($safeParameters)"
 }
 
 private fun portableReturnType(value: String): Boolean = value.matches(
@@ -1936,6 +1944,8 @@ private fun normalizeGhidraTypes(value: String): String = value
     .replace(Regex("\\bundefined2\\b"), "uint16_t")
     .replace(Regex("\\bundefined1\\b|\\bundefined\\b|\\bbyte\\b"), "uint8_t")
     .replace(Regex("\\blonglong\\b"), "long long")
+    .replace(Regex("\\buint\\b"), "unsigned int")
+    .replace(Regex("\\bulong\\b"), "unsigned long")
     .replace(Regex("\\bpointer\\b"), "void *")
 
 internal fun safeCName(name: String): String {

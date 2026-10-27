@@ -33,6 +33,12 @@ import ghidra.app.script.GhidraScript;
 import ghidra.program.model.address.Address;
 import ghidra.program.model.data.Composite;
 import ghidra.program.model.data.DataType;
+import ghidra.program.model.data.FunctionDefinitionDataType;
+import ghidra.program.model.data.ParameterDefinition;
+import ghidra.program.model.data.ParameterDefinitionImpl;
+import ghidra.program.model.data.Pointer;
+import ghidra.program.model.pcode.HighSymbol;
+import ghidra.program.model.pcode.FunctionPrototype;
 import ghidra.program.model.data.Enum;
 import ghidra.program.model.data.TypeDef;
 import ghidra.program.model.listing.Data;
@@ -949,11 +955,46 @@ public class ExportProgramModel extends GhidraScript {
         }
 
         String source = null;
+        String prototype = function.getPrototypeString(false, false);
         if (includeDecompiledC) {
             try {
                 DecompileResults result = decompiler.decompileFunction(function, DECOMPILE_TIMEOUT_SECONDS, monitor);
                 if (result.decompileCompleted() && result.getDecompiledFunction() != null) {
                     source = result.getDecompiledFunction().getC();
+                    // Use the typed decompiler prototype directly. Listing parameters may still be
+                    // empty after analysis, and display C must not be parsed to invent an interface.
+                    if (result.getHighFunction() != null) {
+                        FunctionPrototype recovered = result.getHighFunction().getFunctionPrototype();
+                        if (recovered.getNumParams() > 256) {
+                            throw new IllegalStateException("recovered parameter count exceeds the export limit");
+                        }
+                        FunctionDefinitionDataType declaration = new FunctionDefinitionDataType(function.getName());
+                        declaration.setReturnType(recovered.getReturnType());
+                        // Local-symbol-map prototypes expose parameters as HighSymbols; their
+                        // optional ParameterDefinition array is null on this Ghidra path.
+                        ParameterDefinition[] parameters = new ParameterDefinition[recovered.getNumParams()];
+                        for (int parameterIndex = 0; parameterIndex < parameters.length; parameterIndex++) {
+                            HighSymbol parameter = recovered.getParam(parameterIndex);
+                            parameters[parameterIndex] = new ParameterDefinitionImpl(
+                                parameter.getName(), parameter.getDataType(), null
+                            );
+                            DataType parameterType = parameter.getDataType();
+                            int pointerDepth = 0;
+                            while (parameterType instanceof Pointer && pointerDepth++ < 32) {
+                                parameterType = ((Pointer) parameterType).getDataType();
+                            }
+                            if (parameterType instanceof Pointer) {
+                                throw new IllegalStateException("recovered signature pointer depth exceeds the export limit");
+                            }
+                            if (parameterType != null) {
+                                retainType(typesDirectory, planningEvidence, parameterType, function.getEntryPoint());
+                            }
+                        }
+                        declaration.setArguments(parameters);
+                        declaration.setVarArgs(recovered.isVarArg());
+                        prototype = declaration.getPrototypeString(false);
+                        retainType(typesDirectory, planningEvidence, recovered.getReturnType(), function.getEntryPoint());
+                    }
                 } else {
                     String detail = result.getErrorMessage();
                     failure = appendFailure(
@@ -964,6 +1005,7 @@ public class ExportProgramModel extends GhidraScript {
                 }
             } catch (Exception problem) {
                 rethrowInfrastructureFailure(problem);
+                if (source != null) evidenceComplete = false;
                 failure = appendFailure(failure, exceptionMessage("decompilation", problem));
             }
         }
@@ -976,7 +1018,7 @@ public class ExportProgramModel extends GhidraScript {
         output.append("      \"id\": ").append(json(functionId(function))).append(",\n");
         output.append("      \"name\": ").append(json(function.getName())).append(",\n");
         output.append("      \"address\": ").append(json(String.format("0x%x", function.getEntryPoint().getOffset()))).append(",\n");
-        output.append("      \"prototype\": ").append(json(function.getPrototypeString(false, false))).append(",\n");
+        output.append("      \"prototype\": ").append(json(prototype)).append(",\n");
         output.append("      \"extractionStatus\": ").append(json(status)).append(",\n");
         output.append("      \"recoveryAssessment\": \"unassessed\",\n");
         output.append("      \"calls\": ["); appendStrings(output, callIds); output.append("],\n");
