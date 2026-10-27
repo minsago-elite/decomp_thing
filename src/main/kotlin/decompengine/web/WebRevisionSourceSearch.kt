@@ -208,6 +208,9 @@ internal class WebRevisionSourceSearch(
                 var bytePosition = maxOf(lineStart, from); var charPosition = searchFrom
                 while (true) {
                     val start = try {
+                        // Dense hits return before find's candidate checkpoint and reset its budget.
+                        // Check between calls too, retaining the first unprocessed UTF-8 position.
+                        if (searchFrom < content.length && expired()) throw MatchDeadline(searchFrom)
                         find(content, query, folded, searchFrom) { nextStart ->
                             if (expired()) throw MatchDeadline(nextStart)
                         }

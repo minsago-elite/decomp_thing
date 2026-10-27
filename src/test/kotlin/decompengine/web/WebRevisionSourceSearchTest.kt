@@ -275,6 +275,72 @@ class WebRevisionSourceSearchTest {
         }
     }
 
+    @Test fun `dense matches check the deadline and resume at the first unprocessed Unicode position`() {
+        val needle = "a".repeat(128)
+        // A valid 256 KiB line, with dense maximum-width matches and multibyte cursor positions.
+        val body = "😀" + needle.repeat(101) + "😀".repeat(62_303)
+        val bytes = body.toByteArray()
+        assertEquals(256 * 1024, bytes.size)
+        assertNull(WebRevisionSourceContent.textFallback(bytes))
+        for (case in listOf("sensitive", "insensitive")) {
+            var now = 0L; var ticking = true; var clockCalls = 0
+            val engine = WebRevisionSourceSearch(harness(listOf(entry("dense.c", body)))::source,
+                nanoTime = { clockCalls++; now.also { if (ticking) now += 1_000_000 } }, deadlineNanos = 3_000_000)
+            val query = "q=$needle&case=$case&limit=100"
+            val first = search(engine, query)
+            assertEquals("deadline", string(first, "stopReason"))
+            assertEquals(4, clockCalls, "initial clock and one checkpoint per attempted match")
+            assertEquals(listOf("4", "132"), items(first).map { string(it, "offsetBytes") })
+            val next = assertNotNull(cursor(first))
+            assertEquals("260", next.split('_')[2], "resume before the first unprocessed match")
+            assertTrue((bytes[260].toInt() and 0xc0) != 0x80)
+            ticking = false
+            val continued = search(engine, "$query&cursor=$next")
+            assertEquals("complete", string(continued, "status"))
+            assertNull(cursor(continued))
+            assertEquals(truth(bytes, needle).map(Int::toString),
+                (items(first) + items(continued)).map { string(it, "offsetBytes") })
+        }
+    }
+
+    @Test fun `dense matches observe interruption without clearing the flag and can resume`() {
+        val body = "a".repeat(4096)
+        for (case in listOf("sensitive", "insensitive")) {
+            val engine = WebRevisionSourceSearch(harness(listOf(entry("dense.c", body)))::source)
+            val query = "q=a&case=$case&limit=100"
+            val first = try {
+                Thread.currentThread().interrupt()
+                search(engine, query).also { page ->
+                    assertEquals("deadline", string(page, "stopReason"))
+                    assertTrue(items(page).isEmpty(), "do not materialize a page on an interrupted thread")
+                    assertTrue(Thread.currentThread().isInterrupted)
+                    assertEquals("0", assertNotNull(cursor(page)).split('_')[2])
+                }
+            } finally { Thread.interrupted() }
+            val continued = search(engine, "$query&cursor=${cursor(first)}")
+            assertEquals("result-limit", string(continued, "stopReason"))
+            assertEquals(truth(body.toByteArray(), "a").take(100).map(Int::toString),
+                items(continued).map { string(it, "offsetBytes") })
+        }
+    }
+
+    @Test fun `deadline before a dense first match preserves a zero offset continuation`() {
+        for (case in listOf("sensitive", "insensitive")) {
+            var now = 0L; var ticking = true
+            val engine = WebRevisionSourceSearch(harness(listOf(entry("dense.c", "aaaa")))::source,
+                nanoTime = { now.also { if (ticking) now += 1_000_000 } }, deadlineNanos = 1_000_000)
+            val query = "q=a&case=$case"
+            val first = search(engine, query)
+            assertEquals("deadline", string(first, "stopReason"))
+            assertTrue(items(first).isEmpty())
+            assertEquals("0", assertNotNull(cursor(first)).split('_')[2])
+            ticking = false
+            val continued = search(engine, "$query&cursor=${cursor(first)}")
+            assertEquals("complete", string(continued, "status"))
+            assertEquals(listOf("0", "1", "2", "3"), items(continued).map { string(it, "offsetBytes") })
+        }
+    }
+
     @Test fun `interruption is observed inside matching without clearing the thread flag`() {
         val state = harness(listOf(entry("long.c", "a".repeat(4096))))
         val engine = WebRevisionSourceSearch(state::source)
