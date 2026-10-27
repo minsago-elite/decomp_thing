@@ -405,6 +405,27 @@ class OwnedJdkTest(unittest.TestCase):
             callers.extend(line for line in path.read_text().splitlines() if 'scripts/ci-owned-jdk.py run ' in line)
         self.assertEqual(5,len(callers));self.assertTrue(all('run --source-profile actions-host-ca-v1 --' in line for line in callers))
 
+    def test_owned_test_jvm_and_isolated_worker_runtime_are_distinct(self):
+        captured = {}
+        def command(argv, cwd, env):
+            captured.update(env)
+            return mock.Mock(returncode=0)
+        # Only intercept execution/evidence collection. Provisioning and the
+        # post-command source/clone integrity checks still execute normally.
+        with mock.patch.dict(os.environ, {'DECOMP_CI_WORKER_JAVA_HOME': '/stale/worker'}), \
+             mock.patch.object(fixture, 'UNIX_SOCKET_PATH_BYTES', 4096), \
+             mock.patch.object(fixture.subprocess, 'run', side_effect=command), \
+             mock.patch.object(fixture, 'verify_jvms', return_value=1):
+            fixture.run(self.repo, self.source, ['inert-never-executed'])
+        self.assertEqual(str(self.source.resolve()), captured['DECOMP_CI_WORKER_JAVA_HOME'])
+        clone = Path(captured['JAVA_HOME'])
+        self.assertNotEqual(self.source, clone)
+        self.assertEqual(str(clone), captured['ORG_GRADLE_PROJECT_ciAcpFixtureJdkHome'])
+        self.assertNotEqual(self.java.stat().st_ino, (clone / 'bin/java').stat().st_ino)
+        for path in [ROOT / 'src/test/kotlin/decompengine/oracle/fulltree/FullTreeFunctionObservationIsolatedRunnerTest.kt',
+                     ROOT / 'src/test/kotlin/decompengine/oracle/gcc/GccCompilerEngineLiveContainmentControllerTest.kt']:
+            self.assertIn('System.getenv("DECOMP_CI_WORKER_JAVA_HOME")', path.read_text())
+
     def test_full_caller_credentials_are_authority(self):
         result = fixture.credentials('Pid:\t123\nUid:\t10 11 12 13\nGid:\t20 21 22 23\n', 123)
         self.assertEqual({'Uid':'10,11,12,13','Gid':'20,21,22,23'}, result)
