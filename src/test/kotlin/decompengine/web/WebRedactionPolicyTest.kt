@@ -58,6 +58,29 @@ class WebRedactionPolicyTest {
         assertEquals("Context tokens: 5", policy.text("Context tokens: 5"))
     }
 
+    @Test fun `quoted credential assignments consume escaped quotes and long or truncated values`() {
+        val assignments = listOf(
+            """password="alpha\"bravo"""" to "alpha",
+            """token='alpha\'bravo'""" to "bravo",
+            "password=\"${"x".repeat(4096)}\"" to "x".repeat(32),
+            """secret="${"a\\\"".repeat(2048)}end"""" to "end",
+            "password=\"unfinished credential" to "unfinished",
+            "token='unfinished\\" to "unfinished",
+        )
+        for ((assignment, secretPart) in assignments) {
+            val prefix = assignment.substringBefore('=') + "="
+            val safe = policy.text(assignment)
+            assertEquals(prefix + "[redacted]", safe, assignment.take(80))
+            assertEquals(safe, policy.text(safe))
+            val document = buildJsonObject { put("note", assignment) }.toString().toByteArray()
+            val download = Json.parseToJsonElement(policy.document(document).decodeToString()).jsonObject
+            assertEquals(safe, download.getValue("note").jsonPrimitive.content)
+            assertFalse(download.toString().contains(secretPart))
+        }
+        // A truncated assignment stops at the line boundary, not at the end of the document.
+        assertEquals("password=[redacted]\npublic note", policy.text("password=\"unfinished\npublic note"))
+    }
+
     @Test fun `redaction is stable when reapplied and never leaves a configured literal`() {
         val inputs = listOf("Authorization: Bearer $canary", "x${canary}y /home/a/b token=$canary", "[redacted]X")
         for (input in inputs) {

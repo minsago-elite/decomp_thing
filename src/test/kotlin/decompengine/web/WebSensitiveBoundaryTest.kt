@@ -259,7 +259,12 @@ class WebSensitiveBoundaryTest {
             assertEquals(WebAuditOutcome.ACCEPTED, server.audit.read(jobId).entries.single { it.action == WebAuditAction.JOB_UPLOAD }.outcome)
 
             val reports = Files.createDirectories(root.resolve(jobId).resolve("reports"))
-            Files.writeString(reports.resolve("exploration.json"), "{\"note\": \"token $canary at /home/someone/x\"}")
+            Files.writeString(reports.resolve("exploration.json"), buildJsonObject {
+                put("note", "token $canary at /home/someone/x")
+                put("escaped", """password="alpha\"bravo"""")
+                put("long", "token='${"x".repeat(4096)}'")
+                put("truncated", "secret=\"unfinished credential")
+            }.toString())
             Files.createDirectories(reports.resolve("source-tree/src"))
             Files.writeString(reports.resolve("source-tree/src/main.c"), "/* built in /home/someone/x */\n")
             fun download(path: String) = client.send(HttpRequest.newBuilder(URI("$origin/jobs/$jobId/artifacts/$path"))
@@ -267,7 +272,11 @@ class WebSensitiveBoundaryTest {
             val report = download("reports/exploration.json")
             assertEquals(200, report.statusCode())
             assertFalse(report.body().contains(canary) || report.body().contains("/home/someone"), report.body())
-            assertEquals("token [redacted] at [private-path]", Json.parseToJsonElement(report.body()).jsonObject.getValue("note").jsonPrimitive.content)
+            val publicReport = Json.parseToJsonElement(report.body()).jsonObject
+            assertEquals("token [redacted] at [private-path]", publicReport.getValue("note").jsonPrimitive.content)
+            assertEquals("password=[redacted]", publicReport.getValue("escaped").jsonPrimitive.content)
+            assertEquals("token=[redacted]", publicReport.getValue("long").jsonPrimitive.content)
+            assertEquals("secret=[redacted]", publicReport.getValue("truncated").jsonPrimitive.content)
             assertEquals("/* built in /home/someone/x */\n", download("reports/source-tree/src/main.c").body(), "committed source is job content")
         } finally { server.stop(); root.toFile().deleteRecursively() }
     }
