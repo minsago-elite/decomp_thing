@@ -52,6 +52,9 @@ it('returns to the filtered job list, with its form and request restored, after 
     expect(screen.getByLabelText('Workflow state')).toHaveProperty('value', 'failed');
     expect(transport.get.mock.calls.at(-1)?.[1]).toBe('/jobs?status=failed&limit=50');
     await act(() => { history.forward(); });
+    // A retained lazy-route heading can exist before the native traversal completes.
+    // Wait for the destination too, so a pending Forward cannot leak into the next test.
+    await waitFor(() => expect(location.pathname).toBe(`/nested/jobs/${job.jobId}`));
     await screen.findByRole('heading', { name: 'filtered-match.elf' });
   } finally { auth.dispose(); }
 });
