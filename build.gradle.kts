@@ -390,6 +390,7 @@ fun publishInstalledFileAtomically(source: Path, target: Path) {
     require(Files.isDirectory(target.parent, LinkOption.NOFOLLOW_LINKS))
     require(!Files.isSymbolicLink(target))
     val expected = sha256(source)
+    if (Files.isRegularFile(target, LinkOption.NOFOLLOW_LINKS) && sha256(target) == expected) return
     val temporary = Files.createTempFile(target.parent, ".install-", ".tmp")
     try {
         Files.copy(source, temporary, StandardCopyOption.REPLACE_EXISTING,
@@ -1464,9 +1465,14 @@ tasks.named<Sync>("installDist") {
     val appJar = tasks.named<Jar>("jar")
     val launcherName = project.extensions.getByType<org.gradle.api.plugins.JavaApplication>().applicationName
     val protectedPaths = setOf("lib/${appJar.get().archiveFileName.get()}", "bin/$launcherName", "bin/$launcherName.bat")
-    inputs.property("atomicApplicationPublicationVersion", 1)
-    preserve { protectedPaths.forEach { include(it) } }
-    eachFile { if (relativePath.pathString in protectedPaths) exclude() }
+    inputs.property("atomicApplicationPublicationVersion", 2)
+    preserve {
+        protectedPaths.forEach { include(it) }
+        include("libexec/ghidra/**")
+    }
+    eachFile {
+        if (relativePath.pathString in protectedPaths || relativePath.pathString.startsWith("libexec/ghidra/")) exclude()
+    }
     doLast {
         val sourceJar = appJar.get().archiveFile.get().asFile.toPath()
         JarFile(sourceJar.toFile(), false).use { jar ->
@@ -1477,7 +1483,25 @@ tasks.named<Sync>("installDist") {
         listOf(launcherName, "$launcherName.bat").forEach { name ->
             publishInstalledFileAtomically(scripts.resolve(name), destinationDir.resolve("bin/$name").toPath())
         }
-        destinationDir.resolve("libexec/ghidra").walkTopDown().filter { it.isFile }.forEach { file ->
+        val stagedBundle = project(":ghidra-bridge").layout.buildDirectory.dir("bundle").get().asFile
+        val installedBundle = destinationDir.resolve("libexec/ghidra")
+        val bundleFiles = stagedBundle.walkTopDown().filter { it.isFile }.toList()
+        val bundlePaths = bundleFiles.map { it.relativeTo(stagedBundle).invariantSeparatorsPath }.toSet()
+        // Sync must never truncate a bundle file which a running verifier/worker may be reading.
+        // Retain unchanged inodes, stage changed files, and publish the inventory commitment last.
+        bundleFiles.filter { it.name != "bundle.sha256" }.forEach { source ->
+            val target = installedBundle.resolve(source.relativeTo(stagedBundle).path)
+            publishInstalledFileAtomically(source.toPath(), target.toPath())
+            Files.setPosixFilePermissions(target.toPath(), PosixFilePermissions.fromString(
+                if (source.canExecute()) "rwxr-xr-x" else "rw-r--r--"))
+        }
+        installedBundle.walkTopDown().filter { it.isFile && it.relativeTo(installedBundle).invariantSeparatorsPath !in bundlePaths }
+            .forEach { check(it.delete()) { "Could not remove obsolete bundled file: $it" } }
+        val installedManifest = installedBundle.resolve("bundle.sha256").toPath()
+        publishInstalledFileAtomically(stagedBundle.resolve("bundle.sha256").toPath(), installedManifest)
+        Files.setPosixFilePermissions(installedManifest,
+            PosixFilePermissions.fromString("rw-r--r--"))
+        installedBundle.walkTopDown().filter { it.isFile }.forEach { file ->
             check(file.setLastModified(315532800000L)) { "Could not normalize installed Ghidra timestamp: $file" }
         }
     }
@@ -1518,6 +1542,11 @@ val verifyAtomicApplicationPublication = tasks.register("verifyAtomicApplication
         val newJar = makeJar("new")
         val installed = fixture.resolve("installed/application.jar")
         publishInstalledFileAtomically(oldJar, installed)
+        val originalInode = Files.readAttributes(installed, BasicFileAttributes::class.java).fileKey()
+        publishInstalledFileAtomically(oldJar, installed)
+        check(Files.readAttributes(installed, BasicFileAttributes::class.java).fileKey() == originalInode) {
+            "unchanged installation replaced its existing inode"
+        }
         val process = ProcessBuilder(launcher.absolutePath, "-cp", installed.toString(), "race.Holder")
             .redirectErrorStream(true).start()
         try {
