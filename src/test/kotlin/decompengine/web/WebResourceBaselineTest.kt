@@ -42,8 +42,11 @@ class WebResourceBaselineTest {
         // The request-diagnostic sink is one process-wide daemon shared by every listener.
         val threads = Thread.getAllStackTraces().keys.filter { it.isAlive }.map { it.name }
             .filter { (it.startsWith("decomp-web") && it != "decomp-web-diagnostics") || it.startsWith("HTTP-Dispatcher") }.sorted()
-        val descriptors = Path.of("/proc/self/fd").let { if (Files.isDirectory(it)) Files.list(it).use { entries -> entries.count().toInt() } else 0 }
-        return Measurement(threads, descriptors, runtime.totalMemory() - runtime.freeMemory())
+        return Measurement(threads, descriptorCount(), runtime.totalMemory() - runtime.freeMemory())
+    }
+
+    private fun descriptorCount(): Int = Path.of("/proc/self/fd").let {
+        if (Files.isDirectory(it)) Files.list(it).use { entries -> entries.count().toInt() } else 0
     }
 
     private fun awaitBaseline(baseline: Measurement): Measurement {
@@ -141,6 +144,7 @@ class WebResourceBaselineTest {
         server.start()
         val port = server.serverPort
         val origin = "http://127.0.0.1:$port"
+        val peers = mutableListOf<Socket>()
         try {
             val token = server.issueBrowserBootstrap().token
             val login = client.send(HttpRequest.newBuilder(URI("$origin/w/api/v1/session")).header("Origin", origin)
@@ -164,26 +168,37 @@ class WebResourceBaselineTest {
                     .header("Cookie", cookie).header("Accept", "application/json").build(), HttpResponse.BodyHandlers.discarding())
                 assertEquals(404, response.statusCode())
             }
-            // Slow clients: unfinished headers and a stalled upload body, both closed by the server.
-            val slow = (1..4).map { Socket("127.0.0.1", port).apply {
-                getOutputStream().write("GET /w/api/v1/bootstrap HTTP/1.1\r\nHost: x\r\nX-Slow: ".toByteArray())
-            } }
-            val stalled = Socket("127.0.0.1", port).apply {
+            // Keep every peer open through EOF/reset AND worker/descriptor recovery. A timeout is
+            // a failure, never permission for test-side cleanup to unblock the server's worker.
+            val descriptorsBeforePeers = descriptorCount()
+            repeat(4) {
+                Socket("127.0.0.1", port).also { peers += it }.apply {
+                    getOutputStream().write("GET /w/api/v1/bootstrap HTTP/1.1\r\nHost: x\r\nX-Slow: ".toByteArray())
+                }
+            }
+            Socket("127.0.0.1", port).also { peers += it }.apply {
                 getOutputStream().write(("POST /w/api/v1/jobs HTTP/1.1\r\nHost: 127.0.0.1:$port\r\nOrigin: $origin\r\nCookie: $cookie\r\n" +
                     "X-CSRF-Token: $csrf\r\nIdempotency-Key: stalled_baseline_0123456789\r\nAccept: application/json\r\n" +
                     "Content-Type: multipart/form-data; boundary=b\r\nContent-Length: 1048576\r\n\r\n" +
                     "--b\r\nContent-Disposition: form-data; name=\"binary\"; filename=\"s.elf\"\r\n\r\n\u007fELF").toByteArray())
             }
-            (slow + stalled).forEach { socket ->
+            peers.forEach { socket ->
                 socket.soTimeout = 30_000
-                socket.use { runCatching { it.getInputStream().readBytes() } }
+                requireResourcePeerClosedByServer(socket)
             }
+            // Only the client descriptors may remain; the pre-existing cycle bounds are unchanged.
+            val descriptorLimit = descriptorsBeforePeers + peers.size + DESCRIPTOR_TOLERANCE
             val deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(10)
-            while (server.admissionSample().activeWorkers != 0 && System.nanoTime() < deadline) Thread.sleep(20)
-            assertEquals(0, server.admissionSample().activeWorkers)
+            while ((server.admissionSample().activeWorkers != 0 || descriptorCount() > descriptorLimit) &&
+                System.nanoTime() < deadline) Thread.sleep(20)
+            assertTrue(peers.none { it.isClosed }, "no client was closed to cause server recovery")
+            assertEquals(0, server.admissionSample().activeWorkers, "workers recover with peers still open")
+            assertTrue(descriptorCount() <= descriptorLimit, "server descriptors recover with peers still open")
             assertTrue(server.capacity.headerDeadlineClosures.get() >= 4)
             assertTrue(server.capacity.requestDeadlineClosures.get() >= 1)
-        } finally { server.stop() }
+        } finally {
+            try { peers.forEach { it.close() } } finally { server.stop() }
+        }
     }
 
     private companion object {
