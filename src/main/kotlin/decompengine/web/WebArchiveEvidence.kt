@@ -88,8 +88,18 @@ internal class WebArchiveEvidence(private val store: JobStore, private val sourc
                 ) { "archive build contract differs from the current rebuilt executable" }
                 identity(snapshot)
             }
-            // A second complete receipt pass must observe the identical snapshot; otherwise this is a conflict.
-            if (store.sourceArchiveReceipts(jobId, transport, reportPrefix, MAXIMUM_FILE_BYTES, MAXIMUM_BYTES) != receipts) {
+            // The first pass already admitted this tree. Unavailability or an inventory/budget
+            // refusal on revalidation is a concurrent change, not an initially missing artifact.
+            val revalidated = try {
+                store.sourceArchiveReceipts(jobId, transport, reportPrefix, MAXIMUM_FILE_BYTES, MAXIMUM_BYTES)
+            } catch (failure: decompengine.jobs.ArtifactChangedException) {
+                throw failure
+            } catch (_: decompengine.jobs.JobStoreException) {
+                throw decompengine.jobs.ArtifactChangedException("archive source tree changed during verification")
+            } catch (_: IllegalArgumentException) {
+                throw decompengine.jobs.ArtifactChangedException("archive source tree changed during verification")
+            }
+            if (revalidated != receipts) {
                 throw decompengine.jobs.ArtifactChangedException("archive source tree changed during verification")
             }
             require(source.manifestDocument == sources.read(jobId, reportPrefix).manifestDocument) { "archive source revision changed during verification" }

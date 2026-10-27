@@ -84,6 +84,47 @@ class WebArchiveEvidenceTest {
         } finally { root.toFile().deleteRecursively() }
     }
 
+    @Test
+    fun `losing an admitted source tree before the second receipt pass is a conflict`() {
+        for (replaceWithLink in listOf(false, true)) {
+            val root = Files.createTempDirectory("web-archive-receipt-race-")
+            try {
+                val store = decompengine.jobs.JobStore(root)
+                val bytes = decompengine.jobs.elfFixture()
+                val job = store.createFromUpload("inert.elf", bytes)
+                val tree = root.resolve(job.id).resolve("reports/source-tree")
+                val inputHash = java.security.MessageDigest.getInstance("SHA-256").digest(bytes).joinToString("") { "%02x".format(it) }
+                decompengine.project.SourceTreeGenerator.generate(decompengine.project.RecoveredProgramModel(
+                    inputSha256 = inputHash,
+                    functions = listOf(decompengine.project.RecoveredFunction("fn_1000", "core", 0x1000uL, "int core(void)")),
+                ), tree)
+                kotlin.test.assertEquals(0, decompengine.project.MakeProjectBuilder.build(tree).returnCode)
+                decompengine.project.ArchivalPackager.create(tree, tree.parent.resolve("source-tree.zip"))
+                val profile = GeneratedCMakeReconstructionProfile.descriptor
+                val artifactPath = decompengine.project.ReconstructionAdapters.resolve(profile).archiveBuild.contractPaths(profile).artifactPath
+                var changed = false
+                val reader = { id: String, relative: String, limit: Long ->
+                    val snapshot = store.readArtifact(id, relative, limit)
+                    // This executable read follows the first complete source receipt pass and precedes
+                    // its revalidation. No sleeps or filesystem timing races are required.
+                    if (!changed && relative == "reports/source-tree/$artifactPath") {
+                        changed = true
+                        if (replaceWithLink) {
+                            val moved = tree.resolveSibling("source-tree.moved")
+                            Files.move(tree, moved)
+                            Files.createSymbolicLink(tree, moved)
+                        } else assertTrue(tree.toFile().deleteRecursively())
+                    }
+                    snapshot
+                }
+                val sources = WebSourceEvidence(store, listOf(profile), reader)
+                val archives = WebArchiveEvidence(store, sources, reader)
+                assertFailsWith<decompengine.jobs.ArtifactChangedException> { archives.read(job.id) }
+                assertTrue(changed, "the admitted tree was removed before receipt revalidation")
+            } finally { root.toFile().deleteRecursively() }
+        }
+    }
+
     private fun storedArchive(entries: Map<String, ByteArray>): ByteArray {
         val bytes = ByteArrayOutputStream()
         ZipOutputStream(bytes).use { zip ->
