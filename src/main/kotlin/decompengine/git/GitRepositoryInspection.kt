@@ -1,11 +1,14 @@
 package decompengine.git
 
+import java.io.IOException
 import java.net.URI
+import java.nio.file.FileVisitResult
 import java.nio.file.Files
 import java.nio.file.FileSystemException
 import java.nio.file.NoSuchFileException
 import java.nio.file.LinkOption.NOFOLLOW_LINKS
 import java.nio.file.Path
+import java.nio.file.SimpleFileVisitor
 import java.nio.file.attribute.BasicFileAttributes
 import java.security.MessageDigest
 import java.time.Duration
@@ -62,6 +65,7 @@ object GitConfigurationAudit {
     }
 
     fun requireManaged(runner: GitCommandRunner, gitDir: Path) {
+        GitManagedLayout.requireUnlinkedRepository(gitDir)
         val entries = read(runner, gitDir.resolve("config"))
         val values = entries.groupBy({ it.first }, { it.second })
         if (entries.any { it.first !in MANAGED_KEYS } || values.values.any { it.size != 1 } ||
@@ -108,7 +112,48 @@ object GitManagedLayout {
         } finally { Files.deleteIfExists(temporary) }
     }
 
+    private const val MAX_LAYOUT_ENTRIES = 100_000
+
+    /**
+     * Defense in depth, not storage admission: callers must own and lock the physical storage
+     * against concurrent replacement and reject shared writable inodes when importing it.
+     */
+    fun requireUnlinkedDirectory(path: Path) {
+        var directory: Path? = path.toAbsolutePath()
+        while (directory != null) {
+            if (!Files.isDirectory(directory, NOFOLLOW_LINKS)) {
+                throw GitRepositoryException("REPOSITORY_UNSUPPORTED", "The managed directory is missing or linked.")
+            }
+            directory = directory.parent
+        }
+    }
+
+    /** Inspect metadata without following links, including nested refs and loose object storage. */
+    fun requireUnlinkedRepository(gitDir: Path) {
+        requireUnlinkedDirectory(gitDir)
+        val deadline = System.nanoTime() + Duration.ofSeconds(20).toNanos()
+        var entries = 0
+        fun checkEntry(attributes: BasicFileAttributes): FileVisitResult {
+            if (!attributes.isDirectory && !attributes.isRegularFile) {
+                throw GitRepositoryException("REPOSITORY_UNSUPPORTED", "The managed repository contains linked or special files.")
+            }
+            if (++entries > MAX_LAYOUT_ENTRIES || System.nanoTime() > deadline) {
+                throw GitRepositoryException("REPOSITORY_UNAVAILABLE", "The repository layout could not be checked within its bounds.")
+            }
+            return FileVisitResult.CONTINUE
+        }
+        try {
+            Files.walkFileTree(gitDir, object : SimpleFileVisitor<Path>() {
+                override fun preVisitDirectory(dir: Path, attrs: BasicFileAttributes): FileVisitResult = checkEntry(attrs)
+                override fun visitFile(file: Path, attrs: BasicFileAttributes): FileVisitResult = checkEntry(attrs)
+            })
+        } catch (_: IOException) {
+            throw GitRepositoryException("REPOSITORY_UNSUPPORTED", "The managed repository layout could not be read.")
+        }
+    }
+
     fun prepare(gitDir: Path) {
+        requireUnlinkedRepository(gitDir)
         val info = gitDir.resolve("info")
         if (!Files.exists(info, NOFOLLOW_LINKS)) Files.createDirectory(info)
         if (!Files.isDirectory(info, NOFOLLOW_LINKS)) throw GitRepositoryException("REPOSITORY_UNSUPPORTED", "The managed repository layout is invalid.")
@@ -144,8 +189,10 @@ data class GitWorkspaceObservation(
     val refsTruncated: Boolean,
     val dirty: Boolean,
     /**
-     * SHA-256 of HEAD, every non-ignored status entry (with its index blob and the work-tree file's
-     * size and modification time) and completeness, so any observed change produces a new value.
+     * Bounded read fingerprint of HEAD and non-ignored status entries, including index blobs,
+     * file modes, size and modification time. It anchors read pagination, not source identity:
+     * edits preserving metadata or beyond the output bound may leave it unchanged.
+     * Mutation/provenance callers need a separately locked content snapshot.
      */
     val statusDigest: String,
     val status: GitStatusSnapshot = GitStatusSnapshot(emptyList(), true),
@@ -162,7 +209,11 @@ object GitRepositoryInspector {
     fun head(runner: GitCommandRunner, gitDir: Path, format: GitObjectFormat): GitHeadObservation {
         val symbolic = runner.run(GitInvocation("symbolic-ref", listOf("-q", "HEAD"), gitDir = gitDir, allowedExitCodes = setOf(0, 1), limits = READ))
         val refName = symbolic.text.trim().takeIf { symbolic.exitCode == 0 }
-        if (refName != null && !GitRefNames.isObservedRefName(refName)) throw GitRepositoryException("REPOSITORY_UNSUPPORTED", "HEAD names an unsupported reference.")
+        if (refName != null) {
+            if (!refName.startsWith("refs/heads/") || !GitRefNames.isObservedRefName(refName) ||
+                runner.run(GitInvocation("check-ref-format", listOf(refName), allowedExitCodes = setOf(0, 1), limits = READ)).exitCode != 0
+            ) throw GitRepositoryException("REPOSITORY_UNSUPPORTED", "HEAD does not name a supported branch reference.")
+        }
         val resolved = runner.run(GitInvocation("rev-parse", listOf("-q", "--verify", "HEAD^{commit}"), gitDir = gitDir,
             allowedExitCodes = setOf(0, 1), limits = READ))
         val objectId = if (resolved.exitCode == 0) format.objectIdOrNull(resolved.text.trim())
@@ -180,7 +231,7 @@ object GitRepositoryInspector {
         }
     }
 
-    fun refs(runner: GitCommandRunner, gitDir: Path, format: GitObjectFormat): Pair<List<GitRefObservation>, Boolean> {
+    fun refs(runner: GitCommandRunner, gitDir: Path, format: GitObjectFormat, head: GitHeadObservation? = null): Pair<List<GitRefObservation>, Boolean> {
         val output = runner.run(GitInvocation("for-each-ref", listOf("--count=${MAX_REFS + 1}", "--format=%(objectname) %(refname)",
             "refs/heads", "refs/tags"), gitDir = gitDir, limits = READ)).text
         val refs = output.lineSequence().filter { it.isNotEmpty() }.map { line ->
@@ -189,7 +240,17 @@ object GitRepositoryInspector {
             if (objectId == null || !GitRefNames.isObservedRefName(name)) throw GitRepositoryException("REPOSITORY_CORRUPT", "A reference has an invalid name or object ID.")
             GitRefObservation(name, objectId)
         }.toList()
-        return refs.take(MAX_REFS) to (refs.size > MAX_REFS)
+        val truncated = refs.size > MAX_REFS
+        val bounded = refs.take(MAX_REFS)
+        val attached = head?.takeIf { it.state == GitHeadState.ATTACHED }?.let { GitRefObservation(it.refName!!, it.objectId!!) }
+        if (attached != null && attached !in bounded) {
+            if (refs.any { it.name == attached.name && it != attached } || !truncated) {
+                throw GitRepositoryException("REPOSITORY_UNAVAILABLE", "HEAD and its branch could not be observed consistently.")
+            }
+            // The wire contract requires attached HEAD to match a listed ref, even on a bounded page.
+            return (bounded.take(MAX_REFS - 1) + attached) to true
+        }
+        return bounded to truncated
     }
 
     internal fun worktreeStat(root: Path, file: Path): BasicFileAttributes? {
@@ -215,13 +276,14 @@ object GitRepositoryInspector {
 
     /** Status never fetches, refreshes optional locks, descends into submodules or runs hooks. */
     fun inspect(runner: GitCommandRunner, gitDir: Path, workTree: Path, commonDir: Path = gitDir): GitWorkspaceObservation {
+        GitManagedLayout.requireUnlinkedDirectory(workTree)
         if (commonDir == gitDir) GitConfigurationAudit.requireManaged(runner, gitDir)
         else GitConfigurationAudit.requireManagedWorktree(runner, commonDir, gitDir)
         try {
             val format = objectFormat(runner, gitDir)
             if (format == GitObjectFormat.UNKNOWN) throw GitRepositoryException("REPOSITORY_UNSUPPORTED", "The repository object format is not supported.")
             val head = head(runner, gitDir, format)
-            val (refs, truncated) = refs(runner, gitDir, format)
+            val (refs, truncated) = refs(runner, gitDir, format, head)
             val status = GitReads.status(runner, gitDir, workTree)
             val relevant = status.entries.filter { !it.ignored }
             val digest = MessageDigest.getInstance("SHA-256").apply {

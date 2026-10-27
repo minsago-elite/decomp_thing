@@ -156,6 +156,7 @@ internal storage optimization and must not merge identity, permissions or histor
 | `POST R/recover` | `202 run`, `Location` of a new attempt | Closed `recover` request; explicit `retry` or capability-gated `resume`; run If-Match and idempotency; #486 |
 | `GET R/controls` | `200 attemptControls`, strong run ETag | Read-only cancel/retry/resume eligibility with closed reasons; reserves nothing; #528/#529 |
 | `GET R/snapshot` | `200 snapshot`, ETag | Run state and consistent event watermark; #174 |
+| `GET R/queue-position` | `200 queuePosition` | Approximate sampled position of one queued attempt; no query, counts only; #530 |
 | `GET R/events` | `200 text/event-stream` | Resume with `Last-Event-ID` or `after`, never both; #174 |
 | `GET R/events?transport=poll` | `200 events` | Same retention/cursor semantics, bounded page; #174 |
 | `GET R/reports/{reportId}` | `200 report` | State may be missing/partial/unsupported/unknown; #165 |
@@ -548,6 +549,11 @@ Status/diff snapshots carry repository/worktree versions plus observed HEAD/ref 
 Commit, stage, branch changes, integration and push require those versions and expected object
 IDs under the same repository/worktree lock as execution. A changed ref or dirty source snapshot
 requires `409 REF_CHANGED`/`WORKTREE_BUSY`, with a fresh review; no implicit overwrite/stash/reset.
+The adapter's `statusDigest` is only a display-status fingerprint of bounded porcelain output and
+HEAD, not either version, a content digest or an optimistic-concurrency/provenance guard. Further
+edits to an already-untracked or modified file, non-HEAD ref changes and edits beyond the output
+bound may leave it unchanged. Mutation services must separately bind a content-sensitive snapshot
+and revalidate it under their execution lock; truncated display status cannot establish that guard.
 Push names the remote/ref registration, exact local object and reviewed expected remote object
 (`null` means expected absent). The server rechecks remote state and enforces the expected value
 at the remote ref-update boundary; no unchecked force update. Automatic fetch, background push,
@@ -656,6 +662,14 @@ Git is unusable. The executable path never leaves the server.
   contain only server-written keys (`core.repositoryformatversion`, `core.filemode`,
   `core.bare=true`, `core.ignorecase`, `core.precomposeunicode`, `core.logallrefupdates`,
   `extensions.objectformat`, `user.*`). Otherwise the read fails with `REPOSITORY_CONFIG_UNTRUSTED`.
+  Before config is read, the repository root and its ancestors must be non-linked directories;
+  a no-follow metadata walk rejects links and special files, including linked `info`, nested refs
+  and loose object storage. The walk is bounded to 100,000 entries and 20 seconds (exhaustion is
+  `REPOSITORY_UNAVAILABLE`). The registered worktree root/ancestors must also be non-linked.
+  These checks do not replace admission: D8.2 must select registered storage under a trusted
+  managed root, isolate imported content (including shared writable inodes), validate the object
+  graph and enforce ownership/locking against concurrent filesystem replacement. Inspection is
+  not an arbitrary-host-path admission API or a race-safe source snapshot.
   Alternates, `commondir` and shallow files are `REPOSITORY_UNSUPPORTED`. Hooks never run because
   of the empty `core.hooksPath`. Attribute files can name a filter, but no driver exists. Built-in
   conversions need no driver (`text`/`eol` line endings, `ident`, `working-tree-encoding`), so
@@ -665,7 +679,10 @@ Git is unusable. The executable path never leaves the server.
   or contacts a remote. No exceptions exist yet. Any future hook, filter, submodule or helper
   support needs its own reviewed design and capability.
 - **States.** A read reports `unborn`, `attached`, `detached`, `dirty` and the object format,
-  without assuming a branch name. A missing or linked repository is `REPOSITORY_UNSUPPORTED`. A ref
+  without assuming a branch name. Symbolic HEAD must name a valid `refs/heads/...` branch;
+  other namespaces are `REPOSITORY_UNSUPPORTED`, not attached or unborn branches. Ref display is
+  bounded to 200 entries with explicit truncation; attached HEAD's matching ref is retained within
+  that bound even if it sorts after the other refs. A missing or linked repository is `REPOSITORY_UNSUPPORTED`. A ref
   that does not resolve, or a non-commit HEAD, is `REPOSITORY_CORRUPT`. Bounded failures are
   `REPOSITORY_UNAVAILABLE`.
 
@@ -1167,6 +1184,30 @@ report unavailable metrics without zero values. Runtime uses the session-time
 snapshot; it neither polls these counts nor infers workflow availability from
 capacity. See [scheduler summary and verification](web-scheduler-summary.md).
 
+### Attempt queue position and stop reasons
+
+`GET jobs/J/runs/R/queue-position` samples one attempt's place in this process's executor queue.
+A queued attempt reports `position`/`ahead`, the total `queuedTasks` and busy/limit workers, always
+with `approximate: true`: queued work can be cancelled or stopped, two workers start tasks
+independently, and the queue is read separately from the attempt record. Other tasks are counted,
+never identified. A started or terminal attempt reports `not-queued` with its state; a borrowed
+executor or an attempt not found in the local queue reports `unavailable` with
+`EXTERNAL_EXECUTOR`/`NOT_IN_LOCAL_QUEUE`. The sample is display-only, never admission authority.
+The attempt view reads it on demand only while the attempt is queued.
+
+Terminal reasons keep stop outcomes separate. `LIMIT_EXHAUSTED` is a used-up budget (tool calls,
+output, tokens), `TIMED_OUT` a wall-clock or idle deadline, `CANCELLED` a recorded user request,
+`FAILED` a workflow-reported failure, `INFRASTRUCTURE_FAILED` an adapter or executor submission that
+could not produce any outcome, and `PROCESS_INTERRUPTED` a service stop or restart. Adapters may
+report `FAILED`, `REFUSED`, `LIMIT_EXHAUSTED` or `TIMED_OUT`; only the service records
+cancellation, infrastructure failure and interruption.
+
+Reported attempt usage comes from the terminal receipt. The view gives its units, its source and
+the receipt time (`endedAt`); the provider's own measurement time is not reported and stays
+"Not reported", as does every missing counter. Limits name the configuration persisted at
+`createdAt`. Live context-usage observations are coalesced for display only (one pending snapshot
+per 100 ms window) and never change the acknowledged cursor or persisted evidence.
+
 ## Current source catalog metadata
 
 `GET /api/v1/jobs/{jobId}/runs/{runId}/source-catalog` requires the existing private
@@ -1521,6 +1562,33 @@ Activity uses SSE after bounded polling catch-up, with bounded reconnect and pol
 Run state now stays locked during bounded journal capture, with locks released before HTTP delivery.
 Controlled authenticated HTTP snapshot/replay and SSE eviction/resume checks now cover concurrent
 cutover. Slow-socket qualification and timed retention remain outstanding under #174.
+
+### Activity stages, correlation and private reasoning
+
+The Activity view summarizes the retained page as stages. The attempt row comes from the
+durable snapshot (`queued` waiting, `running`, `cancelling` blocked, `completed` accepted or
+completed without acceptance, `cancelled`, `failed`/`interrupted` terminal failure). Task rows
+group observations by `taskIdSha256` and keep the latest reported stage: analysis, planning
+and agent work are running; policy, build and behavior checks plus provisional/compile-valid
+results are validating; `unresolved` or a denied permission is blocked; `accepted`,
+`rolled_back`, `completed`, `cancelled` and failure phases are final. Rows without a stage
+(messages, tools, usage) keep the previous stage. Journal stages never establish acceptance.
+
+A percentage is shown only for an authoritative, producer-declared total. Observed task counts
+are not a denominator because tasks that have not started are invisible, so the view states
+how many observed tasks reached a final stage and that no percentage is shown.
+
+Correlation disclosures render on demand. The browser hashes the loaded attempt's own
+identities (attempt, previous attempt, input and result revision) with SHA-256, the same plain
+commitment the journal uses, and links only exact matches: a result revision to its source
+browser and a workflow-run digest to the previous attempt. Every other reference states why
+it is not linked (not recorded, not compared yet, no published task or session evidence page,
+or no matching revision). A task digest can narrow the page filter instead.
+
+Provider reasoning (`agent_thought_chunk`, role `thought`) is private. The journal records only
+its position, role, completion and `textOmitted: true`; it never buffers, stores, measures or
+commits to its text. Public projection also withholds `contentSha256`/`chunkCharacters` from
+older thought records. The ACP client never requests reasoning and no workflow depends on it.
 
 ## Agent preflight and harness readiness
 

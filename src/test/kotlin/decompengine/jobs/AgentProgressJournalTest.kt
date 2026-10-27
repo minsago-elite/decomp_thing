@@ -227,7 +227,7 @@ class AgentProgressJournalTest {
             // Incomplete chunks publish only a commitment, never an invalid raw preview.
             identities.forEachIndexed { index, text ->
                 task.event(AgentMessageEvent((2 * identities.size + index).toLong(), "content-$index",
-                    AgentMessageRole.THOUGHT, text))
+                    AgentMessageRole.SYSTEM, text))
             }
         }
         val messages = assertNotNull(AgentProgressJournal.read(root)).getValue("events").jsonArray
@@ -1053,7 +1053,7 @@ class AgentProgressJournalTest {
         AgentProgressJournal(root, "repair", maximumQueuedEvents = 1024).use { journal ->
             val task = journal.beginTask("streamed-hash-task", request(root))
             cases.forEachIndexed { index, text ->
-                task.event(AgentMessageEvent(index.toLong(), "case-$index", AgentMessageRole.THOUGHT, text))
+                task.event(AgentMessageEvent(index.toLong(), "case-$index", AgentMessageRole.SYSTEM, text))
             }
         }
         val messages = assertNotNull(AgentProgressJournal.read(root)).getValue("events").jsonArray
@@ -1064,6 +1064,40 @@ class AgentProgressJournalTest {
             assertEquals(cases[index].length, record.getValue("chunkCharacters").jsonPrimitive.int)
             assertFalse("text" in record)
         }
+    }
+
+    @Test
+    fun `private reasoning is neither retained measured nor committed`(): Unit {
+        val parent = Files.createDirectories(java.nio.file.Path.of("build/test-tmp/progress-reasoning").toAbsolutePath())
+        val root = createTempDirectory(parent, "journal-")
+        AgentProgressJournal(root, "repair", maximumQueuedEvents = 1024).use { journal ->
+            val task = journal.beginTask("reasoning-task", request(root))
+            task.event(AgentMessageEvent(0, "reasoning", AgentMessageRole.THOUGHT, "PRIVATE_REASONING_PREFIX "))
+            task.event(AgentMessageEvent(1, "reasoning", AgentMessageRole.THOUGHT, "PRIVATE_REASONING_TAIL", completed = true))
+            task.event(AgentMessageEvent(2, "answer", AgentMessageRole.ASSISTANT, "public answer", completed = true))
+        }
+        val journal = assertNotNull(AgentProgressJournal.read(root))
+        assertFalse(journal.toString().contains("PRIVATE_REASONING"))
+        val messages = journal.getValue("events").jsonArray.map { it.jsonObject }
+            .filter { it["kind"]?.jsonPrimitive?.content == "message" }
+        assertEquals(3, messages.size)
+        messages.take(2).forEach { record ->
+            assertEquals("thought", record.getValue("role").jsonPrimitive.content)
+            assertTrue(record.getValue("textOmitted").jsonPrimitive.boolean)
+            listOf("text", "contentSha256", "chunkCharacters", "messageIdSha256").forEach { assertFalse(it in record, it) }
+        }
+        assertTrue(messages[1].getValue("completed").jsonPrimitive.boolean)
+        assertEquals("public answer", messages[2].getValue("text").jsonPrimitive.content)
+        assertEquals(AgentProgressJournal.displayCommitment("public answer"), messages[2].getValue("contentSha256").jsonPrimitive.content)
+        // Records written before this policy keep their sequence, but public replay withholds the measurements.
+        val legacy = buildJsonObject {
+            put("sequence", 4); put("kind", "message"); put("role", "thought"); put("text", "PRIVATE_REASONING")
+            put("contentSha256", "a".repeat(64)); put("chunkCharacters", 17); put("completed", true)
+        }
+        val public = publicProgressRecord(legacy)
+        assertEquals(setOf("role", "completed", "textOmitted"), public.fields.keys)
+        assertEquals(3, public.omittedFieldCount)
+        assertTrue(public.fields.getValue("textOmitted").jsonPrimitive.boolean)
     }
 
     private fun request(root: java.nio.file.Path) = AgentExecutionRequest(
