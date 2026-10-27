@@ -512,7 +512,8 @@ class RecoveredAbiInterfaceCandidateProjectionV1 private constructor(private val
             if (result == null || !result.completed || !result.valid || result.timedOut || result.cancelled || result.failedToStart) {
                 return NormalizationResult(null, "highfunction-result-is-not-a-completed-valid-observation")
             }
-            if (!prototype.parameterCountsMatch || prototype.parameterCount != inferred.parameters.size) {
+            if (!prototype.parameterCountsMatch || prototype.parameterCount != prototype.localSymbolParameterCount ||
+                prototype.localSymbolParameterCount != inferred.parameters.size) {
                 return NormalizationResult(null, "highfunction-parameter-counts-do-not-match")
             }
             if (listing.varArgs != prototype.varArgs) return NormalizationResult(null, "listing-and-highfunction-varargs-disagree")
