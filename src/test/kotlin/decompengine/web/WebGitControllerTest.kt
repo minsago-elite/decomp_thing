@@ -240,6 +240,10 @@ class WebGitControllerTest {
             raw("branch", "-D", "a")
             error(f.read("$base/refs?limit=1&cursor=$restarted"), 409, "REF_CHANGED")
             error(f.read("$base/refs?cursor=refs~1"), 400, "INVALID_CURSOR")
+            // Syntactically plausible cursors must not reach the reader's require(skip) as 500s.
+            for (offset in listOf("100001", "999999")) {
+                error(f.read("$base/refs?cursor=refs~${"a".repeat(32)}~$offset"), 400, "INVALID_CURSOR")
+            }
             raw("branch", "-D", "b"); raw("branch", "-D", "c")
             // A status page cursor is bound to the work-tree version it was taken from.
             val statusCursor = data(f.read("$base/status?limit=1"), 200, "gitStatus").getValue("nextCursor")
@@ -251,6 +255,9 @@ class WebGitControllerTest {
             error(f.read("$base/status?cursor=$ignoredCursor"), 409, "REF_CHANGED")
             error(f.read("$base/history?start=${head.take(12)}"), 422, "VALIDATION_FAILED")
             error(f.read("$base/history?start=$head&cursor=$cursor"), 400, "INVALID_CURSOR")
+            for (offset in listOf("1000001", "9999999")) {
+                error(f.read("$base/history?cursor=$head~$offset"), 400, "INVALID_CURSOR")
+            }
             error(f.read("$base/history?start=${"0".repeat(40)}"), 404, "NOT_FOUND")
             error(f.read("$base/diff?scope=commit"), 422, "VALIDATION_FAILED")
             error(f.read("$base/diff?scope=staged&commit=$head"), 422, "VALIDATION_FAILED")
