@@ -23,6 +23,12 @@ internal class GitHttpsFixture(private val projectRoot: Path, private val work: 
     private val username: String? = null, private val password: String? = null,
     private val authenticateWritesOnly: Boolean = false) : AutoCloseable {
     @Volatile var stall: CountDownLatch? = null
+    /** Pause only after sending actual pack bytes, not at discovery or before a transfer starts. */
+    class PartialUpload {
+        val started = CountDownLatch(1)
+        val release = CountDownLatch(1)
+    }
+    @Volatile var partialUpload: PartialUpload? = null
     @Volatile var requests = 0
         private set
     /** PEM certificate that a client must trust to verify this server. */
@@ -89,7 +95,23 @@ internal class GitHttpsFixture(private val projectRoot: Path, private val work: 
                     if (name.equals("Status", true)) status = value.substringBefore(' ').toInt() else exchange.responseHeaders.add(name, value)
                 }
                 exchange.sendResponseHeaders(status, if (payload.isEmpty()) -1 else payload.size.toLong())
-                if (payload.isNotEmpty()) exchange.responseBody.use { it.write(payload) }
+                if (payload.isNotEmpty()) exchange.responseBody.use { response ->
+                    // Protocol v2 also POSTs ls-refs to this endpoint; only pause a pack response.
+                    val pack = indexOf(payload, "PACK".toByteArray())
+                    val pause = partialUpload.takeIf {
+                        exchange.requestMethod == "POST" && exchange.requestURI.path.endsWith("/git-upload-pack") && pack >= 0
+                    }
+                    if (pause == null) response.write(payload)
+                    else {
+                        val cut = payload.size / 2
+                        check(pack + 12 < cut) { "Expected a populated pack before the transfer pause" }
+                        response.write(payload, 0, cut)
+                        response.flush()
+                        pause.started.countDown()
+                        check(pause.release.await(60, TimeUnit.SECONDS)) { "Partial upload was not released" }
+                        response.write(payload, cut, payload.size - cut)
+                    }
+                }
             } catch (_: Exception) {
                 try { exchange.sendResponseHeaders(500, -1) } catch (_: Exception) { }
             } finally { exchange.close() }
@@ -110,6 +132,7 @@ internal class GitHttpsFixture(private val projectRoot: Path, private val work: 
 
     override fun close() {
         stall?.countDown()
+        partialUpload?.release?.countDown()
         server.stop(0)
         (server.executor as java.util.concurrent.ExecutorService).shutdownNow()
     }

@@ -1,8 +1,10 @@
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
+import { spawnSync } from 'node:child_process';
 import { promises as fs } from 'node:fs';
 import { join } from 'node:path';
 import { createWebGitFixture } from './web-git-fixtures.mjs';
+import { assertCredentialAbsent, collectGitRedactionSurfaces, credentialCanaries, scanCredentialStorage } from './packaged-git-redaction.mjs';
 
 const SUBJECT = 'Packaged journey: add notes';
 
@@ -11,6 +13,16 @@ const SUBJECT = 'Packaged journey: add notes';
  * commit also proves hooks stay inert. The job itself is uploaded through the UI, so no job
  * record is authored by the test. Nothing here invokes a workflow or reaches the network.
  */
+/** Test-only raw Git in a fixture repository: fixed identity, no hooks, no user configuration, file transport only. */
+function fixtureGit(cwd, args) {
+  const result = spawnSync('git', ['-c', 'core.hooksPath=/dev/null', '-c', 'commit.gpgSign=false', ...args], { cwd, encoding: 'utf8', timeout: 15_000,
+    env: { PATH: process.env.PATH ?? '/usr/bin:/bin', LC_ALL: 'C', TZ: 'UTC', GIT_CONFIG_NOSYSTEM: '1', GIT_CONFIG_GLOBAL: '/dev/null',
+      GIT_TERMINAL_PROMPT: '0', GIT_ALLOW_PROTOCOL: 'file', GIT_AUTHOR_NAME: 'Web Fixture Author', GIT_AUTHOR_EMAIL: 'web-fixture@example.invalid',
+      GIT_COMMITTER_NAME: 'Web Fixture Committer', GIT_COMMITTER_EMAIL: 'web-fixture@example.invalid' } });
+  if (result.status !== 0) throw new Error(`fixture git ${args[0]} failed: ${result.stderr}`);
+  return result.stdout.trim();
+}
+
 export async function seedGit(scratchParent) {
   // The fixture helper creates its root under os.tmpdir(); keep it inside the owned scratch parent.
   const scratch = await fs.mkdtemp(join(scratchParent, 'packaged-git-'));
@@ -20,7 +32,21 @@ export async function seedGit(scratchParent) {
   try { repository = await createWebGitFixture({ poisonHooks: true }); }
   catch (error) { await fs.rm(scratch, { recursive: true, force: true }); throw error; }
   finally { if (previous === undefined) delete process.env.TMPDIR; else process.env.TMPDIR = previous; }
-  return { repository, importRoot: repository.paths.root, scratch,
+  // Configuration isolation canaries (#610): a filter driver in the admitted repository's own
+  // configuration and attributes that would run it. Neither may execute in the managed copy.
+  const marker = join(scratch, 'filter-ran');
+  await fs.writeFile(join(repository.paths.local, '.gitattributes'), '*.txt filter=canary\n');
+  fixtureGit(repository.paths.local, ['add', '--', '.gitattributes']);
+  fixtureGit(repository.paths.local, ['commit', '-q', '-m', 'fixture: filter attributes']);
+  await fs.appendFile(join(repository.paths.local, '.git', 'config'), `[filter "canary"]\n\tclean = touch '${marker}'\n\tsmudge = touch '${marker}'\n`);
+  const localTip = fixtureGit(repository.paths.local, ['rev-parse', 'main']);
+  // Server-side credential canary for an allowlisted host that can never resolve (#586, #610).
+  const canary = `canary-${createHash('sha256').update(scratch).digest('hex').slice(0, 24)}`;
+  const tokenFile = join(scratch, 'canary-token');
+  await fs.writeFile(tokenFile, `${canary}\n`, { mode: 0o600 });
+  const credentials = join(scratch, 'git-credentials.json');
+  await fs.writeFile(credentials, JSON.stringify({ https: [{ host: 'canary.invalid', username: 'canary-bot', passwordFile: tokenFile }] }), { mode: 0o600 });
+  return { repository, importRoot: repository.paths.root, scratch, marker, localTip, canary, credentials,
     async dispose() { await repository.dispose(); await fs.rm(scratch, { recursive: true, force: true }); } };
 }
 
@@ -99,7 +125,7 @@ export async function qualifyGit({ fixture, makeTarget, cdp, evaluate, ready, br
   await key(cdp, tab, 'Enter', 'Enter', 13, '\r');
   await ready(tab, `document.body.innerText.includes('Branch main') && document.body.innerText.includes('fixture: local branch')`, 'imported repository status and history');
   assert.ok(await evaluate(tab, `document.body.innerText.includes('fixture: baseline') && document.body.innerText.includes('Not mapped to a reconstruction revision')`));
-  assert.equal(fixture.repository.git('local', ['rev-parse', 'main']).stdout.trim(), fixture.repository.commits.local, 'Import changed the admitted repository');
+  assert.equal(fixture.repository.git('local', ['rev-parse', 'main']).stdout.trim(), fixture.localTip, 'Import changed the admitted repository');
 
   const worktree = await managedWorktree(data, fixture.jobId);
   assert.equal(await fs.stat(join(worktree, '.git')).then(stat => stat.isDirectory(), () => false), false, 'Managed work tree must not hold its own .git directory');
@@ -147,7 +173,7 @@ export async function qualifyGit({ fixture, makeTarget, cdp, evaluate, ready, br
   assert.ok(names.includes('notes.txt') && names.includes('README.md'), `Unexpected export entries: ${names.join(', ')}`);
   assert.ok(names.every(name => !name.split('/').includes('.git') && name !== 'helper.o'), 'The export must exclude .git and policy-excluded files');
   assert.deepEqual(names, [...names].sort(), 'Export entries must be in deterministic order');
-  assert.equal(fixture.repository.git('local', ['rev-parse', 'main']).stdout.trim(), fixture.repository.commits.local, 'Committing changed the admitted repository');
+  assert.equal(fixture.repository.git('local', ['rev-parse', 'main']).stdout.trim(), fixture.localTip, 'Committing changed the admitted repository');
   assert.deepEqual(tab.exceptions, []);
   assert.equal(await evaluate(tab, 'localStorage.length + sessionStorage.length'), 0);
   const mutations = tab.requests.slice(beforeView).filter(request => !['GET', 'HEAD'].includes(request.method));
@@ -170,4 +196,138 @@ export async function qualifyGitRestart({ fixture, objectId, exportSha256, boots
   assert.ok(tab.requests.filter(request => !request.url.endsWith('/api/v1/session')).every(request => ['GET', 'HEAD'].includes(request.method)));
   assert.deepEqual(tab.exceptions, []);
   return { durableHistory: true, durableWorktree: true, stableExportDigest: true, mutationRequests: 0 };
+}
+
+/** Wait for an operation started from the workspace to report its outcome in the status region. */
+async function outcome(ready, evaluate, tab, label, description, previous = '') {
+  const texts = `[...document.querySelectorAll('[role="status"]')].map(node => node.textContent)`;
+  await ready(tab, `${texts}.some(text => text !== ${JSON.stringify(previous)} && (text.startsWith(${JSON.stringify(label + ':')})
+    || text.startsWith(${JSON.stringify(label + ' did not complete')}) || text.startsWith(${JSON.stringify('The server refused ' + label)})))`, description);
+  const found = await evaluate(tab, `${texts}.find(text => text !== ${JSON.stringify(previous)} && text.includes(${JSON.stringify(label)}))`);
+  console.log(`Git journey: ${found}`);
+  return found;
+}
+
+async function select(evaluate, tab, label, optionText) {
+  await evaluate(tab, `(() => {
+    const field = [...document.querySelectorAll('label')].find(item => item.textContent.startsWith(${JSON.stringify(label)})).querySelector('select');
+    const option = [...field.options].find(item => item.textContent === ${JSON.stringify(optionText)});
+    field.value = option.value; field.dispatchEvent(new Event('change', { bubbles: true }));
+  })()`);
+}
+
+/**
+ * Packaged synchronization journey (#608-#610) after the restart:
+ * 1. Commit the change that survived the restart.
+ * 2. Register the disposable remote, fetch it and review the divergence.
+ * 3. Merge into a real conflict, resolve it and commit.
+ * 4. Explicitly push to the remote.
+ * Then check that provenance stays verifiable after branch changes and while the remote is
+ * unavailable, that filters and hooks stayed inert, and that the credential canary appears in no
+ * user-facing output or stored file.
+ */
+export async function qualifyGitSync({ fixture, objectId, exportSha256, makeTarget, cdp, evaluate, ready, browserOrigin, data }) {
+  const tab = await makeTarget();
+  await cdp.call('Page.navigate', { url: `${browserOrigin}/nested/jobs/${fixture.jobId}/git` }, tab.sessionId);
+  await ready(tab, `${group('Not staged')}?.innerText.includes('shared.txt') ?? false`, 'workspace before synchronization');
+  // 1. Commit the change that survived the restart.
+  await evaluate(tab, `document.querySelector('input[aria-label="Select shared.txt (Not staged)"]').click()`);
+  await press(ready, evaluate, tab, 'Stage selected');
+  await outcome(ready, evaluate, tab, 'Stage selected', 'staged shared.txt');
+  await ready(tab, `${group('Staged')}?.innerText.includes('shared.txt') ?? false`, 'shared.txt staged');
+  await setField(evaluate, tab, `document.querySelector('#git-commit-message')`, 'Packaged journey: local shared edit');
+  await press(ready, evaluate, tab, 'Commit staged files');
+  await ready(tab, `document.querySelector('ol[aria-label="History"]')?.innerText.includes('Packaged journey: local shared edit') ?? false`, 'local shared commit');
+  // The disposable remote receives a conflicting edit from its peer clone.
+  await fs.writeFile(join(fixture.repository.paths.peer, 'shared.txt'), 'remote conflicting edit\n');
+  fixtureGit(fixture.repository.paths.peer, ['commit', '-q', '-am', 'fixture: remote conflicting edit']);
+  fixtureGit(fixture.repository.paths.peer, ['push', '-q', 'origin', 'main']);
+
+  // 2. Register the remote by admitted name and fetch it.
+  await setField(evaluate, tab, `[...document.querySelectorAll('label')].find(label => label.textContent.startsWith('Remote name')).querySelector('input')`, 'origin');
+  await setField(evaluate, tab, `[...document.querySelectorAll('label')].find(label => label.textContent.startsWith('Remote URL')).querySelector('input')`, 'admitted:remote.git');
+  await press(ready, evaluate, tab, 'Add remote');
+  const registered = await outcome(ready, evaluate, tab, 'Add remote', 'registered remote');
+  await ready(tab, `!!${button('Fetch origin')}`, 'remote listed');
+  assert.ok(await evaluate(tab, `document.body.innerText.includes('admitted:remote.git') && document.body.innerText.includes('Never fetched')`));
+  await press(ready, evaluate, tab, 'Fetch origin');
+  const fetched = await outcome(ready, evaluate, tab, 'Fetch origin', 'fetched remote');
+  assert.match(fetched, /Fetch origin: Fetched origin: [0-9]+ remote-tracking ref/);
+  await ready(tab, `!!document.querySelector('ul[aria-label="Remote-tracking refs of origin"]')`, 'tracking refs');
+  // Divergence from fetched state only; rebase is never offered.
+  await ready(tab, `!!${button('Review divergence')}`, 'integration panel');
+  await select(evaluate, tab, 'Remote-tracking branch', 'refs/remotes/origin/main');
+  await press(ready, evaluate, tab, 'Review divergence');
+  await ready(tab, `document.body.innerText.includes('remote commit(s) not on your branch')`, 'divergence');
+  assert.ok(await evaluate(tab, `${button('Rebase')}.disabled && ${button('Fast-forward to the remote commit')}.disabled`), 'Only a merge is offered for diverged history');
+
+  // 3. Merge into a real conflict, resolve it explicitly and commit.
+  await press(ready, evaluate, tab, 'Merge the remote commit');
+  await outcome(ready, evaluate, tab, 'Merge the remote commit', 'merge started');
+  await ready(tab, `document.body.innerText.includes('Merge conflicts') && !!${button('Review shared.txt')}`, 'conflict listed');
+  await press(ready, evaluate, tab, 'Review shared.txt');
+  await ready(tab, `document.body.innerText.includes('remote conflicting edit')`, 'conflict sides');
+  await press(ready, evaluate, tab, 'Use the remote version');
+  await outcome(ready, evaluate, tab, 'Save resolution', 'resolution saved');
+  await ready(tab, `!document.querySelector('input[aria-label="Mark shared.txt reviewed"]').disabled`, 'reviewable resolution');
+  await evaluate(tab, `document.querySelector('input[aria-label="Mark shared.txt reviewed"]').click()`);
+  await press(ready, evaluate, tab, 'Stage reviewed resolutions');
+  await outcome(ready, evaluate, tab, 'Stage reviewed resolutions', 'resolution staged');
+  await ready(tab, `document.body.innerText.includes('Every conflict is resolved and staged')`, 'all conflicts resolved');
+  await setField(evaluate, tab, `document.querySelector('#git-commit-message')`, 'Packaged journey: merge the remote edit');
+  await press(ready, evaluate, tab, 'Commit staged files');
+  await ready(tab, `document.querySelector('ol[aria-label="History"]')?.innerText.includes('Packaged journey: merge the remote edit') ?? false`, 'merge commit');
+  const merged = await evaluate(tab, `document.querySelector('ol[aria-label="History"] li code').title`);
+  assert.equal(await fs.readFile(join(data, fixture.jobId, 'git', 'repositories', (await fs.readdir(join(data, fixture.jobId, 'git', 'repositories')))[0], 'worktree', 'shared.txt'), 'utf8'),
+    'remote conflicting edit\n');
+
+  // 4. Publish explicitly; the remote receives exactly the reviewed merge commit.
+  await press(ready, evaluate, tab, 'Preview push');
+  await ready(tab, `[...document.querySelectorAll('button')].some(item => /^Push [0-9]+ commit\\(s\\) to main$/.test(item.textContent))`, 'push preview');
+  const pushLabel = await evaluate(tab, `[...document.querySelectorAll('button')].map(item => item.textContent).find(text => /^Push [0-9]+ commit\\(s\\) to main$/.test(text))`);
+  await press(ready, evaluate, tab, pushLabel);
+  await outcome(ready, evaluate, tab, pushLabel, 'push');
+  assert.equal(fixtureGit(fixture.repository.paths.remote, ['rev-parse', 'main']), merged, 'The remote must name the pushed merge commit');
+  await ready(tab, `[...document.querySelectorAll('ol[aria-label="Remote audit history"] li')].some(item => item.textContent.includes('push · published'))`, 'push audit');
+
+  // Provenance stays verifiable after branch changes and while the remote is unavailable.
+  const offline = `${fixture.repository.paths.remote}.offline`;
+  await fs.rename(fixture.repository.paths.remote, offline);
+  try {
+    await press(ready, evaluate, tab, 'Fetch origin');
+    const unavailable = await outcome(ready, evaluate, tab, 'Fetch origin', 'fetch while the remote is unavailable', fetched);
+    assert.ok(/did not complete|refused/.test(unavailable), unavailable);
+    await press(ready, evaluate, tab, `Inspect ${objectId.slice(0, 12)}`);
+    await ready(tab, `document.body.innerText.includes(${JSON.stringify(`Source export SHA-256: ${exportSha256}`)})`, 'export digest with the remote unavailable');
+  } finally { await fs.rename(offline, fixture.repository.paths.remote); }
+
+  // A credentialed remote on an allowlisted host that never resolves: the attempt fails safely.
+  await setField(evaluate, tab, `[...document.querySelectorAll('label')].find(label => label.textContent.startsWith('Remote name')).querySelector('input')`, 'canary');
+  await setField(evaluate, tab, `[...document.querySelectorAll('label')].find(label => label.textContent.startsWith('Remote URL')).querySelector('input')`, 'https://canary.invalid/team/project.git');
+  await press(ready, evaluate, tab, 'Add remote');
+  await outcome(ready, evaluate, tab, 'Add remote', 'credentialed remote registered', registered);
+  await ready(tab, `!!${button('Fetch canary')} && document.body.innerText.includes('Credential configured on the server')`, 'credential state shown, not the credential');
+  await press(ready, evaluate, tab, 'Fetch canary');
+  const denied = await outcome(ready, evaluate, tab, 'Fetch canary', 'credentialed fetch');
+  assert.ok(/did not complete/.test(denied), denied);
+
+  // Isolation and redaction checks (#610).
+  assert.equal(await fs.stat(fixture.marker).then(() => true, () => false), false, 'A repository filter driver ran');
+  const base = `/nested/api/v1/jobs/${fixture.jobId}/repositories`;
+  const surfaces = await evaluate(tab, `(${collectGitRedactionSurfaces.toString()})(
+    ${JSON.stringify(base)}, ${JSON.stringify(fixture.jobId)}, ${JSON.stringify(merged)}, document.body.innerText)`);
+  const canaries = credentialCanaries('canary-bot', fixture.canary);
+  for (const { name, text } of surfaces) assertCredentialAbsent(text, canaries, `the ${name} surface`);
+  const storage = await scanCredentialStorage(data, canaries);
+  assert.deepEqual(tab.exceptions, []);
+  return { importFetchDivergence: true, conflictResolved: true, mergeCommit: merged, pushedToRemote: true, auditedPublication: true,
+    exportDigestStable: true, remoteUnavailableHandled: true, filterInert: true,
+    credentialRedaction: { checkedSurfaces: surfaces.length, surfaceNames: surfaces.map(surface => surface.name),
+      representations: canaries.length, storage, absentOnCheckedSurfaces: true } };
+}
+
+/** Activate a native button once it is enabled; an operation that is still finishing keeps controls disabled. */
+async function press(ready, evaluate, tab, label) {
+  await ready(tab, `!!${button(label)} && !${button(label)}.disabled`, `enabled ${label}`);
+  await evaluate(tab, `${button(label)}.click()`);
 }

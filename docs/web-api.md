@@ -1343,6 +1343,38 @@ remote, branches and commits.
 The separate `github-optional` CI lane runs these tests and the fixture's own test with no
 secrets or network credentials (#612).
 
+### Supported Git capabilities
+
+This summary (#611) collects the supported Git surface. The sections above give each behavior and
+its refusal codes.
+
+| Area | Supported | Not supported |
+| --- | --- | --- |
+| Git runtime | The system `git` executable, 2.36.0 or newer, resolved once at startup. Bootstrap reports `runtime.gitVersion` and the `git` capability | Older Git (`GIT_VERSION_UNSUPPORTED`). Bundled or library Git implementations |
+| Transports | `https` and `ssh` (scp-like `host:path` is normalized to `ssh`) on hosts allowed by `--git-remote-host`. `admitted:<name>` local remotes under `--git-remote-root`. HTTPS always verifies certificates (optional CA bundle) and follows no redirects. SSH runs in batch mode with strict host-key checking against a required known-hosts file | `git://`, `file://`, plain paths, `ext::` and other helper syntax, embedded credentials, any host outside the allowlist. Remote operations stay `unavailable` (`GIT_REMOTES_UNCONFIGURED`) until configured |
+| Credentials | Server-side HTTPS username and token files, and SSH identity files, from `--git-credentials`. Passed only through the child environment, never through argv, records, audit, responses or exports | Browser-supplied credentials, credential helpers and interactive prompts |
+| Identity | Every commit and merge uses the server identity (`Decomp Workbench <workbench@localhost.invalid>` by default) as author and committer | Per-user or repository-configured identities |
+| Signing | Commits and merges are unsigned. Bootstrap reports `git-signing` as `unsupported`. A policy that requires signed commits refuses commits and merge commits (`SIGNING_UNAVAILABLE`) but keeps fast-forwards | Signing keys, GPG or SSH signing, and verification of existing signatures |
+| Repositories | Bare and non-bare imports in SHA-1 or SHA-256 object format. Full clones discover the remote's advertised object format and initialize the destination accordingly, including empty SHA-256 remotes. JVM regressions cover admitted and HTTPS SHA-256 clones; the packaged browser journey still qualifies import/fetch, not clone. Imported HEAD may be attached, detached or unborn; cloning a detached remote HEAD requires an explicit branch. Server-managed linked work trees for attempts | Shallow repositories and shallow or partial clones, alternates, `commondir`, `.git` files, reftable, repository format above 1, and extensions other than `objectFormat`, `worktreeConfig`, `noop` and `preciousObjects` (`REPOSITORY_UNSUPPORTED`). Packaged clone/candidate-validation qualification remains open (#608) |
+| Detached HEAD | Status, history, diffs, provenance, branch creation and switching | Integration (`DETACHED`): switch to a branch first |
+| Integration | Fetch-then-review divergence, fast-forward and merge with conflict review, explicit staging and commit, and abort | Rebase, cherry-pick, squash, history rewriting and force pushes |
+| Publication | Explicit, reviewed fast-forward pushes, leased to the reviewed remote state, with reconciliation after an uncertain outcome | Force pushes, deleting remote branches, pushing tags |
+| Repository content | Hooks, filter, diff and merge drivers, fsmonitor, aliases, includes and submodule recursion never run. Configuration written by the server is the only configuration admitted | Running repository-provided programs. Submodules, which stay empty gitlinks |
+| Hosting | Optional GitHub pull requests through `--github-config` for same-repository heads | Forks, other hosting providers, comments, reviews and auto-merge |
+
+`GitRecoveryBoundariesTest` includes pre-start fetch restart/cancellation cases (#609): the
+operation has reached durable `running`, but no transfer child has started. Separate in-flight
+cases use a populated loopback HTTPS remote, pause after sending pack data, and wait for a
+nonempty client partial pack in the operation's private quarantine before cancellation or service
+shutdown/reopen. They identify the fetch child by that staging Git directory and check child
+termination, removal of the entire staging tree, an unchanged live object store, prior tracking
+refs and HEAD, no implicit replay, and an explicit retry. This is orderly service restart coverage,
+not an OS process-death test. The remaining boundaries restart a push after publication, a commit after Git committed, and
+a merge after Git stopped with conflicts. The accepted evidence of the first commit is compared
+after each interruption: recorded snapshot digests, the revision mapping with its `accepted`
+state, and the verified export digest. Passing hosted JVM evidence is required before treating
+these cases as qualification.
+
 ### Git workspace view and packaged journey
 
 The SPA route `/jobs/{jobId}/git` (#583) is a lazily loaded view over the endpoints above. The job
@@ -1393,7 +1425,28 @@ digest, that its entries are stored, sorted and free of `.git` and excluded file
 admitted repository is unchanged. Finally it replaces the JVM on the same origin and, with a new
 session, loads `/jobs/{jobId}/git` directly. It confirms that the commit, the unstaged change and
 the export digest are still there. The route is a server-classified SPA document path, so a direct
-load or reload gets the shell. No network access or credentials are used.
+load or reload gets the shell. These local steps use no network access or credentials.
+
+The synchronization extension (#608/#610) then fetches a disposable admitted remote, reviews
+divergence, resolves a conflict, explicitly commits and pushes, checks audit history, and reads
+prior provenance while the remote is unavailable. Its report calls this `importFetchDivergence`:
+it starts from an import, not a packaged clone, and does not run candidate build/behavior
+validation. Packaged clone/validation coverage and passing hosted end-to-end evidence remain
+required by #608; a Git commit is not reconstruction acceptance.
+
+For redaction, the extension attempts a failing fetch to allowlisted `canary.invalid` using a
+synthetic server-side credential. Selected repository API responses, bootstrap, current UI text
+and all regular files in application storage are checked for the raw token, username/token pair,
+Base64 pair, Basic value and complete Authorization header. Storage scanning is streamed with
+no large-file exclusion; non-regular entries are not followed and are listed in the report.
+Each required API read must return HTTP 200, the expected API-version/kind envelope, and non-null
+DTO contents tied to this repository and journey (including the published merge). Unavailable,
+missing, malformed or empty responses fail qualification rather than counting as clean surfaces;
+negative controls exercise these failures using the same collector injected into the browser.
+`credentialRedaction` records surface names/representation counts and storage coverage, and asserts
+absence only on those checked surfaces. It does not certify every user-facing download/export
+or demonstrate a production credential leak. Positive-control scanner tests run in frontend CI.
+Full #610 acceptance, including all export surfaces and submodule isolation, remains separate.
 
 ## Legacy compatibility
 
