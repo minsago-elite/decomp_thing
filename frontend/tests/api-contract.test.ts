@@ -274,6 +274,48 @@ describe('generated v1 contract pipeline', () => {
         .toThrow(expect.objectContaining({ code: 'unsupported_contract' }));
     }
   });
+  it('keeps reported module validation optional and excludes private compiler fields', () => {
+    const original = decodeResponse(fixture('revision-file-unicode'), 'revisionFile');
+    const compilation = { sourceSha256: original.data.item.sha256, outcome: 'passed', returnCode: 0,
+      diagnosticsSha256: 'e'.repeat(64), diagnosticsBytes: '7' };
+    const validation = { authority: 'reported-module-validation', checkpointSha256: 'f'.repeat(64), compilation };
+    const recorded = { authority: 'reported-generation', moduleId: 'module_1', implementationSha256: original.data.item.sha256,
+      planSha256: 'c'.repeat(64), generationEvidenceSha256: 'd'.repeat(64), promptCharacters: null, promptBudgetCharacters: null };
+    for (const value of [undefined, null, { ...validation, compilation: null }, validation]) {
+      const document = { ...original, data: { ...original.data, recordedModule: { ...recorded, validation: value } } };
+      const wire = JSON.stringify(document);
+      expect(decodeContract(wire, { mode: 'producer' })).toEqual(JSON.parse(wire));
+      expect(decodeResponse(wire, 'revisionFile')).toEqual(JSON.parse(wire));
+    }
+    const document = { ...original, data: { ...original.data, recordedModule: { ...recorded, validation: { ...validation,
+      checkpointPath: '/PRIVATE-CHECKPOINT', compilation: { ...compilation, command: ['PRIVATE-COMMAND'], output: 'PRIVATE-DIAGNOSTIC' } } } } };
+    const result = decodeResponse(JSON.stringify(document), 'revisionFile');
+    expect(result.data.recordedModule?.validation).toEqual(validation);
+    expect(JSON.stringify(result)).not.toContain('PRIVATE');
+    expect(() => decodeContract(JSON.stringify(document), { mode: 'producer' })).toThrow(ApiClientError);
+  });
+  it('refuses foreign compiler sources contradictory outcomes and unbounded reported return codes', () => {
+    const original = decodeResponse(fixture('revision-file-unicode'), 'revisionFile');
+    const compilation = { sourceSha256: original.data.item.sha256, outcome: 'passed', returnCode: 0,
+      diagnosticsSha256: 'e'.repeat(64), diagnosticsBytes: '7' };
+    const recorded = { authority: 'reported-generation', moduleId: 'module_1', implementationSha256: original.data.item.sha256,
+      planSha256: 'c'.repeat(64), generationEvidenceSha256: 'd'.repeat(64), promptCharacters: null, promptBudgetCharacters: null };
+    const invalid = [{ ...compilation, sourceSha256: 'a'.repeat(64) }, { ...compilation, outcome: 'verified' },
+      { ...compilation, returnCode: 1 }, { ...compilation, returnCode: '0' }, { ...compilation, returnCode: 0.5 },
+      { ...compilation, returnCode: 2147483648 }, { ...compilation, returnCode: -2147483649 },
+      { ...compilation, outcome: 'failed-to-start', returnCode: 1 }, { ...compilation, diagnosticsBytes: '-1' }];
+    for (const value of invalid) for (const mode of ['producer', 'response'] as const) {
+      const document = { ...original, data: { ...original.data, recordedModule: { ...recorded,
+        validation: { authority: 'reported-module-validation', checkpointSha256: 'f'.repeat(64), compilation: value } } } };
+      expect(() => decodeContract(JSON.stringify(document), { mode })).toThrow(ApiClientError);
+    }
+    for (const returnCode of [-2147483648, 2147483647, null]) {
+      const document = { ...original, data: { ...original.data, recordedModule: { ...recorded,
+        validation: { authority: 'reported-module-validation', checkpointSha256: 'f'.repeat(64),
+          compilation: { ...compilation, outcome: 'failed', returnCode } } } } };
+      expect(decodeContract(JSON.stringify(document), { mode: 'producer' })).toEqual(document);
+    }
+  });
   it('keeps older file metadata readable and projects only admitted reported-generation fields', () => {
     const original = decodeResponse(fixture('revision-file-unicode'), 'revisionFile');
     expect(decodeContract(JSON.stringify(original), { mode: 'producer' })).toEqual(original);

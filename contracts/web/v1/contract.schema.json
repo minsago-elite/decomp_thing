@@ -460,8 +460,7 @@
         "message",
         "workflows",
         "agentContractVersion",
-        "limits",
-        "launch"
+        "limits"
       ],
       "additionalProperties": false,
       "allOf": [
@@ -1171,6 +1170,16 @@
                 "FAILED",
                 "PROCESS_INTERRUPTED"
               ]
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "recovery": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/runRecovery"
             },
             {
               "type": "null"
@@ -4194,6 +4203,82 @@
                       "type": "null"
                     }
                   ]
+                },
+                "validation": {
+                  "anyOf": [
+                    {
+                      "type": "object",
+                      "properties": {
+                        "authority": {
+                          "const": "reported-module-validation"
+                        },
+                        "checkpointSha256": {
+                          "$ref": "#/definitions/sha256"
+                        },
+                        "compilation": {
+                          "anyOf": [
+                            {
+                              "type": "object",
+                              "properties": {
+                                "sourceSha256": {
+                                  "$ref": "#/definitions/sha256"
+                                },
+                                "outcome": {
+                                  "type": "string",
+                                  "enum": [
+                                    "passed",
+                                    "failed",
+                                    "failed-to-start",
+                                    "timed-out",
+                                    "output-limit-exceeded",
+                                    "source-changed"
+                                  ]
+                                },
+                                "returnCode": {
+                                  "anyOf": [
+                                    {
+                                      "type": "integer",
+                                      "minimum": -2147483648,
+                                      "maximum": 2147483647
+                                    },
+                                    {
+                                      "type": "null"
+                                    }
+                                  ]
+                                },
+                                "diagnosticsSha256": {
+                                  "$ref": "#/definitions/sha256"
+                                },
+                                "diagnosticsBytes": {
+                                  "$ref": "#/definitions/uint64"
+                                }
+                              },
+                              "required": [
+                                "sourceSha256",
+                                "outcome",
+                                "returnCode",
+                                "diagnosticsSha256",
+                                "diagnosticsBytes"
+                              ],
+                              "additionalProperties": false
+                            },
+                            {
+                              "type": "null"
+                            }
+                          ]
+                        }
+                      },
+                      "required": [
+                        "authority",
+                        "checkpointSha256",
+                        "compilation"
+                      ],
+                      "additionalProperties": false
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
                 }
               },
               "required": [
@@ -5078,6 +5163,226 @@
         "action"
       ],
       "additionalProperties": false
+    },
+    "resumeRestoration": {
+      "type": "string",
+      "enum": [
+        "agent-session",
+        "project-evidence"
+      ]
+    },
+    "runRecovery": {
+      "type": "object",
+      "properties": {
+        "mode": {
+          "type": "string",
+          "enum": [
+            "retry",
+            "resume"
+          ]
+        },
+        "restores": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/resumeRestoration"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "checkpointSha256": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/sha256"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "mode",
+        "restores",
+        "checkpointSha256"
+      ],
+      "additionalProperties": false
+    },
+    "attemptControls": {
+      "type": "object",
+      "properties": {
+        "jobId": {
+          "$ref": "#/definitions/id"
+        },
+        "runId": {
+          "$ref": "#/definitions/id"
+        },
+        "runVersion": {
+          "$ref": "#/definitions/version"
+        },
+        "state": {
+          "$ref": "#/definitions/runState"
+        },
+        "inputRevisionId": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/id"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "cancel": {
+          "type": "object",
+          "properties": {
+            "available": {
+              "type": "boolean"
+            },
+            "reason": {
+              "anyOf": [
+                {
+                  "$ref": "#/definitions/cancelReason"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            }
+          },
+          "required": [
+            "available",
+            "reason"
+          ],
+          "additionalProperties": false
+        },
+        "retry": {
+          "type": "object",
+          "properties": {
+            "available": {
+              "type": "boolean"
+            },
+            "reason": {
+              "anyOf": [
+                {
+                  "$ref": "#/definitions/recoveryReason"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            }
+          },
+          "required": [
+            "available",
+            "reason"
+          ],
+          "additionalProperties": false
+        },
+        "resume": {
+          "type": "object",
+          "properties": {
+            "available": {
+              "type": "boolean"
+            },
+            "reason": {
+              "anyOf": [
+                {
+                  "$ref": "#/definitions/resumeReason"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            }
+          },
+          "required": [
+            "available",
+            "reason"
+          ],
+          "additionalProperties": false
+        },
+        "resumeRestores": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/resumeRestoration"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "successorRunId": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/id"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "jobId",
+        "runId",
+        "runVersion",
+        "state",
+        "inputRevisionId",
+        "cancel",
+        "retry",
+        "resume",
+        "resumeRestores",
+        "successorRunId"
+      ],
+      "additionalProperties": false
+    },
+    "cancelReason": {
+      "type": "string",
+      "enum": [
+        "RECOVERY_REQUIRED",
+        "ATTEMPT_TERMINAL",
+        "CANCEL_PENDING",
+        "SERVICE_STOPPED",
+        "NO_OWNED_WORKER",
+        "RECEIPT_CAPACITY"
+      ]
+    },
+    "recoveryReason": {
+      "type": "string",
+      "enum": [
+        "RECOVERY_REQUIRED",
+        "SERVICE_STOPPED",
+        "ATTEMPT_ACTIVE",
+        "ATTEMPT_COMPLETED",
+        "ATTEMPT_SUPERSEDED",
+        "ACTIVE_RUN",
+        "WORKFLOW_UNAVAILABLE",
+        "INPUT_UNVERIFIED",
+        "UPLOAD_CAPACITY",
+        "CAPACITY_UNAVAILABLE"
+      ]
+    },
+    "resumeReason": {
+      "anyOf": [
+        {
+          "$ref": "#/definitions/recoveryReason"
+        },
+        {
+          "type": "string",
+          "enum": [
+            "RESUME_UNSUPPORTED",
+            "HARNESS_CHANGED",
+            "CHECKPOINT_MISSING",
+            "CHECKPOINT_MISMATCH",
+            "CHECKPOINT_UNVERIFIED",
+            "WORKSPACE_UNVERIFIED",
+            "SESSION_QUARANTINED",
+            "CLEANUP_UNVERIFIED"
+          ]
+        }
+      ]
     }
   },
   "oneOf": [
@@ -5810,6 +6115,30 @@
         },
         "data": {
           "$ref": "#/definitions/validationHistory"
+        }
+      },
+      "required": [
+        "apiVersion",
+        "kind",
+        "requestId",
+        "data"
+      ],
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "properties": {
+        "apiVersion": {
+          "const": 1
+        },
+        "kind": {
+          "const": "attemptControls"
+        },
+        "requestId": {
+          "$ref": "#/definitions/requestId"
+        },
+        "data": {
+          "$ref": "#/definitions/attemptControls"
         }
       },
       "required": [

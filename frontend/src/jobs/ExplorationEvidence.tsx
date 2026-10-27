@@ -7,10 +7,15 @@ import { withApiFailureReference } from '../api/errors';
 import { ExplorationCases } from './ExplorationCases';
 import { OutputSignatureBreadth } from './OutputSignatureBreadth';
 
+import { receive } from '../shared/receiptTime';
+import type { Received } from '../shared/receiptTime';
+import { MetadataReceipt } from '../shared/MetadataReceipt';
+
 export function ExplorationEvidence({ jobId, runId, basePath }: { jobId: string; runId: string; basePath: string }) {
   const { client } = usePrivateTransport(basePath);
   const [request, setRequest] = useState(0);
-  const [report, setReport] = useState<Report | null>(null);
+  const [observation, setReport] = useState<Received<Report> | null>(null);
+  const report = observation?.value;
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
   useEffect(() => {
@@ -22,7 +27,7 @@ export function ExplorationEvidence({ jobId, runId, basePath }: { jobId: string;
       if (value.binding.jobId !== jobId || value.binding.runId !== runId || value.reportType !== 'exploration') {
         setError(copy.theReportDoesNotBelongToTheRequestedAttempt); return;
       }
-      setReport(value);
+      setReport(receive(value));
     }).catch((failure: unknown) => {
       if (!controller.signal.aborted) setError(withApiFailureReference(copy.explorationEvidenceCouldNotBeReadCheckTheSessionAnd, failure));
     }).finally(() => { if (!controller.signal.aborted) setLoading(false); });
@@ -35,6 +40,7 @@ export function ExplorationEvidence({ jobId, runId, basePath }: { jobId: string;
     {loading && <p role="status">{copy.readingExplorationEvidence}</p>}
     {error && <p role="alert">{error}</p>}
     {report && <>
+      <MetadataReceipt kind="exploration" receipt={observation?.receipt} />
       <p>{displayMessage(copy.state, { state: report.state, authority: report.authority })}</p>
       <dl id="exploration-report-binding" class="job-facts" aria-label={copy.reportBinding}>
         <dt>{copy.reportIdentity}</dt><dd><code>{report.reportId}</code></dd>

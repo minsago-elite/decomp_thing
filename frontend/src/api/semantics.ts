@@ -1,4 +1,4 @@
-import type { ContractDocument, Page, RevisionDirectory, Run, SourceChunk, ValidationBytePreview, ValidationCases, ValidationFailure, ValidationHistory, ValidationSummary } from './generated';
+import type { AttemptControls, ContractDocument, Page, RevisionDirectory, Run, SourceChunk, ValidationBytePreview, ValidationCases, ValidationFailure, ValidationHistory, ValidationSummary } from './generated';
 import { ApiClientError } from './errors';
 import { normalizeBasePath, validateResourceHref } from '../app/paths';
 import type { ApiResource } from '../app/paths';
@@ -173,6 +173,22 @@ function checkRun(run: Run): void {
   // A recorded agent configuration names the harness the attempt submitted, never another one.
   const harness = run.configuration?.harness ?? null;
   if (harness !== null) requireValue(run.harnessCapabilityId === `agent-${harness.kind}`);
+  const recovery = run.recovery;
+  if (recovery) {
+    requireValue(run.previousRunId !== null && (recovery.restores === null) === (recovery.checkpointSha256 === null));
+    requireValue((recovery.mode === 'retry') === (recovery.restores === null));
+  }
+}
+
+/** Eligibility per command; never a reservation, result or authorization. */
+function checkAttemptControls(value: AttemptControls): void {
+  const { cancel, retry, resume } = value;
+  for (const control of [cancel, retry, resume]) requireValue(control.available === (control.reason === null));
+  requireValue((value.resumeRestores !== null) === value.resume.available);
+  if (value.cancel.available) requireValue(value.state === 'queued' || value.state === 'running');
+  const recoverable = ['failed', 'cancelled', 'interrupted'].includes(value.state);
+  if (value.retry.available || value.resume.available) requireValue(recoverable && value.successorRunId === null);
+  requireValue(value.successorRunId !== value.runId);
 }
 
 function checkSourcePage(items: ReadonlyArray<{ fileId: string; displayName: string }>, totalFiles: number, page: Page, version: string): void {
@@ -268,6 +284,9 @@ export function checkSemantics(document: ContractDocument, basePath = '/'): void
     case 'run':
       checkRun(document.data);
       break;
+    case 'attemptControls':
+      checkAttemptControls(document.data);
+      break;
     case 'runs': {
       const { items, page, jobId } = document.data;
       requireValue(items.length <= page.limit && new Set(items.map(item => item.runId)).size === items.length);
@@ -301,6 +320,12 @@ export function checkSemantics(document: ContractDocument, basePath = '/'): void
         const used = recorded.promptCharacters; const maximum = recorded.promptBudgetCharacters;
         requireValue((used === null) === (maximum === null));
         if (used !== null && maximum !== null) requireValue(BigInt(maximum) > 0n && BigInt(used) <= BigInt(maximum));
+        const compilation = recorded.validation?.compilation;
+        if (compilation) {
+          requireValue(compilation.sourceSha256 === recorded.implementationSha256);
+          requireValue(compilation.outcome !== 'passed' || compilation.returnCode === 0);
+          requireValue(compilation.outcome !== 'failed-to-start' || compilation.returnCode === null);
+        }
       }
       break;
     }
@@ -338,8 +363,9 @@ export function checkSemantics(document: ContractDocument, basePath = '/'): void
       const { limits, capabilities, apiVersions } = document.data;
       requireValue(limits.defaultPageLimit <= limits.maxPageLimit);
       requireValue(new Set(capabilities.map((item) => item.id)).size === capabilities.length);
-      // An agent contract version is reported exactly for launch options that contact an agent.
-      requireValue(capabilities.every((item) => item.launch === null
+      // An agent contract version is reported exactly for launch options that contact an agent;
+      // older v1 producers omit launch, which means no launch facts were reported.
+      requireValue(capabilities.every((item) => item.launch == null
         || item.launch.contactsAgent === (item.agentContractVersion !== null)));
       // Harness facts match the submitted harness; the built-in harness is never reported as selectable.
       requireValue(capabilities.every((item) => item.launch?.harness == null

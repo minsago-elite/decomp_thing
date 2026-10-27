@@ -7,7 +7,8 @@ The D1 frontend is an opt-in packaged preview. It currently provides the public
 shell and runtime view, local browser sessions, and authenticated v1 bootstrap
 and single-job metadata reads. Persistent job management and workflow actions
 remain on the default legacy UI until the D-series parity and access-control gates
-permit migration. The preview cannot upload or start a workflow.
+permit migration. The preview can upload ELF binaries and list and inspect jobs, but it cannot start a workflow;
+see the [workbench user guide](workbench-user-guide.md) for what it does today.
 
 Build with the pinned Node/npm versions in [.node-version](../.node-version) and
 [the frontend workspace](../frontend/README.md). Node is a build dependency only.
