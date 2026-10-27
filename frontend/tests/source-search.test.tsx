@@ -174,6 +174,28 @@ it('accepts long encoded Unicode searches with continuation room and refuses ove
   expect(new URLSearchParams(window.location.search).get('path')).toBe(unicode.path);
 });
 
+it.each(['root', directory])('refuses oversized bookmarked searches in %s and lets the user shorten them', scope => {
+  // This first-page URL fits the document ceiling but cannot fit a cursor or the prefixed API URL.
+  const query = new URLSearchParams({ q: '😀'.repeat(128), path: '😀'.repeat(scope === 'root' ? 210 : 202),
+    ...(scope === 'root' ? {} : { directory: scope }) }).toString();
+  expect(query.length).toBeLessThan(4096);
+  const parsed = sourceSearchSelection(`?${query}`).request!;
+  expect(sourceSearchFits(scope, parsed)).toBe(false);
+  expect(() => sourceSearchPath('/nested', selected, scope, { ...parsed, cursor })).toThrow(ApiClientError);
+  const local = vi.fn<typeof fetch>(); vi.stubGlobal('fetch', local);
+  mount(`?${query}`);
+  expect(screen.getByRole('alert').textContent).toContain('too long once encoded');
+  expect(local).not.toHaveBeenCalled();
+  expect(screen.queryByRole('button', { name: 'Continue search' })).toBeNull();
+  if (scope !== 'root') expect(screen.getByRole('link', { name: 'Search all recorded inputs instead' }).getAttribute('href')).toBe(base);
+  // The form is retained for correction, not stranded in a loading or invalid-route state.
+  fireEvent.input(screen.getByRole('searchbox', { name: /Search text/u }), { target: { value: 'needle' } });
+  fireEvent.input(screen.getByRole('textbox', { name: /Path contains/u }), { target: { value: 'src' } });
+  fireEvent.click(screen.getByRole('button', { name: 'Search' }));
+  expect(new URLSearchParams(window.location.search).get('q')).toBe('needle');
+  expect(new URLSearchParams(window.location.search).get('path')).toBe('src');
+});
+
 it('keeps coverage gaps from earlier pages on a final continued page', async () => {
   vi.stubGlobal('fetch', vi.fn<typeof fetch>().mockResolvedValueOnce(response(fixture('source-search-continued-gaps'))));
   mount(`?q=needle&cursor=${cursor}`);
