@@ -51,6 +51,36 @@ class SourceTreeTest {
     }
 
     @Test
+    fun `captured review can retain behavior while recording changed evidence provenance`() {
+        val project = createTempDirectory("source-evidence-review-")
+        var calls = 0
+        val client = object : decompengine.repair.RepairClient {
+            override fun requestRepair(request: decompengine.repair.RepairRequest,
+                invocation: decompengine.repair.RepairClientInvocation): decompengine.repair.RepairResponse {
+                calls++
+                val fingerprint = Regex("reconstruction-context-sha256: ([0-9a-f]{64})")
+                    .find(request.prompt)!!.groupValues[1]
+                return decompengine.repair.RepairResponse("Reviewed recovered evidence", listOf(
+                    decompengine.repair.SourcePatch("src/modules/parse.c",
+                        "/* fn_0000000000401000; reconstruction-context-sha256: $fingerprint */\n" +
+                            "int parse_input(void) { return 17; }\n")))
+            }
+        }
+        val reconstructor = BoundedLlmModuleReconstructor(decompengine.repair.RepairClientAgentHarness(client))
+        val original = oneModuleModel()
+        assertTrue(SourceTreeGenerator.generate(original, project, reconstructor = reconstructor)
+            .unresolvedImplementationIds.isEmpty())
+        val first = project.resolve("src/modules/parse.c").readText()
+        val changed = original.copy(functions = original.functions.map { it.copy(strings = setOf("new evidence")) })
+        assertTrue(SourceTreeGenerator.generate(changed, project, reconstructor = reconstructor)
+            .unresolvedImplementationIds.isEmpty())
+        assertFalse(first == project.resolve("src/modules/parse.c").readText())
+        assertTrue(SourceTreeGenerator.generate(changed, project, reconstructor = reconstructor)
+            .unresolvedImplementationIds.isEmpty())
+        assertEquals(2, calls)
+    }
+
+    @Test
     fun `typed prototypes retain scalar and pointer parameters in generated headers`() {
         val function = oneModuleModel().functions.single().copy(
             prototype = "int parse_input(char *input, const char *suffix, uint count)",
@@ -87,6 +117,7 @@ class SourceTreeTest {
                 override fun requestRepair(request: decompengine.repair.RepairRequest, invocation: decompengine.repair.RepairClientInvocation): decompengine.repair.RepairResponse {
                     calls++
                     assertTrue(request.prompt.contains("fn_0000000000401000"))
+                    assertTrue(request.prompt.contains("reconstruction-context-sha256:"))
                     assertTrue(request.projectFiles.containsKey("include/modules/parse.h"))
                     assertTrue(request.projectFiles.containsKey("src/modules/parse.c"))
                     return decompengine.repair.RepairResponse("reconstructed", if (scenario == "empty") emptyList() else listOf(

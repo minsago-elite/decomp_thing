@@ -318,6 +318,10 @@ class BoundedLlmModuleReconstructor(
             Preserve recovered behavior and suspicious operations. Do not invent file paths or edit headers.
             Edit $target in the authorized workspace and keep provenance comments containing every owned entity ID:
             ${provenanceIds.joinToString(", ")}
+            Record the reviewed module evidence in a source comment:
+            /* reconstruction-context-sha256: ${request.sessionEvidenceFingerprint} */
+            If the existing implementation already fits the evidence, preserve its behavior and update its
+            provenance comment to identify the current evidence. Return the complete reviewed source file.
             Do not use generic return-value placeholders or undefined decompiler types. If evidence is insufficient,
             stop without claiming completion so the module is recorded as explicitly unresolved.
         """.trimIndent() + "\n\n" + acceptance
@@ -1798,7 +1802,8 @@ object SourceTreeGenerator {
         val functions = module.functionIds.sorted().joinToString("\n") { id ->
             val item = model.functions.single { it.id == id }
             listOf(item.id, item.name, item.address.toString(), item.prototype, item.status.name, item.decompiledC.orEmpty(),
-                item.calls.sorted().joinToString(","), item.functionReferences.sorted().joinToString(","), item.referencedGlobals.sorted().joinToString(","), item.strings.sorted().joinToString(",")).joinToString("|")
+                item.calls.sorted().joinToString(","), item.referencedGlobals.sorted().joinToString(","), item.strings.sorted().joinToString(",")).joinToString("|") +
+                if (item.functionReferences.isEmpty()) "" else "|functionReferences:${item.functionReferences.sorted().joinToString(",")}"
         }
         val globals = module.globalIds.sorted().joinToString("\n") { id -> model.globals.single { it.id == id }.toString() }
         val types = module.typeIds.sorted().joinToString("\n") { id -> model.types.single { it.id == id }.toString() }
