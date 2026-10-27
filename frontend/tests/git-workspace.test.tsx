@@ -576,6 +576,36 @@ it('clones a new repository from a remote URL when the job has none', async () =
     { action: 'git.clone', url: 'https://git.example.org/team/project.git', remoteName: 'origin', branch: null }]);
 });
 
+it.each(['detached', 'unsupported'])('recovers a %s clone default with an explicit branch and retains refused input', async reason => {
+  listing = [];
+  transport.post.mockResolvedValueOnce({ data: { ...operation('failed', 'git.clone').data,
+    message: `The remote default is ${reason}; select a supported branch explicitly.` } });
+  mount();
+  const url = await screen.findByLabelText('Remote URL');
+  const branch = screen.getByLabelText('Branch to check out (optional)');
+  fireEvent.input(url, { target: { value: 'admitted:upstream.git' } });
+  fireEvent.click(screen.getByRole('button', { name: 'Clone repository' }));
+  expect(await screen.findByText(new RegExp(`remote default is ${reason}`))).toBeTruthy();
+  expect(transport.post.mock.calls[0]?.[3]).toMatchObject({ branch: null });
+  expect(url).toHaveProperty('value', 'admitted:upstream.git');
+
+  fireEvent.input(branch, { target: { value: 'topic' } });
+  transport.post.mockRejectedValueOnce(new ApiClientError('http_error', { status: 422 }));
+  fireEvent.click(screen.getByRole('button', { name: 'Clone repository' }));
+  await waitFor(() => expect(transport.post).toHaveBeenCalledTimes(2));
+  await waitFor(() => expect(screen.getByRole('button', { name: 'Clone repository' })).toHaveProperty('disabled', false));
+  expect(branch).toHaveProperty('value', 'topic');
+  expect(url).toHaveProperty('value', 'admitted:upstream.git');
+
+  transport.post.mockResolvedValueOnce(operation('completed', 'git.clone'));
+  listing = [repository];
+  fireEvent.click(screen.getByRole('button', { name: 'Clone repository' }));
+  await waitFor(() => expect(transport.post).toHaveBeenCalledTimes(3));
+  expect(transport.post.mock.calls[2]?.slice(1, 4)).toEqual([`/jobs/${jobId}/repositories`, 'gitRepositoryCloneRequest',
+    { action: 'git.clone', url: 'admitted:upstream.git', remoteName: 'origin', branch: 'topic' }]);
+  expect(await screen.findByText('Branch main')).toBeTruthy();
+});
+
 it('follows ref pages so every branch stays reachable, and drops a displayed diff when the status is read again', async () => {
   paged = true;
   entries = [entry('file_s', 'src/util.c', 'modified', 'none')];

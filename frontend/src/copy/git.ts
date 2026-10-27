@@ -124,5 +124,7 @@ export const gitRemotesCopy = {
   cloneTitle: 'Clone from a remote',
   cloneAction: 'Clone repository',
   cloneRemoteName: 'Remote name for the source',
+  cloneBranch: 'Branch to check out (optional)',
+  cloneBranchHelp: 'Leave blank to use the remote’s default branch. If that default is detached or unsupported, enter a supported branch name and retry.',
   cloneHelp: 'Cloning copies branches and tags into an isolated managed repository. Hooks, filters, submodules and LFS stay inert, and nothing is validated or accepted.',
 } as const;

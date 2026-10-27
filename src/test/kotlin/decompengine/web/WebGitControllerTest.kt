@@ -370,6 +370,47 @@ class WebGitControllerTest {
         error(f.read("$base/provenance/${head.take(10)}"), 422, "VALIDATION_FAILED")
     }
 
+    @Test fun `clone HTTP refusal recovers with an explicit supported branch`() {
+        for (detached in listOf(true, false)) Fixture().use { f ->
+            decompengine.git.GitTestRepositories().use { g ->
+                val bare = f.admitted.resolve("upstream.git")
+                g.git("init", "-q", "--bare", "--initial-branch=main", bare.toString())
+                val seed = Files.createDirectories(g.root.resolve("seed"))
+                g.git("init", "-q", "--initial-branch=topic", seed.toString())
+                Files.writeString(seed.resolve("README.md"), "explicit topic source\n")
+                g.git("-C", seed.toString(), "add", "-A"); g.git("-C", seed.toString(), "commit", "-q", "-m", "topic")
+                g.git("-C", seed.toString(), "push", "-q", bare.toString(), "topic")
+                val expected = g.git("-C", bare.toString(), "rev-parse", "refs/heads/topic").trim()
+                if (detached) g.git("-C", bare.toString(), "update-ref", "--no-deref", "HEAD", expected)
+                else {
+                    val unsupported = "b".repeat(201)
+                    g.git("-C", bare.toString(), "update-ref", "refs/heads/$unsupported", expected)
+                    g.git("-C", bare.toString(), "symbolic-ref", "HEAD", "refs/heads/$unsupported")
+                }
+                fun clone(branch: String?, key: String): JsonObject {
+                    val body = buildJsonObject {
+                        put("action", "git.clone"); put("url", "admitted:upstream.git"); put("remoteName", "origin")
+                        put("branch", branch?.let(::JsonPrimitive) ?: JsonNull)
+                    }.toString()
+                    val response = f.send("POST", body, f.headers(key = key))
+                    data(response, 202, "operation")
+                    return f.awaitOperation(response.headers().firstValue("Location").orElseThrow())
+                }
+                val refused = clone(null, "http_clone_default_01")
+                assertEquals("failed", refused.getValue("state").jsonPrimitive.content)
+                assertTrue(refused.getValue("message").jsonPrimitive.content.contains("explicitly"))
+                assertTrue(data(f.read(), 200, "gitRepositories").getValue("repositories").jsonArray.isEmpty())
+                val completed = clone("topic", "http_clone_branch_001")
+                assertEquals("completed", completed.getValue("state").jsonPrimitive.content, completed.toString())
+                val repositoryId = completed.getValue("repositoryId").jsonPrimitive.content
+                val status = data(f.read("${f.collection}/$repositoryId/status"), 200, "gitStatus")
+                assertEquals("refs/heads/topic", status.getValue("headRefName").jsonPrimitive.content)
+                assertEquals(expected, status.getValue("headObjectId").jsonPrimitive.content)
+                assertEquals("explicit topic source\n", Files.readString(f.root.resolve("${f.job.id}/git/repositories/$repositoryId/worktree/README.md")))
+            }
+        }
+    }
+
     @Test fun `remotes, fetch, audit, clone and cancel over HTTP never expose paths or credentials`(): Unit = Fixture().use { f ->
         decompengine.git.GitTestRepositories().use { g ->
             val bare = f.admitted.resolve("upstream.git")

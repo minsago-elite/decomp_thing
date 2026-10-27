@@ -366,8 +366,8 @@ export function GitWorkspace({ jobId, basePath, session, capabilities, pollInter
         : <p>{importing?.message ?? copy.importUnavailable}</p>}
       <p>{copy.importHelp}</p>
       <h3>{gitRemotesCopy.cloneTitle}</h3>
-      {remoting?.state === 'supported' ? <CloneForm disabled={busy} onClone={(url, remoteName) =>
-        create('gitRepositoryCloneRequest', gitRemotesCopy.cloneAction, { action: 'git.clone', url, remoteName, branch: null })} />
+      {remoting?.state === 'supported' ? <CloneForm disabled={busy} onClone={(url, remoteName, branch) =>
+        create('gitRepositoryCloneRequest', gitRemotesCopy.cloneAction, { action: 'git.clone', url, remoteName, branch })} />
         : <p><StateMark tone={remoting ? capabilityTone(remoting.state) : 'unknown'}>{gitRemotesCopy.unavailable}</StateMark> {remoting?.message ?? gitRemotesCopy.notReported}</p>}
       {running && running.action === 'git.clone' && <p role="status">{running.progress
         ? textMessage(gitRemotesCopy.progress, { phase: running.progress.phase, percent: running.progress.percent === null ? '' : ` ${running.progress.percent}%` })
@@ -509,12 +509,16 @@ export function GitWorkspace({ jobId, basePath, session, capabilities, pollInter
   </section>;
 }
 
-function CloneForm({ disabled, onClone }: { disabled: boolean; onClone: (url: string, remoteName: string) => Promise<void> }) {
+function CloneForm({ disabled, onClone }: { disabled: boolean; onClone: (url: string, remoteName: string, branch: string | null) => Promise<void> }) {
   const [url, setUrl] = useState('');
   const [remoteName, setRemoteName] = useState('origin');
-  return <form onSubmit={event => { event.preventDefault(); if (url && remoteName) void onClone(url, remoteName); }}>
+  const [branch, setBranch] = useState('');
+  return <form onSubmit={event => { event.preventDefault(); if (url && remoteName) void onClone(url, remoteName, branch || null); }}>
     <label>{gitRemotesCopy.url} <input value={url} maxLength={2048} required autoComplete="off" spellcheck={false} onInput={event => { setUrl(event.currentTarget.value); }} /></label>
     <label>{gitRemotesCopy.cloneRemoteName} <input value={remoteName} pattern="[A-Za-z0-9][A-Za-z0-9._\-]{0,63}" required onInput={event => { setRemoteName(event.currentTarget.value); }} /></label>
+    <label>{gitRemotesCopy.cloneBranch} <input value={branch} autoComplete="off" spellcheck={false}
+      aria-describedby="git-clone-branch-help" onInput={event => { setBranch(event.currentTarget.value); }} /></label>
+    <p id="git-clone-branch-help">{gitRemotesCopy.cloneBranchHelp}</p>
     <button type="submit" disabled={disabled}>{gitRemotesCopy.cloneAction}</button>
     <p>{gitRemotesCopy.urlHelp}</p>
   </form>;
