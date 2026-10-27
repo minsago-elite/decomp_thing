@@ -10,7 +10,7 @@ import java.nio.file.StandardCopyOption.REPLACE_EXISTING
 import java.util.concurrent.atomic.AtomicInteger
 import kotlin.test.*
 
-/** Deterministic reproduction of the packaged appended-SSE timeout (#514): no thread timing is involved. */
+/** Deterministic journal-publication read-failure control; the historical appended-SSE cause (#514) remains unproved. */
 class WebProgressPublicationReadTest {
     private fun withJournal(block: (Path, Path) -> Unit) {
         val root = Files.createTempDirectory(Files.createDirectories(Path.of("build/test-fixtures")), "web-progress-publication-")

@@ -168,8 +168,8 @@ it('uses polling when the server explicitly reports exhausted stream capacity', 
   expect(fetcher).toHaveBeenCalledOnce();
 });
 
-// Packaged history flake (#514): the stream opened while the journal was atomically republished,
-// its first descriptor-pinned read failed before headers and Activity stopped following.
+// Injected-503 recovery control for a possible journal-publication read failure (#514).
+// This does not establish the cause of the historical packaged appended-SSE timeout.
 it('retries a stream refused during journal republication over a fresh stream without polling', async () => {
   const error = fixture<{ error: { code: string } }>('error-validation');
   error.error.code = 'PROGRESS_UNAVAILABLE';

@@ -1,13 +1,17 @@
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
-import { mkdtemp, readFile, rm } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { mkdir, mkdtemp, readFile, rm } from 'node:fs/promises';
+import { dirname, join, resolve } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import test from 'node:test';
 import { seedHistory } from './packaged-browser-history.mjs';
 
+const sourceRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..');
+
 async function withHistory(check) {
-  const parent = await mkdtemp(join(tmpdir(), 'packaged-history-test-'));
+  const build = join(sourceRoot, 'build');
+  await mkdir(build, { recursive: true });
+  const parent = await mkdtemp(join(build, 'packaged-history-test-'));
   try {
     await check(await seedHistory(join(parent, 'jobs')));
   } finally {
@@ -17,6 +21,8 @@ async function withHistory(check) {
 
 test('history fixture uses public ELF categories and a publishable workflow version', async () => {
   await withHistory(async fixture => {
+    assert.ok(fixture.directory.startsWith(join(sourceRoot, 'build', 'packaged-history-test-')),
+      'History fixtures must stay under the repository build directory without a TMPDIR override');
     const jobBytes = await readFile(join(fixture.directory, 'job.json'));
     const job = JSON.parse(jobBytes);
     const input = await readFile(join(fixture.directory, 'input.elf'));
