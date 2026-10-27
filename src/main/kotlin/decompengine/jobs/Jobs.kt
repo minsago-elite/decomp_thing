@@ -303,6 +303,11 @@ class JobStore internal constructor(
         return streamContainedFile(jobId, relativePath, declaredSize, consume, cancellationCheck)
     }
 
+    /** Inventory input reads retain the store's private upload ceiling, with the same admission accounting. */
+    internal fun readArtifactInventoryInput(jobId: String, reserveBytes: (Long) -> Unit,
+        cancellationCheck: () -> Unit): StableRegularFile =
+        readArtifactInventoryFile(jobId, "input.elf", MAX_INPUT_BYTES.toLong(), reserveBytes, cancellationCheck)
+
     /** Catalog inventory reads use the same pinned streaming boundary, including input and failed-read accounting. */
     internal fun readArtifactInventoryFile(jobId: String, relativePath: String, maximumBytes: Long,
         reserveBytes: (Long) -> Unit, cancellationCheck: () -> Unit): StableRegularFile {
