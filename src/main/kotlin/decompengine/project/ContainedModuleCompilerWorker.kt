@@ -9,6 +9,7 @@ import decompengine.acp.LinuxBoundedSessionOutputLimitException
 import decompengine.acp.LinuxBoundedSessionProcess
 import decompengine.acp.LinuxBoundedSessionResult
 import decompengine.acp.LinuxBoundedSessionTimeoutException
+import decompengine.acp.LinuxFilesystemSyscalls
 import decompengine.oracle.fulltree.StableControlFile
 import decompengine.repair.readStableRegularFile
 import java.nio.ByteBuffer
@@ -62,7 +63,12 @@ object ContainedModuleCompilerWorker {
         try {
             verifySnapshotInventory(request)
             request.inputs.forEach { input -> pinned += PinnedCompilerInput.open(request.snapshotRoot, input, currentUid) }
-            StableControlFile.open(request.compilerPath, MAXIMUM_COMPILER_BYTES, "pinned module compiler").use { compiler ->
+            // Host root becomes an unmapped/overflow UID inside the user namespace. Never
+            // reinterpret that UID as trusted root (it also represents arbitrary foreign owners).
+            // The controller retains the original runtime pin; here authenticate a private copy
+            // against the request digest and lease the exact owned inode we will execute.
+            val executable = materializeCompiler(request, currentUid)
+            StableControlFile.open(executable, MAXIMUM_COMPILER_BYTES, "pinned module compiler").use { compiler ->
                 compiler.requireSingleLink("pinned module compiler")
                 require(compiler.authenticatedSha256 == request.compilerSha256) { "module compiler executable digest differs" }
                 val scratch = Files.createDirectory(request.outputDirectory.resolve("tmp"),
@@ -73,7 +79,10 @@ object ContainedModuleCompilerWorker {
                 namespace.requireUnchanged()
                 var terminal: LinuxBoundedSessionResult? = null
                 var outcome = try {
-                    terminal = LinuxBoundedSessionProcess.execute(LinuxBoundedSessionCommand(request.command, environment,
+                    // Keep every profile argument, including -B pointing at the authenticated
+                    // toolchain closure. Only argv[0] selects the digest-identical private inode.
+                    val command = listOf(executable.toString()) + request.command.drop(1)
+                    terminal = LinuxBoundedSessionProcess.execute(LinuxBoundedSessionCommand(command, environment,
                         workingDirectory = Path.of("/"), timeout = Duration.ofMillis(request.maximumWallMillis),
                         maximumStdoutBytes = (request.maximumOutputBytes / 2).toInt(),
                         maximumStderrBytes = (request.maximumOutputBytes - request.maximumOutputBytes / 2).toInt()))
@@ -143,6 +152,42 @@ object ContainedModuleCompilerWorker {
             try { pinned.asReversed().forEach { it.close() } } finally { namespace.close() }
         }
     }
+}
+
+/**
+ * Snapshot bytes, not foreign ownership, authorize this executable. No source descriptor is
+ * executed or admitted as a StableControlFile. A raced/mutable foreign source can at most supply
+ * bytes matching the independently pinned digest; the owned destination must then acquire the
+ * ordinary kernel lease before launch. Copying is streaming, bounded and descriptor-relative.
+ */
+private fun materializeCompiler(request: ContainedModuleCompilerRequest, uid: Int): Path {
+    val runtime = Files.createDirectory(request.outputDirectory.resolve("compiler-runtime"),
+        PosixFilePermissions.asFileAttribute(PosixFilePermissions.fromString("rwx------")))
+    requireOwnedDirectory(runtime, uid)
+    val name = request.compilerPath.fileName.toString()
+    val executable = runtime.resolve(name)
+    LinuxFilesystemSyscalls.openRoot(request.compilerPath.parent).use { sourceDirectory ->
+        val source = requireNotNull(LinuxFilesystemSyscalls.openRegularFileAtOrNull(sourceDirectory.fd, name)) {
+            "module compiler executable is unavailable"
+        }
+        source.use {
+            require(source.identity.linkCount == 1 && source.identity.mode and 0x12 == 0) {
+                "module compiler executable must be single linked without untrusted writes"
+            }
+            LinuxFilesystemSyscalls.openRoot(runtime).use { destinationDirectory ->
+                LinuxFilesystemSyscalls.createRegularFile(destinationDirectory.fd, name, 384).use { destination ->
+                    require(LinuxFilesystemSyscalls.copyReadableTo(source, destination, MAXIMUM_COMPILER_BYTES) > 0) {
+                        "module compiler executable must not be empty"
+                    }
+                    LinuxFilesystemSyscalls.chmod(destination, 320) // owner read/execute, never writable
+                    LinuxFilesystemSyscalls.synchronize(destination)
+                }
+                LinuxFilesystemSyscalls.synchronize(destinationDirectory)
+            }
+        }
+    }
+    requireOwnedRegularFile(executable, uid)
+    return executable
 }
 
 private class PinnedCompilerInput private constructor(

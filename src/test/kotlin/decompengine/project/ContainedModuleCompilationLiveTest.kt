@@ -38,6 +38,19 @@ class ContainedModuleCompilationLiveTest {
     @Test
     fun `real compilation issues live authority only for the exact current source and header snapshot`() {
         val fixture = fixture("exact-snapshot")
+        // The configured lane must exercise the deployment boundary host-only fixtures miss:
+        // this host-root inode is mounted through --unshare-user, where root is unmapped.
+        val compilerIdentity = Files.readAttributes(fixture.runtime.compilerExecutable, "unix:uid,gid,mode,nlink", LinkOption.NOFOLLOW_LINKS)
+        assertEquals(0, compilerIdentity.getValue("uid"), "configured qualification requires the root-owned runtime compiler")
+        assertEquals(1, compilerIdentity.getValue("nlink"))
+        assertEquals(0, (compilerIdentity.getValue("mode") as Int) and 0x12)
+        assertEquals(fixture.runtime.compilerSha256, sha256(Files.readAllBytes(fixture.runtime.compilerExecutable)))
+        fixture.report("root-owned-compiler-regression.json", JsonObject(mapOf(
+            "compilerSha256" to JsonPrimitive(fixture.runtime.compilerSha256),
+            "hostUid" to JsonPrimitive(compilerIdentity.getValue("uid") as Int),
+            "hostGid" to JsonPrimitive(compilerIdentity.getValue("gid") as Int),
+            "boundary" to JsonPrimitive("configured-unshare-user-with-digest-authenticated-owned-compiler-copy"),
+        )))
         val sourcePath = fixture.path("module-implementation")
         val headerPath = fixture.path("module-interface")
         fixture.write(fixture.path("shared-interface"), "/* authored live fixture */\n")

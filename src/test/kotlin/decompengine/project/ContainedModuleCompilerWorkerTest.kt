@@ -39,6 +39,59 @@ class ContainedModuleCompilerWorkerTest {
     }
 
     @Test
+    fun `compiler executes only its owned digest authenticated private copy`() = withRoot { root ->
+        val marker = root.resolve("executed-path")
+        val compiler = script(root.resolve("compiler"), "printf '%s' \"\$0\" > '$marker'; exit 0")
+        val fixture = fixture(root.resolve("run"), compiler = compiler)
+        val execution = launch(fixture)
+        assertEquals(0, execution.exitCode, execution.stderr)
+        val result = ContainedModuleCompilerResult.parse(execution.stdout)
+        result.requireBinding(fixture.request)
+        assertEquals("object-invalid", result.outcome)
+        val privateCompiler = fixture.request.outputDirectory.resolve("compiler-runtime/compiler")
+        assertEquals(privateCompiler.toString(), Files.readString(marker))
+        assertEquals(fixture.request.compilerSha256, sha256(Files.readAllBytes(privateCompiler)))
+        assertEquals(Files.getAttribute(fixture.request.outputDirectory, "unix:uid"), Files.getAttribute(privateCompiler, "unix:uid"))
+        assertEquals(PosixFilePermissions.fromString("r-x------"), Files.getPosixFilePermissions(privateCompiler))
+        assertEquals(1, Files.getAttribute(privateCompiler, "unix:nlink"))
+        verifyLogs(fixture, result)
+    }
+
+    @Test
+    @org.junit.jupiter.api.Tag("ci-live")
+    fun `host root compiler is materialized without trusting its foreign namespace owner`() = withRoot { root ->
+        val compiler = Path.of(System.getProperty("decompengine.analysis.io.testCompiler", "/usr/bin/cc")).toRealPath()
+        assertEquals(0, Files.getAttribute(compiler, "unix:uid"), "this regression requires the installed root-owned compiler")
+        for ((index, profile) in ReconstructionProfiles.builtIn.withIndex()) {
+            // As in deployment, put cc1/as beside the compiler. Overlay only the compiler
+            // with the actual host-root inode in the namespace; no privileged chown is needed.
+            val fixture = fixture(root.resolve("profile-$index"), profile = profile)
+            val execution = launch(fixture, rootCompiler = compiler)
+            assertEquals(0, execution.exitCode, execution.stderr)
+            val result = ContainedModuleCompilerResult.parse(execution.stdout)
+            result.requireBinding(fixture.request)
+            assertEquals("compiled-object", result.outcome, Files.readString(fixture.request.outputDirectory.resolve("compiler.stderr")))
+            val copy = fixture.request.outputDirectory.resolve("compiler-runtime").resolve(fixture.request.compilerPath.fileName)
+            assertEquals(fixture.request.compilerSha256, sha256(Files.readAllBytes(copy)))
+            assertEquals(Files.getAttribute(fixture.request.outputDirectory, "unix:uid"), Files.getAttribute(copy, "unix:uid"))
+            assertEquals(0, Files.getAttribute(compiler, "unix:uid"), "materialization must not change the installed compiler")
+            val identity = Files.readString(fixture.root.resolve("namespace-identity"))
+            assertEquals("65534", identity.lineSequence().first(), "host root must actually be unmapped in this regression")
+            println("root-owned compiler namespace regression ${profile.id}: sha256=${fixture.request.compilerSha256}\n$identity")
+            verifyLogs(fixture, result)
+
+            val substituted = fixture(root.resolve("substituted-$index"), profile = profile)
+            val foreignSubstitute = Path.of("/usr/bin/true").toRealPath()
+            assertEquals(0, Files.getAttribute(foreignSubstitute, "unix:uid"))
+            val refused = launch(substituted, rootCompiler = foreignSubstitute)
+            assertTrue(refused.exitCode != 0, "foreign runtime substitution reached compiler execution")
+            assertTrue(refused.stderr.contains("module compiler executable digest differs"), refused.stderr)
+            assertTrue(refused.stdout.isEmpty())
+            assertFalse(Files.exists(substituted.request.outputDirectory.resolve("module.o")))
+        }
+    }
+
+    @Test
     fun `compiler rejection records real exit and diagnostic bytes without an object identity`() = withRoot { root ->
         val fixture = fixture(root, source = "#include \"modules/alpha.h\"\nint alpha(void) { return missing; }\n")
         val execution = launch(fixture)
@@ -86,7 +139,7 @@ class ContainedModuleCompilerWorkerTest {
 
     @Test
     fun `changed source compiler digest unexpected file symlink and hardlink never reach compiler execution`() = withRoot { root ->
-        for (kind in listOf("source", "compiler", "unexpected", "symlink", "hardlink", "stale-object")) {
+        for (kind in listOf("source", "compiler", "compiler-writable", "compiler-hardlink", "unexpected", "symlink", "hardlink", "stale-object")) {
             val parent = Files.createDirectory(root.resolve(kind))
             val marker = parent.resolve("launched")
             val compiler = script(parent.resolve("compiler"), "printf launched > '$marker'; exit 0")
@@ -101,6 +154,8 @@ class ContainedModuleCompilerWorkerTest {
                     Files.setPosixFilePermissions(compiler, PosixFilePermissions.fromString("rwx------"))
                     Files.writeString(compiler, "#!/bin/sh\nprintf changed > '$marker'\n")
                 }
+                "compiler-writable" -> Files.setPosixFilePermissions(compiler, PosixFilePermissions.fromString("r-x-w----"))
+                "compiler-hardlink" -> Files.createLink(parent.resolve("compiler-alias"), compiler)
                 "unexpected" -> Files.writeString(fixture.request.snapshotRoot.resolve("unexpected.h"), "extra\n")
                 "symlink" -> { Files.delete(source); Files.createSymbolicLink(source, compiler) }
                 "hardlink" -> Files.createLink(parent.resolve("source-alias"), source)
@@ -251,7 +306,7 @@ class ContainedModuleCompilerWorkerTest {
         return Fixture(root, request)
     }
 
-    private fun launch(fixture: Fixture, duringExecution: () -> Unit = {}): Execution {
+    private fun launch(fixture: Fixture, rootCompiler: Path? = null, duringExecution: () -> Unit = {}): Execution {
         val root = fixture.root
         val requestFile = root.resolve("request.json")
         Files.write(requestFile, fixture.request.canonicalBytes)
@@ -266,7 +321,14 @@ class ContainedModuleCompilerWorkerTest {
                 requestFile.toString(), fixture.request.sha256)
         val stdout = root.resolve("worker.stdout")
         val stderr = root.resolve("worker.stderr")
-        val process = ProcessBuilder(arguments).directory(root.toFile()).redirectOutput(stdout.toFile()).redirectError(stderr.toFile()).apply {
+        val command = if (rootCompiler == null) arguments else listOf("/usr/bin/bwrap", "--die-with-parent", "--new-session",
+            "--unshare-all", "--unshare-user", "--disable-userns", "--assert-userns-disabled", "--cap-drop", "ALL",
+            "--ro-bind", "/", "/", "--bind", root.toString(), root.toString(),
+            "--ro-bind", rootCompiler.toString(), fixture.request.compilerPath.toString(),
+            "--proc", "/proc", "--dev", "/dev", "--",
+            "/bin/sh", "-c", "{ /usr/bin/stat -c '%u' '${fixture.request.compilerPath}'; /usr/bin/id; " +
+                "/bin/cat /proc/self/uid_map /proc/self/gid_map; } > '$root/namespace-identity'; exec \"\$@\"", "worker") + arguments
+        val process = ProcessBuilder(command).directory(root.toFile()).redirectOutput(stdout.toFile()).redirectError(stderr.toFile()).apply {
             environment().clear()
             environment()["TMPDIR"] = temporary.toString()
         }.start()
