@@ -164,7 +164,7 @@ function checkRun(run: Run): void {
   const reasons: Record<Run['state'], readonly Run['terminalReason'][]> = {
     queued: [null], running: [null], cancelling: [null],
     completed: ['COMPLETED', 'NO_CHANGES'],
-    failed: ['FAILED', 'REFUSED', 'LIMIT_EXHAUSTED'],
+    failed: ['FAILED', 'REFUSED', 'LIMIT_EXHAUSTED', 'TIMED_OUT', 'INFRASTRUCTURE_FAILED'],
     cancelled: ['CANCELLED'], interrupted: ['PROCESS_INTERRUPTED'],
   };
   requireValue(reasons[run.state].includes(run.terminalReason));
@@ -364,6 +364,15 @@ export function checkSemantics(document: ContractDocument, basePath = '/'): void
           requireValue(BigInt(matches.length) <= BigInt(log.search.matchCount));
           requireValue(log.search.matchesTruncated === BigInt(log.search.matchCount) > BigInt(matches.length));
         }
+      }
+      break;
+    }
+    case 'queuePosition': {
+      const sample = document.data;
+      if (sample.state === 'queued') {
+        requireValue(BigInt(sample.ahead) === BigInt(sample.position) - 1n);
+        requireValue(BigInt(sample.position) <= BigInt(sample.queuedTasks));
+        requireValue(BigInt(sample.activeWorkers) <= BigInt(sample.workerLimit));
       }
       break;
     }
