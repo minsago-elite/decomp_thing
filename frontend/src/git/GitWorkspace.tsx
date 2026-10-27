@@ -485,9 +485,10 @@ export function GitWorkspace({ jobId, basePath, session, capabilities, pollInter
         <GitPushPanel key={`${jobId}:${statusData.repositoryId}:${statusData.worktreeId}:${statusData.headRefName ?? ''}`}
           remotes={loaded.remotes} branch={statusData.headState === 'attached' ? statusData.headRefName : null} writable={writable}
           readPreview={readPushPreview} onPush={push} onReconcile={reconcilePush} />}
-      <GitHubPanel key={`${jobId}:${statusData.repositoryId}:${statusData.worktreeId}`}
-        capability={hosting} remotes={loaded.remotes} branch={statusData.headState === 'attached' ? statusData.headRefName : null}
-        writable={writable} readStatus={readGitHub} onCreate={createPull} onReconcile={reconcilePull} />
+      {loaded.listing.jobId === jobId && statusData.worktreeId === (worktree ?? repository.worktreeId) &&
+        <GitHubPanel key={`${jobId}:${statusData.repositoryId}:${statusData.worktreeId}`}
+          capability={hosting} remotes={loaded.remotes} branch={statusData.headState === 'attached' ? statusData.headRefName : null}
+          writable={writable} readStatus={readGitHub} onCreate={createPull} onReconcile={reconcilePull} />}
       <GitRemotesPanel capability={remoting} remotes={loaded.remotes} audit={loaded.audit} writable={writable} running={running}
         onAction={remoteAction} onCancel={operation => { void cancelTransfer(operation); }} />
       <section aria-labelledby="git-branches-title">

@@ -566,6 +566,22 @@ it('drops a pull request review when a fetch moves the reviewed head', async () 
     .queryByRole('button', { name: 'Create pull request' })).toBeNull());
 });
 
+it('drops a pending PR review as soon as the selected worktree changes', async () => {
+  remoteList = [{ ...(remoteList[0] as object), trackingRefs: [{ refId: 'ref_origin_main', name: 'refs/remotes/origin/main', objectId: head },
+    { refId: 'ref_origin_release', name: 'refs/remotes/origin/release', objectId: other }] }];
+  let resolve!: (value: unknown) => void;
+  const pending = new Promise(done => { resolve = done; });
+  transport.get.mockImplementation((kind, path) => kind === 'gitHubStatus' ? pending : serve(kind, path));
+  mount([...supported, capability('github', 'supported')]);
+  fireEvent.click(await screen.findByRole('button', { name: 'Check pull requests' }));
+  fireEvent.click(screen.getByRole('button', { name: `Show ${linkedId}` }));
+  await waitFor(() => expect(screen.queryByRole('button', { name: 'Check pull requests' })).toBeNull());
+  resolve(await serve('gitHubStatus', `${base}/github?remote=remote_1&branch=main&base=release`));
+  await pending;
+  expect(screen.queryByRole('button', { name: 'Create pull request' })).toBeNull();
+  expect(transport.post).not.toHaveBeenCalled();
+});
+
 it('explains an absent GitHub integration without affecting local Git', async () => {
   mount([...supported, capability('github', 'unavailable', 'No GitHub integration is configured.', 'GITHUB_UNCONFIGURED')]);
   expect(await screen.findByText(/No GitHub integration is configured/)).toBeTruthy();
