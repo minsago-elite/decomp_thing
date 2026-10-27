@@ -39,7 +39,7 @@ import kotlinx.serialization.json.jsonPrimitive
 class SourceTreeTest {
     @Test
     fun `captured source inference reconstructs modules and rejects unauthorized edits`() {
-        for (scenario in listOf("valid", "unauthorized", "invalid-c")) {
+        for (scenario in listOf("valid", "unauthorized", "invalid-c", "empty")) {
             val unauthorized = scenario == "unauthorized"
             val project = createTempDirectory("source-captured-inference-")
             var calls = 0
@@ -49,7 +49,7 @@ class SourceTreeTest {
                     assertTrue(request.prompt.contains("fn_0000000000401000"))
                     assertTrue(request.projectFiles.containsKey("include/modules/parse.h"))
                     assertTrue(request.projectFiles.containsKey("src/modules/parse.c"))
-                    return decompengine.repair.RepairResponse("reconstructed", listOf(
+                    return decompengine.repair.RepairResponse("reconstructed", if (scenario == "empty") emptyList() else listOf(
                         decompengine.repair.SourcePatch(
                             if (unauthorized) "include/modules/parse.h" else "src/modules/parse.c",
                             if (scenario == "invalid-c") "/* fn_0000000000401000 */\nint parse_input(void) { return absent_symbol; }\n"
@@ -64,6 +64,7 @@ class SourceTreeTest {
             if (scenario != "valid") {
                 assertEquals(listOf("fn_0000000000401000"), manifest.unresolvedImplementationIds)
                 assertFalse(project.resolve("include/modules/parse.h").readText().contains("return 17;"))
+                if (scenario == "empty") assertTrue(project.resolve("reports/modules/parse.json").readText().contains("no-source-changes"))
             } else {
                 assertTrue(manifest.unresolvedImplementationIds.isEmpty())
                 assertTrue(project.resolve("src/modules/parse.c").readText().contains("return 17;"))

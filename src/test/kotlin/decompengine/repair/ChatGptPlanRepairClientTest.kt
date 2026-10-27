@@ -67,15 +67,58 @@ class ChatGptPlanRepairClientTest {
         }
     }
 
+    @Test
+    fun `transient connection failure retries and emits only safe diagnostics`() {
+        val logs = mutableListOf<String>()
+        val transport = FakeResponsesClient(null, completedStream(), failures = 1)
+        val response = client(transport, logs::add).requestRepair(request())
+        assertEquals(1, response.patches.size)
+        assertEquals(2, transport.calls)
+        assertTrue(logs.any { "cause=connection-failed" in it && "retry=true" in it })
+        assertTrue(logs.any { "completed patches=1" in it })
+        assertTrue(logs.none { "private-error" in it || "test-access-token" in it || "Implement src/test.c" in it })
+    }
+
+    @Test
+    fun `repeated transport failures exhaust a bounded number of attempts`() {
+        val transport = FakeResponsesClient(null, completedStream(), failures = 10)
+        val failure = assertFailsWith<AgentExecutionException> { client(transport).requestRepair(request()) }
+        assertEquals(3, transport.calls)
+        assertEquals("connection-failed", failure.failure.details["diagnosticCode"])
+    }
+
+    @Test
+    fun `all retry attempts share the invocation wall deadline`() {
+        val transport = FakeResponsesClient(null, completedStream(), failures = 10)
+        val invocation = RepairClientInvocation(RepairResourceBudget(),
+            decompengine.agent.AgentExecutionLimits(wallClockTimeout = Duration.ofMillis(100)),
+            decompengine.agent.AgentCancellation.NONE)
+        val failure = assertFailsWith<AgentExecutionException> { client(transport).requestRepair(request(), invocation) }
+        assertEquals(1, transport.calls)
+        assertEquals(AgentFailureKind.TIMEOUT, failure.failure.kind)
+    }
+
+    @Test
+    fun `explicit empty patch set is a no-change response rather than malformed JSON`() {
+        val patch = """{"summary":"insufficient interfaces","patches":[]}"""
+        val transport = FakeResponsesClient(null, textStream(patch))
+        val response = client(transport).requestRepair(request())
+        assertTrue(response.patches.isEmpty())
+        assertEquals(1, transport.calls)
+    }
+
     private fun request() = RepairRequest("reconstruction", "Implement src/test.c", mapOf("src/test.c" to ""), emptyList())
 
     private fun completedStream(): String {
         val patch = """{"summary":"implemented","patches":[{"relativePath":"src/test.c","replacement":"int test(void) { return 17; }"}]}"""
-        return "event: response.output_text.delta\ndata: {\"delta\":${JsonPrimitive(patch)}}\n\n" +
-            "event: response.completed\ndata: {\"type\":\"response.completed\"}\n\n"
+        return textStream(patch)
     }
 
-    private fun client(transport: HttpClient): ChatGptPlanRepairClient {
+    private fun textStream(text: String) =
+        "event: response.output_text.delta\ndata: {\"delta\":${JsonPrimitive(text)}}\n\n" +
+            "event: response.completed\ndata: {\"type\":\"response.completed\"}\n\n"
+
+    private fun client(transport: HttpClient, log: (String) -> Unit = {}): ChatGptPlanRepairClient {
         val store = ChatGptPlanCredentialStore.create(createTempDirectory("chatgpt-stream-test-").resolve("credentials"))
         store.saveNewAccount(NewChatGptPlanAccount(
             email = null, clientId = "test-client", subject = "test-subject", idToken = "test-id-token",
@@ -84,12 +127,15 @@ class ChatGptPlanRepairClientTest {
             scopes = setOf("offline_access", "resource.invoke", "chatgpt.tokens.use.direct"),
         ))
         store.setModel(null, "test-model")
-        return ChatGptPlanRepairClient(store = store, profileId = null, httpClient = transport)
+        return ChatGptPlanRepairClient(store = store, profileId = null, httpClient = transport, diagnosticLog = log)
     }
 
-    private class FakeResponsesClient(private val contentType: String?, private val body: String) : HttpClient() {
+    private class FakeResponsesClient(private val contentType: String?, private val body: String, private val failures: Int = 0) : HttpClient() {
         var closed = false
+        var calls = 0
         override fun <T> sendAsync(request: HttpRequest, handler: HttpResponse.BodyHandler<T>): CompletableFuture<HttpResponse<T>> {
+            calls++
+            if (calls <= failures) return CompletableFuture.failedFuture(java.net.ConnectException("private-error"))
             assertEquals("https://api.openai.com/v1/responses", request.uri().toString())
             assertEquals("text/event-stream", request.headers().firstValue("Accept").orElseThrow())
             val input = object : ByteArrayInputStream(body.toByteArray()) {

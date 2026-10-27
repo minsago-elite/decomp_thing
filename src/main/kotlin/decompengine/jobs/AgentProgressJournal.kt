@@ -206,6 +206,7 @@ class AgentProgressJournal(
                         }
                         is AgentExecutionOutcome.Failed -> {
                             put("failureKind", outcome.failure.kind.name.lowercase())
+                            put("failureDiagnostic", decompengine.agent.safeAgentFailureDiagnostic(outcome.failure))
                             outcome.failure.session?.let { put("sessionIdSha256", digest(it.sessionId)) }
                             // Arbitrary exception text can contain credentials; retain classification.
                         }

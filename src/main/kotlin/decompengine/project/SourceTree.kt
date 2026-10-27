@@ -10,6 +10,10 @@ import decompengine.agent.AgentExecutionResult
 import decompengine.agent.AgentFileChange
 import decompengine.agent.AgentFileChangeEvent
 import decompengine.agent.captureAgentExecutionReceipt
+import decompengine.agent.AgentExecutionException
+import decompengine.agent.AgentFailure
+import decompengine.agent.AgentFailureKind
+import decompengine.agent.safeAgentFailureDiagnostic
 import decompengine.agent.AgentAccessPolicy
 import decompengine.agent.AgentContextInput
 import decompengine.agent.AgentExecutionRequest
@@ -436,6 +440,10 @@ class BoundedLlmModuleReconstructor(
                     maximumContextCharacters,
                 )
             }
+            if (execution.stopReason == AgentStopReason.NO_CHANGES) throw AgentExecutionException(AgentFailure(
+                AgentFailureKind.UNAVAILABLE, "No source changes were proposed for this module",
+                details = mapOf("diagnosticCode" to "no-source-changes"),
+            ))
             require(execution.stopReason == AgentStopReason.COMPLETED) {
                 "module reconstruction stopped with ${execution.stopReason.name.lowercase()}: ${execution.summary.orEmpty()}"
             }
@@ -816,6 +824,8 @@ object SourceTreeGenerator {
                     ) &&
                     (if (checkpoint.accepted) checkpoint.hasCurrentModuleAcceptance() else !checkpoint.retryable)
             }
+            val moduleStarted = System.nanoTime()
+            System.err.println("reconstruction: module=${module.id} index=${index + 1}/${plan.modules.size} ${if (cached == null) "started" else "cached"}")
             val checkpoint = cached ?: run {
                 val previousAccepted = verifiedPreviousAcceptance
                 val previousSource = previousAccepted?.let { sourcePath.readText() }
@@ -926,6 +936,9 @@ object SourceTreeGenerator {
                 request, checkpoint.accepted, checkpoint.sourceSha256,
                 checkpoint.executionRequestSha256, checkpoint.executionEvidenceSha256,
             )
+            System.err.println("reconstruction: module=${module.id} ${if (checkpoint.accepted) "accepted" else "unresolved"} " +
+                "elapsedMillis=${java.util.concurrent.TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - moduleStarted)} " +
+                "issues=${checkpoint.issues.take(8).joinToString(",") { it.code }} report=reports/modules/${module.id}.json")
             val normalizedSource = sourcePath.readText()
             val moduleEntityIds = module.functionIds + module.globalIds
             if (!checkpoint.accepted) unresolvedImplementations += moduleEntityIds
@@ -1421,15 +1434,20 @@ object SourceTreeGenerator {
         val fallback = EvidenceModuleReconstructor().reconstruct(request)
         val entityIds = request.module.functionIds + request.module.globalIds
         val agentOutcome = failure as? ModuleReconstructionAgentOutcomeException
+        val agentFailure = generateSequence<Throwable>(failure) { it.cause }.take(16)
+            .filterIsInstance<AgentExecutionException>().firstOrNull()?.failure
+        agentFailure?.let { System.err.println("reconstruction: module=${request.module.id} failed ${safeAgentFailureDiagnostic(it)}") }
         val code = when {
             failure is ModuleContextBudgetExceededException -> "context-budget-exceeded"
             agentOutcome != null -> "agent-${agentOutcome.evidence.terminalOutcome}"
+            agentFailure != null -> "agent-${agentFailure.kind.name.lowercase()}"
             else -> "reconstruction-failed"
         }
         val message = when {
             failure is ModuleContextBudgetExceededException ->
                 "module context required ${failure.promptCharacters} characters; limit=${failure.promptBudgetCharacters}"
             agentOutcome != null -> "agent invocation ended with ${agentOutcome.evidence.terminalOutcome}"
+            agentFailure != null -> "agent invocation failed: ${safeAgentFailureDiagnostic(agentFailure)}"
             else -> "${failure::class.simpleName ?: "Exception"} during module reconstruction"
         }
         return fallback.copy(

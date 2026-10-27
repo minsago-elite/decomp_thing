@@ -4,6 +4,7 @@ import decompengine.agent.AgentExecutionException
 import decompengine.agent.AgentExecutionLimits
 import decompengine.agent.AgentCancellation
 import decompengine.agent.AgentFailure
+import decompengine.agent.safeAgentFailureDiagnostic
 import decompengine.agent.AgentFailureKind
 import decompengine.chatgpt.ChatGptPlanAccount
 import decompengine.chatgpt.ChatGptPlanAuthenticationException
@@ -42,6 +43,7 @@ class ChatGptPlanRepairClient(
     private val profileId: String? = System.getenv()["DECOMP_CHATGPT_PROFILE"]?.takeIf(String::isNotBlank),
     private val httpClient: HttpClient = defaultHttpClient(),
     private val bodyExecutor: Executor = HTTP_BODY_EXECUTOR,
+    private val diagnosticLog: (String) -> Unit = { System.err.println(it) },
 ) : RepairClient {
     override fun modelIdentifier(): String? = selectedAccount()?.model
 
@@ -111,11 +113,33 @@ class ChatGptPlanRepairClient(
             ?: throw AgentExecutionException(AgentFailure(AgentFailureKind.CONFIGURATION, "Select an account-available model with llm_bin_patch chatgpt models --select <slug>."))
         val body = encodeRequestBody(request, invocation.budget, model)
         val deadline = deadlineAfter(invocation.limits.wallClockTimeout)
+        val requestId = sha256(body).take(12)
+        val started = System.nanoTime()
+        for (attempt in 1..MAXIMUM_ATTEMPTS) {
+            requireNotCancelled(invocation.cancellation, null)
+            log("request=$requestId attempt=$attempt/$MAXIMUM_ATTEMPTS files=${request.projectFiles.size} requestBytes=${body.size} started")
+            try {
+                val result = requestOnce(body, invocation, deadline, requestId)
+                log("request=$requestId attempt=$attempt completed patches=${result.patches.size} elapsedMillis=${TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - started)}")
+                return result
+            } catch (failure: AgentExecutionException) {
+                val retry = failure.failure.retryable && attempt < MAXIMUM_ATTEMPTS &&
+                    !Thread.currentThread().isInterrupted && !invocation.cancellation.isCancellationRequested() &&
+                    System.nanoTime() < deadline
+                log("request=$requestId attempt=$attempt failed ${safeAgentFailureDiagnostic(failure.failure)} retry=$retry elapsedMillis=${TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - started)}")
+                if (!retry) throw failure
+                retryDelay(attempt, deadline, invocation.cancellation)
+            }
+        }
+        error("unreachable ChatGPT attempt state")
+    }
+
+    private fun requestOnce(body: ByteArray, invocation: RepairClientInvocation, deadline: Long, requestId: String): RepairResponse {
         var result: RepairResponse? = null
         store.withFreshAccessToken(profileId, refresh = oauth::refreshTokens) { freshAccount ->
             requirePlanScope(freshAccount)
             val httpRequest = HttpRequest.newBuilder(RESPONSES_ENDPOINT)
-                .timeout(invocation.limits.wallClockTimeout)
+                .timeout(remainingTimeout(deadline))
                 .header("Authorization", "Bearer ${freshAccount.accessToken}")
                 .header("Content-Type", "application/json")
                 .header("Accept", "text/event-stream")
@@ -124,9 +148,10 @@ class ChatGptPlanRepairClient(
             val exchange = try {
                 httpClient.sendAsync(httpRequest, HttpResponse.BodyHandlers.ofInputStream())
             } catch (failure: Exception) {
-                throw AgentExecutionException(AgentFailure(AgentFailureKind.TRANSPORT, "could not start ChatGPT Responses request", retryable = true), failure)
+                throw transportFailure(failure)
             }
             val response = await(exchange, deadline, invocation.cancellation)
+            log("request=$requestId httpStatus=${response.statusCode()} contentType=${if (response.headers().firstValue("Content-Type").isPresent) "present" else "absent"}")
             if (response.statusCode() !in 200..299) {
                 val error = readBodyAsync(response.body(), ERROR_BODY_BYTES, deadline, invocation.cancellation, exchange)
                 throw providerFailure("ChatGPT Responses request", response.statusCode(), error)
@@ -191,6 +216,10 @@ class ChatGptPlanRepairClient(
         body.appendAscii(",\"instructions\":")
         body.appendJsonString(
             "Return source patches as JSON with summary and patches. Each patch must have relativePath and replacement. " +
+                "Each replacement must contain the complete file, not a diff. Use the immutable objective and recovered " +
+                "evidence to reconstruct the authorized implementation, even when its captured file is empty. " +
+                "Follow the provided declarations exactly. Preserve suspicious behavior. " +
+                "If evidence or interfaces prevent a valid implementation, return an empty patches array; do not fabricate behavior. " +
                 "Do not include markdown fences or paths outside the provided project files.",
         )
         body.appendAscii(",\"input\":[{\"role\":\"user\",\"content\":")
@@ -202,10 +231,12 @@ class ChatGptPlanRepairClient(
     private fun parseRepairResponse(content: String, invocation: RepairClientInvocation): RepairResponse {
         val normalized = content.trim().removePrefix("```json").removePrefix("```").removeSuffix("```").trim()
         val response = runCatching { Json.parseToJsonElement(normalized).jsonObject }
-            .getOrElse { throw AgentExecutionException(AgentFailure(AgentFailureKind.PROTOCOL, "ChatGPT response was not valid patch JSON"), it) }
+            .getOrElse { throw AgentExecutionException(AgentFailure(AgentFailureKind.PROTOCOL, "ChatGPT response was not valid patch JSON", details = mapOf("diagnosticCode" to "invalid-patch-json")), it) }
         val summary = response["summary"]?.jsonPrimitive?.contentOrNull?.ifBlank { null } ?: "ChatGPT plan repair response"
-        val patchElements = response["patches"]?.jsonArray.orEmpty()
-        if (patchElements.isEmpty() || patchElements.size > invocation.budget.maximumPatchFiles) {
+        val patchElements = response["patches"] as? JsonArray
+            ?: throw AgentExecutionException(AgentFailure(AgentFailureKind.PROTOCOL, "ChatGPT response omitted its patches array",
+                details = mapOf("diagnosticCode" to "invalid-patch-set")))
+        if (patchElements.size > invocation.budget.maximumPatchFiles) {
             throw AgentExecutionException(AgentFailure(AgentFailureKind.PROTOCOL, "ChatGPT response did not include an acceptable patch set"))
         }
         var totalBytes = 0L
@@ -255,9 +286,11 @@ class ChatGptPlanRepairClient(
                     output.append(delta)
                 }
                 "response.completed" -> receivedCompleted = true
+                "response.incomplete" -> throw AgentExecutionException(AgentFailure(AgentFailureKind.PROTOCOL,
+                    "ChatGPT Responses request was incomplete", details = mapOf("diagnosticCode" to "stream-incomplete")))
                 "response.failed", "error" -> {
-                    val code = json?.get("response")?.jsonObject?.get("error")?.jsonObject?.get("code")?.jsonPrimitive?.contentOrNull
-                    throw AgentExecutionException(AgentFailure(AgentFailureKind.TRANSPORT, "ChatGPT Responses request failed${code?.let { ": $it" }.orEmpty()}"))
+                    throw AgentExecutionException(AgentFailure(AgentFailureKind.TRANSPORT,
+                        "ChatGPT Responses request failed", details = mapOf("diagnosticCode" to "stream-failed")))
                 }
             }
             eventData = StringBuilder()
@@ -276,7 +309,7 @@ class ChatGptPlanRepairClient(
         }
         dispatch()
         if (!receivedCompleted) {
-            throw AgentExecutionException(AgentFailure(AgentFailureKind.PROTOCOL, "ChatGPT Responses stream ended before response.completed"))
+            throw AgentExecutionException(AgentFailure(AgentFailureKind.PROTOCOL, "ChatGPT Responses stream ended before response.completed", details = mapOf("diagnosticCode" to "stream-incomplete")))
         }
         output.toString()
     }
@@ -339,6 +372,11 @@ class ChatGptPlanRepairClient(
                 if (status == 401 || status == 403) AgentFailureKind.AUTHENTICATION else AgentFailureKind.TRANSPORT,
                 "$operation failed with HTTP $status; response body redacted (prefixSha256=$digest, capturedBytes=${body.size})",
                 retryable = status >= 500 || status == 429,
+                details = mapOf("httpStatus" to status.toString(), "diagnosticCode" to when {
+                    status == 429 -> "rate-limited"
+                    status >= 500 -> "http-server-error"
+                    else -> "http-client-error"
+                }),
             ),
         )
     }
@@ -355,20 +393,60 @@ class ChatGptPlanRepairClient(
             val remaining = deadline - System.nanoTime()
             if (remaining <= 0) {
                 future.cancel(true)
-                throw AgentExecutionException(AgentFailure(AgentFailureKind.TIMEOUT, "ChatGPT request exceeded its wall deadline"))
+                throw AgentExecutionException(AgentFailure(AgentFailureKind.TIMEOUT, "ChatGPT request exceeded its wall deadline", details = mapOf("diagnosticCode" to "wall-deadline")))
             }
             try { return future.get(minOf(remaining, POLL_NANOS), TimeUnit.NANOSECONDS) }
             catch (_: TimeoutException) { }
             catch (failure: InterruptedException) {
                 Thread.currentThread().interrupt()
                 future.cancel(true)
-                throw AgentExecutionException(AgentFailure(AgentFailureKind.TRANSPORT, "ChatGPT request was interrupted", retryable = true), failure)
+                throw AgentExecutionException(AgentFailure(AgentFailureKind.TRANSPORT, "ChatGPT request was interrupted", details = mapOf("diagnosticCode" to "interrupted")), failure)
             } catch (failure: ExecutionException) {
                 val cause = failure.cause ?: failure
                 if (cause is AgentExecutionException) throw cause
-                throw AgentExecutionException(AgentFailure(AgentFailureKind.TRANSPORT, "ChatGPT request transport failed", retryable = true), cause)
+                throw transportFailure(cause)
             }
         }
+    }
+
+    private fun log(message: String) {
+        runCatching { diagnosticLog("chatgpt-plan: $message") }
+    }
+
+    private fun transportFailure(cause: Throwable): AgentExecutionException {
+        val chain = generateSequence(cause) { it.cause }.take(16).toList()
+        val code = when {
+            chain.any { it is InterruptedException } -> "interrupted"
+            chain.any { it is java.net.http.HttpConnectTimeoutException } -> "connection-timeout"
+            chain.any { it is javax.net.ssl.SSLException } -> "tls-failed"
+            chain.any { it is java.net.UnknownHostException || it is java.nio.channels.UnresolvedAddressException } -> "dns-failed"
+            chain.any { it is java.net.ConnectException } -> "connection-failed"
+            chain.any { it is java.io.IOException } -> "io-failed"
+            else -> "transport-failed"
+        }
+        return AgentExecutionException(AgentFailure(AgentFailureKind.TRANSPORT,
+            "ChatGPT request transport failed ($code)", retryable = code in setOf("connection-timeout", "connection-failed", "io-failed"),
+            details = mapOf("diagnosticCode" to code)), cause)
+    }
+
+    private fun remainingTimeout(deadline: Long): Duration {
+        val remaining = deadline - System.nanoTime()
+        if (remaining <= 0) throw AgentExecutionException(AgentFailure(AgentFailureKind.TIMEOUT,
+            "ChatGPT request exceeded its wall deadline", details = mapOf("diagnosticCode" to "wall-deadline")))
+        return Duration.ofNanos(remaining)
+    }
+
+    private fun retryDelay(attempt: Int, deadline: Long, cancellation: AgentCancellation) {
+        val wake = minOf(deadline, System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(250L * attempt))
+        while (System.nanoTime() < wake) {
+            requireNotCancelled(cancellation, null)
+            try { TimeUnit.NANOSECONDS.sleep(minOf(POLL_NANOS, (wake - System.nanoTime()).coerceAtLeast(1))) }
+            catch (failure: InterruptedException) {
+                Thread.currentThread().interrupt()
+                throw transportFailure(failure)
+            }
+        }
+        remainingTimeout(deadline)
     }
 
     private fun requireNotCancelled(cancellation: AgentCancellation, future: CompletableFuture<*>?) {
@@ -403,6 +481,7 @@ class ChatGptPlanRepairClient(
         private const val MAXIMUM_SSE_EVENT_BYTES = 256 * 1024
         private const val MAXIMUM_SSE_EVENT_NAME_BYTES = 128
         private const val ERROR_BODY_BYTES = 8192L
+        private const val MAXIMUM_ATTEMPTS = 3
         private const val POLL_NANOS = 25_000_000L
         private val MODEL_ID_PATTERN = Regex("[A-Za-z0-9][A-Za-z0-9._:/-]{0,199}")
         private val HTTP_BODY_EXECUTOR = Executors.newFixedThreadPool(4) { runnable ->
