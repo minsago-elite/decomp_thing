@@ -105,6 +105,79 @@ class GhidraExportLaunchTest {
     }
 
     @Test
+    fun `interrupted cleanup waits still confirm later exit and restore interruption`() {
+        for (grace in listOf(Duration.ZERO, Duration.ofMillis(100))) {
+            val childAlive = AtomicBoolean(true)
+            val child = fixtureHandle(2102L, initialAlive = true, refusesTermination = true, alive = childAlive)
+            val process = FixtureOwnedProcess(fixtureHandle(2101L, initialAlive = true, refusesTermination = false))
+            val clock = AtomicLong()
+            val waits = AtomicInteger()
+            val tree = ExportProcessTree(
+                process, grace,
+                nanoTime = clock::get,
+                sleepNanos = { nanos ->
+                    clock.addAndGet(nanos)
+                    if (waits.incrementAndGet() == 1) throw InterruptedException("fixture cleanup wait interrupted")
+                    childAlive.set(false)
+                },
+                descendantObservation = { _, retain -> retain(child) },
+            )
+            try {
+                // Both entry and in-flight interruption must be preserved, not treated as unknown liveness.
+                Thread.currentThread().interrupt()
+                val result = tree.terminate()
+                assertTrue(result.confirmedAbsent)
+                assertEquals(null, result.failure)
+                assertTrue(Thread.currentThread().isInterrupted)
+                assertEquals(2, waits.get(), "exit observations must not exhaust the cleanup window")
+                assertEquals(TimeUnit.MILLISECONDS.toNanos(50), clock.get())
+                assertEquals(result, tree.terminate(), "cached cleanup must preserve the caller interrupt too")
+                assertTrue(Thread.currentThread().isInterrupted)
+            } finally {
+                Thread.interrupted()
+            }
+        }
+    }
+
+    @Test
+    fun `interrupted cleanup preserves operation failure without quarantining a confirmed owner`() = inControlTemporaryDirectory { root ->
+        val primary = IllegalStateException("authored wait failure before interrupted cleanup")
+        val process = FixtureOwnedProcess(fixtureHandle(2201L, initialAlive = true, refusesTermination = false), primary)
+        val childAlive = AtomicBoolean(true)
+        val child = fixtureHandle(2202L, initialAlive = true, refusesTermination = true, alive = childAlive)
+        val clock = AtomicLong()
+        val waits = AtomicInteger()
+        val controller = BoundedAnalysisProcessLaunch()
+        val analyzer = GhidraHeadlessProgramModelAnalyzer(
+            commandFactory = { listOf("fixture-owned-export") },
+            limits = GhidraProgramModelExportLimits(wallClockTimeout = Duration.ofSeconds(5), terminationGrace = Duration.ZERO),
+            processStarter = { _, _ -> process },
+        ).withProcessLifecycleForTests(controller) { owned, grace ->
+            ExportProcessTree(owned, grace, nanoTime = clock::get,
+                sleepNanos = { nanos ->
+                    clock.addAndGet(nanos)
+                    if (waits.incrementAndGet() == 1) throw InterruptedException("fixture cleanup wait interrupted")
+                    childAlive.set(false)
+                },
+                descendantObservation = { _, retain -> retain(child) },
+            )
+        }
+        try {
+            val failure = assertFailsWith<IllegalStateException> {
+                analyzer.analyze(root.resolve("unused-input"), root.resolve("analysis"))
+            }
+            assertTrue(failure === primary)
+            assertFalse(controller.hasQuarantinedOwner())
+            assertTrue(Thread.currentThread().isInterrupted)
+            Thread.interrupted()
+            val next = FixtureOwnedProcess(fixtureHandle(2203L, initialAlive = false, refusesTermination = false))
+            assertTrue(controller.start({}, { next }, { error("admitted process must not use late cleanup") }) === next)
+        } finally {
+            Thread.interrupted()
+        }
+    }
+
+    @Test
     fun `process tree retains a new process identity that reuses a dead handle PID`() {
         val rootProcess = FixtureOwnedProcess(fixtureHandle(6201L, initialAlive = true, refusesTermination = false))
         val oldDeadHandle = fixtureHandle(6210L, initialAlive = false, refusesTermination = true)
@@ -985,8 +1058,12 @@ class GhidraExportLaunchTest {
         }
     }
 
-    private fun fixtureHandle(pid: Long, initialAlive: Boolean, refusesTermination: Boolean): ProcessHandle {
-        val alive = AtomicBoolean(initialAlive)
+    private fun fixtureHandle(
+        pid: Long,
+        initialAlive: Boolean,
+        refusesTermination: Boolean,
+        alive: AtomicBoolean = AtomicBoolean(initialAlive),
+    ): ProcessHandle {
         lateinit var handle: ProcessHandle
         handle = Proxy.newProxyInstance(
             ProcessHandle::class.java.classLoader,

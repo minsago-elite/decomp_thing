@@ -698,6 +698,18 @@ internal class ExportProcessTree(
 
     @Synchronized
     fun terminate(): ExportProcessCleanupResult {
+        var interrupted = Thread.interrupted()
+        try {
+            return terminateObserved {
+                interrupted = true
+                Thread.interrupted()
+            }
+        } finally {
+            if (interrupted) Thread.currentThread().interrupt()
+        }
+    }
+
+    private fun terminateObserved(onWaitInterrupted: () -> Unit): ExportProcessCleanupResult {
         result?.let { return it }
         val started = terminationStartedNanos ?: nanoTime().also { terminationStartedNanos = it }
         val graceNanos = gracefulTermination.toNanos()
@@ -759,9 +771,10 @@ internal class ExportProcessTree(
                 val remaining = remaining(allowance)
                 if (remaining == 0L) return false
                 try { sleepNanos(minOf(remaining, POLL_NANOS)) }
-                catch (failure: InterruptedException) {
-                    if (observationFailure == null) observationFailure = failure
-                    Thread.interrupted()
+                catch (_: InterruptedException) {
+                    // Interrupted waiting says nothing about the retained process inventory.
+                    // Continue observing within the same window and restore interruption on exit.
+                    onWaitInterrupted()
                 }
             }
         }
