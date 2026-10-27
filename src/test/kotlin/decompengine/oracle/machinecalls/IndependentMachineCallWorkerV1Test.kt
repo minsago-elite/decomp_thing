@@ -259,6 +259,102 @@ class IndependentMachineCallWorkerV1Test {
         Files.list(root).use { paths -> assertFalse(paths.anyMatch { it.fileName.toString().endsWith(".pending") }) }
     }
 
+    @Test fun `publication stays anchored when parent or ancestor is substituted before link`() = fixture { root ->
+        for (replaceAncestor in listOf(false, true)) for (symlink in listOf(false, true)) {
+            val case = Files.createDirectory(root.resolve("case-$replaceAncestor-$symlink"))
+            val ancestor = Files.createDirectory(case.resolve("ancestor"))
+            val parent = Files.createDirectory(ancestor.resolve("parent"))
+            val output = parent.resolve("output.json")
+            val replaced = if (replaceAncestor) ancestor else parent
+            val moved = case.resolve("retained")
+            val replacement = Files.createDirectory(case.resolve("replacement"))
+            val replacementParent = if (replaceAncestor) Files.createDirectory(replacement.resolve("parent")) else replacement
+            val decoy = Files.writeString(replacementParent.resolve("output.json"), "untrusted replacement")
+            var linked = false
+            publishMachineCallResultV1(output, "validated report".toByteArray()) { phase ->
+                if (phase == "before publication link") {
+                    linked = true
+                    Files.move(replaced, moved)
+                    if (symlink) Files.createSymbolicLink(replaced, replacement) else Files.move(replacement, replaced)
+                }
+            }
+            assertTrue(linked)
+            val retainedParent = if (replaceAncestor) moved.resolve("parent") else moved
+            assertEquals("validated report", Files.readString(retainedParent.resolve("output.json")))
+            assertEquals("untrusted replacement", Files.readString(output))
+            if (symlink) assertEquals("untrusted replacement", Files.readString(decoy))
+            Files.list(retainedParent).use { paths -> assertEquals(listOf("output.json"), paths.map { it.fileName.toString() }.toList()) }
+        }
+    }
+
+    @Test fun `failed publication closes unnamed staging without touching substituted cleanup paths`() = fixture { root ->
+        val ancestor = Files.createDirectory(root.resolve("ancestor"))
+        val parent = Files.createDirectory(ancestor.resolve("parent"))
+        val output = parent.resolve("output.json")
+        val moved = root.resolve("retained")
+        val replacement = Files.createDirectories(root.resolve("replacement/parent"))
+        val sentinel = Files.writeString(replacement.resolve(".machine-call-decoy.pending"), "keep me")
+        Files.writeString(replacement.resolve("output.json"), "replacement report")
+        val injected = IllegalStateException("injected before link")
+        var cleaned = false
+        val failure = assertFailsWith<IllegalStateException> {
+            publishMachineCallResultV1(output, "validated report".toByteArray()) { phase ->
+                when (phase) {
+                    "before publication link" -> throw injected
+                    "before staging close" -> {
+                        cleaned = true
+                        Files.move(ancestor, moved)
+                        Files.createSymbolicLink(ancestor, replacement.parent)
+                    }
+                }
+            }
+        }
+        assertTrue(failure === injected)
+        assertTrue(cleaned)
+        assertEquals("keep me", Files.readString(sentinel))
+        assertEquals("replacement report", Files.readString(output))
+        Files.list(moved.resolve("parent")).use { paths -> assertEquals(0L, paths.count()) }
+    }
+
+    @Test fun `late output collision cannot replace bytes and leaves no staging entry`() = fixture { root ->
+        val output = root.resolve("output.json")
+        var cleaned = false
+        assertFails {
+            publishMachineCallResultV1(output, "validated report".toByteArray()) { phase ->
+                if (phase == "before publication link") Files.writeString(output, "concurrent winner")
+                if (phase == "before staging close") cleaned = true
+            }
+        }
+        assertTrue(cleaned)
+        assertEquals("concurrent winner", Files.readString(output))
+        Files.list(root).use { paths -> assertEquals(listOf(output), paths.toList()) }
+    }
+
+    @Test fun `publication rejects group or world writable output parents`() = fixture { root ->
+        val permissions = Files.getPosixFilePermissions(root)
+        try {
+            for (untrusted in listOf(java.nio.file.attribute.PosixFilePermission.GROUP_WRITE,
+                java.nio.file.attribute.PosixFilePermission.OTHERS_WRITE)) {
+                Files.setPosixFilePermissions(root, permissions + untrusted)
+                assertFailsWith<IllegalArgumentException> {
+                    publishMachineCallResultV1(root.resolve("output.json"), byteArrayOf(1))
+                }
+                Files.list(root).use { paths -> assertEquals(0L, paths.count()) }
+            }
+        } finally {
+            Files.setPosixFilePermissions(root, permissions)
+        }
+    }
+
+    @Test fun `publication rejects symlinked directory chains without creating output`() = fixture { root ->
+        val real = Files.createDirectories(root.resolve("real/parent"))
+        val linked = Files.createSymbolicLink(root.resolve("linked"), real.parent)
+        assertFails { publishMachineCallResultV1(linked.resolve("parent/output.json"), byteArrayOf(1)) }
+        val leafLink = Files.createSymbolicLink(root.resolve("leaf-link"), real)
+        assertFails { publishMachineCallResultV1(leafLink.resolve("output.json"), byteArrayOf(1)) }
+        Files.list(real).use { paths -> assertEquals(0L, paths.count()) }
+    }
+
     private fun request(root: Path) = IndependentMachineCallRequestV1(
         MachineCallFileV1(root.resolve("rich.elf"), 3, "1".repeat(64)),
         MachineCallFileV1(root.resolve("oracle.json"), 2, "2".repeat(64)), "3".repeat(64),
