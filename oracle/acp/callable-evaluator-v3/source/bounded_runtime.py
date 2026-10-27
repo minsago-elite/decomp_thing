@@ -933,9 +933,9 @@ def _reclaim_worker_receipt(receipt, result, *, provisioning=False):
             owned_directory(os.fstat(directory_fd), directory_expected)
             owned_directory(os.stat(directory.name, dir_fd=root_fd, follow_symlinks=False), directory_expected)
         directories_unchanged()
-        expected = {'launch.json', 'gate.json', 'python-cache'}
-        if not provisioning:
-            expected.add('worker-proof.jsonl')
+        # Provisioning closes the unused report FD but retains its initial file.
+        # It is inventory only, never a compiler report or deletion authority.
+        expected = {'launch.json', 'gate.json', 'python-cache', 'worker-proof.jsonl'}
         names = set()
         with os.scandir(directory_fd) as entries:
             for entry in entries:
@@ -950,8 +950,11 @@ def _reclaim_worker_receipt(receipt, result, *, provisioning=False):
             if (not stat.S_ISREG(metadata.st_mode) or stat.S_IMODE(metadata.st_mode) != 0o600 or
                     metadata.st_uid != os.getuid() or metadata.st_nlink != 1):
                 raise ValueError('receipt entry is not a private owned regular file')
-            if name == 'worker-proof.jsonl' and (metadata.st_dev, metadata.st_ino) != (receipt['device'], receipt['inode']):
-                raise ValueError('consumed report file was replaced')
+            if name == 'worker-proof.jsonl':
+                if (metadata.st_dev, metadata.st_ino) != (receipt['device'], receipt['inode']):
+                    raise ValueError('retained report file was replaced')
+                if provisioning and metadata.st_size != 0:
+                    raise ValueError('unused provisioning report is not empty')
             inventory[name] = identity(metadata)
         if not provisioning:
             # Preserve the already-consumed raw proof on the result. Refuse a
@@ -2152,9 +2155,10 @@ def _run_scoped(argv, cwd, environment, stdin, bounds, *, provisioning, runtime_
         _worker_environment(environment, cwd)
         receipt = _create_worker_receipt(deadline=phase_end, initialization=receipt_initialization)
         if provisioning:
-            # No report descriptor/channel exists for this fixed trusted compiler exception.
+            # No report descriptor/channel exists for this fixed trusted compiler
+            # exception. Retain the unused file: even here a close-then-unlink
+            # could delete a same-UID peer's replacement of the final name.
             os.close(receipt['fd']); receipt['fd'] = None
-            receipt['path'].unlink()
         launch = _prepare_launch(argv, cwd, bounds, receipt, provisioning, deadline=phase_end, **({'runtime_library':runtime_library} if runtime_library is not None else {}),
                                  **({'helper_admission':helper_admission} if helper_admission is not None else {}))
         result.update(workerProofBindings=launch['proofBinding'], launchInputPins=launch['pins'])

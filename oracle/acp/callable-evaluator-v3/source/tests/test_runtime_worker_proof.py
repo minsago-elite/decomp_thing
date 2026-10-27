@@ -1566,7 +1566,7 @@ class RuntimeWorkerProof(unittest.TestCase):
 
     def test_fixed_provisioning_receipt_needs_complete_controller_without_worker_proof(self):
         for complete in (True,False):
-            base,receipt,result=self.receipt_fixture();receipt['path'].unlink()
+            base,receipt,result=self.receipt_fixture();receipt['path'].write_bytes(b'')
             result.update(provisioningOnly=True,workerProof=None,workerProofRaw=b'',workerProofBindings=None,
                           workerExecVerified=False,workerTerminationVerified=False,captureComplete=complete)
             with patch.object(runtime,'BASE',base):
@@ -1576,6 +1576,76 @@ class RuntimeWorkerProof(unittest.TestCase):
             self.assertEqual('exclusive-deletion-authority-unavailable' if complete else
                              'receipt-not-fully-consumed',facts['reason'])
             self.assertFalse(result['workerExecVerified']);self.assertEqual(b'',result['workerProofRaw'])
+
+    def test_provisioning_close_boundary_never_deletes_replacement(self):
+        # Actual runner, with no launcher: replace the final entry immediately
+        # after the admitted FD closes, before the old provisioning unlink.
+        for mutation in (None,'file','symlink','parent'):
+            with self.subTest(mutation=mutation):
+                base,receipt,_=self.receipt_fixture(close=False)
+                os.ftruncate(receipt['fd'],0)
+                descriptor=receipt['fd'];real_close=os.close;closed=[]
+                original=base/'admitted-report';foreign=base/'foreign'
+                foreign.write_bytes(b'foreign replacement canary')
+                def closing(fd):
+                    real_close(fd)
+                    if fd==descriptor:
+                        closed.append(fd)
+                        if mutation=='parent':
+                            receipt['directory'].rename(base/'admitted-directory')
+                            receipt['directory'].mkdir(mode=0o700)
+                            receipt['path'].write_bytes(foreign.read_bytes())
+                        elif mutation is not None:
+                            receipt['path'].rename(original)
+                            if mutation=='symlink':receipt['path'].symlink_to(foreign)
+                            else:receipt['path'].write_bytes(foreign.read_bytes())
+                primary=ValueError('authored prelaunch stop')
+                bounds=runtime.execution_bounds(managed_scope=True,phase='helper-build')
+                with patch.object(runtime,'BASE',base),patch.object(runtime,'_work_directory',return_value=self.work), \
+                        patch.object(runtime,'_worker_environment'), \
+                        patch.object(runtime,'_create_worker_receipt',return_value=receipt), \
+                        patch.object(runtime.os,'close',side_effect=closing), \
+                        patch.object(runtime.os,'unlink',wraps=os.unlink) as unlink, \
+                        patch.object(runtime.os,'rmdir',wraps=os.rmdir) as rmdir, \
+                        patch.object(runtime,'_prepare_launch',side_effect=primary) as prepare, \
+                        patch.object(runtime.subprocess,'Popen') as popen:
+                    with self.assertRaises(ValueError) as raised:
+                        runtime._run_scoped(['NOT-EXECUTED'],self.work,self.env,b'',bounds,provisioning=True)
+                self.assertIs(primary,raised.exception);prepare.assert_called_once();popen.assert_not_called()
+                unlink.assert_not_called();rmdir.assert_not_called()
+                self.assertEqual([descriptor],closed);self.assertIsNone(receipt['fd'])
+                with self.assertRaises(OSError):os.fstat(descriptor)
+                result=raised.exception.bounded_result
+                self.assertFalse(result['launcherCreated']);self.assertFalse(result['workerExecVerified'])
+                self.assertIsNone(result['exitCode']);self.assertEqual('retained',result['_receiptCleanup']['status'])
+                self.assertEqual(b'' if mutation is None else foreign.read_bytes(),receipt['path'].read_bytes())
+                if mutation=='symlink':self.assertTrue(receipt['path'].is_symlink())
+                if mutation in ('file','symlink'):self.assertEqual(b'',original.read_bytes())
+                if mutation=='parent':self.assertEqual(b'',(base/'admitted-directory/worker-proof.jsonl').read_bytes())
+
+    def test_provisioning_inventory_retains_unused_report_and_refuses_substitution(self):
+        for mutation in (None,'missing','replacement','symlink','nonempty'):
+            with self.subTest(mutation=mutation):
+                base,receipt,result=self.receipt_fixture();receipt['path'].write_bytes(b'')
+                result.update(provisioningOnly=True,workerProof=None,workerProofRaw=b'',workerProofBindings=None,
+                              workerExecVerified=False,workerTerminationVerified=False)
+                if mutation in ('missing','replacement','symlink'):
+                    receipt['path'].rename(base/'admitted-report')
+                    if mutation=='replacement':receipt['path'].write_bytes(b'')
+                    if mutation=='symlink':receipt['path'].symlink_to(base/'admitted-report')
+                if mutation=='nonempty':receipt['path'].write_bytes(b'not a compiler report')
+                before={p.name:(p.lstat().st_ino,p.read_bytes()) for p in receipt['directory'].iterdir() if not p.is_dir()}
+                with patch.object(runtime,'BASE',base), \
+                        patch.object(runtime.os,'unlink',side_effect=AssertionError('must retain')) as unlink, \
+                        patch.object(runtime.os,'rmdir',side_effect=AssertionError('must retain')) as rmdir:
+                    facts=runtime._reclaim_worker_receipt(receipt,result,provisioning=True)
+                self.assertEqual('retained' if mutation is None else 'refused',facts['status'])
+                if mutation is None:
+                    self.assertEqual('exclusive-deletion-authority-unavailable',facts['reason'])
+                    self.assertEqual([],facts['removedEntries'])
+                unlink.assert_not_called();rmdir.assert_not_called()
+                self.assertEqual(before,{p.name:(p.lstat().st_ino,p.read_bytes()) for p in receipt['directory'].iterdir() if not p.is_dir()})
+                self.assertFalse(result['workerExecVerified']);self.assertIsNone(result['workerProof'])
 
     def test_unknown_absence_unconsumed_proof_or_open_report_retains_receipt(self):
         for mutation in ('cleanupVerified','rootReaped','finalAbsenceVerified','scope','proof','open'):

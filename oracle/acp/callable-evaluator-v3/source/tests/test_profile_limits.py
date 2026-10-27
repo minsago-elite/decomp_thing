@@ -442,7 +442,10 @@ class ProfileLimits(unittest.TestCase):
                 return None
             runtime.write_json(receipt['directory']/'gate.json',{'pid':123,'start':9})
             if provisioning:
-                self.assertIsNone(receipt['fd']); self.assertFalse(receipt['path'].exists())
+                self.assertIsNone(receipt['fd'])  # No compiler report channel.
+                metadata=receipt['path'].lstat()
+                self.assertEqual((receipt['device'],receipt['inode']),(metadata.st_dev,metadata.st_ino))
+                self.assertEqual(b'',receipt['path'].read_bytes())  # Retained, never unlinked.
                 return acquired_scope()
             e = {'v':1,'t':'exec','s':1,'a':launch['expected']['attempt'],'p':'runtime','c':3,
                  'ed':7,'ei':8,'od':7,'oi':8,'w':parser.EXEC_WAIT_STATUS,'cf':1,'dp':0,
