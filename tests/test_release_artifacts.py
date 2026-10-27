@@ -206,6 +206,16 @@ class ReleaseArtifactsTest(unittest.TestCase):
         with self.assertRaisesRegex(release.ReleaseError, "does not describe the shipped UI build"):
             release.verify(output, None)
 
+    def test_verification_requires_a_package_record_for_every_browser_owner(self) -> None:
+        output = self.assemble(members())
+        dependencies = json.loads((output / "frontend-dependencies.json").read_text())
+        dependencies["packages"] = []
+        (output / "frontend-dependencies.json").write_text(json.dumps(dependencies))
+        release.write_checksums(output)
+        # Standalone verification must not skip notice coverage for an omitted package.
+        with self.assertRaisesRegex(release.ReleaseError, "outside the recorded runtime set"):
+            release.verify(output, None)
+
     def test_source_is_unknown_unless_explicitly_asserted(self) -> None:
         output = self.assemble(members())
         source = json.loads((output / "release-record.json").read_text())["source"]

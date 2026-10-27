@@ -62,6 +62,11 @@ class Member:
     def same(self, other: "Member") -> bool:
         return (self.size, self.digest, self.mode) == (other.size, other.digest, other.mode)
 
+    def required_data(self) -> bytes:
+        if self.data is None:
+            raise ReleaseError("a member needed for verification was not retained")
+        return self.data
+
 
 def kept(name: str) -> bool:
     """Members whose contents are inspected: launchers, the application JAR and the shipped notices."""
@@ -300,14 +305,14 @@ def assemble(distributions: Path, output: Path, lockfile: Path, composition: Pat
     application_jar = f"lib/llm-bin-patch-{version}.jar"
     if application_jar not in members:
         raise ReleaseError(f"the distribution omits {application_jar}")
-    manifest = ui_manifest(members[application_jar].data)
+    manifest = ui_manifest(members[application_jar].required_data())
     classpath = launcher_classpath(members, application_jar)
     chunks = read_composition(composition)
     check_composition(chunks, manifest)
     dependencies = frontend_dependencies(lockfile, chunks)
     if NOTICES not in members:
         raise ReleaseError(f"the distribution omits {NOTICES}")
-    check_notices(members[NOTICES].data, dependencies)
+    check_notices(members[NOTICES].required_data(), dependencies)
 
     release = output / f"{NAME}-{version}"
     if release.exists():
@@ -334,7 +339,7 @@ def assemble(distributions: Path, output: Path, lockfile: Path, composition: Pat
     (release / "release-inventory.json").write_bytes(json_bytes(inventory))
     (release / "ui-manifest.json").write_bytes(json_bytes(manifest))
     (release / "frontend-dependencies.json").write_bytes(json_bytes(dependencies))
-    (release / "frontend-THIRD_PARTY_NOTICES.txt").write_bytes(members[NOTICES].data)
+    (release / "frontend-THIRD_PARTY_NOTICES.txt").write_bytes(members[NOTICES].required_data())
     (release / "release-record.json").write_bytes(json_bytes(record))
     write_checksums(release)
     return release
@@ -379,7 +384,7 @@ def verify(release: Path, lockfile: Path | None) -> dict:
                 raise ReleaseError(f"{archive.name} member {name} differs from the inventory")
         if launcher_classpath(members, record["applicationJar"]) != inventory["classPath"]:
             raise ReleaseError(f"{archive.name} launcher class path differs from the inventory")
-        application_jar = members[record["applicationJar"]].data
+        application_jar = members[record["applicationJar"]].required_data()
         if sha256(application_jar) != record["applicationBuildId"]:
             raise ReleaseError("the application JAR differs from the recorded application build ID")
         manifest = ui_manifest(application_jar)
@@ -397,6 +402,9 @@ def verify(release: Path, lockfile: Path | None) -> dict:
     if owners != dependencies["browserModuleOwners"] or any(
             package["browserModules"] != (package["name"] in owners) for package in dependencies["packages"]):
         raise ReleaseError("the recorded browser-module owners differ from the recorded chunk owners")
+    unknown = sorted(set(owners) - {package["name"] for package in dependencies["packages"]})
+    if unknown:
+        raise ReleaseError(f"bundle modules come from packages outside the recorded runtime set: {unknown}")
     check_notices((release / "frontend-THIRD_PARTY_NOTICES.txt").read_bytes(), dependencies)
     if lockfile is not None:
         if file_sha256(lockfile) != dependencies["lockfileSha256"]:
@@ -410,7 +418,7 @@ def verify(release: Path, lockfile: Path | None) -> dict:
 
 
 def main(argv: list[str]) -> int:
-    parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    parser = argparse.ArgumentParser(description=(__doc__ or "Assemble and verify release archives.").splitlines()[0])
     commands = parser.add_subparsers(dest="command", required=True)
     build = commands.add_parser("assemble")
     build.add_argument("--distributions", type=Path, default=REPOSITORY / "build/distributions")
