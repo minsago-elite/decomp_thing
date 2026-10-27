@@ -658,6 +658,90 @@ it('requests each older history page once and keeps changed files visible when p
   expect(screen.getByLabelText('Tag name')).toBeTruthy();
 });
 
+it.each(['success', 'timeout'])('shows paginated commit files and tagging while provenance is pending, then handles %s independently', async outcome => {
+  paged = true;
+  historyPages.first = { entries: [commitSummary(older, 'Previous', true)], nextCursor: null };
+  const gate = deferred();
+  transport.get.mockImplementation(async (kind, path) => {
+    if (kind === 'gitProvenance') {
+      await gate.promise;
+      if (outcome === 'timeout') throw new ApiClientError('timeout');
+    }
+    return serve(kind, path);
+  });
+  mount();
+  fireEvent.click(await screen.findByRole('button', { name: `Inspect ${older.slice(0, 12)}` }));
+  await screen.findByText('src/second.c');
+  expect(screen.getByText('src/main.c')).toBeTruthy();
+  expect(screen.getByText('Reading provenance and source export…')).toBeTruthy();
+  expect(screen.queryByRole('link', { name: 'Download source export' })).toBeNull();
+  fireEvent.input(screen.getByLabelText('Tag name'), { target: { value: 'draft-without-export' } });
+  gate.resolve();
+  if (outcome === 'success') await screen.findByRole('link', { name: 'Download source export' });
+  else await screen.findByText(/provenance and source export of this commit are unavailable/);
+  expect(screen.queryByText('Reading provenance and source export…')).toBeNull();
+  expect(screen.getByText('src/main.c')).toBeTruthy();
+  expect(screen.getByLabelText('Tag name')).toHaveProperty('value', 'draft-without-export');
+  expect(transport.post).not.toHaveBeenCalled();
+});
+
+it.each(['refresh', 'worktree change'])('discards a pending provenance result after a %s', async change => {
+  historyPages.first = { entries: [commitSummary(older, 'Previous', true)], nextCursor: null };
+  const gate = deferred();
+  let settled = false;
+  transport.get.mockImplementation(async (kind, path) => {
+    if (kind === 'gitProvenance') { await gate.promise; settled = true; }
+    return serve(kind, path);
+  });
+  mount();
+  fireEvent.click(await screen.findByRole('button', { name: `Inspect ${older.slice(0, 12)}` }));
+  await screen.findByLabelText('Tag name');
+  fireEvent.click(screen.getByRole('button', { name: change === 'refresh' ? 'Refresh repository' : `Show ${linkedId}` }));
+  await waitFor(() => expect(screen.queryByLabelText('Tag name')).toBeNull());
+  gate.resolve();
+  await waitFor(() => expect(settled).toBe(true));
+  expect(screen.queryByRole('link', { name: 'Download source export' })).toBeNull();
+  expect(screen.queryByRole('heading', { name: `Commit ${older.slice(0, 12)}` })).toBeNull();
+});
+
+it.each(['primary', 'linked attached', 'linked detached'])('scopes current branch controls to the selected %s tree and identifies branches checked out elsewhere', async selection => {
+  entries = [];
+  transport.get.mockImplementation(async (kind, path) => {
+    if (kind === 'gitStatus' && path.includes(`worktree=${linkedId}`)) return { data: { ...status(false), worktreeId: linkedId,
+      headState: selection === 'linked detached' ? 'detached' : 'attached', headRefName: selection === 'linked detached' ? null : 'refs/heads/topic', headObjectId: other } };
+    if (kind === 'gitWorktrees') return { data: { repositoryId, worktrees: [
+      { worktreeId, primary: true, ownerRunId: null, worktreeVersion: 'tree_v1', headState: 'attached', headRefName: 'refs/heads/main', headObjectId: head, dirty: false },
+      { worktreeId: linkedId, primary: false, ownerRunId: null, worktreeVersion: 'tree_v2', headState: selection === 'linked detached' ? 'detached' : 'attached',
+        headRefName: selection === 'linked detached' ? null : 'refs/heads/topic', headObjectId: other, dirty: false },
+    ] } };
+    return serve(kind, path);
+  });
+  mount();
+  await screen.findByRole('heading', { name: 'Branches and tags' });
+  if (selection !== 'primary') {
+    fireEvent.click(screen.getByRole('button', { name: `Show ${linkedId}` }));
+    await waitFor(() => expect(screen.getByRole('button', { name: `Show ${linkedId}` })).toHaveProperty('disabled', true));
+  }
+  const branches = screen.getByRole('heading', { name: 'Branches and tags' }).closest('section')!;
+  const main = within(branches).getByText('refs/heads/main').closest('li')!;
+  const topic = within(branches).getByText('refs/heads/topic').closest('li')!;
+  const current = selection === 'primary' ? main : selection === 'linked attached' ? topic : null;
+  for (const [row, name] of [[main, 'main'], [topic, 'topic']] as const) {
+    if (row === current) {
+      expect(within(row).getByText('current')).toBeTruthy();
+      expect(within(row).queryByRole('button')).toBeNull();
+      expect(within(row).queryByText('checked out in another work tree')).toBeNull();
+    } else {
+      expect(within(row).queryByText('current')).toBeNull();
+      const elsewhere = row === main || selection === 'primary';
+      expect(!!within(row).queryByText('checked out in another work tree')).toBe(elsewhere);
+      expect(within(row).getByRole('button', { name: `Switch to ${name}` })).toHaveProperty('disabled', elsewhere);
+      expect(within(row).getByRole('button', { name: `Delete ${name}` })).toHaveProperty('disabled', elsewhere);
+    }
+  }
+  expect(transport.post).not.toHaveBeenCalled();
+});
+
 it('reports a failed job read during import instead of stopping silently', async () => {
   listing = [];
   jobFails = true;
