@@ -292,6 +292,74 @@ class GitRemotesTest {
         }
     }
 
+    @Test fun `remote registration audits recover exactly once across mutation and audit crash windows`() {
+        for (action in listOf(GitOperationAction.REMOTE_ADD, GitOperationAction.REMOTE_REMOVE)) {
+            for (point in listOf(GitOperationCrashPoint.AFTER_REMOTE_MUTATION, GitOperationCrashPoint.AFTER_REMOTE_AUDIT)) Fixture().use { f ->
+                f.remote(); f.initialized()
+                val original = if (action == GitOperationAction.REMOTE_REMOVE) {
+                    assertEquals(GitOperationState.COMPLETED, sync(GitOperationAction.REMOTE_ADD, "name" to "upstream", "url" to "admitted:upstream.git").state)
+                    service.remotes(jobId, repositoryId).single().record
+                } else null
+                val parameters = if (original == null) mapOf("name" to "upstream", "url" to "admitted:upstream.git")
+                    else mapOf("remoteId" to original.remoteId)
+                val (view, guard) = guards()
+                f.hook = { if (it == point) throw SimulatedGitCrash() }
+                val admission = service.requestWorkspace(jobId, repositoryId, GitSyncRequest(action, view.worktreeId, guard, parameters), key())
+                assertTrue(service.awaitIdle(60_000))
+                val operationId = admission.operation.operationId
+                assertEquals(action == GitOperationAction.REMOTE_ADD, service.remotes(jobId, repositoryId).isNotEmpty())
+                fun entries() = service.auditLog(jobId, repositoryId, 100).filter { it["operationId"] == kotlinx.serialization.json.JsonPrimitive(operationId) }
+                assertEquals(if (point == GitOperationCrashPoint.AFTER_REMOTE_AUDIT) 1 else 0, entries().size)
+                service.close(); f.hook = {}; service = f.open()
+                repeat(2) {
+                    val recovered = service.operation(jobId, repositoryId, operationId)
+                    assertEquals(GitOperationState.COMPLETED, recovered.state, recovered.message)
+                    val entry = entries().single()
+                    assertEquals(kotlinx.serialization.json.JsonPrimitive(if (original == null) "remote.add" else "remote.remove"), entry["action"])
+                    assertEquals(kotlinx.serialization.json.JsonPrimitive("completed"), entry["outcome"])
+                    assertEquals(kotlinx.serialization.json.JsonPrimitive("admitted:upstream.git"), entry["destination"])
+                    assertEquals(kotlinx.serialization.json.JsonPrimitive(original?.remoteId ?: service.remotes(jobId, repositoryId).single().record.remoteId), entry["remoteId"])
+                    assertNull(GitRemoteStore.pendingAudit(f.store.resolve("$jobId/git/repositories/$repositoryId"), operationId))
+                    service.close(); service = f.open()
+                }
+            }
+        }
+    }
+
+    @Test fun `failed remote audit writes retain recovery ownership until publication succeeds`() {
+        for (action in listOf(GitOperationAction.REMOTE_ADD, GitOperationAction.REMOTE_REMOVE)) Fixture().use { f ->
+            f.remote(); f.initialized()
+            val original = if (action == GitOperationAction.REMOTE_REMOVE) {
+                sync(GitOperationAction.REMOTE_ADD, "name" to "upstream", "url" to "admitted:upstream.git")
+                service.remotes(jobId, repositoryId).single().record
+            } else null
+            val directory = f.store.resolve("$jobId/git/repositories/$repositoryId")
+            val audit = directory.resolve(GitRemoteStore.AUDIT)
+            val backup = directory.resolve("audit-retained")
+            f.hook = { if (it == GitOperationCrashPoint.AFTER_REMOTE_MUTATION) {
+                if (Files.exists(audit)) Files.move(audit, backup)
+                Files.createDirectory(audit) // Real storage error after the registration changed.
+            } }
+            val parameters = if (original == null) arrayOf("name" to "upstream", "url" to "admitted:upstream.git")
+                else arrayOf("remoteId" to original.remoteId)
+            val failed = sync(action, *parameters)
+            assertEquals(GitOperationState.RECOVERY_REQUIRED, failed.state)
+            assertEquals("AUDIT_RECOVERY_REQUIRED", failed.failureCode)
+            assertNotNull(GitRemoteStore.pendingAudit(directory, failed.operationId))
+            service.close(); f.hook = {}; service = f.open()
+            assertEquals(GitOperationState.RECOVERY_REQUIRED, service.operation(jobId, repositoryId, failed.operationId).state)
+            refused("WORKTREE_BUSY", GitOperationAction.REMOTE_ADD, "name" to "other", "url" to "admitted:upstream.git")
+            Files.delete(audit)
+            if (Files.exists(backup)) Files.move(backup, audit)
+            service.recover(listOf(jobId))
+            assertEquals(GitOperationState.COMPLETED, service.operation(jobId, repositoryId, failed.operationId).state)
+            val entries = service.auditLog(jobId, repositoryId, 100).filter { it["operationId"] == kotlinx.serialization.json.JsonPrimitive(failed.operationId) }
+            assertEquals(1, entries.size)
+            assertEquals(kotlinx.serialization.json.JsonPrimitive("admitted:upstream.git"), entries.single()["destination"])
+            assertNull(GitRemoteStore.pendingAudit(directory, failed.operationId))
+        }
+    }
+
     @Test fun `clone publishes a complete managed repository from an admitted remote`(): Unit = Fixture().use { f ->
         f.remote()
         service = f.open()

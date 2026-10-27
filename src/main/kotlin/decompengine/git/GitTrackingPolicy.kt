@@ -88,7 +88,7 @@ object GitTrackingPolicy {
         val ready = java.nio.file.Files.isRegularFile(exclude, java.nio.file.LinkOption.NOFOLLOW_LINKS) &&
             java.nio.file.Files.readString(exclude) == excludeFile()
         if (!ready) {
-            if (!prepare) throw GitRepositoryException("CAPABILITY_UNAVAILABLE", "The server-owned tracking policy is not prepared.")
+            if (!prepare) throw GitRepositoryException("REPOSITORY_UNAVAILABLE", "The server-owned tracking policy is not prepared.")
             java.nio.file.Files.createDirectories(workTree)
             if (!java.nio.file.Files.exists(gitDir.resolve("HEAD"), java.nio.file.LinkOption.NOFOLLOW_LINKS)) {
                 runner.run(GitInvocation("init", listOf("--quiet", "--bare", gitDir.toString())))

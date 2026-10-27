@@ -1169,12 +1169,19 @@ on the shared job event stream, which is still run-scoped.
 
 `GET G/audit?limit=` returns the repository's newest audit entries first: remote additions and
 removals, fetches and clones, with destination, refs, objects and outcome. Audit entries are
-separate from reconstruction evidence and never accept a revision.
+separate from reconstruction evidence and never accept a revision. Registration additions and
+removals retain an operation-scoped write-ahead audit intent before changing the registration,
+including the removed destination. Startup/mutation recovery publishes that entry idempotently
+before completing the operation. An audit-storage failure retains `recovery-required` ownership
+and blocks further mutations until explicit recovery succeeds; GET never attempts publication.
+The bounded audit window is replaced atomically, so an interrupted append cannot corrupt a
+recovered entry.
 
 The workspace shows a **Remotes** panel. It lists the remotes and their states, adds and removes
 remotes, fetches with live progress and a **Cancel transfer** control, and shows the audit history.
-A job without a repository offers **Clone from a remote** next to import. Neither form accepts a
-credential.
+A job without a repository offers **Clone from a remote** next to import. Its optional branch
+field selects a supported branch explicitly when the advertised default is detached or unsupported;
+URL, remote name and branch remain available after a refusal. Neither form accepts a credential.
 
 `GitRemotesTest` covers:
 
