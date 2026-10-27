@@ -36,17 +36,22 @@ class ArchivalReconstructionTest {
                         "src/modules/decomp.c", "/* fn_1000 */\nint decomp_engine_main(void) { return $expression; }\n")))
                 }
             }
-            val service = ArchivalReconstructionService(analyzer,
-                BoundedLlmModuleReconstructor(decompengine.repair.RepairClientAgentHarness(client)))
-            service.reconstruct(binary, output)
+            fun reconstruct(): ArchivalReconstructionResult = decompengine.jobs.AgentProgressJournal(
+                temp.resolve("progress"), "reconstruction", recordFullRun = true,
+            ).use { progress ->
+                ArchivalReconstructionService(analyzer,
+                    BoundedLlmModuleReconstructor(decompengine.repair.RepairClientAgentHarness(client)),
+                    progress = progress).reconstruct(binary, output)
+            }
+            reconstruct()
             changed = true
             if (correctable) {
-                val result = service.reconstruct(binary, output)
+                val result = reconstruct()
                 assertEquals(0, result.build.returnCode)
                 assertEquals(3, calls)
             } else {
                 kotlin.test.assertFailsWith<ModuleReconstructionRevisionRejectedException> {
-                    service.reconstruct(binary, output)
+                    reconstruct()
                 }
                 assertEquals(4, calls)
                 assertTrue(output.resolve("source-tree/src/modules/decomp.c").readText().contains("return 17;"))

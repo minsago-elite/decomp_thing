@@ -877,7 +877,7 @@ object SourceTreeGenerator {
                         if (previousExecutionEvidence == null) path.deleteIfExists()
                         else writeAtomically(path, previousExecutionEvidence)
                     }
-                    progress.phase(AgentWorkflowPhase.ROLLED_BACK, module.id, previousAccepted.sourceSha256)
+                    progress.phase(AgentWorkflowPhase.ROLLED_BACK, module.id)
                     return attemptEvidence
                 }
                 val attempted = try {
