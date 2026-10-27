@@ -53,8 +53,8 @@ malformed protocol data.
 
 If agent-backed modules remain unresolved, the CLI exits with status 1 and writes an `incomplete` summary to
 `reconstruction.json`, preserving partial source and `source-tree/UNRESOLVED.md` without packaging placeholders.
-After an exporter upgrade, use a fresh output directory: old analysis checkpoints remain bound to their original
-exporter and must not be mixed with new typed signature evidence.
+After an exporter upgrade, rerun with the same output: the CLI preserves the old analysis capture under
+`.analysis-history/` and recaptures evidence with the new exporter. Old checkpoints retain their original identity.
 
 Each new reconstruction attempt also retains a private `run-history/<run-id>/` directory containing
 `events.jsonl` and `run.json`. This complete, redacted event sequence is separate from the bounded live snapshot;
