@@ -61,6 +61,8 @@ jobs:
           python3 -m pip install --requirement requirements/oracle-generation.txt
       - name: Verify packaged upgrade and cache evidence controls
         run: node scripts/test-packaged-browser-upgrade.mjs
+      - name: Verify lazy upload picker readiness controls
+        run: node --test scripts/packaged-browser-upload.test.mjs
       - name: Verify bounded archival cleanup controls
         timeout-minutes: 1
         run: python3 -B scripts/test-archival-diagnostics.py --verbose
