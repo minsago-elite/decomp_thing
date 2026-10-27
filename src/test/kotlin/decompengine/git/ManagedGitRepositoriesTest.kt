@@ -25,7 +25,7 @@ class ManagedGitRepositoriesTest {
         val store: Path = Files.createDirectories(repositories.root.resolve("store"))
         val snapshot: Path = Files.createDirectories(store.resolve(jobId).resolve("reports/runs/run_1/source-tree"))
         val crashes = mutableSetOf<GitOperationCrashPoint>()
-        val reached = mutableSetOf<GitOperationCrashPoint>()
+        val observedCrashPoints = mutableSetOf<GitOperationCrashPoint>()
         private val opened = mutableListOf<ManagedGitRepositories>()
         val resolver = GitSourceSnapshotResolver { job, run, revision ->
             if (job != jobId || run != "run_1" || revision != "revision_1") {
@@ -61,7 +61,7 @@ class ManagedGitRepositoriesTest {
         fun open(policy: GitRepositoryPolicy = GitRepositoryPolicy(defaultBranch = "trunk"),
             availability: GitAvailability = GitRuntime.detect(), limits: GitCheckoutLimits = GitCheckoutLimits()): ManagedGitRepositories =
             ManagedGitRepositories(store, availability, resolver, importRoot, policy, crash = { point ->
-                reached += point
+                observedCrashPoints += point
                 if (point in crashes) throw SimulatedGitCrash()
             }, importLimits = limits).also(opened::add)
 
@@ -183,14 +183,14 @@ class ManagedGitRepositoriesTest {
             val first = f.open()
             val admission = first.request(jobId, GitRepositoryRequest.Init("run_1", "revision_1", null), "crash_request_key_01")
             assertTrue(first.awaitIdle(60_000))
-            // Terminal-persist hooks are workspace-only; initialization must complete without
-            // hitting them. Keep all enum cases, explicitly proving which hooks actually fired.
-            val interruptsInit = point !in setOf(GitOperationCrashPoint.BEFORE_TERMINAL_PERSIST, GitOperationCrashPoint.AFTER_TERMINAL_PERSIST)
-            assertEquals(interruptsInit, point in f.reached, point.name)
-            val published = point == GitOperationCrashPoint.AFTER_PUBLISH || !interruptsInit
-            assertEquals(!published, first.listing(jobId).repositories.isEmpty(), point.name)
-            assertEquals(if (interruptsInit) GitOperationState.RUNNING else GitOperationState.COMPLETED,
+            assertTrue(point in f.observedCrashPoints, "INIT must reach the injected crash at $point")
+            val published = point in setOf(GitOperationCrashPoint.AFTER_PUBLISH,
+                GitOperationCrashPoint.BEFORE_TERMINAL_PERSIST, GitOperationCrashPoint.AFTER_TERMINAL_PERSIST)
+            // No half-prepared repository is exposed. The record becomes terminal only after its
+            // atomic replacement; a published registration lets restart finish either earlier gap.
+            assertEquals(if (point == GitOperationCrashPoint.AFTER_TERMINAL_PERSIST) GitOperationState.COMPLETED else GitOperationState.RUNNING,
                 first.operation(jobId, admission.operation.repositoryId, admission.operation.operationId).state, point.name)
+            assertEquals(published, first.listing(jobId).repositories.isNotEmpty(), point.name)
             first.close()
             f.crashes.clear()
             val restarted = f.open()
