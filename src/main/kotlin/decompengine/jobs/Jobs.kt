@@ -303,6 +303,11 @@ class JobStore internal constructor(
         return streamContainedFile(jobId, relativePath, declaredSize, consume, cancellationCheck)
     }
 
+    /** Inventory input reads retain the store's private upload ceiling, with the same admission accounting. */
+    internal fun readArtifactInventoryInput(jobId: String, reserveBytes: (Long) -> Unit,
+        cancellationCheck: () -> Unit): StableRegularFile =
+        readArtifactInventoryFile(jobId, "input.elf", MAX_INPUT_BYTES.toLong(), reserveBytes, cancellationCheck)
+
     /** Catalog inventory reads use the same pinned streaming boundary, including input and failed-read accounting. */
     internal fun readArtifactInventoryFile(jobId: String, relativePath: String, maximumBytes: Long,
         reserveBytes: (Long) -> Unit, cancellationCheck: () -> Unit): StableRegularFile {
@@ -542,20 +547,20 @@ class JobStore internal constructor(
         }
     }
 
-    companion object {
-        private const val MAX_STATUS_MESSAGE_CHARACTERS = 500
-        internal const val MAX_INPUT_BYTES = 32 * 1024 * 1024
-        private const val MAX_METADATA_BYTES = 256 * 1024
-        private val METADATA_LIMITS = StrictJsonLimits(
+    private companion object {
+        const val MAX_STATUS_MESSAGE_CHARACTERS = 500
+        const val MAX_INPUT_BYTES = 32 * 1024 * 1024
+        const val MAX_METADATA_BYTES = 256 * 1024
+        val METADATA_LIMITS = StrictJsonLimits(
             maximumCanonicalBytes = MAX_METADATA_BYTES,
             maximumStringBytes = MAX_METADATA_BYTES,
             maximumTotalStringBytes = MAX_METADATA_BYTES,
             maximumDepth = 8,
             maximumNodes = 128,
         )
-        private val VALID_STATUSES = setOf("uploaded", "queued", "analyzing", "complete", "failed")
-        private val STATUS_MESSAGE_RESERVE = "\u0001".repeat(500)
-        private const val MAXIMUM_UPDATE_TIMESTAMP = "9999-12-31T23:59:59.999999999Z"
+        val VALID_STATUSES = setOf("uploaded", "queued", "analyzing", "complete", "failed")
+        val STATUS_MESSAGE_RESERVE = "\u0001".repeat(500)
+        const val MAXIMUM_UPDATE_TIMESTAMP = "9999-12-31T23:59:59.999999999Z"
     }
 }
 
