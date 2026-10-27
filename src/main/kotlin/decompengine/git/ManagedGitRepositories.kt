@@ -1082,7 +1082,9 @@ class ManagedGitRepositories(
                 // Mutable titles are not provenance: an independently created same-title PR is ambiguous.
                 val matches = candidates.filter { it.correlation == intent.operationId }
                 val found = matches.singleOrNull()
-                if (matches.size > 1 || (found == null && (!inventory.complete || candidates.isNotEmpty()))) throw GitOperationRefusal("PR_AMBIGUOUS",
+                // A match in a truncated inventory cannot prove uniqueness: a later entry may
+                // carry the same marker (including the actual creation behind a copied marker).
+                if (!inventory.complete || matches.size > 1 || (found == null && candidates.isNotEmpty())) throw GitOperationRefusal("PR_AMBIGUOUS",
                     "The bounded GitHub search cannot establish this creation's outcome. New or conflicting pull requests may exist; " +
                         "the creation stays unconfirmed. Inspect them on GitHub.")
                 val (state, code, message) = if (found != null) Triple(GitOperationState.COMPLETED, null,

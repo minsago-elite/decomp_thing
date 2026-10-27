@@ -521,6 +521,42 @@ class GitHubIntegrationTest {
         }
     }
 
+    @Test fun `a copied match inside a capped inventory cannot confirm the wrong pull request`(): Unit = Fixture().use { f ->
+        FakeGitHub(token).use { fake ->
+            val config = configuration(fake, f.repositories.root, writable = true)
+            f.cloned(config)
+            fake.dropAfterCreate = true
+            val uncertain = run(create())
+            assertEquals("PR_UNCONFIRMED", uncertain.failureCode)
+            val original = fake.pulls.single()
+            fake.pulls.clear()
+            // Newest-first provider order: the copied marker is visible, the actual creation is not.
+            fake.pulls += kotlinx.serialization.json.JsonObject(openPull(301, "Copied review") + mapOf(
+                "body" to original.getValue("body"),
+                "base" to buildJsonObject { put("ref", "other-base") },
+            ))
+            repeat(299) { fake.pulls += closedPull(it + 2, "Other review") }
+            fake.pulls += original
+            val inventory = GitHubClient(config).inventory(GitHubBinding("admitted:upstream.git", "fixture-owner", "fixture-repo"), "feature")
+            assertFalse(inventory.complete); assertEquals(300, inventory.pulls.size)
+            assertEquals(listOf(301), inventory.pulls.filter { it.correlation == uncertain.operationId }.map { it.number })
+
+            assertEquals("PR_AMBIGUOUS", reconcile(uncertain.operationId).failureCode)
+            assertEquals(GitOperationState.RECOVERY_REQUIRED, service.operation(jobId, repositoryId, uncertain.operationId).state)
+            service.close(); service = f.open(config)
+            service.recover(listOf(jobId))
+            assertEquals(listOf(uncertain.operationId), service.githubStatus(jobId, repositoryId, null, remoteId(), "feature").unconfirmed.map { it.operationId })
+            // Even a complete inventory with both markers is ambiguous, and must retain the intent.
+            fake.pulls.removeAll { it.getValue("number").jsonPrimitive.content.toInt() in 2..300 }
+            assertEquals("PR_AMBIGUOUS", reconcile(uncertain.operationId).failureCode)
+            fake.pulls.removeAt(0)
+            assertEquals(GitOperationState.COMPLETED, reconcile(uncertain.operationId).state)
+            assertTrue(service.operation(jobId, repositoryId, uncertain.operationId).message.contains("#1:"))
+            assertTrue(service.githubStatus(jobId, repositoryId, null, remoteId(), "feature").unconfirmed.isEmpty())
+            assertEquals(1, fake.requests.count { it.startsWith("POST") })
+        }
+    }
+
     @Test fun `an incomplete preflight inventory refuses creation without posting`(): Unit = Fixture().use { f ->
         FakeGitHub(token).use { fake ->
             repeat(301) { fake.pulls += closedPull(it + 1, "History") }
