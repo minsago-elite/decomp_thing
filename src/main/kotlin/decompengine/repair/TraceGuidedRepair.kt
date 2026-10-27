@@ -502,7 +502,7 @@ class HttpOpenAiCompatibleRepairClient(
 }
 
 /** Builds the exact UTF-8 request body without allocating an unbounded escaped intermediate string. */
-private class BoundedUtf8JsonBody(private val maximumBytes: Long) {
+internal class BoundedUtf8JsonBody(private val maximumBytes: Long) {
     private val output = ByteArrayOutputStream(minOf(maximumBytes, 8192L).toInt())
 
     init {

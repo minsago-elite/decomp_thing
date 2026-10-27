@@ -6,6 +6,8 @@ import decompengine.acp.AcpHarnessSelection
 import decompengine.acp.AcpAgentHarness
 import decompengine.acp.AcpPreflightWorkflow
 import decompengine.agent.AgentExecutionException
+import decompengine.chatgpt.ChatGptPlanCredentialStore
+import decompengine.repair.ChatGptPlanRepairClient
 import decompengine.analysis.BundledGhidra
 import java.net.URI
 import java.net.http.HttpClient
@@ -78,19 +80,48 @@ class Doctor(
         checks += bubblewrapCheck()
         checks += outputCheck(options.outputDir)
         if (!options.toolsOnly) {
-            val harnessSelection = runCatching {
-                AcpHarnessFactory.fromEnvironment(withHarnessOverride(options.harnessOverride))
-            }
-            checks += agentHarnessChecks(
-                harnessSelection,
-                options.workflowOverride ?: AcpPreflightWorkflow.ALL,
-                options.showAuthMethods,
-            )
-            if (harnessSelection.getOrNull()?.kind == AcpHarnessKind.LEGACY_OPENAI && !options.showAuthMethods) {
-                checks += llmChecks()
+            val selectedHarness = options.harnessOverride ?: environment["ACP_HARNESS"]
+            if (selectedHarness == "chatgpt-plan") {
+                checks += chatGptPlanChecks()
+            } else {
+                val harnessSelection = runCatching {
+                    AcpHarnessFactory.fromEnvironment(withHarnessOverride(options.harnessOverride))
+                }
+                checks += agentHarnessChecks(
+                    harnessSelection,
+                    options.workflowOverride ?: AcpPreflightWorkflow.ALL,
+                    options.showAuthMethods,
+                )
+                if (harnessSelection.getOrNull()?.kind == AcpHarnessKind.LEGACY_OPENAI && !options.showAuthMethods) {
+                    checks += llmChecks()
+                }
             }
         }
         return DoctorReport(checks)
+    }
+
+    private fun chatGptPlanChecks(): List<DoctorCheck> = try {
+        val store = ChatGptPlanCredentialStore.default()
+        val account = store.activeAccount()
+            ?: return listOf(DoctorCheck("ChatGPT plan", false, "No active account. Run llm_bin_patch chatgpt login."))
+        if (account.refreshToken.isBlank()) {
+            return listOf(DoctorCheck("ChatGPT plan", false, "Account ${account.id} is signed out. Run llm_bin_patch chatgpt login --account ${account.id}."))
+        }
+        if (!account.canUseChatGptPlan) {
+            return listOf(DoctorCheck("ChatGPT plan", false, "The account did not grant chatgpt.tokens.use.direct. Reauthorize with llm_bin_patch chatgpt login --account ${account.id}."))
+        }
+        val client = ChatGptPlanRepairClient(store = store)
+        val models = client.listModels()
+        val selected = account.model
+        if (selected == null) {
+            listOf(DoctorCheck("ChatGPT plan", false, "Sign-in and direct inference scope are available, but no model is selected. Run llm_bin_patch chatgpt models --select <slug>."))
+        } else if (models.none { it.slug == selected }) {
+            listOf(DoctorCheck("ChatGPT plan", false, "Selected model is no longer visible. Run llm_bin_patch chatgpt models --select <slug>."))
+        } else {
+            listOf(DoctorCheck("ChatGPT plan", true, "Signed in; direct inference scope granted; model $selected is visible. No inference request was sent."))
+        }
+    } catch (failure: Exception) {
+        listOf(DoctorCheck("ChatGPT plan", false, failure.message ?: "ChatGPT account check failed."))
     }
 
     private fun executableCheck(name: String, command: List<String>, remediation: String): DoctorCheck =
@@ -154,6 +185,11 @@ class Doctor(
                         "Selected ${resolved.provenance.stableDescriptor}; migrate to the default ACP harness.",
                     ),
                 )
+                AcpHarnessKind.CHATGPT_PLAN -> listOf(DoctorCheck(
+                    "ChatGPT plan",
+                    false,
+                    "Use the dedicated chatgpt-plan doctor check; no inference request was sent.",
+                ))
             }
         },
         onFailure = { failure ->

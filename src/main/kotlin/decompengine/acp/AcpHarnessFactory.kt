@@ -4,9 +4,10 @@ import decompengine.agent.AGENT_EXECUTION_CONTRACT_VERSION
 import decompengine.agent.AgentHarness
 import decompengine.repair.HttpOpenAiCompatibleRepairClient
 import decompengine.repair.RepairClientAgentHarness
+import decompengine.repair.ChatGptPlanRepairClient
 import java.util.Collections
 
-enum class AcpHarnessKind { ACP, LEGACY_OPENAI }
+enum class AcpHarnessKind { ACP, LEGACY_OPENAI, CHATGPT_PLAN }
 
 /** Stable, non-secret identity for the selected agent-execution boundary. */
 data class AcpHarnessProvenance(
@@ -19,7 +20,7 @@ data class AcpHarnessProvenance(
     val deprecated: Boolean,
 ) {
     init {
-        require(harness in setOf(ACP_HARNESS_NAME, LEGACY_OPENAI_HARNESS_NAME)) {
+        require(harness in setOf(ACP_HARNESS_NAME, LEGACY_OPENAI_HARNESS_NAME, CHATGPT_PLAN_HARNESS_NAME)) {
             "unknown harness provenance: $harness"
         }
         require(implementationId.matches(Regex("[A-Za-z0-9_][A-Za-z0-9_.-]{0,127}"))) {
@@ -50,6 +51,9 @@ data class AcpHarnessProvenance(
                     acpSdkVersion == null &&
                     configurationSha256 == null
             ) { "legacy OpenAI harness provenance must be deprecated and must not claim ACP metadata" }
+            CHATGPT_PLAN_HARNESS_NAME -> require(
+                !deprecated && acpProtocolVersion == null && acpSdkVersion == null && configurationSha256 == null
+            ) { "ChatGPT plan provenance must not claim ACP metadata" }
         }
     }
 
@@ -94,9 +98,10 @@ object AcpHarnessFactory {
         return when (selected) {
             ACP_HARNESS_NAME -> acpSelection(environment)
             LEGACY_OPENAI_HARNESS_NAME -> legacySelection(environment)
+            CHATGPT_PLAN_HARNESS_NAME -> chatGptPlanSelection()
             else -> throw IllegalArgumentException(
                 "unknown $ACP_HARNESS_ENVIRONMENT value " +
-                    "(expected exactly $ACP_HARNESS_NAME or $LEGACY_OPENAI_HARNESS_NAME; " +
+                "(expected exactly $ACP_HARNESS_NAME, $LEGACY_OPENAI_HARNESS_NAME, or $CHATGPT_PLAN_HARNESS_NAME; " +
                     "direct is no longer supported)",
             )
         }
@@ -155,12 +160,28 @@ object AcpHarnessFactory {
             RepairClientAgentHarness(HttpOpenAiCompatibleRepairClient.fromEnvironment(frozenEnvironment))
         }
     }
+
+    private fun chatGptPlanSelection(): AcpHarnessSelection {
+        val provenance = AcpHarnessProvenance(
+            harness = CHATGPT_PLAN_HARNESS_NAME,
+            implementationId = "siwc-responses-repair",
+            agentExecutionContractVersion = AGENT_EXECUTION_CONTRACT_VERSION,
+            acpProtocolVersion = null,
+            acpSdkVersion = null,
+            configurationSha256 = null,
+            deprecated = false,
+        )
+        return AcpHarnessSelection(AcpHarnessKind.CHATGPT_PLAN, null, provenance) {
+            RepairClientAgentHarness(ChatGptPlanRepairClient())
+        }
+    }
 }
 
 private const val ACP_HARNESS_ENVIRONMENT = "ACP_HARNESS"
 private const val ACP_CONFIG_FILE_ENVIRONMENT = "ACP_CONFIG_FILE"
 private const val ACP_HARNESS_NAME = "acp"
 private const val LEGACY_OPENAI_HARNESS_NAME = "legacy-openai"
+private const val CHATGPT_PLAN_HARNESS_NAME = "chatgpt-plan"
 private val LEGACY_OPENAI_ENVIRONMENT = listOf("BASE_URL", "API_KEY", "MODEL", "REASONING_EFFORT")
 private val OBSOLETE_ACP_ENVIRONMENT = listOf(
     "ACP_AGENT_EXECUTABLE",

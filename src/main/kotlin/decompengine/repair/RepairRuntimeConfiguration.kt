@@ -28,8 +28,8 @@ class RepairRuntimeConfiguration(
 
     /** Exact data-only override; the Java gate still performs the sole factory selection. */
     val harnessOverride: String? = harnessOverride.also { selected ->
-        require(selected == null || selected in setOf("acp", "legacy-openai")) {
-            "repair harness must be exactly acp or legacy-openai"
+        require(selected == null || selected in setOf("acp", "legacy-openai", "chatgpt-plan")) {
+            "repair harness must be exactly acp, legacy-openai, or chatgpt-plan"
         }
     }
 }
