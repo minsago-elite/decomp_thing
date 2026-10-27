@@ -133,14 +133,24 @@ function observeLeaks() {
     expectNone() {
       const stored = [localStorage, sessionStorage].flatMap(area =>
         Array.from({ length: area.length }, (_, index) => `${area.key(index)}=${area.getItem(area.key(index)!)}`)).join('\n');
-      const logged = logs.flatMap(spy => spy.mock.calls.map(call => call.map(String).join(' '))).join('\n');
-      for (const surface of [document.body.innerHTML, document.title, location.href, stored, logged, writes.mock.calls.join('\n')]) {
+      // These schedules are deliberately silent. Reject every call rather than stringify arguments:
+      // String(object) hides nested secrets, and serialization can omit Error/custom fields.
+      for (const log of logs) expect(log).not.toHaveBeenCalled();
+      for (const surface of [document.body.innerHTML, document.title, location.href, stored, writes.mock.calls.join('\n')]) {
         expect(surface).not.toContain(canary); expect(surface).not.toContain(hostPath);
       }
       expect(document.querySelector('img[onerror]')).toBeNull();
     },
   };
 }
+
+it.each(['log', 'info', 'warn', 'error', 'debug'] as const)('rejects private content nested in console.%s arguments', method => {
+  const leaks = observeLeaks();
+  leaks.expectNone();
+  console[method]('response', { error: { message: planted } });
+  expect(() => leaks.expectNone()).toThrow();
+});
+
 function bounded(alert: HTMLElement) {
   expect(alert.textContent?.trim()).not.toBe('');
   expect(alert.textContent?.length).toBeLessThanOrEqual(512);
