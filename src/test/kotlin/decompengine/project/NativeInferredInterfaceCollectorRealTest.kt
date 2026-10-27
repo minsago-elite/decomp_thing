@@ -74,6 +74,7 @@ class NativeInferredInterfaceCollectorRealTest {
         }
         assertStagingControls(root)
         assertFailureDiagnostics(root)
+        assertLifecycleControls(root)
         val controlReceipt = Json.parseToJsonElement(Files.readString(root.resolve("verified-control-receipt.json"))).jsonObject
         assertTrue(controlReceipt.getValue("fixtureOnly").jsonPrimitive.boolean)
         val nativeRows = controlReceipt.getValue("functions").jsonArray.map { it.jsonObject }
@@ -153,6 +154,30 @@ class NativeInferredInterfaceCollectorRealTest {
                 assertFalse(frame.getValue(flag).jsonPrimitive.boolean)
         }
         assertFalse(Files.exists(root.resolve("listing-cancelled-inferred")))
+    }
+
+    private fun assertLifecycleControls(root: Path) {
+        val receipt = Json.parseToJsonElement(Files.readString(root.resolve("verified-lifecycle-controls.json"))).jsonObject
+        assertEquals("authored-native-inferred-interface-lifecycle-controls-v1", receipt.getValue("kind").jsonPrimitive.content)
+        assertTrue(receipt.getValue("fixtureOnly").jsonPrimitive.boolean)
+        val controls = receipt.getValue("controls").jsonArray.map { it.jsonObject }
+        assertEquals(listOf("staged-cancellation", "admitted-cancellation", "post-native-deadline"),
+            controls.map { it.getValue("phase").jsonPrimitive.content })
+        for (control in controls) {
+            val phase = control.getValue("phase").jsonPrimitive.content
+            for (field in listOf("stageObserved", "nativeProcessesExited", "outputRemoved", "programUnchanged", "frozenInputsUnchanged"))
+                assertTrue(control.getValue(field).jsonPrimitive.boolean, "$phase missing $field")
+            assertEquals(phase != "staged-cancellation", control.getValue("nativeAdmissionObserved").jsonPrimitive.boolean)
+            assertEquals(phase == "post-native-deadline", control.getValue("nativeAttemptReturned").jsonPrimitive.boolean)
+            if (phase != "staged-cancellation") assertTrue(control.getValue("observedNativeProcesses").jsonPrimitive.int > 0)
+            assertEquals(if (phase == "post-native-deadline") "java.lang.IllegalStateException" else "ghidra.util.exception.CancelledException",
+                control.getValue("failureClass").jsonPrimitive.content)
+            if (phase == "post-native-deadline") assertEquals("inferred-interface operation deadline exhausted",
+                control.getValue("failureMessage").jsonPrimitive.content)
+            assertFalse(Files.exists(root.resolve(phase)))
+        }
+        for (field in listOf("authoritativeOracleEvidence", "productionInterfacesAdmitted", "releaseEligible"))
+            assertFalse(receipt.getValue(field).jsonPrimitive.boolean)
     }
 
     private fun assertStagingControls(root: Path) {
