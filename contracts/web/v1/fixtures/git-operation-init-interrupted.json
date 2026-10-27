@@ -14,6 +14,7 @@
     "endedAt": "2026-10-25T00:05:00Z",
     "resultObjectId": null,
     "recoveryRequired": false,
-    "message": "Interrupted by a server restart before publication. No repository was published and the source snapshot was not changed. Start a new request explicitly."
+    "message": "Interrupted by a server restart before publication. No repository was published and the source snapshot was not changed. Start a new request explicitly.",
+    "progress": null
   }
 }

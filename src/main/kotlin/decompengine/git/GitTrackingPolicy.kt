@@ -59,11 +59,9 @@ object GitTrackingPolicy {
      * server-owned scratch repository whose only ignore source is this policy, with `--no-index`, so
      * nothing a repository contains can override it. Staging enforces this result.
      */
-    internal fun prepare(runner: GitCommandRunner) { policyRepository(runner, prepare = true) }
-
-    fun excluded(runner: GitCommandRunner, paths: Collection<String>, prepare: Boolean = true): Set<String> {
+    fun excluded(runner: GitCommandRunner, paths: Collection<String>, readOnly: Boolean = false): Set<String> {
         if (paths.isEmpty()) return emptySet()
-        val (gitDir, workTree) = policyRepository(runner, prepare)
+        val (gitDir, workTree) = policyRepository(runner, prepare = !readOnly)
         val excluded = HashSet<String>()
         fun check(batch: List<String>) = runner.run(GitInvocation("check-ignore", listOf("--no-index", "--") + batch, gitDir = gitDir,
             workTree = workTree, allowedExitCodes = setOf(0, 1),
@@ -79,7 +77,10 @@ object GitTrackingPolicy {
         return excluded
     }
 
-    private fun policyRepository(runner: GitCommandRunner, prepare: Boolean): Pair<java.nio.file.Path, java.nio.file.Path> = synchronized(policyLock) {
+    /** Startup/mutation authority creates the scratch repository before read-only observations. */
+    fun prepare(runner: GitCommandRunner) { policyRepository(runner, prepare = true) }
+
+    private fun policyRepository(runner: GitCommandRunner, prepare: Boolean = false): Pair<java.nio.file.Path, java.nio.file.Path> = synchronized(policyLock) {
         val root = runner.environment.root.resolve("policy-$VERSION")
         val gitDir = root.resolve("repository.git")
         val workTree = root.resolve("empty")
@@ -87,7 +88,7 @@ object GitTrackingPolicy {
         val ready = java.nio.file.Files.isRegularFile(exclude, java.nio.file.LinkOption.NOFOLLOW_LINKS) &&
             java.nio.file.Files.readString(exclude) == excludeFile()
         if (!ready) {
-            if (!prepare) throw GitRepositoryException("REPOSITORY_UNAVAILABLE", "The server-owned Git tracking policy is unavailable. Reads do not repair runtime storage.")
+            if (!prepare) throw GitRepositoryException("REPOSITORY_UNAVAILABLE", "The server-owned tracking policy is not prepared.")
             java.nio.file.Files.createDirectories(workTree)
             if (!java.nio.file.Files.exists(gitDir.resolve("HEAD"), java.nio.file.LinkOption.NOFOLLOW_LINKS)) {
                 runner.run(GitInvocation("init", listOf("--quiet", "--bare", gitDir.toString())))

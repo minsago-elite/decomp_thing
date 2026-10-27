@@ -865,6 +865,35 @@
       "valid": true
     },
     {
+      "file": "fixtures/request-git-clone.json",
+      "valid": true
+    },
+    {
+      "file": "fixtures/request-git-remote-add.json",
+      "valid": true
+    },
+    {
+      "file": "fixtures/request-git-fetch.json",
+      "valid": true
+    },
+    {
+      "file": "fixtures/request-git-cancel.json",
+      "valid": true
+    },
+    {
+      "file": "fixtures/invalid-request-git-fetch-refspec.json",
+      "valid": false,
+      "reason": "A fetch names only its registered remote; refspecs that could write local branches are refused."
+    },
+    {
+      "file": "fixtures/git-remotes.json",
+      "valid": true
+    },
+    {
+      "file": "fixtures/git-audit.json",
+      "valid": true
+    },
+    {
       "file": "fixtures/attempt-controls-retry.json",
       "valid": true
     },

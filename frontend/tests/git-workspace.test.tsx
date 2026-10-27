@@ -20,7 +20,7 @@ const base = `/jobs/${jobId}/repositories/${repositoryId}`;
 const session = { csrf: () => 'a'.repeat(43) };
 const capability = (id: string, state: Capability['state'], message: string | null = null, reasonCode: string | null = null): Capability =>
   ({ id, state, reasonCode, message, workflows: [], agentContractVersion: null, limits: null });
-const supported = [capability('git', 'supported'), capability('git-import', 'supported')];
+const supported = [capability('git', 'supported'), capability('git-import', 'supported'), capability('git-remotes', 'supported')];
 
 const repository = { repositoryId, worktreeId, operationId: 'operation_0', origin: 'initialized', objectFormat: 'sha1',
   trackingPolicy: 'source-only-v1', createdAt: '2026-10-25T00:00:00Z', runId: 'run_1', candidateRevisionId: 'revision_1' };
@@ -39,6 +39,9 @@ let entries: unknown[];
 let historyPages: Record<string, { entries: unknown[]; nextCursor: string | null }>;
 let listing: unknown[];
 let paged: boolean;
+let remoteList: unknown[];
+let operationReads: unknown[];
+let operationOverride: (() => unknown) | null = null;
 let provenanceFails = false;
 let jobFails = false;
 
@@ -101,7 +104,11 @@ function serve(kind: string, path: string): Promise<unknown> {
     if (route === `${base}/provenance/${older}`) return { repositoryId, objectId: older, objectFormat: 'sha1', committedAt: '2026-10-25T00:00:00Z',
       subject: 'Record candidate', refNames: ['refs/tags/v1'], mapping, worktreeDirtyAtCommit: false,
       export: { sha256: 'e'.repeat(64), sizeBytes: 512, files: 1, skippedEntries: 0, verification: 'tree-blob-ids-match' } };
-    if (route.startsWith(`${base}/operations/`)) return operation('completed').data;
+    if (route === `${base}/remotes`) return { repositoryId, configured: true, remotes: remoteList };
+    if (route === `${base}/audit`) return { repositoryId, entries: [{ at: '2026-10-25T00:00:00Z', action: 'remote.add', operationId: 'operation_0',
+      outcome: 'completed', remoteId: 'remote_1', destination: 'https://git.example.org/team/project.git', ref: null, oldObjectId: null,
+      newObjectId: null, detail: null }] };
+    if (route.startsWith(`${base}/operations/`)) return operationOverride?.() ?? operationReads.shift() ?? operation('completed').data;
     if (route === `/jobs/${jobId}`) return { jobId, version: 'job_v3' };
     if (route.startsWith(`/jobs/${jobId}/repositories/`) && route.includes('/operations/')) return operation('completed', 'git.attach').data;
     throw new Error(`unexpected ${kind} ${path}`);
@@ -114,6 +121,11 @@ beforeEach(() => {
   transport.get.mockImplementation(serve);
   listing = [repository];
   paged = false;
+  operationReads = [];
+  operationOverride = null;
+  remoteList = [{ remoteId: 'remote_1', name: 'origin', transport: 'https', display: 'https://git.example.org/team/project.git',
+    credential: 'configured', allowed: true, fetchedAt: null, fetchOperationId: null,
+    trackingRefs: [{ refId: 'ref_origin_main', name: 'refs/remotes/origin/main', objectId: other }] }];
   provenanceFails = false;
   jobFails = false;
   historyGate = null;
@@ -280,7 +292,7 @@ it('explains active worker refusals using fixed local copy without retrying', as
   expect(transport.post).toHaveBeenCalledOnce();
 });
 
-it('admits import once and never posts after leaving while the initial job read is pending', async () => {
+it.each(['import', 'clone'])('admits %s once and never posts after leaving while the initial job read is pending', async action => {
   listing = [];
   const gate = deferred();
   let signal: AbortSignal | undefined;
@@ -289,8 +301,9 @@ it('admits import once and never posts after leaving while the initial job read 
     return serve(kind, path);
   });
   const view = mount();
-  fireEvent.input(await screen.findByLabelText('Repository name'), { target: { value: 'local' } });
-  const form = screen.getByRole('button', { name: 'Import repository' }).closest('form')!;
+  fireEvent.input(await screen.findByLabelText(action === 'import' ? 'Repository name' : 'Remote URL'),
+    { target: { value: action === 'import' ? 'local' : 'https://git.example.org/team/project.git' } });
+  const form = screen.getByRole('button', { name: action === 'import' ? 'Import repository' : 'Clone repository' }).closest('form')!;
   fireEvent.submit(form); fireEvent.submit(form);
   expect(transport.get.mock.calls.filter(call => call[0] === 'job')).toHaveLength(1);
   view.unmount();
@@ -300,18 +313,19 @@ it('admits import once and never posts after leaving while the initial job read 
   expect(transport.post).not.toHaveBeenCalled();
 });
 
-it('stops observing an admitted import on unmount without sending a server cancellation', async () => {
+it.each(['import', 'clone'])('stops observing an admitted %s on unmount without sending a server cancellation', async action => {
   listing = [];
   const gate = deferred();
   let signal: AbortSignal | undefined;
-  transport.post.mockResolvedValueOnce(operation('queued', 'git.attach'));
+  transport.post.mockResolvedValueOnce(operation('queued', action === 'import' ? 'git.attach' : 'git.clone'));
   transport.get.mockImplementation(async (kind, path, settings) => {
     if (kind === 'operation') { signal = settings?.signal; await gate.promise; }
     return serve(kind, path);
   });
   const view = mount();
-  fireEvent.input(await screen.findByLabelText('Repository name'), { target: { value: 'local' } });
-  fireEvent.click(screen.getByRole('button', { name: 'Import repository' }));
+  fireEvent.input(await screen.findByLabelText(action === 'import' ? 'Repository name' : 'Remote URL'),
+    { target: { value: action === 'import' ? 'local' : 'https://git.example.org/team/project.git' } });
+  fireEvent.click(screen.getByRole('button', { name: action === 'import' ? 'Import repository' : 'Clone repository' }));
   await waitFor(() => expect(transport.get.mock.calls.filter(call => call[0] === 'operation')).toHaveLength(1));
   expect(transport.post.mock.calls[0]?.[4].signal).toBe(signal);
   view.unmount();
@@ -513,6 +527,85 @@ it('reads every status page before review and keeps the commit message when the 
   expect(screen.getByLabelText('Commit message')).toHaveProperty('value', 'Keep this draft');
 });
 
+it('fetches a remote with visible progress, cancels it explicitly and never shows a credential', async () => {
+  transport.post.mockResolvedValueOnce({ data: { ...operation('running', 'git.fetch').data, progress: { phase: 'Receiving objects', percent: 40 } } });
+  operationReads = [{ ...operation('running', 'git.fetch').data, progress: { phase: 'Receiving objects', percent: 45 } },
+    { ...operation('running', 'git.fetch').data, progress: { phase: 'Receiving objects', percent: 50 } },
+    { ...operation('cancelled', 'git.fetch').data, message: 'The transfer was cancelled.' }];
+  mount();
+  const remotes = await screen.findByRole('list', { name: 'Remotes' });
+  expect(within(remotes).getAllByText(/Credential configured on the server/)[0]).toBeTruthy();
+  expect(within(remotes).getAllByText(/Never fetched; remote state is unknown/)[0]).toBeTruthy();
+  expect(screen.getByRole('list', { name: 'Remote-tracking refs of origin' }).textContent).toContain('refs/remotes/origin/main');
+  transport.post.mockResolvedValueOnce({ data: { ...operation('cancelling', 'git.fetch').data } });
+  fireEvent.click(screen.getByRole('button', { name: 'Fetch origin' }));
+  fireEvent.click(await screen.findByRole('button', { name: 'Cancel transfer' }));
+  await waitFor(() => expect(transport.post).toHaveBeenCalledTimes(2));
+  expect(transport.post.mock.calls[0]?.slice(2, 4)).toEqual(['gitFetchRequest', { action: 'git.fetch', worktreeId, remoteId: 'remote_1',
+    guards: { repositoryVersion: 'repo_v1', worktreeVersion: 'tree_v1', expectedHeadObjectId: head, expectedRefId: null, expectedRefObjectId: null } }]);
+  expect(transport.post.mock.calls[1]?.slice(1, 4)).toEqual([`${base}/operations/operation_1/cancel`, 'gitOperationCancelRequest', { action: 'git.cancel' }]);
+  expect(transport.post.mock.calls[1]?.[4]).toMatchObject({ ifMatch: '"operation_v1"' });
+  expect(await screen.findByText(/Fetch origin did not complete: The transfer was cancelled/)).toBeTruthy();
+  expect(document.body.textContent).not.toMatch(/token=|Authorization:|Basic [A-Za-z0-9+/=]{8}/);
+});
+
+it('adds a remote by URL only and explains when remote operations are unavailable', async () => {
+  transport.post.mockResolvedValueOnce(operation('completed', 'git.remote.add'));
+  const view = mount();
+  fireEvent.input(await screen.findByLabelText('Remote name'), { target: { value: 'upstream' } });
+  fireEvent.input(screen.getByLabelText('Remote URL'), { target: { value: 'admitted:upstream.git' } });
+  fireEvent.click(screen.getByRole('button', { name: 'Add remote' }));
+  await waitFor(() => expect(transport.post).toHaveBeenCalledOnce());
+  expect(transport.post.mock.calls[0]?.[3]).toMatchObject({ action: 'git.remote.add', name: 'upstream', url: 'admitted:upstream.git' });
+  view.unmount();
+  mount([capability('git', 'supported'), capability('git-remotes', 'unavailable', 'Remote clone, fetch and push need operator-allowed destinations.', 'GIT_REMOTES_UNCONFIGURED')]);
+  expect(await screen.findByText(/need operator-allowed destinations/)).toBeTruthy();
+  expect(screen.queryByRole('button', { name: 'Add remote' })).toBeNull();
+  expect(screen.getByRole('button', { name: 'Fetch origin' })).toHaveProperty('disabled', true);
+});
+
+it('clones a new repository from a remote URL when the job has none', async () => {
+  listing = [];
+  transport.post.mockResolvedValueOnce(operation('queued', 'git.clone'));
+  mount();
+  fireEvent.input(await screen.findByLabelText('Remote URL'), { target: { value: 'https://git.example.org/team/project.git' } });
+  listing = [repository];
+  fireEvent.click(screen.getByRole('button', { name: 'Clone repository' }));
+  await waitFor(() => expect(transport.post).toHaveBeenCalledOnce());
+  expect(transport.post.mock.calls[0]?.slice(1, 4)).toEqual([`/jobs/${jobId}/repositories`, 'gitRepositoryCloneRequest',
+    { action: 'git.clone', url: 'https://git.example.org/team/project.git', remoteName: 'origin', branch: null }]);
+});
+
+it.each(['detached', 'unsupported'])('recovers a %s clone default with an explicit branch and retains refused input', async reason => {
+  listing = [];
+  transport.post.mockResolvedValueOnce({ data: { ...operation('failed', 'git.clone').data,
+    message: `The remote default is ${reason}; select a supported branch explicitly.` } });
+  mount();
+  const url = await screen.findByLabelText('Remote URL');
+  const branch = screen.getByLabelText('Branch to check out (optional)');
+  fireEvent.input(url, { target: { value: 'admitted:upstream.git' } });
+  fireEvent.click(screen.getByRole('button', { name: 'Clone repository' }));
+  expect(await screen.findByText(new RegExp(`remote default is ${reason}`))).toBeTruthy();
+  expect(transport.post.mock.calls[0]?.[3]).toMatchObject({ branch: null });
+  expect(url).toHaveProperty('value', 'admitted:upstream.git');
+
+  fireEvent.input(branch, { target: { value: 'topic' } });
+  transport.post.mockRejectedValueOnce(new ApiClientError('http_error', { status: 422 }));
+  fireEvent.click(screen.getByRole('button', { name: 'Clone repository' }));
+  await waitFor(() => expect(transport.post).toHaveBeenCalledTimes(2));
+  await waitFor(() => expect(screen.getByRole('button', { name: 'Clone repository' })).toHaveProperty('disabled', false));
+  expect(branch).toHaveProperty('value', 'topic');
+  expect(url).toHaveProperty('value', 'admitted:upstream.git');
+
+  transport.post.mockResolvedValueOnce(operation('completed', 'git.clone'));
+  listing = [repository];
+  fireEvent.click(screen.getByRole('button', { name: 'Clone repository' }));
+  await waitFor(() => expect(transport.post).toHaveBeenCalledTimes(3));
+  expect(transport.post.mock.calls[2]?.slice(1, 4)).toEqual([`/jobs/${jobId}/repositories`, 'gitRepositoryCloneRequest',
+    { action: 'git.clone', url: 'admitted:upstream.git', remoteName: 'origin', branch: 'topic' }]);
+  expect(await screen.findByText('Branch main')).toBeTruthy();
+});
+
 it('follows ref pages so every branch stays reachable, and drops a displayed diff when the status is read again', async () => {
   paged = true;
   entries = [entry('file_s', 'src/util.c', 'modified', 'none')];
@@ -534,6 +627,28 @@ it('explains and disables a commit or selection beyond the 200-file request boun
   expect(screen.getByText(/At most 200 files can be staged or unstaged in one action/)).toBeTruthy();
   expect(screen.getByRole('button', { name: 'Unstage selected' })).toHaveProperty('disabled', true);
 }, 20_000);
+
+it('offers cancellation while the first repository is being cloned', async () => {
+  listing = [];
+  transport.post.mockResolvedValueOnce({ data: { ...operation('running', 'git.clone').data, progress: { phase: 'Receiving objects', percent: 10 } } });
+  let cancelled = false;
+  operationOverride = () => cancelled ? { ...operation('cancelled', 'git.clone').data, message: 'The clone was cancelled.' }
+    : { ...operation('running', 'git.clone').data, progress: { phase: 'Receiving objects', percent: 20 } };
+  mount();
+  fireEvent.input(await screen.findByLabelText('Remote URL'), { target: { value: 'https://git.example.org/team/project.git' } });
+  fireEvent.click(screen.getByRole('button', { name: 'Clone repository' }));
+  transport.post.mockImplementationOnce(() => {
+    cancelled = true;
+    return Promise.resolve({ data: { ...operation('cancelling', 'git.clone').data } });
+  });
+  await waitFor(() => expect(transport.post).toHaveBeenCalledOnce());
+  expect(await screen.findByText(/Receiving objects 20%/)).toBeTruthy();
+  fireEvent.click(screen.getByRole('button', { name: 'Cancel transfer' }));
+  await waitFor(() => expect(transport.post).toHaveBeenCalledTimes(2));
+  expect(transport.post.mock.calls[1]?.slice(1, 4)).toEqual([`/jobs/${jobId}/repositories/${repositoryId}/operations/operation_1/cancel`,
+    'gitOperationCancelRequest', { action: 'git.cancel' }]);
+  expect(await screen.findByText(/Clone repository did not complete: The clone was cancelled/)).toBeTruthy();
+});
 
 it('lists every file of an inspected commit and drops an older-history page that arrives after a refresh', async () => {
   paged = true;

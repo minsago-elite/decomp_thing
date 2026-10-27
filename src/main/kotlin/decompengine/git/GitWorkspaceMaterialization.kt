@@ -310,7 +310,8 @@ internal object GitRepositoryImport {
     }
 
     /** Bound files, directory prefixes and declared blob bytes before checkout creates anything. */
-    fun requireCheckoutBounds(runner: GitCommandRunner, gitDir: Path, objectId: String, limits: GitCheckoutLimits) {
+    fun requireCheckoutBounds(runner: GitCommandRunner, gitDir: Path, objectId: String, limits: GitCheckoutLimits,
+        repositoryBudget: Long = Long.MAX_VALUE) {
         val listing = try {
             runner.run(GitInvocation("ls-tree", listOf("-r", "-t", "-l", "-z", "--full-tree", objectId), gitDir = gitDir,
                 limits = GitExecutionLimits(Duration.ofMinutes(2), 32 * 1024 * 1024, 64 * 1024)))
@@ -336,6 +337,8 @@ internal object GitRepositoryImport {
             if (fields[1] != "tree" && ++files > limits.maxFiles) tooLarge()
             if (fields[1] == "blob") {
                 val size = fields[3].toLongOrNull()?.takeIf { it >= 0 } ?: corrupt("The repository's HEAD tree could not be read.")
+                if (size > repositoryBudget - bytes) throw GitOperationFailure("TRANSFER_LIMIT",
+                    "The clone's checkout exceeds the remaining repository size bound. Nothing was published.")
                 if (size > limits.maxBytes - bytes) tooLarge()
                 bytes += size
             }

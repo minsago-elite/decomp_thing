@@ -34,10 +34,7 @@ class GitBranchesWorktreesTest {
             GitSourceSnapshot(snapshot, run, revision, "a".repeat(64), mapOf("src/main.c" to GitSourceCommitment(
                 GitSourceCopy.digestOf(snapshot.resolve("src/main.c")), Files.size(snapshot.resolve("src/main.c")))))
         }, policy = GitRepositoryPolicy(defaultBranch = "trunk"), crash = { hook(it) }, activity = { runs.toMap() },
-            workspaceLeases = leases).also { service ->
-                opened.add(service)
-                service.recover(listOf("0123456789abcdef0123456789abcdef")) // Mirror production startup authority.
-            }
+            workspaceLeases = leases).also { it.recover(listOf("0123456789abcdef0123456789abcdef")); opened += it }
         override fun close() { opened.forEach { it.close() }; repositories.close() }
     }
 
@@ -675,9 +672,7 @@ class GitBranchesWorktreesTest {
         assertEquals(moved, GitRefOperations.refObject(f.repositories.runner, f.gitDir(), GitObjectFormat.SHA1, "refs/heads/experiment"))
         // An explicit operator repair can be reconciled without forgetting or replaying the failed add.
         f.repositories.git("--git-dir=${f.gitDir()}", "update-ref", "refs/heads/experiment", base, moved)
-        // GET no longer performs this rollback. Explicitly sweep the repaired operation before
-        // reviewing fresh guards; mutation admission must still refuse pre-rollback ref versions.
-        service.recover(listOf(jobId))
+        service.recover(listOf(jobId)) // Explicit repair/recovery precedes the next reviewed guards, never GET.
         assertEquals(GitOperationState.COMPLETED, run(GitRefRequest(GitOperationAction.WORKTREE_ADD, primary, guards().second,
             name = "experiment", objectId = base)).state)
     }

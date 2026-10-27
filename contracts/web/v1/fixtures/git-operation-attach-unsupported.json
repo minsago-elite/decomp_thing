@@ -14,6 +14,7 @@
     "endedAt": "2026-10-25T00:00:01Z",
     "resultObjectId": null,
     "recoveryRequired": false,
-    "message": "Shallow, linked or alternate-object repositories are not imported."
+    "message": "Shallow, linked or alternate-object repositories are not imported.",
+    "progress": null
   }
 }

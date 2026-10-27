@@ -7,6 +7,7 @@ import decompengine.git.GitOperationAction
 import decompengine.git.GitRefRequest
 import decompengine.git.GitRepositoryRequest
 import decompengine.git.GitStageRequest
+import decompengine.git.GitSyncRequest
 import decompengine.git.ManagedGitException
 import decompengine.git.ManagedGitRepositories
 import decompengine.oracle.core.OracleJson
@@ -82,6 +83,8 @@ internal class WebGitOperations(private val repositories: () -> ManagedGitReposi
             "git.tag" -> setOf("action", "worktreeId", "guards", "name", "targetObjectId")
             "git.worktree.add" -> setOf("action", "worktreeId", "guards", "startObjectId", "branchName", "runId")
             "git.worktree.remove" -> setOf("action", "worktreeId", "guards")
+            "git.remote.add" -> setOf("action", "worktreeId", "guards", "name", "url")
+            "git.remote.remove", "git.fetch" -> setOf("action", "worktreeId", "guards", "remoteId")
             else -> invalid()
         }
         if (body.keys != expected) invalid()
@@ -103,6 +106,15 @@ internal class WebGitOperations(private val repositories: () -> ManagedGitReposi
                 else -> GitRefRequest(kind, worktreeId, guards)
             }
             return request to guards
+        }
+        GitOperationAction.entries.singleOrNull { it.wireName == action && it in GitSyncRequest.ACTIONS }?.let { kind ->
+            val parameters = when (kind) {
+                GitOperationAction.REMOTE_ADD -> mapOf(
+                    "name" to (text(body["name"]).takeIf { it.matches(Regex("[A-Za-z0-9][A-Za-z0-9._-]{0,63}")) } ?: invalid()),
+                    "url" to (text(body["url"]).takeIf { it.length in 1..2048 } ?: invalid()))
+                else -> mapOf("remoteId" to id(body["remoteId"]))
+            }
+            return GitSyncRequest(kind, worktreeId, guards, parameters) to guards
         }
         val files = (body["selectedFileIds"] as? JsonArray)?.map { element ->
             text(element).takeIf { it.matches(Regex("file_[0-9a-f]{32}")) } ?: invalid()

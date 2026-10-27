@@ -181,6 +181,20 @@ class ManagedGitRepositoriesTest {
         assertEquals(damaged, f.storageTree())
     }
 
+    @Test fun `workspace reads refuse missing or changed tracking policy without recreating scratch`() {
+        for (missing in listOf(true, false)) Fixture().use { f ->
+            val service = f.open()
+            val completed = service.settle(service.request(jobId, GitRepositoryRequest.Init("run_1", "revision_1", null), "readonly_policy_0001"))
+            val exclude = f.store.resolve(".git-runtime/policy-${GitTrackingPolicy.VERSION}/repository.git/info/exclude")
+            if (missing) Files.delete(exclude) else Files.writeString(exclude, "changed policy\n")
+            val before = f.storageTree()
+            assertEquals("REPOSITORY_UNAVAILABLE", assertFailsWith<ManagedGitException> {
+                service.workspace(jobId, completed.repositoryId)
+            }.code)
+            assertEquals(before, f.storageTree())
+        }
+    }
+
     @Test fun `initialization copies source bytes exactly, applies policy and creates no commit`(): Unit = Fixture().use { f ->
         val before = f.tree(f.snapshot)
         val service = f.open()
@@ -283,9 +297,8 @@ class ManagedGitRepositoriesTest {
         assertFalse(f.store.resolve(jobId).resolve("git/staging").let { it.exists() && Files.list(it).use { s -> s.count() } > 0 })
     }
 
-    @Test fun `restart reconciles every initialization interruption point without exposing or overwriting anything`() {
-        // Workspace validation/capture and commit mapping are tested in GitWorkspaceMutationsTest;
-        // initialization reaches exactly these four publication boundaries.
+    @Test fun `restart reconciles every interruption point without exposing or overwriting anything`() {
+        // Only initialization phases; snapshot mapping and remote-audit phases have their own tests.
         for (point in listOf(GitOperationCrashPoint.AFTER_RUNNING, GitOperationCrashPoint.AFTER_STAGING,
             GitOperationCrashPoint.BEFORE_PUBLISH, GitOperationCrashPoint.AFTER_PUBLISH)) Fixture().use { f ->
             val before = f.tree(f.snapshot)
