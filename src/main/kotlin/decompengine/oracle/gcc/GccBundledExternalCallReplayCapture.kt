@@ -42,6 +42,14 @@ internal object GccBundledExternalCallReplayOutputCapture {
                 OracleArtifacts.sha256(request.canonicalBytes), request)
         }
 
+    fun captureIndependent(run: LinuxDescriptor, controlName: String, expectedControl: LinuxFileIdentity,
+        request: IndependentExternalCallRequestV2, checkpoint: () -> Unit): GccBundledExternalCallReplayCapture =
+        capture(run, controlName, expectedControl, request.legacy.outputPath, INDEPENDENT_NAME,
+            request.canonicalBytes, request.legacy.limits.maximumOutputBytes, checkpoint) { report ->
+            IndependentExternalCallReportV1.validateWorker(OracleJson.parseCanonical(report, JSON_LIMITS).jsonObject,
+                OracleArtifacts.sha256(request.canonicalBytes), request)
+        }
+
     fun captureRecovered(run: LinuxDescriptor, controlName: String, expectedControl: LinuxFileIdentity,
         request: RecoveredExternalNamespaceRequestV1, frozen: FrozenNativeExternalClaimsSnapshotV1,
         pair: ElfExternalNamespacePairV1, checkpoint: () -> Unit): GccBundledExternalCallReplayCapture =
@@ -51,6 +59,26 @@ internal object GccBundledExternalCallReplayOutputCapture {
                 request.nativeManifest.sha256 == frozen.manifestSha256 && request.nativeManifest.bytes == frozen.manifestBytes &&
                 request.nativeObservations.sha256 == frozen.observationsSha256 && request.nativeObservations.bytes == frozen.observationBytes)
             // Re-derive from the complete original bytes; a saved binding or DTO alone is insufficient.
+            val refrozen = FrozenNativeExternalClaimsV1.freeze(frozen.rawManifestBytes, frozen.rawObservationBytes,
+                request.expectedNativeBindings, checkpoint = checkpoint)
+            require(refrozen.canonicalEvidenceBytes.contentEquals(frozen.canonicalEvidenceBytes) &&
+                refrozen.rawSiteCount == frozen.rawSiteCount && refrozen.rawRecordCount == frozen.rawRecordCount)
+            val report = OracleJson.parseCanonical(bytes, recoveryNamespaceJsonLimits(request.limits)).jsonObject
+            validateRecoveredExternalWorkerCommitmentsV1(report, OracleArtifacts.sha256(request.canonicalBytes), request) { checkpoint() }
+            val component = JsonObject(report - setOf("requestSha256", "runtime", "containmentStatus") +
+                ("decoderAuthentication" to JsonPrimitive("external-worker-required")))
+            RecoveredExternalNamespaceV1.validate(component, refrozen, pair, request.limits) { checkpoint() }
+            pair.requireCurrent()
+        }
+
+    fun captureRecovered(run: LinuxDescriptor, controlName: String, expectedControl: LinuxFileIdentity,
+        request: RecoveredExternalNamespaceRequestV2, frozen: FrozenNativeExternalClaimsSnapshotV1,
+        pair: ElfExternalNamespacePairV1, checkpoint: () -> Unit): GccBundledExternalCallReplayCapture =
+        capture(run, controlName, expectedControl, request.outputPath, RECOVERED_NAME,
+            request.canonicalBytes, request.limits.maximumOutputBytes, checkpoint) { bytes ->
+            require(request.expectedNativeBindings == frozen.bindings &&
+                request.nativeManifest.sha256 == frozen.manifestSha256 && request.nativeManifest.bytes == frozen.manifestBytes &&
+                request.nativeObservations.sha256 == frozen.observationsSha256 && request.nativeObservations.bytes == frozen.observationBytes)
             val refrozen = FrozenNativeExternalClaimsV1.freeze(frozen.rawManifestBytes, frozen.rawObservationBytes,
                 request.expectedNativeBindings, checkpoint = checkpoint)
             require(refrozen.canonicalEvidenceBytes.contentEquals(frozen.canonicalEvidenceBytes) &&

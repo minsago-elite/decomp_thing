@@ -5,9 +5,10 @@ import decompengine.oracle.core.OracleJson
 import decompengine.oracle.core.StrictJsonLimits
 import decompengine.oracle.fulltree.StableControlFile
 import decompengine.oracle.fulltree.requireStableDirectory
-import decompengine.oracle.machinecalls.AuthenticatedMachineCallRuntimeV1
+import decompengine.oracle.machinecalls.AuthenticatedMachineCallRuntimeV2
 import decompengine.oracle.machinecalls.MachineCallFileV1
 import decompengine.oracle.machinecalls.MachineCallRuntimeV1
+import decompengine.oracle.machinecalls.MachineCallRuntimeV2
 import decompengine.oracle.machinecalls.publishMachineCallResultV1
 import decompengine.project.NativeCallAddressV1
 import decompengine.project.NativeCallBindingsV1
@@ -93,6 +94,46 @@ internal data class RecoveredExternalNamespaceRequestV1(
     }
 }
 
+/** Live request; old V1 parsing remains for frozen report/source compatibility only. */
+internal data class RecoveredExternalNamespaceRequestV2(
+    val legacy: RecoveredExternalNamespaceRequestV1,
+    val runtime: MachineCallRuntimeV2,
+    val controlRoot: Path,
+) {
+    val nativeManifest get() = legacy.nativeManifest
+    val nativeObservations get() = legacy.nativeObservations
+    val artifactManifest get() = legacy.artifactManifest
+    val richFile get() = legacy.richFile
+    val strippedFile get() = legacy.strippedFile
+    val expectedNativeBindings get() = legacy.expectedNativeBindings
+    val outputPath get() = legacy.outputPath
+    val limits get() = legacy.limits
+    init {
+        require(controlRoot.isAbsolute && controlRoot.normalize() == controlRoot && controlRoot == outputPath.parent?.parent &&
+            outputPath == controlRoot.resolve("reports/recovered-external-call-observations.json")) {
+            "recovered external output path differs from fixed owned control root"
+        }
+        require(runtime.bridgeSnapshot.path == controlRoot.resolve("runtime/ghidra-bridge.runtime") &&
+            runtime.bundleManifestSnapshot.path == controlRoot.resolve("runtime/ghidra-bundle-manifest.runtime")) {
+            "recovered external snapshots differ from fixed control-root locations"
+        }
+    }
+    val canonicalBytes: ByteArray get() = v2ExternalRequestBytes(legacy.canonicalBytes, runtime, controlRoot,
+        "recovered-external-namespace-request-v2")
+    companion object {
+        fun parse(bytes: ByteArray): RecoveredExternalNamespaceRequestV2 {
+            val root = OracleJson.parseCanonical(bytes, REQUEST_LIMITS) as? JsonObject
+                ?: error("recovered external V2 request must be an object")
+            root.fields("schemaVersion", "kind", "nativeManifest", "nativeObservations", "artifactManifest", "richFile", "strippedFile",
+                "expectedNativeBindings", "runtime", "controlRoot", "outputPath", "limits")
+            require(root.number("schemaVersion") == 2L && root.string("kind") == "recovered-external-namespace-request-v2")
+            val runtime = parseMachineCallRuntimeV2(root.obj("runtime"))
+            val legacy = RecoveredExternalNamespaceRequestV1.parse(legacyExternalRequestBytes(root, runtime, REQUEST_KIND))
+            return RecoveredExternalNamespaceRequestV2(legacy, runtime, Path.of(root.string("controlRoot")))
+        }
+    }
+}
+
 /** Standalone diagnostic computation; the external owner supplies process containment and cleanup. */
 object RecoveredExternalNamespaceWorkerV1 {
     @JvmStatic fun main(arguments: Array<String>) {
@@ -106,7 +147,7 @@ object RecoveredExternalNamespaceWorkerV1 {
         val budget = WorkerBudget(checkpoint)
         StableControlFile.openWithCheckpoint(requestPath, REQUEST_LIMITS.maximumInputBytes.toLong(), "recovered namespace request", budget::step).use { requestFile ->
             require(requestFile.authenticatedSha256 == requestSha256) { "recovered namespace request commitment differs" }
-            val request = RecoveredExternalNamespaceRequestV1.parse(requestFile.readExactly(0, requestFile.size.toInt(), "recovered namespace request", budget::step))
+            val request = RecoveredExternalNamespaceRequestV2.parse(requestFile.readExactly(0, requestFile.size.toInt(), "recovered namespace request", budget::step))
             budget.configure(request.limits)
             val inputPaths = listOf(request.nativeManifest.path, request.nativeObservations.path, request.artifactManifest.path, request.richFile.path, request.strippedFile.path)
             require(requestPath !in inputPaths && request.outputPath != requestPath && requestPath != request.runtime.ghidraArchivePath &&
@@ -130,12 +171,12 @@ object RecoveredExternalNamespaceWorkerV1 {
                                 val pair = ElfExternalNamespacePairV1.prove(artifactManifest, request.artifactManifest.sha256, rich, stripped,
                                     ElfExternalNamespacePairLimitsV1(maximumWorkUnits = maxOf(16, request.limits.maximumWorkUnits),
                                         maximumOutputBytes = request.limits.maximumOutputBytes, maximumWallMillis = request.limits.maximumWallMillis), budget::step)
-                                AuthenticatedMachineCallRuntimeV1.open(request.runtime, budget::step).use { runtime ->
+                                AuthenticatedMachineCallRuntimeV2.open(request.runtime, budget::step).use { runtime ->
                                     val result = runtime.withDecoder { basic -> runtime.withStaticMemoryTransferDecoder { memory ->
                                         RecoveredExternalNamespaceV1.compose(frozen, pair, basic, memory, request.limits, budget::step)
                                     } }
                                     val final = JsonObject(result + mapOf(
-                                        "requestSha256" to JsonPrimitive(requestSha256), "runtime" to request.runtime.json(),
+                                        "requestSha256" to JsonPrimitive(requestSha256), "runtime" to request.runtime.reportJson(),
                                         "decoderAuthentication" to JsonPrimitive("authenticated-bundled-worker-v1"),
                                         "containmentStatus" to JsonPrimitive("external-owner-required"),
                                     ))
@@ -163,13 +204,29 @@ internal fun validateRecoveredExternalWorkerCommitmentsV1(
     document: JsonObject, expectedRequestSha256: String, request: RecoveredExternalNamespaceRequestV1,
     checkpoint: (String) -> Unit = {},
 ) {
+    validateRecoveredExternalWorkerCommitments(document, expectedRequestSha256, request, request.canonicalBytes,
+        request.runtime.json(), checkpoint)
+}
+
+internal fun validateRecoveredExternalWorkerCommitmentsV1(
+    document: JsonObject, expectedRequestSha256: String, request: RecoveredExternalNamespaceRequestV2,
+    checkpoint: (String) -> Unit = {},
+) {
+    validateRecoveredExternalWorkerCommitments(document, expectedRequestSha256, request.legacy, request.canonicalBytes,
+        request.runtime.reportJson(), checkpoint)
+}
+
+private fun validateRecoveredExternalWorkerCommitments(
+    document: JsonObject, expectedRequestSha256: String, request: RecoveredExternalNamespaceRequestV1,
+    canonicalRequestBytes: ByteArray, runtimeJson: JsonObject, checkpoint: (String) -> Unit,
+) {
     OracleJson.canonicalBytes(document, recoveryNamespaceJsonLimits(request.limits), checkpoint)
     requireDigest(expectedRequestSha256)
-    require(OracleArtifacts.sha256(request.canonicalBytes) == expectedRequestSha256)
+    require(OracleArtifacts.sha256(canonicalRequestBytes) == expectedRequestSha256)
     require(document.keys == COMPONENT_FIELDS + setOf("requestSha256", "runtime", "containmentStatus")) { "unexpected recovered namespace worker fields" }
     require(document["schemaVersion"] == JsonPrimitive(1) && document["kind"] == JsonPrimitive("recovered-external-namespace-component-v1") &&
         document["scope"] == JsonPrimitive("component") && document["policy"] == JsonPrimitive("native-claim-before-pair-v1"))
-    require(document["requestSha256"] == JsonPrimitive(expectedRequestSha256) && document["runtime"] == request.runtime.json() &&
+    require(document["requestSha256"] == JsonPrimitive(expectedRequestSha256) && document["runtime"] == runtimeJson &&
         document["limits"] == request.limits.toJson()) { "recovered namespace worker commitments differ" }
     require(document["decoderAuthentication"] == JsonPrimitive("authenticated-bundled-worker-v1") &&
         document["containmentStatus"] == JsonPrimitive("external-owner-required") && document["rawSitesEnumerated"] == JsonPrimitive(true))

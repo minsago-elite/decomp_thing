@@ -7,6 +7,8 @@ import decompengine.oracle.fulltree.FullTreeElfSymbolSectionKind
 import decompengine.oracle.fulltree.StableControlFile
 import decompengine.oracle.machinecalls.IndependentMachineCallReportV1
 import decompengine.oracle.machinecalls.IndependentMachineCallRequestV1
+import decompengine.oracle.machinecalls.IndependentMachineCallRequestV2
+import decompengine.oracle.machinecalls.IndependentMachineCallRequestIdentity
 import decompengine.oracle.machinecalls.MachineInstructionDecoderV1
 import decompengine.oracle.machinecalls.MachineInstructionV1
 import decompengine.oracle.machinecalls.MachineInstructionRefusalV1
@@ -16,6 +18,7 @@ import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.JsonNull
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
+import kotlinx.serialization.json.longOrNull
 
 /** Known memory location read by a transfer; never the runtime pointer stored at that location. */
 internal data class StaticMemoryTransferV1(
@@ -58,7 +61,15 @@ internal object IndependentExternalCallsV1 {
         val budget = ExternalBudget(limits)
         return StableControlFile.openWithCheckpoint(sourceRequest, 65_536, "source machine-call request", budget::check).use { requestFile ->
             require(requestFile.authenticatedSha256 == expectedRequestSha256) { "source request commitment differs" }
-            val request = IndependentMachineCallRequestV1.parse(requestFile.readExactly(0, requestFile.size.toInt(), "source request", budget::check))
+            val requestBytes = requestFile.readExactly(0, requestFile.size.toInt(), "source request", budget::check)
+            val requestDocument = OracleJson.parseCanonical(requestBytes, StrictJsonLimits(maximumInputBytes = 65536,
+                maximumCanonicalBytes = 65536, maximumDepth = 8, maximumNodes = 128, maximumStringBytes = 4096,
+                maximumTotalStringBytes = 16384)) as? JsonObject ?: error("source machine-call request must be an object")
+            val request: IndependentMachineCallRequestIdentity = when ((requestDocument["schemaVersion"] as? JsonPrimitive)?.longOrNull) {
+                1L -> IndependentMachineCallRequestV1.parse(requestBytes)
+                2L -> IndependentMachineCallRequestV2.parse(requestBytes)
+                else -> error("unsupported source machine-call request schema")
+            }
             StableControlFile.openWithCheckpoint(sourceReport, HARD_BYTES.toLong(), "source machine-call report", budget::check).use { reportFile ->
                 require(reportFile.authenticatedSha256 == expectedReportSha256) { "source report commitment differs" }
                 val report = OracleJson.parseCanonical(reportFile.readExactly(0, reportFile.size.toInt(), "source report", budget::check),

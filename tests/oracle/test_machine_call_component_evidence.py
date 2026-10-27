@@ -29,6 +29,24 @@ def reference(path: str, data: bytes) -> dict:
 
 
 class MachineCallComponentEvidenceTest(unittest.TestCase):
+    def test_v2_runtime_snapshots_bind_fixed_source_roles_and_exact_control_root(self) -> None:
+        request = copy.deepcopy(self.request)
+        root = "/unavailable/owned-control"
+        request.update(schemaVersion=2, kind="independent-machine-call-request-v2", controlRoot=root,
+                       outputPath=root + "/reports/independent-machine-call-observations.json")
+        request["runtime"].update(
+            bridgeSnapshot={"path": root + "/runtime/ghidra-bridge.runtime", "bytes": 128, "sha256": "a" * 64},
+            bundleManifestSnapshot={"path": root + "/runtime/ghidra-bundle-manifest.runtime", "bytes": 32, "sha256": "b" * 64})
+        VERIFY.verify_runtime_snapshots(request, request["runtime"], "independent-machine-call-observations.json")
+        tampered = copy.deepcopy(request)
+        tampered["runtime"]["bridgeSnapshot"]["path"] = root + "/elsewhere.runtime"
+        with self.assertRaises(VERIFY.VerificationError):
+            VERIFY.verify_runtime_snapshots(tampered, tampered["runtime"], "independent-machine-call-observations.json")
+        tampered = copy.deepcopy(request)
+        tampered["outputPath"] = root + "/state/redirect.json"
+        with self.assertRaises(VERIFY.VerificationError):
+            VERIFY.verify_runtime_snapshots(tampered, tampered["runtime"], "independent-machine-call-observations.json")
+
     def setUp(self) -> None:
         temporary_root = ROOT / "build/machine-call-evidence-controls"
         temporary_root.mkdir(parents=True, exist_ok=True)
@@ -223,14 +241,14 @@ verify = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(verify)
 verify.REPOSITORY_ROOT = Path(sys.argv[2])
 victim = verify.REPOSITORY_ROOT / "fifo-substitution.bin"
-original = verify.repository_path
-def substitute(path, *, existing):
-    selected = original(path, existing=existing)
-    assert selected == victim and existing
-    selected.unlink()
-    os.mkfifo(selected, 0o600)
-    return selected
-verify.repository_path = substitute
+original = os.open
+def substitute(path, flags, *args, **kwargs):
+    if path == victim.name:
+        assert kwargs.get("dir_fd") is not None
+        victim.unlink()
+        os.mkfifo(victim, 0o600)
+    return original(path, flags, *args, **kwargs)
+os.open = substitute
 try:
     verify.read_file(victim, 64)
 except verify.VerificationError:
@@ -244,6 +262,81 @@ else:
             env=os.environ | {"PYTHONDONTWRITEBYTECODE": "1"}, stdout=subprocess.PIPE,
             stderr=subprocess.PIPE, timeout=5, check=True)
         self.assertIn(b"real FIFO substitution refused", result.stdout)
+
+    def test_parent_substitution_cannot_redirect_read_create_or_failure_cleanup(self) -> None:
+        # Deterministic syscall-boundary substitutions, not timing-dependent race loops.
+        for operation in ("read", "create", "cleanup"):
+            with self.subTest(operation=operation):
+                base = self.root / operation
+                repository = base / "repository"
+                parent = repository / "parent"
+                outside = base / "outside"
+                parent.mkdir(parents=True)
+                outside.mkdir()
+                held = repository / "held-parent"
+                destination = parent / "report.json"
+                sentinel = outside / destination.name
+                sentinel.write_bytes(b"outside sentinel")
+                if operation == "read":
+                    destination.write_bytes(b"inside input")
+                original_open = os.open
+                substituted = False
+
+                def substitute(path, flags, *args, **kwargs):
+                    nonlocal substituted
+                    if path == destination.name:
+                        self.assertIsNotNone(kwargs.get("dir_fd"))
+                        self.assertFalse(substituted)
+                        parent.rename(held)
+                        parent.symlink_to(outside, target_is_directory=True)
+                        substituted = True
+                    return original_open(path, flags, *args, **kwargs)
+
+                with mock.patch.object(VERIFY, "REPOSITORY_ROOT", repository), mock.patch.object(VERIFY.os, "open", substitute):
+                    if operation == "read":
+                        self.assertEqual(b"inside input", VERIFY.read_file(destination, 64))
+                    elif operation == "create":
+                        VERIFY.extract_report(destination, b"inside output")
+                        self.assertEqual(b"inside output", (held / destination.name).read_bytes())
+                    else:
+                        with mock.patch.object(VERIFY.os, "fsync", side_effect=OSError("authored write failure")):
+                            with self.assertRaisesRegex(OSError, "authored write failure"):
+                                VERIFY.extract_report(destination, b"partial output")
+                        self.assertFalse((held / destination.name).exists())
+                self.assertTrue(substituted)
+                self.assertEqual(b"outside sentinel", sentinel.read_bytes())
+
+    def test_parent_substitution_before_directory_open_is_rejected(self) -> None:
+        parent = self.root / "race-parent"
+        parent.mkdir()
+        outside = self.root / "race-outside"
+        outside.mkdir()
+        original_open = os.open
+
+        def substitute(path, flags, *args, **kwargs):
+            if path == parent.name:
+                parent.rename(self.root / "race-held")
+                parent.symlink_to(outside, target_is_directory=True)
+            return original_open(path, flags, *args, **kwargs)
+
+        with mock.patch.object(VERIFY.os, "open", substitute):
+            with self.assertRaises(OSError):
+                VERIFY.extract_report(parent / "report.json", b"must not escape")
+        self.assertEqual([], list(outside.iterdir()))
+
+    def test_read_refuses_symlink_parent_final_symlink_and_oversized_input(self) -> None:
+        victim = self.root / "input.bin"
+        victim.write_bytes(b"bounded input")
+        link = self.root / "input-link"
+        link.symlink_to(victim)
+        parent_link = self.root / "input-parent-link"
+        parent_link.symlink_to(self.directory, target_is_directory=True)
+        for candidate in (link, parent_link / "request.json", self.directory):
+            with self.subTest(path=candidate):
+                with self.assertRaises((VERIFY.VerificationError, OSError)):
+                    VERIFY.read_file(candidate, 64)
+        with self.assertRaises(VERIFY.VerificationError):
+            VERIFY.read_file(victim, 1)
 
     def test_extraction_refuses_overwrite_symlinks_missing_parent_and_repository_escape(self) -> None:
         recovered, _ = self.verify()
@@ -264,6 +357,20 @@ else:
 
 
 class ExternalCallComponentEvidenceTest(unittest.TestCase):
+    def test_v2_external_runtime_snapshot_bindings_are_fixed_and_report_scoped(self) -> None:
+        control = "/unavailable/external-control"
+        request = {"controlRoot": control, "outputPath": control + "/reports/independent-external-call-observations.json",
+            "runtime": {"bridgeSha256": "a" * 64, "bundleManifestSha256": "b" * 64,
+                "bridgeSnapshot": {"path": control + "/runtime/ghidra-bridge.runtime", "bytes": 64, "sha256": "a" * 64},
+                "bundleManifestSnapshot": {"path": control + "/runtime/ghidra-bundle-manifest.runtime", "bytes": 16, "sha256": "b" * 64}}}
+        VERIFY.verify_runtime_snapshots(request, request["runtime"], "independent-external-call-observations.json")
+        for key, field, value in (("bridgeSnapshot", "sha256", "c" * 64),
+                                  ("bundleManifestSnapshot", "path", control + "/runtime/other.runtime")):
+            tampered = copy.deepcopy(request)
+            tampered["runtime"][key][field] = value
+            with self.assertRaises(VERIFY.VerificationError):
+                VERIFY.verify_runtime_snapshots(tampered, tampered["runtime"], "independent-external-call-observations.json")
+
     # Reuse the tiny authored Git fixture without inheriting/re-running the eight machine controls.
     write_manifest = MachineCallComponentEvidenceTest.write_manifest
     write_payloads = MachineCallComponentEvidenceTest.write_payloads
@@ -366,8 +473,10 @@ class ExternalCallComponentEvidenceTest(unittest.TestCase):
             "-c", "commit.gpgsign=false", "commit", "--quiet", "-m", message)
 
     def source_provenance(self) -> dict:
+        expected_paths = (VERIFY.EXTERNAL_SOURCE_PATHS_V1 if self.request["schemaVersion"] == 1
+                          else VERIFY.EXTERNAL_SOURCE_PATHS_V2)
         return {"commit": self.git("rev-parse", "HEAD"), "tree": self.git("rev-parse", "HEAD^{tree}"),
-            "files": [reference(path, (self.root / path).read_bytes()) for path in sorted(VERIFY.EXTERNAL_SOURCE_PATHS)]}
+            "files": [reference(path, (self.root / path).read_bytes()) for path in sorted(expected_paths)]}
 
     def commit_changed_source_manifest(self, value: dict) -> None:
         data = VERIFY.canonical_bytes(value)
@@ -394,6 +503,30 @@ class ExternalCallComponentEvidenceTest(unittest.TestCase):
         self.assertEqual(raw, (self.root / "recovered-external.json").read_bytes())
         self.assertIn("1 static import requests", output.getvalue())
         self.assertIn("no production qualification", output.getvalue())
+
+    def test_v2_external_evidence_uses_expanded_source_inventory_and_snapshot_bindings(self) -> None:
+        control = "/unavailable/external-control"
+        self.request.update(schemaVersion=2, kind="independent-external-call-request-v2", controlRoot=control,
+            outputPath=control + "/reports/independent-external-call-observations.json")
+        self.request["runtime"].update(
+            bridgeSnapshot={"path": control + "/runtime/ghidra-bridge.runtime", "bytes": 128,
+                "sha256": self.request["runtime"]["bridgeSha256"]},
+            bundleManifestSnapshot={"path": control + "/runtime/ghidra-bundle-manifest.runtime", "bytes": 32,
+                "sha256": self.request["runtime"]["bundleManifestSha256"]})
+        self.report["runtime"] = {key: self.request["runtime"][key]
+            for key in VERIFY.RUNTIME | VERIFY.RUNTIME_PATHS}
+        self.evidence["source"] = self.source_provenance()
+        self.assertEqual(16, len(self.evidence["source"]["files"]))
+        self.write_payloads()
+        raw, _ = self.verify()
+        self.assertEqual(VERIFY.canonical_bytes(self.report), raw)
+        original = copy.deepcopy(self.request["runtime"]["bridgeSnapshot"])
+        self.request["runtime"]["bridgeSnapshot"]["path"] = control + "/runtime/other.runtime"
+        self.write_payloads()
+        with self.assertRaises(VERIFY.VerificationError):
+            self.verify()
+        self.request["runtime"]["bridgeSnapshot"] = original
+        self.write_payloads()
 
     def test_external_source_reference_hash_commit_exact_inventory_and_recursion_are_required(self) -> None:
         original = copy.deepcopy(self.evidence)

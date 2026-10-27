@@ -29,6 +29,10 @@ internal object IndependentExternalCallReportV1 {
         Validator(document, true).validate()
         validateExternalWorkerCommitmentsV1(document, requestSha256, request)
     }
+    fun validateWorker(document: JsonObject, requestSha256: String, request: IndependentExternalCallRequestV2) {
+        Validator(document, true).validate()
+        validateExternalWorkerCommitmentsV1(document, requestSha256, request.legacy, request.canonicalBytes)
+    }
 }
 
 private class Validator(val document: JsonObject, val worker: Boolean) {
