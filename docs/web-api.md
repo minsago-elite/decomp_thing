@@ -1534,6 +1534,12 @@ and an admitted Git operation is always visible to the next deletion check. A ho
 (`RETENTION_HOLD_UNAVAILABLE`). A refused `DELETE` is `409 RETENTION_PROTECTED` with one error
 `details` entry (pointer `/protections/N`, protection code, recovery message) per reason.
 
+These holds and admission locks cover retention and active-operation coordination only. They
+are not a backup/restore protocol or qualification of managed Git history/worktree recovery.
+The backup participation acceptance criterion in #509 and its parent #172 remains open until
+implementation and backup/restore evidence are supplied; deletion protection alone does not
+complete either issue.
+
 **Deletion (`DELETE J`).** The body repeats the reviewed job identity
 (`{"confirmJobId": "<jobId>"}`; a mismatch is `422`). The key lookup precedes all other checks,
 so an exact replay returns the original operation (`Idempotency-Replayed: true`) even after the
