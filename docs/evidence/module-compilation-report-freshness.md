@@ -13,7 +13,7 @@ Artifacts from the attempt are retained locally under `.omo/a-series-20261026/qu
 
 ## Correction
 
-The initialization script now registers a no-output `moduleCompilationLiveQualificationFreshness` prerequisite. It checks the exact report path with `NOFOLLOW_LINKS`, so stale directories, files, and symlinks refuse before the Test task prepares its output directory. The live Test task depends on that prerequisite and no longer repeats the check in `doFirst` after output preparation.
+The initialization script registers a no-output freshness prerequisite (originally `moduleCompilationLiveQualificationFreshness`, now consolidated with the parent's `moduleCompilerLivePreflight`). It checks the exact report path with `NOFOLLOW_LINKS`, so stale directories, files, and symlinks refuse before the Test task prepares its output directory. The live Test task depends on that prerequisite and no longer repeats the check in `doFirst` after output preparation.
 
 The qualifier shell preflight remains in place. Follow-up commit `2ae6b9dbb994b38b294112ee8ea5a84fa81a9a58` covers the compiled inventory node as well as report paths. It now treats a symlink at either guarded report/index path as existing state, including a dangling symlink, and refuses before Gradle starts.
 
@@ -24,6 +24,33 @@ The qualifier shell preflight remains in place. Follow-up commit `2ae6b9dbb994b3
 - `bash -n scripts/qualify-contained-module-compilation.sh` and `git diff --check` passed.
 
 Raw logs and source hashes are under `.omo/a-series-20261026/module-deployment-report-freshness/`.
+
+## Remediation checkpoint (2026-10-27)
+
+The non-destructive merge of parent #1800 at `8a714d3522358fdb80b7904f0934b649daa149f5`
+keeps one production freshness prerequisite and the parent's stronger
+`scripts/test-module-compilation-qualification-preflight.sh` workflow regression.
+That fixture loads the actual production init script, executes a real one-test
+Gradle `Test` task, preserves stale XML, and refuses empty directories and dangling
+report links. The retained Python wiring control now checks the consolidated task
+name; its copied miniature Gradle example is historical, not the required workflow
+qualification. Routing controls additionally cover dangling report, inventory and
+case paths. Local verification passed the production-init regression, 16 routing,
+36 reconciliation, 3 quota-cleanup and 2 nonduplicative Python freshness controls.
+
+Independent source inspection also found that stage/manifest ownership checks did
+not compare each staged JAR's UID/GID. Re-entry now binds each member owner to its
+already authenticated stage owner. A focused regression models consistent foreign
+UID and GID observations without requiring privileged `chown`; both cases failed
+before the fix and pass afterward, preserving all frozen manifest/member bytes on
+refusal. All 16 deployment controls, including the actual repeated Gradle task,
+pass. This does not change compiler limits, installed runtime authority, or the
+required configured qualification cases.
+
+Raw remediation logs and active YAML/Python LSP results are retained under
+`.worktrees/review-remediation/evidence/prs/1813/live/`. Kotlin changes inherited
+from the parent retain its 159-test focused evidence; full current-source builds,
+bundled-Ghidra tests and configured containment remain Actions-owned gates.
 
 ## Acceptance boundary
 

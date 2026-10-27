@@ -243,6 +243,8 @@ def _verify_staged(parent_fd: int, stage_name: str, stage: Path, pins: list[dict
                 if (not stat.S_ISREG(before.st_mode) or before.st_nlink != 1 or
                         stat.S_IMODE(before.st_mode) != 0o444 or before.st_size != pin["bytes"]):
                     _fail(f"worker deployment member is not its exact private regular file: {name}")
+                if (before.st_uid, before.st_gid) != (stage_before.st_uid, stage_before.st_gid):
+                    _fail(f"worker deployment member owner differs from its frozen stage: {name}")
                 size, digest, after = _hash_descriptor(descriptor, int(pin["bytes"]))
                 named = os.stat(name, dir_fd=stage_fd, follow_symlinks=False)
                 if _version(after) != _version(named) or size != pin["bytes"] or digest != pin["sha256"]:

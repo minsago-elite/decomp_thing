@@ -12,7 +12,9 @@ import shutil
 import subprocess
 import tempfile
 import textwrap
+from types import SimpleNamespace
 import unittest
+from unittest import mock
 import zipfile
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -123,6 +125,31 @@ class DeploymentFixture(unittest.TestCase):
             self.prepare()
         self.assertEqual(linked[0], self.manifest.read_bytes())
         self.assertTrue(target.is_symlink())
+
+    def test_wrong_member_uid_or_gid_refuses_without_repair(self) -> None:
+        self.prepare()
+        frozen = self.snapshot()
+        member = self.stage / "000-app.jar"
+        identity = member.stat()
+        real_stat, real_fstat = os.stat, os.fstat
+
+        # Model a consistent foreign-owner inode through both descriptor and name
+        # observations, without requiring chown privileges on the test host. All
+        # other identities, bytes, modes and link counts remain authentic.
+        for field in ("st_uid", "st_gid"):
+            with self.subTest(field=field):
+                def foreign_owner(info):
+                    if (info.st_dev, info.st_ino) != (identity.st_dev, identity.st_ino):
+                        return info
+                    fields = {name: getattr(info, name) for name in dir(info) if name.startswith("st_")}
+                    fields[field] += 1
+                    return SimpleNamespace(**fields)
+
+                with mock.patch.object(DEPLOYMENT.os, "fstat", side_effect=lambda *args: foreign_owner(real_fstat(*args))), \
+                        mock.patch.object(DEPLOYMENT.os, "stat", side_effect=lambda *args, **kwargs: foreign_owner(real_stat(*args, **kwargs))):
+                    with self.assertRaisesRegex(DEPLOYMENT.DeploymentError, "owner"):
+                        self.prepare()
+                self.assertEqual(frozen, self.snapshot(), "refusal must not rewrite the frozen deployment")
 
     def test_changed_source_hash_refuses_and_preserves_prepared_manifest(self) -> None:
         self.prepare()
