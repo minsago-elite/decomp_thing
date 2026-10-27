@@ -4960,6 +4960,7 @@
             "detached",
             "conflicted",
             "busy",
+            "active-worker",
             "incomplete"
           ]
         },

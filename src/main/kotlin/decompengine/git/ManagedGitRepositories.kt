@@ -719,12 +719,19 @@ class ManagedGitRepositories(
     /**
      * A work tree is leased to active workflow attempts: the primary one to any active attempt of
      * the job, and a linked one to the attempt that owns it. Checkout or removal never replaces
-     * files under a running worker.
+     * files under a running worker. This read is advisory for the UI; mutation admission still
+     * checks the lease again under its guards.
      */
-    private fun requireNoLease(located: Located) {
+    fun activeWorker(jobId: String, repositoryId: String, worktreeId: String? = null): Boolean =
+        hasActiveWorker(locate(jobId, repositoryId, worktreeId))
+
+    private fun hasActiveWorker(located: Located): Boolean {
         val runs = activity.runs(located.record.jobId)
-        val held = if (located.primary) runs.any { it.value } else located.ownerRunId?.let { runs[it] } == true
-        if (held) GitRefOperations.refuse("ACTIVE_RUN", "A workflow attempt is running against this work tree. Wait for it to finish; nothing was changed.")
+        return if (located.primary) runs.any { it.value } else located.ownerRunId?.let { runs[it] } == true
+    }
+
+    private fun requireNoLease(located: Located) {
+        if (hasActiveWorker(located)) GitRefOperations.refuse("ACTIVE_RUN", "A workflow attempt is running against this work tree. Wait for it to finish; nothing was changed.")
     }
 
     private fun relevant(observation: GitWorkspaceObservation) = observation.status.entries.filter { !it.ignored }

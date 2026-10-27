@@ -584,6 +584,81 @@ it('reports a failed job read during import instead of stopping silently', async
   expect(screen.getByRole('button', { name: 'Import repository' })).toHaveProperty('disabled', false);
 });
 
+it('shows the selected work tree worker lock before checkout and removal, without blocking reads or ref creation', async () => {
+  entries = [];
+  const notice = { code: 'active-worker', message: 'A worker owns this work tree. Switching and removal wait; refresh after it finishes.' };
+  transport.get.mockImplementation(async (kind, path) => {
+    if (kind === 'gitStatus') return { data: { ...status(false), worktreeId: path.includes(`worktree=${linkedId}`) ? linkedId : worktreeId, notices: [notice] } };
+    return serve(kind, path);
+  });
+  mount();
+  expect(await screen.findByText(notice.message)).toBeTruthy();
+  expect(screen.getByRole('button', { name: 'Switch to topic' })).toHaveProperty('disabled', true);
+  fireEvent.click(screen.getByRole('button', { name: `Show ${linkedId}` }));
+  await waitFor(() => expect(transport.get.mock.calls.some(call => call[1].includes(`worktree=${linkedId}`))).toBe(true));
+  await waitFor(() => expect(screen.getByRole('button', { name: `Show ${linkedId}` })).toHaveProperty('disabled', true));
+  expect(screen.getByRole('button', { name: `Remove ${linkedId}` })).toHaveProperty('disabled', true);
+  expect(screen.getByRole('button', { name: 'Create branch at HEAD' })).toHaveProperty('disabled', false);
+  expect(screen.getByRole('button', { name: 'Older commits' })).toHaveProperty('disabled', false);
+  expect(transport.post).not.toHaveBeenCalled();
+  transport.get.mockImplementation(async (kind, path) => {
+    if (kind === 'gitStatus') return { data: { ...status(false), worktreeId: linkedId } };
+    return serve(kind, path);
+  });
+  fireEvent.click(screen.getByRole('button', { name: 'Refresh repository' }));
+  await waitFor(() => expect(screen.getByRole('button', { name: 'Switch to topic' })).toHaveProperty('disabled', false));
+  expect(screen.getByRole('button', { name: `Remove ${linkedId}` })).toHaveProperty('disabled', false);
+});
+
+it('retains the selected linked tree after a refused removal and prevents tree changes during the mutation', async () => {
+  entries = [];
+  transport.get.mockImplementation(async (kind, path) => {
+    if (kind === 'gitStatus') return { data: { ...status(false), worktreeId: path.includes(`worktree=${linkedId}`) ? linkedId : worktreeId } };
+    return serve(kind, path);
+  });
+  const gate = deferred();
+  transport.post.mockImplementationOnce(async () => { await gate.promise; throw new ApiClientError('http_error', { status: 409 }); });
+  mount();
+  fireEvent.click(await screen.findByRole('button', { name: `Show ${linkedId}` }));
+  await waitFor(() => expect(screen.getByRole('button', { name: `Remove ${linkedId}` })).toHaveProperty('disabled', false));
+  fireEvent.click(screen.getByRole('button', { name: `Remove ${linkedId}` }));
+  await waitFor(() => expect(transport.post).toHaveBeenCalledOnce());
+  expect(screen.getByRole('button', { name: `Show ${worktreeId}` })).toHaveProperty('disabled', true);
+  gate.resolve();
+  await screen.findByText(/The server refused Remove/);
+  await waitFor(() => expect(transport.get.mock.calls.filter(call => call[0] === 'gitRepositories')).toHaveLength(3));
+  expect(screen.getByRole('button', { name: `Show ${linkedId}` })).toHaveProperty('disabled', true);
+  expect(transport.post.mock.calls[0]?.[3]).toMatchObject({ worktreeId: linkedId });
+});
+
+it.each(['diff selection', 'diff refresh', 'history refresh'])('drops obsolete errors after a newer %s', async scenario => {
+  const gate = deferred();
+  let answered = false;
+  transport.get.mockImplementation(async (kind, path) => {
+    if ((scenario.startsWith('diff') && kind === 'gitDiff' && path.includes('scope=unstaged')) ||
+        (scenario === 'history refresh' && kind === 'gitHistory' && path.includes('cursor='))) {
+      await gate.promise; answered = true;
+      throw new ApiClientError('http_error', { status: 409 });
+    }
+    return serve(kind, path);
+  });
+  mount();
+  await screen.findByRole('group', { name: 'Not staged' });
+  if (scenario === 'history refresh') fireEvent.click(screen.getByRole('button', { name: 'Older commits' }));
+  else fireEvent.click(within(screen.getByRole('group', { name: 'Not staged' })).getByRole('button', { name: 'Show diff for src/util.c' }));
+  if (scenario === 'diff selection') {
+    fireEvent.click(within(screen.getByRole('group', { name: 'Staged' })).getByRole('button', { name: 'Show diff for src/util.c' }));
+    await screen.findByText('Staged diff: src/util.c');
+  } else {
+    historyPages.first = { entries: [commitSummary(other, 'New generation', false)], nextCursor: null };
+    fireEvent.click(screen.getByRole('button', { name: 'Refresh repository' }));
+    await screen.findByText('New generation');
+  }
+  gate.resolve();
+  await waitFor(() => expect(answered).toBe(true));
+  expect(screen.getByRole('status').textContent).toBe('');
+});
+
 it('shows only the latest requested diff even when an earlier one answers later', async () => {
   mount();
   await screen.findByRole('group', { name: 'Staged' });

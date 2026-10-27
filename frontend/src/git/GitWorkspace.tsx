@@ -194,7 +194,9 @@ export function GitWorkspace({ jobId, basePath, session, capabilities, pollInter
     try {
       const result = await client.get('gitDiff', `${base}/diff?scope=${scope}&file=${entry.fileId}${query ? `&${query}` : ''}`);
       if (generation === diffGeneration.current && request === diffRequest.current) setDiff(result.data);
-    } catch (failure: unknown) { setStatus(withApiFailureReference(copy.readFailed, failure)); }
+    } catch (failure: unknown) {
+      if (generation === diffGeneration.current && request === diffRequest.current) setStatus(withApiFailureReference(copy.readFailed, failure));
+    }
   }
 
   /** Every changed file of a commit across its anchored pages; a listing past the page budget is marked incomplete. */
@@ -249,8 +251,9 @@ export function GitWorkspace({ jobId, basePath, session, capabilities, pollInter
       // Append only to the history this page continues; a duplicate or stale page is dropped.
       setLoaded(previous => previous?.history && previous.history.nextCursor === cursor
         ? { ...previous, history: { ...page, entries: [...previous.history.entries, ...page.entries] } } : previous);
-    } catch (failure: unknown) { setStatus(withApiFailureReference(copy.historyChanged, failure)); }
-    finally { olderPending.current = false; }
+    } catch (failure: unknown) {
+      if (generation === diffGeneration.current) setStatus(withApiFailureReference(copy.historyChanged, failure));
+    } finally { olderPending.current = false; }
   }
 
   function toggle(id: string) {
@@ -268,6 +271,7 @@ export function GitWorkspace({ jobId, basePath, session, capabilities, pollInter
   }
 
   const writable = !busy && !(statusData?.busy ?? false);
+  const activeWorker = statusData?.notices.some(notice => notice.code === 'active-worker') ?? false;
   const dirty = statusData ? groups.staged.length + groups.unstaged.length + groups.conflicted.length > 0 : true;
   // Selection is per group: a file with staged and unstaged changes is chosen separately for each action.
   const selectedIn = (...names: ('staged' | 'unstaged' | 'untracked')[]) =>
@@ -323,7 +327,7 @@ export function GitWorkspace({ jobId, basePath, session, capabilities, pollInter
           <dt>{copy.objectFormat}</dt><dd><code>{repository.objectFormat}</code></dd>
         </dl>
         <ul aria-label={copy.worktrees}>{statusData.notices.map(notice => <li key={notice.code}>
-          <StateMark tone={notice.code === 'clean' ? 'settled' : notice.code === 'busy' ? 'active' : notice.code === 'conflicted' ? 'stopped' : 'pending'}>{notice.code}</StateMark> {notice.message}
+          <StateMark tone={notice.code === 'clean' ? 'settled' : notice.code === 'busy' || notice.code === 'active-worker' ? 'active' : notice.code === 'conflicted' ? 'stopped' : 'pending'}>{notice.code}</StateMark> {notice.message}
         </li>)}</ul>
         {statusData.busy && <p>{copy.busy}</p>}
       </section>
@@ -332,11 +336,11 @@ export function GitWorkspace({ jobId, basePath, session, capabilities, pollInter
         <ul>{loaded.worktrees.worktrees.map(item => <li key={item.worktreeId}>
           <code>{item.worktreeId}</code> {item.primary ? copy.primary : copy.linked} · {headLabel(item.headState, item.headRefName, item.headObjectId)}
           {item.ownerRunId && <> · {textMessage(copy.owner, { run: item.ownerRunId })}</>}
-          {' '}<button type="button" disabled={item.worktreeId === worktreeId} onClick={() => { setWorktree(item.primary ? null : item.worktreeId); }}>
+          {' '}<button type="button" disabled={busy || item.worktreeId === worktreeId} onClick={() => { setWorktree(item.primary ? null : item.worktreeId); }}>
             {textMessage(copy.selectWorktree, { worktree: item.worktreeId })}</button>
-          {!item.primary && <button type="button" disabled={!writable || item.worktreeId !== worktreeId || item.dirty}
+          {!item.primary && <button type="button" disabled={!writable || activeWorker || item.worktreeId !== worktreeId || item.dirty}
             onClick={() => { void act('gitWorktreeRemoveRequest', textMessage(copy.removeWorktree, { worktree: item.worktreeId }), guarded =>
-              ({ action: 'git.worktree.remove', worktreeId: item.worktreeId, guards: guarded })).then(() => { setWorktree(null); }); }}>
+              ({ action: 'git.worktree.remove', worktreeId: item.worktreeId, guards: guarded })).then(done => { if (done) setWorktree(null); }); }}>
             {textMessage(copy.removeWorktree, { worktree: item.worktreeId })}</button>}
         </li>)}</ul>
       </section>}
@@ -414,7 +418,7 @@ export function GitWorkspace({ jobId, basePath, session, capabilities, pollInter
         <ul>{loaded.refs?.refs.map(ref => <li key={ref.refId}>
           <code>{ref.displayName}</code> <code title={ref.objectId}>{short(ref.objectId)}</code>{ref.current && <> <StateMark tone="settled">{copy.current}</StateMark></>}
           {ref.kind === 'branch' && !ref.current && <>
-            {' '}<button type="button" disabled={!writable || dirty} onClick={() => { void act('gitSwitchRequest', textMessage(copy.switchAction, { name: branch(ref.displayName) }),
+            {' '}<button type="button" disabled={!writable || activeWorker || dirty || !statusData.complete} onClick={() => { void act('gitSwitchRequest', textMessage(copy.switchAction, { name: branch(ref.displayName) }),
               guarded => ({ action: 'git.switch', worktreeId, guards: guarded, refId: ref.refId, objectId: ref.objectId })); }}>
               {textMessage(copy.switchAction, { name: branch(ref.displayName) })}</button>
             {' '}<button type="button" disabled={!writable} onClick={() => { void act('gitBranchDeleteRequest', textMessage(copy.deleteAction, { name: branch(ref.displayName) }),

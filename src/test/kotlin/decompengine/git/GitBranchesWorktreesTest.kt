@@ -79,6 +79,24 @@ class GitBranchesWorktreesTest {
     private fun Fixture.raw(vararg args: String, worktree: Path = workTree(), gitDir: Path = gitDir()) =
         repositories.git("--git-dir=$gitDir", "--work-tree=$worktree", *args, cwd = worktree)
 
+    @Test fun `worker lock reads distinguish the primary tree from each linked owner`(): Unit = Fixture().use { f ->
+        val base = f.prepare()
+        val primary = service.workspace(jobId, repositoryId).worktreeId
+        val owned = run(GitRefRequest(GitOperationAction.WORKTREE_ADD, primary, guards().second, objectId = base, runId = "run_1")).worktreeId
+        val unowned = run(GitRefRequest(GitOperationAction.WORKTREE_ADD, primary, guards().second, objectId = base)).worktreeId
+        assertFalse(service.activeWorker(jobId, repositoryId))
+        f.runs["run_2"] = true
+        assertTrue(service.activeWorker(jobId, repositoryId, primary))
+        assertFalse(service.activeWorker(jobId, repositoryId, owned))
+        assertFalse(service.activeWorker(jobId, repositoryId, unowned))
+        f.runs["run_1"] = true
+        assertTrue(service.activeWorker(jobId, repositoryId, owned))
+        assertFalse(service.busy(jobId))
+        f.runs.replaceAll { _, _ -> false }
+        assertFalse(service.activeWorker(jobId, repositoryId, owned))
+        assertFalse(service.activeWorker(jobId, repositoryId))
+    }
+
     @Test fun `branches are created at an exact base and switched only when clean and unleased`(): Unit = Fixture().use { f ->
         val base = f.prepare()
         val worktree = service.workspace(jobId, repositoryId).worktreeId
