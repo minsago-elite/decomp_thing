@@ -68,6 +68,12 @@ class ManagedGitRepositoriesTest {
                 .associate { root.relativize(it).toString() to Files.readAllBytes(it).toList() }
         }
 
+        /** Include empty directories as well as file bytes so read-side preparation/cleanup is visible. */
+        fun storageTree(): Map<String, List<Byte>?> = Files.walk(store).use { paths ->
+            paths.toList().associate { path -> store.relativize(path).toString() to
+                if (Files.isDirectory(path, NOFOLLOW_LINKS)) null else Files.readAllBytes(path).toList() }
+        }
+
         fun repositoryDirectory(repositoryId: String): Path = store.resolve(jobId).resolve("git/repositories").resolve(repositoryId)
 
         override fun close() { opened.forEach { it.close() }; repositories.close() }
@@ -76,6 +82,82 @@ class ManagedGitRepositoriesTest {
     private fun ManagedGitRepositories.settle(admission: GitOperationAdmission): GitOperationRecord {
         assertTrue(awaitIdle(60_000))
         return operation(jobId, admission.operation.repositoryId, admission.operation.operationId)
+    }
+
+    @Test fun `fresh repository reads create neither runtime nor job storage`(): Unit = Fixture().use { f ->
+        val service = f.open()
+        val before = f.storageTree()
+        assertEquals(GitRepositoryListing(emptyList(), emptyList()), service.listing(jobId))
+        assertEquals("NOT_FOUND", assertFailsWith<ManagedGitException> { service.workspace(jobId, "repository_missing") }.code)
+        assertEquals("NOT_FOUND", assertFailsWith<ManagedGitException> {
+            service.operation(jobId, "repository_missing", "operation_missing")
+        }.code)
+        assertFalse(service.busy(jobId))
+        for (read in listOf<() -> Any>(
+            { service.repository(jobId, "repository_missing") },
+            { service.history(jobId, "repository_missing", null, 0, 1) },
+            { service.diff(jobId, "repository_missing", GitDiffScope.UNSTAGED, null, null) },
+            { service.refs(jobId, "repository_missing", 0, 1) },
+        )) assertEquals("NOT_FOUND", assertFailsWith<ManagedGitException> { read() }.code)
+        assertEquals(before, f.storageTree())
+        assertFalse(f.store.resolve(".git-runtime").exists())
+    }
+
+    @Test fun `reads do not retry failed startup recovery even after the record becomes readable`() {
+        for (retryWithMutation in listOf(false, true)) Fixture().use { f ->
+            f.crashes += GitOperationCrashPoint.AFTER_STAGING
+            val first = f.open()
+            val admission = first.request(jobId, GitRepositoryRequest.Init("run_1", "revision_1", null), "read_recovery_key_01")
+            assertTrue(first.awaitIdle(60_000)); first.close(); f.crashes.clear()
+            val operation = admission.operation
+            val file = f.store.resolve("$jobId/git/operations/${operation.operationId}.json")
+            val retained = Files.readAllBytes(file)
+            Files.writeString(file, "unreadable record")
+            val restarted = f.open()
+            restarted.recover(listOf(jobId)) // Startup is allowed to continue when this job fails recovery.
+            Files.write(file, retained) // A repaired record must not make GET silently retry recovery.
+            val before = f.storageTree()
+            for (read in listOf<() -> Any>(
+                { restarted.listing(jobId) },
+                { restarted.operation(jobId, operation.repositoryId, operation.operationId) },
+                { restarted.workspace(jobId, operation.repositoryId) },
+                { restarted.busy(jobId) },
+                { restarted.repository(jobId, operation.repositoryId) },
+                { restarted.history(jobId, operation.repositoryId, null, 0, 1) },
+                { restarted.diff(jobId, operation.repositoryId, GitDiffScope.UNSTAGED, null, null) },
+                { restarted.refs(jobId, operation.repositoryId, 0, 1) },
+            )) assertEquals("STORAGE_UNAVAILABLE", assertFailsWith<ManagedGitException> { read() }.code)
+            assertEquals(before, f.storageTree())
+            assertTrue(f.store.resolve("$jobId/git/staging/${operation.operationId}").exists())
+            // Only an explicit lifecycle sweep or authorized mutation can perform recovery.
+            if (retryWithMutation) {
+                val replay = restarted.request(jobId, GitRepositoryRequest.Init("run_1", "revision_1", null), "read_recovery_key_01")
+                assertTrue(replay.replayed); assertEquals(GitOperationState.INTERRUPTED, replay.operation.state)
+            } else restarted.recover(listOf(jobId))
+            assertEquals(GitOperationState.INTERRUPTED,
+                restarted.operation(jobId, operation.repositoryId, operation.operationId).state)
+            assertFalse(f.store.resolve("$jobId/git/staging/${operation.operationId}").exists())
+        }
+    }
+
+    @Test fun `successful startup prepares workspace reads without subsequent storage mutations`(): Unit = Fixture().use { f ->
+        val first = f.open()
+        val completed = first.settle(first.request(jobId, GitRepositoryRequest.Init("run_1", "revision_1", null), "readonly_workspace_01"))
+        first.close()
+        val restarted = f.open()
+        restarted.recover(listOf(jobId))
+        val before = f.storageTree()
+        repeat(2) {
+            assertEquals(1, restarted.listing(jobId).repositories.size)
+            assertEquals(completed, restarted.operation(jobId, completed.repositoryId, completed.operationId))
+            assertEquals(GitHeadState.UNBORN, restarted.workspace(jobId, completed.repositoryId).observation.head.state)
+            assertFalse(restarted.busy(jobId))
+            assertEquals(completed.repositoryId, restarted.repository(jobId, completed.repositoryId).repositoryId)
+            assertNull(restarted.history(jobId, completed.repositoryId, null, 0, 1).first)
+            assertTrue(restarted.diff(jobId, completed.repositoryId, GitDiffScope.UNSTAGED, null, null).listing.files.isEmpty())
+            assertTrue(restarted.refs(jobId, completed.repositoryId, 0, 1).second.entries.isEmpty())
+        }
+        assertEquals(before, f.storageTree())
     }
 
     @Test fun `initialization copies source bytes exactly, applies policy and creates no commit`(): Unit = Fixture().use { f ->
@@ -799,6 +881,21 @@ class ManagedGitRepositoriesTest {
             }
             assertTrue(service.listing(jobId).operations.isEmpty())
         }
+    }
+
+    @Test fun `interrupted cleanup preserves an entirely empty directory tree`(): Unit = Fixture().use { f ->
+        val empty = Files.createDirectories(f.store.resolve("empty staging"))
+        repeat(32) { Files.createDirectories(empty.resolve("branch$it/nested/leaf")) }
+        val before = f.storageTree()
+        Thread.currentThread().interrupt()
+        try {
+            assertFailsWith<java.io.InterruptedIOException> { GitStorage.deleteTree(empty) }
+            assertTrue(Thread.currentThread().isInterrupted, "cleanup must not consume cancellation")
+        } finally { Thread.interrupted() }
+        assertEquals(before, f.storageTree())
+        // The same empty tree is removable once cancellation is cleared.
+        GitStorage.deleteTree(empty)
+        assertFalse(empty.exists())
     }
 
     @Test fun `shutdown reports a Git worker that outlives its wait, and storage loops stop on interruption`() {

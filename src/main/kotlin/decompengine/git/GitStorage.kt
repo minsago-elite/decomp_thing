@@ -74,14 +74,20 @@ internal object GitStorage {
 
     /** Delete a private tree without following links. Missing trees are already removed. */
     fun deleteTree(root: Path) {
+        checkInterrupted()
         if (!Files.exists(root, NOFOLLOW_LINKS)) return
         Files.walkFileTree(root, object : SimpleFileVisitor<Path>() {
+            override fun preVisitDirectory(directory: Path, attributes: BasicFileAttributes): FileVisitResult {
+                checkInterrupted()
+                return FileVisitResult.CONTINUE
+            }
             override fun visitFile(file: Path, attributes: BasicFileAttributes): FileVisitResult {
                 checkInterrupted()
                 Files.delete(file); return FileVisitResult.CONTINUE
             }
             override fun postVisitDirectory(directory: Path, failure: IOException?): FileVisitResult {
                 if (failure != null) throw failure
+                checkInterrupted()
                 Files.delete(directory); return FileVisitResult.CONTINUE
             }
         })
