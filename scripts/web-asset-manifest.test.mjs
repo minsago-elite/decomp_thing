@@ -262,29 +262,45 @@ test('source and graph modules must stay outside the initial closure', () => {
 test('only the three fixed built-in prerequisite navigation URLs are reviewed, never remote loads', () => {
   for (const number of [76, 77, 79]) {
     const url = `https://github.com/minsago-elite/decomp_thing/issues/${number}`;
-    for (const source of [`h("a", { href: "${url}" })`,
-      `j(\`a\`, {href: \`${url}\`, rel: \`noreferrer\`, children: label})`,
-      `h("a", { "href": "${url}", children: "Tracker" })`]) {
-      assert.doesNotThrow(() => assertNoRemoteLoads(source, 'fixture'), source);
+    for (const quote of ['"', "'", '`']) {
+      assert.doesNotThrow(() => assertNoRemoteLoads(`h(${quote}a${quote}, { href: ${quote}${url}${quote}, rel: ${quote}noreferrer${quote}, children: label })`, 'fixture'));
     }
+    const anchor = `h("a", { href: "${url}", rel: "noreferrer", children: label });`;
     for (const source of [`import("${url}")`, `new Worker("${url}")`, `<script src="${url}"></script>`,
-      `body { background: url("${url}") }`, `fetch("${url}")`, `fetch(\`${url}\`, {body: privateData})`,
+      `body { background: url("${url}") }`, `fetch("${url}")`, `fetch(\`${url}\`)`,
       `navigator.sendBeacon("${url}", privateData)`, `new WebSocket("${url}")`, `new EventSource("${url}")`,
-      `h("img", {src: "${url}"})`, `h("iframe", {src: "${url}"})`, `h("link", {href: "${url}"})`,
-      `const image = new Image(); image.src = "${url}"`, `const url = "${url}"; h("a", {href: url}); fetch(url)`,
-      `h(tag, {href: "${url}"})`, `h("a", {href: "${url}", ...otherProps})`,
-      `h("a", {...otherProps, href: "${url}"})`, `h("a", {href: "${url}", href: other})`,
-      `h("a", {href: "${url}", ping: "${url}"})`, `h("a", {href: "${url}", children: fetch("${url}")})`,
-      `h("a", {href: "${url}"}); navigator.sendBeacon("${url}", privateData)`]) {
+      `const image = new Image(); image.src = "${url}"`, `h("img", {src: "${url}"})`,
+      `h("script", {src: "${url}"})`, `h("link", {href: "${url}", rel: "stylesheet"})`,
+      `h("iframe", {src: "${url}"})`, `const link = "${url}"; h("a", {href: link, rel: "noreferrer"})`,
+      `const props = {href: "${url}", rel: "noreferrer"}; h("a", props)`,
+      `h("a", {href: "${url}", rel: "noreferrer", ...props})`,
+      `h("a", {href: "${url}", rel: "noreferrer", ping: "./beacon"})`,
+      `h("a", {href: "${url}", rel: "noreferrer", href: "./overridden"})`,
+      `h("a", {href: "${url}", rel: "noreferrer", onClick: handler})`,
+      `h(tag, {href: "${url}", rel: "noreferrer"})`,
+      `h("a", {...props, href: "${url}", rel: "noreferrer"})`,
+      `h("a", {href: "${url}", rel: "noreferrer", children: fetch("${url}")})`,
+      `// ${anchor}`, `const markup = '${anchor}';`,
+      anchor + `fetch("${url}")`, anchor + `navigator.sendBeacon("${url}", privateData)`,
+      anchor + `h("img", {src: "${url}"})`]) {
       assert.throws(() => assertNoRemoteLoads(source, 'fixture'), /loads a remote resource/);
     }
     for (const unreviewed of [url + '/other', url + '?redirect=https://evil.test', url + '#extra',
       url.replace('github.com', 'github.com.evil.test'), url.replace('github.com', 'github.com@evil.test'),
       url.replace('github.com', 'github.com:8443'), url.replace('https:', 'http:')]) {
-      assert.throws(() => assertNoRemoteLoads(`h("a", { href: "${unreviewed}" })`, 'fixture'), /loads a remote resource/);
+      assert.throws(() => assertNoRemoteLoads(`h("a", { href: "${unreviewed}", rel: "noreferrer" })`, 'fixture'), /loads a remote resource/);
     }
   }
   assert.throws(() => assertNoRemoteLoads('const link = "https://github.com/minsago-elite/decomp_thing/issues/80"', 'fixture'), /loads a remote resource/);
+});
+
+test('actual producer refuses prerequisite URLs used for fetch, beacon and compiled resources', async t => {
+  const url = 'https://github.com/minsago-elite/decomp_thing/issues/79';
+  for (const source of [`fetch("${url}")`, `navigator.sendBeacon("${url}", privateData)`, `h("img", {src: "${url}"})`]) {
+    const root = fixture(t, true);
+    writeFileSync(join(root, 'dist/assets/index-abc12345.js'), source);
+    await assert.rejects(buildBundleReport(pathToFileURL(root + '/')), /loads a remote resource/);
+  }
 });
 
 test('shipped assets reject remote resource loads but keep inert namespace strings', () => {

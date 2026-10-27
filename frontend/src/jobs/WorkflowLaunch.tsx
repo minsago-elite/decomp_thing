@@ -133,12 +133,13 @@ function Requirement({ option, basePath }: { option: LaunchOption; basePath: str
   if (option.state === 'supported' || option.reasonCode === null) return null;
   const workflow = option.workflows[0]!;
   if (option.reasonCode === 'BUILTIN_HARNESS_NOT_INTEGRATED') {
-    // Keep reviewed issue URLs directly in navigation props: bundle admission rejects every other use.
-    const workflowLink = textMessage(copy.requirementBuiltinWorkflow, { workflow: workflowLabels[workflow] });
+    // Literal hrefs keep the build's reviewed navigation exception scoped to these anchor props,
+    // not reusable URL constants that could also reach fetch, beacon or resource-loading sinks.
+    const ownerLabel = textMessage(copy.requirementBuiltinWorkflow, { workflow: workflowLabels[workflow] });
     return <p>{textMessage(copy.requirementHeading, { text: textMessage(copy.requirementBuiltin, { workflow: workflowLabels[workflow] }) })}{' '}
       <a href="https://github.com/minsago-elite/decomp_thing/issues/79" rel="noreferrer">{copy.requirementBuiltinTracker}</a>
-      {workflow === 'reconstruct' && <>{' '}<a href="https://github.com/minsago-elite/decomp_thing/issues/76" rel="noreferrer">{workflowLink}</a></>}
-      {workflow === 'repair' && <>{' '}<a href="https://github.com/minsago-elite/decomp_thing/issues/77" rel="noreferrer">{workflowLink}</a></>}</p>;
+      {workflow === 'reconstruct' && <>{' '}<a href="https://github.com/minsago-elite/decomp_thing/issues/76" rel="noreferrer">{ownerLabel}</a></>}
+      {workflow === 'repair' && <>{' '}<a href="https://github.com/minsago-elite/decomp_thing/issues/77" rel="noreferrer">{ownerLabel}</a></>}</p>;
   }
   const text = requirements[option.reasonCode];
   return text === undefined ? null

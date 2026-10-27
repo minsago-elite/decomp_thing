@@ -119,9 +119,13 @@ internal data class WebHarnessReadiness(
         return if (snapshot.status == "failed") folded.withFailedAgentFact() else folded
     }
 
-    private fun withFailedAgentFact(): WebHarnessReadiness = prerequisites?.let { facts ->
-        copy(prerequisites = facts.withFailedAgentInspection())
-    } ?: this
+    private fun withFailedAgentFact(): WebHarnessReadiness = copy(prerequisites = prerequisites?.let { facts ->
+        // Aggregate readiness may already be unavailable for an unrelated tool. Admission reads the
+        // selected harness's own fact, so always fold the matching failure there as well as in agent.
+        facts.copy(agent = PREFLIGHT_FAILED, harnesses = facts.harnesses.mapValues { (_, value) ->
+            if (value.selected) value.copy(prerequisite = PREFLIGHT_FAILED) else value
+        })
+    })
 
     /**
      * Folds the last explicit agent preflight into a configured harness. Bootstrap never starts the
@@ -134,17 +138,9 @@ internal data class WebHarnessReadiness(
         else -> copy(message = "An agent harness and sandbox helpers are available. The agent has not been started by an operator inspection, so its readiness is unproven.")
     }
 
-    private fun failedInspection() = WebHarnessReadiness("unavailable", WebAgentPreflight.REASON_FAILED,
-        "The last operator inspection could not start the configured agent. Inspect the agent configuration and retry.",
-        prerequisites = prerequisites?.withFailedAgentInspection())
-}
-
-/** A failed inspection updates its selected harness even when another prerequisite already failed. */
-private fun WebWorkflowPrerequisites.withFailedAgentInspection(): WebWorkflowPrerequisites {
-    val selected = harnesses.entries.singleOrNull { it.value.selected }?.key
-    return copy(agent = PREFLIGHT_FAILED, harnesses = harnesses.mapValues { (harness, value) ->
-        if (harness == selected) value.copy(prerequisite = PREFLIGHT_FAILED) else value
-    })
+    private fun failedInspection() = copy(state = "unavailable", reasonCode = WebAgentPreflight.REASON_FAILED,
+        message = "The last operator inspection could not start the configured agent. Inspect the agent configuration and retry.")
+        .withFailedAgentFact()
 }
 
 /** Atomically expires queued work or retains an admitted callback until its final exit. */
