@@ -167,7 +167,7 @@ data class GitRepositoryPolicy(
 class ManagedGitException(val code: String, message: String) : RuntimeException(message)
 
 /** Crash points for recovery tests; a crash leaves records and staging exactly as a process death would. */
-enum class GitOperationCrashPoint { AFTER_RUNNING, AFTER_STAGING, BEFORE_PUBLISH, AFTER_PUBLISH, BEFORE_TERMINAL_PERSIST, AFTER_TERMINAL_PERSIST, AFTER_SNAPSHOT_CAPTURE }
+enum class GitOperationCrashPoint { AFTER_RUNNING, AFTER_STAGING, BEFORE_PUBLISH, AFTER_PUBLISH, BEFORE_TERMINAL_PERSIST, AFTER_TERMINAL_PERSIST, AFTER_SNAPSHOT_CAPTURE, AFTER_COMMIT_PUBLISH }
 internal class SimulatedGitCrash : Error("simulated process death")
 
 /**
@@ -1460,6 +1460,7 @@ class ManagedGitRepositories(
                         GitWorkspaceMutations.publishCommit(runner, located.gitDir, staging, reviewed.head, reviewed.objectFormat, commit, located.commonDir) {
                             publishedCommit = commit
                         }
+                        crash(GitOperationCrashPoint.AFTER_COMMIT_PUBLISH)
                         GitIntegrations.finishCommit(runner, located.gitDir, reviewed.objectFormat, commit, reviewed.head.objectId)
                     }
                     result = checkNotNull(publishedCommit)
@@ -1656,6 +1657,18 @@ class ManagedGitRepositories(
                 return finish(operation, GitOperationState.RECOVERY_REQUIRED, "COMMIT_LOCKS_REQUIRE_REVIEW",
                     "Interrupted by a server restart with a Git lock whose ownership could not be confirmed. Inspect the repository and its writers before a new request.",
                     observed.objectId.takeIf { it != guards?.expectedHeadObjectId })
+            }
+            if (observed.objectId != null && observed.objectId != guards?.expectedHeadObjectId && GitIntegrations.mergeInProgress(gitDir)) {
+                val staging = GitStorage.directories(root.resolve(jobId).resolve("git"), "staging", operation.operationId)
+                // Reclaim only witnessed original locks above, then acquire new Git-compatible locks
+                // before matching the published commit to MERGE_HEAD. A second crash reuses the
+                // same inode-witness paths, so this cleanup can itself be safely retried.
+                for (name in listOf("index.lock", "HEAD.lock")) Files.deleteIfExists(staging.resolve(name))
+                GitWorkspaceMutations.withCommitLocks(gitDir, staging, operation.operationId) {
+                    if (GitRepositoryInspector.head(runner, gitDir, record.objectFormat) == observed) {
+                        GitIntegrations.finishCommit(runner, gitDir, record.objectFormat, observed.objectId, guards?.expectedHeadObjectId)
+                    }
+                }
             }
             observed.objectId
         } catch (_: Exception) { return finish(operation, GitOperationState.RECOVERY_REQUIRED, "HEAD_UNKNOWN",

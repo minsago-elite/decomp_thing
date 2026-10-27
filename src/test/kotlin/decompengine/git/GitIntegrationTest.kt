@@ -288,6 +288,75 @@ class GitIntegrationTest {
         }.code)
     }
 
+    @Test fun `restart finishes published merge metadata cleanup without creating another commit`(): Unit {
+        for (secondCrash in listOf(false, true)) Fixture().use { f ->
+            f.cloned()
+            val fileId = f.conflictOn("README.md")
+            val detail = service.conflictFile(jobId, repositoryId, null, fileId)
+            sync(GitOperationAction.CONFLICT_SAVE, mapOf("fileId" to fileId, "expectedSha256" to detail.currentSha256, "resolution" to "ours"))
+            val saved = service.conflictFile(jobId, repositoryId, null, fileId)
+            sync(GitOperationAction.CONFLICT_COMPLETE, content = "$fileId ${saved.currentSha256}\n")
+            val (view, g) = guards()
+            val request = GitCommitRequest(view.worktreeId, g, emptyList(), "Merge keeping ours", true)
+            val replayKey = key()
+            f.hook = { if (it == GitOperationCrashPoint.AFTER_COMMIT_PUBLISH) throw SimulatedGitCrash() }
+            val admission = service.requestWorkspace(jobId, repositoryId, request, replayKey)
+            assertTrue(service.awaitIdle(60_000))
+            val gitDir = f.store.resolve("$jobId/git/repositories/$repositoryId/repository.git")
+            val published = f.repositories.git("--git-dir=$gitDir", "rev-parse", "HEAD").trim()
+            assertTrue(GitIntegrations.mergeInProgress(gitDir), "crash is after ref publication but before metadata cleanup")
+            service.close()
+            f.hook = { if (secondCrash && it == GitOperationCrashPoint.BEFORE_TERMINAL_PERSIST) throw SimulatedGitCrash() }
+            service = f.open()
+            if (secondCrash) {
+                assertFailsWith<SimulatedGitCrash> { service.operation(jobId, repositoryId, admission.operation.operationId) }
+                assertFalse(GitIntegrations.mergeInProgress(gitDir), "cleanup precedes the interrupted recovery persistence")
+                service.close(); f.hook = {}; service = f.open()
+            }
+            val recovered = service.operation(jobId, repositoryId, admission.operation.operationId)
+            // Preserve the existing conservative commit-outcome contract; metadata housekeeping
+            // must not invent a completed intent from HEAD alone or replay a commit.
+            assertEquals(GitOperationState.RECOVERY_REQUIRED, recovered.state)
+            assertEquals("HEAD_MOVED", recovered.failureCode)
+            assertFalse(service.conflicts(jobId, repositoryId, null).mergeInProgress)
+            assertEquals(published, service.workspace(jobId, repositoryId).observation.head.objectId)
+            assertEquals(3, f.repositories.git("--git-dir=$gitDir", "rev-list", "--parents", "-n", "1", published).trim().split(' ').size)
+            assertTrue(service.requestWorkspace(jobId, repositoryId, request, replayKey).replayed)
+            refused("NO_MERGE", GitOperationAction.MERGE_ABORT)
+            val (clean, cg) = guards()
+            assertEquals("NOTHING_TO_COMMIT", assertFailsWith<ManagedGitException> {
+                service.requestWorkspace(jobId, repositoryId, GitCommitRequest(clean.worktreeId, cg, emptyList(), "duplicate"), key())
+            }.code)
+            assertEquals(published, service.workspace(jobId, repositoryId).observation.head.objectId)
+        }
+    }
+
+    @Test fun `merge cleanup recovery preserves mismatched parents and foreign commit locks`(): Unit {
+        for (foreignLock in listOf(false, true)) Fixture().use { f ->
+            f.cloned()
+            val fileId = f.conflictOn("README.md")
+            val detail = service.conflictFile(jobId, repositoryId, null, fileId)
+            sync(GitOperationAction.CONFLICT_SAVE, mapOf("fileId" to fileId, "expectedSha256" to detail.currentSha256, "resolution" to "ours"))
+            val saved = service.conflictFile(jobId, repositoryId, null, fileId)
+            sync(GitOperationAction.CONFLICT_COMPLETE, content = "$fileId ${saved.currentSha256}\n")
+            val (view, g) = guards()
+            f.hook = { if (it == GitOperationCrashPoint.AFTER_COMMIT_PUBLISH) throw SimulatedGitCrash() }
+            val admission = service.requestWorkspace(jobId, repositoryId, GitCommitRequest(view.worktreeId, g, emptyList(), "merge", true), key())
+            assertTrue(service.awaitIdle(60_000)); service.close(); f.hook = {}
+            val gitDir = f.store.resolve("$jobId/git/repositories/$repositoryId/repository.git")
+            if (foreignLock) Files.writeString(gitDir.resolve("index.lock"), "foreign writer\n")
+            else Files.writeString(gitDir.resolve("MERGE_HEAD"), "${g.expectedHeadObjectId}\n")
+            service = f.open()
+            val recovered = service.operation(jobId, repositoryId, admission.operation.operationId)
+            assertEquals(GitOperationState.RECOVERY_REQUIRED, recovered.state)
+            assertTrue(GitIntegrations.mergeInProgress(gitDir), "unproven merge metadata is never discarded")
+            if (foreignLock) {
+                assertEquals("COMMIT_LOCKS_REQUIRE_REVIEW", recovered.failureCode)
+                assertEquals("foreign writer\n", Files.readString(gitDir.resolve("index.lock")))
+            } else assertEquals("${g.expectedHeadObjectId}\n", Files.readString(gitDir.resolve("MERGE_HEAD")))
+        }
+    }
+
     @Test fun `integration publication owns the shared workflow admission lease`(): Unit = Fixture().use { f ->
         f.cloned()
         Files.writeString(f.seed.resolve("util.c"), "int remote_util;\n"); f.remoteCommit("advance"); fetch()
