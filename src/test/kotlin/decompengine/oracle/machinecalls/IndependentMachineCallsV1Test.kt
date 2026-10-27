@@ -26,6 +26,15 @@ class IndependentMachineCallsV1Test {
         action(input.produce(cfgDecoder()))
     }
 
+    internal fun withCrossBaseFixture(action: (JsonObject) -> Unit) = fixture { root ->
+        val input = input(root, listOf(Symbol("caller", 0x110, 6), Symbol("target", 0x150, 1),
+            Symbol("cross-base", 0x180, 0x180, absoluteValue = 0x3ffff0UL)), listOf(0x110, 0x150))
+        action(input.produce(MachineInstructionDecoderV1 { address, bytes ->
+            if (address == 0x400110UL) instruction(address, bytes, "direct-call", 5, target = 0x400150UL)
+            else instruction(address, bytes, "return")
+        }))
+    }
+
     internal fun withWorkerFixture(action: (Path, Path, String, String, String) -> Unit) = fixture { root ->
         val input = input(root, listOf(Symbol("caller", 0x110, 16), Symbol("target", 0x150, 1), Symbol("truncated", 0x170, 1)),
             listOf(0x110, 0x150, 0x170), code = mapOf(0x110 to byteArrayOf(-24, 59, 0, 0, 0, -1, -48, -112, -61),
@@ -64,6 +73,21 @@ class IndependentMachineCallsV1Test {
         assertEquals("unresolved-missing-symbol-extent", canonical.single { it.text("id") == "canonical-190" }.text("disposition"))
         assertEquals("unresolved-no-emitted-address", canonical.single { it.text("id") == "inlined-only" }.text("disposition"))
         assertEquals(listOf(0x400110UL, 0x400120UL, 0x400180UL), visited)
+        assertNoNegativeAuthority(report)
+    }
+
+    @Test fun `below base absolute extents revoke all intersecting caller and target ownership`() = withCrossBaseFixture { report ->
+        val roots = report.records("roots")
+        assertEquals(3, roots.size)
+        for (root in roots) assertTrue("overlapping-symbol-extents" in root.texts("ownershipProblems"))
+        val crossing = roots.single { it["rva"] == JsonNull }
+        assertTrue("below-image-base" in crossing.texts("ownershipProblems"))
+        assertEquals("0x170", crossing.text("endExclusiveRva"))
+        assertEquals(listOf("0x110", "0x150"), roots.filter { it["rva"] != JsonNull }.map { it.text("rva") })
+        assertEquals(3L, report.count("rootsWithUnresolvedOwnership"))
+        assertEquals(0L, report.count("instructionAttempts"))
+        assertEquals(0L, report.count("physicalCallSites"))
+        assertEquals(0L, report.count("positiveInternalCallSites"))
         assertNoNegativeAuthority(report)
     }
 
@@ -252,7 +276,7 @@ class IndependentMachineCallsV1Test {
         assertFalse(report.records("calls").any { it.text("disposition").startsWith("negative") })
     }
 
-    private data class Symbol(val name: String, val rva: Int?, val size: Int, val type: Int = 2)
+    private data class Symbol(val name: String, val rva: Int?, val size: Int, val type: Int = 2, val absoluteValue: ULong? = null)
     private data class Input(val rich: Path, val oracle: Path, val inputSha: String, val oracleSha: String, val manifestSha: String) {
         fun produce(decoder: MachineInstructionDecoderV1, limits: MachineCallLimitsV1 = MachineCallLimitsV1()) =
             IndependentMachineCallsV1.produce(rich, oracle, inputSha, oracleSha, manifestSha, decoder, limits)
@@ -266,8 +290,11 @@ class IndependentMachineCallsV1Test {
         bytes.fill(0xc3.toByte(), 0x100, 0x200)
         code.forEach { (offset, instructions) -> instructions.copyInto(bytes, offset) }
         val symbolOffset = FullTreeElfTestBytes.symbolTableOffset(bytes)
-        symbols.forEachIndexed { index, symbol -> FullTreeElfTestBytes.put64(bytes, symbolOffset + (index + 1) * 24 + 16,
-            symbol.size.toULong(), true) }
+        symbols.forEachIndexed { index, symbol ->
+            val offset = symbolOffset + (index + 1) * 24
+            symbol.absoluteValue?.let { FullTreeElfTestBytes.put64(bytes, offset + 8, it, true) }
+            FullTreeElfTestBytes.put64(bytes, offset + 16, symbol.size.toULong(), true)
+        }
         val inputSha = OracleArtifacts.sha256(bytes)
         val manifestSha = "6".repeat(64)
         val rich = Files.write(root.resolve("rich.elf"), bytes)
@@ -307,6 +334,9 @@ class IndependentMachineCallsV1Test {
 
 internal fun withMachineCallComponentFixtureV1(action: (JsonObject) -> Unit) =
     IndependentMachineCallsV1Test().withComponentFixture(action)
+
+internal fun withMachineCallCrossBaseFixtureV1(action: (JsonObject) -> Unit) =
+    IndependentMachineCallsV1Test().withCrossBaseFixture(action)
 
 internal fun withMachineCallWorkerFixtureV1(action: (Path, Path, String, String, String) -> Unit) =
     IndependentMachineCallsV1Test().withWorkerFixture(action)

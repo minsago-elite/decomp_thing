@@ -106,6 +106,8 @@ unambiguous mapping inside one executable, allocated, file-backed section and
 one executable load segment. Section and segment file mappings must agree.
 Undefined symbols, IFUNC identity, zero sizes, conflicting or overlapping
 extents, and canonical starts inside another extent remain ownership problems.
+Overlap checks include every nonempty, nonoverflowing absolute symbol interval,
+even an otherwise invalid symbol starting below the image base with no RVA.
 The producer never guesses an end from the next symbol.
 
 Traversal starts at each independently owned extent entry. It reads at most 15
