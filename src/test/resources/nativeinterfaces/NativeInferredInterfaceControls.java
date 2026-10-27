@@ -368,6 +368,7 @@ public final class NativeInferredInterfaceControls {
         catch (Exception expected) { refused = true; }
         require(refused && originalOutput.equals(snapshots(first)), "existing inference output accepted or altered");
         cancelledCollection(program);
+        lifecycleCollections(program);
         changingProgramCollection(program, functions.get("integer_add"));
         changedListingCollection(program);
         stagingBudgetControls(program, functions.get("integer_add"));
@@ -377,7 +378,7 @@ public final class NativeInferredInterfaceControls {
             "ninth-SSE-stack-use-not-promoted-to-parameter " +
             "complete-function-dispositions external thunk unsupported-body typed-first-mapping separate-listing-inferred " +
             "recursive-type-graph union packed array typedef bitfield deterministic model-unchanged listing-unchanged " +
-            "program-unchanged cancellation stale-output-rejected same-census-mutation-rejected changed-listing-rejected " +
+            "program-unchanged cancellation staged-cancellation admitted-cancellation post-native-deadline-cleanup stale-output-rejected same-census-mutation-rejected changed-listing-rejected " +
             "actual-staging-exact-peak actual-staging-one-byte-below-peak actual-stale-listing-larger-rerender-bounded\n");
     }
 
@@ -540,6 +541,132 @@ public final class NativeInferredInterfaceControls {
         try { ExportInferredInterfacesV1.collect(program, monitor, collectorArguments(destination)); }
         catch (ghidra.util.exception.CancelledException expected) { rejected = true; }
         require(rejected && !Files.exists(destination), "cancelled inference left successful or partial output");
+    }
+
+    /** Real engine/process controls; only elapsed-time injection is synthetic, not native results. */
+    private static void lifecycleCollections(Program program) throws Exception {
+        com.google.gson.JsonArray rows = new com.google.gson.JsonArray();
+        for (String phase : List.of("staged-cancellation", "admitted-cancellation", "post-native-deadline")) {
+            // A pooled process from earlier controls must not be mistaken for this capture's engine.
+            awaitNativeExit(nativeProcesses());
+            Map<Path, String> modelBefore = snapshots(root.resolve("reports"));
+            Map<Path, String> listingBefore = snapshots(listing);
+            String inputBefore = sha256(input);
+            long modification = program.getModificationNumber();
+            Path destination = root.resolve(phase);
+            LifecycleMonitor monitor = new LifecycleMonitor(destination, phase);
+            Exception failure = null;
+            try {
+                if (phase.equals("post-native-deadline")) {
+                    // Expire the existing monotonic deadline only after a real native attempt.
+                    // Reflection stays in test code: no configurable clock, engine factory or
+                    // relaxed production ceiling/API is added just to make the test fast.
+                    var constructor = ExportInferredInterfacesV1.class.getDeclaredConstructor(Program.class, TaskMonitor.class);
+                    constructor.setAccessible(true);
+                    monitor.collector = constructor.newInstance(program, monitor);
+                    var export = ExportInferredInterfacesV1.class.getDeclaredMethod("export", String[].class);
+                    export.setAccessible(true);
+                    try { export.invoke(monitor.collector, (Object) collectorArguments(destination)); }
+                    catch (java.lang.reflect.InvocationTargetException wrapped) {
+                        if (wrapped.getCause() instanceof Exception cause) throw cause;
+                        throw wrapped;
+                    }
+                } else ExportInferredInterfacesV1.collect(program, monitor, collectorArguments(destination));
+            } catch (ghidra.util.exception.CancelledException | IllegalStateException expected) { failure = expected; }
+            require(monitor.triggered && monitor.stageSeen, phase + " never reached its lifecycle injection point");
+            if (phase.equals("post-native-deadline")) {
+                require(failure instanceof IllegalStateException &&
+                    "inferred-interface operation deadline exhausted".equals(failure.getMessage()),
+                    "post-native control did not fail at the operation deadline: " + failure);
+            } else require(failure instanceof ghidra.util.exception.CancelledException,
+                phase + " did not propagate cancellation: " + failure);
+            if (!phase.equals("staged-cancellation"))
+                require(!monitor.processes.isEmpty(), phase + " did not observe a live bundled native engine");
+            awaitNativeExit(monitor.processes);
+            require(nativeProcesses().isEmpty(), phase + " left an untracked native engine");
+            require(!Files.exists(destination, LinkOption.NOFOLLOW_LINKS),
+                phase + " left a manifest, observations, comparison or private staging directory");
+            require(program.getModificationNumber() == modification, phase + " modified the native Program");
+            require(inputBefore.equals(sha256(input)) && modelBefore.equals(snapshots(root.resolve("reports"))) &&
+                listingBefore.equals(snapshots(listing)), phase + " modified frozen inputs");
+            JsonObject row = new JsonObject();
+            row.addProperty("phase", phase); row.addProperty("stageObserved", monitor.stageSeen);
+            row.addProperty("nativeAdmissionObserved", monitor.admitted);
+            row.addProperty("nativeAttemptReturned", monitor.nativeReturned);
+            row.addProperty("observedNativeProcesses", monitor.processes.size());
+            row.addProperty("failureClass", failure.getClass().getName());
+            row.addProperty("failureMessage", failure.getMessage());
+            row.addProperty("nativeProcessesExited", true); row.addProperty("outputRemoved", true);
+            row.addProperty("programUnchanged", true); row.addProperty("frozenInputsUnchanged", true);
+            rows.add(row);
+        }
+        JsonObject receipt = new JsonObject();
+        receipt.addProperty("kind", "authored-native-inferred-interface-lifecycle-controls-v1");
+        receipt.addProperty("fixtureOnly", true);
+        receipt.addProperty("deadlineInjection", "test-only monotonic start moved past fixed ceiling after real native attempt");
+        receipt.addProperty("authoritativeOracleEvidence", false);
+        receipt.addProperty("productionInterfacesAdmitted", false); receipt.addProperty("releaseEligible", false);
+        receipt.add("controls", rows);
+        Files.writeString(root.resolve("verified-lifecycle-controls.json"), receipt.toString() + "\n");
+    }
+
+    private static final class LifecycleMonitor extends TaskMonitorAdapter {
+        final Path destination;
+        final String phase;
+        boolean stageSeen, admitted, nativeReturned, triggered;
+        List<ProcessHandle> processes = List.of();
+        ExportInferredInterfacesV1 collector;
+        LifecycleMonitor(Path destination, String phase) { super(true); this.destination = destination; this.phase = phase; }
+        @Override public boolean isCancelled() {
+            if (!triggered && inMethod("ghidra.app.decompiler.DecompInterface", "decompileFunction")) {
+                observeStage();
+                processes = nativeProcesses();
+                require(stageSeen && !processes.isEmpty(), "native attempt was not admitted with staging and a live engine");
+                admitted = true;
+                if (phase.equals("admitted-cancellation")) { triggered = true; cancel(); }
+            }
+            return super.isCancelled();
+        }
+        @Override public void checkCancelled() throws ghidra.util.exception.CancelledException {
+            if (!triggered) {
+                observeStage();
+                if (stageSeen && phase.equals("staged-cancellation")) { triggered = true; cancel(); }
+                else if (admitted && phase.equals("post-native-deadline") &&
+                        inMethod("ExportInferredInterfacesV1", "inferred") &&
+                        !inMethod("ghidra.app.decompiler.DecompInterface", "decompileFunction")) {
+                    // inferred() checkpoints immediately after decompileFunction returns.
+                    nativeReturned = true;
+                    try {
+                        var started = ExportInferredInterfacesV1.class.getDeclaredField("started");
+                        started.setAccessible(true);
+                        started.setLong(collector, System.nanoTime() - java.util.concurrent.TimeUnit.SECONDS.toNanos(121));
+                    } catch (ReflectiveOperationException failure) { throw new AssertionError(failure); }
+                    triggered = true;
+                }
+            }
+            super.checkCancelled();
+        }
+        private void observeStage() {
+            if (!Files.isDirectory(destination, LinkOption.NOFOLLOW_LINKS)) return;
+            try (var entries = Files.list(destination)) {
+                stageSeen |= entries.anyMatch(path -> path.getFileName().toString().startsWith(".inferred-"));
+            } catch (java.io.IOException failure) { throw new AssertionError(failure); }
+        }
+    }
+    private static boolean inMethod(String owner, String method) {
+        return StackWalker.getInstance().walk(frames -> frames.anyMatch(frame ->
+            frame.getClassName().equals(owner) && frame.getMethodName().equals(method)));
+    }
+    private static List<ProcessHandle> nativeProcesses() {
+        try (var descendants = ProcessHandle.current().descendants()) {
+            return descendants.filter(process -> process.isAlive() && process.info().command()
+                .map(command -> Path.of(command).equals(nativeDecompiler)).orElse(false)).toList();
+        }
+    }
+    private static void awaitNativeExit(List<ProcessHandle> processes) throws Exception {
+        var exits = processes.stream().map(ProcessHandle::onExit).toArray(java.util.concurrent.CompletableFuture[]::new);
+        java.util.concurrent.CompletableFuture.allOf(exits).get(5, java.util.concurrent.TimeUnit.SECONDS);
+        require(processes.stream().noneMatch(ProcessHandle::isAlive), "native engine survived collector teardown");
     }
 
     private static void changingProgramCollection(ProgramDB program, Function function) throws Exception {
