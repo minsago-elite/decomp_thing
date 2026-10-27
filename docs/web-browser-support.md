@@ -42,6 +42,31 @@ be reported as satisfying their full acceptance criteria.
 - **Firefox does not wrap Tab back into the page** after the last stop (focus moves to browser
   chrome). This is browser behaviour, not an application defect; keyboard walks start from the
   route heading.
+- **WebKit native downloads bypassed Playwright API interception.** The hosted run at
+  `ecab8539a40715e3cade41e055f467ec0840710e`
+  ([run](https://github.com/minsago-elite/decomp_thing/actions/runs/40437211724)) failed with
+  `download.path: Unauthorized`: the fixture-only audit had no real server session. The audit
+  now serves the same bound API fixtures at an owned loopback HTTP boundary, including the
+  attachment, while streaming packaged documents/assets and their CSP unchanged from the JVM.
+  All engines use this boundary; the separate session smoke journey still uses the authenticated
+  server directly. Keyboard activation, native download completion and exact byte comparison
+  remain mandatory. This fixes the fixture transport, not production authentication. A new
+  successful Firefox/WebKit qualification is still required.
+
+### Populated audit evidence boundary
+
+Every fresh layout/contrast and focus navigation explicitly follows and pauses activity, reads
+exploration evidence and validation history/cases, or highlights source rows, as applicable to
+that route. Each preparation requires distinctive visible rows/tokens and successful fresh,
+identity-bound fixture reads; attempt identity alone is only shell readiness. The report retains
+these interactions separately. Route-data timings describe initial-route metadata, **not** the
+latency of explicit activity/evidence reads. The shared verdict requires the complete layout,
+contrast and focus matrices, highlighted token coverage, finite timing samples and rejects
+non-exempt local scrolling/clipping even when the document root does not overflow. Named
+keyboard-scrollable source/table regions remain the only two-dimensional exceptions.
+
+The older Firefox local smoke/audit result above predates these stronger population controls;
+it must not be used as qualification of the revised audit or as full #1791/#631 acceptance.
 
 ## Capability detection and fallbacks
 

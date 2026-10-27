@@ -6,6 +6,7 @@ import { dirname, isAbsolute, join, resolve } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { parseArgs } from 'node:util';
 import { assertAudit, auditFixtures, auditViewports, measureContrast, measureFocus, measurePage } from './packaged-browser-audit.mjs';
+import { openEngineAuditPage, serveEngineAuditFixtures } from './packaged-browser-engine-adapter.mjs';
 
 // Cross-engine packaged smoke and audit (#631). The DevTools-based check-packaged-web-browser.mjs
 // is Chromium-only; this runner drives Firefox, WebKit or Chromium through Playwright against the
@@ -107,22 +108,6 @@ async function context(options = {}) {
   return { context: created, record };
 }
 
-async function fulfilFixtures(target, fixtures, fulfilled, unmapped, origin) {
-  await target.route(`${origin}/nested/api/v1/**`, async (route) => {
-    const request = route.request();
-    const pathname = new URL(request.url()).pathname.slice('/nested/api/v1'.length);
-    const headers = await request.allHeaders();
-    const response = fixtures.respond(request.method(), pathname, headers.accept ?? '');
-    if (response.status === 404) unmapped.push(`${request.method()} ${pathname}`);
-    fulfilled.push({ method: request.method(), path: pathname, status: response.status,
-      ...(request.method() === 'POST' ? { idempotencyKey: headers['idempotency-key'] ?? null, ifMatch: headers['if-match'] ?? null,
-        csrf: headers['x-csrf-token'] === fixtures.csrfToken } : {}) });
-    await route.fulfill({ status: response.status, body: response.bytes ?? JSON.stringify(response.document),
-      headers: { 'Content-Type': response.contentType ?? 'application/json; charset=utf-8',
-        'X-Request-ID': response.document?.requestId ?? 'request_audit_download', 'Cache-Control': 'no-store' } });
-  });
-}
-
 /** Real server session: bootstrap link, cookie restore across reload, runtime identity and sign-out. */
 async function smoke(origin, manifest) {
   const { context: created, record } = await context();
@@ -154,28 +139,34 @@ async function smoke(origin, manifest) {
   return { record, result: { authenticated: true, fragmentRemoved: true, restoredAfterReload: true, runtimeBuild: manifest.buildId, signedOut: true, storageEntries: storage } };
 }
 
-async function audit(origin, manifest) {
+async function audit(packagedOrigin, manifest) {
   const fixtures = auditFixtures(repo, manifest.buildId);
-  const fulfilled = []; const unmapped = []; const records = [];
+  const fulfilled = []; const unmapped = [];
+  const fixtureServer = await serveEngineAuditFixtures(packagedOrigin, fixtures, fulfilled, unmapped);
+  try {
+    return await auditWithFixtures(fixtureServer.origin, fixtures, fulfilled, unmapped);
+  } finally {
+    await fixtureServer.close();
+  }
+}
+
+async function auditWithFixtures(origin, fixtures, fulfilled, unmapped) {
+  const records = []; const interactions = [];
   let highlightedTokens = 0; let keyboard = null;
   const populated = (page) => `document.querySelector('main h1') !== null && document.querySelector('main [aria-busy="true"]') === null
     && document.body.innerText.includes(${JSON.stringify(page.rendered)}) && !document.querySelector('main [role="alert"]')`;
-  // A function predicate: Playwright evaluates string predicates with eval(), which the enforced CSP blocks.
-  const open = async (target, page) => {
-    await target.goto(origin + page.path);
-    await target.waitForFunction((rendered) => document.querySelector('main h1') !== null && document.querySelector('main [aria-busy="true"]') === null
-      && document.body.innerText.includes(rendered) && !document.querySelector('main [role="alert"]'), page.rendered, { timeout: 30000 });
+  const open = async (target, page, context, prepare = true) => {
+    interactions.push(...await openEngineAuditPage(target, { origin, page, fulfilled, context, prepare }));
   };
   const layout = []; const contrast = []; const focus = [];
   for (const viewport of auditViewports) {
     const { context: created, record } = await context({ viewport: { width: viewport.width, height: viewport.height },
       deviceScaleFactor: viewport.deviceScaleFactor, ...(values.engine === 'firefox' ? {} : { isMobile: viewport.mobile }) });
     records.push(record);
-    await fulfilFixtures(created, fixtures, fulfilled, unmapped, origin);
     const target = await created.newPage();
     for (const page of fixtures.pages) {
       await target.emulateMedia({ colorScheme: 'light', reducedMotion: 'reduce' });
-      await open(target, page);
+      await open(target, page, viewport.name);
       await delay(100);
       for (const scheme of ['light', 'dark']) {
         await target.emulateMedia({ colorScheme: scheme, reducedMotion: 'reduce' });
@@ -189,7 +180,7 @@ async function audit(origin, manifest) {
       if (viewport.width === 1440) {
         for (const scheme of ['light', 'dark']) {
           await target.emulateMedia({ colorScheme: scheme, reducedMotion: 'reduce' });
-          await open(target, page);
+          await open(target, page, `focus ${scheme}`);
           const stops = [];
           for (const backward of [false, true]) {
             await target.evaluate(() => document.querySelector('main h1').focus());
@@ -219,7 +210,7 @@ async function audit(origin, manifest) {
       };
       keyboard = { steps: [] };
       const overview = fixtures.pages.find((page) => page.name === 'attempt overview');
-      await open(target, overview);
+      await open(target, overview, 'keyboard commands');
       for (const [mode, command, key, done] of [['retry', 'Retry as a new attempt', ' ', `Open new attempt ${fixtures.retriedRunId}`],
         ['running', 'Request cancellation', 'Enter', `Cancellation of attempt ${fixtures.runId} was recorded`]]) {
         fixtures.controls.mode = mode;
@@ -235,28 +226,25 @@ async function audit(origin, manifest) {
         assert.ok(sent[0].idempotencyKey && sent[0].ifMatch === `"${fixtures.runVersion}"` && sent[0].csrf, `${command} lost its identity-bound headers: ${JSON.stringify(sent[0])}`);
       }
       const source = fixtures.pages.find((page) => page.name === 'source file');
-      await open(target, source);
+      await open(target, source, 'keyboard download');
       keyboard.steps.push({ action: 'Download complete recorded input', tabs: await tabTo('Download complete recorded input') });
       const [download] = await Promise.all([target.waitForEvent('download'), target.keyboard.press('Enter')]);
       const saved = await fs.readFile(await download.path());
       assert.ok(saved.equals(fixtures.sourceBytes), 'Keyboard download bytes differ from the recorded input');
       keyboard.download = { suggestedFilename: download.suggestedFilename(), bytes: saved.length, matches: true };
-      await open(target, source);
-      await target.getByRole('button', { name: 'Highlight displayed rows locally' }).click();
-      await target.locator('.source-token').first().waitFor();
+      await open(target, source, 'worker/CSP qualification');
       highlightedTokens = await target.locator('.source-token').count();
     }
     await created.close();
   }
-  // Timing: cold loads in fresh contexts, then in-app route activations.
+  // Timing: initial-route metadata only; explicit-read population is recorded in interactions.
   const cold = []; const feedback = []; const data = [];
   for (let sample = 0; sample < 20; sample += 1) {
     const { context: created, record } = await context();
     records.push(record);
-    await fulfilFixtures(created, fixtures, fulfilled, unmapped, origin);
     const target = await created.newPage();
     const started = Date.now();
-    await open(target, fixtures.pages[0]);
+    await open(target, fixtures.pages[0], 'cold dashboard', false);
     cold.push(Date.now() - started);
     if (sample === 19) {
       const cycle = fixtures.pages.filter((page) => page.name !== 'upload');
@@ -284,11 +272,11 @@ async function audit(origin, manifest) {
     return { samples: list.length, median: at(0.5), p95: at(0.95) }; };
   const workerTargets = records.flatMap((record) => record.workers ?? []);
   const responses = records.flatMap((record) => record.responses);
-  const result = { fixtures: fixtures.pages.map(({ name, path }) => ({ name, path })), layout, contrast, focus, fulfilled, unmapped,
+  const result = { fixtures: fixtures.pages.map(({ name, path }) => ({ name, path })), layout, contrast, focus, fulfilled, unmapped, interactions,
     workers: { highlightedTokens,
       targets: workerTargets.map((worker) => ({ ...worker, responses: responses.filter((response) => response.url === worker.url) })) },
     keyboard, timing: { coldLoad: summary(cold), routeFeedback: summary(feedback), routeData: summary(data), raw: { cold, feedback, data } } };
-  return { result, records, responses };
+  return { result, records, responses, origin };
 }
 
 try {
@@ -301,11 +289,12 @@ try {
   report.smoke = smoked.result;
   const audited = await audit(origin, installation.manifest);
   report.audit = audited.result;
-  report.auditVerdict = assertAudit(audited.result, installation.manifest, audited.responses, origin);
+  report.auditOrigins = { packaged: origin, fixtures: audited.origin };
+  report.auditVerdict = assertAudit(audited.result, installation.manifest, audited.responses, audited.origin);
   const records = [smoked.record, ...audited.records];
   report.contentSecurityPolicy = {
     documents: records.flatMap((record) => record.documents).length,
-    missingPolicyDocuments: records.flatMap((record) => record.documents).filter((entry) => entry.url.startsWith(`${origin}/nested`) && !entry.url.startsWith(`${origin}/nested/api/`) && !entry.csp),
+    missingPolicyDocuments: records.flatMap((record) => record.documents).filter((entry) => [origin, audited.origin].some(base => entry.url.startsWith(`${base}/nested`) && !entry.url.startsWith(`${base}/nested/api/`)) && !entry.csp),
     // Fixture-fulfilled API responses (such as the attachment download) are not packaged documents.
     violations: records.flatMap((record) => record.csp), exceptions: records.flatMap((record) => record.exceptions),
   };

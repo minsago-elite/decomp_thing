@@ -65,6 +65,7 @@ jobs:
         run: |
           node scripts/test-packaged-browser-audit.mjs
           node scripts/test-browser-engine-input.mjs
+          node scripts/test-packaged-browser-engine-adapter.mjs
           node --check scripts/packaged-browser-engines.mjs
       - name: Verify bounded archival cleanup controls
         timeout-minutes: 1

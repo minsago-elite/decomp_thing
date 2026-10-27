@@ -69,6 +69,10 @@ jobs:
         run: |
           engines="$(node scripts/browser-engine-input.mjs "$ENGINES")"
           echo "ENGINES=$engines" >> "$GITHUB_ENV"
+      - name: Verify shared audit and cross-engine adapter controls
+        run: |
+          node scripts/test-packaged-browser-audit.mjs
+          node scripts/test-packaged-browser-engine-adapter.mjs
       - name: Install test-only Playwright and browsers with host dependencies
         env:
           PLAYWRIGHT_BROWSERS_PATH: ${{ runner.temp }}/pw-browsers
