@@ -173,6 +173,17 @@ class GhidraProgramModelExporterTest {
 
         val first = analyzer.analyze(binary, work)
         assertEquals(2, first.schemaVersion)
+        val twice = first.functions.single { it.name == "twice" }
+        assertTrue(twice.prototype.contains("int ") && !twice.prototype.endsWith("(void)"))
+        val numericPointerReferences = first.functions.flatMap { function ->
+            Regex("PTR_([0-9a-fA-F]{8,16})").findAll(function.decompiledC.orEmpty()).map {
+                it.groupValues[1].toULong(16)
+            }.toList()
+        }.distinct()
+        assertTrue(numericPointerReferences.isNotEmpty(), "fixture must exercise an indirect pointer reference")
+        numericPointerReferences.forEach { address ->
+            assertTrue(first.globals.any { it.address == address }, "missing exact indirect-pointer global at $address")
+        }
         val modelPath = work.resolve("reports/program_model.json")
         val firstModel = modelPath.readBytes()
         assertEquals(first, decompengine.oracle.structural.CanonicalProgramModelStreaming.readCanonical(firstModel).model)

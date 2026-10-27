@@ -878,6 +878,18 @@ public class ExportProgramModel extends GhidraScript {
 
     private GlobalEvidence globalAt(Address address) {
         Data data = currentProgram.getListing().getDataContaining(address);
+        Data component = data;
+        int depth = 0;
+        while (component != null && component.getNumComponents() > 0 && !component.isUnion() && depth++ < 32) {
+            long offset = address.subtract(component.getAddress());
+            if (offset < 0 || offset >= component.getLength()) break;
+            component = component.getComponentContaining((int) offset);
+        }
+        // Keep an exact primitive slot, never turn a byte inside a scalar or an
+        // ambiguous union member into an invented independent global.
+        if (component != null && component.getNumComponents() == 0 && component.getAddress().equals(address)) {
+            data = component;
+        }
         Address base = data == null ? address : data.getAddress();
         Symbol symbol = currentProgram.getSymbolTable().getPrimarySymbol(base);
         String name = symbol == null ? "DAT_" + base.toString() : symbol.getName();
@@ -922,7 +934,8 @@ public class ExportProgramModel extends GhidraScript {
                         strings.add(data.getValue().toString());
                         continue;
                     }
-                    if (reference.getReferenceType().isData() && currentProgram.getFunctionManager().getFunctionContaining(target) == null) {
+                    if ((reference.getReferenceType().isData() || reference.getReferenceType().isIndirect()) &&
+                        currentProgram.getFunctionManager().getFunctionContaining(target) == null) {
                         GlobalEvidence global = globalAt(target);
                         String globalRecord = renderGlobal(global);
                         if (planningEvidence == null) {
