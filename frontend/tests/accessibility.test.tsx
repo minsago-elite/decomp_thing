@@ -20,7 +20,8 @@ const fixture = (name: string) => JSON.parse(readFileSync(resolve(process.cwd(),
 const bootstrap = fixture('bootstrap').data as unknown as Bootstrap;
 const job = fixture('job-lossless');
 const jobId = job.data.jobId as string;
-const run = fixture('run-completed-unaccepted');
+// A recorded admission configuration keeps that overview section populated during the scan.
+const run = fixture('run-configured-agent');
 const runId = run.data.runId as string;
 const revisionId = 'revision_1';
 const selected = { jobId, runId, revisionId };
@@ -132,7 +133,8 @@ it('has no automated WCAG A/AA violations with display preferences open', async 
 });
 
 it('has no automated WCAG A/AA violations on the workflow launch form with settings and summary', async () => {
-  const launch = fixture('bootstrap-workflow-launch').data as unknown as Bootstrap;
+  // Harness options include a disabled built-in option with its prerequisite links.
+  const launch = fixture('bootstrap-harness-options').data as unknown as Bootstrap;
   const value = createBrowserSession({
     bootstrap: () => Promise.resolve({ ...launch, basePath: '/nested/', sessionExpiresAt: new Date(Date.now() + 60000).toISOString() }),
     exchange: vi.fn(), logout: () => Promise.resolve(),

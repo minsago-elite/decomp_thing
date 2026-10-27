@@ -1,8 +1,8 @@
 import { Fragment } from 'preact';
 import { useEffect, useMemo, useRef, useState } from 'preact/hooks';
 import { ApiClientError, withApiFailureReference } from '../api/client';
-import type { Capability, ExecutionLimits, Job, Run, Workflow, WorkflowLaunch as Launch, WorkflowStart } from '../api/generated';
-import { runPath } from '../app/paths';
+import type { Capability, ExecutionLimits, HarnessFacts, Job, Run, Workflow, WorkflowLaunch as Launch, WorkflowStart } from '../api/generated';
+import { appPath, runPath } from '../app/paths';
 import { launchCopy as copy } from '../copy/launch';
 import { jobCopy } from '../copy/job';
 import { usePrivateTransport } from '../session/PrivateTransport';
@@ -19,6 +19,16 @@ const workflowLabels = {
   validate: jobCopy.validation, repair: jobCopy.repair,
 } satisfies Record<Workflow, string>;
 const modeLabels = { tools: copy.modeTools, agent: copy.modeAgent, 'evidence-only': copy.modeEvidenceOnly } satisfies Record<Launch['mode'], string>;
+// Labels stay transport-neutral; the harness kind itself is shown as provenance in each option's facts.
+const harnessLabels = { acp: copy.modeAgent, 'legacy-openai': copy.modeLegacyAgent, builtin: copy.modeBuiltinAgent } satisfies Record<HarnessFacts['kind'], string>;
+const modeLabel = (launch: Launch) => launch.harness ? harnessLabels[launch.harness.kind] : modeLabels[launch.mode];
+/** Fixed actionable text per server reason code; server message text and configuration are never interpreted. */
+const requirements: Partial<Record<string, string>> = {
+  HARNESS_NOT_CONFIGURED: copy.requirementHarnessNotConfigured, HARNESS_CONFIGURATION_INVALID: copy.requirementHarnessInvalid,
+  HARNESS_UNSUPPORTED: copy.requirementHarnessUnsupported, AGENT_PREFLIGHT_FAILED: copy.requirementPreflightFailed,
+  SANDBOX_HELPER_MISSING: copy.requirementSandbox, GHIDRA_MISSING: copy.requirementGhidra,
+  PROBE_TIMEOUT: copy.requirementUnknown, PROBE_FAILED: copy.requirementUnknown, PREREQUISITES_UNKNOWN: copy.requirementUnknown,
+};
 const toolLabels = {
   sandbox: copy.toolSandbox, ghidra: copy.toolGhidra, 'agent-harness': copy.toolAgentHarness,
   'c-toolchain': copy.toolCToolchain, angr: copy.toolAngr,
@@ -106,6 +116,36 @@ function useRevisions(basePath: string, job: Job, needed: boolean): {
   return { ...current, retry: () => { setAttempt(value => value + 1); } };
 }
 
+function HarnessFactList({ harness }: { harness: HarnessFacts }) {
+  return <>
+    <p>{message(copy.harnessIdentity, { kind: <code>{harness.kind}</code>,
+      implementation: harness.implementationId === null ? copy.harnessImplementationUnresolved : <code>{harness.implementationId}</code> })}</p>
+    {harness.protocolVersion !== null && <p>{textMessage(copy.harnessProtocol, { version: harness.protocolVersion })}</p>}
+    <p>{harness.operations.length === 0 ? copy.harnessNoOperations
+      : textMessage(copy.harnessOperations, { operations: harness.operations.map(workflow => workflowLabels[workflow]).join(', ') })}</p>
+    <p>{harness.deprecated ? copy.harnessDeprecated : copy.harnessCurrent}</p>
+    <p>{copy.harnessNeverSubstituted}</p>
+  </>;
+}
+
+/** The actionable requirement behind an unavailable option, with where an operator acts on it. */
+function Requirement({ option, basePath }: { option: LaunchOption; basePath: string }) {
+  if (option.state === 'supported' || option.reasonCode === null) return null;
+  const workflow = option.workflows[0]!;
+  if (option.reasonCode === 'BUILTIN_HARNESS_NOT_INTEGRATED') {
+    // Literal hrefs keep the build's reviewed navigation exception scoped to these anchor props,
+    // not reusable URL constants that could also reach fetch, beacon or resource-loading sinks.
+    const ownerLabel = textMessage(copy.requirementBuiltinWorkflow, { workflow: workflowLabels[workflow] });
+    return <p>{textMessage(copy.requirementHeading, { text: textMessage(copy.requirementBuiltin, { workflow: workflowLabels[workflow] }) })}{' '}
+      <a href="https://github.com/minsago-elite/decomp_thing/issues/79" rel="noreferrer">{copy.requirementBuiltinTracker}</a>
+      {workflow === 'reconstruct' && <>{' '}<a href="https://github.com/minsago-elite/decomp_thing/issues/76" rel="noreferrer">{ownerLabel}</a></>}
+      {workflow === 'repair' && <>{' '}<a href="https://github.com/minsago-elite/decomp_thing/issues/77" rel="noreferrer">{ownerLabel}</a></>}</p>;
+  }
+  const text = requirements[option.reasonCode];
+  return text === undefined ? null
+    : <p>{textMessage(copy.requirementHeading, { text })} <a href={appPath(basePath, '/runtime')}>{copy.openRuntime}</a></p>;
+}
+
 function OptionFacts({ option }: { option: LaunchOption }) {
   const { launch } = option;
   return <>
@@ -114,6 +154,8 @@ function OptionFacts({ option }: { option: LaunchOption }) {
       ? textMessage(copy.contactsAgent, { version: option.agentContractVersion ?? '?' })
       : copy.doesNotContactAgent}</p>
     {launch.requiredTools.length > 0 && <p>{textMessage(copy.requiredTools, { tools: launch.requiredTools.map(tool => toolLabels[tool]).join(', ') })}</p>}
+    {launch.harness ? <HarnessFactList harness={launch.harness} />
+      : launch.contactsAgent && <p>{copy.harnessFactsNotReported}</p>}
     {launch.mode === 'evidence-only' && <p>{copy.evidenceOnlyLimitations}</p>}
   </>;
 }
@@ -205,12 +247,13 @@ export function WorkflowLaunch({ job, runtime, basePath, session, onRefresh, onS
           return <div class="launch-option" key={option.id}>
             <input type="radio" name="workflow-option" id={id} value={option.id} disabled={!ready}
               checked={selected?.id === option.id} aria-describedby={`${id}-facts`} onChange={() => { choose(option); }} />
-            <label for={id}>{textMessage(copy.optionLabel, { workflow: workflowLabels[option.workflows[0]!], mode: modeLabels[option.launch.mode] })}</label>
+            <label for={id}>{textMessage(copy.optionLabel, { workflow: workflowLabels[option.workflows[0]!], mode: modeLabel(option.launch) })}</label>
             <div id={`${id}-facts`} class="launch-facts">
               <p>{message(copy.optionState, { state: <code>{option.state}</code> })}</p>
               {ready && option.state !== 'supported' && <p>{copy.checkedAtStart}</p>}
               {!ready && <p>{option.message ? textMessage(copy.optionUnavailable, { reason: option.message }) : copy.optionUnavailableWithoutReason}
                 {option.reasonCode && <> <code>{option.reasonCode}</code></>}</p>}
+              <Requirement option={option} basePath={basePath} />
               <OptionFacts option={option} />
             </div>
           </div>;
@@ -258,6 +301,8 @@ export function WorkflowLaunch({ job, runtime, basePath, session, onRefresh, onS
           <dt>{copy.summaryWorkflow}</dt><dd><code>{body.workflow}</code></dd>
           <dt>{copy.summaryOption}</dt><dd><code>{selected?.id}</code></dd>
           <dt>{copy.summaryHarness}</dt><dd>{body.harnessCapabilityId ? <code>{body.harnessCapabilityId}</code> : copy.summaryNoHarness}</dd>
+          {selected?.launch.harness && <><dt>{copy.summaryHarnessImplementation}</dt><dd>{textMessage(copy.summaryHarnessResolvedAtStart, {
+            kind: selected.launch.harness.kind, implementation: selected.launch.harness.implementationId ?? copy.harnessImplementationUnresolved })}</dd></>}
           <dt>{copy.summaryInput}</dt><dd>{body.inputRevisionId ? <code>{body.inputRevisionId}</code> : copy.inputUploaded}</dd>
           <dt>{copy.summaryLimits}</dt><dd>{textMessage(copy.summaryLimitValues, { wall: body.limits.wallClockMs, idle: body.limits.idleMs,
             output: body.limits.maxOutputBytes, tools: body.limits.maxToolCalls })}</dd>

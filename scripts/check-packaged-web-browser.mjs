@@ -851,8 +851,10 @@ try {
     await ready(authenticated, `document.querySelector('h1')?.textContent === 'Runtime status' && document.querySelector('#server-runtime-title')?.textContent === 'Connected server'`, 'authenticated Runtime');
     assert.equal((await evaluate(authenticated, 'window.__sessionTestRequests')).length, firstRequests.length,
       'Opening Runtime issued a probe or another bootstrap request');
-    // The packaged environment configures no agent: agent options report that reason, unimplemented workflows say so.
-    assert.ok(await evaluate(authenticated, `(() => { const text = document.body.innerText; return text.includes('workflow-reconstruct-agent: unavailable')
+    // The packaged environment configures no agent: agent options report that reason, unimplemented workflows say so,
+    // and the built-in harness is reported as unsupported rather than substituted for the unconfigured one.
+    assert.ok(await evaluate(authenticated, `(() => { const text = document.body.innerText; return text.includes('workflow-reconstruct-agent-acp: unavailable')
+      && text.includes('workflow-reconstruct-agent-builtin: unsupported') && text.includes('BUILTIN_HARNESS_NOT_INTEGRATED')
       && text.includes('HARNESS_NOT_CONFIGURED') && text.includes('workflow-build: unsupported') && text.includes('WORKFLOW_NOT_IMPLEMENTED')
       && !text.includes('Workflow actions are unavailable in this preview.') && text.includes('33554432 bytes'); })()`));
     const scheduler = await evaluate(authenticated, `(() => {

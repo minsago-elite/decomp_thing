@@ -14,6 +14,7 @@ import { ProgressPin } from '../jobs/ProgressPin';
 import { AttemptControls } from '../jobs/AttemptControls';
 import { ExplorationEvidence } from '../jobs/ExplorationEvidence';
 import { RecordedValidationEvidence } from '../jobs/RecordedValidationEvidence';
+import { RecordedConfiguration } from '../jobs/RecordedConfiguration';
 import type { ValidationNavigation } from '../jobs/validationNavigation';
 import { useSession } from '../session/useSession';
 import { receive } from '../shared/receiptTime';
@@ -86,6 +87,7 @@ function Details({ jobId, runId, basePath, session, view, navigation }: {
       <p>{copy.completionAloneDoesNotEstablishAcceptedReconstructionAcceptanceBelongsTo}</p>
       <p>{copy.recordedHarnessBoundary}</p>
       {run.previousRunId && <a href={runPath(basePath, jobId, run.previousRunId)}>{copy.openPreviousAttempt}</a>}
+      <RecordedConfiguration run={run} />
       {run.state === 'queued' && <QueuePosition key={`queue/${jobId}/${runId}/${run.version}`} jobId={jobId} runId={runId} basePath={basePath} />}
       <h2>{copy.recordedLimits}</h2>
       <p>{displayMessage(outcomeCopy.limitsSource, { time: <time dateTime={run.createdAt} title={run.createdAt}>{formatExactTimestamp(run.createdAt)}</time> })}</p>

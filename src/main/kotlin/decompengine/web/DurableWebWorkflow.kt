@@ -80,16 +80,31 @@ enum class WebWorkflowRequirement(val wireName: String) {
 
 enum class DurableWebWorkflowMode(val wireName: String) { TOOLS("tools"), AGENT("agent"), EVIDENCE_ONLY("evidence-only") }
 
+/**
+ * One agent-execution boundary a workflow option can name. [selector] is the exact data-only value the
+ * application-owned harness factory accepts; the built-in harness has none because no workflow runs it yet.
+ */
+enum class WebAgentHarness(val wireName: String, val capabilityId: String, val selector: String?, val deprecated: Boolean) {
+    ACP("acp", "agent-acp", "acp", false),
+    LEGACY_OPENAI("legacy-openai", "agent-legacy-openai", "legacy-openai", true),
+    BUILTIN("builtin", "agent-builtin", null, false),
+}
+
 /** Facts the launch form shows; they describe the adapter, they never authorize admission. */
 data class DurableWebWorkflowLaunch(
     val mode: DurableWebWorkflowMode,
     val executesBinary: Boolean,
     val contactsAgent: Boolean,
     val requiredTools: List<String>,
+    /** The single harness an agent option uses; never another one as a fallback. */
+    val harness: WebAgentHarness? = null,
 ) {
     init {
         require(contactsAgent == (mode == DurableWebWorkflowMode.AGENT)) { "agent contact must match the declared mode" }
         require(requiredTools.size <= 8 && requiredTools.distinct() == requiredTools && requiredTools.all { it in LAUNCH_TOOLS })
+        require((harness != null) == contactsAgent && harness?.selector != null == contactsAgent) {
+            "an agent option names exactly one executable harness"
+        }
     }
     companion object { val LAUNCH_TOOLS = setOf("sandbox", "ghidra", "agent-harness", "c-toolchain", "angr") }
 }

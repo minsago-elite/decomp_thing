@@ -24,7 +24,8 @@
         "idleMs": "15000",
         "maxOutputBytes": "1048576",
         "maxToolCalls": "16"
-      }
+      },
+      "configuration": null
     },
     "throughCursor": "cursor_example_1",
     "throughSequence": "1",

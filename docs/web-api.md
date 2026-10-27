@@ -487,8 +487,10 @@ the view assigns it no unlimited or unsupported meaning. Reports without an
 assigned workflow stay in the general capability section.
 
 Workflow capabilities name one launchable option each (`workflow-explore-tools`,
-`workflow-reconstruct-agent`, `workflow-reconstruct-evidence-only`,
-`workflow-repair-agent`). Their `launch` object carries the server's launch
+`workflow-reconstruct-agent-acp`, `workflow-reconstruct-evidence-only`,
+`workflow-repair-agent-acp`). An agent option's identity ends in the single
+harness it uses, so options for different harnesses of one workflow never share an
+identity. Their `launch` object carries the server's launch
 facts: the `harnessCapabilityId` a start must submit, the execution `mode`
 (`tools`, `agent` or `evidence-only`), whether the option executes the uploaded
 binary or contacts the configured agent, its required tools, its input-revision
@@ -530,8 +532,63 @@ rechecks registration, limits, input and readiness.
 
 These are report-level observations, separate from an individual attempt's
 recorded limits and job-specific admission. Displaying them performs no new
-request, preflight, provider selection or workflow action. Implementation-version,
-deprecation, selection and full workflow qualification requirements remain open.
+request, preflight, provider selection or workflow action.
+
+### Harness options
+
+New servers name exactly one harness for each agent option in `launch.harness`
+(null for non-agent options). This additive v1 response field is optional on the
+wire; omission by an older server means provenance was not reported, not that
+another harness may be inferred. When present, it describes its `kind`, the `implementationId` and `protocolVersion` the
+harness factory resolved from the operator's configuration (null when that
+configuration did not resolve), whether it is `deprecated`, and the `operations`
+(workflows) this server registers for it. Harnesses are probed independently with
+their exact factory selector; no configuration value, path, credential or digest
+appears in bootstrap.
+
+| Harness | Option identity suffix | Reported when | Notes |
+| --- | --- | --- | --- |
+| `acp` | `-agent-acp` | Always (ACP is the default) | `unavailable` with `HARNESS_NOT_CONFIGURED`, `HARNESS_CONFIGURATION_INVALID`, `HARNESS_UNSUPPORTED` or `AGENT_PREFLIGHT_FAILED` until configured and resolvable |
+| `legacy-openai` | `-agent-legacy-openai` | Only when the operator explicitly selected `ACP_HARNESS=legacy-openai` | Deprecated; records a non-secret settings digest but no ACP protocol or SDK provenance |
+| `builtin` | `-agent-builtin` | Always, beside each ACP agent option | `unsupported` with `BUILTIN_HARNESS_NOT_INTEGRATED`: no workflow runs the built-in harness yet (#79, #76, #77), so it has no registration and is never admitted |
+
+The `harnessCapabilityId` of an agent option is always `agent-<kind>`. Admission
+looks up the exact (workflow, harness) registration: an unknown, unnamed or
+built-in harness is refused as `HARNESS_UNAVAILABLE`, and an unavailable harness is
+refused with its prerequisite, never served by another configured harness. The
+start form shows each option's identity, operations, deprecation status and, for
+an unavailable option, a fixed actionable requirement keyed by its reason code
+with a link to the runtime page (or, for the built-in harness, to its owning
+issues). The UI calls the harness the configured agent; the kind is shown only as
+provenance.
+
+### Recorded attempt configuration
+
+Every newly admitted attempt records `run.configuration`, the configuration the
+server validated: the option identity, mode, binary execution and agent contact,
+required tools, input policy, whether limits were adjustable, the reconstruction
+profile (when known), and for an agent option the harness provenance resolved at
+admission (`kind`, `implementationId`, `agentContractVersion`, `protocolVersion`,
+`sdkVersion`, the factory's canonical `configurationSha256` and `deprecated`). It is
+written atomically with the attempt and its start receipt and is never rewritten: a
+later configuration change is recorded only on a new attempt, and a keyed replay
+returns the original record. It is not part of the caller's start intent. When work
+begins, the adapter resolves the harness again and refuses the attempt (`failed`,
+`REFUSED`) before any agent work if the resolution differs from the record.
+Attempts recorded before this field existed report `configuration: null` from new
+servers. This additive v1 response field may also be omitted by older servers;
+consumers treat both cases as not recorded, never as an evidence-only configuration.
+Present records retain the full schema and harness-identity validation.
+
+For the deprecated legacy adapter, the versioned canonical digest binds the effective
+chat-completions endpoint, exact model and normalized reasoning effort. It excludes
+`API_KEY` entirely (including hashes of its value); credential rotation is not a
+configuration or account-identity claim. `BASE_URL` must be a non-secret routing URL
+without user-info, query or fragment; the factory refuses those components rather
+than hashing potential embedded credentials or silently omitting execution settings.
+Keep credentials only in `API_KEY`, never in the endpoint path or model. New legacy
+selections always have a digest; historical null-digest records remain readable and
+are never rewritten. Neither kind of record qualifies a real provider invocation.
 
 Runtime information uses allowlisted implementation/version/platform names and effective limit
 values. It excludes absolute installations/worktrees, environment values, credential-bearing
@@ -1054,7 +1111,16 @@ input (503 `CAPABILITY_UNAVAILABLE`, 422) uses a fresh key after review. Double 
 is ignored while a request is pending. A busy job (`queued` or `running`) disables the
 form and links its active attempt. A successful answer must name the same job and workflow;
 the form then opens the attempt, whose overview shows the recorded workflow, harness
-capability, input revision and limits. The form never retries automatically.
+capability, input revision and limits, and its recorded configuration (see "Recorded
+attempt configuration"). The form never retries automatically.
+
+Agent options also show their harness facts: the harness kind as provenance, the
+resolved implementation identity and protocol version, the operations this server runs
+with it and whether it is current or deprecated. An unavailable option states one fixed
+actionable requirement for its reason code and links the runtime page; the built-in
+harness links its owning issues instead. Server message text, configuration values,
+paths and credentials are never interpreted or shown. The summary names the harness
+implementation that will be recorded.
 
 ## SPA recorded source navigation
 

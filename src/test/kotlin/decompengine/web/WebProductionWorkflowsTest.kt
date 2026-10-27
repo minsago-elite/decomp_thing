@@ -130,7 +130,7 @@ class WebProductionWorkflowsTest {
             }
             writeSourceTree(reports.resolve("source-tree"), "base")
         }
-        val agent = ReconstructWorkflowAdapter(engines, FAST, WebReconstructionMode.AGENT, "agent-acp", emptyList())
+        val agent = ReconstructWorkflowAdapter(engines, FAST, WebReconstructionMode.AGENT, WebAgentHarness.ACP, emptyList())
         val completed = assertIs<DurableWebWorkflowOutcome.Completed>(agent.execute(context(root, root.resolve("counted"), WebWorkflowDefaults.RECONSTRUCT_AGENT)))
         assertEquals(5uL, completed.usage?.toolCalls); assertEquals(7uL, completed.usage?.inputTokens)
         assertLimitExhausted(agent.execute(context(root, root.resolve("bounded"), WebWorkflowDefaults.RECONSTRUCT_AGENT.copy(maxToolCalls = 4uL))))
@@ -210,7 +210,7 @@ class WebProductionWorkflowsTest {
     @Test
     fun `repair stays unavailable until the production repair validator is qualified`() = withRoot { root ->
         assertFalse(decompengine.project.LinuxGeneratedCRepairValidationBoundary.productionQualified())
-        assertNull(RepairWorkflowAdapter(FakeEngines(), FAST, "agent-acp").publication,
+        assertNull(RepairWorkflowAdapter(FakeEngines(), FAST, WebAgentHarness.ACP).publication,
             "production registered an unqualified acceptance publisher")
         val ready = WebPrerequisite.AVAILABLE
         val prerequisites = WebWorkflowPrerequisites(ready, ready, ready, WebHarnessReadinessProjector.probeEnvironment(emptyMap(),
@@ -218,9 +218,9 @@ class WebProductionWorkflowsTest {
         assertEquals("REPAIR_VALIDATOR_UNQUALIFIED", prerequisites.repairValidator.reasonCode)
         val reported = webWorkflowCapabilities(adapters(FakeEngines()), WebHarnessReadiness("supported", null, "ready", prerequisites = prerequisites))
             .associateBy { it.getValue("id").jsonPrimitive.content }
-        assertEquals("unavailable", reported.getValue("workflow-repair-agent").getValue("state").jsonPrimitive.content)
-        assertEquals("REPAIR_VALIDATOR_UNQUALIFIED", reported.getValue("workflow-repair-agent").getValue("reasonCode").jsonPrimitive.content)
-        assertEquals("supported", reported.getValue("workflow-reconstruct-agent").getValue("state").jsonPrimitive.content)
+        assertEquals("unavailable", reported.getValue("workflow-repair-agent-acp").getValue("state").jsonPrimitive.content)
+        assertEquals("REPAIR_VALIDATOR_UNQUALIFIED", reported.getValue("workflow-repair-agent-acp").getValue("reasonCode").jsonPrimitive.content)
+        assertEquals("supported", reported.getValue("workflow-reconstruct-agent-acp").getValue("state").jsonPrimitive.content)
         val store = JobStore(root.resolve("jobs")); val job = store.createFromUpload("validator.elf", elfFixture())
         val engines = FakeEngines()
         service(store, adapters(engines)).use { service ->
@@ -247,7 +247,7 @@ class WebProductionWorkflowsTest {
             reported.getValue(id)["reasonCode"]?.takeUnless { it == JsonNull }?.jsonPrimitive?.content
         assertEquals("unknown" to "SANDBOX_HELPER_UNCHECKED", state("workflow-explore-tools"))
         assertEquals("supported" to null, state("workflow-reconstruct-evidence-only"))
-        assertEquals("unavailable" to "HARNESS_NOT_CONFIGURED", state("workflow-reconstruct-agent"))
+        assertEquals("unavailable" to "HARNESS_NOT_CONFIGURED", state("workflow-reconstruct-agent-acp"))
         val store = JobStore(root.resolve("jobs")); val job = store.createFromUpload("passive.elf", elfFixture())
         val engines = FakeEngines()
         service(store, adapters(engines)).use { service ->
@@ -321,13 +321,13 @@ class WebProductionWorkflowsTest {
             }
             writeSourceTree(reports.resolve("source-tree"), "base")
         }
-        val agent = ReconstructWorkflowAdapter(engines, FAST, WebReconstructionMode.AGENT, "agent-acp", emptyList())
+        val agent = ReconstructWorkflowAdapter(engines, FAST, WebReconstructionMode.AGENT, WebAgentHarness.ACP, emptyList())
         val exhausted = agent.execute(context(root, root.resolve("tools"), WebWorkflowDefaults.RECONSTRUCT_AGENT.copy(maxToolCalls = 2uL)))
         assertLimitExhausted(exhausted)
         assertEquals(baseCandidate(), (exhausted as DurableWebWorkflowOutcome.Failed).candidate, "candidate output is retained, not accepted")
         val completed = assertIs<DurableWebWorkflowOutcome.Completed>(agent.execute(context(root, root.resolve("agent"), WebWorkflowDefaults.RECONSTRUCT_AGENT)))
         assertEquals(baseCandidate(), completed.candidate); assertEquals(3uL, completed.usage?.toolCalls)
-        val evidence = ReconstructWorkflowAdapter(engines, FAST, WebReconstructionMode.EVIDENCE_ONLY, EVIDENCE_ONLY_CAPABILITY, emptyList())
+        val evidence = ReconstructWorkflowAdapter(engines, FAST, WebReconstructionMode.EVIDENCE_ONLY, null, emptyList())
         assertFalse(checkNotNull(evidence.launch).contactsAgent); assertTrue(checkNotNull(agent.launch).contactsAgent)
         engines.reconstructBody = { reports, mode, _ -> modes += mode; Files.createDirectories(reports) }
         val missing = assertIs<DurableWebWorkflowOutcome.Completed>(evidence.execute(context(root, root.resolve("evidence"), WebWorkflowDefaults.RECONSTRUCT_EVIDENCE)))
@@ -378,24 +378,29 @@ class WebProductionWorkflowsTest {
             prerequisites = WebWorkflowPrerequisites(WebPrerequisite(false, "HARNESS_NOT_CONFIGURED", "No agent harness is configured."),
                 WebPrerequisite.AVAILABLE, WebPrerequisite(false, "GHIDRA_MISSING", "The bundled Ghidra distribution is not present.")))
         val reported = webWorkflowCapabilities(adapters, readiness).associateBy { it.getValue("id").jsonPrimitive.content }
-        assertEquals(setOf("workflow-explore-tools", "workflow-reconstruct-agent", "workflow-reconstruct-evidence-only",
-            "workflow-repair-agent", "workflow-build", "workflow-validate"), reported.keys)
+        assertEquals(setOf("workflow-explore-tools", "workflow-reconstruct-agent-acp", "workflow-reconstruct-agent-builtin",
+            "workflow-reconstruct-evidence-only", "workflow-repair-agent-acp", "workflow-repair-agent-builtin", "workflow-build",
+            "workflow-validate"), reported.keys)
         fun state(id: String) = reported.getValue(id).getValue("state").jsonPrimitive.content to
             (reported.getValue(id)["reasonCode"]?.takeUnless { it == JsonNull }?.jsonPrimitive?.content)
         assertEquals("supported" to null, state("workflow-explore-tools"))
-        assertEquals("unavailable" to "HARNESS_NOT_CONFIGURED", state("workflow-reconstruct-agent"))
+        assertEquals("unavailable" to "HARNESS_NOT_CONFIGURED", state("workflow-reconstruct-agent-acp"))
         assertEquals("unavailable" to "GHIDRA_MISSING", state("workflow-reconstruct-evidence-only"))
-        assertEquals("unavailable" to "HARNESS_NOT_CONFIGURED", state("workflow-repair-agent"))
+        assertEquals("unavailable" to "HARNESS_NOT_CONFIGURED", state("workflow-repair-agent-acp"))
+        assertEquals("unsupported" to "BUILTIN_HARNESS_NOT_INTEGRATED", state("workflow-repair-agent-builtin"))
         assertEquals("unsupported" to "WORKFLOW_NOT_IMPLEMENTED", state("workflow-build"))
-        val repair = reported.getValue("workflow-repair-agent").getValue("launch").jsonObject
+        val repair = reported.getValue("workflow-repair-agent-acp").getValue("launch").jsonObject
         assertEquals("recorded-required", repair.getValue("input").jsonPrimitive.content)
         assertEquals("false", repair.getValue("limitsAdjustable").jsonPrimitive.content)
-        assertEquals("1", reported.getValue("workflow-repair-agent").getValue("agentContractVersion").jsonPrimitive.content)
+        assertEquals("1", reported.getValue("workflow-repair-agent-acp").getValue("agentContractVersion").jsonPrimitive.content)
+        assertEquals(JsonNull, reported.getValue("workflow-explore-tools").getValue("launch").jsonObject.getValue("harness"))
         assertEquals(JsonNull, reported.getValue("workflow-reconstruct-evidence-only").getValue("agentContractVersion"))
         assertEquals("true", reported.getValue("workflow-explore-tools").getValue("launch").jsonObject.getValue("executesBinary").jsonPrimitive.content)
         assertEquals(JsonNull, reported.getValue("workflow-build").getValue("launch"))
         val unknown = webWorkflowCapabilities(adapters, WebHarnessReadiness("unavailable", "PROBE_TIMEOUT", "timed out"))
-        assertTrue(unknown.filter { it["launch"] != JsonNull }.all { it.getValue("state").jsonPrimitive.content == "unknown" })
+        // Unknown readiness never hides that the built-in harness is unsupported regardless of any probe.
+        assertEquals(mapOf("unknown" to 4, "unsupported" to 2), unknown.filter { it["launch"] != JsonNull }
+            .groupingBy { it.getValue("state").jsonPrimitive.content }.eachCount())
         val text = reported.values.joinToString()
         assertFalse(text.contains("/tmp") || text.contains(Path.of("").toAbsolutePath().toString()), "a capability exposed a host path")
         // Inert test registrations keep the general preview refusal rather than claiming production launch facts.
@@ -500,10 +505,10 @@ class WebProductionWorkflowsTest {
         // An agent-contacting option: its harness choice decides which agent receives the job's evidence.
         val original = object : DurableWebWorkflowAdapter {
             override val workflow = WorkflowKind.RECONSTRUCT
-            override val harnessCapabilityId = "recorded-harness"
+            override val harnessCapabilityId = "agent-legacy-openai"
             override val limits = WebWorkflowDefaults.RECONSTRUCT_AGENT
             override val launch = DurableWebWorkflowLaunch(DurableWebWorkflowMode.AGENT, executesBinary = false,
-                contactsAgent = true, requiredTools = listOf("agent-harness"))
+                contactsAgent = true, requiredTools = listOf("agent-harness"), harness = WebAgentHarness.LEGACY_OPENAI)
             override fun execute(context: DurableWebWorkflowContext): DurableWebWorkflowOutcome {
                 executions++; return DurableWebWorkflowOutcome.Failed()
             }
@@ -514,7 +519,10 @@ class WebProductionWorkflowsTest {
             failed = service.requestDurableStart(job.id, version(service, job.id), NewWorkflowAttempt(original.workflow,
                 original.limits, harnessCapabilityId = original.harnessCapabilityId), "recorded_harness_start").attempt
         }
-        val replacement = object : DurableWebWorkflowAdapter by original { override val harnessCapabilityId = "different-harness" }
+        val replacement = object : DurableWebWorkflowAdapter by original {
+            override val harnessCapabilityId = "agent-acp"
+            override val launch = original.launch.copy(harness = WebAgentHarness.ACP)
+        }
         service(store, listOf(replacement)).use { service ->
             service.initializeExistingStorage()
             assertEquals("WORKFLOW_UNAVAILABLE", service.attemptControls(job.id, failed.runId).retryReason)
@@ -534,13 +542,63 @@ class WebProductionWorkflowsTest {
         assertEquals("SANDBOX_HELPER_MISSING", passive.reasonCode); assertTrue(passive.prerequisites!!.agent.available)
         val failed = passive.withAgentInspection(WebAgentPreflightSnapshot("failed", "inspection_1", WebAgentPreflight.REASON_FAILED,
             passive.configurationIdentity))
-        assertEquals(WebAgentPreflight.REASON_FAILED, failed.prerequisites!!.agent.reasonCode)
-        val reported = webWorkflowCapabilities(adapters(FakeEngines()), failed).associateBy { it.getValue("id").jsonPrimitive.content }
-        assertEquals("unavailable", reported.getValue("workflow-reconstruct-agent").getValue("state").jsonPrimitive.content)
-        assertEquals(WebAgentPreflight.REASON_FAILED, reported.getValue("workflow-reconstruct-agent").getValue("reasonCode").jsonPrimitive.content)
+        val failedFacts = assertNotNull(failed.prerequisites)
+        assertEquals(WebAgentPreflight.REASON_FAILED, failedFacts.agent.reasonCode)
+        assertEquals(WebAgentPreflight.REASON_FAILED, failedFacts.harness(WebAgentHarness.LEGACY_OPENAI).reasonCode)
+        assertEquals(passive.prerequisites!!.harnesses.getValue(WebAgentHarness.ACP), failedFacts.harnesses.getValue(WebAgentHarness.ACP))
+        assertEquals(passive.prerequisites!!.sandbox, failedFacts.sandbox)
+        assertEquals(passive.prerequisites!!.ghidra, failedFacts.ghidra)
+        val engines = FakeEngines()
+        val options = adapters(engines) + ReconstructWorkflowAdapter(engines, FAST, WebReconstructionMode.AGENT,
+            WebAgentHarness.LEGACY_OPENAI, emptyList())
+        val reported = webWorkflowCapabilities(options, failed).associateBy { it.getValue("id").jsonPrimitive.content }
+        assertEquals("unavailable", reported.getValue("workflow-reconstruct-agent-legacy-openai").getValue("state").jsonPrimitive.content)
+        assertEquals(WebAgentPreflight.REASON_FAILED, reported.getValue("workflow-reconstruct-agent-legacy-openai").getValue("reasonCode").jsonPrimitive.content)
+        assertEquals("HARNESS_NOT_CONFIGURED", reported.getValue("workflow-reconstruct-agent-acp").getValue("reasonCode").jsonPrimitive.content)
         // An inspection of a different configuration says nothing about the current agent.
         val foreign = passive.withAgentInspection(WebAgentPreflightSnapshot("failed", "inspection_2", WebAgentPreflight.REASON_FAILED, "other_configuration"))
-        assertTrue(foreign.prerequisites!!.agent.available)
+        assertEquals(passive.prerequisites, foreign.prerequisites)
+
+        val store = JobStore(root.resolve("jobs")); val job = store.createFromUpload("inspection.elf", elfFixture())
+        service(store, options).use { service ->
+            service.initializeExistingStorage()
+            val request = NewWorkflowAttempt(WorkflowKind.RECONSTRUCT, WebWorkflowDefaults.RECONSTRUCT_AGENT,
+                harnessCapabilityId = "agent-legacy-openai")
+            engines.reconstructBody = { _, _, _ -> error("inert agent failure") }
+            // Reconstruction has no sandbox requirement: this start is admitted before inspection fails.
+            val attempt = service.requestDurableStart(job.id, version(service, job.id), request,
+                "before_failed_inspection", passive.prerequisites).attempt
+            assertEquals(WorkflowRunState.FAILED, attempt.state); assertEquals(1, engines.calls.get())
+            val before = root.resolve("jobs").resolve(job.id).resolve("workflow-state.json").readBytes()
+            assertCode("WORKFLOW_PREREQUISITE_UNAVAILABLE") {
+                service.requestDurableStart(job.id, version(service, job.id), request, "after_failed_inspection", failedFacts)
+            }
+            assertCode("WORKFLOW_PREREQUISITE_UNAVAILABLE") {
+                service.requestDurableRecovery(job.id, attempt.runId, attempt.version, WorkflowRecoveryMode.RETRY, null,
+                    "retry_failed_inspection", failedFacts)
+            }
+            assertEquals(1, engines.calls.get(), "refused start/retry executed an agent")
+            assertContentEquals(before, root.resolve("jobs").resolve(job.id).resolve("workflow-state.json").readBytes())
+        }
+    }
+
+    @Test
+    fun `failed inspection preserves independently available nonselected harness facts`() {
+        for ((state, reason) in listOf("supported" to null, "unavailable" to "SANDBOX_HELPER_MISSING",
+            "unknown" to "SANDBOX_HELPER_UNCHECKED")) {
+            val facts = harnessPrerequisites(acp = ACP_PROVENANCE, legacy = LEGACY_PROVENANCE)
+            val readiness = WebHarnessReadiness(state, reason, "fixture", "selected_config", prerequisites = facts)
+            val failed = readiness.withAgentInspection(WebAgentPreflightSnapshot("failed", "inspection_1",
+                WebAgentPreflight.REASON_FAILED, "selected_config"))
+            val inspected = assertNotNull(failed.prerequisites)
+            assertEquals(WebAgentPreflight.REASON_FAILED, inspected.harness(WebAgentHarness.LEGACY_OPENAI).reasonCode)
+            assertEquals(facts.harnesses.getValue(WebAgentHarness.ACP), inspected.harnesses.getValue(WebAgentHarness.ACP))
+            assertTrue(inspected.harness(WebAgentHarness.ACP).available)
+            assertEquals(facts.harnesses.getValue(WebAgentHarness.LEGACY_OPENAI).provenance,
+                inspected.harnesses.getValue(WebAgentHarness.LEGACY_OPENAI).provenance)
+            assertEquals(inspected, failed.withAgentInspection(WebAgentPreflightSnapshot("failed", "inspection_1",
+                WebAgentPreflight.REASON_FAILED, "selected_config")).prerequisites, "failure folding must be idempotent")
+        }
     }
 
     @Test
@@ -655,6 +713,81 @@ class WebProductionWorkflowsTest {
     }
 
     @Test
+    fun `each selectable harness is probed separately and the legacy adapter appears only when selected`() {
+        val defaults = WebHarnessReadinessProjector.harnessFacts(emptyMap())
+        assertEquals(setOf(WebAgentHarness.ACP), defaults.keys)
+        assertEquals("HARNESS_NOT_CONFIGURED", defaults.getValue(WebAgentHarness.ACP).prerequisite.reasonCode)
+        assertTrue(defaults.getValue(WebAgentHarness.ACP).selected); assertNull(defaults.getValue(WebAgentHarness.ACP).provenance)
+        val legacyEnvironment = mapOf("ACP_HARNESS" to "legacy-openai", "BASE_URL" to "https://example.invalid/v1",
+            "API_KEY" to "legacy-private-key", "MODEL" to "legacy-model")
+        val legacy = WebHarnessReadinessProjector.harnessFacts(legacyEnvironment)
+        assertEquals(setOf(WebAgentHarness.ACP, WebAgentHarness.LEGACY_OPENAI), legacy.keys)
+        // Selecting the legacy adapter never makes ACP ready, and ACP is never substituted for it.
+        assertEquals("HARNESS_NOT_CONFIGURED", legacy.getValue(WebAgentHarness.ACP).prerequisite.reasonCode)
+        assertFalse(legacy.getValue(WebAgentHarness.ACP).selected)
+        val legacyFacts = legacy.getValue(WebAgentHarness.LEGACY_OPENAI)
+        assertTrue(legacyFacts.prerequisite.available); assertTrue(legacyFacts.selected)
+        val provenance = assertNotNull(legacyFacts.provenance)
+        assertEquals("legacy-openai-compatible", provenance.implementationId); assertTrue(provenance.deprecated)
+        assertTrue(assertNotNull(provenance.configurationSha256).matches(Regex("[0-9a-f]{64}")))
+        assertFalse(legacy.toString().contains("legacy-private-key") || legacy.toString().contains("example.invalid"))
+        val unsupported = WebHarnessReadinessProjector.harnessFacts(mapOf("ACP_HARNESS" to "direct"))
+        assertEquals("HARNESS_UNSUPPORTED", unsupported.getValue(WebAgentHarness.ACP).prerequisite.reasonCode)
+
+        assertEquals(listOf("workflow-explore-tools", "workflow-reconstruct-agent-acp", "workflow-reconstruct-evidence-only",
+            "workflow-repair-agent-acp"), productionDurableWebWorkflows(emptyMap(), engines = FakeEngines()).map(::webWorkflowCapabilityId))
+        val retained = productionDurableWebWorkflows(legacyEnvironment, engines = FakeEngines())
+        assertEquals(listOf("workflow-explore-tools", "workflow-reconstruct-agent-acp", "workflow-reconstruct-agent-legacy-openai",
+            "workflow-reconstruct-evidence-only", "workflow-repair-agent-acp", "workflow-repair-agent-legacy-openai"),
+            retained.map(::webWorkflowCapabilityId))
+        assertEquals(listOf("agent-acp", "agent-legacy-openai", "evidence-only", "agent-acp", "agent-legacy-openai"),
+            retained.drop(1).map { it.harnessCapabilityId })
+        assertTrue(retained.none { it.launch?.harness == WebAgentHarness.BUILTIN }, "the built-in harness was registered")
+    }
+
+    @Test
+    fun `harness options report identity, operations and deprecation and never select the built-in harness`() = withRoot { root ->
+        val engines = FakeEngines()
+        val adapters = adapters(engines) + listOf(
+            ReconstructWorkflowAdapter(engines, FAST, WebReconstructionMode.AGENT, WebAgentHarness.LEGACY_OPENAI, emptyList()),
+            RepairWorkflowAdapter(engines, FAST, WebAgentHarness.LEGACY_OPENAI))
+        val prerequisites = harnessPrerequisites(acp = ACP_PROVENANCE, legacy = LEGACY_PROVENANCE)
+        val reported = webWorkflowCapabilities(adapters, WebHarnessReadiness("supported", null, "ready", prerequisites = prerequisites))
+            .associateBy { it.getValue("id").jsonPrimitive.content }
+        fun harness(id: String) = reported.getValue(id).getValue("launch").jsonObject.getValue("harness").jsonObject
+        assertEquals("acp", harness("workflow-reconstruct-agent-acp").getValue("kind").jsonPrimitive.content)
+        assertEquals("fixture-agent", harness("workflow-reconstruct-agent-acp").getValue("implementationId").jsonPrimitive.content)
+        assertEquals("1", harness("workflow-reconstruct-agent-acp").getValue("protocolVersion").jsonPrimitive.content)
+        assertEquals("false", harness("workflow-repair-agent-acp").getValue("deprecated").jsonPrimitive.content)
+        assertEquals(listOf("reconstruct", "repair"), harness("workflow-repair-agent-acp").getValue("operations").jsonArray.map { it.jsonPrimitive.content })
+        assertEquals("true", harness("workflow-repair-agent-legacy-openai").getValue("deprecated").jsonPrimitive.content)
+        assertEquals("supported", reported.getValue("workflow-repair-agent-legacy-openai").getValue("state").jsonPrimitive.content)
+        val builtin = reported.getValue("workflow-reconstruct-agent-builtin")
+        assertEquals("unsupported", builtin.getValue("state").jsonPrimitive.content)
+        assertEquals("agent-builtin", builtin.getValue("launch").jsonObject.getValue("harnessCapabilityId").jsonPrimitive.content)
+        assertEquals(0, harness("workflow-reconstruct-agent-builtin").getValue("operations").jsonArray.size)
+        assertEquals(JsonNull, harness("workflow-reconstruct-agent-builtin").getValue("implementationId"))
+        assertFalse(reported.values.joinToString().contains(ACP_PROVENANCE.configurationSha256!!), "a configuration digest left the attempt record")
+
+        val store = JobStore(root); val job = store.createFromUpload("builtin.elf", elfFixture())
+        service(store, adapters).use { service ->
+            service.initializeExistingStorage()
+            // The built-in option has no registration: naming it is refused, never served by another harness.
+            assertCode("HARNESS_UNAVAILABLE") {
+                service.requestDurableStart(job.id, version(service, job.id), NewWorkflowAttempt(WorkflowKind.RECONSTRUCT,
+                    WebWorkflowDefaults.RECONSTRUCT_AGENT, harnessCapabilityId = WebAgentHarness.BUILTIN.capabilityId), "builtin_reconstruct_01", prerequisites)
+            }
+            // An unavailable ACP option never borrows the configured legacy adapter.
+            assertCode("WORKFLOW_PREREQUISITE_UNAVAILABLE") {
+                service.requestDurableStart(job.id, version(service, job.id), NewWorkflowAttempt(WorkflowKind.RECONSTRUCT,
+                    WebWorkflowDefaults.RECONSTRUCT_AGENT, harnessCapabilityId = "agent-acp"), "acp_without_configuration",
+                    harnessPrerequisites(acp = null, legacy = LEGACY_PROVENANCE))
+            }
+            assertEquals(0, engines.calls.get())
+        }
+    }
+
+    @Test
     fun `production restart never promotes metadata after source or blob evidence is lost`() = withRoot { root ->
         for (damage in listOf("changed-source", "missing-source", "corrupt-blob", "missing-blob")) {
             val storage = root.resolve(damage)
@@ -695,6 +828,182 @@ class WebProductionWorkflowsTest {
     }
 
     @Test
+    fun `each attempt records its own validated configuration and a later change never rewrites it`() = withRoot { root ->
+        val store = JobStore(root); val job = store.createFromUpload("configuration.elf", elfFixture())
+        val engines = FakeEngines()
+        val first = service(store, adapters(engines)).use { service ->
+            service.initializeExistingStorage()
+            val attempt = service.requestDurableStart(job.id, version(service, job.id), NewWorkflowAttempt(WorkflowKind.RECONSTRUCT,
+                WebWorkflowDefaults.RECONSTRUCT_AGENT, harnessCapabilityId = "agent-acp"), "configured_reconstruct_1",
+                harnessPrerequisites(acp = ACP_PROVENANCE)).attempt
+            val configuration = assertNotNull(attempt.configuration)
+            assertEquals("workflow-reconstruct-agent-acp", configuration.optionId); assertEquals("agent", configuration.mode)
+            assertEquals(WorkflowAttemptHarness("acp", "fixture-agent", 1, 1, ACP_PROVENANCE.sdkVersion,
+                ACP_PROVENANCE.configurationSha256, false), configuration.harness)
+            assertEquals(ACP_PROVENANCE.stableDescriptor, engines.harnesses.single()?.expectedDescriptor,
+                "execution did not receive the admitted harness")
+            // The run DTO projects the record, including the digest, without configuration content.
+            val dto = webRun(attempt).getValue("configuration").jsonObject
+            assertEquals(ACP_PROVENANCE.configurationSha256, dto.getValue("harness").jsonObject.getValue("configurationSha256").jsonPrimitive.content)
+            val evidence = service.requestDurableStart(job.id, version(service, job.id), NewWorkflowAttempt(WorkflowKind.RECONSTRUCT,
+                WebWorkflowDefaults.RECONSTRUCT_EVIDENCE, harnessCapabilityId = EVIDENCE_ONLY_CAPABILITY), "configured_evidence_01",
+                harnessPrerequisites(acp = ACP_PROVENANCE)).attempt
+            assertNull(assertNotNull(evidence.configuration).harness); assertEquals("evidence-only", evidence.configuration?.mode)
+            attempt
+        }
+        val changed = ACP_PROVENANCE.copy(configurationSha256 = "b".repeat(64),
+            stableDescriptor = ACP_PROVENANCE.stableDescriptor.replace("a".repeat(64), "b".repeat(64)))
+        service(store, adapters(engines)).use { service ->
+            service.initializeExistingStorage()
+            val expected = version(service, job.id)
+            val second = service.requestDurableStart(job.id, expected, NewWorkflowAttempt(WorkflowKind.RECONSTRUCT,
+                WebWorkflowDefaults.RECONSTRUCT_AGENT, harnessCapabilityId = "agent-acp"), "configured_reconstruct_2",
+                harnessPrerequisites(acp = changed)).attempt
+            assertEquals("b".repeat(64), second.configuration?.harness?.configurationSha256)
+            val retained = service.presentation(job.id).snapshot!!.attempts.single { it.runId == first.runId }
+            assertEquals(first.configuration, retained.configuration, "a later admission rewrote earlier provenance")
+            // A keyed replay returns the original record, not one derived from the current configuration.
+            val replay = service.requestDurableStart(job.id, expected, NewWorkflowAttempt(WorkflowKind.RECONSTRUCT,
+                WebWorkflowDefaults.RECONSTRUCT_AGENT, harnessCapabilityId = "agent-acp"), "configured_reconstruct_2",
+                harnessPrerequisites(acp = ACP_PROVENANCE))
+            assertTrue(replay.replayed); assertEquals(second.configuration, replay.attempt.configuration)
+        }
+    }
+
+    @Test
+    fun `retry checks its own harness and records a fresh immutable configuration with recovery`() = withRoot { root ->
+        val store = JobStore(root); val job = store.createFromUpload("retry-config.elf", elfFixture())
+        val engines = FakeEngines().apply { reconstructBody = { _, _, _ -> error("inert initial failure") } }
+        val failed = service(store, adapters(engines)).use { service ->
+            service.initializeExistingStorage()
+            service.requestDurableStart(job.id, version(service, job.id), NewWorkflowAttempt(WorkflowKind.RECONSTRUCT,
+                WebWorkflowDefaults.RECONSTRUCT_AGENT, harnessCapabilityId = "agent-acp"), "retry_config_initial",
+                harnessPrerequisites(acp = ACP_PROVENANCE)).attempt
+        }
+        assertEquals(WorkflowRunState.FAILED, failed.state)
+        val changed = ACP_PROVENANCE.copy(configurationSha256 = "b".repeat(64),
+            stableDescriptor = ACP_PROVENANCE.stableDescriptor.replace("a".repeat(64), "b".repeat(64)))
+        val retried = service(store, adapters(engines)).use { service ->
+            service.initializeExistingStorage()
+            // A ready selected legacy agent cannot satisfy the retry's recorded ACP choice.
+            assertCode("WORKFLOW_PREREQUISITE_UNAVAILABLE") {
+                service.requestDurableRecovery(job.id, failed.runId, failed.version, WorkflowRecoveryMode.RETRY,
+                    null, "retry_config_refused", harnessPrerequisites(acp = null, legacy = LEGACY_PROVENANCE))
+            }
+            assertEquals(1, engines.calls.get(), "refused retry ran an engine")
+            engines.resolvedDescriptor = changed.stableDescriptor
+            engines.reconstructBody = { reports, _, _ -> writeSourceTree(reports.resolve("source-tree"), "base") }
+            service.requestDurableRecovery(job.id, failed.runId, failed.version, WorkflowRecoveryMode.RETRY,
+                null, "retry_config_success", harnessPrerequisites(acp = changed)).attempt
+        }
+        assertEquals(WorkflowRunState.COMPLETED, retried.state)
+        assertEquals(failed.runId, retried.previousRunId)
+        assertEquals(WorkflowRecoveryMode.RETRY, retried.recovery?.mode)
+        assertEquals("b".repeat(64), retried.configuration?.harness?.configurationSha256)
+        assertEquals("b".repeat(64), webRun(retried).getValue("configuration").jsonObject
+            .getValue("harness").jsonObject.getValue("configurationSha256").jsonPrimitive.content)
+        service(store, adapters(engines)).use { service ->
+            service.initializeExistingStorage()
+            val retained = service.presentation(job.id).snapshot!!.attempts.associateBy { it.runId }
+            assertEquals(failed.configuration, retained.getValue(failed.runId).configuration)
+            assertEquals(retried.configuration, retained.getValue(retried.runId).configuration)
+            assertEquals(retried.recovery, retained.getValue(retried.runId).recovery)
+            val replay = service.requestDurableRecovery(job.id, failed.runId, failed.version, WorkflowRecoveryMode.RETRY,
+                null, "retry_config_success", harnessPrerequisites(acp = ACP_PROVENANCE))
+            assertTrue(replay.replayed); assertEquals(retried.configuration, replay.attempt.configuration)
+        }
+        assertEquals(2, engines.calls.get(), "restart or replay ran extra work")
+    }
+
+    @Test
+    fun `real legacy settings survive restart and changed settings bind only new admissions`() = withRoot { root ->
+        val environment = mapOf("ACP_HARNESS" to "legacy-openai", "BASE_URL" to "https://first.invalid/v1",
+            "API_KEY" to "legacy-secret-canary", "MODEL" to "first-model", "REASONING_EFFORT" to "medium")
+        val job = JobStore(root).createFromUpload("legacy-configuration.elf", elfFixture())
+        val engines = FakeEngines()
+        val adapter = ReconstructWorkflowAdapter(engines, FAST, WebReconstructionMode.AGENT, WebAgentHarness.LEGACY_OPENAI, emptyList())
+        val request = NewWorkflowAttempt(WorkflowKind.RECONSTRUCT, WebWorkflowDefaults.RECONSTRUCT_AGENT,
+            harnessCapabilityId = "agent-legacy-openai")
+        val retained = mutableListOf<WorkflowAttempt>()
+        var firstExpected = ""
+        val settings = listOf(environment, environment + ("BASE_URL" to "https://second.invalid/v1"),
+            environment + ("MODEL" to "second-model"), environment + ("REASONING_EFFORT" to "high"))
+        settings.forEachIndexed { index, current ->
+            val facts = WebHarnessReadinessProjector.harnessFacts(current).getValue(WebAgentHarness.LEGACY_OPENAI)
+            assertTrue(facts.prerequisite.available)
+            val provenance = assertNotNull(facts.provenance)
+            engines.resolvedDescriptor = provenance.stableDescriptor
+            // Reopen both durable stores as on a server restart, using only inert execution engines.
+            service(JobStore(root), listOf(adapter)).use { service ->
+                service.initializeExistingStorage()
+                val expected = version(service, job.id)
+                if (index == 0) firstExpected = expected
+                val attempt = service.requestDurableStart(job.id, expected, request, "legacy_config_start_$index",
+                    harnessPrerequisites(acp = null, legacy = provenance)).attempt
+                assertEquals(WorkflowRunState.COMPLETED, attempt.state)
+                val recorded = assertNotNull(attempt.configuration?.harness)
+                assertEquals(provenance.configurationSha256, recorded.configurationSha256)
+                assertEquals(provenance.stableDescriptor, engines.harnesses.last()?.expectedDescriptor)
+                val dto = webRun(attempt).getValue("configuration").jsonObject.getValue("harness").jsonObject
+                assertEquals(recorded.configurationSha256, dto.getValue("configurationSha256").jsonPrimitive.content)
+                retained.forEach { earlier ->
+                    assertNotEquals(earlier.configuration, attempt.configuration)
+                    assertEquals(earlier.configuration,
+                        service.presentation(job.id).snapshot!!.attempts.single { it.runId == earlier.runId }.configuration)
+                }
+                retained += attempt
+                val replay = service.requestDurableStart(job.id, firstExpected, request, "legacy_config_start_0",
+                    harnessPrerequisites(acp = null, legacy = provenance))
+                assertTrue(replay.replayed); assertEquals(retained.first().configuration, replay.attempt.configuration)
+                assertFalse(dto.toString().contains("legacy-secret-canary") || dto.toString().contains(".invalid"))
+            }
+        }
+        assertEquals(settings.size, engines.harnesses.size, "a replay or restart executed extra work")
+    }
+
+    @Test
+    fun `changed real legacy settings refuse execution before agent work`() = withRoot { root ->
+        val environment = mapOf("ACP_HARNESS" to "legacy-openai", "BASE_URL" to "https://first.invalid/v1",
+            "API_KEY" to "legacy-secret-canary", "MODEL" to "first-model")
+        val admitted = WebHarnessReadinessProjector.harnessFacts(environment).getValue(WebAgentHarness.LEGACY_OPENAI).provenance!!
+        val changed = decompengine.acp.AcpHarnessFactory.fromEnvironment(environment + ("MODEL" to "second-model")).provenance
+        val engines = FakeEngines().apply {
+            resolvedDescriptor = changed.stableDescriptor
+            reconstructBody = { _, _, _ -> throw AssertionError("agent work ran after a legacy configuration change") }
+        }
+        val store = JobStore(root); val job = store.createFromUpload("legacy-changed.elf", elfFixture())
+        val adapter = ReconstructWorkflowAdapter(engines, FAST, WebReconstructionMode.AGENT, WebAgentHarness.LEGACY_OPENAI, emptyList())
+        service(store, listOf(adapter)).use { service ->
+            service.initializeExistingStorage()
+            val attempt = service.requestDurableStart(job.id, version(service, job.id), NewWorkflowAttempt(WorkflowKind.RECONSTRUCT,
+                WebWorkflowDefaults.RECONSTRUCT_AGENT, harnessCapabilityId = "agent-legacy-openai"), "legacy_changed_start1",
+                harnessPrerequisites(acp = null, legacy = admitted)).attempt
+            assertEquals(WorkflowRunState.FAILED, attempt.state)
+            assertEquals(WorkflowTerminalReason.REFUSED, attempt.terminalReason)
+        }
+    }
+
+    @Test
+    fun `a harness that resolves differently at execution refuses the attempt before any work`() = withRoot { root ->
+        val store = JobStore(root); val job = store.createFromUpload("changed.elf", elfFixture())
+        val engines = FakeEngines().apply { resolvedDescriptor = "agent-harness-v1:acp:changed" }
+        var reconstructed = false
+        engines.reconstructBody = { _, _, _ -> reconstructed = true }
+        service(store, adapters(engines)).use { service ->
+            service.initializeExistingStorage()
+            val attempt = service.requestDurableStart(job.id, version(service, job.id), NewWorkflowAttempt(WorkflowKind.RECONSTRUCT,
+                WebWorkflowDefaults.RECONSTRUCT_AGENT, harnessCapabilityId = "agent-acp"), "changed_harness_start1",
+                harnessPrerequisites(acp = ACP_PROVENANCE)).attempt
+            assertEquals(WorkflowRunState.FAILED, attempt.state); assertEquals(WorkflowTerminalReason.REFUSED, attempt.terminalReason)
+            assertFalse(reconstructed, "work ran under a harness other than the admitted one")
+        }
+        // A record the current factory cannot reproduce never matches any resolution.
+        val unreproducible = WebAdmittedHarness.of(WebAgentHarness.ACP, WorkflowAttemptHarness("acp", "fixture-agent", 1, 1, null, null, false))
+        assertFailsWith<WebHarnessConfigurationChanged> { unreproducible.requireResolved(ACP_PROVENANCE.stableDescriptor) }
+        assertNull(WebAdmittedHarness.of(WebAgentHarness.ACP, null).expectedDescriptor, "an unchecked admission invented provenance")
+    }
+
+    @Test
     fun `startup graph captures share the recovery budget and preserve partial publication uncertainty`() = withRoot { root ->
         val store = JobStore(root)
         val jobs = List(2) { store.createFromUpload("pending.elf", elfFixture()) }.sortedBy { it.id }
@@ -732,7 +1041,7 @@ class WebProductionWorkflowsTest {
         var cancelled = false
         var captures = 0
         val engines = FakeEngines()
-        val repair = RepairWorkflowAdapter(engines, FAST, "agent-acp", true)
+        val repair = RepairWorkflowAdapter(engines, FAST, WebAgentHarness.ACP, true)
         val observed = object : DurableWebWorkflowAdapter by repair {
             override val publication = DurableWebWorkflowPublication { context ->
                 assertNotNull(repair.publication).verify(context.copy(reserveCapture = { bytes ->
@@ -789,19 +1098,27 @@ class WebProductionWorkflowsTest {
         override fun explore(binary: Path, reportsDirectory: Path, activity: () -> Unit) {
             calls.incrementAndGet(); this.activity = activity; exploreBody(reportsDirectory)
         }
-        override fun reconstruct(binary: Path, reportsDirectory: Path, mode: WebReconstructionMode, progress: AgentWorkflowProgress) {
-            calls.incrementAndGet(); reconstructBody(reportsDirectory, mode, progress)
+        val harnesses = mutableListOf<WebAdmittedHarness?>()
+        /** The descriptor the inert "factory" resolves at execution; null leaves the admitted one unchecked. */
+        var resolvedDescriptor: String? = null
+        override fun reconstruct(binary: Path, reportsDirectory: Path, mode: WebReconstructionMode, progress: AgentWorkflowProgress,
+            harness: WebAdmittedHarness?) {
+            calls.incrementAndGet(); harnesses += harness
+            resolvedDescriptor?.let { harness?.requireResolved(it) }
+            reconstructBody(reportsDirectory, mode, progress)
         }
-        override fun repair(project: Path, binary: Path, reportsDirectory: Path, harness: String): RepairRunStatus {
-            calls.incrementAndGet(); check(harness == "acp"); repairBody(project); return RepairRunStatus.FULLY_ACCEPTED
+        override fun repair(project: Path, binary: Path, reportsDirectory: Path, harness: WebAdmittedHarness): RepairRunStatus {
+            calls.incrementAndGet(); harnesses += harness; check(harness.selector == "acp")
+            resolvedDescriptor?.let { harness.requireResolved(it) }
+            repairBody(project); return RepairRunStatus.FULLY_ACCEPTED
         }
     }
 
     private fun adapters(engines: WebWorkflowEngines, acceptTestOnly: Boolean = false): List<DurableWebWorkflowAdapter> = listOf(
         ExploreWorkflowAdapter(engines, FAST, allowTestOnlyExecution = true),
-        ReconstructWorkflowAdapter(engines, FAST, WebReconstructionMode.AGENT, "agent-acp", emptyList()),
-        ReconstructWorkflowAdapter(engines, FAST, WebReconstructionMode.EVIDENCE_ONLY, EVIDENCE_ONLY_CAPABILITY, emptyList()),
-        RepairWorkflowAdapter(engines, FAST, "agent-acp", acceptTestOnly),
+        ReconstructWorkflowAdapter(engines, FAST, WebReconstructionMode.AGENT, WebAgentHarness.ACP, emptyList()),
+        ReconstructWorkflowAdapter(engines, FAST, WebReconstructionMode.EVIDENCE_ONLY, null, emptyList()),
+        RepairWorkflowAdapter(engines, FAST, WebAgentHarness.ACP, acceptTestOnly),
     )
     private fun service(store: JobStore, adapters: List<DurableWebWorkflowAdapter>) = WebJobService(store,
         JobAnalyzer { _, _ -> throw AssertionError("legacy analyzer fallback") },
@@ -830,6 +1147,23 @@ class WebProductionWorkflowsTest {
         val PROFILE = DeclarativeRepairIndexProfile("web-workflow-fixture", RepairIndexLayout(listOf("code.c"), listOf("code.c"),
             modules = listOf(RepairModuleEvidence("fixture-module", listOf("code.c")))))
         val INPUTS = listOf(ProcessInput("fixture-case"))
+        val ACP_PROVENANCE = WebHarnessProvenance.of(decompengine.acp.AcpHarnessProvenance("acp", "fixture-agent",
+            decompengine.agent.AGENT_EXECUTION_CONTRACT_VERSION, decompengine.acp.ACP_STABLE_PROTOCOL_VERSION,
+            decompengine.acp.ACP_KOTLIN_SDK_VERSION, "a".repeat(64), false))
+        val LEGACY_PROVENANCE = WebHarnessProvenance.of(decompengine.acp.AcpHarnessProvenance("legacy-openai", "legacy-openai-compatible",
+            decompengine.agent.AGENT_EXECUTION_CONTRACT_VERSION, null, null, null, true))
+
+        /** A complete probe snapshot with per-harness facts; a null provenance is an unconfigured harness. */
+        fun harnessPrerequisites(acp: WebHarnessProvenance?, legacy: WebHarnessProvenance? = null): WebWorkflowPrerequisites {
+            fun facts(provenance: WebHarnessProvenance?, selected: Boolean) = WebHarnessFacts(if (provenance != null) WebPrerequisite.AVAILABLE
+                else WebPrerequisite(false, "HARNESS_NOT_CONFIGURED", "No agent harness is configured."), provenance, selected)
+            val harnesses = buildMap {
+                put(WebAgentHarness.ACP, facts(acp, legacy == null))
+                if (legacy != null) put(WebAgentHarness.LEGACY_OPENAI, facts(legacy, true))
+            }
+            return WebWorkflowPrerequisites(harnesses.values.single { it.selected }.prerequisite, WebPrerequisite.AVAILABLE,
+                WebPrerequisite.AVAILABLE, harnesses = harnesses)
+        }
 
         fun baseSha(): String = sha256("base".toByteArray())
         fun baseCandidate() = WorkflowCandidate(webSourceRevisionId(baseSha()), baseSha())

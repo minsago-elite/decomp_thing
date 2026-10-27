@@ -1,0 +1,57 @@
+{
+  "apiVersion": 1,
+  "kind": "run",
+  "requestId": "request_example_1",
+  "data": {
+    "runId": "run_example_1",
+    "jobId": "1234567890abcdef1234567890abcdef",
+    "workflow": "reconstruct",
+    "state": "completed",
+    "version": "run_version_2",
+    "createdAt": "2026-09-05T00:00:00Z",
+    "startedAt": "2026-09-05T00:00:00Z",
+    "endedAt": "2026-09-05T00:00:01Z",
+    "previousRunId": null,
+    "inputRevisionId": null,
+    "resultRevisionId": "revision_example_1",
+    "acceptance": "not-evaluated",
+    "harnessCapabilityId": "agent-acp",
+    "terminalReason": "COMPLETED",
+    "usage": {
+      "inputTokens": "9007199254740993",
+      "outputTokens": null,
+      "cachedInputTokens": null,
+      "toolCalls": "1",
+      "wallClockMs": "1000"
+    },
+    "limits": {
+      "wallClockMs": "60000",
+      "idleMs": "15000",
+      "maxOutputBytes": "1048576",
+      "maxToolCalls": "16"
+    },
+    "configuration": {
+      "optionId": "workflow-reconstruct-agent-acp",
+      "mode": "evidence-only",
+      "executesBinary": false,
+      "contactsAgent": false,
+      "requiredTools": [
+        "ghidra",
+        "agent-harness",
+        "c-toolchain"
+      ],
+      "input": "none",
+      "limitsAdjustable": true,
+      "harness": {
+        "kind": "acp",
+        "implementationId": "fixture-agent",
+        "agentContractVersion": 1,
+        "protocolVersion": 1,
+        "sdkVersion": "0.30.1",
+        "configurationSha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "deprecated": false
+      },
+      "profileId": null
+    }
+  }
+}

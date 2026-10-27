@@ -4,6 +4,7 @@ import { readFile, readdir, writeFile } from 'node:fs/promises';
 import { resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { gzipSync } from 'node:zlib';
+import ts from 'typescript';
 
 function assetPath(name) {
   assert.ok(typeof name === 'string' && name.length <= 240 && /^[a-zA-Z0-9_./-]+$/.test(name) &&
@@ -149,8 +150,9 @@ const remoteLoads = [
 ];
 // Scripts can also build URLs for DOM elements, fetch or JSX props, so every absolute or
 // protocol-relative URL literal must name a reviewed inert host: XML namespaces, the
-// non-resolvable .invalid parsing base (RFC 6761) and one documentation link inside a
-// bundled router error message. Anything else fails, whatever code would use it.
+// non-resolvable .invalid parsing base (RFC 6761), or the router documentation.
+// Real prerequisite URLs are NOT inert; only their direct anchor href occurrences below
+// receive a navigation exception. Reusing the same literal in any other sink is refused.
 const urlLiteral = /(?:https?:)?\/\/[^\s"'`)<>\\]+/gi;
 const inertUrls = [
   url => url.hostname === 'www.w3.org',
@@ -165,11 +167,48 @@ function inertUrl(literal) {
   return url.username === '' && url.password === '' && url.port === '' && inertUrls.some(inert => inert(url));
 }
 
+const prerequisiteNavigationUrls = new Set([76, 77, 79].map(number =>
+  `https://github.com/minsago-elite/decomp_thing/issues/${number}`));
+
+/** Positions of literal hrefs in emitted Preact anchor calls; no regex context or URL dataflow exemptions. */
+function prerequisiteNavigation(source) {
+  const file = ts.createSourceFile('asset.js', source, ts.ScriptTarget.Latest, true, ts.ScriptKind.JS);
+  const positions = new Set();
+  if (file.parseDiagnostics.length) return positions; // Ambiguous syntax cannot earn an exception.
+  function visit(node) {
+    if (ts.isCallExpression(node) && ts.isIdentifier(node.expression) && node.arguments.length === 2) {
+      const [tag, props] = node.arguments;
+      if (ts.isStringLiteralLike(tag) && tag.text === 'a' && ts.isObjectLiteralExpression(props)) {
+        const attributes = new Map();
+        for (const property of props.properties) {
+          // No spreads, accessors, computed names, duplicate/extra props or event/resource attributes.
+          if (!ts.isPropertyAssignment(property) || !(ts.isIdentifier(property.name) || ts.isStringLiteral(property.name))
+            || !['href', 'rel', 'children'].includes(property.name.text) || attributes.has(property.name.text)) return;
+          attributes.set(property.name.text, property.initializer);
+        }
+        const href = attributes.get('href');
+        const rel = attributes.get('rel');
+        if (href && ts.isStringLiteralLike(href) && prerequisiteNavigationUrls.has(href.text)
+          && rel && ts.isStringLiteralLike(rel) && rel.text === 'noreferrer') {
+          positions.add(href.getStart(file) + 1);
+        }
+      }
+    }
+    ts.forEachChild(node, visit);
+  }
+  visit(file);
+  return positions;
+}
+
 /** Shipped HTML, scripts and styles never fetch from a CDN or any other remote origin. */
 export function assertNoRemoteLoads(source, name) {
   for (const pattern of remoteLoads) assert.ok(!pattern.test(source), `Production asset loads a remote resource: ${name}`);
-  for (const [literal] of source.matchAll(urlLiteral)) {
-    assert.ok(inertUrl(literal), `Production asset loads a remote resource: ${name} names unreviewed URL ${literal.slice(0, 80)}`);
+  let navigation;
+  for (const match of source.matchAll(urlLiteral)) {
+    const [literal] = match;
+    if (inertUrl(literal)) continue;
+    if (prerequisiteNavigationUrls.has(literal)) navigation ??= prerequisiteNavigation(source);
+    assert.ok(navigation?.has(match.index), `Production asset loads a remote resource: ${name} names unreviewed URL ${literal.slice(0, 80)}`);
   }
 }
 

@@ -217,6 +217,16 @@
         },
         "limitsAdjustable": {
           "type": "boolean"
+        },
+        "harness": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/harnessFacts"
+            },
+            {
+              "type": "null"
+            }
+          ]
         }
       },
       "required": [
@@ -242,12 +252,124 @@
             "properties": {
               "contactsAgent": {
                 "const": true
+              },
+              "harness": {
+                "$ref": "#/definitions/harnessFacts"
               }
             }
           },
           "else": {
             "properties": {
               "contactsAgent": {
+                "const": false
+              },
+              "harness": {
+                "type": "null"
+              }
+            }
+          }
+        }
+      ]
+    },
+    "harnessFacts": {
+      "type": "object",
+      "description": "Transport-neutral facts about the single agent harness an option uses. Implementation identity is present only when the server resolved that harness's configuration; credentials, paths and configuration values are never reported.",
+      "properties": {
+        "kind": {
+          "type": "string",
+          "enum": [
+            "acp",
+            "legacy-openai",
+            "builtin"
+          ]
+        },
+        "implementationId": {
+          "anyOf": [
+            {
+              "type": "string",
+              "pattern": "^[A-Za-z0-9_][A-Za-z0-9_.-]{0,127}$"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "protocolVersion": {
+          "anyOf": [
+            {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 65535
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "deprecated": {
+          "type": "boolean"
+        },
+        "operations": {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/workflow"
+          },
+          "maxItems": 5,
+          "uniqueItems": true
+        }
+      },
+      "required": [
+        "kind",
+        "implementationId",
+        "protocolVersion",
+        "deprecated",
+        "operations"
+      ],
+      "additionalProperties": false,
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "kind": {
+                "const": "builtin"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "implementationId": {
+                "type": "null"
+              },
+              "protocolVersion": {
+                "type": "null"
+              },
+              "operations": {
+                "maxItems": 0
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "kind": {
+                "const": "legacy-openai"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "deprecated": {
+                "const": true
+              },
+              "protocolVersion": {
+                "type": "null"
+              }
+            }
+          },
+          "else": {
+            "properties": {
+              "deprecated": {
                 "const": false
               }
             }
@@ -732,6 +854,225 @@
       ],
       "additionalProperties": false
     },
+    "attemptHarness": {
+      "type": "object",
+      "description": "Non-secret harness provenance the server resolved when the attempt was admitted. The configuration digest is the harness factory's canonical digest, never configuration content.",
+      "properties": {
+        "kind": {
+          "type": "string",
+          "enum": [
+            "acp",
+            "legacy-openai"
+          ]
+        },
+        "implementationId": {
+          "anyOf": [
+            {
+              "type": "string",
+              "pattern": "^[A-Za-z0-9_][A-Za-z0-9_.-]{0,127}$"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "agentContractVersion": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 65535
+        },
+        "protocolVersion": {
+          "anyOf": [
+            {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 65535
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "sdkVersion": {
+          "anyOf": [
+            {
+              "type": "string",
+              "pattern": "^[0-9A-Za-z][0-9A-Za-z.+-]{0,63}$"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "configurationSha256": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/sha256"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "deprecated": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "kind",
+        "implementationId",
+        "agentContractVersion",
+        "protocolVersion",
+        "sdkVersion",
+        "configurationSha256",
+        "deprecated"
+      ],
+      "additionalProperties": false,
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "kind": {
+                "const": "legacy-openai"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "deprecated": {
+                "const": true
+              },
+              "protocolVersion": {
+                "type": "null"
+              },
+              "sdkVersion": {
+                "type": "null"
+              }
+            }
+          },
+          "else": {
+            "properties": {
+              "deprecated": {
+                "const": false
+              }
+            }
+          }
+        }
+      ]
+    },
+    "attemptConfiguration": {
+      "type": "object",
+      "description": "The server-validated configuration recorded atomically with an attempt at admission. It is immutable; a later configuration change is recorded on a new attempt.",
+      "properties": {
+        "optionId": {
+          "$ref": "#/definitions/id"
+        },
+        "mode": {
+          "type": "string",
+          "enum": [
+            "tools",
+            "agent",
+            "evidence-only"
+          ]
+        },
+        "executesBinary": {
+          "type": "boolean"
+        },
+        "contactsAgent": {
+          "type": "boolean"
+        },
+        "requiredTools": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "enum": [
+              "sandbox",
+              "ghidra",
+              "agent-harness",
+              "c-toolchain",
+              "angr"
+            ]
+          },
+          "maxItems": 8,
+          "uniqueItems": true
+        },
+        "input": {
+          "type": "string",
+          "enum": [
+            "none",
+            "accepted-optional",
+            "recorded-required"
+          ]
+        },
+        "limitsAdjustable": {
+          "type": "boolean"
+        },
+        "harness": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/attemptHarness"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "profileId": {
+          "anyOf": [
+            {
+              "type": "string",
+              "pattern": "^[A-Za-z0-9_][A-Za-z0-9_.-]{0,127}$"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "optionId",
+        "mode",
+        "executesBinary",
+        "contactsAgent",
+        "requiredTools",
+        "input",
+        "limitsAdjustable",
+        "harness",
+        "profileId"
+      ],
+      "additionalProperties": false,
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "mode": {
+                "const": "agent"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "contactsAgent": {
+                "const": true
+              },
+              "harness": {
+                "$ref": "#/definitions/attemptHarness"
+              }
+            }
+          },
+          "else": {
+            "properties": {
+              "contactsAgent": {
+                "const": false
+              },
+              "harness": {
+                "type": "null"
+              }
+            }
+          }
+        }
+      ]
+    },
     "run": {
       "type": "object",
       "properties": {
@@ -859,6 +1200,16 @@
         },
         "limits": {
           "$ref": "#/definitions/executionLimits"
+        },
+        "configuration": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/attemptConfiguration"
+            },
+            {
+              "type": "null"
+            }
+          ]
         }
       },
       "required": [

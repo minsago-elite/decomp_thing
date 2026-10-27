@@ -1018,7 +1018,8 @@ class WebJobService(
         val inputSourceTree = selectInput(jobId, view.snapshot, registration.adapter.input, request.inputRevisionId)
         val job = store.get(jobId)
         val admitted = publishStart(jobId) {
-            owner.createIdempotent(jobId, view.snapshot.version, request, requestKey, expectedJobVersion)
+            owner.createIdempotent(jobId, view.snapshot.version,
+                request.copy(configuration = webAttemptConfiguration(registration.adapter, prerequisites)), requestKey, expectedJobVersion)
         }
         if (admitted.replayed) return DurableWebWorkflowStartResult(admitted.attempt, replayed = true)
         return dispatchAdmitted(DurableTask(job, admitted.attempt, registration.adapter, inputSourceTree = inputSourceTree))
@@ -1282,7 +1283,8 @@ class WebJobService(
             throw WebJobServiceException("WORKFLOW_LIMITS_UNAVAILABLE", "The attempt's recorded limits are no longer server-approved.")
         }
         val request = NewWorkflowAttempt(predecessor.workflow, predecessor.limits, predecessor.inputRevisionId,
-            decision.registration.harnessCapabilityId, predecessor.runId, decision.recovery)
+            decision.registration.harnessCapabilityId, predecessor.runId, recovery = decision.recovery,
+            configuration = webAttemptConfiguration(decision.registration.adapter, prerequisites))
         val job = store.get(jobId)
         val admitted = publishStart(jobId) {
             owner.createIdempotent(jobId, view.snapshot.version, request, requestKey, expectedRunVersion)
@@ -1296,7 +1298,7 @@ class WebJobService(
     private fun requirePrerequisites(adapter: DurableWebWorkflowAdapter, prerequisites: WebWorkflowPrerequisites?) {
         val requirements = adapter.requirements
         val unmet = if (requirements.isEmpty()) null
-            else prerequisites?.unmet(requirements) ?: if (prerequisites == null)
+            else prerequisites?.unmet(requirements, adapter.launch?.harness) ?: if (prerequisites == null)
                 WebPrerequisite(false, "PREREQUISITES_UNKNOWN", "Runtime prerequisites could not be determined. Refresh runtime readiness before retrying.") else null
         if (unmet != null) throw WebJobServiceException("WORKFLOW_PREREQUISITE_UNAVAILABLE", unmet.message)
     }

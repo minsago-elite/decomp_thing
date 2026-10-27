@@ -19,6 +19,7 @@ vi.mock('../src/api/client', async load => ({ ...await load<typeof ClientModule>
 const fixture = <T,>(name: string) => (JSON.parse(readFileSync(resolve(process.cwd(), `../contracts/web/v1/fixtures/${name}.json`), 'utf8')) as { data: T }).data;
 const job = fixture<Job>('job-lossless');
 const launchBootstrap = fixture<Bootstrap>('bootstrap-workflow-launch');
+const harnessBootstrap = fixture<Bootstrap>('bootstrap-harness-options');
 const session = { csrf: () => 'a'.repeat(43) };
 
 function runtime(capabilities: Capability[] = launchBootstrap.capabilities): RuntimeSnapshot {
@@ -46,8 +47,8 @@ afterEach(cleanup);
 it('describes every server option and allows an explicit choice only among supported ones', () => {
   mount();
   const options = screen.getAllByRole('radio');
-  expect(options.map(option => option.getAttribute('value'))).toEqual(['workflow-explore-tools', 'workflow-reconstruct-agent',
-    'workflow-reconstruct-evidence-only', 'workflow-repair-agent']);
+  expect(options.map(option => option.getAttribute('value'))).toEqual(['workflow-explore-tools', 'workflow-reconstruct-agent-acp',
+    'workflow-reconstruct-evidence-only', 'workflow-repair-agent-acp']);
   expect(options.map(option => (option as HTMLInputElement).disabled)).toEqual([false, true, false, true]);
   expect(options.every(option => !(option as HTMLInputElement).checked)).toBe(true);
   expect(start()).toHaveProperty('disabled', true);
@@ -56,12 +57,24 @@ it('describes every server option and allows an explicit choice only among suppo
   expect(facts.textContent).toContain('HARNESS_NOT_CONFIGURED');
   expect(facts.textContent).toContain('Contacts the configured agent (agent contract 1)');
   expect(facts.textContent).toContain('a configured agent harness');
+  // The unavailable harness names its actionable requirement and where an operator acts on it.
+  expect(facts.textContent).toContain('Requirement: an operator must configure an agent harness for this server');
+  expect(within(facts).getByRole('link', { name: 'Open the runtime status page' }).getAttribute('href')).toBe('/nested/runtime');
+  expect(facts.textContent).toContain('Agent harness: acp, implementation not resolved');
+  expect(facts.textContent).toContain('Operations this harness runs on this server: Reconstruction, Repair');
   const explore = document.getElementById(screen.getByLabelText('Exploration: local tools').getAttribute('aria-describedby')!)!;
   expect(explore.textContent).toContain('Runs the uploaded binary inside the sandbox.');
   expect(explore.textContent).toContain('Does not contact any agent and uses no model credentials.');
   const evidence = document.getElementById(screen.getByLabelText('Reconstruction: evidence only').getAttribute('aria-describedby')!)!;
   expect(evidence.textContent).toMatch(/explicit choice.*never used automatically when the agent is unavailable/);
   expect(screen.queryByText(/workflow-build/)).toBeNull();
+});
+
+it('labels omitted older-server harness facts as not reported without inferring provenance', () => {
+  mount({ capabilities: fixture<Bootstrap>('legacy-bootstrap-before-configuration').capabilities });
+  expect(screen.getAllByText('This server did not report harness provenance for this option.')).toHaveLength(2);
+  expect(screen.queryByText(/Agent harness: acp/)).toBeNull();
+  expect(transport.post).not.toHaveBeenCalled();
 });
 
 it('starts from server defaults with one guarded keyed request and opens the recorded attempt', async () => {
@@ -114,7 +127,7 @@ it('requires a revision recorded by this job for repair and keeps its fixed limi
     { ...run().data, runId: 'run_failed', state: 'failed', resultRevisionId: 'source_failed' },
   ], page: { nextCursor: null, limit: 50, snapshotVersion: 'snapshot_1' } } });
   transport.post.mockResolvedValue(run({ runId: 'run_repair', workflow: 'repair' }));
-  mount({ capabilities: supported('workflow-repair-agent'), selected: { ...job, acceptedRevisionId: 'source_accepted' } });
+  mount({ capabilities: supported('workflow-repair-agent-acp'), selected: { ...job, acceptedRevisionId: 'source_accepted' } });
   fireEvent.click(screen.getByLabelText('Repair: configured agent'));
   expect(screen.queryByLabelText('Wall-clock limit (ms)')).toBeNull();
   expect(screen.getByText('These limits are fixed by the server for this option.')).toBeTruthy();
@@ -134,7 +147,7 @@ it('follows attempt pagination so an older completed candidate stays selectable'
   const failed = Array.from({ length: 200 }, (_, index) => ({ ...run().data, runId: `run_failed_${index}`, state: 'failed' as const }));
   transport.get.mockResolvedValueOnce(page(failed, 'older_page'))
     .mockResolvedValueOnce(page([{ ...run().data, runId: 'run_oldest', state: 'completed', resultRevisionId: 'source_oldest' }], null));
-  mount({ capabilities: supported('workflow-repair-agent') });
+  mount({ capabilities: supported('workflow-repair-agent-acp') });
   fireEvent.click(screen.getByLabelText('Repair: configured agent'));
   const select = await screen.findByLabelText<HTMLSelectElement>('Input revision');
   expect(Array.from(select.options).map(option => option.value)).toEqual(['', 'source_oldest']);
@@ -152,7 +165,7 @@ it('reaches a repair candidate on the sixth page at the full retained-attempt bo
       resultRevisionId: page === 5 && index === 23 ? 'source_oldest' : null,
     })), page: { nextCursor: page < 5 ? String(page + 1) : null, limit: 200, snapshotVersion: 'snapshot_1' } } });
   });
-  mount({ capabilities: supported('workflow-repair-agent') });
+  mount({ capabilities: supported('workflow-repair-agent-acp') });
   fireEvent.click(screen.getByLabelText('Repair: configured agent'));
   const select = await screen.findByLabelText<HTMLSelectElement>('Input revision');
   expect(Array.from(select.options).map(option => option.value)).toEqual(['', 'source_oldest']);
@@ -169,7 +182,7 @@ it.each(['page', 'attempt'] as const)('refuses foreign-job %s data in a repair r
       state: 'completed', resultRevisionId: 'source_foreign' }],
     page: { nextCursor: null, limit: 200, snapshotVersion: 'snapshot_1' },
   } });
-  mount({ capabilities: supported('workflow-repair-agent') });
+  mount({ capabilities: supported('workflow-repair-agent-acp') });
   fireEvent.click(screen.getByLabelText('Repair: configured agent'));
   expect(await screen.findByText(/could not be loaded/)).toBeTruthy();
   expect(screen.queryByLabelText('Input revision')).toBeNull();
@@ -186,7 +199,7 @@ it('discards partial revision choices on a continuation failure and retries from
     page: { nextCursor: null, limit: 200, snapshotVersion: 'snapshot_1' } } };
   transport.get.mockResolvedValueOnce(first).mockRejectedValueOnce(new ApiClientError('network_error'))
     .mockResolvedValueOnce(first).mockResolvedValueOnce(last);
-  mount({ capabilities: supported('workflow-repair-agent') });
+  mount({ capabilities: supported('workflow-repair-agent-acp') });
   fireEvent.click(screen.getByLabelText('Repair: configured agent'));
   expect(await screen.findByText(/could not be loaded/)).toBeTruthy();
   expect(screen.queryByLabelText('Input revision')).toBeNull();
@@ -204,7 +217,7 @@ it('retries a failed revision load explicitly without remounting the form', asyn
   transport.get.mockRejectedValueOnce(new ApiClientError('network_error'))
     .mockResolvedValueOnce({ data: { jobId: job.jobId, items: [{ ...run().data, runId: 'run_done', state: 'completed', resultRevisionId: 'source_done' }],
       page: { nextCursor: null, limit: 200, snapshotVersion: 'snapshot_1' } } });
-  mount({ capabilities: supported('workflow-repair-agent') });
+  mount({ capabilities: supported('workflow-repair-agent-acp') });
   fireEvent.click(screen.getByLabelText('Repair: configured agent'));
   expect(await screen.findByText(/could not be loaded/)).toBeTruthy();
   fireEvent.click(screen.getByRole('button', { name: 'Load revisions again' }));
@@ -292,6 +305,55 @@ it('offers no start controls when the server describes no launch option', () => 
   expect(screen.queryByRole('radio')).toBeNull();
   expect(screen.queryByRole('button')).toBeNull();
   expect(screen.getByText(/reported no workflow option that can be started/)).toBeTruthy();
+});
+
+it('shows each reported harness with its identity and status and never substitutes one for another', async () => {
+  transport.post.mockResolvedValue(run({ runId: 'run_legacy', harnessCapabilityId: 'agent-legacy-openai' }));
+  mount({ capabilities: harnessBootstrap.capabilities });
+  const values = screen.getAllByRole('radio').map(option => option.getAttribute('value'));
+  expect(values).toEqual(['workflow-explore-tools', 'workflow-reconstruct-agent-acp', 'workflow-reconstruct-agent-legacy-openai',
+    'workflow-reconstruct-agent-builtin', 'workflow-reconstruct-evidence-only', 'workflow-repair-agent-acp',
+    'workflow-repair-agent-legacy-openai', 'workflow-repair-agent-builtin']);
+  const facts = (label: string) => document.getElementById(screen.getByLabelText(label).getAttribute('aria-describedby')!)!;
+  const current = facts('Reconstruction: configured agent');
+  expect(current.textContent).toContain('Agent harness: acp, implementation fixture-agent');
+  expect(current.textContent).toContain('Harness protocol version: 1');
+  expect(current.textContent).toContain('Status: current.');
+  expect(current.textContent).toContain('nothing else is used in its place');
+  const legacy = facts('Reconstruction: legacy compatibility agent');
+  expect(legacy.textContent).toContain('Status: deprecated.');
+  expect(legacy.textContent).toContain('implementation legacy-openai-compatible');
+  // The built-in harness is visible, unsupported and points at the work that must land first.
+  const builtin = screen.getByLabelText<HTMLInputElement>('Repair: built-in agent');
+  expect(builtin.disabled).toBe(true);
+  const builtinFacts = facts('Repair: built-in agent');
+  expect(builtinFacts.textContent).toContain('BUILTIN_HARNESS_NOT_INTEGRATED');
+  expect(builtinFacts.textContent).toContain('This server runs no workflow with this harness.');
+  expect(within(builtinFacts).getByRole('link', { name: 'Built-in harness prerequisites' }).getAttribute('href')).toMatch(/\/issues\/79$/);
+  expect(within(builtinFacts).getByRole('link', { name: 'Built-in Repair work' }).getAttribute('href')).toMatch(/\/issues\/77$/);
+  expect(screen.getAllByRole('radio').every(option => !(option as HTMLInputElement).checked)).toBe(true);
+  // Choosing the deprecated adapter is explicit and submits exactly its identity.
+  fireEvent.click(screen.getByLabelText('Reconstruction: legacy compatibility agent'));
+  const summary = within(screen.getByRole('region', { name: 'Configuration to submit' }));
+  expect(summary.getByText('agent-legacy-openai')).toBeTruthy();
+  expect(summary.getByText(/legacy-openai, implementation legacy-openai-compatible\. The server records the exact resolution/)).toBeTruthy();
+  fireEvent.click(start(/Start Reconstruction/));
+  await waitFor(() => expect(transport.post).toHaveBeenCalledOnce());
+  expect(transport.post.mock.calls[0]?.[3]).toMatchObject({ workflow: 'reconstruct', harnessCapabilityId: 'agent-legacy-openai' });
+  expect(document.body.textContent).not.toMatch(/api[_-]?key|ACP_CONFIG_FILE|\/home\//i);
+});
+
+it('explains an unavailable configured agent without enabling another harness in its place', () => {
+  const capabilities = harnessBootstrap.capabilities.map(capability => capability.id === 'workflow-reconstruct-agent-acp'
+    ? { ...capability, state: 'unavailable' as const, reasonCode: 'HARNESS_CONFIGURATION_INVALID', message: 'The agent harness configuration is invalid.' }
+    : capability);
+  mount({ capabilities });
+  const acp = screen.getByLabelText<HTMLInputElement>('Reconstruction: configured agent');
+  expect(acp.disabled).toBe(true);
+  const facts = document.getElementById(acp.getAttribute('aria-describedby')!)!;
+  expect(facts.textContent).toContain('configuration values are never shown here');
+  expect(screen.getByLabelText<HTMLInputElement>('Reconstruction: legacy compatibility agent').checked).toBe(false);
+  expect(start()).toHaveProperty('disabled', true);
 });
 
 it('treats an older producer that omits launch facts like one that reports none', () => {

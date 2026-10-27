@@ -70,7 +70,15 @@ const typesText = header + '// String bounds and cross-field/conditional constra
   `export type ResponseOf<K extends ResponseKind> = Extract<ContractDocument, { kind: K }>;\n` +
   `export type RequestData<K extends RequestKind> = Extract<ContractDocument, { kind: K }>['data'];\n`;
 const runtimeSchema = structuredClone(schema);
-delete runtimeSchema.$schema; delete runtimeSchema.title; delete runtimeSchema.description;
+delete runtimeSchema.$schema; delete runtimeSchema.title;
+// Descriptions document the contract; the runtime validator never reads them, so they stay out of the bundle.
+// Walk schema positions only (as inspect does), so a property that is itself named "description" is kept.
+(function stripDescriptions(node) {
+  delete node.description;
+  for (const key of ['definitions', 'properties']) for (const child of Object.values(node[key] ?? {})) stripDescriptions(child);
+  for (const key of ['anyOf', 'oneOf', 'allOf']) for (const child of node[key] ?? []) stripDescriptions(child);
+  for (const key of ['items', 'if', 'then', 'else']) if (node[key]) stripDescriptions(node[key]);
+})(runtimeSchema);
 const files = {
   'frontend/src/api/generated.ts': typesText,
   'frontend/src/api/generated-schema.ts': header + `import type { Schema } from './schema-types';\n\nexport const contractSchema: Schema = ${JSON.stringify(runtimeSchema, null, 2)};\n`,

@@ -28,4 +28,23 @@ internal fun webRun(run: WorkflowAttempt): JsonObject = buildJsonObject {
         count("inputTokens", usage.inputTokens); count("outputTokens", usage.outputTokens)
         count("cachedInputTokens", usage.cachedInputTokens); count("toolCalls", usage.toolCalls); count("wallClockMs", usage.wallClockMs)
     } } ?: JsonNull)
+    put("configuration", run.configuration?.let(::webRunConfiguration) ?: JsonNull)
+}
+
+/** The admission record as stored: identities, versions and a digest only, never configuration content. */
+internal fun webRunConfiguration(value: decompengine.jobs.WorkflowAttemptConfiguration): JsonObject = buildJsonObject {
+    put("optionId", value.optionId); put("mode", value.mode)
+    put("executesBinary", value.executesBinary); put("contactsAgent", value.contactsAgent)
+    put("requiredTools", JsonArray(value.requiredTools.map(::JsonPrimitive))); put("input", value.input)
+    put("limitsAdjustable", value.limitsAdjustable)
+    put("harness", value.harness?.let { harness -> buildJsonObject {
+        put("kind", harness.kind)
+        put("implementationId", harness.implementationId?.let(::JsonPrimitive) ?: JsonNull)
+        put("agentContractVersion", harness.agentContractVersion)
+        put("protocolVersion", harness.protocolVersion?.let(::JsonPrimitive) ?: JsonNull)
+        put("sdkVersion", harness.sdkVersion?.let(::JsonPrimitive) ?: JsonNull)
+        put("configurationSha256", harness.configurationSha256?.let(::JsonPrimitive) ?: JsonNull)
+        put("deprecated", harness.deprecated)
+    } } ?: JsonNull)
+    put("profileId", value.profileId?.let(::JsonPrimitive) ?: JsonNull)
 }
