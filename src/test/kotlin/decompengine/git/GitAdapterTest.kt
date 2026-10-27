@@ -138,6 +138,39 @@ class GitAdapterTest {
         paths.forEach { assertEquals("ours\n", Files.readString(workTree.resolve(it))) }
     }
 
+    @Test fun `workspace guards bind merge parents and unmerged stages even with unchanged files`(): Unit = GitTestRepositories().use { f ->
+        val (gitDir, workTree) = f.managed("merge-guards")
+        val file = workTree.resolve("main.c")
+        Files.writeString(file, "base\n"); val base = f.commitAll(gitDir, workTree, "base")
+        Files.writeString(file, "ours\n"); val ours = f.commitAll(gitDir, workTree, "ours")
+        f.git("--git-dir=$gitDir", "--work-tree=$workTree", "reset", "--hard", base)
+        Files.writeString(file, "remote one\n"); val target = f.commitAll(gitDir, workTree, "remote one")
+        Files.writeString(file, "remote two\n"); val other = f.commitAll(gitDir, workTree, "remote two")
+        val otherBlob = f.git("--git-dir=$gitDir", "rev-parse", "$other:main.c").trim()
+        f.git("--git-dir=$gitDir", "--work-tree=$workTree", "reset", "--hard", ours)
+        assertTrue(GitIntegrations.merge(f.runner, gitDir, workTree, target, GitIntegrationStrategy.MERGE, "merge", GitRepositoryPolicy()))
+        val reviewed = GitRepositoryInspector.inspect(f.runner, gitDir, workTree)
+        val content = Files.readString(file)
+        // Same HEAD, work-tree bytes/stat and index, but a different pending merge parent.
+        Files.writeString(gitDir.resolve("MERGE_HEAD"), "$other\n")
+        val changedParent = GitRepositoryInspector.inspect(f.runner, gitDir, workTree)
+        assertEquals(reviewed.head, changedParent.head); assertEquals(reviewed.status, changedParent.status)
+        assertNotEquals(reviewed.statusDigest, changedParent.statusDigest)
+        Files.writeString(gitDir.resolve("MERGE_HEAD"), "$target\n")
+        f.runner.run(GitInvocation("update-index", listOf("--index-info"), gitDir = gitDir, workTree = workTree,
+            input = "100644 $otherBlob 3\tmain.c\n".toByteArray()))
+        val changedStage = GitRepositoryInspector.inspect(f.runner, gitDir, workTree)
+        assertEquals(content, Files.readString(file))
+        assertNotEquals(reviewed.status.entries.single().conflictStageIdentity, changedStage.status.entries.single().conflictStageIdentity)
+        assertNotEquals(reviewed.statusDigest, changedStage.statusDigest)
+        // Resolving to ours leaves no staged changes; the merge parent must still affect guards.
+        Files.writeString(file, "ours\n"); f.git("--git-dir=$gitDir", "--work-tree=$workTree", "add", "main.c")
+        val resolved = GitRepositoryInspector.inspect(f.runner, gitDir, workTree)
+        assertTrue(resolved.status.entries.isEmpty())
+        Files.writeString(gitDir.resolve("MERGE_HEAD"), "$other\n")
+        assertNotEquals(resolved.statusDigest, GitRepositoryInspector.inspect(f.runner, gitDir, workTree).statusDigest)
+    }
+
     @Test fun `branch names are validated by local syntax and check-ref-format`(): Unit = GitTestRepositories().use { f ->
         listOf("main", "trunk", "feature/one", "release-1.2", "功能", "x_y").forEach {
             assertEquals(it, GitRefNames.requireBranchName(f.runner, it))

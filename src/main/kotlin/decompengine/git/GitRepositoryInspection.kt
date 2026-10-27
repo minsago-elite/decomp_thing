@@ -123,8 +123,8 @@ data class GitWorkspaceObservation(
     val refsTruncated: Boolean,
     val dirty: Boolean,
     /**
-     * SHA-256 of HEAD, every non-ignored status entry (with its index blob and the work-tree file's
-     * size and modification time) and completeness, so any observed change produces a new value.
+     * SHA-256 of HEAD, pending merge parents, every non-ignored status entry (with all index stage
+     * blobs/modes and the work-tree file's size/time) and completeness, so reviews bind the merge too.
      */
     val statusDigest: String,
     val status: GitStatusSnapshot = GitStatusSnapshot(emptyList(), true),
@@ -183,10 +183,20 @@ object GitRepositoryInspector {
             val status = GitReads.status(runner, gitDir, workTree)
             val relevant = status.entries.filter { !it.ignored }
             val digest = MessageDigest.getInstance("SHA-256").apply {
-                update("git-workspace-status-v2\n${head.state.wireName}\n${head.refName ?: ""}\n${head.objectId ?: ""}\n${status.complete}\n".toByteArray())
+                update("git-workspace-status-v3\n${head.state.wireName}\n${head.refName ?: ""}\n${head.objectId ?: ""}\n${status.complete}\n".toByteArray())
+                // Identical resolved trees can have different merge parents. Bind them even once
+                // the index is clean; conflict guards also retain every unmerged stage below.
+                val mergeHead = gitDir.resolve("MERGE_HEAD")
+                if (Files.exists(mergeHead, NOFOLLOW_LINKS)) {
+                    val parents = try { GitStorage.read(mergeHead, 16 * 1024) } catch (_: java.io.IOException) {
+                        throw GitRepositoryException("REPOSITORY_UNSUPPORTED", "The pending merge metadata could not be read within its bounds.")
+                    }
+                    update(parents)
+                }
+                update(0)
                 for (entry in relevant) {
                     update(entry.path.bytes); update(0)
-                    update("${entry.originalPath?.display ?: ""}\u0000${entry.staged}\u0000${entry.unstaged}\u0000${entry.untracked}\u0000${entry.conflict}\u0000${entry.indexObjectId ?: ""}\u0000${entry.indexMode ?: ""}\u0000${entry.worktreeMode ?: ""}\u0000".toByteArray())
+                    update("${entry.originalPath?.display ?: ""}\u0000${entry.staged}\u0000${entry.unstaged}\u0000${entry.untracked}\u0000${entry.conflict}\u0000${entry.indexObjectId ?: ""}\u0000${entry.indexMode ?: ""}\u0000${entry.worktreeMode ?: ""}\u0000${entry.conflictStageIdentity ?: ""}\u0000".toByteArray())
                     // Re-editing an already modified file changes no status code; its size and time do.
                     val file = entry.path.exact?.let { runCatching { workTree.resolve(it) }.getOrNull() }
                     val stat = file?.let { runCatching { Files.readAttributes(it, java.nio.file.attribute.BasicFileAttributes::class.java, NOFOLLOW_LINKS) }.getOrNull() }
