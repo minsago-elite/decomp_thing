@@ -177,7 +177,7 @@ class WebRevisionSourceSearchTest {
         val large = ("x".repeat(1023) + "\n").repeat(5 * 1024) + "needle\n"
         val entries = listOf(entry("a.c", large), entry("b.c", large), entry("c.c", "needle\n"))
         val state = harness(entries)
-        val engine = WebRevisionSourceSearch(state::source, maximumScannedBytes = WebRevisionSourceContent.MAXIMUM_FILE_BYTES)
+        val engine = WebRevisionSourceSearch(state::source, maximumScannedBytes = WebRevisionSourceContent.MAXIMUM_FILE_BYTES + 1)
         val first = search(engine, "q=needle")
         assertEquals("partial", first.getValue("status").jsonPrimitive.content)
         assertEquals("byte-limit", first.getValue("stopReason").jsonPrimitive.content)
@@ -192,13 +192,32 @@ class WebRevisionSourceSearchTest {
         val large = ("x".repeat(1023) + "\n").repeat(5 * 1024) + "needle\n"
         val entries = listOf(entry("a.c", large), entry("b.c", large), entry("c.c", large))
         val state = harness(entries).also { it.bodies = it.bodies + ("a.c" to null) + ("b.c" to null) }
-        val engine = WebRevisionSourceSearch(state::source, maximumScannedBytes = WebRevisionSourceContent.MAXIMUM_FILE_BYTES)
+        val engine = WebRevisionSourceSearch(state::source, maximumScannedBytes = WebRevisionSourceContent.MAXIMUM_FILE_BYTES + 1)
         val first = search(engine, "q=needle")
         // The failed 5 MiB read leaves no room for another 5 MiB read on this page.
         assertEquals("byte-limit", first.getValue("stopReason").jsonPrimitive.content)
         assertEquals(1, state.reads)
-        assertEquals(entries[0].bytes.size.toString(), first.getValue("progress").jsonObject.getValue("scannedBytes").jsonPrimitive.content)
+        assertEquals((entries[0].bytes.size + 1).toString(), first.getValue("progress").jsonObject.getValue("scannedBytes").jsonPrimitive.content)
         assertEquals(listOf("c.c"), all(engine, "q=needle").map { string(it, "displayName") })
+    }
+
+    @Test fun `page admission includes overflow probes at the maximum file size`() {
+        val entries = (0 until 5).map { Entry("f$it.c", byteArrayOf(), text,
+            size = WebRevisionSourceContent.MAXIMUM_FILE_BYTES) }
+        val state = harness(entries).also { it.bodies = entries.associate { file -> file.path to null } }
+        val engine = WebRevisionSourceSearch(state::source)
+        val first = search(engine, "q=needle")
+        val progress = first.getValue("progress").jsonObject
+        // Four complete 8 MiB reservations plus their probes would exceed the unchanged 32 MiB ceiling.
+        assertEquals(3, state.reads)
+        assertEquals(3, progress.getValue("unavailableFiles").jsonPrimitive.int)
+        assertEquals(3 * (WebRevisionSourceContent.MAXIMUM_FILE_BYTES + 1), progress.getValue("scannedBytes").jsonPrimitive.long)
+        assertEquals("byte-limit", first.getValue("stopReason").jsonPrimitive.content)
+        assertNotNull(cursor(first))
+        val last = search(engine, "q=needle&cursor=${cursor(first)}")
+        assertEquals(5, state.reads)
+        assertEquals("complete", last.getValue("status").jsonPrimitive.content)
+        assertEquals(5, last.getValue("coverageGaps").jsonObject.getValue("unavailableFiles").jsonPrimitive.int)
     }
 
     @Test fun `elapsed deadline stops with explicit progress and every continuation advances`() {
@@ -297,7 +316,8 @@ class WebRevisionSourceSearchTest {
         for (mode in listOf("valid", "changed", "missing", "busy", "valid")) {
             val engine = WebRevisionSourceSearch({ _, _, _, scan ->
                 evidence.search(reference, { job, run, path, maximum ->
-                    assertEquals(jobId, job); assertEquals(runId, run); assertEquals(WebRevisionSourceContent.MAXIMUM_FILE_BYTES, maximum)
+                    assertEquals(jobId, job); assertEquals(runId, run)
+                    assertEquals(if (path == "Makefile") 1L else payload.size.toLong(), maximum)
                     if (mode == "busy") assertEquals("SOURCE_SEARCH_BUSY", assertFailsWith<WebAccessDenied> {
                         evidence.search(reference, { _, _, _, _ -> error("nested") }) { _, _ -> JsonObject(emptyMap()) }
                     }.code)
