@@ -57,7 +57,7 @@ internal class WebRedactionPolicy private constructor(
         return if (leaksLiteral(current) || redactOnce(current, paths) != current) SECRET_MARK else current
     }
 
-    /** Recursively redact string values. Object keys are fixed contract vocabulary and are kept. */
+    /** Fixed-contract DTO projection only: protocol vocabulary, routing and byte-preview exemptions apply. */
     fun json(value: JsonElement): JsonElement = json(value, opaque = false)
 
     /**
@@ -75,16 +75,44 @@ internal class WebRedactionPolicy private constructor(
         // Decide on decoded JSON values: escaping can hide a literal (quotes, backslashes) or a path from the raw text.
         val parsed = try { Json.parseToJsonElement(text) } catch (_: Exception) { null }
         if (parsed != null) {
-            val safe = json(parsed)
-            return if (safe == parsed && !leaksLiteral(text)) bytes else safe.toString().toByteArray(Charsets.UTF_8)
+            val safe = documentJson(parsed)
+            if (safe == parsed && !leaksLiteral(text)) return bytes
+            val serialized = safe.toString()
+            // A configured literal can include JSON punctuation (for example a quoted property name).
+            // Never return the same leaking serialization after detecting it in the original bytes.
+            return if (leaksLiteral(serialized)) "null".toByteArray() else serialized.toByteArray(Charsets.UTF_8)
         }
         return if (text(text) == text) bytes else text(text).toByteArray(Charsets.UTF_8)
     }
 
     /** Persisted prose: every configured sensitive value (including short ones) plus this policy. */
     fun diagnostic(value: String, maximumCharacters: Int = 480): String {
-        val first = diagnosticRedactor?.text(value, maximumCharacters) ?: value.take(maximumCharacters)
-        return text(first)
+        require(maximumCharacters >= 0)
+        // Preserve complete syntax spans before the progress redactor can mask only a prefix or truncate.
+        val safe = text(value)
+        val preview = diagnosticRedactor?.text(safe, maximumCharacters) ?: safe.take(maximumCharacters)
+        return text(preview)
+    }
+
+    /** Arbitrary report JSON has no trusted field names or fixed-DTO exemptions. */
+    private fun documentJson(value: JsonElement): JsonElement {
+        return when (value) {
+            is JsonObject -> {
+                val fields = linkedMapOf<String, JsonElement>()
+                for ((key, child) in value) {
+                    val safeKey = text(key)
+                    // Do not silently overwrite distinct properties that collapse to the same public key.
+                    if (safeKey in fields) return JsonPrimitive(SECRET_MARK)
+                    val safe = if (DOCUMENT_CREDENTIAL_KEY.matches(key)) JsonPrimitive(SECRET_MARK) else documentJson(child)
+                    val maximum = PUBLIC_TEXT_BOUNDS[key]
+                    fields[safeKey] = if (safe != child && maximum != null && safe is JsonPrimitive && safe.isString && safe.content.length > maximum)
+                        JsonPrimitive(SECRET_MARK) else safe
+                }
+                JsonObject(fields)
+            }
+            is JsonArray -> JsonArray(value.map(::documentJson))
+            is JsonPrimitive -> if (value.isString) JsonPrimitive(text(value.content)) else value
+        }
     }
 
     /** True when any configured literal or redactable span is present; canary and preview checks. */
@@ -119,11 +147,44 @@ internal class WebRedactionPolicy private constructor(
     }
 
     private fun redactOnce(source: String, paths: Boolean = true): String {
-        var result = source
-        for (literal in literals) if (result.contains(literal)) result = result.replace(literal, SECRET_MARK)
-        result = URL_USER_INFO.replace(result) { "${it.groupValues[1]}$SECRET_MARK@" }
+        // Collect complete spans against the same original text. Sequential substitutions can erase
+        // the assignment prefix/quote before syntax masking, or split an overlapping configured literal.
+        var starts: IntArray? = null
+        var ends: IntArray? = null
+        fun mark(start: Int, end: Int) {
+            if (starts == null) {
+                starts = IntArray(source.length + 1)
+                ends = IntArray(source.length + 1)
+            }
+            val beginnings = requireNotNull(starts)
+            beginnings[start]++
+            ends!![end]++
+        }
+        for (literal in literals) {
+            var start = source.indexOf(literal)
+            while (start >= 0) {
+                mark(start, start + literal.length)
+                start = source.indexOf(literal, start + 1)
+            }
+        }
+        for (match in URL_USER_INFO.findAll(source)) mark(match.groups[1]!!.range.last + 1, match.range.last)
         for ((pattern, keepPrefix) in CREDENTIAL_PATTERNS) {
-            result = pattern.replace(result) { if (keepPrefix) it.groupValues[1] + SECRET_MARK else SECRET_MARK }
+            for (match in pattern.findAll(source)) {
+                mark(if (keepPrefix) match.groups[1]!!.range.last + 1 else match.range.first, match.range.last + 1)
+            }
+        }
+        var result = if (starts == null) source else buildString {
+            var active = 0
+            var masking = false
+            for (index in source.indices) {
+                active -= ends!![index]
+                if (active == 0) masking = false
+                active += starts[index]
+                if (active > 0) {
+                    if (!masking) append(SECRET_MARK)
+                    masking = true
+                } else append(source[index])
+            }
         }
         if (!paths) return result
         for (root in privateRoots) result = root.replace(result, PATH_MARK)
@@ -155,6 +216,7 @@ internal class WebRedactionPolicy private constructor(
         private val ROUTE_SYNTAX = Regex("/(?:[A-Za-z0-9._~!$&'()*+,;=:@%-]+/?)*(?:\\?[A-Za-z0-9._~!$&'()*+,;=:@%/?-]*)?")
         private const val CREDENTIAL_KEYS = "api[_-]?key|access[_-]?key|secret[_-]?key|access[_-]?token|refresh[_-]?token|" +
             "auth[_-]?token|client[_-]?secret|password|passwd|passphrase|secret|token"
+        private val DOCUMENT_CREDENTIAL_KEY = Regex("(?i)(?:$CREDENTIAL_KEYS|(?:proxy-)?authorization|cookie|set-cookie)")
         private val URL_USER_INFO =Regex("(?i)\\b([a-z][a-z0-9+.-]{1,31}://)[^/\\s:@\"'<>]{1,256}:[^/\\s@\"'<>]{1,512}@")
         private val CREDENTIAL_PATTERNS = listOf(
             Regex("(?i)\\b((?:proxy-)?authorization\\s*[:=]\\s*)(?:basic|bearer|token|digest)\\s+[^\\s,;\"'<>]+") to true,

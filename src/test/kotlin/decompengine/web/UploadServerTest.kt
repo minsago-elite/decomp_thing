@@ -942,7 +942,7 @@ class UploadServerTest {
         val password = "synthetic-password-value"
         val basicToken = "c3ludGhldGljOnNlbnRpbmVs" // Deliberately absent from sensitiveValues.
         val server = UploadServer("127.0.0.1", 0, dataDir,
-            analyzer = JobAnalyzer { _, _ -> error("Provider refused $configured; Bearer $bearer; password=$password; pRoXy-AuThOrIzAtIoN: bAsIc $basicToken <script>bad</script>") },
+            analyzer = JobAnalyzer { _, _ -> error("Provider refused $configured; Bearer $bearer; password=\"$password bravo charlie\"; pRoXy-AuThOrIzAtIoN: bAsIc $basicToken <script>bad</script>") },
             reconstructor = JobReconstructor { _, _ -> error("z".repeat(17000) + configured) },
             executor = Executor { it.run() }, sensitiveValues = listOf(configured))
         server.start()
@@ -958,7 +958,7 @@ class UploadServerTest {
             val api = request(server, "GET", "/api/jobs/$id").body.decodeToString()
             val page = request(server, "GET", "/jobs/$id").body.decodeToString()
             listOf(persisted).forEach { text ->
-                listOf(configured, bearer, password, basicToken).forEach { assertTrue(!text.contains(it)) }
+                listOf(configured, bearer, password, "bravo", "charlie", basicToken).forEach { assertTrue(!text.contains(it)) }
                 assertTrue(text.contains("[redacted]"))
             }
             listOf(configured, bearer, password, basicToken, "status_message", "binary_path").forEach {

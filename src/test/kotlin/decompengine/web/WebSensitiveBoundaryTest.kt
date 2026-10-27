@@ -245,7 +245,7 @@ class WebSensitiveBoundaryTest {
             val origin = "http://127.0.0.1:${server.serverPort}"
             val headers = legacySessionHeaders(server)
             val boundary = "legacy_boundary"
-            val payload = "--$boundary\r\nContent-Disposition: form-data; name=\"binary\"; filename=\"l.elf\"\r\n\r\n".toByteArray() +
+            val payload = "--$boundary\r\nContent-Disposition: form-data; name=\"binary\"; filename=\"legacy-$canary.elf\"\r\n\r\n".toByteArray() +
                 elfFixture() + "\r\n--$boundary--\r\n".toByteArray()
             val uploaded = client.send(HttpRequest.newBuilder(URI("$origin/jobs")).header("Origin", origin)
                 .header("Accept", "application/json").header("Content-Type", "multipart/form-data; boundary=$boundary")
@@ -258,8 +258,20 @@ class WebSensitiveBoundaryTest {
             while (server.audit.read(jobId).entries.none { it.action == WebAuditAction.JOB_UPLOAD } && System.nanoTime() < deadline) Thread.sleep(10)
             assertEquals(WebAuditOutcome.ACCEPTED, server.audit.read(jobId).entries.single { it.action == WebAuditAction.JOB_UPLOAD }.outcome)
 
+            assertFalse(uploaded.body().contains(canary))
+            for (path in listOf("/", "/jobs/$jobId")) {
+                val page = client.send(HttpRequest.newBuilder(URI("$origin$path")).header("Accept", "text/html")
+                    .apply { headers.forEach { (k, v) -> header(k, v) } }.GET().build(), HttpResponse.BodyHandlers.ofString())
+                assertEquals(200, page.statusCode(), path)
+                assertFalse(page.body().contains(canary), path)
+                assertTrue(page.body().contains("legacy-[redacted].elf"), path)
+                assertTrue(page.body().contains("window.legacySession"), "trusted session script is unchanged")
+            }
+
             val reports = Files.createDirectories(root.resolve(jobId).resolve("reports"))
             Files.writeString(reports.resolve("exploration.json"), buildJsonObject {
+                put(canary, "public property value")
+                put("password", "alpha bravo charlie")
                 put("note", "token $canary at /home/someone/x")
                 put("escaped", """password="alpha\"bravo"""")
                 put("long", "token='${"x".repeat(4096)}'")
@@ -273,6 +285,9 @@ class WebSensitiveBoundaryTest {
             assertEquals(200, report.statusCode())
             assertFalse(report.body().contains(canary) || report.body().contains("/home/someone"), report.body())
             val publicReport = Json.parseToJsonElement(report.body()).jsonObject
+            assertEquals("public property value", publicReport.getValue("[redacted]").jsonPrimitive.content)
+            assertEquals("[redacted]", publicReport.getValue("password").jsonPrimitive.content)
+            assertFalse(report.body().contains("bravo") || report.body().contains("charlie"))
             assertEquals("token [redacted] at [private-path]", publicReport.getValue("note").jsonPrimitive.content)
             assertEquals("password=[redacted]", publicReport.getValue("escaped").jsonPrimitive.content)
             assertEquals("token=[redacted]", publicReport.getValue("long").jsonPrimitive.content)

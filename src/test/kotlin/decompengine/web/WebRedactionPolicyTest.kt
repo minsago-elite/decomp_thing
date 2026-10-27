@@ -213,6 +213,66 @@ class WebRedactionPolicyTest {
         assertEquals("1", generic.text("1"))
     }
 
+    @Test fun `diagnostics mask complete quoted spans before either redactor or preview truncation`() {
+        val diagnostic = WebRedactionPolicy.create(emptyMap(), listOf("s3cr"), emptyList())
+        for (assignment in listOf(
+            "password=\"alpha bravo charlie\"",
+            "client_secret='alpha bravo charlie'",
+            "password=\"alpha\\\"bravo charlie\"",
+            "password=\"${"x".repeat(4096)} tail\"",
+            "password=\"unfinished credential",
+            "password=\"s3cr bravo charlie\"",
+        )) {
+            val expected = assignment.substringBefore('=') + "=[redacted]"
+            assertEquals(expected, diagnostic.diagnostic(assignment))
+            assertEquals(expected, WebRedactionPolicy.BASELINE.diagnostic(assignment))
+            assertFalse(diagnostic.diagnostic("public ".repeat(100) + assignment, 128).contains("charlie"))
+        }
+        // The earlier ACP inventory redactor must not destroy the context before web projection.
+        val progress = decompengine.jobs.ProgressRedactor(emptyList())
+        assertEquals("password=[redacted]", progress.text("password=\"alpha bravo charlie\""))
+        assertEquals("password=[redacted]", progress.text("password=\"alpha\\\"bravo charlie\""))
+    }
+
+    @Test fun `configured literals cannot destroy complete quoted credential context`() {
+        for (literal in listOf("password", "password=\"alpha", "alpha bravo", "bravo charlie\"")) {
+            val overlapping = WebRedactionPolicy.create(mapOf("TEST_TOKEN" to literal), listOf(literal), emptyList())
+            for (safe in listOf(overlapping.text("password=\"alpha bravo charlie\""),
+                overlapping.diagnostic("password=\"alpha bravo charlie\""))) {
+                assertFalse(safe.contains("alpha") || safe.contains("bravo") || safe.contains("charlie"), safe)
+                assertFalse(safe.contains(literal), safe)
+            }
+        }
+    }
+
+    @Test fun `arbitrary JSON downloads redact decoded keys credential properties and DTO lookalikes`() {
+        val input = buildJsonObject {
+            put(canary, "public")
+            put("password", "alpha bravo charlie")
+            put("nested", buildJsonArray { add(buildJsonObject {
+                put("client_secret", buildJsonObject { put("value", "hidden") })
+                put("Authorization", "Basic arbitrary credential")
+                put("nextCursor", "sk-abcdefghijklmnopqrstuvwxyz012345")
+                put("snapshotHref", "/home/private/report")
+            }) })
+        }
+        val safe = Json.parseToJsonElement(policy.document(input.toString().toByteArray()).decodeToString()).jsonObject
+        assertFalse(safe.toString().contains(canary))
+        assertEquals("public", safe.getValue("[redacted]").jsonPrimitive.content)
+        assertEquals("[redacted]", safe.getValue("password").jsonPrimitive.content)
+        assertFalse(safe.toString().contains("hidden") || safe.toString().contains("arbitrary credential"))
+        assertFalse(safe.toString().contains("sk-abc") || safe.toString().contains("/home/private"))
+        val escapedKey = WebRedactionPolicy.create(mapOf("TEST_TOKEN" to "ab\"cd\\ef0123"), emptyList(), emptyList())
+        val escaped = buildJsonObject { put("ab\"cd\\ef0123", "public") }
+        assertFalse(escapedKey.document(escaped.toString().toByteArray()).decodeToString().contains("ab\\\"cd"))
+        val punctuation = WebRedactionPolicy.create(mapOf("TEST_TOKEN" to "\"password\""), emptyList(), emptyList())
+        assertEquals("null", punctuation.document("{\"password\":\"alpha bravo charlie\"}".toByteArray()).decodeToString())
+        val colliding = buildJsonObject { put(canary, "first"); put("[redacted]", "second") }
+        val collision = policy.document(colliding.toString().toByteArray())
+        assertEquals(JsonPrimitive("[redacted]"), Json.parseToJsonElement(collision.decodeToString()))
+        assertContentEquals(collision, policy.document(collision))
+    }
+
     @Test fun `persisted diagnostics also redact short configured values before storage`() {
         val diagnostic = WebRedactionPolicy.create(emptyMap(), listOf("s3cr"), emptyList())
         assertEquals("value [redacted] at [private-path]", diagnostic.diagnostic("value s3cr at /home/x/y"))
