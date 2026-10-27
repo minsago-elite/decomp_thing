@@ -2,6 +2,8 @@ package decompengine.git
 
 import java.io.ByteArrayInputStream
 import java.io.ByteArrayOutputStream
+import java.io.IOException
+import java.io.OutputStream
 import java.nio.file.Path
 import java.security.MessageDigest
 import java.time.Duration
@@ -86,17 +88,21 @@ object GitSourceExports {
             zip.setMethod(ZipOutputStream.STORED)
             for (entry in entries) {
                 val bytes = contents.getValue(entry.objectId)
-                val zipEntry = ZipEntry(entry.text).apply {
-                    method = ZipEntry.STORED
-                    size = bytes.size.toLong(); compressedSize = bytes.size.toLong()
-                    crc = CRC32().apply { update(bytes) }.value
-                    timeLocal = FIXED_TIME
-                }
-                zip.putNextEntry(zipEntry); zip.write(bytes); zip.closeEntry()
+                writeEntry(zip, entry.text, bytes)
             }
         }
         val bytes = output.toByteArray()
         return GitSourceExport(bytes, GitStorage.sha256(bytes), entries.associate { it.text to it.objectId }, skipped)
+    }
+
+    private fun writeEntry(zip: ZipOutputStream, name: String, bytes: ByteArray) {
+        val entry = ZipEntry(name).apply {
+            method = ZipEntry.STORED
+            size = bytes.size.toLong(); compressedSize = bytes.size.toLong()
+            crc = CRC32().apply { update(bytes) }.value
+            timeLocal = FIXED_TIME
+        }
+        zip.putNextEntry(entry); zip.write(bytes); zip.closeEntry()
     }
 
     /** Blob contents through `cat-file --batch`, parsed length-first so any byte content is exact. */
@@ -133,28 +139,51 @@ object GitSourceExports {
     /**
      * Independent check of an export: every entry's Git blob ID, recomputed from the archive bytes,
      * must equal the commit tree's, with nothing extra. It needs no remote and trusts no ref name.
+     * This verifies our deterministic STORED export profile, not arbitrary ZIP variants. Re-encoding
+     * into a byte comparator checks every local header, central record and end record too: a local-
+     * entry stream alone would silently accept missing/truncated directories or even non-ZIP bytes.
      */
     fun verify(bytes: ByteArray, format: GitObjectFormat, expected: Map<String, String>): Boolean = try {
         verifyEntries(bytes, format, expected)
-    } catch (_: java.io.IOException) { false }
+    } catch (_: IOException) { false }
+      catch (_: IllegalArgumentException) { false }
 
     private fun verifyEntries(bytes: ByteArray, format: GitObjectFormat, expected: Map<String, String>): Boolean {
         val seen = HashMap<String, String>()
         val paths = GitExportPaths()
         var total = 0
-        ZipInputStream(ByteArrayInputStream(bytes)).use { zip ->
-            while (true) {
-                val entry = zip.nextEntry ?: break
-                if (entry.isDirectory || seen.size >= MAX_FILES || !paths.add(entry.name)) return false
-                val content = zip.readNBytes(MAX_BYTES - total + 1)
-                total += content.size
-                if (total > MAX_BYTES) return false
-                val digest = MessageDigest.getInstance(if (format == GitObjectFormat.SHA256) "SHA-256" else "SHA-1")
-                digest.update("blob ${content.size}\u0000".toByteArray(Charsets.US_ASCII)); digest.update(content)
-                seen[entry.name] = digest.digest().joinToString("") { "%02x".format(it) }
+        val comparison = ExportByteComparison(bytes)
+        ZipOutputStream(comparison).use { canonical ->
+            ZipInputStream(ByteArrayInputStream(bytes)).use { zip ->
+                while (true) {
+                    val entry = zip.nextEntry ?: break
+                    if (entry.isDirectory || seen.size >= MAX_FILES || !paths.add(entry.name)) return false
+                    val content = zip.readNBytes(MAX_BYTES - total + 1)
+                    total += content.size
+                    if (total > MAX_BYTES) return false
+                    val digest = MessageDigest.getInstance(if (format == GitObjectFormat.SHA256) "SHA-256" else "SHA-1")
+                    digest.update("blob ${content.size}\u0000".toByteArray(Charsets.US_ASCII)); digest.update(content)
+                    seen[entry.name] = digest.digest().joinToString("") { "%02x".format(it) }
+                    writeEntry(canonical, entry.name, content)
+                }
             }
         }
-        return seen == expected
+        return comparison.complete && seen == expected
+    }
+
+    /** Compare as we encode, without retaining a second archive-sized buffer or any temp files. */
+    private class ExportByteComparison(private val expected: ByteArray) : OutputStream() {
+        private var offset = 0
+        val complete get() = offset == expected.size
+        override fun write(value: Int) {
+            if (offset >= expected.size || expected[offset] != value.toByte()) throw IOException("Noncanonical export ZIP")
+            offset++
+        }
+        override fun write(bytes: ByteArray, start: Int, length: Int) {
+            if (length > expected.size - offset || java.util.Arrays.mismatch(expected, offset, offset + length, bytes, start, start + length) != -1)
+                throw IOException("Noncanonical export ZIP")
+            offset += length
+        }
     }
 
     private fun tooLarge(): Nothing = throw GitRepositoryException("REPOSITORY_UNSUPPORTED", "The commit tree exceeds the export limits.")

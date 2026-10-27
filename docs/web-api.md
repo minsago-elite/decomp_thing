@@ -1006,6 +1006,13 @@ resume answers `409 WORKTREE_BUSY` while Git owns it. Replays of retained workfl
 remain read-only and do not schedule another worker. At most one Git operation runs per job,
 on a single executor.
 
+A branch switch also holds the destination's common-repository Git ref lock through final
+validation and checkout, so an external ref writer cannot substitute a new tip after the size
+and identity checks. A busy destination is `WORKTREE_BUSY`; symbolic branch aliases are refused
+as `SWITCH_REFUSED` because locking an alias would not pin its referent. Restart reclaims only
+inode-witnessed owned locks and does not report a later external destination move as a completed
+checkout of the reviewed object.
+
 `GET G/worktrees` (`gitWorktrees`) lists the primary and linked work trees with HEAD, dirty state,
 version and owner. `GET G/worktrees/{worktreeId}` returns that work tree's `gitWorkspace`.
 `G/status`, `G/history` and `G/diff` accept `worktree=<id>`, and every mutation names its target
@@ -1045,7 +1052,10 @@ represented. The provenance envelope travels separately and is never inside the 
 
 `GitSourceExports.verify` checks an export independently. It recomputes every entry's Git blob ID
 from the archive bytes and compares the set with the commit tree; it needs no remote and trusts no
-ref name. The reconstruction pipeline's own deterministic `source-tree.zip` is unchanged: it is
+ref name. It verifies this deterministic STORED ZIP profile, not arbitrary ZIP variants: local
+headers, the complete matching central directory and end record must reproduce exactly, with no
+trailing bytes. Truncated directories and non-ZIP payloads fail even for an empty expected tree;
+a complete empty ZIP succeeds. The reconstruction pipeline's own deterministic `source-tree.zip` is unchanged: it is
 still built from recorded snapshots, and its packager still refuses any `.git` path. A Git
 repository is never an input to it.
 

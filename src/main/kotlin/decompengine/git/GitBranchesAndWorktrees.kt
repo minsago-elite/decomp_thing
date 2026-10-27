@@ -9,6 +9,9 @@ import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 import kotlinx.serialization.json.put
 import java.nio.file.Path
+import java.nio.file.Files
+import java.nio.file.LinkOption.NOFOLLOW_LINKS
+import java.nio.file.FileAlreadyExistsException
 import java.time.Duration
 import java.time.Instant
 
@@ -99,7 +102,32 @@ internal object GitRefOperations {
         return runner.run(GitInvocation("rev-list", arguments, gitDir = commonDir, limits = LIMITS)).text.trim().toLongOrNull() ?: Long.MAX_VALUE
     }
 
-    /** Switch without guessing, recursing into submodules or running hooks. */
+    /**
+     * Pin a branch through final validation AND checkout using Git's files-ref lock protocol.
+     * A private inode witness lets restart recovery reclaim only our lock, never another writer's.
+     * Symbolic branches are refused: locking an alias would not pin its referent.
+     */
+    fun lockSwitchBranch(runner: GitCommandRunner, commonDir: Path, ref: String, staging: Path): AutoCloseable {
+        check(ref.startsWith("refs/heads/") && GitRefNames.isObservedRefName(ref))
+        GitStorage.directories(commonDir, *ref.split('/').dropLast(1).toTypedArray())
+        val witness = Files.createFile(staging.resolve("ref-lock"))
+        GitStorage.replaceAtomically(staging.resolve("ref-name"), ref.toByteArray(Charsets.UTF_8))
+        val file = commonDir.resolve("$ref.lock")
+        try { Files.createLink(file, witness) } catch (_: FileAlreadyExistsException) {
+            refuse("WORKTREE_BUSY", "Another Git writer holds the destination branch lock. Nothing was checked out.")
+        }
+        val ownership = AutoCloseable {
+            if (Files.isRegularFile(file, NOFOLLOW_LINKS) && Files.isSameFile(file, witness)) Files.delete(file)
+        }
+        try {
+            GitStorage.forceDirectory(file.parent)
+            val symbolic = runner.run(GitInvocation("symbolic-ref", listOf("-q", ref), gitDir = commonDir, allowedExitCodes = setOf(0, 1)))
+            if (symbolic.exitCode == 0) refuse("SWITCH_REFUSED", "A symbolic branch cannot be pinned for checkout. Select a direct branch or an exact commit.")
+            return ownership
+        } catch (failure: Throwable) { ownership.close(); throw failure }
+    }
+
+    /** Switch without guessing, recursing into submodules or running hooks. Caller pins a named branch. */
     fun switch(runner: GitCommandRunner, gitDir: Path, workTree: Path, branch: String?, objectId: String?) {
         // Ignored local files (experiment outputs) are never overwritten by a tracked destination file.
         val arguments = if (branch != null) listOf("--no-guess", "--no-recurse-submodules", "--no-overwrite-ignore", branch)

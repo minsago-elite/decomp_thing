@@ -399,6 +399,105 @@ class GitBranchesWorktreesTest {
         }
     }
 
+    @Test fun `branch switches pin the reviewed destination through the after-validation race`() {
+        for (linked in listOf(false, true)) for (explicitTip in listOf(false, true)) Fixture().use { f ->
+            val base = f.prepare()
+            val primary = service.workspace(jobId, repositoryId).worktreeId
+            val target = if (linked) run(GitRefRequest(GitOperationAction.WORKTREE_ADD, primary, guards().second, objectId = base)).worktreeId else primary
+            run(GitRefRequest(GitOperationAction.BRANCH_CREATE, primary, guards().second, name = "reviewed", objectId = base))
+            // A packed destination must obey the same common-directory lock as a loose one.
+            f.raw("pack-refs", "--all", "--prune")
+            val moved = f.raw("commit-tree", "-p", base, "-m", "unreviewed tip", "$base^{tree}").trim()
+            var raced = false
+            f.hook = { if (it == GitOperationCrashPoint.BEFORE_PUBLISH) {
+                val update = f.repositories.runner.run(GitInvocation("update-ref", listOf("refs/heads/reviewed", moved, base),
+                    gitDir = f.gitDir(), allowedExitCodes = setOf(0, 128)))
+                assertEquals(128, update.exitCode, "an external writer cannot change the reviewed destination during checkout")
+                raced = true
+            } }
+            val operation = run(GitRefRequest(GitOperationAction.SWITCH, target, guards(target).second,
+                refId = refId("refs/heads/reviewed"), objectId = base.takeIf { explicitTip }))
+            assertTrue(raced)
+            assertEquals(GitOperationState.COMPLETED, operation.state, operation.message)
+            assertEquals(base, operation.resultObjectId)
+            val after = service.workspace(jobId, repositoryId, target)
+            assertEquals(base, after.observation.head.objectId)
+            assertEquals("refs/heads/reviewed", after.observation.head.refName)
+            assertFalse(Files.exists(f.gitDir().resolve("refs/heads/reviewed.lock")))
+            // Once the operation has released ownership, normal external ref writers work again.
+            f.raw("update-ref", "refs/heads/reviewed", moved, base)
+        }
+    }
+
+    @Test fun `switch restart does not report a later external destination tip as its result`() {
+        for (explicit in listOf(false, true)) Fixture().use { f ->
+            val base = f.prepare()
+            val primary = service.workspace(jobId, repositoryId).worktreeId
+            run(GitRefRequest(GitOperationAction.BRANCH_CREATE, primary, guards().second, name = "reviewed", objectId = base))
+            f.hook = { if (it == GitOperationCrashPoint.AFTER_PUBLISH) throw SimulatedGitCrash() }
+            val admitted = service.requestWorkspace(jobId, repositoryId, GitRefRequest(GitOperationAction.SWITCH, primary, guards().second,
+                refId = refId("refs/heads/reviewed"), objectId = base.takeIf { explicit }), "switch_moved_recovery_key")
+            assertTrue(service.awaitIdle(60_000)); service.close(); f.hook = {}
+            // Retain the durable target as it would survive real process death (which skips finally).
+            val staging = Files.createDirectories(f.store.resolve("$jobId/git/staging/${admitted.operation.operationId}"))
+            Files.writeString(staging.resolve("switch-target"), base)
+            val moved = f.raw("commit-tree", "-p", base, "-m", "later external tip", "$base^{tree}").trim()
+            f.raw("update-ref", "refs/heads/reviewed", moved, base)
+            service = f.open()
+            val recovered = service.operation(jobId, repositoryId, admitted.operation.operationId)
+            assertEquals(GitOperationState.RECOVERY_REQUIRED, recovered.state)
+            assertEquals("REF_CHANGED", recovered.failureCode)
+        }
+    }
+
+    @Test fun `switch restart reclaims only its witnessed destination lock`() {
+        for (foreign in listOf(false, true)) Fixture().use { f ->
+            val base = f.prepare()
+            val primary = service.workspace(jobId, repositoryId).worktreeId
+            run(GitRefRequest(GitOperationAction.BRANCH_CREATE, primary, guards().second, name = "reviewed", objectId = base))
+            f.hook = { if (it == GitOperationCrashPoint.BEFORE_PUBLISH) throw SimulatedGitCrash() }
+            val admitted = service.requestWorkspace(jobId, repositoryId, GitRefRequest(GitOperationAction.SWITCH, primary, guards().second,
+                refId = refId("refs/heads/reviewed"), objectId = base), "switch_recovery_key")
+            assertTrue(service.awaitIdle(60_000)); service.close(); f.hook = {}
+            // Emulate process death, where finally cannot unlink the owned branch lock.
+            val staging = Files.createDirectories(f.store.resolve("$jobId/git/staging/${admitted.operation.operationId}"))
+            Files.writeString(staging.resolve("ref-name"), "refs/heads/reviewed")
+            val witness = Files.createFile(staging.resolve("ref-lock"))
+            val lock = f.gitDir().resolve("refs/heads/reviewed.lock")
+            if (foreign) Files.writeString(lock, "foreign replacement\n") else Files.createLink(lock, witness)
+            service = f.open()
+            val recovered = service.operation(jobId, repositoryId, admitted.operation.operationId)
+            if (foreign) {
+                assertEquals(GitOperationState.RECOVERY_REQUIRED, recovered.state)
+                assertEquals("SWITCH_LOCK_REQUIRES_REVIEW", recovered.failureCode)
+                assertEquals("foreign replacement\n", Files.readString(lock))
+            } else {
+                assertEquals(GitOperationState.INTERRUPTED, recovered.state)
+                assertFalse(Files.exists(lock))
+                assertEquals(GitOperationState.COMPLETED, run(GitRefRequest(GitOperationAction.SWITCH, primary, guards().second,
+                    refId = refId("refs/heads/reviewed"), objectId = base)).state)
+            }
+        }
+    }
+
+    @Test fun `switches refuse symbolic destinations and preserve foreign destination locks`(): Unit = Fixture().use { f ->
+        val base = f.prepare()
+        val primary = service.workspace(jobId, repositoryId).worktreeId
+        f.raw("symbolic-ref", "refs/heads/alias", "refs/heads/trunk")
+        val symbolic = run(GitRefRequest(GitOperationAction.SWITCH, primary, guards().second,
+            refId = refId("refs/heads/alias"), objectId = base))
+        assertEquals(GitOperationState.FAILED, symbolic.state); assertEquals("SWITCH_REFUSED", symbolic.failureCode)
+        assertFalse(Files.exists(f.gitDir().resolve("refs/heads/alias.lock")))
+        run(GitRefRequest(GitOperationAction.BRANCH_CREATE, primary, guards().second, name = "locked", objectId = base))
+        val foreign = f.gitDir().resolve("refs/heads/locked.lock")
+        Files.writeString(foreign, "another writer\n")
+        val operation = run(GitRefRequest(GitOperationAction.SWITCH, primary, guards().second,
+            refId = refId("refs/heads/locked"), objectId = base))
+        assertEquals(GitOperationState.FAILED, operation.state); assertEquals("WORKTREE_BUSY", operation.failureCode)
+        assertEquals("another writer\n", Files.readString(foreign))
+        assertEquals("refs/heads/trunk", service.workspace(jobId, repositoryId).observation.head.refName)
+    }
+
     @Test fun `branch deletion compares the reviewed tip even if the branch moves after validation`(): Unit = Fixture().use { f ->
         val base = f.prepare()
         val primary = service.workspace(jobId, repositoryId).worktreeId
@@ -513,6 +612,31 @@ class GitBranchesWorktreesTest {
         }
         val paths = GitExportPaths()
         assertTrue(paths.add("src/normal.c")); assertTrue(paths.add("src/other.c")); assertFalse(paths.add("src/normal.c"))
+    }
+
+    @Test fun `verification requires a complete consistent archive including the valid empty case`(): Unit = Fixture().use { f ->
+        val base = f.prepare()
+        val export = service.export(jobId, repositoryId, base)
+        assertTrue(GitSourceExports.verify(export.bytes, GitObjectFormat.SHA1, export.blobs))
+        val empty = java.io.ByteArrayOutputStream().also { java.util.zip.ZipOutputStream(it).close() }.toByteArray()
+        assertTrue(GitSourceExports.verify(empty, GitObjectFormat.SHA1, emptyMap()))
+        assertTrue(GitSourceExports.verify(empty, GitObjectFormat.SHA256, emptyMap()))
+        for (bytes in listOf(byteArrayOf(), "not a zip".toByteArray(), empty.copyOf(empty.size - 1), empty + byteArrayOf(0))) {
+            assertFalse(GitSourceExports.verify(bytes, GitObjectFormat.SHA1, emptyMap()))
+        }
+        val buffer = java.nio.ByteBuffer.wrap(export.bytes).order(java.nio.ByteOrder.LITTLE_ENDIAN)
+        val end = export.bytes.size - 22
+        val central = buffer.getInt(end + 16)
+        // Local entries and correct blob contents alone are not a complete ZIP.
+        for (length in listOf(central, central + 10, end, export.bytes.size - 1)) {
+            assertFalse(GitSourceExports.verify(export.bytes.copyOf(length), GitObjectFormat.SHA1, export.blobs), "truncation at $length")
+        }
+        // Inconsistent central metadata must fail even when local entries and blob IDs are intact.
+        for (at in listOf(central + 16, central + 20, central + 24, central + 42, central + 46, end + 8, end + 12, end + 16)) {
+            val changed = export.bytes.copyOf().also { it[at] = (it[at].toInt() xor 1).toByte() }
+            assertFalse(GitSourceExports.verify(changed, GitObjectFormat.SHA1, export.blobs), "metadata at $at")
+        }
+        assertFalse(GitSourceExports.verify(export.bytes + byteArrayOf(0), GitObjectFormat.SHA1, export.blobs))
     }
 
     @Test fun `a large file exports within the capture bounds`(): Unit = Fixture().use { f ->
