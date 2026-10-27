@@ -61,6 +61,10 @@ jobs:
           python3 -m pip install --requirement requirements/oracle-generation.txt
       - name: Verify packaged upgrade and cache evidence controls
         run: node scripts/test-packaged-browser-upgrade.mjs
+      - name: Verify lazy upload picker readiness controls
+        run: node --test scripts/packaged-browser-upload.test.mjs
+      - name: Verify shipped build-record path controls
+        run: python3 -B scripts/test-reproducible-jar.py --verbose
       - name: Verify bounded archival cleanup controls
         timeout-minutes: 1
         run: python3 -B scripts/test-archival-diagnostics.py --verbose
@@ -184,6 +188,8 @@ jobs:
           test "${#web_distribution[@]}" -eq 1
           test -f "${web_distribution[0]}"
           echo "WEB_TEST_ARCHIVE=${web_distribution[0]}" >> "$GITHUB_ENV"
+      - name: Require a byte-identical application JAR across Gradle invocations
+        run: python3 scripts/check-reproducible-jar.py
       - name: Require positive real-browser expiry evidence
         run: >-
           python3 scripts/test-ci-partitions.py

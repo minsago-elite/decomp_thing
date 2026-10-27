@@ -46,6 +46,8 @@ build/install/llm_bin_patch/bin/llm_bin_patch web --ui spa
 | `--ui` | `legacy` | `legacy` or `spa`. |
 | `--base-path` | `/` | Serve under a prefix such as `/workbench/`. **Only with `--ui spa`**: the legacy workbench refuses to start with `--base-path is supported by --ui spa`. |
 
+`web --help` prints these options and exits; `llm_bin_patch --version` prints the packaged version.
+
 On start the launcher prints two lines:
 
 ```text
@@ -165,6 +167,10 @@ harness (see the README).
 | You see | Meaning and what to do |
 |---|---|
 | `Cannot bind web server to 127.0.0.1:8000. Check --host or choose an unused --port.` | The port is busy. Pick another with `--port`. |
+| `Cannot start web server: <reason>` | The launcher refused its configuration before accepting any job (for example a non-loopback `--host`, or `--base-path` without `--ui spa`). Correct the named option; `web --help` lists them. |
+| `llm_bin_patch web: <option> …` followed by the usage line | An option is unknown or has an invalid value. Nothing was started. |
+| **Generate source tree** fails and `reports/analysis/reports/ghidra_stderr.log` shows `Path element starting with '.' is not permitted` | Builds before the fix for #1785 placed the Ghidra project under the data directory verbatim, and Ghidra rejects any path component that starts with `.` (including the default `.decomp_engine/jobs`). Current builds hand Ghidra the job's own directory through the analysis worker's working directory, so the default data directory works; update the distribution. |
+| `Ghidra cannot open a project at …: a path component starts with '.' or uses a character outside …` | The job directory could not be passed to Ghidra by the worker-directory route (it is only available on Linux). Choose a `--data-dir` (or `reconstruct --output`) whose path uses only letters, digits and `.-=@ _()[]~`, with no component starting with `.`. |
 | `BOOTSTRAP_REQUIRED` / "Open a newly issued local browser link." | The link was already used (or does not match). Restart the launcher and open the new link. |
 | `BOOTSTRAP_EXPIRED` / "The local browser link expired. Issue a new link." | More than five minutes passed before the link was opened. Restart the launcher and open the new link. |
 | `SESSION_REQUIRED` / "Open a local browser link to start a session." | You are not signed in. Open the launcher's link. |

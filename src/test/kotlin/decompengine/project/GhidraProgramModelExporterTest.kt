@@ -167,6 +167,49 @@ class GhidraProgramModelExporterTest {
     }
 
     @Test
+    fun `headless adapter opens projects under a dot prefixed data directory through the worker directory`() {
+        val temp = createTempDirectory("program-model-hidden-data-")
+        val fake = fakeGhidraHome(temp, complete = true)
+        val binary = temp.resolve("input/program").also {
+            it.parent.createDirectories()
+            it.writeText("binary fixture")
+        }
+        // The default web data directory is .decomp_engine/jobs; Ghidra rejects that project path.
+        val work = temp.resolve(".decomp_engine/jobs/job-1/reports/analysis")
+        val projects = mutableListOf<Path>()
+        val model = GhidraHeadlessProgramModelAnalyzer({ invocation: GhidraInvocation ->
+            projects.add(invocation.project)
+            fake(invocation)
+        }).analyze(binary, work)
+
+        assertEquals(listOf("fn_0000000000001000"), model.functions.map { it.id })
+        assertEquals(listOf(Path.of("/proc/self/cwd/ghidra_project")), projects)
+        assertTrue(work.resolve("ghidra_project").toFile().isDirectory)
+        assertTrue(work.resolve("invocation.txt").readText().lineSequence().contains("/proc/self/cwd/ghidra_project"))
+    }
+
+    @Test
+    fun `opt in real Ghidra recovers a program under a dot prefixed data directory`() {
+        if (System.getenv("RUN_REAL_GHIDRA") != "true") return
+        val temp = createTempDirectory("program-model-hidden-real-")
+        val source = temp.resolve("program.c")
+        val binary = temp.resolve("program")
+        source.writeText("static int twice(int x) { return x * 2; }\nint main(void) { return twice(21); }\n")
+        val compiler = ProcessBuilder("gcc", "-g", "-O0", source.pathString, "-o", binary.pathString)
+            .redirectErrorStream(true)
+            .start()
+        val compilerOutput = compiler.inputStream.bufferedReader().readText()
+        check(compiler.waitFor() == 0) { compilerOutput }
+        val work = temp.resolve(".decomp_engine/jobs/job-1/reports/analysis")
+
+        val model = GhidraHeadlessProgramModelAnalyzer().analyze(binary, work)
+
+        assertTrue(model.functions.any { it.name == "main" }, model.functions.map { it.name }.toString())
+        assertTrue(work.resolve("ghidra_project/archival_reconstruction.gpr").exists())
+        assertFalse(work.resolve("reports/ghidra_stderr.log").readText().contains("starting with '.' is not permitted"))
+    }
+
+    @Test
     fun `headless adapter terminates an over-budget export with resumable guidance`() = inControlTemporaryDirectory { temp ->
         val home = fakeGhidraHome(temp, complete = false)
         val binary = temp.resolve("input/program").also {

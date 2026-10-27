@@ -52,6 +52,16 @@ class LlvmBehaviorNativeSandboxPolicyV2Test {
     }
 
     @Test
+    fun `compiler location must use the exact logical build root even with rebound digests`() = withFixture { fixture ->
+        for (location in listOf("/home/developer/toolchain/cc", "/usr/bin/cc", "compiler", "\${BUILD_ROOT}/tmp/../compiler")) {
+            fixture.writeBuildRecord(compilerExecutable = location)
+            fixture.writePolicy(fixture.validPolicy())
+            val failure = assertFailsWith<LlvmBehaviorNativeSandboxPolicyV2Exception> { fixture.verify() }
+            assertTrue(failure.message.orEmpty().contains("fixed recorded build root"))
+        }
+    }
+
+    @Test
     fun `bundled draft pins independently reviewed platform roles IO and nonauthority`() {
         val static = staticSchemaProperties()
         assertEquals(JsonPrimitive(2), static.getValue("schemaVersion"))
@@ -516,7 +526,7 @@ class LlvmBehaviorNativeSandboxPolicyV2Test {
         }
 
         fun writeBuildRecord(
-            compilerExecutable: String = "/usr/bin/cc",
+            compilerExecutable: String = NATIVE_HELPER_RECORDED_COMPILER,
             compilerVersion: String = "cc fixture 1.0",
         ) {
             val record = JsonObject(

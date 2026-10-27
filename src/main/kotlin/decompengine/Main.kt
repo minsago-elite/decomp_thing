@@ -60,6 +60,7 @@ fun main(args: Array<String>) {
         "llvm-native-runtime-measurement" -> runLlvmNativeRuntimeMeasurement(args.drop(1))
         "web" -> runWeb(args.drop(1))
         null, "help", "--help", "-h" -> printHelp()
+        "version", "--version" -> println(applicationVersionLine())
         else -> {
             val exitCode = renderUnknownCommand(args.first(), System.getenv().values)
             printHelp()
@@ -880,62 +881,102 @@ private fun doctorUsageError(message: String, toolsOnly: Boolean): Nothing {
     kotlin.system.exitProcess(2)
 }
 
-private fun runWeb(args: List<String>) {
-    var host = "127.0.0.1"
-    var port = 8000
-    var listenBacklog = 64
-    var dataDir = Path.of(".decomp_engine/jobs")
-    var uiMode = WebUiMode.LEGACY
-    var basePath = "/"
-    var devFrontendOrigin: String? = null
+internal const val WEB_USAGE =
+    "usage: llm_bin_patch web [--host 127.0.0.1] [--port 8000] [--listen-backlog 64] [--data-dir .decomp_engine/jobs] " +
+        "[--ui legacy|spa] [--base-path /] [--dev-frontend-origin http://127.0.0.1:5173]"
+
+internal data class WebCliOptions(
+    val host: String = "127.0.0.1",
+    val port: Int = 8000,
+    val listenBacklog: Int = 64,
+    val dataDir: Path = Path.of(".decomp_engine/jobs"),
+    val uiMode: WebUiMode = WebUiMode.LEGACY,
+    val basePath: String = "/",
+    val devFrontendOrigin: String? = null,
+)
+
+internal sealed interface WebCliInvocation {
+    data object Help : WebCliInvocation
+    data class Serve(val options: WebCliOptions) : WebCliInvocation
+    data class Invalid(val message: String) : WebCliInvocation
+}
+
+/** Parses `web` options without starting anything; every rejection is a one-line operator message. */
+internal fun parseWebCliArguments(args: List<String>): WebCliInvocation {
+    var options = WebCliOptions()
     var index = 0
     while (index < args.size) {
-        require(index + 1 < args.size) { "${args[index]} requires a value; see llm_bin_patch --help" }
-        when (args[index]) {
-            "--host" -> {
-                host = args[index + 1]
-                index += 2
-            }
-            "--port" -> {
-                port = args[index + 1].toInt()
-                index += 2
-            }
-            "--listen-backlog" -> {
-                listenBacklog = args.getOrNull(index + 1)?.toIntOrNull()
-                    ?: error("--listen-backlog requires an integer between 1 and 4096")
-                index += 2
-            }
-            "--data-dir" -> {
-                dataDir = Path.of(args[index + 1])
-                index += 2
-            }
-            "--ui" -> {
-                uiMode = when (args[index + 1]) {
-                    "legacy" -> WebUiMode.LEGACY
-                    "spa" -> WebUiMode.SPA
-                    else -> error("--ui must be legacy or spa")
-                }
-                index += 2
-            }
-            "--base-path" -> {
-                basePath = args[index + 1]
-                index += 2
-            }
-            "--dev-frontend-origin" -> {
-                devFrontendOrigin = args[index + 1]
-                index += 2
-            }
-            else -> error("unknown web argument: ${args[index]}")
+        val option = args[index]
+        if (option == "--help" || option == "-h") return WebCliInvocation.Help
+        val known = option in setOf("--host", "--port", "--listen-backlog", "--data-dir", "--ui", "--base-path", "--dev-frontend-origin")
+        if (!known) return WebCliInvocation.Invalid("unknown web argument: ${cliOperatorText(option)}")
+        val value = args.getOrNull(index + 1) ?: return WebCliInvocation.Invalid("$option requires a value")
+        options = when (option) {
+            "--host" -> options.copy(host = value)
+            "--port" -> options.copy(port = value.toIntOrNull()?.takeIf { it in 0..65535 }
+                ?: return WebCliInvocation.Invalid("--port must be between 0 and 65535 (0 selects an available port)"))
+            "--listen-backlog" -> options.copy(listenBacklog = value.toIntOrNull()?.takeIf { it in 1..4096 }
+                ?: return WebCliInvocation.Invalid("--listen-backlog requires an integer between 1 and 4096"))
+            "--data-dir" -> options.copy(dataDir = try { Path.of(value) } catch (_: java.nio.file.InvalidPathException) {
+                return WebCliInvocation.Invalid("--data-dir is not a valid path")
+            })
+            "--ui" -> options.copy(uiMode = when (value) {
+                "legacy" -> WebUiMode.LEGACY
+                "spa" -> WebUiMode.SPA
+                else -> return WebCliInvocation.Invalid("--ui must be legacy or spa")
+            })
+            "--base-path" -> options.copy(basePath = value)
+            else -> options.copy(devFrontendOrigin = value)
         }
+        index += 2
     }
-    require(port in 0..65535) { "--port must be between 0 and 65535 (0 selects an available port)" }
+    return WebCliInvocation.Serve(options)
+}
+
+/** Startup refusals are configuration or environment problems; report them as one actionable line. */
+internal fun webStartupRefusal(failure: Throwable, host: String, port: Int): String? = when (failure) {
+    is java.net.BindException -> "Cannot bind web server to $host:$port. Check --host or choose an unused --port."
+    is java.net.UnknownHostException -> "Cannot resolve --host ${cliOperatorText(host)}. Use a loopback address such as 127.0.0.1."
+    is IllegalArgumentException, is IllegalStateException, is java.io.IOException ->
+        "Cannot start web server: ${cliOperatorText((failure.message ?: failure.javaClass.simpleName).lineSequence().first())}"
+    else -> null
+}
+
+/** Bounds operator-supplied or exception text to one printable line. */
+internal fun cliOperatorText(text: String): String {
+    val line = text.map { if (it.isISOControl()) '?' else it }.joinToString("")
+    return if (line.length <= 512) line else line.take(512) + "..."
+}
+
+/** The packaged JAR manifest carries the Gradle project version; class directories have none. */
+internal fun applicationVersionLine(
+    version: String? = WebCliOptions::class.java.`package`?.implementationVersion,
+): String = "llm_bin_patch ${version ?: "development build"}"
+
+private fun runWeb(args: List<String>) {
+    val options = when (val invocation = parseWebCliArguments(args)) {
+        WebCliInvocation.Help -> {
+            println(WEB_USAGE)
+            return
+        }
+        is WebCliInvocation.Invalid -> {
+            System.err.println("llm_bin_patch web: ${invocation.message}")
+            System.err.println(WEB_USAGE)
+            kotlin.system.exitProcess(2)
+        }
+        is WebCliInvocation.Serve -> invocation.options
+    }
+    val host = options.host
+    val basePath = options.basePath
+    val uiMode = options.uiMode
     val server = try {
         decompengine.web.startWebServerWithShutdownHook { cancellation ->
-            UploadServer(host, port, dataDir, uiMode = uiMode, basePath = basePath, devFrontendOrigin = devFrontendOrigin,
-                listenBacklog = listenBacklog, startupCancellation = cancellation)
+            UploadServer(host, options.port, options.dataDir, uiMode = uiMode, basePath = basePath,
+                devFrontendOrigin = options.devFrontendOrigin, listenBacklog = options.listenBacklog,
+                startupCancellation = cancellation)
         }
-    } catch (_: java.net.BindException) {
-        System.err.println("Cannot bind web server to $host:$port. Check --host or choose an unused --port.")
+    } catch (failure: Exception) {
+        System.err.println(webStartupRefusal(failure, host, options.port) ?: throw failure)
         kotlin.system.exitProcess(2)
     }
     val urlHost = if (':' in host && !host.startsWith('[')) "[$host]" else host
@@ -963,6 +1004,7 @@ private fun printHelp() {
           llm_bin_patch gcc-engine-full-export <cc1|driver> <stripped-binary> --profile <file> --ghidra-archive <file> --output <empty-private-directory> --scratch <provisioned-mount>
           llm_bin_patch gcc-engine-native-calls <cc1|driver> <stripped-binary> --profile <file> --ghidra-archive <file> --output <empty-private-directory> --scratch <provisioned-mount>
           llm_bin_patch llvm-native-runtime-measurement [--listener-continuity] <oci-layout> <fixed-client> <empty-config> <private-socket> <fresh-output>
+          llm_bin_patch --version
           llm_bin_patch web [--host 127.0.0.1] [--port 8000] [--listen-backlog 64] [--data-dir .decomp_engine/jobs] [--ui legacy|spa] [--base-path /] [--dev-frontend-origin http://127.0.0.1:5173]
 
         Agent harness selection for doctor, patch, reconstruction, and repair:

@@ -416,6 +416,45 @@ covers the separate actual-browser modes and exact-source evidence. Record which
 commands executed, reused outputs, skipped cases and failed prerequisites. Production
 workflow and release qualification retain their full separate acceptance scopes.
 
+### Reproducible application JAR
+
+The web server's `applicationBuildId` is the SHA-256 of the application JAR, so the JAR
+must be byte-identical across Gradle invocations from unchanged source. Archive tasks
+drop file timestamps and use a fixed entry order. The native helper producers compile
+in a private, randomly named directory under `build/native/`. Their shipped records
+(`analysis-native-io/build-v1.json` and
+`oracle/native-helper/llvm-behavior-native-helper-deployment-reference-v1.json`)
+replace that directory with the fixed token `${BUILD_ROOT}`. The recorded staged
+source, output and `HOME`/`TMPDIR` are therefore `${BUILD_ROOT}/<name>`, `${BUILD_ROOT}/home`
+and `${BUILD_ROOT}/tmp`. The installed verifiers require exactly those spellings, and
+the checksum and deployment-reference bindings still tie the helper bytes to the record.
+The compiler location is `${BUILD_ROOT}/compiler` in both build records, the deployment
+reference, compile argv[0] and the `--version` command. This is a logical record location,
+not a staged copy or an executable runtime path: the producer still opens and measures the
+configured canonical compiler before executing it. Configurable toolchains may live under a
+user's home, so their absolute locations must not be shipped. Both verifiers require the
+exact token everywhere while retaining compiler size/SHA-256, version/result commitments,
+fixed recipe, helper checksums and record/deployment closure digests. The fixed platform
+working directory `/` and search path `/usr/bin:/bin` are recipe constants, not captured
+host-specific locations. A different toolchain is a different input, and the JAR is expected
+to change with it. Producer regression controls build with a user-local compiler wrapper and
+then relocate identical wrapper bytes, requiring byte-identical metadata without host paths.
+These records remain passive provenance; they do not authenticate an implicit toolchain
+closure or confer execution authority.
+
+```sh
+python3 scripts/check-reproducible-jar.py --gradle-arg=--offline
+```
+
+The script builds the JAR, then reruns resource generation and the JAR task. It fails
+if the digests differ, naming the changed entries. It also fails if any entry embeds the
+repository's absolute path, or a resource names a producer's private build directory. It also
+scans all three shipped helper JSON records for absolute paths, including compiler locations
+outside the checkout or paths in version text. Only the exact fixed platform working directory
+and search path above are allowed in their specific fields. Fast positive/negative controls
+run via `python3 -B scripts/test-reproducible-jar.py`; the full rebuild check runs in the packaged
+web CI job.
+
 ### Updating dependencies and release metadata
 
 For a frontend dependency change, update exact direct versions and
