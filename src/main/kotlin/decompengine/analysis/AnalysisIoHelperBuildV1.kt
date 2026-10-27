@@ -101,8 +101,8 @@ object AnalysisIoHelperBuildV1 {
                                 "bytes" to JsonPrimitive(compilerGuard.size), "sha256" to JsonPrimitive(compilerGuard.authenticatedSha256),
                                 "version" to JsonPrimitive(firstLine), "versionCommand" to analysisBuildStrings(versionArguments),
                                 "result" to analysisBuildProcessResult(version))),
-                            "compilation" to JsonObject(linkedMapOf("arguments" to analysisBuildStrings(arguments),
-                                "environment" to JsonObject(environment.mapValues { JsonPrimitive(it.value) }),
+                            "compilation" to JsonObject(linkedMapOf("arguments" to analysisBuildStrings(analysisRecordedArguments(compiler)),
+                                "environment" to JsonObject(analysisRecordedEnvironment(environment).mapValues { JsonPrimitive(it.value) }),
                                 "workingDirectory" to JsonPrimitive("/"), "timeoutMillis" to JsonPrimitive(30000),
                                 "maximumStdoutBytes" to JsonPrimitive(65536), "maximumStderrBytes" to JsonPrimitive(65536),
                                 "result" to analysisBuildProcessResult(compilation))),
@@ -145,6 +145,30 @@ object AnalysisIoHelperBuildV1 {
         }
     }
 }
+
+/**
+ * The compiler runs in a private, randomly named directory under the Gradle build directory. Its
+ * shipped record names that directory by this fixed token instead, so the application JAR carries
+ * no build-host path and is byte-identical across rebuilds of the same source with the same
+ * compiler. The token stands for the per-build directory holding the staged source, the output
+ * and the `home`/`tmp` scratch directories; the recipe and compiler identity stay exact.
+ */
+internal const val ANALYSIS_IO_RECORDED_BUILD_ROOT = "\${BUILD_ROOT}"
+
+internal fun analysisRecordedArguments(compiler: Path): List<String> =
+    listOf(compiler.toString()) + ANALYSIS_IO_COMPILER_ARGUMENTS.map {
+        when (it) {
+            "\${SOURCE}" -> "$ANALYSIS_IO_RECORDED_BUILD_ROOT/decomp_analysis_io_helper.c"
+            "\${OUTPUT}" -> "$ANALYSIS_IO_RECORDED_BUILD_ROOT/$ANALYSIS_IO_BINARY_NAME"
+            else -> it
+        }
+    }
+
+internal fun analysisRecordedEnvironment(environment: Map<String, String>): Map<String, String> =
+    LinkedHashMap(environment).apply {
+        replace("HOME", "$ANALYSIS_IO_RECORDED_BUILD_ROOT/home")
+        replace("TMPDIR", "$ANALYSIS_IO_RECORDED_BUILD_ROOT/tmp")
+    }
 
 object AnalysisIoHelperBuildV1Cli {
     @JvmStatic fun main(arguments: Array<String>) {

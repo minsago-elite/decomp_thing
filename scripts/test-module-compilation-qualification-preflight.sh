@@ -73,4 +73,13 @@ if run_fixture > "$fixture/empty.log" 2>&1; then
     echo 'preflight incorrectly admitted an existing empty report directory' >&2; exit 1
 fi
 grep -q 'refusing existing hosted compiler test reports' "$fixture/empty.log"
-echo 'module compiler preflight: fresh execution, stale XML preservation and empty-directory refusal passed'
+# A dangling report symlink is still preexisting state. Neither Gradle nor the
+# preflight may follow it and create reports at its target.
+rmdir "$reports"
+ln -s "$fixture/missing-report-target" "$reports"
+if run_fixture > "$fixture/symlink.log" 2>&1; then
+    echo 'preflight incorrectly admitted a dangling report symlink' >&2; exit 1
+fi
+grep -q 'refusing existing hosted compiler test reports' "$fixture/symlink.log"
+[[ -L "$reports" && ! -e "$fixture/missing-report-target" ]]
+echo 'module compiler preflight: fresh execution, stale XML preservation, empty-directory and dangling-symlink refusal passed'
