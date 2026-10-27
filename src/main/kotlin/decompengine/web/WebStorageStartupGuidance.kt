@@ -14,6 +14,7 @@ internal fun webStorageStartupGuidance(failure: Throwable): String? {
         when (cause) {
             is WorkflowStoreException -> cause.code
             is WebJobServiceException -> cause.code
+            is WebJobStoreOwnershipException -> cause.code
             else -> null
         }
     } ?: return null

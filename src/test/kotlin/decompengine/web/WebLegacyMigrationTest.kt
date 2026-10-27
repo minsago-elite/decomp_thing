@@ -313,6 +313,44 @@ class WebLegacyMigrationTest {
     }
 
     @Test
+    fun `real web contenders receive typed ownership guidance locally and through the launcher`() {
+        retainedLegacyStore()
+        for (mode in WebUiMode.entries) start(mode).use { owner ->
+            val original = storageDigest()
+            val failure = assertFailsWith<WebJobStoreOwnershipException> { start(mode).close() }
+            assertEquals("OWNERSHIP_CONFLICT", failure.code)
+            val guidance = assertNotNull(webStorageStartupGuidance(failure))
+            assertTrue(guidance.contains("Another server owns this data directory"), guidance)
+            assertFalse(guidance.contains(root.toAbsolutePath().toString()), guidance)
+            // A matching message on an unrelated exception is not a storage classification.
+            assertEquals(null, webStorageStartupGuidance(IllegalStateException(failure.message)))
+
+            // A second JVM cannot see the local owners map: this exercises the actual file lock and
+            // Main's refusal boundary, including the fixed stderr message and exit status.
+            val process = ProcessBuilder(
+                Path.of(System.getProperty("java.home"), "bin", "java").toString(),
+                "-XX:-UsePerfData", "-Djava.io.tmpdir=${System.getProperty("java.io.tmpdir")}",
+                "-cp", System.getProperty("java.class.path"), "decompengine.MainKt", "web",
+                "--host", "127.0.0.1", "--port", "0", "--ui", mode.name.lowercase(),
+                "--data-dir", root.toAbsolutePath().toString(),
+            ).apply { environment().clear() }.start()
+            try {
+                assertTrue(process.waitFor(60, TimeUnit.SECONDS), "$mode contender did not exit")
+                val stdout = process.inputStream.readNBytes(16 * 1024).decodeToString()
+                val stderr = process.errorStream.readNBytes(16 * 1024).decodeToString()
+                assertEquals(2, process.exitValue(), stderr)
+                assertEquals(guidance + System.lineSeparator(), stderr)
+                assertEquals("", stdout, "a refused contender advertised serving or a session link")
+                assertEquals(original, storageDigest(), "a refused contender changed storage")
+                assertEquals(200, owner.call("GET", "/", headers = mapOf("Cookie" to
+                    legacySessionHeaders(owner.server).getValue("Cookie"))).statusCode(), "the owner stopped serving")
+            } finally {
+                if (process.isAlive) process.destroyForcibly().waitFor(10, TimeUnit.SECONDS)
+            }
+        }
+    }
+
+    @Test
     fun `startup guidance keeps an uncertain recovery outcome hidden behind a web wrapper`() {
         val uncertain = decompengine.jobs.WorkflowStoreException("STARTUP_RECOVERY_INCOMPLETE",
             "Startup recovery did not finish; changes may have begun.", true,

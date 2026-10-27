@@ -199,6 +199,12 @@ jobs:
           path: |
             build/test-results/test/TEST-decompengine.web.BrowserSessionExpiryTest.xml
             build/packaged-web-ci/browser-expiry-tests.json
+      - name: Verify legacy deep links remain inert in pinned Chrome
+        run: |
+          node scripts/check-packaged-web-browser.mjs \
+            --archive "$WEB_TEST_ARCHIVE" \
+            --chrome "$RUNNER_TEMP/web-test-browser/chrome" --java-home "$JAVA_HOME" \
+            --python "$(command -v python3)" --work-parent "$GITHUB_WORKSPACE/build" --mode legacy --no-sandbox
       - name: Exercise packaged session and recovery in pinned Chrome
         run: |
           node scripts/check-packaged-web-browser.mjs \

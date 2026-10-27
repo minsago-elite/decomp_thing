@@ -61,7 +61,13 @@ In the SPA presentation each answers 404 or 405 and starts nothing, even with a 
 SPA uploads use `POST /api/v1/jobs` and SPA workflow starts use the v1 run API.
 
 **In the browser.** The packaged legacy browser journey (`scripts/packaged-browser-legacy.mjs`) opens a D0-shaped
-job and asserts that the only non-GET requests are the session exchange, the explicit upload and sign-out. In the
+job and asserts that the only non-GET requests are the session exchange, the explicit upload and sign-out.
+The non-optional `Verify legacy deep links remain inert in pinned Chrome` step in the CI job
+`Packaged web contracts and browser` runs it with `--mode legacy` against the built distribution. Its
+`packaged-web-verification` artifact retains `build/packaged-browser-*/report.json`; browser acceptance
+requires a report with `mode: legacy`, `status: passed` and `legacy.workflowAdmitted: false` from the
+run for the exact PR head. The previous five-mode job did not qualify this journey; adding the step
+alone is not passing evidence while the new head's run is pending. In the
 SPA on `master`, the typed client's only mutations are the session exchange, upload, progress pin and the attempt
 cancel/recover commands, each sent only from an explicit control; no SPA code path starts a workflow (the launch
 form is pending in #1702). The SPA routes added by the D-series (`/runtime`, `/upload`, attempt, activity, evidence
@@ -108,6 +114,10 @@ No recovery changes were applied; stored job files are unchanged.
 Back up the stopped data directory before editing it; see docs/web-legacy-migration.md (Migration failure and rollback).
 ```
 
+An actual competing web server is also refused before opening storage, with fixed code
+`OWNERSHIP_CONFLICT`, guidance to stop the other server, and exit status 2. Both in-process ownership
+and the cross-JVM lock use the same typed refusal, not exception-message matching.
+
 The guidance never includes record contents, host paths or exception text. If a refusal reports that recovery
 changes may have begun (an I/O failure after the write phase started), preserve the whole directory and reconcile it
 before retrying. A record damaged while the server is already running is isolated instead: the library shows a
@@ -152,9 +162,9 @@ specified in [the Git contract](web-api.md) and [Git fixtures](web-git-fixtures.
 | --- | --- | --- |
 | Every D0 route has an equivalent, redirect or deliberate deprecation | MIG matrix, `every legacy route answers its documented migration outcome…` | Merged behavior, tested |
 | Legacy JSON compatibility and sanitized responses | MIG-09/10, exact key set, error envelope, private-diagnostic and host-path checks | Tested; sunset date unpublished (#231) |
-| Opening old deep links or migrated jobs starts nothing | Analyzer/reconstructor counters, byte-identical storage after every GET/HEAD, SPA POST refusals | Tested at the server; browser journey in #225 |
+| Opening old deep links or migrated jobs starts nothing | Analyzer/reconstructor counters, byte-identical storage after every GET/HEAD, SPA POST refusals; packaged `--mode legacy` report | Tested at the server; browser acceptance requires the exact-head passing legacy report above, not the earlier five-mode artifact (#225) |
 | Upgrade/restart/rollback preserve authoritative bytes | `upgrade restart and presentation rollback preserve…` | Tested |
-| Failure preserves data with actionable guidance | Damaged-record and newer-schema refusals, `webStorageStartupGuidance` | Tested |
+| Failure preserves data with actionable guidance | Damaged-record and newer-schema refusals; real local and cross-JVM ownership contenders through the launcher | Regression coverage; current-head Actions qualification required |
 | Non-Git jobs and user repository history untouched | `migration never creates or invokes Git…` | Tested; managed Git pending in open PRs |
 
 Remaining gaps, for the removal checkpoint (#231) rather than this contract:
