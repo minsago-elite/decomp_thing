@@ -1,6 +1,6 @@
 export const logCopy = {
   title: 'Build log',
-  boundary: 'The recorded build log of this attempt, as plain text. Host paths are replaced by labels (policy {policy}); the download applies the same policy. Log text does not establish validation or acceptance.',
+  boundary: 'The recorded build log of this attempt, as plain text. Credentials and private host paths are redacted (policy {policy}); the download applies the same policy. Log text does not establish validation or acceptance.',
   loading: 'Reading the build log.',
   missing: 'This attempt has no recorded build log yet.',
   checkAgain: 'Check again',

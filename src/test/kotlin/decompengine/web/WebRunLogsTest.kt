@@ -127,6 +127,27 @@ class WebRunLogsTest {
         assertEquals("0", search(root.toString()).getValue("matchCount").jsonPrimitive.content)
     }
 
+    @Test fun `shared configured credentials and private paths are masked before display cuts and search`() {
+        val canary = "ConfiguredLogCanary0123456789"
+        val policy = WebRedactionPolicy.create(mapOf("TEST_API_KEY" to canary), listOf(canary), emptyList())
+        val protected = WebRunLogs(WebLogRedaction(mapOf("job-store" to root), policy))
+        val (jobId, run) = attempt()
+        val inputs = listOf("raw $canary", "API_KEY=synthetic-key-123", "Authorization: Bearer synthetic-bearer-123",
+            "password=\"alpha\\\"bravo charlie\"", "token='unterminated credential", "/home/another-user/private-file",
+            "C:\\Users\\another-user\\private-file", "x".repeat(4096) + " secret=\"hidden suffix\"")
+        val capture = assertNotNull(protected.capture(inputs.joinToString("\n").toByteArray(), sha))
+        assertEquals(inputs.size, capture.redactedLines)
+        val forbidden = listOf(canary, "synthetic-key-123", "synthetic-bearer-123", "bravo", "unterminated credential",
+            "another-user", "hidden suffix")
+        val download = protected.download(jobId, run, capture, Instant.EPOCH).decodeToString()
+        for (secret in forbidden) {
+            assertFalse(download.contains(secret))
+            assertFalse(capture.allLines().any { it.text.contains(secret) || it.searchText.contains(secret) })
+            val result = protected.range(jobId, run, capture, false, WebRunLogs.Query(1, false, 1, secret), Instant.EPOCH)
+            assertEquals("0", result.getValue("search").jsonObject.getValue("matchCount").jsonPrimitive.content)
+        }
+    }
+
     @Test fun `downloads share the live redaction and carry provenance`() {
         val (jobId, run) = attempt()
         val capture = assertNotNull(logs.capture("first $root/a.c\n\u001b[1mbold\n".toByteArray(), sha))

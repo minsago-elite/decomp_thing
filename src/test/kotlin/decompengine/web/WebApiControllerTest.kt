@@ -396,6 +396,47 @@ class WebApiControllerTest {
             assertTrue(download.body().contains("# job ${job.id} attempt ${run.runId}"))
             assertTrue(download.body().contains(lines.first() + "\n"))
             assertError(request(server, "$path/content", headers = headers + mapOf("Accept" to "text/plain", "Range" to "bytes=0-1")), 400, "UNSUPPORTED_HEADER")
+            // Credential syntax and private paths must be absent in all authenticated projections,
+            // including whole-log search beyond the display cut. Query echo is not match evidence.
+            val canaries = listOf("log-key-canary-012345", "log-bearer-canary-67890", "quoted canary value", "/home/other-user/private.txt")
+            Files.writeString(log, "api_key=${canaries[0]}\nAuthorization: Bearer ${canaries[1]}\n" +
+                "x".repeat(4096) + " password=\"${canaries[2]}\" ${canaries[3]}\n")
+            val safe = assertEnvelopeRaw(request(server, path, headers = headers), "logRange")
+            assertEquals("3", safe.getValue("redactedLines").jsonPrimitive.content)
+            val safeLines = safe.getValue("lines").jsonArray.map { it.jsonObject.getValue("text").jsonPrimitive.content }
+            val safeDownload = request(server, "$path/content", headers = headers + ("Accept" to "text/plain"))
+            assertEquals(200, safeDownload.statusCode())
+            for (canary in canaries) {
+                assertFalse(safe.toString().contains(canary))
+                assertFalse(safeDownload.body().contains(canary))
+                val query = java.net.URLEncoder.encode(canary, Charsets.UTF_8)
+                val searched = assertEnvelopeRaw(request(server, "$path?search=$query", headers = headers), "logRange")
+                assertEquals("0", searched.getValue("search").jsonObject.getValue("matchCount").jsonPrimitive.content)
+                assertTrue(searched.getValue("search").jsonObject.getValue("matches").jsonArray.isEmpty())
+            }
+            for (line in safeLines) assertTrue(safeDownload.body().contains(line))
+
+            // Rejected directories, leaf links and parent links are unavailable, never proven absent.
+            Files.delete(log)
+            Files.createDirectory(log)
+            fun assertUnavailable() {
+                assertError(request(server, path, headers = headers), 503, "JOB_STORAGE_UNAVAILABLE")
+                assertError(request(server, "$path/content", headers = headers + ("Accept" to "text/plain")), 503, "JOB_STORAGE_UNAVAILABLE")
+            }
+            assertUnavailable()
+            Files.delete(log)
+            Files.createSymbolicLink(log, log.resolveSibling("absent-target"))
+            assertUnavailable()
+            Files.delete(log)
+            Files.delete(log.parent)
+            Files.createSymbolicLink(log.parent, root.resolve("absent-parent"))
+            assertUnavailable()
+            Files.delete(log.parent)
+            Files.createDirectory(log.parent)
+            // A genuinely absent leaf remains a missing result.
+            assertEquals("missing", assertEnvelopeRaw(request(server, path, headers = headers), "logRange")
+                .getValue("state").jsonPrimitive.content)
+
             // Both independent capture budgets must report unavailable output, not a missing file.
             for (oversized in listOf(
                 ByteArray(1_000_001) { '\n'.code.toByte() },

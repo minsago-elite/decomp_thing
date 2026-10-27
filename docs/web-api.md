@@ -687,7 +687,10 @@ capacity. See [scheduler summary and verification](web-scheduler-summary.md).
 ### Attempt build log ranges
 
 `GET jobs/J/runs/R/logs/build` reads `reports/runs/R/source-tree/reports/build.log` (at most
-8 MiB; larger logs report `oversized`, absent logs `missing`) and returns one contiguous range:
+8 MiB; larger logs report `oversized`, proven initial absence reports `missing`) and returns one contiguous range.
+Unsafe, inaccessible or changed files fail with `503 JOB_STORAGE_UNAVAILABLE`, not a successful
+`missing` range or a download 404. Only initial traversal ENOENT establishes absence; disappearance
+or replacement after authorization fails the stable-descriptor read. Range selection is:
 `tail=true` for the newest lines, `beforeLine=N` for the lines ending just before line N (both fill
 their byte budget backward, so the range always ends at the final or requested line), or
 `fromLine=N` (a position just past the end returns an empty, current range for following), `limit` 1–500 lines (default 200) and at most 256 KiB of text. The
@@ -698,7 +701,13 @@ times and the server `readAt` time. Lines are decoded as UTF-8 with replacement 
 escapes (`\e`, `\uXXXX`), so terminal sequences and markup reach the browser only as text.
 
 Redaction policy `web-log-v1` replaces the job store, home, temporary and working directories with
-fixed labels and flags each changed line. The optional `search` is a literal substring of at most 128
+fixed labels and flags each changed line. Before root labeling, the shared `WebRedactionPolicy`
+credential projection masks configured credential literals, quoted/unquoted credential assignments,
+authorization/bearer syntax, URL credentials and known token formats; generic private user/temporary
+paths are masked afterward. Redaction precedes control escaping, display truncation and whole-log
+search, and the download uses that same capture. Unsupported credential configurations are refused,
+not silently omitted. This is log-boundary adoption of #520's shared policy, not a claim that
+listener-wide DTO/event/export integration is complete. The optional `search` is a literal substring of at most 128
 characters, never a pattern; it scans the complete redacted, visibly escaped text of the bounded log
 before the 4,096-character display cut and returns the match count and the first 200 line numbers.
 A match beyond that cut is counted even though its text is not displayed in the range or download.

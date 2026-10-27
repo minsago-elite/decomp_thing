@@ -269,6 +269,7 @@ class JobStore internal constructor(
         jobId: String,
         relativePath: String,
         maximumBytes: Long,
+        distinguishInitialAbsence: Boolean = false,
     ): StableRegularFile {
         jobDirectory(jobId)
         require(relativePath.startsWith("reports/") && relativePath.length <= 4096 &&
@@ -279,6 +280,9 @@ class JobStore internal constructor(
         ) { "artifact path must be a canonical report path" }
         return try {
             readStableRegularFile(root, "$jobId/$relativePath", maximumBytes)
+        } catch (missing: decompengine.repair.StableRegularFileAbsentException) {
+            if (distinguishInitialAbsence) throw missing
+            throw JobStoreException("artifact is unavailable or its path changed")
         } catch (_: IOException) {
             throw JobStoreException("artifact is unavailable or its path changed")
         }

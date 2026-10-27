@@ -7291,6 +7291,9 @@ internal fun hashStableRegularFile(
     }
 }
 
+/** Proven ENOENT during initial traversal only; never used for failed revalidation after a read. */
+internal class StableRegularFileAbsentException : java.io.IOException("stable file-read target is absent")
+
 internal fun readStableRegularFile(
     root: Path,
     relative: String,
@@ -7313,13 +7316,16 @@ internal fun readStableRegularFile(
         pinnedDirectories += parent
         parts.dropLast(1).forEach { segment ->
             cancellationCheck()
-            parent = LinuxFilesystemSyscalls.openDirectoryAt(parent.fd, segment)
+            parent = try { LinuxFilesystemSyscalls.openDirectoryAt(parent.fd, segment) }
+            catch (failure: decompengine.acp.LinuxSyscallException) {
+                if (failure.errno == LinuxFilesystemSyscalls.ENOENT) throw StableRegularFileAbsentException()
+                throw failure
+            }
             pinnedDirectories += parent
             cancellationCheck()
         }
-        authorized = requireNotNull(LinuxFilesystemSyscalls.openPathAtOrNull(parent.fd, parts.last())) {
-            "stable file-read target disappeared: $relative"
-        }
+        authorized = LinuxFilesystemSyscalls.openPathAtOrNull(parent.fd, parts.last())
+            ?: throw StableRegularFileAbsentException()
         require(authorized.identity.isRegularFile && !authorized.identity.isSymbolicLink) {
             "stable file-read target is not a regular non-symbolic-link file: $relative"
         }

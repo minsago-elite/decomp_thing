@@ -218,24 +218,31 @@ internal class WebRunLogs(private val redaction: WebLogRedaction) {
     }
 }
 
-/** Host roots are replaced by fixed labels; literal configured values are never echoed. */
-internal class WebLogRedaction(roots: Map<String, Path>) {
+/** Shared credential/private-path policy, with stable labels for the log's known host roots. */
+internal class WebLogRedaction(roots: Map<String, Path>, private val policy: WebRedactionPolicy = WebRedactionPolicy.BASELINE) {
     private val literals = roots.mapNotNull { (label, path) ->
         path.toAbsolutePath().normalize().toString().takeIf { it.length >= 2 && it != "/" }?.let { it to "[$label]" }
     }.sortedByDescending { it.first.length }
 
     fun apply(text: String): Pair<String, Boolean> {
         var value = text
+        // Mask credentials before replacing roots: a root inside a quoted credential must not
+        // destroy the assignment context. Retain known-root labels on non-credential text.
+        value = policy.credentials(value)
         for ((literal, label) in literals) value = value.replace(literal, label)
+        value = WebRedactionPolicy.BASELINE.text(value)
         return value to (value != text)
     }
 
     companion object {
-        fun forHost(storageRoot: Path) = WebLogRedaction(buildMap {
-            put("job-store", storageRoot)
-            System.getProperty("user.home")?.let { put("home", Path.of(it)) }
-            System.getProperty("java.io.tmpdir")?.let { put("temporary", Path.of(it)) }
-            System.getProperty("user.dir")?.let { put("working-directory", Path.of(it)) }
-        })
+        fun forHost(storageRoot: Path): WebLogRedaction {
+            val environment = System.getenv()
+            return WebLogRedaction(buildMap {
+                put("job-store", storageRoot)
+                System.getProperty("user.home")?.let { put("home", Path.of(it)) }
+                System.getProperty("java.io.tmpdir")?.let { put("temporary", Path.of(it)) }
+                System.getProperty("user.dir")?.let { put("working-directory", Path.of(it)) }
+            }, WebRedactionPolicy.create(environment, environment.values, emptyList()))
+        }
     }
 }
