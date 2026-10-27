@@ -1107,6 +1107,13 @@ worker. The `202 operation` has `action: "archive.verify"` and null repository, 
 object. Its `Location` names `archive-verifications/{operationId}`, which reports `queued`,
 `running`, `completed` (verified), `failed` (with a fixed message) or `interrupted`.
 
+Archive observation for status (including HEAD) and new verification keys shares artifact-read
+admission with catalog, detail and download hashing: four global reads and two per session,
+otherwise `429 DOWNLOAD_LIMIT`. The exchange's request deadline and thread interruption cancel
+hashing between chunks; cancellation releases the pinned descriptor and read admission without
+admitting a verification or binding its key. Operation reads and existing-key replay do not hash
+the archive or consume this read capacity, so they remain available during saturation.
+
 Operation records and verified labels live in memory for the listener lifetime, at most 256
 records and 256 admitted request keys (including deduplicated aliases). When key capacity is full,
 the oldest terminal operation and all its aliases are evicted together; if every retained operation

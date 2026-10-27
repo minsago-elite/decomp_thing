@@ -47,23 +47,29 @@ internal class WebSourceArchives(
     private val reference: (String, String, String) -> WebRevisionSourceReference,
     private val clock: Clock = Clock.systemUTC(),
     private val shutdownTimeoutMs: Long = 60_000,
+    private val artifactReads: WebArtifactDownloads = WebArtifactDownloads(),
 ) : AutoCloseable {
     private val records = LinkedHashMap<String, WebArchiveVerification>()
     private val keys = HashMap<String, String>()
 
     /** Observed digest of the retained archive, or null when no archive file is retained for the attempt. */
-    private fun observe(jobId: String, runId: String): Pair<String, Long>? {
-        if (!store.present(jobId, runId, ARCHIVE)) return null
-        val digest = store.stream(jobId, runId, ARCHIVE, { if (it > MAXIMUM_ARCHIVE_BYTES) throw WebArtifactTooLarge() }, { _, _ -> }, {})
-        return digest.sha256 to digest.size
-    }
+    private fun observe(jobId: String, runId: String, sessionId: String, cancellationCheck: () -> Unit): Pair<String, Long>? =
+        artifactReads.admit(sessionId) {
+            cancellationCheck()
+            if (!store.present(jobId, runId, ARCHIVE)) return@admit null
+            val digest = store.stream(jobId, runId, ARCHIVE,
+                { if (it > MAXIMUM_ARCHIVE_BYTES) throw WebArtifactTooLarge() }, { _, _ -> }, cancellationCheck)
+            cancellationCheck()
+            digest.sha256 to digest.size
+        }
 
-    fun status(basePath: String, jobId: String, runId: String, revisionId: String): JsonObject {
+    fun status(basePath: String, jobId: String, runId: String, revisionId: String,
+        sessionId: String = "internal", cancellationCheck: () -> Unit = {}): JsonObject {
         val snapshot = revision(jobId, runId, revisionId)
         val run = attempt(jobId, runId)
         check(snapshot.reference.jobId == jobId && snapshot.reference.runId == runId && snapshot.reference.revisionId == revisionId)
         var tooLarge = false
-        val current = try { observe(jobId, runId) } catch (_: WebArtifactTooLarge) { tooLarge = true; null }
+        val current = try { observe(jobId, runId, sessionId, cancellationCheck) } catch (_: WebArtifactTooLarge) { tooLarge = true; null }
         // One consistent copy of every record's progress; the projection below never rereads mutable state.
         val history = synchronized(this) {
             records.values.filter { it.jobId == jobId && it.runId == runId && it.revisionId == revisionId }.map { it to it.progress }
@@ -132,14 +138,15 @@ internal class WebSourceArchives(
      * operation; the same key with another intent conflicts. A verification already queued or running for the same
      * archive and revision metadata is returned instead of starting a second one.
      */
-    fun start(jobId: String, runId: String, revisionId: String, archiveSha256: String, key: String): Started {
+    fun start(jobId: String, runId: String, revisionId: String, archiveSha256: String, key: String,
+        sessionId: String = "internal", cancellationCheck: () -> Unit = {}): Started {
         // Existing operations require durable candidate authorization, not another read of their verification inputs.
         val selected = reference(jobId, runId, revisionId)
         val intent = listOf(jobId, runId, revisionId, archiveSha256).joinToString("\u0000")
         synchronized(this) { replay(key, intent, selected)?.let { return it } }
         val snapshot = revision(jobId, runId, revisionId)
         if (snapshot.reference != selected) revisionSourceChanged()
-        val current = try { observe(jobId, runId) } catch (_: WebArtifactTooLarge) {
+        val current = try { observe(jobId, runId, sessionId, cancellationCheck) } catch (_: WebArtifactTooLarge) {
             throw WebAccessDenied(413, "ARCHIVE_TOO_LARGE", "The retained source archive exceeds the verifier's 64 MiB limit.")
         } ?: throw WebAccessDenied(404, "ARCHIVE_NOT_FOUND", "No source archive is retained for this attempt.")
         if (current.first != archiveSha256) throw WebAccessDenied(409, "ARCHIVE_CHANGED",

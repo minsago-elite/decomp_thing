@@ -26,6 +26,8 @@ class WebSourceArchivesTest {
         shutdownTimeoutMs: Long = 60_000, entered: CountDownLatch = CountDownLatch(0),
         capture: () -> WebRevisionSourceSnapshot = { snapshot },
         checked: () -> WebRevisionSourceSnapshot = { snapshot },
+        artifactReads: WebArtifactDownloads = WebArtifactDownloads(),
+        read: (() -> Unit) -> Unit = { it() },
         reference: (String, String, String) -> WebRevisionSourceReference = { job, run, revision ->
             snapshot.reference.copy(jobId = job, runId = run, revisionId = revision)
         }): WebSourceArchives {
@@ -36,7 +38,9 @@ class WebSourceArchivesTest {
             override fun attempts(jobId: String) = listOf(attempt)
             override fun present(jobId: String, runId: String, path: String) = true
             override fun stream(jobId: String, runId: String, path: String, declaredSize: (Long) -> Unit,
-                consume: (ByteArray, Int) -> Unit, cancellationCheck: () -> Unit): StableFileDigest { observe(); return StableFileDigest(digest, 10, identity) }
+                consume: (ByteArray, Int) -> Unit, cancellationCheck: () -> Unit): StableFileDigest {
+                observe(); read(cancellationCheck); return StableFileDigest(digest, 10, identity)
+            }
             override fun revisionCommitments(jobId: String, runId: String, revisionId: String, budget: WebArtifactReadBudget) = null
         }
         return WebSourceArchives({ job, run, revision ->
@@ -52,7 +56,65 @@ class WebSourceArchivesTest {
             val observed = checked()
             WebArchiveSnapshot(ByteArray(0), sha, WebSourceArchivesTestViews.view, kotlinx.serialization.json.JsonObject(emptyMap()),
                 observed.descriptorSha256, observed.manifestSha256)
-        }, Executors.newSingleThreadExecutor(), reference, shutdownTimeoutMs = shutdownTimeoutMs)
+        }, Executors.newSingleThreadExecutor(), reference, shutdownTimeoutMs = shutdownTimeoutMs, artifactReads = artifactReads)
+    }
+
+    @Test fun `deadline expiry during status or start hashing closes pinned descriptors and releases shared admission`() {
+        val parent = java.nio.file.Files.createDirectories(java.nio.file.Path.of("build/test-tmp/web-archive-deadline").toAbsolutePath())
+        val root = java.nio.file.Files.createTempDirectory(parent, "deadline-")
+        val scheduler = object : java.util.concurrent.ScheduledThreadPoolExecutor(1) {
+            lateinit var expire: Runnable
+            override fun schedule(command: Runnable, delay: Long, unit: TimeUnit): java.util.concurrent.ScheduledFuture<*> {
+                expire = command
+                return super.schedule(command, 1, TimeUnit.DAYS)
+            }
+        }
+        try {
+            val store = JobStore(root)
+            val job = store.createFromUpload("inert.elf", elfFixture())
+            val file = java.nio.file.Files.createDirectories(root.resolve(job.id).resolve("reports/runs/run_1")).resolve("source-tree.zip")
+            java.nio.file.Files.write(file, ByteArray(1024 * 1024))
+            fun descriptors() = java.nio.file.Files.list(java.nio.file.Path.of("/proc/self/fd")).use { links ->
+                links.filter { link -> runCatching { java.nio.file.Files.readSymbolicLink(link) == file }.getOrDefault(false) }.count()
+            }
+            for (starting in listOf(false, true)) {
+                val reads = WebArtifactDownloads()
+                val exchange = Any()
+                val closed = CountDownLatch(1)
+                val deadline = WebRequestDeadline(scheduler, AutoCloseable { closed.countDown() }, 30_000)
+                WebRequestDeadline.register(exchange, deadline)
+                var chunks = 0
+                var expire = true
+                val entered = CountDownLatch(1)
+                try {
+                    archives(CountDownLatch(0), CountDownLatch(1), artifactReads = reads, entered = entered, read = { cancellation ->
+                        assertEquals(1, reads.activeCount())
+                        store.streamArtifact(job.id, "reports/runs/run_1/source-tree.zip", {}, { _, _ ->
+                            chunks++
+                            assertTrue(descriptors() > 0, "the real pinned descriptor must be open during the hash")
+                            if (expire) scheduler.expire.run()
+                        }, cancellation)
+                    }).use { archives ->
+                        val cancellation = webExchangeCancellation(exchange)
+                        assertFailsWith<java.util.concurrent.CancellationException> {
+                            if (starting) archives.start(jobId, "run_1", "revision_1", digest, "key-deadline-00000001", "session", cancellation)
+                            else archives.status("/", jobId, "run_1", "revision_1", "session", cancellation)
+                        }
+                        assertTrue(deadline.expired); assertEquals(0, closed.count)
+                        assertEquals(1, chunks, "deadline cancellation must stop before a second chunk")
+                        assertEquals(0, descriptors()); assertEquals(0, reads.activeCount())
+                        assertEquals(1, entered.count, "an expired start must not enqueue verification or bind its key")
+                        expire = false
+                        // A fresh exchange can read again, including retrying the exact unadmitted key.
+                        if (starting) {
+                            val started = archives.start(jobId, "run_1", "revision_1", digest, "key-deadline-00000001", "session")
+                            assertFalse(started.replayed); awaitTerminal(started.record)
+                        } else archives.status("/", jobId, "run_1", "revision_1", "session")
+                        assertEquals(0, descriptors()); assertEquals(0, reads.activeCount())
+                    }
+                } finally { WebRequestDeadline.release(exchange); deadline.cancel() }
+            }
+        } finally { scheduler.shutdownNow(); root.toFile().deleteRecursively() }
     }
 
     @Test fun `a deduplicated request binds its own key to the returned operation`() {

@@ -52,16 +52,16 @@ internal class WebApiController(
     })
     private val artifactStore = WebJobArtifactStore(jobs)
     private val artifactCatalog = WebArtifactCatalog(artifactStore)
+    internal val artifactDownloads = WebArtifactDownloads()
     private val sourceArchives = archiveEvidence?.let { evidence ->
         WebSourceArchives(jobs::readRevisionSources, jobs::getAttempt, artifactStore, { job, run ->
             try { jobs.readArtifact(job, "reports/runs/$run/source-tree/reports/build_contract.json", 1_048_576).bytes }
             catch (failure: Exception) { if (failure is InterruptedException) throw failure; null }
         }, { job, run, digest -> evidence.read(job, digest, "reports/runs/$run") },
             java.util.concurrent.Executors.newSingleThreadExecutor { task -> Thread(task, "decomp-archive-verifier").apply { isDaemon = true } },
-            jobs::revisionSourceReference, clock)
+            jobs::revisionSourceReference, clock, artifactReads = artifactDownloads)
     }
     private val artifactContent = WebArtifactContent(artifactStore)
-    internal val artifactDownloads = WebArtifactDownloads()
     private val revisionValidationReports = WebRevisionValidationReports(jobs::readRecordedValidationReport)
     private val eventStream = WebEventStream(access, streamResources, progressPages, read = { jobId, runId ->
         readWebProgress(jobs, jobId, runId).second
@@ -272,13 +272,14 @@ internal class WebApiController(
                     sendWebAttachment(exchange, patch.bytes, patch.fileName, patch.headers)
                 }
                 resource.matches(Regex("jobs/[^/]+/runs/[^/]+/revisions/[^/]+/source-archive")) -> {
-                    access.authorize(exchange, WebEndpointPolicy.privateRead(allowHead = true))
+                    val session = checkNotNull(access.authorize(exchange, WebEndpointPolicy.privateRead(allowHead = true)))
                     requireJsonAccept(exchange); requireNoWebApiQuery(exchange)
                     val parts = resource.split('/')
-                    sendWebApiResponse(exchange, 200, "sourceArchive", archives().status(assets.basePath, parts[1], parts[3], parts[5]))
+                    sendWebApiResponse(exchange, 200, "sourceArchive", archives().status(assets.basePath, parts[1], parts[3], parts[5],
+                        session.sessionId, webExchangeCancellation(exchange)))
                 }
                 resource.matches(Regex("jobs/[^/]+/runs/[^/]+/revisions/[^/]+/archive-verifications")) && exchange.requestMethod == "POST" -> {
-                    access.authorize(exchange, WebEndpointPolicy.jsonMutation("POST"))
+                    val session = checkNotNull(access.authorize(exchange, WebEndpointPolicy.jsonMutation("POST")))
                     requireJsonAccept(exchange); requireNoWebApiQuery(exchange)
                     val key = singleUploadHeader(exchange, "Idempotency-Key")
                     if (key == null || !key.matches(Regex("[A-Za-z0-9_-]{16,128}"))) {
@@ -288,7 +289,8 @@ internal class WebApiController(
                         throw WebAccessDenied(400, "UNSUPPORTED_HEADER", "Archive verification binds the displayed digest in its body, not in conditional headers.")
                     }
                     val parts = resource.split('/')
-                    val started = archives().start(parts[1], parts[3], parts[5], readArchiveVerificationRequest(exchange), key)
+                    val started = archives().start(parts[1], parts[3], parts[5], readArchiveVerificationRequest(exchange), key,
+                        session.sessionId, webExchangeCancellation(exchange))
                     exchange.responseHeaders.set("Location", "${prefix}jobs/${parts[1]}/runs/${parts[3]}/revisions/${parts[5]}/archive-verifications/${started.record.operationId}")
                     if (started.replayed) exchange.responseHeaders.set("Idempotency-Replayed", "true")
                     sendWebApiResponse(exchange, 202, "operation", webArchiveOperation(started.record))
