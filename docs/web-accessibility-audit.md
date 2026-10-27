@@ -51,6 +51,25 @@ use `checkVisibility()` to exclude those boxes. Opening the disclosure restores 
 regression controls require visible overflow and insufficient contrast to fail. This does not
 exempt visible previews or add any new horizontal-scroll exception.
 
+An independent review found two further coverage gaps. The verdict previously accepted empty
+layout/contrast/focus arrays and `null` timing percentiles. It now requires the exact 10-route ×
+5-viewport × 2-theme layout matrix (100 records), contrast at desktop and 320 CSS pixels in
+both themes (40 records), and both-theme focus walks for every route (20 records), rejecting
+missing, duplicate or unexpected cells. Timing evidence must contain 20 target-load and 50/50
+route-feedback/data finite nonnegative samples, with matching finite median/p95 summaries;
+only then are the existing budgets evaluated. These target-load measurements still do not
+establish the fresh-browser-process cold-load requirement in #623.
+
+Previously, source highlighting was activated only in the later worker/CSP journey, after
+contrast and layout measurements. Each fresh source navigation for layout/contrast/focus now
+explicitly highlights and requires distinctive rendered plain/keyword/string/comment/number
+tokens before measurement. Each source contrast record must include measured text of all five
+token kinds in both themes at both contrast profiles. The dedicated worker-target/CSP checks
+remain separate and mandatory. Negative controls inject low-contrast rendered tokens and absent
+token measurements, as well as empty/partial matrices and missing/null/nonfinite timing evidence.
+These controls validate the audit, not browser rendering; the expanded highlighted-state coverage
+requires new-head hosted qualification and does not establish a pre-existing token colour defect.
+
 Contrast, reflow, focus, target-size and reduced-motion results are retained in the CI
 `packaged-web-verification` artifact
 (`build/packaged-browser-*/report.json`, every route's 400% zoom screenshot and the dashboard, job

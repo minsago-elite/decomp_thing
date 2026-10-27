@@ -9,6 +9,10 @@ import { join } from 'node:path';
 // contract fixtures, because inert seeding cannot persist source revisions; every
 // response is a schema fixture the SPA validates exactly as it would a server response.
 
+export const auditPageNames = ['workspace', 'upload', 'runtime', 'job detail', 'attempt history',
+  'attempt overview', 'attempt activity', 'attempt evidence', 'source directory', 'source file'];
+export const auditTokenKinds = ['plain', 'keyword', 'string', 'comment', 'number'];
+
 const fixtureRoot = (repo) => join(repo, 'contracts/web/v1/fixtures');
 const longFilename = `${'reconstructed-firmware-image-with-an-unbroken-very-long-name-'.repeat(4)}0123456789abcdef.elf`.slice(0, 255);
 const longLine = `static const unsigned char embedded_table_with_a_long_identifier[] = { ${Array.from({ length: 160 }, (_, index) => `0x${(index * 37 % 256).toString(16).padStart(2, '0')}`).join(', ')} };`;
@@ -119,7 +123,14 @@ export function auditFixtures(repo, buildId) {
     { name: 'attempt activity', path: `${base}/activity`, rendered: 'Attempt identity', preparation: activity },
     { name: 'attempt evidence', path: `${base}/evidence`, rendered: 'Attempt identity', preparation: evidence },
     { name: 'source directory', path: `${base}/revisions/${revisionId}/sources/root`, rendered: 'é space' },
-    { name: 'source file', path: `${base}/revisions/${revisionId}/source-files/${file.data.item.fileId}?byte=0`, rendered: 'embedded_table_with_a_long_identifier' },
+    { name: 'source file', path: `${base}/revisions/${revisionId}/source-files/${file.data.item.fileId}?byte=0`, rendered: 'embedded_table_with_a_long_identifier',
+      preparation: [{ action: 'Highlight displayed rows locally', reads: [], content: [
+        { selector: '.source-token-plain', text: 'embedded_table_with_a_long_identifier' },
+        { selector: '.source-token-keyword', text: 'static' },
+        { selector: '.source-token-string', text: '"/very/deep/source/tree' },
+        { selector: '.source-token-comment', text: 'Synthetic audit source' },
+        { selector: '.source-token-number', text: '0x00' },
+      ] }] },
   ];
   return {
     pages, controls, csrfToken: bootstrap.data.csrfToken, sourceBytes: bytes, sourceName: file.data.item.displayName, runId, retriedRunId: retried.data.runId,
@@ -218,6 +229,7 @@ export const measureContrast = `(() => {
     return { rgb: [255, 255, 255] };
   };
   const results = []; const failures = []; const unsupported = [];
+  const tokens = Object.fromEntries((${JSON.stringify(auditTokenKinds)}).map(kind => [kind, 0]));
   const walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT);
   const seen = new Set();
   for (let node = walker.nextNode(); node; node = walker.nextNode()) {
@@ -236,9 +248,10 @@ export const measureContrast = `(() => {
     const value = ratio(fg.rgb, bg.rgb);
     const required = large ? 3 : 4.5;
     results.push(value);
+    for (const kind of Object.keys(tokens)) if (element.matches('.source-token-' + kind)) tokens[kind]++;
     if (value < required) failures.push({ text: node.textContent.trim().slice(0, 40), ratio: Number(value.toFixed(3)), required, color: style.color, background: 'rgb(' + bg.rgb.join(', ') + ')' });
   }
-  return { measured: results.length, minimum: results.length ? Number(Math.min(...results).toFixed(3)) : null, failures: failures.slice(0, 12), failureCount: failures.length, unsupported: unsupported.slice(0, 12) };
+  return { measured: results.length, minimum: results.length ? Number(Math.min(...results).toFixed(3)) : null, failures: failures.slice(0, 12), failureCount: failures.length, unsupported: unsupported.slice(0, 12), tokens };
 })()`;
 
 export const measureFocus = `(async () => {
@@ -410,8 +423,7 @@ export async function qualifyAudit({ origin, repo, manifest, evidenceDirectory, 
   await cdp.call('Target.setAutoAttach', { autoAttach: true, waitForDebuggerOnStart: true, flatten: true }, tab.sessionId);
   await cdp.call('Page.navigate', { url: origin + sourcePage.path }, tab.sessionId);
   await ready(tab, populated(sourcePage), 'source file for highlighting');
-  await evaluate(tab, `[...document.querySelectorAll('button')].find(button => button.textContent === 'Highlight displayed rows locally').click()`);
-  await ready(tab, `document.querySelector('.source-token') !== null`, 'worker-highlighted source rows');
+  await prepare(tab, sourcePage, 'worker/CSP qualification');
   const highlighted = await evaluate(tab, `document.querySelectorAll('.source-token').length`);
   await cdp.call('Target.setAutoAttach', { autoAttach: false, waitForDebuggerOnStart: false, flatten: true }, tab.sessionId);
 
@@ -517,7 +529,30 @@ export async function qualifyAudit({ origin, repo, manifest, evidenceDirectory, 
 /** Assertions are separate from measurement so the full report is retained when one fails. */
 export function assertAudit(audit, manifest, responses, origin, budgets = { coldLoadP95: 1500, routeFeedbackP95: 100, routeDataP95: 500 }) {
   const failures = [];
-  for (const entry of audit.layout) {
+  // Expectations come from the qualification contract, not the report's claimed coverage.
+  const schemes = ['light', 'dark'];
+  const expected = (viewports) => auditPageNames.flatMap(page => viewports.flatMap(viewport =>
+    schemes.map(scheme => ({ page, ...(viewport ? { viewport: viewport.name } : {}), scheme }))));
+  const coverage = (kind, matrix) => {
+    const records = Array.isArray(audit[kind]) ? audit[kind] : [];
+    const key = entry => JSON.stringify([entry.page, ...(kind === 'focus' ? [] : [entry.viewport]), entry.scheme]);
+    const missing = new Set(matrix.map(key));
+    const seen = new Set();
+    for (const entry of records) {
+      if (!entry || typeof entry !== 'object') { failures.push(`${kind}: invalid coverage record`); continue; }
+      const identity = key(entry);
+      if (seen.has(identity)) failures.push(`${kind}: duplicate coverage ${identity}`);
+      else if (!missing.delete(identity)) failures.push(`${kind}: unexpected coverage ${identity}`);
+      seen.add(identity);
+    }
+    if (missing.size) failures.push(`${kind}: missing ${missing.size} coverage records: ${[...missing].join(', ')}`);
+    return records.filter(entry => entry && typeof entry === 'object');
+  };
+  const layout = coverage('layout', expected(auditViewports));
+  const contrast = coverage('contrast', expected(auditViewports.filter(viewport =>
+    viewport.width === 1440 || viewport.width === 320 && viewport.deviceScaleFactor === 1)));
+  const focus = coverage('focus', expected([null]));
+  for (const entry of layout) {
     const where = `${entry.page} @ ${entry.viewport} (${entry.scheme})`;
     if (entry.pageOverflowPx > 1) failures.push(`${where}: page scrolls horizontally by ${entry.pageOverflowPx}px: ${entry.overflow.join('; ')}`);
     if (entry.overflowCount > 0) failures.push(`${where}: non-exempt horizontal overflow (${entry.overflowCount}): ${entry.overflow.join('; ')}`);
@@ -530,13 +565,17 @@ export function assertAudit(audit, manifest, responses, origin, budgets = { cold
     for (const region of entry.scrollRegions) if (!region.fits || !region.focusable || !region.named)
       failures.push(`${where}: scroll region ${JSON.stringify(region)}`);
   }
-  for (const entry of audit.contrast) {
+  for (const entry of contrast) {
     const where = `${entry.page} @ ${entry.viewport} (${entry.scheme})`;
     if (entry.failureCount) failures.push(`${where}: text contrast ${JSON.stringify(entry.failures)}`);
     if (entry.unsupported.length) failures.push(`${where}: unmeasurable colours ${JSON.stringify(entry.unsupported)}`);
-    if (entry.measured === 0) failures.push(`${where}: no text measured`);
+    if (!Number.isInteger(entry.measured) || entry.measured <= 0 || !Number.isFinite(entry.minimum))
+      failures.push(`${where}: no valid text measurement`);
+    if (entry.page === 'source file') for (const kind of auditTokenKinds)
+      if (!Number.isInteger(entry.tokens?.[kind]) || entry.tokens[kind] <= 0)
+        failures.push(`${where}: no measured highlighted ${kind} tokens`);
   }
-  for (const entry of audit.focus) {
+  for (const entry of focus) {
     if (entry.stops.length < 3) failures.push(`${entry.page} (${entry.scheme}): only ${entry.stops.length} Tab stops`);
     for (const stop of entry.stops) {
       if (!stop.focusVisible || stop.outlineStyle === 'none' || stop.outlineWidth < 2 || stop.contrast === null || stop.contrast < 3 || !stop.inViewport || !stop.unobscured)
@@ -560,9 +599,23 @@ export function assertAudit(audit, manifest, responses, origin, budgets = { cold
   if (missing.length) failures.push(`packaged assets not loaded under ${assetBase}: ${missing.join(', ')}`);
   const failed = responses.filter((response) => response.url.startsWith(assetBase) && response.status !== 200);
   if (failed.length) failures.push(`asset responses failed: ${JSON.stringify(failed)}`);
-  const { timing } = audit;
-  if (timing.coldLoad.p95 > budgets.coldLoadP95) failures.push(`cold dashboard p95 ${timing.coldLoad.p95}ms exceeds ${budgets.coldLoadP95}ms`);
-  if (timing.routeFeedback.p95 > budgets.routeFeedbackP95) failures.push(`route feedback p95 ${timing.routeFeedback.p95}ms exceeds ${budgets.routeFeedbackP95}ms`);
-  if (timing.routeData.p95 > budgets.routeDataP95) failures.push(`route data p95 ${timing.routeData.p95}ms exceeds ${budgets.routeDataP95}ms`);
+  for (const [name, rawName, count, label, budget] of [
+    ['coldLoad', 'cold', 20, 'cold dashboard', budgets.coldLoadP95],
+    ['routeFeedback', 'feedback', 50, 'route feedback', budgets.routeFeedbackP95],
+    ['routeData', 'data', 50, 'route data', budgets.routeDataP95],
+  ]) {
+    const timing = audit.timing?.[name];
+    const raw = audit.timing?.raw?.[rawName];
+    const validMs = value => Number.isFinite(value) && value >= 0;
+    if (!timing || timing.samples !== count || !validMs(timing.median) || !validMs(timing.p95)
+      || !Array.isArray(raw) || raw.length !== count || !Array.from(raw).every(validMs)) {
+      failures.push(`${label}: invalid timing evidence (requires ${count} finite nonnegative samples, median and p95)`);
+      continue;
+    }
+    const calculated = summary(raw);
+    if (timing.median !== calculated.median || timing.p95 !== calculated.p95)
+      failures.push(`${label}: timing summary does not match raw samples`);
+    if (timing.p95 > budget) failures.push(`${label} p95 ${timing.p95}ms exceeds ${budget}ms`);
+  }
   return { failures, declaredAssets: declared, loadedAssets: [...loaded.keys()], fonts: declared.filter((path) => /\.(?:woff2?|ttf|otf)$/.test(path)), budgets };
 }

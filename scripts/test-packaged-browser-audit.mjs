@@ -4,7 +4,7 @@ import { dirname, resolve } from 'node:path';
 import test from 'node:test';
 import { fileURLToPath } from 'node:url';
 import { runInNewContext } from 'node:vm';
-import { assertAudit, auditContentReady, auditFixtures, auditPageReady, auditViewports, measureContrast, measureFocus, measurePage, prepareAuditPage, qualifyAudit } from './packaged-browser-audit.mjs';
+import { assertAudit, auditContentReady, auditFixtures, auditPageNames, auditPageReady, auditTokenKinds, auditViewports, measureContrast, measureFocus, measurePage, prepareAuditPage, qualifyAudit } from './packaged-browser-audit.mjs';
 
 // Controls for the packaged audit's own verdict: each injected defect must be reported, so a
 // passing CI audit cannot be a vacuous one.
@@ -15,22 +15,92 @@ const manifest = { buildId: 'b'.repeat(64), files: [{ path: 'index.html' }, { pa
   { path: 'assets/Home-a.js' }, { path: 'assets/highlight.worker-a.js' }, { path: 'assets/mark-a.svg' }] };
 const responses = ['assets/index-a.js', 'assets/index-a.css', 'assets/Home-a.js'].map((path) => ({ url: base + path, status: 200 }));
 const stop = { key: 1, heading: false, target: 'button "Refresh"', focusVisible: true, outlineStyle: 'solid', outlineWidth: 3, contrast: 5.1, inViewport: true, unobscured: true };
+function timingEvidence(cold = 400, feedback = 40, data = 90) {
+  return { coldLoad: { samples: 20, median: cold, p95: cold }, routeFeedback: { samples: 50, median: feedback, p95: feedback },
+    routeData: { samples: 50, median: data, p95: data }, raw: { cold: Array(20).fill(cold), feedback: Array(50).fill(feedback), data: Array(50).fill(data) } };
+}
 function clean() {
+  const fixtures = auditFixtures(repo, manifest.buildId);
+  const matrix = fixtures.pages.flatMap(({ name: page }) => auditViewports.flatMap(viewport =>
+    ['light', 'dark'].map(scheme => ({ page, viewport: viewport.name, scheme }))));
   return {
-    layout: [{ page: 'job detail', viewport: 'reflow 320', scheme: 'dark', pageOverflowPx: 0, overflow: [], overflowCount: 0, clippedActions: [], smallTargets: [],
+    layout: matrix.map(identity => ({ ...identity, pageOverflowPx: 0, overflow: [], overflowCount: 0, clippedActions: [], smallTargets: [],
       headingWithinWidth: true, navigation: { narrow: true, toggleShown: true, linksShown: false }, animations: 0,
-      scrollRegions: [{ fits: true, scrolls: true, focusable: true, named: true }] }],
-    contrast: [{ page: 'job detail', viewport: 'reflow 320', scheme: 'dark', measured: 40, minimum: 4.8, failures: [], failureCount: 0, unsupported: [] }],
-    focus: [{ page: 'job detail', scheme: 'dark', stops: [stop, { ...stop, key: 2 }, { ...stop, key: 3 }] }],
+      scrollRegions: [{ fits: true, scrolls: true, focusable: true, named: true }] })),
+    contrast: matrix.filter(entry => ['desktop 1440x900', 'reflow 320'].includes(entry.viewport)).map(identity => ({ ...identity,
+      measured: 40, minimum: 4.8, failures: [], failureCount: 0, unsupported: [], tokens: Object.fromEntries(auditTokenKinds.map(kind => [kind, 1])) })),
+    focus: fixtures.pages.flatMap(({ name: page }) => ['light', 'dark'].map(scheme => ({ page, scheme,
+      stops: [{ ...stop }, { ...stop, key: 2 }, { ...stop, key: 3 }] }))),
     unmapped: [],
     workers: { highlightedTokens: 12, targets: [{ url: `${base}assets/highlight.worker-a.js`, responses: [{ url: `${base}assets/highlight.worker-a.js`, status: 200 }] }] },
-    timing: { coldLoad: { p95: 400 }, routeFeedback: { p95: 40 }, routeData: { p95: 90 } },
+    timing: timingEvidence(),
   };
 }
 const verdict = (audit, served = responses) => assertAudit(audit, manifest, served, origin).failures;
 
 test('a clean audit with every packaged asset and the worker has no failures', () => {
-  assert.deepEqual(verdict(clean()), []);
+  const audit = clean();
+  assert.deepEqual(auditFixtures(repo, manifest.buildId).pages.map(page => page.name), auditPageNames);
+  assert.deepEqual([audit.layout.length, audit.contrast.length, audit.focus.length], [100, 40, 20]);
+  assert.deepEqual(verdict(audit), []);
+});
+
+test('rejects absent, empty, partial, duplicate and unexpected measurement matrices', () => {
+  for (const kind of ['layout', 'contrast', 'focus']) {
+    for (const missing of [undefined, null, []]) {
+      const audit = clean(); audit[kind] = missing;
+      assert.match(verdict(audit).join('\n'), new RegExp(`${kind}: missing`));
+    }
+    // Remove each cell in turn, including each page, profile and theme, not just a count.
+    for (let index = 0; index < clean()[kind].length; index++) {
+      const audit = clean(); audit[kind].splice(index, 1);
+      assert.match(verdict(audit).join('\n'), new RegExp(`${kind}: missing 1 coverage`));
+    }
+    const duplicate = clean(); duplicate[kind][1] = structuredClone(duplicate[kind][0]);
+    assert.match(verdict(duplicate).join('\n'), new RegExp(`${kind}: duplicate coverage`));
+    assert.match(verdict(duplicate).join('\n'), new RegExp(`${kind}: missing 1 coverage`));
+    for (const field of kind === 'focus' ? ['page', 'scheme'] : ['page', 'viewport', 'scheme']) {
+      const unexpected = clean(); unexpected[kind][0][field] = 'unqualified';
+      assert.match(verdict(unexpected).join('\n'), new RegExp(`${kind}: unexpected coverage`));
+    }
+  }
+  const empty = clean(); empty.layout = []; empty.contrast = []; empty.focus = [];
+  empty.timing = { coldLoad: { p95: null }, routeFeedback: { p95: null }, routeData: { p95: null } };
+  assert.equal(verdict(empty).length, 6, 'the independently reproduced empty/null report must fail');
+});
+
+test('requires finite, complete timing samples and consistent summaries before budget checks', () => {
+  for (const [name, rawName, label] of [['coldLoad', 'cold', 'cold dashboard'], ['routeFeedback', 'feedback', 'route feedback'], ['routeData', 'data', 'route data']]) {
+    for (const value of [undefined, null, NaN, Infinity, -Infinity, -1, '40']) {
+      for (const field of ['p95', 'median', 'samples']) {
+        const audit = clean(); audit.timing[name][field] = value;
+        assert.match(verdict(audit).join('\n'), new RegExp(`${label}: invalid timing evidence`));
+      }
+      const audit = clean(); audit.timing.raw[rawName][0] = value;
+      assert.match(verdict(audit).join('\n'), new RegExp(`${label}: invalid timing evidence`));
+    }
+    for (const count of [0, 1, clean().timing[name].samples - 1, clean().timing[name].samples + 1]) {
+      const audit = clean(); audit.timing[name].samples = count;
+      audit.timing.raw[rawName] = Array(count).fill(20);
+      assert.match(verdict(audit).join('\n'), /invalid timing evidence/);
+    }
+    for (const field of ['p95', 'median']) {
+      const audit = clean(); audit.timing[name][field] = 1;
+      assert.match(verdict(audit).join('\n'), /summary does not match raw samples/);
+    }
+    for (const raw of [undefined, null, [], Array(clean().timing[name].samples)]) {
+      const audit = clean(); audit.timing.raw[rawName] = raw;
+      assert.match(verdict(audit).join('\n'), /invalid timing evidence/);
+    }
+    const missing = clean(); delete missing.timing[name];
+    assert.match(verdict(missing).join('\n'), /invalid timing evidence/);
+  }
+  for (const timing of [undefined, null, {}]) {
+    const audit = clean(); audit.timing = timing;
+    assert.equal(verdict(audit).length, 3);
+  }
+  const noRaw = clean(); delete noRaw.timing.raw;
+  assert.equal(verdict(noRaw).length, 3);
 });
 
 test('reports page-wide horizontal scrolling, clipped actions and small targets', () => {
@@ -80,7 +150,7 @@ test('requires every declared script/style and the worker to resolve under the b
 
 test('enforces the documented loopback timing budgets', () => {
   const audit = clean();
-  audit.timing = { coldLoad: { p95: 1600 }, routeFeedback: { p95: 101 }, routeData: { p95: 501 } };
+  audit.timing = timingEvidence(1600, 101, 501);
   assert.equal(verdict(audit).length, 3);
 });
 
@@ -136,10 +206,10 @@ function contentModel(page, { omitRead = null, omitContent = null, onRead = () =
   const ready = async (tab, expression, label) => assert.ok(await evaluate(tab, expression), label);
   return { document, nodes, fulfilled, actions, evaluate, ready };
 }
-const attemptPages = auditFixtures(repo, manifest.buildId).pages.filter(page => page.preparation);
+const preparedPages = auditFixtures(repo, manifest.buildId).pages.filter(page => page.preparation);
 
-test('attempt shells are not populated activity, chart/table or validation receipt coverage', async () => {
-  for (const page of attemptPages) {
+test('shells are not populated activity, chart/table, validation receipt or highlighted source coverage', async () => {
+  for (const page of preparedPages) {
     const model = contentModel(page);
     assert.equal(await model.evaluate(null, auditPageReady(page)), true, 'initial-route metadata is ready');
     assert.equal(await model.evaluate(null, auditPageReady(page, true)), false, `${page.name} is only a shell`);
@@ -156,7 +226,7 @@ test('attempt shells are not populated activity, chart/table or validation recei
 });
 
 test('preparation refuses missing rendered content or unused read fixtures', async () => {
-  for (const page of attemptPages) {
+  for (const page of preparedPages) {
     const reads = [...new Set(page.preparation.flatMap(step => step.reads))];
     for (const omitRead of reads) {
       const model = contentModel(page, { omitRead });
@@ -290,7 +360,7 @@ test('closed disclosure content with client rects is not measured as visible ove
 
 test('contrast ignores unrendered disclosure text but measures it when opened', () => {
   for (const visible of [false, true]) {
-    const element = { closest: () => null, checkVisibility: () => visible };
+    const element = { closest: () => null, checkVisibility: () => visible, matches: () => false };
     const text = { parentElement: element, textContent: 'Closed preview' };
     let visited = false;
     const document = { body: {}, createTreeWalker: () => ({ nextNode: () => {
@@ -302,6 +372,35 @@ test('contrast ignores unrendered disclosure text but measures it when opened', 
         backgroundImage: 'none', backgroundColor: 'rgb(255, 255, 255)', fontSize: '16px', fontWeight: '400' }) });
     assert.equal(measured.measured, visible ? 1 : 0);
     assert.equal(measured.failureCount, visible ? 1 : 0, 'Visible white-on-white text must still fail');
+  }
+});
+
+test('measures every highlighted token kind and rejects insufficient rendered token contrast', () => {
+  for (const scheme of ['light', 'dark']) for (const viewport of ['desktop 1440x900', 'reflow 320']) {
+    for (const badKind of [null, ...auditTokenKinds]) {
+      const nodes = auditTokenKinds.map(kind => ({ textContent: `highlighted ${kind}`, parentElement: {
+        kind, closest: () => null, checkVisibility: () => true, matches: selector => selector === `.source-token-${kind}`,
+      } }));
+      let index = 0;
+      const document = { body: {}, createTreeWalker: () => ({ nextNode: () => nodes[index++] ?? null }) };
+      const background = scheme === 'light' ? 'rgb(255, 255, 255)' : 'rgb(0, 0, 0)';
+      const foreground = scheme === 'light' ? 'rgb(0, 0, 0)' : 'rgb(255, 255, 255)';
+      const measured = runInNewContext(measureContrast, { document, NodeFilter: { SHOW_TEXT: 4 },
+        getComputedStyle: element => ({ visibility: 'visible', opacity: '1', color: element.kind === badKind ? background : foreground,
+          backgroundImage: 'none', backgroundColor: background, fontSize: '16px', fontWeight: '400' }) });
+      assert.equal(measured.measured, auditTokenKinds.length);
+      assert.deepEqual({ ...measured.tokens }, Object.fromEntries(auditTokenKinds.map(kind => [kind, 1])));
+      const audit = clean();
+      Object.assign(audit.contrast.find(entry => entry.page === 'source file' && entry.viewport === viewport && entry.scheme === scheme), measured);
+      if (badKind) assert.match(verdict(audit).join('\n'), new RegExp(`text contrast.*highlighted ${badKind}.*ratio.*1`));
+      else assert.deepEqual(verdict(audit), []);
+    }
+    for (const kind of auditTokenKinds) {
+      const audit = clean();
+      const source = audit.contrast.find(entry => entry.page === 'source file' && entry.viewport === viewport && entry.scheme === scheme);
+      source.tokens[kind] = 0;
+      assert.match(verdict(audit).join('\n'), new RegExp(`no measured highlighted ${kind} tokens`));
+    }
   }
 });
 
