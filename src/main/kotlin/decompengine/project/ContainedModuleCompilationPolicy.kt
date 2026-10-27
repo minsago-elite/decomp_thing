@@ -208,8 +208,7 @@ internal class VerifiedContainedModuleCompilation private constructor(private va
                 releaseAttempted = true
                 acquired.requireCleanAndRelease()
                 released = true
-                Files.delete(requestPath)
-                Files.delete(temporary)
+                removeOwnedModuleCompilerRequestDirectory(temporary)
                 val worker = checkNotNull(workerResult)
                 val proof = JsonObject(mapOf(
                     "schemaVersion" to JsonPrimitive(2), "provider" to JsonPrimitive("contained-module-compilation-v2"),

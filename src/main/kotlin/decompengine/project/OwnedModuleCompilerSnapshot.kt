@@ -54,4 +54,11 @@ internal fun materializeOwnedModuleCompilerSnapshot(
     return KotlinSystemdCgroupCommandInput(destination, input.bytes, input.sha256)
 }
 
+/** Normal-path cleanup, called only after the coordinator proves process/scope absence. */
+internal fun removeOwnedModuleCompilerRequestDirectory(directory: Path) {
+    Files.delete(directory.resolve("request.json"))
+    Files.delete(directory.resolve("compiler"))
+    Files.delete(directory)
+}
+
 private const val MAXIMUM_MODULE_COMPILER_SNAPSHOT_BYTES = 64L * 1024 * 1024
