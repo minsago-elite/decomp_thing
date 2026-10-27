@@ -49,7 +49,8 @@ describe('generated v1 contract pipeline', () => {
     const text = fixture('legacy-request-before-reconstruction');
     const document = decodeContract(text, { mode: 'producer' });
     if (document.kind !== 'workflowStartRequest') throw Error('Expected start fixture');
-    expect(encodeRequest('workflowStartRequest', document.data)).toBe(JSON.stringify(JSON.parse(text).data));
+    expect(encodeRequest('workflowStartRequest', document.data)).toBe(JSON.stringify(document.data));
+    expect(document.data).not.toHaveProperty('scope');
     for (const scope of ['all', { modules: ['module_a'] }, { maxContextCharacters: 60000 }]) {
       expect(() => encodeRequest('workflowStartRequest', { ...document.data, scope } as never)).toThrow(ApiClientError);
     }

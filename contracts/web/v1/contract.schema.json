@@ -1148,8 +1148,21 @@
       ],
       "additionalProperties": false,
       "oneOf": [
-        { "required": ["reconstruction"] },
-        { "required": ["profileId"] }
+        {
+          "properties": {
+            "reconstruction": {
+              "anyOf": [
+                { "$ref": "#/definitions/attemptReconstruction" },
+                { "type": "null" }
+              ]
+            }
+          },
+          "required": ["reconstruction"]
+        },
+        {
+          "properties": { "profileId": { "type": "null" } },
+          "required": ["profileId"]
+        }
       ],
       "allOf": [
         {
