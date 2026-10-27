@@ -184,6 +184,44 @@ class WebRunLogsTest {
         assertFailsWith<IllegalArgumentException> { WebRedactionPolicy.create(tooMany, emptyList(), emptyList()) }
     }
 
+    @Test fun `credential suffix assignments are masked without configured literals`() {
+        val (jobId, run) = attempt()
+        val assignments = listOf(
+            "DATABASE_PASSWORD=unquoted-build-only-canary" to "unquoted-build-only-canary",
+            "CUSTOM_API_KEY=\"quoted build-only canary\"" to "quoted build-only canary",
+            "AWS_SECRET_ACCESS_KEY='single-quoted-build-only-canary'" to "single-quoted-build-only-canary",
+            "_DATABASE_PASSWORD=leading-underscore-build-canary" to "leading-underscore-build-canary",
+        )
+        val capture = assertNotNull(logs.capture(assignments.joinToString("\n") { it.first }.toByteArray(), sha))
+        assertEquals(assignments.size, capture.redactedLines)
+        val download = logs.download(jobId, run, capture, Instant.EPOCH).decodeToString()
+        for ((_, secret) in assignments) {
+            assertFalse(download.contains(secret))
+            assertFalse(capture.allLines().any { it.text.contains(secret) || it.searchText.contains(secret) })
+            assertEquals("0", logs.range(jobId, run, capture, false, WebRunLogs.Query(1, false, 1, secret), Instant.EPOCH)
+                .getValue("search").jsonObject.getValue("matchCount").jsonPrimitive.content)
+        }
+    }
+
+    @Test fun `complete Digest authorization values are withheld through the end of the line`() {
+        val (jobId, run) = attempt()
+        val value = "Digest username=\"alice-digest-canary\", realm=\"build-digest-canary\", nonce=\"nonce-digest-canary\", " +
+            "uri=\"/artifact\", response=\"response-digest-canary-0123456789\""
+        for (header in listOf("Authorization: $value", "Proxy-Authorization: $value", "HTTP_AUTHORIZATION=$value",
+            "{\"Authorization\": \"$value\"}")) {
+            val capture = assertNotNull(logs.capture((header + "\npublic\n").toByteArray(), sha))
+            assertEquals(2, capture.totalLines); assertEquals("public", capture.line(1).text)
+            assertTrue(capture.line(0).redacted)
+            val download = logs.download(jobId, run, capture, Instant.EPOCH).decodeToString()
+            for (secret in listOf("alice-digest-canary", "build-digest-canary", "nonce-digest-canary", "response-digest-canary-0123456789")) {
+                assertFalse(download.contains(secret))
+                assertFalse(capture.line(0).searchText.contains(secret))
+                assertEquals("0", logs.range(jobId, run, capture, false, WebRunLogs.Query(1, false, 1, secret), Instant.EPOCH)
+                    .getValue("search").jsonObject.getValue("matchCount").jsonPrimitive.content)
+            }
+        }
+    }
+
     @Test fun `downloads share the live redaction and carry provenance`() {
         val (jobId, run) = attempt()
         val capture = assertNotNull(logs.capture("first $root/a.c\n\u001b[1mbold\n".toByteArray(), sha))

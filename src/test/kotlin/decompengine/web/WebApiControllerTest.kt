@@ -416,6 +416,29 @@ class WebApiControllerTest {
             }
             for (line in safeLines) assertTrue(safeDownload.body().contains(line))
 
+            // Unknown build-time environment assignments and complete Digest fields must not
+            // depend on the web listener having the same credential values in its environment.
+            val unknownCredentials = listOf(
+                "DATABASE_PASSWORD=build-only-password-canary" to listOf("build-only-password-canary"),
+                "CUSTOM_API_KEY=\"quoted build-only-key canary\"" to listOf("quoted build-only-key canary"),
+                "Authorization: Digest username=\"digest-user-canary\", nonce=\"digest-nonce-canary\", response=\"digest-response-canary\"" to
+                    listOf("digest-user-canary", "digest-nonce-canary", "digest-response-canary"),
+            )
+            for ((assignment, fragments) in unknownCredentials) {
+                Files.writeString(log, assignment + "\n")
+                val projected = assertEnvelopeRaw(request(server, path, headers = headers), "logRange")
+                assertEquals("1", projected.getValue("redactedLines").jsonPrimitive.content)
+                val exported = request(server, "$path/content", headers = headers + ("Accept" to "text/plain"))
+                assertEquals(200, exported.statusCode())
+                for (fragment in fragments) {
+                    assertFalse(projected.toString().contains(fragment))
+                    assertFalse(exported.body().contains(fragment))
+                    val query = java.net.URLEncoder.encode(fragment, Charsets.UTF_8)
+                    val searched = assertEnvelopeRaw(request(server, "$path?search=$query", headers = headers), "logRange")
+                    assertEquals("0", searched.getValue("search").jsonObject.getValue("matchCount").jsonPrimitive.content)
+                }
+            }
+
             // Rejected directories, leaf links and parent links are unavailable, never proven absent.
             Files.delete(log)
             Files.createDirectory(log)

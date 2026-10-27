@@ -222,12 +222,16 @@ internal class WebRedactionPolicy private constructor(
         private val DOCUMENT_CREDENTIAL_KEY = Regex("(?i)(?:$CREDENTIAL_KEYS|(?:proxy-)?authorization|cookie|set-cookie)")
         private val URL_USER_INFO =Regex("(?i)\\b([a-z][a-z0-9+.-]{1,31}://)[^/\\s:@\"'<>]{1,256}:[^/\\s@\"'<>]{1,512}@")
         private val CREDENTIAL_PATTERNS = listOf(
-            Regex("(?i)\\b((?:proxy-)?authorization\\s*[:=]\\s*)(?:basic|bearer|token|digest)\\s+[^\\s,;\"'<>]+") to true,
+            // Digest carries quoted comma-separated parameters, not one opaque token. Withhold
+            // the entire authorization value through the line boundary (also for JSON-like logs).
+            Regex("(?i)(?:\\b|(?<=_))((?:proxy-)?authorization[\"']?\\s*[:=][\\t ]*)[^\\r\\n]+") to true,
             Regex("(?i)\\b(bearer\\s+)[A-Za-z0-9._~+/=-]{8,}") to true,
             // Consume escaped quotes and the full bounded input, including unterminated previews.
             // Possessive repetition avoids recursive backtracking on long/escape-heavy credentials.
-            Regex("""(?i)\b((?:$CREDENTIAL_KEYS)["']?\s*[:=]\s*)(?:"(?:[^"\\\r\n]|\\[^\r\n]?)*+(?:"|(?=[\r\n]|$))|'(?:[^'\\\r\n]|\\[^\r\n]?)*+(?:'|(?=[\r\n]|$)))""") to true,
-            Regex("(?i)\\b((?:$CREDENTIAL_KEYS)[\"']?\\s*[:=]\\s*)(?!\\[redacted])[^\\s,;\"'&<>]+") to true,
+            // An underscore is a word character: permit the credential suffix of DATABASE_PASSWORD
+            // or CUSTOM_API_KEY without an unbounded environment-name prefix/backtracking pattern.
+            Regex("""(?i)(?:\b|(?<=_))((?:$CREDENTIAL_KEYS)["']?\s*[:=]\s*)(?:"(?:[^"\\\r\n]|\\[^\r\n]?)*+(?:"|(?=[\r\n]|$))|'(?:[^'\\\r\n]|\\[^\r\n]?)*+(?:'|(?=[\r\n]|$)))""") to true,
+            Regex("(?i)(?:\\b|(?<=_))((?:$CREDENTIAL_KEYS)[\"']?\\s*[:=]\\s*)(?!\\[redacted])[^\\s,;\"'&<>]+") to true,
             Regex("(?<![A-Za-z0-9_-])(?:sk-[A-Za-z0-9_-]{16,}|sk-ant-[A-Za-z0-9_-]{8,}|gh[pousr]_[A-Za-z0-9]{20,}|" +
                 "github_pat_[A-Za-z0-9_]{20,}|xox[abprs]-[A-Za-z0-9-]{10,}|AKIA[0-9A-Z]{16}|AIza[0-9A-Za-z_-]{35})") to false,
         )
