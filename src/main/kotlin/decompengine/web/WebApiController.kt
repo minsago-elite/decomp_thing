@@ -304,7 +304,8 @@ internal class WebApiController(
                         throw WebAccessDenied(400, "UNSUPPORTED_HEADER", "This bounded log download does not support Range or conditional requests.")
                     }
                     val parts = resource.split('/')
-                    val (attempt, file, _) = jobs.readRunBuildLog(parts[1], parts[3], WebRunLogs.MAXIMUM_LOG_BYTES.toLong())
+                    val (attempt, file, oversized) = jobs.readRunBuildLog(parts[1], parts[3], WebRunLogs.MAXIMUM_LOG_BYTES.toLong())
+                    if (oversized) throw WebAccessDenied(413, "LOG_TOO_LARGE", "The build log exceeds its byte budget and cannot be downloaded here.")
                     if (file == null) throw WebAccessDenied(404, "NOT_FOUND", "This attempt has no downloadable build log.")
                     val capture = runLogs.capture(file.bytes, file.sha256)
                         ?: throw WebAccessDenied(413, "LOG_TOO_LARGE", "The build log exceeds its line budget and cannot be downloaded here.")
