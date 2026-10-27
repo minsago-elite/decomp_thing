@@ -871,6 +871,7 @@ class ManagedGitRepositories(
         var current = queued
         var worktreeAddAttempted = false
         var lease: AutoCloseable? = null
+        var switchBranchLock: AutoCloseable? = null
         var publishedCommit: String? = null
         var publicationAttempted = false
         try {
@@ -881,6 +882,13 @@ class ManagedGitRepositories(
             val runner = requireRunner()
             current = synchronized(lock) { advance(directory, current, GitOperationState.RUNNING, RUNNING_WORKSPACE_MESSAGE) }
             crash(GitOperationCrashPoint.AFTER_RUNNING)
+            val switchRequest = (queued.request as? GitRefRequest)?.takeIf { it.action == GitOperationAction.SWITCH }
+            switchRequest?.refId?.let { refId ->
+                val branch = branchFor(runner, located, refId).first
+                GitStorage.directories(directory, "staging", queued.operationId)
+                GitStorage.forceDirectory(staging.parent)
+                switchBranchLock = GitRefOperations.lockSwitchBranch(runner, located.commonDir, branch, staging)
+            }
             // Admission cannot race this final activity check: retain exclusive ownership through publication.
             val observation = synchronized(lock) { validate(runner, located, queued.request) }
             crash(GitOperationCrashPoint.BEFORE_PUBLISH)
@@ -925,6 +933,10 @@ class ManagedGitRepositories(
                 is GitRefRequest -> result = executeRef(runner, located, queued, request) { worktreeAddAttempted = true }
                 else -> error("not a workspace request")
             }
+            // Release before persisting a terminal record: a process death must not leave a lock
+            // attached to an operation that restart reconciliation would otherwise skip.
+            switchBranchLock?.close()
+            switchBranchLock = null
             synchronized(lock) { current = finish(current, GitOperationState.COMPLETED, null, message, result); persist(directory, current) }
         } catch (_: SimulatedGitCrash) {
             synchronized(lock) { active -= queued.operationId }
@@ -938,6 +950,8 @@ class ManagedGitRepositories(
                     else "REPOSITORY_UNAVAILABLE" to "Git did not complete within its bounds. Read the current status before trying again."
                 else -> "STORAGE_FAILED" to "Repository storage could not be written. Read the current status before trying again."
             }
+            switchBranchLock?.close()
+            switchBranchLock = null
             synchronized(lock) {
                 current = if (worktreeAddAttempted) {
                     // Git can create -b's branch before checkout fails inside the command, and storage
@@ -955,9 +969,13 @@ class ManagedGitRepositories(
                 try { persist(directory, current) } catch (_: Exception) { /* reconciled after restart */ }
             }
         } finally {
-            try { GitStorage.deleteTree(staging) } catch (_: Exception) { /* removed by reconciliation */ }
-            synchronized(lock) { active -= queued.operationId }
-            lease?.close()
+            try {
+                switchBranchLock?.close()
+                try { GitStorage.deleteTree(staging) } catch (_: Exception) { /* removed by reconciliation */ }
+            } finally {
+                synchronized(lock) { active -= queued.operationId }
+                lease?.close()
+            }
         }
     }
 
@@ -975,8 +993,14 @@ class ManagedGitRepositories(
                 objectId
             }
             GitOperationAction.SWITCH -> {
-                val branch = request.refId?.let { branchFor(runner, located, it).first.removePrefix("refs/heads/") }
-                GitRefOperations.switch(runner, located.gitDir, located.workTree, branch, request.objectId)
+                val destination = request.refId?.let { branchFor(runner, located, it) }
+                if (destination != null) {
+                    // Persist the exact pinned target even for guard-covered switches that omit objectId.
+                    // Restart must not mistake a later external branch move for our checkout result.
+                    val staging = root.resolve(operation.jobId).resolve("git/staging").resolve(operation.operationId)
+                    GitStorage.replaceAtomically(staging.resolve("switch-target"), destination.second.toByteArray(Charsets.US_ASCII))
+                }
+                GitRefOperations.switch(runner, located.gitDir, located.workTree, destination?.first?.removePrefix("refs/heads/"), request.objectId)
                 crash(GitOperationCrashPoint.AFTER_PUBLISH)
                 GitRepositoryInspector.head(runner, located.gitDir, format).objectId
             }
@@ -1133,14 +1157,24 @@ class ManagedGitRepositories(
                 }
                 GitOperationAction.SWITCH -> {
                     val gitDir = if (operation.worktreeId == record.worktreeId) commonDir else commonDir.resolve("worktrees").resolve(operation.worktreeId)
+                    val staging = root.resolve(jobId).resolve("git/staging").resolve(operation.operationId)
+                    GitWorkspaceMutations.reclaimCommitLocks(gitDir, staging, operation.operationId, commonDir)
                     val head = GitRepositoryInspector.head(runner, gitDir, format)
                     val target = request.refId?.let { refId ->
                         GitReads.allRefs(runner, commonDir, format).singleOrNull { GitWorkspaceVersions.refId(record.repositoryId, it.name) == refId }?.name
                     }
+                    if (target != null && Files.exists(commonDir.resolve("$target.lock"), NOFOLLOW_LINKS)) {
+                        return recovery("SWITCH_LOCK_REQUIRES_REVIEW", "The destination branch has a Git lock whose ownership could not be confirmed. Inspect its writers before switching again.")
+                    }
+                    val targetFile = staging.resolve("switch-target")
+                    val expectedTarget = request.objectId ?: if (Files.isRegularFile(targetFile, NOFOLLOW_LINKS))
+                        format.objectIdOrNull(GitStorage.read(targetFile, 128).toString(Charsets.US_ASCII)) else null
                     when {
                         head.state == GitHeadState.UNBORN && head.refName != null && target == null && request.refId != null ->
                             recovery("REF_DELETED", "HEAD names a branch that no longer exists (unborn). Choose a branch or commit before new work.")
-                        target != null && head.refName == target -> completed("The switch finished before the server restarted.", head.objectId)
+                        target != null && head.refName == target && (expectedTarget == null || head.objectId != expectedTarget) ->
+                            recovery("REF_CHANGED", "The destination's reviewed object cannot be confirmed after restart. Inspect the checkout before any new request.", head.objectId)
+                        target != null && head.refName == target -> completed("The switch finished before the server restarted.", expectedTarget)
                         request.objectId != null && head.state == GitHeadState.DETACHED && head.objectId == request.objectId ->
                             completed("The switch finished before the server restarted.", head.objectId)
                         head.objectId == request.guards.expectedHeadObjectId && (request.guards.expectedRefId == null ||
