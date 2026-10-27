@@ -217,6 +217,36 @@ class StableCppNameCandidateTableTest {
     }
 
     @Test
+    fun `input byte budget is enforced while acquiring the entity snapshot`() {
+        val first = input("entity:0", "x".repeat(16 * 1024), StableCppNameEntityKind.FUNCTION)
+        val firstInputBytes = listOf(first.sourceEntityId, first.identityCandidateId, first.rawName!!,
+            first.moduleOwnerId, first.sourcePath).sumOf { it.toByteArray(Charsets.UTF_8).size.toLong() }
+        for ((budget, expectedConsumed) in listOf(1L to 1, firstInputBytes to 2)) {
+            var consumed = 0
+            val lazyInputs = object : AbstractList<StableCppNameCandidateInput>() {
+                override val size: Int get() = 0
+                override fun get(index: Int): StableCppNameCandidateInput =
+                    input("entity:$index", "x".repeat(16 * 1024), StableCppNameEntityKind.FUNCTION)
+
+                override fun iterator(): Iterator<StableCppNameCandidateInput> = object : Iterator<StableCppNameCandidateInput> {
+                    override fun hasNext(): Boolean = true
+                    override fun next(): StableCppNameCandidateInput {
+                        check(consumed < expectedConsumed) { "materialized another entity before byte budget rejection" }
+                        return get(consumed++)
+                    }
+                }
+            }
+
+            val failure = assertFailsWith<IllegalArgumentException> {
+                StableCppNameCandidateTable.build(lazyInputs,
+                    StableCppNameCandidateLimits(maximumEntities = 10, maximumInputUtf8Bytes = budget))
+            }
+            assertEquals("C++ name candidate input exceeds its UTF-8 byte bound", failure.message)
+            assertEquals(expectedConsumed, consumed, "reject the over-budget entity before requesting another")
+        }
+    }
+
+    @Test
     fun `candidate generation uses the same snapshot that was validated`() {
         val validated = input("validated", "safe", StableCppNameEntityKind.FUNCTION)
         val replacement = input("replacement", "unvalidated", StableCppNameEntityKind.FUNCTION,

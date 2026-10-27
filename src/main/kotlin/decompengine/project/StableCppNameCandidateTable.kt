@@ -174,13 +174,9 @@ internal object StableCppNameCandidateTable {
         limits: StableCppNameCandidateLimits = StableCppNameCandidateLimits(),
     ): FrozenStableCppNameCandidateTable {
         require(inputs.size <= limits.maximumEntities) { "C++ name candidate count exceeds its bound" }
+        // Validate and charge each entity before retaining it or requesting the next one.
         // Do not trust a caller-owned list's size or traverse it again after validation.
         val snapshot = ArrayList<StableCppNameCandidateInput>(minOf(inputs.size, 1024))
-        val iterator = inputs.iterator()
-        while (iterator.hasNext()) {
-            require(snapshot.size < limits.maximumEntities) { "C++ name candidate count exceeds its bound" }
-            snapshot += iterator.next()
-        }
         var inputBytes = 0L
         var quotedReportStringBytes = 0L
         fun charge(value: String, label: String, maximumBytes: Int) {
@@ -197,7 +193,10 @@ internal object StableCppNameCandidateTable {
         val sourceIds = HashSet<String>()
         val candidateIds = HashSet<String>()
         var scopeComponentCount = 0
-        for (input in snapshot) {
+        val iterator = inputs.iterator()
+        while (iterator.hasNext()) {
+            require(snapshot.size < limits.maximumEntities) { "C++ name candidate count exceeds its bound" }
+            val input = iterator.next()
             require(input.scope.size <= MAXIMUM_CPP_NAME_SCOPE_DEPTH) { "C++ lexical scope exceeds its depth bound" }
             require(input.sourceEntityId.length == 64 && input.sourceEntityId.matches(SHA256_HEX)) {
                 "source entity identity must be a SHA-256 digest"
@@ -248,6 +247,7 @@ internal object StableCppNameCandidateTable {
             }
             require(input.rawName == null || input.rawName.isNotBlank()) { "C++ source name must not be blank" }
             scopeComponentCount = Math.addExact(scopeComponentCount, input.scope.size)
+            snapshot += input
         }
 
         val estimatedOutputBytes = Math.addExact(
