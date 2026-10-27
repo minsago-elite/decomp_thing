@@ -86,7 +86,9 @@ four documents and `frontend/README.md` resolve.
 
 ## Not executed
 
-- Browser modes `proxy`, `upgrade`, `live`, `scale`, `upload`, `history` and `legacy`. `upgrade` needs two separately qualified archives; the others run in CI.
+- Browser modes `proxy`, `live` and `scale`. The normal CI lane is configured to run these alongside `session` and `metadata`; that configuration is not evidence of a successful current-head run.
+- Browser mode `upgrade`, which needs two separately qualified archives.
+- Browser modes `upload`, `history` and `legacy`. Neither this replay nor the normal CI lane executes these modes, so their qualification remains missing here. The shared upload check in `metadata` does not replace the additional mode-gated `upload` journeys.
 - The complete Kotlin suite, opt-in live Ghidra cases, Docker, and the CI host's Python 3.12. This host used 3.14.9.
 - The fixture guide's original separate `GRADLE_USER_HOME`. It was replaced as described above.
 - The replay checkout path contained a dot-prefixed component (`.claude/worktrees/…`). Ghidra refuses such project paths ([#1785](https://github.com/minsago-elite/decomp_thing/issues/1785)), but no documented step here runs a Ghidra project analysis, so none failed for that reason.
