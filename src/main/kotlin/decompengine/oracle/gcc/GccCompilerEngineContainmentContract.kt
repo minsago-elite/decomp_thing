@@ -188,9 +188,9 @@ internal class GccCompilerEngineContainmentRequest(
 
     init {
         require(engineId in setOf("cc1", "lto1", "driver"))
-        require(engineId != "driver" || (bundledRuntime?.invocationVersion == 5 &&
+        require(engineId != "driver" || (bundledRuntime?.invocationVersion in setOf(5, 8) &&
             runKind == GccCompilerEngineContainmentRunKind.FRESH_CONTROL)) {
-            "GCC driver containment requires bundled full-recovery export with fresh control state"
+            "GCC driver containment requires bundled full-recovery or native-call export with fresh control state"
         }
         require(bundledRuntime?.invocationVersion !in setOf(6, 7) || (engineId == "cc1" &&
             runKind == GccCompilerEngineContainmentRunKind.FRESH_CONTROL)) {
@@ -224,8 +224,8 @@ internal class GccCompilerEngineContainmentRequest(
         }
         require(this.command.isNotEmpty())
         if (bundledRuntime != null) {
-            require(bundledRuntime.invocationVersion != 8 || engineId == "cc1") {
-                "native call observations require the pinned cc1 engine"
+            require(bundledRuntime.invocationVersion != 8 || engineId in setOf("cc1", "driver")) {
+                "native call observations require the pinned cc1 or driver engine"
             }
             require(this.command == bundledRuntime.command(this.artifacts, analysisState, outputLease, runKind)) {
                 "command differs from the exact bundled direct-API worker invocation"
