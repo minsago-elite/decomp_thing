@@ -173,7 +173,10 @@ internal object RecoveredAbiTypeGraphClassifierV1 {
                             if (targetShape.byteSize != node.length.toLong() || targetShape.alignmentBytes != node.alignment.toLong()) {
                                 throw UnsupportedShape("typedef-layout-differs-from-its-captured-target")
                             }
-                            reidentify(typeId, targetShape)
+                            // Shapes are immutable layouts, not alias identities. Retain the target
+                            // itself so deep alias chains cannot multiply wide field allocations.
+                            // Root identity remains in Result.root/nativeNode/typeTokenSha256.
+                            targetShape
                         }
                         "structure", "union" -> {
                             require(node.expansion == "expanded" && node.childCount == children.size &&
@@ -297,12 +300,6 @@ internal object RecoveredAbiTypeGraphClassifierV1 {
     private fun sourceToken(root: NativeInterfaceTypeRootV1): String =
         OracleArtifacts.sha256("${root.scope.channel}\u0000${root.scope.functionOrdinal}\u0000${root.role}\u0000${root.slot}\u0000${root.listingTypeOrdinal}\u0000${root.node}"
             .toByteArray(Charsets.UTF_8))
-
-    private fun reidentify(id: String, shape: DwarfAbiTypeShape) = DwarfAbiTypeShape(
-        id, shape.byteSize, shape.alignmentBytes, shape.scalar,
-        shape.fields.map { DwarfAbiFieldShape(it.offsetBits, it.type, it.bitSize, it.storageOffsetBits) },
-        shape.arrayElement, shape.arrayCount, shape.aggregate, shape.union, shape.invisibleReference,
-    )
 
     private class UnsupportedShape(message: String) : RuntimeException(message)
 }

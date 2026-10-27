@@ -92,7 +92,8 @@ class RecoveredAbiInterfaceCandidateProjectionV1 private constructor(private val
                 maximumCombinedBytes = MAXIMUM_CAPTURE_CANDIDATE_BYTES,
                 maximumModelBytes = MAXIMUM_CAPTURE_CANDIDATE_BYTES.toInt(),
                 maximumFunctions = limits.maximumNativeFunctions,
-                maximumParameters = limits.maximumParameters.toInt(),
+                // Raw validation requires positive capacity; project still enforces an exact zero.
+                maximumParameters = limits.maximumParameters.toInt().coerceAtLeast(1),
                 maximumGraphNodes = RecoveredAbiTypeGraphClassifierV1.maximumNodes,
                 maximumGraphEdges = RecoveredAbiTypeGraphClassifierV1.maximumEdges,
                 maximumGraphWork = RecoveredAbiTypeGraphClassifierV1.maximumWork.toLong(),
