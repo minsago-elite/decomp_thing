@@ -46,6 +46,16 @@ class GitAdapterTest {
         assertFalse(garbage.message.contains("PRIVATE_CANARY"))
     }
 
+    @Test fun `a required process memory ceiling is hard and soft and never falls back when unavailable`(): Unit = GitTestRepositories().use { f ->
+        val echo = fakeGit(f.root.resolve("memory-bound"), "ulimit -Sv; ulimit -Hv; ulimit -c")
+        val invocation = GitInvocation("version", limits = GitExecutionLimits(maxAddressSpaceBytes = 48L * 1024 * 1024))
+        assertEquals(listOf("49152", "49152", "0"), GitCommandRunner(echo, f.environment).run(invocation).text.trim().lines())
+        val unavailable = GitCommandRunner(echo, f.environment, memoryLimiter = null)
+        assertEquals(GitCommandException.Kind.START_FAILED, assertFailsWith<GitCommandException> { unavailable.run(invocation) }.kind)
+        // Ordinary non-import calls do not depend on the optional resource launcher.
+        assertTrue(unavailable.run(GitInvocation("version")).text.isNotBlank())
+    }
+
     @Test fun `argv is passed without a shell and the child environment is fixed`(): Unit = GitTestRepositories().use { f ->
         val marker = f.root.resolve("shell-ran")
         val echo = fakeGit(f.root.resolve("echo"), "for argument in \"\$@\"; do printf '[%s]\\n' \"\$argument\"; done; env | LC_ALL=C sort")

@@ -1,8 +1,12 @@
 package decompengine.git
 
+import java.net.URI
 import java.nio.file.Files
+import java.nio.file.FileSystemException
+import java.nio.file.NoSuchFileException
 import java.nio.file.LinkOption.NOFOLLOW_LINKS
 import java.nio.file.Path
+import java.nio.file.attribute.BasicFileAttributes
 import java.security.MessageDigest
 import java.time.Duration
 
@@ -70,10 +74,15 @@ object GitConfigurationAudit {
             }
         }
         val attributes = gitDir.resolve("info").resolve("attributes")
-        val neutral = Files.isRegularFile(attributes, NOFOLLOW_LINKS) && Files.size(attributes) <= 4096 &&
-            Files.readString(attributes) == GitManagedLayout.ATTRIBUTES
-        if (!neutral) throw GitRepositoryException("REPOSITORY_CONFIG_UNTRUSTED",
-            "The managed repository does not neutralize content conversions.")
+        val content = if (Files.isDirectory(attributes.parent, NOFOLLOW_LINKS) &&
+            Files.isRegularFile(attributes, NOFOLLOW_LINKS) && Files.size(attributes) <= 4096) Files.readString(attributes) else null
+        when (content) {
+            GitManagedLayout.ATTRIBUTES -> Unit
+            // Upgrade only the exact previously audited server layout, never arbitrary attributes.
+            GitManagedLayout.LEGACY_ATTRIBUTES -> GitManagedLayout.upgradeAttributes(gitDir)
+            else -> throw GitRepositoryException("REPOSITORY_CONFIG_UNTRUSTED",
+                "The managed repository does not neutralize content conversions and diff attributes.")
+        }
     }
 }
 
@@ -85,7 +94,19 @@ object GitConfigurationAudit {
  * paths, so checkout and status always see the exact blob bytes.
  */
 object GitManagedLayout {
-    const val ATTRIBUTES = "* -text !eol -crlf -ident -filter !working-tree-encoding\n"
+    internal const val LEGACY_ATTRIBUTES = "* -text !eol -crlf -ident -filter !working-tree-encoding\n"
+    // Unspecified diff restores Git's automatic binary detection, overriding source `diff` rules.
+    const val ATTRIBUTES = "* -text !eol -crlf -ident -filter !working-tree-encoding !diff\n"
+
+    internal fun upgradeAttributes(gitDir: Path) {
+        val attributes = gitDir.resolve("info/attributes")
+        val temporary = Files.createTempFile(attributes.parent, ".attributes-upgrade-", ".tmp")
+        try {
+            Files.writeString(temporary, ATTRIBUTES)
+            Files.move(temporary, attributes, java.nio.file.StandardCopyOption.ATOMIC_MOVE,
+                java.nio.file.StandardCopyOption.REPLACE_EXISTING)
+        } finally { Files.deleteIfExists(temporary) }
+    }
 
     fun prepare(gitDir: Path) {
         val info = gitDir.resolve("info")
@@ -171,6 +192,27 @@ object GitRepositoryInspector {
         return refs.take(MAX_REFS) to (refs.size > MAX_REFS)
     }
 
+    internal fun worktreeStat(root: Path, file: Path): BasicFileAttributes? {
+        return try {
+            Files.readAttributes(file, BasicFileAttributes::class.java, NOFOLLOW_LINKS)
+        } catch (_: NoSuchFileException) {
+            null
+        } catch (failure: FileSystemException) {
+            // A tracked directory replaced by a file makes its deleted descendants fail with
+            // ENOTDIR on Unix, not NoSuchFileException. Prove the absence via exact ancestor
+            // paths, without relying on localized error text or hiding permission/I/O failures.
+            var ancestor = root
+            for (component in root.relativize(file.parent)) {
+                ancestor = ancestor.resolve(component)
+                // Ancestors follow links just as the original leaf lookup does; the leaf does not.
+                val stat = try { Files.readAttributes(ancestor, BasicFileAttributes::class.java) }
+                    catch (_: NoSuchFileException) { return null }
+                if (!stat.isDirectory) return null
+            }
+            throw failure
+        }
+    }
+
     /** Status never fetches, refreshes optional locks, descends into submodules or runs hooks. */
     fun inspect(runner: GitCommandRunner, gitDir: Path, workTree: Path, commonDir: Path = gitDir): GitWorkspaceObservation {
         if (commonDir == gitDir) GitConfigurationAudit.requireManaged(runner, gitDir)
@@ -188,8 +230,20 @@ object GitRepositoryInspector {
                     update(entry.path.bytes); update(0)
                     update("${entry.originalPath?.display ?: ""}\u0000${entry.staged}\u0000${entry.unstaged}\u0000${entry.untracked}\u0000${entry.conflict}\u0000${entry.indexObjectId ?: ""}\u0000${entry.indexMode ?: ""}\u0000${entry.worktreeMode ?: ""}\u0000".toByteArray())
                     // Re-editing an already modified file changes no status code; its size and time do.
-                    val file = entry.path.exact?.let { runCatching { workTree.resolve(it) }.getOrNull() }
-                    val stat = file?.let { runCatching { Files.readAttributes(it, java.nio.file.attribute.BasicFileAttributes::class.java, NOFOLLOW_LINKS) }.getOrNull() }
+                    val stat = try {
+                        // URI percent escapes preserve native filename bytes on Unix, unlike a
+                        // lossy UTF-8 String. Other providers must fail rather than hash a stable
+                        // sentinel for a name they cannot represent.
+                        val root = workTree.toAbsolutePath().normalize()
+                        val file = entry.path.exact?.let(root::resolve) ?: Path.of(URI(
+                            root.toUri().toASCIIString().trimEnd('/') + "/" + entry.path.bytes.joinToString("") {
+                                if (it == '/'.code.toByte()) "/" else "%%%02X".format(it.toInt() and 0xff)
+                            }))
+                        if (!file.normalize().startsWith(root) || file.normalize() == root) throw IllegalArgumentException()
+                        worktreeStat(root, file)
+                    } catch (_: Exception) {
+                        throw GitRepositoryException("REPOSITORY_UNAVAILABLE", "A work-tree file could not be observed exactly.")
+                    }
                     update("${stat?.size() ?: -1}\u0000${stat?.lastModifiedTime()?.toInstant() ?: ""}\n".toByteArray())
                 }
             }.digest().joinToString("") { "%02x".format(it) }

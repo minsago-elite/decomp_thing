@@ -17,7 +17,7 @@ internal class GitTestRepositories : AutoCloseable {
     val runner: GitCommandRunner = (GitRuntime.detect() as GitAvailability.Available).runner(environment)
 
     /** Raw fixture Git: argv only, fixture HOME, no hooks. Returns stdout. */
-    fun git(vararg args: String, cwd: Path = root, expect: Int = 0): String {
+    fun git(vararg args: String, cwd: Path = root, expect: Int = 0, variables: Map<String, String> = emptyMap()): String {
         val process = ProcessBuilder(listOf("git", "-c", "core.hooksPath=/dev/null", "-c", "commit.gpgSign=false", *args))
             .directory(cwd.toFile()).redirectErrorStream(true).also { builder ->
                 builder.environment().clear()
@@ -30,6 +30,7 @@ internal class GitTestRepositories : AutoCloseable {
                     "GIT_COMMITTER_NAME" to "Fixture Committer", "GIT_COMMITTER_EMAIL" to "fixture@example.invalid",
                     "GIT_AUTHOR_DATE" to "2026-01-01T00:00:00Z", "GIT_COMMITTER_DATE" to "2026-01-01T00:00:00Z",
                 ))
+                builder.environment().putAll(variables)
             }.start()
         process.outputStream.close()
         val output = process.inputStream.readBytes().toString(Charsets.UTF_8)

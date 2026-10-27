@@ -347,6 +347,88 @@ class WebGitControllerTest {
         error(f.read("$base/provenance/${head.take(10)}"), 422, "VALIDATION_FAILED")
     }
 
+    @Test fun `directory replacements keep workspace status and diff pages usable`(): Unit = Fixture().use { f ->
+        val (base, directory) = f.initialized()
+        decompengine.git.GitTestRepositories().use { g ->
+            val gitDir = directory.resolve("repository.git"); val workTree = directory.resolve("worktree")
+            fun raw(vararg args: String) = g.git("--git-dir=$gitDir", "--work-tree=$workTree", *args, cwd = workTree)
+            val component = Files.createDirectories(workTree.resolve("component.c"))
+            for (name in listOf("a.c", "b.c")) Files.writeString(component.resolve(name), "int original_child_$name;\n")
+            raw("add", "-A"); raw("commit", "-q", "-m", "base")
+            Files.delete(component.resolve("a.c")); Files.delete(component.resolve("b.c")); Files.delete(component)
+            Files.writeString(component, "int replacement;\n")
+            for (scope in listOf("unstaged", "staged")) {
+                if (scope == "staged") raw("add", "-A")
+                val workspace = data(f.read(base), 200, "gitWorkspace")
+                assertEquals(JsonPrimitive(true), workspace["dirty"])
+                val status = data(f.read("$base/status"), 200, "gitStatus")
+                val entries = status.getValue("entries").jsonArray.map { it.jsonObject }
+                assertEquals("deleted", entries.single { it.getValue("path").jsonPrimitive.content == "component.c/a.c" }
+                    .getValue(scope).jsonPrimitive.content)
+                val firstStatus = data(f.read("$base/status?limit=1"), 200, "gitStatus")
+                val statusCursor = firstStatus.getValue("nextCursor").jsonPrimitive.content
+                data(f.read("$base/status?limit=1&cursor=$statusCursor"), 200, "gitStatus")
+                val firstDiff = data(f.read("$base/diff?scope=$scope&limit=1"), 200, "gitDiff")
+                val diffCursor = firstDiff.getValue("nextCursor").jsonPrimitive.content
+                data(f.read("$base/diff?scope=$scope&limit=1&cursor=$diffCursor"), 200, "gitDiff")
+                val diff = data(f.read("$base/diff?scope=$scope"), 200, "gitDiff")
+                val deleted = diff.getValue("files").jsonArray.map { it.jsonObject }
+                    .single { it.getValue("path").jsonPrimitive.content == "component.c/a.c" }
+                val patch = data(f.read("$base/diff?scope=$scope&file=${deleted.getValue("fileId").jsonPrimitive.content}"), 200, "gitDiff")
+                    .getValue("patch").jsonObject
+                assertTrue(patch.getValue("text").jsonPrimitive.content.contains("-int original_child_a.c;"))
+                assertEquals(JsonPrimitive(false), patch["truncated"])
+                Files.writeString(component, "int replacement_changed_for_$scope;\n")
+                error(f.read("$base/status?limit=1&cursor=$statusCursor"), 409, "REF_CHANGED")
+                error(f.read("$base/diff?scope=$scope&limit=1&cursor=$diffCursor"), 409, "REF_CHANGED")
+                assertNotEquals(workspace.getValue("worktreeVersion"), data(f.read(base), 200, "gitWorkspace").getValue("worktreeVersion"))
+            }
+        }
+    }
+
+    @Test fun `history HTTP retains every parent of a 65-parent commit`(): Unit = Fixture().use { f ->
+        val (base, directory) = f.initialized()
+        decompengine.git.GitTestRepositories().use { g ->
+            val gitDir = directory.resolve("repository.git"); val workTree = directory.resolve("worktree")
+            fun raw(vararg args: String) = g.git("--git-dir=$gitDir", "--work-tree=$workTree", *args, cwd = workTree).trim()
+            raw("add", "-A"); raw("commit", "-q", "-m", "base")
+            val tree = raw("rev-parse", "HEAD^{tree}")
+            val parents = (1..65).map { raw("commit-tree", tree, "-m", "parent $it") }
+            val merge = raw("commit-tree", tree, *parents.flatMap { listOf("-p", it) }.toTypedArray(), "-m", "65 parents")
+            val history = data(f.read("$base/history?start=$merge&limit=1"), 200, "gitHistory")
+            val entry = history.getValue("entries").jsonArray.single().jsonObject
+            assertEquals(parents, entry.getValue("parentObjectIds").jsonArray.map { it.jsonPrimitive.content })
+            assertEquals(3200, schema.getValue("gitCommitSummary").jsonObject.getValue("properties").jsonObject
+                .getValue("parentObjectIds").jsonObject.getValue("maxItems").jsonPrimitive.int)
+        }
+    }
+
+    @Test fun `native filename re-edits invalidate status and diff cursors`(): Unit = Fixture().use { f ->
+        val (base, directory) = f.initialized()
+        decompengine.git.GitTestRepositories().use { g ->
+            val gitDir = directory.resolve("repository.git"); val workTree = directory.resolve("worktree")
+            fun raw(vararg args: String) = g.git("--git-dir=$gitDir", "--work-tree=$workTree", *args, cwd = workTree)
+            val native = Path.of(URI(workTree.toUri().toASCIIString() + "a%FF.c"))
+            Files.writeString(native, "int base;\n")
+            Files.writeString(workTree.resolve("z.c"), "int base;\n")
+            raw("add", "-A"); raw("commit", "-q", "-m", "base")
+            Files.writeString(native, "int first;\n")
+            Files.writeString(workTree.resolve("z.c"), "int first;\n")
+            val status = data(f.read("$base/status?limit=1"), 200, "gitStatus")
+            val diff = data(f.read("$base/diff?scope=unstaged&limit=1"), 200, "gitDiff")
+            val statusCursor = status.getValue("nextCursor").jsonPrimitive.content
+            val diffCursor = diff.getValue("nextCursor").jsonPrimitive.content
+            val beforeVersion = status.getValue("worktreeVersion")
+            Files.writeString(native, "int second;\nint more;\n")
+            error(f.read("$base/status?cursor=$statusCursor&limit=1"), 409, "REF_CHANGED")
+            error(f.read("$base/diff?scope=unstaged&cursor=$diffCursor&limit=1"), 409, "REF_CHANGED")
+            val refreshed = data(f.read("$base/status?limit=1"), 200, "gitStatus")
+            assertNotEquals(beforeVersion, refreshed.getValue("worktreeVersion"))
+            assertEquals(status.getValue("entries").jsonArray.single().jsonObject.getValue("fileId"),
+                refreshed.getValue("entries").jsonArray.single().jsonObject.getValue("fileId"))
+        }
+    }
+
     @Test fun `authorization guards and strict bodies precede any repository operation`(): Unit = Fixture().use { f ->
         val body = f.init()
         error(f.send(), 401)

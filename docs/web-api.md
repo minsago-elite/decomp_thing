@@ -153,7 +153,8 @@ internal storage optimization and must not merge identity, permissions or histor
 | `POST /agent/preflight` | `202 agentPreflight`, `409` while one runs | Strict `agentPreflightRequest` (`{"action":"inspect"}`), session/Origin/CSRF; starts one single-flight `preflight(WEB)`; #493 |
 | `POST J/runs` | `202 run`, `Location: R` | `workflowStart` request, capability/limits/input checks, job If-Match; #163 |
 | `POST R/cancel` | `202 run` or `200 run` if already terminal | Closed `workflowCancel` request, idempotent recorded intent, run If-Match; #163 |
-| `POST R/recover` | `202 run`, `Location` of a new attempt | Explicit `retry` or capability-gated `resume`; If-Match; #163 |
+| `POST R/recover` | `202 run`, `Location` of a new attempt | Closed `recover` request; explicit `retry` or capability-gated `resume`; run If-Match and idempotency; #486 |
+| `GET R/controls` | `200 attemptControls`, strong run ETag | Read-only cancel/retry/resume eligibility with closed reasons; reserves nothing; #528/#529 |
 | `GET R/snapshot` | `200 snapshot`, ETag | Run state and consistent event watermark; #174 |
 | `GET R/events` | `200 text/event-stream` | Resume with `Last-Event-ID` or `after`, never both; #174 |
 | `GET R/events?transport=poll` | `200 events` | Same retention/cursor semantics, bounded page; #174 |
@@ -266,6 +267,52 @@ a new session after a full listener restart. These authored methods await their
 own Actions qualification; browser and production-adapter/runtime qualification
 remain unfinished. Bootstrap continues to report workflows unavailable, and
 fresh starts without registrations or retained start receipts retain 405.
+
+The recovery transport accepts only the closed `recover` data object (not its
+fixture wrapper), bounded to 1024 bytes: `mode` is `retry` or `resume`, and
+`expectedInputRevisionId` is the predecessor's recorded input revision or null for
+the original upload. It uses the same shared session/Origin/JSON/CSRF boundary
+before any body or service read, one strong run `If-Match`, one 16–128 character
+`Idempotency-Key` and no query or other conditional header. Workflow, limits,
+harness, checkpoint and paths are never caller fields; they come from the
+trusted registration and the predecessor attempt.
+
+Only the latest unsuccessful (failed, cancelled or interrupted) attempt can be
+recovered, and only while its recorded input is the original upload or the
+job's current accepted revision. A different expected input is 409
+`INPUT_REVISION_CONFLICT`; an input that is no longer trusted evidence is 409
+`INPUT_UNVERIFIED`, so recovery never silently starts from an unverified
+workspace. `retry` always publishes a new queued attempt linked through
+`previousRunId`, with `recovery.mode: retry` and no restored state. `resume`
+requires the registered adapter's trusted checkpoint policy, the exact recorded
+harness identity and a verified checkpoint; the new attempt records
+`recovery.restores` (`agent-session` or `project-evidence`) and the checkpoint
+digest, and the adapter receives the predecessor's workflow-owned report
+directory. Unsupported or unsafe resume is 409 with a specific code
+(`RESUME_UNSUPPORTED`, `HARNESS_CHANGED`, `CHECKPOINT_MISSING`,
+`CHECKPOINT_MISMATCH`, `CHECKPOINT_UNVERIFIED`, `WORKSPACE_UNVERIFIED`,
+`SESSION_QUARANTINED`, `CLEANUP_UNVERIFIED`). A newer attempt is 409
+`ATTEMPT_SUPERSEDED`, unfinished or completed predecessors 409
+`ATTEMPT_ACTIVE`/`ATTEMPT_COMPLETED`, a stale run guard 412, a key reused for
+different intent 409, admission capacity 429 and an unavailable workflow 503.
+
+Success is `202 run` for the new attempt with its `Location` and ETag. The
+recovery receipt shares the atomic attempt publication; its replay identity is
+the predecessor, its version, the mode and the expected input, so a keyed replay
+returns the same new attempt with `Idempotency-Replayed: true` before any
+eligibility, capacity or capability check, and never schedules again. Without
+registered workflows or retained keyed receipts the route answers 503
+`CAPABILITY_UNAVAILABLE` without reading the body. Production adapters remain
+unregistered and none declares a checkpoint policy yet, so packaged builds
+report retry and resume unavailable; ACP session continuation through the
+shared `AgentSessionJournal` policy still needs a registered adapter (#68).
+
+`GET R/controls` returns `attemptControls`: the run version and state, the
+recorded input revision, `cancel`, `retry` and `resume` each with `available`
+and a closed `reason`, the scope a resume would restore and any linked
+`successorRunId`. It is computed from durable state and current owned work, is
+private and read-only, and is not a reservation; each command re-checks its
+guards. Browsers read it explicitly and never send a command on load or reload.
 
 Errors carry `code`, safe `message`, `retryable`, optional field-level `details` and
 `retryAfterMs`; the correlation ID connects to redacted server logs. A detail contains a JSON
@@ -673,12 +720,32 @@ and `HEAD`/`objects`/`refs` at the top level is a bare one. A `.git` file or lin
 --no-includes`. A fresh managed repository then receives the object store (without
 `objects/info`), the branch and tag refs (loose and packed) and HEAD. Every branch or tag must be
 a valid full ref name, such as `refs/tags/HEAD`; one that cannot be imported fails the import
-instead of being dropped. Configuration, hooks, `info/`, the index, reflogs, remotes, notes,
-replace refs, worktrees, submodule repositories and uncommitted working-tree changes are not
-copied. A full `git fsck` must succeed, which re-hashes every object against its ID (otherwise
-`REPOSITORY_CORRUPT`). Before checkout, `ls-tree -r -l` of the HEAD tree must fit the work-tree
-quota (20,000 entries and 512 MiB of declared blob bytes), because a few compressed objects can
-expand without bound. The HEAD commit is then checked out with `read-tree --reset -u` under the server configuration and
+instead of being dropped. Selected symbolic refs are resolved as bounded inert data (at most 16
+steps), including targets in omitted namespaces, and stored as full object IDs; HEAD retains its
+branch name. Cyclic or excessive symbolic chains give `REPOSITORY_UNSUPPORTED`.
+Object copying pins every source ancestor with descriptor-relative no-follow directory opens.
+The shared Linux filesystem boundary opens leaves with `O_PATH`, authenticates regular-file type
+on the pinned descriptor, then reopens that exact inode with `O_NONBLOCK` for reading. A raced-in
+FIFO cannot block an import waiting for a writer, and links cannot redirect reads. Copies stream
+at most 512 MiB into newly created regular files (at most 100,000 object-store files and directories
+combined). Unsupported native/default-filesystem/procfs boundaries fail closed as
+`REPOSITORY_UNSUPPORTED`; there is no pathname-copy fallback. Imported HEAD, packed refs and
+loose refs (including symbolic-ref targets) use the same pinned-ancestor, regular-type-authenticated
+nonblocking read boundary, with their existing 4 KiB/4 MiB metadata limits and cancellation checks.
+A metadata entry replaced by a link or special file is refused rather than blocking the worker.
+Configuration, hooks, `info/`, the index, reflogs, remotes, notes, replace refs, worktrees, submodule repositories and
+uncommitted working-tree changes are not copied. A full `git fsck` must succeed, which re-hashes
+every object against its ID (integrity errors give `REPOSITORY_CORRUPT`). Verification runs with
+a hard and soft 512 MiB process address-space ceiling, including mappings and inflation of
+packed, dangling and historical objects, before checkout quotas run. This requires the server's
+fixed `/usr/bin/prlimit` or `/bin/prlimit` utility; missing/unstartable containment fails closed as
+`REPOSITORY_UNAVAILABLE`, never an unbounded retry. Fatal/resource exits give
+`REPOSITORY_UNSUPPORTED` rather than claiming proven corruption. No core dump is allowed.
+Before checkout, `ls-tree -r -t -l` of the HEAD tree must fit the work-tree quotas: 20,000 leaf
+entries, 20,000 directories and 512 MiB of declared blob bytes. Tree paths count once per prefix;
+inert gitlinks also count as directories. This bounds directory expansion as well as repeated or
+highly compressed blobs before `read-tree` creates anything.
+The HEAD commit is then checked out with `read-tree --reset -u` under the server configuration and
 the neutral `info/attributes`. No hook, filter, fsmonitor or submodule recursion can run, and no
 attribute conversion can rewrite bytes. Attached, detached and unborn HEADs
 are preserved and reported as such, and SHA-256 repositories keep their format. Failed
@@ -695,6 +762,11 @@ job, non-terminal records are reconciled. A published repository makes its opera
 `recoveryRequired: false`. If removal fails, it becomes `recovery-required` and the tree is kept
 for inspection. Reconciliation never repeats work. Replaying the original key reports the
 interrupted operation, and a new key starts a fresh, explicit initialization.
+
+Shutdown interrupts the Git worker. Copy and cleanup loops stop at their next step, and Git
+processes are killed. The listener releases store ownership only after the worker has actually
+stopped. A worker that outlives the bounded wait keeps the store owned, so a replacement listener
+cannot reconcile staging that is still being written.
 
 `GET J/repositories` returns `gitRepositories`: the job's repository summary (at most one) and
 its latest 20 operations. `GET G` returns `gitWorkspace` from a fresh bounded inspection. Its
@@ -733,10 +805,17 @@ textconv, external diff tool or submodule command, and no read refreshes the ind
   `worktreeVersion`; once anything observable changes, a later page answers `409 REF_CHANGED`.
 - `worktreeVersion` now digests HEAD plus every non-ignored status entry. That includes the
   entry's index blob and the work-tree file's size and modification time, so re-editing an
-  already modified file or re-staging different content changes it. Ignored files never do.
+  already modified file or re-staging different content changes it. Native invalid-UTF-8 names
+  are observed using their exact filesystem bytes, not their escaped display names. Observation
+  errors other than a missing file fail explicitly rather than supplying a stable placeholder.
+  Ignored files never change this version.
 - `history` (`gitHistory`) lists commits from an exact `start` object (default HEAD; an unborn
   branch has none). The output is NUL-delimited `git log` with full object IDs, all parents (merges
   included), author, timestamps and a 200-character subject with an explicit truncation flag.
+  Parent arrays are never silently shortened. The raw history read (including its lookahead
+  commit) is capped at 128 KiB; this also bounds any one parent list below the schema's 3200
+  entries. Output above that bound returns `REPOSITORY_UNAVAILABLE`, not a partial parent list;
+  a smaller page limit can help when multiple commits exhaust the bound.
   The cursor embeds the start object and offset, so a branch that moves after the first page
   cannot shift later pages. A history entry's `mapping` is non-null only for an explicitly
   recorded, validated commit-to-revision binding. A commit alone is never treated as a
@@ -748,7 +827,11 @@ textconv, external diff tool or submodule command, and no read refreshes the ind
   modes, line counts and a binary flag (`-` counts mean binary). The new blob's size comes from
   `cat-file --batch-check` without reading the content. `file=<fileId>` returns that file alone
   with a unified patch of at most 128 KiB, flagged `truncated` when cut. Binary files never
-  render content. Abbreviated object IDs are rejected with 422.
+  render content. Managed `info/attributes` restores automatic binary detection with `!diff`,
+  overriding source-controlled forced-text/binary/driver attributes. The exact previous managed
+  attributes layout is atomically upgraded on audit; unrecognized layouts are rejected without
+  rewriting them. No source or index bytes change during that upgrade. Abbreviated object IDs
+  are rejected with 422.
 - `refs` (`gitRefs`) pages through branches and tags with exact and peeled object IDs, stable
   `refId`s and the branch HEAD currently names. Its cursor carries a digest of every ref listed
   before it. If a branch or tag is created, deleted or moved ahead of the offset, the page answers
@@ -763,6 +846,10 @@ belongs to its record:
 - an unresolved conflict returns Git's combined `diff --cc` section;
 - a metadata-only rename or mode change is matched by its header, quoted as Git quotes unusual
   names.
+
+If the bounded capture ends before the selected section (for example, an unrelated subtree
+under a rename's former path fills the capture), the response reports `truncated: true`, even
+if its selected text is empty. An incomplete source capture is never presented as complete.
 
 Paths are display strings. Backslashes, control characters (newline, tab, escape and the like)
 and invalid UTF-8 bytes are escaped, and `pathEscaped` marks any name whose display differs from
@@ -791,43 +878,70 @@ reviewed state still holds.
 
 After `git rm --cached`, a path is both staged for deletion and untracked, in one status entry.
 Selecting that entry for `git.unstage` unstages the deletion, and selecting it for `git.stage`
-stages the replacement.
+stages the replacement. Its staged deletion remains protected by overlap checks: an untracked
+replacement does not allow another selected path to silently unstage the deletion.
 
-The server checks guards and selection twice: at admission under the job lock, and again by the
-single operation executor immediately before Git runs. A race with another tab, a worker or an
-external edit therefore fails instead of applying something nobody reviewed.
+The server checks guards and selection at admission under the job lock and again by the single
+operation executor immediately before Git runs. Commits additionally acquire Git's `index.lock`
+and `HEAD.lock`, revalidate, and capture the reviewed index into a private immutable tree. The
+commit uses that tree and the reviewed parent, never the later live index. Publication locks the
+target ref, compares the reviewed HEAD under that lock, and atomically replaces the ref. Busy
+writers or a changed parent are refused; no unreviewed index entries can enter the commit.
+Because read-only status suppresses submodules, commit validation separately reads a bounded,
+gitlink-inclusive index comparison at admission, execution and from the captured private index.
+Any staged gitlink addition, pointer change, deletion or type change is refused with
+`EXCLUDED_PATH`, even if it is absent from status and has not changed the status-derived guards.
+An incomplete index comparison fails closed with `STATUS_INCOMPLETE`.
 
 | Refusal | Meaning |
 | --- | --- |
 | `409 REF_CHANGED` | `repositoryVersion`, HEAD or the guarded ref changed |
+| `WORKTREE_BUSY` (operation failure) | Another Git writer holds the index, HEAD or target-ref lock; nothing is published |
 | `409 WORKTREE_CHANGED` | The work tree or index changed (any status entry, index blob or file stat) |
 | `409 SELECTION_CHANGED` | A selected file identity is no longer in the current status |
+| `409 SELECTION_OVERLAP` | A pathspec would affect unselected descendants, staging a descendant would remove an unselected tracked ancestor, or unstaging a deletion/rename source would remove an unselected staged ancestor |
 | `409 INDEX_CHANGED` | A commit's `selectedFileIds` differ from today's staged set; nothing is swept in or left out |
 | `409 CONFLICTED`, `409 NOTHING_TO_COMMIT` | Unmerged paths exist, or nothing is staged |
 | `422 EXCLUDED_PATH` | The file is excluded by the source-only policy (decided independently of any repository `.gitignore`), is a submodule, or has a non-UTF-8 name |
-| `422 NOTHING_SELECTED`, `422 STATUS_INCOMPLETE` | A selected file has nothing to stage or unstage, or the status was too large to review completely |
+| `422 NOTHING_SELECTED`, `422 STATUS_INCOMPLETE` | A selected file has nothing to stage or unstage, or the status/index comparison was too large to review completely |
 | `503 SIGNING_UNAVAILABLE` | Server policy requires signed commits, which no capability provides |
 
 Staging runs `git add -- <paths>` with literal pathspecs. Unstaging runs `reset -q HEAD -- <paths>`
 (or `rm --cached` on an unborn branch), so work-tree contents never change. A commit uses the
-server's configured identity, passed as allowlisted author and committer variables.
-`--no-verify` and `--no-gpg-sign` back up the command-line hook and signing settings, and the
-message is read verbatim from an operation-private file. Nothing is pushed. Bootstrap reports
+server's configured identity, passed as allowlisted author and committer variables. `write-tree`
+uses an operation-private index, and `commit-tree --no-gpg-sign` creates the exact reviewed commit
+without running commit hooks. The message is read verbatim from an operation-private file.
+Managed files-backend ref publication does not append reflogs; history remains object-based.
+Nothing is pushed. Bootstrap reports
 `git-signing` as `unsupported`, so a signing requirement can never hang on a hidden prompt.
 
 A successful commit returns its object ID as `resultObjectId`. It is mapped to the repository's
 candidate revision only when its tree, compared by Git blob IDs computed from the recorded
-snapshot, equals exactly the copied snapshot minus policy-excluded files. The mapping is stored
+snapshot, equals exactly the copied snapshot minus policy-excluded files. The complete captured
+file manifest must match the manifest retained at initialization. SHA-256 commitments, sizes and
+Git blob IDs come from the same bounded read of each file, so changed canonical inputs or added
+undeclared files cannot borrow the original revision's identity. The mapping is stored
 under the repository as `(repositoryId, objectId, revisionId, sourceSha256)` with the
 work-tree's dirty state. `gitWorkspace.mapping` and history entries show it. `acceptance` is read
 from the job's canonical accepted revision at view time, never stored and never changed by a
-commit. Any other commit is a new candidate and stays unmapped.
+commit. Any other commit is a new candidate and stays unmapped. Mapping/inspection IO failure
+also leaves the published commit successful with an explicit unconfirmed-mapping message; it
+never turns that commit into an apparently uncommitted failure. Other post-publication failures
+report `recovery-required`, retaining the exact published `resultObjectId` when known, rather
+than reading a possibly later writer's HEAD as this operation's result.
 
 After a restart, stage and unstage operations become `interrupted`, since the index may have been
-partly updated and status must be re-read. A commit is `interrupted` when HEAD is still the
-reviewed parent. It becomes `recovery-required` with the new HEAD as `resultObjectId` when HEAD
-moved, because the commit may or may not be the requested one. Nothing is repeated
-automatically.
+partly updated and status must be re-read. Commit locks have private inode witnesses persisted
+before the public lock names are linked, so owned locks can be reclaimed even with empty or
+partial contents. A replacement inode is never reclaimed on the basis of matching contents when
+a witness exists. Complete operation markers from older versions remain recoverable; legacy
+partial locks without ownership proof are preserved.
+
+A commit is `interrupted` when HEAD is still the reviewed parent and no unproven Git locks
+remain. Otherwise it becomes `recovery-required`: `COMMIT_LOCKS_REQUIRE_REVIEW` means a remaining
+index, HEAD or target-ref lock requires inspection of the repository and its writers. A moved
+HEAD is included as `resultObjectId`, because the commit may or may not be the requested one.
+Nothing is repeated automatically.
 
 Job retention: uncommitted or unpublished Git work should hold the job against deletion. The
 `JobRetentionHold` interface arrives with #1694 (D10, #509) and has not merged yet. Registering a
@@ -840,7 +954,14 @@ hold for a dirty work tree or for unmapped commits is left as a follow-up once i
 - every refusal above, including a `.gitignore` negation that tries to re-include a credential;
 - keyed replay and idempotency conflict;
 - an external edit between admission and execution, which fails with `WORKTREE_CHANGED`;
-- restart before and after the commit.
+- staging a descendant refuses an unselected tracked ancestor deletion, but succeeds after that
+  deletion is explicitly staged;
+- external index writers after capture, busy locks, parent CAS, detached parents in both object
+  formats, and exact result identity when a later writer advances HEAD;
+- snapshot file additions and mutation after capture, ordinary post-publication errors and
+  optional mapping-write failure;
+- restart before and after the commit, empty/partial owned lock recovery, external replacement
+  preservation and conservative recovery status for unproven legacy locks.
 
 `WebGitControllerTest` covers the HTTP guards, `If-Match` binding, strict bodies and the mapping
 shown on the workspace and in history.
@@ -862,15 +983,20 @@ staging and committing.
 
 Leases: the primary work tree is leased to every active workflow attempt of the job, and a linked
 work tree to the attempt that owns it. While a lease is held, switch and removal answer `409
-ACTIVE_RUN`, so checkout never replaces files under a running worker. At most one Git operation
-runs per job, on a single executor.
+ACTIVE_RUN`, so checkout never replaces files under a running worker. Workflow admission and
+checkout/removal also share an atomic reservation: a new workflow start, retry or checkpoint
+resume answers `409 WORKTREE_BUSY` while Git owns it. Replays of retained workflow commands
+remain read-only and do not schedule another worker. At most one Git operation runs per job,
+on a single executor.
 
 `GET G/worktrees` (`gitWorktrees`) lists the primary and linked work trees with HEAD, dirty state,
 version and owner. `GET G/worktrees/{worktreeId}` returns that work tree's `gitWorkspace`.
 `G/status`, `G/history` and `G/diff` accept `worktree=<id>`, and every mutation names its target
 `worktreeId`. Each linked work tree has its own index and guards. Its administrative directory is
 audited: it must point back to the common repository and carry no configuration, hooks or info
-files of its own.
+files of its own. Linked commits lock their private index and HEAD, but publish attached branch
+refs in the common repository; detached commits update only their own HEAD. Commit recovery
+checks the same private and shared lock locations and never deletes an unproven writer's lock.
 
 Restart reconciliation compares each intent with the actual refs and never repeats it:
 
