@@ -13,6 +13,7 @@ import java.security.MessageDigest
 import java.security.SecureRandom
 import java.util.Collections
 import java.util.concurrent.Callable
+import java.util.concurrent.CountDownLatch
 import java.util.concurrent.ExecutionException
 import java.util.concurrent.Executors
 import java.util.concurrent.Future
@@ -119,6 +120,7 @@ internal class WebSourceCatalogEvidence(
         val pending = AtomicInteger(1)
         fun finished() { if (pending.decrementAndGet() == 0) capturing.set(false) }
         val tasks = mutableListOf<Future<*>>()
+        val workerExits = mutableListOf<CountDownLatch>()
         try {
             val root = "reports/runs/${reference.runId}/source-tree"
             val manifestPath = "$root/source_tree_manifest.json"
@@ -143,12 +145,14 @@ internal class WebSourceCatalogEvidence(
                         WebStructureEvidence(record, digest, parse(record.bytes))
                     }
                 })
+                val exited = CountDownLatch(1)
                 tasks += task
+                workerExits += exited
                 pending.incrementAndGet()
                 try {
                     // The wrapper always runs its finally, even if task was cancelled before it started.
-                    structureWorkers.execute { try { task.run() } finally { finished() } }
-                } catch (failure: Throwable) { finished(); throw failure }
+                    structureWorkers.execute { try { task.run() } finally { finished(); exited.countDown() } }
+                } catch (failure: Throwable) { finished(); exited.countDown(); throw failure }
                 return task
             }
             fun <R> joined(task: Future<WebStructureEvidence<R>>?): WebStructureEvidence<R> = try {
@@ -188,6 +192,12 @@ internal class WebSourceCatalogEvidence(
             requireSame(descriptor, readArtifact(reference.jobId, descriptorPath, MAXIMUM_MANIFEST_BYTES))
             requireSame(captured, readArtifact(reference.jobId, manifestPath, MAXIMUM_MANIFEST_BYTES))
             requireSame(input, readInput(reference.jobId))
+            // Future.get() can precede its executor wrapper's final admission release, and unused speculative
+            // records may never be joined. A successful synchronous read must drain both bounded bodies before
+            // returning so its immediate continuation is not spuriously refused as SOURCE_CATALOG_BUSY.
+            // Failure/interruption still takes the nonblocking cancellation path below and retains admission
+            // until every actual body exits; cancelled Future state is never treated as cleanup evidence.
+            workerExits.forEach { it.await() }
             return result
         } finally {
             // Covers rejection, submission failure and an early unavailable-model result that never joins the plan.

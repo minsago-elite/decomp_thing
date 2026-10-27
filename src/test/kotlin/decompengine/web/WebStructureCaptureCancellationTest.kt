@@ -7,6 +7,7 @@ import decompengine.repair.RepairBudgetExceededException
 import decompengine.repair.StableRegularFile
 import java.util.concurrent.CancellationException
 import java.util.concurrent.CountDownLatch
+import java.util.concurrent.FutureTask
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicInteger
 import kotlin.test.*
@@ -95,6 +96,59 @@ class WebStructureCaptureCancellationTest {
         } finally {
             releases.forEach { it.countDown() }
             exited.forEach { it.await(5, TimeUnit.SECONDS) }
+        }
+    }
+
+    @Test fun `successful projection drains unused workers before returning to sequential readers`() {
+        val fixture = WebStructureFixture()
+        val reference = fixture.revision("run_1", "revision_1", null, null)
+        val input = StableRegularFile("input".toByteArray(), fixture.inputSha,
+            LinuxFileIdentity(LinuxFileKey(1, 1), 0x8180, 1000, 1000, 1, 1, true, false, false))
+        val entered = CountDownLatch(2)
+        val projected = CountDownLatch(1)
+        val release = CountDownLatch(1)
+        val returned = CountDownLatch(1)
+        val live = AtomicInteger()
+        val evidence = WebSourceCatalogEvidence(listOf(fixture.profile), { input }) { _, path, _ ->
+            if (!path.endsWith("/reports/program_model.json") && !path.endsWith("/reports/module_plan.json")) fixture.files.getValue(path)
+            else {
+                live.incrementAndGet()
+                entered.countDown()
+                try {
+                    release.await()
+                    throw RepairBudgetExceededException("Uncommitted speculative record.")
+                } finally { live.decrementAndGet() }
+            }
+        }
+        val cache = WebProgramStructureCache()
+        val reader = FutureTask {
+            try {
+                val value = evidence.readStructure(reference, cache) { _, _ ->
+                    assertTrue(entered.await(5, TimeUnit.SECONDS))
+                    projected.countDown()
+                    "projected"
+                }
+                assertEquals("projected", value)
+                assertEquals(0, live.get(), "A successful capture cannot return while its unused workers are live.")
+                // No retries: a sequential metadata read and a cached structure read must be admitted immediately.
+                repeat(20) {
+                    evidence.read(reference.jobId, reference.runId)
+                    evidence.readStructure(reference, cache) { _, _ -> Unit }
+                }
+            } finally { returned.countDown() }
+        }
+        val thread = Thread.ofVirtual().start(reader)
+        try {
+            assertTrue(projected.await(5, TimeUnit.SECONDS))
+            assertFalse(returned.await(100, TimeUnit.MILLISECONDS), "Successful projection must await worker cleanup.")
+            assertEquals("SOURCE_CATALOG_BUSY", assertFailsWith<WebAccessDenied> {
+                evidence.read(reference.jobId, reference.runId)
+            }.code)
+            release.countDown()
+            reader.get(5, TimeUnit.SECONDS)
+        } finally {
+            release.countDown()
+            thread.join(5000)
         }
     }
 
