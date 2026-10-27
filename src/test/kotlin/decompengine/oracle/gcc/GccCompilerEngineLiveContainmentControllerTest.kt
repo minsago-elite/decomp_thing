@@ -1122,7 +1122,9 @@ class GccCompilerEngineLiveContainmentControllerTest {
 
     private fun liveExecutables(): Map<GccCompilerEngineContainmentArtifactRole, Path> = mapOf(
         GccCompilerEngineContainmentArtifactRole.JAVA_EXECUTABLE to
-            requireNotNull(Path.of(System.getProperty("java.home"), "bin", "java").realExecutableOrNull()),
+            // Do not substitute the owned Test JVM for the authenticated worker runtime.
+            requireNotNull(Path.of(System.getenv("DECOMP_CI_WORKER_JAVA_HOME")
+                ?: System.getProperty("java.home"), "bin", "java").realExecutableOrNull()),
         GccCompilerEngineContainmentArtifactRole.BUBBLEWRAP_EXECUTABLE to
             requireNotNull(Path.of("/usr/bin/bwrap").realExecutableOrNull()),
         GccCompilerEngineContainmentArtifactRole.RESOURCE_LIMITER_EXECUTABLE to

@@ -3436,8 +3436,12 @@ class FullTreeFunctionObservationIsolatedFixtureRunnerTest {
         boundedBootFixture: Boolean = false,
     ): FullTreeFunctionObservationIsolationConfiguration? {
         val uid = (Files.getAttribute(Path.of("/proc/self"), "unix:uid") as Number).toInt()
-        val java = Path.of(System.getProperty("java.home"), "bin", "java").realExecutableOrNull() ?: return null
-        val javaRuntime = Path.of(System.getProperty("java.home")).toRealPath()
+        // ci-owned-jdk runs this Test JVM from an unprivileged clone. Workers
+        // must instead use the separately provisioned root-owned runtime; its
+        // complete manifest and trusted ancestors are still checked below.
+        val javaRuntime = Path.of(System.getenv("DECOMP_CI_WORKER_JAVA_HOME")
+            ?: System.getProperty("java.home")).toRealPath()
+        val java = javaRuntime.resolve("bin/java").realExecutableOrNull() ?: return null
         val unusedLaunchBoundary = runtimeParent.parent.resolve("unused-launch-boundary")
         val runtime: Path
         val bubblewrap: Path

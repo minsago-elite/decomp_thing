@@ -309,6 +309,8 @@ def provision(repo: Path, source: Path, source_profile=STRICT_SOURCE_PROFILE):
                 require(len(os.fsencode(link)) <= 4096, 'JDK symlink bound')
                 require(link == inventory[key].get('target'), 'JDK symlink changed after admission')
                 if key == HOST_CA_SLOT and inventory[key].get('externalInput'):
+                    if host_ca_bytes is None:
+                        raise ValueError('host CA capture bytes unavailable')
                     require(host_ca is not None and host_ca['profile'] == HOST_CA_SOURCE_PROFILE and
                             host_ca['sourceSlot'] == key and host_ca['target'] == link and
                             0 < len(host_ca_bytes) == host_ca['bytes'] <= MAX_HOST_CA_BYTES and
@@ -423,7 +425,9 @@ def provision(repo: Path, source: Path, source_profile=STRICT_SOURCE_PROFILE):
             materialized = key == HOST_CA_SLOT and records[key].get('externalInput') == HOST_CA_SOURCE_PROFILE
             require(entry['kind'] == ('file' if materialized else records[key]['kind']), 'owned JDK kind differs from source')
             if entry['kind'] == 'file':
-                entry['sha256'] = host_ca['sha256'] if materialized else records[key]['sha256']
+                if materialized and host_ca is None:
+                    raise ValueError('host CA capture metadata unavailable')
+                entry['sha256'] = host_ca['sha256'] if materialized and host_ca is not None else records[key]['sha256']
             elif entry['kind'] == 'link':
                 require(entry['target'] == records[key]['target'], 'owned JDK link differs from source')
     finally:
@@ -437,10 +441,11 @@ def provision(repo: Path, source: Path, source_profile=STRICT_SOURCE_PROFILE):
     for directory in ['home', 'tmp', 'cache', 'gradle', 'preferences', 'receipts', 'selections']:
         (container / directory).mkdir(mode=0o700)
     creds = caller_credentials()
+    vendor = re.search(r'^IMPLEMENTOR="([^"\n]{1,128})"$', release, re.M)
     receipt = {'schema': 1, 'source': str(source), 'home': str(clone), 'container': str(container), 'sourceRoot': source_root,
                'uid': os.geteuid(), 'callerUid': creds['Uid'], 'callerGid': creds['Gid'], 'launcherIdentity': identity(after),
                'launcherSha256': records['bin/java']['sha256'], 'releaseSha256': hashlib.sha256(release_bytes).hexdigest(),
-               'vendor': re.search(r'^IMPLEMENTOR="([^"\n]{1,128})"$', release, re.M).group(1) if re.search(r'^IMPLEMENTOR="([^"\n]{1,128})"$', release, re.M) else 'UNAVAILABLE', 'entries': count, 'bytes': total, 'sourceEntries': records, 'cloneRoot': clone_root, 'cloneEntries': clone_entries,
+               'vendor': vendor.group(1) if vendor else 'UNAVAILABLE', 'entries': count, 'bytes': total, 'sourceEntries': records, 'cloneRoot': clone_root, 'cloneEntries': clone_entries,
                'sourceProfile': source_profile, 'hostCaInput': host_ca}
     write_json(container / 'provision.json', receipt)
     properties = {'home': str(clone), 'java': str(clone / 'bin/java'), 'dev': str(after.st_dev), 'ino': str(after.st_ino),
@@ -646,7 +651,11 @@ def run(repo, source, command, source_profile=STRICT_SOURCE_PROFILE):
     env = dict(os.environ)
     for name in ['_JAVA_OPTIONS', 'JDK_JAVA_OPTIONS', 'JAVA_OPTS', 'GRADLE_OPTS', 'JAVA_TOOL_OPTIONS']:
         env.pop(name, None)
-    env.update(JAVA_HOME=home, PATH=home + '/bin:' + env.get('PATH', ''), HOME=str(container / 'home'),
+    # The owned Test JVM is not the isolated worker runtime. Preserve the selected
+    # source as a separate test-fixture input; production runtime-manifest admission
+    # still authenticates its root, ancestors and complete contents before launch.
+    env.update(DECOMP_CI_WORKER_JAVA_HOME=str(source.resolve(strict=True)),
+               JAVA_HOME=home, PATH=home + '/bin:' + env.get('PATH', ''), HOME=str(container / 'home'),
                GRADLE_USER_HOME=str(container / 'gradle'), TMPDIR=scratch['path'], TMP=scratch['path'],
                TEMP=scratch['path'], XDG_CACHE_HOME=str(container / 'cache'), JAVA_OPTS=shlex.join(options),
                JAVA_TOOL_OPTIONS=' '.join(options), GRADLE_OPTS=shlex.join(gradle),

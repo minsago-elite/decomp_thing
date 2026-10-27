@@ -168,9 +168,20 @@ class RepairProviderReceiptRetentionTest {
     @Test
     fun `replay rejects a schema v6 receipt cross-paired with a schema v2 graph binding`() = withProject { project ->
         ModuleRevisionGraph.open(project, GeneratedCRepairIndexProfile).use { graph ->
+            // Upgrade before creating the attempt so its finalized rollback record
+            // is self-contained, not dependent on a declared legacy pending origin
+            // that would also need changing with the binding.
+            graph.enableRunContract()
             val attempt = attempt(graph)
             graph.persistAndBindAgentInvocation(attempt, receipt(project, attempt.id, providerFixture = true))
-            graph.reject(attempt, RepairEvidence("agent-failure", "fixture protocol failure"))
+            val rejected = graph.reject(attempt, RepairEvidence("agent-failure", "fixture protocol failure"))
+            val rollback = assertNotNull(rejected.rollbackRecord)
+            assertFalse(rollback.legacyPendingStateUnknown)
+        }
+        // Prove that graph/origin admission succeeds before introducing only the
+        // receipt-schema mismatch. Keep the precise cross-pair assertion below.
+        ModuleRevisionGraph.open(project, GeneratedCRepairIndexProfile).use { replay ->
+            assertEquals(6, replay.snapshot.nodes.last().repairMetadata?.agentInvocation?.receiptSchemaVersion)
         }
         val graphPath = project.resolve("reports/repair-revisions/graph.json")
         val before = graphPath.readText()

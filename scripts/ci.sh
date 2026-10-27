@@ -4,6 +4,9 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 
 echo "==> Reconstruction neutrality gate and JVM/Kotlin checks"
+# Bind native DNS receipts to this invocation, never to an inherited/stale run.
+# Existing output is still refused by the native tests; do not delete it here.
+export DECOMP_ACP_CONTRACT_RUN_ID="$(python3 -B -c 'import uuid; print(uuid.uuid4())')"
 case "${DECOMP_CI_TEST_SHARD:-full}" in
   full)
     ./gradlew --no-daemon verifyReconstructionNeutrality test \
