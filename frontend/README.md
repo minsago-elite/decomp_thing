@@ -310,8 +310,11 @@ also scanned for remote resource loads (CSS `url()`/`@import`, `import()`/`from`
 also build element URLs, `fetch` targets or JSX props, every absolute or protocol-relative
 URL literal must name a reviewed inert host (XML namespaces, the non-resolvable `.invalid`
 parsing base and one router error-message documentation link); any other host fails the
-build, so no CDN asset can ship. Interface copy therefore links to repository docs, not
-external sites.
+build, so no CDN asset can ship. The three fixed built-in prerequisite issue links
+(#76, #77, #79) have a narrower exception: the pinned build-only TypeScript parser
+recognizes only a direct literal `href` in a compiled anchor call. The same URL in
+`fetch`, `sendBeacon`, image/iframe/link props, aliases, dynamic tags or spread/duplicate
+props is rejected. No issue URL is globally inert, and the parser is not bundled.
 
 ## Dependency updates
 

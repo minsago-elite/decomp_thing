@@ -4,6 +4,7 @@ import { readFile, readdir, writeFile } from 'node:fs/promises';
 import { resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { gzipSync } from 'node:zlib';
+import ts from 'typescript';
 
 function assetPath(name) {
   assert.ok(typeof name === 'string' && name.length <= 240 && /^[a-zA-Z0-9_./-]+$/.test(name) &&
@@ -147,19 +148,14 @@ const remoteLoads = [
   /\bimportScripts\(\s*["'`](?:https?:)?\/\//i,
   /<(?:script|link|img|iframe)\b[^>]*\b(?:src|href)\s*=\s*["']?(?:https?:)?\/\//i,
 ];
-// Scripts can also build URLs for DOM elements, fetch or JSX props, so every absolute or
-// protocol-relative URL literal must name a reviewed inert host: XML namespaces, the
-// non-resolvable .invalid parsing base (RFC 6761), the router documentation and three
-// fixed prerequisite issue links rendered as user navigation by WorkflowLaunch (#557).
-// Resource-load syntax above still rejects these URLs; no arbitrary issue/host is allowed.
+// Scripts can also build URLs for DOM elements, fetch or JSX props. Only namespace/parsing
+// constants and router documentation are globally inert. Prerequisite issue URLs are NOT:
+// their exception below is scoped to a literal href in a compiled anchor, never a load sink.
 const urlLiteral = /(?:https?:)?\/\/[^\s"'`)<>\\]+/gi;
 const inertUrls = [
   url => url.hostname === 'www.w3.org',
   url => url.hostname.endsWith('.invalid'),
   url => url.hostname === 'github.com' && `${url.pathname}${url.hash}` === '/preactjs/preact-iso#locationprovider',
-  url => url.protocol === 'https:' && url.hostname === 'github.com' && url.search === '' && url.hash === ''
-    && ['/minsago-elite/decomp_thing/issues/76', '/minsago-elite/decomp_thing/issues/77',
-      '/minsago-elite/decomp_thing/issues/79'].includes(url.pathname),
 ];
 
 /** Parse the literal as the browser would, so userinfo or an allowed prefix cannot hide the real host. */
@@ -169,11 +165,48 @@ function inertUrl(literal) {
   return url.username === '' && url.password === '' && url.port === '' && inertUrls.some(inert => inert(url));
 }
 
+const prerequisiteNavigationUrls = new Set([76, 77, 79].map(number =>
+  `https://github.com/minsago-elite/decomp_thing/issues/${number}`));
+
+/**
+ * Identify only the href token in the production JSX runtime's anchor-call shape. Do not
+ * erase a URL globally: the same bytes elsewhere (fetch/beacon/DOM/CSS) must still refuse.
+ * Direct literal props also avoid aliases shared with load sinks, spreads, dynamic tags,
+ * duplicate/overridden hrefs, ping attributes and escaped or interpolated URL expressions.
+ * TypeScript is a pinned build-only parser; none of it enters the application bundle.
+ */
+function prerequisiteAnchorOffsets(source) {
+  const file = ts.createSourceFile('asset.js', source, ts.ScriptTarget.Latest, true, ts.ScriptKind.JS);
+  if (file.parseDiagnostics.length) return new Set();
+  const offsets = new Set();
+  const literal = node => ts.isStringLiteral(node) || ts.isNoSubstitutionTemplateLiteral(node);
+  function visit(node) {
+    if (ts.isCallExpression(node) && ts.isIdentifier(node.expression) && node.arguments.length >= 2) {
+      const [tag, props] = node.arguments;
+      if (literal(tag) && tag.text === 'a' && ts.isObjectLiteralExpression(props)) {
+        const names = props.properties.map(property => ts.isPropertyAssignment(property) &&
+          (ts.isIdentifier(property.name) || ts.isStringLiteral(property.name)) ? property.name.text : null);
+        if (names.every(name => ['href', 'rel', 'children', 'key'].includes(name)) && new Set(names).size === names.length) {
+          const href = props.properties[names.indexOf('href')]?.initializer;
+          if (href && literal(href) && prerequisiteNavigationUrls.has(href.text) &&
+              source.slice(href.getStart(file) + 1, href.end - 1) === href.text) offsets.add(href.getStart(file) + 1);
+        }
+      }
+    }
+    ts.forEachChild(node, visit);
+  }
+  visit(file);
+  return offsets;
+}
+
 /** Shipped HTML, scripts and styles never fetch from a CDN or any other remote origin. */
 export function assertNoRemoteLoads(source, name) {
   for (const pattern of remoteLoads) assert.ok(!pattern.test(source), `Production asset loads a remote resource: ${name}`);
-  for (const [literal] of source.matchAll(urlLiteral)) {
-    assert.ok(inertUrl(literal), `Production asset loads a remote resource: ${name} names unreviewed URL ${literal.slice(0, 80)}`);
+  const navigation = prerequisiteAnchorOffsets(source);
+  for (const match of source.matchAll(urlLiteral)) {
+    const [literal] = match;
+    assert.ok(inertUrl(literal) || navigation.has(match.index),
+      `Production asset loads a remote resource: ${name} names unreviewed URL ${literal.slice(0, 80)}`);
   }
 }
 
