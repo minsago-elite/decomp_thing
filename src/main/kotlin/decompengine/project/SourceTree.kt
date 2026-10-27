@@ -836,8 +836,14 @@ object SourceTreeGenerator {
                     ?.map { it.code }?.filter { it.matches(Regex("[a-z0-9-]{1,128}")) }
                     ?.joinToString(", ")?.takeIf(String::isNotEmpty),
                 compilerDiagnostics = compilerFeedback(module.id)?.takeIf {
-                    it.contextSha256 == fingerprint && sourcePath.exists() && it.sourceSha256 == sha256(sourcePath.readBytes())
-                }?.diagnostics,
+                    it.contextSha256 == fingerprint && sourcePath.exists() &&
+                        sha256(sourcePath.readBytes()).let { current -> current == it.sourceSha256 || current == it.restoredSourceSha256 }
+                }?.let { feedback ->
+                    if (feedback.restoredSourceSha256 == null) feedback.diagnostics
+                    else "Rejected candidate source SHA-256=${feedback.sourceSha256}; " +
+                        "previous accepted source SHA-256=${feedback.restoredSourceSha256} was restored. " +
+                        "These diagnostics describe the rejected candidate, not the restored source.\n${feedback.diagnostics}"
+                },
             )
             val cacheIdentity = reconstructor.cacheIdentity()
             val cached = recordedCheckpoint?.takeIf { checkpoint ->
@@ -939,6 +945,10 @@ object SourceTreeGenerator {
                 )
                 if (!accepted && previousAccepted != null) {
                     val attemptEvidence = restoreAcceptedRevision()
+                    if (compilation != null && !compilation.passed) {
+                        onCompilerFeedback(ModuleCompilerFeedback(module.id, compilation.sourceSha256, fingerprint,
+                            compilation.diagnosticsSha256, compilation.diagnosticsPrefix, previousAccepted.sourceSha256))
+                    }
                     val rejectedCheckpoint = candidateCheckpoint.copy(executionEvidencePath = attemptEvidence?.path)
                     writeAtomically(
                         attemptPath,

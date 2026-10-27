@@ -10,6 +10,51 @@ import kotlin.test.assertTrue
 
 class ArchivalReconstructionTest {
     @Test
+    fun `rejected accepted revisions restore source and receive bounded compiler corrections`() {
+        for (correctable in listOf(true, false)) {
+            val temp = createTempDirectory("archival-revision-correction-")
+            val binary = temp.resolve("input").also { it.writeBytes(byteArrayOf(1)) }
+            var changed = false
+            var calls = 0
+            val model = RecoveredProgramModel(inputSha256 = sha256(byteArrayOf(1)), functions = listOf(
+                RecoveredFunction("fn_1000", "decomp_engine_main", 0x1000UL, "int decomp_engine_main(void)")))
+            val analyzer = ProgramModelAnalyzer { _, _ ->
+                if (changed) model.copy(functions = model.functions.map { it.copy(strings = setOf("new evidence")) }) else model
+            }
+            val output = temp.resolve("result")
+            val client = object : decompengine.repair.RepairClient {
+                override fun requestRepair(request: decompengine.repair.RepairRequest,
+                    invocation: decompengine.repair.RepairClientInvocation): decompengine.repair.RepairResponse {
+                    calls++
+                    if (calls > 2) {
+                        assertTrue(output.resolve("source-tree/src/modules/decomp.c").readText().contains("return 17;"))
+                        assertTrue(request.prompt.contains("missing_symbol"))
+                        assertTrue(request.prompt.contains("diagnostics describe the rejected candidate"))
+                    }
+                    val expression = if (calls == 1) "17" else if (calls > 2 && correctable) "19" else "missing_symbol"
+                    return decompengine.repair.RepairResponse("candidate", listOf(decompengine.repair.SourcePatch(
+                        "src/modules/decomp.c", "/* fn_1000 */\nint decomp_engine_main(void) { return $expression; }\n")))
+                }
+            }
+            val service = ArchivalReconstructionService(analyzer,
+                BoundedLlmModuleReconstructor(decompengine.repair.RepairClientAgentHarness(client)))
+            service.reconstruct(binary, output)
+            changed = true
+            if (correctable) {
+                val result = service.reconstruct(binary, output)
+                assertEquals(0, result.build.returnCode)
+                assertEquals(3, calls)
+            } else {
+                kotlin.test.assertFailsWith<ModuleReconstructionRevisionRejectedException> {
+                    service.reconstruct(binary, output)
+                }
+                assertEquals(4, calls)
+                assertTrue(output.resolve("source-tree/src/modules/decomp.c").readText().contains("return 17;"))
+            }
+        }
+    }
+
+    @Test
     fun `generation passes do not repeat authentication failures`() {
         val temp = createTempDirectory("archival-auth-stop-")
         val binary = temp.resolve("input.elf").also { it.writeBytes(byteArrayOf(1)) }

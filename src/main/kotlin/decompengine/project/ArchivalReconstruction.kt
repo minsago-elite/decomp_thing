@@ -331,14 +331,24 @@ class ArchivalReconstructionService(
                 progressPath.writeText("{\"phase\":\"modules\",\"completed\":$completed,\"total\":$total,\"module\":\"$module\"}\n")
             }
         }
-        var manifest = generatePass(1)
-        if (reconstructor.requiresExecutionEvidenceForCheckpointReuse()) {
-            for (pass in 2..3) {
-                if (manifest.unresolvedImplementationIds.isEmpty() || manifest.blockedByAgentConfiguration) break
-                progress.phase(AgentWorkflowPhase.PLANNING)
-                manifest = generatePass(pass)
+        var generated: SourceTreeManifest? = null
+        val maximumPasses = if (reconstructor.requiresExecutionEvidenceForCheckpointReuse()) 3 else 1
+        for (pass in 1..maximumPasses) {
+            if (pass > 1) progress.phase(AgentWorkflowPhase.PLANNING)
+            try {
+                generated = generatePass(pass)
+            } catch (failure: ModuleReconstructionRevisionRejectedException) {
+                if (pass == maximumPasses || failure.issues.none { it.code == "module-compilation-failed" } ||
+                    failure.issues.any { it.code in setOf("agent-authentication", "agent-authorization", "agent-configuration") }) throw failure
+                val message = "reconstruction: rejected revision restored; retrying compiler correction " +
+                    "pass=${pass + 1}/$maximumPasses issues=${failure.issues.joinToString(",") { it.code }}"
+                System.err.println(message)
+                progress.diagnostic(message)
+                continue
             }
+            if (generated.unresolvedImplementationIds.isEmpty() || generated.blockedByAgentConfiguration) break
         }
+        val manifest = checkNotNull(generated)
         if (reconstructor.requiresExecutionEvidenceForCheckpointReuse() && manifest.unresolvedImplementationIds.isNotEmpty()) {
             val unresolvedModules = manifest.files.filter {
                 ProjectFileRole.MODULE_IMPLEMENTATION in it.roles && it.acceptedImplementation != true

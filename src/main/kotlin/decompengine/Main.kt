@@ -124,6 +124,12 @@ private fun runReconstruct(args: List<String>) {
             System.err.println(failure.message)
             progress.close()
             kotlin.system.exitProcess(2)
+        } catch (failure: decompengine.project.ModuleReconstructionRevisionRejectedException) {
+            progress.phase(AgentWorkflowPhase.UNRESOLVED)
+            System.err.println("${failure.message}; issues=${failure.issues.joinToString(",") { it.code }}; " +
+                "see $output/source-tree/reports/modules for the rejected attempt")
+            progress.close()
+            kotlin.system.exitProcess(1)
         } catch (failure: ReconstructionIncompleteException) {
             progress.phase(AgentWorkflowPhase.UNRESOLVED)
             System.err.println(failure.message)

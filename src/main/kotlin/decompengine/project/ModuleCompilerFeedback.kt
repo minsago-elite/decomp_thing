@@ -20,6 +20,7 @@ data class ModuleCompilerFeedback(
     val contextSha256: String,
     val diagnosticsSha256: String,
     val diagnostics: String,
+    val restoredSourceSha256: String? = null,
 )
 
 internal class ModuleCompilerFeedbackStore(
@@ -37,7 +38,7 @@ internal class ModuleCompilerFeedbackStore(
         require(Files.isRegularFile(file, NOFOLLOW_LINKS))
         val bytes = Files.newInputStream(file, READ, NOFOLLOW_LINKS).use { it.readNBytes(65_537) }
         val value = OracleJson.parse(bytes, StrictJsonLimits(maximumInputBytes = 65_536)).jsonObject
-        require(value.keys == setOf("schemaVersion", "inputSha256", "profileSha256", "moduleId", "sourceSha256", "contextSha256", "diagnosticsSha256", "diagnostics"))
+        require(value.keys - "restoredSourceSha256" == setOf("schemaVersion", "inputSha256", "profileSha256", "moduleId", "sourceSha256", "contextSha256", "diagnosticsSha256", "diagnostics"))
         require(value["schemaVersion"] == JsonPrimitive(1))
         if (value.getValue("inputSha256").jsonPrimitive.content != inputSha256 ||
             value.getValue("profileSha256").jsonPrimitive.content != profileSha256) return null
@@ -45,12 +46,14 @@ internal class ModuleCompilerFeedbackStore(
         fun hash(name: String) = value.getValue(name).jsonPrimitive.content.also { require(HASH.matches(it)) }
         val diagnostics = value.getValue("diagnostics").jsonPrimitive.content
         require(diagnostics.toByteArray(Charsets.UTF_8).size <= 32_768)
-        return ModuleCompilerFeedback(moduleId, hash("sourceSha256"), hash("contextSha256"), hash("diagnosticsSha256"), diagnostics)
+        return ModuleCompilerFeedback(moduleId, hash("sourceSha256"), hash("contextSha256"), hash("diagnosticsSha256"), diagnostics,
+            value["restoredSourceSha256"]?.let { hash("restoredSourceSha256") })
     }
 
     fun write(feedback: ModuleCompilerFeedback) {
         require(MODULE.matches(feedback.moduleId))
         require(listOf(feedback.sourceSha256, feedback.contextSha256, feedback.diagnosticsSha256).all(HASH::matches))
+        require(feedback.restoredSourceSha256 == null || HASH.matches(feedback.restoredSourceSha256))
         require(feedback.diagnostics.toByteArray(Charsets.UTF_8).size <= 32_768)
         val directory = root.resolve(DIRECTORY)
         if (!Files.exists(directory, NOFOLLOW_LINKS)) Files.createDirectory(directory,
@@ -63,6 +66,7 @@ internal class ModuleCompilerFeedbackStore(
             put("moduleId", feedback.moduleId); put("sourceSha256", feedback.sourceSha256)
             put("contextSha256", feedback.contextSha256); put("diagnosticsSha256", feedback.diagnosticsSha256)
             put("diagnostics", feedback.diagnostics)
+            feedback.restoredSourceSha256?.let { put("restoredSourceSha256", it) }
         }.toString().toByteArray(Charsets.UTF_8)
         require(value.size <= 65_536)
         val temporary = Files.createTempFile(directory, ".feedback-", ".tmp")

@@ -88,7 +88,10 @@ When the bundled exporter changes, the CLI preserves incompatible analysis under
 recapturing; this history also follows the input when switching binaries.
 
 Failed compiler diagnostics are retained privately under `.compiler-feedback/` and supplied only to a correction
-attempt whose input, profile, source bytes, and transitive interface context still match. These diagnostic artifacts
+attempt whose input, profile, source bytes, and transitive interface context still match. If a rejected revision
+restores previously accepted source, the feedback records both source identities and explicitly labels the diagnostics
+as belonging to the rejected candidate. Ordinary compiler rejections can continue within the same three-pass budget;
+accepted source, receipts, and checkpoints remain protected by rollback. These diagnostic artifacts
 can contain snippets of the candidate source; they are not echoed into the general event log and do not authorize
 acceptance or relax compiler warnings.
 

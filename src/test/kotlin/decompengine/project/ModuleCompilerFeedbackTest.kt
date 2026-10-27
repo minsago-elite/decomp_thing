@@ -13,6 +13,10 @@ class ModuleCompilerFeedbackTest {
         val store = ModuleCompilerFeedbackStore(root, input, profile)
         store.write(feedback)
         assertEquals(feedback, store.read("core"))
+        val rejected = feedback.copy(restoredSourceSha256 = "8".repeat(64))
+        store.write(rejected)
+        assertEquals(rejected, store.read("core"))
+        assertFailsWith<IllegalArgumentException> { store.write(rejected.copy(restoredSourceSha256 = "invalid")) }
         assertNull(ModuleCompilerFeedbackStore(root, "6".repeat(64), profile).read("core"))
         assertNull(ModuleCompilerFeedbackStore(root, input, "7".repeat(64)).read("core"))
         val permissions = Files.getPosixFilePermissions(root.resolve(ModuleCompilerFeedbackStore.DIRECTORY))
