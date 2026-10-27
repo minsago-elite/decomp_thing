@@ -200,32 +200,54 @@ internal object GitWorkspaceMutations {
     private fun pathspecs(paths: List<String>): ByteArray = paths.joinToString("") { "$it\u0000" }.toByteArray(Charsets.UTF_8)
     private val FROM_STDIN = listOf("--pathspec-from-file=-", "--pathspec-file-nul")
 
-    /**
-     * A pathspec is not an index-entry identity: `add` of a deleted file whose name is now a
-     * directory would also add everything beneath it. Deletions are therefore staged with an
-     * index-only `rm --cached` (which never recurses), and every other path must still be a
-     * regular file or link, never a directory.
-     */
-    fun stage(runner: GitCommandRunner, gitDir: Path, workTree: Path, entries: List<GitStatusEntry>) {
-        val (deletions, others) = entries.partition { it.unstaged == GitIndexChange.DELETED }
-        for (entry in others) {
-            if (Files.isDirectory(workTree.resolve(checkNotNull(entry.path.exact)), NOFOLLOW_LINKS)) {
-                refuse("SELECTION_CHANGED", "A selected path is now a directory; read the current status before staging.")
+    /** Capture selected bytes once, verify their reviewed commitments, then index only that capture. */
+    fun stage(runner: GitCommandRunner, gitDir: Path, workTree: Path, entries: List<GitStatusEntry>,
+        observation: GitWorkspaceObservation, staging: Path, index: Path, captured: () -> Unit = {}) {
+        val budget = GitWorkspaceContent.Budget()
+        val updates = entries.mapIndexed { position, entry ->
+            val path = checkNotNull(entry.path.exact)
+            if (entry.unstaged == GitIndexChange.DELETED) {
+                "0 ${"0".repeat(if (observation.objectFormat == GitObjectFormat.SHA256) 64 else 40)}\t$path\u0000"
+            } else {
+                val file = staging.resolve("blob-$position")
+                val fingerprint = GitWorkspaceContent.fingerprint(workTree, workTree.resolve(path), budget, file)
+                if (fingerprint != observation.contentFingerprints[entry.path]) {
+                    refuse("WORKTREE_CHANGED", "Selected content changed during capture. Read the current status before staging.")
+                }
+                val mode = fingerprint.substringBefore(':')
+                if (mode !in setOf("100644", "100755", "120000")) {
+                    refuse("SELECTION_CHANGED", "A selected path is no longer a file or link. Read the current status before staging.")
+                }
+                val blob = runner.run(GitInvocation("hash-object", listOf("-w", "--no-filters", "--", file.toString()),
+                    gitDir = gitDir, limits = COMMIT_LIMITS)).text.trim()
+                check(observation.objectFormat.objectIdOrNull(blob) != null)
+                "$mode $blob\t$path\u0000"
             }
         }
-        if (deletions.isNotEmpty()) runner.run(GitInvocation("rm", listOf("--cached", "-q") + FROM_STDIN, gitDir = gitDir, workTree = workTree,
-            input = pathspecs(deletions.map { checkNotNull(it.path.exact) }), limits = COMMIT_LIMITS))
-        if (others.isNotEmpty()) runner.run(GitInvocation("add", FROM_STDIN, gitDir = gitDir, workTree = workTree,
-            input = pathspecs(others.map { checkNotNull(it.path.exact) }), limits = COMMIT_LIMITS))
+        captured()
+        // Index-info names exact entries (not recursive pathspecs). Deletions precede additions
+        // so explicitly selected file/directory replacements work in either request order.
+        val ordered = updates.filter { it.startsWith("0 ") } + updates.filterNot { it.startsWith("0 ") }
+        runner.run(GitInvocation("update-index", listOf("-z", "--index-info"), gitDir = gitDir, workTree = workTree,
+            variables = mapOf("GIT_INDEX_FILE" to index.toString()), input = ordered.joinToString("").toByteArray(Charsets.UTF_8),
+            limits = COMMIT_LIMITS))
     }
 
-    fun unstage(runner: GitCommandRunner, gitDir: Path, workTree: Path, entries: List<GitStatusEntry>, unborn: Boolean) {
+    /** Mutate a private index against the guarded parent object, never a later resolution of HEAD. */
+    fun unstage(runner: GitCommandRunner, gitDir: Path, workTree: Path, entries: List<GitStatusEntry>, parent: String?, index: Path) {
         val paths = pathspecs(entries.flatMap { listOfNotNull(it.originalPath?.exact, it.path.exact) }.distinct())
-        // `-f` only overrides rm's up-to-date check; `--cached` keeps the work tree untouched.
-        if (unborn) runner.run(GitInvocation("rm", listOf("--cached", "-f", "-q") + FROM_STDIN, gitDir = gitDir, workTree = workTree,
-            input = paths, limits = COMMIT_LIMITS))
-        else runner.run(GitInvocation("reset", listOf("-q") + FROM_STDIN + "HEAD", gitDir = gitDir, workTree = workTree,
-            input = paths, allowedExitCodes = setOf(0, 1), limits = COMMIT_LIMITS))
+        val variables = mapOf("GIT_INDEX_FILE" to index.toString())
+        if (parent == null) runner.run(GitInvocation("rm", listOf("--cached", "-f", "-q") + FROM_STDIN, gitDir = gitDir, workTree = workTree,
+            variables = variables, input = paths, limits = COMMIT_LIMITS))
+        else runner.run(GitInvocation("reset", listOf("-q") + FROM_STDIN + parent, gitDir = gitDir, workTree = workTree,
+            variables = variables, input = paths, allowedExitCodes = setOf(0, 1), limits = COMMIT_LIMITS))
+    }
+
+    /** Publish the fully prepared index atomically while the caller owns Git's index.lock. */
+    fun publishIndex(gitDir: Path, index: Path) {
+        FileChannel.open(index, WRITE, NOFOLLOW_LINKS).use { it.force(true) }
+        Files.move(index, gitDir.resolve("index"), ATOMIC_MOVE, java.nio.file.StandardCopyOption.REPLACE_EXISTING)
+        GitStorage.forceDirectory(gitDir)
     }
 
     /** Git-compatible exclusive locks cover final validation, index capture and ref publication. */
@@ -253,6 +275,28 @@ internal object GitWorkspaceMutations {
             return block()
         } finally {
             acquired.asReversed().forEach { (file, witness) ->
+                if (Files.isRegularFile(file, NOFOLLOW_LINKS) && Files.isSameFile(file, witness)) Files.delete(file)
+            }
+        }
+    }
+
+    /** Also pin the symbolic HEAD's branch while a stage/unstage transaction publishes its index. */
+    fun <T> withWorkspaceLocks(runner: GitCommandRunner, gitDir: Path, staging: Path, operationId: String,
+        format: GitObjectFormat, block: () -> T): T = withCommitLocks(gitDir, staging, operationId) {
+        val ref = GitRepositoryInspector.head(runner, gitDir, format).refName
+        if (ref == null) block() else {
+            GitStorage.directories(gitDir, *ref.split('/').dropLast(1).toTypedArray())
+            Files.writeString(staging.resolve("ref-name"), ref)
+            val witness = Files.createFile(staging.resolve("ref-lock"))
+            GitStorage.forceDirectory(staging)
+            val file = gitDir.resolve("$ref.lock")
+            try { Files.createLink(file, witness) } catch (_: FileAlreadyExistsException) {
+                refuse("WORKTREE_BUSY", "Another Git writer holds the reviewed branch lock. Nothing was staged.")
+            }
+            try {
+                GitStorage.forceDirectory(file.parent)
+                block()
+            } finally {
                 if (Files.isRegularFile(file, NOFOLLOW_LINKS) && Files.isSameFile(file, witness)) Files.delete(file)
             }
         }

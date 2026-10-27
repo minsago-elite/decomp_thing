@@ -174,9 +174,11 @@ class ManagedGitRepositoriesTest {
         assertFalse(f.store.resolve(jobId).resolve("git/staging").let { it.exists() && Files.list(it).use { s -> s.count() } > 0 })
     }
 
-    @Test fun `restart reconciles every interruption point without exposing or overwriting anything`() {
-        // Snapshot capture belongs only to commit mapping, not initialization publication.
-        for (point in GitOperationCrashPoint.entries.filter { it != GitOperationCrashPoint.AFTER_SNAPSHOT_CAPTURE }) Fixture().use { f ->
+    @Test fun `restart reconciles every initialization interruption point without exposing or overwriting anything`() {
+        // Workspace validation/capture and commit mapping are tested in GitWorkspaceMutationsTest;
+        // initialization reaches exactly these four publication boundaries.
+        for (point in listOf(GitOperationCrashPoint.AFTER_RUNNING, GitOperationCrashPoint.AFTER_STAGING,
+            GitOperationCrashPoint.BEFORE_PUBLISH, GitOperationCrashPoint.AFTER_PUBLISH)) Fixture().use { f ->
             val before = f.tree(f.snapshot)
             f.crashes += point
             val first = f.open()
