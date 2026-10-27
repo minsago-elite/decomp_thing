@@ -2,7 +2,7 @@
 
 Status: implementation contract; production qualification is incomplete. These are native observations and byte assessments, not oracle identities, scored recovery, or release authority.
 
-The production route requires the retained pinned cc1 profile. Authored ELF controls cannot create the production operation capability. Existing model exporter bytes and invocation encodings remain unchanged. New versions are runtime 8, operation intent 5, and containment definition 5. The fresh cc1 command is `gcc-engine-native-calls`; it does not support resume or an arbitrary collector.
+The production route requires the retained pinned selected cc1 or driver profile. Authored ELF controls cannot create the production operation capability. Existing model exporter bytes and invocation encodings remain unchanged. New versions are runtime 8, operation intent 5, and containment definition 5. The fresh command is `gcc-engine-native-calls <cc1|driver>`; it does not support resume or an arbitrary collector.
 
 ## Output and traversal
 
@@ -204,3 +204,29 @@ After proved worker/cgroup absence, capture the unchanged full model, then the e
 Real compiled native controls cover repeated/recursive direct calls, zero-call functions and an unowned disassembled call; resolved/unresolved register/memory indirect calls; branch/switch discrimination and separately tagged tails; PLT and `-fno-plt` EXTERNAL/pointer-slot provenance; immediate thunks; RETURN/CALL_RETURN overrides and unsupported boundaries; repeated deterministic collection and unchanged model/progress/checkpoint bytes. Owned capture controls reject substitutions, extra files, malformed coverage, stale destinations, overflow and cancellation without successful publication.
 
 Small authored ELF controls are not production qualification. Production acceptance requires an actual pinned cc1 collection through the normal CLI and independently verified deterministic regeneration. Structural admission, selected independent identities, production replay, scoring and full milestone requirements remain incomplete.
+
+### Selected driver capture
+
+The driver uses the same compiled collector, closed raw observation format,
+serial runtime v8 and fresh intent v5 as cc1. Its retained profile selects the
+independently pinned driver input and target; cross-target input, profile,
+manifest, runtime and CLI substitutions are rejected before execution. Native
+capture remains a separate operation from ordinary full export and cannot resume.
+The contained recovery worker receives no independent call oracle.
+
+Use the `qualify:driver-native-calls` PR label to select normal installed-CLI
+capture. It coexists with `qualify:driver-full-export`. Qualification retains the
+whole raw native stream and manifest, paired model, exporter/runtime/collector
+bindings and execution/assessment lineage. It replays every raw record twice
+against the independently pinned target and model commitments and retains a
+population summary. This checks deterministic byte interpretation, not a second
+execution of the native producer.
+
+The frozen population includes prototype calls, analysis-call candidates and
+direct-tail candidates as distinct categories. Repeated, external, indirect,
+unowned and synthetic-address-space observations keep their original coordinates
+and metadata; none is removed by matching against oracle positives. Consumers
+must retain these distinctions and visible unknowns when mapping to the shared
+call-site contract. Ghidra observations are recovered claims, never oracle truth.
+This driver extension does not close the original cc1 production qualification,
+independent producer regeneration, call identity mapping or call-scoring outcomes.

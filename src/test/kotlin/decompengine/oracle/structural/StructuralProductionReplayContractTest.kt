@@ -262,7 +262,24 @@ class StructuralProductionReplayContractTest {
         assertFailsWith<StructuralProductionReplayException> {
             StructuralReplayAdapterRegistry.production.replayFreshForTests(fixture.request)
         }
-        assertTrue(VerifiedStructuralInputsV1::class.java.declaredConstructors.all { Modifier.isPrivate(it.modifiers) })
+        assertTrue(VerifiedStructuralInputsV1::class.java.declaredConstructors
+            .filterNot { it.isSynthetic }.all { Modifier.isPrivate(it.modifiers) })
+        // Synthetic Kotlin bridges must still require the opaque operation/admission chain;
+        // ordinary public reflection must never be able to mint authority from raw JSON bytes.
+        assertTrue(VerifiedStructuralInputsV1::class.java.constructors.all { constructor ->
+            constructor.parameterTypes.firstOrNull() == StructuralReplayAdapterRegistry.SelectedBoundaryAdmission::class.java
+        })
+        assertTrue(StructuralReplayAdapterRegistry.SelectedBoundaryAdmission::class.java.constructors.all { constructor ->
+            constructor.parameterTypes.firstOrNull() == decompengine.oracle.gcc.GccBundledStructuralReplayOperation::class.java
+        })
+        for (constructor in StructuralReplayAdapterRegistry.SelectedBoundaryAdmission::class.java.constructors) {
+            assertFailsWith<java.lang.reflect.InvocationTargetException> {
+                constructor.newInstance(*arrayOfNulls<Any>(constructor.parameterCount))
+            }
+            assertFailsWith<IllegalArgumentException> {
+                constructor.newInstance(*Array<Any?>(constructor.parameterCount) { if (it == 0) Any() else null })
+            }
+        }
         assertTrue(
             StructuralProductionReplayContract::class.java.methods.none {
                 it.returnType == VerifiedStructuralInputsV1::class.java

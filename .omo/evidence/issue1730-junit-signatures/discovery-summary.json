@@ -1,0 +1,134 @@
+{
+  "baseline": {
+    "annotatedMethods": 4421,
+    "artifactPath": "build/junit-signatures/baseline.json",
+    "artifactSha256": "af53d1b595b418a66071a981008fdbd6da01cd795262b295e7f0f7c0cd75c091",
+    "boundaryClass": {
+      "bytes": 59673,
+      "major": 65,
+      "path": "decompengine/oracle/structural/StructuralBoundaryReplayV1Test.class",
+      "root": 0,
+      "sha256": "b305d9771f633539d0c6ef4589aa611eb89fdfe3318d2d99d8ede1426d61bc03"
+    },
+    "classes": 1721,
+    "violations": [
+      {
+        "annotations": [
+          "Lorg/jetbrains/annotations/NotNull;",
+          "Lorg/junit/jupiter/api/Test;"
+        ],
+        "class": "decompengine.oracle.structural.StructuralBoundaryReplayV1Test",
+        "descriptor": "()Ldecompengine/oracle/structural/StructuralRecoveryV1Exception;",
+        "effectiveAnnotations": [
+          "Lorg/junit/jupiter/api/Test;"
+        ],
+        "method": "selected verification rejects altered results metadata and canonical bytes",
+        "status": "non-void-ordinary-test"
+      },
+      {
+        "annotations": [
+          "Lorg/jetbrains/annotations/NotNull;",
+          "Lorg/junit/jupiter/api/Test;"
+        ],
+        "class": "decompengine.oracle.structural.StructuralBoundaryReplayV1Test",
+        "descriptor": "()Ldecompengine/oracle/structural/StructuralRecoveryV1Exception;",
+        "effectiveAnnotations": [
+          "Lorg/junit/jupiter/api/Test;"
+        ],
+        "method": "selected observation preserves name-independent stable ties and exclusion accounting",
+        "status": "non-void-ordinary-test"
+      },
+      {
+        "annotations": [
+          "Lorg/jetbrains/annotations/NotNull;",
+          "Lorg/junit/jupiter/api/Test;"
+        ],
+        "class": "decompengine.oracle.structural.StructuralBoundaryReplayV1Test",
+        "descriptor": "()Ldecompengine/oracle/structural/StructuralRecoveryV1Exception;",
+        "effectiveAnnotations": [
+          "Lorg/junit/jupiter/api/Test;"
+        ],
+        "method": "selected full export parser admits large source without widening historical replay",
+        "status": "non-void-ordinary-test"
+      }
+    ]
+  },
+  "controlsSha256": "e250ccc5b458b51983e70a2c85192bf1b87a7df606f27db8bb71ffe633a44eb6",
+  "controlsSourceSha256": "53ef89525c56e6ceb9861e82ac55779cf62a65e3de6912e92a2ed680223c79e0",
+  "executedNames": [
+    "a valid one-to-one near mapping is rejected when it is not minimum distance()",
+    "crossed name-driven pair sequence is rejected even when local equations close()",
+    "duplicate normalized starts and noncanonical model bytes fail closed()",
+    "historical rich fixture replays deterministically to an observed binding()",
+    "objective tie ambiguity and canonical-report claims are independently checked()",
+    "recovered names cannot choose the upper edge of an equal-distance tie()",
+    "recovered universe omissions and substitutions are rejected()",
+    "replay derives facts from the authenticated parsed snapshot only()",
+    "selected base underflow and executable-range escapes fail closed()",
+    "selected full export parser admits large source without widening historical replay()",
+    "selected observation bytes are deterministic and defensively owned()",
+    "selected observation enforces canonical input address and resource bounds()",
+    "selected observation preserves name-independent stable ties and exclusion accounting()",
+    "selected observation reproduces every historical rich projection without scoring authority()",
+    "selected observation retains failed extraction records in every recovered boundary partition()",
+    "selected verification cannot reuse an observation for another model twin base or oracle()",
+    "selected verification rejects altered results metadata and canonical bytes()"
+  ],
+  "fixed": {
+    "annotatedMethods": 4387,
+    "artifactPath": "build/reports/junit-signatures/compiled-signatures.json",
+    "artifactSha256": "063e8120b72a04cbe89157dd03bf62feb4d8e9c876a9d17b26a9a457ea17a575",
+    "boundaryClass": {
+      "bytes": 59417,
+      "major": 65,
+      "path": "decompengine/oracle/structural/StructuralBoundaryReplayV1Test.class",
+      "root": 0,
+      "sha256": "4b6bbb1ad7208fdb9a698c03e75cba02acbebaab8061d08d653732dceee0c48e"
+    },
+    "classes": 1696,
+    "restoredMethods": [
+      {
+        "annotations": [
+          "Lorg/junit/jupiter/api/Test;"
+        ],
+        "class": "decompengine.oracle.structural.StructuralBoundaryReplayV1Test",
+        "descriptor": "()V",
+        "effectiveAnnotations": [
+          "Lorg/junit/jupiter/api/Test;"
+        ],
+        "method": "selected verification rejects altered results metadata and canonical bytes",
+        "status": "accepted"
+      },
+      {
+        "annotations": [
+          "Lorg/junit/jupiter/api/Test;"
+        ],
+        "class": "decompengine.oracle.structural.StructuralBoundaryReplayV1Test",
+        "descriptor": "()V",
+        "effectiveAnnotations": [
+          "Lorg/junit/jupiter/api/Test;"
+        ],
+        "method": "selected observation preserves name-independent stable ties and exclusion accounting",
+        "status": "accepted"
+      },
+      {
+        "annotations": [
+          "Lorg/junit/jupiter/api/Test;"
+        ],
+        "class": "decompengine.oracle.structural.StructuralBoundaryReplayV1Test",
+        "descriptor": "()V",
+        "effectiveAnnotations": [
+          "Lorg/junit/jupiter/api/Test;"
+        ],
+        "method": "selected full export parser admits large source without widening historical replay",
+        "status": "accepted"
+      }
+    ]
+  },
+  "guardSourceSha256": "9f08a4bd27181c51274fbeb58ebab8949bd8b0f56e68a151d02042201befcbc7",
+  "junitXmlSha256": "3e74033716fddfcd9d40bd8d00b83518d3106953ad6dceeb779587f6b89e0cc8",
+  "schemaVersion": 1,
+  "sourceHead": "de238fd3bf897eef9bac857b85a5dc2a54bc67d1",
+  "taskRoutesCaptureSha256": "5781fb1670a1d486b5a3504e4ee992d4dd4e6f7fa7f01ea2d10453a6fd3e2e33",
+  "taskRoutesSha256": "dfcab36bf5da946e27a5b9d24ab4779e64949949328693edb35234c47bfe49e0"
+}
