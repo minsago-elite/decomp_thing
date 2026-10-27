@@ -184,12 +184,13 @@ class GitTransportContext(
     init {
         require(configuration.size <= 32 && configuration.all { (key, value) -> key.matches(Regex("[A-Za-z0-9.-]{1,128}")) && value.length <= 4096 && '\u0000' !in value })
         require(variables.keys.all { it in PUBLIC_VARIABLES })
+        require(variables["GIT_TRACE_PACKET"].let { it == null || it == "1" }) // Never a trace-file path.
         require(secretVariables.keys.all { it.matches(Regex("GIT_CONFIG_(?:COUNT|KEY_[0-9]|VALUE_[0-9])")) } && secretVariables.values.all { '\u0000' !in it && it.length <= 8192 })
     }
     internal fun environment(): Map<String, String> = variables + secretVariables
     override fun toString(): String = "GitTransportContext(configuration=${configuration.map { it.first }}, secrets=${secretVariables.size})"
 
-    companion object { val PUBLIC_VARIABLES = setOf("GIT_ALLOW_PROTOCOL", "GIT_SSH_VARIANT", "GIT_HTTP_LOW_SPEED_LIMIT", "GIT_HTTP_LOW_SPEED_TIME") }
+    companion object { val PUBLIC_VARIABLES = setOf("GIT_ALLOW_PROTOCOL", "GIT_SSH_VARIANT", "GIT_HTTP_LOW_SPEED_LIMIT", "GIT_HTTP_LOW_SPEED_TIME", "GIT_TRACE_PACKET") }
 }
 
 /**
@@ -251,7 +252,7 @@ data class GitInvocation(
             "version", "init", "config", "check-ref-format", "rev-parse", "symbolic-ref", "for-each-ref",
             "status", "read-tree", "fsck", "cat-file", "ls-files", "ls-tree", "check-ignore", "update-ref",
             "log", "diff", "diff-tree", "add", "rm", "reset", "commit", "switch", "worktree", "rev-list",
-            "fetch", "push", "ls-remote", "merge", "merge-base", "checkout-index",
+            "fetch", "push", "ls-remote", "merge", "merge-base", "checkout-index", "check-attr", "hash-object", "update-index",
         )
         val TRANSPORT_SUBCOMMANDS = setOf("fetch", "push", "ls-remote")
         val VARIABLES = setOf("GIT_AUTHOR_NAME", "GIT_AUTHOR_EMAIL", "GIT_AUTHOR_DATE",
@@ -274,7 +275,18 @@ class GitCommandRunner internal constructor(val executable: Path, val environmen
         addAll(invocation.arguments)
     }
 
-    fun run(invocation: GitInvocation): GitCommandResult {
+    fun run(invocation: GitInvocation): GitCommandResult = execute(invocation)
+
+    /** Drain large structured listings without retaining their complete stdout in memory. The
+     * consumer runs serially on the stdout reader, and its failures terminate the child. */
+    internal fun stream(invocation: GitInvocation, maxBytes: Long, consume: (ByteArray, Int) -> Unit) {
+        require(!invocation.truncateStdout && maxBytes in 1..256L * 1024 * 1024)
+        execute(invocation, StreamOutput(maxBytes, consume))
+    }
+
+    private class StreamOutput(val maxBytes: Long, val consume: (ByteArray, Int) -> Unit)
+
+    private fun execute(invocation: GitInvocation, stream: StreamOutput? = null): GitCommandResult {
         val builder = ProcessBuilder(argv(invocation))
             .directory((invocation.workTree ?: invocation.gitDir ?: environment.root).toFile())
             .redirectInput(ProcessBuilder.Redirect.PIPE)
@@ -291,11 +303,12 @@ class GitCommandRunner internal constructor(val executable: Path, val environmen
             else Thread.ofVirtual().start {
                 try { process.outputStream.use { it.write(input) } } catch (_: IOException) { /* child exited early */ }
             }
-            val stdout = BoundedCapture(process.inputStream, invocation.limits.maxStdoutBytes)
+            val stdout = BoundedCapture(process.inputStream, invocation.limits.maxStdoutBytes, stream = stream)
             val stderr = BoundedCapture(process.errorStream, invocation.limits.maxStderrBytes, invocation.control?.progress)
             val readers = listOf(Thread.ofVirtual().start(stdout), Thread.ofVirtual().start(stderr))
             val deadline = System.nanoTime() + invocation.limits.timeout.toNanos()
             while (process.isAlive) {
+                stdout.failure?.let { terminate(process); throw it }
                 if (stdout.overflowed && invocation.truncateStdout) break
                 if (stdout.overflowed || stderr.overflowed) {
                     terminate(process)
@@ -318,6 +331,7 @@ class GitCommandRunner internal constructor(val executable: Path, val environmen
                 terminate(process)
                 throw GitCommandException(GitCommandException.Kind.TIMED_OUT, "Git output did not close within its time bound.")
             }
+            stdout.failure?.let { throw it }
             // The readers can still be draining when the process exits, so only their final state
             // decides truncation. Stderr keeps its own limit either way.
             val truncated = stdout.overflowed && invocation.truncateStdout
@@ -350,9 +364,12 @@ class GitCommandRunner internal constructor(val executable: Path, val environmen
      * With a [progress] listener it keeps only the tail instead and reports each progress line.
      */
     private class BoundedCapture(private val input: InputStream, private val limit: Int,
-        private val progress: ((String) -> Unit)? = null) : Runnable {
+        private val progress: ((String) -> Unit)? = null, private val stream: StreamOutput? = null) : Runnable {
         private val buffer = java.io.ByteArrayOutputStream()
         private val line = StringBuilder()
+        private var streamedBytes = 0L
+        @Volatile var failure: Exception? = null
+            private set
         @Volatile var overflowed = false
             private set
 
@@ -363,6 +380,14 @@ class GitCommandRunner internal constructor(val executable: Path, val environmen
                     while (true) {
                         val count = stream.read(chunk)
                         if (count < 0) break
+                        if (this.stream != null) {
+                            streamedBytes += count
+                            if (streamedBytes > this.stream.maxBytes) overflowed = true
+                            if (!overflowed && failure == null) {
+                                try { this.stream.consume(chunk, count) } catch (error: Exception) { failure = error }
+                            }
+                            continue
+                        }
                         synchronized(buffer) {
                             if (progress != null) {
                                 buffer.write(chunk, 0, count)

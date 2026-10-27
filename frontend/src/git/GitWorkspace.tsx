@@ -79,6 +79,7 @@ export function GitWorkspace({ jobId, basePath, session, capabilities, pollInter
   const [status, setStatus] = useState('');
   const [busy, setBusy] = useState(false);
   const [worktree, setWorktree] = useState<string | null>(null);
+  const [conflictOffset, setConflictOffset] = useState(0);
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const [diff, setDiff] = useState<GitDiff | null>(null);
   const [commit, setCommit] = useState<{ diff: GitDiff; provenance: GitProvenance } | null>(null);
@@ -109,12 +110,14 @@ export function GitWorkspace({ jobId, basePath, session, capabilities, pollInter
           client.get('gitHistory', `${prefix}/history${suffix ? `${suffix}&limit=20` : '?limit=20'}`, { signal: controller.signal }),
           client.get('gitRemotes', `${prefix}/remotes`, { signal: controller.signal }),
           client.get('gitAudit', `${prefix}/audit?limit=50`, { signal: controller.signal }),
-          client.get('gitConflicts', `${prefix}/conflicts${suffix}`, { signal: controller.signal }),
+          // Keep status/guards and abort available even if conflict enumeration fails.
+          client.get('gitConflicts', `${prefix}/conflicts${suffix}${conflictOffset ? `${suffix ? '&' : '?'}offset=${conflictOffset}` : ''}`,
+            { signal: controller.signal }).catch(() => null),
         ]);
         if (controller.signal.aborted) return;
         diffGeneration.current++;
         setDiff(null);
-        setLoaded({ listing, status, worktrees: worktrees.data, refs, history: history.data, remotes: remotes.data, audit: audit.data, conflicts: conflicts.data });
+        setLoaded({ listing, status, worktrees: worktrees.data, refs, history: history.data, remotes: remotes.data, audit: audit.data, conflicts: conflicts?.data ?? null });
         // A selection survives a refresh only while the same file identity is still listed.
         setSelected(previous => new Set([...previous].filter(key => status.entries.some(entry => key.endsWith(`:${entry.fileId}`)))));
       } catch (failure: unknown) {
@@ -122,7 +125,7 @@ export function GitWorkspace({ jobId, basePath, session, capabilities, pollInter
       }
     })();
     return () => { controller.abort(); };
-  }, [client, jobId, supported, worktree, refresh]);
+  }, [client, jobId, supported, worktree, refresh, conflictOffset]);
 
   useEffect(() => () => { active.current?.abort(); }, []);
 
@@ -197,16 +200,18 @@ export function GitWorkspace({ jobId, basePath, session, capabilities, pollInter
       return false;
     } finally {
       setRunning(null);
-      if (active.current === controller) { active.current = null; setBusy(false); setRefresh(value => value + 1); }
+      if (active.current === controller) { active.current = null; setBusy(false); setConflictOffset(0); setRefresh(value => value + 1); }
     }
   }
 
   /** Ask the server to stop a running transfer; the polling loop reports its final state. */
   async function cancelTransfer(operation: Operation) {
     const csrfToken = session.csrf();
-    if (!base || !csrfToken) { setStatus(copy.reconnect); return; }
+    // A clone has no loaded repository yet; its operation names the repository being created.
+    if (!csrfToken || !operation.repositoryId) { setStatus(copy.reconnect); return; }
     try {
-      const cancelled = (await client.post('operation', `${base}/operations/${operation.operationId}/cancel`, 'gitOperationCancelRequest',
+      const cancelled = (await client.post('operation', `/jobs/${jobId}/repositories/${operation.repositoryId}/operations/${operation.operationId}/cancel`,
+        'gitOperationCancelRequest',
         { action: 'git.cancel' }, { csrfToken, ifMatch: `"${operation.version}"`, idempotencyKey: crypto.randomUUID() })).data;
       setRunning(cancelled);
     } catch (failure: unknown) {
@@ -378,7 +383,9 @@ export function GitWorkspace({ jobId, basePath, session, capabilities, pollInter
         : <p><StateMark tone={remoting ? capabilityTone(remoting.state) : 'unknown'}>{gitRemotesCopy.unavailable}</StateMark> {remoting?.message ?? gitRemotesCopy.notReported}</p>}
       {running && running.action === 'git.clone' && <p role="status">{running.progress
         ? textMessage(gitRemotesCopy.progress, { phase: running.progress.phase, percent: running.progress.percent === null ? '' : ` ${running.progress.percent}%` })
-        : gitRemotesCopy.transferring}</p>}
+        : gitRemotesCopy.transferring}
+        {' '}{running.state === 'cancelling' ? gitRemotesCopy.cancelling
+          : <button type="button" onClick={() => { void cancelTransfer(running); }}>{gitRemotesCopy.cancel}</button>}</p>}
       <p>{gitRemotesCopy.cloneHelp}</p>
     </section>}
     {loaded && repository && statusData && <>
@@ -442,7 +449,7 @@ export function GitWorkspace({ jobId, basePath, session, capabilities, pollInter
         </section>}
       </section>
       {groups.staged.length > MAX_SELECTION && <p role="alert">{textMessage(copy.commitTooLarge, { max: MAX_SELECTION, count: groups.staged.length })}</p>}
-      <CommitForm staged={groups.staged} parent={statusData.headObjectId}
+      <CommitForm staged={groups.staged} parent={statusData.headObjectId} merging={loaded.conflicts?.mergeInProgress ?? false}
         disabled={!writable || !statusData.complete || groups.conflicted.length > 0 || groups.staged.length > MAX_SELECTION}
         onCommit={message => act('gitCommitRequest', copy.commitAction, guarded => ({ action: 'git.commit', worktreeId, guards: guarded,
           selectedFileIds: groups.staged.map(entry => entry.fileId), message }))} />
@@ -471,7 +478,8 @@ export function GitWorkspace({ jobId, basePath, session, capabilities, pollInter
             ({ action: 'git.tag', worktreeId, guards: guarded, name, targetObjectId: commit.provenance.objectId }))} />
         </section>}
       </section>
-      <GitIntegrationPanel remotes={loaded.remotes} conflicts={loaded.conflicts} writable={writable}
+      <GitIntegrationPanel remotes={loaded.remotes} conflicts={loaded.conflicts} writable={writable} onConflictPage={setConflictOffset}
+        destination={{ worktreeId: statusData.worktreeId, headRefName: statusData.headRefName, headObjectId: statusData.headObjectId }}
         readDivergence={readDivergence} readConflict={readConflict} onAction={integrationAction} />
       {loaded.listing.jobId === jobId && statusData.worktreeId === (worktree ?? repository.worktreeId) &&
         <GitPushPanel key={`${jobId}:${statusData.repositoryId}:${statusData.worktreeId}:${statusData.headRefName ?? ''}`}
@@ -535,14 +543,15 @@ function NameForm({ label, action, disabled, onSubmit }: { label: string; action
   </form>;
 }
 
-function CommitForm({ staged, parent, disabled, onCommit }: {
-  staged: GitStatusEntry[]; parent: string | null; disabled: boolean; onCommit: (message: string) => Promise<boolean>;
+function CommitForm({ staged, parent, merging, disabled, onCommit }: {
+  staged: GitStatusEntry[]; parent: string | null; merging: boolean; disabled: boolean; onCommit: (message: string) => Promise<boolean>;
 }) {
   const [message, setMessage] = useState('');
   return <section aria-labelledby="git-commit-form-title">
     <h3 id="git-commit-form-title">{copy.commitTitle}</h3>
-    {staged.length === 0 ? <p>{copy.nothingStaged}</p> : <>
-      <p>{copy.commitFiles}</p>
+    {/* A pending merge is committed even when its resolved tree matches the current commit. */}
+    {staged.length === 0 && !merging ? <p>{copy.nothingStaged}</p> : <>
+      {staged.length === 0 ? <p>{copy.mergeUnchanged}</p> : <p>{copy.commitFiles}</p>}
       <ul aria-label={copy.commitFiles}>{staged.map(entry => <li key={entry.fileId}><code>{entry.path}</code> {entry.staged}</li>)}</ul>
       <p>{parent ? textMessage(copy.parent, { object: parent }) : copy.noParent}</p>
       <form onSubmit={event => { event.preventDefault(); if (message.trim()) void onCommit(message).then(done => { if (done) setMessage(''); }); }}>

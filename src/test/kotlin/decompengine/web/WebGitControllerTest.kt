@@ -413,6 +413,13 @@ class WebGitControllerTest {
             val conflicts = data(f.read("$base/conflicts"), 200, "gitConflicts")
             assertFalse(conflicts.getValue("mergeInProgress").jsonPrimitive.boolean)
             assertEquals(0, conflicts.getValue("files").jsonArray.size)
+            assertEquals(0, conflicts.getValue("offset").jsonPrimitive.int)
+            assertEquals(0, conflicts.getValue("totalCount").jsonPrimitive.int)
+            assertEquals(JsonNull, conflicts.getValue("nextOffset"))
+            assertEquals(200, data(f.read("$base/conflicts?offset=200"), 200, "gitConflicts").getValue("offset").jsonPrimitive.int)
+            for (offset in listOf("-1", "01", "200001", "999999999999999999999", "bad")) {
+                error(f.read("$base/conflicts?offset=$offset"), 422, "VALIDATION_FAILED")
+            }
             error(f.read("$base/conflicts/file_${"0".repeat(32)}"), 404, "NOT_FOUND")
             error(change(mapOf("action" to JsonPrimitive("git.merge"), "trackingRefId" to JsonPrimitive(trackingId),
                 "targetObjectId" to tracking.getValue("trackingRefs").jsonArray.single().jsonObject.getValue("objectId"),
