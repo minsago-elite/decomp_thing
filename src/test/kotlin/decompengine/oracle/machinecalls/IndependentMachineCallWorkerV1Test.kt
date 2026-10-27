@@ -103,16 +103,28 @@ class IndependentMachineCallWorkerV1Test {
     @Test fun `request and input commitment mutations fail before runtime loading or output`() = fixture { root ->
         val rich = Files.write(root.resolve("rich.elf"), byteArrayOf(1, 2, 3))
         val oracle = Files.write(root.resolve("oracle.json"), byteArrayOf(123, 125))
-        val base = request(root).copy(
+        val base = liveRequest(root).copy(
             richFile = MachineCallFileV1(rich, 3, OracleArtifacts.sha256(Files.readAllBytes(rich))),
             canonicalOracle = MachineCallFileV1(oracle, 2, OracleArtifacts.sha256(Files.readAllBytes(oracle))),
         )
         val requestPath = Files.write(root.resolve("request.json"), base.canonicalBytes)
-        assertFailsWith<IllegalArgumentException> { IndependentMachineCallWorkerV1.run(requestPath, "0".repeat(64)) }
+        val requestSha = OracleArtifacts.sha256(base.canonicalBytes)
+        assertContentEquals(base.canonicalBytes, IndependentMachineCallRequestV2.parse(base.canonicalBytes).canonicalBytes)
+        assertEquals("machine-call request SHA-256 differs", assertFailsWith<IllegalArgumentException> {
+            IndependentMachineCallWorkerV1.run(requestPath, "0".repeat(64))
+        }.message)
         Files.write(rich, byteArrayOf(1, 2, 4))
-        assertFailsWith<IllegalArgumentException> {
-            IndependentMachineCallWorkerV1.run(requestPath, OracleArtifacts.sha256(base.canonicalBytes))
-        }
+        assertEquals("machine-call rich ELF bytes or SHA-256 differ", assertFailsWith<IllegalArgumentException> {
+            IndependentMachineCallWorkerV1.run(requestPath, requestSha)
+        }.message)
+        assertFalse(Files.exists(base.outputPath))
+
+        // Restore the rich input so the oracle substitution must pass the first input check.
+        Files.write(rich, byteArrayOf(1, 2, 3))
+        Files.write(oracle, byteArrayOf(123, 93))
+        assertEquals("machine-call canonical oracle bytes or SHA-256 differ", assertFailsWith<IllegalArgumentException> {
+            IndependentMachineCallWorkerV1.run(requestPath, requestSha)
+        }.message)
         assertFalse(Files.exists(base.outputPath))
     }
 
