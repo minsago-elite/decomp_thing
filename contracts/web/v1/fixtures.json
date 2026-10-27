@@ -885,6 +885,46 @@
     {
       "file": "fixtures/invalid-source-search-gaps-over-scope.json",
       "valid": false
+    },
+    {
+      "file": "fixtures/queue-position-queued.json",
+      "valid": true
+    },
+    {
+      "file": "fixtures/queue-position-not-queued.json",
+      "valid": true
+    },
+    {
+      "file": "fixtures/queue-position-unavailable.json",
+      "valid": true
+    },
+    {
+      "file": "fixtures/invalid-queue-position-ahead.json",
+      "valid": false
+    },
+    {
+      "file": "fixtures/invalid-queue-position-exact.json",
+      "valid": false
+    },
+    {
+      "file": "fixtures/invalid-queue-position-identities.json",
+      "valid": false
+    },
+    {
+      "file": "fixtures/invalid-queue-position-queued-state.json",
+      "valid": false
+    },
+    {
+      "file": "fixtures/run-timed-out.json",
+      "valid": true
+    },
+    {
+      "file": "fixtures/run-infrastructure-failed.json",
+      "valid": true
+    },
+    {
+      "file": "fixtures/invalid-run-interrupted-timed-out.json",
+      "valid": false
     }
   ]
 }
