@@ -13,6 +13,12 @@ internal fun webRun(run: WorkflowAttempt): JsonObject = buildJsonObject {
     nullable("resultRevisionId", run.acceptedRevision?.revisionId ?: run.candidate?.revisionId)
     put("acceptance", if (run.acceptedRevision != null) "accepted" else "not-evaluated")
     nullable("harnessCapabilityId", run.harnessCapabilityId); nullable("terminalReason", run.terminalReason?.name)
+    // Recovery provenance states what a resume restored; a retry restores nothing from its predecessor.
+    put("recovery", run.recovery?.let { recovery -> buildJsonObject {
+        put("mode", recovery.mode.wireName)
+        put("restores", recovery.restores?.wireName?.let(::JsonPrimitive) ?: JsonNull)
+        put("checkpointSha256", recovery.checkpointSha256?.let(::JsonPrimitive) ?: JsonNull)
+    } } ?: JsonNull)
     put("limits", buildJsonObject {
         put("wallClockMs", run.limits.wallClockMs.toString()); put("idleMs", run.limits.idleMs.toString())
         put("maxOutputBytes", run.limits.maxOutputBytes.toString()); put("maxToolCalls", run.limits.maxToolCalls.toString())
@@ -40,6 +46,8 @@ internal fun webRunConfiguration(value: decompengine.jobs.WorkflowAttemptConfigu
         put("configurationSha256", harness.configurationSha256?.let(::JsonPrimitive) ?: JsonNull)
         put("deprecated", harness.deprecated)
     } } ?: JsonNull)
+    // Retain the parent's required v1 placeholder for older clients; only reconstruction carries profile authority.
+    put("profileId", JsonNull)
     put("reconstruction", value.reconstruction?.let { reconstruction -> buildJsonObject {
         put("profileId", reconstruction.profileId); put("profileSha256", reconstruction.profileSha256)
         put("maxContextCharacters", reconstruction.maxContextCharacters?.let { JsonPrimitive(it.toString()) } ?: JsonNull)

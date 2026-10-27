@@ -30,8 +30,11 @@ const requirements: Partial<Record<string, string>> = {
   PROBE_TIMEOUT: copy.requirementUnknown, PROBE_FAILED: copy.requirementUnknown, PREREQUISITES_UNKNOWN: copy.requirementUnknown,
 };
 // Owning issues for the built-in harness: the harness parity tracker and each workflow's built-in delivery.
-const issue = (number: number) => `https://github.com/minsago-elite/decomp_thing/issues/${number}`;
-const builtinIssues: Partial<Record<Workflow, number>> = { reconstruct: 76, repair: 77 };
+const builtinTracker = 'https://github.com/minsago-elite/decomp_thing/issues/79';
+const builtinIssues: Partial<Record<Workflow, string>> = {
+  reconstruct: 'https://github.com/minsago-elite/decomp_thing/issues/76',
+  repair: 'https://github.com/minsago-elite/decomp_thing/issues/77',
+};
 const toolLabels = {
   sandbox: copy.toolSandbox, ghidra: copy.toolGhidra, 'agent-harness': copy.toolAgentHarness,
   'c-toolchain': copy.toolCToolchain, angr: copy.toolAngr,
@@ -42,7 +45,7 @@ const decimal = /^(?:0|[1-9][0-9]{0,19})$/;
 /** Only server-described options with exactly one workflow and explicit default limits can be offered. */
 export function launchOptions(runtime: RuntimeSnapshot): LaunchOption[] {
   return runtime.capabilities
-    .filter((capability): capability is LaunchOption => capability.launch !== null && capability.limits !== null
+    .filter((capability): capability is LaunchOption => capability.launch != null && capability.limits !== null
       && capability.workflows.length === 1)
     .sort((left, right) => order.indexOf(left.workflows[0]!) - order.indexOf(right.workflows[0]!));
 }
@@ -184,8 +187,8 @@ function Requirement({ option, basePath }: { option: LaunchOption; basePath: str
   if (option.reasonCode === 'BUILTIN_HARNESS_NOT_INTEGRATED') {
     const owner = builtinIssues[workflow];
     return <p>{textMessage(copy.requirementHeading, { text: textMessage(copy.requirementBuiltin, { workflow: workflowLabels[workflow] }) })}{' '}
-      <a href={issue(79)} rel="noreferrer">{copy.requirementBuiltinTracker}</a>
-      {owner !== undefined && <>{' '}<a href={issue(owner)} rel="noreferrer">{textMessage(copy.requirementBuiltinWorkflow, { workflow: workflowLabels[workflow] })}</a></>}</p>;
+      <a href={builtinTracker} rel="noreferrer">{copy.requirementBuiltinTracker}</a>
+      {owner !== undefined && <>{' '}<a href={owner} rel="noreferrer">{textMessage(copy.requirementBuiltinWorkflow, { workflow: workflowLabels[workflow] })}</a></>}</p>;
   }
   const text = requirements[option.reasonCode];
   return text === undefined ? null
@@ -216,7 +219,8 @@ function OptionFacts({ option }: { option: LaunchOption }) {
       ? textMessage(copy.contactsAgent, { version: option.agentContractVersion ?? '?' })
       : copy.doesNotContactAgent}</p>
     {launch.requiredTools.length > 0 && <p>{textMessage(copy.requiredTools, { tools: launch.requiredTools.map(tool => toolLabels[tool]).join(', ') })}</p>}
-    {launch.harness && <HarnessFactList harness={launch.harness} />}
+    {launch.harness ? <HarnessFactList harness={launch.harness} />
+      : launch.contactsAgent && <p>{copy.harnessFactsNotReported}</p>}
     {launch.mode === 'evidence-only' && <p>{copy.evidenceOnlyLimitations}</p>}
   </>;
 }
@@ -267,10 +271,12 @@ export function WorkflowLaunch({ job, runtime, basePath, session, onRefresh, onS
     workflow: selected.workflows[0]!, inputRevisionId: inputRevisionId === '' ? null : inputRevisionId,
     harnessCapabilityId: selected.launch.harnessCapabilityId,
     limits: selected.launch.limitsAdjustable ? { ...values } : { ...selected.limits },
-    // Only the context budget can narrow a reconstruction; the planner keeps every module.
-    scope: contextRange ? { maxContextCharacters: context } : null,
+    // Only submit scope when the server advertises it. Older v1 servers reject even an unknown null field.
+    // The context budget can narrow a reconstruction; the planner keeps every module.
+    ...(contextRange ? { scope: { maxContextCharacters: context } } : {}),
+    // Only validation sends cases; older v1 peers do not know this additive field.
     // A validation names only the reviewed server-approved corpus of its revision, by digest.
-    cases: reviewed ? { presetId: reviewed.presetId, corpusSha256: reviewed.corpusSha256! } : null,
+    ...(reviewed ? { cases: { presetId: reviewed.presetId, corpusSha256: reviewed.corpusSha256! } } : {}),
   } : null;
   const signature = body ? JSON.stringify([job.jobId, job.version, body]) : null;
 

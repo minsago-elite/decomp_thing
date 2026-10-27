@@ -7,6 +7,7 @@ import decompengine.jobs.WorkflowCandidate
 import decompengine.jobs.WorkflowExecutionLimits
 import decompengine.jobs.WorkflowJobSnapshot
 import decompengine.jobs.WorkflowKind
+import decompengine.jobs.WorkflowResumeRestoration
 import decompengine.jobs.WorkflowStoreDiagnostic
 import decompengine.jobs.WorkflowTerminalReason
 import decompengine.jobs.WorkflowUsage
@@ -30,8 +31,41 @@ interface DurableWebWorkflowAdapter {
     val reconstruction: DurableWebReconstructionScope? get() = null
     /** Whether a start must name the reviewed server-approved validation corpus of its input revision. */
     val validationCases: Boolean get() = false
+    /** Null means checkpoint resume is unsupported; explicit retry remains a separate new attempt. */
+    val checkpoints: DurableWebWorkflowCheckpointPolicy? get() = null
     fun execute(context: DurableWebWorkflowContext): DurableWebWorkflowOutcome
 }
+
+/**
+ * Trusted, workflow-owned checkpoint verification. Implementations reconcile the predecessor's persisted
+ * checkpoint, accepted revision and workspace identity with the shared harness recovery policy
+ * (for ACP, [decompengine.agent.AgentSessionJournal]) before any admission. Inspection must be bounded and
+ * read-only: it cannot start a process, load a session, quarantine or mutate evidence. The execution context
+ * later carries the recorded digest; an adapter must refuse to continue if its checkpoint no longer matches.
+ */
+fun interface DurableWebWorkflowCheckpointPolicy {
+    fun inspect(request: DurableWebWorkflowCheckpointRequest): DurableWebWorkflowCheckpoint
+}
+
+/** Internal only: the predecessor directory is workflow-owned and never a transport or caller value. */
+data class DurableWebWorkflowCheckpointRequest(val job: Job, val predecessor: WorkflowAttempt, val predecessorReportsDirectory: Path)
+
+sealed interface DurableWebWorkflowCheckpoint {
+    data class Verified(val checkpointSha256: String, val restores: WorkflowResumeRestoration) : DurableWebWorkflowCheckpoint {
+        init { require(checkpointSha256.matches(Regex("[0-9a-f]{64}"))) { "invalid checkpoint identity" } }
+    }
+    data class Refused(val reason: DurableWebWorkflowCheckpointRefusal) : DurableWebWorkflowCheckpoint
+}
+
+/** Closed public vocabulary; adapter diagnostics stay server-side. */
+enum class DurableWebWorkflowCheckpointRefusal(val code: String) {
+    CHECKPOINT_MISSING("CHECKPOINT_MISSING"),
+    CHECKPOINT_MISMATCH("CHECKPOINT_MISMATCH"),
+    WORKSPACE_UNVERIFIED("WORKSPACE_UNVERIFIED"),
+    SESSION_QUARANTINED("SESSION_QUARANTINED"),
+    CLEANUP_UNVERIFIED("CLEANUP_UNVERIFIED"),
+}
+
 
 /** What an attempt may start from. Paths are resolved by the service, never by the caller. */
 enum class DurableWebWorkflowInput {
@@ -45,6 +79,7 @@ enum class DurableWebWorkflowInput {
 
 enum class WebWorkflowRequirement(val wireName: String) {
     SANDBOX("sandbox"), GHIDRA("ghidra"), AGENT_HARNESS("agent-harness"), REPAIR_VALIDATOR("repair-validator"),
+    EXPLORATION_HELPER_OWNERSHIP("exploration-helper-ownership"),
 }
 
 enum class DurableWebWorkflowMode(val wireName: String) { TOOLS("tools"), AGENT("agent"), EVIDENCE_ONLY("evidence-only") }
@@ -114,11 +149,20 @@ fun interface DurableWebWorkflowPublication {
     fun verify(context: DurableWebWorkflowPublicationContext): WorkflowAcceptanceReference?
 }
 
-data class DurableWebWorkflowPublicationContext(val job: Job, val attempt: WorkflowAttempt, val reportsDirectory: Path)
+/** Verifiers must reserve each capture before reading and checkpoint between bounded read units. */
+data class DurableWebWorkflowPublicationContext(
+    val job: Job, val attempt: WorkflowAttempt, val reportsDirectory: Path,
+    val checkpoint: () -> Unit = { if (Thread.currentThread().isInterrupted) throw InterruptedException("Publication interrupted") },
+    val reserveCapture: (Long) -> Unit = {},
+)
 
-/** Internal execution context. Paths are never transport DTO fields. */
+/**
+ * Internal execution context. Paths are never transport DTO fields. A recovery attempt records its
+ * mode/checkpoint in [WorkflowAttempt.recovery]; [predecessorReportsDirectory] is present only for resume.
+ * [inputSourceTree] is the selected recorded revision's retained source for adapters that require one.
+ */
 data class DurableWebWorkflowContext(val job: Job, val attempt: WorkflowAttempt, val reportsDirectory: Path,
-    val inputSourceTree: Path? = null)
+    val predecessorReportsDirectory: Path? = null, val inputSourceTree: Path? = null)
 
 sealed interface DurableWebWorkflowOutcome {
     data class Completed(val candidate: WorkflowCandidate? = null, val usage: WorkflowUsage? = null,
@@ -127,7 +171,7 @@ sealed interface DurableWebWorkflowOutcome {
     }
     data class Failed(val reason: WorkflowTerminalReason = WorkflowTerminalReason.FAILED,
         val candidate: WorkflowCandidate? = null, val usage: WorkflowUsage? = null) : DurableWebWorkflowOutcome {
-        init { require(reason in setOf(WorkflowTerminalReason.FAILED, WorkflowTerminalReason.REFUSED, WorkflowTerminalReason.LIMIT_EXHAUSTED)) }
+        init { require(reason in setOf(WorkflowTerminalReason.FAILED, WorkflowTerminalReason.REFUSED, WorkflowTerminalReason.LIMIT_EXHAUSTED, WorkflowTerminalReason.TIMED_OUT)) }
     }
 }
 

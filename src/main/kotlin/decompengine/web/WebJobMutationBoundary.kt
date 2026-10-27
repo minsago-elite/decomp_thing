@@ -4,6 +4,7 @@ import com.sun.net.httpserver.HttpExchange
 import decompengine.jobs.PublishedJobUpload
 import decompengine.jobs.NewWorkflowAttempt
 import decompengine.jobs.WorkflowPinActor
+import decompengine.jobs.WorkflowRecoveryMode
 import decompengine.jobs.WorkflowPinRequestResult
 import decompengine.jobs.WorkflowCancellationActor
 import decompengine.jobs.WorkflowCancellationRequestResult
@@ -37,6 +38,11 @@ internal class WebJobMutationBoundary(
     fun authorizeDurableStart(exchange: HttpExchange): AuthorizedWebWorkflowStart {
         checkNotNull(access.authorize(exchange, WebEndpointPolicy.jsonMutation("POST")))
         return AuthorizedWebWorkflowStart(jobs)
+    }
+
+    fun authorizeRecovery(exchange: HttpExchange): AuthorizedWebRecovery {
+        checkNotNull(access.authorize(exchange, WebEndpointPolicy.jsonMutation("POST")))
+        return AuthorizedWebRecovery(jobs)
     }
 
     fun authorizeCancellation(exchange: HttpExchange): AuthorizedWebCancellation {
@@ -77,6 +83,14 @@ internal class AuthorizedWebWorkflowStart internal constructor(private val jobs:
         }
         return jobs.requestDurableStart(jobId, expectedJobVersion, request, requestKey, prerequisites, prepared)
     }
+}
+
+/** Recovery capability for one identified predecessor; callers cannot select a workflow, harness, path or session. */
+internal class AuthorizedWebRecovery internal constructor(private val jobs: WebJobService) {
+    fun request(jobId: String, runId: String, expectedRunVersion: String, mode: WorkflowRecoveryMode,
+        expectedInputRevisionId: String?, requestKey: String,
+        prerequisites: WebWorkflowPrerequisites? = WebWorkflowPrerequisites.UNCHECKED): DurableWebWorkflowStartResult =
+        jobs.requestDurableRecovery(jobId, runId, expectedRunVersion, mode, expectedInputRevisionId, requestKey, prerequisites)
 }
 
 /** Cancellation-only capability; the body cannot select the authenticated actor. */

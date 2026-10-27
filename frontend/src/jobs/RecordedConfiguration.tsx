@@ -13,7 +13,7 @@ export function RecordedConfiguration({ run, basePath }: { run: Run; basePath: s
   return <section aria-labelledby="recorded-configuration-title">
     <h2 id="recorded-configuration-title">{copy.title}</h2>
     <p>{copy.source}</p>
-    {configuration === null ? <p>{copy.notRecorded}</p> : <>
+    {configuration == null ? <p>{copy.notRecorded}</p> : <>
       <dl class="job-facts">
         <dt>{copy.option}</dt><dd><code>{configuration.optionId}</code></dd>
         <dt>{copy.mode}</dt><dd><code>{configuration.mode}</code></dd>

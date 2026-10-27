@@ -32,6 +32,16 @@ async function session() {
   return value;
 }
 
+/** A traversal is asynchronous in jsdom too: do not leave its popstate queued for the next test. */
+async function traverse(direction: 'back' | 'forward') {
+  await act(async () => {
+    await new Promise<void>(resolve => {
+      window.addEventListener('popstate', () => { resolve(); }, { once: true });
+      history[direction]();
+    });
+  });
+}
+
 it('returns to the filtered job list, with its form and request restored, after opening a job and going back', async () => {
   const auth = await session();
   const job = { ...sample, displayFilename: 'filtered-match.elf' };
@@ -46,12 +56,12 @@ it('returns to the filtered job list, with its form and request restored, after 
     fireEvent.click(await screen.findByRole('link', { name: /filtered-match\.elf/ }));
     await screen.findByRole('heading', { name: 'filtered-match.elf' });
     expect(location.pathname).toBe(`/nested/jobs/${job.jobId}`);
-    await act(() => { history.back(); });
+    await traverse('back');
     await waitFor(() => expect(location.search).toBe('?status=failed'));
     expect(await screen.findByRole('link', { name: /filtered-match\.elf/ })).toBeTruthy();
     expect(screen.getByLabelText('Workflow state')).toHaveProperty('value', 'failed');
     expect(transport.get.mock.calls.at(-1)?.[1]).toBe('/jobs?status=failed&limit=50');
-    await act(() => { history.forward(); });
+    await traverse('forward');
     await screen.findByRole('heading', { name: 'filtered-match.elf' });
   } finally { auth.dispose(); }
 });

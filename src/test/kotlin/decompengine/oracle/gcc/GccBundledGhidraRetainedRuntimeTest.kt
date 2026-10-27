@@ -112,7 +112,8 @@ class GccBundledGhidraRetainedRuntimeTest {
     @Test
     fun `writable temporary or linked roots never acquire retained runtime authority or alter caller files`() {
         val reference = deploymentReference()
-        val temporary = Files.createTempDirectory("gcc-untrusted-bundled-runtime-")
+        val temporary = Files.createTempDirectory(Files.createDirectories(Path.of("build/test-tmp").toAbsolutePath().normalize()),
+            "gcc-untrusted-bundled-runtime-")
         val marker = temporary.resolve("caller-owned-marker")
         val link = temporary.resolve("bundle-link")
         try {

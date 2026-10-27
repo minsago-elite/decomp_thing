@@ -85,6 +85,11 @@ internal fun readProjectRecordedRepairHistory(
     cancel: () -> Unit = {},
 ): RepairHistoryReadResult = readFixedHistoryDirectory(projectRoot, listOf("reports", "repair-revisions"), cancel)
 
+/** Operation-wide reservation precedes EVERY body capture, including continuity and diagnostic reads. */
+internal fun readProjectRecordedRepairHistory(
+    projectRoot: Path, reserveCapture: (Long) -> Unit, cancel: () -> Unit,
+): RepairHistoryReadResult = readFixedHistoryDirectory(projectRoot, listOf("reports", "repair-revisions"), cancel, reserveCapture)
+
 /** Fixed selector only. The calling service must separately authorize this selected job/run. */
 internal fun readSelectedJobRecordedRepairHistory(
     storageRoot: Path,
@@ -122,12 +127,13 @@ private fun readRecordedRepairHistorySnapshotWithHistory(
     reports: LinuxDescriptor,
     revalidateDirectory: () -> Unit,
     cancel: () -> Unit,
+    reserveCapture: (Long) -> Unit,
 ): RepairHistoryReadResult = try {
     reports.whileOpen {
         revisions.whileOpen {
             requireHistoryDirectory(reports.identity, reports.identity)
             requireHistoryDirectory(revisions.identity, reports.identity)
-            HistoryCaptureSession(revisions, revalidateDirectory, cancel).readWithHistory(reports)
+            HistoryCaptureSession(revisions, revalidateDirectory, cancel, reserveCapture).readWithHistory(reports)
         }
     }
 } catch (_: Throwable) {
@@ -178,6 +184,7 @@ private class HistoryCaptureSession(
     private val revisions: LinuxDescriptor,
     private val revalidateDirectory: () -> Unit,
     private val cancel: () -> Unit,
+    private val reserveCapture: (Long) -> Unit = {},
 ) {
     private val ledger = HistoryReadLedger()
 
@@ -257,6 +264,7 @@ private class HistoryCaptureSession(
                 require(before.isRegularFile && size in 0..budget.maximumProjectionBytes)
                 val captured = if (size == 0L) null else {
                     ledger.reserve(size) // Failed H captures are NEVER refunded/retried.
+                    reserveCapture(size)
                     readStableRegularFile(LinuxFilesystemSyscalls.descriptorPath(reports), "repair_history.json", size,
                         cancellationCheck = transaction::checkCancellation)
                 }
@@ -306,6 +314,7 @@ private class HistoryCaptureSession(
             require(before.isRegularFile)
             requireHistoryCanonicalCaptureSize(size, maximumBytes)
             ledger.reserve(size) // Debit BEFORE any body read, including final captures.
+            reserveCapture(size)
             val captured = readStableRegularFile(LinuxFilesystemSyscalls.descriptorPath(revisions), name, size,
                 cancellationCheck = cancel)
             require(captured.identity == held.identity && captured.bytes.size.toLong() == size)
@@ -396,10 +405,12 @@ private fun <R : AutoCloseable, T> withHistoryOwned(resource: R, body: (R) -> T)
     }
 }
 
-private fun readFixedHistoryDirectory(root: Path, components: List<String>, cancel: () -> Unit): RepairHistoryReadResult = try {
+private fun readFixedHistoryDirectory(root: Path, components: List<String>, cancel: () -> Unit,
+    reserveCapture: (Long) -> Unit = {},
+): RepairHistoryReadResult = try {
     require(root.fileSystem == FileSystems.getDefault())
     val base = root.toAbsolutePath().normalize()
-    withHistoryOwned(HistoryDirectoryChain(base, components, cancel)) { chain ->
+    withHistoryOwned(HistoryDirectoryChain(base, components, cancel, reserveCapture)) { chain ->
         chain.open()?.let { revisions ->
             chain.readWithHistory(revisions)
         } ?: RepairHistoryReadResult.absent()
@@ -413,6 +424,7 @@ private class HistoryDirectoryChain(
     private val root: Path,
     private val components: List<String>,
     private val cancel: () -> Unit,
+    private val reserveCapture: (Long) -> Unit,
 ) : AutoCloseable {
     private val held = ArrayList<LinuxDescriptor>()
 
@@ -444,7 +456,7 @@ private class HistoryDirectoryChain(
     fun readWithHistory(revisions: LinuxDescriptor): RepairHistoryReadResult {
         require(held.size == components.size + 1 && held.last() === revisions &&
             components.takeLast(2) == listOf("reports", "repair-revisions"))
-        return readRecordedRepairHistorySnapshotWithHistory(revisions, held[held.lastIndex - 1], this::revalidate, cancel)
+        return readRecordedRepairHistorySnapshotWithHistory(revisions, held[held.lastIndex - 1], this::revalidate, cancel, reserveCapture)
     }
 
     private fun retain(descriptor: LinuxDescriptor) {

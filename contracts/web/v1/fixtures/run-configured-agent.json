@@ -56,7 +56,8 @@
         "profileSha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
         "maxContextCharacters": "60000"
       },
-      "validation": null
+      "validation": null,
+      "profileId": null
     }
   }
 }

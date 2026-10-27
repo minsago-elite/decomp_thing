@@ -70,6 +70,26 @@ it('describes every server option and allows an explicit choice only among suppo
   expect(screen.queryByText(/workflow-build/)).toBeNull();
 });
 
+it('labels omitted older-server harness facts as not reported without inferring provenance', () => {
+  mount({ capabilities: fixture<Bootstrap>('legacy-bootstrap-before-configuration').capabilities });
+  expect(screen.getAllByText('This server did not report harness provenance for this option.')).toHaveLength(2);
+  expect(screen.queryByText(/Agent harness: acp/)).toBeNull();
+  expect(transport.post).not.toHaveBeenCalled();
+});
+
+it('does not send unsupported scope fields to an older v1 server', async () => {
+  transport.post.mockResolvedValue(run({ harnessCapabilityId: 'evidence-only' }));
+  mount({ capabilities: fixture<Bootstrap>('legacy-bootstrap-before-configuration').capabilities });
+  fireEvent.click(screen.getByLabelText('Reconstruction: evidence only'));
+  expect(screen.queryByLabelText('Maximum context characters per module')).toBeNull();
+  fireEvent.click(start(/Start Reconstruction/));
+  expect(transport.post).toHaveBeenCalledOnce();
+  const body = transport.post.mock.calls[0]![3];
+  expect(Object.keys(body).sort()).toEqual(['harnessCapabilityId', 'inputRevisionId', 'limits', 'workflow']);
+  expect(body).not.toHaveProperty('scope');
+  await waitFor(() => expect(screen.getByRole('link', { name: 'Open the started attempt' })).toBeTruthy());
+});
+
 it('starts from server defaults with one guarded keyed request and opens the recorded attempt', async () => {
   let answer!: (value: unknown) => void;
   transport.post.mockImplementation(() => new Promise(resolve => { answer = resolve; }));
@@ -85,7 +105,7 @@ it('starts from server defaults with one guarded keyed request and opens the rec
   const [kind, path, requestKind, body, settings] = transport.post.mock.calls[0]!;
   expect([kind, path, requestKind]).toEqual(['run', '/jobs/' + job.jobId + '/runs', 'workflowStartRequest']);
   expect(body).toEqual({ workflow: 'reconstruct', inputRevisionId: null, harnessCapabilityId: 'evidence-only',
-    limits: { wallClockMs: '7200000', idleMs: '1200000', maxOutputBytes: '4294967296', maxToolCalls: '0' }, scope: null, cases: null });
+    limits: { wallClockMs: '7200000', idleMs: '1200000', maxOutputBytes: '4294967296', maxToolCalls: '0' } });
   expect(settings).toMatchObject({ csrfToken: session.csrf(), ifMatch: '"job_version_1"' });
   expect(settings.idempotencyKey).toMatch(/^[A-Za-z0-9_-]{16,128}$/);
   expect(start(/Start Reconstruction/)).toHaveProperty('disabled', true);
@@ -111,7 +131,7 @@ it('validates lowered bounds locally and never submits a raised or inconsistent 
   expect(start()).toHaveProperty('disabled', false);
   fireEvent.click(start());
   expect(transport.post.mock.calls[0]?.[3]).toEqual({ workflow: 'explore', inputRevisionId: null, harnessCapabilityId: null,
-    limits: { wallClockMs: '1000', idleMs: '1000', maxOutputBytes: '1024', maxToolCalls: '0' }, scope: null, cases: null });
+    limits: { wallClockMs: '1000', idleMs: '1000', maxOutputBytes: '1024', maxToolCalls: '0' } });
 });
 
 it('requires a revision recorded by this job for repair and keeps its fixed limits read-only', async () => {
@@ -146,6 +166,64 @@ it('follows attempt pagination so an older completed candidate stays selectable'
   expect(Array.from(select.options).map(option => option.value)).toEqual(['', 'source_oldest']);
   expect(transport.get.mock.calls.map(call => call[1])).toEqual(['/jobs/' + job.jobId + '/runs?limit=200',
     '/jobs/' + job.jobId + '/runs?limit=200&cursor=older_page']);
+});
+
+it('reaches a repair candidate on the sixth page at the full retained-attempt bound', async () => {
+  transport.get.mockImplementation((_kind, path) => {
+    const cursor = new URL(path, 'http://localhost').searchParams.get('cursor');
+    const page = cursor ? Number(cursor) : 0;
+    const count = page < 5 ? 200 : 24;
+    return Promise.resolve({ data: { jobId: job.jobId, items: Array.from({ length: count }, (_, index) => ({
+      ...run().data, runId: `run_${page * 200 + index}`, state: page === 5 && index === 23 ? 'completed' : 'failed',
+      resultRevisionId: page === 5 && index === 23 ? 'source_oldest' : null,
+    })), page: { nextCursor: page < 5 ? String(page + 1) : null, limit: 200, snapshotVersion: 'snapshot_1' } } });
+  });
+  mount({ capabilities: supported('workflow-repair-agent-acp') });
+  fireEvent.click(screen.getByLabelText('Repair: configured agent'));
+  const select = await screen.findByLabelText<HTMLSelectElement>('Input revision');
+  expect(Array.from(select.options).map(option => option.value)).toEqual(['', 'source_oldest']);
+  expect(transport.get).toHaveBeenCalledTimes(6);
+  expect(start(/Start Repair/)).toHaveProperty('disabled', true);
+  fireEvent.change(select, { target: { value: 'source_oldest' } });
+  expect(start(/Start Repair/)).toHaveProperty('disabled', false);
+});
+
+it.each(['page', 'attempt'] as const)('refuses foreign-job %s data in a repair revision page', async foreign => {
+  transport.get.mockResolvedValue({ data: {
+    jobId: foreign === 'page' ? 'f'.repeat(32) : job.jobId,
+    items: [{ ...run().data, jobId: foreign === 'attempt' ? 'f'.repeat(32) : job.jobId,
+      state: 'completed', resultRevisionId: 'source_foreign' }],
+    page: { nextCursor: null, limit: 200, snapshotVersion: 'snapshot_1' },
+  } });
+  mount({ capabilities: supported('workflow-repair-agent-acp') });
+  fireEvent.click(screen.getByLabelText('Repair: configured agent'));
+  expect(await screen.findByText(/could not be loaded/)).toBeTruthy();
+  expect(screen.queryByLabelText('Input revision')).toBeNull();
+  expect(start(/Start Repair/)).toHaveProperty('disabled', true);
+  expect(transport.post).not.toHaveBeenCalled();
+});
+
+it('discards partial revision choices on a continuation failure and retries from the first page', async () => {
+  const first = { data: { jobId: job.jobId,
+    items: [{ ...run().data, state: 'completed', resultRevisionId: 'source_partial' }],
+    page: { nextCursor: 'older_page', limit: 200, snapshotVersion: 'snapshot_1' } } };
+  const last = { data: { jobId: job.jobId,
+    items: [{ ...run().data, state: 'completed', resultRevisionId: 'source_older' }],
+    page: { nextCursor: null, limit: 200, snapshotVersion: 'snapshot_1' } } };
+  transport.get.mockResolvedValueOnce(first).mockRejectedValueOnce(new ApiClientError('network_error'))
+    .mockResolvedValueOnce(first).mockResolvedValueOnce(last);
+  mount({ capabilities: supported('workflow-repair-agent-acp') });
+  fireEvent.click(screen.getByLabelText('Repair: configured agent'));
+  expect(await screen.findByText(/could not be loaded/)).toBeTruthy();
+  expect(screen.queryByLabelText('Input revision')).toBeNull();
+  expect(start(/Start Repair/)).toHaveProperty('disabled', true);
+  fireEvent.click(screen.getByRole('button', { name: 'Load revisions again' }));
+  const select = await screen.findByLabelText<HTMLSelectElement>('Input revision');
+  expect(Array.from(select.options).map(option => option.value)).toEqual(['', 'source_partial', 'source_older']);
+  expect(transport.get.mock.calls.map(call => call[1])).toEqual([
+    '/jobs/' + job.jobId + '/runs?limit=200', '/jobs/' + job.jobId + '/runs?limit=200&cursor=older_page',
+    '/jobs/' + job.jobId + '/runs?limit=200', '/jobs/' + job.jobId + '/runs?limit=200&cursor=older_page',
+  ]);
 });
 
 it('retries a failed revision load explicitly without remounting the form', async () => {
@@ -343,7 +421,7 @@ it('reviews the server-approved cases of the selected revision and submits only 
   fireEvent.click(start(/Start Validation/));
   await waitFor(() => expect(transport.post).toHaveBeenCalledOnce());
   expect(transport.post.mock.calls[0]?.[3]).toEqual({ workflow: 'validate', inputRevisionId: revision, harnessCapabilityId: null,
-    limits: { wallClockMs: '7200000', idleMs: '1200000', maxOutputBytes: '4294967296', maxToolCalls: '0' }, scope: null,
+    limits: { wallClockMs: '7200000', idleMs: '1200000', maxOutputBytes: '4294967296', maxToolCalls: '0' },
     cases: { presetId: 'retained-corpus-v1', corpusSha256: casePlan.corpusSha256 } });
 });
 
@@ -372,4 +450,10 @@ it('keeps a configured validation on its revision and refuses unverifiable or ch
   fireEvent.click(start(/Start Validation/));
   expect(await screen.findByText(/cases changed since you reviewed them/)).toBeTruthy();
   await waitFor(() => expect(transport.get.mock.calls.filter(call => call[0] === 'validationCasePlan').length).toBe(reads + 1));
+});
+
+it('treats an older producer that omits launch facts like one that reports none', () => {
+  mount({ capabilities: launchBootstrap.capabilities.map(capability => { const legacy: Capability = { ...capability }; delete legacy.launch; return legacy; }) });
+  expect(screen.queryByRole('radio')).toBeNull();
+  expect(screen.queryByRole('button')).toBeNull();
 });

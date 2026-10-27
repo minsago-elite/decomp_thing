@@ -4,6 +4,8 @@ import { resolve } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { decodeContract, decodeResponse, encodeRequest } from '../src/api/decode';
 import { ApiClientError } from '../src/api/errors';
+import type { Schema } from '../src/api/schema-types';
+import { validateSchema } from '../src/api/validate';
 import { parseBoundedJson } from '../src/api/json';
 import type { ResponseOf, Run } from '../src/api/generated';
 
@@ -28,6 +30,70 @@ function mismatchContract(page = 1) {
 }
 
 describe('generated v1 contract pipeline', () => {
+  it('keeps configured producer responses readable by the frozen parent v1 configuration decoder', () => {
+    // Frozen verbatim from parent 5ef442822f7eb0680790aba295c5ec17c45b3e4c; shared id/harness refs are unchanged.
+    const legacy = JSON.parse(readFileSync(resolve(root, 'compatibility/pre-reconstruction-configuration.schema.json'), 'utf8')) as Schema;
+    for (const name of ['run-configured-agent', 'run-configured-legacy', 'run-legacy-without-digest']) {
+      const document = decodeContract(fixture(name), { mode: 'producer' });
+      if (document.kind !== 'run' || !document.data.configuration) throw Error('Expected configured run fixture');
+      const configuration = document.data.configuration;
+      expect(configuration.profileId).toBeNull();
+      const projected = validateSchema(configuration, legacy, true) as Record<string, unknown>;
+      expect(projected.profileId).toBeNull();
+      expect(projected).not.toHaveProperty('reconstruction');
+      // This field omission is the actual old-client failure, even with additive-response projection.
+      const { profileId: omitted, ...withoutPlaceholder } = configuration;
+      expect(omitted).toBeNull();
+      expect(() => validateSchema(withoutPlaceholder, legacy, true)).toThrow(ApiClientError);
+      expect(decodeContract(fixture(name), { mode: 'response' })).toEqual(document);
+    }
+  });
+  it('accepts the pre-reconstruction v1 admission record without inferring a profile', () => {
+    const text = fixture('legacy-run-before-reconstruction');
+    for (const mode of ['producer', 'response'] as const) {
+      const document = decodeContract(text, { mode });
+      expect(document).toEqual(JSON.parse(text));
+      if (document.kind !== 'run') throw Error('Expected run fixture');
+      expect(document.data.configuration?.reconstruction).toBeUndefined();
+      // A historical placeholder can never claim profile authority or replace a malformed current record.
+      for (const configuration of [
+        { ...document.data.configuration, profileId: 'generated-c-make-v1' },
+        { ...document.data.configuration, reconstruction: { profileId: 'generated-c-make-v1' } },
+      ]) {
+        expect(() => decodeContract(JSON.stringify({ ...document, data: { ...document.data, configuration } }), { mode }))
+          .toThrow(ApiClientError);
+      }
+    }
+  });
+  it('encodes a scope-less start with the same closed request shape accepted by earlier v1 servers', () => {
+    const text = fixture('legacy-request-before-reconstruction');
+    const document = decodeContract(text, { mode: 'producer' });
+    if (document.kind !== 'workflowStartRequest') throw Error('Expected start fixture');
+    expect(encodeRequest('workflowStartRequest', document.data)).toBe(JSON.stringify(document.data));
+    expect(document.data).not.toHaveProperty('scope');
+    for (const scope of ['all', { modules: ['module_a'] }, { maxContextCharacters: 60000 }]) {
+      expect(() => encodeRequest('workflowStartRequest', { ...document.data, scope } as never)).toThrow(ApiClientError);
+    }
+  });
+  it.each(['run', 'runs', 'snapshot', 'bootstrap'])('accepts the pre-configuration v1 %s response unchanged', kind => {
+    const text = fixture(`legacy-${kind}-before-configuration`);
+    // Frozen older-server wire bytes, not a new producer fixture with fields deleted at runtime.
+    expect(decodeContract(text, { mode: 'response' })).toEqual(JSON.parse(text));
+  });
+  it.each(['invalid-run-configuration-harness-mismatch',
+    'invalid-launch-agent-without-harness', 'invalid-launch-builtin-selectable'])(
+    'still validates present provenance in consumer mode: %s', name => {
+      expect(() => decodeContract(fixture(name), { mode: 'response' })).toThrow(ApiClientError);
+    });
+  it('accepts current and historical legacy configuration identities without granting ACP metadata', () => {
+    for (const mode of ['producer', 'response'] as const) {
+      for (const name of ['run-configured-legacy', 'run-legacy-without-digest']) {
+        const text = fixture(name);
+        expect(decodeContract(text, { mode })).toEqual(JSON.parse(text));
+      }
+      expect(() => decodeContract(fixture('invalid-run-legacy-protocol'), { mode })).toThrow(ApiClientError);
+    }
+  });
   it('accepts only coherent preflight status identity and fixed reason combinations', () => {
     const allowed = new Set(['idle:null:null', 'inspecting:inspection_fixture:null', 'ready:inspection_fixture:null',
       'cancelled:inspection_fixture:null', 'failed:inspection_fixture:AGENT_PREFLIGHT_FAILED']);
@@ -253,6 +319,48 @@ describe('generated v1 contract pipeline', () => {
       expect(decodeContract(JSON.stringify(partial), { mode })).toEqual(partial);
       expect(() => decodeContract(JSON.stringify({ ...partial, data: { ...partial.data, producerSchemaVersion: 3 } }), { mode }))
         .toThrow(expect.objectContaining({ code: 'unsupported_contract' }));
+    }
+  });
+  it('keeps reported module validation optional and excludes private compiler fields', () => {
+    const original = decodeResponse(fixture('revision-file-unicode'), 'revisionFile');
+    const compilation = { sourceSha256: original.data.item.sha256, outcome: 'passed', returnCode: 0,
+      diagnosticsSha256: 'e'.repeat(64), diagnosticsBytes: '7' };
+    const validation = { authority: 'reported-module-validation', checkpointSha256: 'f'.repeat(64), compilation };
+    const recorded = { authority: 'reported-generation', moduleId: 'module_1', implementationSha256: original.data.item.sha256,
+      planSha256: 'c'.repeat(64), generationEvidenceSha256: 'd'.repeat(64), promptCharacters: null, promptBudgetCharacters: null };
+    for (const value of [undefined, null, { ...validation, compilation: null }, validation]) {
+      const document = { ...original, data: { ...original.data, recordedModule: { ...recorded, validation: value } } };
+      const wire = JSON.stringify(document);
+      expect(decodeContract(wire, { mode: 'producer' })).toEqual(JSON.parse(wire));
+      expect(decodeResponse(wire, 'revisionFile')).toEqual(JSON.parse(wire));
+    }
+    const document = { ...original, data: { ...original.data, recordedModule: { ...recorded, validation: { ...validation,
+      checkpointPath: '/PRIVATE-CHECKPOINT', compilation: { ...compilation, command: ['PRIVATE-COMMAND'], output: 'PRIVATE-DIAGNOSTIC' } } } } };
+    const result = decodeResponse(JSON.stringify(document), 'revisionFile');
+    expect(result.data.recordedModule?.validation).toEqual(validation);
+    expect(JSON.stringify(result)).not.toContain('PRIVATE');
+    expect(() => decodeContract(JSON.stringify(document), { mode: 'producer' })).toThrow(ApiClientError);
+  });
+  it('refuses foreign compiler sources contradictory outcomes and unbounded reported return codes', () => {
+    const original = decodeResponse(fixture('revision-file-unicode'), 'revisionFile');
+    const compilation = { sourceSha256: original.data.item.sha256, outcome: 'passed', returnCode: 0,
+      diagnosticsSha256: 'e'.repeat(64), diagnosticsBytes: '7' };
+    const recorded = { authority: 'reported-generation', moduleId: 'module_1', implementationSha256: original.data.item.sha256,
+      planSha256: 'c'.repeat(64), generationEvidenceSha256: 'd'.repeat(64), promptCharacters: null, promptBudgetCharacters: null };
+    const invalid = [{ ...compilation, sourceSha256: 'a'.repeat(64) }, { ...compilation, outcome: 'verified' },
+      { ...compilation, returnCode: 1 }, { ...compilation, returnCode: '0' }, { ...compilation, returnCode: 0.5 },
+      { ...compilation, returnCode: 2147483648 }, { ...compilation, returnCode: -2147483649 },
+      { ...compilation, outcome: 'failed-to-start', returnCode: 1 }, { ...compilation, diagnosticsBytes: '-1' }];
+    for (const value of invalid) for (const mode of ['producer', 'response'] as const) {
+      const document = { ...original, data: { ...original.data, recordedModule: { ...recorded,
+        validation: { authority: 'reported-module-validation', checkpointSha256: 'f'.repeat(64), compilation: value } } } };
+      expect(() => decodeContract(JSON.stringify(document), { mode })).toThrow(ApiClientError);
+    }
+    for (const returnCode of [-2147483648, 2147483647, null]) {
+      const document = { ...original, data: { ...original.data, recordedModule: { ...recorded,
+        validation: { authority: 'reported-module-validation', checkpointSha256: 'f'.repeat(64),
+          compilation: { ...compilation, outcome: 'failed', returnCode } } } } };
+      expect(decodeContract(JSON.stringify(document), { mode: 'producer' })).toEqual(document);
     }
   });
   it('keeps older file metadata readable and projects only admitted reported-generation fields', () => {

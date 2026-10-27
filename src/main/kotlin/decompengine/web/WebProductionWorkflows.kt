@@ -44,7 +44,8 @@ import java.nio.file.attribute.BasicFileAttributes
  * entry points the `explore`, `reconstruct` and `repair` commands use.
  */
 internal interface WebWorkflowEngines {
-    fun explore(binary: Path, reportsDirectory: Path)
+    /** [activity] is called after each completed exploration sample. */
+    fun explore(binary: Path, reportsDirectory: Path, activity: () -> Unit)
     /**
      * [harness] is the admitted selection for an agent run, null for evidence-only reconstruction;
      * [maxContextCharacters] is the admitted per-module context budget for an agent run.
@@ -57,8 +58,9 @@ internal interface WebWorkflowEngines {
 
     companion object {
         fun production(environment: Map<String, String>, sensitiveValues: Collection<String>): WebWorkflowEngines = object : WebWorkflowEngines {
-            override fun explore(binary: Path, reportsDirectory: Path) {
-                AutomaticExplorer().explore(binary, listOf(CandidateInput("seed_default", CandidateSource.SEED)), reportsDirectory)
+            override fun explore(binary: Path, reportsDirectory: Path, activity: () -> Unit) {
+                AutomaticExplorer(coverage = decompengine.exploration.OutputCoverageMeasurer(onSample = activity))
+                    .explore(binary, listOf(CandidateInput("seed_default", CandidateSource.SEED)), reportsDirectory)
             }
 
             override fun reconstruct(binary: Path, reportsDirectory: Path, mode: WebReconstructionMode, progress: AgentWorkflowProgress,
@@ -178,18 +180,32 @@ private fun <T> unwrap(result: BoundedWorkflowResult<T>): BoundedWorkflowResult<
     return result
 }
 
-internal class ExploreWorkflowAdapter(private val engines: WebWorkflowEngines, private val executor: BoundedWorkflowExecutor) : DurableWebWorkflowAdapter {
+internal class ExploreWorkflowAdapter(
+    private val engines: WebWorkflowEngines,
+    private val executor: BoundedWorkflowExecutor,
+    // Inert executor/service controls only; production registrations never opt in (#71).
+    private val allowTestOnlyExecution: Boolean = false,
+) : DurableWebWorkflowAdapter {
     override val workflow = WorkflowKind.EXPLORE
+    // No production checkpoint policy yet (no agent-session journal reconciliation), so POST R/recover
+    // reports resume as RESUME_UNSUPPORTED; an explicit retry always starts a fresh linked attempt.
+    override val checkpoints: DurableWebWorkflowCheckpointPolicy? = null
     override val limits = WebWorkflowDefaults.EXPLORE
     override val limitsAdjustable = true
-    override val requirements = setOf(WebWorkflowRequirement.SANDBOX)
+    override val requirements = if (allowTestOnlyExecution) setOf(WebWorkflowRequirement.SANDBOX)
+        else setOf(WebWorkflowRequirement.SANDBOX, WebWorkflowRequirement.EXPLORATION_HELPER_OWNERSHIP)
     override val input = DurableWebWorkflowInput.NONE
     override val launch = DurableWebWorkflowLaunch(DurableWebWorkflowMode.TOOLS, executesBinary = true, contactsAgent = false,
         requiredTools = listOf("sandbox", "angr"))
 
     override fun execute(context: DurableWebWorkflowContext): DurableWebWorkflowOutcome {
+        // Also fence direct dispatch and any already-admitted attempt: readiness alone is not a gate.
+        if (!allowTestOnlyExecution) return DurableWebWorkflowOutcome.Failed(WorkflowTerminalReason.REFUSED)
         val meter = WorkflowExecutionMeter(context.reportsDirectory, toolCallsMetered = false)
-        val (result, usage) = executor.run(context.attempt.limits, meter) { engines.explore(context.job.binaryPath, context.reportsDirectory) }
+        // Completed samples are progress: a long healthy exploration writes its report only at the end.
+        val (result, usage) = executor.run(context.attempt.limits, meter) {
+            engines.explore(context.job.binaryPath, context.reportsDirectory, meter::activity)
+        }
         return when (unwrap(result)) {
             is BoundedWorkflowResult.Returned -> DurableWebWorkflowOutcome.Completed(usage = usage)
             is BoundedWorkflowResult.Exhausted -> limitFailure(usage)
@@ -209,6 +225,9 @@ internal class ReconstructWorkflowAdapter(
     private val agent = mode == WebReconstructionMode.AGENT
     override val harnessCapabilityId: String = harness?.capabilityId ?: EVIDENCE_ONLY_CAPABILITY
     override val workflow = WorkflowKind.RECONSTRUCT
+    // No production checkpoint policy yet (no agent-session journal reconciliation), so POST R/recover
+    // reports resume as RESUME_UNSUPPORTED; an explicit retry always starts a fresh linked attempt.
+    override val checkpoints: DurableWebWorkflowCheckpointPolicy? = null
     override val limits = if (agent) WebWorkflowDefaults.RECONSTRUCT_AGENT else WebWorkflowDefaults.RECONSTRUCT_EVIDENCE
     override val limitsAdjustable = true
     override val requirements = if (agent) setOf(WebWorkflowRequirement.GHIDRA, WebWorkflowRequirement.AGENT_HARNESS)
@@ -330,11 +349,14 @@ internal class RepairWorkflowAdapter(
     private val engines: WebWorkflowEngines,
     private val executor: BoundedWorkflowExecutor,
     private val harness: WebAgentHarness,
-    // Test seam only: production never accepts a test-only, release-ineligible graph publication.
+    // Inert integration seam only; metadata cannot attest production acceptance (see #478).
     private val acceptTestOnlyPublication: Boolean = false,
 ) : DurableWebWorkflowAdapter {
     override val harnessCapabilityId: String = harness.capabilityId
     override val workflow = WorkflowKind.REPAIR
+    // No production checkpoint policy yet (no agent-session journal reconciliation), so POST R/recover
+    // reports resume as RESUME_UNSUPPORTED; an explicit retry always starts a fresh linked attempt.
+    override val checkpoints: DurableWebWorkflowCheckpointPolicy? = null
     override val limits = WebWorkflowDefaults.REPAIR
     // The tool-call ceiling is structural (iterations times the per-invocation agent limit), so it is fixed.
     override val limitsAdjustable = false
@@ -343,7 +365,10 @@ internal class RepairWorkflowAdapter(
     override val input = DurableWebWorkflowInput.RECORDED_REQUIRED
     override val launch = DurableWebWorkflowLaunch(DurableWebWorkflowMode.AGENT, executesBinary = true, contactsAgent = true,
         requiredTools = listOf("sandbox", "agent-harness", "c-toolchain"), harness = harness)
-    override val publication = DurableWebWorkflowPublication { context -> verifyRepairAcceptance(context, acceptTestOnlyPublication) }
+    // No production publisher until canonical evidence attestation is qualified; do not scan a
+    // library's graphs merely because the repair execution adapter is registered.
+    override val publication: DurableWebWorkflowPublication? = if (acceptTestOnlyPublication)
+        DurableWebWorkflowPublication { context -> verifyRepairAcceptance(context, allowTestOnly = true) } else null
 
     override fun execute(context: DurableWebWorkflowContext): DurableWebWorkflowOutcome {
         val input = checkNotNull(context.inputSourceTree) { "repair requires a recorded input revision" }
@@ -414,10 +439,21 @@ private fun repairCandidate(project: Path, attemptStartedMillis: Long?, allowTes
     return WorkflowCandidate(webSourceRevisionId(sha), sha)
 }
 
-/** Read-only attestation from the canonical repair graph; a candidate digest alone is never acceptance. */
+/**
+ * Inert publication control only. Recorded history is metadata, NOT acceptance authority: it does
+ * not verify installed sources, blobs, receipt bodies or their binary/profile/corpus commitments.
+ * Production must remain closed until a workflow-owned bounded read-only attestation is qualified
+ * for that full scope (#478). Never substitute the mutating graph recovery path here.
+ */
 internal fun verifyRepairAcceptance(context: DurableWebWorkflowPublicationContext, allowTestOnly: Boolean = false): WorkflowAcceptanceReference? {
+    if (!allowTestOnly) return null
     val candidate = context.attempt.candidate ?: return null
-    val snapshot = recordedHistory(context.reportsDirectory.resolve("source-tree")) ?: return null
+    context.checkpoint()
+    val history = readProjectRecordedRepairHistory(context.reportsDirectory.resolve("source-tree"),
+        reserveCapture = context.reserveCapture, cancel = context.checkpoint)
+    // The diagnostic reader withholds a snapshot on any failure; never swallow the caller's latch.
+    context.checkpoint()
+    val snapshot = history.snapshot?.takeIf { history.status == RepairHistoryReadStatus.RECORDED } ?: return null
     val (node, sha) = acceptedHead(snapshot, context.attempt.startedAt?.toEpochMilli(), allowTestOnly) ?: return null
     if (candidate != WorkflowCandidate(webSourceRevisionId(sha), sha) || !snapshot.graphSha256.matches(DIGEST)) return null
     return WorkflowAcceptanceReference(context.attempt.jobId, context.attempt.runId, candidate.revisionId, sha,

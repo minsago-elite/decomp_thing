@@ -13,6 +13,7 @@ export const launchCopy = {
   "modeBuiltinAgent": "built-in agent",
   "harnessIdentity": "Agent harness: {kind}, implementation {implementation}",
   "harnessImplementationUnresolved": "not resolved",
+  "harnessFactsNotReported": "This server did not report harness provenance for this option.",
   "harnessProtocol": "Harness protocol version: {version}",
   "harnessOperations": "Operations this harness runs on this server: {operations}",
   "harnessNoOperations": "This server runs no workflow with this harness.",

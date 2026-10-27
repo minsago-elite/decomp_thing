@@ -129,6 +129,43 @@ class AcpHarnessFactoryTest {
     }
 
     @Test
+    fun `legacy provenance binds effective public settings but never credential values`() {
+        val environment = mutableMapOf("ACP_HARNESS" to "legacy-openai", "BASE_URL" to "https://example.invalid/v1",
+            "API_KEY" to "low-entropy-secret", "MODEL" to "fixture-model", "REASONING_EFFORT" to "medium")
+        fun provenance(overrides: Map<String, String> = emptyMap()) = AcpHarnessFactory.fromEnvironment(environment + overrides).provenance
+        val first = provenance()
+        assertEquals("84384301589671ac7776cb61e00a78a06ea74557ba4b16400e8a0463fe650ca3", first.configurationSha256)
+        assertEquals(first, provenance(mapOf("API_KEY" to "different-secret")), "credentials must not enter a public digest")
+        assertEquals(first, provenance(mapOf("BASE_URL" to "https://example.invalid/v1///", "REASONING_EFFORT" to " medium ")))
+        listOf(mapOf("BASE_URL" to "https://other.invalid/v1"), mapOf("BASE_URL" to "https://example.invalid/v2"),
+            mapOf("MODEL" to "another-model"), mapOf("REASONING_EFFORT" to "high")).forEach {
+            assertNotEquals(first.stableDescriptor, provenance(it).stableDescriptor)
+        }
+        val selection = AcpHarnessFactory.fromEnvironment(environment)
+        environment["MODEL"] = "changed-after-resolution"
+        assertEquals(first, selection.provenance, "resolution must be immutable")
+        assertEquals(first, AcpHarnessFactory.fromEnvironment(environment + ("MODEL" to "fixture-model")).provenance,
+            "a fresh factory resolution must reproduce the same non-secret identity")
+        assertFalse(first.toString().contains("low-entropy-secret") || first.toString().contains("example.invalid"))
+        assertNull(first.copy(configurationSha256 = null).configurationSha256, "historical legacy provenance must stay readable")
+        assertNull(first.acpProtocolVersion); assertNull(first.acpSdkVersion)
+    }
+
+    @Test
+    fun `legacy URL credentials are refused with a fixed diagnostic before digesting`() {
+        val environment = mapOf("ACP_HARNESS" to "legacy-openai", "BASE_URL" to "https://example.invalid/v1",
+            "API_KEY" to "credential-canary", "MODEL" to "fixture-model")
+        listOf("https://user:secret-canary@example.invalid/v1", "https://example.invalid/v1?token=secret-canary",
+            "https://example.invalid/v1#secret-canary").forEach { url ->
+            val failure = assertFailsWith<IllegalArgumentException> {
+                AcpHarnessFactory.fromEnvironment(environment + ("BASE_URL" to url))
+            }
+            assertEquals("legacy BASE_URL must not contain user-info, query or fragment; supply credentials only through API_KEY", failure.message)
+            assertFalse(failure.message.orEmpty().contains("secret-canary"))
+        }
+    }
+
+    @Test
     fun `harness provenance rejects incoherent ACP and legacy identities`() {
         assertFailsWith<IllegalArgumentException> {
             AcpHarnessProvenance(

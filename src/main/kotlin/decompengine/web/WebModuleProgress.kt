@@ -6,11 +6,14 @@ import decompengine.jobs.WorkflowKind
 import decompengine.jobs.WorkflowRunState
 import decompengine.oracle.core.OracleJson
 import decompengine.oracle.core.StrictJsonLimits
+import decompengine.project.GENERATED_C_BUILD_CONTRACT_SCHEMA_VERSION
 import decompengine.project.ModulePlanJson
+import decompengine.project.ReconstructionAdapters
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonNull
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
+import kotlinx.serialization.json.booleanOrNull
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.put
 
@@ -24,6 +27,7 @@ internal data class WebModuleProgressCapture(
     val summary: ByteArray?,
     val plan: ByteArray?,
     val generation: ByteArray?,
+    val build: ByteArray? = null,
 )
 
 internal const val MODULE_PROGRESS_SMALL_BYTES = 64L * 1024
@@ -45,7 +49,8 @@ internal fun WebJobService.readModuleProgress(jobId: String, runId: String): Web
         // Per-module outcomes are written when generation finishes, before the build; skip the large read only
         // while an active attempt is still generating modules.
         if (generationFinished(parsedProgress(progress)) || attempt.state.terminal)
-            read("source-tree/reports/confidence.json", MODULE_PROGRESS_EVIDENCE_BYTES) else null)
+            read("source-tree/reports/confidence.json", MODULE_PROGRESS_EVIDENCE_BYTES) else null,
+        read("source-tree/reports/build_contract.json", MODULE_PROGRESS_EVIDENCE_BYTES))
     if (getAttempt(jobId, runId).version != attempt.version)
         throw WebAccessDenied(409, "REPORT_CHANGED", "The attempt changed during this read. Refresh its module progress.")
     return capture
@@ -90,6 +95,44 @@ private fun parsedSummary(bytes: ByteArray?): ReportedSummary? {
     // The exit code is an integer the producer wrote; a negative value is a signal-style failure.
     val exit = (root["buildExitCode"] as? JsonPrimitive)?.takeUnless { it.isString }?.content?.toLongOrNull() ?: return null
     return ReportedSummary(root.count("moduleCount") ?: return null, exit, root.count("unresolvedEntityCount") ?: return null, profile)
+}
+
+/**
+ * The builder records this source/profile-bound result before throwing on a failed build, whereas
+ * reconstruction.json is written only after packaging. This is reported build completion, not an
+ * archive/source attestation: current source bytes and archive acceptance remain the core's authority.
+ */
+private fun parsedBuildOutcome(bytes: ByteArray?, attempt: WorkflowAttempt): String? {
+    val root = parse(bytes, LARGE) ?: return null
+    val recorded = attempt.configuration?.reconstruction ?: return null
+    val profile = defaultWebSourceProfiles().singleOrNull { it.id == recorded.profileId && it.sha256 == recorded.profileSha256 } ?: return null
+    if (root.count("schemaVersion") != GENERATED_C_BUILD_CONTRACT_SCHEMA_VERSION.toLong() ||
+        root.text("profileId") != profile.id || root.text("profileSha256") != profile.sha256) return null
+    val revision = root.text("sourceRevisionSha256")?.takeIf(DIGEST::matches) ?: return null
+    val inputs = (root["sourceInputs"] as? JsonArray)?.takeIf { it.isNotEmpty() } ?: return null
+    val paths = mutableListOf<String>()
+    val canonical = buildString {
+        for (element in inputs) {
+            val input = element as? JsonObject ?: return null
+            val path = input.text("path")?.takeIf { it.isNotBlank() && !it.startsWith('/') &&
+                '\\' !in it && it.none { char -> char.code < 0x20 } && it.split('/').none { part -> part in setOf("", ".", "..") } } ?: return null
+            val size = input.count("bytes") ?: return null
+            val digest = input.text("sha256")?.takeIf(DIGEST::matches) ?: return null
+            paths.add(path)
+            append("${path.length}:$path:$size:$digest\n")
+        }
+    }
+    if (paths != paths.sorted() || paths.distinct().size != paths.size ||
+        WebExplorationArtifact.sha256(canonical.toByteArray(Charsets.UTF_8)) != revision) return null
+    val exit = (root["returnCode"] as? JsonPrimitive)?.takeUnless { it.isString }?.content?.toIntOrNull() ?: return null
+    val stable = (root["sourceStableDuringBuild"] as? JsonPrimitive)?.takeUnless { it.isString }?.booleanOrNull ?: return null
+    val artifactElement = root["artifact"] ?: return null
+    val artifact = artifactElement as? JsonObject
+    val artifactPath = ReconstructionAdapters.resolve(profile).archiveBuild.contractPaths(profile).artifactPath
+    val hasArtifact = artifact != null && artifact.text("path") == artifactPath &&
+        (artifact.count("bytes") ?: 0) > 0 && artifact.text("sha256")?.matches(DIGEST) == true
+    if (artifactElement != JsonNull && !hasArtifact) return null
+    return if (exit == 0 && stable && hasArtifact) "build-passed" else "build-failed"
 }
 
 private fun parsedPlan(bytes: ByteArray?): ReportedPlan? = bytes?.let {
@@ -161,6 +204,8 @@ internal fun webModuleProgress(jobId: String, capture: WebModuleProgressCapture,
     val reconstruct = attempt.workflow == WorkflowKind.RECONSTRUCT
     val progress = parsedProgress(capture.progress)
     val summary = parsedSummary(capture.summary)
+    val buildOutcome = summary?.let { if (it.buildExitCode == 0L) "build-passed" else "build-failed" }
+        ?: parsedBuildOutcome(capture.build, attempt)
     val plan = parsedPlan(capture.plan)
     val unresolved = unresolvedModules(capture.generation, plan)
     val queued = attempt.state == WorkflowRunState.QUEUED
@@ -170,10 +215,13 @@ internal fun webModuleProgress(jobId: String, capture: WebModuleProgressCapture,
     fun ended(reached: Boolean) = when { queued -> "pending"; running -> if (reached) "active" else "pending"; reached -> "stopped"; else -> "not-reached" }
     // Evidence that a later stage finished establishes every earlier one. Reports are captured separately and may
     // be missing, oversized or from different moments, so the stages are reconciled into one ordered sequence.
-    val validationDone = summary != null
+    val validationDone = buildOutcome != null
     val generationDone = validationDone || generationFinished(progress)
     val planningDone = generationDone || phase == "modules" || plan != null && phase != "planning"
     val analysisDone = planningDone || progress != null || plan != null
+    val generationTotal = summary?.moduleCount ?: progress?.takeIf { it.phase != "planning" }?.total
+        ?: plan?.moduleIds?.size?.toLong()
+    val generatedModules = if (generationDone) generationTotal else progress?.completed
     val published = attempt.candidate != null || attempt.acceptedRevision != null
     fun stage(name: String, done: Boolean, previousDone: Boolean, completed: Long? = null, total: Long? = null, outcome: String? = null) = buildJsonObject {
         put("stage", name)
@@ -185,11 +233,11 @@ internal fun webModuleProgress(jobId: String, capture: WebModuleProgressCapture,
     val stages = if (!reconstruct) emptyList() else listOf(
         stage("analysis", analysisDone, true),
         stage("planning", planningDone, analysisDone, outcome = if (plan != null) "plan-recorded" else null),
-        // The final summary outranks a progress record captured at another moment.
-        stage("generation", generationDone, planningDone, summary?.moduleCount ?: progress?.completed, summary?.moduleCount ?: progress?.total),
-        stage("validation", validationDone, generationDone, outcome = summary?.let { if (it.buildExitCode == 0L) "build-passed" else "build-failed" }),
-        // A candidate retained after an unfinished build is recorded, but its publication never completed.
-        stage("publication", published && validationDone, validationDone || published, outcome = when {
+        // Later-stage evidence outranks incomplete progress captured at an earlier moment.
+        stage("generation", generationDone, planningDone, generatedModules, generationTotal),
+        stage("validation", validationDone, generationDone, outcome = buildOutcome),
+        // Build completion does not establish archive publication, even when a candidate was retained.
+        stage("publication", published && summary != null, validationDone || published, outcome = when {
             attempt.acceptedRevision != null -> "accepted"
             attempt.candidate != null -> "candidate-recorded"
             else -> null
@@ -209,14 +257,14 @@ internal fun webModuleProgress(jobId: String, capture: WebModuleProgressCapture,
         put("workflow", attempt.workflow.wireName)
         put("attemptState", attempt.state.wireName)
         put("attemptVersion", attempt.version)
-        put("state", when { !reconstruct -> "not-applicable"; progress == null && plan == null && summary == null -> "not-recorded"; else -> "recorded" })
+        put("state", when { !reconstruct -> "not-applicable"; progress == null && plan == null && summary == null && buildOutcome == null -> "not-recorded"; else -> "recorded" })
         put("stages", JsonArray(stages))
         put("plan", plan?.let { recorded -> buildJsonObject {
             put("sha256", recorded.sha256); put("moduleCount", recorded.moduleIds.size.toString())
             put("profileId", attempt.configuration?.reconstruction?.profileId?.let(::JsonPrimitive) ?: JsonNull)
         } } ?: JsonNull)
         // The progress record names a module only after it finished; it is the last generated one while others remain.
-        put("lastGeneratedModuleId", progress?.module?.takeIf { running && !generationFinished(progress) && phase == "modules" }
+        put("lastGeneratedModuleId", progress?.module?.takeIf { running && !generationDone && phase == "modules" }
             ?.let(::JsonPrimitive) ?: JsonNull)
         put("unresolved", if (!reconstruct) JsonNull else buildJsonObject {
             put("moduleCount", unresolved?.let { JsonPrimitive(it.size.toString()) } ?: JsonNull)

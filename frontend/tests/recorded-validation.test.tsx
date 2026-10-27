@@ -103,6 +103,15 @@ function pinComparison() {
   fireEvent.click(screen.getByRole('button', { name: 'Use selected observation as comparison baseline' }));
 }
 
+it('keeps older v1 validation history inspectable without inventing its origin', async () => {
+  const history = historyFixture();
+  history.data.items.forEach(owner => { delete owner.origin; });
+  const fetcher = vi.fn<typeof fetch>().mockResolvedValueOnce(response(history));
+  vi.stubGlobal('fetch', fetcher); mount(); await discover();
+  expect(screen.getByText('Unknown')).toBeTruthy();
+  expect(screen.queryByText('This attempt')).toBeNull();
+});
+
 it('compares complete corpus mismatch changes beyond either visible case page', () => {
   const before = comparisonDocument('before', [1, 22]), after = comparisonDocument('after', [22, 61]);
   const first = validationComparisonSnapshot(before.document.data, before.selected);
@@ -688,4 +697,66 @@ it('does not offer mismatch navigation for matching or unobserved compile-only c
     expect(screen.queryByRole('button', { name: 'First page with a mismatch' })).toBeNull();
     expect(fetcher).toHaveBeenCalledTimes(2); view.unmount();
   }
+});
+
+
+it('retains history and baseline receipt times while selecting and paging another report', async () => {
+  const epoch = Date.parse('2026-09-05T00:00:00Z'); let elapsed = 0;
+  vi.spyOn(Date, 'now').mockImplementation(() => epoch + elapsed);
+  vi.spyOn(performance, 'now').mockImplementation(() => elapsed);
+  const fetcher = vi.fn<typeof fetch>().mockImplementation(input => {
+    const url = new URL(typeof input === 'string' ? input : input instanceof URL ? input.href : input.url, 'http://localhost');
+    if (url.pathname.endsWith('/validation-history')) return Promise.resolve(response(comparisonHistory()));
+    const id = url.searchParams.get('historyEvidence') === 'attempt_before' ? 'before' : 'after';
+    const page = Number(url.searchParams.get('historyValidationPage') ?? '1');
+    return Promise.resolve(response(comparisonDocument(id, id === 'before' ? [1, 22] : [22, 61], page).document));
+  });
+  vi.stubGlobal('fetch', fetcher);
+  try {
+    const view = mount(); await discoverComparisons();
+    const historyAt = screen.getByLabelText('Validation history').querySelector<HTMLElement>('[data-received-at]')?.getAttribute('data-received-at');
+    elapsed = 20_000; await inspectComparison('before');
+    const beforeAt = screen.getByLabelText('Selected validation report').querySelector<HTMLElement>('[data-received-at]')?.getAttribute('data-received-at');
+    expect(beforeAt).not.toBe(historyAt);
+    elapsed = 40_000; pinComparison();
+    expect(screen.getByLabelText('Comparison baseline').querySelector<HTMLElement>('[data-received-at]')?.getAttribute('data-received-at')).toBe(beforeAt);
+    elapsed = 60_000; await inspectComparison('after');
+    const selectedAt = screen.getByLabelText('Selected validation report').querySelector<HTMLElement>('[data-received-at]')?.getAttribute('data-received-at');
+    expect(selectedAt).not.toBe(beforeAt);
+    expect(screen.getByLabelText('Comparison baseline').querySelector<HTMLElement>('[data-received-at]')?.getAttribute('data-received-at')).toBe(beforeAt);
+    expect(screen.getByLabelText('Validation history').querySelector<HTMLElement>('[data-received-at]')?.getAttribute('data-received-at')).toBe(historyAt);
+    expect(fetcher).toHaveBeenCalledTimes(3);
+    elapsed = 80_000;
+    fireEvent.click(screen.getByRole('button', { name: 'Next validation cases' }));
+    await screen.findByText('Case page 2 / 4');
+    expect(screen.getByLabelText('Selected validation report').querySelector<HTMLElement>('[data-received-at]')?.getAttribute('data-received-at')).not.toBe(selectedAt);
+    expect(screen.getByLabelText('Comparison baseline').querySelector<HTMLElement>('[data-received-at]')?.getAttribute('data-received-at')).toBe(beforeAt);
+    expect(screen.getByLabelText('Validation history').querySelector<HTMLElement>('[data-received-at]')?.getAttribute('data-received-at')).toBe(historyAt);
+    expect(fetcher).toHaveBeenCalledTimes(4);
+    view.unmount();
+  } finally { vi.restoreAllMocks(); }
+});
+
+it('publishes a source-resolution receipt only after both source commitments match', async () => {
+  const epoch = Date.parse('2026-09-05T00:00:00Z'); let elapsed = 0;
+  vi.spyOn(Date, 'now').mockImplementation(() => epoch + elapsed);
+  vi.spyOn(performance, 'now').mockImplementation(() => elapsed);
+  let finishDirectory!: (response: Response) => void;
+  const fetcher = vi.fn<typeof fetch>().mockResolvedValueOnce(response(sourceRunFixture()))
+    .mockImplementationOnce(() => new Promise(resolve => { finishDirectory = resolve; }));
+  vi.stubGlobal('fetch', fetcher);
+  try {
+    const view = render(<ValidationSourceSnapshot jobId={jobId} runId={runId} validationRevisionId="validation_revision"
+      sourceSha256={reportFixture().data.validationCases!.sourceSha256} basePath="/nested" />);
+    expect(screen.queryByLabelText('Source link resolution')).toBeNull();
+    fireEvent.click(screen.getByRole('button', { name: 'Find matching source snapshot' }));
+    await waitFor(() => expect(fetcher).toHaveBeenCalledTimes(2));
+    expect(screen.queryByLabelText('Source link resolution')).toBeNull();
+    elapsed = 30_000;
+    await act(async () => { finishDirectory(response(sourceDirectoryFixture())); await Promise.resolve(); });
+    await screen.findByLabelText('Source link resolution');
+    expect(screen.getByLabelText('Source link resolution').querySelector<HTMLElement>('[data-received-at]')?.getAttribute('data-received-at')).toBe(new Date(epoch + elapsed).toISOString());
+    expect(fetcher).toHaveBeenCalledTimes(2);
+    view.unmount();
+  } finally { vi.restoreAllMocks(); }
 });

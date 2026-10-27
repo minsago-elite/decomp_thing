@@ -13,6 +13,8 @@ import decompengine.jobs.WorkflowExecutionLimits
 import decompengine.jobs.WorkflowUsage
 import java.nio.file.FileVisitResult
 import java.nio.file.Files
+import java.nio.file.LinkOption.NOFOLLOW_LINKS
+import java.nio.file.NoSuchFileException
 import java.nio.file.Path
 import java.nio.file.SimpleFileVisitor
 import java.nio.file.attribute.BasicFileAttributes
@@ -79,7 +81,12 @@ internal class WorkflowExecutionMeter(
 
     /** Exact retained bytes, or null when the bounded walk could not complete (treated as exhausted). */
     fun outputBytes(): Long? {
-        if (!Files.isDirectory(reportsDirectory)) return 0
+        // isDirectory collapses absence, denied reads, links and replaced roots into false. Only
+        // known absence is empty output; every other incomplete observation must fail closed.
+        val root = try {
+            Files.readAttributes(reportsDirectory, BasicFileAttributes::class.java, NOFOLLOW_LINKS)
+        } catch (_: NoSuchFileException) { return 0L } catch (_: java.io.IOException) { return null }
+        if (!root.isDirectory) return null
         var total = 0L
         var entries = 0
         return try {
@@ -89,15 +96,20 @@ internal class WorkflowExecutionMeter(
                     return FileVisitResult.CONTINUE
                 }
                 override fun visitFile(file: Path, attrs: BasicFileAttributes): FileVisitResult {
-                    if (++entries > maximumEntries) throw WalkLimit()
+                    // The root may have been replaced after its initial metadata read.
+                    if (file == reportsDirectory || ++entries > maximumEntries) throw WalkLimit()
                     total = if (Long.MAX_VALUE - total < attrs.size()) Long.MAX_VALUE else total + attrs.size()
                     return FileVisitResult.CONTINUE
                 }
-                // A file removed during the walk is simply no longer retained output.
-                override fun visitFileFailed(file: Path, exc: java.io.IOException): FileVisitResult = FileVisitResult.CONTINUE
+                // A vanished entry is no longer retained. Denied/incomplete reads cannot prove a
+                // byte total and must not turn an unreadable subtree into zero/partial output.
+                override fun visitFileFailed(file: Path, exc: java.io.IOException): FileVisitResult {
+                    if (exc is NoSuchFileException) return FileVisitResult.CONTINUE
+                    throw exc
+                }
             })
             total
-        } catch (_: WalkLimit) { null } catch (_: java.io.IOException) { total }
+        } catch (_: WalkLimit) { null } catch (_: java.io.IOException) { null }
     }
 
     fun usage(wallClockMillis: Long): WorkflowUsage = WorkflowUsage(

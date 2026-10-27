@@ -380,6 +380,74 @@ class AcpCurrentConfigInventoryTest {
         (privateValues + "peer-secret").forEach { assertFalse(failure.stackTraceToString().contains(it)) }
     }
 
+    @Test
+    fun `setter failure constructors retain protocol kind and original control metadata`() {
+        for ((kind, index) in listOf("model" to null, "mode" to null, "configOption" to 3)) {
+            for (rpcCode in listOf(null, "-32602", "0")) {
+                val failure = sessionPreferenceSetterFailure(kind, index, emptyList(), emptyList(), rpcCode)
+                assertEquals(AgentFailureKind.PROTOCOL, failure.failure.kind)
+                assertEquals(buildMap {
+                    put("preference", kind)
+                    index?.let { put("preferenceIndex", it.toString()) }
+                    rpcCode?.let { put("rpcCode", it) }
+                }, failure.failure.details)
+                assertEquals(if (rpcCode == null) "ACP session preference setter returned an invalid response"
+                    else "ACP session preference setter was rejected", failure.failure.message)
+                assertNull(failure.cause)
+            }
+        }
+    }
+
+    @Test
+    fun `fixed setter messages cannot echo private labels or redaction marker collisions`() {
+        val privateValues = listOf("ACP", "setter", "session preference", "[redacted]",
+            "ACP session preference setter was rejected", "ACP session preference setter returned an invalid response")
+        for (privateValue in privateValues) {
+            for (rpcCode in listOf(null, "-32602")) {
+                val failure = sessionPreferenceSetterFailure("configOption", 0, emptyList(), listOf(privateValue), rpcCode)
+                assertEquals(AgentFailureKind.PROTOCOL, failure.failure.kind)
+                assertTrue(failure.failure.message.isNotBlank())
+                assertTrue(failure.failure.message.length < 1024)
+                assertFalse(failure.failure.message.contains(privateValue))
+                assertFalse(failure.message.orEmpty().contains(privateValue))
+            }
+        }
+    }
+
+    @Test
+    fun `setter failure diagnostics include unapplied preferences and the full environment budget`() {
+        val environment = List(4096) { if (it == 4095) "setter" else "environment-$it" }
+        val preferences = AcpSessionPreferences("private-model", "private-mode", List(64) {
+            if (it == 63) AcpSessionConfigPreference("was rejected", AcpSessionConfigValue.Select("returned an invalid response"))
+            else AcpSessionConfigPreference("option-$it", AcpSessionConfigValue.Select("value-$it"))
+        })
+        val identifiers = preferences.privateIdentifiers()
+        assertEquals(130, identifiers.size)
+        for (rpcCode in listOf(null, "-32602")) {
+            val failure = sessionPreferenceSetterFailure("configOption", 0, environment, identifiers, rpcCode)
+            assertEquals(AgentFailureKind.PROTOCOL, failure.failure.kind)
+            assertEquals("0", failure.failure.details["preferenceIndex"])
+            assertTrue(failure.failure.message.isNotBlank())
+            assertTrue(failure.failure.message.length < 1024)
+            (environment + identifiers).forEach { assertFalse(failure.failure.message.contains(it)) }
+        }
+    }
+
+    @Test
+    fun `setter failure screening handles raw whitespace without an unsafe fixed fallback`() {
+        val privateValues = listOf("ACP session preference setter was rejected",
+            "ACP session preference setter returned an invalid response", "[redacted]")
+        for (rpcCode in listOf(null, "0")) {
+            val failure = sessionPreferenceSetterFailure("mode", null, listOf(" "), privateValues, rpcCode)
+            assertTrue(failure.failure.message.isNotBlank())
+            assertTrue(failure.failure.message.length < 1024)
+            assertFalse(failure.failure.message.contains(' '))
+            privateValues.forEach { assertFalse(failure.failure.message.contains(it)) }
+            assertEquals(if (rpcCode == null) mapOf("preference" to "mode")
+                else mapOf("preference" to "mode", "rpcCode" to rpcCode), failure.failure.details)
+        }
+    }
+
     private fun appliedPreferences() = listOf(
         AcpSessionConfigPreference("reasoning", AcpSessionConfigValue.Select("high")),
         AcpSessionConfigPreference("telemetry", AcpSessionConfigValue.BooleanValue(false)),

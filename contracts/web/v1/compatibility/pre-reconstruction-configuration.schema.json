@@ -1,0 +1,113 @@
+{
+  "type": "object",
+  "description": "The server-validated configuration recorded atomically with an attempt at admission. It is immutable; a later configuration change is recorded on a new attempt.",
+  "properties": {
+    "optionId": {
+      "$ref": "#/definitions/id"
+    },
+    "mode": {
+      "type": "string",
+      "enum": [
+        "tools",
+        "agent",
+        "evidence-only"
+      ]
+    },
+    "executesBinary": {
+      "type": "boolean"
+    },
+    "contactsAgent": {
+      "type": "boolean"
+    },
+    "requiredTools": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "enum": [
+          "sandbox",
+          "ghidra",
+          "agent-harness",
+          "c-toolchain",
+          "angr"
+        ]
+      },
+      "maxItems": 8,
+      "uniqueItems": true
+    },
+    "input": {
+      "type": "string",
+      "enum": [
+        "none",
+        "accepted-optional",
+        "recorded-required"
+      ]
+    },
+    "limitsAdjustable": {
+      "type": "boolean"
+    },
+    "harness": {
+      "anyOf": [
+        {
+          "$ref": "#/definitions/attemptHarness"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "profileId": {
+      "anyOf": [
+        {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9_][A-Za-z0-9_.-]{0,127}$"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    }
+  },
+  "required": [
+    "optionId",
+    "mode",
+    "executesBinary",
+    "contactsAgent",
+    "requiredTools",
+    "input",
+    "limitsAdjustable",
+    "harness",
+    "profileId"
+  ],
+  "additionalProperties": false,
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "mode": {
+            "const": "agent"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "contactsAgent": {
+            "const": true
+          },
+          "harness": {
+            "$ref": "#/definitions/attemptHarness"
+          }
+        }
+      },
+      "else": {
+        "properties": {
+          "contactsAgent": {
+            "const": false
+          },
+          "harness": {
+            "type": "null"
+          }
+        }
+      }
+    }
+  ]
+}

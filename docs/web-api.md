@@ -153,8 +153,10 @@ internal storage optimization and must not merge identity, permissions or histor
 | `POST /agent/preflight` | `202 agentPreflight`, `409` while one runs | Strict `agentPreflightRequest` (`{"action":"inspect"}`), session/Origin/CSRF; starts one single-flight `preflight(WEB)`; #493 |
 | `POST J/runs` | `202 run`, `Location: R` | `workflowStart` request, explicit option, server-approved limits, reconstruction scope and reviewed validation cases, input policy and fresh readiness checks, job If-Match; #163/#478/#559/#561 |
 | `POST R/cancel` | `202 run` or `200 run` if already terminal | Closed `workflowCancel` request, idempotent recorded intent, run If-Match; #163 |
-| `POST R/recover` | `202 run`, `Location` of a new attempt | Explicit `retry` or capability-gated `resume`; If-Match; #163 |
+| `POST R/recover` | `202 run`, `Location` of a new attempt | Closed `recover` request; explicit `retry` or capability-gated `resume`; run If-Match and idempotency; #486 |
+| `GET R/controls` | `200 attemptControls`, strong run ETag | Read-only cancel/retry/resume eligibility with closed reasons; reserves nothing; #528/#529 |
 | `GET R/snapshot` | `200 snapshot`, ETag | Run state and consistent event watermark; #174 |
+| `GET R/queue-position` | `200 queuePosition` | Approximate sampled position of one queued attempt; no query, counts only; #530 |
 | `GET R/events` | `200 text/event-stream` | Resume with `Last-Event-ID` or `after`, never both; #174 |
 | `GET R/events?transport=poll` | `200 events` | Same retention/cursor semantics, bounded page; #174 |
 | `GET R/reports/{reportId}` | `200 report` | State may be missing/partial/unsupported/unknown; #165 |
@@ -275,6 +277,52 @@ own Actions qualification; browser and live model/binary runtime qualification
 remain unfinished. Fresh starts on a server without registrations or retained
 start receipts retain 405.
 
+The recovery transport accepts only the closed `recover` data object (not its
+fixture wrapper), bounded to 1024 bytes: `mode` is `retry` or `resume`, and
+`expectedInputRevisionId` is the predecessor's recorded input revision or null for
+the original upload. It uses the same shared session/Origin/JSON/CSRF boundary
+before any body or service read, one strong run `If-Match`, one 16–128 character
+`Idempotency-Key` and no query or other conditional header. Workflow, limits,
+harness, checkpoint and paths are never caller fields; they come from the
+trusted registration and the predecessor attempt.
+
+Only the latest unsuccessful (failed, cancelled or interrupted) attempt can be
+recovered, and only while its recorded input is the original upload or the
+job's current accepted revision. A different expected input is 409
+`INPUT_REVISION_CONFLICT`; an input that is no longer trusted evidence is 409
+`INPUT_UNVERIFIED`, so recovery never silently starts from an unverified
+workspace. `retry` always publishes a new queued attempt linked through
+`previousRunId`, with `recovery.mode: retry` and no restored state. `resume`
+requires the registered adapter's trusted checkpoint policy, the exact recorded
+harness identity and a verified checkpoint; the new attempt records
+`recovery.restores` (`agent-session` or `project-evidence`) and the checkpoint
+digest, and the adapter receives the predecessor's workflow-owned report
+directory. Unsupported or unsafe resume is 409 with a specific code
+(`RESUME_UNSUPPORTED`, `HARNESS_CHANGED`, `CHECKPOINT_MISSING`,
+`CHECKPOINT_MISMATCH`, `CHECKPOINT_UNVERIFIED`, `WORKSPACE_UNVERIFIED`,
+`SESSION_QUARANTINED`, `CLEANUP_UNVERIFIED`). A newer attempt is 409
+`ATTEMPT_SUPERSEDED`, unfinished or completed predecessors 409
+`ATTEMPT_ACTIVE`/`ATTEMPT_COMPLETED`, a stale run guard 412, a key reused for
+different intent 409, admission capacity 429 and an unavailable workflow 503.
+
+Success is `202 run` for the new attempt with its `Location` and ETag. The
+recovery receipt shares the atomic attempt publication; its replay identity is
+the predecessor, its version, the mode and the expected input, so a keyed replay
+returns the same new attempt with `Idempotency-Replayed: true` before any
+eligibility, capacity or capability check, and never schedules again. Without
+registered workflows or retained keyed receipts the route answers 503
+`CAPABILITY_UNAVAILABLE` without reading the body. Production adapters remain
+unregistered and none declares a checkpoint policy yet, so packaged builds
+report retry and resume unavailable; ACP session continuation through the
+shared `AgentSessionJournal` policy still needs a registered adapter (#68).
+
+`GET R/controls` returns `attemptControls`: the run version and state, the
+recorded input revision, `cancel`, `retry` and `resume` each with `available`
+and a closed `reason`, the scope a resume would restore and any linked
+`successorRunId`. It is computed from durable state and current owned work, is
+private and read-only, and is not a reservation; each command re-checks its
+guards. Browsers read it explicitly and never send a command on load or reload.
+
 Errors carry `code`, safe `message`, `retryable`, optional field-level `details` and
 `retryAfterMs`; the correlation ID connects to redacted server logs. A detail contains a JSON
 pointer plus stable code/message and never the rejected value. Resource existence is disclosed
@@ -343,8 +391,9 @@ it never silently launches execution or duplicates accepted publication.
 
 ### Production workflow adapters and restart reconciliation
 
-Each adapter reuses the CLI implementation: `explore` runs the existing
-automatic explorer against the uploaded binary in the sandbox; `reconstruct`
+Each adapter reuses the CLI implementation: `explore` is wired to the existing
+automatic explorer but production dispatch is disabled pending helper ownership
+and cancellation qualification (#71); `reconstruct`
 runs archival reconstruction with the bundled Ghidra analyzer and either the
 configured agent harness (ACP or the deprecated legacy adapter selected by
 `ACP_HARNESS`) or the explicit agent-free evidence-only profile, with no
@@ -358,9 +407,13 @@ the byte total of the attempt's own report directory and, where metered, agent
 tool calls (identities are distinct within each agent invocation and summed across
 invocations; a returned receipt reporting more calls raises the count). Limits are
 checked again when a body finishes between samples. A breach or cancellation
-interrupts the child, which kills and awaits its helper process trees (including
-exploration's angr and strings helpers), and the adapter does not return while the
-child is alive. Breaches record
+interrupts the child, and the adapter does not return while that child thread is
+alive. Exploration's angr and strings helpers still have an ownership gap: a
+leader can fork a pipe-holding child and exit between descendant samples, leaving
+cancellation blocked on an unobserved writer. Observed-descendant cleanup does
+not fix this race. Production exploration is therefore refused at admission and
+at direct adapter execution; the explicit inert test seam qualifies only executor
+and service controls, not process cleanup. Breaches in enabled adapters record
 `LIMIT_EXHAUSTED`; cancellation and shutdown keep their existing `CANCELLED` and
 `PROCESS_INTERRUPTED` outcomes. Repair's tool-call ceiling is structural (five
 iterations, each one agent invocation bounded at 256 tool calls), so its limits
@@ -371,24 +424,37 @@ Reconstruction and repair record a candidate whenever a canonical source digest
 exists: the schema-3 build contract's `sourceRevisionSha256`, or the repair
 graph's published head. The revision identifier is derived from the digest, so
 one identifier can never name different sources. A candidate is never
-acceptance. After a repair attempt completes, and while the service still owns
-it, a read-only attestation reads the canonical repair graph: only a fully
-accepted head bound to a fully accepted run that began within this attempt, and
-published for release (test-only publication is refused), yields an acceptance. An
-input that already validates is accepted as the graph root without a repair
-iteration; its source digest and proof assurance come from the graph's recorded
-acceptance proof, and only a strictly contained proof is release-eligible. The result is an acceptance
-reference (`graphNodeId` = head, `artifactId` = `repair-graph`,
-`artifactSha256` = graph digest). The service records it once, rechecking the
-persisted candidate, versions and that the attempt is still the latest.
+acceptance. Production repair acceptance publication is **disabled** pending a
+qualified workflow-owned, bounded, read-only attestation of installed canonical
+sources, retained blobs and receipt bodies, including binary/profile/corpus and
+invocation bindings (#478). The recorded repair-history reader is diagnostic
+metadata only and must never authorize acceptance, even for a recorded accepted
+head or baseline. The explicit test-only publication seam exercises service/store
+integration with inert graphs; it is not production acceptance evidence. The
+service publication infrastructure rechecks the persisted candidate, versions and
+that the attempt is still the latest before recording any trusted reference.
+
+Production options declare no checkpoint policy yet, so `POST R/recover` and
+`GET R/controls` report resume as `RESUME_UNSUPPORTED`; an explicit retry starts a
+fresh linked attempt with the predecessor's own option and recorded (possibly
+lowered) limits; recovery never raises them. A new recovery command passes the same
+runtime-prerequisite admission as a fresh start, including the bounded sandbox check
+at submission, while a keyed replay stays read-only. A repair retry
+re-resolves the predecessor's recorded input revision (accepted or completed
+candidate) and copies its retained source afresh; if that revision is no longer
+retained, retry is refused with `INPUT_UNVERIFIED`.
 
 Startup recovery keeps its existing transitions and then reconciles. Queued
 attempts become `interrupted` with no `startedAt`: they never executed. Active
 attempts become `interrupted` with their `startedAt` and partial evidence. Neither
-is resumed or re-executed. A completed candidate whose attestation now verifies
-(for example after a crash between completion and acceptance) is published once;
-an existing acceptance is never repeated or replaced. Reconciliation reads
-retained evidence only and never executes a binary, model or adapter body.
+is resumed or re-executed. Completed production repair candidates remain
+unpublished until qualified attestation exists; existing acceptances are never
+repeated or replaced. Registered trusted publication adapters (currently inert
+test controls) share the recovery operation's admitted inventory, aggregate read
+and retention allowances, and cancellation checkpoints, including final mutation
+rechecks. A limit or cancellation after recovery changes began retains outcome
+uncertainty; an earlier durable acceptance is not rolled back or repeated.
+Reconciliation never executes a binary, model or adapter body.
 
 ### Admission and overload
 
@@ -435,26 +501,35 @@ policy (`none`, `accepted-optional` or `recorded-required`) and whether its
 defaults and, when adjustable, per-field ceilings. `agentContractVersion` is
 reported exactly for options that contact an agent. `supported` means every
 declared prerequisite (sandbox helpers, bundled Ghidra, a configured agent
-harness and, for repair, a production-qualified contained repair validator) was
+harness, qualified exploration helper ownership and, for repair, a
+production-qualified contained repair validator) was
 established by the current readiness observation. Workflow prerequisites follow the
 same passive rule as harness readiness: a page load reads configuration and file
 metadata only (helper executability, bundled Ghidra presence) and launches no
-helper. Options that execute the binary therefore report `unknown` with
+helper. Otherwise-qualified options that execute the binary report `unknown` with
 `SANDBOX_HELPER_UNCHECKED` ("checked when this workflow starts") unless a recent
 explicit agent preflight already checked the helpers. Starting a workflow is itself
 an explicit operator action: when the selected option needs the sandbox, its other
 prerequisites hold and the helpers are unchecked, `POST J/runs` runs the same
 bounded helper check (at most five seconds) before admission; a keyed replay still
 returns its recorded run whatever the check reports. It needs no configured agent and no prior
-preflight. Only a failed or timed-out check refuses the start, with
+preflight. A failed or timed-out check refuses the start, with
 `503 CAPABILITY_UNAVAILABLE` and its fixed reason message; nothing is recorded.
-Evidence-only reconstruction needs only Ghidra presence. Until the secure repair
-runtime's validator qualification gate opens, repair reports
+Evidence-only reconstruction needs only Ghidra presence. Production exploration
+reports `unavailable` / `EXPLORATION_HELPERS_UNQUALIFIED` when readiness facts are
+present, even if sandbox inspection succeeded. It refuses fresh starts and retries
+without recording a new attempt, skips the unnecessary helper probe, and refuses
+direct execution before starting an engine or worker. No environment flag opens
+this qualification gate. A missing readiness snapshot remains `unknown` and also
+cannot authorize execution. Until the secure repair runtime's validator
+qualification gate opens, repair reports
 `REPAIR_VALIDATOR_UNQUALIFIED` and is refused at admission. A missing prerequisite
 is `unavailable` with its fixed reason code, and a probe that did not finish makes
 the option `unknown`. Workflows without a production adapter (`build`,
 `validate`) are reported `unsupported` with `WORKFLOW_NOT_IMPLEMENTED`. Every
-other capability has `launch: null`. Launch facts describe adapters; admission
+other capability has `launch: null`. `launch` is optional within v1: an older
+producer omits it, and clients treat absence like null (no launch facts, no start
+control). Launch facts describe adapters; admission
 rechecks registration, limits, input and readiness.
 
 These are report-level observations, separate from an individual attempt's
@@ -463,8 +538,10 @@ request, preflight, provider selection or workflow action.
 
 ### Harness options
 
-Each agent option names exactly one harness in `launch.harness` (null for
-non-agent options): its `kind`, the `implementationId` and `protocolVersion` the
+New servers name exactly one harness for each agent option in `launch.harness`
+(null for non-agent options). This additive v1 response field is optional on the
+wire; omission by an older server means provenance was not reported, not that
+another harness may be inferred. When present, it describes its `kind`, the `implementationId` and `protocolVersion` the
 harness factory resolved from the operator's configuration (null when that
 configuration did not resolve), whether it is `deprecated`, and the `operations`
 (workflows) this server registers for it. Harnesses are probed independently with
@@ -474,7 +551,7 @@ appears in bootstrap.
 | Harness | Option identity suffix | Reported when | Notes |
 | --- | --- | --- | --- |
 | `acp` | `-agent-acp` | Always (ACP is the default) | `unavailable` with `HARNESS_NOT_CONFIGURED`, `HARNESS_CONFIGURATION_INVALID`, `HARNESS_UNSUPPORTED` or `AGENT_PREFLIGHT_FAILED` until configured and resolvable |
-| `legacy-openai` | `-agent-legacy-openai` | Only when the operator explicitly selected `ACP_HARNESS=legacy-openai` | Deprecated; retained for compatibility and records no agent protocol provenance |
+| `legacy-openai` | `-agent-legacy-openai` | Only when the operator explicitly selected `ACP_HARNESS=legacy-openai` | Deprecated; records a non-secret settings digest but no ACP protocol or SDK provenance |
 | `builtin` | `-agent-builtin` | Always, beside each ACP agent option | `unsupported` with `BUILTIN_HARNESS_NOT_INTEGRATED`: no workflow runs the built-in harness yet (#79, #76, #77), so it has no registration and is never admitted |
 
 The `harnessCapabilityId` of an agent option is always `agent-<kind>`. Admission
@@ -500,12 +577,26 @@ later configuration change is recorded only on a new attempt, and a keyed replay
 returns the original record. It is not part of the caller's start intent. When work
 begins, the adapter resolves the harness again and refuses the attempt (`failed`,
 `REFUSED`) before any agent work if the resolution differs from the record.
-Attempts recorded before this field existed report `configuration: null`.
+Attempts recorded before this field existed report `configuration: null` from new
+servers. This additive v1 response field may also be omitted by older servers;
+consumers treat both cases as not recorded, never as an evidence-only configuration.
+Present records retain the full schema and harness-identity validation.
+
+For the deprecated legacy adapter, the versioned canonical digest binds the effective
+chat-completions endpoint, exact model and normalized reasoning effort. It excludes
+`API_KEY` entirely (including hashes of its value); credential rotation is not a
+configuration or account-identity claim. `BASE_URL` must be a non-secret routing URL
+without user-info, query or fragment; the factory refuses those components rather
+than hashing potential embedded credentials or silently omitting execution settings.
+Keep credentials only in `API_KEY`, never in the endpoint path or model. New legacy
+selections always have a digest; historical null-digest records remain readable and
+are never rewritten. Neither kind of record qualifies a real provider invocation.
 
 ### Reconstruction scope
 
-Reconstruction options report `launch.reconstruction` (null for other workflows): the
-reconstruction `profileId`, `planner: "deterministic"`, `moduleSelection: "all-planned"`,
+New servers report `launch.reconstruction` for reconstruction options (null for other
+workflows). This additive v1 field may be omitted by earlier servers; omission does not
+establish a profile or authorize scope controls. When present, it describes the reconstruction `profileId`, `planner: "deterministic"`, `moduleSelection: "all-planned"`,
 the planner's scale bounds (`plannerMaximumEntities`, `plannerMaximumDependencyEdges`,
 `plannerMaximumWorkUnits`) and `maximumFunctionsPerModule`, and for the agent option the
 per-module `contextCharacters` range (`default`, `minimum`; null for evidence-only). The
@@ -514,14 +605,25 @@ start cannot select, exclude or reorder modules or supply a plan. Planner bounds
 limits: a binary beyond them stops during planning rather than reconstructing partially.
 Large-binary support and harness availability remain separate feature-level dependencies.
 
-A start's `scope` is `null` or `{"maxContextCharacters": "<uint64>"}`; any other field,
+A start's optional `scope` is `null` or `{"maxContextCharacters": "<uint64>"}`; omission and
+null both mean the server default. The form omits the field when no context range is
+advertised, so it can still start work on older v1 servers that reject unknown fields. Any other field,
 unquoted number or non-object is `422 VALIDATION_FAILED`. Admission refuses a scope outside
 the option's range, or on an option without a context range, as `422
 RECONSTRUCTION_SCOPE_UNAVAILABLE`. A scope is part of the start intent (absent for scope-less
 starts, so earlier receipts keep their digest). The attempt records the exact effective values
 in `configuration.reconstruction`: `profileId`, the profile's `profileSha256` and the
 `maxContextCharacters` the run used (the default when none was requested; null for
-evidence-only). The agent reconstructor runs with that recorded budget.
+evidence-only). The agent reconstructor runs with that recorded budget. Earlier v1
+servers instead reported the always-null `configuration.profileId` placeholder. Consumers
+accept that shape without inferring a profile or budget. New servers also retain the always-null
+`configuration.profileId` alongside the additive `reconstruction` facts, so older clients can
+still decode run details, run lists and snapshots. A non-null legacy placeholder or malformed
+reconstruction record is still refused. Durable storage decodes the earlier shape
+as unrecorded reconstruction provenance while preserving the rest of the admission record.
+Recovery also preserves an explicitly lowered scope, revalidating it against the current
+option; it never silently raises that budget to the default. A scope no longer approved by
+the option refuses recovery as `503 CAPABILITY_UNAVAILABLE` before admitting any successor.
 
 ### Validation requests
 
@@ -572,17 +674,23 @@ and repair attempts link their overview to this evidence view.
 
 `GET R/reports/module-progress` returns `moduleProgress` for one attempt, read from that
 attempt's own `reconstruction_progress.json`, `reconstruction.json` and source-tree
-`reports/module_plan.json` and `reports/confidence.json` (the last only after generation),
-captured between two reads of the same attempt version (`409 REPORT_CHANGED` otherwise). An
-absent or partially rewritten report is unrecorded, never an outcome. Non-reconstruction
+`reports/module_plan.json`, `reports/confidence.json` (only after generation) and the bounded
+`reports/build_contract.json`, captured between two reads of the same attempt version
+(`409 REPORT_CHANGED` otherwise). An absent or partially rewritten report is unrecorded,
+never an outcome. Non-reconstruction
 attempts report `state: "not-applicable"` with no stages.
 
 `stages` always lists `analysis`, `planning`, `generation` (completed/total modules),
 `validation` (the profile build, `build-passed` or `build-failed`) and `publication` (the
 recorded candidate revision or acceptance), each `pending`, `active`, `completed`, `stopped`
 (active when the attempt ended) or `not-reached`. A later stage never completes before an
-earlier one; a candidate retained after an unfinished build is `stopped` with
-`candidate-recorded`. `lastGeneratedModuleId` names the most recently finished module while others are still generating (the progress record names a module only after it finishes); `plan` carries the recorded plan digest and module count;
+earlier one. Validation completion is independent of archive publication: a recorded build
+contract matching the attempt's configured profile and carrying a consistent source-revision
+digest reports `build-failed` for a nonzero exit, unstable inputs or a missing output artifact,
+and `build-passed` otherwise. A missing, unsupported or malformed contract does not invent an
+outcome. These are reported build facts, not current-source verification or acceptance. A
+candidate retained after an unfinished build or failed packaging is `stopped` with
+`candidate-recorded`; a completed build alone never completes publication. Reconstruction records generation start (`modules`, 0 of N) before the first module, so a long first module shows generation active. `lastGeneratedModuleId` names the most recently finished module while others are still generating (the progress record names a module only after it finishes); `plan` carries the recorded plan digest and module count;
 `unresolved` lists up to 100 planned modules the generation record reports as unresolved,
 with the total and the archive's unresolved entity count.
 
@@ -865,6 +973,30 @@ configured limits, lifecycle, source and server sample time. Borrowed executors
 report unavailable metrics without zero values. Runtime uses the session-time
 snapshot; it neither polls these counts nor infers workflow availability from
 capacity. See [scheduler summary and verification](web-scheduler-summary.md).
+
+### Attempt queue position and stop reasons
+
+`GET jobs/J/runs/R/queue-position` samples one attempt's place in this process's executor queue.
+A queued attempt reports `position`/`ahead`, the total `queuedTasks` and busy/limit workers, always
+with `approximate: true`: queued work can be cancelled or stopped, two workers start tasks
+independently, and the queue is read separately from the attempt record. Other tasks are counted,
+never identified. A started or terminal attempt reports `not-queued` with its state; a borrowed
+executor or an attempt not found in the local queue reports `unavailable` with
+`EXTERNAL_EXECUTOR`/`NOT_IN_LOCAL_QUEUE`. The sample is display-only, never admission authority.
+The attempt view reads it on demand only while the attempt is queued.
+
+Terminal reasons keep stop outcomes separate. `LIMIT_EXHAUSTED` is a used-up budget (tool calls,
+output, tokens), `TIMED_OUT` a wall-clock or idle deadline, `CANCELLED` a recorded user request,
+`FAILED` a workflow-reported failure, `INFRASTRUCTURE_FAILED` an adapter or executor submission that
+could not produce any outcome, and `PROCESS_INTERRUPTED` a service stop or restart. Adapters may
+report `FAILED`, `REFUSED`, `LIMIT_EXHAUSTED` or `TIMED_OUT`; only the service records
+cancellation, infrastructure failure and interruption.
+
+Reported attempt usage comes from the terminal receipt. The view gives its units, its source and
+the receipt time (`endedAt`); the provider's own measurement time is not reported and stays
+"Not reported", as does every missing counter. Limits name the configuration persisted at
+`createdAt`. Live context-usage observations are coalesced for display only (one pending snapshot
+per 100 ms window) and never change the acknowledged cursor or persisted evidence.
 
 ## Current source catalog metadata
 
@@ -1266,6 +1398,33 @@ Activity uses SSE after bounded polling catch-up, with bounded reconnect and pol
 Run state now stays locked during bounded journal capture, with locks released before HTTP delivery.
 Controlled authenticated HTTP snapshot/replay and SSE eviction/resume checks now cover concurrent
 cutover. Slow-socket qualification and timed retention remain outstanding under #174.
+
+### Activity stages, correlation and private reasoning
+
+The Activity view summarizes the retained page as stages. The attempt row comes from the
+durable snapshot (`queued` waiting, `running`, `cancelling` blocked, `completed` accepted or
+completed without acceptance, `cancelled`, `failed`/`interrupted` terminal failure). Task rows
+group observations by `taskIdSha256` and keep the latest reported stage: analysis, planning
+and agent work are running; policy, build and behavior checks plus provisional/compile-valid
+results are validating; `unresolved` or a denied permission is blocked; `accepted`,
+`rolled_back`, `completed`, `cancelled` and failure phases are final. Rows without a stage
+(messages, tools, usage) keep the previous stage. Journal stages never establish acceptance.
+
+A percentage is shown only for an authoritative, producer-declared total. Observed task counts
+are not a denominator because tasks that have not started are invisible, so the view states
+how many observed tasks reached a final stage and that no percentage is shown.
+
+Correlation disclosures render on demand. The browser hashes the loaded attempt's own
+identities (attempt, previous attempt, input and result revision) with SHA-256, the same plain
+commitment the journal uses, and links only exact matches: a result revision to its source
+browser and a workflow-run digest to the previous attempt. Every other reference states why
+it is not linked (not recorded, not compared yet, no published task or session evidence page,
+or no matching revision). A task digest can narrow the page filter instead.
+
+Provider reasoning (`agent_thought_chunk`, role `thought`) is private. The journal records only
+its position, role, completion and `textOmitted: true`; it never buffers, stores, measures or
+commits to its text. Public projection also withholds `contentSha256`/`chunkCharacters` from
+older thought records. The ACP client never requests reasoning and no workflow depends on it.
 
 ## Agent preflight and harness readiness
 
