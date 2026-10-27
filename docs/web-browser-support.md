@@ -9,8 +9,8 @@ GitHub issues own live status.
 
 | Engine | Build | How it is exercised | Status |
 | --- | --- | --- | --- |
-| Chromium | Chrome for Testing 149.0.7827.55, linux64, pinned with its SHA-256 in `scripts/web-test-browser.json` | Every CI `web-packaged` run drives the packaged JVM in this build through DevTools: session, metadata, live dashboard, 10,000-job scale, Vite proxy and (with #1782) the route audit, which covers reflow, contrast, focus, keyboard commands/download, assets under CSP and timing. `upgrade` and `legacy` modes exist for explicit runs. Each run records `Browser.getVersion` and the binary SHA-256 in `report.json`. | Qualified for the journeys listed, per CI run |
-| Firefox | Playwright 1.58.2 Firefox 146.0.1 (browser revision 1509) | `scripts/packaged-browser-engines.mjs --engine firefox` against the packaged JVM at `/nested/` with its enforced CSP. The smoke journey uses the real server: bootstrap link sign-in with fragment removal, cookie restore across reload, runtime build identity, heading focus on route change, sign-out, and no browser storage left behind. It then runs the same route audit as Chromium: reflow at all five sizes in light and dark, text and focus contrast, Tab and Shift+Tab stops, 24 px targets, reduced motion, attempt retry/cancel and the source download by keyboard, every packaged asset plus the highlight worker under CSP, and timing budgets. | **Qualified locally** on 2026-10-26 (Linux x86-64): every check passed. Cold dashboard p95 219 ms, route feedback p95 16 ms, first data p95 49 ms. CI re-runs it for engine-driver changes or by dispatching *Browser engine qualification* |
+| Chromium | Chrome for Testing 149.0.7827.55, linux64, pinned with its SHA-256 in `scripts/web-test-browser.json` | Every CI `web-packaged` run drives the packaged JVM in this build through DevTools: session, metadata, live dashboard, 10,000-job scale, Vite proxy and (with #1782) the route audit, which covers reflow, contrast, focus, keyboard commands/download, assets under CSP and timing. `upgrade` and `legacy` modes exist for explicit runs. Each run records `Browser.getVersion` and the binary SHA-256 in `report.json`. | Existing journeys qualified only per successful CI run; #1782 route-audit/download implementation is integrated here, but current-head qualification is still pending |
+| Firefox | Playwright 1.58.2 Firefox 146.0.1 (browser revision 1509) | `scripts/packaged-browser-engines.mjs --engine firefox` against the packaged JVM at `/nested/` with its enforced CSP. The smoke journey uses the real server: bootstrap link sign-in with fragment removal, cookie restore across reload, runtime build identity, heading focus on route change, sign-out, and no browser storage left behind. It then runs the same route audit as Chromium: reflow at all five sizes in light and dark, text and focus contrast, Tab and Shift+Tab stops, 24 px targets, reduced motion, attempt retry/cancel and the source download by keyboard, every packaged asset plus the highlight worker under CSP, and timing budgets. | **Historical local smoke/audit only** on 2026-10-26 (Linux x86-64): the earlier checks passed; the strengthened current-head audit is not yet qualified. Cold dashboard p95 219 ms, route feedback p95 16 ms, first data p95 49 ms. CI re-runs it for engine-driver changes or by dispatching *Browser engine qualification* |
 | WebKit | Playwright 1.58.2 WebKit (browser revision 2248) | The same runner with `--engine webkit`. | **Not yet qualified.** The local host lacks WebKit's system libraries. It needs a passing *Browser engine qualification* run, which installs WebKit and its host dependencies on ubuntu-24.04. Engine-driver pull requests run it before merge; it can also be dispatched. Tracked in #1791 |
 | Safari (macOS) | — | Not run; release-time manual check per `docs/web-delivery.md`. | Not qualified |
 
@@ -72,13 +72,15 @@ it must not be used as qualification of the revised audit or as full #1791/#631 
 
 The client detects features (`frontend/src/shared/browserCapabilities.ts`) and never reads the
 user-agent string. A missing capability selects one of these documented paths instead of
-producing a failure state.
+producing a failure state for streaming or clipboard. #1782's complete-source download fix is
+integrated here, but a passing current-head packaged keyboard-download run is still required;
+documenting the fallback does not qualify that capability.
 
 | Capability | Detection | Fallback | Evidence |
 | --- | --- | --- | --- |
 | Streamed event delivery (readable `fetch` body) | `ReadableStream`, `TextDecoder` and `Response.prototype.body` present | Activity polls `events?transport=poll` every 2.5 s from the start and says it is using periodic refresh. A server that answers the stream with 406/415/501, a stream limit, or repeated transient failures switches to the same polling at runtime. API responses still enforce the byte limit while reading a stream even without `TextDecoder`, using a strict UTF-8 decoder after the bounded read. Only engines without readable bodies use `arrayBuffer()`: the declared length is checked before reading and the actual byte limit afterwards, but the browser must buffer that response whole (`api/body.ts`). | `capability-fallbacks.test.tsx`, `activity-stream.test.tsx` |
-| Clipboard write | `navigator.clipboard.writeText` in a secure context | The copy action is replaced by guidance to select the displayed text or download the complete input. A write that fails at runtime reports its failure, and the download remains. | `capability-fallbacks.test.tsx` |
-| File download | Native `<a download>` with a non-empty name (`download=""` would be taken over by the router) | Source and evidence attachments are served with `Content-Disposition: attachment`, so a browser that ignores the attribute still saves the file. The validation page export is an in-memory `data:` link and relies on `download`, which all three engines support; no further fallback is implemented. | `accessibility.test.tsx`, packaged audit keyboard download |
+| Clipboard write | `navigator.clipboard.writeText` in a secure context | The copy action is replaced by guidance to select the displayed text or download the complete input. A write that fails at runtime reports its failure. Selection is available; #1782's complete-source download fix is integrated, with current-head browser qualification still pending as described below. | `capability-fallbacks.test.tsx` verifies the guidance and clipboard behavior, not a completed download |
+| File download | Native `<a download>` with a non-empty name | #1782's fix is integrated: the non-empty filename prevents the router from treating the click as SPA navigation (`download=""` would be intercepted). Source and evidence attachment responses use `Content-Disposition: attachment` for browsers ignoring the attribute. The validation page's in-memory `data:` export relies on `download`; no further fallback is implemented. **Current-head browser qualification is pending**, including the WebKit fixture-transport correction above. | Focused accessibility/component controls pass; they do not establish native download completion. The packaged keyboard download must complete and match exact bytes in each engine; the #631 download slice remains open. |
 | Module worker (source highlighting) | Worker construction inside the explicit highlight action | Highlighting reports "unavailable" and the complete text stays plain; nothing else depends on the worker. | `source-highlight-operation.test.ts` |
 | Broadcast session invalidation | `BroadcastChannel` | Without it, other tabs learn about sign-out at their next authenticated read (401) instead of immediately. | `session-tabs.test.ts` |
 | Local preference storage | `localStorage` access | Display preferences apply to the tab only and say they could not be saved. | `display-preferences.test.tsx` |
@@ -109,7 +111,10 @@ not establish its full acceptance criterion.
   | `localStorage` | `decomp.display-preferences.v1` | Theme and reduced-motion choice |
   | `sessionStorage` | `decomp.upload.v1:<base>` | One bounded upload intent identity; no file bytes |
   | `sessionStorage` | `decomp.attempt-command.v1:<base>` | One unconfirmed attempt command: identities, version and request key, never credentials |
-  | `sessionStorage` | `decomp.reload-attempt.v1:<base>` | The public UI build ID a reload left (#630) |
+  | `sessionStorage` (reserved, not implemented here) | `decomp.reload-attempt.v1:<base>` | Planned public UI build ID a reload left (#630), pending #1784 |
+
+  The policy test allowlists `app/reloadGuard.ts` for #1784, but that module and record do not
+  exist at this head. An allowed future path is not evidence that the recovery guard is present.
 
 - **Offline viewing is limited to what the page already shows.** When the browser reports
   offline, the shell marks previously loaded information as possibly out of date and says server
@@ -123,14 +128,20 @@ not establish its full acceptance criterion.
 ## Old tabs and a new server (#632)
 
 - A lazy route whose hashed chunk no longer exists produces one application notice and one
-  explicit reload. There is no automatic chunk retry or reload, and no mutation is sent. The
+  explicit reload per page lifetime, not a guard persisted across reloads. There is no automatic
+  chunk retry or reload, and no mutation is sent. The
   packaged `--mode upgrade` journey checks this with a real previous/current pair of packages
   when run explicitly; normal CI does not build the second package.
-- An authenticated tab whose server reports a different UI build gets one explicit reload, then
-  only manual guidance if the reload kept the same build (`docs/web-failure-states.md`).
+- **Pending unmerged #1784:** compare an authenticated tab's UI build with the server's build,
+  offer one explicit reload and then only manual guidance if that reload kept the same build.
+  This head only reports server-instance changes; it does not implement that UI-build comparison
+  or the persisted one-reload guard. #1784 also supplies `docs/web-failure-states.md`, which is not
+  present here, and shares the persisted guard with asset recovery.
 - A response in a contract version this client cannot read moves the session to "incompatible",
   shows the reload guidance and stops private reads. Nothing is replayed.
 
-Still open in #632: running `--mode upgrade` with the HTTP cache enabled against two complete
-distinct packages in CI. The cache-observation helper and its controls exist, but no CI job
-builds a second package.
+Still open in #632: integrate and verify #1784's UI-build mismatch recovery and persisted guard,
+and run `--mode upgrade` with the HTTP cache enabled against two complete distinct packages in CI.
+The cache-observation helper and its controls exist, but no CI job builds a second package. The
+missing implementation and the unexecuted two-package qualification are separate gaps; existing
+asset/API recovery checks do not close either one.
