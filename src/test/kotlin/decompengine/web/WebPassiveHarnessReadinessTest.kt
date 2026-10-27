@@ -137,7 +137,8 @@ class WebPassiveHarnessReadinessTest {
 
     @Test
     fun `selection configuration inspection never calls its adapter provider`() {
-        val selected = AcpHarnessFactory.fromEnvironment(mapOf("ACP_HARNESS" to "legacy-openai"))
+        val selected = AcpHarnessFactory.fromEnvironment(mapOf("ACP_HARNESS" to "legacy-openai",
+            "BASE_URL" to "https://example.invalid/v1", "API_KEY" to "authored-key", "MODEL" to "authored-model"))
         var validations = 0
         var constructions = 0
         val selection = AcpHarnessSelection(selected.kind, selected.configuration, selected.provenance,
@@ -156,8 +157,12 @@ class WebPassiveHarnessReadinessTest {
         environment.clear()
         valid.validateConfiguration()
         environment.putAll(mapOf("ACP_HARNESS" to "legacy-openai"))
-        val invalid = AcpHarnessFactory.fromEnvironment(environment)
+        // Fresh provenance is bound to validated settings, so invalid selection fails at resolution,
+        // before an adapter can be constructed. Mutating the caller map never changes the valid selection.
+        assertFailsWith<IllegalArgumentException> { AcpHarnessFactory.fromEnvironment(environment) }
+        valid.validateConfiguration()
         environment.putAll(mapOf("BASE_URL" to "https://example.invalid/v1", "API_KEY" to "authored-key", "MODEL" to "authored-model"))
-        assertFailsWith<IllegalArgumentException> { invalid.validateConfiguration() }
+        AcpHarnessFactory.fromEnvironment(environment).validateConfiguration()
+        valid.validateConfiguration()
     }
 }
