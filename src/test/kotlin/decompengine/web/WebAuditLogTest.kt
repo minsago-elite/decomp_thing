@@ -171,6 +171,29 @@ class WebAuditLogTest {
         } finally { parent.toFile().deleteRecursively() }
     }
 
+    @Test fun `pre-storage queue overflow remains incomplete after flushing and restart`() {
+        val parent = root("overflow")
+        val store = parent.resolve("jobs")
+        try {
+            val log = WebAuditLog(store, clock)
+            repeat(WebAuditLog.MAXIMUM_PENDING_ENTRIES) { assertEquals(it + 1L, log.cancel()?.sequence) }
+            repeat(3) { assertNull(log.cancel()) }
+            assertFalse(Files.exists(store))
+            assertEquals(3, log.read(limit = 500).unrecordedEntries)
+            Files.createDirectory(store)
+            // Flush through read, then append successfully; neither may clear the sticky loss.
+            assertFalse(log.read(limit = 500).complete)
+            assertEquals(WebAuditLog.MAXIMUM_PENDING_ENTRIES + 1L, log.cancel()?.sequence)
+            val reopened = WebAuditLog(store, clock)
+            val page = reopened.read(limit = 500)
+            assertEquals(WebAuditLog.MAXIMUM_PENDING_ENTRIES + 1, page.entries.size)
+            assertTrue(page.unrecordedEntries > 0)
+            assertFalse(page.complete)
+            reopened.cancel()
+            assertFalse(WebAuditLog(store, clock).read(limit = 500).complete)
+        } finally { parent.toFile().deleteRecursively() }
+    }
+
     @Test fun `new audit directories and segments are made durable before a record is reported`() {
         val root = root("dirsync")
         try {
