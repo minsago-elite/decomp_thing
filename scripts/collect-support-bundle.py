@@ -18,6 +18,7 @@ and deletes the bundle if any appear.
 from __future__ import annotations
 
 import argparse
+from collections.abc import Callable
 import datetime
 import hashlib
 import json
@@ -167,12 +168,35 @@ def request_lines(log: Path) -> str:
     return "".join(f"{line}\n" for line in lines[-1000:])
 
 
-def scalar_facts(source: object, fields: tuple[str, ...]) -> dict:
-    """Project known scalar fields; never copy nested objects or extension fields verbatim."""
+def matching(pattern: str) -> Callable[[object], bool]:
+    return lambda value: isinstance(value, str) and re.fullmatch(pattern, value) is not None
+
+
+def one_of(*values: str) -> Callable[[object], bool]:
+    return lambda value: isinstance(value, str) and value in values
+
+
+def uint64(value: object) -> bool:
+    """Wire counters are canonical decimal strings, not arbitrary scalar text."""
+    return isinstance(value, str) and re.fullmatch(r"0|[1-9][0-9]{0,19}", value) is not None \
+        and int(value) <= (1 << 64) - 1
+
+
+def instant(value: object) -> bool:
+    if not isinstance(value, str) or re.fullmatch(r"[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(?:\.[0-9]{1,9})?Z", value) is None:
+        return False
+    try:
+        datetime.datetime.fromisoformat(value.replace("Z", "+00:00"))
+        return True
+    except ValueError:
+        return False
+
+
+def scalar_facts(source: object, fields: dict[str, Callable[[object], bool]]) -> dict:
+    """Project only field-valid wire facts; malformed values are omitted, never echoed."""
     if not isinstance(source, dict):
         return {}
-    return {key: source[key] for key in fields if key in source
-            and (source[key] is None or type(source[key]) in (str, int, bool))}
+    return {key: source[key] for key, valid in fields.items() if key in source and valid(source[key])}
 
 
 def runtime(reply: Path) -> dict:
@@ -182,28 +206,47 @@ def runtime(reply: Path) -> dict:
     if not isinstance(data, dict) or not isinstance(data.get("applicationBuildId"), str) or "runtime" not in data:
         raise BundleError("--runtime-json must be a saved GET /api/v1/bootstrap reply; a session reply has no runtime facts")
     raw_capabilities = data.get("capabilities", [])
-    capabilities = [scalar_facts(capability, ("id", "state", "reasonCode"))
+    code = matching(r"[A-Z][A-Z0-9_]{0,63}")
+    capabilities = [scalar_facts(capability, {
+        "id": one_of("workflows", "harness"),
+        "state": one_of("supported", "unavailable", "unsupported", "unknown"),
+        "reasonCode": lambda value: value is None or code(value)})
                     for capability in raw_capabilities if isinstance(capability, dict)] if isinstance(raw_capabilities, list) else []
     source = data.get("runtime")
     if not isinstance(source, dict):
         raise BundleError("--runtime-json bootstrap runtime must be an object")
     return {
-        **scalar_facts(data, ("applicationBuildId", "uiBuildId", "basePath", "readiness")),
+        **scalar_facts(data, {
+            "applicationBuildId": matching(r"[0-9a-f]{64}"), "uiBuildId": matching(r"[0-9a-f]{64}"),
+            "basePath": matching(r"/(?:[A-Za-z0-9_-]{1,64}/){0,3}"),
+            "readiness": one_of("ready", "degraded", "draining", "unavailable")}),
         "apiVersions": [version for version in data.get("apiVersions", [])
                         if type(version) is int and 0 <= version <= 1_000_000]
                        if isinstance(data.get("apiVersions"), list) else [],
         "capabilities": capabilities,
-        "limits": scalar_facts(data.get("limits"), (
-            "requestDeadlineMs", "uploadDeadlineMs", "downloadIdleMs", "maxJsonBytes", "maxUploadBytes",
-            "maxSourceChunkBytes", "maxLogChunkBytes", "maxEventCount", "maxEventBytes",
-            "terminalEventRetentionMs", "defaultPageLimit", "maxPageLimit")),
+        "limits": scalar_facts(data.get("limits"), {
+            **{field: uint64 for field in (
+                "requestDeadlineMs", "uploadDeadlineMs", "downloadIdleMs", "maxJsonBytes", "maxUploadBytes",
+                "maxSourceChunkBytes", "maxLogChunkBytes", "maxEventCount", "maxEventBytes", "terminalEventRetentionMs")},
+            **{field: lambda value: type(value) is int and 1 <= value <= 200
+               for field in ("defaultPageLimit", "maxPageLimit")}}),
         "runtime": {
-            **scalar_facts(source, ("javaVersion", "osName", "architecture", "gitVersion")),
-            "scheduler": scalar_facts(source.get("scheduler"), (
-                "sampledAt", "state", "reasonCode", "source", "approximate", "lifecycle",
-                "activeWorkers", "workerLimit", "queuedTasks", "queueCapacity")),
-            "progressRetention": scalar_facts(source.get("progressRetention"), (
-                "enabled", "sampledAt", "examined", "expired", "failures", "lastFailureCode")),
+            **scalar_facts(source, {
+                "javaVersion": matching(r"[0-9]{1,3}(?:\.[0-9]{1,5}){0,3}(?:[+_-][0-9A-Za-z.-]{1,32})?"),
+                "osName": one_of("linux", "macos", "windows", "unknown"),
+                "architecture": one_of("x86_64", "aarch64", "unknown"),
+                "gitVersion": lambda value: value is None or matching(r"[0-9]{1,3}(?:\.[0-9]{1,5}){1,3}")(value)}),
+            "scheduler": scalar_facts(source.get("scheduler"), {
+                "sampledAt": instant, "state": one_of("available", "unavailable"),
+                "reasonCode": one_of("EXTERNAL_EXECUTOR"), "source": one_of("web-workflow-executor"),
+                "approximate": lambda value: value is True, "lifecycle": one_of("running", "stopping"),
+                "activeWorkers": matching(r"[0-2]"), "workerLimit": matching(r"[1-2]"),
+                "queuedTasks": matching(r"0|[1-9]|[12][0-9]|3[0-2]"),
+                "queueCapacity": matching(r"[1-9]|[12][0-9]|3[0-2]")}),
+            "progressRetention": scalar_facts(source.get("progressRetention"), {
+                "enabled": lambda value: type(value) is bool, "sampledAt": instant,
+                "examined": uint64, "expired": uint64, "failures": uint64,
+                "lastFailureCode": lambda value: value is None or code(value)}),
         },
     }
 

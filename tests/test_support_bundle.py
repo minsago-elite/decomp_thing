@@ -145,6 +145,52 @@ class SupportBundleTest(unittest.TestCase):
         self.assertEqual({"enabled": True, "examined": "3", "lastFailureCode": None},
                          facts["runtime"]["progressRetention"])
 
+    def test_numeric_runtime_facts_drop_confidential_or_malformed_scalars(self) -> None:
+        document = json.loads(self.reply.read_text())
+        data = document["data"]
+        for index, malformed in enumerate(("customer-confidential-counter", "-1", "01", "1.5", "1e2", " 1", "١", "9" * 500,
+                                           str(1 << 64), -1, 1.5, True, None, [], {})):
+            with self.subTest(value=malformed):
+                data["limits"] = {"maxUploadBytes": malformed, "maxJsonBytes": malformed,
+                                  "defaultPageLimit": malformed, "maxPageLimit": malformed}
+                data["runtime"]["scheduler"] = {field: malformed for field in (
+                    "activeWorkers", "workerLimit", "queuedTasks", "queueCapacity")}
+                data["runtime"]["progressRetention"] = {field: malformed for field in (
+                    "examined", "expired", "failures", "enabled", "sampledAt")}
+                # True is valid only for the boolean field, never for numeric counters.
+                self.reply.write_text(json.dumps(document))
+                output = bundle_module.collect(self.install, self.root / f"out-{index}", self.data, self.log,
+                                               self.reply, self.environment)
+                facts = json.loads((output / "runtime.json").read_text())
+                self.assertEqual({}, facts["limits"])
+                self.assertEqual({}, facts["runtime"]["scheduler"])
+                self.assertEqual({"enabled": True} if malformed is True else {}, facts["runtime"]["progressRetention"])
+                self.assertNotIn("customer-confidential", "".join(path.read_text() for path in output.iterdir()))
+
+    def test_runtime_wire_bounds_and_formats_are_preserved(self) -> None:
+        document = json.loads(self.reply.read_text())
+        data = document["data"]
+        data["limits"] = {"maxUploadBytes": str((1 << 64) - 1), "maxJsonBytes": "0",
+                          "defaultPageLimit": 1, "maxPageLimit": 200}
+        data["runtime"]["scheduler"] = {
+            "activeWorkers": "2", "workerLimit": "2", "queuedTasks": "32", "queueCapacity": "32",
+            "sampledAt": "2026-10-27T01:02:03.123456789Z", "approximate": True,
+            "state": "available", "source": "web-workflow-executor", "lifecycle": "running"}
+        data["runtime"]["progressRetention"] = {"enabled": False, "examined": "0", "expired": "1", "failures": "2",
+                                                 "sampledAt": "2026-10-27T01:02:03Z", "lastFailureCode": "RETENTION_UNAVAILABLE"}
+        self.reply.write_text(json.dumps(document))
+        facts = bundle_module.runtime(self.reply)
+        self.assertEqual(data["limits"], facts["limits"])
+        self.assertEqual(data["runtime"], facts["runtime"])
+        data["runtime"]["scheduler"].update(activeWorkers="3", workerLimit="0", queuedTasks="33", queueCapacity="0")
+        data["runtime"]["progressRetention"].update(sampledAt="2026-02-30T00:00:00Z", lastFailureCode="private-project")
+        self.reply.write_text(json.dumps(document))
+        facts = bundle_module.runtime(self.reply)
+        for field in ("activeWorkers", "workerLimit", "queuedTasks", "queueCapacity"):
+            self.assertNotIn(field, facts["runtime"]["scheduler"])
+        for field in ("sampledAt", "lastFailureCode"):
+            self.assertNotIn(field, facts["runtime"]["progressRetention"])
+
     def test_non_object_runtime_is_refused_without_retaining_a_bundle(self) -> None:
         for malformed in (None, "customer-confidential-runtime", []):
             with self.subTest(runtime=malformed):
