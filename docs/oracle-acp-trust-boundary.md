@@ -48,8 +48,16 @@ only reconstruction is agent-free and is not a harness fallback.
 One trusted factory owns harness selection and construction for CLI, web, reconstruction, repair, and patch workflows.
 Provisioning uses structured ordered arguments, explicit environment provenance, authenticated executable/runtime
 manifests, stable ACP v1 capability requirements, bounded lifecycle/resource settings, and the verified Linux
-bubblewrap/cgroup boundary. Provider credentials belong to the ACP agent's own configuration and are not inherited by
-the engine process boundary.
+bubblewrap/cgroup boundary. For contained provider-backed execution, an operator-controlled broker/relay owns provider
+credentials outside the ACP agent, analyzed program, candidate build and terminal children. The agent receives only an
+admitted invocation/session-bound model channel; provider connectivity supplies no oracle or acceptance authority.
+That separately qualified transport remains unavailable in the current network-free production deployment. See
+[provider credentials and current availability](acp-v1-client.md#provider-credentials-and-current-availability).
+
+Explicit secret environment bindings are forwarded to the agent, including during initialize preflight. They may
+describe non-provider agent secrets, but cannot hold provider credentials for this brokered contract. Agent-protocol
+authentication and provider-transport authentication retain their separate lifecycle and qualification requirements;
+neither a configured secret nor an advertised authentication method proves a usable provider channel.
 
 Accepted model-driven artifacts bind at least:
 

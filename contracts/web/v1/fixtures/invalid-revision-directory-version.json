@@ -1,0 +1,51 @@
+{
+  "apiVersion": 1,
+  "kind": "revisionDirectory",
+  "requestId": "request_directory_1",
+  "data": {
+    "binding": {
+      "jobId": "job_1",
+      "runId": "run_1",
+      "revisionId": "revision_1"
+    },
+    "authority": "source-input-commitments",
+    "sourceSha256": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+    "metadataVersion": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+    "items": [
+      {
+        "kind": "directory",
+        "directoryId": "dir_1_1_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "displayName": "\u00e9 space",
+        "sourceFileCount": 2
+      },
+      {
+        "fileId": "file_0_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "displayName": "Makefile",
+        "sizeBytes": "0",
+        "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "declaredUtf8Text": true,
+        "declaredViewable": true,
+        "kind": "file"
+      }
+    ],
+    "page": {
+      "nextCursor": null,
+      "snapshotVersion": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "limit": 50
+    },
+    "directoryId": "root",
+    "parentDirectoryId": null,
+    "displayName": null,
+    "depth": 0,
+    "breadcrumbs": [
+      {
+        "directoryId": "root",
+        "displayName": null
+      }
+    ],
+    "omittedAncestors": 0,
+    "emptyDirectories": "not-recorded",
+    "sourceFileCount": 3,
+    "totalChildren": 2
+  }
+}

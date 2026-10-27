@@ -7,10 +7,11 @@ import { createServer as createHttpServer } from 'node:http';
 import { fileURLToPath } from 'node:url';
 import { parseArgs } from 'node:util';
 import { qualifyUpload, qualifyUploadFailures, qualifyMeasuredUpload } from './packaged-browser-upload.mjs';
-import { seedScale, qualifyScale } from './packaged-browser-scale.mjs';
+import { seedScale, qualifyScale, dashboardFiltersWithSnapshot } from './packaged-browser-scale.mjs';
+import { seedLive, qualifyLive } from './packaged-browser-live.mjs';
 import { seedHistory, qualifyHistory } from './packaged-browser-history.mjs';
 import { seedLegacy, qualifyLegacy } from './packaged-browser-legacy.mjs';
-import { qualifyUpgrade } from './packaged-browser-upgrade.mjs';
+import { qualifyUpgrade, qualifyUpgradeCache } from './packaged-browser-upgrade.mjs';
 
 // Test driver only: the application is launched with a separate Node-free PATH.
 const repo = resolve(dirname(fileURLToPath(import.meta.url)), '..');
@@ -27,9 +28,11 @@ const { values } = parseArgs({ options: {
   help: { type: 'boolean', default: false },
 } });
 if (values.help) {
-  console.log('Usage: node scripts/check-packaged-web-browser.mjs --archive /absolute/distribution.zip --chrome /absolute/chrome --java-home /absolute/jdk [--mode public|session|upload|history|scale|proxy|upgrade|legacy] [--previous-archive /absolute/previous.zip] [--work-parent /absolute/scratch] [--keep-workdir] [--python /absolute/python3] [--no-sandbox]');
+  console.log('Usage: node scripts/check-packaged-web-browser.mjs --archive /absolute/distribution.zip --chrome /absolute/chrome --java-home /absolute/jdk [--mode public|session|upload|metadata|history|scale|live|proxy|upgrade|legacy] [--previous-archive /absolute/previous.zip] [--work-parent /absolute/scratch] [--keep-workdir] [--python /absolute/python3] [--no-sandbox]');
   console.log('public: packaged home/Runtime/recovery; session: public plus local session journey; upload: session plus inert upload and lost-response retry; history: session plus preseeded inert multi-page attempts; scale: session plus 10,000 persisted jobs and keyboard pagination; proxy: real Vite HMR and session journey against packaged JVM; upgrade: previous JVM to current JVM on one origin with an old tab.');
   console.log('legacy: inert legacy HTML/polling with explicit test-owned state edits; no workflow execution.');
+  console.log('metadata: session plus one inert header upload/retry, real packaged job metadata, maximum uint64 address, and simulated malformed-response recovery; no workflow execution or upload quota/scale measurement.');
+  console.log('live: session plus authored inert job changes and real background listing reads; preserves focused row order and applies new jobs on explicit refresh.');
   console.log('upgrade requires --previous-archive and distinct manifest builds with the old Runtime chunk absent from --archive. Its previous extraction is always removed before the current extraction, even with --keep-workdir.');
   console.log('Reports/screenshots stay in build/. Owned extraction/profile/socket directories are removed after confirmed shutdown unless --keep-workdir is set. Proxy requires npm ci --ignore-scripts under the pinned Node beforehand.');
   process.exit(0);
@@ -41,7 +44,7 @@ for (const option of ['archive', 'chrome', 'java-home', 'python']) {
   assert.ok(values[option] && isAbsolute(values[option]), `--${option} must name an absolute existing path; see --help`);
   await fs.access(values[option]);
 }
-assert.ok(['public', 'session', 'upload', 'history', 'scale', 'proxy', 'upgrade', 'legacy'].includes(values.mode), '--mode must be public, session, upload, history, scale, proxy, upgrade or legacy');
+assert.ok(['public', 'session', 'upload', 'metadata', 'history', 'scale', 'live', 'proxy', 'upgrade', 'legacy'].includes(values.mode), '--mode must be public, session, upload, metadata, history, scale, live, proxy, upgrade or legacy');
 if (values.mode === 'upgrade') {
   assert.ok(values['previous-archive'] && isAbsolute(values['previous-archive']), 'upgrade requires --previous-archive as an absolute existing ZIP path');
   await fs.access(values['previous-archive']);
@@ -222,10 +225,12 @@ function correlateDocumentResponse(state, requestId, response, source) {
   state.pendingDocumentRequests.delete(requestId);
 }
 
-async function makeTarget({ cspProbe = false } = {}) {
+async function makeTarget({ cspProbe = false, cacheEnabled = false } = {}) {
+  assert.equal(typeof cacheEnabled, 'boolean', 'Browser cache policy must be explicit');
   const { targetId } = await cdp.call('Target.createTarget', { url: 'about:blank' });
   const { sessionId } = await cdp.call('Target.attachToTarget', { targetId, flatten: true });
-  const state = { targetId, sessionId, cspProbe, requests: [], responses: [], exceptions: [], requestUrls: new Map(),
+  const state = { targetId, sessionId, cspProbe, cacheEnabled, requests: [], responses: [], exceptions: [], requestUrls: new Map(),
+    cacheRequests: [], cacheResponses: [], cacheRequestIds: new Set(),
     documentRequests: [], pendingDocumentRequests: new Map(), orphanDocumentResponses: [],
     cspViolations: [], cspLogEntries: [], cspBlockedRequests: [], cspIssues: [] };
   targets.push(state);
@@ -239,6 +244,7 @@ async function makeTarget({ cspProbe = false } = {}) {
     const url = event.request.url.split('#')[0].split('?')[0];
     state.requestUrls.set(event.requestId, url);
     state.requests.push({ method: event.request.method, url, type });
+    if (cacheEnabled) state.cacheRequests.push({ requestId: event.requestId, method: event.request.method, url, type });
     if (type === 'Document') {
       const request = { requestId: event.requestId, sequence: state.documentRequests.length,
         route: new URL(url).pathname, method: event.request.method, status: null,
@@ -247,8 +253,13 @@ async function makeTarget({ cspProbe = false } = {}) {
       state.pendingDocumentRequests.set(event.requestId, request);
     }
   }, sessionId);
+  cdp.on('Network.requestServedFromCache', (event) => {
+    if (cacheEnabled) state.cacheRequestIds.add(event.requestId);
+  }, sessionId);
   cdp.on('Network.responseReceived', (event) => {
     const response = { url: event.response.url.split('#')[0].split('?')[0], status: event.response.status, type: event.type };
+    if (cacheEnabled) state.cacheResponses.push({ requestId: event.requestId, ...response,
+      fromDiskCache: event.response.fromDiskCache ?? null, fromServiceWorker: event.response.fromServiceWorker ?? null });
     if (event.type === 'Document' || state.pendingDocumentRequests.has(event.requestId)) {
       response.contentSecurityPolicy = responseHeader(event.response, 'content-security-policy');
       correlateDocumentResponse(state, event.requestId, event.response, 'responseReceived');
@@ -292,7 +303,7 @@ async function makeTarget({ cspProbe = false } = {}) {
       sourceFile: event.sourceFile, statusCode: event.statusCode, violatedDirective: event.violatedDirective,
     }));
   });` }, sessionId);
-  await cdp.call('Network.setCacheDisabled', { cacheDisabled: true }, sessionId);
+  await cdp.call('Network.setCacheDisabled', { cacheDisabled: !cacheEnabled }, sessionId);
   await cdp.call('Emulation.setDeviceMetricsOverride', { width: 1280, height: 900, deviceScaleFactor: 1, mobile: false }, sessionId);
   return state;
 }
@@ -448,8 +459,10 @@ try {
   const legacyFixture = values.mode === 'legacy' ? await seedLegacy(data) : null;
   const historyFixture = values.mode === 'history' ? await seedHistory(data) : null;
   const scaleFixture = values.mode === 'scale' ? await seedScale(data) : null;
-  const populated = !!(historyFixture || scaleFixture);
-  const libraryText = historyFixture ? 'synthetic-history.elf' : scaleFixture ? 'synthetic-project-09999.elf' : 'No uploaded jobs yet.';
+  const liveFixture = values.mode === 'live' ? await seedLive(data) : null;
+  const populated = !!(historyFixture || scaleFixture || liveFixture);
+  const libraryText = historyFixture ? 'synthetic-history.elf' : scaleFixture ? 'synthetic-project-09999.elf'
+    : liveFixture ? 'live-dashboard-2.elf' : 'No uploaded jobs yet.';
   let developmentPort;
   let browserOrigin;
   if (values.mode === 'proxy') {
@@ -496,12 +509,27 @@ try {
     const previousRuntime = previous.manifest.files.find((entry) => /^assets\/Runtime-.+\.js$/.test(entry.path));
     assert.ok(previousRuntime, 'Previous package must contain a Runtime lazy chunk');
     const previousRuntimeUrl = `${origin}/nested/assets/ui/${previousRuntime.path}`;
-    const tab = await makeTarget();
+    const tab = await makeTarget({ cacheEnabled: true });
     await cdp.call('Page.navigate', { url: `${origin}/nested/` }, tab.sessionId);
     await ready(tab, `document.querySelector('h1')?.textContent === 'Your work, with its evidence'`, 'previous packaged home');
     assert.equal(await evaluate(tab, `document.querySelector('meta[name="decomp-ui-build"]')?.content`), previous.manifest.buildId);
     assert.equal(await evaluate(tab, `document.querySelector('meta[name="decomp-application-version"]')?.content`), previous.manifest.applicationVersion);
     assert.equal(tab.requests.filter((entry) => entry.url === previousRuntimeUrl).length, 0, 'Previous Runtime chunk was loaded before replacement');
+    // A second target uses the same owned browser profile and real HTTP cache.
+    // Keep the original old tab alive with its lazy Runtime still unrequested.
+    const cacheProbe = await makeTarget({ cacheEnabled: true });
+    await cdp.call('Page.navigate', { url: `${origin}/nested/` }, cacheProbe.sessionId);
+    await ready(cacheProbe, `document.querySelector('h1')?.textContent === 'Your work, with its evidence'`, 'cached previous packaged home');
+    assert.equal(await evaluate(cacheProbe, `document.querySelector('meta[name="decomp-ui-build"]')?.content`), previous.manifest.buildId);
+    await delay(100); // Drain already-produced DevTools resource/cache events.
+    report.upgrade.cachedBootstrap = qualifyUpgradeCache(previous.manifest, `${origin}/nested/assets/ui/`, {
+      cacheEnabled: cacheProbe.cacheEnabled, coldResponses: tab.cacheResponses,
+      requests: cacheProbe.cacheRequests, responses: cacheProbe.cacheResponses,
+      cacheRequestIds: [...cacheProbe.cacheRequestIds],
+    });
+    assert.equal(cacheProbe.requests.filter((entry) => entry.url === previousRuntimeUrl).length, 0, 'Cache warm-up loaded the old lazy Runtime');
+    await cdp.call('Page.bringToFront', {}, tab.sessionId);
+    lastTarget = tab;
     await capture(tab, 'upgrade-previous-home.png');
 
     // The tab and its old entry module remain alive. Only the owned JVM and its
@@ -577,6 +605,9 @@ try {
     assert.ok(tab.responses.some((entry) => entry.url === `${origin}/nested/assets/ui/${pair.currentRuntime.path}` && entry.status === 200), 'Current Runtime chunk did not load successfully');
     assert.ok(tab.requests.every((entry) => ['GET', 'HEAD'].includes(entry.method)), 'Explicit reload sent a mutation');
     assert.ok(tab.requests.every((entry) => entry.url.startsWith(origin + '/')), 'Upgrade fetched an external dependency');
+    assert.ok(cacheProbe.requests.every((entry) => ['GET', 'HEAD'].includes(entry.method)), 'Cache warm-up tab sent a later mutation');
+    assert.ok(cacheProbe.requests.every((entry) => entry.url.startsWith(origin + '/')), 'Cache warm-up tab fetched an external dependency');
+    assert.deepEqual(cacheProbe.exceptions, []);
     assert.deepEqual(tab.exceptions, []);
     assert.equal(await fs.stat(installation.data).then(() => true, () => false), false, 'Current public browsing created job data');
     await capture(tab, 'upgrade-current-runtime.png');
@@ -585,9 +616,10 @@ try {
       automaticReloads: 0, automaticChunkRetries: 0, explicitReloadDocumentRequests: 1,
       recoveredCurrentBuild: true, mutationRequests: 0, noticeTitleWithinViewport: true, reloadControlWithinViewport: true });
     report.requests.upgrade = tab.requests;
+    report.requests.upgradeCacheWarm = cacheProbe.requests;
     report.jobDataCreated = false;
   }
-  if (values.mode === 'public' || values.mode === 'session' || values.mode === 'upload' || values.mode === 'history' || values.mode === 'scale') {
+  if (values.mode === 'public' || values.mode === 'session' || values.mode === 'upload' || values.mode === 'metadata' || values.mode === 'history' || values.mode === 'scale' || values.mode === 'live') {
     const identityExpression = `(() => ({ buildId: document.querySelector('meta[name="decomp-ui-build"]')?.content, applicationVersion: document.querySelector('meta[name="decomp-application-version"]')?.content, page: location.pathname, text: document.body.innerText }))()`;
     const home = await makeTarget();
     await cdp.call('Page.navigate', { url: `${origin}/nested/` }, home.sessionId);
@@ -744,7 +776,7 @@ try {
     report.requests = {};
   }
 
-  if (values.mode === 'session' || values.mode === 'upload' || values.mode === 'history' || values.mode === 'scale' || values.mode === 'proxy') {
+  if (values.mode === 'session' || values.mode === 'upload' || values.mode === 'metadata' || values.mode === 'history' || values.mode === 'scale' || values.mode === 'live' || values.mode === 'proxy') {
     const bootstrapUrl = await waitFor(() => applicationOutput.split(/\s+/).find((part) => part.startsWith(browserOrigin + '/nested/#bootstrap=')), 'local bootstrap handoff');
     const token = new URL(bootstrapUrl).hash.slice('#bootstrap='.length);
     sensitiveValues.push(token);
@@ -779,12 +811,12 @@ try {
     })()`);
     await evaluate(authenticated, `[...document.querySelectorAll('button')].find(button => button.textContent === 'Apply filters').click()`);
     await ready(authenticated, `document.body.innerText.includes('No jobs match these filters.')`, 'filtered empty job library');
-    assert.equal(await evaluate(authenticated, 'location.search'), '?search=absent+fixture');
+    assert.equal(dashboardFiltersWithSnapshot(await evaluate(authenticated, 'location.search')), '?search=absent+fixture');
     await cdp.call('Page.reload', {}, authenticated.sessionId);
     await ready(authenticated, `document.body.innerText.includes('Local session connected.') && document.body.innerText.includes('No jobs match these filters.')`, 'saved job filters after reload');
     await evaluate(authenticated, `[...document.querySelectorAll('button')].find(button => button.textContent === 'Reset filters').click()`);
     await ready(authenticated, `document.body.innerText.includes('${libraryText}')`, 'reset job library');
-    assert.equal(await evaluate(authenticated, 'location.search'), '');
+    assert.equal(dashboardFiltersWithSnapshot(await evaluate(authenticated, 'location.search')), '');
     report.dashboard = { emptyLibrary: !populated, populatedLibrary: populated, noMatches: true, filtersSurviveReload: true, resetFilters: true };
     if (historyFixture) {
       const row = await evaluate(authenticated, `(() => {
@@ -825,7 +857,7 @@ try {
       return { text: section.innerText, values: Array.from(section.querySelectorAll('dd')).map(node => node.textContent), sampledAt: section.querySelector('time')?.dateTime };
     })()`);
     assert.deepEqual(scheduler.values, ['running', '0', '2', '0', '32']);
-    assert.ok(scheduler.text.includes('approximate aggregate observations') && scheduler.text.includes('queue position and start time are not reported'));
+    assert.ok(scheduler.text.includes('approximate aggregate observations') && scheduler.text.includes('own approximate queue position is shown on its attempt page'));
     assert.ok(Number.isFinite(Date.parse(scheduler.sampledAt)));
     const retention = await evaluate(authenticated, `(() => {
       const section = document.querySelector('section[aria-labelledby="retention-title"]');
@@ -871,8 +903,16 @@ try {
     report.attemptHistory = { navigation: true, directReload: true, missingExplained: true, mutationRequests: 0 };
 
     if (scaleFixture) report.scale = await qualifyScale({ fixture: scaleFixture, makeTarget, cdp, evaluate, ready, browserOrigin });
+    if (liveFixture) {
+      report.liveDashboard = await qualifyLive({ fixture: liveFixture, makeTarget, cdp, evaluate, ready, waitFor, browserOrigin });
+      report.jobDataCreated = true;
+    }
     if (historyFixture) {
       report.populatedHistory = await qualifyHistory({ fixture: historyFixture, makeTarget, cdp, evaluate, ready, browserOrigin });
+      report.jobDataCreated = true;
+    }
+    if (values.mode === 'metadata') {
+      report.upload = await qualifyUpload({ makeTarget, cdp, evaluate, ready, browserOrigin, data });
       report.jobDataCreated = true;
     }
     if (values.mode === 'upload') {
@@ -962,8 +1002,8 @@ try {
     assert.equal(await evaluate(authenticated, 'localStorage.length + sessionStorage.length'), 0);
     assert.ok(authenticated.requests.every((request) => request.url.startsWith(browserOrigin + '/')));
     assert.ok(authenticated.requests.every((request) => ['GET', 'HEAD'].includes(request.method) || request.url === browserOrigin + '/nested/api/v1/session'));
-    assert.equal(await fs.stat(data).then(() => true, () => false), values.mode === 'upload' || values.mode === 'history' || values.mode === 'scale');
-    report.session = { authenticated: true, cookie: { httpOnly: true, sameSite: 'Strict', path: '/nested/', secure: false }, fragmentRemovedBeforeFetch: true, restoredAfterReload: true, explicitLogoutRequests: 1, successfulExchangeRequests: 1, consumedLinkRequests: 1, automaticMutationRetries: 0, storageEntries: 0, installationUnchanged: true, jobDataCreated: values.mode === 'upload' || populated };
+    assert.equal(await fs.stat(data).then(() => true, () => false), values.mode === 'upload' || values.mode === 'metadata' || populated);
+    report.session = { authenticated: true, cookie: { httpOnly: true, sameSite: 'Strict', path: '/nested/', secure: false }, fragmentRemovedBeforeFetch: true, restoredAfterReload: true, explicitLogoutRequests: 1, successfulExchangeRequests: 1, consumedLinkRequests: 1, automaticMutationRetries: 0, storageEntries: 0, installationUnchanged: true, jobDataCreated: values.mode === 'upload' || values.mode === 'metadata' || populated };
     report.requests.authenticated = authenticated.requests;
   }
 

@@ -5,8 +5,11 @@ const MAX_DEPTH = 40;
 const MAX_NODES = 50_000;
 
 /** Bounded JSON parser: duplicate keys, non-finite numbers and unpaired UTF-16 are invalid. */
-export function parseBoundedJson(text: string, maxBytes = MAX_JSON_BYTES): unknown {
+export function parseBoundedJson(text: string, maxBytes = MAX_JSON_BYTES, maxNodes = MAX_NODES): unknown {
   if (!Number.isSafeInteger(maxBytes) || maxBytes < 1 || maxBytes > MAX_JSON_BYTES) {
+    throw new ApiClientError('invalid_request');
+  }
+  if (!Number.isSafeInteger(maxNodes) || maxNodes < 1 || maxNodes > 100_000) {
     throw new ApiClientError('invalid_request');
   }
   // Character count avoids allocating an encoded copy when the input is already too large.
@@ -41,7 +44,7 @@ export function parseBoundedJson(text: string, maxBytes = MAX_JSON_BYTES): unkno
     return invalid();
   };
   const value = (depth: number): unknown => {
-    if (depth > MAX_DEPTH || ++nodes > MAX_NODES) throw new ApiClientError('response_too_large');
+    if (depth > MAX_DEPTH || ++nodes > maxNodes) throw new ApiClientError('response_too_large');
     whitespace();
     const char = text[position];
     if (char === '"') return string();

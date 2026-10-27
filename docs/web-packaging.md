@@ -1,10 +1,14 @@
 # Building and serving the embedded UI
 
+For one clean-checkout tool and cache setup, use
+[repository-local frontend setup](#repository-local-frontend-setup-and-rebuilds).
+
 The D1 frontend is an opt-in packaged preview. It currently provides the public
 shell and runtime view, local browser sessions, and authenticated v1 bootstrap
 and single-job metadata reads. Persistent job management and workflow actions
 remain on the default legacy UI until the D-series parity and access-control gates
-permit migration. The preview cannot upload or start a workflow.
+permit migration. The preview can upload ELF binaries and list and inspect jobs, but it cannot start a workflow;
+see the [workbench user guide](workbench-user-guide.md) for what it does today.
 
 Build with the pinned Node/npm versions in [.node-version](../.node-version) and
 [the frontend workspace](../frontend/README.md). Node is a build dependency only.
@@ -106,6 +110,10 @@ script with only required launcher utilities on PATH. It checks HTTP assets and
 deep links, exact hashes, HEAD/304, private/unknown errors and bounded shutdown.
 The JVM runtime does not invoke the test driver or Node. This HTTP smoke does not
 replace browser-rendered checks.
+
+For deterministic fixture generation, choosing a test layer, investigating a
+packaged-browser failure and retrieving its exact Actions artifacts, use the
+[fixture and failure investigation guide](web-workflow-fixtures.md#generating-and-selecting-development-fixtures).
 
 The dependency-free [browser driver](../scripts/check-packaged-web-browser.mjs)
 uses the pinned Node as a test process, Python 3.11+ for ZIP inspection, a JDK and
@@ -310,3 +318,125 @@ integrity or behavior from a successful application packaging check. See
 The SPA server now schedules bounded progress-journal cleanup by default. Existing unpinned terminal journals older than 24 hours can expire after startup; pin selected history from its attempt page to retain it. Unpinning does not reset the deadline or recover removed observations. Byte/count limits can omit older observations before timed cleanup. Legacy mode keeps periodic cleanup disabled.
 
 The scan preserves active work, pending publication, durable pins and live writers, and coordinates with checked snapshot/artifact reads. It does not delete uploaded inputs, workflow metadata, source revisions or other reports. Runtime displays the enabled configuration and process-local scan counters sampled at the last session check. These are not disk accounting or proof that every eligible job has been visited. See [the production policy](web-progress-adapter.md#spa-production-retention-and-sampled-status).
+
+## Repository-local frontend setup and rebuilds
+
+For feature extension, use the [route/DTO/event/component workflow](web-architecture.md#route-and-contract-extension-workflow)
+and the [Git adapter and identity contract](web-git-fixtures.md#git-adapter-extension-contract).
+
+This path starts at a clean checkout on a Linux x86-64 build host with the normal
+JVM build prerequisites available: JDK 21, Python 3.12+ with `venv` support and the
+repository's C/native build tools. Ghidra is a bundled Java-API dependency supplied
+by the normal build.
+The frontend installer supplies the checksum-locked build-only Node distribution.
+Run from the repository root and keep tools, caches and scratch there:
+
+```sh
+mkdir -p build/frontend-dev/tools build/frontend-dev/tmp \
+  build/frontend-dev/cache build/frontend-dev/state
+export TMPDIR="$PWD/build/frontend-dev/tmp"
+export XDG_CACHE_HOME="$PWD/build/frontend-dev/cache"
+export XDG_STATE_HOME="$PWD/build/frontend-dev/state"
+export NPM_CONFIG_CACHE="$PWD/build/frontend-dev/cache/npm"
+export PIP_CACHE_DIR="$PWD/build/frontend-dev/cache/pip"
+export GRADLE_USER_HOME="$PWD/build/frontend-dev/gradle"
+export PYTHONDONTWRITEBYTECODE=1
+
+python3 -m venv "$PWD/build/frontend-dev/tools/python"
+export PATH="$PWD/build/frontend-dev/tools/python/bin:$PATH"
+python3 -m pip install --requirement requirements/oracle-generation.txt
+
+bash scripts/install-frontend-node.sh "$PWD/build/frontend-dev/tools/node"
+export PATH="$PWD/build/frontend-dev/tools/node/bin:$PATH"
+node --version
+npm --version
+
+./gradlew -PfrontendNodeHome="$PWD/build/frontend-dev/tools/node" frontendInstall
+npm --prefix frontend run typecheck
+npm --prefix frontend run lint
+npm --prefix frontend test
+./gradlew -PfrontendNodeHome="$PWD/build/frontend-dev/tools/node" \
+  jar installDist distZip distTar
+```
+
+The installer requires its final destination to be absent and its parent to exist.
+It verifies the official archive against
+[`scripts/frontend-node-sha256.txt`](../scripts/frontend-node-sha256.txt), then checks
+Node 24.20.0, bundled npm 11.19.0, `.node-version`, package engines and
+`packageManager` before publishing the tool directory. An existing destination is
+preserved; reuse an already verified installation by selecting its absolute root,
+or choose a new absent path when intentionally installing another copy.
+
+`frontendInstall` invokes `npm ci --ignore-scripts --no-audit --no-fund` with the
+locked package files. The later distribution invocation reuses that task's declared
+inputs/outputs when unchanged and builds the production UI through Gradle. Actual
+type/lint/test results above remain distinct from reused build outputs. The
+installed launcher is `build/install/llm_bin_patch/bin/llm_bin_patch`; ZIP/TAR output
+is under `build/distributions/`. Node remains a development/build tool. The archived
+application serves its inventoried UI from the application JAR.
+
+The Python environment installs the pinned fixture/contract dependencies before
+`npm test`. Frontend development tests invoke `python3` to generate schema-checked
+fixtures, so keep this environment's `bin` on `PATH` for tests and fixture commands;
+Node's package installation does not install these Python packages.
+
+### Keep resources and runtime references together
+
+The frontend task chain described above ends in `processResources → jar`. Its
+owners are explicit: Vite owns `build/frontend/dist/`, manifest generation owns
+`build/frontend/asset-manifest.json`, and `stageFrontend` synchronizes the reserved
+generated resource tree. Gradle removes stale generated resources before copying
+the new closure, while the manifest verifier rejects missing, duplicated or changed
+assets. Rebuild through these tasks after a UI change.
+
+The resulting application JAR also participates in authenticated runtime closures:
+
+| Generated reference | Input owner and ordering |
+|---|---|
+| `generateKotlinBootClasspathReference` | `stageKotlinBootRuntime` stages the final application JAR and runtime dependencies after `jar`. |
+| `generateLlvmHostedWorkerClasspathReference` | The same final staged JVM closure supplies the fixed LLVM worker reference. |
+| `generateGccBundledGhidraReference` | The final JAR, bundled Ghidra tree and exporter source supply the Ghidra deployment reference. |
+
+`installDist`, `distZip` and `distTar` depend on those references and the required
+native-helper/checksum tasks. A UI-only JAR change therefore changes the closure's
+application digest too. Keep installed JARs, embedded resources, helpers and
+generated references from the same build checkpoint. Use the normal distribution
+tasks to regenerate them from the final build outputs, then verify the installation:
+
+```sh
+./gradlew -PfrontendNodeHome="$PWD/build/frontend-dev/tools/node" \
+  verifyGhidraDistributionArchives verifyAcpGateHelperDistribution \
+  verifyLlvmBehaviorHelperDistribution \
+  verifyKotlinBootClasspathDistribution verifyPackagedWeb
+```
+
+These checks cover their distribution/HTTP contracts. The
+[fixture investigation guide](web-workflow-fixtures.md#investigating-a-packaged-browser-failure)
+covers the separate actual-browser modes and exact-source evidence. Record which
+commands executed, reused outputs, skipped cases and failed prerequisites. Production
+workflow and release qualification retain their full separate acceptance scopes.
+
+### Updating dependencies and release metadata
+
+For a frontend dependency change, update exact direct versions and
+`frontend/package-lock.json` together under the pinned Node/npm. Follow
+[the dependency update procedure](../frontend/README.md#dependency-updates), review
+transitive packages, install scripts, license/provenance and the bundle delta, and
+repeat locked installation, type/lint/component checks and production packaging.
+A Node/npm update also changes `.node-version`, the frontend engines/package manager,
+`scripts/install-frontend-node.sh` and its reviewed official archive checksums
+together. Keep required CI tool selection aligned with those exact pins.
+
+Release source maps are disabled in Vite and rejected by the bundle/inventory
+gates. Fixture/dev/test modules stay outside the production payload. Preserve
+`frontend/THIRD_PARTY_NOTICES.txt` for shipped runtime dependencies and Vite-generated
+browser helpers; Gradle packages it as `docs/frontend-THIRD_PARTY_NOTICES.txt` in
+the distribution, outside public UI assets. Review notices when shipped code or
+dependencies change.
+
+Record planned work, acceptance and verification status in the repository's
+[GitHub milestones](https://github.com/minsago-elite/decomp_thing/milestones) and
+[issues](https://github.com/minsago-elite/decomp_thing/issues), with exact source and
+artifact identities. `ROADMAP.md` remains a deprecated migration pointer. The
+[CI verification contract](ci.md#reporting-skipped-or-unrun-verification) explains
+how to report incomplete checks without converting them into passing evidence.

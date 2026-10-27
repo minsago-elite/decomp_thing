@@ -7,6 +7,11 @@ import decompengine.oracle.fulltree.ContainedCommandOperationDeadline
 import decompengine.oracle.core.DescriptorBoundAtomicStateFile
 import decompengine.oracle.core.OracleArtifacts
 import decompengine.oracle.core.OracleJson
+import decompengine.oracle.structural.StructuralBoundaryReplayRequestV1
+import decompengine.oracle.structural.StructuralBoundaryReplayWorkerV1
+import decompengine.oracle.structural.StructuralProductionReplayContract
+import decompengine.oracle.structural.StructuralReplayAdapterRegistry
+import decompengine.oracle.structural.VerifiedStructuralInputsV1
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
 import decompengine.oracle.fulltree.FullTreeDiskScratchBorrowedRunRoot
@@ -104,6 +109,27 @@ internal class GccBundledFullExportOperation(
     }
 }
 
+/** Issued only after a second contained worker replays the frozen recovered model. */
+internal class GccBundledStructuralReplayOperation(
+    val profile: GccDriverStructuralInputsV1,
+    val export: GccDriverStructuralAuthenticatedFullExportV1,
+    val request: StructuralBoundaryReplayRequestV1,
+    val capture: GccBundledStructuralReplayCapture,
+    attachmentBytes: ByteArray,
+    executionBytes: ByteArray,
+    constructionPermit: Any,
+) {
+    private val attachment = attachmentBytes.copyOf()
+    private val execution = executionBytes.copyOf()
+    val attachmentBytes: ByteArray get() = attachment.copyOf()
+    val executionBytes: ByteArray get() = execution.copyOf()
+    init {
+        check(constructionPermit === GCC_BUNDLED_PREPARED_OPERATION_PERMIT) {
+            "structural replay requires retained live coordinator ownership"
+        }
+    }
+}
+
 /** Retained native collection provenance; no scored or release authority is granted. */
 internal class GccBundledNativeCallOperation(
     intentBytes: ByteArray,
@@ -126,6 +152,13 @@ internal class GccBundledNativeCallOperation(
     init {
         check(constructionPermit === GCC_BUNDLED_PREPARED_OPERATION_PERMIT) {
             "GCC native call operation requires retained coordinator ownership"
+        }
+        val selected = OracleJson.parseCanonical(intent).let { it as JsonObject }
+        require(selected["engineId"] == JsonPrimitive(snapshot.target.engineId) &&
+            snapshot.target.inputSha256 == model.inputSha256 && snapshot.target.inputBytes == model.inputBytes &&
+            snapshot.summary.bindings.programModelSha256 == model.programModelSha256 &&
+            snapshot.summary.bindings.programModelBytes == model.programModelBytes) {
+            "native operation differs from its retained target or paired model"
         }
     }
 }
@@ -228,12 +261,12 @@ internal class GccBundledPreparedOperation internal constructor(
     /** Executes the versioned full-recovery exporter and snapshots its output after worker absence. */
     @Synchronized
     fun executeFullExport(): GccBundledFullExportOperation {
-        check(intent.bundledRuntime.recoveryMode == "full") { "full export execution requires the full-recovery runtime" }
-        check(intent.bundledRuntime.invocationVersion != 8) { "native call runtime cannot enter ordinary full-export publication" }
+        intent.requireFullExportExecution()
         return executeRun(GccCompilerEngineContainmentRunKind.FRESH_CONTROL, null) { borrowed, execution ->
             val receipt = journal.recordExecution(execution.canonicalBytes)
             val captured = borrowed.withPinnedDescriptor { descriptor ->
-                GccBundledFullExportCapture.capture(descriptor, directories.getValue("reports"), intent.artifacts)
+                GccBundledFullExportCapture.capture(descriptor, directories.getValue("reports"), intent.artifacts,
+                    expectedDecompilerWorkers = intent.bundledRuntime.decompilerWorkerCount)
             }
             inputs.verify("after GCC full export snapshot")
             lease.requireCurrentOperationRunRootAfterCgroupAbsence(runRoot)
@@ -245,12 +278,24 @@ internal class GccBundledPreparedOperation internal constructor(
         }.also { completedFullExport = it }
     }
 
+    /** Diagnostic execution produces only contained execution evidence, never a full-export capability. */
+    @Synchronized
+    fun executeRuntimeDiagnostic(): Path {
+        check(intent.bundledRuntime.runtimeDiagnostics) { "runtime diagnostics require the explicit diagnostic runtime" }
+        return executeRun(GccCompilerEngineContainmentRunKind.FRESH_CONTROL, null) { _, execution ->
+            journal.recordExecution(execution.canonicalBytes)
+            inputs.verify("after GCC diagnostic execution")
+            lease.requireCurrentOperationRunRootAfterCgroupAbsence(runRoot)
+            journal.path.resolve("execution.json")
+        }
+    }
+
     /** Captures both outputs only after the contained worker and its cgroup are absent. */
     @Synchronized
     fun executeNativeCallObservations(): GccBundledNativeCallOperation {
-        check(intent.bundledRuntime.invocationVersion == 8 && intent.engineId == "cc1" &&
+        check(intent.bundledRuntime.invocationVersion == 8 && intent.engineId in setOf("cc1", "driver") &&
             intent.runKind == GccCompilerEngineContainmentRunKind.FRESH_CONTROL && intent.cliInvocation != null
-        ) { "native observations require the retained fresh pinned cc1 CLI operation" }
+        ) { "native observations require the retained fresh pinned cc1 or driver CLI operation" }
         return executeRun(GccCompilerEngineContainmentRunKind.FRESH_CONTROL, null) { borrowed, execution ->
             val receipt = journal.recordExecution(execution.canonicalBytes)
             val deadline = checkNotNull(operationDeadline)
@@ -511,9 +556,12 @@ internal class GccBundledPreparedOperation internal constructor(
                 inputs.verify("after GCC planner and cgroup absence")
                 val executionReceipt = journal.recordPlannerExecution(execution.canonicalBytes)
                 val logLimit = minOf(maximumFileBytes, 64L * 1024 * 1024).toInt()
+                deadline.requireCurrent()
+                val capturedModel = exported.programModelBytes
+                deadline.requireCurrent()
                 val captured = borrowed.withPinnedDescriptor { descriptor ->
                     GccBundledPlannerOutputCapture.capture(descriptor, controlName, checkNotNull(execution.controlDirectoryIdentity),
-                        request, exported.programModelBytes, logLimit, logLimit)
+                        request, capturedModel, logLimit, logLimit) { deadline.requireCurrent() }
                 }
                 inputs.verify("after GCC planner output capture")
                 lease.requireCurrentOperationRunRootAfterCgroupAbsence(runRoot)
@@ -574,7 +622,136 @@ internal class GccBundledPreparedOperation internal constructor(
         }
     }
 
-    /** Publishes the descriptor-captured full model and its authenticated profile binding, never a score. */
+    /** Oracle truth is admitted only after recovery stopped and its complete model was frozen. */
+    private fun replayFullExportBoundary(
+        exported: GccBundledFullExportOperation,
+        authenticated: GccDriverStructuralAuthenticatedFullExportV1,
+    ): VerifiedStructuralInputsV1 {
+        val cli = checkNotNull(intent.cliInvocation)
+        val deadline = checkNotNull(operationDeadline)
+        val profile = GccDriverStructuralInputsV1.load(cli.options.profile.parent, "driver")
+        authenticated.requireSameSnapshot(exported.snapshot)
+        val oraclePath = profile.root.resolve("function-recovery-oracle.json")
+        val oracleBytes = 12_558_460
+        val original = GccCompilerEngineContainmentContract.parseDefinitionForLiveController(definition)
+        val configuration = deriveRuntimeConfiguration(original, inputs.classPathEntries)
+        val controlName = "control-" + OracleArtifacts.sha256(
+            ("structural-boundary-replay-v1\n" + intent.requestSha256 + "\n" + authenticated.binding.sha256).toByteArray(),
+        )
+        val controlPath = original.outputLease.path.resolve(controlName)
+        val request = StructuralBoundaryReplayRequestV1(
+            original.outputLease.path.resolve("reports/program_model.json"),
+            Math.toIntExact(authenticated.programModelBytes), authenticated.programModelSha256,
+            profile.strippedBinary.sha256, oraclePath, oracleBytes,
+            GccDriverStructuralBoundaryEvidenceV1.FUNCTION_ORACLE_SHA256, profile.imageBase,
+            controlPath.resolve("reports"), intent.requestSha256, authenticated.binding.sha256,
+        )
+        val requestBytes = request.canonicalBytes
+        val requestSha = OracleArtifacts.sha256(requestBytes)
+        val requestPath = cli.options.output.resolve("structural-replay-request.json")
+        fun publish(name: String, bytes: ByteArray) {
+            deadline.requireCurrent()
+            LinuxFilesystemSyscalls.openRoot(cli.options.output).use { output ->
+                cli.requireCurrent()
+                DescriptorBoundAtomicStateFile.publishNoReplace(output, name, bytes, 256 * 1024)
+                cli.requireCurrent()
+            }
+            deadline.requireCurrent()
+        }
+        publish(requestPath.fileName.toString(), requestBytes)
+        val runtime = intent.bundledRuntime.root
+        val runtimeMount = FullTreeFunctionObservationRuntimeMount(runtime, runtime,
+            calculateFullTreeObservationRuntimeManifestSha256(runtime))
+        val unit = "decomp-structural-${requestSha.take(32)}.scope"
+        val command = listOf(configuration.javaExecutable.toString(),
+            "-Xmx${minOf(intent.budgets.maximumResidentBytes / (1024 * 1024) * 3 / 4, 3072)}m",
+            "-XX:+DisableAttachMechanism", "-Duser.home=${controlPath.resolve("state")}",
+            "-Djava.io.tmpdir=${controlPath.resolve("tmp")}", "-cp",
+            inputs.classPathEntries.indices.joinToString(java.io.File.pathSeparator) {
+                controlPath.resolve("runtime/classpath-$it.jar").toString()
+            }, StructuralBoundaryReplayWorkerV1::class.java.name, requestPath.toString(), requestSha)
+        try {
+            return lease.withCurrentOperationRunRootForContainedExecution(runRoot) { borrowed ->
+                val frozenReports = borrowed.withPinnedDescriptor { run ->
+                    GccBundledReplayReportsV1.capture(run, directories.getValue("reports"))
+                }
+                fun requireFrozenModel() {
+                    deadline.requireCurrent()
+                    inputs.verify("before structural replay")
+                    journal.verify("before structural replay")
+                    borrowed.withPinnedDescriptor { run ->
+                        LinuxFilesystemSyscalls.openDirectoryAt(run.fd, "reports").use { reports ->
+                            frozenReports.requireCurrent(reports)
+                            val files = GccBoundExportFiles(authenticated.programModelBytes) { deadline.requireCurrent() }
+                            val actual = files.read(reports, "program_model.json", request.modelBytes)
+                            require(actual.size == request.modelBytes && OracleArtifacts.sha256(actual) == request.modelSha256) {
+                                "structural replay model differs from the immutable recovered snapshot"
+                            }
+                            files.verify()
+                            frozenReports.requireCurrent(reports)
+                        }
+                    }
+                }
+                requireFrozenModel()
+                val protectedDirectories = borrowed.withPinnedDescriptor { run ->
+                    listOf("state", "reports").associateWith { name ->
+                        LinuxFilesystemSyscalls.openDirectoryAt(run.fd, name).use { it.identity }
+                    }
+                }
+                var attachmentBytes: ByteArray? = null
+                val execution = KotlinSystemdCgroupCommandLauncher.execute(
+                    borrowed, configuration, unit, original.expectedControlGroup.substringBeforeLast('/') + "/" + unit,
+                    requestSha, command, original.environment,
+                    listOf(KotlinSystemdCgroupCommandInput(requestPath, requestBytes.size.toLong(), requestSha),
+                        KotlinSystemdCgroupCommandInput(oraclePath, oracleBytes.toLong(), request.functionOracleSha256)),
+                    listOf(runtimeMount), KotlinSystemdCgroupCommandResources(
+                        deadline.remainingWholeSecondsMillis(minOf(intent.budgets.wallClockMillis, 300_000)),
+                        minOf(intent.budgets.maximumResidentBytes, 4L * 1024 * 1024 * 1024),
+                        intent.budgets.pidsMax, GccBundledStructuralReplayOutputCapture.MAXIMUM_OBSERVATION_BYTES.toLong()),
+                    inputs.deploymentClosureSha256, controlDirectoryName = controlName,
+                    readOnlyControlDirectories = completedControls.toMap(),
+                    readOnlyStateDirectory = protectedDirectories.getValue("state"),
+                    readOnlyReportsDirectory = protectedDirectories.getValue("reports"), operationDeadline = deadline,
+                    beforeStart = { attachment ->
+                        lease.requireCurrentOperationRunRootAfterScopeAttachment(runRoot)
+                        requireFrozenModel()
+                        attachmentBytes = attachment.canonicalBytes
+                        publish("structural-replay-attachment.json", attachment.canonicalBytes)
+                        publish("structural-replay-start-authorized.json", OracleJson.canonicalBytes(JsonObject(mapOf(
+                            "provider" to JsonPrimitive("structural-replay-start-authorized-v1"),
+                            "operationRequestSha256" to JsonPrimitive(intent.requestSha256),
+                            "requestSha256" to JsonPrimitive(requestSha),
+                            "attachmentSha256" to JsonPrimitive(OracleArtifacts.sha256(attachment.canonicalBytes)),
+                            "fullExportBindingSha256" to JsonPrimitive(authenticated.binding.sha256),
+                        ))))
+                        requireFrozenModel()
+                        lease.requireCurrentOperationRunRootAfterScopeAttachment(runRoot)
+                    },
+                )
+                lease.requireCurrentOperationRunRootAfterCgroupAbsence(runRoot)
+                requireFrozenModel()
+                publish("structural-replay-execution.json", execution.canonicalBytes)
+                val captured = borrowed.withPinnedDescriptor { run ->
+                    GccBundledStructuralReplayOutputCapture.capture(run, controlName,
+                        checkNotNull(execution.controlDirectoryIdentity), request) { deadline.requireCurrent() }
+                }
+                lease.requireCurrentOperationRunRootAfterCgroupAbsence(runRoot)
+                requireFrozenModel()
+                publish("structural-replay-output.json", captured.metadataBytes)
+                publish("structural-replay-capture.json", captured.assessmentBytes)
+                completedControls[controlName] = checkNotNull(execution.controlDirectoryIdentity)
+                val replay = GccBundledStructuralReplayOperation(profile, authenticated, request, captured,
+                    checkNotNull(attachmentBytes), execution.canonicalBytes, GCC_BUNDLED_PREPARED_OPERATION_PERMIT)
+                StructuralReplayAdapterRegistry.production.admitSelectedBoundary(replay).also { deadline.requireCurrent() }
+            }
+        } catch (failure: Throwable) {
+            poisoned = true
+            if (failure is KotlinSystemdCgroupCommandExecutionException) pendingCleanup = failure.cleanup
+            throw failure
+        }
+    }
+
+    /** Publishes the immutable model; only supported, independently replayed dimensions are scored. */
     @Synchronized
     fun publishFullExportCliResult(authenticatedExport: GccDriverStructuralAuthenticatedFullExportV1): Path {
         check(!closed && !poisoned && !cliPublicationAttempted)
@@ -605,6 +782,22 @@ internal class GccBundledPreparedOperation internal constructor(
             val modelPath = original.outputLease.path.resolve("reports/program_model.json")
             val bindingPath = cli.options.output.resolve(bindingName)
             val manifestPath = cli.options.output.resolve(manifestName)
+            val boundaryEvidence = if (intent.engineId == "driver") {
+                GccDriverStructuralBoundaryEvidenceV1.capture(
+                    GccDriverStructuralInputsV1.load(cli.options.profile.parent, "driver"), authenticatedExport,
+                )
+            } else null
+            val verifiedBoundaryInputs = if (boundaryEvidence != null) {
+                replayFullExportBoundary(exported, authenticatedExport).also { verified ->
+                    val scored = OracleJson.parse(StructuralProductionReplayContract.scoreSelectedBoundary(verified),
+                        GccBundledFullExportCliResultV2.TREE_MANIFEST_JSON_LIMITS) as JsonObject
+                    require(scored["boundaryObservationSha256"] == JsonPrimitive(
+                        OracleArtifacts.sha256(boundaryEvidence.observationBytes))) {
+                        "contained boundary replay differs from independent host observation"
+                    }
+                }
+            } else null
+            deadline.requireCurrent()
             val resultBytes = GccBundledFullExportCliResultV2.create(
                 operationId = intent.operationId,
                 requestSha256 = intent.requestSha256,
@@ -621,6 +814,7 @@ internal class GccBundledPreparedOperation internal constructor(
                 treeManifestBytes = manifestBytes,
                 outputTreeSha256 = snapshot.outputTreeSha256,
                 operationWallTime = deadline.snapshot(),
+                verifiedBoundaryInputs = verifiedBoundaryInputs,
             )
             LinuxFilesystemSyscalls.openRoot(cli.options.output).use { output ->
                 cli.requireCurrent()
@@ -632,6 +826,32 @@ internal class GccBundledPreparedOperation internal constructor(
                 )
                 cli.requireCurrent()
                 DescriptorBoundAtomicStateFile.publishNoReplace(output, bindingName, bindingBytes, 256 * 1024)
+                boundaryEvidence?.let { evidence ->
+                    authenticatedExport.requireSameSnapshot(snapshot)
+                    cli.requireCurrent()
+                    DescriptorBoundAtomicStateFile.publishManifestNoReplace(
+                        output, GccDriverStructuralBoundaryEvidenceV1.OBSERVATION_NAME,
+                        evidence.observationBytes, GccDriverStructuralBoundaryEvidenceV1.MAXIMUM_OBSERVATION_BYTES,
+                    )
+                    cli.requireCurrent()
+                    DescriptorBoundAtomicStateFile.publishNoReplace(
+                        output, GccDriverStructuralBoundaryEvidenceV1.BINDING_NAME,
+                        evidence.bindingBytes, GccDriverStructuralBoundaryEvidenceV1.MAXIMUM_BINDING_BYTES,
+                    )
+                }
+                verifiedBoundaryInputs?.let { verified ->
+                    authenticatedExport.requireSameSnapshot(snapshot)
+                    cli.requireCurrent()
+                    DescriptorBoundAtomicStateFile.publishManifestNoReplace(output,
+                        GccBundledFullExportCliResultV2.PRODUCTION_BOUNDARY_SCORE_NAME,
+                        StructuralProductionReplayContract.scoreSelectedBoundary(verified),
+                        GccBundledStructuralReplayOutputCapture.MAXIMUM_OBSERVATION_BYTES)
+                    cli.requireCurrent()
+                    DescriptorBoundAtomicStateFile.publishManifestNoReplace(output,
+                        GccDriverProductionFunctionAccuracyV1.SCORE_NAME,
+                        GccDriverProductionFunctionAccuracyV1.create(verified),
+                        GccBundledStructuralReplayOutputCapture.MAXIMUM_OBSERVATION_BYTES)
+                }
                 inputs.verify("after full-export binding publication")
                 journal.verify("after full-export binding publication")
                 lease.requireCurrentOperationRunRootAfterCgroupAbsence(runRoot)
@@ -715,7 +935,7 @@ internal class GccBundledPreparedOperation internal constructor(
     ): T {
         requireCurrent()
         require(intent.runKind == kind) { "GCC bundled execution kind differs from the prepared intent" }
-        require(intent.bundledRuntime.invocationVersion in 2..3 || intent.bundledRuntime.invocationVersion in setOf(5, 8)) {
+        require(intent.bundledRuntime.invocationVersion in 2..3 || intent.bundledRuntime.invocationVersion in 5..8) {
             "GCC contained execution requires an explicitly bound fresh JVM runtime"
         }
         executionAttempted = true
@@ -762,6 +982,7 @@ internal class GccBundledPreparedOperation internal constructor(
                         checkNotNull(operationDeadline).remainingWholeSecondsMillis(intent.budgets.wallClockMillis),
                         intent.budgets.maximumResidentBytes, intent.budgets.pidsMax,
                         minOf(intent.diskPolicy.maximumFilesystemBytes, 1024L * 1024 * 1024),
+                        processorCount = intent.bundledRuntime.processorCount,
                     ),
                     deploymentClosureSha256 = inputs.deploymentClosureSha256,
                     interruption = interruption,

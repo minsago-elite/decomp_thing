@@ -1,0 +1,20 @@
+{
+  "benchmarkAccepted": false,
+  "boundaryBindingSha256": "a7e24ae81a59f8e5f3ea754f52b99d0c12a779fdceced20d03ff52a6651354bc",
+  "boundaryObservationSha256": "277520971632cf28aef60a8d823797e4d23e1d1b36034469d87f2abc6400f604",
+  "complete": false,
+  "diagnosticStdoutAuthority": "diagnostic-only",
+  "diagnosticStdoutBytes": 501944,
+  "diagnosticStdoutSha256": "40164be4212581aa88f70070d9f1863a6a1c9420968212b8100a7f5bbfc29453",
+  "engine": "driver",
+  "functionCount": 3384,
+  "limitation": "live contained driver export and selected function-boundary replay only; structural identity admission and production scoring remain open",
+  "operationId": "a27735d8a3f103b89d05f775335cefe609459b1c025ada4533a72bd34e909695",
+  "outputTreeSha256": "9204d728b59eee67a0a1e0234f5cfd43bb23363c4205410c6e0a661edbef2e57",
+  "programModelBytes": 7634939,
+  "programModelSha256": "0c6814473ef9e05d5b9f77c3fea837bc16e0812c4bb0c2e273bd5d695736f379",
+  "provider": "gcc-driver-live-full-export-capture-v1",
+  "releaseEligible": false,
+  "requestSha256": "567c2f44c557f65e9e6fc86ef9d20cee5b1057b20d1c4acf16804298bc87821c",
+  "scored": false
+}

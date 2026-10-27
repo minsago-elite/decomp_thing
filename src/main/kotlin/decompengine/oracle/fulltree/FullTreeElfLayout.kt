@@ -136,6 +136,74 @@ internal data class FullTreeElfFunctionSymbol(
     val rva: ULong?,
 )
 
+internal data class FullTreeElfSectionGroupLimits(
+    val maximumGroups: Int = 16_384,
+    val maximumMemberships: Int = 131_072,
+    val maximumSignatureNameBytes: Long = 8L * 1024L * 1024L,
+) {
+    init {
+        require(maximumGroups in 1..1_000_000)
+        require(maximumMemberships in 1..1_000_000)
+        require(maximumSignatureNameBytes in 1L..256L * 1024L * 1024L)
+    }
+}
+
+/** Raw relocatable-object coordinates, never linked RVAs or a linker selection decision. */
+internal data class FullTreeElfGroupSignature(
+    val symbolTableSectionIndex: Int,
+    val symbolIndex: Long,
+    val name: String,
+    val info: Int,
+    val other: Int,
+    val rawSectionIndex: Int,
+    val resolvedSectionIndex: Long,
+    val sectionKind: FullTreeElfSymbolSectionKind,
+    val value: ULong,
+    val size: ULong,
+)
+
+internal data class FullTreeElfGroupMember(
+    val sectionIndex: Int,
+    val name: String,
+    val type: Long,
+    val flags: ULong,
+    val address: ULong,
+    val offset: Long,
+    val size: ULong,
+    val link: Int,
+    val info: Int,
+    val alignment: ULong,
+    val entrySize: ULong,
+)
+
+internal class FullTreeElfSectionGroup(
+    val sectionIndex: Int,
+    val name: String,
+    val flags: Long,
+    val address: ULong,
+    val alignment: ULong,
+    val offset: Long,
+    val size: ULong,
+    val signature: FullTreeElfGroupSignature,
+    members: List<FullTreeElfGroupMember>,
+) {
+    val members: List<FullTreeElfGroupMember> = Collections.unmodifiableList(ArrayList(members))
+    val isComdat: Boolean get() = flags and GRP_COMDAT != 0L
+}
+
+internal class FullTreeElfSectionGroupObservation(
+    val elfClass: Int,
+    val byteOrder: Int,
+    val machine: Int,
+    val osAbi: Int,
+    val abiVersion: Int,
+    val rawEntryPoint: ULong,
+    val scannedSymbols: Long,
+    groups: List<FullTreeElfSectionGroup>,
+) {
+    val groups: List<FullTreeElfSectionGroup> = Collections.unmodifiableList(ArrayList(groups))
+}
+
 internal enum class FullTreeElfSymbolSectionKind { DEFINED, UNDEFINED, COMMON, ABSOLUTE, RESERVED }
 internal enum class FullTreeElfObjectStorage { MAPPED_LOAD, TLS, UNDEFINED, COMMON, ABSOLUTE, NONALLOC, UNMAPPED }
 
@@ -252,6 +320,24 @@ private fun elfHex(value: ULong?): JsonElement = value?.let { JsonPrimitive("0x$
  */
 internal object FullTreeElfLayout {
     /**
+     * Read SHT_GROUP's raw signature, flags and member headers from ET_REL only. Existing linked
+     * layout/function/object entry points retain their ET_EXEC/ET_DYN and program-table contract.
+     * A complete return is still only raw input evidence: the caller must authenticate the object
+     * and its build membership, then separately prove the linker's retained/discarded selection.
+     */
+    fun scanRelocatableGroups(
+        file: StableControlFile,
+        label: String,
+        limits: FullTreeElfLayoutLimits = FullTreeElfLayoutLimits(),
+        groupLimits: FullTreeElfSectionGroupLimits = FullTreeElfSectionGroupLimits(),
+        checkpoint: (String) -> Unit = {},
+    ): FullTreeElfSectionGroupObservation {
+        val observation = ElfReader(file, label, limits, checkpoint).scanRelocatableGroups(groupLimits)
+        file.verifyUnchanged("$label ELF section-group source")
+        return observation
+    }
+
+    /**
      * Reads only ELF identity, extended header metadata, and PT_LOAD layout. The returned layout
      * is path-identity checked before it escapes; section names and symbol tables are not visited.
      */
@@ -297,6 +383,111 @@ private class ElfReader(
     private var parseSteps = 0L
 
     fun scanLayout(): FullTreeElfCoreLayout = readCoreLayout(parseHeaders())
+
+    fun scanRelocatableGroups(groupLimits: FullTreeElfSectionGroupLimits): FullTreeElfSectionGroupObservation {
+        val headers = parseHeaders(relocatableOnly = true)
+        val sections = readNamedSections(headers)
+        val owners = IntArray(sections.size) { -1 }
+        val candidates = ArrayList<SectionGroupCandidate>()
+        val signatures = LinkedHashMap<Pair<Int, Long>, FullTreeElfGroupSignature?>()
+        var memberships = 0L
+        sections.forEach { section ->
+            step("section groups")
+            if (section.type != SHT_GROUP) return@forEach
+            if (candidates.size >= groupLimits.maximumGroups) fail("ELF section-group count exceeds its bound")
+            val alignment = section.alignment
+            if (section.flags != 0UL || section.address != 0UL ||
+                (alignment > 1UL && (alignment and (alignment - 1UL)) != 0UL) ||
+                section.entrySize != 4UL || section.size < 4UL || section.size % 4UL != 0UL
+            ) {
+                fail("ELF section group has invalid flags, address, alignment, size or word width")
+            }
+            if (section.link !in sections.indices || sections[section.link].type !in setOf(SHT_SYMTAB, SHT_DYNSYM)) {
+                fail("ELF section group has an invalid signature symbol table")
+            }
+            val memberCount = longValue(section.size / 4UL - 1UL, "group membership count")
+            memberships = checkedAdd(memberships, memberCount, "aggregate group memberships")
+            if (memberships > groupLimits.maximumMemberships) fail("ELF group memberships exceed their bound")
+            val flags = u32At(section.offset, headers.byteOrder)
+            if (flags and GROUP_ALLOWED_FLAGS.inv() != 0L) fail("ELF group uses reserved flag bits")
+            checkpoint("before parsing $label section-group members")
+            val indices = IntArray(memberCount.toInt())
+            for (index in indices.indices) {
+                step("section-group members")
+                val offset = checkedAdd(section.offset, (index.toLong() + 1L) * 4L, "group member offset")
+                val member = u32At(offset, headers.byteOrder)
+                if (member <= section.index.toLong() || member >= sections.size.toLong()) {
+                    fail("ELF group member is missing or does not follow its group")
+                }
+                val target = sections[member.toInt()]
+                if (target.type == SHT_NULL || target.flags and SHF_GROUP == 0UL) {
+                    fail("ELF group member lacks an active SHF_GROUP section")
+                }
+                if (owners[target.index] != -1) fail("ELF section belongs to more than one group or repeats a membership")
+                owners[target.index] = section.index
+                indices[index] = target.index
+            }
+            signatures.putIfAbsent(section.link to section.info.toLong(), null)
+            candidates += SectionGroupCandidate(section, flags, indices)
+        }
+        sections.forEach { section ->
+            step("group membership closure")
+            if (section.flags and SHF_GROUP != 0UL && owners[section.index] == -1) {
+                fail("ELF SHF_GROUP section has no group membership")
+            }
+        }
+        validateGroupSectionReferences(sections, owners)
+        var signatureBytes = 0L
+        val scanned = scanSymbols(headers, sections, objectMode = true) { symbol ->
+            val key = symbol.tableIndex to symbol.index
+            if (signatures.containsKey(key)) {
+                val name = symbolName(symbol, "group signature")
+                signatureBytes = checkedAdd(signatureBytes, name.toByteArray(StandardCharsets.UTF_8).size.toLong(), "group signature names")
+                if (signatureBytes > groupLimits.maximumSignatureNameBytes) fail("ELF group signature names exceed their aggregate bound")
+                signatures[key] = FullTreeElfGroupSignature(
+                    symbol.tableIndex, symbol.index, name, symbol.info, symbol.other,
+                    symbol.rawSectionIndex, symbol.resolvedSectionIndex, symbol.sectionKind, symbol.value, symbol.size,
+                )
+            }
+        }
+        val groups = candidates.map { candidate ->
+            step("group observations")
+            val section = candidate.section
+            val signature = signatures[section.link to section.info.toLong()]
+                ?: fail("ELF section-group signature symbol is missing")
+            val members = candidate.indices.map { index ->
+                step("group member observations")
+                val member = sections[index]
+                FullTreeElfGroupMember(member.index, member.name, member.type, member.flags, member.address,
+                    member.offset, member.size, member.link, member.info, member.alignment, member.entrySize)
+            }
+            FullTreeElfSectionGroup(section.index, section.name, candidate.flags, section.address,
+                section.alignment, section.offset, section.size, signature, members)
+        }
+        return FullTreeElfSectionGroupObservation(headers.elfClass, headers.byteOrder, headers.machine,
+            headers.osAbi, headers.abiVersion, headers.rawEntryPoint, scanned, groups)
+    }
+
+    private fun validateGroupSectionReferences(sections: List<FunctionElfSection>, owners: IntArray) {
+        fun checkReference(sourceGroup: Int, target: Int) {
+            if (target == SHN_UNDEF) return
+            if (target !in sections.indices) fail("ELF section reference is outside its section table")
+            val targetGroup = owners[target]
+            if (targetGroup != -1 && targetGroup != sourceGroup) {
+                fail("ELF section reference enters a group from outside that group")
+            }
+        }
+        sections.forEach { section ->
+            step("group section references")
+            if (section.type == SHT_NULL) return@forEach
+            // A group may contain its own signature table; its defining header owns that reference.
+            val sourceGroup = if (section.type == SHT_GROUP) section.index else owners[section.index]
+            checkReference(sourceGroup, section.link)
+            if (section.type == SHT_REL || section.type == SHT_RELA || section.flags and SHF_INFO_LINK != 0UL) {
+                checkReference(sourceGroup, section.info)
+            }
+        }
+    }
 
     fun scanFunctions(consume: (FullTreeElfFunctionSymbol) -> Unit): FullTreeElfLayoutObservation {
         val headers = parseHeaders()
@@ -512,7 +703,45 @@ private class ElfReader(
             )
             sections += readSection(offset, headers.sectionEntrySize, headers.elfClass, headers.byteOrder, index)
         }
+        if (headers.elfType == "ET_REL") validateRelocatableSections(sections)
         return attachSectionNames(sections, headers.nameIndex)
+    }
+
+    private fun validateRelocatableSections(sections: List<FunctionElfSection>) {
+        val fileSections = ArrayList<FunctionElfSection>()
+        sections.forEach { section ->
+            step("relocatable section structure")
+            if (section.type == SHT_NULL) return@forEach
+            val alignment = section.alignment
+            if (section.flags and SHF_ALLOC == 0UL && section.address != 0UL) {
+                fail("ELF non-allocated section has a nonzero address")
+            }
+            if (section.type == SHT_NOBITS && section.flags and SHF_COMPRESSED != 0UL) {
+                fail("ELF compressed SHT_NOBITS section is invalid")
+            }
+            if (alignment > 1UL && ((alignment and (alignment - 1UL)) != 0UL || section.address % alignment != 0UL)) {
+                fail("ELF relocatable section has invalid address alignment")
+            }
+            if (section.type == SHT_STRTAB && section.size != 0UL) {
+                if (section.flags and SHF_COMPRESSED != 0UL) fail("ELF relocatable string table is compressed")
+                val last = checkedAdd(section.offset, longValue(section.size - 1UL, "string-table boundary"), "string-table boundary")
+                if (window.byte(section.offset) != 0 || window.byte(last) != 0) {
+                    fail("ELF relocatable string table lacks boundary NUL bytes")
+                }
+            }
+            // NOBITS has a conceptual offset only; empty sections own no file bytes.
+            if (section.type != SHT_NOBITS && section.size != 0UL) fileSections += section
+        }
+        fileSections.sortWith { first, second ->
+            step("relocatable section ordering")
+            first.offset.compareTo(second.offset)
+        }
+        var end = 0L
+        fileSections.forEach { section ->
+            step("relocatable section extents")
+            if (section.offset < end) fail("ELF relocatable file-backed sections overlap")
+            end = checkedAdd(section.offset, longValue(section.size, "section size"), "section extent")
+        }
     }
 
     private fun symbolName(symbol: ParsedElfSymbol, subject: String): String =
@@ -551,6 +780,9 @@ private class ElfReader(
             }
             val count = longValue(section.size / section.entrySize, "symbol count")
             if (count < 1L) fail("symbol table ${section.name} has no STN_UNDEF entry")
+            if (headers.elfType == "ET_REL" && section.info.toLong() !in 1L..count) {
+                fail("relocatable symbol table ${section.name} has an invalid local-symbol boundary")
+            }
             if (window.bytes(section.offset, minimumSymbolEntry).any { it != 0.toByte() }) {
                 fail("symbol table ${section.name} has a nonzero STN_UNDEF entry")
             }
@@ -605,6 +837,14 @@ private class ElfReader(
                     info = symbol[12].toInt() and 0xff
                     rawSectionIndex = u16(symbol, 14, byteOrder)
                 }
+                // ET_REL string tables already have a final NUL, so every in-range name terminates.
+                // Check every entry, including names that are not selected as group signatures.
+                if (headers.elfType == "ET_REL" && nameOffset != 0L && nameOffset.toULong() >= strings.size) {
+                    fail("relocatable symbol name offset exceeds its string table")
+                }
+                if (headers.elfType == "ET_REL" && ((info ushr 4 == 0) != (symbolIndex < section.info.toLong()))) {
+                    fail("relocatable symbol table ${section.name} disagrees with its local-symbol boundary")
+                }
                 val extendedWord = extended?.let { companion ->
                     u32At(
                         checkedAdd(
@@ -640,7 +880,7 @@ private class ElfReader(
         return scanned
     }
 
-    private fun parseHeaders(): ParsedElfHeaders {
+    private fun parseHeaders(relocatableOnly: Boolean = false): ParsedElfHeaders {
         if (file.size < ELF32_HEADER_BYTES) fail("ELF header is truncated")
         val identification = window.bytes(0L, ELF_IDENT_BYTES)
         if (!identification.copyOfRange(0, 4).contentEquals(ELF_MAGIC)) fail("input is not ELF")
@@ -653,12 +893,17 @@ private class ElfReader(
         if (file.size < headerBytes) fail("ELF header is truncated")
         val header = window.bytes(0L, headerBytes)
         val elfTypeValue = u16(header, 16, byteOrder)
-        val elfType = when (elfTypeValue) {
+        val elfType = if (relocatableOnly) {
+            if (elfTypeValue != ET_REL) fail("section-group evidence requires an ET_REL object")
+            "ET_REL"
+        } else when (elfTypeValue) {
             ET_EXEC -> "ET_EXEC"
             ET_DYN -> "ET_DYN"
             else -> fail("ELF type is not ET_EXEC or ET_DYN")
         }
         val machine = u16(header, 18, byteOrder)
+        val rawEntryPoint = if (elfClass == ELFCLASS64) u64(header, 24, byteOrder)
+            else u32(header, 24, byteOrder).toULong()
         if (u32(header, 20, byteOrder) != EV_CURRENT.toLong()) fail("ELF header version is invalid")
         val headerSize = u16(header, if (elfClass == ELFCLASS64) 52 else 40, byteOrder)
         if (headerSize != headerBytes) fail("ELF header size is noncanonical")
@@ -723,16 +968,20 @@ private class ElfReader(
             }
             else -> rawProgramCount.also {
                 if (sectionZero.info != 0) fail("section zero carries an unrequested extended program count")
-                if (it !in 1..limits.maximumProgramHeaders) fail("ELF has no bounded program-header table")
+                if (it !in (if (relocatableOnly) 0 else 1)..limits.maximumProgramHeaders) fail("ELF has no bounded program-header table")
             }
         }
         val minimumProgramEntry = if (elfClass == ELFCLASS64) ELF64_PROGRAM_BYTES else ELF32_PROGRAM_BYTES
-        if (programOffset <= 0L || programEntrySize < minimumProgramEntry) fail("ELF program table is malformed")
-        requireFileRange(
-            programOffset,
-            checkedMultiply(programCount.toLong(), programEntrySize.toLong(), "program table"),
-            "ELF program table",
-        )
+        if (programCount > 0) {
+            if (programOffset <= 0L || programEntrySize < minimumProgramEntry) fail("ELF program table is malformed")
+            requireFileRange(
+                programOffset,
+                checkedMultiply(programCount.toLong(), programEntrySize.toLong(), "program table"),
+                "ELF program table",
+            )
+        } else if (programOffset != 0L) {
+            fail("ELF absent program table has a nonzero offset")
+        }
 
         return ParsedElfHeaders(
             elfClass = elfClass,
@@ -741,6 +990,7 @@ private class ElfReader(
             machine = machine,
             osAbi = identification[EI_OSABI].toInt() and 0xff,
             abiVersion = identification[EI_ABIVERSION].toInt() and 0xff,
+            rawEntryPoint = rawEntryPoint,
             programOffset = programOffset,
             programEntrySize = programEntrySize,
             programCount = programCount,
@@ -1057,6 +1307,7 @@ private data class ParsedElfHeaders(
     val machine: Int,
     val osAbi: Int,
     val abiVersion: Int,
+    val rawEntryPoint: ULong,
     val programOffset: Long,
     val programEntrySize: Int,
     val programCount: Int,
@@ -1101,6 +1352,12 @@ private data class FunctionElfSection(
     val info: Int,
     val alignment: ULong,
     val entrySize: ULong,
+)
+
+private data class SectionGroupCandidate(
+    val section: FunctionElfSection,
+    val flags: Long,
+    val indices: IntArray,
 )
 
 private class ElfWindow(
@@ -1219,6 +1476,7 @@ private const val ELFCLASS64 = 2
 private const val ELFDATA2LSB = 1
 private const val ELFDATA2MSB = 2
 private const val EV_CURRENT = 1
+private const val ET_REL = 1
 private const val ET_EXEC = 2
 private const val ET_DYN = 3
 private const val PT_TLS = 7
@@ -1227,12 +1485,19 @@ private const val PF_X = 1L
 private const val SHT_SYMTAB = 2L
 private const val SHT_NULL = 0L
 private const val SHT_STRTAB = 3L
+private const val SHT_RELA = 4L
 private const val SHT_NOBITS = 8L
+private const val SHT_REL = 9L
 private const val SHT_DYNSYM = 11L
+private const val SHT_GROUP = 17L
 private const val SHT_SYMTAB_SHNDX = 18L
 private const val SHF_ALLOC = 0x2UL
+private const val SHF_INFO_LINK = 0x40UL
+private const val SHF_GROUP = 0x200UL
 private const val SHF_TLS = 0x400UL
 private const val SHF_COMPRESSED = 0x800UL
+private const val GRP_COMDAT = 0x1L
+private const val GROUP_ALLOWED_FLAGS = 0xfff00001L // GRP_COMDAT | GRP_MASKOS | GRP_MASKPROC; meanings stay raw.
 private const val SHN_UNDEF = 0
 private const val SHN_LORESERVE = 0xff00
 private const val SHN_COMMON = 0xfff2

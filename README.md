@@ -10,6 +10,8 @@ zero digest with a value measured during trusted provisioning. The credential-fr
 argv, disables parent-environment inheritance, and bounds protocol, filesystem, process, memory, CPU, file, and
 runtime-closure use. Optional secret provenance is configured explicitly as described in the complete procedure at
 [docs/acp-v1-client.md](docs/acp-v1-client.md#operator-provisioning-and-preflight).
+Those bindings forward non-provider agent secrets; they do not provision provider connectivity. Provider credentials
+remain outside the agent under the [broker ownership boundary](docs/acp-v1-client.md#provider-credentials-and-current-availability).
 
 ```bash
 ./gradlew installDist
@@ -117,7 +119,8 @@ For a non-Docker angr installation, set `ANGR_PYTHON` to the Python executable t
 
 An early embedded SPA preview is available with `web --ui spa`; it serves the
 public shell and runtime view while job/workflow parity is developed. The default
-remains the existing workbench. See [packaging and preview usage](docs/web-packaging.md).
+remains the existing workbench. See the [workbench user guide](docs/workbench-user-guide.md) for launch, sessions and
+what the preview can do today, and [packaging and preview usage](docs/web-packaging.md) for building it.
 
 Ghidra 12.1.3 is a hash-locked, bundled dependency. `installDist`, ZIP/TAR distributions and Docker include its Java libraries, processor data, native decompiler and licenses. An application-owned JVM worker links directly to the Ghidra APIs; no separate Ghidra installation, `GHIDRA_HOME`, or runtime download is used. The first build downloads the pinned 569 MB archive into the Gradle cache. See [bundled Ghidra](docs/bundled-ghidra.md) for offline builds and verification.
 
@@ -202,6 +205,30 @@ Trace-guided repair iterates over compile and behavior failures while retaining 
 ```bash
 llm_bin_patch repair ./original ./generated-project --max-iterations 5 --explore
 ```
+
+Inspect durable repair history after reconnecting without starting another repair:
+
+```bash
+llm_bin_patch repair-history ./generated-project
+```
+
+This read-only command distinguishes published, provisional and fully accepted
+recorded revisions, restoration failure/recovery and unavailable history. It
+withholds prompts, source bodies and peer text. Each page contains at most 20
+finalized attempts and runs, plus a pending attempt on the latest page. Older and
+newer navigation prints the options to reuse with the same project directory:
+
+```bash
+llm_bin_patch repair-history ./generated-project --page 2 --graph <recorded-graph-sha256>
+llm_bin_patch repair-history ./generated-project --case-page 2 --graph <recorded-graph-sha256>
+```
+
+Continued pages require the graph identity printed by the first read and refuse a
+changed history. Case pages expose at most 20 public references per attempt, bound
+to that attempt's retained corpus; private case IDs, arguments and stdin stay
+withheld. The default legacy web history provides equivalent bounded navigation
+and checked evidence links. Recorded metadata does not revalidate current source
+or execution, and the CLI does not independently read or verify receipt contents.
 
 With `--explore`, all automatically generated L4 inputs become persisted L3 regression cases and are re-run after every repair attempt.
 

@@ -28,6 +28,7 @@ import decompengine.repair.SourcePatch
 import decompengine.repair.writeRepairEvidenceAtomically
 import decompengine.validation.ProcessInput
 import java.io.BufferedWriter
+import java.io.PrintStream
 import java.nio.ByteBuffer
 import java.nio.charset.CharacterCodingException
 import java.nio.charset.CodingErrorAction
@@ -37,6 +38,7 @@ import java.nio.file.Path
 import java.nio.file.StandardCopyOption
 import java.time.Instant
 import java.util.Comparator
+import java.util.Collections
 import kotlin.io.path.createDirectories
 import kotlin.io.path.deleteIfExists
 import kotlin.io.path.exists
@@ -53,7 +55,7 @@ enum class MvpPublicationMode { REQUIRE_ACP_RELEASE, TEST_ONLY_NON_RELEASE }
 class MvpPatchWorkflow(
     private val harness: AgentHarness,
     private val environment: Map<String, String> = System.getenv(),
-    private val approve: (String) -> Boolean = ::promptForApproval,
+    private val approve: ((String) -> Boolean)? = null,
     private val decompiler: BinaryDecompiler = GhidraDecompiler(),
     private val binaryExecution: BinaryExecutionBoundary = BinaryExecutionBoundaryFactory.fromEnvironment(environment),
     private val harnessProvenance: String? = null,
@@ -70,10 +72,15 @@ class MvpPatchWorkflow(
         require(ReconstructionProfiles.builtIn.any { it.id == profile.id && it.sha256 == profile.sha256 }) {
             "MVP patch profile is not admitted by this application"
         }
+        requireMvpSummaryCapacity(resourceBudget.maximumProjectionBytes)
         val compilerPolicy = ReconstructionAdapters.resolve(profile).mvpPatchCompiler
         val input = options.inputElf.toAbsolutePath().normalize()
         val output = options.outputDir.toAbsolutePath().normalize()
         require(input.isRegularFile()) { "input ELF does not exist: $input" }
+        val evidence = MvpRunEvidence(
+            environment, harnessProvenance ?: fallbackHarnessIdentity(), profile.id, profile.sha256,
+            resourceBudget.maximumProjectionBytes,
+        )
         cleanOutputDirectory(output, input)
         val logs = output.resolve("logs").createDirectories()
         val decompiled = output.resolve("decompile").createDirectories()
@@ -85,8 +92,7 @@ class MvpPatchWorkflow(
         val raw = work.resolve("ghidra_decompiled.c")
         val finalBinary = patchedBinaryDir.resolve("patched_binary")
         finalBinary.deleteIfExists()
-        val logger = StreamingLogger(logs.resolve("patch-${Instant.now().toEpochMilli()}.log"))
-        val evidence = MvpRunEvidence(environment, harnessProvenance ?: fallbackHarnessIdentity(), profile.id, profile.sha256)
+        val logger = StreamingLogger(logs.resolve("patch-${Instant.now().toEpochMilli()}.log"), evidence)
         var phase = "inspect"
         var reconstructionAgentEvidence: AcpExecutionReceiptDocument? = null
         var reconstructionCandidate: ByteArray? = null
@@ -118,21 +124,25 @@ class MvpPatchWorkflow(
                         "decompiled.c" to RECONSTRUCTION_TARGET_PLACEHOLDER,
                     ),
                 )
-                retainRequest(evidenceDir.resolve("reconstruction-request.md"), reconstructionRequest, evidence)
+                val reconstructionInput = retainMvpCapturedRequest(
+                    evidenceDir.resolve("reconstruction-request.md"), reconstructionRequest,
+                    "decompiled.c", resourceBudget, evidence,
+                )
                 val reconstruction = requestCapturedReplacement(
-                    reconstructionRequest,
-                    "decompiled.c",
+                    reconstructionInput,
                     evidenceDir.resolve(RECONSTRUCTION_AGENT_EVIDENCE),
                     evidenceDir.resolve(RECONSTRUCTION_AGENT_ASSESSMENT),
                     "reconstruction-turn",
                 )
-                retainResponse(evidenceDir.resolve("reconstruction-response.md"), reconstruction.response, evidence)
                 val reconstructedSource = singleReplacement(
                     reconstruction.response.patches.map { it.relativePath to it.replacement },
                     "decompiled.c",
                 )
                 reconstructionAgentEvidence = reconstruction.agentExecutionEvidence
                 reconstructionCandidate = reconstructedSource.toByteArray(StandardCharsets.UTF_8)
+                retainMvpCapturedResponse(
+                    evidenceDir.resolve("reconstruction-response.md"), reconstruction.response, resourceBudget, evidence,
+                )
                 validateMeaningfulReconstruction(reconstructedSource)
                 reconstructed.writeText(reconstructedSource)
                 evidence.check("meaningful standalone reconstruction", true, "source has main, control/data behavior, and no generic placeholder shape")
@@ -183,15 +193,15 @@ class MvpPatchWorkflow(
                         "patched.c" to reconstructed.readText(),
                     ),
                 )
-                retainRequest(evidenceDir.resolve("patch-request.md"), patchRequest, evidence)
+                val patchInput = retainMvpCapturedRequest(
+                    evidenceDir.resolve("patch-request.md"), patchRequest, "patched.c", resourceBudget, evidence,
+                )
                 val proposal = requestCapturedReplacement(
-                    patchRequest,
-                    "patched.c",
+                    patchInput,
                     evidenceDir.resolve(PATCH_AGENT_EVIDENCE),
                     evidenceDir.resolve(PATCH_AGENT_ASSESSMENT),
                     "patch-turn",
                 )
-                retainResponse(evidenceDir.resolve("patch-response.md"), proposal.response, evidence)
                 evidence.patchExplanation = proposal.response.summary
                 val proposedSource = patchedSourceDir.resolve("patched.c")
                 val proposedSourceText = singleReplacement(
@@ -200,6 +210,9 @@ class MvpPatchWorkflow(
                 )
                 patchAgentEvidence = proposal.agentExecutionEvidence
                 patchCandidate = proposedSourceText.toByteArray(StandardCharsets.UTF_8)
+                retainMvpCapturedResponse(
+                    evidenceDir.resolve("patch-response.md"), proposal.response, resourceBudget, evidence,
+                )
                 proposedSource.writeText(proposedSourceText)
                 val diff = it.command(listOf("diff", "-u", reconstructed.pathString, proposedSource.pathString), work, "proposed patch", false, accepted = setOf(0, 1))
                 if (diff.exitCode == 0 || diff.stdout.isBlank()) throw MvpPatchException("proposed patch did not change reconstructed C")
@@ -207,7 +220,8 @@ class MvpPatchWorkflow(
                 diffPath.writeText(evidence.redact(diff.stdout))
                 evidence.patchDiff = diff.stdout
                 evidence.patchDiffPath = diffPath
-                val approved = options.assumeYes || approve(evidence.patchExplanation)
+                val approved = options.assumeYes || (approve?.invoke(evidence.patchExplanation)
+                    ?: promptForApproval(evidence.patchExplanation, evidence))
                 evidence.approvalDecision = when {
                     !approved -> "rejected interactively"
                     options.assumeYes -> "approved by --yes automation"
@@ -351,20 +365,15 @@ class MvpPatchWorkflow(
      * aggregate workspace quotas as each replacement is received.
      */
     private fun requestCapturedReplacement(
-        request: RepairRequest,
-        target: String,
+        input: MvpCapturedRequest,
         receiptPath: Path,
         assessmentPath: Path,
         taskId: String,
     ): CapturedAgentReplacement {
-        require(target in request.projectFiles) { "captured patch target is absent: $target" }
-        val initialFiles = request.projectFiles.mapValues { (_, text) -> text.toByteArray(StandardCharsets.UTF_8) }
-        val objective = buildString {
-            append(request.prompt.trim())
-            append("\n\nEdit ").append(target)
-            append(" in place. Do not create, delete, or modify any other file.")
-        }
-        requireRequestBudget(request.failureKind, objective, initialFiles)
+        val request = input.request
+        val target = input.target
+        val initialFiles = input.initialFiles
+        val objective = input.objective
         lateinit var agentRequest: AgentExecutionRequest
         val eventRecorder = BoundedAgentExecutionEventRecorder()
         val staged = CapturedRepairStagingAuthority.executeReceipt(
@@ -430,7 +439,7 @@ class MvpPatchWorkflow(
                 execution = executionEvidence,
                 issue = AcpExecutionOutcomeIssue(code, message),
             )
-            throw MvpPatchException(message)
+            throw MvpPatchException("$message [$code]")
         }
         val result = when (val outcome = staged.receipt.outcome) {
             is AgentExecutionOutcome.Returned -> outcome.result
@@ -478,15 +487,13 @@ class MvpPatchWorkflow(
         if (change.sizeBytes != null && change.sizeBytes != after.size.toLong()) {
             reject("change-size-mismatch", "patch agent size does not match the captured replacement")
         }
-        return CapturedAgentReplacement(
-            response = RepairResponse(
-                summary = result.summary?.trim().orEmpty().ifBlank {
-                    "agent supplied a captured full-file replacement"
-                },
-                patches = listOf(SourcePatch(target, decodeStrictUtf8(target, after))),
-            ),
-            agentExecutionEvidence = executionEvidence,
-        )
+        val replacement = decodeStrictUtf8(target, after)
+        val response = try {
+            prepareMvpCapturedResponse(result.summary, target, replacement, resourceBudget)
+        } catch (_: MvpPatchException) {
+            reject("response-content-budget", "patch agent response exceeds retained content budgets")
+        }
+        return CapturedAgentReplacement(response, executionEvidence)
     }
 
     private fun retainAgentExecutionEvidence(
@@ -546,29 +553,6 @@ class MvpPatchWorkflow(
         publicationMode == MvpPublicationMode.TEST_ONLY_NON_RELEASE -> false
         harnessProvenance?.startsWith("agent-harness-v1:legacy-openai:") == true -> false
         else -> true
-    }
-
-    private fun requireRequestBudget(
-        failureKind: String,
-        objective: String,
-        initialFiles: Map<String, ByteArray>,
-    ) {
-        var bytes = "project".toByteArray(StandardCharsets.UTF_8).size.toLong()
-        bytes = Math.addExact(
-            bytes,
-            RepairClientAgentHarness.FAILURE_KIND_CONTEXT_ID.toByteArray(StandardCharsets.UTF_8).size.toLong(),
-        )
-        bytes = Math.addExact(bytes, failureKind.toByteArray(StandardCharsets.UTF_8).size.toLong())
-        bytes = Math.addExact(bytes, objective.toByteArray(StandardCharsets.UTF_8).size.toLong())
-        initialFiles.forEach { (path, content) ->
-            bytes = Math.addExact(bytes, path.toByteArray(StandardCharsets.UTF_8).size.toLong())
-            bytes = Math.addExact(bytes, content.size.toLong())
-        }
-        if (bytes > resourceBudget.maximumRequestBytes) {
-            throw MvpPatchException(
-                "captured patch request requires $bytes bytes; limit=${resourceBudget.maximumRequestBytes}",
-            )
-        }
     }
 
     private fun decodeStrictUtf8(relativePath: String, bytes: ByteArray): String = try {
@@ -651,12 +635,39 @@ data class CommandResult(val exitCode: Int, val stdout: String, val stderr: Stri
     val combined: String = stdout + stderr
 }
 
-class StreamingLogger(path: Path) : AutoCloseable {
+class StreamingLogger private constructor(
+    path: Path,
+    private val privacy: MvpLogPrivacy,
+    private val output: PrintStream,
+    private val errors: PrintStream,
+    private val timestamp: () -> String,
+) : AutoCloseable {
+    constructor(path: Path) : this(path, defaultPrivacy(), System.out, System.err, { Instant.now().toString() })
+
+    internal constructor(
+        path: Path, evidence: MvpRunEvidence, output: PrintStream = System.out, errors: PrintStream = System.err,
+        timestamp: () -> String = { Instant.now().toString() },
+    ) : this(path, evidence.logPrivacy, output, errors, timestamp)
+
     private val writer: BufferedWriter = Files.newBufferedWriter(path)
+    private val emittedLines = privacy.lines()
+
     fun phase(name: String) = info("==> $name")
-    fun info(message: String) {
-        println(message); System.out.flush(); writer.appendLine("[${Instant.now()}] $message"); writer.flush()
+    fun info(message: String) = emit(message, false, timestamp())
+
+    @Synchronized
+    private fun emit(message: String, error: Boolean, stamp: String? = null, pipe: MvpLogPrivacy.Lines? = null) {
+        val guarded = privacy.message(message, emittedLines, pipe)
+        val frame = privacy.frame(guarded, error, stamp)
+        val console = if (frame.error) errors else output
+        console.println(frame.console)
+        console.flush()
+        writer.appendLine(frame.retained)
+        writer.flush()
     }
+
+    internal fun outputLine(line: String, error: Boolean, pipe: MvpLogPrivacy.Lines) = emit(line, error, pipe = pipe)
+
     fun command(
         command: List<String>, directory: Path, label: String, requireSuccess: Boolean = true,
         environment: Map<String, String> = emptyMap(), accepted: Set<Int> = setOf(0),
@@ -666,10 +677,16 @@ class StreamingLogger(path: Path) : AutoCloseable {
             .apply { environment().putAll(environment) }.start()
         val stdout = StringBuilder()
         val stderr = StringBuilder()
-        val outThread = stream(process.inputStream, stdout, false)
-        val errThread = stream(process.errorStream, stderr, true)
+        val projectionFailure = MvpLogFailure()
+        val display = MvpLiveCommandDisplay(privacy) { line, error, pipe -> emit(line, error, pipe = pipe) }
+        val captureBudget = MvpCommandCaptureBudget(privacy.maximumBytes)
+        val outThread = stream(process.inputStream, stdout, false, projectionFailure, display, captureBudget)
+        val errThread = stream(process.errorStream, stderr, true, projectionFailure, display, captureBudget)
         outThread.join(); errThread.join()
-        val code = process.waitFor(); info("$label exit_code=$code")
+        val code = process.waitFor()
+        projectionFailure.requireSuccess()
+        display.finish(stdout, stderr)
+        info("$label exit_code=$code")
         if (requireSuccess && code !in accepted) throw MvpPatchException("$label failed with exit code $code")
         return CommandResult(code, stdout.toString(), stderr.toString())
     }
@@ -683,27 +700,56 @@ class StreamingLogger(path: Path) : AutoCloseable {
     ): BinaryExecutionResult {
         info("$ $label: isolated-exec ${executable.toAbsolutePath().normalize()}")
         val result = boundary.execute(executable, directory, environment)
-        synchronized(this) {
-            result.stdout.lineSequence().filter(String::isNotEmpty).forEach { line -> println(line); writer.appendLine(line) }
-            result.stderr.lineSequence().filter(String::isNotEmpty).forEach { line -> System.err.println(line); writer.appendLine("[stderr] $line") }
-            writer.flush()
-        }
+        // Admit both complete streams before output. The boundary does not retain cross-pipe order,
+        // so any earlier peer introducer prefix makes every local record ambiguous during replay.
+        val stdoutLines = privacy.linesWithUnorderedPeer(result.stderr)
+        val stderrLines = privacy.linesWithUnorderedPeer(result.stdout)
+        result.stdout.lineSequence().filter(String::isNotEmpty).forEach { outputLine(it, false, stdoutLines) }
+        result.stderr.lineSequence().filter(String::isNotEmpty).forEach { outputLine(it, true, stderrLines) }
         info("$label exit_code=${result.exitCode} isolation=${result.isolation}")
         return result
     }
 
-    private fun stream(input: java.io.InputStream, capture: StringBuilder, error: Boolean): Thread =
-        Thread {
-            input.bufferedReader().useLines { lines -> lines.forEach { line ->
-                synchronized(this) {
-                    capture.appendLine(line)
-                    if (error) System.err.println(line) else println(line)
-                    if (error) System.err.flush() else System.out.flush()
-                    writer.appendLine(if (error) "[stderr] $line" else line); writer.flush()
+    private fun stream(
+        input: java.io.InputStream, capture: StringBuilder, error: Boolean,
+        projectionFailure: MvpLogFailure, display: MvpLiveCommandDisplay,
+        captureBudget: MvpCommandCaptureBudget,
+    ): Thread {
+        val collector = MvpCommandCapture(capture, captureBudget)
+        return Thread {
+            try {
+                input.reader(Charsets.UTF_8).use { reader ->
+                    val buffer = CharArray(4096)
+                    while (true) {
+                        val count = reader.read(buffer)
+                        if (count < 0) break
+                        // After the first collection/display failure, drain without retaining more.
+                        if (count > 0) projectionFailure.attempt {
+                            collector.feed(buffer, count) {
+                                projectionFailure.attempt { display.line(error, capture) }
+                            }
+                        }
+                    }
+                    projectionFailure.attempt {
+                        collector.finish { projectionFailure.attempt { display.line(error, capture) } }
+                    }
                 }
-            } }
+                projectionFailure.attempt { display.complete(error, capture) }
+            } catch (failure: Throwable) {
+                // Avoid the JVM's raw child-thread exception printer; caller rethrows unchanged.
+                projectionFailure.record(failure)
+            }
         }.also { it.start() }
+    }
+
     override fun close() = writer.close()
+
+    private companion object {
+        fun defaultPrivacy(): MvpLogPrivacy {
+            val maximum = decompengine.repair.MAXIMUM_REPAIR_PROJECTION_BYTES
+            return MvpLogPrivacy(MvpArtifactRedactor(System.getenv().values, maximum))
+        }
+    }
 }
 
 private fun singleReplacement(patches: List<Pair<String, String>>, suffix: String): String {
@@ -747,22 +793,207 @@ private fun validateMeaningfulReconstruction(source: String) {
     }
 }
 
-private fun retainRequest(path: Path, request: RepairRequest, evidence: MvpRunEvidence) {
-    val files = request.projectFiles.toSortedMap().entries.joinToString("\n\n") { (name, content) ->
-        "## $name\n\n```c\n${evidence.redact(content).trimEnd()}\n```"
+internal class MvpCapturedRequest(
+    val request: RepairRequest,
+    val target: String,
+    val objective: String,
+    val initialFiles: Map<String, ByteArray>,
+)
+
+/** Admit the complete retained fields before encoding files or rendering their Markdown. */
+internal fun prepareMvpCapturedRequest(
+    request: RepairRequest,
+    target: String,
+    budget: RepairResourceBudget,
+): MvpCapturedRequest {
+    if (request.projectFiles.size > budget.maximumContextFiles ||
+        request.regressionInputs.size > budget.maximumRegressionInputs
+    ) {
+        throw MvpPatchException("captured patch request exceeds its entry budget")
     }
-    path.writeText(
-        "# Retained LLM Request\n\n- Failure kind: ${evidence.redact(request.failureKind)}\n" +
-            "- Regression inputs: ${request.regressionInputs.joinToString { evidence.redact(it.id) }}\n\n" +
-            "## Objective\n\n${evidence.redact(request.prompt)}\n\n## Binary-derived context\n\n$files\n",
+    val frozen = request.copy(
+        projectFiles = request.projectFiles.toMap(),
+        regressionInputs = captureMvpRegressionInputs(request.regressionInputs, budget),
+    )
+    require(target in frozen.projectFiles) { "captured patch target is absent: $target" }
+    val content = MvpContentBudget(budget.maximumRequestBytes, "captured patch request")
+    content.charge("project")
+    content.charge(RepairClientAgentHarness.FAILURE_KIND_CONTEXT_ID)
+    content.charge(frozen.failureKind)
+    val staging = MvpContentBudget(budget.maximumStagingBytes, "captured patch staging")
+    frozen.projectFiles.forEach { (path, text) ->
+        content.charge(path)
+        staging.chargeBytes(content.charge(text))
+    }
+    val commonBytes = content.used
+    // The transcript retains the raw prompt, not the trimmed agent objective.
+    content.charge(frozen.prompt)
+    frozen.regressionInputs.forEach { input ->
+        content.charge(input.id)
+        input.args.forEach { content.charge(it) }
+        content.chargeBytes(input.stdin.size.toLong())
+    }
+    val objective = buildString {
+        append(frozen.prompt.trim())
+        append("\n\nEdit ").append(target)
+        append(" in place. Do not create, delete, or modify any other file.")
+    }
+    MvpContentBudget(budget.maximumRequestBytes, "captured patch request").apply {
+        chargeBytes(commonBytes)
+        charge(objective)
+    }
+    return MvpCapturedRequest(
+        frozen, target, objective,
+        frozen.projectFiles.mapValues { (_, text) -> text.toByteArray(StandardCharsets.UTF_8) },
     )
 }
 
-private fun retainResponse(path: Path, response: decompengine.repair.RepairResponse, evidence: MvpRunEvidence) {
-    val patches = response.patches.joinToString("\n\n") { patch ->
-        "## ${evidence.redact(patch.relativePath)}\n\n```c\n${evidence.redact(patch.replacement).trimEnd()}\n```"
+private fun captureMvpRegressionInputs(inputs: List<ProcessInput>, budget: RepairResourceBudget): List<ProcessInput> {
+    val content = MvpContentBudget(budget.maximumRegressionInputBytes, "captured regression inputs")
+    val snapshot = ArrayList<ProcessInput>()
+    var argumentCount = 0L
+    inputs.forEach { input ->
+        val suppliedArguments = input.args.size.toLong()
+        if (snapshot.size >= budget.maximumRegressionInputs || suppliedArguments < 0 ||
+            suppliedArguments > budget.maximumRegressionArguments - argumentCount
+        ) {
+            throw MvpPatchException("captured regression inputs exceed their entry budget")
+        }
+        content.charge(input.id)
+        content.chargeBytes(input.stdin.size.toLong())
+        val arguments = ArrayList<String>()
+        input.args.forEach { argument ->
+            if (argumentCount >= budget.maximumRegressionArguments) {
+                throw MvpPatchException("captured regression inputs exceed their argument budget")
+            }
+            content.charge(argument)
+            arguments += argument
+            argumentCount++
+        }
+        snapshot += ProcessInput(input.id, Collections.unmodifiableList(arguments), input.stdin.copyOf())
     }
-    path.writeText("# Retained LLM Response\n\n## Summary\n\n${evidence.redact(response.summary)}\n\n$patches\n")
+    return Collections.unmodifiableList(snapshot)
+}
+
+internal fun retainMvpCapturedRequest(
+    path: Path,
+    request: RepairRequest,
+    target: String,
+    budget: RepairResourceBudget,
+    evidence: MvpRunEvidence,
+): MvpCapturedRequest {
+    val admitted = prepareMvpCapturedRequest(request, target, budget)
+    retainRequest(path, admitted.request, evidence)
+    return admitted
+}
+
+internal fun prepareMvpCapturedResponse(
+    summary: String?,
+    target: String,
+    replacement: String,
+    budget: RepairResourceBudget,
+): RepairResponse {
+    val raw = RepairResponse(summary.orEmpty(), listOf(SourcePatch(target, replacement)))
+    requireMvpResponseContentBudget(raw, budget)
+    val response = raw.copy(summary = raw.summary.trim().ifBlank {
+        "agent supplied a captured full-file replacement"
+    })
+    // A blank summary's fallback must also fit a caller's smaller response budget.
+    requireMvpResponseContentBudget(response, budget)
+    return response
+}
+
+internal fun retainMvpCapturedResponse(
+    path: Path,
+    response: RepairResponse,
+    budget: RepairResourceBudget,
+    evidence: MvpRunEvidence,
+) {
+    if (response.patches.size > budget.maximumPatchFiles) {
+        throw MvpPatchException("captured patch response exceeds its entry budget")
+    }
+    val frozen = response.copy(patches = response.patches.toList())
+    requireMvpResponseContentBudget(frozen, budget)
+    retainResponse(path, frozen, evidence)
+}
+
+private fun requireMvpResponseContentBudget(response: RepairResponse, budget: RepairResourceBudget) {
+    if (response.patches.size > budget.maximumPatchFiles) {
+        throw MvpPatchException("captured patch response exceeds its entry budget")
+    }
+    val content = MvpContentBudget(budget.maximumResponseBytes, "captured patch response")
+    val patches = MvpContentBudget(budget.maximumPatchBytes, "captured patch replacement")
+    content.charge(response.summary)
+    response.patches.forEach { patch ->
+        content.charge(patch.relativePath)
+        patches.chargeBytes(content.charge(patch.replacement))
+    }
+}
+
+/** Counts String.toByteArray(UTF_8) bytes without allocating an oversized encoded copy. */
+private class MvpContentBudget(private val maximum: Long, private val label: String) {
+    var used: Long = 0
+        private set
+
+    fun charge(text: String): Long {
+        val remaining = maximum - used
+        if (text.length.toLong() > remaining) exceeded()
+        var bytes = 0L
+        var index = 0
+        while (index < text.length) {
+            val character = text[index++].code
+            val width = when {
+                character < 0x80 -> 1
+                character < 0x800 -> 2
+                character in 0xD800..0xDBFF && index < text.length &&
+                    text[index].code in 0xDC00..0xDFFF -> { index++; 4 }
+                character in 0xD800..0xDFFF -> 1 // The UTF-8 encoder replaces an unpaired surrogate with '?'.
+                else -> 3
+            }
+            if (bytes > remaining - width) exceeded()
+            bytes += width
+        }
+        chargeBytes(bytes)
+        return bytes
+    }
+
+    fun chargeBytes(bytes: Long) {
+        if (bytes < 0 || bytes > maximum - used) exceeded()
+        used += bytes
+    }
+
+    private fun exceeded(): Nothing = throw MvpPatchException("$label exceeds its content byte budget")
+}
+
+private fun retainRequest(path: Path, request: RepairRequest, evidence: MvpRunEvidence) {
+    val transcript = evidence.artifactText {
+        append("# Retained LLM Request\n\n- Failure kind: ").append(request.failureKind)
+        append("\n- Regression inputs: ")
+        request.regressionInputs.forEachIndexed { index, input ->
+            if (index != 0) append(", ")
+            append(input.id)
+        }
+        append("\n\n## Objective\n\n").append(request.prompt).append("\n\n## Binary-derived context\n\n")
+        request.projectFiles.toSortedMap().entries.forEachIndexed { index, (name, content) ->
+            if (index != 0) append("\n\n")
+            append("## ").append(name).append("\n\n```c\n").append(evidence.redact(content).trimEnd()).append("\n```")
+        }
+        append("\n")
+    }
+    Files.write(path, encodeMvpArtifactUtf8(transcript))
+}
+
+private fun retainResponse(path: Path, response: decompengine.repair.RepairResponse, evidence: MvpRunEvidence) {
+    val transcript = evidence.artifactText {
+        append("# Retained LLM Response\n\n## Summary\n\n").append(response.summary).append("\n\n")
+        response.patches.forEachIndexed { index, patch ->
+            if (index != 0) append("\n\n")
+            append("## ").append(patch.relativePath).append("\n\n```c\n")
+                .append(evidence.redact(patch.replacement).trimEnd()).append("\n```")
+        }
+        append("\n")
+    }
+    Files.write(path, encodeMvpArtifactUtf8(transcript))
 }
 
 private fun findSourceLocation(sanitizer: String): String? =
@@ -771,7 +1002,7 @@ private fun findSourceLocation(sanitizer: String): String? =
         ?.value
         ?.substringAfterLast('/')
 
-private fun promptForApproval(summary: String): Boolean {
-    println("Patch summary: $summary"); print("Apply this patch? [y/N] "); System.out.flush()
+private fun promptForApproval(summary: String, evidence: MvpRunEvidence): Boolean {
+    print(renderMvpApprovalPrompt(summary, evidence)); System.out.flush()
     return readlnOrNull()?.trim()?.lowercase() in setOf("y", "yes")
 }

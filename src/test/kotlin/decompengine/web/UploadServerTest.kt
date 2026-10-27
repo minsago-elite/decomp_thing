@@ -1,5 +1,8 @@
 package decompengine.web
 
+import decompengine.testing.RecoveryMatrixEvidence
+import decompengine.testing.recoveryMatrixTempDirectory as createTempDirectory
+import org.junit.jupiter.api.extension.ExtendWith
 import decompengine.jobs.elfFixture
 import decompengine.project.ReconstructionProfiles
 import decompengine.project.ReconstructionAdapters
@@ -20,6 +23,26 @@ import decompengine.project.ArchivalPackager
 import decompengine.repair.ModuleRevisionAttempt
 import decompengine.repair.ModuleRevisionGraphTest
 import decompengine.repair.TRACE_REPAIR_ACP_RECEIPT_KIND
+import decompengine.repair.ModuleRevisionGraph
+import decompengine.repair.open
+import decompengine.repair.openForTesting
+import decompengine.repair.DeclarativeRepairIndexProfile
+import decompengine.repair.RepairIndexLayout
+import decompengine.repair.RepairModuleEvidence
+import decompengine.repair.RevisionRepairMetadata
+import decompengine.repair.RepairEvidence
+import decompengine.repair.RepairPublicationMode
+import decompengine.repair.RepairRollbackState
+import decompengine.repair.ModuleRevisionFaultInjector
+import decompengine.repair.ModuleRevisionFaultPoint
+import decompengine.repair.readProjectRecordedRepairHistory
+import decompengine.presentRecordedRepairHistory
+import decompengine.produceRejectedRecordedTraceHistory
+import decompengine.producePagedRecordedTraceHistory
+import decompengine.repair.RepairRecordedHistorySelection
+import decompengine.repair.RepairRunStatus
+import decompengine.project.sha256
+import decompengine.validation.ProcessInput
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonPrimitive
@@ -35,7 +58,6 @@ import java.nio.file.StandardOpenOption
 import java.security.MessageDigest
 import java.util.concurrent.Executor
 import kotlin.io.path.createDirectories
-import kotlin.io.path.createTempDirectory
 import kotlin.io.path.exists
 import kotlin.io.path.readBytes
 import kotlin.io.path.writeText
@@ -44,9 +66,12 @@ import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertContentEquals
 import kotlin.test.assertNotEquals
+import kotlin.test.assertNotNull
 import kotlin.test.assertFalse
 import kotlin.test.assertTrue
+import kotlin.test.assertFailsWith
 
+@ExtendWith(RecoveryMatrixEvidence::class)
 class UploadServerTest {
     private val sessions = java.util.IdentityHashMap<UploadServer, Map<String, String>>()
     private val followingClient = java.net.http.HttpClient.newBuilder().followRedirects(java.net.http.HttpClient.Redirect.NORMAL).build()
@@ -519,6 +544,73 @@ class UploadServerTest {
     }
 
     @Test
+    fun `legacy recovery reads pause during an admitted streamed upload and resume after publication`() = withServer { server, root ->
+        val priorResponse = upload(server, "prior-recovery.elf", elfFixture(), acceptJson = true)
+        assertEquals(201, priorResponse.status)
+        val priorId = Json.parseToJsonElement(priorResponse.body.decodeToString()).jsonObject.getValue("id").toString().trim('"')
+        val metadata = root.resolve(priorId).resolve("job.json")
+        val before = Files.readAllBytes(metadata)
+        val service = UploadServer::class.java.getDeclaredField("jobs").apply { isAccessible = true }.get(server) as WebJobService
+        val entered = java.util.concurrent.CountDownLatch(1)
+        val release = java.util.concurrent.CountDownLatch(1)
+        val caller = java.util.concurrent.Executors.newSingleThreadExecutor()
+        val boundary = "legacy-recovery-overlap"
+        val body = "--$boundary\r\nContent-Disposition: form-data; name=\"binary\"; filename=\"active-recovery.elf\"\r\n\r\n".toByteArray() +
+            elfFixture() + "\r\n--$boundary--\r\n".toByteArray()
+        val input = object : java.io.FilterInputStream(body.inputStream()) {
+            private fun waitForRelease() {
+                entered.countDown()
+                check(release.await(15, java.util.concurrent.TimeUnit.SECONDS))
+            }
+            override fun read(): Int { waitForRelease(); return super.read() }
+            override fun read(bytes: ByteArray, offset: Int, length: Int): Int {
+                waitForRelease()
+                return super.read(bytes, offset, length)
+            }
+        }
+        try {
+            val publication = caller.submit<decompengine.jobs.Job> {
+                var uploaded: decompengine.jobs.Job? = null
+                assertTrue(server.withActiveRequest {
+                    uploaded = input.use { service.uploadMultipart(it, "multipart/form-data; boundary=$boundary") }
+                })
+                checkNotNull(uploaded)
+            }
+            assertTrue(entered.await(10, java.util.concurrent.TimeUnit.SECONDS))
+            val stage = Files.newDirectoryStream(root, ".upload-stream-v1-*").use { it.toList().single() }
+            val stagedInput = Files.readAllBytes(stage.resolve("input.elf"))
+            val busy = request(server, "GET", "/api/recovery", headers = mapOf("Accept" to "application/json"))
+            assertEquals(503, busy.status)
+            assertTrue(busy.body.decodeToString().contains("RECOVERY_INSPECTION_BUSY"))
+            assertTrue(!busy.body.decodeToString().contains("retainedUploadStages"))
+            val page = request(server, "GET", "/")
+            assertEquals(200, page.status)
+            val html = page.body.decodeToString()
+            assertTrue(html.contains("Recovery inspection paused"))
+            assertTrue(html.contains("prior-recovery.elf"))
+            assertTrue(!html.contains("Retained recovery files"))
+            assertTrue(!html.contains("Observed 1 upload stages"))
+            kotlin.test.assertContentEquals(stagedInput, Files.readAllBytes(stage.resolve("input.elf")))
+            kotlin.test.assertContentEquals(before, Files.readAllBytes(metadata))
+            release.countDown()
+            val uploaded = publication.get(10, java.util.concurrent.TimeUnit.SECONDS)
+            assertTrue(!Files.exists(stage))
+            val settled = request(server, "GET", "/api/recovery")
+            assertEquals(200, settled.status)
+            assertEquals("0", Json.parseToJsonElement(settled.body.decodeToString()).jsonObject.getValue("retainedUploadStages").toString())
+            val refreshed = request(server, "GET", "/").body.decodeToString()
+            assertTrue(!refreshed.contains("Recovery inspection paused"))
+            assertTrue(refreshed.contains("active-recovery.elf"))
+            assertEquals(setOf(priorId, uploaded.id), server.internalStore().list().map { it.id }.toSet())
+            kotlin.test.assertContentEquals(before, Files.readAllBytes(metadata))
+        } finally {
+            release.countDown()
+            caller.shutdownNow()
+            assertTrue(caller.awaitTermination(10, java.util.concurrent.TimeUnit.SECONDS))
+        }
+    }
+
+    @Test
     fun `shutdown discards caller-queued work and late delivery cannot alter a new owner state`() {
         val dataDir = createTempDirectory("web-caller-queue-")
         val queued = java.util.concurrent.CopyOnWriteArrayList<Runnable>()
@@ -604,6 +696,7 @@ class UploadServerTest {
             release.countDown()
             executor.shutdownNow()
         }
+    }
     @Test
     fun `dashboard keeps an unreadable published job visible without leaking its contents`() {
         val root = createTempDirectory("web-listing-admission-")
@@ -626,7 +719,6 @@ class UploadServerTest {
         } finally { server.stop() }
     }
 
-    }
 
     @Test
     fun `early stop signal discards delivered queued work before cleanup takes the lifecycle lock`() {
@@ -669,13 +761,16 @@ class UploadServerTest {
     fun `completion publication racing the stop signal is repaired to failed`() {
         val root = createTempDirectory("web-completion-fence-")
         val analyzing = java.util.concurrent.CountDownLatch(1)
+        val completed = java.util.concurrent.CountDownLatch(1)
         lateinit var server: UploadServer
         server = UploadServer("127.0.0.1", 0, root,
             analyzer = JobAnalyzer { _, _ ->
                 analyzing.countDown()
                 check(server.requestStopSignalled().await(15, java.util.concurrent.TimeUnit.SECONDS))
             }, executor = Executor { task ->
-                Thread(task, "web-stop-race-worker").apply { isDaemon = true; start() }
+                Thread({
+                    try { task.run() } finally { completed.countDown() }
+                }, "web-stop-race-worker").apply { isDaemon = true; start() }
             })
         server.start()
         try {
@@ -685,12 +780,8 @@ class UploadServerTest {
             server.requestStop()
             // The stop signal is published while the worker is mid-operation; the completion
             // decision observes it and persists failed instead of a completed publication.
-            val deadline = System.nanoTime() + java.util.concurrent.TimeUnit.SECONDS.toNanos(10)
-            var job = decompengine.jobs.JobStore(root).get(id)
-            while (job.status != "failed" && System.nanoTime() < deadline) {
-                Thread.sleep(20)
-                job = decompengine.jobs.JobStore(root).get(id)
-            }
+            assertTrue(completed.await(10, java.util.concurrent.TimeUnit.SECONDS))
+            val job = decompengine.jobs.JobStore(root).get(id)
             assertEquals("failed", job.status)
             assertEquals("Server stopped before the operation reported completion", job.statusMessage)
         } finally {
@@ -758,10 +849,16 @@ class UploadServerTest {
         val dataDir = createTempDirectory("web-stop-signal-order-")
         val server = UploadServer("127.0.0.1", 0, dataDir)
         server.start()
+        val serviceMonitor = UploadServer::class.java.getDeclaredField("jobs").apply { isAccessible = true }.get(server)
         val stopThread = Thread { server.stop() }
         try {
             synchronized(server.lifecycleMonitor()) {
-                stopThread.start()
+                synchronized(serviceMonitor) {
+                    stopThread.start()
+                    assertTrue(awaitBlocked(stopThread), "cleanup must wait for the held service monitor")
+                    assertTrue(server.jobServiceStopping(),
+                        "the stop signal must be visible before service-monitor cleanup")
+                }
                 assertTrue(awaitBlockedIn("decompengine.web.UploadServer", "stop"),
                     "stop() should wait on the lifecycle lock while it is held")
                 // The job service must already be signalled while stop() is still blocked:
@@ -837,12 +934,15 @@ class UploadServerTest {
 
     @Test
     fun `background diagnostics are redacted in storage and withheld from public rendering`() {
-        val dataDir = createTempDirectory("web-private-diagnostic-")
+        val dataDir = createTempDirectory(
+            Files.createDirectories(Path.of("build", "progress-basic-authorization-tests")), "web-",
+        )
         val configured = "configured-provider-credential"
         val bearer = "synthetic-bearer-value"
         val password = "synthetic-password-value"
+        val basicToken = "c3ludGhldGljOnNlbnRpbmVs" // Deliberately absent from sensitiveValues.
         val server = UploadServer("127.0.0.1", 0, dataDir,
-            analyzer = JobAnalyzer { _, _ -> error("Provider refused $configured; Bearer $bearer; password=$password <script>bad</script>") },
+            analyzer = JobAnalyzer { _, _ -> error("Provider refused $configured; Bearer $bearer; password=$password; pRoXy-AuThOrIzAtIoN: bAsIc $basicToken <script>bad</script>") },
             reconstructor = JobReconstructor { _, _ -> error("z".repeat(17000) + configured) },
             executor = Executor { it.run() }, sensitiveValues = listOf(configured))
         server.start()
@@ -858,20 +958,90 @@ class UploadServerTest {
             val api = request(server, "GET", "/api/jobs/$id").body.decodeToString()
             val page = request(server, "GET", "/jobs/$id").body.decodeToString()
             listOf(persisted).forEach { text ->
-                listOf(configured, bearer, password).forEach { assertTrue(!text.contains(it)) }
+                listOf(configured, bearer, password, basicToken).forEach { assertTrue(!text.contains(it)) }
                 assertTrue(text.contains("[redacted]"))
             }
-            listOf(configured, bearer, password, "status_message", "binary_path").forEach {
+            listOf(configured, bearer, password, basicToken, "status_message", "binary_path").forEach {
                 assertTrue(!api.contains(it))
             }
             assertTrue(page.contains("Stored diagnostic details are withheld"))
-            listOf(configured, bearer, password, "Provider refused", "[redacted]", "bad</script>").forEach {
+            listOf(configured, bearer, password, basicToken, "Provider refused", "[redacted]", "bad</script>").forEach {
                 assertTrue(!page.contains(it))
             }
             assertEquals(303, request(server, "POST", "/jobs/$id/reconstruct", followRedirects = false).status)
             val job = decompengine.jobs.JobStore(dataDir).get(id)
             assertEquals("failed", job.status)
             assertEquals("[oversized text omitted]", job.statusMessage)
+        } finally {
+            server.stop()
+        }
+    }
+
+    @Test
+    fun `configured credential indicators cannot expose background diagnostic values in storage`() {
+        val dataDir = createTempDirectory(
+            Files.createDirectories(Path.of("build", "progress-credential-indicator-tests")), "web-",
+        )
+        val credentials = listOf("unknown-bearer-value", "unknown-api-value", "unknown-password-value", "unknown-token-value")
+        val diagnostic = "Provider refused; Bearer ${credentials[0]}; api_key=${credentials[1]}; " +
+            "password=${credentials[2]}; ghp_${credentials[3]}; end"
+        val server = UploadServer("127.0.0.1", 0, dataDir,
+            analyzer = JobAnalyzer { _, _ -> error(diagnostic) },
+            reconstructor = JobReconstructor { _, _ -> error(diagnostic) },
+            executor = Executor { it.run() }, sensitiveValues = listOf("Bearer", "api_key", "password", "ghp_"))
+        server.start()
+        try {
+            val uploaded = upload(server, "diagnostic.elf", elfFixture(), acceptJson = true)
+            val id = Json.parseToJsonElement(uploaded.body.decodeToString()).jsonObject.getValue("id").toString().trim('"')
+            for (workflow in listOf("explore", "reconstruct")) {
+                assertEquals(303, request(server, "POST", "/jobs/$id/$workflow", followRedirects = false).status)
+                val job = decompengine.jobs.JobStore(dataDir).get(id)
+                assertEquals("failed", job.status)
+                assertTrue(job.statusMessage!!.startsWith("Provider refused; "))
+                assertTrue(job.statusMessage!!.endsWith("; end"))
+                val persisted = dataDir.resolve(id).resolve("job.json").readBytes().decodeToString()
+                val api = request(server, "GET", "/api/jobs/$id").body.decodeToString()
+                val page = request(server, "GET", "/jobs/$id").body.decodeToString()
+                for (text in listOf(persisted, api, page)) {
+                    credentials.forEach { assertFalse(text.contains(it)) }
+                    assertFalse(text.contains(diagnostic))
+                }
+                assertTrue(persisted.contains("[redacted]"))
+                assertFalse(api.contains("status_message"))
+                assertFalse(api.contains("Provider refused"))
+                assertFalse(page.contains("Provider refused"))
+                assertFalse(page.contains("[redacted]"))
+                assertTrue(page.contains("Stored diagnostic details are withheld"))
+            }
+        } finally {
+            server.stop()
+        }
+    }
+
+    @Test
+    fun `background diagnostics cannot persist sensitive omission markers`() {
+        val dataDir = createTempDirectory(
+            Files.createDirectories(Path.of("build", "progress-redactor-fallback-tests")), "web-",
+        )
+        val secrets = listOf("[oversized text omitted]", "[redacted]", "[unredactable text omitted]")
+        val server = UploadServer("127.0.0.1", 0, dataDir,
+            analyzer = JobAnalyzer { _, _ -> error("x".repeat(16_385)) },
+            reconstructor = JobReconstructor { _, _ -> error("[redacted]") },
+            executor = Executor { it.run() }, sensitiveValues = secrets)
+        server.start()
+        try {
+            val uploaded = upload(server, "diagnostic.elf", elfFixture(), acceptJson = true)
+            val id = Json.parseToJsonElement(uploaded.body.decodeToString()).jsonObject.getValue("id").toString().trim('"')
+            for (workflow in listOf("explore", "reconstruct")) {
+                assertEquals(303, request(server, "POST", "/jobs/$id/$workflow", followRedirects = false).status)
+                val job = decompengine.jobs.JobStore(dataDir).get(id)
+                assertEquals("failed", job.status)
+                assertEquals("", job.statusMessage)
+                val persisted = dataDir.resolve(id).resolve("job.json").readBytes().decodeToString()
+                val api = request(server, "GET", "/api/jobs/$id").body.decodeToString()
+                val page = request(server, "GET", "/jobs/$id").body.decodeToString()
+                for (text in listOf(persisted, api, page)) secrets.forEach { assertFalse(text.contains(it)) }
+            }
         } finally {
             server.stop()
         }
@@ -1070,8 +1240,10 @@ class UploadServerTest {
             val event = item.jsonObject
             assertEquals(index.toString(), event.getValue("sequence").toString())
             assertEquals("true", event.getValue("textOmitted").toString())
-            assertEquals(if (index == 3) "3" else "2", event.getValue("presentationOmittedFields").toString())
-            assertEquals("\"${"a".repeat(64)}\"", event.getValue("contentSha256").toString())
+            // Provider reasoning also withholds its content commitment (#517).
+            assertEquals(if (index == 0 || index == 3) "3" else "2", event.getValue("presentationOmittedFields").toString())
+            if (index == 0) assertFalse("contentSha256" in event)
+            else assertEquals("\"${"a".repeat(64)}\"", event.getValue("contentSha256").toString())
         }
         assertEquals("1", rows[4].jsonObject.getValue("entryCount").toString())
         assertEquals("9223372036854775807", rows[5].jsonObject.getValue("inputTokens").toString())
@@ -1197,6 +1369,353 @@ class UploadServerTest {
     }
 
     @Test
+    fun `canonical empty and run only HTTP histories expose every cancelled run without another workflow`() {
+        withServer(JobAnalyzer { _, _ -> error("history read must not analyze") },
+            JobReconstructor { _, _ -> error("history read must not reconstruct") }) { server, dataDir ->
+            val id = uploadedJobId(server)
+            val project = dataDir.resolve("$id/reports/source-tree").createDirectories()
+            project.resolve("code.c").writeText("PRIVATE-source")
+            val profile = recordedRepairProfile()
+            ModuleRevisionGraph.open(project, profile).use { graph ->
+                graph.enableRunContract()
+                graph.synchronizeRepairHistory()
+            }
+            val emptySnapshot = requireNotNull(readProjectRecordedRepairHistory(project).snapshot)
+            val emptyBefore = recordedProjectBytes(project)
+            val empty = request(server, "GET", "/jobs/$id")
+            assertEquals(200, empty.status)
+            val emptyBody = empty.body.decodeToString()
+            assertTrue("History page 1 of 1" in emptyBody && "No repair attempts are recorded." in emptyBody, emptyBody)
+            assertEquals(400, request(server, "GET", "/jobs/$id?historyPage=2&historyGraph=${emptySnapshot.graphSha256}").status)
+            val emptyAfter = recordedProjectBytes(project)
+            assertEquals(emptyBefore.keys, emptyAfter.keys)
+            emptyBefore.forEach { (name, bytes) -> assertContentEquals(bytes, emptyAfter.getValue(name), name) }
+            ModuleRevisionGraph.open(project, profile).use { graph ->
+                repeat(101) {
+                    graph.beginRun(1, 60_000)
+                    graph.finishRun(RepairRunStatus.CANCELLED, RepairEvidence("cancelled", "PRIVATE-before-any-attempt"))
+                }
+                graph.synchronizeRepairHistory()
+            }
+            val snapshot = requireNotNull(readProjectRecordedRepairHistory(project).snapshot)
+            assertTrue(snapshot.attempts.isEmpty() && snapshot.pending == null)
+            val before = recordedProjectBytes(project)
+            assertEquals(409, request(server, "GET", "/jobs/$id?historyGraph=${emptySnapshot.graphSha256}").status)
+            val runRows = Regex("Repair run: cancelled · 0/1 attempts · <code>(run_[0-9]{8})</code>")
+            val pages = (1..2).map { number ->
+                val path = if (number == 1) "/jobs/$id" else "/jobs/$id?historyPage=2&historyGraph=${snapshot.graphSha256}"
+                val response = request(server, "GET", path)
+                assertEquals(200, response.status)
+                val body = response.body.decodeToString()
+                assertTrue("History page $number of 2" in body && "No repair attempts are recorded." in body, body)
+                assertFalse("PRIVATE" in body || "code.c" in body, body)
+                val rows = runRows.findAll(body).map { it.groupValues[1] }.toList()
+                assertEquals(if (number == 1) 100 else 1, rows.size, body)
+                assertTrue((if (number == 1) "Older history" else "Newer history") in body, body)
+                rows
+            }
+            assertEquals(snapshot.runs.map { it.identity.value }, pages.reversed().flatten())
+            val after = recordedProjectBytes(project)
+            assertEquals(before.keys, after.keys)
+            before.forEach { (name, bytes) -> assertContentEquals(bytes, after.getValue(name), name) }
+        }
+    }
+
+    @Test
+    fun `older trace history and case pages retain authorized evidence across restart and reject stale or corrupt captures`() {
+        val parent = Path.of("build/test-tmp/recorded-paged-http").toAbsolutePath().createDirectories()
+        val dataDir = createTempDirectory(parent, "case-")
+        fun server() = UploadServer("127.0.0.1", 0, dataDir,
+            JobAnalyzer { _, _ -> error("history read must not analyze") },
+            JobReconstructor { _, _ -> error("history read must not reconstruct") }, Executor(Runnable::run))
+        var active: UploadServer? = server()
+        try {
+            val initial = requireNotNull(active)
+            initial.start()
+            val id = uploadedJobId(initial)
+            val project = dataDir.resolve("$id/reports/source-tree").createDirectories()
+            val fixture = producePagedRecordedTraceHistory(project)
+            val recorded = readProjectRecordedRepairHistory(project)
+            val snapshot = requireNotNull(recorded.snapshot)
+            val first = snapshot.attempts.first()
+            val before = recordedProjectBytes(project)
+            val evidencePath = "reports/source-tree/reports/iteration_1.validation.json"
+            repeat(2) { index ->
+                if (index == 1) {
+                    requireNotNull(active).stop(0)
+                    active = null
+                    active = server().also { it.start() }
+                }
+                val current = requireNotNull(active)
+                val latest = request(current, "GET", "/jobs/$id").body.decodeToString()
+                assertFalse("aria-label=\"Attempt 1\"" in latest, latest)
+                assertFalse(evidencePath in latest, latest)
+                assertTrue("historyPage=2" in latest && "historyGraph=${snapshot.graphSha256}" in latest, latest)
+                val query = "historyPage=2&historyGraph=${snapshot.graphSha256}"
+                val response = request(current, "GET", "/jobs/$id?$query")
+                val older = response.body.decodeToString()
+                assertEquals(200, response.status)
+                assertTrue("aria-label=\"Attempt 1\"" in older && "Compile repair — rejected" in older, older)
+                assertTrue("$evidencePath\">Open retained evidence" in older, older)
+                assertTrue("Recorded reference: <code>${first.after?.artifact?.value}</code>" in older, older)
+                assertTrue("Recorded run: <code>${first.run?.value}</code>" in older, older)
+                assertTrue(first.retainedCases.first().value in older, older)
+                assertFalse(first.retainedCases.last().value in older, older)
+                assertTrue("Retained case corpus: <code>${first.corpusSha256}</code>" in older, older)
+                assertTrue("Test-only evidence; release completeness is not established." in older, older)
+                val cases = request(current, "GET", "/jobs/$id?$query&historyCasesPage=2").body.decodeToString()
+                assertTrue(first.retainedCases.last().value in cases, cases)
+                assertFalse(first.retainedCases.first().value in cases, cases)
+                assertFalse("PRIVATE" in cases || "code.c" in cases, cases)
+                assertEquals(200, request(current, "GET", "/jobs/$id/artifacts/$evidencePath").status)
+                val cli = presentRecordedRepairHistory(recorded,
+                    RepairRecordedHistorySelection(6, 1, snapshot.graphSha256)).lines.joinToString("\n")
+                assertTrue("Compile repair — rejected" in cli && first.retainedCases.first().value in cli, cli)
+                fixture.assertSingleInvocation()
+                for (bad in listOf("historyPage=2", "$query&historyPage=2", "historyPage=0",
+                    "$query&historyCasesPage=999", "historyPage=999&historyGraph=${snapshot.graphSha256}",
+                    "$query&other=value", "historyPage=2147483648", "historyGraph=PRIVATE")) {
+                    assertEquals(400, request(current, "GET", "/jobs/$id?$bad").status, bad)
+                }
+                assertEquals(404, request(current, "GET", "/jobs/$id?runId=run_missing&$query").status)
+            }
+            val after = recordedProjectBytes(project)
+            assertEquals(before.keys, after.keys)
+            before.forEach { (name, bytes) -> assertContentEquals(bytes, after.getValue(name), name) }
+            val profile = DeclarativeRepairIndexProfile("PRIVATE-trace-profile", RepairIndexLayout(
+                listOf("code.c"), listOf("code.c"),
+                modules = listOf(RepairModuleEvidence("PRIVATE-module", listOf("code.c")))))
+            ModuleRevisionGraph.open(project, profile).use { graph ->
+                graph.retainRegressionInputs(listOf(ProcessInput("PRIVATE-later-case")))
+                graph.synchronizeRepairHistory()
+            }
+            val grown = readProjectRecordedRepairHistory(project)
+            val grownSnapshot = requireNotNull(grown.snapshot)
+            assertNotEquals(snapshot.graphSha256, grownSnapshot.graphSha256)
+            val afterGrowth = recordedProjectBytes(project)
+            val current = requireNotNull(active)
+            assertEquals(409, request(current, "GET", "/jobs/$id?historyPage=2&historyGraph=${snapshot.graphSha256}").status)
+            assertEquals(2, presentRecordedRepairHistory(grown,
+                RepairRecordedHistorySelection(6, 1, snapshot.graphSha256)).exitCode)
+            val fresh = request(current, "GET", "/jobs/$id?historyPage=2&historyGraph=${grownSnapshot.graphSha256}").body.decodeToString()
+            assertTrue(first.retainedCases.first().value in fresh, fresh)
+            val afterStale = recordedProjectBytes(project)
+            assertEquals(afterGrowth.keys, afterStale.keys)
+            afterGrowth.forEach { (name, bytes) -> assertContentEquals(bytes, afterStale.getValue(name), name) }
+            val history = project.resolve("reports/repair_history.json")
+            history.writeText(Files.readString(history).take(32))
+            val truncatedProjection = request(current, "GET", "/jobs/$id?historyPage=2&historyGraph=${grownSnapshot.graphSha256}")
+            assertEquals(200, truncatedProjection.status)
+            assertTrue("Compile repair — rejected" in truncatedProjection.body.decodeToString())
+            val graphFile = project.resolve("reports/repair-revisions/graph.json")
+            graphFile.writeText(Files.readString(graphFile).take(32))
+            val invalidBefore = recordedProjectBytes(project)
+            assertEquals(409, request(current, "GET", "/jobs/$id?historyPage=2&historyGraph=${grownSnapshot.graphSha256}").status)
+            val invalid = request(current, "GET", "/jobs/$id").body.decodeToString()
+            assertTrue("Repair history is unavailable or corrupt." in invalid, invalid)
+            assertFalse("Compile repair — rejected" in invalid, invalid)
+            assertEquals(1, presentRecordedRepairHistory(readProjectRecordedRepairHistory(project)).exitCode)
+            val invalidAfter = recordedProjectBytes(project)
+            assertEquals(invalidBefore.keys, invalidAfter.keys)
+            invalidBefore.forEach { (name, bytes) -> assertContentEquals(bytes, invalidAfter.getValue(name), name) }
+            fixture.assertSingleInvocation()
+        } finally { active?.stop(0) }
+    }
+
+    @Test
+    fun `actual trace guided rejection survives server restart with matching CLI and private safe HTTP history`() {
+        val parent = Path.of("build/test-tmp/recorded-trace-http").toAbsolutePath().createDirectories()
+        val dataDir = createTempDirectory(parent, "case-")
+        fun server() = UploadServer("127.0.0.1", 0, dataDir,
+            JobAnalyzer { _, _ -> error("history read must not analyze") },
+            JobReconstructor { _, _ -> error("history read must not reconstruct") }, Executor(Runnable::run))
+        var active: UploadServer? = server()
+        try {
+            val initial = requireNotNull(active)
+            initial.start()
+            val id = uploadedJobId(initial)
+            val project = dataDir.resolve("$id/reports/source-tree").createDirectories()
+            val fixture = produceRejectedRecordedTraceHistory(project)
+            val before = recordedProjectBytes(project)
+            repeat(2) { index ->
+                if (index == 1) {
+                    requireNotNull(active).stop(0)
+                    active = null
+                    active = server().also { it.start() }
+                }
+                val response = request(requireNotNull(active), "GET", "/jobs/$id")
+                val body = response.body.decodeToString()
+                assertEquals(200, response.status)
+                assertTrue("Compile repair — rejected" in body, body)
+                assertTrue("Repair run: rejected" in body, body)
+                assertTrue("Recorded restoration was not required; candidate source installation did not begin." in body, body)
+                assertTrue("Fully accepted revision: <code>none</code>" in body, body)
+                assertTrue("Test-only evidence; release completeness is not established." in body, body)
+                assertTrue("Retained regression cases:</b> 1" in body, body)
+                assertFalse("PRIVATE" in body || "code.c" in body || "Recorded restoration completed and was verified." in body, body)
+                val cli = presentRecordedRepairHistory(readProjectRecordedRepairHistory(project)).lines.joinToString("\n")
+                assertTrue("repair iteration 1: rejected" in cli, cli)
+                assertTrue("repair run run_00000001: rejected" in cli, cli)
+                assertTrue("Recorded restoration was not required; candidate source installation did not begin." in cli, cli)
+                assertFalse("PRIVATE" in cli, cli)
+                fixture.assertSingleInvocation()
+            }
+            val after = recordedProjectBytes(project)
+            assertEquals(before.keys, after.keys)
+            before.forEach { (name, bytes) -> assertContentEquals(bytes, after.getValue(name), name) }
+        } finally { active?.stop(0) }
+    }
+
+    @Test
+    fun `actual canonical rejected history survives reconnect and empty H without private payload or writes`() {
+        for (detached in listOf(false, true)) {
+            withServer { server, dataDir ->
+                val id = uploadedJobId(server)
+                val project = dataDir.resolve("$id/reports/source-tree").createDirectories()
+                produceRecordedRepairHistory(project, detached = detached)
+                val before = recordedProjectBytes(project)
+                val expectedRollback = if (detached)
+                    "Recorded restoration was not required; candidate source installation did not begin."
+                else "Recorded restoration completed and was verified."
+                repeat(2) {
+                    val response = request(server, "GET", "/jobs/$id")
+                    val body = response.body.decodeToString()
+                    assertEquals(200, response.status)
+                    assertTrue("Compile repair — rejected" in body, body)
+                    assertTrue(expectedRollback in body, body)
+                    assertFalse((if (detached) "Recorded restoration completed and was verified."
+                        else "Recorded restoration was not required;") in body, body)
+                    assertTrue("Fully accepted revision: <code>none</code>" in body, body)
+                    assertTrue("Test-only evidence; release completeness is not established." in body, body)
+                    assertTrue("Before:</b> Build validation evidence · Retained evidence is corrupt." in body, body)
+                    assertTrue("/jobs/$id/artifacts/reports/source-tree/reports/after.json\">Open retained evidence" in body, body)
+                    for (private in listOf("PRIVATE-", "code.c", "<script>private", "bounded failure")) assertFalse(private in body, body)
+                }
+                val after = recordedProjectBytes(project)
+                assertEquals(before.keys, after.keys)
+                before.forEach { (name, bytes) -> assertContentEquals(bytes, after.getValue(name), name) }
+                val cli = presentRecordedRepairHistory(readProjectRecordedRepairHistory(project)).lines.joinToString("\n")
+                assertTrue("repair iteration 1: rejected" in cli, cli)
+                assertTrue(expectedRollback in cli, cli)
+
+                project.resolve("reports/repair_history.json").writeText("")
+                val emptyH = request(server, "GET", "/jobs/$id").body.decodeToString()
+                assertTrue("Compile repair — rejected" in emptyH, emptyH)
+                assertTrue("History projection: empty" in emptyH, emptyH)
+                project.resolve("reports/repair-revisions/graph.json").writeText("")
+                val invalidGraph = request(server, "GET", "/jobs/$id").body.decodeToString()
+                assertTrue("Repair history is unavailable or corrupt." in invalidGraph, invalidGraph)
+                assertFalse("Recorded restoration completed" in invalidGraph, invalidGraph)
+                assertFalse(expectedRollback in invalidGraph, invalidGraph)
+            }
+        }
+    }
+
+    @Test
+    fun `actual restoration failure stays visible after recovery and HTTP server restart`() {
+        val parent = Path.of("build/test-tmp/recorded-history-http").toAbsolutePath().createDirectories()
+        val dataDir = createTempDirectory(parent, "restart-")
+        val initial = UploadServer("127.0.0.1", 0, dataDir, JobAnalyzer { _, _ -> error("read only") },
+            JobReconstructor { _, _ -> error("read only") }, Executor(Runnable::run))
+        var active: UploadServer? = initial
+        try {
+            initial.start()
+            val id = uploadedJobId(initial)
+            val project = dataDir.resolve("$id/reports/source-tree").createDirectories()
+            project.resolve("code.c").writeText("PRIVATE-original")
+            val profile = recordedRepairProfile()
+            var armed = false
+            ModuleRevisionGraph.openForTesting(project, profile, faultInjector = ModuleRevisionFaultInjector { point ->
+                if (armed && point is ModuleRevisionFaultPoint.BeforePublicationExchange && point.phase == "rollback")
+                    throw RecordedRestoreFailure()
+            }).use { graph ->
+                graph.enableRunContract()
+                val attempt = graph.beginAttempt(listOf("code.c"))
+                graph.installCandidate(attempt, mapOf("code.c" to "PRIVATE-candidate".toByteArray()))
+                armed = true
+                assertFailsWith<RecordedRestoreFailure> { graph.reject(attempt) }
+            }
+            val failed = request(initial, "GET", "/jobs/$id").body.decodeToString()
+            assertTrue("Recorded restoration failed and remains unresolved." in failed, failed)
+            assertEquals("PRIVATE-candidate", Files.readString(project.resolve("code.c")))
+            ModuleRevisionGraph.open(project, profile).close() // Authored recovery, never performed by the HTTP reader.
+            assertEquals("PRIVATE-original", Files.readString(project.resolve("code.c")))
+            initial.stop(0)
+            active = null
+            val restarted = UploadServer("127.0.0.1", 0, dataDir, JobAnalyzer { _, _ -> error("read only") },
+                JobReconstructor { _, _ -> error("read only") }, Executor(Runnable::run))
+            active = restarted
+            restarted.start()
+            val recovered = request(restarted, "GET", "/jobs/$id").body.decodeToString()
+            assertTrue("Recorded restoration completed after failure; the earlier failure is retained." in recovered, recovered)
+            assertTrue("Recorded restoration failure records retained: 1" in recovered, recovered)
+            assertFalse("PRIVATE-" in recovered, recovered)
+            val cli = presentRecordedRepairHistory(readProjectRecordedRepairHistory(project)).lines.joinToString("\n")
+            assertTrue("Recorded restoration completed after failure; the earlier failure is retained." in cli, cli)
+        } finally { active?.stop(0) }
+    }
+
+    @Test
+    fun `older canonical receipt is verified only on its selected page and corruption preserves rejection`() {
+        withServer { server, dataDir ->
+            val id = uploadedJobId(server)
+            val project = dataDir.resolve("$id/reports/source-tree").createDirectories()
+            produceRecordedRepairHistory(project, receipt = true, padding = 100)
+            val snapshot = requireNotNull(readProjectRecordedRepairHistory(project).snapshot)
+            val first = snapshot.attempts.first()
+            val query = "historyPage=2&historyGraph=${snapshot.graphSha256}"
+            val receiptPath = "reports/source-tree/reports/repair-revisions/${first.identity.value}.acp-receipt.json"
+            val before = recordedProjectBytes(project)
+            val latest = request(server, "GET", "/jobs/$id").body.decodeToString()
+            assertFalse("ACP receipt is complete; repair acceptance was not established." in latest, latest)
+            assertFalse(receiptPath in latest, latest)
+            val selected = request(server, "GET", "/jobs/$id?$query").body.decodeToString()
+            assertTrue("ACP receipt is complete; repair acceptance was not established." in selected, selected)
+            assertTrue(receiptPath in selected, selected)
+            assertTrue("Compile repair — rejected" in selected, selected)
+            val after = recordedProjectBytes(project)
+            assertEquals(before.keys, after.keys)
+            before.forEach { (name, bytes) -> assertContentEquals(bytes, after.getValue(name), name) }
+            val receipt = Files.list(project.resolve("reports/repair-revisions")).use { files ->
+                files.filter { it.fileName.toString().endsWith(".acp-receipt.json") }.toList().single()
+            }
+            receipt.writeText("{\"PRIVATE-corrupt-receipt\":true}")
+            val corrupt = request(server, "GET", "/jobs/$id?$query").body.decodeToString()
+            assertTrue("ACP receipt is corrupt; release completeness is not established." in corrupt, corrupt)
+            assertTrue("Compile repair — rejected" in corrupt, corrupt)
+            assertFalse("Release-complete ACP receipt was verified" in corrupt || "PRIVATE-" in corrupt, corrupt)
+        }
+    }
+
+    @Test
+    fun `canonical authored receipt is checked separately and later corruption cannot become release acceptance`() {
+        withServer { server, dataDir ->
+            val id = uploadedJobId(server)
+            val project = dataDir.resolve("$id/reports/source-tree").createDirectories()
+            produceRecordedRepairHistory(project, receipt = true)
+            val valid = request(server, "GET", "/jobs/$id").body.decodeToString()
+            assertTrue("Compile repair — rejected" in valid, valid)
+            assertTrue("ACP receipt is complete; repair acceptance was not established." in valid, valid)
+            assertFalse("Release-complete ACP receipt was verified" in valid, valid)
+            val captured = assertNotNull(readProjectRecordedRepairHistory(project).snapshot)
+            val focus = "historyGraph=${captured.graphSha256}&historyEvidence=${captured.attempts.single().identity.value}"
+            val focused = request(server, "GET", "/jobs/$id?$focus").body.decodeToString()
+            assertTrue("ACP receipt is complete; repair acceptance was not established." in focused, focused)
+            val receipt = Files.list(project.resolve("reports/repair-revisions")).use { files ->
+                files.filter { it.fileName.toString().endsWith(".acp-receipt.json") }.toList().single()
+            }
+            receipt.writeText("{\"PRIVATE-corrupt-receipt\":true}")
+            val corrupt = request(server, "GET", "/jobs/$id").body.decodeToString()
+            assertTrue("Compile repair — rejected" in corrupt, corrupt)
+            assertTrue("ACP receipt is corrupt; release completeness is not established." in corrupt, corrupt)
+            val focusedCorrupt = request(server, "GET", "/jobs/$id?$focus").body.decodeToString()
+            assertTrue("ACP receipt is corrupt; release completeness is not established." in focusedCorrupt, focusedCorrupt)
+            assertFalse("PRIVATE" in focusedCorrupt || "ACP receipt is complete;" in focusedCorrupt, focusedCorrupt)
+            assertFalse("PRIVATE-" in corrupt, corrupt)
+        }
+    }
+
+    @Test
     fun `job state page shows status metadata and repair iteration history`() {
         withServer { server, dataDir ->
             val upload = upload(server, "fixture.elf", elfFixture(), acceptJson = true)
@@ -1242,7 +1761,7 @@ class UploadServerTest {
             assertTrue(body.contains("Repair History"))
             assertTrue(body.contains("Attempt 1"))
             assertTrue(body.contains("Behavior repair — rejected"))
-            assertTrue(body.contains("Rollback: Completed; the rejected candidate did not advance the source head."))
+            assertTrue(body.contains("Rollback: Unverified; this history does not record restoration completion or failure."))
             assertTrue(body.contains("Test-only evidence; release completeness is not established."))
             assertTrue(body.contains("<b>Before:</b> Behavior validation evidence · Retained evidence is corrupt."))
             assertTrue(body.contains("<b>After:</b> Behavior validation evidence · <a href=\"/jobs/$jobId/artifacts/reports/after.behavior.json\">Open retained evidence</a>"))
@@ -1600,6 +2119,83 @@ class UploadServerTest {
     }
 
     @Test
+    fun `ordinary report GET and HEAD require a session and enforce the complete download ceiling`() {
+        withServer { server, dataDir ->
+            val jobId = uploadedJobId(server)
+            val record = dataDir.resolve("$jobId/job.json")
+            val before = record.readBytes()
+            val reports = dataDir.resolve("$jobId/reports").createDirectories()
+            val report = reports.resolve("ordinary.json")
+            val payload = "{\"observation\":\"bounded report\"}".toByteArray()
+            report.writeBytes(payload)
+            val path = "/jobs/$jobId/artifacts/reports/ordinary.json"
+            val get = request(server, "GET", path)
+            assertEquals(200, get.status)
+            assertContentEquals(payload, get.body)
+            val head = request(server, "HEAD", path)
+            assertEquals(200, head.status)
+            assertTrue(head.body.isEmpty())
+            assertEquals(payload.size.toString(), head.contentLength)
+            assertEquals(get.contentLength, head.contentLength)
+            assertEquals(get.contentDisposition, head.contentDisposition)
+            for (method in listOf("GET", "HEAD")) {
+                val unauthenticated = directClient.send(java.net.http.HttpRequest.newBuilder(
+                    URI("http://127.0.0.1:${server.serverPort}$path"))
+                    .timeout(java.time.Duration.ofSeconds(5))
+                    .method(method, java.net.http.HttpRequest.BodyPublishers.noBody()).build(),
+                    java.net.http.HttpResponse.BodyHandlers.ofByteArray())
+                assertEquals(401, unauthenticated.statusCode(), method)
+                assertTrue(!unauthenticated.body().decodeToString().contains("bounded report"))
+            }
+            Files.delete(report)
+            sparseFile(report, 64L * 1024 * 1024 + 1)
+            for (method in listOf("GET", "HEAD")) {
+                val refused = request(server, method, path)
+                assertEquals(400, refused.status, method)
+                assertTrue(!refused.body.decodeToString().contains(dataDir.toString()))
+            }
+            Files.delete(report)
+            report.writeBytes(payload)
+            assertContentEquals(payload, request(server, "GET", path).body)
+            assertContentEquals(before, record.readBytes())
+        }
+    }
+
+    @Test
+    fun `ordinary report GET and HEAD reject file parent and nonregular indirection without outside bytes`() {
+        withServer { server, dataDir ->
+            val jobId = uploadedJobId(server)
+            val reports = dataDir.resolve("$jobId/reports").createDirectories()
+            val report = reports.resolve("ordinary.json")
+            val outside = dataDir.resolve("outside-report").createDirectories()
+            outside.resolve("ordinary.json").writeText("outside-boundary-marker")
+            val path = "/jobs/$jobId/artifacts/reports/ordinary.json"
+            fun refuse() {
+                for (method in listOf("GET", "HEAD")) {
+                    val response = request(server, method, path)
+                    assertRejectedWithoutMarker(response)
+                    assertTrue(!response.body.decodeToString().contains(dataDir.toString()))
+                }
+            }
+            Files.createSymbolicLink(report, outside.resolve("ordinary.json"))
+            refuse()
+            Files.delete(report)
+            val retained = reports.resolveSibling("retained-reports")
+            Files.move(reports, retained)
+            Files.createSymbolicLink(reports, outside)
+            refuse()
+            Files.delete(reports)
+            Files.move(retained, reports)
+            report.createDirectories()
+            refuse()
+            Files.delete(report)
+            report.writeText("ordinary inside report")
+            assertContentEquals("ordinary inside report".toByteArray(), request(server, "GET", path).body)
+            assertEquals("outside-boundary-marker", outside.resolve("ordinary.json").readBytes().decodeToString())
+        }
+    }
+
+    @Test
     fun `source rendering never reads linked or oversized provenance metadata`() {
         withServer { server, dataDir ->
             val jobId = uploadedJobId(server)
@@ -1917,13 +2513,188 @@ class UploadServerTest {
         }
     }
 
+    @Test
+    fun `selected canonical receipt and ordinary links survive a full unselected receipt directory without extra workflows`() {
+        var executions = 0
+        withServer(JobAnalyzer { _, _ -> executions++; error("No analyzer expected") },
+            JobReconstructor { _, _ -> executions++; error("No reconstruction expected") }) { server, dataDir ->
+            val id = uploadedJobId(server)
+            val reports = dataDir.resolve("$id/reports")
+            val project = reports.resolve("source-tree").createDirectories()
+            produceRecordedRepairHistory(project, receipt = true)
+            reports.resolve("ordinary-summary.json").writeText("{}")
+            val revisions = project.resolve("reports/repair-revisions")
+            val receipt = Files.list(revisions).use { files ->
+                files.filter { it.fileName.toString().endsWith(".acp-receipt.json") }.toList().single()
+            }
+            // Explicit unselected namespace entries, not9,999real agent invocations or receipt proofs.
+            repeat(9_999) { index ->
+                val ordinal = 90_000_000 + index
+                Files.createFile(revisions.resolve("revision_${ordinal}_0123456789abcdef.acp-receipt.json"))
+                Files.createFile(project.resolve("reports/iteration_$ordinal.validation.json"))
+                Files.createFile(project.resolve("reports/iteration_$ordinal.diff.json"))
+            }
+            val recorded = readProjectRecordedRepairHistory(project)
+            assertNotNull(recorded.snapshot)
+            val context = WebReportContext(reports)
+            val target = "reports/source-tree/reports/repair-revisions/${receipt.fileName}"
+            val listed = listLegacyArtifactSummaries(context, recorded)
+            assertTrue(listed.any { it.relativePath == target && it.displayName == "Repair evidence" })
+            assertTrue(listed.any { it.relativePath == "reports/ordinary-summary.json" })
+            assertEquals(1, listed.count { "/repair-revisions/" in it.relativePath })
+            val before = recordedProjectBytes(project)
+            repeat(2) {
+                val response = request(server, "GET", "/jobs/$id")
+                val body = response.body.decodeToString()
+                assertEquals(200, response.status)
+                assertTrue("ACP receipt is complete; repair acceptance was not established." in body, body)
+                assertTrue("/jobs/$id/artifacts/reports/ordinary-summary.json" in body, body)
+                assertTrue("/jobs/$id/artifacts/reports/source-tree/reports/after.json\">Open retained evidence" in body, body)
+                assertFalse("Artifact listing is unavailable" in body || "PRIVATE-" in body || "revision_90000000" in body, body)
+            }
+            assertEquals(0, executions)
+            val after = recordedProjectBytes(project)
+            assertEquals(before.keys, after.keys)
+            before.forEach { (name, bytes) -> assertContentEquals(bytes, after.getValue(name), name) }
+
+            val displacedReceipt = project.resolve("PRIVATE-displaced-receipt.json")
+            Files.move(receipt, displacedReceipt)
+            Files.createSymbolicLink(receipt, displacedReceipt)
+            assertFalse(listLegacyArtifactSummaries(context, recorded).any { it.relativePath == target })
+            Files.delete(receipt)
+            Files.move(displacedReceipt, receipt)
+            val displacedDirectory = project.resolve("PRIVATE-displaced-revisions")
+            Files.move(revisions, displacedDirectory)
+            Files.createSymbolicLink(revisions, displacedDirectory)
+            val linkedDirectory = listLegacyArtifactSummaries(context, recorded)
+            assertFalse(linkedDirectory.any { "/repair-revisions/" in it.relativePath })
+            assertTrue(linkedDirectory.any { it.relativePath == "reports/ordinary-summary.json" })
+            assertEquals(0, executions)
+        }
+    }
+
+    @Test
+    fun `every iteration can inspect retained evidence after the full page read allowance is consumed`() {
+        var executions = 0
+        withServer(JobAnalyzer { _, _ -> executions++; error("No analyzer expected") },
+            JobReconstructor { _, _ -> executions++; error("No reconstruction expected") }) { server, dataDir ->
+            val id = uploadedJobId(server)
+            val project = dataDir.resolve("$id/reports/source-tree").createDirectories()
+            project.resolve("code.c").writeText("PRIVATE-original")
+            val reports = project.resolve("reports").createDirectories()
+            var lastAttempt = ""
+            ModuleRevisionGraph.open(project, recordedRepairProfile()).use { graph ->
+                graph.enableRunContract()
+                val corpus = graph.retainedRegressionCorpus()
+                // Host graph writes:70iterations/140small reports, not70agent or validator invocations.
+                for (index in 1..70) {
+                    reports.resolve("before-$index.validation.json").writeText("{}")
+                    reports.resolve("after-$index.validation.json").writeText("{}")
+                    val metadata = RevisionRepairMetadata(index, "compile", "PRIVATE-prompt", "PRIVATE-summary",
+                        corpus.inputs.map { it.id }, RepairEvidence("compile", "PRIVATE-before",
+                            "reports/before-$index.validation.json"), corpus.sha256,
+                        publicationMode = RepairPublicationMode.TEST_ONLY_NON_RELEASE)
+                    val attempt = graph.beginAttempt(listOf("code.c"), metadata)
+                    graph.installCandidate(attempt, mapOf("code.c" to "PRIVATE-candidate-$index".toByteArray()))
+                    graph.reject(attempt, RepairEvidence("valid", "PRIVATE-after", "reports/after-$index.validation.json"))
+                    lastAttempt = attempt.id
+                }
+            }
+            val snapshot = assertNotNull(readProjectRecordedRepairHistory(project).snapshot)
+            val before = recordedProjectBytes(project)
+            val beforeLink = "/jobs/$id/artifacts/reports/source-tree/reports/before-70.validation.json\">Open retained evidence"
+            val afterLink = "/jobs/$id/artifacts/reports/source-tree/reports/after-70.validation.json\">Open retained evidence"
+            val overview = request(server, "GET", "/jobs/$id").body.decodeToString()
+            assertFalse(afterLink in overview, overview) //140unique files exceed the unchanged128call allowance.
+            assertTrue("Inspect evidence for this iteration" in overview, overview)
+            val query = "historyGraph=${snapshot.graphSha256}&historyEvidence=$lastAttempt"
+            val selected = request(server, "GET", "/jobs/$id?$query")
+            val body = selected.body.decodeToString()
+            assertEquals(200, selected.status)
+            assertTrue(beforeLink in body && afterLink in body, body)
+            assertEquals(70, Regex("class=\"history-item\"").findAll(body).count())
+            assertTrue("Inspecting this iteration's evidence." in body && "Show page evidence" in body, body)
+            assertTrue("Test-only evidence; release completeness is not established." in body, body)
+            assertFalse("PRIVATE" in body || "code.c" in body, body)
+            assertEquals(400, request(server, "GET", "/jobs/$id?historyEvidence=$lastAttempt").status)
+            assertEquals(400, request(server, "GET", "/jobs/$id?$query&historyEvidence=$lastAttempt").status)
+            assertEquals(400, request(server, "GET", "/jobs/$id?historyGraph=${snapshot.graphSha256}&historyEvidence=foreign").status)
+            assertEquals(409, request(server, "GET", "/jobs/$id?historyGraph=${"0".repeat(64)}&historyEvidence=$lastAttempt").status)
+            val after = recordedProjectBytes(project)
+            assertEquals(before.keys, after.keys)
+            before.forEach { (name, bytes) -> assertContentEquals(bytes, after.getValue(name), name) }
+            assertEquals(0, executions)
+        }
+    }
+
+    private class RecordedRestoreFailure : IllegalStateException("authored rollback refusal")
+
+    private fun recordedRepairProfile() = DeclarativeRepairIndexProfile("PRIVATE-profile", RepairIndexLayout(
+        listOf("code.c"), listOf("code.c"), modules = listOf(RepairModuleEvidence("PRIVATE-module", listOf("code.c")))))
+
+    /** Producer and authored receipt data only; no agent process or runtime is qualified here. */
+    private fun produceRecordedRepairHistory(project: Path, receipt: Boolean = false, detached: Boolean = true,
+        padding: Int = 0) {
+        require(padding in 0..100)
+        val original = "PRIVATE-original-source".toByteArray()
+        val candidate = "PRIVATE-candidate-source".toByteArray()
+        Files.write(project.resolve("code.c"), original)
+        val reports = project.resolve("reports").createDirectories()
+        reports.resolve("before.json").writeText("not JSON")
+        reports.resolve("after.json").writeText("{\"retained\":true}")
+        ModuleRevisionGraph.open(project, recordedRepairProfile()).use { graph ->
+            graph.enableRunContract()
+            graph.retainRegressionInputs(listOf(ProcessInput("PRIVATE-case", listOf("PRIVATE-argv"), "PRIVATE-stdin".toByteArray())))
+            if (detached) {
+                graph.beginRun(2, 60_000)
+                graph.bindOriginalBinary(sha256("reference".toByteArray()))
+                graph.bindExpectedObservations(sha256("expected".toByteArray()))
+            }
+            val corpus = graph.retainedRegressionCorpus()
+            val metadata = RevisionRepairMetadata(1, "compile", if (receipt) "bounded failure" else "<script>private PRIVATE-prompt</script>",
+                "PRIVATE-summary", corpus.inputs.map { it.id }, RepairEvidence("compile", "PRIVATE-before", "reports/before.json"),
+                corpus.sha256, publicationMode = if (receipt) RepairPublicationMode.ACP_RELEASE else RepairPublicationMode.TEST_ONLY_NON_RELEASE)
+            val attempt = graph.beginAttempt(listOf("code.c"), metadata)
+            graph.installCandidate(attempt, mapOf("code.c" to candidate))
+            assertContentEquals(if (detached) original else candidate, project.resolve("code.c").readBytes())
+            if (receipt) graph.persistAndBindAgentInvocation(attempt,
+                ModuleRevisionGraphTest().completeAcpReceiptDocument(project, attempt, "code.c", original, candidate))
+            val rejected = graph.reject(attempt, RepairEvidence("valid", "PRIVATE-after", "reports/after.json"))
+            val rollback = assertNotNull(rejected.rollbackRecord)
+            assertEquals(if (detached) RepairRollbackState.NOT_REQUIRED_VERIFIED else RepairRollbackState.RESTORED_VERIFIED,
+                rollback.state)
+            assertEquals(!detached, rollback.candidateSourceInstallStarted)
+            assertEquals(rollback.expectedSourceRevisionSha256, rollback.observedSourceRevisionSha256)
+            assertContentEquals(original, project.resolve("code.c").readBytes())
+        }
+        if (padding > 0) ModuleRevisionGraph.open(project, recordedRepairProfile()).use { graph ->
+            if (graph.snapshot.runs.lastOrNull()?.terminal == false)
+                graph.finishRun(RepairRunStatus.REJECTED, RepairEvidence("rejected", "authored padding boundary"))
+            val corpus = graph.retainedRegressionCorpus()
+            for (index in 2..padding + 1) {
+                val metadata = RevisionRepairMetadata(index, "behavior", "PRIVATE-padding", "PRIVATE-padding",
+                    corpus.inputs.map { it.id }, RepairEvidence("behavior", "PRIVATE-padding"), corpus.sha256,
+                    publicationMode = RepairPublicationMode.TEST_ONLY_NON_RELEASE)
+                val attempt = graph.beginAttempt(listOf("code.c"), metadata)
+                graph.installCandidate(attempt, mapOf("code.c" to "PRIVATE-padding-$index".toByteArray()))
+                graph.reject(attempt, RepairEvidence("rejected", "PRIVATE-padding"))
+            }
+            graph.synchronizeRepairHistory()
+        }
+    }
+
+    private fun recordedProjectBytes(root: Path): Map<String, ByteArray> = Files.walk(root).use { paths ->
+        paths.filter { Files.isRegularFile(it) }.toList().associate { root.relativize(it).toString() to it.readBytes() }
+    }
+
     private fun withServer(
         analyzer: JobAnalyzer = JobAnalyzer { _, _ -> },
         reconstructor: JobReconstructor = JobReconstructor { _, _ -> },
         profiles: List<ReconstructionProfile> = ReconstructionProfiles.builtIn,
         block: (UploadServer, java.nio.file.Path) -> Unit,
     ) {
-        val dataDir = createTempDirectory("web-jobs-")
+        val parent = Path.of("build/test-tmp/web-jobs").toAbsolutePath().createDirectories()
+        val dataDir = createTempDirectory(parent, "case-")
         val directExecutor = Executor { command -> command.run() }
         val server = UploadServer("127.0.0.1", 0, dataDir, analyzer, reconstructor, directExecutor, sourceProfiles = profiles)
         server.start()

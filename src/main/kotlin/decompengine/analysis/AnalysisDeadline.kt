@@ -2,7 +2,6 @@ package decompengine.analysis
 
 import java.util.concurrent.ScheduledThreadPoolExecutor
 import java.util.concurrent.TimeUnit
-import java.util.concurrent.atomic.AtomicBoolean
 
 /** One invocation's elapsed allowance; checkpoints and the watchdog enforce it, and child limits can only shorten it. */
 internal class AnalysisDeadline private constructor(
@@ -25,30 +24,45 @@ internal class AnalysisDeadline private constructor(
     fun remainingNanosOrZero(): Long = remainingAt(System.nanoTime(), "while waiting for analysis", rejectExpired = false)
 
     /** Interrupts an in-flight synchronous phase at expiry and waits for its cancellation cleanup to finish. */
-    fun <T> enforceDuring(stage: String, operation: () -> T): T {
+    fun <T> enforceDuring(stage: String, operation: () -> T): T = enforceDuring(stage, { action, allowance ->
+        val watchdog = WATCHDOG.schedule(action, allowance, TimeUnit.NANOSECONDS)
+        AutoCloseable { watchdog.cancel(false) }
+    }, operation)
+
+    /** An internal scheduling seam permits controlled delivery races without replacing the shared clock. */
+    internal fun <T> enforceDuring(stage: String, schedule: (Runnable, Long) -> AutoCloseable, operation: () -> T): T {
         checkpoint("before $stage")
         val allowance = remainingNanos("before $stage")
         val thread = Thread.currentThread()
-        val finished = AtomicBoolean(false)
-        val expired = AtomicBoolean(false)
-        val watchdog = WATCHDOG.schedule({
-            if (finished.compareAndSet(false, true)) {
-                expired.set(true)
-                thread.interrupt()
+        val delivery = Any()
+        var retired = false
+        var expired = false
+        fun retire(): Boolean = synchronized(delivery) {
+            retired = true
+            expired
+        }
+        val watchdog = schedule(Runnable {
+            synchronized(delivery) {
+                if (!retired) {
+                    expired = true
+                    // Retirement must not pass a dispatch that can still interrupt this caller.
+                    thread.interrupt()
+                }
             }
-        }, allowance, TimeUnit.NANOSECONDS)
+        }, allowance)
         try {
             val result = operation()
-            if (expired.get()) throw timeoutDuring(stage)
+            if (retire()) throw timeoutDuring(stage)
             checkpoint("after $stage")
             return result
         } catch (failure: Throwable) {
+            val timedOut = retire()
             if (failure is Error) throw failure
-            if (expired.get()) throw timeoutDuring(stage, failure)
+            if (timedOut) throw timeoutDuring(stage, failure)
             throw failure
         } finally {
-            finished.set(true)
-            watchdog.cancel(false)
+            retire()
+            watchdog.close()
         }
     }
 

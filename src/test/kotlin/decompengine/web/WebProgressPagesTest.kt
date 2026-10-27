@@ -81,6 +81,27 @@ class WebProgressPagesTest {
         assertEquals("6", boundary.throughSequence)
         assertEquals(listOf("5", "6"), sequences(page(pages, bytes, "cursor=${boundary.oldestCursor}")))
         assertEquals(listOf("7"), sequences(page(pages, journal(listOf(5, 6, 7)), "cursor=${boundary.throughCursor}")))
+
+        val original = journal(listOf(0, 1), text = "private-before-owned-replay")
+        val originalBoundary = pages.boundary("owner", "job", "attempt", original)
+        val cleaned = decompengine.jobs.replayProgressSnapshot(decompengine.jobs.AgentProgressJournal.decode(original))
+        val cleanedBytes = cleaned.toString().toByteArray()
+        assertEquals("EVENT_GAP", assertFailsWith<WebAccessDenied> {
+            page(pages, cleanedBytes, "after=${originalBoundary.throughCursor}")
+        }.code)
+        val fresh = pages.boundary("owner", "job", "attempt", cleanedBytes)
+        assertEquals(listOf("0", "1"), sequences(page(pages, cleanedBytes, "after=${fresh.oldestCursor}")))
+        val later = decompengine.jobs.AgentProgressJournal.decode(journal(listOf(0, 1, 2)))
+            .getValue("events").jsonArray.last()
+        val appended = JsonObject(cleaned + mapOf(
+            "nextSequence" to JsonPrimitive(3),
+            "events" to JsonArray(cleaned.getValue("events").jsonArray + later),
+        ))
+        assertEquals(listOf("2"), sequences(page(pages, appended.toString().toByteArray(), "after=${fresh.throughCursor}")))
+        val republished = decompengine.jobs.replayProgressSnapshot(
+            decompengine.jobs.AgentProgressJournal.decode(appended.toString().toByteArray()),
+        ).toString().toByteArray()
+        assertEquals(listOf("2"), sequences(page(pages, republished, "after=${fresh.throughCursor}")))
     }
 
     @Test fun `fresh cutover acknowledges trailing omitted sequences without a reset loop`() {

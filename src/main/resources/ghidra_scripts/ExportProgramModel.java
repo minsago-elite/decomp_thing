@@ -27,7 +27,17 @@ import java.util.Set;
 import java.util.TreeMap;
 import java.util.TreeSet;
 import java.util.UUID;
+import java.util.concurrent.ArrayBlockingQueue;
+import java.util.concurrent.ExecutionException;
+import java.util.concurrent.ExecutorCompletionService;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
+import java.util.concurrent.TimeUnit;
+import java.util.regex.Pattern;
 import ghidra.app.decompiler.DecompInterface;
+import ghidra.app.decompiler.DecompiledFunction;
+import ghidra.app.decompiler.DecompileOptions;
 import ghidra.app.decompiler.DecompileResults;
 import ghidra.app.script.GhidraScript;
 import ghidra.program.model.address.Address;
@@ -42,7 +52,247 @@ import ghidra.program.model.listing.Instruction;
 import ghidra.program.model.listing.InstructionIterator;
 import ghidra.program.model.listing.Parameter;
 import ghidra.program.model.symbol.Reference;
+import ghidra.program.model.symbol.ReferenceIterator;
+import ghidra.program.model.pcode.PcodeOp;
+import ghidra.program.model.pcode.Varnode;
+import ghidra.program.model.mem.MemoryBlock;
 import ghidra.program.model.symbol.Symbol;
+import ghidra.util.task.TaskMonitor;
+import ghidra.util.task.TaskMonitorAdapter;
+
+// PARALLEL_EXPORT_TEST_BEGIN
+/** Only this coordinator prepares metadata and publishes evidence; workers return immutable results. */
+/** Bounded diagnostic observations only: elapsed timers are NOT CPU or qualification facts. */
+final class ExporterPhaseObservationV1 {
+    enum Phase {
+        METADATA_INITIAL, METADATA_RETRY,
+        NATIVE_0_INITIAL, NATIVE_0_RETRY, NATIVE_1_INITIAL, NATIVE_1_RETRY,
+        NATIVE_2_INITIAL, NATIVE_2_RETRY, NATIVE_3_INITIAL, NATIVE_3_RETRY,
+        RENDER, FUNCTION_PUBLICATION, PROGRESS_PUBLICATION,
+        GLOBAL_EXISTING, GLOBAL_FIRST_ATTEMPT, TYPE_EXISTING, TYPE_FIRST_ATTEMPT,
+        IDLE_POLL_WAIT, BARRIER_POLL_WAIT
+    }
+    private final long[] starts = new long[Phase.values().length];
+    private final long[] ends = new long[Phase.values().length];
+    private final long[] elapsed = new long[Phase.values().length];
+    private final long[] published = new long[2];
+    private final long[] raced = new long[2];
+    private int snapshots;
+    private int cadence = 1;
+    private boolean terminal;
+
+    synchronized long begin(Phase phase) { starts[phase.ordinal()]++; return System.nanoTime(); }
+    synchronized void end(Phase phase, long since) {
+        ends[phase.ordinal()]++;
+        elapsed[phase.ordinal()] += Math.max(0L, System.nanoTime() - since);
+    }
+    synchronized void waitElapsed(boolean barrier, long nanos) {
+        int index = (barrier ? Phase.BARRIER_POLL_WAIT : Phase.IDLE_POLL_WAIT).ordinal();
+        starts[index]++; ends[index]++; elapsed[index] += Math.max(0L, nanos);
+    }
+    synchronized void publication(boolean type, boolean race) {
+        (race ? raced : published)[type ? 1 : 0]++;
+    }
+    synchronized void configure(int functions) { cadence = Math.max(1, (int) (((long) functions + 13L) / 14L)); }
+
+    // At most16 snapshots *4 lines =64 fixed lines, each <=1024 characters/UTF-8 bytes.
+    // Ends include exceptional returns; starts-ends is in-flight, not a success count.
+    synchronized void emit(java.util.function.Consumer<String> sink, int completed, boolean terminalState,
+                           boolean runReturned) {
+        if (terminal || (!terminalState && (snapshots >= 15 || completed % cadence != 0))) return;
+        snapshots++;
+        if (terminalState) terminal = true;
+        try {
+            Phase[] phases = Phase.values();
+            for (int group = 0; group < 4; group++) {
+                StringBuilder line = new StringBuilder("program-model phase-observation-v1");
+                line.append(" snapshot=").append(snapshots).append(" group=").append(group)
+                    .append(" state=").append(terminalState ? (runReturned ? "RETURNED" : "FAILED_OR_INTERRUPTED") : "PARTIAL")
+                    .append(" completed=").append(completed)
+                    .append(" clocks=elapsed_not_cpu overlap=inclusive inflight=starts_minus_ends analyzer_cpu=UNMEASURED worker_cpu=UNMEASURED");
+                for (int index = group * 5; index < Math.min(group * 5 + 5, phases.length); index++) {
+                    line.append(' ').append(phases[index].name()).append('=')
+                        .append(starts[index]).append('/').append(ends[index]).append('/').append(elapsed[index]);
+                }
+                if (group == 3) line.append(" global_published=").append(published[0])
+                    .append(" type_published=").append(published[1]).append(" global_raced=").append(raced[0])
+                    .append(" type_raced=").append(raced[1]);
+                if (line.length() <= 1024) sink.accept(line.toString());
+            }
+        } catch (Throwable diagnosticFailure) { /* Diagnostics never replace the primary outcome. */ }
+    }
+}
+
+final class ExporterParallelCoordinatorV1<M, R> implements AutoCloseable {
+    static final int MAXIMUM_WORKERS = 4;
+    static final long CLEANUP_MILLIS = 2_000;
+
+    interface Worker<M, R> {
+        R execute(M metadata, boolean retry) throws Exception;
+        // Both lifecycle operations must be nonblocking; native termination is awaited below.
+        void cancel();
+        void dispose();
+    }
+
+    interface Source<M, R> {
+        void checkCancelled() throws Exception;
+        boolean accepted(int index) throws Exception;
+        M prepare(int index, boolean retry) throws Exception;
+        boolean metadataComplete(M metadata);
+        boolean retryRequired(R result);
+        boolean retrySucceeded(R result);
+        void commit(int index, R result) throws Exception;
+        default void observePollWait(boolean barrier, long nanos) {}
+    }
+
+    private static final class Attempt<M, R> {
+        final int index;
+        final M metadata;
+        final R original;
+
+        Attempt(int index, M metadata, R original) {
+            this.index = index;
+            this.metadata = metadata;
+            this.original = original;
+        }
+    }
+
+    private static final class Completed<M, R> {
+        final Attempt<M, R> attempt;
+        final R result;
+
+        Completed(Attempt<M, R> attempt, R result) {
+            this.attempt = attempt;
+            this.result = result;
+        }
+    }
+
+    private final List<Worker<M, R>> workers;
+    private final ArrayBlockingQueue<Worker<M, R>> available;
+    private final ExecutorService executor;
+    private final ExecutorCompletionService<Completed<M, R>> completions;
+    private int outstanding;
+    private boolean started;
+    private boolean closed;
+
+    ExporterParallelCoordinatorV1(List<Worker<M, R>> workers) {
+        if (workers.isEmpty() || workers.size() > MAXIMUM_WORKERS || workers.contains(null)) {
+            throw new IllegalArgumentException("full recovery worker count must be between one and four");
+        }
+        this.workers = new ArrayList<>(workers);
+        available = new ArrayBlockingQueue<>(workers.size());
+        available.addAll(workers);
+        executor = Executors.newFixedThreadPool(workers.size(), task -> {
+            Thread thread = new Thread(task, "program-model-decompiler");
+            // The outer isolated worker owns the final process-tree termination boundary.
+            thread.setDaemon(true);
+            return thread;
+        });
+        completions = new ExecutorCompletionService<>(executor, new ArrayBlockingQueue<>(workers.size()));
+    }
+
+    void run(int count, Source<M, R> source) throws Exception {
+        if (started || closed || count < 0) throw new IllegalStateException("full recovery coordinator is not fresh");
+        started = true;
+        int next = 0;
+        Set<Integer> metadataBarriers = new TreeSet<>();
+        while (next < count || outstanding != 0) {
+            source.checkCancelled();
+            while (next < count && outstanding < workers.size() && metadataBarriers.isEmpty()) {
+                source.checkCancelled();
+                int index = next++;
+                if (source.accepted(index)) continue;
+                M metadata = source.prepare(index, false);
+                if (!source.metadataComplete(metadata)) metadataBarriers.add(index);
+                submit(new Attempt<>(index, metadata, null));
+            }
+            if (outstanding == 0) continue;
+            long pollStarted = System.nanoTime();
+            Future<Completed<M, R>> ready;
+            try { ready = completions.poll(50, TimeUnit.MILLISECONDS); }
+            finally { source.observePollWait(!metadataBarriers.isEmpty(), System.nanoTime() - pollStarted); }
+            if (ready == null) continue;
+            Completed<M, R> completed;
+            try {
+                completed = ready.get();
+            } catch (ExecutionException failed) {
+                Throwable cause = failed.getCause();
+                if (cause instanceof Exception) throw (Exception) cause;
+                if (cause instanceof Error) throw (Error) cause;
+                throw new IllegalStateException("full recovery worker failed", cause);
+            }
+            outstanding--;
+            source.checkCancelled();
+            Attempt<M, R> attempt = completed.attempt;
+            if (attempt.original == null && source.retryRequired(completed.result)) {
+                // Repeat metadata recovery just as the serial exporter did before its native retry.
+                // An initially incomplete metadata pass blocks later first-owner claims until here.
+                M metadata = source.prepare(attempt.index, true);
+                if (!source.metadataComplete(metadata)) metadataBarriers.add(attempt.index);
+                submit(new Attempt<>(attempt.index, metadata, completed.result));
+            } else {
+                R selected = attempt.original != null && !source.retrySucceeded(completed.result)
+                    ? attempt.original : completed.result;
+                source.commit(attempt.index, selected);
+                metadataBarriers.remove(attempt.index);
+            }
+        }
+    }
+
+    private void submit(Attempt<M, R> attempt) {
+        if (outstanding >= workers.size()) throw new IllegalStateException("full recovery live-job bound exceeded");
+        completions.submit(() -> {
+            Worker<M, R> worker = available.remove();
+            try {
+                R result = worker.execute(attempt.metadata, attempt.original != null);
+                if (result == null) throw new IllegalStateException("full recovery worker returned no result");
+                return new Completed<>(attempt, result);
+            } finally {
+                available.add(worker);
+            }
+        });
+        outstanding++;
+    }
+
+    @Override
+    public void close() {
+        if (closed) return;
+        closed = true;
+        boolean interrupted = Thread.interrupted();
+        Throwable failure = null;
+        long deadline = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(CLEANUP_MILLIS);
+        for (Worker<M, R> worker : workers) {
+            try { worker.cancel(); }
+            catch (Throwable problem) { failure = addFailure(failure, problem); }
+        }
+        executor.shutdownNow();
+        try {
+            boolean stopped = false;
+            while (!stopped && System.nanoTime() < deadline) {
+                try {
+                    stopped = executor.awaitTermination(Math.max(1, deadline - System.nanoTime()), TimeUnit.NANOSECONDS);
+                } catch (InterruptedException problem) {
+                    interrupted = true;
+                }
+            }
+            if (!stopped) failure = addFailure(failure, new IllegalStateException("full recovery workers exceeded cleanup deadline"));
+        } finally {
+            for (Worker<M, R> worker : workers) {
+                try { worker.dispose(); }
+                catch (Throwable problem) { failure = addFailure(failure, problem); }
+            }
+            if (interrupted) Thread.currentThread().interrupt();
+        }
+        if (failure != null) throw new IllegalStateException("full recovery worker cleanup failed", failure);
+    }
+
+    private static Throwable addFailure(Throwable previous, Throwable next) {
+        if (previous == null) return next;
+        if (previous != next) previous.addSuppressed(next);
+        return previous;
+    }
+}
+// PARALLEL_EXPORT_TEST_END
 
 // SEMANTIC_FINGERPRINT_TEST_BEGIN
 final class ExporterSemanticFingerprintV1 {
@@ -411,9 +661,57 @@ final class ExporterSemanticFingerprintV1 {
 }
 // SEMANTIC_FINGERPRINT_TEST_END
 
+// PURE_RENDERING_TEST_BEGIN
+final class ExporterPureRenderingV1 {
+    private static final char[] HEX = "0123456789abcdef".toCharArray();
+    private static final Pattern TYPE_NAME_UNSAFE = Pattern.compile("[^A-Za-z0-9_]");
+
+    private ExporterPureRenderingV1() { }
+
+    static String addressId(String prefix, long offset) {
+        char[] result = new char[prefix.length() + 16];
+        prefix.getChars(0, prefix.length(), result, 0);
+        for (int index = result.length - 1; index >= prefix.length(); index--) {
+            result[index] = HEX[(int) (offset & 0xf)];
+            offset >>>= 4;
+        }
+        return new String(result);
+    }
+
+    static String hexDigest(byte[] digest) {
+        char[] result = new char[digest.length * 2];
+        for (int index = 0; index < digest.length; index++) {
+            int value = digest[index] & 0xff;
+            result[index * 2] = HEX[value >>> 4];
+            result[index * 2 + 1] = HEX[value & 0xf];
+        }
+        return new String(result);
+    }
+
+    static String typeName(String name) {
+        return TYPE_NAME_UNSAFE.matcher(name).replaceAll("_");
+    }
+}
+// PURE_RENDERING_TEST_END
+
 public class ExportProgramModel extends GhidraScript {
-    private static final int EXPORTER_VERSION = 11;
+    private ExporterPhaseObservationV1 phaseObservation;
+    private int observedCompleted;
+    private long phaseBegin(ExporterPhaseObservationV1.Phase phase) {
+        return phaseObservation == null ? 0L : phaseObservation.begin(phase);
+    }
+    private void phaseEnd(ExporterPhaseObservationV1.Phase phase, long started) {
+        if (phaseObservation != null) phaseObservation.end(phase, started);
+    }
+    private void emitPhases(boolean terminal, boolean returned) {
+        try { if (phaseObservation != null) phaseObservation.emit(this::println, observedCompleted, terminal, returned); }
+        catch (Throwable diagnosticFailure) { /* Never replace the primary outcome. */ }
+    }
+
+    private static final int EXPORTER_VERSION = 17;
     private static final int DECOMPILE_TIMEOUT_SECONDS = 60;
+    private static final int DECOMPILE_RETRY_TIMEOUT_SECONDS = 180;
+    private static final int MAXIMUM_DECOMPILE_INSTRUCTIONS = 500_000;
     private static final long MAXIMUM_FULL_FUNCTION_RECORD_BYTES = 64L * 1024 * 1024;
     private static final int PLANNING_BATCH_FUNCTIONS = 512;
     private static final long MAXIMUM_PLANNING_BATCH_FRAGMENT_BYTES = 64L * 1024 * 1024;
@@ -421,6 +719,7 @@ public class ExportProgramModel extends GhidraScript {
     private static final int MAXIMUM_PLANNING_EVIDENCE_RECORD_BYTES = 1024 * 1024;
     private static final int MAXIMUM_PLANNING_BATCHES = 256;
     private static final long MAXIMUM_PROGRAM_MODEL_BYTES = 512L * 1024 * 1024;
+    private static final int MAXIMUM_OPEN_EVIDENCE_CURSORS = 32;
     private static final int MAXIMUM_EXPORT_STATE_BYTES = 64 * 1024;
 
     private static final class PlanningIntegrityException extends RuntimeException {
@@ -431,6 +730,7 @@ public class ExportProgramModel extends GhidraScript {
 
     private static final class GlobalEvidence {
         final String id, name, type, initializer;
+        String byteEvidence;
         final Address address;
 
         GlobalEvidence(String id, String name, Address address, String type, String initializer) {
@@ -783,17 +1083,15 @@ public class ExportProgramModel extends GhidraScript {
     }
 
     private static String functionId(Function function) {
-        return String.format("fn_%016x", function.getEntryPoint().getOffset());
+        return ExporterPureRenderingV1.addressId("fn_", function.getEntryPoint().getOffset());
     }
 
     private static String globalId(Address address) {
-        return String.format("global_%016x", address.getOffset());
+        return ExporterPureRenderingV1.addressId("global_", address.getOffset());
     }
 
     private static String hexDigest(byte[] digest) {
-        StringBuilder result = new StringBuilder();
-        for (byte value : digest) result.append(String.format("%02x", value & 0xff));
-        return result.toString();
+        return ExporterPureRenderingV1.hexDigest(digest);
     }
 
     private static String sha256(Path path) throws Exception {
@@ -834,8 +1132,13 @@ public class ExportProgramModel extends GhidraScript {
     }
 
     private void rethrowInfrastructureFailure(Exception failure) throws Exception {
+        if (failure instanceof InterruptedException) {
+            Thread.currentThread().interrupt();
+            throw failure;
+        }
         if (
-            monitor.isCancelled() || failure instanceof IOException ||
+            monitor.isCancelled() || Thread.currentThread().isInterrupted() || failure instanceof InterruptedException ||
+            failure instanceof IOException ||
             failure instanceof PlanningIntegrityException
         ) throw failure;
     }
@@ -850,7 +1153,7 @@ public class ExportProgramModel extends GhidraScript {
         String key = type.getPathName();
         String id = "type_" + sha256(key.getBytes(StandardCharsets.UTF_8));
         int length = Math.max(type.getLength(), 1);
-        String cName = type.getName().replaceAll("[^A-Za-z0-9_]", "_");
+        String cName = ExporterPureRenderingV1.typeName(type.getName());
         if (cName.isEmpty() || Character.isDigit(cName.charAt(0))) cName = "recovered_" + id;
         // Retain the exact path used for the identity without allowing a comment terminator.
         String prefix = "/* Ghidra type " + json(key).replace("/", "\\/") + " */ ";
@@ -865,29 +1168,336 @@ public class ExportProgramModel extends GhidraScript {
         TypeEvidence evidence = new TypeEvidence(id, declaration, sourceAddress);
         String record = renderType(evidence);
         if (planningEvidence == null) {
-            writeIfAbsentAtomic(typesDirectory.resolve(id + ".json"), record);
+            writeIfAbsentAtomic(typesDirectory.resolve(id + ".json"), record, phaseObservation, true);
         } else {
             planningEvidence.retainType(id, record);
         }
     }
 
-    private GlobalEvidence globalAt(Address address) {
+    private static final int MAXIMUM_REFERENCE_CANDIDATES = 65536;
+    private static final int MAXIMUM_BYTE_WINDOWS = 4096;
+    private static final int MAXIMUM_WINDOWS_PER_GLOBAL = 32;
+    private static final int MAXIMUM_WINDOW_BYTES = 256;
+    private static final long MAXIMUM_REQUESTED_BYTES = 65536;
+    private final Map<String, String> referencedByteEvidence = new TreeMap<>();
+    // Set only by the collector's first genuinely unadmitted batch/window, never by a lookup miss.
+    private String referenceCollectionCutoff;
+
+    private static final class GlobalByteWindows {
+        final List<ByteWindow> windows = new ArrayList<>();
+        boolean globalLimit;
+    }
+
+    private static final class ByteSortCancelled extends RuntimeException {}
+
+    private String byteAddress(Address address) {
+        if (!address.isMemoryAddress() || address.getAddressSpace().getSize() > 64 ||
+            !address.getAddressSpace().equals(currentProgram.getAddressFactory().getDefaultAddressSpace())) {
+            throw new PlanningIntegrityException("unrepresentable reference byte-evidence address");
+        }
+        return String.format("0x%x", address.getOffset());
+    }
+
+    private void checkByteCancellation() throws Exception {
+        if (monitor.isCancelled() || Thread.currentThread().isInterrupted()) {
+            throw new InterruptedException("reference byte-evidence export was cancelled");
+        }
+    }
+
+    private static final class ByteWindow {
+        final Address target, instruction;
+        final int operand, width;
+        final String basis, record;
+        ByteWindow(Address target, Address instruction, int operand, int width, String basis, String record) {
+            this.target = target; this.instruction = instruction; this.operand = operand;
+            this.width = width; this.basis = basis; this.record = record;
+        }
+    }
+
+    private boolean referencesMemory(Varnode value, Address target) {
+        return value != null && value.getAddress().isMemoryAddress() && value.getAddress().equals(target);
+    }
+
+    // Finite direct-value read policy: binary floating add/multiply consume both inputs.
+    // Other arithmetic/control-flow operations remain unsupported until separately reviewed.
+    private boolean supportsDirectValueRead(int opcode) {
+        return opcode == PcodeOp.FLOAT_ADD || opcode == PcodeOp.FLOAT_MULT;
+    }
+
+    // Width comes only from an exact LOAD/STORE pointer or a supported direct RAM value.
+    // Control-flow addresses, unsupported operations, dynamic pointers and multiple associations stay unknown.
+    private int[] referenceWidth(Instruction instruction, Reference reference) {
+        int width = 0, basis = 0, matches = 0;
+        Address target = reference.getToAddress();
+        for (PcodeOp operation : instruction.getPcode()) {
+            int opcode = operation.getOpcode();
+            if (opcode == PcodeOp.LOAD || opcode == PcodeOp.STORE) {
+                Varnode pointer = operation.getInput(1);
+                Varnode space = operation.getInput(0);
+                if (!pointer.isConstant() || !space.isConstant()) return new int[] {0, 0};
+                if (space.getOffset() != target.getAddressSpace().getSpaceID() || pointer.getOffset() != target.getOffset()) continue;
+                matches++;
+                width = opcode == PcodeOp.LOAD ? operation.getOutput().getSize() : operation.getInput(2).getSize();
+                basis = opcode == PcodeOp.LOAD ? 1 : 2;
+            } else if (opcode == PcodeOp.COPY && operation.getNumInputs() == 1 && operation.getOutput() != null) {
+                Varnode input = operation.getInput(0), output = operation.getOutput();
+                if (referencesMemory(input, target)) { matches++; width = input.getSize(); basis = 3; }
+                if (referencesMemory(output, target)) { matches++; width = output.getSize(); basis = 4; }
+                if (input.getSize() != output.getSize()) return new int[] {0, 0};
+            } else if (supportsDirectValueRead(opcode) && operation.getNumInputs() == 2 && operation.getOutput() != null) {
+                Varnode output = operation.getOutput();
+                if (referencesMemory(output, target)) return new int[] {0, 0};
+                for (Varnode input : operation.getInputs()) {
+                    if (input.getSize() != output.getSize()) return new int[] {0, 0};
+                    if (referencesMemory(input, target)) { matches++; width = input.getSize(); basis = 3; }
+                }
+            } else {
+                if (referencesMemory(operation.getOutput(), target)) return new int[] {0, 0};
+                for (Varnode input : operation.getInputs()) if (referencesMemory(input, target)) return new int[] {0, 0};
+            }
+        }
+        return matches == 1 && width > 0 ? new int[] {width, basis} : new int[] {0, 0};
+    }
+
+    private String readByteSegments(Address target, int width) throws Exception {
+        StringBuilder segments = new StringBuilder("[");
+        int start = 0;
+        String previousReason = null;
+        StringBuilder hex = new StringBuilder();
+        int available = 0;
+        for (int offset = 0; offset <= width; offset++) {
+            checkByteCancellation();
+            String reason = null;
+            int value = -1;
+            if (offset < width) {
+                Address address = target.addNoWrap(offset);
+                MemoryBlock block = currentProgram.getMemory().getBlock(address);
+                if (block == null) reason = "unmapped";
+                else if (!block.isRead()) reason = "unreadable";
+                else if (!block.isInitialized()) reason = "uninitialized";
+                else {
+                    byte[] one = new byte[1];
+                    try {
+                        if (currentProgram.getMemory().getBytes(address, one) != 1) reason = "read_failed";
+                        else { value = one[0] & 255; available++; }
+                    } catch (ghidra.program.model.mem.MemoryAccessException failure) { reason = "read_failed"; }
+                }
+            }
+            if (offset > start && (offset == width || !java.util.Objects.equals(reason, previousReason))) {
+                if (start > 0) segments.append(',');
+                segments.append("{\"offset\":").append(start).append(",\"length\":").append(offset - start)
+                    .append(",\"availability\":").append(json(previousReason == null ? "available" : "unavailable"))
+                    .append(",\"hex\":").append(previousReason == null ? json(hex.toString()) : "null")
+                    .append(",\"reason\":").append(json(previousReason)).append('}');
+                start = offset; hex.setLength(0);
+            }
+            if (value >= 0) hex.append(String.format("%02x", value));
+            previousReason = reason;
+        }
+        segments.append(']');
+        String availability = available == width ? "available" : available == 0 ? "unavailable" : "partial";
+        return "\"availability\":" + json(availability) + ",\"segments\":" + segments;
+    }
+
+    private void checkByteSortCancellation() {
+        if (monitor.isCancelled() || Thread.currentThread().isInterrupted()) throw new ByteSortCancelled();
+    }
+
+    // ReferenceIterator is streaming; retain at most the remaining work allowance and inspect
+    // one nonretained lookahead. A whole oversized instruction batch is left unadmitted.
+    private List<Reference> referenceBatch(Instruction instruction, int remaining) throws Exception {
+        List<Reference> batch = new ArrayList<>();
+        ReferenceIterator references = currentProgram.getReferenceManager().getReferenceIterator(instruction.getAddress());
+        while (references.hasNext()) {
+            checkByteCancellation();
+            Reference reference = references.next();
+            if (!reference.getFromAddress().equals(instruction.getAddress())) break;
+            if (batch.size() == remaining) {
+                referenceCollectionCutoff = "reference_work_limit";
+                return null;
+            }
+            batch.add(reference);
+        }
+        checkByteCancellation();
+        try {
+            batch.sort((left, right) -> {
+                checkByteSortCancellation();
+                int order = left.getToAddress().compareTo(right.getToAddress());
+                if (order == 0) order = Integer.compare(Math.max(-1, left.getOperandIndex()), Math.max(-1, right.getOperandIndex()));
+                if (order == 0) order = Byte.compare(left.getReferenceType().getValue(), right.getReferenceType().getValue());
+                return order;
+            });
+        } catch (ByteSortCancelled cancelled) {
+            throw new InterruptedException("reference byte-evidence export was cancelled");
+        }
+        checkByteCancellation();
+        return batch;
+    }
+
+    private String renderByteEvidence(GlobalByteWindows global) throws Exception {
+        checkByteCancellation();
+        StringBuilder records = new StringBuilder();
+        boolean unknown = false;
+        if (global != null) {
+            try {
+                global.windows.sort((left, right) -> {
+                    checkByteSortCancellation();
+                    int order = left.target.compareTo(right.target);
+                    if (order == 0) order = left.instruction.compareTo(right.instruction);
+                    if (order == 0) order = Integer.compare(left.operand, right.operand);
+                    if (order == 0) order = left.basis.compareTo(right.basis);
+                    if (order == 0) order = Integer.compare(left.width, right.width);
+                    return order;
+                });
+            } catch (ByteSortCancelled cancelled) {
+                throw new InterruptedException("reference byte-evidence export was cancelled");
+            }
+            for (ByteWindow window : global.windows) {
+                checkByteCancellation();
+                unknown |= window.width == 0;
+                if (records.length() > 0) records.append(',');
+                records.append(window.record);
+            }
+        }
+        String local = global != null && global.globalLimit ? json("global_window_limit") : "";
+        String cutoff = referenceCollectionCutoff == null ? "" : json(referenceCollectionCutoff);
+        checkByteCancellation();
+        return "{\"schemaVersion\":2,\"windows\":[" + records +
+            "],\"omissionReason\":" + (unknown ? json("unknown_access_width") : "null") +
+            ",\"collectionOmissions\":[" + local + (!local.isEmpty() && !cutoff.isEmpty() ? "," : "") + cutoff + "]}";
+    }
+
+    private void collectReferencedByteEvidence(List<Function> functions) throws Exception {
+        Map<String, GlobalByteWindows> globals = new TreeMap<>();
+        int candidates = 0, windowCount = 0;
+        long requestedBytes = 0;
+        referencedByteEvidence.clear();
+        referenceCollectionCutoff = null;
+        collection:
+        for (Function function : functions) {
+            InstructionIterator instructions = currentProgram.getListing().getInstructions(function.getBody(), true);
+            while (instructions.hasNext()) {
+                checkByteCancellation();
+                Instruction instruction = instructions.next();
+                byteAddress(instruction.getAddress());
+                List<Reference> batch = referenceBatch(instruction, MAXIMUM_REFERENCE_CANDIDATES - candidates);
+                if (batch == null) break collection;
+                // Raw memory-reference entries, including duplicates and filtered references, charge work.
+                candidates += batch.size();
+                for (Reference reference : batch) {
+                    checkByteCancellation();
+                    if (!reference.getReferenceType().isData()) continue;
+                    Address target = reference.getToAddress();
+                    if (!target.isMemoryAddress()) continue;
+                    byteAddress(target);
+                    Data data = currentProgram.getListing().getDataContaining(target);
+                    if (data != null && data.hasStringValue() && data.getValue() != null) continue;
+                    if (currentProgram.getFunctionManager().getFunctionContaining(target) != null) continue;
+                    Address base = data == null ? target : data.getAddress();
+                    byteAddress(base);
+                    String id = globalId(base);
+                    GlobalByteWindows global = globals.get(id);
+                    int[] association = referenceWidth(instruction, reference);
+                    int width = association[0];
+                    if (width > MAXIMUM_WINDOW_BYTES) throw new PlanningIntegrityException("reference window requested-byte bound exceeded");
+                    if (width > 0) target.addNoWrap(width - 1L);
+                    String basis = association[1] == 1 ? "pcode_load" : association[1] == 2 ? "pcode_store" : association[1] == 3 ? "pcode_direct_read" : association[1] == 4 ? "pcode_direct_write" : "unknown_width";
+                    int operand = Math.max(-1, reference.getOperandIndex());
+                    boolean duplicate = false;
+                    if (global != null) {
+                        for (ByteWindow retained : global.windows) {
+                            checkByteCancellation();
+                            if (retained.target.equals(target) && retained.instruction.equals(instruction.getAddress()) && retained.operand == operand) {
+                                if (retained.width != width || !retained.basis.equals(basis))
+                                    throw new PlanningIntegrityException("conflicting reference byte-evidence origin: " + id);
+                                duplicate = true;
+                                break;
+                            }
+                        }
+                    }
+                    if (duplicate) continue;
+                    if (global != null && global.windows.size() == MAXIMUM_WINDOWS_PER_GLOBAL) {
+                        global.globalLimit = true;
+                        continue;
+                    }
+                    if (windowCount == MAXIMUM_BYTE_WINDOWS) {
+                        referenceCollectionCutoff = "model_window_limit";
+                        break collection;
+                    }
+                    if (width > MAXIMUM_REQUESTED_BYTES - requestedBytes) {
+                        referenceCollectionCutoff = "model_requested_byte_limit";
+                        break collection;
+                    }
+                    String origin = "{\"instructionAddress\":" + json(byteAddress(instruction.getAddress())) +
+                        ",\"referenceAddress\":" + json(byteAddress(target)) + ",\"operandIndex\":" +
+                        (operand < 0 ? "null" : operand) + ",\"widthBasis\":" + json(basis) + "}";
+                    String record = "{\"address\":" + json(byteAddress(target)) + ",\"requestedLength\":" +
+                        (width == 0 ? "null" : width) + ",\"origin\":" + origin + "," +
+                        (width == 0 ? "\"availability\":\"unknown\",\"segments\":[]" : readByteSegments(target, width)) + "}";
+                    if (global == null) {
+                        global = new GlobalByteWindows();
+                        globals.put(id, global);
+                    }
+                    global.windows.add(new ByteWindow(target, instruction.getAddress(), operand, width, basis, record));
+                    windowCount++;
+                    requestedBytes += width;
+                }
+            }
+        }
+        checkByteCancellation();
+        for (Map.Entry<String, GlobalByteWindows> entry : globals.entrySet()) {
+            checkByteCancellation();
+            referencedByteEvidence.put(entry.getKey(), renderByteEvidence(entry.getValue()));
+        }
+        checkByteCancellation();
+    }
+
+    private GlobalEvidence globalAt(Address address) throws Exception {
+        checkByteCancellation();
         Data data = currentProgram.getListing().getDataContaining(address);
         Address base = data == null ? address : data.getAddress();
+        byteAddress(address);
+        byteAddress(base);
         Symbol symbol = currentProgram.getSymbolTable().getPrimarySymbol(base);
         String name = symbol == null ? "DAT_" + base.toString() : symbol.getName();
         String type = data == null ? "unsigned char" : data.getDataType().getDisplayName();
         String initializer = data == null ? null : data.getDefaultValueRepresentation();
-        return new GlobalEvidence(globalId(base), name, base, type, initializer);
+        GlobalEvidence global = new GlobalEvidence(globalId(base), name, base, type, initializer);
+        global.byteEvidence = referencedByteEvidence.get(global.id);
+        if (global.byteEvidence == null && referenceCollectionCutoff != null) global.byteEvidence = renderByteEvidence(null);
+        if (global.byteEvidence == null) throw new PlanningIntegrityException("missing reference byte-evidence origin: " + global.id);
+        checkByteCancellation();
+        return global;
     }
 
-    private FunctionExport exportFunction(
+    private static final class FunctionMetadata {
+        final Function function;
+        final String prefix, evidence, failure;
+        final boolean evidenceComplete;
+
+        FunctionMetadata(Function function, String prefix, String evidence, String failure, boolean evidenceComplete) {
+            this.function = function;
+            this.prefix = prefix;
+            this.evidence = evidence;
+            this.failure = failure;
+            this.evidenceComplete = evidenceComplete;
+        }
+    }
+
+    private static final class NativeOutcome {
+        final String source, failure;
+
+        NativeOutcome(String source, String failure) {
+            this.source = source;
+            this.failure = failure;
+        }
+    }
+
+    private FunctionMetadata collectFunctionMetadata(
         Function function,
-        DecompInterface decompiler,
         Path globalsDirectory,
         Path typesDirectory,
-        PlanningBatchEvidence planningEvidence,
-        boolean includeDecompiledC
+        PlanningBatchEvidence planningEvidence
     ) throws Exception {
         Set<String> callIds = new TreeSet<>();
         Set<String> referencedGlobals = new TreeSet<>();
@@ -908,10 +1518,15 @@ public class ExportProgramModel extends GhidraScript {
         try {
             InstructionIterator instructions = currentProgram.getListing().getInstructions(function.getBody(), true);
             while (instructions.hasNext()) {
+                if (monitor.isCancelled() || Thread.currentThread().isInterrupted()) {
+                    throw new InterruptedException("program-model metadata recovery was cancelled");
+                }
                 Instruction instruction = instructions.next();
+                byteAddress(instruction.getAddress());
                 for (Reference reference : instruction.getReferencesFrom()) {
                     Address target = reference.getToAddress();
                     if (!target.isMemoryAddress()) continue;
+                    byteAddress(target);
                     Data data = currentProgram.getListing().getDataContaining(target);
                     if (data != null && data.hasStringValue() && data.getValue() != null) {
                         strings.add(data.getValue().toString());
@@ -921,7 +1536,7 @@ public class ExportProgramModel extends GhidraScript {
                         GlobalEvidence global = globalAt(target);
                         String globalRecord = renderGlobal(global);
                         if (planningEvidence == null) {
-                            writeIfAbsentAtomic(globalsDirectory.resolve(global.id + ".json"), globalRecord);
+                            writeIfAbsentAtomic(globalsDirectory.resolve(global.id + ".json"), globalRecord, phaseObservation, false);
                         } else {
                             planningEvidence.retainGlobal(global.id, globalRecord);
                         }
@@ -949,43 +1564,151 @@ public class ExportProgramModel extends GhidraScript {
             failure = appendFailure(failure, exceptionMessage("type recovery", problem));
         }
 
+        StringBuilder prefix = new StringBuilder();
+        prefix.append("    {\n");
+        prefix.append("      \"id\": ").append(json(functionId(function))).append(",\n");
+        prefix.append("      \"name\": ").append(json(function.getName())).append(",\n");
+        prefix.append("      \"address\": ").append(json(String.format("0x%x", function.getEntryPoint().getOffset()))).append(",\n");
+        prefix.append("      \"prototype\": ").append(json(function.getPrototypeString(false, false))).append(",\n");
+        StringBuilder evidence = new StringBuilder();
+        evidence.append("      \"recoveryAssessment\": \"unassessed\",\n");
+        evidence.append("      \"calls\": ["); appendStrings(evidence, callIds); evidence.append("],\n");
+        evidence.append("      \"referencedGlobals\": ["); appendStrings(evidence, referencedGlobals); evidence.append("],\n");
+        evidence.append("      \"strings\": ["); appendStrings(evidence, strings); evidence.append("],\n");
+        if ((long) prefix.length() + evidence.length() > MAXIMUM_FULL_FUNCTION_RECORD_BYTES ||
+            (long) prefix.toString().getBytes(StandardCharsets.UTF_8).length +
+                evidence.toString().getBytes(StandardCharsets.UTF_8).length > MAXIMUM_FULL_FUNCTION_RECORD_BYTES) {
+            throw new PlanningIntegrityException("function metadata exceeds its byte bound: " + functionId(function));
+        }
+        return new FunctionMetadata(function, prefix.toString(), evidence.toString(), failure, evidenceComplete);
+    }
+
+    private static NativeOutcome decompileFunction(
+        Function function,
+        DecompInterface decompiler,
+        int timeoutSeconds,
+        TaskMonitor taskMonitor
+    ) throws Exception {
         String source = null;
-        if (includeDecompiledC) {
-            try {
-                DecompileResults result = decompiler.decompileFunction(function, DECOMPILE_TIMEOUT_SECONDS, monitor);
-                if (result.decompileCompleted() && result.getDecompiledFunction() != null) {
-                    source = result.getDecompiledFunction().getC();
-                } else {
-                    String detail = result.getErrorMessage();
-                    failure = appendFailure(
-                        failure,
-                        "decompilation failed or timed out" +
-                            (detail == null || detail.trim().isEmpty() ? "" : ": " + detail)
-                    );
+        String failure = null;
+        try {
+            if (taskMonitor.isCancelled() || Thread.currentThread().isInterrupted()) {
+                throw new InterruptedException("program-model native decompilation was cancelled");
+            }
+            DecompileResults result = decompiler.decompileFunction(function, timeoutSeconds, taskMonitor);
+            if (taskMonitor.isCancelled() || Thread.currentThread().isInterrupted()) {
+                throw new InterruptedException("program-model native decompilation was cancelled");
+            }
+            DecompiledFunction rendered = result.decompileCompleted() ? result.getDecompiledFunction() : null;
+            if (rendered != null) {
+                source = rendered.getC();
+                if (source != null && (source.length() > MAXIMUM_FULL_FUNCTION_RECORD_BYTES ||
+                    source.getBytes(StandardCharsets.UTF_8).length > MAXIMUM_FULL_FUNCTION_RECORD_BYTES)) {
+                    throw new PlanningIntegrityException("decompiled source exceeds its byte bound");
                 }
-            } catch (Exception problem) {
-                rethrowInfrastructureFailure(problem);
-                failure = appendFailure(failure, exceptionMessage("decompilation", problem));
+            } else {
+                String detail = result.getErrorMessage();
+                failure = appendFailure(null, "decompilation failed or timed out" +
+                    (detail == null || detail.trim().isEmpty() ? "" : ": " + detail));
+            }
+        } catch (Exception problem) {
+            if (taskMonitor.isCancelled() || Thread.currentThread().isInterrupted() ||
+                problem instanceof InterruptedException || problem instanceof IOException ||
+                problem instanceof PlanningIntegrityException) throw problem;
+            failure = appendFailure(null, exceptionMessage("decompilation", problem));
+        }
+        return new NativeOutcome(source, failure);
+    }
+
+    private static FunctionExport renderFunction(FunctionMetadata metadata, NativeOutcome nativeOutcome, boolean full) {
+        String source = nativeOutcome == null ? null : nativeOutcome.source;
+        String failure = nativeOutcome == null ? metadata.failure : appendFailure(metadata.failure, nativeOutcome.failure);
+        String status = full
+            ? (source == null ? "failed" : (metadata.evidenceComplete ? "recovered" : "partial"))
+            : (metadata.evidenceComplete ? "partial" : "failed");
+        String record = metadata.prefix + "      \"extractionStatus\": " + json(status) + ",\n" +
+            metadata.evidence + "      \"decompiledC\": " + json(source) + "\n    }";
+        if (record.getBytes(StandardCharsets.UTF_8).length > MAXIMUM_FULL_FUNCTION_RECORD_BYTES) {
+            throw new PlanningIntegrityException("function record exceeds its byte bound");
+        }
+        return new FunctionExport(record, status, failure);
+    }
+
+    private FunctionExport exportFunction(
+        Function function,
+        DecompInterface decompiler,
+        Path globalsDirectory,
+        Path typesDirectory,
+        PlanningBatchEvidence planningEvidence,
+        boolean includeDecompiledC,
+        int decompileTimeoutSeconds
+    ) throws Exception {
+        FunctionMetadata metadata = collectFunctionMetadata(function, globalsDirectory, typesDirectory, planningEvidence);
+        NativeOutcome nativeOutcome = includeDecompiledC
+            ? decompileFunction(function, decompiler, decompileTimeoutSeconds, monitor) : null;
+        return renderFunction(metadata, nativeOutcome, includeDecompiledC);
+    }
+
+    private final class NativeWorker implements ExporterParallelCoordinatorV1.Worker<FunctionMetadata, FunctionExport> {
+        private final DecompInterface decompiler = new DecompInterface();
+        private final TaskMonitorAdapter taskMonitor = new TaskMonitorAdapter(true);
+
+        private final int workerIndex;
+        private final ExporterPhaseObservationV1 observation;
+        NativeWorker(int workerIndex) {
+            this.workerIndex = workerIndex;
+            this.observation = phaseObservation;
+            try {
+                DecompileOptions decompileOptions = new DecompileOptions();
+                decompileOptions.setMaxInstructions(MAXIMUM_DECOMPILE_INSTRUCTIONS);
+                decompiler.setOptions(decompileOptions);
+                decompiler.toggleSyntaxTree(false);
+                if (!decompiler.openProgram(currentProgram)) {
+                    throw new IllegalStateException("Ghidra decompiler could not open the current program");
+                }
+            } catch (RuntimeException | Error failure) {
+                decompiler.stopProcess();
+                decompiler.dispose();
+                throw failure;
             }
         }
 
-        String status = includeDecompiledC
-            ? (source == null ? "failed" : (evidenceComplete ? "recovered" : "partial"))
-            : (evidenceComplete ? "partial" : "failed");
-        StringBuilder output = new StringBuilder();
-        output.append("    {\n");
-        output.append("      \"id\": ").append(json(functionId(function))).append(",\n");
-        output.append("      \"name\": ").append(json(function.getName())).append(",\n");
-        output.append("      \"address\": ").append(json(String.format("0x%x", function.getEntryPoint().getOffset()))).append(",\n");
-        output.append("      \"prototype\": ").append(json(function.getPrototypeString(false, false))).append(",\n");
-        output.append("      \"extractionStatus\": ").append(json(status)).append(",\n");
-        output.append("      \"recoveryAssessment\": \"unassessed\",\n");
-        output.append("      \"calls\": ["); appendStrings(output, callIds); output.append("],\n");
-        output.append("      \"referencedGlobals\": ["); appendStrings(output, referencedGlobals); output.append("],\n");
-        output.append("      \"strings\": ["); appendStrings(output, strings); output.append("],\n");
-        output.append("      \"decompiledC\": ").append(json(source)).append("\n");
-        output.append("    }");
-        return new FunctionExport(output.toString(), status, failure);
+        @Override
+        public FunctionExport execute(FunctionMetadata metadata, boolean retry) throws Exception {
+            ExporterPhaseObservationV1.Phase nativePhase = ExporterPhaseObservationV1.Phase.values()[
+                ExporterPhaseObservationV1.Phase.NATIVE_0_INITIAL.ordinal() + workerIndex * 2 + (retry ? 1 : 0)];
+            long started = observation.begin(nativePhase);
+            NativeOutcome outcome;
+            try { outcome = decompileFunction(metadata.function, decompiler,
+                retry ? DECOMPILE_RETRY_TIMEOUT_SECONDS : DECOMPILE_TIMEOUT_SECONDS, taskMonitor); }
+            finally { observation.end(nativePhase, started); }
+            long rendering = observation.begin(ExporterPhaseObservationV1.Phase.RENDER);
+            try { return renderFunction(metadata, outcome, true); }
+            finally { observation.end(ExporterPhaseObservationV1.Phase.RENDER, rendering); }
+        }
+
+        @Override
+        public void cancel() {
+            taskMonitor.cancel();
+            decompiler.stopProcess();
+        }
+
+        @Override
+        public void dispose() { decompiler.dispose(); }
+    }
+
+    private ExporterParallelCoordinatorV1<FunctionMetadata, FunctionExport> createFullRecoveryCoordinator(int count) {
+        List<ExporterParallelCoordinatorV1.Worker<FunctionMetadata, FunctionExport>> workers = new ArrayList<>();
+        try {
+            for (int index = 0; index < count; index++) workers.add(new NativeWorker(index));
+            return new ExporterParallelCoordinatorV1<>(workers);
+        } catch (RuntimeException | Error failure) {
+            for (ExporterParallelCoordinatorV1.Worker<FunctionMetadata, FunctionExport> worker : workers) {
+                try { worker.cancel(); } catch (Throwable problem) { failure.addSuppressed(problem); }
+                try { worker.dispose(); } catch (Throwable problem) { failure.addSuppressed(problem); }
+            }
+            throw failure;
+        }
     }
 
     private PlanningSemanticState computePlanningSemanticState(List<Function> functions) throws Exception {
@@ -1006,7 +1729,7 @@ public class ExportProgramModel extends GhidraScript {
                 // production-sized batch mirrors exact first-owner behavior: a type record's
                 // sourceAddress may legitimately differ at later references to its stable identity.
                 Function function = functions.get(index);
-                FunctionExport exported = exportFunction(function, null, null, null, evidence, false);
+                FunctionExport exported = exportFunction(function, null, null, null, evidence, false, DECOMPILE_TIMEOUT_SECONDS);
                 String id = functionId(function);
                 fingerprint.beginFunction(id, exported.record);
                 functionFragmentBytes = appendBoundedPlanningRecord(
@@ -1063,6 +1786,7 @@ public class ExportProgramModel extends GhidraScript {
             "      \"address\": " + json(String.format("0x%x", global.address.getOffset())) + ",\n" +
             "      \"type\": " + json(global.type) + ",\n" +
             "      \"initializer\": " + json(global.initializer) + ",\n" +
+            "      \"byteEvidence\": " + global.byteEvidence + ",\n" +
             "      \"extractionStatus\": \"recovered\",\n" +
             "      \"recoveryAssessment\": \"unassessed\"\n" +
             "    }";
@@ -1115,22 +1839,38 @@ public class ExportProgramModel extends GhidraScript {
     }
 
     private static void writeIfAbsentAtomic(Path target, String content) throws IOException {
-        if (Files.isRegularFile(target)) return;
-        Files.createDirectories(target.getParent());
-        Path temporary = target.resolveSibling("." + target.getFileName() + "." + UUID.randomUUID() + ".tmp");
+        writeIfAbsentAtomic(target, content, null, false);
+    }
+
+    private static void writeIfAbsentAtomic(Path target, String content, ExporterPhaseObservationV1 observation,
+                                           boolean type) throws IOException {
+        long since = System.nanoTime();
+        boolean existing = Files.isRegularFile(target);
+        ExporterPhaseObservationV1.Phase phase = type
+            ? (existing ? ExporterPhaseObservationV1.Phase.TYPE_EXISTING : ExporterPhaseObservationV1.Phase.TYPE_FIRST_ATTEMPT)
+            : (existing ? ExporterPhaseObservationV1.Phase.GLOBAL_EXISTING : ExporterPhaseObservationV1.Phase.GLOBAL_FIRST_ATTEMPT);
+        // The initial existence check is included in elapsed; failed/raced first attempts are not publications.
+        if (observation != null) observation.begin(phase);
         try {
-            writeAndForce(temporary, content);
+            if (existing) return;
+            Files.createDirectories(target.getParent());
+            Path temporary = target.resolveSibling("." + target.getFileName() + "." + UUID.randomUUID() + ".tmp");
             try {
-                Files.move(temporary, target, StandardCopyOption.ATOMIC_MOVE);
-            } catch (AtomicMoveNotSupportedException unsupported) {
-                Files.move(temporary, target);
+                writeAndForce(temporary, content);
+                try {
+                    Files.move(temporary, target, StandardCopyOption.ATOMIC_MOVE);
+                } catch (AtomicMoveNotSupportedException unsupported) {
+                    Files.move(temporary, target);
+                }
+                forceDirectory(target.getParent());
+                if (observation != null) observation.publication(type, false);
+            } catch (FileAlreadyExistsException raced) {
+                if (observation != null) observation.publication(type, true);
+                Files.deleteIfExists(temporary);
+            } finally {
+                Files.deleteIfExists(temporary);
             }
-            forceDirectory(target.getParent());
-        } catch (FileAlreadyExistsException raced) {
-            Files.deleteIfExists(temporary);
-        } finally {
-            Files.deleteIfExists(temporary);
-        }
+        } finally { if (observation != null) observation.end(phase, since); }
     }
 
     private static void writeAtomic(Path target, String content) throws IOException {
@@ -1348,7 +2088,9 @@ public class ExportProgramModel extends GhidraScript {
                 }
                 String record = fragment.substring(location, recordEnd);
                 if (
-                    (evidenceKind.equals("globals") && (countOccurrences(record, "\n      \"extractionStatus\": \"recovered\",\n") != 1 ||
+                    (evidenceKind.equals("globals") && (countOccurrences(record, "\n      \"byteEvidence\": {\"schemaVersion\":2,\"windows\":[") != 1 ||
+                        countOccurrences(record, ",\"collectionOmissions\":[") != 1 ||
+                        countOccurrences(record, "\n      \"extractionStatus\": \"recovered\",\n") != 1 ||
                         countOccurrences(record, "\n      \"recoveryAssessment\": \"unassessed\"\n") != 1)) ||
                     (evidenceKind.equals("types") && (countOccurrences(record, "\n      \"extractionStatus\": \"partial\",\n") != 1 ||
                         countOccurrences(record, "\n      \"recoveryAssessment\": \"unassessed\"\n") != 1)) ||
@@ -1594,7 +2336,12 @@ public class ExportProgramModel extends GhidraScript {
         }
     }
 
-    private static void appendCanonicalEvidenceArray(OutputStream output, List<BoundFragment> fragments) throws Exception {
+    private static void mergeCanonicalEvidenceArray(
+        OutputStream output, List<BoundFragment> fragments, boolean finalArray, List<String> mergedIds
+    ) throws Exception {
+        if (fragments.size() > MAXIMUM_OPEN_EVIDENCE_CURSORS) {
+            throw new PlanningIntegrityException("canonical merge exceeds its open-cursor bound");
+        }
         List<PlanningEvidenceCursor> cursors = new ArrayList<>();
         PriorityQueue<PlanningEvidenceCursor> queue = new PriorityQueue<>(
             Comparator.comparing(cursor -> cursor.currentId)
@@ -1612,10 +2359,12 @@ public class ExportProgramModel extends GhidraScript {
                     throw new PlanningIntegrityException("canonical evidence identities are duplicated or unordered: " + cursor.currentId);
                 }
                 previousId = cursor.currentId;
+                if (mergedIds != null) mergedIds.add(cursor.currentId);
                 writeUtf8(output, cursor.currentRecord);
                 cursor.advance();
                 if (cursor.currentId != null) queue.add(cursor);
-                writeUtf8(output, queue.isEmpty() ? "\n" : ",\n");
+                if (!queue.isEmpty()) writeUtf8(output, ",\n");
+                else if (finalArray) writeUtf8(output, "\n");
             }
         } finally {
             for (PlanningEvidenceCursor cursor : cursors) {
@@ -1625,6 +2374,61 @@ public class ExportProgramModel extends GhidraScript {
                     // Integrity was checked while consuming; close errors do not change accepted bytes.
                 }
             }
+        }
+    }
+
+    private static void appendCanonicalEvidenceArray(
+        OutputStream output, List<BoundFragment> fragments, Path temporaryDirectory
+    ) throws Exception {
+        if (fragments.isEmpty()) return;
+        // Full recovery writes one sidecar per global/type in identity order. Streaming these
+        // already sorted records avoids holding thousands of file descriptors at model assembly.
+        boolean singleRecordOrder = true;
+        String previousId = null;
+        for (BoundFragment fragment : fragments) {
+            if (fragment.ids.size() != 1 ||
+                (previousId != null && previousId.compareTo(fragment.ids.get(0)) >= 0)) {
+                singleRecordOrder = false;
+                break;
+            }
+            previousId = fragment.ids.get(0);
+        }
+        if (singleRecordOrder) {
+            for (int index = 0; index < fragments.size(); index++) {
+                try (PlanningEvidenceCursor cursor = new PlanningEvidenceCursor(fragments.get(index))) {
+                    writeUtf8(output, cursor.currentRecord);
+                    cursor.advance();
+                    writeUtf8(output, index + 1 == fragments.size() ? "\n" : ",\n");
+                }
+            }
+            return;
+        }
+
+        List<Path> temporary = new ArrayList<>();
+        try {
+            List<BoundFragment> active = fragments;
+            while (active.size() > MAXIMUM_OPEN_EVIDENCE_CURSORS) {
+                List<BoundFragment> next = new ArrayList<>();
+                for (int start = 0; start < active.size(); start += MAXIMUM_OPEN_EVIDENCE_CURSORS) {
+                    List<BoundFragment> group = active.subList(
+                        start, Math.min(start + MAXIMUM_OPEN_EVIDENCE_CURSORS, active.size())
+                    );
+                    Path path = Files.createTempFile(temporaryDirectory, ".evidence-merge-", ".fragment");
+                    temporary.add(path);
+                    List<String> ids = new ArrayList<>();
+                    try (OutputStream merged = new BufferedOutputStream(new BoundedOutput(
+                        Files.newOutputStream(path, StandardOpenOption.WRITE, StandardOpenOption.TRUNCATE_EXISTING),
+                        MAXIMUM_PROGRAM_MODEL_BYTES
+                    ))) {
+                        mergeCanonicalEvidenceArray(merged, group, false, ids);
+                    }
+                    next.add(bindCurrentFile(path, ids));
+                }
+                active = next;
+            }
+            mergeCanonicalEvidenceArray(output, active, true, null);
+        } finally {
+            for (Path path : temporary) Files.deleteIfExists(path);
         }
     }
 
@@ -1652,7 +2456,7 @@ public class ExportProgramModel extends GhidraScript {
         List<BoundFragment> types,
         List<BoundFragment> auxiliaryEvidence
     ) throws Exception {
-        String prefix = "{\n  \"schemaVersion\": 2,\n  \"inputSha256\": " + json(inputSha256) + ",\n  \"functions\": [\n";
+        String prefix = "{\n  \"schemaVersion\": 4,\n  \"inputSha256\": " + json(inputSha256) + ",\n  \"functions\": [\n";
         String globalsPrefix = "  ],\n  \"globals\": [\n";
         String typesPrefix = "  ],\n  \"types\": [\n";
         String suffix = "  ]\n}\n";
@@ -1684,9 +2488,9 @@ public class ExportProgramModel extends GhidraScript {
                 writeUtf8(output, prefix);
                 appendBoundRecordArray(output, functions);
                 writeUtf8(output, globalsPrefix);
-                appendCanonicalEvidenceArray(output, globals);
+                appendCanonicalEvidenceArray(output, globals, outputPath.getParent());
                 writeUtf8(output, typesPrefix);
-                appendCanonicalEvidenceArray(output, types);
+                appendCanonicalEvidenceArray(output, types, outputPath.getParent());
                 writeUtf8(output, suffix);
             }
             if (bounded.bytesWritten != expectedBytes) {
@@ -1704,6 +2508,13 @@ public class ExportProgramModel extends GhidraScript {
         } finally {
             Files.deleteIfExists(temporary);
         }
+    }
+
+    private void observedProgress(Path path, String phase, int completed, int total, int recovered,
+                                  int partial, int failed, int reused, String currentFunction) throws IOException {
+        long started = phaseBegin(ExporterPhaseObservationV1.Phase.PROGRESS_PUBLICATION);
+        try { writeProgress(path, phase, completed, total, recovered, partial, failed, reused, currentFunction); }
+        finally { phaseEnd(ExporterPhaseObservationV1.Phase.PROGRESS_PUBLICATION, started); }
     }
 
     private static void writeProgress(
@@ -1744,17 +2555,27 @@ public class ExportProgramModel extends GhidraScript {
         }
     }
 
+    private static boolean isRetryableDecompileTimeout(FunctionExport exported) {
+        return exported.status.equals("failed") && exported.failure != null &&
+            exported.failure.contains("decompilation failed or timed out:") &&
+            exported.failure.contains("process: timeout");
+    }
+
     @Override
     protected void run() throws Exception {
+        phaseObservation = null;
+        observedCompleted = 0;
+        boolean returned = false;
+        try { runObserved(); returned = true; }
+        finally { emitPhases(true, returned); }
+    }
+
+    private void runObserved() throws Exception {
         String[] arguments = getScriptArgs();
         if (arguments.length != 4 && arguments.length != 5) {
             throw new IllegalArgumentException(
-                "expected exporter SHA-256, analysis-tool SHA-256, recovery mode, output path, and optional checkpoint hold"
+                "expected exporter SHA-256, analysis-tool SHA-256, recovery mode, output path, and optional execution policy"
             );
-        }
-        boolean holdFirstPlanningCheckpoint = arguments.length == 5;
-        if (holdFirstPlanningCheckpoint && !"hold-first-planning-checkpoint-v1".equals(arguments[4])) {
-            throw new IllegalArgumentException("unsupported planning checkpoint hold");
         }
         if (!arguments[0].matches("[0-9a-f]{64}")) throw new IllegalArgumentException("invalid exporter SHA-256");
         if (!arguments[1].matches("[0-9a-f]{64}")) throw new IllegalArgumentException("invalid analysis-tool SHA-256");
@@ -1765,6 +2586,18 @@ public class ExportProgramModel extends GhidraScript {
             throw new IllegalArgumentException("unsupported recovery mode");
         }
         boolean includeDecompiledC = recoveryMode.equals("full");
+        if (includeDecompiledC) phaseObservation = new ExporterPhaseObservationV1();
+        boolean holdFirstPlanningCheckpoint = false;
+        int decompilationWorkers = 1;
+        if (arguments.length == 5) {
+            if (!includeDecompiledC && "hold-first-planning-checkpoint-v1".equals(arguments[4])) {
+                holdFirstPlanningCheckpoint = true;
+            } else if (includeDecompiledC && arguments[4].matches("full-recovery-workers-v1:[1-4]")) {
+                decompilationWorkers = arguments[4].charAt(arguments[4].length() - 1) - '0';
+            } else {
+                throw new IllegalArgumentException("unsupported export execution policy");
+            }
+        }
         Path outputPath = Paths.get(arguments[3]).toAbsolutePath().normalize();
         Path stateDirectory = outputPath.resolveSibling(outputPath.getFileName() + ".export");
         Path functionsDirectory = stateDirectory.resolve("functions");
@@ -1783,6 +2616,7 @@ public class ExportProgramModel extends GhidraScript {
         while (inventory.hasNext()) {
             Function function = inventory.next();
             if (function.isExternal() || function.isThunk()) continue;
+            byteAddress(function.getEntryPoint());
             String id = functionId(function);
             if (previousFunctionId != null && previousFunctionId.compareTo(id) >= 0) {
                 throw new PlanningIntegrityException("program function inventory is not in strict address order: " + id);
@@ -1797,6 +2631,7 @@ public class ExportProgramModel extends GhidraScript {
             throw new PlanningIntegrityException("program inventory exceeds the planning batch-count bound");
         }
 
+        collectReferencedByteEvidence(functions);
         PlanningSemanticState planningSemanticState =
             includeDecompiledC ? null : computePlanningSemanticState(functions);
         if (
@@ -1819,6 +2654,7 @@ public class ExportProgramModel extends GhidraScript {
             ",\"exporterSha256\":" + json(exporterSha256) +
             ",\"analysisToolSha256\":" + json(analysisToolSha256) +
             ",\"recoveryMode\":" + json(recoveryMode) +
+            (includeDecompiledC ? ",\"decompilationWorkers\":" + decompilationWorkers : "") +
             ",\"inputSha256\":" + json(inputSha256) +
             ",\"language\":" + json(currentProgram.getLanguageID().toString()) +
             ",\"compilerSpec\":" + json(currentProgram.getCompilerSpec().getCompilerSpecID().toString()) +
@@ -1885,44 +2721,82 @@ public class ExportProgramModel extends GhidraScript {
                 else failed++;
             }
             reused = completed;
-            writeProgress(progressPath, "decompiling", completed, total, recovered, partial, failed, reused, null);
+            observedProgress(progressPath, "decompiling", completed, total, recovered, partial, failed, reused, null);
 
-            DecompInterface decompiler = new DecompInterface();
-            if (!decompiler.openProgram(currentProgram)) {
-                decompiler.dispose();
-                throw new IllegalStateException("Ghidra decompiler could not open the current program");
-            }
-            try {
-                for (int index = 0; index < functions.size(); index++) {
-                    Function function = functions.get(index);
-                    String id = functionIds.get(index);
-                    Path record = functionsDirectory.resolve(id + ".json");
-                    if (isAcceptedRecord(record)) continue;
-                    if (monitor.isCancelled()) throw new InterruptedException("program-model export was cancelled");
-                    writeProgress(progressPath, "decompiling", completed, total, recovered, partial, failed, reused, id);
-                    FunctionExport exported = exportFunction(
-                        function,
-                        decompiler,
-                        globalsDirectory,
-                        typesDirectory,
-                        null,
-                        true
-                    );
-                    writeFunctionFailure(failuresDirectory, id, exported);
-                    if (exported.record.getBytes(StandardCharsets.UTF_8).length > MAXIMUM_FULL_FUNCTION_RECORD_BYTES) {
-                        throw new IllegalStateException("full function record exceeds its byte bound: " + id);
+            phaseObservation.configure(total);
+            observedCompleted = completed;
+            emitPhases(false, false);
+            final int[] counts = { completed, recovered, partial, failed };
+            final int reusedRecords = reused;
+            final Map<Integer, Long> startedFunctions = new TreeMap<>();
+            try (ExporterParallelCoordinatorV1<FunctionMetadata, FunctionExport> coordinator =
+                createFullRecoveryCoordinator(decompilationWorkers)) {
+                coordinator.run(functions.size(), new ExporterParallelCoordinatorV1.Source<FunctionMetadata, FunctionExport>() {
+                    @Override
+                    public void checkCancelled() throws Exception {
+                        if (monitor.isCancelled() || Thread.currentThread().isInterrupted()) {
+                            throw new InterruptedException("program-model export was cancelled");
+                        }
                     }
-                    writeAtomic(record, exported.record);
-                    completed++;
-                    if (exported.status.equals("recovered")) recovered++;
-                    else if (exported.status.equals("partial")) partial++;
-                    else failed++;
-                    writeProgress(progressPath, "decompiling", completed, total, recovered, partial, failed, reused, null);
-                    println("program-model export " + completed + "/" + total + " " + id + " status=" + exported.status);
-                }
-            } finally {
-                decompiler.dispose();
+
+                    @Override
+                    public void observePollWait(boolean barrier, long nanos) { phaseObservation.waitElapsed(barrier, nanos); }
+
+                    @Override
+                    public boolean accepted(int index) throws Exception {
+                        Path record = functionsDirectory.resolve(functionIds.get(index) + ".json");
+                        return isAcceptedRecord(record);
+                    }
+
+                    @Override
+                    public FunctionMetadata prepare(int index, boolean retry) throws Exception {
+                        String id = functionIds.get(index);
+                        if (retry) {
+                            println("program-model retrying timed-out function " + id + " with " + DECOMPILE_RETRY_TIMEOUT_SECONDS + " seconds");
+                        } else {
+                            startedFunctions.put(index, System.nanoTime());
+                        }
+                        observedProgress(progressPath, "decompiling", counts[0], total, counts[1], counts[2], counts[3], reusedRecords, id);
+                        ExporterPhaseObservationV1.Phase metadataPhase = retry
+                            ? ExporterPhaseObservationV1.Phase.METADATA_RETRY : ExporterPhaseObservationV1.Phase.METADATA_INITIAL;
+                        long metadata = phaseBegin(metadataPhase);
+                        try { return collectFunctionMetadata(functions.get(index), globalsDirectory, typesDirectory, null); }
+                        finally { phaseEnd(metadataPhase, metadata); }
+                    }
+
+                    @Override
+                    public boolean metadataComplete(FunctionMetadata metadata) { return metadata.evidenceComplete; }
+
+                    @Override
+                    public boolean retryRequired(FunctionExport exported) { return isRetryableDecompileTimeout(exported); }
+
+                    @Override
+                    public boolean retrySucceeded(FunctionExport exported) { return !exported.status.equals("failed"); }
+
+                    @Override
+                    public void commit(int index, FunctionExport exported) throws Exception {
+                        String id = functionIds.get(index);
+                        long publication = phaseBegin(ExporterPhaseObservationV1.Phase.FUNCTION_PUBLICATION);
+                        try {
+                            writeFunctionFailure(failuresDirectory, id, exported);
+                            writeAtomic(functionsDirectory.resolve(id + ".json"), exported.record);
+                        } finally { phaseEnd(ExporterPhaseObservationV1.Phase.FUNCTION_PUBLICATION, publication); }
+                        counts[0]++;
+                        if (exported.status.equals("recovered")) counts[1]++;
+                        else if (exported.status.equals("partial")) counts[2]++;
+                        else counts[3]++;
+                        observedProgress(progressPath, "decompiling", counts[0], total, counts[1], counts[2], counts[3], reusedRecords, null);
+                        observedCompleted = counts[0];
+                        emitPhases(false, false);
+                        println("program-model export " + counts[0] + "/" + total + " " + id +
+                            " status=" + exported.status + " elapsedNanos=" + (System.nanoTime() - startedFunctions.remove(index)));
+                    }
+                });
             }
+            completed = counts[0];
+            recovered = counts[1];
+            partial = counts[2];
+            failed = counts[3];
             for (String id : functionIds) {
                 Path record = functionsDirectory.resolve(id + ".json");
                 if (!isAcceptedRecord(record)) throw new IllegalStateException("missing durable function record: " + id);
@@ -2039,7 +2913,7 @@ public class ExportProgramModel extends GhidraScript {
                 }
             }
             reused = completed;
-            writeProgress(progressPath, "planning", completed, total, recovered, partial, failed, reused, null);
+            observedProgress(progressPath, "planning", completed, total, recovered, partial, failed, reused, null);
 
             for (int start = completed; start < total; start += PLANNING_BATCH_FUNCTIONS) {
                 int end = Math.min(start + PLANNING_BATCH_FUNCTIONS, total);
@@ -2061,7 +2935,8 @@ public class ExportProgramModel extends GhidraScript {
                         globalsDirectory,
                         typesDirectory,
                         planningEvidence,
-                        false
+                        false,
+                        DECOMPILE_TIMEOUT_SECONDS
                     );
                     if (exported.failure != null) {
                         planningEvidence.retainFailure(id, renderFunctionFailure(id, exported));
@@ -2183,7 +3058,7 @@ public class ExportProgramModel extends GhidraScript {
                 recovered += validation.functions.recovered;
                 partial += validation.functions.partial;
                 failed += validation.functions.failed;
-                writeProgress(progressPath, "planning", completed, total, recovered, partial, failed, reused, null);
+                observedProgress(progressPath, "planning", completed, total, recovered, partial, failed, reused, null);
                 println("program-model planning export " + completed + "/" + total + " batch=" + baseName);
                 // The contained owner must durably authorize and deliver the requested stop
                 // while this child is still live. Only an explicitly bound interrupted run
@@ -2195,7 +3070,7 @@ public class ExportProgramModel extends GhidraScript {
         }
 
         assembleModel(outputPath, inputSha256, functionRecords, globalRecords, typeRecords, auxiliaryEvidence);
-        writeProgress(progressPath, "complete", completed, total, recovered, partial, failed, reused, null);
+        observedProgress(progressPath, "complete", completed, total, recovered, partial, failed, reused, null);
         println(
             "program-model export complete functions=" + completed + " partial=" + partial +
                 " failed=" + failed + " reused=" + reused

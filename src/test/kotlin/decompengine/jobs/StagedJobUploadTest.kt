@@ -1,12 +1,15 @@
 package decompengine.jobs
 
+import decompengine.testing.RecoveryMatrixEvidence
+import decompengine.testing.recoveryMatrixTempDirectory as createTempDirectory
+import org.junit.jupiter.api.extension.ExtendWith
 import java.io.IOException
 import java.nio.file.Files
 import java.security.MessageDigest
-import kotlin.io.path.createTempDirectory
 import kotlin.io.path.readBytes
 import kotlin.test.*
 
+@ExtendWith(RecoveryMatrixEvidence::class)
 class StagedJobUploadTest {
     @Test fun `complete job becomes visible only after input and metadata are durable`() = withRoot { root ->
         val store = JobStore(root)

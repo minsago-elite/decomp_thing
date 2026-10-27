@@ -77,7 +77,14 @@ def load_compiler_engine_profile(path: Path) -> tuple[dict[str, Any], dict[str, 
         import fastjsonschema  # type: ignore[import-untyped]
     except ModuleNotFoundError as error:
         raise VerificationError("compiler-engine validation requires pinned oracle dependencies") from error
-    schema, _ = _load_json(Path(__file__).with_name("compiler-engines.schema.json"), "compiler-engine schema")
+    analysis = profile.get("analysis")
+    exporter = analysis.get("exporter") if isinstance(analysis, dict) else None
+    version = exporter.get("version") if isinstance(exporter, dict) else None
+    schemas = {11: "compiler-engines.schema.json", 12: "compiler-engines-exporter12.schema.json",
+               13: "compiler-engines-exporter13.schema.json", 17: "compiler-engines-exporter17.schema.json"}
+    if type(version) is not int or version not in schemas:
+        raise VerificationError("compiler-engine profile has unsupported exporter version")
+    schema, _ = _load_json(Path(__file__).with_name(schemas[version]), "compiler-engine schema")
     try:
         fastjsonschema.compile(schema)(profile)
     except fastjsonschema.JsonSchemaException as error:

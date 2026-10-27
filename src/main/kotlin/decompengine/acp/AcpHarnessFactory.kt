@@ -74,8 +74,12 @@ class AcpHarnessSelection internal constructor(
     val kind: AcpHarnessKind,
     val configuration: AcpProcessConfiguration?,
     val provenance: AcpHarnessProvenance,
+    private val configurationValidation: () -> Unit = {},
     private val harnessProvider: () -> AgentHarness,
 ) {
+    /** Validate frozen settings without constructing an execution adapter. */
+    fun validateConfiguration() = configurationValidation()
+
     fun createHarness(): AgentHarness = harnessProvider()
 }
 
@@ -151,7 +155,9 @@ object AcpHarnessFactory {
             configurationSha256 = null,
             deprecated = true,
         )
-        return AcpHarnessSelection(AcpHarnessKind.LEGACY_OPENAI, null, provenance) {
+        return AcpHarnessSelection(AcpHarnessKind.LEGACY_OPENAI, null, provenance,
+            configurationValidation = { HttpOpenAiCompatibleRepairClient.validateEnvironment(frozenEnvironment) },
+        ) {
             RepairClientAgentHarness(HttpOpenAiCompatibleRepairClient.fromEnvironment(frozenEnvironment))
         }
     }

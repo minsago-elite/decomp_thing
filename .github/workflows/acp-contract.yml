@@ -13,13 +13,22 @@ concurrency:
 
 jobs:
   required-contract:
+    env:
+      NPM_CONFIG_CACHE: ${{ github.workspace }}/build/npm-download-cache
     runs-on: ubuntu-24.04
     timeout-minutes: 25
     steps:
       - uses: actions/checkout@v7
         with:
           submodules: recursive
+      - name: Cache reviewed frontend Node downloads
+        uses: actions/cache@v6
+        with:
+          path: ${{ github.workspace }}/build/frontend-node-downloads
+          key: frontend-node-archives-v1-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('scripts/install-frontend-node.sh', 'scripts/frontend-node-sha256.txt', '.node-version', 'frontend/package.json') }}
       - name: Install pinned build-only frontend toolchain
+        env:
+          DECOMP_FRONTEND_NODE_DOWNLOAD_CACHE: '1'
         run: |
           bash scripts/install-frontend-node.sh "$RUNNER_TEMP/frontend-node"
           echo "$RUNNER_TEMP/frontend-node/bin" >> "$GITHUB_PATH"
@@ -27,10 +36,14 @@ jobs:
         with:
           distribution: temurin
           java-version: "21"
-      - uses: gradle/actions/setup-gradle@v6
+      - uses: ./.github/actions/setup-gradle-compiler-cache
         with:
-          cache-provider: basic
           cache-read-only: ${{ github.ref != 'refs/heads/master' }}
+      - name: Cache locked frontend package downloads
+        uses: actions/cache@v6
+        with:
+          path: ${{ github.workspace }}/build/npm-download-cache/_cacache
+          key: frontend-npm-downloads-v1-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('frontend/package-lock.json', 'frontend/package.json', 'frontend/.npmrc', '.node-version', 'scripts/install-frontend-node.sh', 'scripts/frontend-node-sha256.txt') }}
       - name: Install sandbox host prerequisites
         run: |
           sudo apt-get update
@@ -53,4 +66,5 @@ jobs:
           path: |
             build/reports/tests/test
             build/test-results/test
+            build/reports/junit-signatures
             build/acp-contract-qualification

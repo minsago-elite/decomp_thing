@@ -7,6 +7,8 @@ import decompengine.acp.LinuxSyscallException
 import decompengine.acp.permissions
 import java.io.IOException
 import java.nio.file.Path
+import java.nio.file.Files
+import java.nio.file.attribute.BasicFileAttributes
 
 /**
  * Descriptor-owned durable state for one repair project.
@@ -23,6 +25,8 @@ internal class RepairStateStore private constructor(
     private val faultInjector: ModuleRevisionFaultInjector?,
 ) : AutoCloseable {
     private var closed = false
+    private var validationDiffs: LinuxDescriptor? = null
+    private var normalValidationReceipts: LinuxDescriptor? = null
 
     val projectPath: Path = LinuxFilesystemSyscalls.descriptorPath(projectRoot)
     val reportsPath: Path = LinuxFilesystemSyscalls.descriptorPath(reports)
@@ -70,6 +74,37 @@ internal class RepairStateStore private constructor(
         }
     }
 
+    /** Declared compatibility inputs, not authenticated chronology. Every name/body is bounded. */
+    fun forEachDeclaredLegacyGraph(budget: RepairResourceBudget, consume: (String, ByteArray) -> Unit) {
+        checkOpen()
+        val names = LinuxFilesystemSyscalls.directoryEntryNames(revisions, repairRevisionDirectoryEntryLimit(budget))
+        require(names.count { it.matches(LEGACY_GRAPH_NAME) } <= budget.maximumStateDirectoryEntries) {
+            "declared legacy graph candidate count exceeds its entry budget"
+        }
+        var remaining = budget.maximumIndexEvidenceBytes
+        names.sorted().filter { it.matches(LEGACY_GRAPH_NAME) }.forEach { name ->
+            val opened = requireNotNull(LinuxFilesystemSyscalls.openRegularFileAtOrNull(revisions.fd, name)) {
+                "declared legacy graph disappeared"
+            }
+            opened.use { descriptor ->
+                requireManagedRegularFile(descriptor.identity, revisions.identity, "declared legacy graph")
+                val admitted = Files.readAttributes(LinuxFilesystemSyscalls.descriptorPath(descriptor),
+                    BasicFileAttributes::class.java).size()
+                if (admitted !in 1..minOf(budget.maximumGraphBytes, remaining)) {
+                    throw RepairBudgetExceededException("declared legacy graph exceeds its remaining evidence budget")
+                }
+                remaining -= admitted
+                // Forward EXACT admitted size; growth is fatal, not a skip to another source.
+                // The existing reader may consume one final 64KiB chunk on rejected growth.
+                val observed = readRequiredStable(revisions, revisionsPath, name, admitted, "declared legacy graph")
+                require(observed.identity == descriptor.identity && observed.bytes.size.toLong() == admitted) {
+                    "declared legacy graph identity or size changed"
+                }
+                consume(name, observed.bytes)
+            }
+        }
+    }
+
     fun writeBinding(bytes: ByteArray) =
         writeAtomically(revisions, RECOVERY_BINDING_NAME, bytes, "recovery-binding")
 
@@ -102,6 +137,182 @@ internal class RepairStateStore private constructor(
     }
 
     fun writeReport(name: String, bytes: ByteArray) = writeAtomically(reports, name, bytes, "repair-report")
+
+    /** The selected provider receipt is retained independently of its operator-selected directory. */
+    fun writeImmutableValidationReceipt(name: String, bytes: ByteArray) {
+        require(name.matches(Regex("validation_[0-9a-f]{32}\\.validation\\.json")))
+        require(bytes.size.toLong() in 1..64L * 1024 * 1024)
+        if (exists(reports, name)) {
+            require(readRequiredStable(reports, reportsPath, name, 64L * 1024 * 1024,
+                "immutable validation receipt").bytes.contentEquals(bytes)) {
+                "immutable validation receipt already has different bytes"
+            }
+            return
+        }
+        writeAtomically(reports, name, bytes, "validation-receipt", requireAbsent = true)
+    }
+
+    /** Normal primary roles carry invocation and digest ownership; fatal root receipts are separate. */
+    fun writeImmutableNormalValidationReceipt(name: String, bytes: ByteArray) {
+        require(name.matches(Regex("validation_[0-9a-f]{32}_[0-9a-f]{64}\\.json")))
+        require(bytes.size.toLong() in 1..64L * 1024 * 1024 &&
+            decompengine.project.sha256(bytes) == name.removeSuffix(".json").substringAfterLast('_'))
+        val parent = requireNotNull(normalValidationReceiptDirectory(create = true))
+        if (exists(parent, name)) {
+            require(readRequiredStable(parent, LinuxFilesystemSyscalls.descriptorPath(parent), name,
+                64L * 1024 * 1024, "immutable normal validation receipt").bytes.contentEquals(bytes)) {
+                "immutable normal validation receipt already has different bytes"
+            }
+            return
+        }
+        writeAtomically(parent, name, bytes, "normal-validation-receipt", requireAbsent = true)
+    }
+
+    fun readImmutableNormalValidationReceipt(name: String, maximumBytes: Long): ByteArray {
+        require(name.matches(Regex("validation_[0-9a-f]{32}_[0-9a-f]{64}\\.json")) && maximumBytes in 1..64L * 1024 * 1024)
+        val parent = requireNotNull(normalValidationReceiptDirectory(create = false))
+        return readRequiredStable(parent, LinuxFilesystemSyscalls.descriptorPath(parent), name,
+            maximumBytes, "immutable normal validation receipt").bytes
+    }
+
+    fun normalValidationReceiptNames(maximumEntries: Int): List<String> =
+        normalValidationReceiptDirectory(create = false)?.let { LinuxFilesystemSyscalls.directoryEntryNames(it, maximumEntries) }
+            ?: emptyList()
+
+    fun normalValidationReceiptsPath(): Path? = normalValidationReceiptDirectory(create = false)?.let { LinuxFilesystemSyscalls.descriptorPath(it) }
+
+    fun cleanupNormalValidationReceiptTemporary(name: String) {
+        require(name.matches(Regex("validation_[0-9a-f]{32}_[0-9a-f]{64}\\.json")))
+        normalValidationReceiptDirectory(create = false)?.let { cleanupAtomicTemporary(it, name) }
+    }
+
+    /** Inspect the exact named inode before reserving both quarantine verification reads. */
+    fun normalValidationReceiptMetadata(name: String): Pair<LinuxFileIdentity, Long> {
+        require(name.matches(Regex("validation_[0-9a-f]{32}_[0-9a-f]{64}\\.json(?:\\.cleanup)?")))
+        val parent = requireNotNull(normalValidationReceiptDirectory(create = false))
+        val opened = requireNotNull(LinuxFilesystemSyscalls.openRegularFileAtOrNull(parent.fd, name))
+        return opened.use { held ->
+            requireManagedRegularFile(held.identity, parent.identity, "normal validation receipt cleanup")
+            val size = Files.readAttributes(LinuxFilesystemSyscalls.descriptorPath(held), BasicFileAttributes::class.java).size()
+            require(LinuxFilesystemSyscalls.identity(held.fd) == held.identity)
+            requireNamedIdentity(parent, name, held.identity, "normal validation receipt cleanup")
+            held.identity to size
+        }
+    }
+
+    private fun normalValidationReceiptDirectory(create: Boolean): LinuxDescriptor? {
+        checkOpen()
+        normalValidationReceipts?.let { return it }
+        val opened = if (create) openOrCreateDirectory(revisions, "validation-receipts") else try {
+            LinuxFilesystemSyscalls.openDirectoryAt(revisions.fd, "validation-receipts")
+        } catch (failure: LinuxSyscallException) {
+            if (failure.errno == LinuxFilesystemSyscalls.ENOENT) return null
+            throw failure
+        }
+        try {
+            requireSecureDirectory(opened.identity, revisions.identity, "normal validation receipt directory")
+            requireNamedIdentity(revisions, "validation-receipts", opened.identity, "normal validation receipt directory")
+            normalValidationReceipts = opened
+            return opened
+        } catch (failure: Throwable) {
+            opened.close()
+            throw failure
+        }
+    }
+
+    /** Content-addressed derived roles have an independent bounded directory, not one root entry per observation. */
+    fun writeImmutableValidationDiff(name: String, bytes: ByteArray) {
+        require(name.matches(Regex("[0-9a-f]{64}\\.json")))
+        require(bytes.size.toLong() in 1..64L * 1024 * 1024 &&
+            decompengine.project.sha256(bytes) == name.removeSuffix(".json"))
+        val parent = requireNotNull(validationDiffDirectory(create = true))
+        if (exists(parent, name)) {
+            require(readRequiredStable(parent, LinuxFilesystemSyscalls.descriptorPath(parent), name,
+                64L * 1024 * 1024, "immutable validation diff").bytes.contentEquals(bytes)) {
+                "immutable validation diff already has different bytes"
+            }
+            return
+        }
+        writeAtomically(parent, name, bytes, "validation-diff", requireAbsent = true)
+    }
+
+    fun readImmutableValidationDiff(name: String, maximumBytes: Long): ByteArray {
+        require(name.matches(Regex("[0-9a-f]{64}\\.json")) && maximumBytes in 1..64L * 1024 * 1024)
+        val parent = requireNotNull(validationDiffDirectory(create = false))
+        return readRequiredStable(parent, LinuxFilesystemSyscalls.descriptorPath(parent), name,
+            maximumBytes, "immutable validation diff").bytes
+    }
+
+    fun validationDiffNames(maximumEntries: Int): List<String> =
+        validationDiffDirectory(create = false)?.let { LinuxFilesystemSyscalls.directoryEntryNames(it, maximumEntries) }
+            ?: emptyList()
+
+    fun validationDiffsPath(): Path? = validationDiffDirectory(create = false)?.let { LinuxFilesystemSyscalls.descriptorPath(it) }
+
+    fun cleanupValidationDiffTemporary(name: String) {
+        require(name.matches(Regex("[0-9a-f]{64}\\.json")))
+        validationDiffDirectory(create = false)?.let { cleanupAtomicTemporary(it, name) }
+    }
+
+    /** Inspect the exact named inode before reserving both quarantine verification reads. */
+    fun validationDiffMetadata(name: String): Pair<LinuxFileIdentity, Long> {
+        require(name.matches(Regex("[0-9a-f]{64}\\.json(?:\\.cleanup)?")))
+        val parent = requireNotNull(validationDiffDirectory(create = false))
+        val opened = requireNotNull(LinuxFilesystemSyscalls.openRegularFileAtOrNull(parent.fd, name))
+        return opened.use { held ->
+            requireManagedRegularFile(held.identity, parent.identity, "validation diff cleanup")
+            val size = Files.readAttributes(LinuxFilesystemSyscalls.descriptorPath(held), BasicFileAttributes::class.java).size()
+            require(LinuxFilesystemSyscalls.identity(held.fd) == held.identity)
+            requireNamedIdentity(parent, name, held.identity, "validation diff cleanup")
+            held.identity to size
+        }
+    }
+
+    private fun validationDiffDirectory(create: Boolean): LinuxDescriptor? {
+        checkOpen()
+        validationDiffs?.let { return it }
+        val opened = if (create) openOrCreateDirectory(revisions, "validation-diffs") else try {
+            LinuxFilesystemSyscalls.openDirectoryAt(revisions.fd, "validation-diffs")
+        } catch (failure: LinuxSyscallException) {
+            if (failure.errno == LinuxFilesystemSyscalls.ENOENT) return null
+            throw failure
+        }
+        try {
+            requireSecureDirectory(opened.identity, revisions.identity, "validation diff directory")
+            requireNamedIdentity(revisions, "validation-diffs", opened.identity, "validation diff directory")
+            validationDiffs = opened
+            return opened
+        } catch (failure: Throwable) {
+            opened.close()
+            throw failure
+        }
+    }
+
+    /** Uses the same descriptor-pinned no-replace publication as immutable invocation receipts. */
+    fun writeImmutableValidationDiagnostic(name: String, bytes: ByteArray) {
+        require(name.matches(Regex("validation_[0-9a-f]{32}\\.validation-failure\\.json")))
+        require(bytes.size in 1..4096)
+        if (exists(reports, name)) {
+            require(readRequiredStable(reports, reportsPath, name, 4096,
+                "immutable validation diagnostic").bytes.contentEquals(bytes)) {
+                "immutable validation diagnostic already has different bytes"
+            }
+            return
+        }
+        writeAtomically(reports, name, bytes, "validation-diagnostic", requireAbsent = true)
+    }
+
+    fun readValidationReport(relative: String, maximumBytes: Long): ByteArray {
+        require(maximumBytes in 1..64L * 1024 * 1024 && relative.length <= 4096)
+        val parts = relative.split('/')
+        require(parts.size in 2..32 && parts.first() == "reports" && parts[1] !in setOf("repair-revisions", "runs", "source-tree"))
+        require(parts.drop(1).all { it != "." && it != ".." && it.matches(Regex("[A-Za-z0-9._-]{1,160}")) })
+        require(relative != "reports/repair_history.json")
+        return withProjectEvidenceParent(relative) { parent, name ->
+            readRequiredStable(parent, LinuxFilesystemSyscalls.descriptorPath(parent), name,
+                maximumBytes, "validation report").bytes
+        }
+    }
 
     fun writeRoot(name: String, bytes: ByteArray) = writeAtomically(projectRoot, name, bytes, "project-evidence")
 
@@ -210,9 +421,17 @@ internal class RepairStateStore private constructor(
     override fun close() {
         if (closed) return
         closed = true
-        blobs.close()
-        revisions.close()
-        reports.close()
+        try {
+            normalValidationReceipts?.close()
+        } finally {
+            try {
+                validationDiffs?.close()
+            } finally {
+                blobs.close()
+                revisions.close()
+                reports.close()
+            }
+        }
     }
 
     private fun exists(parent: LinuxDescriptor, name: String): Boolean {
@@ -564,3 +783,5 @@ private const val GROUP_OR_OTHER_WRITE = 0x12 // 0022
 private val SHA256_NAME = Regex("[0-9a-f]{64}")
 private val BLOB_ATOMIC_NAME = Regex("\\.([0-9a-f]{64})\\.repair-atomic\\.tmp")
 private val BLOB_CLEANUP_NAME = Regex("([0-9a-f]{64})\\.cleanup")
+
+private val LEGACY_GRAPH_NAME = Regex("legacy-graph-([0-9a-f]{64})\\.json")

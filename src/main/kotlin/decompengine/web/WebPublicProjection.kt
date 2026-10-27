@@ -170,9 +170,9 @@ private fun publicVersionedJob(fields: JsonObject): JsonObject {
  */
 internal fun publicWebDiagnosticCode(code: String): String = when (code) {
     "JOB_NOT_FOUND", "RUN_NOT_FOUND", "LEGACY_INTERRUPTED", "LEGACY_RECOVERY_REQUIRED",
-    "PUBLICATION_PENDING", "RECOVERY_REQUIRED", "UPLOAD_STAGING_RECOVERY_REQUIRED",
+    "PUBLICATION_PENDING", "RECOVERY_REQUIRED", "UPLOAD_STAGING_RECOVERY_REQUIRED", "RECOVERY_INSPECTION_BUSY",
     "CORRUPT_LEGACY_JOB", "CORRUPT_WORKFLOW_STATE", "INVALID_STORAGE_ENTRY",
-    "JOB_RECORD_UNAVAILABLE", "STORE_LIMIT", "LISTING_UNAVAILABLE", "PERSISTENCE_FAILED",
+    "JOB_RECORD_UNAVAILABLE", "STORE_LIMIT", "STORE_DURABILITY_UNAVAILABLE", "LISTING_UNAVAILABLE", "PERSISTENCE_FAILED",
     "SERVICE_NOT_INITIALIZED", "SERVICE_STOPPED", "PROGRESS_UNAVAILABLE",
     "PROGRESS_RETENTION_FAILED", "VERSION_CONFLICT", "IDEMPOTENCY_CONFLICT",
     "PIN_RECEIPT_CAPACITY", "UPLOAD_CAPACITY", "UPLOAD_STORAGE",
@@ -187,12 +187,15 @@ internal fun publicWebDiagnosticMessage(code: String): String = when (publicWebD
     "LEGACY_INTERRUPTED" -> "Historical legacy work was interrupted; its workflow identity is unknown."
     "LEGACY_RECOVERY_REQUIRED" -> "The historical operation has no workflow identity. Run startup recovery before requesting new work."
     "PUBLICATION_PENDING" -> "Completed candidate output awaits canonical publication review; it is not accepted evidence."
+    "RECOVERY_INSPECTION_BUSY" -> "Recovery inspection is paused while uploads are in progress. Refresh after uploads finish."
     "RECOVERY_REQUIRED", "UPLOAD_STAGING_RECOVERY_REQUIRED" ->
         "Storage recovery is required. Preserve the job and reopen storage before retrying."
     "CORRUPT_LEGACY_JOB", "CORRUPT_WORKFLOW_STATE", "INVALID_STORAGE_ENTRY", "JOB_RECORD_UNAVAILABLE" ->
         "The job record is unavailable or invalid. Preserve its storage and restore a verified backup before retrying."
     "STORE_LIMIT", "LISTING_UNAVAILABLE" ->
         "Job storage exceeds a configured inspection limit. Inspect storage before retrying."
+    "STORE_DURABILITY_UNAVAILABLE" ->
+        "Store directory durability could not be confirmed. Preserve stored data and verify filesystem support before retrying."
     "PERSISTENCE_FAILED" -> "The requested state change could not be published. Refresh before retrying."
     "SERVICE_NOT_INITIALIZED" -> "Job storage is not initialized for reads."
     "SERVICE_STOPPED" -> "The job service is stopping or stopped."

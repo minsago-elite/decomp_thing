@@ -4,6 +4,30 @@ import { promises as fs } from 'node:fs';
 import { join } from 'node:path';
 import { createHash } from 'node:crypto';
 
+// Pure assertions on the metadata returned by the existing browser commands.
+export function dashboardFiltersWithSnapshot(search) {
+  assert.equal(typeof search, 'string');
+  assert.ok(search.length <= 4096, 'Dashboard query exceeds its bound');
+  const params = new URLSearchParams(search);
+  assert.equal(search, '?' + params.toString(), 'Dashboard query must retain canonical encoding');
+  const cursors = params.getAll('cursor');
+  assert.equal(cursors.length, 1, 'Displayed dashboard must have exactly one snapshot cursor');
+  assert.match(cursors[0], /^[A-Za-z0-9_-]{1,128}$/, 'Snapshot cursor must remain bounded and opaque');
+  params.delete('cursor');
+  const filters = params.toString();
+  return filters ? '?' + filters : '';
+}
+
+function dashboardFilterObjectWithSnapshot(query) {
+  assert.ok(query !== null && typeof query === 'object' && !Array.isArray(query));
+  const { cursor, ...filters } = query;
+  assert.equal(typeof cursor, 'string');
+  assert.match(cursor, /^[A-Za-z0-9_-]{1,128}$/, 'Snapshot cursor must remain bounded and opaque');
+  assert.ok(Object.values(filters).every(value => typeof value === 'string'));
+  assert.ok(new URLSearchParams(query).toString().length + 1 <= 4096, 'Dashboard query exceeds its bound');
+  return filters;
+}
+
 // Private test data only, created before the application acquires storage ownership.
 export async function seedScale(root) {
   await fs.mkdir(root, { mode: 0o700 });
@@ -20,7 +44,7 @@ export async function seedScale(root) {
     const at = new Date(Date.parse('2026-01-01T00:00:00.000Z') + index * 10).toISOString();
     const job = { id, filename: `synthetic-project-${String(index).padStart(5, '0')}.elf`, status: 'uploaded',
       created_at: at, updated_at: at, size_bytes: 64, binary_path: join(directory, 'input.elf'),
-      metadata: { format: 'ELF64', endianness: 'little', elf_version: 1, os_abi: 'System V', object_type: 'EXEC',
+      metadata: { format: 'ELF64', endianness: 'little', elf_version: 1, os_abi: 'System V', object_type: 'executable',
         machine: 'x86-64', entry_point: 0, elf_header_size: 64, program_header_count: 0, section_header_count: 0, section_name_table_index: 0 } };
     await fs.writeFile(join(directory, 'input.elf'), input, { flag: 'wx', mode: 0o600 });
     await fs.writeFile(join(directory, 'job.json'), JSON.stringify(job), { flag: 'wx', mode: 0o600 });
@@ -72,11 +96,11 @@ export async function qualifyScale({ fixture, makeTarget, cdp, evaluate, ready, 
   await evaluate(tab, `[...document.querySelectorAll('button')].find(b => b.textContent === 'Apply filters').click()`);
   await ready(tab, `location.search.includes('createdBefore') && (${rows}).length === 1 && document.activeElement.textContent === 'Job results'`, 'combined nanosecond filters');
   assert.deepEqual(await evaluate(tab, rows), ['/nested/jobs/' + fixture.ids[42]]);
-  assert.deepEqual(await evaluate(tab, 'Object.fromEntries(new URLSearchParams(location.search))'), filters);
+  assert.deepEqual(dashboardFilterObjectWithSnapshot(await evaluate(tab, 'Object.fromEntries(new URLSearchParams(location.search))')), filters);
   await cdp.call('Page.reload', {}, tab.sessionId);
   await ready(tab, `(${rows}).length === 1`, 'combined filters restored after reload');
   assert.deepEqual(await evaluate(tab, rows), ['/nested/jobs/' + fixture.ids[42]]);
-  assert.deepEqual(await evaluate(tab, 'Object.fromEntries(new URLSearchParams(location.search))'), filters);
+  assert.deepEqual(dashboardFilterObjectWithSnapshot(await evaluate(tab, 'Object.fromEntries(new URLSearchParams(location.search))')), filters);
   await cdp.call('Page.navigate', { url: browserOrigin + '/nested/?sort=oldest&limit=200' }, tab.sessionId);
   const oldest = fixture.ids.slice(0, 200).map(id => '/nested/jobs/' + id);
   await ready(tab, `(${rows})[0] === ${JSON.stringify(oldest[0])} && (${rows}).length === 200`, 'oldest-first library');
@@ -125,7 +149,7 @@ export async function qualifyScale({ fixture, makeTarget, cdp, evaluate, ready, 
   assert.equal(await evaluate(tab, `[...document.querySelectorAll('label')].find(label => label.textContent.startsWith('Sort by')).querySelector('select').value`), 'oldest');
   await evaluate(tab, `[...document.querySelectorAll('button')].find(b => b.textContent === 'Reset filters').click()`);
   await ready(tab, `(${rows})[0] === ${JSON.stringify('/nested/jobs/' + fixture.ids[9999])} && (${rows}).length === 50`, 'reset oldest-first preference');
-  assert.equal(await evaluate(tab, 'location.search'), '');
+  assert.equal(dashboardFiltersWithSnapshot(await evaluate(tab, 'location.search')), '');
   const reflow = [];
   for (const width of [390, 320]) {
     await cdp.call('Emulation.setDeviceMetricsOverride', { width, height: 844, deviceScaleFactor: 1, mobile: false }, tab.sessionId);
@@ -149,7 +173,7 @@ export async function qualifyScale({ fixture, makeTarget, cdp, evaluate, ready, 
   assert.ok(invalidField.description?.value.includes('valid calendar date'));
   assert.equal(tab.requests.filter(request => request.url.endsWith('/api/v1/jobs')).length, readsBeforeInvalid);
   assert.equal((await evaluate(tab, rows)).length, 50);
-  assert.equal(await evaluate(tab, 'location.search'), '');
+  assert.equal(dashboardFiltersWithSnapshot(await evaluate(tab, 'location.search')), '');
   await evaluate(tab, `[...document.querySelectorAll('button')].find(b => b.textContent === 'Reset filters').click()`);
   await ready(tab, `!document.querySelector('#job-filter-error') && document.activeElement.textContent === 'Job results'`, 'invalid date reset recovery');
   const filterContrast = await qualifyFilterContrast({ tab, cdp, evaluate });

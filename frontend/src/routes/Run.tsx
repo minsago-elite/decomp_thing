@@ -1,87 +1,157 @@
+import { runCopy as copy } from '../copy/attempt';
+import { sourceCopy } from '../copy/sources';
+import { message as displayMessage } from '../shared/messages';
+import { formatExactTimestamp } from '../jobs/metadataFormat';
 import { usePrivateTransport } from '../session/PrivateTransport';
-import { useEffect, useState } from 'preact/hooks';
+import { useEffect, useMemo, useState } from 'preact/hooks';
+import { useLocation } from 'preact-iso/router';
 import type { Run as RunData } from '../api/generated';
-import { ApiClientError, withApiFailureReference } from '../api/client';
-import { jobPath, runPath } from '../app/paths';
+import { withApiFailureReference } from '../api/client';
+import { jobPath, runPath, runViewPath, sourceDirectoryPath, type RunView } from '../app/paths';
 import type { BrowserSession } from '../session/session';
 import { Activity } from '../jobs/Activity';
 import { ProgressPin } from '../jobs/ProgressPin';
+import { AttemptControls } from '../jobs/AttemptControls';
 import { ExplorationEvidence } from '../jobs/ExplorationEvidence';
+import { RecordedValidationEvidence } from '../jobs/RecordedValidationEvidence';
+import type { ValidationNavigation } from '../jobs/validationNavigation';
 import { useSession } from '../session/useSession';
+import { receive } from '../shared/receiptTime';
+import type { Received } from '../shared/receiptTime';
+import { MetadataReceipt } from '../shared/MetadataReceipt';
+import { canRetainMetadata, metadataFailureKind } from '../shared/retainMetadata';
+import { attemptOutcomeCopy as outcomeCopy, stopOutcomeCopy } from '../copy/attemptOutcome';
+import { QueuePosition } from '../jobs/QueuePosition';
 
-function Details({ jobId, runId, basePath, session }: { jobId: string; runId: string; basePath: string; session: BrowserSession }) {
+function Details({ jobId, runId, basePath, session, view, navigation }: {
+  jobId: string; runId: string; basePath: string; session: BrowserSession; view: RunView; navigation?: ValidationNavigation;
+}) {
   const { client } = usePrivateTransport(basePath);
-  const [run, setRun] = useState<RunData | null>(null);
-  const [error, setError] = useState('');
+  const binding = useMemo(() => ({ client, basePath, jobId, runId, session }), [client, basePath, jobId, runId, session]);
+  const [stored, setStored] = useState<{ binding: typeof binding; data: Received<RunData> | null; error: string; loading: boolean }>(
+    { binding, data: null, error: '', loading: true });
+  const { data: observation, error, loading } = stored.binding === binding ? stored : { data: null, error: '', loading: true };
+  const run = observation?.value;
   const [refresh, setRefresh] = useState(0);
-  const [loading, setLoading] = useState(true);
   useEffect(() => {
-    const controller = new AbortController(); setRun(null); setError(''); setLoading(true);
+    const controller = new AbortController();
+    setStored(previous => ({ binding, data: previous.binding === binding ? previous.data : null, error: '', loading: true }));
     void client.get('run', `/jobs/${jobId}/runs/${runId}`, { signal: controller.signal }).then(response => {
       if (controller.signal.aborted) return;
       if (response.data.jobId !== jobId || response.data.runId !== runId) {
-        setError('The response does not belong to the requested job and attempt.'); return;
+        setStored({ binding, data: null, error: copy.theResponseDoesNotBelongToTheRequestedJobAnd, loading: false }); return;
       }
-      setRun(response.data);
+      setStored({ binding, data: receive(response.data), error: '', loading: false });
     }).catch((failure: unknown) => {
-      if (!controller.signal.aborted) setError(withApiFailureReference(failure instanceof ApiClientError && failure.status === 404
-        ? 'This attempt is unavailable for this job.' : 'The attempt could not be loaded. Check the local session and server.', failure));
-    }).finally(() => { if (!controller.signal.aborted) setLoading(false); });
+      if (!controller.signal.aborted) setStored(previous => ({ binding,
+        data: previous.binding === binding && canRetainMetadata(failure) ? previous.data : null,
+        error: withApiFailureReference({
+          session: copy.reconnectToReadThisAttempt, denied: copy.attemptAccessDenied,
+          missing: copy.thisAttemptIsUnavailableForThisJob, unsupported: copy.incompatibleAttemptResponse,
+          unverified: copy.attemptMetadataCouldNotBeVerified,
+          failed: copy.theAttemptCouldNotBeLoadedCheckTheLocalSession,
+        }[metadataFailureKind(failure)], failure), loading: false }));
+    });
     return () => { controller.abort(); };
-  }, [client, jobId, runId, refresh]);
+  }, [binding, client, jobId, runId, refresh]);
   return <>
-    {loading && <p role="status">Loading attempt…</p>}
+    {loading && <p role="status">{run ? copy.refreshingAttempt : copy.loadingAttempt}</p>}
     {error && <p role="alert">{error}</p>}
-    <button type="button" disabled={loading} onClick={() => setRefresh(value => value + 1)}>Refresh attempt</button>
+    {error && run && <p>{copy.previousAttemptMetadataMayBeOutdated}</p>}
+    <button type="button" disabled={loading} onClick={() => setRefresh(value => value + 1)}>{copy.refreshAttempt}</button>
     {run && <>
+      <MetadataReceipt kind="run" receipt={observation?.receipt} />
+      {view !== 'overview' && <dl class="job-facts">
+        <dt>{copy.attemptIdentity}</dt><dd><code>{run.runId}</code></dd>
+        <dt>{copy.attemptState}</dt><dd>{run.state}</dd>
+        <dt>{copy.acceptance}</dt><dd>{run.acceptance}</dd>
+        <dt>{copy.resultRevision}</dt><dd>{run.resultRevisionId ?? copy.noResultRevisionRecorded}</dd>
+      </dl>}
+      {view === 'overview' && <>
       <dl class="job-facts">
-        <dt>Attempt identity</dt><dd><code>{run.runId}</code></dd>
-        <dt>Workflow</dt><dd>{run.workflow}</dd><dt>Attempt state</dt><dd>{run.state}</dd>
-        <dt>Acceptance</dt><dd>{run.acceptance}</dd>
-        <dt>Created</dt><dd><time dateTime={run.createdAt}>{run.createdAt}</time></dd>
-        <dt>Started</dt><dd>{run.startedAt ? <time dateTime={run.startedAt}>{run.startedAt}</time> : 'Not recorded'}</dd>
-        <dt>Ended</dt><dd>{run.endedAt ? <time dateTime={run.endedAt}>{run.endedAt}</time> : 'Not recorded'}</dd>
-        <dt>Terminal reason</dt><dd>{run.terminalReason ?? 'No terminal reason recorded'}</dd>
-        <dt>Input revision</dt><dd>{run.inputRevisionId ?? 'Original uploaded input'}</dd>
-        <dt>Result revision</dt><dd>{run.resultRevisionId ?? 'No result revision recorded'}</dd>
+        <dt>{copy.attemptIdentity}</dt><dd><code>{run.runId}</code></dd>
+        <dt>{copy.workflow}</dt><dd>{run.workflow}</dd><dt>{copy.attemptState}</dt><dd>{run.state}</dd>
+        <dt>{copy.recordedHarnessCapability}</dt><dd><code>{run.harnessCapabilityId ?? copy.harnessCapabilityNotRecorded}</code></dd>
+        <dt>{copy.acceptance}</dt><dd>{run.acceptance}</dd>
+        <dt>{copy.created}</dt><dd><time dateTime={run.createdAt} title={run.createdAt}>{formatExactTimestamp(run.createdAt)}</time></dd>
+        <dt>{copy.started}</dt><dd>{run.startedAt ? <time dateTime={run.startedAt} title={run.startedAt}>{formatExactTimestamp(run.startedAt)}</time> : copy.notRecorded}</dd>
+        <dt>{copy.ended}</dt><dd>{run.endedAt ? <time dateTime={run.endedAt} title={run.endedAt}>{formatExactTimestamp(run.endedAt)}</time> : copy.notRecorded}</dd>
+        <dt>{outcomeCopy.stopReason}</dt><dd>{run.terminalReason ? <>
+          <strong>{stopOutcomeCopy[run.terminalReason].label}</strong>. {stopOutcomeCopy[run.terminalReason].detail}{' '}
+          {displayMessage(outcomeCopy.recordedCode, { code: <code>{run.terminalReason}</code> })}
+        </> : copy.noTerminalReasonRecorded}</dd>
+        <dt>{copy.inputRevision}</dt><dd>{run.inputRevisionId ?? copy.originalUploadedInput}</dd>
+        <dt>{copy.resultRevision}</dt><dd>{run.resultRevisionId ?? copy.noResultRevisionRecorded}</dd>
       </dl>
-      <p>Completion alone does not establish accepted reconstruction. Acceptance belongs to this attempt; a job may retain an accepted result from another attempt.</p>
-      {run.previousRunId && <a href={runPath(basePath, jobId, run.previousRunId)}>Open previous attempt</a>}
-      <h2>Recorded limits</h2>
-      <p>Source: the persisted configuration for this attempt. Limits do not measure consumption or confer acceptance.</p>
+      <p>{copy.completionAloneDoesNotEstablishAcceptedReconstructionAcceptanceBelongsTo}</p>
+      <p>{copy.recordedHarnessBoundary}</p>
+      {run.previousRunId && <a href={runPath(basePath, jobId, run.previousRunId)}>{copy.openPreviousAttempt}</a>}
+      {run.state === 'queued' && <QueuePosition key={`queue/${jobId}/${runId}/${run.version}`} jobId={jobId} runId={runId} basePath={basePath} />}
+      <h2>{copy.recordedLimits}</h2>
+      <p>{displayMessage(outcomeCopy.limitsSource, { time: <time dateTime={run.createdAt} title={run.createdAt}>{formatExactTimestamp(run.createdAt)}</time> })}</p>
       <dl class="job-facts">
-        <dt>Wall-clock limit</dt><dd>{run.limits.wallClockMs} milliseconds</dd>
-        <dt>Idle limit</dt><dd>{run.limits.idleMs} milliseconds</dd>
-        <dt>Output limit</dt><dd>{run.limits.maxOutputBytes} bytes</dd>
-        <dt>Tool-call limit</dt><dd>{run.limits.maxToolCalls} calls</dd>
+        <dt>{copy.wallClockLimit2}</dt><dd>{displayMessage(copy.wallClockLimit, { value: run.limits.wallClockMs })}</dd>
+        <dt>{copy.idleLimit2}</dt><dd>{displayMessage(copy.idleLimit, { value: run.limits.idleMs })}</dd>
+        <dt>{copy.outputLimit2}</dt><dd>{displayMessage(copy.outputLimit, { value: run.limits.maxOutputBytes })}</dd>
+        <dt>{copy.toolCallLimit2}</dt><dd>{displayMessage(copy.toolCallLimit, { value: run.limits.maxToolCalls })}</dd>
       </dl>
-      <h2>Reported usage</h2>
-      <p>Source: the persisted attempt receipt. Measurement time is not reported; the attempt end time is not a substitute. Missing counters remain unknown.</p>
+      <h2>{copy.reportedUsage}</h2>
+      <p>{run.endedAt ? displayMessage(outcomeCopy.usageSource, { time: <time dateTime={run.endedAt} title={run.endedAt}>{formatExactTimestamp(run.endedAt)}</time> })
+        : outcomeCopy.usageWhileActive}</p>
       {run.usage ? <dl class="job-facts">
-        <dt>Input tokens</dt><dd>{run.usage.inputTokens ?? 'Not reported'}</dd>
-        <dt>Output tokens</dt><dd>{run.usage.outputTokens ?? 'Not reported'}</dd>
-        <dt>Cached input tokens</dt><dd>{run.usage.cachedInputTokens ?? 'Not reported'}</dd>
-        <dt>Tool calls</dt><dd>{run.usage.toolCalls ?? 'Not reported'}</dd>
-        <dt>Wall-clock usage</dt><dd>{run.usage.wallClockMs === null ? 'Not reported' : `${run.usage.wallClockMs} milliseconds`}</dd>
-      </dl> : <p>Usage was not reported for this attempt.</p>}
-      <ProgressPin key={`pin/${jobId}/${runId}`} jobId={jobId} runId={runId} basePath={basePath} session={session} />
-      <Activity key={`activity/${jobId}/${runId}`} jobId={jobId} runId={runId} basePath={basePath} />
-      <ExplorationEvidence key={`${jobId}/${runId}`} jobId={jobId} runId={runId} basePath={basePath} />
-      <p>Source and artifact navigation for this attempt is not connected yet.</p>
+        <dt>{copy.inputTokens}</dt><dd>{run.usage.inputTokens ?? copy.notReported}</dd>
+        <dt>{copy.outputTokens}</dt><dd>{run.usage.outputTokens ?? copy.notReported}</dd>
+        <dt>{copy.cachedInputTokens}</dt><dd>{run.usage.cachedInputTokens ?? copy.notReported}</dd>
+        <dt>{copy.toolCalls}</dt><dd>{run.usage.toolCalls ?? copy.notReported}</dd>
+        <dt>{copy.wallClockUsage2}</dt><dd>{run.usage.wallClockMs === null ? copy.notReported : displayMessage(copy.wallClockUsage, { value: run.usage.wallClockMs })}</dd>
+      </dl> : <p>{copy.usageWasNotReportedForThisAttempt}</p>}
+      </>}
+      {view !== 'evidence' && <>
+        <AttemptControls key={`controls/${jobId}/${runId}`} jobId={jobId} runId={runId} basePath={basePath} session={session}
+          run={run} onChanged={() => { setRefresh(value => value + 1); }} />
+        <ProgressPin key={`pin/${jobId}/${runId}`} jobId={jobId} runId={runId} basePath={basePath} session={session} />
+        <Activity key={`activity/${jobId}/${runId}`} jobId={jobId} runId={runId} basePath={basePath} {...(view === 'activity' && navigation !== undefined ? { navigation } : {})} />
+      </>}
+      {view !== 'activity' && <>
+        <ExplorationEvidence key={`${jobId}/${runId}`} jobId={jobId} runId={runId} basePath={basePath} />
+        <RecordedValidationEvidence key={`${jobId}/${runId}`} jobId={jobId} runId={runId} basePath={basePath} {...(navigation === undefined ? {} : { navigation })} />
+      </>}
+      {run.resultRevisionId ? <p><a href={sourceDirectoryPath(basePath, { jobId, runId, revisionId: run.resultRevisionId })}>{sourceCopy.browse}</a></p>
+        : <p>{sourceCopy.noRevision}</p>}
     </>}
   </>;
 }
 
-export default function Run({ jobId, runId, basePath, session }: { jobId: string; runId: string; basePath: string; session: BrowserSession | null }) {
+export default function Run({ jobId, runId, basePath, session, view = 'overview', navigation: suppliedNavigation }: {
+  jobId: string; runId: string; basePath: string; session: BrowserSession | null; view?: RunView; navigation?: ValidationNavigation;
+}) {
   const state = useSession(session);
+  const route = useLocation();
+  const routedNavigation = useMemo<ValidationNavigation | undefined>(() => {
+    if (!route.url) return undefined; // The legacy embedding has no router provider.
+    const address = new URL(route.url, window.location.origin), pathname = address.pathname;
+    return { search: address.search, preserveRouteContext: true,
+      currentSearch: () => window.location.pathname === pathname ? window.location.search : null,
+      navigate: (search: string, expectedSearch: string) => {
+        if (window.location.pathname === pathname && window.location.search === expectedSearch)
+          route.route(`${pathname}${search}`);
+      },
+    };
+  }, [route.url, route.route]);
+  const navigation = suppliedNavigation ?? routedNavigation;
   const valid = /^[0-9a-f]{32}$/.test(jobId) && /^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/.test(runId);
   return <section aria-labelledby="attempt-title">
-    <h1 id="attempt-title">Workflow attempt</h1>
+    <h1 id="attempt-title">{view === 'activity' ? copy.activityTitle : view === 'evidence' ? copy.evidenceTitle : copy.workflowAttempt}</h1>
     {valid ? <>
-      <a href={jobPath(basePath, jobId)}>Return to job overview</a>
-      <p><a href={`${jobPath(basePath, jobId)}/runs`}>Browse attempt history</a></p>
-      {session && state?.status === 'authenticated' ? <Details key={`${jobId}/${runId}`} jobId={jobId} runId={runId} basePath={basePath} session={session} />
-        : <p>Connect a local session to view this attempt.</p>}
-    </> : <p role="alert">The requested job or attempt identity is invalid.</p>}
+      <a href={jobPath(basePath, jobId)}>{copy.returnToJobOverview}</a>
+      <p><a href={`${jobPath(basePath, jobId)}/runs`}>{copy.browseAttemptHistory}</a></p>
+      <nav class="job-actions" aria-label={copy.attemptViews}>
+        <a href={runViewPath(basePath, jobId, runId, 'overview')} aria-current={view === 'overview' ? 'page' : undefined}>{copy.overviewView}</a>
+        <a href={runViewPath(basePath, jobId, runId, 'activity')} aria-current={view === 'activity' ? 'page' : undefined}>{copy.activityView}</a>
+        <a href={runViewPath(basePath, jobId, runId, 'evidence')} aria-current={view === 'evidence' ? 'page' : undefined}>{copy.evidenceView}</a>
+      </nav>
+      {session && state?.status === 'authenticated' ? <Details key={`${state.generation}/${jobId}/${runId}/${view}`} jobId={jobId} runId={runId} basePath={basePath} session={session} view={view} {...(navigation === undefined ? {} : { navigation })} />
+        : <p>{copy.connectALocalSessionToViewThisAttempt}</p>}
+    </> : <p role="alert">{copy.theRequestedJobOrAttemptIdentityIsInvalid}</p>}
   </section>;
 }

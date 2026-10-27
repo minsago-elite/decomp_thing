@@ -6,6 +6,8 @@ import java.nio.file.Path
 import java.io.IOException
 import java.util.concurrent.CompletableFuture
 import java.util.concurrent.CountDownLatch
+import java.util.concurrent.Executor
+import java.util.concurrent.RejectedExecutionException
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.SynchronousQueue
 import java.util.concurrent.ThreadPoolExecutor
@@ -84,6 +86,112 @@ class BundledGhidraVerificationProcessTest {
                     assertTrue(failure.message.orEmpty().contains(name), failure.message)
                 }
             }
+        }
+    }
+
+    @Test
+    fun `invalid default directories refuse before any launch executor submission`() {
+        val root = Path.of("build/ghidra-verifier-directory-tests").toAbsolutePath().normalize()
+        val invalidValues = listOf<String?>(null, "", " \t", "bad\npath", "bad\u0000path", "bad\u007fpath")
+        withParentDirectoryProperties(mapOf("user.home" to root.toString(), "java.io.tmpdir" to root.toString(), "jna.tmpdir" to null)) {
+            for (name in listOf("user.home", "java.io.tmpdir", "jna.tmpdir")) {
+                for (value in invalidValues.filterNot { name == "jna.tmpdir" && it == null }) {
+                    withParentDirectoryProperties(mapOf(name to value)) {
+                        var submissions = 0
+                        var starts = 0
+                        val checkpoints = mutableListOf<String>()
+                        val verifier = BundledGhidraVerificationProcess(
+                            processStarter = { _, _ -> starts++; error("invalid directory reached process creation") },
+                            launchExecutor = Executor { submissions++; throw RejectedExecutionException("authored saturation") },
+                        )
+                        val failure = assertFailsWith<IllegalArgumentException> {
+                            verifier.verifyAndGetLibraries(root) { checkpoints += it }
+                        }
+                        assertTrue(failure.message.orEmpty().contains(name), failure.message)
+                        assertEquals(listOf("before starting bundled Ghidra verifier"), checkpoints)
+                        assertEquals(0, submissions)
+                        assertEquals(0, starts)
+                    }
+                }
+            }
+        }
+    }
+
+    @Test
+    fun `valid default directories including absent JNA retain genuine capacity refusal`() {
+        val root = Path.of("build/ghidra-verifier-directory-tests").toAbsolutePath().normalize()
+        withParentDirectoryProperties(mapOf("user.home" to root.toString(), "java.io.tmpdir" to root.toString(), "jna.tmpdir" to null)) {
+            var submissions = 0
+            var starts = 0
+            val rejected = RejectedExecutionException("authored saturation")
+            val verifier = BundledGhidraVerificationProcess(
+                processStarter = { _, _ -> starts++; error("rejected launch reached process creation") },
+                launchExecutor = Executor { submissions++; throw rejected },
+            )
+            val failure = assertFailsWith<GhidraAnalysisException> { verifier.verifyAndGetLibraries(root) {} }
+            assertEquals("bundled Ghidra verifier launch capacity is exhausted", failure.message)
+            assertTrue(failure.cause === rejected)
+            assertEquals(1, submissions)
+            assertEquals(0, starts)
+        }
+    }
+
+    @Test
+    fun `default worker command uses directory snapshot admitted before executor callback`() {
+        val root = Path.of("build/ghidra-verifier-directory-tests").toAbsolutePath().normalize()
+        val home = root.resolve("original home")
+        val temporary = root.resolve("original tmp")
+        val nativeTemporary = root.resolve("original native tmp")
+        withParentDirectoryProperties(mapOf("user.home" to home.toString(), "java.io.tmpdir" to temporary.toString(), "jna.tmpdir" to nativeTemporary.toString())) {
+            var captured: List<String>? = null
+            var submissions = 0
+            var starts = 0
+            val stopped = IOException("authored inert starter refusal")
+            val verifier = BundledGhidraVerificationProcess(
+                processStarter = { command, actualRoot ->
+                    starts++
+                    assertEquals(root, actualRoot)
+                    captured = command
+                    throw stopped // Never construct or launch a native or fixture Process.
+                },
+                launchExecutor = Executor { task ->
+                    submissions++
+                    // Deterministically change parent policy between admission and worker preparation.
+                    System.setProperty("user.home", "")
+                    System.setProperty("java.io.tmpdir", "changed\ninvalid")
+                    System.clearProperty("jna.tmpdir")
+                    task.run() // Manual executor; no thread is started.
+                },
+            )
+            assertTrue(assertFailsWith<IOException> { verifier.verifyAndGetLibraries(root) {} } === stopped)
+            assertEquals(1, submissions)
+            assertEquals(1, starts)
+            assertEquals(listOf("-Duser.home=$home", "-Djava.io.tmpdir=$temporary", "-Djna.tmpdir=$nativeTemporary"),
+                requireNotNull(captured).filter { it.startsWith("-Duser.home=") || it.startsWith("-Djava.io.tmpdir=") || it.startsWith("-Djna.tmpdir=") })
+        }
+    }
+
+    @Test
+    fun `custom command factory remains worker side and independent of default directory policy`() {
+        val root = Path.of("build/ghidra-verifier-directory-tests").toAbsolutePath().normalize()
+        withParentDirectoryProperties(mapOf("user.home" to "", "java.io.tmpdir" to "bad\npath", "jna.tmpdir" to null)) {
+            val events = mutableListOf<String>()
+            val stopped = IOException("authored custom starter refusal")
+            val verifier = BundledGhidraVerificationProcess(
+                commandFactory = { actualRoot ->
+                    events += "factory"
+                    assertEquals(root, actualRoot)
+                    listOf("authored-never-executed-command")
+                },
+                processStarter = { command, _ ->
+                    events += "starter"
+                    assertEquals(listOf("authored-never-executed-command"), command)
+                    throw stopped
+                },
+                launchExecutor = Executor { task -> events += "admission"; task.run() },
+            )
+            assertTrue(assertFailsWith<IOException> { verifier.verifyAndGetLibraries(root) {} } === stopped)
+            assertEquals(listOf("admission", "factory", "starter"), events)
         }
     }
 

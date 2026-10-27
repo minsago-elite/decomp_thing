@@ -1,0 +1,36 @@
+{
+  "apiVersion": 1,
+  "kind": "sourceCatalog",
+  "requestId": "request_catalog_1",
+  "data": {
+    "binding": {
+      "jobId": "job_1",
+      "runId": "run_1",
+      "revisionId": null
+    },
+    "authority": "manifest-metadata",
+    "manifestSha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "totalFiles": 3,
+    "items": [
+      {
+        "fileId": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "displayName": "src/modules/m_1.c",
+        "sha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+        "declaredUtf8Text": true,
+        "declaredViewable": true
+      },
+      {
+        "fileId": "dddddddddddddddddddddddddddddddd",
+        "displayName": "reports/confidence.json",
+        "sha256": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+        "declaredUtf8Text": true,
+        "declaredViewable": false
+      }
+    ],
+    "page": {
+      "nextCursor": "catalog_next_2",
+      "snapshotVersion": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "limit": 50
+    }
+  }
+}

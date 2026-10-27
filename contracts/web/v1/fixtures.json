@@ -70,6 +70,10 @@
       "valid": true
     },
     {
+      "file": "fixtures/report-normal-not-recorded.json",
+      "valid": true
+    },
+    {
       "file": "fixtures/report-invalid.json",
       "valid": true
     },
@@ -124,6 +128,18 @@
     {
       "file": "fixtures/request-workflow-start.json",
       "valid": true
+    },
+    {
+      "file": "fixtures/request-workflow-cancel.json",
+      "valid": true
+    },
+    {
+      "file": "fixtures/invalid-workflow-cancel-actor.json",
+      "valid": false
+    },
+    {
+      "file": "fixtures/invalid-workflow-cancel-action.json",
+      "valid": false
     },
     {
       "file": "fixtures/request-recover.json",
@@ -391,6 +407,50 @@
       "valid": false
     },
     {
+      "file": "fixtures/agent-preflight.json",
+      "valid": true
+    },
+    {
+      "file": "fixtures/agent-preflight-idle.json",
+      "valid": true
+    },
+    {
+      "file": "fixtures/request-agent-preflight.json",
+      "valid": true
+    },
+    {
+      "file": "fixtures/invalid-agent-preflight-status.json",
+      "valid": false
+    },
+    {
+      "file": "fixtures/invalid-agent-preflight-detail.json",
+      "valid": false
+    },
+    {
+      "file": "fixtures/invalid-agent-preflight-request-action.json",
+      "valid": false
+    },
+    {
+      "file": "fixtures/agent-preflight-ready.json",
+      "valid": true
+    },
+    {
+      "file": "fixtures/invalid-agent-preflight-idle-detail.json",
+      "valid": false
+    },
+    {
+      "file": "fixtures/invalid-agent-preflight-failed-without-reason.json",
+      "valid": false
+    },
+    {
+      "file": "fixtures/invalid-agent-preflight-reason-vocabulary.json",
+      "valid": false
+    },
+    {
+      "file": "fixtures/invalid-agent-preflight-ready-reason.json",
+      "valid": false
+    },
+    {
       "file": "fixtures/bootstrap-retention.json",
       "valid": true
     },
@@ -400,6 +460,398 @@
     },
     {
       "file": "fixtures/invalid-retention-error.json",
+      "valid": false
+    },
+    {
+      "file": "fixtures/recovery-retained.json",
+      "valid": true
+    },
+    {
+      "file": "fixtures/recovery-empty.json",
+      "valid": true
+    },
+    {
+      "file": "fixtures/recovery-incomplete.json",
+      "valid": true
+    },
+    {
+      "file": "fixtures/invalid-recovery-complete.json",
+      "valid": false,
+      "reason": "Uninspected entries cannot assert a complete inspection."
+    },
+    {
+      "file": "fixtures/invalid-recovery-byte-bound.json",
+      "valid": false,
+      "reason": "Observed bytes cannot exceed the 64 MiB inspection ceiling."
+    },
+    {
+      "file": "fixtures/invalid-recovery-candidate-bound.json",
+      "valid": false,
+      "reason": "Combined retained candidates cannot exceed 128."
+    },
+    {
+      "file": "fixtures/source-catalog.json",
+      "valid": true
+    },
+    {
+      "file": "fixtures/invalid-source-catalog-duplicate.json",
+      "valid": false
+    },
+    {
+      "file": "fixtures/invalid-source-catalog-snapshot.json",
+      "valid": false
+    },
+    {
+      "file": "fixtures/invalid-source-catalog-total.json",
+      "valid": false
+    },
+    {
+      "file": "fixtures/invalid-source-catalog-revision.json",
+      "valid": false
+    },
+    {
+      "file": "fixtures/invalid-source-catalog-path-id.json",
+      "valid": false
+    },
+    {
+      "file": "fixtures/source-catalog-partial.json",
+      "valid": true
+    },
+    {
+      "file": "fixtures/invalid-source-catalog-complete-continuation.json",
+      "valid": false
+    },
+    {
+      "file": "fixtures/revision-sources.json",
+      "valid": true
+    },
+    {
+      "file": "fixtures/revision-sources-partial.json",
+      "valid": true
+    },
+    {
+      "file": "fixtures/invalid-revision-sources-null-binding.json",
+      "valid": false
+    },
+    {
+      "file": "fixtures/invalid-revision-sources-numeric-size.json",
+      "valid": false
+    },
+    {
+      "file": "fixtures/invalid-revision-sources-duplicate.json",
+      "valid": false
+    },
+    {
+      "file": "fixtures/invalid-revision-sources-complete-continuation.json",
+      "valid": false
+    },
+    {
+      "file": "fixtures/invalid-revision-sources-version.json",
+      "valid": false
+    },
+    {
+      "file": "fixtures/invalid-revision-sources-authority.json",
+      "valid": false
+    },
+    {
+      "file": "fixtures/revision-directory-root.json",
+      "valid": true
+    },
+    {
+      "file": "fixtures/revision-directory-child-partial.json",
+      "valid": true
+    },
+    {
+      "file": "fixtures/invalid-revision-directory-version.json",
+      "valid": false
+    },
+    {
+      "file": "fixtures/invalid-revision-directory-complete-continuation.json",
+      "valid": false
+    },
+    {
+      "file": "fixtures/invalid-revision-directory-duplicate.json",
+      "valid": false
+    },
+    {
+      "file": "fixtures/invalid-revision-directory-descendant-count.json",
+      "valid": false
+    },
+    {
+      "file": "fixtures/invalid-revision-directory-parent.json",
+      "valid": false
+    },
+    {
+      "file": "fixtures/invalid-revision-directory-omitted-ancestors.json",
+      "valid": false
+    },
+    {
+      "file": "fixtures/invalid-revision-directory-order.json",
+      "valid": false
+    },
+    {
+      "file": "fixtures/invalid-revision-directory-path-label.json",
+      "valid": false
+    },
+    {
+      "file": "fixtures/revision-directory-deep.json",
+      "valid": true
+    },
+    {
+      "file": "fixtures/revision-directory-unicode-order.json",
+      "valid": true
+    },
+    {
+      "file": "fixtures/source-chunk-utf8-partial.json",
+      "valid": true
+    },
+    {
+      "file": "fixtures/source-chunk-complete-BOM-CRLF.json",
+      "valid": true
+    },
+    {
+      "file": "fixtures/source-chunk-hex.json",
+      "valid": true
+    },
+    {
+      "file": "fixtures/source-chunk-empty.json",
+      "valid": true
+    },
+    {
+      "file": "fixtures/source-chunk-mid-line.json",
+      "valid": true
+    },
+    {
+      "file": "fixtures/invalid-source-chunk-length.json",
+      "valid": false
+    },
+    {
+      "file": "fixtures/invalid-source-chunk-next-offset.json",
+      "valid": false
+    },
+    {
+      "file": "fixtures/invalid-source-chunk-completeness.json",
+      "valid": false
+    },
+    {
+      "file": "fixtures/invalid-source-chunk-hex-lines.json",
+      "valid": false
+    },
+    {
+      "file": "fixtures/invalid-source-chunk-fallback.json",
+      "valid": false
+    },
+    {
+      "file": "fixtures/invalid-source-chunk-first-line.json",
+      "valid": false
+    },
+    {
+      "file": "fixtures/invalid-source-chunk-end-line.json",
+      "valid": false
+    },
+    {
+      "file": "fixtures/invalid-source-chunk-oversize.json",
+      "valid": false
+    },
+    {
+      "file": "fixtures/invalid-source-chunk-surrogate.json",
+      "valid": false
+    },
+    {
+      "file": "fixtures/invalid-source-chunk-numeric-offset.json",
+      "valid": false
+    },
+    {
+      "file": "fixtures/revision-file-root.json",
+      "valid": true
+    },
+    {
+      "file": "fixtures/revision-file-unicode.json",
+      "valid": true
+    },
+    {
+      "file": "fixtures/invalid-revision-file-verification.json",
+      "valid": false
+    },
+    {
+      "file": "fixtures/invalid-revision-file-binding.json",
+      "valid": false
+    },
+    {
+      "file": "fixtures/invalid-revision-file-numeric-size.json",
+      "valid": false
+    },
+    {
+      "file": "fixtures/invalid-revision-file-root-parent.json",
+      "valid": false
+    },
+    {
+      "file": "fixtures/invalid-revision-file-nested-parent.json",
+      "valid": false
+    },
+    {
+      "file": "fixtures/invalid-revision-file-empty-component.json",
+      "valid": false
+    },
+    {
+      "file": "fixtures/invalid-revision-file-long-component.json",
+      "valid": false
+    },
+    {
+      "file": "fixtures/invalid-revision-file-path-selector.json",
+      "valid": false
+    },
+    {
+      "file": "fixtures/report-normal-cases.json",
+      "valid": true
+    },
+    {
+      "file": "fixtures/invalid-report-case-preview-truncation.json",
+      "valid": false,
+      "reason": "A bounded preview must state truncation from its exact observed and prefix byte counts."
+    },
+    {
+      "file": "fixtures/validation-history.json",
+      "valid": true
+    },
+    {
+      "file": "fixtures/invalid-validation-history-unrecorded-inspection.json",
+      "valid": false
+    },
+    {
+      "file": "fixtures/report-validation-failure.json",
+      "valid": true
+    },
+    {
+      "file": "fixtures/validation-history-failure.json",
+      "valid": true
+    },
+    {
+      "file": "fixtures/invalid-validation-failure-position.json",
+      "valid": false
+    },
+    {
+      "file": "fixtures/invalid-validation-history-failure-borrow.json",
+      "valid": false
+    },
+    {
+      "file": "fixtures/agent-preflight-inspecting.json",
+      "valid": true
+    },
+    {
+      "file": "fixtures/agent-preflight-cancelled.json",
+      "valid": true
+    },
+    {
+      "file": "fixtures/invalid-agent-preflight-failed-identity.json",
+      "valid": false
+    },
+    {
+      "file": "fixtures/attempt-controls-retry.json",
+      "valid": true
+    },
+    {
+      "file": "fixtures/attempt-controls-resume.json",
+      "valid": true
+    },
+    {
+      "file": "fixtures/attempt-controls-running.json",
+      "valid": true
+    },
+    {
+      "file": "fixtures/attempt-controls-superseded.json",
+      "valid": true
+    },
+    {
+      "file": "fixtures/run-retry.json",
+      "valid": true
+    },
+    {
+      "file": "fixtures/run-resume.json",
+      "valid": true
+    },
+    {
+      "file": "fixtures/invalid-attempt-controls-available-reason.json",
+      "valid": false
+    },
+    {
+      "file": "fixtures/invalid-attempt-controls-resume-scope.json",
+      "valid": false
+    },
+    {
+      "file": "fixtures/invalid-attempt-controls-terminal-cancel.json",
+      "valid": false
+    },
+    {
+      "file": "fixtures/invalid-attempt-controls-superseded-retry.json",
+      "valid": false
+    },
+    {
+      "file": "fixtures/invalid-attempt-controls-retry-resume-reason.json",
+      "valid": false
+    },
+    {
+      "file": "fixtures/invalid-run-recovery-without-predecessor.json",
+      "valid": false
+    },
+    {
+      "file": "fixtures/invalid-run-retry-checkpoint.json",
+      "valid": false
+    },
+    {
+      "file": "fixtures/invalid-run-resume-without-checkpoint.json",
+      "valid": false
+    },
+    {
+      "file": "fixtures/invalid-recover-mode.json",
+      "valid": false
+    },
+    {
+      "file": "fixtures/invalid-recover-caller-workspace.json",
+      "valid": false
+    },
+    {
+      "file": "fixtures/request-recover-resume.json",
+      "valid": true
+    },
+    {
+      "file": "fixtures/queue-position-queued.json",
+      "valid": true
+    },
+    {
+      "file": "fixtures/queue-position-not-queued.json",
+      "valid": true
+    },
+    {
+      "file": "fixtures/queue-position-unavailable.json",
+      "valid": true
+    },
+    {
+      "file": "fixtures/invalid-queue-position-ahead.json",
+      "valid": false
+    },
+    {
+      "file": "fixtures/invalid-queue-position-exact.json",
+      "valid": false
+    },
+    {
+      "file": "fixtures/invalid-queue-position-identities.json",
+      "valid": false
+    },
+    {
+      "file": "fixtures/invalid-queue-position-queued-state.json",
+      "valid": false
+    },
+    {
+      "file": "fixtures/run-timed-out.json",
+      "valid": true
+    },
+    {
+      "file": "fixtures/run-infrastructure-failed.json",
+      "valid": true
+    },
+    {
+      "file": "fixtures/invalid-run-interrupted-timed-out.json",
       "valid": false
     }
   ]

@@ -27,7 +27,7 @@ class GccCompilerEngineProfileTest {
     @Test
     fun `retained planner profile binds all parsed files and derived policy`() {
         val root = copyControlPlane(checkedProfile().parent)
-        val retained = GccRetainedCompilerEngineProfile.open(root.resolve("compiler-engines.json"))
+        val retained = GccRetainedCompilerEngineProfile.open(root.resolve("compiler-engines-exporter17.json"))
         retained.use {
             val bytes = retained.policyBytes()
             val policy = OracleJson.parseCanonical(bytes).jsonObject
@@ -52,7 +52,7 @@ class GccCompilerEngineProfileTest {
     fun `retained profile rejects replacement of every dependency even with identical bytes`() {
         for (name in CONTROL_FILES) {
             val root = copyControlPlane(checkedProfile().parent)
-            GccRetainedCompilerEngineProfile.open(root.resolve("compiler-engines.json")).use { retained ->
+            GccRetainedCompilerEngineProfile.open(root.resolve("compiler-engines-exporter17.json")).use { retained ->
                 val path = root.resolve(name)
                 val original = path.readBytes()
                 Files.move(path, path.resolveSibling("saved-$name"))
@@ -69,12 +69,12 @@ class GccCompilerEngineProfileTest {
         val source = root.resolve("source-lock.json")
         val original = source.readBytes()
         source.writeBytes(original + byteArrayOf(32))
-        assertFails { GccRetainedCompilerEngineProfile.open(root.resolve("compiler-engines.json")) }
+        assertFails { GccRetainedCompilerEngineProfile.open(root.resolve("compiler-engines-exporter17.json")) }
         source.writeBytes(original)
-        GccRetainedCompilerEngineProfile.open(root.resolve("compiler-engines.json")).use { it.requireCurrent() }
+        GccRetainedCompilerEngineProfile.open(root.resolve("compiler-engines-exporter17.json")).use { it.requireCurrent() }
         Files.move(source, root.resolve("saved-source-lock.json"))
         source.createSymbolicLinkPointingTo(root.resolve("saved-source-lock.json"))
-        assertFails { GccRetainedCompilerEngineProfile.open(root.resolve("compiler-engines.json")) }
+        assertFails { GccRetainedCompilerEngineProfile.open(root.resolve("compiler-engines-exporter17.json")) }
     }
 
     @Test
@@ -86,13 +86,24 @@ class GccCompilerEngineProfileTest {
         assertEquals("x86_64-linux-gnu", suite.target)
         assertEquals("78d4ac73dd391005b895a6148cd9831e28e1208b", suite.sourceRevision)
         assertEquals(1_800_000L, suite.budgets.exportWallClockMillis)
+        assertEquals(14_400_000L, suite.budgets.fullRecoveryCc1ExportWallClockMillis)
         assertEquals(16L * 1024 * 1024 * 1024, suite.budgets.exportMaximumResidentBytes)
         assertEquals("12.1.3", suite.analysis.ghidraVersion)
         assertEquals(569_445_154L, suite.analysis.ghidraArchive.bytes)
         assertEquals("93a5d11a9ad510622acaaf908c556a7b9b764d338e78a7567f3689bf5081fd54", suite.analysis.ghidraArchive.sha256)
-        assertEquals("2bbf9f50ff10fb8e6effd0d2777bc6de6949e4bad9623f461e30e068e6bdec6e", suite.analysis.exporterSha256)
-        assertEquals(11, suite.analysis.exporterVersion)
+        assertEquals("0ee91d684d310357363cbf8516b2dc65b5f56c4b38c62d4c9e09304eb3ecafaf", suite.analysis.exporterSha256)
+        assertEquals(17, suite.analysis.exporterVersion)
         assertEquals("planning", suite.analysis.exporterMode)
+        val diagnostics = checkNotNull(suite.cc1RuntimeDiagnostics)
+        assertEquals("gcc-cc1-runtime-diagnostics-v1", diagnostics.provider)
+        assertEquals(7, diagnostics.runtimeInvocationVersion)
+        assertEquals("analyze-diagnostics-v1", diagnostics.workerOperation)
+        assertEquals("jvm-mxbean-stdout-v1", diagnostics.diagnosticPolicy)
+        assertEquals(2L * 1024 * 1024 * 1024, diagnostics.maximumJavaHeapBytes)
+        assertEquals(16L * 1024 * 1024 * 1024, diagnostics.maximumResidentBytes)
+        assertEquals(14_400L, diagnostics.wallClockSeconds)
+        assertEquals(listOf(4, 4, 4), listOf(diagnostics.processorCount, diagnostics.analysisThreadCount, diagnostics.decompilerWorkerCount))
+        assertEquals(null, suite.fullRecoveryCc1Throughput)
         assertEquals(listOf("cc1", "lto1"), suite.engines.map(GccCompilerEngine::id))
 
         val cc1 = suite.engine("cc1")
@@ -112,12 +123,57 @@ class GccCompilerEngineProfileTest {
     }
 
     @Test
+    fun `the explicit parallel profile differs from the serial default only by its throughput policy`() {
+        val root = checkedProfile().parent
+        val serial = OracleJson.parse(checkedProfile().readBytes()).jsonObject
+        val parallelPath = root.resolve("compiler-engines-exporter17-parallel.json")
+        decompengine.oracle.core.OracleSchemas.validate("gcc/compiler-engines-exporter17", OracleJson.parse(parallelPath.readBytes()))
+        val parallel = GccCompilerEngineProfiles.load(parallelPath)
+        val policy = checkNotNull(parallel.fullRecoveryCc1Throughput)
+        assertEquals(1, policy.schemaVersion)
+        assertEquals(6, policy.runtimeInvocationVersion)
+        assertEquals(listOf(4, 4, 4), listOf(policy.processorCount, policy.analysisThreadCount, policy.decompilerWorkerCount))
+        assertEquals(17, parallel.analysis.exporterVersion)
+        assertEquals(GccCompilerEngineProfiles.load(checkedProfile()).analysis.exporterSha256, parallel.analysis.exporterSha256)
+        val analysisOfParallel = OracleJson.parse(parallelPath.readBytes()).jsonObject.getValue("analysis").jsonObject
+        val analysisOfSerial = serial.getValue("analysis").jsonObject
+        assertEquals(analysisOfSerial.keys + "fullRecoveryCc1Throughput", analysisOfParallel.keys)
+        assertEquals(serial.filterKeys { it != "analysis" }, OracleJson.parse(parallelPath.readBytes()).jsonObject.filterKeys { it != "analysis" })
+    }
+
+    @Test
+    fun `historical exporter eleven twelve and thirteen profiles remain inspectable but cannot authorize current work`() {
+        val root = checkedProfile().parent
+        val historical = root.resolve("compiler-engines.json").readBytes()
+        decompengine.oracle.core.OracleSchemas.validate("gcc/compiler-engines", OracleJson.parse(historical))
+        decompengine.oracle.core.OracleSchemas.validate("gcc/compiler-engines-exporter17", OracleJson.parse(checkedProfile().readBytes()))
+        assertEquals("d32c73335a8639c335c8e04d822a51256aee79dc889de1c9bfe999d584610732", OracleArtifacts.sha256(historical))
+        assertEquals("11", OracleJson.parse(historical).jsonObject.getValue("analysis").jsonObject
+            .getValue("exporter").jsonObject.getValue("version").jsonPrimitive.content)
+        assertEquals("e3f74c9329c2124be0d123525d10ac59928097570f028afdf40ce5f8363539e4",
+            OracleArtifacts.sha256(root.resolve("structural-full-export-profile.json").readBytes()))
+        assertFailsWith<GccCompilerEngineProfileException> { GccCompilerEngineProfiles.load(root.resolve("compiler-engines.json")) }
+        val twelve = root.resolve("compiler-engines-exporter12.json")
+        decompengine.oracle.core.OracleSchemas.validate("gcc/compiler-engines-exporter12", OracleJson.parse(twelve.readBytes()))
+        assertEquals("f8a487df5b35168a1a1212a95c9f40e84a299969005e1a9ffd7383a1db26ed19", OracleArtifacts.sha256(twelve.readBytes()))
+        assertEquals("011f49895f66c4af2692eeaac6bb514a96761ed864f2b0051b533bda3fead06f",
+            OracleArtifacts.sha256(root.resolve("structural-full-export-profile-exporter12.json").readBytes()))
+        assertFailsWith<GccCompilerEngineProfileException> { GccCompilerEngineProfiles.load(twelve) }
+        val thirteen = root.resolve("compiler-engines-exporter13.json")
+        decompengine.oracle.core.OracleSchemas.validate("gcc/compiler-engines-exporter13", OracleJson.parse(thirteen.readBytes()))
+        assertEquals("0d2c6f571b1ee7a977b2baf496823186da3fa95c97ede358e2c4ef75403927ca", OracleArtifacts.sha256(thirteen.readBytes()))
+        assertEquals("1075cd580b0a5bc872149633c1aa95a30b08b9da2f2e9feb689352571032b615",
+            OracleArtifacts.sha256(root.resolve("structural-full-export-profile-exporter13.json").readBytes()))
+        assertFailsWith<GccCompilerEngineProfileException> { GccCompilerEngineProfiles.load(thirteen) }
+    }
+
+    @Test
     fun `current compiler profile rejects the previous exporter version`() {
         val root = copyControlPlane(checkedProfile().parent)
-        val profile = root.resolve("compiler-engines.json")
+        val profile = root.resolve("compiler-engines-exporter17.json")
         val current = profile.readBytes().decodeToString()
-        assertTrue("\"version\": 11" in current)
-        profile.writeBytes(current.replaceFirst("\"version\": 11", "\"version\": 10").toByteArray())
+        assertTrue("\"version\": 17" in current)
+        profile.writeBytes(current.replaceFirst("\"version\": 17", "\"version\": 16").toByteArray())
 
         assertFailsWith<GccCompilerEngineProfileException> {
             GccCompilerEngineProfiles.load(profile)
@@ -131,7 +187,7 @@ class GccCompilerEngineProfileTest {
         val sourceMutation = copyControlPlane(sourceRoot)
         sourceMutation.resolve("source-lock.json").also { path -> path.writeBytes(path.readBytes() + '\n'.code.toByte()) }
         assertFailsWith<GccCompilerEngineProfileException> {
-            GccCompilerEngineProfiles.load(sourceMutation.resolve("compiler-engines.json"))
+            GccCompilerEngineProfiles.load(sourceMutation.resolve("compiler-engines-exporter17.json"))
         }
 
         val manifestMutation = copyControlPlane(sourceRoot)
@@ -143,7 +199,7 @@ class GccCompilerEngineProfileTest {
         bytes[offset] = if (bytes[offset] == 'b'.code.toByte()) 'c'.code.toByte() else 'b'.code.toByte()
         manifest.writeBytes(bytes)
         assertFailsWith<GccCompilerEngineProfileException> {
-            GccCompilerEngineProfiles.load(manifestMutation.resolve("compiler-engines.json"))
+            GccCompilerEngineProfiles.load(manifestMutation.resolve("compiler-engines-exporter17.json"))
         }
     }
 
@@ -266,7 +322,7 @@ class GccCompilerEngineProfileTest {
     }
 
     private fun checkedProfile(): Path = Path.of(System.getProperty("user.dir"))
-        .resolve("oracle/gcc/16.2.0/compiler-engines.json")
+        .resolve("oracle/gcc/16.2.0/compiler-engines-exporter17.json")
         .toAbsolutePath()
         .normalize()
 
@@ -280,7 +336,7 @@ class GccCompilerEngineProfileTest {
 
     private companion object {
         val CONTROL_FILES = listOf(
-            "compiler-engines.json",
+            "compiler-engines-exporter17.json",
             "source-lock.json",
             "build-record.json",
             "toolchain-reproduction.json",

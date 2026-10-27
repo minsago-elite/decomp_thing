@@ -89,3 +89,28 @@ ceilings and publication-identity consistency. Session isolation, bounded cache/
 monotonic counts and progress-poll cancellation have focused tests. This evidence closes
 #169's core picker, validation, progress, cancellation/retry and no-implicit-execution
 criteria; #162's remaining storage and process-crash requirements remain separate.
+
+
+## Field error semantics
+
+Selection errors, recovery-file mismatches and authoritative invalid/oversized-file
+rejections mark the picker invalid and associate the existing feedback through
+`aria-errormessage`. Failure feedback uses the shared error notice and alert
+semantics; advisory size guidance and transfer/publication messages remain status
+information. Network, session and capacity failures do not mark the selected file
+invalid. Explicit replacement clears the field error and retains the existing
+picker-focus restoration. These presentation changes preserve the file/retry-key
+pair, manual submission/retry, server validation and recovery storage behavior.
+
+The additional mock-view controls cover selection correction, restored-ticket
+mismatch, invalid/oversized rejection, error association, focus continuity and
+network/session/capacity retry identity. Full keyboard/screen-reader and physical
+browser qualification remains a separate requirement.
+
+An authoritative invalid/oversized-file message stays associated with the retained
+file during a pending retry and after a later transport failure. New operation
+feedback is combined with that bounded message without accumulating retry history.
+Server acceptance or an explicit new selection/discard clears the file error. A
+rejected multi-file replacement leaves an existing valid selection valid and
+reports the rejected replacement separately; uploading that file still requires
+the explicit submit action. Mock controls cover both error lifetimes.

@@ -52,7 +52,7 @@ class FullTreeSourceInventoryControlTest {
         }
 
     @Test
-    fun `source inventory semantic ownership exclusion order count and binding mutations fail closed`() =
+    fun `source inventory semantic ownership exclusion order count and binding mutations fail closed`(): Unit =
         inControlTemporaryDirectory { directory ->
             val fixture = createFullTreeControlFixture(directory.resolve("fixture"))
             val scope = fixture.authenticatedScope()

@@ -22,22 +22,39 @@ import java.util.concurrent.atomic.AtomicReference
  * Bounded display projection of the workflow's separate authoritative invocation receipts.
  * Callbacks only normalize and enqueue; one owned writer publishes atomic snapshots. An overloaded
  * view drops records with explicit sequence gaps and counters, never backpressures protocol I/O.
+ * At most maximumQueuedEvents ordinary records plus one reserved overflow terminal record wait
+ * for the writer; replacement of that terminal record is also counted as explicit queue loss.
  */
-class AgentProgressJournal(
+class AgentProgressJournal private constructor(
     private val reportsDirectory: Path,
     private val workflow: String,
-    sensitiveValues: Collection<String> = emptyList(),
-    private val maximumEvents: Int = 256,
-    private val maximumQueuedEvents: Int = 128,
-    private val maximumSnapshotBytes: Int = 512 * 1024,
-    private val onPhase: (AgentWorkflowPhase) -> Unit = {},
+    sensitiveValues: Collection<String>,
+    private val maximumEvents: Int,
+    private val maximumQueuedEvents: Int,
+    private val maximumSnapshotBytes: Int,
+    private val onPhase: (AgentWorkflowPhase) -> Unit,
+    private val afterSnapshotWrite: (() -> Unit)?,
+    private val beforeSnapshotEncode: (() -> Unit)?,
 ) : AgentWorkflowProgress, AutoCloseable {
+    constructor(
+        reportsDirectory: Path,
+        workflow: String,
+        sensitiveValues: Collection<String> = emptyList(),
+        maximumEvents: Int = 256,
+        maximumQueuedEvents: Int = 128,
+        maximumSnapshotBytes: Int = 512 * 1024,
+        onPhase: (AgentWorkflowPhase) -> Unit = {},
+    ) : this(reportsDirectory, workflow, sensitiveValues, maximumEvents, maximumQueuedEvents,
+        maximumSnapshotBytes, onPhase, null, null)
+
     private val monitor = Object()
     private val queue = ArrayDeque<JsonObject>()
+    private var overflowTerminal: JsonObject? = null
     private val retained = ArrayDeque<JsonObject>()
     private val redactor = ProgressRedactor(sensitiveValues)
     private val failure = AtomicReference<Throwable?>()
     private val runId = UUID.randomUUID().toString()
+    internal val journalRunId: String get() = runId
     private var sequence = 0L
     private var queueDropped = 0L
     private var historyDropped = 0L
@@ -54,19 +71,25 @@ class AgentProgressJournal(
         writerLease = requireNotNull(AgentProgressJournalLease.tryAcquire(reportsDirectory) {
             FileChannel.open(reportsDirectory.resolve("agent-progress.lock"), CREATE, WRITE, NOFOLLOW_LINKS)
         }) { "another workflow owns the progress journal" }
+        var startedWriter: Thread? = null
         try {
             val previous = read(reportsDirectory)
             if (previous != null) {
                 sequence = previous.getValue("nextSequence").jsonPrimitive.long
                 queueDropped = previous.getValue("queueDropped").jsonPrimitive.long
                 historyDropped = previous.getValue("historyDropped").jsonPrimitive.long
-                previous.getValue("events").jsonArray.forEach { retained.add(it.jsonObject) }
+                previous.getValue("events").jsonArray.forEach { retained.add(replayProgressRecord(it.jsonObject)) }
                 while (retained.size > maximumEvents) { retained.removeFirst(); historyDropped++ }
             }
-            writer = Thread(::writeLoop, "decomp-progress-$workflow").apply { isDaemon = true; start() }
+            requireSequenceCapacity()
+            writer = Thread(::writeLoop, "decomp-progress-$workflow").apply { isDaemon = true }
+            startedWriter = writer
+            writer.start()
             enqueue("run_started") { put("status", "running") }
         } catch (problem: Throwable) {
-            writerLease.close()
+            synchronized(monitor) { closed = true; monitor.notifyAll() }
+            // A started writer keeps ownership until its own final publication is over.
+            if (startedWriter?.isAlive != true) writerLease.close()
             throw problem
         }
     }
@@ -82,13 +105,18 @@ class AgentProgressJournal(
     private fun beginCorrelatedTask(taskId: String, request: AgentExecutionRequest, workflowRunId: String?): AgentTaskProgress {
         val safeTaskId = redactor.text(taskId)
         val binding = AgentExecutionRequestBinding.capture(request)
+        val taskIdSha256 = digest(taskId)
+        val workflowRun = workflowRunId?.let { redactor.text(it) to digest(it) }
         val turnId = UUID.randomUUID().toString()
         fun post(kind: String, body: JsonObjectBuilder.() -> Unit) = enqueue(kind) {
             put("taskId", safeTaskId)
-            put("taskIdSha256", digest(taskId))
+            put("taskIdSha256", taskIdSha256)
             put("turnId", turnId)
             put("requestSha256", binding.requestSha256)
-            workflowRunId?.let { put("workflowRunId", redactor.text(it)); put("workflowRunIdSha256", digest(it)) }
+            workflowRun?.let { (preview, commitment) ->
+                put("workflowRunId", preview)
+                put("workflowRunIdSha256", commitment)
+            }
             body()
         }
         post("task_started") { put("phase", "agent_running") }
@@ -130,7 +158,13 @@ class AgentProgressJournal(
                             event.costAmount?.let { put("reportedCostAmount", it.toString()) }
                             event.costCurrency?.let { put("reportedCostCurrency", redactor.text(it)) }
                         }
-                        is AgentMessageEvent -> {
+                        is AgentMessageEvent -> if (event.role == AgentMessageRole.THOUGHT) {
+                            // Private reasoning is neither buffered, measured nor committed. The record
+                            // only marks that the provider sent a reasoning update in this position.
+                            put("role", "thought")
+                            put("completed", event.completed)
+                            put("textOmitted", true)
+                        } else {
                             val messageIdDigest = digest(event.messageId)
                             val messageKey = event.role.name + ":" + messageIdDigest
                             put("messageIdSha256", messageIdDigest)
@@ -218,7 +252,7 @@ class AgentProgressJournal(
     override fun phase(phase: AgentWorkflowPhase, taskId: String?, acceptedRevisionSha256: String?) {
         require(acceptedRevisionSha256 == null || acceptedRevisionSha256.matches(Regex("[a-f0-9]{64}")))
         require(acceptedRevisionSha256 == null || phase == AgentWorkflowPhase.ACCEPTED)
-        enqueue("workflow_phase") {
+        enqueue("workflow_phase", preserveTerminal = phase in TERMINAL_PHASES) {
             put("phase", phase.name.lowercase())
             taskId?.let { put("taskId", redactor.text(it)); put("taskIdSha256", digest(it)) }
             acceptedRevisionSha256?.let { put("acceptedRevisionSha256", it) }
@@ -227,7 +261,7 @@ class AgentProgressJournal(
     }
 
     override fun runState(observation: AgentWorkflowRunObservation) {
-        enqueue("workflow_run_state") {
+        enqueue("workflow_run_state", preserveTerminal = observation.phase in TERMINAL_PHASES) {
             put("phase", observation.phase.name.lowercase())
             put("workflowRunId", redactor.text(observation.workflowRunId))
             put("workflowRunIdSha256", digest(observation.workflowRunId))
@@ -238,9 +272,10 @@ class AgentProgressJournal(
         onPhase(observation.phase)
     }
 
-    private fun enqueue(kind: String, body: JsonObjectBuilder.() -> Unit) = synchronized(monitor) {
+    private fun enqueue(kind: String, preserveTerminal: Boolean = false, body: JsonObjectBuilder.() -> Unit) = synchronized(monitor) {
         check(!closed) { "progress journal is closed" }
         failure.get()?.let { throw IllegalStateException("progress journal persistence failed", it) }
+        requireSequenceCapacity()
         val record = buildJsonObject {
             put("sequence", sequence++)
             put("runId", runId)
@@ -249,32 +284,53 @@ class AgentProgressJournal(
             put("kind", kind)
             body()
         }
-        if (queue.size >= maximumQueuedEvents) queueDropped++ else queue.add(record)
+        if (queue.size < maximumQueuedEvents) {
+            queue.add(record)
+        } else if (preserveTerminal) {
+            if (overflowTerminal != null) queueDropped++
+            overflowTerminal = record
+        } else queueDropped++
         dirty = true
         monitor.notifyAll()
+    }
+
+    private fun requireSequenceCapacity() {
+        check(sequence < Long.MAX_VALUE - 1) { "progress sequence space is exhausted" }
     }
 
     private fun writeLoop() {
         try {
             while (true) {
-                val snapshot = synchronized(monitor) {
+                val boundary = synchronized(monitor) {
                     while (!dirty && !closed) monitor.wait()
                     if (!dirty && closed) return
                     while (queue.isNotEmpty()) retained.add(queue.removeFirst())
+                    // Overflow can exist only beside a full ordinary queue. Its last record is
+                    // newer than every queued record; drain both atomically in sequence order.
+                    overflowTerminal?.let { retained.add(it) }
+                    overflowTerminal = null
                     while (retained.size > maximumEvents) { retained.removeFirst(); historyDropped++ }
                     dirty = false
-                    var bytes = snapshot().toString().toByteArray(Charsets.UTF_8)
-                    while (bytes.size > maximumSnapshotBytes && retained.isNotEmpty()) {
-                        retained.removeFirst(); historyDropped++
-                        bytes = snapshot().toString().toByteArray(Charsets.UTF_8)
-                    }
-                    check(bytes.size <= maximumSnapshotBytes) { "progress snapshot exceeds its limit" }
-                    bytes
+                    SnapshotBoundary(sequence, queueDropped, historyDropped)
                 }
+                // Only this writer owns retained. Producers may enqueue the next cut while
+                // this coherent cut is encoded, trimmed and published without their monitor.
+                beforeSnapshotEncode?.invoke()
+                var sizeDropped = 0L
+                val untrimmed = snapshot(boundary, sizeDropped)
+                var snapshotBytes = untrimmed.toString().toByteArray(Charsets.UTF_8)
+                if (snapshotBytes.size > maximumSnapshotBytes) {
+                    val removed = prefixEvictionsToFit(untrimmed, maximumSnapshotBytes)
+                    repeat(removed) { retained.removeFirst() }
+                    sizeDropped = removed.toLong()
+                    snapshotBytes = snapshot(boundary, sizeDropped).toString().toByteArray(Charsets.UTF_8)
+                }
+                check(snapshotBytes.size <= maximumSnapshotBytes) { "progress snapshot exceeds its limit" }
+                synchronized(monitor) { historyDropped += sizeDropped }
                 val temporary = Files.createTempFile(reportsDirectory, ".agent-progress-", ".tmp")
                 try {
                     FileChannel.open(temporary, WRITE, NOFOLLOW_LINKS).use { channel ->
-                        val buffer = java.nio.ByteBuffer.wrap(snapshot)
+                        val buffer = java.nio.ByteBuffer.wrap(snapshotBytes)
                         while (buffer.hasRemaining()) channel.write(buffer)
                         channel.force(true)
                     }
@@ -283,19 +339,29 @@ class AgentProgressJournal(
                 } finally {
                     Files.deleteIfExists(temporary)
                 }
+                afterSnapshotWrite?.invoke()
             }
-        } catch (problem: Throwable) { failure.set(problem) }
+        } catch (problem: Throwable) {
+            failure.set(problem)
+        } finally {
+            // Close may already have exhausted its join budget. The writer still retires
+            // its own lease once no further snapshot can be published.
+            try { writerLease.close() } catch (problem: Throwable) { failure.compareAndSet(null, problem) }
+        }
     }
 
-    private fun snapshot(): JsonObject = buildJsonObject {
+    private data class SnapshotBoundary(val nextSequence: Long, val queueDropped: Long, val historyDropped: Long)
+
+    private fun snapshot(boundary: SnapshotBoundary, sizeDropped: Long): JsonObject = buildJsonObject {
+        val historyLoss = boundary.historyDropped + sizeDropped
         put("schemaVersion", 1)
         put("displayOnly", true)
-        put("nextSequence", sequence)
-        put("queueDropped", queueDropped)
-        put("historyDropped", historyDropped)
-        put("truncated", queueDropped > 0 || historyDropped > 0)
+        put("nextSequence", boundary.nextSequence)
+        put("queueDropped", boundary.queueDropped)
+        put("historyDropped", historyLoss)
+        put("truncated", boundary.queueDropped > 0 || historyLoss > 0)
         put("events", JsonArray(retained.toList()))
-        put("omittedSequenceRanges", omissionRanges(retained.toList(), sequence))
+        put("omittedSequenceRanges", omissionRanges(retained.toList(), boundary.nextSequence))
     }
 
     override fun close() {
@@ -308,9 +374,37 @@ class AgentProgressJournal(
     }
 
     companion object {
+        /** Controlled writer boundary for component qualification, without filesystem fault injection. */
+        internal fun withSnapshotWriteHook(
+            reportsDirectory: Path,
+            workflow: String,
+            afterSnapshotWrite: () -> Unit,
+        ): AgentProgressJournal = AgentProgressJournal(
+            reportsDirectory, workflow, emptyList(), 256, 128, 512 * 1024, {}, afterSnapshotWrite, null,
+        )
+
+        /** Controlled cut/publication boundaries for producer-isolation qualification. */
+        internal fun withSnapshotEncodeHooks(
+            reportsDirectory: Path,
+            workflow: String,
+            beforeSnapshotEncode: () -> Unit,
+            afterSnapshotWrite: () -> Unit,
+            maximumSnapshotBytes: Int = 512 * 1024,
+            maximumQueuedEvents: Int = 128,
+        ): AgentProgressJournal = AgentProgressJournal(
+            reportsDirectory, workflow, emptyList(), 256, maximumQueuedEvents, maximumSnapshotBytes, {},
+            afterSnapshotWrite, beforeSnapshotEncode,
+        )
+
         const val FILE_NAME = "agent-progress.json"
         internal const val MAXIMUM_READ_BYTES = 2 * 1024 * 1024
         private const val MAXIMUM_MESSAGE_CHARACTERS = 8192
+        private val TERMINAL_PHASES = setOf(
+            AgentWorkflowPhase.COMPLETED, AgentWorkflowPhase.UNRESOLVED, AgentWorkflowPhase.FAILED,
+            AgentWorkflowPhase.ACCEPTED, AgentWorkflowPhase.ROLLED_BACK, AgentWorkflowPhase.COMPILE_VALID,
+            AgentWorkflowPhase.REJECTED, AgentWorkflowPhase.EXHAUSTED, AgentWorkflowPhase.RESOURCE_EXHAUSTED,
+            AgentWorkflowPhase.CANCELLED, AgentWorkflowPhase.INTERRUPTED,
+        )
 
         fun read(reportsDirectory: Path): JsonObject? {
             val path = reportsDirectory.resolve(FILE_NAME)
@@ -387,15 +481,62 @@ class AgentProgressJournal(
             return result
         }
 
+        /** Coherent writer snapshots only; retain the exact first fitting suffix in linear work. */
+        internal fun prefixEvictionsToFit(snapshot: JsonObject, maximumBytes: Int): Int {
+            require(maximumBytes in 4096..MAXIMUM_READ_BYTES)
+            val events = snapshot.getValue("events").jsonArray.map { it.jsonObject }
+            require(events.size <= 1024)
+            val next = snapshot.getValue("nextSequence").jsonPrimitive.long
+            val queueLoss = snapshot.getValue("queueDropped").jsonPrimitive.long
+            val historyLoss = snapshot.getValue("historyDropped").jsonPrimitive.long
+            val sequences = events.map { it.getValue("sequence").jsonPrimitive.long }
+            val eventBytes = LongArray(events.size + 1)
+            val rangeBytes = LongArray(events.size + 1)
+            val rangeCounts = IntArray(events.size + 1)
+            fun gapBytes(start: Long, end: Long): Long =
+                omissionRange(start, end).toString().toByteArray(Charsets.UTF_8).size.toLong()
+            // Each record and each following gap is encoded once, rather than per eviction.
+            for (index in events.indices.reversed()) {
+                eventBytes[index] = eventBytes[index + 1] +
+                    events[index].toString().toByteArray(Charsets.UTF_8).size
+                val start = sequences[index] + 1
+                val end = sequences.getOrNull(index + 1) ?: next
+                val hasGap = start < end
+                rangeBytes[index] = rangeBytes[index + 1] + if (hasGap) gapBytes(start, end) else 0L
+                rangeCounts[index] = rangeCounts[index + 1] + if (hasGap) 1 else 0
+            }
+            val empty = JsonArray(emptyList())
+            val metadata = snapshot.filterKeys { it != "events" && it != "omittedSequenceRanges" }
+            for (removed in 0..events.size) {
+                val prefixEnd = sequences.getOrNull(removed) ?: next
+                val hasPrefix = prefixEnd > 0
+                val gaps = rangeCounts[removed] + if (hasPrefix) 1 else 0
+                val frame = JsonObject(metadata + mapOf(
+                    "historyDropped" to JsonPrimitive(historyLoss + removed),
+                    "truncated" to JsonPrimitive(queueLoss > 0 || historyLoss + removed > 0),
+                    "events" to empty,
+                    "omittedSequenceRanges" to empty,
+                ))
+                val frameBytes = frame.toString().toByteArray(Charsets.UTF_8).size.toLong()
+                val encodedBytes = frameBytes + eventBytes[removed] +
+                    (events.size - removed - 1).coerceAtLeast(0) + rangeBytes[removed] +
+                    (if (hasPrefix) gapBytes(0, prefixEnd) else 0L) + (gaps - 1).coerceAtLeast(0)
+                if (encodedBytes <= maximumBytes) return removed
+            }
+            error("progress snapshot exceeds its limit")
+        }
+
+        private fun omissionRange(start: Long, end: Long): JsonObject = buildJsonObject {
+            put("startInclusive", start.toString())
+            put("endExclusive", end.toString())
+        }
+
         // The complement of at most 1024 retained sequences has at most 1025 ranges.
         // Decimal strings preserve exact 64-bit boundaries in browser JSON consumers.
         private fun omissionRanges(events: List<JsonObject>, next: Long): JsonArray = buildJsonArray {
             var cursor = 0L
             fun gap(endExclusive: Long) {
-                if (cursor < endExclusive) add(buildJsonObject {
-                    put("startInclusive", cursor.toString())
-                    put("endExclusive", endExclusive.toString())
-                })
+                if (cursor < endExclusive) add(omissionRange(cursor, endExclusive))
             }
             events.forEach { event ->
                 val retainedSequence = event.getValue("sequence").jsonPrimitive.long
@@ -405,16 +546,105 @@ class AgentProgressJournal(
             gap(next)
         }
 
-        private fun digest(text: String): String = MessageDigest.getInstance("SHA-256")
-            .digest(text.toByteArray(Charsets.UTF_8)).joinToString("") { "%02x".format(it) }
+        /** Complete display commitment with bounded encoding buffers and the receipt text domain. */
+        internal fun displayCommitment(text: String): String {
+            val digest = MessageDigest.getInstance("SHA-256")
+            var malformed = false
+            var index = 0
+            while (index < text.length) {
+                val unit = text[index]
+                if (unit.isHighSurrogate()) {
+                    if (index + 1 >= text.length || !text[index + 1].isLowSurrogate()) {
+                        malformed = true
+                        break
+                    }
+                    index++
+                } else if (unit.isLowSurrogate()) {
+                    malformed = true
+                    break
+                }
+                index++
+            }
+            if (malformed) {
+                // Malformation anywhere classifies the WHOLE input as ff + raw UTF-16BE.
+                // Never encode a valid prefix as UTF-8 before discovering a later bad unit.
+                digest.update(0xff.toByte())
+                val buffer = ByteArray(8_192)
+                var used = 0
+                for (unit in text) {
+                    if (used == buffer.size) {
+                        digest.update(buffer, 0, used)
+                        used = 0
+                    }
+                    buffer[used++] = (unit.code ushr 8).toByte()
+                    buffer[used++] = unit.code.toByte()
+                }
+                if (used > 0) digest.update(buffer, 0, used)
+            } else {
+                var start = 0
+                while (start < text.length) {
+                    var end = start + minOf(4_096, text.length - start)
+                    if (end < text.length && text[end - 1].isHighSurrogate()) end--
+                    // Each bounded, whole-codepoint chunk keeps the existing strict codec.
+                    digest.update(receiptCommitmentBytes(text.substring(start, end)))
+                    start = end
+                }
+            }
+            return digest.digest().joinToString("") { "%02x".format(it) }
+        }
+
+        private fun digest(text: String): String = displayCommitment(text)
+    }
+}
+
+/** Shared normalization policy for previews, full artifacts and projected original spans. */
+internal object ProgressControlPolicy {
+    val removable = Regex("[\\p{Cntrl}&&[^\\n\\t]]")
+}
+
+/** Project ordered original format matches through control removal without an input-sized map. */
+internal class OriginalCredentialSpanCursor(original: String, pattern: Regex, private val retainPrefix: Boolean) {
+    private val matcher = pattern.toPattern().matcher(original)
+    private val controls = ProgressControlPolicy.removable.toPattern().matcher(original)
+    private var controlsStarted = false
+    private var nextControl = Int.MAX_VALUE
+    private var removed = 0
+    var start: Int = 0
+        private set
+    var end: Int = 0
+        private set
+
+    fun advance(): Boolean {
+        while (matcher.find()) {
+            start = project(if (retainPrefix) matcher.end(1) else matcher.start())
+            end = project(matcher.end())
+            if (start < end) return true
+        }
+        return false
+    }
+
+    private fun project(offset: Int): Int {
+        if (!controlsStarted) {
+            nextControl = if (controls.find()) controls.start() else Int.MAX_VALUE
+            controlsStarted = true
+        }
+        while (nextControl < offset) {
+            removed += controls.end() - controls.start()
+            nextControl = if (controls.find()) controls.start() else Int.MAX_VALUE
+        }
+        return offset - removed
     }
 }
 
 /** Bounded previews only; invocation artifacts continue to retain content commitments. */
 internal class ProgressRedactor(values: Collection<String>, additionalValues: Collection<String> = emptyList()) {
-    private val removableControls = Regex("[\\p{Cntrl}&&[^\\n\\t]]")
-    private val secrets: List<String>
+    private val removableControls = ProgressControlPolicy.removable
+    private val secrets: List<ProgressLiteralSecret>
     init {
+        // Bound supplied work before blank scanning and de-duplication, not only its result.
+        require(values.size <= 4096 && values.sumOf { it.length.toLong() } <= 1024 * 1024) {
+            "progress redaction values exceed the configured limit"
+        }
         val primary = values.filter { it.isNotBlank() }.distinct()
         require(primary.size <= 4096 && primary.sumOf { it.length.toLong() } <= 1024 * 1024) {
             "progress redaction values exceed the configured limit"
@@ -425,45 +655,193 @@ internal class ProgressRedactor(values: Collection<String>, additionalValues: Co
         }
         secrets = (primary + additionalValues.filter { it.isNotEmpty() })
             .map { it.replace(removableControls, "") }.filter { it.isNotEmpty() }
-            .distinct().sortedByDescending(String::length)
+            .distinct().sortedByDescending(String::length).map(::ProgressLiteralSecret)
     }
 
     /** True when any configured secret survives into the given formatted output. */
-    fun leaks(text: String): Boolean = secrets.any { text.contains(it) }
+    fun leaks(text: String): Boolean = secrets.any { it.occursIn(text) }
 
     fun text(value: String, maximumCharacters: Int = 512): String {
         require(maximumCharacters >= 0)
         // Do not take a raw prefix: that can expose a partial configured secret.
-        if (value.length > 16_384) return "[oversized text omitted]"
+        if (value.length > MAXIMUM_REDACTION_CHARACTERS) return omission("[oversized text omitted]")
         var safe = value.replace(removableControls, "")
+        var original: String? = value
         // Replacing one secret can synthesize another ("fooX" with the secrets "foo" and
         // "[redacted]X"); repeat replacement passes until the output is stable and omit
         // any result that still contains a secret.
         for (pass in 1..REDACTION_PASSES) {
-            val next = redact(safe)
+            val next = redact(safe, original) ?: return omission("[oversized text omitted]")
+            original = null
             if (next == safe) break
             safe = next
-            if (safe.length > 16_384) return "[oversized text omitted]"
+            if (safe.length > MAXIMUM_REDACTION_CHARACTERS) return omission("[oversized text omitted]")
         }
         if (safe.length > maximumCharacters) {
             var end = maximumCharacters
             if (end > 0 && safe[end - 1].isHighSurrogate() && safe[end].isLowSurrogate()) end--
             safe = safe.take(end) + "… [preview truncated]"
         }
-        if (leaks(safe)) return "[unredactable text omitted]"
+        if (leaks(safe)) return omission("[unredactable text omitted]")
         return safe
     }
 
-    private fun redact(source: String): String {
-        var safe = source
-        secrets.forEach { safe = safe.replace(it, "[redacted]") }
-        safe = safe.replace(Regex("(?i)(bearer\\s+)[^\\s,;]+"), "$1[redacted]")
-        safe = safe.replace(Regex("(?i)((?:api[_-]?key|access[_-]?token|password|secret|authorization)\\s*[:=]\\s*)[^\\s,;]+"), "$1[redacted]")
-        safe = safe.replace(Regex("(?:sk-|ghp_|github_pat_)[A-Za-z0-9_-]+"), "[redacted]")
-        return safe
+    /** For typed failures whose contract requires a nonblank message, even after omission. */
+    fun nonBlankText(value: String, maximumCharacters: Int = 512): String {
+        require(maximumCharacters > 0)
+        val safe = text(value, maximumCharacters)
+        if (safe.isNotBlank()) return safe
+        // The bounded inventory has at most 4,096 + 130 literals. A one-character
+        // indicator can match only a one-character literal, so the 6,400 nonblank
+        // BMP private-use characters guarantee a collision-free choice.
+        val indicators = sequenceOf('!', '?', '\u26a0') + ('\ue000'..'\uf8ff').asSequence()
+        for (character in indicators) {
+            val indicator = character.toString()
+            if (!leaks(indicator)) return indicator
+        }
+        error("bounded redaction inventory exhausted nonblank indicators")
+    }
+
+    // Fixed diagnostic text can itself be a configured secret; no fixed replacement is always safe.
+    private fun omission(marker: String): String = if (leaks(marker)) "" else marker
+
+    private fun redact(source: String, original: String? = null): String? {
+        val replacement = "[redacted]"
+        var starts: IntArray? = null
+        var ends: IntArray? = null
+        fun allocate() {
+            if (starts == null) {
+                starts = IntArray(source.length + 1)
+                ends = IntArray(source.length + 1)
+            }
+        }
+        // Neither format nor literal masking may destroy the other's complete match.
+        for ((pattern, retainPrefix) in FORMATS) {
+            val matcher = pattern.toPattern().matcher(source)
+            while (matcher.find()) {
+                allocate()
+                starts!![if (retainPrefix) matcher.end(1) else matcher.start()]++
+                ends!![matcher.end()]++
+            }
+        }
+        if (original != null) for ((pattern, retainPrefix) in FORMATS) {
+            val cursor = OriginalCredentialSpanCursor(original, pattern, retainPrefix)
+            while (cursor.advance()) {
+                allocate()
+                starts!![cursor.start]++
+                ends!![cursor.end]++
+            }
+        }
+        // No-match calls need no coverage arrays or builder; keep the immutable KMP inventory.
+        if (starts == null && secrets.none { it.occursIn(source) }) return source
+        allocate()
+        val beginnings = requireNotNull(starts)
+        val endings = requireNotNull(ends)
+        for (secret in secrets) secret.markCoverage(source, beginnings, endings)
+        fun render(output: StringBuilder?): Int? {
+            var active = 0
+            var masking = false
+            var length = 0
+            for (index in source.indices) {
+                active -= endings[index]
+                // Preserve separate adjacent matches, including the existing exact-growth contract.
+                if (active == 0) masking = false
+                active += beginnings[index]
+                if (active > 0) {
+                    if (!masking) {
+                        if (length > MAXIMUM_REDACTION_CHARACTERS - replacement.length) return null
+                        length += replacement.length
+                        output?.append(replacement)
+                        masking = true
+                    }
+                } else {
+                    if (length == MAXIMUM_REDACTION_CHARACTERS) return null
+                    length++
+                    output?.append(source[index])
+                    masking = false
+                }
+            }
+            return length
+        }
+        val length = render(null) ?: return null
+        // Admit the exact output size before allocating; no builder grows beyond the old cap.
+        val output = StringBuilder(length)
+        render(output)
+        return output.toString()
     }
 
     private companion object {
+        val FORMATS = listOf(
+            Regex("(?i)(\\b(?:proxy-)?authorization\\s*[:=]\\s*)basic\\s+[^\\s,;]+") to true,
+            Regex("(?i)(bearer\\s+)[^\\s,;]+") to true,
+            Regex("(?i)((?:api[_-]?key|access[_-]?token|password|secret|authorization)\\s*[:=]\\s*)[^\\s,;]+") to true,
+            Regex("(?:sk-|ghp_|github_pat_)[A-Za-z0-9_-]+") to false,
+        )
         const val REDACTION_PASSES = 8
+        const val MAXIMUM_REDACTION_CHARACTERS = 16_384
+    }
+}
+
+/** Immutable literal index; prefix fallback avoids rescanning a long repeated-prefix match. */
+internal class ProgressLiteralSecret(private val value: String) {
+    private val prefix: IntArray
+
+    init {
+        require(value.isNotEmpty()) { "redaction literal must not be empty" }
+        prefix = IntArray(value.length)
+        for (index in 1 until value.length) {
+            var matched = prefix[index - 1]
+            while (matched > 0 && value[index] != value[matched]) matched = prefix[matched - 1]
+            if (value[index] == value[matched]) matched++
+            prefix[index] = matched
+        }
+    }
+
+    fun occursIn(source: String): Boolean = find(source, 0) >= 0
+
+    /** Literal, non-overlapping replacement with no intermediate builder beyond the existing cap. */
+    fun replaceBounded(source: String, replacement: String, maximumCharacters: Int): String? {
+        require(maximumCharacters >= 0)
+        var match = find(source, 0)
+        if (match < 0) return source.takeIf { it.length <= maximumCharacters }
+        val maximumGrowth = (replacement.length.toLong() - value.length).coerceAtLeast(0)
+        val maximumOutput = source.length.toLong() + (source.length / value.length).toLong() * maximumGrowth
+        val output = StringBuilder(minOf(maximumCharacters.toLong(), maximumOutput).toInt())
+        var copied = 0
+        while (match >= 0) {
+            if (output.length.toLong() + match - copied + replacement.length > maximumCharacters) return null
+            output.append(source, copied, match).append(replacement)
+            copied = match + value.length
+            match = find(source, copied)
+        }
+        if (output.length.toLong() + source.length - copied > maximumCharacters) return null
+        return output.append(source, copied, source.length).toString()
+    }
+
+    /** Mark complete overlapping matches without changing text or allocating a match object. */
+    fun markCoverage(source: String, starts: IntArray, ends: IntArray) {
+        require(starts.size == source.length + 1 && ends.size == starts.size)
+        if (value.length > source.length) return
+        var matched = 0
+        for (index in source.indices) {
+            while (matched > 0 && source[index] != value[matched]) matched = prefix[matched - 1]
+            if (source[index] == value[matched]) matched++
+            if (matched == value.length) {
+                starts[index - value.length + 1]++
+                ends[index + 1]++
+                matched = prefix[matched - 1]
+            }
+        }
+    }
+
+    private fun find(source: String, start: Int): Int {
+        if (value.length > source.length - start) return -1
+        var matched = 0
+        for (index in start until source.length) {
+            while (matched > 0 && source[index] != value[matched]) matched = prefix[matched - 1]
+            if (source[index] == value[matched]) matched++
+            if (matched == value.length) return index - value.length + 1
+        }
+        return -1
     }
 }
