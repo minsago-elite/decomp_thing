@@ -23,7 +23,10 @@ gradle.projectsEvaluated {
     def helper = new File(project.rootDir, "scripts/oracle/clang_18_1_3_loader_snapshot.py")
     def sources = project.sourceSets.create("clang1813Loader")
     sources.resources.setSrcDirs([])
-    sources.java.setSrcDirs([new File(snapshot, "sources/oracle/clang/18.1.3")])
+    sources.java.setSrcDirs([
+        new File(snapshot, "sources/oracle/clang/18.1.3"),
+        new File(snapshot, "sources/src/main/java")
+    ])
     project.kotlin.sourceSets.getByName("clang1813Loader").kotlin.setSrcDirs([
         new File(snapshot, "sources/src/main/kotlin")
     ])

@@ -5441,6 +5441,7 @@ class RecipeAndCandidateBindingTests(unittest.TestCase):
         record = self.valid_build_record()
         provision.validate_build_record(record, self.contract)
         for key in ("aLoaderControlSupportSha256", "aLoaderSchemasSha256", "aLoaderLinuxFilesystemSha256",
+                    "aLoaderOwnedStatxDirectSha256", "aLoaderOwnedMountPollDirectSha256",
                     "aLoaderArtifactsSha256", "aLoaderJsonSha256", "aLoaderSnapshotSha256",
                     "hostTransportSha256", "hostJournalSha256", "gradleBuildSha256"):
             with self.subTest(key=key), self.temporary_directory() as temp:
@@ -7155,6 +7156,28 @@ class LoaderCompileSnapshotTests(unittest.TestCase):
             self.assertEqual(len(manifest["files"]), len(snapshot.SOURCE_PATHS) + 1)
             self.assertEqual((output / "classpath/000.jar").read_bytes(), b"authored inert dependency, not executable")
 
+    def test_native_abi_bridges_are_captured_recipe_bound_and_tamper_checked(self):
+        helpers = {
+            "aLoaderOwnedStatxDirectSha256": "src/main/java/decompengine/acp/LinuxOwnedStatxDirect.java",
+            "aLoaderOwnedMountPollDirectSha256": "src/main/java/decompengine/acp/LinuxOwnedMountPollDirect.java",
+        }
+        for key, name in helpers.items():
+            with self.subTest(helper=name), tempfile.TemporaryDirectory() as tmp:
+                snapshot, output, digest, manifest, root, jar, expected = self.capture(Path(tmp))
+                self.assertIn(name, snapshot.SOURCE_PATHS)
+                self.assertEqual(provision.RECIPE_FILES[key], ROOT / name)
+                self.assertEqual(provision.recipe_identity()[key], provision.sha256_file(ROOT / name))
+                captured = output / "sources" / name
+                self.assertEqual(hashlib.sha256(captured.read_bytes()).hexdigest(), expected[name])
+                captured.chmod(0o600)
+                captured.write_bytes(b"changed captured ABI bridge")
+                with self.assertRaisesRegex(snapshot.SnapshotError, "snapshot bytes changed"):
+                    snapshot.verify(output, digest)
+                (root / name).write_bytes(b"changed checkout ABI bridge")
+                with self.assertRaisesRegex(snapshot.SnapshotError, "selected recipe"):
+                    snapshot.prepare(root, Path(tmp) / "recaptured", [jar], expected)
+                self.assertFalse((Path(tmp) / "recaptured").exists())
+
     def test_changed_source_refuses_before_snapshot_creation(self):
         with tempfile.TemporaryDirectory() as tmp:
             base = Path(tmp)
@@ -7219,6 +7242,8 @@ class LoaderCompileSnapshotTests(unittest.TestCase):
         self.assertLessEqual(expected_paths, paths)
         schema = json.loads((ROOT / "oracle/clang/18.1.3/build-record.schema.json").read_bytes())
         self.assertEqual(set(schema["$defs"]["recipe"]["required"]), set(provision.RECIPE_FILES))
+        self.assertEqual(set(schema["$defs"]["recipe"]["properties"]), set(provision.RECIPE_FILES))
+        self.assertIs(schema["$defs"]["recipe"]["additionalProperties"], False)
         workflow = (ROOT / ".github/workflows/generic-template-toolchain.yml").read_text()
         for path in expected_paths - {"gradle/wrapper/gradle-wrapper.jar", "gradle/wrapper/gradle-wrapper.properties"}:
             if path.startswith("oracle/clang/"):
@@ -7234,6 +7259,12 @@ class LoaderCompileSnapshotTests(unittest.TestCase):
         self.assertNotIn("project.javaexec", init)
         self.assertNotIn('dependsOn project.tasks.named("classes")', init)
         self.assertIn('clang1813AProfileLoaderCompile', workflow)
+        self.assertIn('sources.java.setSrcDirs([\n'
+                      '        new File(snapshot, "sources/oracle/clang/18.1.3"),\n'
+                      '        new File(snapshot, "sources/src/main/java")\n'
+                      '    ])', init)
+        self.assertIn('new File(snapshot, "sources/src/main/kotlin")', init)
+        self.assertNotIn('sourceSets.main', init)
         self.assertIn('sources.compileClasspath = capturedClasspath', init)
         self.assertIn('"--manifest-sha256", manifestSha256', init)
 

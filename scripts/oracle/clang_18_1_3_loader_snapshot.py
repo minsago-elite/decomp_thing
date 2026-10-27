@@ -14,7 +14,8 @@ SOURCE_PATHS = (
     "src/main/kotlin/decompengine/oracle/fulltree/FullTreeControlSupport.kt",
     "src/main/kotlin/decompengine/oracle/core/OracleSchemas.kt",
     "src/main/kotlin/decompengine/acp/LinuxFilesystemSyscalls.kt",
-
+    "src/main/java/decompengine/acp/LinuxOwnedStatxDirect.java",
+    "src/main/java/decompengine/acp/LinuxOwnedMountPollDirect.java",
     "oracle/clang/18.1.3/Clang1813AProfileLoaderSmoke.java",
     "src/main/kotlin/decompengine/oracle/fulltree/FullTreeGenericTemplateFrontendProfileV1.kt",
     "src/main/kotlin/decompengine/oracle/core/OracleArtifacts.kt",

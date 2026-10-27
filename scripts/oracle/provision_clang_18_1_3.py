@@ -67,7 +67,8 @@ RECIPE_FILES = {
     "aLoaderControlSupportSha256": ROOT / "src/main/kotlin/decompengine/oracle/fulltree/FullTreeControlSupport.kt",
     "aLoaderSchemasSha256": ROOT / "src/main/kotlin/decompengine/oracle/core/OracleSchemas.kt",
     "aLoaderLinuxFilesystemSha256": ROOT / "src/main/kotlin/decompengine/acp/LinuxFilesystemSyscalls.kt",
-
+    "aLoaderOwnedStatxDirectSha256": ROOT / "src/main/java/decompengine/acp/LinuxOwnedStatxDirect.java",
+    "aLoaderOwnedMountPollDirectSha256": ROOT / "src/main/java/decompengine/acp/LinuxOwnedMountPollDirect.java",
     "aLoaderArtifactsSha256": ROOT / "src/main/kotlin/decompengine/oracle/core/OracleArtifacts.kt",
     "aLoaderJsonSha256": ROOT / "src/main/kotlin/decompengine/oracle/core/OracleJson.kt",
     "aLoaderSnapshotSha256": ROOT / "scripts/oracle/clang_18_1_3_loader_snapshot.py",
