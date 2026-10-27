@@ -26,13 +26,21 @@ Pages are signed for one session, filter set and page size and embed the
 `structureVersion`; a changed record expires them (`410 CURSOR_EXPIRED`). Entity and
 module links in the browser carry `structureVersion`; a read pinned to a different
 version is refused with `409 STRUCTURE_CHANGED`, so a view never merges records from
-two report generations.
+two report generations. Generated implementation and header links also carry the
+originating `sourceSha256` and `metadataVersion`; a manifest-only change is refused
+by the source viewer rather than silently adopting a newer source snapshot.
 
 The reader admits a model of at most 64 MiB and 250,000 functions (250,000 globals
-and types each), a plan of at most 16 MiB, identifiers of at most 4096 characters
-and 100,000 references per function. It retains a compact projection for at most
-two input/manifest/descriptor digest combinations. A projection is reused only for
-identical commitments; the commitments themselves are recaptured on every read.
+and types each), a plan of at most 16 MiB, identifiers of at most 4096 characters,
+100,000 references per array and 500,000 references across all model call/global
+arrays. Before retaining entity columns and references, it charges a conservative
+allocation estimate (UTF-16 strings, reference slots, array growth, maps, lazy orders
+and collision groups), capped at 96 MiB per projection including its admitted plan.
+The cache retains at most two input/manifest/descriptor digest combinations and at
+most 128 MiB of those charges, evicting least-recently-used projections. These are
+admission/retention limits, not measured peak JVM heap or complete #536 qualification;
+parser buffers, input bytes and active requests also need memory. A projection is
+reused only for identical commitments; commitments are recaptured on every read.
 Entity detail reads the committed model again, checks its digest and parses only the
 selected entity object from its recorded offset.
 
@@ -57,8 +65,18 @@ files are never admitted, so an incomplete export has no `available` state.
 
 The web reader checks the schema version, closed field sets for that version,
 unique identities per kind, address grammar, the extraction vocabulary and that
-schema 2+ entities remain `unassessed`. It does not re-verify canonical bytes; that
-remains the producer and archival-audit authority.
+schema 2+ entities remain `unassessed`. Schema 3/4 byte evidence is bounded before
+nested JSON allocation and validated with the producer's closed-shape, generation,
+nullability and aggregate window/requested-byte rules. It does not re-verify model
+canonical bytes; that remains the producer and archival-audit authority.
+
+Canonical plan bytes alone are insufficient for admission. Module IDs must match
+the web module grammar (at most 128 characters), generated paths must be bounded
+relative paths without traversal or control characters, and owned entity IDs obey
+the model identifier bound. Cycles must reference distinct recorded modules. Invalid
+or over-limit plans leave a valid model available with ownership `not-recorded` and
+no module projections. Ambiguous entity ownership and bounded references with no
+model record remain intentional visible diagnostics, not malformed-plan errors.
 
 ## Identity, labels and evidence classes
 

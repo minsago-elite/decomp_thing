@@ -153,8 +153,10 @@ internal storage optimization and must not merge identity, permissions or histor
 | `POST /agent/preflight` | `202 agentPreflight`, `409` while one runs | Strict `agentPreflightRequest` (`{"action":"inspect"}`), session/Origin/CSRF; starts one single-flight `preflight(WEB)`; #493 |
 | `POST J/runs` | `202 run`, `Location: R` | `workflowStart` request, capability/limits/input checks, job If-Match; #163 |
 | `POST R/cancel` | `202 run` or `200 run` if already terminal | Closed `workflowCancel` request, idempotent recorded intent, run If-Match; #163 |
-| `POST R/recover` | `202 run`, `Location` of a new attempt | Explicit `retry` or capability-gated `resume`; If-Match; #163 |
+| `POST R/recover` | `202 run`, `Location` of a new attempt | Closed `recover` request; explicit `retry` or capability-gated `resume`; run If-Match and idempotency; #486 |
+| `GET R/controls` | `200 attemptControls`, strong run ETag | Read-only cancel/retry/resume eligibility with closed reasons; reserves nothing; #528/#529 |
 | `GET R/snapshot` | `200 snapshot`, ETag | Run state and consistent event watermark; #174 |
+| `GET R/queue-position` | `200 queuePosition` | Approximate sampled position of one queued attempt; no query, counts only; #530 |
 | `GET R/events` | `200 text/event-stream` | Resume with `Last-Event-ID` or `after`, never both; #174 |
 | `GET R/events?transport=poll` | `200 events` | Same retention/cursor semantics, bounded page; #174 |
 | `GET R/reports/{reportId}` | `200 report` | State may be missing/partial/unsupported/unknown; #165 |
@@ -269,6 +271,52 @@ a new session after a full listener restart. These authored methods await their
 own Actions qualification; browser and production-adapter/runtime qualification
 remain unfinished. Bootstrap continues to report workflows unavailable, and
 fresh starts without registrations or retained start receipts retain 405.
+
+The recovery transport accepts only the closed `recover` data object (not its
+fixture wrapper), bounded to 1024 bytes: `mode` is `retry` or `resume`, and
+`expectedInputRevisionId` is the predecessor's recorded input revision or null for
+the original upload. It uses the same shared session/Origin/JSON/CSRF boundary
+before any body or service read, one strong run `If-Match`, one 16–128 character
+`Idempotency-Key` and no query or other conditional header. Workflow, limits,
+harness, checkpoint and paths are never caller fields; they come from the
+trusted registration and the predecessor attempt.
+
+Only the latest unsuccessful (failed, cancelled or interrupted) attempt can be
+recovered, and only while its recorded input is the original upload or the
+job's current accepted revision. A different expected input is 409
+`INPUT_REVISION_CONFLICT`; an input that is no longer trusted evidence is 409
+`INPUT_UNVERIFIED`, so recovery never silently starts from an unverified
+workspace. `retry` always publishes a new queued attempt linked through
+`previousRunId`, with `recovery.mode: retry` and no restored state. `resume`
+requires the registered adapter's trusted checkpoint policy, the exact recorded
+harness identity and a verified checkpoint; the new attempt records
+`recovery.restores` (`agent-session` or `project-evidence`) and the checkpoint
+digest, and the adapter receives the predecessor's workflow-owned report
+directory. Unsupported or unsafe resume is 409 with a specific code
+(`RESUME_UNSUPPORTED`, `HARNESS_CHANGED`, `CHECKPOINT_MISSING`,
+`CHECKPOINT_MISMATCH`, `CHECKPOINT_UNVERIFIED`, `WORKSPACE_UNVERIFIED`,
+`SESSION_QUARANTINED`, `CLEANUP_UNVERIFIED`). A newer attempt is 409
+`ATTEMPT_SUPERSEDED`, unfinished or completed predecessors 409
+`ATTEMPT_ACTIVE`/`ATTEMPT_COMPLETED`, a stale run guard 412, a key reused for
+different intent 409, admission capacity 429 and an unavailable workflow 503.
+
+Success is `202 run` for the new attempt with its `Location` and ETag. The
+recovery receipt shares the atomic attempt publication; its replay identity is
+the predecessor, its version, the mode and the expected input, so a keyed replay
+returns the same new attempt with `Idempotency-Replayed: true` before any
+eligibility, capacity or capability check, and never schedules again. Without
+registered workflows or retained keyed receipts the route answers 503
+`CAPABILITY_UNAVAILABLE` without reading the body. Production adapters remain
+unregistered and none declares a checkpoint policy yet, so packaged builds
+report retry and resume unavailable; ACP session continuation through the
+shared `AgentSessionJournal` policy still needs a registered adapter (#68).
+
+`GET R/controls` returns `attemptControls`: the run version and state, the
+recorded input revision, `cancel`, `retry` and `resume` each with `available`
+and a closed `reason`, the scope a resume would restore and any linked
+`successorRunId`. It is computed from durable state and current owned work, is
+private and read-only, and is not a reservation; each command re-checks its
+guards. Browsers read it explicitly and never send a command on load or reload.
 
 Errors carry `code`, safe `message`, `retryable`, optional field-level `details` and
 `retryAfterMs`; the correlation ID connects to redacted server logs. A detail contains a JSON
@@ -641,6 +689,30 @@ report unavailable metrics without zero values. Runtime uses the session-time
 snapshot; it neither polls these counts nor infers workflow availability from
 capacity. See [scheduler summary and verification](web-scheduler-summary.md).
 
+### Attempt queue position and stop reasons
+
+`GET jobs/J/runs/R/queue-position` samples one attempt's place in this process's executor queue.
+A queued attempt reports `position`/`ahead`, the total `queuedTasks` and busy/limit workers, always
+with `approximate: true`: queued work can be cancelled or stopped, two workers start tasks
+independently, and the queue is read separately from the attempt record. Other tasks are counted,
+never identified. A started or terminal attempt reports `not-queued` with its state; a borrowed
+executor or an attempt not found in the local queue reports `unavailable` with
+`EXTERNAL_EXECUTOR`/`NOT_IN_LOCAL_QUEUE`. The sample is display-only, never admission authority.
+The attempt view reads it on demand only while the attempt is queued.
+
+Terminal reasons keep stop outcomes separate. `LIMIT_EXHAUSTED` is a used-up budget (tool calls,
+output, tokens), `TIMED_OUT` a wall-clock or idle deadline, `CANCELLED` a recorded user request,
+`FAILED` a workflow-reported failure, `INFRASTRUCTURE_FAILED` an adapter or executor submission that
+could not produce any outcome, and `PROCESS_INTERRUPTED` a service stop or restart. Adapters may
+report `FAILED`, `REFUSED`, `LIMIT_EXHAUSTED` or `TIMED_OUT`; only the service records
+cancellation, infrastructure failure and interruption.
+
+Reported attempt usage comes from the terminal receipt. The view gives its units, its source and
+the receipt time (`endedAt`); the provider's own measurement time is not reported and stays
+"Not reported", as does every missing counter. Limits name the configuration persisted at
+`createdAt`. Live context-usage observations are coalesced for display only (one pending snapshot
+per 100 ms window) and never change the acknowledged cursor or persisted evidence.
+
 ## Current source catalog metadata
 
 `GET /api/v1/jobs/{jobId}/runs/{runId}/source-catalog` requires the existing private
@@ -995,6 +1067,33 @@ Activity uses SSE after bounded polling catch-up, with bounded reconnect and pol
 Run state now stays locked during bounded journal capture, with locks released before HTTP delivery.
 Controlled authenticated HTTP snapshot/replay and SSE eviction/resume checks now cover concurrent
 cutover. Slow-socket qualification and timed retention remain outstanding under #174.
+
+### Activity stages, correlation and private reasoning
+
+The Activity view summarizes the retained page as stages. The attempt row comes from the
+durable snapshot (`queued` waiting, `running`, `cancelling` blocked, `completed` accepted or
+completed without acceptance, `cancelled`, `failed`/`interrupted` terminal failure). Task rows
+group observations by `taskIdSha256` and keep the latest reported stage: analysis, planning
+and agent work are running; policy, build and behavior checks plus provisional/compile-valid
+results are validating; `unresolved` or a denied permission is blocked; `accepted`,
+`rolled_back`, `completed`, `cancelled` and failure phases are final. Rows without a stage
+(messages, tools, usage) keep the previous stage. Journal stages never establish acceptance.
+
+A percentage is shown only for an authoritative, producer-declared total. Observed task counts
+are not a denominator because tasks that have not started are invisible, so the view states
+how many observed tasks reached a final stage and that no percentage is shown.
+
+Correlation disclosures render on demand. The browser hashes the loaded attempt's own
+identities (attempt, previous attempt, input and result revision) with SHA-256, the same plain
+commitment the journal uses, and links only exact matches: a result revision to its source
+browser and a workflow-run digest to the previous attempt. Every other reference states why
+it is not linked (not recorded, not compared yet, no published task or session evidence page,
+or no matching revision). A task digest can narrow the page filter instead.
+
+Provider reasoning (`agent_thought_chunk`, role `thought`) is private. The journal records only
+its position, role, completion and `textOmitted: true`; it never buffers, stores, measures or
+commits to its text. Public projection also withholds `contentSha256`/`chunkCharacters` from
+older thought records. The ACP client never requests reasoning and no workflow depends on it.
 
 ## Agent preflight and harness readiness
 

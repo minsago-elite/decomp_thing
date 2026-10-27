@@ -32,6 +32,7 @@ internal class WebApiController(
     private val progressPins = WebProgressPinController(access, jobs, jobMutations)
     private val workflowStarts = WebWorkflowStartController(jobs, jobMutations, assets.basePath)
     private val cancellations = WebCancellationController(jobMutations, assets.basePath)
+    private val recoveries = WebRecoveryController(jobs, jobMutations, assets.basePath)
     private val agentPreflights = WebAgentPreflightController(access, agentPreflight, assets.basePath)
     private val runPages = WebRunPages { jobId ->
         when (val inspection = jobs.inspectDurableJob(jobId)) {
@@ -51,11 +52,40 @@ internal class WebApiController(
     }, clock = clock)
     private val jobPages = WebJobPages(jobs::collectionRecords, checkpointedSource = jobs::collectionRecordsWithProgress)
 
+    // One private resource pattern per line, so independent route additions merge cleanly.
+    private val privateResources = listOf(
+        "(?:jobs|uploads)/[^/]+",
+        "jobs/[^/]+/runs",
+        "jobs/[^/]+/runs/[^/]+",
+        "jobs/[^/]+/runs/[^/]+/reports/(?:exploration|revision-validation)",
+        "jobs/[^/]+/runs/[^/]+/validation-history",
+        "jobs/[^/]+/runs/[^/]+/source-catalog",
+        "jobs/[^/]+/runs/[^/]+/revisions/[^/]+/sources",
+        "jobs/[^/]+/runs/[^/]+/revisions/[^/]+/source-directories/[^/]+",
+        "jobs/[^/]+/runs/[^/]+/revisions/[^/]+/source-files/[^/]+(?:/(?:chunk|content))?",
+        "jobs/[^/]+/runs/[^/]+/revisions/[^/]+/functions(?:/[^/]+)?",
+        "jobs/[^/]+/runs/[^/]+/revisions/[^/]+/modules(?:/[^/]+)?",
+        "jobs/[^/]+/runs/[^/]+/revisions/[^/]+/globals/[^/]+",
+        "jobs/[^/]+/runs/[^/]+/revisions/[^/]+/types/[^/]+",
+        "jobs/[^/]+/runs/[^/]+/revisions/[^/]+/graph",
+        "jobs/[^/]+/runs/[^/]+/revisions/[^/]+/scorecard",
+        "jobs/[^/]+/runs/[^/]+/revisions/[^/]+/scorecard-comparison",
+        "jobs/[^/]+/runs/[^/]+/revisions/[^/]+/records/[^/]+",
+        "jobs/[^/]+/runs/[^/]+/snapshot",
+        "jobs/[^/]+/runs/[^/]+/events",
+        "jobs/[^/]+/runs/[^/]+/progress-pin",
+        "jobs/[^/]+/runs/[^/]+/cancel",
+        "jobs/[^/]+/runs/[^/]+/recover",
+        "jobs/[^/]+/runs/[^/]+/controls",
+        "jobs/[^/]+/runs/[^/]+/queue-position",
+        "jobs/[^/]+/artifacts/[^/]+/content",
+    ).map(::Regex)
+
     fun route(exchange: HttpExchange): Boolean {
         val path = exchange.requestURI.rawPath
         if (!path.startsWith("${assets.basePath}api/")) return false
         val resource = path.removePrefix(prefix)
-        if (!path.startsWith(prefix) || !(resource in setOf("session", "bootstrap", "jobs", "recovery", "agent/preflight") || resource.matches(Regex("(?:jobs|uploads)/[^/]+|jobs/[^/]+/runs(?:/[^/]+(?:/reports/(?:exploration|revision-validation)|/validation-history|/source-catalog|/revisions/[^/]+/(?:sources|source-directories/[^/]+|source-files/[^/]+(?:/(?:chunk|content))?|functions(?:/[^/]+)?|modules(?:/[^/]+)?|globals/[^/]+|types/[^/]+|graph|scorecard|scorecard-comparison|records/[^/]+)|/snapshot|/events|/progress-pin|/cancel)?)?|jobs/[^/]+/artifacts/[^/]+/content")))) {
+        if (!path.startsWith(prefix) || !(resource in setOf("session", "bootstrap", "jobs", "recovery", "agent/preflight") || privateResources.any { resource.matches(it) })) {
             try {
                 val policy = if (exchange.requestMethod in setOf("POST", "PUT", "PATCH", "DELETE")) {
                     WebEndpointPolicy.jsonMutation(exchange.requestMethod)
@@ -138,6 +168,18 @@ internal class WebApiController(
                 resource.matches(Regex("jobs/[^/]+/runs/[^/]+/cancel")) -> {
                     val parts = resource.split('/')
                     cancellations.handle(exchange, parts[1], parts[3])
+                }
+                resource.matches(Regex("jobs/[^/]+/runs/[^/]+/recover")) -> {
+                    val parts = resource.split('/')
+                    recoveries.handle(exchange, parts[1], parts[3])
+                }
+                resource.matches(Regex("jobs/[^/]+/runs/[^/]+/controls")) -> {
+                    access.authorize(exchange, WebEndpointPolicy.privateRead())
+                    requireNoWebApiQuery(exchange); requireJsonAccept(exchange)
+                    val parts = resource.split('/')
+                    val controls = jobs.attemptControls(parts[1], parts[3])
+                    exchange.responseHeaders.set("ETag", "\"${controls.attempt.version}\"")
+                    sendWebApiResponse(exchange, 200, "attemptControls", controls.toJson())
                 }
                 resource.matches(Regex("jobs/[^/]+/runs/[^/]+/progress-pin")) -> {
                     val parts = resource.split('/')
@@ -327,6 +369,12 @@ internal class WebApiController(
                     val session = checkNotNull(access.authorize(exchange, WebEndpointPolicy.privateRead()))
                     requireJsonAccept(exchange)
                     sendWebApiResponse(exchange, 200, "runs", runPages.page(session.sessionId, resource.split('/')[1], exchange.requestURI.rawQuery))
+                }
+                resource.matches(Regex("jobs/[^/]+/runs/[^/]+/queue-position")) -> {
+                    access.authorize(exchange, WebEndpointPolicy.privateRead())
+                    requireNoWebApiQuery(exchange); requireJsonAccept(exchange)
+                    val parts = resource.split('/')
+                    sendWebApiResponse(exchange, 200, "queuePosition", webQueuePosition(parts[1], parts[3], jobs.queuePosition(parts[1], parts[3])))
                 }
                 resource.matches(Regex("jobs/[^/]+/runs/[^/]+")) -> {
                     access.authorize(exchange, WebEndpointPolicy.privateRead())

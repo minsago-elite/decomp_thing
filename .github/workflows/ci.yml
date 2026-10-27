@@ -59,8 +59,8 @@ jobs:
           } > "$RUNNER_TEMP/frontend-ci/toolchain.txt"
           npm --prefix frontend ci --ignore-scripts --no-audit --no-fund
           python3 -m pip install --requirement requirements/oracle-generation.txt
-      - name: Verify packaged upgrade and cache evidence controls
-        run: node scripts/test-packaged-browser-upgrade.mjs
+      - name: Verify packaged upgrade, cache and upload evidence controls
+        run: node --test scripts/test-packaged-browser-upgrade.mjs scripts/test-packaged-browser-upload.mjs
       - name: Verify bounded archival cleanup controls
         timeout-minutes: 1
         run: python3 -B scripts/test-archival-diagnostics.py --verbose
@@ -249,6 +249,7 @@ jobs:
             build/packaged-browser-*/*.png
             build/reports/tests/test
             build/test-results/test
+            build/reports/junit-signatures
 
   kotlin-suite:
     needs: frontend
@@ -455,6 +456,7 @@ jobs:
             build/test-results/full-suite
             build/reports/tests/test
             build/test-results/test
+            build/reports/junit-signatures
             build/web-job-recovery-inventory.json
             build/reports/tests/v3BoundaryFinalStagingIsolated
             build/test-results/v3BoundaryFinalStagingIsolated
@@ -596,6 +598,7 @@ jobs:
           path: |
             build/reports/tests/test
             build/test-results/test
+            build/reports/junit-signatures
       - uses: actions/upload-artifact@v7
         if: always()
         with:
@@ -670,4 +673,5 @@ jobs:
           path: |
             build/reports/tests/test
             build/test-results/test
+            build/reports/junit-signatures
             build/source-identity-fixture-evidence

@@ -9,7 +9,7 @@ import type { EntityDetail, FunctionInventory, ModuleDetail, ModuleInventory, St
 import { structureView } from '../copy/structureTitles';
 import type { StructureView } from '../copy/structureTitles';
 import { appPath, runPath, sourceFilePath } from '../app/paths';
-import type { SourceSelection } from '../app/paths';
+import type { SourceSelection, SourceSnapshotPin } from '../app/paths';
 import { structureItemPath, structureListPath } from '../structure/paths';
 import type { StructureItem } from '../structure/paths';
 import { usePrivateTransport } from '../session/PrivateTransport';
@@ -211,9 +211,11 @@ function Modules({ selected, basePath, search }: { selected: SourceSelection; ba
   </Frame>;
 }
 
-function SourceLink({ basePath, selected, label, path, fileId }: { basePath: string; selected: SourceSelection; label: string; path: string | null; fileId: string | null }) {
+function SourceLink({ basePath, selected, snapshot, label, path, fileId }: {
+  basePath: string; selected: SourceSelection; snapshot: SourceSnapshotPin; label: string; path: string | null; fileId: string | null;
+}) {
   if (path === null) return null;
-  return <><dt>{label}</dt><dd>{fileId ? <a href={sourceFilePath(basePath, selected, fileId)}><bdi>{path}</bdi></a>
+  return <><dt>{label}</dt><dd>{fileId ? <a href={sourceFilePath(basePath, selected, fileId, snapshot)}><bdi>{path}</bdi></a>
     : message(copy.sourceUnavailable, { path: <bdi>{path}</bdi> })}</dd></>;
 }
 
@@ -248,8 +250,8 @@ function Module({ selected, basePath, selector, search }: { selected: SourceSele
         <dt>{copy.moduleColumns.functions}</dt><dd>{module.functionCount}</dd>
         <dt>{copy.moduleColumns.globals}</dt><dd>{module.globalCount}</dd>
         <dt>{copy.moduleColumns.types}</dt><dd>{module.typeCount}</dd>
-        <SourceLink basePath={basePath} selected={selected} label={copy.implementationFile} path={module.implementationPath} fileId={module.implementationFileId} />
-        <SourceLink basePath={basePath} selected={selected} label={copy.interfaceFile} path={module.interfacePath} fileId={module.interfaceFileId} />
+        <SourceLink basePath={basePath} selected={selected} snapshot={data} label={copy.implementationFile} path={module.implementationPath} fileId={module.implementationFileId} />
+        <SourceLink basePath={basePath} selected={selected} snapshot={data} label={copy.interfaceFile} path={module.interfacePath} fileId={module.interfaceFileId} />
         {module.cycle.total > 0 && <><dt>{copy.cycleMembers}</dt><dd><ul>{module.cycle.items.map(item => <li key={item.moduleId}>
           <ModuleLink basePath={basePath} selected={selected} moduleId={item.moduleId} selector={item.selector} version={data.structureVersion} /></li>)}</ul>
           {module.cycle.total > module.cycle.items.length && message(copy.boundedList, { shown: module.cycle.items.length, total: module.cycle.total })}</dd></>}
@@ -343,9 +345,9 @@ function Entity({ selected, basePath, kind, selector, search }: {
       <section>
         <h3>{copy.sourcesTitle}</h3>
         {entity.sources.implementationPath || entity.sources.sharedInterfacePath ? <dl class="job-facts">
-          <SourceLink basePath={basePath} selected={selected} label={copy.implementationFile} path={entity.sources.implementationPath} fileId={entity.sources.implementationFileId} />
-          <SourceLink basePath={basePath} selected={selected} label={copy.interfaceFile} path={entity.sources.interfacePath} fileId={entity.sources.interfaceFileId} />
-          <SourceLink basePath={basePath} selected={selected} label={copy.sharedInterface} path={entity.sources.sharedInterfacePath} fileId={entity.sources.sharedInterfaceFileId} />
+          <SourceLink basePath={basePath} selected={selected} snapshot={data} label={copy.implementationFile} path={entity.sources.implementationPath} fileId={entity.sources.implementationFileId} />
+          <SourceLink basePath={basePath} selected={selected} snapshot={data} label={copy.interfaceFile} path={entity.sources.interfacePath} fileId={entity.sources.interfaceFileId} />
+          <SourceLink basePath={basePath} selected={selected} snapshot={data} label={copy.sharedInterface} path={entity.sources.sharedInterfacePath} fileId={entity.sources.sharedInterfaceFileId} />
         </dl> : <p>{copy.noSources}</p>}
       </section>
       {entity.strings && <section>

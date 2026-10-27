@@ -50,10 +50,13 @@ internal class WebProgramStructurePages(
             "The selected revision structure records changed. Return to the inventory and read its current records.")
     }
 
+    // JSON quotes separators inside values, unlike Map.toString()'s ambiguous display format.
+    private fun filters(query: Query): String = JsonObject(query.fields.toSortedMap().mapValues { JsonPrimitive(it.value) }).toString()
+
     private fun offset(owner: String, route: String, index: WebProgramStructureIndex, query: Query, total: Int): Int {
         val cursor = query.cursor ?: return 0
         val parts = cursor.split('_')
-        if (!MessageDigest.isEqual(signature(owner, route, query.fields.toSortedMap().toString(), query.limit, parts[0], parts[1]).toByteArray(),
+        if (!MessageDigest.isEqual(signature(owner, route, filters(query), query.limit, parts[0], parts[1]).toByteArray(),
                 parts[2].toByteArray())) invalidCursor()
         if (parts[0] != index.structureVersion) {
             throw WebAccessDenied(410, "CURSOR_EXPIRED", "The structure records changed. Refresh the first page.")
@@ -64,7 +67,7 @@ internal class WebProgramStructurePages(
     private fun page(owner: String, route: String, index: WebProgramStructureIndex, query: Query, next: Int?): JsonObject = buildJsonObject {
         put("limit", query.limit); put("snapshotVersion", index.structureVersion)
         put("nextCursor", next?.let { JsonPrimitive("${index.structureVersion}_${it}_${signature(owner, route,
-            query.fields.toSortedMap().toString(), query.limit, index.structureVersion, it)}") } ?: JsonNull)
+            filters(query), query.limit, index.structureVersion, it)}") } ?: JsonNull)
     }
 
     fun functions(owner: String, jobId: String, runId: String, revisionId: String, rawQuery: String?): JsonObject {
@@ -176,19 +179,26 @@ internal class WebProgramStructurePages(
                 }
                 val start = if (ids.isEmpty()) { if (query.cursor != null) invalidCursor(); 0 } else offset(owner, route, index, query, ids.size)
                 val items = ArrayList<JsonObject>(query.limit)
-                var bytes = 0
+                fun owned(next: Int?) = buildJsonObject {
+                    put("kind", kind.wire); put("total", ids.size); put("items", JsonArray(items))
+                    put("page", page(owner, route, index, query, next))
+                }
+                // Charge the complete data payload, including escape-expanded module metadata and the
+                // header. Reserve a longest possible continuation before adding rows; the final cursor
+                // can only shrink. The 1,000,000-byte data budget also leaves 48,576 bytes for the fixed
+                // WebApiResponse envelope (kind, API version and UUID), below its 1 MiB ceiling.
+                put("owned", owned(ids.size.takeIf { it > 0 }))
+                var bytes = utf8Bytes(JsonObject(this))
                 for (id in ids.subList(start, minOf(ids.size, start + query.limit))) {
                     val item = table.index[id]?.let { entityItem(index, table, it) } ?: buildJsonObject {
                         put("kind", kind.wire); put("entityId", id); put("selector", JsonNull); put("recorded", false)
                     }
-                    val size = utf8Bytes(item) + 1
-                    if (items.isNotEmpty() && bytes + size > MAXIMUM_ITEM_BYTES) break
+                    val size = utf8Bytes(item) + if (items.isEmpty()) 0 else 1
+                    if (bytes + size > MAXIMUM_ITEM_BYTES) break
                     bytes += size; items += item
                 }
-                put("owned", buildJsonObject {
-                    put("kind", kind.wire); put("total", ids.size); put("items", JsonArray(items))
-                    put("page", page(owner, route, index, query, (start + items.size).takeIf { it < ids.size }))
-                })
+                check(items.isNotEmpty() || ids.isEmpty()) { "Module detail cannot fit an owned row within its response budget." }
+                put("owned", owned((start + items.size).takeIf { it < ids.size }))
             }.let(::JsonObject)
         }
     }

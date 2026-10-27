@@ -2,6 +2,21 @@ import assert from 'node:assert/strict';
 import { promises as fs } from 'node:fs';
 import { join } from 'node:path';
 
+/** SessionStatus can settle before the lazy upload form has its authenticated limits. */
+export const uploadFormReady = `document.body.innerText.includes('Local session connected.') &&
+  document.querySelector('#upload-guidance')?.textContent.includes('The complete request limit is 33554432 bytes') &&
+  document.querySelector('#binary-file:not(:disabled)') !== null`;
+
+/** Wait for Preact to commit this exact selection, not just the file-input change event. */
+export function uploadSubmitReady(label) {
+  return `(() => {
+    const picker = document.querySelector('#binary-file');
+    const submit = document.querySelector('.upload-panel button[type="submit"]');
+    return picker?.files?.[0]?.name === 'inert-browser-fixture.elf' &&
+      submit?.textContent === ${JSON.stringify(label)} && !submit.disabled;
+  })()`;
+}
+
 /** Isolated packaged-browser fixture: valid header only, never executable behavior. */
 export async function qualifyUpload({ makeTarget, cdp, evaluate, ready, browserOrigin, data }) {
   const tab = await makeTarget();
@@ -32,7 +47,7 @@ export async function qualifyUpload({ makeTarget, cdp, evaluate, ready, browserO
     };
   })();` }, tab.sessionId);
   await cdp.call('Page.navigate', { url: browserOrigin + '/nested/' }, tab.sessionId);
-  await ready(tab, `document.body.innerText.includes('Local session connected.')`, 'upload session');
+  await ready(tab, uploadFormReady, 'authenticated upload form and limits');
   const selectFixture = () => evaluate(tab, `(() => {
     const bytes = new Uint8Array(64); bytes.set([127, 69, 76, 70, 2, 1, 1]);
     const view = new DataView(bytes.buffer); view.setUint16(16, 2, true); view.setUint16(18, 62, true);
@@ -43,6 +58,7 @@ export async function qualifyUpload({ makeTarget, cdp, evaluate, ready, browserO
     picker.dispatchEvent(new Event('change', { bubbles: true }));
   })()`);
   await selectFixture();
+  await ready(tab, uploadSubmitReady('Upload binary'), 'selected fixture and enabled upload');
   assert.equal(await evaluate(tab, `document.activeElement.id`), 'binary-file');
   await evaluate(tab, `[...document.querySelectorAll('button')].find(button => button.textContent === 'Upload binary').focus()`);
   await cdp.call('Page.bringToFront', {}, tab.sessionId);
@@ -62,9 +78,10 @@ export async function qualifyUpload({ makeTarget, cdp, evaluate, ready, browserO
     void cdp.call('Page.handleJavaScriptDialog', { accept: true }, tab.sessionId);
   }, tab.sessionId);
   await cdp.call('Page.reload', {}, tab.sessionId);
-  await ready(tab, `document.body.innerText.includes('An unconfirmed upload is retained') && document.body.innerText.includes('Local session connected.')`, 'retry ticket and session restored after reload');
+  await ready(tab, `document.body.innerText.includes('An unconfirmed upload is retained') && (${uploadFormReady})`, 'retry ticket and authenticated upload form restored after reload');
   assert.equal(await evaluate(tab, 'window.__uploadProof().requests'), 0, 'Reload must not retry automatically');
   await selectFixture();
+  await ready(tab, uploadSubmitReady('Retry this upload'), 'reselected fixture and enabled retry');
   await evaluate(tab, `[...document.querySelectorAll('button')].find(button => button.textContent === 'Retry this upload').click()`);
   await ready(tab, `location.pathname === '/nested/jobs/${ids[0]}' && document.body.innerText.includes('inert-browser-fixture.elf')`, 'retry recovers durable job route');
   assert.deepEqual(await evaluate(tab, 'window.__uploadProof()'), { requests: 1, sameKey: true, hidden: true });
