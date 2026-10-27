@@ -159,12 +159,38 @@ static int write_receipt(const unsigned char receipt[RECEIPT_SIZE], struct legac
     return 1;
 }
 
+/* bwrap --unshare-net has already raised lo before --disable-userns enters
+ * its nested user namespace. CAP_NET_ADMIN in that nested namespace cannot
+ * reconfigure the parent-owned net namespace, even to set identical flags.
+ * Observe first, mutate only if needed, and always independently read back.
+ * This does not excuse EPERM when a down interface actually needs setup. */
+static int loopback_flags(int descriptor, uint32_t *before, uint32_t *after,
+                          struct legacy_diagnostic *diagnostic)
+{
+    struct ifreq request = {0};
+    memcpy(request.ifr_name, "lo", sizeof("lo"));
+    if (ioctl(descriptor, SIOCGIFFLAGS, &request) != 0)
+        return legacy_failure(diagnostic, 83, errno);
+    *before = (uint32_t)(unsigned short)request.ifr_flags;
+    if ((*before & IFF_LOOPBACK) == 0) return legacy_failure(diagnostic, 84, 0);
+    if ((*before & IFF_UP) == 0) {
+        request.ifr_flags = (short)(*before | IFF_UP);
+        if (ioctl(descriptor, SIOCSIFFLAGS, &request) != 0)
+            return legacy_failure(diagnostic, 85, errno);
+    }
+    if (ioctl(descriptor, SIOCGIFFLAGS, &request) != 0)
+        return legacy_failure(diagnostic, 86, errno);
+    *after = (uint32_t)(unsigned short)request.ifr_flags;
+    if ((*after & (IFF_UP | IFF_LOOPBACK)) != (IFF_UP | IFF_LOOPBACK))
+        return legacy_failure(diagnostic, 87, 0);
+    return 0;
+}
+
 static int legacy_loopback(int argc, char **argv, struct legacy_diagnostic *diagnostic)
 {
     uint64_t parent[4];
     struct stat net_namespace;
     struct stat user_namespace;
-    struct ifreq request = {0};
     unsigned char receipt[RECEIPT_SIZE] = {0};
     uint32_t before;
     uint32_t after;
@@ -189,32 +215,12 @@ static int legacy_loopback(int argc, char **argv, struct legacy_diagnostic *diag
 
     descriptor = socket(AF_INET, SOCK_DGRAM | SOCK_CLOEXEC, 0);
     if (descriptor < 0) return legacy_failure(diagnostic, 82, errno);
-    memcpy(request.ifr_name, "lo", sizeof("lo"));
-    if (ioctl(descriptor, SIOCGIFFLAGS, &request) != 0) {
-        int failure_errno = errno;
+    if (loopback_flags(descriptor, &before, &after, diagnostic) != 0) {
         (void)close(descriptor);
-        return legacy_failure(diagnostic, 83, failure_errno);
+        return 1;
     }
-    before = (uint32_t)(unsigned short)request.ifr_flags;
-    if ((before & IFF_LOOPBACK) == 0) {
-        (void)close(descriptor);
-        return legacy_failure(diagnostic, 84, 0);
-    }
-    request.ifr_flags = (short)(before | IFF_UP);
-    if (ioctl(descriptor, SIOCSIFFLAGS, &request) != 0) {
-        int failure_errno = errno;
-        (void)close(descriptor);
-        return legacy_failure(diagnostic, 85, failure_errno);
-    }
-    if (ioctl(descriptor, SIOCGIFFLAGS, &request) != 0) {
-        int failure_errno = errno;
-        (void)close(descriptor);
-        return legacy_failure(diagnostic, 86, failure_errno);
-    }
-    after = (uint32_t)(unsigned short)request.ifr_flags;
     int closed = close(descriptor);
     int close_errno = closed != 0 ? errno : 0;
-    if ((after & (IFF_UP | IFF_LOOPBACK)) != (IFF_UP | IFF_LOOPBACK)) return legacy_failure(diagnostic, 87, 0);
     if (closed != 0) return legacy_failure(diagnostic, 88, close_errno);
 
     /* PDNSLO01, four namespace identity u64s, then two flag u32s; all BE. */

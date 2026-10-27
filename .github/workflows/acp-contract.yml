@@ -56,6 +56,8 @@ jobs:
         run: scripts/ci-prepare-acp-sandbox.sh
       - name: Verify bounded provider guardian fixtures
         run: python3 -B scripts/verify-acp-provider-guardian.py --include-v2
+      - name: Verify disabled-userns loopback setup and flag refusal controls
+        run: python3 -B scripts/test-provider-dns-loopback.py
       - name: Prepare finite ACP quota fixture
         run: bash scripts/ci-prepare-acp-quota.sh
       - name: Qualify every required ACP, native DNS and shared-agent suite
@@ -75,6 +77,7 @@ jobs:
             build/reports/junit-signatures
             build/acp-contract-qualification
             build/provider-guardian-qualification
+            build/provider-dns-loopback-controls
             build/provider-dns-native-qualification
             build/ci-jdk-*/provision.*
             build/ci-jdk-*/scratch.json
