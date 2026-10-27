@@ -295,7 +295,7 @@ class WebModuleProgressTest {
 
     private fun adapters(): List<DurableWebWorkflowAdapter> {
         val engines = object : WebWorkflowEngines {
-            override fun explore(binary: Path, reportsDirectory: Path) = error("not executed")
+            override fun explore(binary: Path, reportsDirectory: Path, activity: () -> Unit) = error("not executed")
             override fun reconstruct(binary: Path, reportsDirectory: Path, mode: WebReconstructionMode,
                 progress: decompengine.agent.AgentWorkflowProgress, harness: WebAdmittedHarness?, maxContextCharacters: Int?) = error("not executed")
             override fun repair(project: Path, binary: Path, reportsDirectory: Path, harness: WebAdmittedHarness) = error("not executed")

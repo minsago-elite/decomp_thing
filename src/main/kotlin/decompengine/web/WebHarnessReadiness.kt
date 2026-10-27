@@ -78,13 +78,18 @@ internal data class WebWorkflowPrerequisites(
         else -> harnesses[harness]?.prerequisite ?: agent
     }
 
-    /** Agent first: its configuration is the most specific operator action. */
+    /** Static qualification gates precede runtime checks: probing cannot establish process ownership. */
     fun unmet(requirements: Set<WebWorkflowRequirement>, harness: WebAgentHarness? = null): WebPrerequisite? = listOf(
+        WebWorkflowRequirement.EXPLORATION_HELPER_OWNERSHIP to EXPLORATION_HELPERS_UNQUALIFIED,
         WebWorkflowRequirement.AGENT_HARNESS to harness(harness), WebWorkflowRequirement.SANDBOX to sandbox,
         WebWorkflowRequirement.GHIDRA to ghidra, WebWorkflowRequirement.REPAIR_VALIDATOR to repairValidator,
     ).firstOrNull { (requirement, fact) -> requirement in requirements && !fact.available }?.second
 
     companion object {
+        // Descendant sampling loses fast-exiting leaders' reparented pipe writers (#71). No runtime
+        // readiness result or environment flag can qualify this production execution option.
+        private val EXPLORATION_HELPERS_UNQUALIFIED = WebPrerequisite(false, "EXPLORATION_HELPERS_UNQUALIFIED",
+            "Exploration helper ownership and cancellation are not yet qualified for production use, so exploration cannot run on this server.")
         /** In-process callers without a runtime probe (inert fixtures). The HTTP path always supplies a snapshot. */
         val UNCHECKED = WebWorkflowPrerequisites(WebPrerequisite.AVAILABLE, WebPrerequisite.AVAILABLE, WebPrerequisite.AVAILABLE)
         /** The built-in harness exists as a library but no workflow runs it yet (#79, #76, #77). */
@@ -107,11 +112,16 @@ internal data class WebHarnessReadiness(
         if (configurationIdentity != null && configurationIdentity != snapshot.configurationIdentity) {
             return withAgentInspection(null)
         }
-        if (state == "unknown" && reasonCode == "SANDBOX_HELPER_UNCHECKED" && snapshot.status == "failed") {
-            return failedInspection()
-        }
-        return withAgentInspection(snapshot.status)
+        val folded = if (state == "unknown" && reasonCode == "SANDBOX_HELPER_UNCHECKED" && snapshot.status == "failed") failedInspection()
+            else withAgentInspection(snapshot.status)
+        // The agent fact is independent of the aggregate harness state: a matching failed inspection
+        // blocks agent options even when another prerequisite already made the harness unavailable.
+        return if (snapshot.status == "failed") folded.withFailedAgentFact() else folded
     }
+
+    private fun withFailedAgentFact(): WebHarnessReadiness = prerequisites?.takeIf { it.agent.available }?.let { facts ->
+        copy(prerequisites = facts.copy(agent = FAILED_AGENT))
+    } ?: this
 
     /**
      * Folds the last explicit agent preflight into a configured harness. Bootstrap never starts the
@@ -338,11 +348,11 @@ internal class WebHarnessReadinessProjector(
                 return WebHarnessReadiness("unavailable", "HARNESS_CONFIGURATION_INVALID", "The agent harness configuration is invalid.",
                     prerequisites = facts(agentMissing("HARNESS_CONFIGURATION_INVALID", "The agent harness configuration is invalid."), null))
             }
+            val identity = if (bindObservation) selection.provenance.stableDescriptor else null
             if (!helpersPresent) {
                 return WebHarnessReadiness("unavailable", "SANDBOX_HELPER_MISSING", "The sandbox helpers required to run analyzed binaries are not available.",
-                    prerequisites = facts(WebPrerequisite.AVAILABLE, false))
+                    identity, prerequisites = facts(WebPrerequisite.AVAILABLE, false))
             }
-            val identity = if (bindObservation) selection.provenance.stableDescriptor else null
             val key = if (bindObservation) observationKey(selection, bubblewrap, timeoutHelper) else null
             val jsonStatus = jsonStatusSupported(bubblewrap)
             if (jsonStatus == false) {

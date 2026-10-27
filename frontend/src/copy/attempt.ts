@@ -1,6 +1,6 @@
 // View-scoped interface copy; protocol values and DOM identities stay in their components.
 
-import { textMessage } from '../shared/messages';
+export { activityReceiptAgeCopy, receiptAge } from './receiptAge';
 
 export const recordedValidationCopy = {
   savedSelectionInvalid: 'This saved validation selection is invalid. No validation read was made. Read validation evidence to select a current observation.',
@@ -100,17 +100,7 @@ export const activityCopy = {
   "activityObservations": "Activity observations"
 } as const;
 
-export const activityReceiptAgeCopy = {
-  "received": "Last activity received: {time} ({age} in this tab). This is receipt age, not the age of the source observations.",
-  "lessThan10SecondsAgo": "less than 10 seconds ago",
-  "secondsAgo": "about {count} seconds ago",
-  "minuteAgo": "about {count} minute ago",
-  "minutesAgo": "about {count} minutes ago",
-  "hourAgo": "about {count} hour ago",
-  "hoursAgo": "about {count} hours ago",
-  "dayAgo": "about {count} day ago",
-  "daysAgo": "about {count} days ago"
-} as const;
+
 
 export const activityRowCopy = {
   "selectedObservation": "Selected observation",
@@ -132,7 +122,7 @@ export const activityRowCopy = {
   "trackingExhausted": "Producer message tracking limit reached.",
   "correlation": "Correlation details for sequence {sequence}",
   "otherObservation": "{type} metadata retained; content is not displayed in this observation view.",
-  "theseAreRecordedReferencesTaskSessionAndRevisionEvidencePages": "These are recorded references. Task, session and revision evidence pages are not available from this view.",
+  "theseAreRecordedReferencesTaskSessionAndRevisionEvidencePages": "These are recorded references. Each one states whether this view links it to attempt or revision evidence, or why it does not.",
   "taskDigest": "Task digest",
   "sessionDigest": "Session digest",
   "revisionDigest": "Revision digest",
@@ -328,7 +318,6 @@ export const runCopy = {
   "created": "Created",
   "started": "Started",
   "ended": "Ended",
-  "terminalReason": "Terminal reason",
   "inputRevision": "Input revision",
   "resultRevision": "Result revision",
   "completionAloneDoesNotEstablishAcceptedReconstructionAcceptanceBelongsTo": "Completion alone does not establish accepted reconstruction. Acceptance belongs to this attempt; a job may retain an accepted result from another attempt.",
@@ -337,13 +326,11 @@ export const runCopy = {
   "harnessCapabilityNotRecorded": "Not recorded for this attempt",
   "recordedHarnessBoundary": "This identity comes from the persisted attempt configuration. It does not identify the current server configuration, verify authentication or establish readiness.",
   "recordedLimits": "Recorded limits",
-  "sourceThePersistedConfigurationForThisAttemptLimitsDoNot": "Source: the persisted configuration for this attempt. Limits do not measure consumption or confer acceptance.",
   "wallClockLimit2": "Wall-clock limit",
   "idleLimit2": "Idle limit",
   "outputLimit2": "Output limit",
   "toolCallLimit2": "Tool-call limit",
   "reportedUsage": "Reported usage",
-  "sourceThePersistedAttemptReceiptMeasurementTimeIsNotReported": "Source: the persisted attempt receipt. Measurement time is not reported; the attempt end time is not a substitute. Missing counters remain unknown.",
   "inputTokens": "Input tokens",
   "outputTokens": "Output tokens",
   "cachedInputTokens": "Cached input tokens",
@@ -426,16 +413,6 @@ export const moduleProgressCopy = {
   recoveryBoundary: 'This explains reuse in advance only. It starts nothing and changes no attempt; recovery commands are separate.',
 } as const;
 
-/** Relative receipt age is display copy; the monotonic clock remains in the component. */
-export function receiptAge(seconds: number): string {
-  if (seconds < 10) return activityReceiptAgeCopy.lessThan10SecondsAgo;
-  if (seconds < 60) return textMessage(activityReceiptAgeCopy.secondsAgo, { count: Math.floor(seconds / 10) * 10 });
-  if (seconds < 3600) return textMessage(seconds < 120 ? activityReceiptAgeCopy.minuteAgo : activityReceiptAgeCopy.minutesAgo, { count: Math.floor(seconds / 60) });
-  if (seconds < 86400) return textMessage(seconds < 7200 ? activityReceiptAgeCopy.hourAgo : activityReceiptAgeCopy.hoursAgo, { count: Math.floor(seconds / 3600) });
-  return textMessage(seconds < 172800 ? activityReceiptAgeCopy.dayAgo : activityReceiptAgeCopy.daysAgo, { count: Math.floor(seconds / 86400) });
-}
-
-
 export const activityHistoryCopy = {
   title: 'Saved activity window',
   boundary: 'This read-only window contains at most 200 observations. It does not follow new events. A saved window may become unavailable when journal retention expires.',
@@ -453,3 +430,84 @@ export const activityHistoryCopy = {
   snapshot: 'Current snapshot state: {state}; acceptance: {acceptance}. This snapshot is not the historical state of the selected events.',
   observations: 'Saved activity observations',
 } as const;
+
+export const attemptControlsCopy = {
+  title: 'Attempt controls',
+  scope: 'Commands here affect only attempt {runId} at version {version}. Each command sends that version and a request key; the server decides the outcome.',
+  read: 'Read available actions',
+  reading: 'Reading available actions…',
+  readFirst: 'Read the available actions before sending a command. Reading never starts, cancels or retries work.',
+  verified: 'Available actions verified for this attempt version. Another tab or the worker may change them; a stale command is refused.',
+  stale: 'The attempt changed since its actions were read. Read the available actions again before sending a command.',
+  paused: 'Attempt controls are paused while this tab is hidden or offline. Read the actions again when you return.',
+  reconnect: 'Reconnect the local session before sending an attempt command.',
+  unverified: 'The available actions could not be verified. Check the local session and server, then read them again.',
+  cancelHeading: 'Cancellation',
+  cancel: 'Request cancellation',
+  cancelling: 'Cancellation requested. The worker is still stopping; this attempt is not cancelled until the server records termination. Its last accepted revision and diagnostics are kept.',
+  retryHeading: 'Retry',
+  retryHelp: 'Creates a new attempt linked to this one. Nothing from this attempt’s execution is restored, and this attempt stays unchanged. Input: {input}.',
+  retry: 'Retry as a new attempt',
+  resumeHeading: 'Checkpoint resume',
+  resumeAgent: 'Creates a new linked attempt that continues the verified checkpoint, restoring the recorded agent session state with the accepted project evidence. Input: {input}.',
+  resumeEvidence: 'Creates a new linked attempt from the verified checkpoint. Only accepted project evidence is restored; the agent conversation starts new. Input: {input}.',
+  resume: 'Resume from checkpoint',
+  originalInput: 'the original uploaded input',
+  unavailable: 'Unavailable: {reason}.',
+  sending: 'Sending the command and waiting for the server’s recorded outcome…',
+  cancelRequested: 'Cancellation of attempt {runId} was recorded. The attempt is still stopping; it is not cancelled yet.',
+  cancelConfirmed: 'Attempt {runId} is cancelled. The server recorded its termination.',
+  finishedFirst: 'Attempt {runId} finished as {state} before cancellation took effect. It was not cancelled.',
+  created: 'New attempt {runId} was created by {mode}. This attempt is unchanged.',
+  createdLink: 'Open new attempt {runId}',
+  successor: 'This attempt was recovered as attempt {runId}.',
+  openSuccessor: 'Open the newer attempt',
+  modeRetry: 'retry',
+  modeResume: 'checkpoint resume',
+  unknown: 'The outcome of the {action} request for attempt {runId} is unconfirmed. Nothing is sent automatically. Read the available actions, then replay the same request or discard it.',
+  replay: 'Replay unconfirmed request',
+  discard: 'Discard unconfirmed request',
+  discarded: 'The unconfirmed request was discarded. Read the available actions before choosing another command.',
+  otherPending: 'Another attempt has an unconfirmed request in this tab. Reconcile it before sending a command here.',
+  openPending: 'Open the attempt with the unconfirmed request',
+  storageBlocked: 'This tab cannot retain an unconfirmed command, so commands are disabled. Discard the retained request or use a browser with session storage.',
+  actionCancel: 'cancellation',
+  actionRetry: 'retry',
+  actionResume: 'resume',
+  conflict: 'The attempt changed or the request key was already used. Read the available actions before choosing another command.',
+  refused: 'The server refused the command: {reason}.',
+  capacity: 'Workflow admission is at capacity. Read the available actions and try again later.',
+  denied: 'Access was denied. Reconnect the local session; the request is retained for an explicit replay.',
+  retriedFrom: 'This attempt is an explicit retry of {runId}. It restored nothing from that attempt.',
+  resumedAgent: 'This attempt resumed a verified checkpoint of {runId}, restoring the recorded agent session state and accepted project evidence.',
+  resumedEvidence: 'This attempt resumed a verified checkpoint of {runId}. Only accepted project evidence was restored; the agent conversation started new.',
+  reasonUnknown: 'the server gave no specific reason',
+} as const;
+
+/** Closed server reason vocabulary; an unknown code is shown as unspecified rather than guessed. */
+export const attemptControlReasonCopy: Readonly<Record<string, string>> = {
+  RECOVERY_REQUIRED: 'storage needs reconciliation before any new command',
+  SERVICE_STOPPED: 'the server is stopping',
+  ATTEMPT_TERMINAL: 'the attempt already finished',
+  CANCEL_PENDING: 'cancellation is already pending',
+  NO_OWNED_WORKER: 'no running worker owns this attempt; reopen storage to reconcile it',
+  RECEIPT_CAPACITY: 'cancellation receipt storage is full',
+  ATTEMPT_ACTIVE: 'the attempt has not finished',
+  ATTEMPT_COMPLETED: 'a completed attempt is not recovered; start a new workflow instead',
+  ATTEMPT_SUPERSEDED: 'a newer attempt exists; only the latest unsuccessful attempt can be recovered',
+  ACTIVE_RUN: 'this job already has active work',
+  WORKFLOW_UNAVAILABLE: 'this workflow is not available on this server',
+  INPUT_UNVERIFIED: 'the attempt’s input revision is no longer verified project evidence, so no work starts from it',
+  UPLOAD_CAPACITY: 'an upload is in progress',
+  CAPACITY_UNAVAILABLE: 'workflow capacity is full',
+  RESUME_UNSUPPORTED: 'this workflow does not support checkpoint resume',
+  HARNESS_CHANGED: 'the configured harness differs from the one this attempt recorded',
+  CHECKPOINT_MISSING: 'no checkpoint was retained for this attempt',
+  CHECKPOINT_MISMATCH: 'the retained checkpoint does not match this attempt',
+  CHECKPOINT_UNVERIFIED: 'the checkpoint could not be verified',
+  WORKSPACE_UNVERIFIED: 'the workspace differs from its accepted evidence',
+  SESSION_QUARANTINED: 'the agent session is quarantined for inspection',
+  CLEANUP_UNVERIFIED: 'cleanup of the previous agent process is unverified',
+  INPUT_REVISION_CONFLICT: 'the attempt’s recorded input differs from the expected input',
+  STORE_LIMIT: 'this job reached its retained attempt limit',
+};

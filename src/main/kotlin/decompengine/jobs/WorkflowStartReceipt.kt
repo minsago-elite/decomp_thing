@@ -26,7 +26,7 @@ data class WorkflowStartReceipt(
         require(VERSION.matches(expectedRequestVersion)) { "invalid workflow start request version" }
         require(intentSha256 == workflowStartIntentSha256(expectedRequestVersion, NewWorkflowAttempt(
             attempt.workflow, attempt.limits, attempt.inputRevisionId, attempt.harnessCapabilityId, attempt.previousRunId,
-            scope = attempt.scope,
+            recovery = attempt.recovery, scope = attempt.scope,
         ))) { "workflow start receipt intent differs from its attempt" }
     }
 
@@ -54,6 +54,10 @@ internal fun workflowStartKeyDigest(jobId: String, requestKey: String): String {
 
 internal fun workflowStartIntentSha256(expectedRequestVersion: String, request: NewWorkflowAttempt): String {
     require(VERSION.matches(expectedRequestVersion)) { "invalid workflow start request version" }
+    // A recovery command has its own closed intent; a plain start's existing digest is unchanged.
+    request.recovery?.let { recovery ->
+        return workflowRecoveryIntentSha256(expectedRequestVersion, checkNotNull(request.previousRunId), recovery.mode, request.inputRevisionId)
+    }
     val intent = buildJsonObject {
         put("expectedRequestVersion", expectedRequestVersion)
         put("workflow", request.workflow.wireName); put("inputRevisionId", request.inputRevisionId)

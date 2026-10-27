@@ -1,4 +1,4 @@
-import type { ContractDocument, ModuleProgress, Page, RevisionDirectory, Run, SourceChunk, ValidationBytePreview, ValidationCases, ValidationFailure, ValidationHistory, ValidationSummary } from './generated';
+import type { AttemptControls, ContractDocument, ModuleProgress, Page, RevisionDirectory, Run, SourceChunk, ValidationBytePreview, ValidationCases, ValidationFailure, ValidationHistory, ValidationSummary } from './generated';
 import { ApiClientError } from './errors';
 import { normalizeBasePath, validateResourceHref } from '../app/paths';
 import type { ApiResource } from '../app/paths';
@@ -164,7 +164,7 @@ function checkRun(run: Run): void {
   const reasons: Record<Run['state'], readonly Run['terminalReason'][]> = {
     queued: [null], running: [null], cancelling: [null],
     completed: ['COMPLETED', 'NO_CHANGES'],
-    failed: ['FAILED', 'REFUSED', 'LIMIT_EXHAUSTED'],
+    failed: ['FAILED', 'REFUSED', 'LIMIT_EXHAUSTED', 'TIMED_OUT', 'INFRASTRUCTURE_FAILED'],
     cancelled: ['CANCELLED'], interrupted: ['PROCESS_INTERRUPTED'],
   };
   requireValue(reasons[run.state].includes(run.terminalReason));
@@ -173,6 +173,22 @@ function checkRun(run: Run): void {
   // A recorded agent configuration names the harness the attempt submitted, never another one.
   const harness = run.configuration?.harness ?? null;
   if (harness !== null) requireValue(run.harnessCapabilityId === `agent-${harness.kind}`);
+  const recovery = run.recovery;
+  if (recovery) {
+    requireValue(run.previousRunId !== null && (recovery.restores === null) === (recovery.checkpointSha256 === null));
+    requireValue((recovery.mode === 'retry') === (recovery.restores === null));
+  }
+}
+
+/** Eligibility per command; never a reservation, result or authorization. */
+function checkAttemptControls(value: AttemptControls): void {
+  const { cancel, retry, resume } = value;
+  for (const control of [cancel, retry, resume]) requireValue(control.available === (control.reason === null));
+  requireValue((value.resumeRestores !== null) === value.resume.available);
+  if (value.cancel.available) requireValue(value.state === 'queued' || value.state === 'running');
+  const recoverable = ['failed', 'cancelled', 'interrupted'].includes(value.state);
+  if (value.retry.available || value.resume.available) requireValue(recoverable && value.successorRunId === null);
+  requireValue(value.successorRunId !== value.runId);
 }
 
 const MODULE_STAGES = ['analysis', 'planning', 'generation', 'validation', 'publication'] as const;
@@ -288,6 +304,9 @@ export function checkSemantics(document: ContractDocument, basePath = '/'): void
     case 'moduleProgress':
       checkModuleProgress(document.data);
       break;
+    case 'attemptControls':
+      checkAttemptControls(document.data);
+      break;
     case 'runs': {
       const { items, page, jobId } = document.data;
       requireValue(items.length <= page.limit && new Set(items.map(item => item.runId)).size === items.length);
@@ -321,6 +340,12 @@ export function checkSemantics(document: ContractDocument, basePath = '/'): void
         const used = recorded.promptCharacters; const maximum = recorded.promptBudgetCharacters;
         requireValue((used === null) === (maximum === null));
         if (used !== null && maximum !== null) requireValue(BigInt(maximum) > 0n && BigInt(used) <= BigInt(maximum));
+        const compilation = recorded.validation?.compilation;
+        if (compilation) {
+          requireValue(compilation.sourceSha256 === recorded.implementationSha256);
+          requireValue(compilation.outcome !== 'passed' || compilation.returnCode === 0);
+          requireValue(compilation.outcome !== 'failed-to-start' || compilation.returnCode === null);
+        }
       }
       break;
     }
@@ -346,6 +371,15 @@ export function checkSemantics(document: ContractDocument, basePath = '/'): void
       }
       break;
     }
+    case 'queuePosition': {
+      const sample = document.data;
+      if (sample.state === 'queued') {
+        requireValue(BigInt(sample.ahead) === BigInt(sample.position) - 1n);
+        requireValue(BigInt(sample.position) <= BigInt(sample.queuedTasks));
+        requireValue(BigInt(sample.activeWorkers) <= BigInt(sample.workerLimit));
+      }
+      break;
+    }
     case 'bootstrap': {
       const retention = document.data.runtime.progressRetention;
       if (retention && (BigInt(retention.expired) > BigInt(retention.examined)
@@ -358,8 +392,9 @@ export function checkSemantics(document: ContractDocument, basePath = '/'): void
       const { limits, capabilities, apiVersions } = document.data;
       requireValue(limits.defaultPageLimit <= limits.maxPageLimit);
       requireValue(new Set(capabilities.map((item) => item.id)).size === capabilities.length);
-      // An agent contract version is reported exactly for launch options that contact an agent.
-      requireValue(capabilities.every((item) => item.launch === null
+      // An agent contract version is reported exactly for launch options that contact an agent;
+      // older v1 producers omit launch, which means no launch facts were reported.
+      requireValue(capabilities.every((item) => item.launch == null
         || item.launch.contactsAgent === (item.agentContractVersion !== null)));
       // Harness facts match the submitted harness; the built-in harness is never reported as selectable.
       requireValue(capabilities.every((item) => item.launch?.harness == null

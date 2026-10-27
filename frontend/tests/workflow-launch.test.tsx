@@ -168,6 +168,64 @@ it('follows attempt pagination so an older completed candidate stays selectable'
     '/jobs/' + job.jobId + '/runs?limit=200&cursor=older_page']);
 });
 
+it('reaches a repair candidate on the sixth page at the full retained-attempt bound', async () => {
+  transport.get.mockImplementation((_kind, path) => {
+    const cursor = new URL(path, 'http://localhost').searchParams.get('cursor');
+    const page = cursor ? Number(cursor) : 0;
+    const count = page < 5 ? 200 : 24;
+    return Promise.resolve({ data: { jobId: job.jobId, items: Array.from({ length: count }, (_, index) => ({
+      ...run().data, runId: `run_${page * 200 + index}`, state: page === 5 && index === 23 ? 'completed' : 'failed',
+      resultRevisionId: page === 5 && index === 23 ? 'source_oldest' : null,
+    })), page: { nextCursor: page < 5 ? String(page + 1) : null, limit: 200, snapshotVersion: 'snapshot_1' } } });
+  });
+  mount({ capabilities: supported('workflow-repair-agent-acp') });
+  fireEvent.click(screen.getByLabelText('Repair: configured agent'));
+  const select = await screen.findByLabelText<HTMLSelectElement>('Input revision');
+  expect(Array.from(select.options).map(option => option.value)).toEqual(['', 'source_oldest']);
+  expect(transport.get).toHaveBeenCalledTimes(6);
+  expect(start(/Start Repair/)).toHaveProperty('disabled', true);
+  fireEvent.change(select, { target: { value: 'source_oldest' } });
+  expect(start(/Start Repair/)).toHaveProperty('disabled', false);
+});
+
+it.each(['page', 'attempt'] as const)('refuses foreign-job %s data in a repair revision page', async foreign => {
+  transport.get.mockResolvedValue({ data: {
+    jobId: foreign === 'page' ? 'f'.repeat(32) : job.jobId,
+    items: [{ ...run().data, jobId: foreign === 'attempt' ? 'f'.repeat(32) : job.jobId,
+      state: 'completed', resultRevisionId: 'source_foreign' }],
+    page: { nextCursor: null, limit: 200, snapshotVersion: 'snapshot_1' },
+  } });
+  mount({ capabilities: supported('workflow-repair-agent-acp') });
+  fireEvent.click(screen.getByLabelText('Repair: configured agent'));
+  expect(await screen.findByText(/could not be loaded/)).toBeTruthy();
+  expect(screen.queryByLabelText('Input revision')).toBeNull();
+  expect(start(/Start Repair/)).toHaveProperty('disabled', true);
+  expect(transport.post).not.toHaveBeenCalled();
+});
+
+it('discards partial revision choices on a continuation failure and retries from the first page', async () => {
+  const first = { data: { jobId: job.jobId,
+    items: [{ ...run().data, state: 'completed', resultRevisionId: 'source_partial' }],
+    page: { nextCursor: 'older_page', limit: 200, snapshotVersion: 'snapshot_1' } } };
+  const last = { data: { jobId: job.jobId,
+    items: [{ ...run().data, state: 'completed', resultRevisionId: 'source_older' }],
+    page: { nextCursor: null, limit: 200, snapshotVersion: 'snapshot_1' } } };
+  transport.get.mockResolvedValueOnce(first).mockRejectedValueOnce(new ApiClientError('network_error'))
+    .mockResolvedValueOnce(first).mockResolvedValueOnce(last);
+  mount({ capabilities: supported('workflow-repair-agent-acp') });
+  fireEvent.click(screen.getByLabelText('Repair: configured agent'));
+  expect(await screen.findByText(/could not be loaded/)).toBeTruthy();
+  expect(screen.queryByLabelText('Input revision')).toBeNull();
+  expect(start(/Start Repair/)).toHaveProperty('disabled', true);
+  fireEvent.click(screen.getByRole('button', { name: 'Load revisions again' }));
+  const select = await screen.findByLabelText<HTMLSelectElement>('Input revision');
+  expect(Array.from(select.options).map(option => option.value)).toEqual(['', 'source_partial', 'source_older']);
+  expect(transport.get.mock.calls.map(call => call[1])).toEqual([
+    '/jobs/' + job.jobId + '/runs?limit=200', '/jobs/' + job.jobId + '/runs?limit=200&cursor=older_page',
+    '/jobs/' + job.jobId + '/runs?limit=200', '/jobs/' + job.jobId + '/runs?limit=200&cursor=older_page',
+  ]);
+});
+
 it('retries a failed revision load explicitly without remounting the form', async () => {
   transport.get.mockRejectedValueOnce(new ApiClientError('network_error'))
     .mockResolvedValueOnce({ data: { jobId: job.jobId, items: [{ ...run().data, runId: 'run_done', state: 'completed', resultRevisionId: 'source_done' }],
@@ -337,4 +395,10 @@ it('shows the whole-plan reconstruction scope and submits only a server-bounded 
   fireEvent.click(screen.getByLabelText('Reconstruction: evidence only'));
   expect(screen.queryByLabelText('Per-module agent context (characters)')).toBeNull();
   expect(screen.getByText('Evidence-only reconstruction uses no agent context budget.')).toBeTruthy();
+});
+
+it('treats an older producer that omits launch facts like one that reports none', () => {
+  mount({ capabilities: launchBootstrap.capabilities.map(capability => { const legacy: Capability = { ...capability }; delete legacy.launch; return legacy; }) });
+  expect(screen.queryByRole('radio')).toBeNull();
+  expect(screen.queryByRole('button')).toBeNull();
 });

@@ -10,6 +10,10 @@ import type { FailureRetainedCase, FailureRetainedCases } from './explorationFai
 import { parsePartialCases } from './explorationPreparationCases';
 import type { PreparationCase, PreparationCases } from './explorationPreparationCases';
 
+import { receive } from '../shared/receiptTime';
+import type { Received } from '../shared/receiptTime';
+import { MetadataReceipt } from '../shared/MetadataReceipt';
+
 function failureCase(value: RetainedCase): FailureRetainedCase | null {
   return 'sample' in value ? value as FailureRetainedCase : null;
 }
@@ -84,7 +88,8 @@ export function ExplorationCases(props: CasesProps) {
 function CaseReader({ artifact, jobId, runId, basePath, producerSchemaVersion = null }: CasesProps) {
   const { client } = usePrivateTransport(basePath);
   const [intent, setIntent] = useState<{ client: typeof client } | null>(null);
-  const [data, setData] = useState<RetainedCases | FailureRetainedCases | PreparationCases | null>(null);
+  const [observation, setData] = useState<Received<RetainedCases | FailureRetainedCases | PreparationCases> | null>(null);
+  const data = observation?.value;
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
   const [source, setSource] = useState('');
@@ -96,7 +101,7 @@ function CaseReader({ artifact, jobId, runId, basePath, producerSchemaVersion = 
     const controller = new AbortController();
     setLoading(true); setError(''); setData(null); setSelected(null); setPage(0); setSource('');
     void client.readArtifactText(artifact, { jobId, runId }, { signal: controller.signal }).then(text => {
-      if (!controller.signal.aborted) setData(producerSchemaVersion === 1 ? parsePartialCases(text) : parseRetainedCases(text));
+      if (!controller.signal.aborted) setData(receive(producerSchemaVersion === 1 ? parsePartialCases(text) : parseRetainedCases(text)));
     }).catch((failure: unknown) => {
       if (!controller.signal.aborted) setError(withApiFailureReference(copy.unavailable, failure));
     }).finally(() => { if (!controller.signal.aborted) setLoading(false); });
@@ -115,6 +120,7 @@ function CaseReader({ artifact, jobId, runId, basePath, producerSchemaVersion = 
     {active && loading && <p role="status">{copy.loading}</p>}
     {active && error && <p role="alert">{error}</p>}
     {active && data && <>
+      <MetadataReceipt kind="explorationCases" receipt={observation?.receipt} />
       {partial && <>
         <p role="status">{copy.failureReasons[partial.failure.code]} <code>{partial.failure.code}</code></p>
         <p>{message(copy.failurePosition, { sample: copy.sampleLabels[partial.failure.phase], index: partial.failure.candidateIndex })}</p>
