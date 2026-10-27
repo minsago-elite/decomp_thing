@@ -433,6 +433,110 @@ class StateProtocolTests(unittest.TestCase):
             reset.service_census(object(), "1" * 32)
 
 
+class StatePublicationTests(unittest.TestCase):
+    """Real file publication with synthetic records; not root/mount qualification."""
+
+    def setUp(self):
+        (ROOT / "build").mkdir(exist_ok=True)
+        temporary = tempfile.TemporaryDirectory(prefix="reset-publication-", dir=ROOT / "build")
+        self.addCleanup(temporary.cleanup)
+        self.directory = Path(temporary.name)
+        self.store = object.__new__(reset.Store)
+        self.store.fds = []
+        self.store.private = self.store.open_dir(self.directory)
+        self.addCleanup(self.store.close)
+        self.store.profile = reset.profile_document()
+        # Only deployment ownership and metadata census are stand-ins. Exercise
+        # the real parser, transition validation, file writes, fsync and rename.
+        reader = patch.object(self.store, "read", side_effect=self.read)
+        reader.start()
+        self.addCleanup(reader.stop)
+        budget = patch.object(reset, "verify_metadata_budget", return_value=(0, 0))
+        self.budget = budget.start()
+        self.addCleanup(budget.stop)
+
+    def read(self, name, maximum):
+        data = (self.directory / name).read_bytes()
+        self.assertLessEqual(len(data), maximum)
+        return data
+
+    def seed(self, record):
+        (self.directory / "state.json").write_bytes(reset.canonical(record))
+        return record
+
+    def assert_published(self, previous, result):
+        self.assertEqual(result["previousHash"], previous["selfHash"])
+        self.assertEqual(result["sequence"], previous["sequence"] + 1)
+        self.assertEqual(reset.parse_record(self.read("state.json", reset.MAX_RECORD)), result)
+        self.assertFalse((self.directory / "state.next").exists())
+        self.assertEqual(self.store.current_state, result)
+
+    def test_registration_can_publish_observed_old_gate_without_argument_collision(self):
+        initial = copy.deepcopy(synthetic_record("REGISTERED"))
+        initial["old"]["gate"]["mode"] = 0
+        previous = self.seed(reset.seal_state(initial))
+        observed_old = copy.deepcopy(previous["old"])
+        observed_old["gate"]["mode"] = 0o711
+        result = self.store.publish(previous, old=observed_old)
+        self.assert_published(previous, result)
+        self.assertEqual(result["old"], observed_old)
+        self.assertEqual(previous["old"]["gate"]["mode"], 0, "source state was mutated")
+        self.budget.assert_called_once_with(self.store, previous)
+
+    def test_registered_request_uses_real_publication_before_submission(self):
+        previous = self.seed(synthetic_record("REGISTERED"))
+        with patch.object(reset, "inactive_snapshot"), \
+             patch.object(reset, "verify_base", return_value=(10, 11)), \
+             patch.object(reset, "verify_live_generation"), \
+             patch.object(reset, "superblock", return_value=previous["old"]["uuid"]), \
+             patch.object(reset, "submit", side_effect=lambda store, state: state) as submit:
+            result = reset.request(self.store, previous, 0)
+        self.assert_published(previous, result)
+        self.assertEqual(result["phase"], "INTENT")
+        self.assertEqual(result["old"], previous["old"])
+        self.assertEqual(result["submission"]["state"], "PENDING")
+        self.assertEqual(result["targetGeneration"], 1)
+        submit.assert_called_once_with(self.store, result)
+
+    def test_published_candidate_can_become_old_generation_in_next_intent(self):
+        previous = self.seed(synthetic_record("PUBLISHED"))
+        result = self.store.publish(
+            previous, phase="INTENT", previousGeneration=1, targetGeneration=2,
+            intentId="b" * 64, targetUuid=OLD_UUID, old=previous["candidate"],
+            candidate=None, custodian=None, formatter=None,
+            submission={"state": "PENDING", "job": None, "invocation": None},
+        )
+        self.assert_published(previous, result)
+        self.assertEqual(result["old"], previous["candidate"])
+        self.assertEqual(result["old"]["generation"], 1)
+        self.assertEqual(previous["old"]["generation"], 0)
+
+    def test_immutable_update_still_refuses_before_staging(self):
+        previous = self.seed(synthetic_record("REGISTERED"))
+        with self.assertRaisesRegex(reset.ResetError, "immutable state field changed"):
+            self.store.publish(previous, manifestSha256="9" * 64, old=previous["old"])
+        self.assertEqual(self.read("state.json", reset.MAX_RECORD), reset.canonical(previous))
+        self.assertFalse((self.directory / "state.next").exists())
+
+    def test_changed_predecessor_is_not_overwritten_and_staged_successor_is_retained(self):
+        previous = self.seed(synthetic_record("REGISTERED"))
+        changed = reset.seal_state(dict(previous, sequence=previous["sequence"] + 1))
+        self.seed(changed)
+        with self.assertRaisesRegex(reset.ResetError, "state changed before publication"):
+            self.store.publish(previous, old=previous["old"])
+        self.assertEqual(self.read("state.json", reset.MAX_RECORD), reset.canonical(changed))
+        staged = reset.parse_record(self.read("state.next", reset.MAX_RECORD))
+        self.assertEqual(staged["previousHash"], previous["selfHash"])
+
+    def test_metadata_reservation_still_refuses_before_staging(self):
+        previous = self.seed(synthetic_record("REGISTERED"))
+        self.budget.return_value = (self.store.profile["metadataBytes"], 0)
+        with self.assertRaisesRegex(reset.ResetError, "metadata reservation"):
+            self.store.publish(previous, old=previous["old"])
+        self.assertEqual(self.read("state.json", reset.MAX_RECORD), reset.canonical(previous))
+        self.assertFalse((self.directory / "state.next").exists())
+
+
 class QualificationHookTests(unittest.TestCase):
     def test_normal_profile_never_reads_or_signals_a_qualification_hook(self):
         store = object.__new__(reset.Store)

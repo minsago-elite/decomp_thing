@@ -717,15 +717,16 @@ class Store:
         if after < before or after > before + 1:
             fail('reset phase transition is not monotonic')
 
-    def publish(self, old, **updates):
-        new = copy.deepcopy(old)
+    def publish(self, previous_state, /, **updates):
+        # State-field updates (notably 'old') must not bind the predecessor argument.
+        new = copy.deepcopy(previous_state)
         new.update(updates)
-        new['previousHash'] = old['selfHash']
-        new['sequence'] = old['sequence'] + 1
+        new['previousHash'] = previous_state['selfHash']
+        new['sequence'] = previous_state['sequence'] + 1
         new = seal_state(new)
-        self.validate_transition(old, new)
+        self.validate_transition(previous_state, new)
         data = canonical(new)
-        usage,entries = verify_metadata_budget(self,old)
+        usage,entries = verify_metadata_budget(self,previous_state)
         if usage + len(data) > self.profile['metadataBytes'] or entries + 1 > 32:
             fail('staged state would exceed metadata reservation')
         fd = self.open_file('state.next', os.O_WRONLY | os.O_CREAT | os.O_EXCL)
@@ -735,7 +736,7 @@ class Store:
         finally:
             self.drop(fd)
         current = parse_record(self.read('state.json', MAX_RECORD))
-        if current != old:
+        if current != previous_state:
             fail('state changed before publication')
         os.rename('state.next','state.json',src_dir_fd=self.private,dst_dir_fd=self.private)
         if new['phase'] == 'READY_PRIVATE':
