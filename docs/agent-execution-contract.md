@@ -67,11 +67,13 @@ replaces each authorized file with rollback on installation failure, and returns
 records. Its provenance remains explicitly deprecated and carries no ACP protocol, SDK or containment claim.
 The planned built-in harness is separate roadmap work; this compatibility adapter does not implement it.
 
-The `chatgpt-plan` selection is a separate supported local public-client flow for captured repair. It uses Sign in
+The `chatgpt-plan` selection is a separate supported local public-client flow for reconstruction and captured repair. It uses Sign in
 with ChatGPT OAuth tokens and the Responses API, lists only account-visible models, and does not use
 `BASE_URL`/`API_KEY` or claim ACP capabilities. `llm_bin_patch chatgpt login|status|models|use|logout` manages its
 local account state; `doctor --harness chatgpt-plan` checks authorization scope and the selected visible model
-without sending a prompt. The adapter is available to the repair workflow only.
+without sending a prompt. Reconstruction captures the declared headers and target implementation in memory, accepts only a replacement of that implementation, and retains compiler validation, execution evidence, and rollback. Captured reconstruction uses a schema-v3
+receipt binding the request, captured-input inventory, strategy, and exact source change; archive verification
+checks it separately from ACP receipts. It does not claim an ACP session or sandbox lifecycle. It does not support the patch workflow or ACP tools.
 
 The shared interface permits additional harnesses without moving provider response parsing into reconstruction or
 repair logic. Each adapter must still satisfy the consuming workflow's acceptance and evidence requirements.

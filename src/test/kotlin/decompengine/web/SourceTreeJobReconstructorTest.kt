@@ -22,6 +22,14 @@ import kotlin.test.assertTrue
 
 class SourceTreeJobReconstructorTest {
     @Test
+    fun `web reconstruction accepts explicit ChatGPT plan selection`() {
+        val strategy = selectWebReconstructionStrategy(mapOf("ACP_HARNESS" to "chatgpt-plan"))
+        assertIs<BoundedLlmModuleReconstructor>(strategy.reconstructor)
+        assertEquals("chatgpt-plan", strategy.harnessProvenance?.harness)
+        assertEquals(false, strategy.harnessProvenance?.deprecated)
+    }
+
+    @Test
     fun `busy display journal does not replace reconstruction configuration failure`() {
         val store = JobStore(createTempDirectory("web-reconstruction-busy-"))
         val job = store.createFromUpload("fixture.elf", elfFixture())

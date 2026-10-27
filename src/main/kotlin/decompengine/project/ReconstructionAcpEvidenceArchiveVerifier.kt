@@ -158,7 +158,7 @@ internal object ReconstructionAcpEvidenceArchiveVerifier {
                     "agent-generated module is unresolved at the archive release gate: $moduleId"
                 }
                 require(checkpoint.schemaVersion in setOf(4L, 5L) &&
-                    checkpoint.executionEvidenceSchemaVersion == 2L &&
+                    checkpoint.executionEvidenceSchemaVersion in setOf(2L, 3L) &&
                     checkpoint.executionReleaseComplete == true &&
                     checkpoint.executionTerminalOutcome == "returned-completed"
                 ) { "agent-generated module lacks release-complete receipt assessment: $moduleId" }
@@ -172,7 +172,8 @@ internal object ReconstructionAcpEvidenceArchiveVerifier {
                 val evidenceManifest = requireNotNull(manifestByPath[evidencePath]) {
                     "ACP execution evidence is absent from the source manifest: $evidencePath"
                 }
-                require(evidenceManifest.generator == ACP_RECEIPT_GENERATOR &&
+                require(evidenceManifest.generator == (if (checkpoint.executionEvidenceSchemaVersion == 3L)
+                    "captured-source-execution-receipt:v1" else ACP_RECEIPT_GENERATOR) &&
                     evidenceManifest.entityIds == source.entityIds
                 ) {
                     "ACP execution evidence manifest provenance is invalid: $evidencePath"
@@ -190,6 +191,13 @@ internal object ReconstructionAcpEvidenceArchiveVerifier {
                     "module checkpoint ACP evidence digest does not identify the archived artifact: $moduleId"
                 }
                 val receiptSourceBytes = repairedSource?.rootBytes ?: requirePayloadSize(source.path, payloadSizes)
+                if (checkpoint.executionEvidenceSchemaVersion == 3L) {
+                    verifyCapturedReconstructionReceipt(evidenceBytes, moduleId, receiptSource,
+                        receiptSourceBytes, checkpoint.executionRequestSha256, checkpoint.promptSha256,
+                        checkpoint.reconstructorIdentity)
+                    expectedExecutionPaths += evidencePath
+                    return@forEach
+                }
                 val verifiedReceipt = verifyExecutionReceipt(
                     bytes = evidenceBytes,
                     moduleId = moduleId,

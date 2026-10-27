@@ -97,6 +97,14 @@ class ReconstructionCliTest {
         }
     }
 
+    @Test
+    fun `ChatGPT plan reconstruction has explicit supported provenance`() {
+        val strategy = selectReconstructionStrategy(false, 4096, "chatgpt-plan", emptyMap())
+        assertIs<BoundedLlmModuleReconstructor>(strategy.reconstructor)
+        assertTrue(strategy.harnessProvenance.orEmpty().contains("chatgpt-plan"))
+        assertTrue(strategy.harnessProvenance.orEmpty().endsWith(":supported"))
+    }
+
     private fun legacyEnvironment(): Map<String, String> = mapOf(
         "BASE_URL" to "https://example.invalid/v1",
         "API_KEY" to "test-key",

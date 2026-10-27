@@ -87,7 +87,7 @@ private fun runReconstruct(args: List<String>) {
                 index += 2
             }
             "--harness" -> {
-                if (index + 1 >= args.size) reconstructUsageError("--harness requires acp or legacy-openai")
+                if (index + 1 >= args.size) reconstructUsageError("--harness requires acp, legacy-openai, or chatgpt-plan")
                 harnessOverride = args[index + 1]; index += 2
             }
             else -> {
@@ -149,9 +149,6 @@ internal fun selectReconstructionStrategy(
 
     val effectiveEnvironment = withHarnessOverride(environment, harnessOverride)
     val selection = AcpHarnessFactory.fromEnvironment(effectiveEnvironment)
-    require(selection.kind != decompengine.acp.AcpHarnessKind.CHATGPT_PLAN) {
-        "chatgpt-plan supports repair inference only; reconstruction requires acp or legacy-openai"
-    }
     return ReconstructionStrategy(
         BoundedLlmModuleReconstructor(
             selection.createHarness(),
@@ -165,7 +162,7 @@ internal fun selectReconstructionStrategy(
 
 private fun reconstructUsageError(message: String): Nothing {
     System.err.println(message)
-    System.err.println("usage: llm_bin_patch reconstruct <binary> --output <directory> [--evidence-only] [--max-context-chars <count>] [--harness acp|legacy-openai]")
+    System.err.println("usage: llm_bin_patch reconstruct <binary> --output <directory> [--evidence-only] [--max-context-chars <count>] [--harness acp|legacy-openai|chatgpt-plan]")
     kotlin.system.exitProcess(2)
 }
 
@@ -551,15 +548,15 @@ private fun printHelp() {
           llm_bin_patch runner [--control-dir <directory>] [--root <directory>]...
           llm_bin_patch repair <original-binary> <project-dir> [--reports <directory>] [--max-iterations <count>] [--explore] [--harness acp|legacy-openai|chatgpt-plan]
           llm_bin_patch explore <binary> --reports <directory> [--arg <value>] [--stdin <value>]
-          llm_bin_patch reconstruct <binary> --output <directory> [--evidence-only] [--max-context-chars <count>] [--harness acp|legacy-openai]
+          llm_bin_patch reconstruct <binary> --output <directory> [--evidence-only] [--max-context-chars <count>] [--harness acp|legacy-openai|chatgpt-plan]
           llm_bin_patch gcc-engine-plan <cc1|lto1> <stripped-binary> --profile <file> --ghidra-archive <file> --output <empty-private-directory> --scratch <provisioned-mount>
           llm_bin_patch web [--host 127.0.0.1] [--port 8000] [--listen-backlog 64] [--data-dir .decomp_engine/jobs] [--ui legacy|spa] [--base-path /] [--dev-frontend-origin http://127.0.0.1:5173]
 
         Agent harness selection for doctor, patch, reconstruction, and repair:
           --harness acp            use the ACP agent provisioned by ACP_CONFIG_FILE (default)
           --harness legacy-openai  use the deprecated direct OpenAI-compatible adapter
-          --harness chatgpt-plan  use locally signed-in ChatGPT plan credentials for repair inference
-          chatgpt-plan supports only the one-shot captured-repair contract, not ACP tools or arbitrary agent workflows.
+          --harness chatgpt-plan  use locally signed-in ChatGPT plan credentials for reconstruction and repair inference
+          chatgpt-plan supports the one-shot captured-source contract, not ACP tools or arbitrary agent workflows.
           Doctor performs an initialize-only ACP v1 preflight for all workflows by default.
           Doctor's --tools-only mode is agent-free and cannot be combined with agent selectors.
           Reconstruction's --evidence-only mode is agent-free and cannot be combined with --harness.

@@ -23,7 +23,7 @@ Full `doctor` loads the same strict `AcpHarnessFactory` selection used by workfl
 negotiates stable ACP v1 and all configured plus selected-workflow capabilities, and proves process-tree cleanup. It
 does not create a session or send a model prompt. `doctor --tools-only` is explicitly agent-free and does not read or
 resolve ACP configuration. The deprecated direct `GET /models` probe exists only behind exact
-`--harness legacy-openai` opt-in. Local captured repair inference can use `--harness chatgpt-plan` with the
+`--harness legacy-openai` opt-in. Local reconstruction and captured repair inference can use `--harness chatgpt-plan` with the
 Sign in with ChatGPT public-client OAuth flow and Responses API, without `BASE_URL` or `API_KEY`.
 
 Sign in locally, inspect available plan models, and then qualify the account without sending an inference prompt:
@@ -34,7 +34,9 @@ build/install/llm_bin_patch/bin/llm_bin_patch chatgpt models --select <visible-m
 build/install/llm_bin_patch/bin/llm_bin_patch doctor --harness chatgpt-plan
 ```
 
-Use `llm_bin_patch repair ... --harness chatgpt-plan` for the captured-repair flow. The credential store is private
+Use `llm_bin_patch reconstruct <binary> --output <directory> --harness chatgpt-plan` for reconstruction,
+or `llm_bin_patch repair ... --harness chatgpt-plan` for captured repair. For web reconstruction, set
+`ACP_HARNESS=chatgpt-plan` and leave `WEB_RECONSTRUCTION_MODE=agent`. The credential store is private
 local state under `~/.config/decomp_engine`; `DECOMP_CHATGPT_TOKEN_STORE` can select another absolute private directory.
 `chatgpt status`, `chatgpt use <account-id>`, and `chatgpt logout [--account <id>]` manage saved accounts.
 

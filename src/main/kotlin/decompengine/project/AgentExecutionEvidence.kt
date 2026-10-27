@@ -617,18 +617,23 @@ private fun JsonObject.receiptTextCommitment(
 /** Reconstruction-specific adapter for the immutable schema-v2 invocation artifact. */
 class ReconstructionAgentExecutionEvidence private constructor(
     private val moduleId: String,
-    private val document: AcpExecutionReceiptDocument,
+    private val document: AcpExecutionReceiptDocument?,
+    private val captured: CapturedReconstructionReceipt? = null,
 ) {
-    internal val requestSha256: String get() = document.requestSha256
-    internal val terminalOutcome: String get() = document.terminalOutcome
-    internal val releaseComplete: Boolean get() = document.releaseComplete
+    internal val schemaVersion: Int get() = if (captured != null) 3 else 2
+    internal val requestSha256: String get() = captured?.requestSha256 ?: requireNotNull(document).requestSha256
+    internal val terminalOutcome: String get() = if (captured != null) "returned-completed" else requireNotNull(document).terminalOutcome
+    internal val releaseComplete: Boolean get() = captured != null || requireNotNull(document).releaseComplete
 
     internal fun toReceiptJson(moduleId: String): String {
         require(moduleId == this.moduleId) { "reconstruction receipt is bound to a different module" }
-        return document.json
+        return captured?.json ?: requireNotNull(document).json
     }
 
     internal companion object {
+        fun captured(moduleId: String, receipt: CapturedReconstructionReceipt) =
+            ReconstructionAgentExecutionEvidence(moduleId, null, receipt)
+
         fun captureOrNull(
             request: AgentExecutionRequest,
             moduleId: String,
@@ -795,6 +800,7 @@ internal class ArchivedAgentEventSnapshot(
     val truncationReason: String?,
 ) {
     val events: List<ArchivedAgentEvent> = Collections.unmodifiableList(ArrayList(events))
+    internal fun fileChanges(): List<AgentFileChange> = events.filterIsInstance<ArchivedFileChangeEvent>().map { it.change }
 
     init {
         require(this.events.size <= MAXIMUM_ARCHIVED_AGENT_EVENTS) {

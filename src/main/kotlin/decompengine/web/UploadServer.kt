@@ -108,9 +108,6 @@ internal fun selectWebReconstructionStrategy(
     return when (configuredMode) {
         WebReconstructionMode.AGENT.configurationValue -> {
             val selection = AcpHarnessFactory.fromEnvironment(environment)
-            require(selection.kind != decompengine.acp.AcpHarnessKind.CHATGPT_PLAN) {
-                "chatgpt-plan supports repair inference only; web reconstruction requires acp or legacy-openai"
-            }
             WebReconstructionStrategy(
                 WebReconstructionMode.AGENT,
                 BoundedLlmModuleReconstructor(

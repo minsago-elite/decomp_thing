@@ -38,6 +38,54 @@ import kotlinx.serialization.json.jsonPrimitive
 
 class SourceTreeTest {
     @Test
+    fun `captured source inference reconstructs modules and rejects unauthorized edits`() {
+        for (scenario in listOf("valid", "unauthorized", "invalid-c")) {
+            val unauthorized = scenario == "unauthorized"
+            val project = createTempDirectory("source-captured-inference-")
+            var calls = 0
+            val client = object : decompengine.repair.RepairClient {
+                override fun requestRepair(request: decompengine.repair.RepairRequest, invocation: decompengine.repair.RepairClientInvocation): decompengine.repair.RepairResponse {
+                    calls++
+                    assertTrue(request.prompt.contains("fn_0000000000401000"))
+                    assertTrue(request.projectFiles.containsKey("include/modules/parse.h"))
+                    assertTrue(request.projectFiles.containsKey("src/modules/parse.c"))
+                    return decompengine.repair.RepairResponse("reconstructed", listOf(
+                        decompengine.repair.SourcePatch(
+                            if (unauthorized) "include/modules/parse.h" else "src/modules/parse.c",
+                            if (scenario == "invalid-c") "/* fn_0000000000401000 */\nint parse_input(void) { return absent_symbol; }\n"
+                            else "/* fn_0000000000401000 */\nint parse_input(void) { return 17; }\n",
+                        ),
+                    ))
+                }
+            }
+            val manifest = SourceTreeGenerator.generate(oneModuleModel(), project,
+                reconstructor = BoundedLlmModuleReconstructor(decompengine.repair.RepairClientAgentHarness(client)))
+            assertEquals(1, calls)
+            if (scenario != "valid") {
+                assertEquals(listOf("fn_0000000000401000"), manifest.unresolvedImplementationIds)
+                assertFalse(project.resolve("include/modules/parse.h").readText().contains("return 17;"))
+            } else {
+                assertTrue(manifest.unresolvedImplementationIds.isEmpty())
+                assertTrue(project.resolve("src/modules/parse.c").readText().contains("return 17;"))
+                assertTrue(project.resolve("reports/modules/parse.json").readText().contains("executionEvidenceSha256"))
+                val hashes = manifest.files.associate { it.path to it.sha256 }
+                val sizes = manifest.files.associate { it.path to Files.size(project.resolve(it.path)) }
+                assertTrue(ReconstructionAcpEvidenceArchiveVerifier.verify(project, hashes, sizes, manifest,
+                    GeneratedCMakeReconstructionProfile.descriptor).isEmpty())
+                val receiptFile = manifest.files.single { it.generator == "captured-source-execution-receipt:v1" }
+                val bytes = project.resolve(receiptFile.path).readBytes()
+                val checkpoint = Json.parseToJsonElement(project.resolve("reports/modules/parse.json").readText()).jsonObject
+                val source = manifest.files.single { it.path == "src/modules/parse.c" }
+                assertFailsWith<IllegalArgumentException> {
+                    verifyCapturedReconstructionReceipt(bytes, "other_module", source, sizes.getValue(source.path),
+                        checkpoint.getValue("executionRequestSha256").jsonPrimitive.content,
+                        source.promptSha256!!, checkpoint.getValue("reconstructorIdentity").jsonPrimitive.content)
+                }
+            }
+        }
+    }
+
+    @Test
     fun `explicit byte typedef is resolved by the compiler`() {
         val project = createTempDirectory("source-defined-byte-type-")
         val reconstructor = ModuleReconstructor {

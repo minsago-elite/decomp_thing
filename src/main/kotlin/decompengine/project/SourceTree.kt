@@ -3,6 +3,13 @@ package decompengine.project
 import decompengine.assessment.HeuristicScoreInterpretation
 import decompengine.acp.LinuxDescriptor
 import decompengine.acp.LinuxFilesystemSyscalls
+import decompengine.repair.CapturedRepairAgentHarness
+import decompengine.repair.CapturedRepairStagingAuthority
+import decompengine.repair.RepairResourceBudget
+import decompengine.agent.AgentExecutionResult
+import decompengine.agent.AgentFileChange
+import decompengine.agent.AgentFileChangeEvent
+import decompengine.agent.captureAgentExecutionReceipt
 import decompengine.agent.AgentAccessPolicy
 import decompengine.agent.AgentContextInput
 import decompengine.agent.AgentExecutionRequest
@@ -217,6 +224,7 @@ class BoundedLlmModuleReconstructor(
         request: ModuleReconstructionRequest,
         acceptedRevision: String? = request.acceptedSourceSha256,
     ): AgentSessionContinuation? {
+        if (harness is CapturedRepairAgentHarness) return null
         val fingerprint = request.sessionEvidenceFingerprint ?: return null
         if (harnessProvenanceSha256 == null) return null
         val root = request.workspaceRoot.toAbsolutePath().normalize()
@@ -347,7 +355,13 @@ class BoundedLlmModuleReconstructor(
                 contextInputs = listOf(
                     AgentContextInput("recovered-module-evidence", evidence),
                     AgentContextInput("observed-behavior", observed),
-                ),
+                ) + if (harness is CapturedRepairAgentHarness) listOf(AgentContextInput(
+                    "captured-source-inventory",
+                    (files.mapValues { (_, content) -> sha256(content.toByteArray(StandardCharsets.UTF_8)) } +
+                        (target to sha256(before ?: byteArrayOf()))).toSortedMap().entries.joinToString("\n") {
+                        (path, digest) -> "$digest  $path"
+                    },
+                )) else emptyList(),
                 accessPolicy = AgentAccessPolicy(
                     readRules + AgentPathRule(
                         targetPath,
@@ -358,12 +372,49 @@ class BoundedLlmModuleReconstructor(
             )
             val eventRecorder = BoundedAgentExecutionEventRecorder()
             val taskProgress = progress.beginTask(request.module.id, agentRequest)
-            val receipt = harness.executeReceipt(agentRequest) { event ->
+            val onEvent: (decompengine.agent.AgentExecutionEvent) -> Unit = { event ->
                 eventRecorder.record(event)
                 taskProgress.event(event)
             }
+            val receipt = if (harness is CapturedRepairAgentHarness) {
+                // Capture only the declared inputs. Providers never receive a writable host workspace.
+                val initial = files.mapValues { (_, content) -> content.toByteArray(StandardCharsets.UTF_8) } +
+                    (target to (before ?: byteArrayOf()))
+                fun actualChange(change: AgentFileChange): AgentFileChange =
+                    if (before == null && change.path == targetPath) AgentFileChange(
+                        change.path, AgentFileChangeKind.CREATED, null, change.afterSha256, change.sizeBytes,
+                    ) else change
+                captureAgentExecutionReceipt(agentRequest) {
+                    val captured = CapturedRepairStagingAuthority.executeReceipt(
+                        harness, initial, setOf(target), RepairResourceBudget(), { agentRequest },
+                    ) { event ->
+                        onEvent(if (event is AgentFileChangeEvent)
+                            AgentFileChangeEvent(event.sequence, actualChange(event.change)) else event)
+                    }
+                    val result = captured.receipt.requireResult()
+                    if (result.stopReason == AgentStopReason.COMPLETED) {
+                        val change = result.changes.single()
+                        val bytes = requireNotNull(captured.files[target])
+                        require(change.path == targetPath && change.kind == AgentFileChangeKind.MODIFIED &&
+                            change.beforeSha256 == sha256(initial.getValue(target)) &&
+                            change.afterSha256 == sha256(bytes) &&
+                            (change.sizeBytes == null || change.sizeBytes == bytes.size.toLong())) {
+                            "captured reconstruction result does not match $target"
+                        }
+                        sourcePath.parent.createDirectories()
+                        sourcePath.writeBytes(bytes)
+                    }
+                    AgentExecutionResult(result.stopReason, result.summary, result.changes.map(::actualChange),
+                        result.session, result.usage)
+                }
+            } else harness.executeReceipt(agentRequest, onEvent)
             taskProgress.complete(receipt)
-            invocationEvidence = ReconstructionAgentExecutionEvidence.captureOrNull(
+            invocationEvidence = if (harness is CapturedRepairAgentHarness &&
+                runCatching { receipt.requireResult().stopReason == AgentStopReason.COMPLETED }.getOrDefault(false)
+            ) ReconstructionAgentExecutionEvidence.captured(request.module.id,
+                CapturedReconstructionReceipt.capture(request.module.id, promptSha256, cacheIdentity(),
+                    agentRequest, receipt, eventRecorder.receiptSnapshot()))
+            else ReconstructionAgentExecutionEvidence.captureOrNull(
                 request = agentRequest,
                 moduleId = request.module.id,
                 promptSha256 = promptSha256,
@@ -911,7 +962,9 @@ object SourceTreeGenerator {
                     profile,
                     evidencePath,
                     evidenceText,
-                    if (checkpoint.executionEvidenceSchemaVersion == 2) {
+                    if (checkpoint.executionEvidenceSchemaVersion == 3) {
+                        "captured-source-execution-receipt:v1"
+                    } else if (checkpoint.executionEvidenceSchemaVersion == 2) {
                         "acp-execution-receipt:v2"
                     } else {
                         "acp-execution-evidence:v1"
@@ -1142,7 +1195,7 @@ object SourceTreeGenerator {
             require(executionRequestSha256 == null || executionRequestSha256.matches(Regex("[0-9a-f]{64}"))) {
                 "module checkpoint execution request digest is invalid"
             }
-            require(executionEvidenceSchemaVersion == null || executionEvidenceSchemaVersion == 2) {
+            require(executionEvidenceSchemaVersion == null || executionEvidenceSchemaVersion in setOf(2, 3)) {
                 "module checkpoint execution evidence schema is unsupported"
             }
             require(executionTerminalOutcome == null ||
@@ -1298,7 +1351,7 @@ object SourceTreeGenerator {
         val persisted = PersistedReconstructionExecutionEvidence(
             path = evidencePath,
             sha256 = sha256(text.toByteArray()),
-            schemaVersion = 2,
+            schemaVersion = evidence.schemaVersion,
             requestSha256 = evidence.requestSha256,
             terminalOutcome = evidence.terminalOutcome,
             releaseComplete = evidence.releaseComplete,
@@ -1416,7 +1469,7 @@ object SourceTreeGenerator {
             if (reconstructed.agentExecutionEvidence?.releaseComplete != true) {
                 issues += ModuleReconstructionIssue(
                     "agent-execution-evidence-incomplete",
-                    "agent candidate lacks complete invocation-bound ACP release evidence",
+                    "agent candidate lacks complete invocation-bound execution evidence",
                     entityIds,
                 )
             }
