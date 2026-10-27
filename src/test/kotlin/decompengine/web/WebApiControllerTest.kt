@@ -370,7 +370,8 @@ class WebApiControllerTest {
             )).attempt
         }
         val server = UploadServer("127.0.0.1", 0, root, JobAnalyzer { _, _ -> error("Unexpected analysis") },
-            JobReconstructor { _, _ -> error("Unexpected reconstruction") }, uiMode = WebUiMode.SPA, basePath = "/workbench/")
+            JobReconstructor { _, _ -> error("Unexpected reconstruction") }, uiMode = WebUiMode.SPA, basePath = "/workbench/",
+            redactionEnvironment = mapOf("API_TOKEN" to "LogCanary0123456789abcdef"))
         server.start()
         try {
             val path = "/workbench/api/v1/jobs/${job.id}/runs/${run.runId}/logs/build"
@@ -402,6 +403,19 @@ class WebApiControllerTest {
             assertTrue(download.body().contains("# job ${job.id} attempt ${run.runId}"))
             assertTrue(download.body().contains(lines.first() + "\n"))
             assertError(request(server, "$path/content", headers = headers + mapOf("Accept" to "text/plain", "Range" to "bytes=0-1")), 400, "UNSUPPORTED_HEADER")
+            Files.writeString(log, "password=hunter2 LogCanary0123456789abcdef /home/redaction-canary/private.c\n")
+            val redacted = assertEnvelopeRaw(request(server, path, headers = headers), "logRange")
+            val safeLine = redacted.getValue("lines").jsonArray.single().jsonObject.getValue("text").jsonPrimitive.content
+            assertEquals("password=[redacted] [redacted] [private-path]", safeLine)
+            assertEquals("1", redacted.getValue("redactedLines").jsonPrimitive.content)
+            val safeDownload = request(server, "$path/content", headers = headers + ("Accept" to "text/plain"))
+            assertEquals(200, safeDownload.statusCode())
+            assertTrue(safeDownload.body().endsWith(safeLine + "\n"))
+            assertEquals(safeDownload.body().toByteArray(Charsets.UTF_8).size.toString(),
+                safeDownload.headers().firstValue("Content-Length").orElseThrow())
+            for (secret in listOf("hunter2", "LogCanary0123456789abcdef", "/home/redaction-canary/private.c")) {
+                assertFalse(safeDownload.body().contains(secret), secret)
+            }
             Files.write(log, ByteArray(1_000_001) { '\n'.code.toByte() })
             assertEquals("oversized", assertEnvelopeRaw(request(server, "$path?tail=true&limit=1", headers = headers), "logRange")
                 .getValue("state").jsonPrimitive.content)

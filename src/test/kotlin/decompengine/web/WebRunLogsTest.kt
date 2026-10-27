@@ -127,6 +127,28 @@ class WebRunLogsTest {
         assertEquals("0", search(root.toString()).getValue("matchCount").jsonPrimitive.content)
     }
 
+    @Test fun `listener credentials are redacted before search truncation and download`() {
+        val (jobId, run) = attempt()
+        val canary = "LogCanary0123456789abcdef"
+        val policy = WebRedactionPolicy.create(mapOf("API_TOKEN" to canary), emptyList(), emptyList())
+        val prefix = "x".repeat(WebRunLogs.MAXIMUM_LINE_CHARACTERS - 8)
+        val capture = assertNotNull(logs.capture(("password=hunter2 $canary /tmp/private.c\n" +
+            "$prefix$canary\n").toByteArray(), sha, policy))
+        assertEquals(2, capture.redactedLines)
+        assertTrue(capture.allLines().all { it.redacted })
+        val range = logs.range(jobId, run, capture, false, logs.parseQuery(null), Instant.EPOCH)
+        val live = range.getValue("lines").jsonArray.map { it.jsonObject.getValue("text").jsonPrimitive.content }
+        val download = logs.download(jobId, run, capture, Instant.EPOCH).decodeToString()
+        assertEquals("password=[redacted] [redacted] [private-path]", live.first())
+        assertTrue(download.endsWith(live.first() + "\n" + live.last() + " [line truncated]\n"))
+        for (secret in listOf("hunter2", canary, "/tmp/private.c", canary.take(8))) {
+            assertFalse(download.contains(secret), secret)
+        }
+        val search = logs.range(jobId, run, capture, false, WebRunLogs.Query(1, false, 200, canary), Instant.EPOCH)
+            .getValue("search").jsonObject
+        assertEquals("0", search.getValue("matchCount").jsonPrimitive.content)
+    }
+
     @Test fun `downloads share the live redaction and carry provenance`() {
         val (jobId, run) = attempt()
         val capture = assertNotNull(logs.capture("first $root/a.c\n\u001b[1mbold\n".toByteArray(), sha))

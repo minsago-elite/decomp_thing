@@ -68,7 +68,7 @@ internal class WebRunLogs(private val redaction: WebLogRedaction) {
     }
 
     /** Null when the log exceeds the line budget; callers report it as oversized, never as a failure. */
-    fun capture(bytes: ByteArray, sha256: String): Capture? {
+    fun capture(bytes: ByteArray, sha256: String, policy: WebRedactionPolicy = WebRedactionPolicy.BASELINE): Capture? {
         require(bytes.size <= MAXIMUM_LOG_BYTES)
         var newlines = 0
         for (byte in bytes) if (byte == '\n'.code.toByte()) newlines += 1
@@ -82,7 +82,11 @@ internal class WebRunLogs(private val redaction: WebLogRedaction) {
             var raw = bytes.copyOfRange(start, end)
             if (raw.isNotEmpty() && raw.last() == '\r'.code.toByte()) raw = raw.copyOf(raw.size - 1)
             val (decoded, replaced) = decode(raw)
-            val (redacted, changed) = redaction.apply(decoded)
+            val (rootRedacted, rootChanged) = redaction.apply(decoded)
+            // Apply the listener policy before truncation, escaping, search and redaction counts.
+            // Both range and download consume this same projection; a cut cannot hide a secret's suffix.
+            val redacted = policy.text(rootRedacted)
+            val changed = rootChanged || redacted != rootRedacted
             val visible = visibleControls(redacted)
             val truncated = visible.length > MAXIMUM_LINE_CHARACTERS
             // Never cut a surrogate pair in half.
