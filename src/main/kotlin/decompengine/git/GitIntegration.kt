@@ -93,14 +93,16 @@ internal object GitIntegrations {
         val result = runner.run(GitInvocation("merge", listOf("-q", "--no-verify", "--no-gpg-sign", "--no-edit", "--no-stat", "--no-log",
             "--no-overwrite-ignore",
             "--no-squash", "--no-signoff", "--no-autostash", "--no-rerere-autoupdate", "--no-progress") + mode + listOf(target),
-            gitDir = gitDir, workTree = workTree, variables = identity, allowedExitCodes = setOf(0, 1, 2, 128), limits = LIMITS))
+            gitDir = gitDir, workTree = workTree, variables = identity, allowedExitCodes = setOf(0, 1, 2, 128), limits = LIMITS,
+            drainDiagnostics = true))
         if (result.exitCode == 0) return false
         if (mergeInProgress(gitDir)) return true
         throw GitOperationRefusal("MERGE_REFUSED", "Git refused the integration, for example because a local file would be overwritten. Nothing was changed.")
     }
 
     fun abort(runner: GitCommandRunner, gitDir: Path, workTree: Path) {
-        val result = runner.run(GitInvocation("merge", listOf("--abort"), gitDir = gitDir, workTree = workTree, allowedExitCodes = setOf(0, 128), limits = LIMITS))
+        val result = runner.run(GitInvocation("merge", listOf("--abort"), gitDir = gitDir, workTree = workTree, allowedExitCodes = setOf(0, 128), limits = LIMITS,
+            drainDiagnostics = true))
         if (result.exitCode != 0) throw GitOperationRefusal("ABORT_REFUSED", "Git could not abort the merge. Inspect the work tree before any new request.")
     }
 

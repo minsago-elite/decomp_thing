@@ -231,9 +231,13 @@ data class GitInvocation(
     /** Required by, and only allowed for, the remote transport subcommands. */
     val transport: GitTransportContext? = null,
     val control: GitProcessControl? = null,
+    /** Merge output is diagnostic, not structured data: retain bounded prefixes but drain to exit.
+     * Unlike truncateStdout this never terminates a mutation halfway through index publication. */
+    val drainDiagnostics: Boolean = false,
 ) {
     init {
         require(subcommand in SUBCOMMANDS) { "Git subcommand is not allowlisted" }
+        require(!drainDiagnostics || (subcommand == "merge" && !truncateStdout)) { "Only merge diagnostics may be drained" }
         require(arguments.size <= 256 && arguments.all { it.length <= 4096 && '\u0000' !in it }) { "Git arguments are unbounded" }
         require(gitDir == null || gitDir.isAbsolute) { "Git directory must be absolute" }
         require(workTree == null || (workTree.isAbsolute && gitDir != null)) { "Git work tree requires an absolute path and Git directory" }
@@ -280,7 +284,7 @@ class GitCommandRunner internal constructor(val executable: Path, val environmen
     /** Drain large structured listings without retaining their complete stdout in memory. The
      * consumer runs serially on the stdout reader, and its failures terminate the child. */
     internal fun stream(invocation: GitInvocation, maxBytes: Long, consume: (ByteArray, Int) -> Unit) {
-        require(!invocation.truncateStdout && maxBytes in 1..256L * 1024 * 1024)
+        require(!invocation.truncateStdout && !invocation.drainDiagnostics && maxBytes in 1..256L * 1024 * 1024)
         execute(invocation, StreamOutput(maxBytes, consume))
     }
 
@@ -310,7 +314,7 @@ class GitCommandRunner internal constructor(val executable: Path, val environmen
             while (process.isAlive) {
                 stdout.failure?.let { terminate(process); throw it }
                 if (stdout.overflowed && invocation.truncateStdout) break
-                if (stdout.overflowed || stderr.overflowed) {
+                if (!invocation.drainDiagnostics && (stdout.overflowed || stderr.overflowed)) {
                     terminate(process)
                     throw GitCommandException(GitCommandException.Kind.OUTPUT_LIMIT, "Git output exceeded its bound.")
                 }
@@ -335,7 +339,7 @@ class GitCommandRunner internal constructor(val executable: Path, val environmen
             // The readers can still be draining when the process exits, so only their final state
             // decides truncation. Stderr keeps its own limit either way.
             val truncated = stdout.overflowed && invocation.truncateStdout
-            if (stderr.overflowed || (stdout.overflowed && !truncated)) {
+            if (!invocation.drainDiagnostics && (stderr.overflowed || (stdout.overflowed && !truncated))) {
                 throw GitCommandException(GitCommandException.Kind.OUTPUT_LIMIT, "Git output exceeded its bound.")
             }
             val exit = if (truncated) -1 else process.exitValue()
@@ -343,7 +347,7 @@ class GitCommandRunner internal constructor(val executable: Path, val environmen
                 throw GitCommandException(GitCommandException.Kind.FAILED, "Git reported a failure.", exit,
                     diagnostic = stderr.bytes().toString(Charsets.UTF_8))
             }
-            return GitCommandResult(exit, stdout.bytes(), stderr.bytes(), truncated)
+            return GitCommandResult(exit, stdout.bytes(), stderr.bytes(), stdout.overflowed)
         } catch (interrupted: InterruptedException) {
             terminate(process)
             Thread.currentThread().interrupt()

@@ -101,6 +101,43 @@ class GitAdapterTest {
         assertFalse(failure.message!!.contains("PRIVATE_CANARY"))
     }
 
+    @Test fun `merge diagnostics drain both streams without killing the mutation`(): Unit = GitTestRepositories().use { f ->
+        val published = f.root.resolve("published")
+        val runner = GitCommandRunner(fakeGit(f.root.resolve("merge-output"),
+            "head -c 2097152 /dev/zero; head -c 2097152 /dev/zero >&2; touch '$published'; exit 1"), f.environment)
+        val result = runner.run(GitInvocation("merge", drainDiagnostics = true, allowedExitCodes = setOf(1),
+            limits = GitExecutionLimits(maxStdoutBytes = 4096, maxStderrBytes = 4096)))
+        assertTrue(published.exists()); assertEquals(1, result.exitCode)
+        assertTrue(result.stdoutTruncated); assertEquals(4096, result.stdout.size)
+        assertEquals(4096, result.diagnostic.length)
+        assertFailsWith<IllegalArgumentException> { GitInvocation("status", drainDiagnostics = true) }
+        assertFailsWith<IllegalArgumentException> { GitInvocation("merge", drainDiagnostics = true, truncateStdout = true) }
+        val slow = GitCommandRunner(fakeGit(f.root.resolve("slow-merge"), "sleep 30"), f.environment)
+        assertEquals(GitCommandException.Kind.TIMED_OUT, assertFailsWith<GitCommandException> {
+            slow.run(GitInvocation("merge", drainDiagnostics = true, limits = GitExecutionLimits(Duration.ofMillis(200))))
+        }.kind)
+    }
+
+    @Test fun `large real merge retains conflict index and abort state beyond diagnostic capture`(): Unit = GitTestRepositories().use { f ->
+        val (gitDir, workTree) = f.managed("large-merge")
+        val paths = (0 until 7000).map { "conflict-${it.toString().padStart(5, '0')}-${"p".repeat(64)}.c" }
+        fun write(text: String) { paths.forEach { Files.writeString(workTree.resolve(it), text) } }
+        write("base\n"); val base = f.commitAll(gitDir, workTree, "base")
+        write("ours\n"); val ours = f.commitAll(gitDir, workTree, "ours")
+        f.git("--git-dir=$gitDir", "--work-tree=$workTree", "reset", "--hard", base)
+        write("theirs\n"); val theirs = f.commitAll(gitDir, workTree, "theirs")
+        f.git("--git-dir=$gitDir", "--work-tree=$workTree", "reset", "--hard", ours)
+        assertTrue(GitIntegrations.merge(f.runner, gitDir, workTree, theirs, GitIntegrationStrategy.MERGE,
+            "large integration", GitRepositoryPolicy()))
+        assertTrue(GitIntegrations.mergeInProgress(gitDir))
+        assertEquals(7000, GitIntegrations.conflicts(f.runner, gitDir, workTree).size)
+        GitIntegrations.abort(f.runner, gitDir, workTree)
+        assertFalse(GitIntegrations.mergeInProgress(gitDir))
+        assertTrue(GitIntegrations.conflicts(f.runner, gitDir, workTree).isEmpty())
+        assertEquals(ours, f.git("--git-dir=$gitDir", "rev-parse", "HEAD").trim())
+        paths.forEach { assertEquals("ours\n", Files.readString(workTree.resolve(it))) }
+    }
+
     @Test fun `branch names are validated by local syntax and check-ref-format`(): Unit = GitTestRepositories().use { f ->
         listOf("main", "trunk", "feature/one", "release-1.2", "功能", "x_y").forEach {
             assertEquals(it, GitRefNames.requireBranchName(f.runner, it))
