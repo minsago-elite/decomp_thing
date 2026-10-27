@@ -116,7 +116,12 @@ class FullTreeDiskScratchAdmissionMountedTest {
         val subtreeMount = mountedAt(fixture.subtree)
         assertEquals("ext4", subtreeMount.fileSystemType)
         assertNotEquals(Path.of("/"), subtreeMount.root)
-        refuseWithoutMutation(fixture.subtree)
+        // The original mount remains visible on the same device. Do not credit the later
+        // alias refusal if validation of the bind mount's non-root subtree is bypassed.
+        refuseWithoutMutation(
+            fixture.subtree,
+            expectedMessage = "disk-scratch path is not the root of a safe dedicated ext4 filesystem",
+        )
     }
 
     @Test
