@@ -35,6 +35,19 @@ class StableLogReadTest {
                 // A later successful capture is allowed; no bytes from the obsolete descriptor escape.
                 if (!remove) assertEquals("new recording", readStableRegularFile(root, "reports/build.log", 1024).bytes.decodeToString())
             }
+            // ENOENT in a stale pinned parent is not absence in the selected namespace.
+            var checkpoints = 0
+            assertFailsWith<IllegalArgumentException> {
+                readStableRegularFile(root, "reports/build.log", 1024, cancellationCheck = {
+                    checkpoints++
+                    if (checkpoints == 4) {
+                        Files.move(reports, root.resolve("detached-reports"), ATOMIC_MOVE)
+                        Files.createDirectory(reports)
+                        Files.writeString(log, "published in replacement parent")
+                    }
+                })
+            }
+            assertTrue(checkpoints >= 4)
         } finally { root.toFile().deleteRecursively() }
     }
 }
