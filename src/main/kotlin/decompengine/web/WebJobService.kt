@@ -705,14 +705,19 @@ class WebJobService(
     internal fun readArtifactRevisionSources(jobId: String, runId: String, revisionId: String,
         budget: WebArtifactReadBudget): WebRevisionSourceSnapshot {
         val reference = revisionSourceReference(jobId, runId, revisionId)
-        fun read(selectedJobId: String, path: String, maximum: Long): decompengine.repair.StableRegularFile {
+        fun authorize(selectedJobId: String) {
             check(selectedJobId == jobId)
             budget.cancellationCheck()
             synchronized(this) { requireInitializedRead(); getAttempt(jobId, runId) }
+        }
+        fun read(selectedJobId: String, path: String, maximum: Long): decompengine.repair.StableRegularFile {
+            authorize(selectedJobId)
             return store.readArtifactInventoryFile(jobId, path, maximum, budget::reserve, budget.cancellationCheck)
         }
-        val evidence = WebSourceCatalogEvidence(sourceProfiles,
-            { selectedJobId -> read(selectedJobId, "input.elf", decompengine.jobs.JobStore.MAX_INPUT_BYTES.toLong()) }, ::read)
+        val evidence = WebSourceCatalogEvidence(sourceProfiles, { selectedJobId ->
+            authorize(selectedJobId)
+            store.readArtifactInventoryInput(selectedJobId, budget::reserve, budget.cancellationCheck)
+        }, ::read)
         val snapshot = evidence.readRevision(reference)
         budget.cancellationCheck()
         if (revisionSourceReference(jobId, runId, revisionId) != reference) revisionSourceChanged()
