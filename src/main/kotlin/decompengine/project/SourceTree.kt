@@ -1934,8 +1934,7 @@ internal fun normalizedPrototype(function: RecoveredFunction): String {
     val name = safeCName(function.name)
     if (name == "main") return "int main(int argc, char **argv)"
     val rawReturn = raw.substringBefore(function.name).trim()
-    val decompiledReturn = function.decompiledC?.trimStart()?.substringBefore(function.name)?.trim()?.substringAfterLast('\n')?.trim()
-    val returnType = decompiledReturn?.takeIf(::portableReturnType) ?: rawReturn.takeIf(::portableReturnType) ?: "int"
+    val returnType = rawReturn.takeIf(::portableReturnType) ?: "int"
     // Parameters come from the exported typed prototype, never from display C.
     val match = Regex("^.*?\\b${Regex.escape(function.name)}\\s*\\(([^()]*)\\)\\s*$").matchEntire(raw)
     val parameters = match?.groupValues?.get(1)?.trim().orEmpty()
@@ -1948,7 +1947,7 @@ internal fun normalizedPrototype(function: RecoveredFunction): String {
 }
 
 private fun portableReturnType(value: String): Boolean = value.matches(
-    Regex("(void|char|short|int|long|float|double|size_t|u?int(8|16|32|64)_t)(\\s+long|\\s*\\*)*"),
+    Regex("(?:(?:const|volatile)\\s+)*(?:(?:signed|unsigned)\\s+)?(void|char|short|int|long|float|double|size_t|u?int(8|16|32|64)_t)(?:\\s+(?:long|int)|\\s*\\*)*"),
 )
 
 private fun globalDeclaration(global: RecoveredGlobal, external: Boolean): String {

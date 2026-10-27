@@ -69,6 +69,10 @@ class SourceTreeTest {
             GeneratedCMakeReconstructionProfile.descriptor).passed)
         assertEquals("uint64_t parse_input(uint64_t value)", normalizedPrototype(function.copy(
             prototype = "undefined8 parse_input(undefined8 value)")))
+        assertEquals("unsigned int parse_input(void)", normalizedPrototype(function.copy(
+            prototype = "uint parse_input(void)", decompiledC = "void parse_input(void) {}")))
+        assertEquals("signed char parse_input(void)", normalizedPrototype(function.copy(
+            prototype = "signed char parse_input(void)", decompiledC = "int parse_input(void) {}")))
         assertEquals("int parse_input(void)", normalizedPrototype(function.copy(
             prototype = "int parse_input(void); int injected(void)")))
     }
