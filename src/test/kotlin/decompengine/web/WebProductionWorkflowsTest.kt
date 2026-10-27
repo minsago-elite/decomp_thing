@@ -543,7 +543,12 @@ class WebProductionWorkflowsTest {
         assertEquals("SANDBOX_HELPER_MISSING", passive.reasonCode); assertTrue(passive.prerequisites!!.agent.available)
         val failed = passive.withAgentInspection(WebAgentPreflightSnapshot("failed", "inspection_1", WebAgentPreflight.REASON_FAILED,
             passive.configurationIdentity))
-        assertEquals(WebAgentPreflight.REASON_FAILED, failed.prerequisites!!.agent.reasonCode)
+        val failedFacts = assertNotNull(failed.prerequisites)
+        assertEquals(WebAgentPreflight.REASON_FAILED, failedFacts.agent.reasonCode)
+        assertEquals(WebAgentPreflight.REASON_FAILED, failedFacts.harness(WebAgentHarness.LEGACY_OPENAI).reasonCode)
+        assertEquals(passive.prerequisites!!.harnesses.getValue(WebAgentHarness.ACP), failedFacts.harnesses.getValue(WebAgentHarness.ACP))
+        assertEquals(passive.prerequisites!!.sandbox, failedFacts.sandbox)
+        assertEquals(passive.prerequisites!!.ghidra, failedFacts.ghidra)
         val engines = FakeEngines()
         val options = adapters(engines) + ReconstructWorkflowAdapter(engines, FAST, WebReconstructionMode.AGENT,
             WebAgentHarness.LEGACY_OPENAI, emptyList())
@@ -551,9 +556,51 @@ class WebProductionWorkflowsTest {
         assertEquals("unavailable", reported.getValue("workflow-reconstruct-agent-legacy-openai").getValue("state").jsonPrimitive.content)
         assertEquals(WebAgentPreflight.REASON_FAILED, reported.getValue("workflow-reconstruct-agent-legacy-openai").getValue("reasonCode").jsonPrimitive.content)
         assertEquals("HARNESS_NOT_CONFIGURED", reported.getValue("workflow-reconstruct-agent-acp").getValue("reasonCode").jsonPrimitive.content)
+        assertEquals(passive.reasonCode, failed.reasonCode, "the independent sandbox failure must be retained")
         // An inspection of a different configuration says nothing about the current agent.
         val foreign = passive.withAgentInspection(WebAgentPreflightSnapshot("failed", "inspection_2", WebAgentPreflight.REASON_FAILED, "other_configuration"))
-        assertTrue(foreign.prerequisites!!.agent.available)
+        assertEquals(passive.prerequisites, foreign.prerequisites)
+
+        val store = JobStore(root.resolve("jobs")); val job = store.createFromUpload("inspection.elf", elfFixture())
+        service(store, options).use { service ->
+            service.initializeExistingStorage()
+            val request = NewWorkflowAttempt(WorkflowKind.RECONSTRUCT, WebWorkflowDefaults.RECONSTRUCT_AGENT,
+                harnessCapabilityId = "agent-legacy-openai")
+            engines.reconstructBody = { _, _, _ -> error("inert agent failure") }
+            // Reconstruction has no sandbox requirement: this start is admitted before inspection fails.
+            val attempt = service.requestDurableStart(job.id, version(service, job.id), request,
+                "before_failed_inspection", passive.prerequisites).attempt
+            assertEquals(WorkflowRunState.FAILED, attempt.state); assertEquals(1, engines.calls.get())
+            val before = root.resolve("jobs").resolve(job.id).resolve("workflow-state.json").readBytes()
+            assertCode("WORKFLOW_PREREQUISITE_UNAVAILABLE") {
+                service.requestDurableStart(job.id, version(service, job.id), request, "after_failed_inspection", failedFacts)
+            }
+            assertCode("WORKFLOW_PREREQUISITE_UNAVAILABLE") {
+                service.requestDurableRecovery(job.id, attempt.runId, attempt.version, WorkflowRecoveryMode.RETRY, null,
+                    "retry_failed_inspection", failedFacts)
+            }
+            assertEquals(1, engines.calls.get(), "refused start/retry executed an agent")
+            assertContentEquals(before, root.resolve("jobs").resolve(job.id).resolve("workflow-state.json").readBytes())
+        }
+    }
+
+    @Test
+    fun `failed inspection preserves independently available nonselected harness facts`() {
+        for ((state, reason) in listOf("supported" to null, "unavailable" to "SANDBOX_HELPER_MISSING",
+            "unknown" to "SANDBOX_HELPER_UNCHECKED")) {
+            val facts = harnessPrerequisites(acp = ACP_PROVENANCE, legacy = LEGACY_PROVENANCE)
+            val readiness = WebHarnessReadiness(state, reason, "fixture", "selected_config", prerequisites = facts)
+            val failed = readiness.withAgentInspection(WebAgentPreflightSnapshot("failed", "inspection_1",
+                WebAgentPreflight.REASON_FAILED, "selected_config"))
+            val inspected = assertNotNull(failed.prerequisites)
+            assertEquals(WebAgentPreflight.REASON_FAILED, inspected.harness(WebAgentHarness.LEGACY_OPENAI).reasonCode)
+            assertEquals(facts.harnesses.getValue(WebAgentHarness.ACP), inspected.harnesses.getValue(WebAgentHarness.ACP))
+            assertTrue(inspected.harness(WebAgentHarness.ACP).available)
+            assertEquals(facts.harnesses.getValue(WebAgentHarness.LEGACY_OPENAI).provenance,
+                inspected.harnesses.getValue(WebAgentHarness.LEGACY_OPENAI).provenance)
+            assertEquals(inspected, failed.withAgentInspection(WebAgentPreflightSnapshot("failed", "inspection_1",
+                WebAgentPreflight.REASON_FAILED, "selected_config")).prerequisites, "failure folding must be idempotent")
+        }
     }
 
     @Test

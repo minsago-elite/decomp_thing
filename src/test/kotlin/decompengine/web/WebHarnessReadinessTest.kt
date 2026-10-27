@@ -58,22 +58,29 @@ class WebHarnessReadinessTest {
     }
 
     @Test
-    fun `failed inspection blocks only the selected harness even when sandbox readiness already failed`() {
-        val missing = WebPrerequisite(false, "SANDBOX_HELPER_MISSING", "Sandbox helpers are unavailable.")
-        val facts = WebWorkflowPrerequisites(WebPrerequisite.AVAILABLE, missing, WebPrerequisite.AVAILABLE,
-            harnesses = mapOf(WebAgentHarness.ACP to WebHarnessFacts(WebPrerequisite.AVAILABLE, null, selected = true),
-                WebAgentHarness.LEGACY_OPENAI to WebHarnessFacts(WebPrerequisite.AVAILABLE, null)))
-        val readiness = WebHarnessReadiness("unavailable", missing.reasonCode, missing.message,
-            configurationIdentity = "current-config", prerequisites = facts)
-        val failed = readiness.withAgentInspection(WebAgentPreflightSnapshot("failed", "inspection_1",
-            WebAgentPreflight.REASON_FAILED, "current-config"))
-        assertEquals(readiness.state, failed.state); assertEquals(readiness.reasonCode, failed.reasonCode)
-        assertEquals(missing, failed.prerequisites?.sandbox)
-        assertEquals(WebAgentPreflight.REASON_FAILED, failed.prerequisites?.agent?.reasonCode)
-        assertEquals(WebAgentPreflight.REASON_FAILED, failed.prerequisites?.harness(WebAgentHarness.ACP)?.reasonCode)
-        assertTrue(failed.prerequisites!!.harness(WebAgentHarness.LEGACY_OPENAI).available)
-        assertEquals(readiness, readiness.withAgentInspection(WebAgentPreflightSnapshot("failed", "inspection_2",
-            WebAgentPreflight.REASON_FAILED, "other-config")))
+    fun `failed inspection updates only the selected harness independently of aggregate and agent readiness`() {
+        val missing = WebPrerequisite(false, "SANDBOX_HELPER_MISSING", "Unavailable.")
+        val selected = WebHarnessFacts(WebPrerequisite.AVAILABLE, null, selected = true)
+        val other = WebHarnessFacts(WebPrerequisite.AVAILABLE, null)
+        for (state in listOf("supported", "unknown", "unavailable")) {
+            for (agent in listOf(WebPrerequisite.AVAILABLE, missing)) {
+                val facts = WebWorkflowPrerequisites(agent, missing, WebPrerequisite.AVAILABLE,
+                    harnesses = mapOf(WebAgentHarness.ACP to selected, WebAgentHarness.LEGACY_OPENAI to other))
+                val readiness = WebHarnessReadiness(state, if (state == "supported") null else "SANDBOX_HELPER_MISSING",
+                    "Fixture.", configurationIdentity = "configuration", prerequisites = facts)
+                val result = readiness.withAgentInspection(WebAgentPreflightSnapshot("failed", "inspection",
+                    WebAgentPreflight.REASON_FAILED, "configuration"))
+                val updated = checkNotNull(result.prerequisites)
+                assertEquals(WebAgentPreflight.REASON_FAILED, updated.agent.reasonCode)
+                assertEquals(WebAgentPreflight.REASON_FAILED, updated.harness(WebAgentHarness.ACP).reasonCode)
+                assertEquals(other, updated.harnesses[WebAgentHarness.LEGACY_OPENAI])
+                assertEquals(facts.sandbox, updated.sandbox); assertEquals(facts.ghidra, updated.ghidra)
+                assertEquals(result, result.withAgentInspection(WebAgentPreflightSnapshot("failed", "inspection",
+                    WebAgentPreflight.REASON_FAILED, "configuration")))
+                assertEquals(readiness.withAgentInspection(null), readiness.withAgentInspection(
+                    WebAgentPreflightSnapshot("failed", "inspection", WebAgentPreflight.REASON_FAILED, "other-config")))
+            }
+        }
     }
 
     @Test

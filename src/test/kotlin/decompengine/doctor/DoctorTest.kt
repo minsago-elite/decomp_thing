@@ -322,7 +322,7 @@ class DoctorTest {
             commandProbe = CommandProbe { _, _ -> CommandProbeResult(0, "available") },
             connectivityProbe = ConnectivityProbe { _, _ -> error("auth inspection must not connect to legacy provider") })
         val report = doctor.inspect(DoctorOptions(output, harnessOverride = "legacy-openai", showAuthMethods = true))
-        assertTrue(report.checks.any { it.name == "ACP authentication methods" && !it.passed })
+        assertTrue(report.checks.any { it.name == "ACP harness" && !it.passed })
         assertFalse(report.checks.any { it.name.startsWith("LLM") })
     }
 
@@ -366,10 +366,8 @@ class DoctorTest {
         val report = doctor.inspect(DoctorOptions(temp.resolve("output")))
 
         assertFalse(report.passed)
-        assertTrue(report.checks.any { it.name == "LLM base URL" && !it.passed })
-        assertTrue(report.checks.any { it.name == "LLM API key" && !it.passed })
-        assertTrue(report.checks.any { it.name == "LLM model" && !it.passed })
-        assertTrue(report.checks.any { it.name == "LLM connectivity" && !it.passed })
+        assertTrue(report.checks.any { it.name == "ACP harness" && !it.passed })
+        assertFalse(report.checks.any { it.name.startsWith("LLM") })
     }
 
     @Test
@@ -406,10 +404,8 @@ class DoctorTest {
 
         val report = doctor.inspect(DoctorOptions(temp.resolve("output")))
 
-        assertTrue(report.checks.any { it.name == "ACP harness" && it.passed && it.detail.contains("deprecated") })
-        assertTrue(report.checks.any { it.name == "LLM base URL" && !it.passed })
-        assertTrue(report.checks.any { it.name == "LLM API key" && !it.passed })
-        assertTrue(report.checks.any { it.name == "LLM model" && !it.passed })
+        assertTrue(report.checks.any { it.name == "ACP harness" && !it.passed })
+        assertFalse(report.checks.any { it.name.startsWith("LLM") })
     }
 
     @Test

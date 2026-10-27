@@ -111,6 +111,34 @@ class WebModuleProgressTest {
     }
 
     @Test
+    fun `only supported complete generation evidence reports definite module outcomes`() {
+        fun unresolved(report: String): JsonObject = webModuleProgress(JOB, WebModuleProgressCapture(
+            attempt(WorkflowRunState.COMPLETED), null, null, PLAN.toByteArray(), report.toByteArray()), adapters(), null)
+            .getValue("unresolved").jsonObject
+        val accepted = GENERATION.replace("\"outcome\":\"unresolved\"", "\"outcome\":\"accepted\"")
+        assertEquals("0", unresolved(accepted).getValue("moduleCount").jsonPrimitive.content)
+        assertEquals("1", unresolved(GENERATION).getValue("moduleCount").jsonPrimitive.content)
+        for (report in listOf(
+            accepted.replace("\"schemaVersion\":2,", ""),
+            accepted.replace("\"schemaVersion\":1,", ""),
+            accepted.replace("\"schemaVersion\":2", "\"schemaVersion\":3"),
+            accepted.replace("\"schemaVersion\":1", "\"schemaVersion\":2"),
+            accepted.replace("\"schemaVersion\":2", "\"schemaVersion\":\"2\""),
+            accepted.replace("\"schemaVersion\":1", "\"schemaVersion\":null"),
+            accepted.replace("\"outcome\":\"accepted\"", "\"outcome\":\"future-outcome\""),
+            GENERATION.replace("\"outcome\":\"unresolved\"", "\"outcome\":null"),
+            GENERATION.replace("\"outcome\":\"unresolved\"", "\"other\":\"unresolved\""),
+            accepted.replace("module_c", "module_a"),
+            accepted.replace("module_c", "unplanned_module"),
+        )) {
+            val value = unresolved(report)
+            assertEquals(JsonNull, value.getValue("moduleCount"), report)
+            assertEquals(emptyList(), value.getValue("moduleIds").jsonArray.toList(), report)
+            assertEquals(JsonNull, value.getValue("entityCount"), report)
+        }
+    }
+
+    @Test
     fun `build completion survives build errors and later packaging failure without a reconstruction summary`() {
         val root = createTempDirectory("module-build-results-")
         try {

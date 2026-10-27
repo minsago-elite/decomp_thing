@@ -150,12 +150,15 @@ private fun parsedPlan(bytes: ByteArray?): ReportedPlan? = bytes?.let {
 /** Planned modules the generation record reports as unresolved, restricted to the recorded plan. */
 private fun unresolvedModules(bytes: ByteArray?, plan: ReportedPlan?): List<String>? {
     val root = parse(bytes, LARGE) ?: return null
-    val modules = ((root["sourceGenerationBudgetEvidence"] as? JsonObject)?.get("modules") as? JsonArray) ?: return null
+    if (root.count("schemaVersion") != 2L) return null
+    val generation = root["sourceGenerationBudgetEvidence"] as? JsonObject ?: return null
+    if (generation.count("schemaVersion") != 1L) return null
+    val modules = generation["modules"] as? JsonArray ?: return null
     val planned = plan?.moduleIds?.toSet() ?: return null
     val outcomes = modules.map { row ->
         val item = row as? JsonObject ?: return null
         val id = item.text("moduleId")?.takeIf { it in planned } ?: return null
-        id to (item.text("outcome") ?: return null)
+        id to (item.text("outcome")?.takeIf { it in setOf("accepted", "unresolved") } ?: return null)
     }
     if (outcomes.map { it.first }.toSet() != planned || outcomes.size != planned.size) return null
     return outcomes.filter { it.second != "accepted" }.map { it.first }.sorted()
