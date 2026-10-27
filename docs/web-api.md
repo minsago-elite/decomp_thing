@@ -898,10 +898,18 @@ Selecting that entry for `git.unstage` unstages the deletion, and selecting it f
 stages the replacement. Its staged deletion remains protected by overlap checks: an untracked
 replacement does not allow another selected path to silently unstage the deletion.
 
-The server checks guards and selection at admission under the job lock and again by the single
-operation executor immediately before Git runs. Commits additionally acquire Git's `index.lock`
-and `HEAD.lock`, revalidate, and capture the reviewed index into a private immutable tree. The
-commit uses that tree and the reviewed parent, never the later live index. Publication locks the
+The server checks guards and selection at admission under the job lock. Mutation worktree
+versions additionally bind bounded exact content/mode commitments for non-ignored status paths;
+the metadata-only pagination fingerprint is not staging authorization. Status must be complete.
+Stage/unstage acquire Git's `index.lock`, `HEAD.lock` and the symbolic HEAD's branch lock before
+final validation. They mutate a private index and atomically publish it under those locks, so an
+external Git writer cannot invalidate overlap checks between validation and mutation. Unstage
+resets against the guarded parent object ID, not mutable `HEAD`. Stage captures selected file/link
+bytes, verifies their reviewed commitments, and writes exact blob/index entries from the capture;
+later worktree edits never supply unreviewed bytes to Git. Content reads share a 512 MiB bound and
+fail closed on drift, unsupported entries or overflow; partial private mutations are not published.
+Commits acquire `index.lock` and `HEAD.lock`, revalidate, and capture the reviewed index into a
+private immutable tree. The commit uses that tree and the reviewed parent, never the later live index. Publication locks the
 target ref, compares the reviewed HEAD under that lock, and atomically replaces the ref. Busy
 writers or a changed parent are refused; no unreviewed index entries can enter the commit.
 Because read-only status suppresses submodules, commit validation separately reads a bounded,
@@ -947,8 +955,8 @@ never turns that commit into an apparently uncommitted failure. Other post-publi
 report `recovery-required`, retaining the exact published `resultObjectId` when known, rather
 than reading a possibly later writer's HEAD as this operation's result.
 
-After a restart, stage and unstage operations become `interrupted`, since the index may have been
-partly updated and status must be re-read. Commit locks have private inode witnesses persisted
+After a restart, stage and unstage operations become `interrupted`: their index publication may
+have completed, so status must be re-read; they are never replayed. All mutation locks have private inode witnesses persisted
 before the public lock names are linked, so owned locks can be reclaimed even with empty or
 partial contents. A replacement inode is never reclaimed on the basis of matching contents when
 a witness exists. Complete operation markers from older versions remain recoverable; legacy

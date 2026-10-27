@@ -312,6 +312,75 @@ class GitBranchesWorktreesTest {
         }
     }
 
+    @Test fun `linked staging and unstaging pin the common branch and private index without shadow locks`(): Unit = Fixture().use { f ->
+        val base = f.prepare()
+        val primary = service.workspace(jobId, repositoryId).worktreeId
+        val linked = run(GitRefRequest(GitOperationAction.WORKTREE_ADD, primary, guards().second,
+            objectId = base, name = "linked-index")).worktreeId
+        val path = f.store.resolve("$jobId/git/repositories/$repositoryId/worktrees/$linked")
+        val admin = f.gitDir().resolve("worktrees/$linked")
+        Files.writeString(path.resolve("src/new.c"), "int linked_index;\n")
+        var attempts = 0
+        f.hook = { if (it == GitOperationCrashPoint.AFTER_WORKSPACE_VALIDATION) {
+            attempts++
+            assertTrue(Files.exists(admin.resolve("index.lock")))
+            assertTrue(Files.exists(admin.resolve("HEAD.lock")))
+            assertTrue(Files.exists(f.gitDir().resolve("refs/heads/linked-index.lock")))
+            assertFalse(Files.exists(admin.resolve("refs/heads/linked-index.lock")))
+            f.repositories.git("--git-dir=${f.gitDir()}", "update-ref", "refs/heads/linked-index", base, base, expect = 128)
+            f.repositories.git("--git-dir=$admin", "--work-tree=$path", "add", "src/main.c", cwd = path, expect = 128)
+        } }
+        for (stage in listOf(true, false)) {
+            val (view, guarded) = guards(linked)
+            val result = run(GitStageRequest(linked, guarded, view.observation.status.entries
+                .filter { it.path.exact == "src/new.c" }.map { it.path.fileId(linked) }, stage))
+            assertEquals(GitOperationState.COMPLETED, result.state, result.message)
+            assertEquals(if (stage) "src/new.c\n" else "", f.raw("diff", "--cached", "--name-only", worktree = path, gitDir = admin))
+            for (name in listOf("index.lock", "HEAD.lock")) assertFalse(Files.exists(admin.resolve(name)))
+            assertFalse(Files.exists(f.gitDir().resolve("refs/heads/linked-index.lock")))
+        }
+        assertEquals(2, attempts)
+        assertEquals("", f.raw("diff", "--cached", "--name-only"), "The primary index stays untouched")
+    }
+
+    @Test fun `linked index restart reclaims private and common witnessed locks but preserves a foreign index`(): Unit {
+        for (external in listOf(false, true)) Fixture().use { f ->
+            val base = f.prepare()
+            val primary = service.workspace(jobId, repositoryId).worktreeId
+            val linked = run(GitRefRequest(GitOperationAction.WORKTREE_ADD, primary, guards().second,
+                objectId = base, name = "linked-recovery")).worktreeId
+            val path = f.store.resolve("$jobId/git/repositories/$repositoryId/worktrees/$linked")
+            val admin = f.gitDir().resolve("worktrees/$linked")
+            Files.writeString(path.resolve("src/new.c"), "int linked_restart;\n")
+            val (view, guarded) = guards(linked)
+            val before = f.raw("ls-files", "--stage", worktree = path, gitDir = admin)
+            f.hook = { if (it == GitOperationCrashPoint.AFTER_WORKSPACE_VALIDATION) throw SimulatedGitCrash() }
+            val admission = service.requestWorkspace(jobId, repositoryId, GitStageRequest(linked, guarded,
+                view.observation.status.entries.filter { it.untracked }.map { it.path.fileId(linked) }, true), "linked_index_crash_01")
+            assertTrue(service.awaitIdle(60_000)); service.close(); f.hook = {}
+            val operationId = admission.operation.operationId
+            val staging = Files.createDirectories(f.store.resolve("$jobId/git/staging/$operationId"))
+            val marker = "decomp-operation:$operationId\n"
+            for (name in listOf("index.lock", "HEAD.lock", "ref-lock")) {
+                val witness = Files.writeString(staging.resolve(name), marker)
+                val lock = if (name == "ref-lock") f.gitDir().resolve("refs/heads/linked-recovery.lock") else admin.resolve(name)
+                if (external && name == "index.lock") Files.writeString(lock, marker) else Files.createLink(lock, witness)
+            }
+            Files.writeString(staging.resolve("ref-name"), "refs/heads/linked-recovery")
+            service = f.open()
+            service.recover(listOf(jobId))
+            assertEquals(GitOperationState.INTERRUPTED, service.operation(jobId, repositoryId, operationId).state)
+            assertEquals(before, f.raw("ls-files", "--stage", worktree = path, gitDir = admin))
+            assertFalse(Files.exists(admin.resolve("HEAD.lock")))
+            assertFalse(Files.exists(f.gitDir().resolve("refs/heads/linked-recovery.lock")))
+            if (external) {
+                assertEquals(marker, Files.readString(admin.resolve("index.lock")))
+                Files.delete(admin.resolve("index.lock")) // Release only this fixture-owned foreign lock.
+            } else assertFalse(Files.exists(admin.resolve("index.lock")))
+            assertEquals("int linked_restart;\n", Files.readString(path.resolve("src/new.c")))
+        }
+    }
+
     @Test fun `linked commit restart preserves an unproven common branch lock`(): Unit = Fixture().use { f ->
         val base = f.prepare()
         val primary = service.workspace(jobId, repositoryId).worktreeId

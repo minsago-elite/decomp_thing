@@ -161,7 +161,8 @@ data class GitRepositoryPolicy(
 class ManagedGitException(val code: String, message: String) : RuntimeException(message)
 
 /** Crash points for recovery tests; a crash leaves records and staging exactly as a process death would. */
-enum class GitOperationCrashPoint { AFTER_RUNNING, AFTER_STAGING, BEFORE_PUBLISH, AFTER_PUBLISH, AFTER_SNAPSHOT_CAPTURE }
+enum class GitOperationCrashPoint { AFTER_RUNNING, AFTER_STAGING, BEFORE_PUBLISH, AFTER_PUBLISH, AFTER_SNAPSHOT_CAPTURE,
+    AFTER_WORKSPACE_VALIDATION, AFTER_WORKSPACE_CAPTURE }
 internal class SimulatedGitCrash : Error("simulated process death")
 
 /**
@@ -890,16 +891,34 @@ class ManagedGitRepositories(
                 switchBranchLock = GitRefOperations.lockSwitchBranch(runner, located.commonDir, branch, staging)
             }
             // Admission cannot race this final activity check: retain exclusive ownership through publication.
-            val observation = synchronized(lock) { validate(runner, located, queued.request) }
+            synchronized(lock) { validate(runner, located, queued.request) }
             crash(GitOperationCrashPoint.BEFORE_PUBLISH)
             var result: String? = null
             var message = completedMessage(queued.action)
             when (val request = queued.request) {
                 is GitStageRequest -> {
-                    val entries = GitWorkspaceMutations.select(located.record, observation, request.fileIds, request.stage, located.worktreeId)
-                    if (request.stage) GitWorkspaceMutations.stage(runner, located.gitDir, located.workTree, entries)
-                    else GitWorkspaceMutations.unstage(runner, located.gitDir, located.workTree, entries,
-                        observation.head.state == GitHeadState.UNBORN)
+                    GitStorage.deleteTree(staging)
+                    GitStorage.directories(directory, "staging", queued.operationId)
+                    GitStorage.forceDirectory(staging.parent)
+                    GitStorage.forceDirectory(directory)
+                    GitWorkspaceMutations.withWorkspaceLocks(runner, located.gitDir, staging, queued.operationId, located.record.objectFormat, located.commonDir) {
+                        // External Git writers obey index.lock, not our JVM lease. Validation,
+                        // private mutation and atomic publication all live inside that lock.
+                        val reviewed = synchronized(lock) { validate(runner, located, request) }
+                        val entries = GitWorkspaceMutations.select(located.record, reviewed, request.fileIds, request.stage, located.worktreeId)
+                        crash(GitOperationCrashPoint.AFTER_WORKSPACE_VALIDATION)
+                        val index = staging.resolve("reviewed-index")
+                        if (Files.exists(located.gitDir.resolve("index"), NOFOLLOW_LINKS)) {
+                            Files.copy(located.gitDir.resolve("index"), index)
+                        }
+                        if (request.stage) GitWorkspaceMutations.stage(runner, located.gitDir, located.workTree, entries, reviewed, staging, index) {
+                            crash(GitOperationCrashPoint.AFTER_WORKSPACE_CAPTURE)
+                        } else GitWorkspaceMutations.unstage(runner, located.gitDir, located.workTree, entries, request.guards.expectedHeadObjectId, index)
+                        if (GitRepositoryInspector.head(runner, located.gitDir, reviewed.objectFormat) != reviewed.head) {
+                            GitWorkspaceMutations.refuse("REF_CHANGED", "The reviewed HEAD changed. Nothing was staged; read the current state first.")
+                        }
+                        GitWorkspaceMutations.publishIndex(located.gitDir, index)
+                    }
                 }
                 is GitCommitRequest -> {
                     GitStorage.deleteTree(staging)
@@ -1094,8 +1113,17 @@ class ManagedGitRepositories(
     private fun reconcileWorkspace(jobId: String, operation: GitOperationRecord): GitOperationRecord {
         (operation.request as? GitRefRequest)?.let { return reconcileRef(jobId, operation, it) }
         if (operation.action != GitOperationAction.COMMIT) {
+            // Stage/unstage use the same witnessed Git locks as commits. Reclaim only inodes
+            // proven to belong to this operation; never replay an interrupted index publication.
+            val record = repositories(jobId).singleOrNull { it.repositoryId == operation.repositoryId }
+            if (record != null) {
+                val commonDir = root.resolve(jobId).resolve("git/repositories").resolve(record.repositoryId).resolve(GIT_DIR)
+                val gitDir = if (operation.worktreeId == record.worktreeId) commonDir else commonDir.resolve("worktrees").resolve(operation.worktreeId)
+                GitWorkspaceMutations.reclaimCommitLocks(gitDir,
+                    root.resolve(jobId).resolve("git/staging").resolve(operation.operationId), operation.operationId, commonDir)
+            }
             return finish(operation, GitOperationState.INTERRUPTED, "INTERRUPTED",
-                "Interrupted by a server restart. The index may be partly updated; read the current status before a new request.")
+                "Interrupted by a server restart. Review the current index before a new request.")
         }
         val guards = (operation.request as? GitRetainedCommit)?.guards
         val head = try {
