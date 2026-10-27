@@ -40,7 +40,13 @@ import kotlin.test.assertFalse
 import kotlin.test.assertFailsWith
 import kotlin.test.assertTrue
 
+@org.junit.jupiter.api.parallel.Execution(org.junit.jupiter.api.parallel.ExecutionMode.SAME_THREAD)
+@org.junit.jupiter.api.parallel.ResourceLock("contained-module-compilation-runtime")
 class ArchivalProjectScaleIntegrationTest {
+    @org.junit.jupiter.api.BeforeEach
+    fun requireConfiguredCompilerForLiveAcceptance(test: org.junit.jupiter.api.TestInfo) =
+        decompengine.project.requireHostedModuleCompiler(test)
+
     private val corpus = Path("benchmarks/archival")
 
     @Test
@@ -79,6 +85,7 @@ class ArchivalProjectScaleIntegrationTest {
     }
 
     @Test
+    @org.junit.jupiter.api.Tag("ci-live")
     fun `small reconstructed project preserves argv behavior and rebuilds from archive`() {
         val temp = createTempDirectory("archival-small-")
         val source = corpus.resolve("small_cli.c")
@@ -113,6 +120,7 @@ class ArchivalProjectScaleIntegrationTest {
     }
 
     @Test
+    @org.junit.jupiter.api.Tag("ci-live")
     fun `large recovered program splits builds validates and archives with complete provenance`() {
         val temp = createTempDirectory("archival-large-")
         val model = largeModel()

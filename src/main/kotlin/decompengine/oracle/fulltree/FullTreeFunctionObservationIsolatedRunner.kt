@@ -1042,6 +1042,8 @@ internal object KotlinSystemdCgroupCommandLauncher {
         readOnlyStateDirectory: LinuxFileIdentity? = null,
         operationDeadline: ContainedCommandOperationDeadline? = null,
         readOnlyReportsDirectory: LinuxFileIdentity? = null,
+        requireTerminalResourceEventProof: Boolean = false,
+        executableSnapshots: List<ContainedCommandExecutableAlias> = emptyList(),
     ): KotlinSystemdCgroupCommandExecution {
         val cleanup = ContainedCommandCleanup()
         val secret = ByteArray(32).also(SECURE_RANDOM::nextBytes)
@@ -1064,8 +1066,15 @@ internal object KotlinSystemdCgroupCommandLauncher {
             require(runtimeMounts.size in 1..MAXIMUM_RUNTIME_MOUNTS)
             val additionalMounts = java.util.List.copyOf(runtimeMounts)
             val additionalInputs = java.util.List.copyOf(readOnlyInputs)
+            val executableAliases = java.util.List.copyOf(executableSnapshots)
+            require(executableAliases.isEmpty() || requireTerminalResourceEventProof) {
+                "executable snapshots require authenticated terminal resource proof"
+            }
+            requireContainedCommandExecutableAliases(additionalInputs, executableAliases)
+            val baseRuntimeProvider = "kotlin-lease-contained-command-runtime-v${if (requireTerminalResourceEventProof) 3 else if (resources.processorCount == 1) 1 else 2}"
             val runtimeClosureSha256 = OracleArtifacts.sha256(OracleJson.canonicalBytes(JsonObject(mapOf(
-                "provider" to JsonPrimitive("kotlin-lease-contained-command-runtime-v${if (resources.processorCount == 1) 1 else 2}"),
+                "provider" to JsonPrimitive(if (executableAliases.isEmpty()) baseRuntimeProvider else
+                    "kotlin-lease-contained-command-runtime-owned-executable-v1"),
                 "configurationSha256" to JsonPrimitive(configuration.canonicalSha256),
                 "deploymentClosureSha256" to JsonPrimitive(deploymentClosureSha256),
                 "runtimeMounts" to JsonArray(additionalMounts.map { it.canonicalIdentity() }),
@@ -1086,7 +1095,13 @@ internal object KotlinSystemdCgroupCommandLauncher {
             )) + (retainedDirectories.stateToJson()?.let { mapOf("readOnlyStateDirectory" to it) } ?: emptyMap()) +
                 (retainedDirectories.reportsToJson()?.let { mapOf("readOnlyReportsDirectory" to it) } ?: emptyMap()) +
                 (operationDeadline?.let { mapOf("operationWallDeadline" to it.policy) } ?: emptyMap()) +
-                (if (resources.processorCount == 1) emptyMap() else mapOf("resources" to resources.json())))))
+                (if (resources.processorCount == 1) emptyMap() else mapOf("resources" to resources.json())) +
+                (if (requireTerminalResourceEventProof) mapOf("terminalResourcePolicySha256" to
+                    JsonPrimitive(ContainedCommandTerminalResourceEvidence.policySha256),
+                    "commandRequestProvider" to JsonPrimitive("kotlin-contained-command-request-v3")) else emptyMap()) +
+                (if (executableAliases.isEmpty()) emptyMap() else mapOf(
+                    "baseRuntimeProvider" to JsonPrimitive(baseRuntimeProvider),
+                    "executableAliases" to JsonArray(executableAliases.map { it.json() }))))))
             val runtime = AuthenticatedObservationRuntime.open(configuration)
             cleanup.runtime = runtime
             for (input in additionalInputs) {
@@ -1107,6 +1122,7 @@ internal object KotlinSystemdCgroupCommandLauncher {
                     }
                 }
                 cleanup.inputs.forEach { it.verifyUnchanged(label) }
+                requireContainedCommandExecutableAliases(additionalInputs, executableAliases)
                 operationDeadline?.requireCurrent()
             }
             val effectiveResources = IsolatedObservationResources.forContainedCommand(resources)
@@ -1115,6 +1131,8 @@ internal object KotlinSystemdCgroupCommandLauncher {
                 effectiveResources.wallSeconds, minOf(resources.maximumFileBytes, 64L * 1024 * 1024),
                 minOf(resources.maximumFileBytes, 64L * 1024 * 1024),
                 allowInterruption = interruption != null,
+                terminalResourcePolicySha256 = if (requireTerminalResourceEventProof)
+                    ContainedCommandTerminalResourceEvidence.policySha256 else null,
             )
             interruption?.bind(request)
             val requestBytes = request.canonicalBytes
@@ -1179,7 +1197,7 @@ internal object KotlinSystemdCgroupCommandLauncher {
                 cleanup.boundary = boundary
                 val unit = boundary.launchContainedCommandKeeper(
                     unitName, nonce, request.sha256, runTree, effectiveResources,
-                    additionalInputs.map { it.path }, additionalMounts, secret, writableRoot, retainedDirectories,
+                    additionalInputs.map { it.path }, additionalMounts, secret, writableRoot, retainedDirectories, executableAliases,
                 ) {
                     verifyInputs("immediately before contained keeper launch")
                     requirePrepared(false)
@@ -1191,6 +1209,7 @@ internal object KotlinSystemdCgroupCommandLauncher {
                 val attachment = unit.captureContainedCommandAttachment(
                     effectiveResources, resources, expectedControlGroup, request.sha256,
                     deploymentClosureSha256, runtimeClosureSha256, keeperPid,
+                    requireTerminalResourceEventProof,
                 )
                 requirePrepared(true)
                 verifyInputs("before contained command START publication")
@@ -1207,6 +1226,7 @@ internal object KotlinSystemdCgroupCommandLauncher {
                 val repeated = unit.captureContainedCommandAttachment(
                     effectiveResources, resources, expectedControlGroup, request.sha256,
                     deploymentClosureSha256, runtimeClosureSha256, keeperPid,
+                    requireTerminalResourceEventProof,
                 )
                 require(MessageDigest.isEqual(attachment.canonicalBytes, repeated.canonicalBytes)) {
                     "contained command attachment changed across START authorization"
@@ -1250,10 +1270,11 @@ internal object KotlinSystemdCgroupCommandLauncher {
                 cleanup.closeAndProveAbsent()
                 borrowed.withPinnedDescriptor(retainedDirectories::verify)
                 val controlIdentity = if (controlDirectoryName == null) null else runTree.withPinnedDescriptor { LinuxFilesystemSyscalls.identity(it.fd) }
+                val executionVersion = if (requireTerminalResourceEventProof) 3 else if (resources.processorCount == 1) 1 else 2
                 val result = JsonObject(mapOf(
-                    "schemaVersion" to JsonPrimitive(if (resources.processorCount == 1) 1 else 2),
-                    "provider" to JsonPrimitive(if (interruption == null) "kotlin-lease-contained-command-execution-v${if (resources.processorCount == 1) 1 else 2}"
-                        else "kotlin-lease-contained-command-interrupted-v${if (resources.processorCount == 1) 1 else 2}"),
+                    "schemaVersion" to JsonPrimitive(executionVersion),
+                    "provider" to JsonPrimitive(if (interruption == null) "kotlin-lease-contained-command-execution-v$executionVersion"
+                        else "kotlin-lease-contained-command-interrupted-v$executionVersion"),
                     "attachmentSha256" to JsonPrimitive(OracleArtifacts.sha256(attachment.canonicalBytes)),
                     "requestSha256" to JsonPrimitive(request.sha256),
                     "deploymentClosureSha256" to JsonPrimitive(deploymentClosureSha256),
@@ -1268,10 +1289,11 @@ internal object KotlinSystemdCgroupCommandLauncher {
                         "memoryMaxEvents" to JsonPrimitive(live.memoryMaxEvents), "memoryOomEvents" to JsonPrimitive(live.memoryOomEvents),
                         "memoryOomKillEvents" to JsonPrimitive(live.memoryOomKillEvents),
                     )),
-                ) + if (interruptionAuthorization == null) emptyMap() else mapOf(
+                ) + (if (interruptionAuthorization == null) emptyMap() else mapOf(
                     "interruptionAuthorization" to OracleJson.parseCanonical(interruptionAuthorization),
                     "interruptionAuthorizationSha256" to JsonPrimitive(OracleArtifacts.sha256(interruptionAuthorization)),
-                ))
+                )) + (if (requireTerminalResourceEventProof) mapOf("terminalResourceEvidence" to
+                    unit.terminalResourceEvidenceAfterCleanup(attachment.canonicalBytes)) else emptyMap()))
                 val withControl = if (controlIdentity == null) result else JsonObject(result + mapOf(
                     "controlDirectory" to JsonPrimitive(controlPath.toString()),
                     "controlDirectoryIdentity" to containedControlIdentityJson(checkNotNull(controlDirectoryName), controlIdentity),
@@ -4155,11 +4177,12 @@ private class TrustedObservationBoundary(
         secret: ByteArray,
         writableRoot: Path,
         retainedDirectories: ContainedCommandRetainedDirectories,
+        executableAliases: List<ContainedCommandExecutableAlias>,
         beforeLaunch: () -> Unit,
     ): ManagedObservationUnit {
         require(unitName.matches(PRODUCTION_KOTLIN_BOOT_UNIT_NAME) && nonce.matches(SHA256))
         require(requestSha256.matches(SHA256) && secret.size == 32)
-        val worker = buildContainedCommandKeeperCommand(runTree.path, nonce, requestSha256, readOnlyInputs, runtimeMounts, writableRoot, retainedDirectories)
+        val worker = buildContainedCommandKeeperCommand(runTree.path, nonce, requestSha256, readOnlyInputs, runtimeMounts, writableRoot, retainedDirectories, executableAliases)
         return launchPrebuilt(
             unitName, runTree.path, nonce, resources, worker,
             ObservationBootProcessTopology.SINGLE_KOTLIN_COMMAND_KEEPER, null, beforeLaunch,
@@ -4497,6 +4520,7 @@ private class TrustedObservationBoundary(
         additionalMounts: List<FullTreeFunctionObservationRuntimeMount>,
         writableRoot: Path,
         retainedDirectories: ContainedCommandRetainedDirectories,
+        executableAliases: List<ContainedCommandExecutableAlias>,
     ): List<String> {
         require(runDirectory == writableRoot || runDirectory.parent == writableRoot) {
             "contained command control directory must belong to its retained writable root"
@@ -4522,6 +4546,13 @@ private class TrustedObservationBoundary(
             }
         }
         requireSyntheticMountPlan(mounts, mountedInputs, writableRoot, runDirectory)
+        executableAliases.forEach { alias ->
+            require(alias.source in mountedInputs && alias.destination in readOnlyInputs &&
+                mounts.any { mount -> alias.destination.startsWith(mount.destination) &&
+                    mount.source.resolve(mount.destination.relativize(alias.destination)) == alias.destination }) {
+                "executable alias must overlay exactly one existing same-path runtime input"
+            }
+        }
         mounts.forEachIndexed { index, mount ->
             require(!pathsOverlap(mount.source, writableRoot)) { "contained command runtime source overlaps writable output" }
             require(mounts.drop(index + 1).none { pathsOverlap(mount.destination, it.destination) }) {
@@ -4543,6 +4574,7 @@ private class TrustedObservationBoundary(
             parents.forEach { addAll(listOf("--dir", it.toString())) }
             mounts.forEach { addAll(listOf("--ro-bind", it.source.toString(), it.destination.toString())) }
             mountedInputs.forEach { addAll(listOf("--ro-bind", it.toString(), it.toString())) }
+            executableAliases.forEach { addAll(listOf("--ro-bind", it.source.toString(), it.destination.toString())) }
             addAll(listOf("--bind", writableRoot.toString(), writableRoot.toString()))
             addAll(retainedDirectories.mountArguments(writableRoot))
             val privateRuntime = runDirectory.resolve(RUNTIME_DIRECTORY).toString()
@@ -5994,6 +6026,8 @@ private class ManagedObservationUnit(
     private var bootProcessHandles: Map<Long, decompengine.acp.LinuxProcessDescriptor>? = null
     private var commandBootPopulation: ObservationBootPopulation? = null
     private var commandKeeperNamespacePid: Long? = null
+    private var commandTerminalResourceBaseline: ContainedCommandTerminalResourceEvidence.Counters? = null
+    private var commandTerminalResourceFinal: ContainedCommandTerminalResourceEvidence.Counters? = null
     private var frozen = false
     var cleaned: Boolean = false
         private set
@@ -6215,6 +6249,7 @@ private class ManagedObservationUnit(
         deploymentClosureSha256: String,
         configurationSha256: String,
         keeperNamespacePid: Long,
+        requireTerminalResourceEventProof: Boolean = false,
     ): KotlinSystemdCgroupCommandAttachment {
         require(bootTopology == ObservationBootProcessTopology.SINGLE_KOTLIN_COMMAND_KEEPER)
         val snapshot = captureStableUnitAttachment(expected)
@@ -6224,13 +6259,25 @@ private class ManagedObservationUnit(
         commandBootPopulation?.let { require(it == snapshot.population) { "contained command keeper identities changed" } }
         commandBootPopulation = snapshot.population
         commandKeeperNamespacePid = keeperNamespacePid
+        val terminalBaseline = if (requireTerminalResourceEventProof) {
+            val before = readPinnedCommandTerminalResourceCounters()
+            val after = readPinnedCommandTerminalResourceCounters()
+            require(before == after) { "contained command resource counters changed during baseline capture" }
+            after.requireNoLimitEvents()
+            commandTerminalResourceBaseline?.let { require(it == after) {
+                "contained command resource baseline changed before START authorization"
+            } }
+            commandTerminalResourceBaseline = after
+            after
+        } else null
         val hostCpuCapacity = if (requested.processorCount == 1) null else captureContainedCommandCpuCapacity(mainPid).also {
             require(it.controlGroup == expectedControlGroup) { "CPU capacity observation differs from the attached cgroup" }
             it.requireCapacity(requested.processorCount)
         }
+        val attachmentVersion = if (requireTerminalResourceEventProof) 3 else if (requested.processorCount == 1) 1 else 2
         val unsigned = JsonObject(mapOf(
-            "schemaVersion" to JsonPrimitive(if (requested.processorCount == 1) 1 else 2),
-            "provider" to JsonPrimitive("kotlin-lease-contained-command-attachment-v${if (requested.processorCount == 1) 1 else 2}"),
+            "schemaVersion" to JsonPrimitive(attachmentVersion),
+            "provider" to JsonPrimitive("kotlin-lease-contained-command-attachment-v$attachmentVersion"),
             "unitName" to JsonPrimitive(unitName), "nonce" to JsonPrimitive(nonce),
             "bootId" to JsonPrimitive(systemdBootIdToKernelUuid(snapshot.bootId)),
             "invocationId" to JsonPrimitive(snapshot.invocationId), "controlGroup" to JsonPrimitive(snapshot.controlGroup),
@@ -6251,7 +6298,10 @@ private class ManagedObservationUnit(
                 "executableDevice" to JsonPrimitive(process.executableDevice), "executableInode" to JsonPrimitive(process.executableInode),
                 "executableMountId" to JsonPrimitive(process.executableMountId),
             )) }),
-        ) + (hostCpuCapacity?.let { mapOf("hostCpuCapacity" to it.json()) } ?: emptyMap()))
+        ) + (hostCpuCapacity?.let { mapOf("hostCpuCapacity" to it.json()) } ?: emptyMap()) +
+            (terminalBaseline?.let { mapOf("terminalResourcePolicySha256" to
+                JsonPrimitive(ContainedCommandTerminalResourceEvidence.policySha256), "terminalResourceBaseline" to it.json) }
+                ?: emptyMap()))
         return KotlinSystemdCgroupCommandAttachment(containedCommandRecord(unsigned, "attachmentSha256"))
     }
 
@@ -6291,6 +6341,41 @@ private class ManagedObservationUnit(
     fun acceptContainedCommandExit(keeperNamespacePid: Long) {
         require(commandKeeperNamespacePid == keeperNamespacePid) { "contained command outcome names a different keeper" }
         keeperPids = requireRetainedCommandKeeperProcesses()
+    }
+
+    /** Read through the retained cgroup descriptor, bracketing the same systemd invocation. */
+    private fun readPinnedCommandTerminalResourceCounters(): ContainedCommandTerminalResourceEvidence.Counters {
+        require(bootTopology == ObservationBootProcessTopology.SINGLE_KOTLIN_COMMAND_KEEPER)
+        val cgroup = checkNotNull(cgroupPath) { "contained command terminal cgroup is absent" }
+        val descriptor = checkNotNull(cgroupDescriptor) { "contained command terminal cgroup descriptor is absent" }
+        val before = requirePinnedCgroupSelection(cgroup)
+        fun requireSameScope() {
+            val properties = controller.show()
+            requireLiveProperties(properties, resources)
+            require(requireInvocationId(properties) == invocationId &&
+                requireCgroupPath(properties["ControlGroup"].orEmpty()) == cgroup) {
+                "contained command terminal resource scope identity changed"
+            }
+        }
+        requireSameScope()
+        val counters = descriptor.whileOpen { fd ->
+            val pinnedPath = LinuxFilesystemSyscalls.stableDescriptorPath(fd)
+            ContainedCommandTerminalResourceEvidence.Counters.parseKernel(
+                readBoundedText(pinnedPath.resolve("pids.events"), 4096),
+                readBoundedText(pinnedPath.resolve("memory.events"), 4096),
+            )
+        }
+        requireSameScope()
+        require(requirePinnedCgroupSelection(cgroup) == before) {
+            "contained command terminal resource cgroup identity changed"
+        }
+        return counters
+    }
+
+    fun terminalResourceEvidenceAfterCleanup(attachment: ByteArray): JsonObject {
+        check(cleaned && !frozen) { "contained command terminal resources require proven scope cleanup" }
+        return ContainedCommandTerminalResourceEvidence.create(attachment,
+            checkNotNull(commandTerminalResourceFinal) { "contained command frozen terminal resources are absent" })
     }
 
     private fun requireRetainedCommandKeeperProcesses(): Set<Long> {
@@ -6774,6 +6859,7 @@ private class ManagedObservationUnit(
         }
         requireLiveProperties(controller.show(), expected)
 
+        val strictCountersBefore = commandTerminalResourceBaseline?.let { readPinnedCommandTerminalResourceCounters() }
         val eventsBefore = readMemoryEvents(cgroup)
         val peakBefore = readRequiredLong(cgroup.resolve("memory.peak"), "isolated memory.peak")
         val cpuBefore = parseFlatCounters(
@@ -6786,14 +6872,22 @@ private class ManagedObservationUnit(
             readBoundedText(cgroup.resolve("cpu.stat"), CGROUP_TEXT_BYTES),
             "cpu.stat",
         )
+        val strictCountersAfter = commandTerminalResourceBaseline?.let { readPinnedCommandTerminalResourceCounters() }
         val cgroupEvents = parseFlatCounters(
             readBoundedText(cgroup.resolve("cgroup.events"), CGROUP_TEXT_BYTES),
             "cgroup.events",
         )
         if (
             eventsBefore != eventsAfter || peakBefore != peakAfter || cpuBefore != cpuAfter ||
+            strictCountersBefore != strictCountersAfter ||
             cgroupEvents["frozen"] != 1L || cgroupEvents["populated"] != 1L
         ) isolationFail("isolated cgroup accounting changed across its frozen sample")
+
+        if (strictCountersAfter != null) {
+            require(currentKeepers() == expectedKeepers) { "contained command keeper population changed after final resource sampling" }
+            strictCountersAfter.requireMonotonicFrom(checkNotNull(commandTerminalResourceBaseline))
+            commandTerminalResourceFinal = strictCountersAfter
+        }
 
         val peak = peakAfter
         val cpuUsec = cpuAfter["usage_usec"] ?: isolationFail("isolated cpu.stat lacks usage_usec")

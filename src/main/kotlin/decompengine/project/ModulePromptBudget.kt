@@ -81,7 +81,7 @@ internal fun modulePromptEvidence(request: ModuleReconstructionRequest, legacy: 
         ))
         return ModulePromptEvidence(selected.prompt.objective, evidence, selected.interfaces, observed, text)
     }
-    val prompt = adapter.modulePrompt(request)
+    val prompt = adapter.modulePrompt(request.copy(compilationCheckpointVersion = 6))
     val objective = prompt.objective
     val evidence = prompt.evidence
     val files = linkedMapOf(
@@ -165,11 +165,12 @@ internal class ProfileModulePromptInputs(
     ): ModuleReconstructionRequest = request(moduleId, projectDir,
         ModuleObservationRetention.replay(observedBehavior, modules.getValue(moduleId), model, legacy))
 
-    fun fingerprint(request: ModuleReconstructionRequest, legacy: Boolean = false): String {
-        if (!legacy) return selectedModuleInputFingerprint(request)
+    fun fingerprint(request: ModuleReconstructionRequest, legacy: Boolean = false,
+        compilerPolicyId: String = adapter.compilation.id): String {
+        if (!legacy) return selectedModuleInputFingerprint(request, compilerPolicyId)
         val localFingerprint = SourceTreeGenerator.moduleFingerprint(
             request.module, model, request.sharedHeader, request.moduleHeader, request.privateHeader,
-            request.dependencyHeaders, request.observedBehavior, profile.sha256, adapter.compilation.id,
+            request.dependencyHeaders, request.observedBehavior, profile.sha256, compilerPolicyId,
         )
         return sha256(("transitive-interfaces-v2\n" + localFingerprint + "\n" +
             interfaceFingerprints.getValue(request.module.id)).toByteArray(Charsets.UTF_8))
@@ -177,8 +178,9 @@ internal class ProfileModulePromptInputs(
 }
 
 /** Exactly the selected, dispatched context; unrelated project entities cannot invalidate it. */
-internal fun selectedModuleInputFingerprint(request: ModuleReconstructionRequest): String = sha256(
+internal fun selectedModuleInputFingerprint(request: ModuleReconstructionRequest,
+    compilerPolicyId: String = ReconstructionAdapters.resolve(request.profile).compilation.id): String = sha256(
     ("module-reconstruction-input-v3\n" + request.model.inputSha256 + "\n" + request.model.schemaVersion + "\n" +
-        request.profile.sha256 + "\n" + ReconstructionAdapters.resolve(request.profile).compilation.id + "\n" +
+        request.profile.sha256 + "\n" + compilerPolicyId + "\n" +
         modulePromptEvidence(request).text).toByteArray(Charsets.UTF_8),
 )

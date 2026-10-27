@@ -22,6 +22,7 @@ internal class KotlinContainedCommandRequest(
     val maximumStdoutBytes: Long,
     val maximumStderrBytes: Long,
     val allowInterruption: Boolean = false,
+    val terminalResourcePolicySha256: String? = null,
 ) {
     val command: List<String>
     val environment: Map<String, String>
@@ -64,9 +65,14 @@ internal class KotlinContainedCommandRequest(
         require(maximumStdoutBytes in 1L..MAXIMUM_LOG_BYTES && maximumStderrBytes in 1L..MAXIMUM_LOG_BYTES) {
             "contained command log budget is outside its bound"
         }
+        require(terminalResourcePolicySha256 == null ||
+            terminalResourcePolicySha256 == ContainedCommandTerminalResourceEvidence.policySha256) {
+            "contained command terminal resource policy is unsupported"
+        }
+        val version = if (terminalResourcePolicySha256 != null) 3 else if (allowInterruption) 2 else 1
         val fields = mapOf(
-            "schemaVersion" to JsonPrimitive(if (allowInterruption) 2 else 1),
-            "provider" to JsonPrimitive(if (allowInterruption) "kotlin-contained-command-request-v2" else "kotlin-contained-command-request-v1"),
+            "schemaVersion" to JsonPrimitive(version),
+            "provider" to JsonPrimitive("kotlin-contained-command-request-v$version"),
             "runDirectory" to JsonPrimitive(runDirectory.toString()),
             "nonce" to JsonPrimitive(nonce),
             "command" to JsonArray(this.command.map(::JsonPrimitive)),
@@ -77,7 +83,9 @@ internal class KotlinContainedCommandRequest(
             "maximumStderrBytes" to JsonPrimitive(maximumStderrBytes),
         )
         encoded = OracleJson.canonicalBytes(JsonObject(fields +
-            if (allowInterruption) mapOf("allowInterruption" to JsonPrimitive(true)) else emptyMap()), CONTAINED_REQUEST_LIMITS)
+            (if (allowInterruption) mapOf("allowInterruption" to JsonPrimitive(true)) else emptyMap()) +
+            (terminalResourcePolicySha256?.let { mapOf("terminalResourcePolicySha256" to JsonPrimitive(it)) } ?: emptyMap())),
+            CONTAINED_REQUEST_LIMITS)
         sha256 = OracleArtifacts.sha256(encoded)
     }
 
@@ -91,14 +99,19 @@ internal class KotlinContainedCommandRequest(
             val document = OracleJson.parseCanonical(bytes, CONTAINED_REQUEST_LIMITS) as? JsonObject
                 ?: throw IllegalArgumentException("contained command request must be an object")
             val version = document.number("schemaVersion")
-            require(version in 1L..2L) { "contained command request version is unsupported" }
-            val allowInterruption = version == 2L
+            require(version in 1L..3L) { "contained command request version is unsupported" }
+            val allowInterruption = version == 2L || (version == 3L && "allowInterruption" in document)
             require(!allowInterruption || document["allowInterruption"] == JsonPrimitive(true)) {
-                "contained command v2 requires explicit interruption admission"
+                "contained command requires explicit interruption admission"
             }
+            require(version != 3L || "terminalResourcePolicySha256" in document) {
+                "contained command v3 requires its terminal resource policy"
+            }
+            val terminalResourcePolicySha256 = if (version == 3L) document.string("terminalResourcePolicySha256") else null
             require(document.keys == setOf("schemaVersion", "provider", "runDirectory", "nonce", "command",
                 "environment", "maximumStartWaitSeconds", "maximumWallSeconds", "maximumStdoutBytes", "maximumStderrBytes") +
-                if (allowInterruption) setOf("allowInterruption") else emptySet()) {
+                (if (allowInterruption) setOf("allowInterruption") else emptySet()) +
+                (if (version == 3L) setOf("terminalResourcePolicySha256") else emptySet())) {
                 "contained command request fields differ from its closed contract"
             }
             require(document.string("provider") == "kotlin-contained-command-request-v$version") {
@@ -113,6 +126,7 @@ internal class KotlinContainedCommandRequest(
                 command.map { it.requireString() }, environment.mapValues { it.value.requireString() },
                 document.number("maximumStartWaitSeconds"), document.number("maximumWallSeconds"),
                 document.number("maximumStdoutBytes"), document.number("maximumStderrBytes"), allowInterruption,
+                terminalResourcePolicySha256,
             ).also { require(it.canonicalBytes.contentEquals(bytes)) { "contained command request changed during parsing" } }
         }
     }
@@ -126,6 +140,8 @@ internal data class KotlinContainedCommandOutcome(
     val stdoutBytes: Long,
     val stderrBytes: Long,
     val status: String,
+    val stdoutSha256: String? = null,
+    val stderrSha256: String? = null,
 ) {
     fun requireSuccessful(failureDiagnostics: String? = null) {
         require(status == "EXITED" && exitCode == 0) {
@@ -139,6 +155,7 @@ internal data class KotlinContainedCommandOutcome(
 }
 
 internal object KotlinContainedCommandProtocol {
+    // The bootstrap argv is unchanged; request v3 selects HMAC wire v2 after request admission.
     const val VERSION = "contained-command-v1"
     const val BOOT_FILE = "contained-command.boot.json"
     const val START_FILE = "contained-command.start.json"
@@ -148,22 +165,23 @@ internal object KotlinContainedCommandProtocol {
     const val STDERR_FILE = "contained-command.stderr"
     const val MAXIMUM_PROTOCOL_BYTES = 4096
     const val SECRET_BYTES = 32
+    private val EMPTY_OUTPUT_SHA256 = OracleArtifacts.sha256(ByteArray(0))
 
     fun boot(secret: ByteArray, request: KotlinContainedCommandRequest, keeperPid: Long): ByteArray =
-        encode(secret, request, "BOOT", emptyOutcome(keeperPid, "BOOT"))
+        encode(secret, request, "BOOT", emptyOutcome(request, keeperPid, "BOOT"))
 
     fun requireBoot(bytes: ByteArray, secret: ByteArray, request: KotlinContainedCommandRequest): Long =
         decode(bytes, secret, request, "BOOT", null).keeperPid
 
     fun start(secret: ByteArray, request: KotlinContainedCommandRequest, keeperPid: Long): ByteArray =
-        encode(secret, request, "START", emptyOutcome(keeperPid, "START"))
+        encode(secret, request, "START", emptyOutcome(request, keeperPid, "START"))
 
     fun requireStart(bytes: ByteArray, secret: ByteArray, request: KotlinContainedCommandRequest, keeperPid: Long) {
         decode(bytes, secret, request, "START", keeperPid)
     }
 
     fun interrupt(secret: ByteArray, request: KotlinContainedCommandRequest, keeperPid: Long): ByteArray =
-        encode(secret, request, "INTERRUPT", emptyOutcome(keeperPid, "INTERRUPT"))
+        encode(secret, request, "INTERRUPT", emptyOutcome(request, keeperPid, "INTERRUPT"))
 
     fun requireInterrupt(bytes: ByteArray, secret: ByteArray, request: KotlinContainedCommandRequest, keeperPid: Long) {
         decode(bytes, secret, request, "INTERRUPT", keeperPid)
@@ -186,9 +204,11 @@ internal object KotlinContainedCommandProtocol {
         outcome: KotlinContainedCommandOutcome,
     ): ByteArray {
         requireOutcomeFields(request, event, outcome)
+        val strict = request.terminalResourcePolicySha256 != null
+        val version = if (strict) 2 else 1
         val unsigned = JsonObject(mapOf(
-            "schemaVersion" to JsonPrimitive(1),
-            "provider" to JsonPrimitive("kotlin-contained-command-protocol-v1"),
+            "schemaVersion" to JsonPrimitive(version),
+            "provider" to JsonPrimitive("kotlin-contained-command-protocol-v$version"),
             "event" to JsonPrimitive(event),
             "nonce" to JsonPrimitive(request.nonce),
             "requestSha256" to JsonPrimitive(request.sha256),
@@ -199,7 +219,8 @@ internal object KotlinContainedCommandProtocol {
             "stdoutBytes" to JsonPrimitive(outcome.stdoutBytes),
             "stderrBytes" to JsonPrimitive(outcome.stderrBytes),
             "status" to JsonPrimitive(outcome.status),
-        ))
+        ) + if (strict) mapOf("stdoutSha256" to JsonPrimitive(checkNotNull(outcome.stdoutSha256)),
+            "stderrSha256" to JsonPrimitive(checkNotNull(outcome.stderrSha256))) else emptyMap())
         val authentication = authenticate(secret, OracleJson.canonicalBytes(unsigned, CONTAINED_PROTOCOL_LIMITS))
         return OracleJson.canonicalBytes(JsonObject(unsigned + ("hmacSha256" to JsonPrimitive(authentication))),
             CONTAINED_PROTOCOL_LIMITS)
@@ -214,12 +235,15 @@ internal object KotlinContainedCommandProtocol {
     ): KotlinContainedCommandOutcome {
         val document = OracleJson.parseCanonical(bytes, CONTAINED_PROTOCOL_LIMITS) as? JsonObject
             ?: throw IllegalArgumentException("contained command protocol must be an object")
+        val strict = request.terminalResourcePolicySha256 != null
+        val version = if (strict) 2L else 1L
         require(document.keys == setOf("schemaVersion", "provider", "event", "nonce", "requestSha256",
-            "keeperPid", "childPid", "exitCode", "elapsedMillis", "stdoutBytes", "stderrBytes", "status", "hmacSha256")) {
+            "keeperPid", "childPid", "exitCode", "elapsedMillis", "stdoutBytes", "stderrBytes", "status", "hmacSha256") +
+            if (strict) setOf("stdoutSha256", "stderrSha256") else emptySet()) {
             "contained command protocol fields differ from its closed contract"
         }
-        require(document.number("schemaVersion") == 1L &&
-            document.string("provider") == "kotlin-contained-command-protocol-v1" &&
+        require(document.number("schemaVersion") == version &&
+            document.string("provider") == "kotlin-contained-command-protocol-v$version" &&
             document.string("event") == event && document.string("nonce") == request.nonce &&
             document.string("requestSha256") == request.sha256) { "contained command protocol binding differs" }
         val authentication = document.string("hmacSha256")
@@ -233,7 +257,8 @@ internal object KotlinContainedCommandProtocol {
         require(exitCode in 0L..255L) { "contained command exit code is invalid" }
         return KotlinContainedCommandOutcome(document.number("keeperPid"), document.number("childPid"), exitCode.toInt(),
             document.number("elapsedMillis"), document.number("stdoutBytes"), document.number("stderrBytes"),
-            document.string("status")).also {
+            document.string("status"), if (strict) document.string("stdoutSha256") else null,
+            if (strict) document.string("stderrSha256") else null).also {
             requireOutcomeFields(request, event, it)
             require(expectedKeeperPid == null || it.keeperPid == expectedKeeperPid) {
                 "contained command keeper identity differs"
@@ -246,8 +271,22 @@ internal object KotlinContainedCommandProtocol {
         require(event != "INTERRUPT" && outcome.status != "INTERRUPTED" || request.allowInterruption) {
             "contained command request does not authorize interruption"
         }
+        if (request.terminalResourcePolicySha256 != null) {
+            require(outcome.stdoutSha256?.matches(CONTAINED_SHA256) == true &&
+                outcome.stderrSha256?.matches(CONTAINED_SHA256) == true) {
+                "strict contained command outcome lacks authenticated pipe hashes"
+            }
+            require((outcome.stdoutBytes != 0L || outcome.stdoutSha256 == EMPTY_OUTPUT_SHA256) &&
+                (outcome.stderrBytes != 0L || outcome.stderrSha256 == EMPTY_OUTPUT_SHA256)) {
+                "strict contained command empty output hash differs"
+            }
+        } else {
+            require(outcome.stdoutSha256 == null && outcome.stderrSha256 == null) {
+                "legacy contained command outcome must not claim strict pipe hashes"
+            }
+        }
         if (event != "OUTCOME") {
-            require(event in setOf("BOOT", "START", "INTERRUPT") && outcome == emptyOutcome(outcome.keeperPid, event)) {
+            require(event in setOf("BOOT", "START", "INTERRUPT") && outcome == emptyOutcome(request, outcome.keeperPid, event)) {
                 "contained command pre-execution event contains an outcome"
             }
             return
@@ -258,7 +297,10 @@ internal object KotlinContainedCommandProtocol {
             outcome.status in setOf("EXITED", "TIMED_OUT", "OUTPUT_LIMIT", "INTERRUPTED")) { "contained command outcome is outside its bounds" }
     }
 
-    private fun emptyOutcome(keeperPid: Long, event: String) = KotlinContainedCommandOutcome(keeperPid, 0L, 0, 0L, 0L, 0L, event)
+    private fun emptyOutcome(request: KotlinContainedCommandRequest, keeperPid: Long, event: String): KotlinContainedCommandOutcome {
+        val hash = if (request.terminalResourcePolicySha256 == null) null else EMPTY_OUTPUT_SHA256
+        return KotlinContainedCommandOutcome(keeperPid, 0L, 0, 0L, 0L, 0L, event, hash, hash)
+    }
 
     private fun authenticate(secret: ByteArray, bytes: ByteArray): String {
         require(secret.size == SECRET_BYTES) { "contained command bootstrap secret has the wrong size" }

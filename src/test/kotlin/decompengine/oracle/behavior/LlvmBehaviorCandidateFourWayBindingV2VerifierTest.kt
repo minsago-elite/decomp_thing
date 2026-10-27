@@ -64,8 +64,15 @@ import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 
+@org.junit.jupiter.api.parallel.Execution(org.junit.jupiter.api.parallel.ExecutionMode.SAME_THREAD)
+@org.junit.jupiter.api.parallel.ResourceLock("contained-module-compilation-runtime")
 class LlvmBehaviorCandidateFourWayBindingV2VerifierTest {
+    @org.junit.jupiter.api.BeforeEach
+    fun requireConfiguredCompilerForLiveAcceptance(test: org.junit.jupiter.api.TestInfo) =
+        decompengine.project.requireHostedModuleCompiler(test)
+
     @Test
+    @org.junit.jupiter.api.Tag("ci-live")
     fun `four raw paths derive one defensive first-class ACP structural identity with no authority`() {
         val root = createTempDirectory("candidate-four-way-v2-success-").toAbsolutePath().normalize()
         val fixture = createFixture(root, "alpha", "/bin/true")
@@ -125,6 +132,7 @@ class LlvmBehaviorCandidateFourWayBindingV2VerifierTest {
     }
 
     @Test
+    @org.junit.jupiter.api.Tag("ci-live")
     fun `archive lineage hosted receipt and executable cannot be cross-paired`() {
         val root = createTempDirectory("candidate-four-way-v2-cross-pair-").toAbsolutePath().normalize()
         val first = createFixture(root, "first", "/bin/true")
@@ -166,6 +174,7 @@ class LlvmBehaviorCandidateFourWayBindingV2VerifierTest {
     }
 
     @Test
+    @org.junit.jupiter.api.Tag("ci-live")
     fun `unsigned hosted session change and lineage association drift is rejected after pair verification`() {
         val root = createTempDirectory("candidate-four-way-v2-acp-drift-").toAbsolutePath().normalize()
         val fixture = createFixture(root, "drift", "/bin/true")
@@ -205,6 +214,7 @@ class LlvmBehaviorCandidateFourWayBindingV2VerifierTest {
     }
 
     @Test
+    @org.junit.jupiter.api.Tag("ci-live")
     fun `canonical bounds aliases and terminal source replacement are rejected`() {
         val root = createTempDirectory("candidate-four-way-v2-hostile-").toAbsolutePath().normalize()
         val fixture = createFixture(root, "hostile", "/bin/true")
@@ -254,6 +264,7 @@ class LlvmBehaviorCandidateFourWayBindingV2VerifierTest {
     }
 
     @Test
+    @org.junit.jupiter.api.Tag("ci-live")
     fun `raw names and parents cannot be replaced after descriptor pinning`() {
         val root = createTempDirectory("candidate-four-way-v2-open-race-").toAbsolutePath().normalize()
         val fileFixture = createFixture(root, "file-race", "/bin/true")

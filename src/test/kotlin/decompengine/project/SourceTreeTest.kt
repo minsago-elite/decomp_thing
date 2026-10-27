@@ -39,8 +39,19 @@ import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonPrimitive
+import org.junit.jupiter.api.BeforeEach
+import org.junit.jupiter.api.Tag
+import org.junit.jupiter.api.TestInfo
+import org.junit.jupiter.api.parallel.Execution
+import org.junit.jupiter.api.parallel.ExecutionMode
+import org.junit.jupiter.api.parallel.ResourceLock
 
+@Execution(ExecutionMode.SAME_THREAD)
+@ResourceLock("contained-module-compilation-runtime")
 class SourceTreeTest {
+    @BeforeEach
+    fun requireConfiguredCompilerForHostedAcceptance(test: TestInfo) = requireHostedModuleCompiler(test)
+
     @Test
     fun `reconstruction cannot claim the reserved repair generator`() {
         val project = createTempDirectory("source-tree-reserved-repair-generator-")
@@ -58,6 +69,7 @@ class SourceTreeTest {
     }
 
     @Test
+    @Tag("ci-live")
     fun `rerun with the other profile removes the stale build definition`() {
         val project = createTempDirectory("source-tree-profile-rerun-")
         val model = oneModuleModel()
@@ -74,6 +86,7 @@ class SourceTreeTest {
     }
 
     @Test
+    @Tag("ci-live")
     fun `module cache binds binary identity and model schema while reusing unchanged inputs`() {
         val project = createTempDirectory("source-tree-model-identity-")
         var calls = 0
@@ -103,75 +116,101 @@ class SourceTreeTest {
     }
 
     @Test
-    fun `running compiler cancellation restores accepted revision and terminates its process`() {
-        val root = createTempDirectory("source-tree-running-compiler-")
+    fun `custom compiler driver cannot authorize fresh acceptance or launch outside the contained runtime`() {
+        // Running-compiler cancellation and rollback are exercised with the real configured
+        // boundary in ContainedModuleCompilationLiveTest, not a shell compiler override.
+        val root = createTempDirectory("source-tree-forbidden-compiler-")
         val project = root.resolve("project")
-        val pause = root.resolve("pause")
-        val ready = root.resolve("ready")
+        val launched = root.resolve("launched")
         val compiler = root.resolve("authored-compiler")
-        compiler.writeText("""
-            #!/bin/sh
-            if [ -f "$pause" ]; then
-                printf '%s\n' "${'$'}${'$'}" > "$ready"
-                exec /bin/sleep 10
-            fi
-            exec /usr/bin/cc "${'$'}@"
-        """.trimIndent() + "\n")
+        compiler.writeText("#!/bin/sh\nprintf launched > '$launched'\nexit 0\n")
         check(compiler.toFile().setExecutable(true, true))
         val base = GeneratedCMakeReconstructionProfile.descriptor
         val profile = ReconstructionProfile(base.schemaVersion, base.id, base.layout, base.budgets,
             base.adapterConfiguration + ("compiler-driver" to listOf(compiler.toString())))
-        val model = oneModuleModel()
-        SourceTreeGenerator.generate(model, project, reconstructor = validReconstructor(), profile = profile)
-        val paths = listOf("src/modules/parse.c", "reports/modules/parse.json", "source_tree_manifest.json")
-        val before = paths.associateWith { project.resolve(it).readBytes() }
-        pause.writeText("pause next compiler invocation")
-        val failure = java.util.concurrent.atomic.AtomicReference<Throwable?>()
-        val cancelled = java.util.concurrent.atomic.AtomicBoolean()
-        val candidate = ModuleReconstructor { request ->
-            validReconstructor().reconstruct(request).let { it.copy(source = it.source.replace("return 4096;", "return 8192;")) }
+        val failure = assertFailsWith<IllegalArgumentException> {
+            SourceTreeGenerator.generate(oneModuleModel(), project, reconstructor = validReconstructor(), profile = profile)
         }
-        val worker = Thread {
-            try {
-                SourceTreeGenerator.generate(model, project, reconstructor = candidate,
-                    observedBehavior = "new observation", profile = profile)
-            } catch (error: Throwable) {
-                failure.set(error)
-            } finally {
-                cancelled.set(Thread.currentThread().isInterrupted)
-            }
-        }
-        var process: ProcessHandle? = null
-        try {
-            worker.start()
-            val deadline = System.nanoTime() + java.util.concurrent.TimeUnit.SECONDS.toNanos(5)
-            var pid: Long? = null
-            while (pid == null && worker.isAlive && System.nanoTime() < deadline) {
-                pid = if (Files.exists(ready)) ready.readText().trim().toLongOrNull() else null
-                if (pid == null) Thread.sleep(5)
-            }
-            process = ProcessHandle.of(requireNotNull(pid) { "compiler did not become ready: ${failure.get()}" }).orElseThrow()
-            assertTrue(process.isAlive)
-            assertTrue(project.resolve("src/modules/parse.c").readText().contains("return 8192;"))
-            assertFalse(before.getValue("src/modules/parse.c").contentEquals(project.resolve("src/modules/parse.c").readBytes()))
-            worker.interrupt()
-            worker.join(5000)
-            assertFalse(worker.isAlive, "cancelled generation must stop")
-            assertTrue(failure.get() is ModuleReconstructionInterruptedException, "unexpected failure: ${failure.get()}")
-            assertTrue(cancelled.get())
-            assertFalse(process.isAlive, "owned compiler must terminate")
-            paths.forEach { assertTrue(before.getValue(it).contentEquals(project.resolve(it).readBytes()), it) }
-            SourceTreeGenerator.generate(model, project, profile = profile, reconstructor = ModuleReconstructor {
-                error("accepted revision must remain reusable after compiler interruption")
-            })
-        } finally {
-            process?.let { if (it.isAlive) it.destroyForcibly() }
-            if (worker.isAlive) worker.interrupt()
-            worker.join(5000)
-        }
+        assertTrue(failure.message.orEmpty().contains("profile may vary only registered reconstruction budgets"))
+        assertFalse(launched.exists(), "an unregistered compiler must never be executed")
+        assertFalse(project.resolve("reports/modules/parse.json").exists())
+        assertFalse(project.resolve("source_tree_manifest.json").exists())
     }
 
     @Test
+    @Tag("ci-live")
+    fun `ordinary compiler read failure restores accepted revision and records failed validation`() {
+        val project = createTempDirectory("source-tree-compiler-read-failure-")
+        val model = oneModuleModel()
+        SourceTreeGenerator.generate(model, project, reconstructor = validReconstructor())
+        val paths = listOf("src/modules/parse.c", "reports/modules/parse.json", "source_tree_manifest.json")
+        val before = paths.associateWith { project.resolve(it).readBytes() }
+        val source = project.resolve(paths.first())
+        var candidateSha256: String? = null
+        val progress = object : decompengine.agent.AgentWorkflowProgress by decompengine.agent.AgentWorkflowProgress.NONE {
+            override fun phase(phase: decompengine.agent.AgentWorkflowPhase, taskId: String?, acceptedRevisionSha256: String?) {
+                if (phase == decompengine.agent.AgentWorkflowPhase.BUILD_VALIDATING) {
+                    candidateSha256 = sha256(source.readBytes())
+                    assertNotEquals(sha256(before.getValue(paths.first())), candidateSha256)
+                    Files.delete(source)
+                }
+            }
+        }
+        val candidate = ModuleReconstructor { request ->
+            validReconstructor().reconstruct(request).let { it.copy(source = it.source.replace("return 4096;", "return 8192;")) }
+        }
+        val failure = assertFailsWith<IllegalArgumentException> {
+            SourceTreeGenerator.generate(model, project, reconstructor = candidate,
+                observedBehavior = "new candidate input", progress = progress)
+        }
+        assertEquals("stable file-read target disappeared: src/modules/parse.c", failure.message)
+        assertFalse(Thread.currentThread().isInterrupted)
+        paths.forEach { assertTrue(before.getValue(it).contentEquals(project.resolve(it).readBytes()), it) }
+        val attempt = Json.parseToJsonElement(project.resolve("reports/modules/parse.attempt.json").readText()).jsonObject
+        assertEquals(JsonPrimitive("validation-failed"), attempt.getValue("status"))
+        assertEquals(JsonPrimitive("module-compilation-failure"), attempt.getValue("kind"))
+        assertEquals(JsonPrimitive(candidateSha256), attempt.getValue("candidateSourceSha256"))
+        assertEquals(JsonPrimitive(sha256(before.getValue(paths.first()))), attempt.getValue("previousAcceptedSourceSha256"))
+        assertEquals(JsonPrimitive(failure.javaClass.name), attempt.getValue("failureType"))
+        assertEquals(JsonNull, attempt.getValue("executionEvidencePath"))
+        assertFalse("compilation" in attempt)
+        SourceTreeGenerator.generate(model, project, reconstructor = ModuleReconstructor {
+            error("accepted revision must remain reusable after compiler read failure")
+        })
+    }
+
+    @Test
+    @Tag("ci-live")
+    fun `compiler rollback failure stays fatal and retains original validation failure`() {
+        val project = createTempDirectory("source-tree-compiler-rollback-failure-")
+        val model = oneModuleModel()
+        SourceTreeGenerator.generate(model, project, reconstructor = validReconstructor())
+        val source = project.resolve("src/modules/parse.c")
+        val checkpoint = project.resolve("reports/modules/parse.json")
+        val beforeCheckpoint = checkpoint.readBytes()
+        val progress = object : decompengine.agent.AgentWorkflowProgress by decompengine.agent.AgentWorkflowProgress.NONE {
+            override fun phase(phase: decompengine.agent.AgentWorkflowPhase, taskId: String?, acceptedRevisionSha256: String?) {
+                if (phase == decompengine.agent.AgentWorkflowPhase.BUILD_VALIDATING) {
+                    Files.delete(source)
+                    Files.createDirectory(source)
+                    source.resolve("rollback-obstruction").writeText("keep the directory nonempty")
+                }
+            }
+        }
+        val failure = assertFailsWith<java.io.IOException> {
+            SourceTreeGenerator.generate(model, project, reconstructor = validReconstructor(),
+                observedBehavior = "force a new attempt", progress = progress)
+        }
+        assertEquals(1, failure.suppressed.size)
+        assertTrue(failure.suppressed.single() is IllegalArgumentException)
+        assertTrue(failure.suppressed.single().message.orEmpty().contains("undeclared compiler search input"))
+        assertTrue(Files.isDirectory(source))
+        assertTrue(beforeCheckpoint.contentEquals(checkpoint.readBytes()))
+        assertFalse(project.resolve("reports/modules/parse.attempt.json").exists())
+    }
+
+    @Test
+    @Tag("ci-live")
     fun `compiler cancellation restores accepted revision and remains retryable`() {
         val project = createTempDirectory("source-tree-compiler-cancelled-")
         val originalModel = oneModuleModel()
@@ -204,6 +243,7 @@ class SourceTreeTest {
     }
 
     @Test
+    @Tag("ci-live")
     fun `explicit byte typedef is resolved by the compiler`() {
         val project = createTempDirectory("source-defined-byte-type-")
         val reconstructor = ModuleReconstructor {
@@ -215,6 +255,7 @@ class SourceTreeTest {
     }
 
     @Test
+    @Tag("ci-live")
     fun `decompiler-like words used as identifiers are accepted by the compiler gate`() {
         for (name in listOf("byte", "longlong", "undefined", "undefined1", "undefined2", "undefined4", "undefined8")) {
             val project = createTempDirectory("source-valid-identifier-")
@@ -230,6 +271,7 @@ class SourceTreeTest {
     }
 
     @Test
+    @Tag("ci-live")
     fun `undeclared decompiler types still fail compilation and remain unresolved`() {
         for (type in listOf("byte", "longlong", "undefined", "undefined1", "undefined2", "undefined4", "undefined8")) {
             val project = createTempDirectory("source-undeclared-type-")
@@ -246,6 +288,7 @@ class SourceTreeTest {
     }
 
     @Test
+    @Tag("ci-live")
     fun `global owners precede consumers and invalidate downstream interface caches`() {
         val model = RecoveredProgramModel(inputSha256 = "input", functions = listOf(
             RecoveredFunction("consumer", "consumer", 1u, "int consumer(void)", "int consumer(void) { return counter; }", referencedGlobals = setOf("counter")),
@@ -269,7 +312,7 @@ class SourceTreeTest {
         val revised = SourceTreeGenerator.generate(changed, project, reconstructor = reconstructor, overrides = overrides)
         assertTrue(revised.unresolvedImplementationIds.isEmpty())
         assertEquals(listOf("zz_data", "consumer", "root"), calls)
-        assertEquals(unrelated, project.resolve("reports/modules/unrelated.json").readText())
+        assertRecompiledCheckpoint(unrelated, project.resolve("reports/modules/unrelated.json").readText())
         assertEquals(0, MakeProjectBuilder.build(project).returnCode)
         calls.clear()
         SourceTreeGenerator.generate(changed, project, reconstructor = reconstructor, overrides = overrides)
@@ -277,6 +320,7 @@ class SourceTreeTest {
     }
 
     @Test
+    @Tag("ci-live")
     fun `interface changes invalidate transitive consumers and resume preserves completed revisions`() {
         val functions = listOf(
             RecoveredFunction("leaf", "leaf", 1u, "int leaf(void)"),
@@ -347,8 +391,8 @@ class SourceTreeTest {
         assertEquals(listOf("root"), calls)
         assertTrue(manifest.unresolvedImplementationIds.isEmpty())
         assertFalse(project.resolve("reports/modules/leaf.attempt.json").exists())
-        completed.forEach { (id, bytes) -> assertEquals(bytes, project.resolve("reports/modules/$id.json").readText()) }
-        assertEquals(unrelatedCheckpoint, project.resolve("reports/modules/unrelated.json").readText())
+        completed.forEach { (id, bytes) -> assertRecompiledCheckpoint(bytes, project.resolve("reports/modules/$id.json").readText()) }
+        assertRecompiledCheckpoint(unrelatedCheckpoint, project.resolve("reports/modules/unrelated.json").readText())
         val confidence = Json.parseToJsonElement(project.resolve("reports/confidence.json").readText()).jsonObject
         confidence.getValue("modules").jsonArray.forEach { element ->
             val revision = element.jsonObject.getValue("revisionEvidence").jsonObject
@@ -391,6 +435,7 @@ class SourceTreeTest {
     }
 
     @Test
+    @Tag("ci-live")
     fun `cyclic interface dependencies invalidate together and stabilize on resume`() {
         val functions = listOf(
             RecoveredFunction("left", "left", 1u, "int left(void)", calls = setOf("right")),
@@ -419,6 +464,7 @@ class SourceTreeTest {
     }
 
     @Test
+    @Tag("ci-live")
     fun `accepted implementations retain unresolved recovery evidence across resume`() {
         val recovered = model().let { original -> original.copy(
             functions = original.functions.map { it.copy(status = RecoveryStatus.PARTIAL) },
@@ -465,10 +511,13 @@ class SourceTreeTest {
         assertTrue(initialCalls > 0)
         SourceTreeGenerator.generate(recovered, project, reconstructor = reconstructor)
         assertEquals(initialCalls, calls)
-        assertEquals(confidence, project.resolve("reports/confidence.json").readText())
+        val renewedConfidence = project.resolve("reports/confidence.json").readText()
+        assertNotEquals(confidence, renewedConfidence, "fresh compilation updates checkpoint and retained proof commitments")
+        assertEquals(withoutCompilationRenewal(report), withoutCompilationRenewal(Json.parseToJsonElement(renewedConfidence).jsonObject))
     }
 
     @Test
+    @Tag("ci-live")
     fun `audit and archive reject missing or cross-paired accepted module confidence evidence`() {
         val project = createTempDirectory("source-confidence-cross-pair-")
         SourceTreeGenerator.generate(
@@ -732,7 +781,7 @@ class SourceTreeTest {
                 assertTrue(request.contextInputs.single { it.id == "observed-behavior" }.content.contains("legacy or opaque exploration is unscoped"))
                 val instructions = request.objective
                 assertTrue(instructions.contains("-Werror"))
-                assertTrue(instructions.contains("-c src/modules/parse.c -o /dev/null"))
+                assertTrue(instructions.contains("-c src/modules/parse.c -o <owned-module-object>"))
                 val path = AgentWorkspacePath("project", "src/modules/parse.c")
                 val expectedRules = mapOf(
                     "src/modules/parse.c" to setOf(
@@ -758,20 +807,17 @@ class SourceTreeTest {
         }
         val oneModule = model().copy(functions = model().functions.take(1), globals = emptyList())
 
-        SourceTreeGenerator.generate(
-            oneModule,
-            project,
-            reconstructor = BoundedLlmModuleReconstructor(harness),
-            observedBehavior = "case default: stdout=ok",
+        val reconstructed = BoundedLlmModuleReconstructor(harness).reconstruct(
+            generatedRequest(oneModule, project, observedBehavior = "case default: stdout=ok"),
         )
 
         assertTrue(project.resolve("src/modules/parse.c").readText().contains("parse_input"))
-        assertTrue(project.resolve("source_tree_manifest.json").readText().contains("\"generator\": \"agent:unspecified\""))
-        val checkpoint = project.resolve("reports/modules/parse.json").readText()
-        assertTrue(checkpoint.contains("\"accepted\": false"))
-        assertTrue(checkpoint.contains("agent-execution-evidence-incomplete"))
-        assertTrue(checkpoint.contains("\"promptCharacters\":"))
-        assertTrue(checkpoint.contains("\"promptBudgetCharacters\": 120000"))
+        assertEquals("agent:unspecified", reconstructed.generator)
+        assertEquals(project.resolve("src/modules/parse.c").readText(), reconstructed.source)
+        assertTrue(requireNotNull(reconstructed.promptCharacters) > 0)
+        assertEquals(120_000, reconstructed.promptBudgetCharacters)
+        assertNull(reconstructed.agentExecutionEvidence, "scripted provider output supplies no authenticated execution evidence")
+        assertFalse(project.resolve("reports/modules/parse.json").exists(), "the provider contract does not authorize acceptance")
     }
 
     @Test
@@ -807,8 +853,9 @@ class SourceTreeTest {
         }
 
         assertFailsWith<IllegalArgumentException> {
-            SourceTreeGenerator.generate(oneModuleModel(), project,
-                reconstructor = BoundedLlmModuleReconstructor(harness), profile = alternateProfile)
+            BoundedLlmModuleReconstructor(harness).reconstruct(
+                generatedRequest(oneModuleModel(), project, profile = alternateProfile),
+            )
         }
         assertFalse(called)
         assertFalse(project.resolve("reports/modules/parse.json").exists())
@@ -859,19 +906,17 @@ class SourceTreeTest {
             )
         }
 
-        val manifest = SourceTreeGenerator.generate(
-            oneModuleModel(),
-            project,
-            reconstructor = BoundedLlmModuleReconstructor(
-                harness,
-                harnessProvenanceDescriptor = "agent-harness-v1:acp:configuration-${"a".repeat(64)}",
-            ),
-            profile = alternateProfile,
-        )
+        val request = generatedRequest(oneModuleModel(), project, profile = alternateProfile)
+        val reconstructed = BoundedLlmModuleReconstructor(
+            harness,
+            harnessProvenanceDescriptor = "agent-harness-v1:acp:configuration-${"a".repeat(64)}",
+        ).reconstruct(request)
 
         assertTrue(called)
-        assertFalse(ProjectFileRole.VIEWABLE in manifest.files.single { it.path == "src/modules/parse.c" }.roles)
-        assertTrue(project.resolve("src/modules/parse.c").readText().contains("parse_input"))
+        assertFalse(ProjectFileRole.VIEWABLE in request.profile.layout.declarationForPath(request.module.sourcePath).roles)
+        assertTrue(reconstructed.source.contains("parse_input"))
+        assertNull(reconstructed.agentExecutionEvidence)
+        assertFalse(project.resolve("reports/modules/parse.json").exists())
     }
 
     @Test
@@ -907,6 +952,7 @@ class SourceTreeTest {
     }
 
     @Test
+    @Tag("ci-live")
     fun `unchanged modules resume from checkpoints without regeneration`() {
         val project = createTempDirectory("source-tree-resume-")
         SourceTreeGenerator.generate(model(), project, reconstructor = validReconstructor())
@@ -933,7 +979,7 @@ class SourceTreeTest {
         )
         listOf("observed case one", "observed case two").forEach { behavior ->
             val failure = assertFailsWith<decompengine.agent.AgentExecutionException> {
-                SourceTreeGenerator.generate(oneModuleModel(), project, reconstructor = reconstructor, observedBehavior = behavior)
+                reconstructor.reconstruct(generatedRequest(oneModuleModel(), project, observedBehavior = behavior))
             }
             assertTrue(generateSequence<Throwable>(failure) { it.cause }.any { it is decompengine.agent.AgentSessionRecoveryException })
         }
@@ -967,6 +1013,7 @@ class SourceTreeTest {
     }
 
     @Test
+    @Tag("ci-live")
     fun `restart acknowledges the durable accepted checkpoint without redispatching reconstruction`() {
         val project = createTempDirectory("source-tree-session-ack-")
         var dispatches = 0
@@ -1000,10 +1047,11 @@ class SourceTreeTest {
         assertEquals(1, dispatches)
         assertEquals(2, acknowledgements)
         assertTrue(manifest.unresolvedImplementationIds.isEmpty())
-        assertTrue(checkpoint.contentEquals(project.resolve("reports/modules/parse.json").readBytes()))
+        assertRecompiledCheckpoint(checkpoint.decodeToString(), project.resolve("reports/modules/parse.json").readText())
     }
 
     @Test
+    @Tag("ci-live")
     fun `module compiler gate rejects source that passes definition and provenance checks`() {
         val project = createTempDirectory("source-tree-compiler-gate-")
         val invalid = ModuleReconstructor { request ->
@@ -1027,6 +1075,7 @@ class SourceTreeTest {
     }
 
     @Test
+    @Tag("ci-live")
     fun `rejected revision preserves the accepted source checkpoint and manifest`() {
         val project = createTempDirectory("source-tree-rejected-revision-")
         val originalModel = oneModuleModel()
@@ -1055,6 +1104,7 @@ class SourceTreeTest {
     }
 
     @Test
+    @Tag("ci-live")
     fun `interrupted revision restores changes made by the reconstructor`() {
         val project = createTempDirectory("source-tree-revision-cancelled-")
         val originalModel = oneModuleModel()
@@ -1075,6 +1125,7 @@ class SourceTreeTest {
     }
 
     @Test
+    @Tag("ci-live")
     fun `contradictory accepted checkpoints are neither reused nor offered as rollback baselines`() {
         for (change in listOf("command", "owners", "duplicate", "status", "issues", "schema",
             "unbound-schema", "binary", "model-schema", "profile", "string-schema")) {
@@ -1119,22 +1170,24 @@ class SourceTreeTest {
     }
 
     @Test
+    @Tag("ci-live")
     fun `historical checkpoints without compiler evidence are regenerated`() {
         val project = createTempDirectory("source-tree-old-checkpoint-")
         val input = oneModuleModel()
         SourceTreeGenerator.generate(input, project, reconstructor = validReconstructor())
         val checkpoint = project.resolve("reports/modules/parse.json")
-        checkpoint.writeText(checkpoint.readText().replace("\"schemaVersion\": 6", "\"schemaVersion\": 4"))
+        checkpoint.writeText(checkpoint.readText().replace("\"schemaVersion\": 7", "\"schemaVersion\": 4"))
         var calls = 0
 
         SourceTreeGenerator.generate(input, project, reconstructor = validReconstructor { calls++ })
 
         assertEquals(1, calls)
-        assertTrue(checkpoint.readText().contains("\"schemaVersion\": 6"))
+        assertTrue(checkpoint.readText().contains("\"schemaVersion\": 7"))
         assertTrue(checkpoint.readText().contains("\"outcome\":\"passed\""))
     }
 
     @Test
+    @Tag("ci-live")
     fun `accepted checkpoints require the current reconstructor identity`() {
         val project = createTempDirectory("source-tree-cache-identity-")
         val input = oneModuleModel()
@@ -1179,6 +1232,7 @@ class SourceTreeTest {
     }
 
     @Test
+    @Tag("ci-live")
     fun `agent strategy never reuses an evidence-free agent-free checkpoint`() {
         val project = createTempDirectory("source-tree-required-evidence-cache-")
         val input = oneModuleModel()
@@ -1205,6 +1259,7 @@ class SourceTreeTest {
     }
 
     @Test
+    @Tag("ci-live")
     fun `agent-free checkpoint reuse remains available without execution evidence`() {
         val project = createTempDirectory("source-tree-agent-free-cache-")
         val input = oneModuleModel()
@@ -1224,6 +1279,7 @@ class SourceTreeTest {
     }
 
     @Test
+    @Tag("ci-live")
     fun `accepted agent-free checkpoints revalidate recorded prompt budgets on reuse`() {
         val project = createTempDirectory("source-tree-legacy-prompt-budget-")
         val input = oneModuleModel()
@@ -1252,6 +1308,7 @@ class SourceTreeTest {
     }
 
     @Test
+    @Tag("ci-live")
     fun `checkpoint evidence path mismatch is rejected before touching the named file`() {
         val project = createTempDirectory("source-tree-evidence-path-mismatch-")
         val input = oneModuleModel()
@@ -1280,6 +1337,7 @@ class SourceTreeTest {
     }
 
     @Test
+    @Tag("ci-live")
     fun `checkpoint evidence cache rejects symbolic links`() {
         val temp = createTempDirectory("source-tree-evidence-symlink-")
         val project = temp.resolve("project")
@@ -1348,6 +1406,7 @@ class SourceTreeTest {
     }
 
     @Test
+    @Tag("ci-live")
     fun `generic agent return stubs are rejected with attributable evidence`() {
         val project = createTempDirectory("source-tree-generic-agent-")
         val harness = writingHarness(
@@ -1369,6 +1428,7 @@ class SourceTreeTest {
     }
 
     @Test
+    @Tag("ci-live")
     fun `partial agent modules remain unresolved before compiler validation`() {
         val project = createTempDirectory("source-tree-partial-agent-")
         val functions = listOf(
@@ -1412,6 +1472,7 @@ class SourceTreeTest {
     }
 
     @Test
+    @Tag("ci-live")
     fun `undefined decompiler types in comments and literals do not reject valid code`() {
         val project = createTempDirectory("source-tree-undefined-comment-")
         val oneModule = model().copy(functions = model().functions.take(1), globals = emptyList())
@@ -1433,6 +1494,7 @@ class SourceTreeTest {
     }
 
     @Test
+    @Tag("ci-live")
     fun `checkpoint source hash prevents a changed implementation from being silently resumed`() {
         val project = createTempDirectory("source-tree-checkpoint-hash-")
         var calls = 0
@@ -1450,6 +1512,7 @@ class SourceTreeTest {
     }
 
     @Test
+    @Tag("ci-live")
     fun `interrupted generation preserves accepted module bytes and resumes at the unfinished module`() {
         val project = createTempDirectory("source-tree-interrupted-")
         val interrupted = object : ModuleReconstructor {
@@ -1539,6 +1602,7 @@ class SourceTreeTest {
     }
 
     @Test
+    @Tag("ci-live")
     fun `schema three checkpoints retain input identity and resume without dispatch`() {
         val input = oneModuleModel().copy(schemaVersion = 3, globals = emptyList())
         val project = createTempDirectory(Path.of("build").toAbsolutePath().normalize().createDirectories(), "schema-three-checkpoint-")
@@ -1558,6 +1622,7 @@ class SourceTreeTest {
     }
 
     @Test
+    @Tag("ci-live")
     fun `model four checkpoint binds nullable evidence and refuses omission-only stale reuse`() {
         val project = createTempDirectory(Path.of("build").toAbsolutePath().normalize().createDirectories(), "schema-four-checkpoint-")
         val base = oneModuleModel().copy(schemaVersion = 4,
@@ -1585,6 +1650,44 @@ class SourceTreeTest {
         }
         assertTrue(checkpoints.any { path -> Json.parseToJsonElement(path.readText()).jsonObject["modelSchemaVersion"] == JsonPrimitive(4) })
     }
+
+    /** Real planner/renderer/provider request with no workflow compilation or acceptance claim. */
+    private fun generatedRequest(model: RecoveredProgramModel, project: Path,
+        profile: ReconstructionProfile = GeneratedCMakeReconstructionProfile.descriptor,
+        observedBehavior: String? = null): ModuleReconstructionRequest {
+        val plan = DeterministicModulePlanner.forProfile(profile).plan(model)
+        val module = plan.modules.single()
+        project.resolve(module.sourcePath).parent.createDirectories()
+        val request = ProfileModulePromptInputs(model, plan, profile).request(module.id, project, observedBehavior)
+        return request.copy(sessionEvidenceFingerprint = selectedModuleInputFingerprint(request))
+    }
+
+    private fun createTempDirectory(prefix: String): Path = Files.createTempDirectory(
+        Path.of("build", "tmp", "source-tree-tests").toAbsolutePath().normalize().createDirectories(), prefix,
+    )
+
+    private fun assertRecompiledCheckpoint(beforeText: String, afterText: String) {
+        val before = Json.parseToJsonElement(beforeText).jsonObject
+        val after = Json.parseToJsonElement(afterText).jsonObject
+        assertEquals(JsonPrimitive(7), after["schemaVersion"])
+        assertEquals(JsonPrimitive(true), after["accepted"])
+        assertEquals(JsonObject(before - "compilation"), JsonObject(after - "compilation"),
+            "recompilation must preserve source, ownership, prompt, and reconstruction provenance")
+        val oldProof = before.getValue("compilation").jsonObject.getValue("containedProof").jsonObject
+        val newProof = after.getValue("compilation").jsonObject.getValue("containedProof").jsonObject
+        val old = ContainedModuleCompilationProof.verify(oldProof)
+        val current = ContainedModuleCompilationProof.verify(newProof)
+        assertEquals(old.request.sourceSha256, current.request.sourceSha256)
+        assertNotEquals(old.request.nonce, current.request.nonce, "cache reuse requires a fresh contained compilation")
+        assertEquals("compiled-object", current.result.outcome)
+    }
+
+    private fun withoutCompilationRenewal(report: JsonObject): JsonObject = JsonObject(report + ("modules" to
+        JsonArray(report.getValue("modules").jsonArray.map { element ->
+            val module = element.jsonObject
+            JsonObject(module + ("revisionEvidence" to JsonObject(module.getValue("revisionEvidence").jsonObject -
+                setOf("compilation", "checkpointSha256"))))
+        })))
 
     private fun writingHarness(source: String): AgentHarness = object : AgentHarness {
         override fun execute(

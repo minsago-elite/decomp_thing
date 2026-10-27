@@ -23,7 +23,13 @@ import kotlin.test.assertTrue
 import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonObject
 
+@org.junit.jupiter.api.parallel.Execution(org.junit.jupiter.api.parallel.ExecutionMode.SAME_THREAD)
+@org.junit.jupiter.api.parallel.ResourceLock("contained-module-compilation-runtime")
 class BehaviorValidationTest {
+    @org.junit.jupiter.api.BeforeEach
+    fun requireConfiguredCompilerForLiveAcceptance(test: org.junit.jupiter.api.TestInfo) =
+        decompengine.project.requireHostedModuleCompiler(test)
+
     @Test
     fun `completed programs exceeding stream or aggregate bounds preserve prior reports`() {
         val root = createTempDirectory("validation-output-bounds-")
@@ -160,6 +166,7 @@ class BehaviorValidationTest {
     }
 
     @Test
+    @org.junit.jupiter.api.Tag("ci-live")
     fun `real sandbox reads retained case files through read-only isolated mounts`() {
         val tempDir = createTempDirectory("validation-file-mounts-")
         val source = """

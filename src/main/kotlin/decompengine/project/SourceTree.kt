@@ -22,6 +22,7 @@ import decompengine.agent.AgentWorkflowProgress
 import decompengine.agent.receiptCommitmentBytes
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonNull
+import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.boolean
 import kotlinx.serialization.json.booleanOrNull
 import kotlinx.serialization.json.contentOrNull
@@ -60,6 +61,8 @@ data class ModuleReconstructionRequest(
     val acceptedSourceSha256: String? = null,
     /** Recovered ownership used to select only required cross-module interfaces. */
     val modulePlan: ModulePlan? = null,
+    /** Archive replay freezes the workflow compiler command at the recorded checkpoint version. */
+    val compilationCheckpointVersion: Int = 7,
 )
 
 data class ReconstructedModule(
@@ -137,6 +140,9 @@ class BoundedLlmModuleReconstructor(
             request.module.id, prompt.length, budget, sha256(prompt.toByteArray()), PRE_DISPATCH_BUDGET_PERMIT,
         )
     }
+
+    internal fun exceedsContextBudget(request: ModuleReconstructionRequest): Boolean =
+        promptBudgetFailure(request, modulePromptEvidence(request).text) != null
 
     internal fun requireRetainableFallbackObservation(request: ModuleReconstructionRequest) {
         if (promptBudgetFailure(request, modulePromptEvidence(request).text) != null) {
@@ -676,15 +682,15 @@ object SourceTreeGenerator {
             } catch (failure: Exception) {
                 throw ModuleReconstructionEvidencePersistenceException(failure)
             }
-            val recordedCheckpoint = readCheckpoint(checkpointPath)
-            // Acceptance rules may tighten without changing model or profile bytes. A previous
-            // compiler pass cannot authorize either cache reuse or rollback past the current gate.
+            val recordedCheckpoint = readCheckpoint(projectDir, checkpointPath, profile, module)
+            // Historical acceptance permits restoration of its recorded bytes, not current
+            // compiler authority. A current cache candidate is compiled again below.
             val currentSourcePassesAdapter by lazy {
                 sourcePath.exists() && adapter.assess(module, model, recordedCheckpoint?.generator.orEmpty(),
                     sourcePath.readText()).isEmpty()
             }
-            fun ModuleCheckpoint.hasCurrentModuleAcceptance(): Boolean =
-                !unresolvedOutput && schemaVersion == 6 && inputBinarySha256 == model.inputSha256 &&
+            fun ModuleCheckpoint.hasRestorableModuleAcceptance(): Boolean =
+                !unresolvedOutput && schemaVersion in 6..7 && inputBinarySha256 == model.inputSha256 &&
                     modelSchemaVersion == model.schemaVersion && profileSha256 == profile.sha256 &&
                     accepted && issues.isEmpty() &&
                     modulePromptAttributionIsValid(
@@ -696,10 +702,10 @@ object SourceTreeGenerator {
                     entityIds.size == entityIds.toSet().size &&
                     entityIds.toSet() == (module.functionIds + module.globalIds).toSet() &&
                     compilation?.passed == true &&
-                    compilation.command == compilationPolicy.command(profile, module.sourcePath) &&
+                    compilation.command == compilationPolicy.commandForCheckpoint(profile, module.sourcePath, schemaVersion) &&
                     currentSourcePassesAdapter
             val verifiedPreviousAcceptance = recordedCheckpoint?.takeIf {
-                it.hasCurrentModuleAcceptance() && sourcePath.exists() && sha256(sourcePath.readBytes()) == it.sourceSha256 &&
+                it.hasRestorableModuleAcceptance() && sourcePath.exists() && sha256(sourcePath.readBytes()) == it.sourceSha256 &&
                     it.hasCurrentExecutionEvidence(projectDir, configuredExecutionEvidencePath, false)
             }
             val request = ModuleReconstructionRequest(
@@ -719,7 +725,7 @@ object SourceTreeGenerator {
             )
             val cacheIdentity = selectedReconstructor.cacheIdentity(profile)
             val cached = recordedCheckpoint?.takeIf { checkpoint ->
-                checkpoint.schemaVersion == 6 && checkpoint.inputBinarySha256 == model.inputSha256 &&
+                checkpoint.schemaVersion == 7 && checkpoint.inputBinarySha256 == model.inputSha256 &&
                     checkpoint.modelSchemaVersion == model.schemaVersion && checkpoint.profileSha256 == profile.sha256 &&
                     checkpoint.fingerprint == fingerprint &&
                     sourcePath.exists() &&
@@ -730,9 +736,19 @@ object SourceTreeGenerator {
                         configuredEvidencePath = configuredExecutionEvidencePath,
                         evidenceRequired = selectedReconstructor.requiresExecutionEvidenceForCheckpointReuse(),
                     ) &&
-                    (if (checkpoint.accepted) checkpoint.hasCurrentModuleAcceptance() else !checkpoint.retryable)
+                    (if (checkpoint.accepted) checkpoint.hasRestorableModuleAcceptance() &&
+                        (!moduleClaimsAgentExecution(checkpoint.generator, checkpoint.reconstructorIdentity) || try {
+                            ReconstructionAcpEvidenceArchiveVerifier.verifyReusableModuleInvocation(projectDir, module,
+                                checkpoint.sourceSha256, checkpoint.generator, checkpoint.promptSha256, profile,
+                                model.inputSha256, model.schemaVersion)
+                            true
+                        } catch (failure: Exception) {
+                            if (failure is InterruptedException || Thread.currentThread().isInterrupted) throw failure
+                            false
+                        }) else !checkpoint.retryable)
             }
-            val checkpoint = cached ?: run {
+            val reusedAccepted = cached?.takeIf { it.accepted }
+            val checkpoint = cached?.takeUnless { it.accepted } ?: run {
                 val previousAccepted = verifiedPreviousAcceptance
                 val previousSource = previousAccepted?.let { sourcePath.readText() }
                 val previousExecutionEvidence = previousAccepted?.executionEvidencePath
@@ -752,8 +768,18 @@ object SourceTreeGenerator {
                     progress.phase(AgentWorkflowPhase.ROLLED_BACK, module.id, previousAccepted.sourceSha256)
                     return attemptEvidence
                 }
+                // Availability is checked before dispatch, but an oversized prompt still gets
+                // its honest undispatched fallback without needing a compiler runtime.
+                if (reusedAccepted == null && selectedReconstructor.requiresExecutionEvidenceForCheckpointReuse() &&
+                    (selectedReconstructor !is BoundedLlmModuleReconstructor || !selectedReconstructor.exceedsContextBudget(request))) {
+                    compilationPolicy.requireAvailable(profile)
+                }
                 var workflowOrigin = "reconstructor-return"
-                val attempted = try {
+                val attempted = if (reusedAccepted != null) ReconstructedModule(
+                    source = requireNotNull(previousSource), generator = reusedAccepted.generator,
+                    promptSha256 = reusedAccepted.promptSha256, promptCharacters = reusedAccepted.promptCharacters,
+                    promptBudgetCharacters = reusedAccepted.promptBudgetCharacters, retryable = reusedAccepted.retryable,
+                ) else try {
                     selectedReconstructor.reconstruct(request)
                 } catch (interrupted: ModuleReconstructionInterruptedException) {
                     interrupted.agentExecutionEvidence?.let(::persistExecutionEvidence)
@@ -783,17 +809,44 @@ object SourceTreeGenerator {
                 }
                 val normalizedSource = attempted.source.trimEnd() + "\n"
                 adapter.validateSourceContent(profile, normalizedSource.toByteArray(), module.sourcePath)
-                val executionEvidence = attempted.agentExecutionEvidence?.let(::persistExecutionEvidence)
-                    ?: persistedExecutionEvidence
+                val executionEvidence = reusedAccepted?.retainedExecutionEvidence()
+                    ?: attempted.agentExecutionEvidence?.let(::persistExecutionEvidence) ?: persistedExecutionEvidence
                 progress.phase(AgentWorkflowPhase.POLICY_CHECKING, module.id)
-                val issues = assessReconstruction(adapter, profile, module, model, attempted, normalizedSource, cacheIdentity).toMutableList()
+                val issues = if (reusedAccepted != null) mutableListOf<ModuleReconstructionIssue>()
+                    else assessReconstruction(adapter, profile, module, model, attempted, normalizedSource, cacheIdentity).toMutableList()
                 writeAtomically(sourcePath, normalizedSource)
-                val compilation = if (issues.isEmpty()) {
-                    progress.phase(AgentWorkflowPhase.BUILD_VALIDATING, module.id)
+                val compilation = if (!unresolvedOutput && issues.isEmpty()) {
                     val validation = try {
-                        compilationPolicy.validate(projectDir, module.sourcePath, profile)
+                        progress.phase(AgentWorkflowPhase.BUILD_VALIDATING, module.id)
+                        compilationPolicy.validate(projectDir, module.sourcePath, profile).also { validation ->
+                            if (!validation.authorizesAcceptance(sha256(normalizedSource.toByteArray()), profile.sha256, compilationPolicy.id)) {
+                                issues += ModuleReconstructionIssue(
+                                    if (validation.passed) "module-compilation-unauthenticated" else "module-compilation-${validation.outcome}",
+                                    if (validation.passed) "compiler facts lack a live authenticated module compilation permit"
+                                    else "module compiler gate ${validation.outcome}; diagnostics SHA-256=${validation.diagnosticsSha256}",
+                                    module.functionIds + module.globalIds,
+                                )
+                            }
+                        }
                     } catch (failure: Exception) {
-                        if (failure !is InterruptedException && !Thread.currentThread().isInterrupted) throw failure
+                        if (failure !is InterruptedException && !Thread.currentThread().isInterrupted) {
+                            try {
+                                val retainedEvidence = restoreAcceptedRevision()
+                                writeValidationFailureReport(attemptPath, module, fingerprint, cacheIdentity,
+                                    sha256(normalizedSource.toByteArray()), previousAccepted, failure, retainedEvidence,
+                                    compilationOnly = reusedAccepted != null)
+                                if (previousAccepted != null && reusedAccepted == null) selectedReconstructor.reconcileSessionCheckpoint(
+                                    request, false, previousAccepted.sourceSha256,
+                                    executionEvidence?.requestSha256, executionEvidence?.sha256,
+                                )
+                            } catch (restorationFailure: Exception) {
+                                // A failed rollback/retention is itself fatal. Preserve the original
+                                // validation failure without presenting cleanup as successful.
+                                if (restorationFailure !== failure) restorationFailure.addSuppressed(failure)
+                                throw restorationFailure
+                            }
+                            throw failure
+                        }
                         // Restore durable state before reinstating cancellation, since file
                         // operations may otherwise abort immediately on the interrupted thread.
                         Thread.interrupted()
@@ -805,19 +858,13 @@ object SourceTreeGenerator {
                         try {
                             val retainedEvidence = restoreAcceptedRevision()
                             writeInterruptionReport(attemptPath, module, fingerprint, cacheIdentity,
-                                sourcePath, recordedCheckpoint, interrupted, retainedEvidence)
+                                sourcePath, recordedCheckpoint, interrupted, retainedEvidence, compilationOnly = reusedAccepted != null)
                         } finally {
                             Thread.currentThread().interrupt()
                         }
                         throw interrupted
                     }
-                    validation.also { validation ->
-                        if (!validation.passed) issues += ModuleReconstructionIssue(
-                            "module-compilation-${validation.outcome}",
-                            "module compiler gate ${validation.outcome}; diagnostics SHA-256=${validation.diagnosticsSha256}",
-                            module.functionIds + module.globalIds,
-                        )
-                    }
+                    validation
                 } else null
                 val accepted = !unresolvedOutput && issues.isEmpty()
                 val normalizedSourceSha256 = sha256(normalizedSource.toByteArray())
@@ -849,14 +896,15 @@ object SourceTreeGenerator {
                 )
                 if (!accepted && previousAccepted != null) {
                     val attemptEvidence = restoreAcceptedRevision()
-                    val rejectedCheckpoint = candidateCheckpoint.copy(executionEvidencePath = attemptEvidence?.path)
+                    val rejectedCheckpoint = candidateCheckpoint.copy(executionEvidencePath = attemptEvidence?.path ?: candidateCheckpoint.executionEvidencePath)
                     writeAtomically(
                         attemptPath,
                         "{\"schemaVersion\":3,\"moduleId\":\"${module.id.jsonEscape()}\",\"status\":\"rejected\","
+                            + "\"attemptKind\":\"${if (reusedAccepted != null) "compiler-revalidation" else "reconstruction"}\","
                             + "\"previousAcceptedSourceSha256\":\"${previousAccepted.sourceSha256}\","
                             + "\"candidate\":${rejectedCheckpoint.toJson()}}\n",
                     )
-                    selectedReconstructor.reconcileSessionCheckpoint(
+                    if (reusedAccepted == null) selectedReconstructor.reconcileSessionCheckpoint(
                         request, false, previousAccepted.sourceSha256,
                         executionEvidence?.requestSha256, executionEvidence?.sha256,
                     )
@@ -872,7 +920,7 @@ object SourceTreeGenerator {
             if (checkpoint.executionEvidencePath == null) configuredExecutionEvidenceFile?.deleteIfExists()
             attemptPath.deleteIfExists()
             projectDir.resolve("reports/modules/${module.id}.attempt.execution.json").deleteIfExists()
-            selectedReconstructor.reconcileSessionCheckpoint(
+            if (reusedAccepted == null) selectedReconstructor.reconcileSessionCheckpoint(
                 request, checkpoint.accepted, checkpoint.sourceSha256,
                 checkpoint.executionRequestSha256, checkpoint.executionEvidenceSha256,
             )
@@ -1098,7 +1146,7 @@ object SourceTreeGenerator {
     }
 
     private data class ModuleCheckpoint(
-        val schemaVersion: Int = 6,
+        val schemaVersion: Int = 7,
         val fingerprint: String,
         val sourceSha256: String,
         val generator: String,
@@ -1126,7 +1174,7 @@ object SourceTreeGenerator {
         init {
             require(schemaVersion < 6 || (inputBinarySha256 != null && modelSchemaVersion in setOf(1, 2, 3, 4) &&
                 profileSha256?.matches(Regex("[0-9a-f]{64}")) == true)) { "module checkpoint lacks input identity" }
-            require(schemaVersion in 2..6) { "unsupported module checkpoint schemaVersion: $schemaVersion" }
+            require(schemaVersion in 2..7) { "unsupported module checkpoint schemaVersion: $schemaVersion" }
             require(workflowOrigin in setOf("reconstructor-return", "exception-fallback",
                 "pre-dispatch-context-budget-fallback")) { "unsupported module checkpoint workflow origin" }
             require(preDispatchObservedBehavior == null ||
@@ -1137,6 +1185,9 @@ object SourceTreeGenerator {
             require(schemaVersion < 5 || !accepted ||
                 (compilation?.passed == true && compilation.sourceSha256 == sourceSha256)
             ) { "accepted module checkpoint lacks successful compilation of its exact source bytes" }
+            require(schemaVersion < 7 || !accepted || compilation?.containedProof != null) {
+                "current accepted module checkpoint lacks contained compiler proof"
+            }
             val evidenceFields = listOf(
                 executionEvidencePath,
                 executionEvidenceSha256,
@@ -1169,6 +1220,12 @@ object SourceTreeGenerator {
             require(executionTerminalOutcome == null ||
                 executionTerminalOutcome.matches(Regex("(?:returned|failed)-[a-z0-9-]{1,64}"))
             ) { "module checkpoint execution terminal outcome is invalid" }
+        }
+
+        fun retainedExecutionEvidence(): PersistedReconstructionExecutionEvidence? = executionEvidencePath?.let { path ->
+            PersistedReconstructionExecutionEvidence(path, requireNotNull(executionEvidenceSha256),
+                requireNotNull(executionEvidenceSchemaVersion), requireNotNull(executionRequestSha256),
+                requireNotNull(executionTerminalOutcome), requireNotNull(executionReleaseComplete))
         }
 
         fun hasCurrentExecutionEvidence(
@@ -1246,14 +1303,20 @@ object SourceTreeGenerator {
         }
     }
 
-    private fun readCheckpoint(path: Path): ModuleCheckpoint? {
+    private fun readCheckpoint(projectDir: Path, path: Path, profile: ReconstructionProfile, module: PlannedModule): ModuleCheckpoint? {
         if (!path.exists()) return null
-        return runCatching {
-            val root = Json.parseToJsonElement(path.readText()).jsonObject
+        return try {
+            val bytes = decompengine.repair.readStableRegularFile(projectDir,
+                projectDir.relativize(path).toString(), 4L * 1024 * 1024).bytes
+            val root = decompengine.oracle.core.OracleJson.parse(bytes,
+                decompengine.oracle.core.StrictJsonLimits(maximumInputBytes = 4 * 1024 * 1024,
+                    maximumCanonicalBytes = 4 * 1024 * 1024, maximumDepth = 64, maximumNodes = 200_000,
+                    maximumStringBytes = 1024 * 1024, maximumTotalStringBytes = 4 * 1024 * 1024,
+                    maximumNumberCharacters = 32)).jsonObject
             val schemaVersion = root["schemaVersion"]?.jsonPrimitive?.intOrNull ?: return null
-            if (schemaVersion !in setOf(2, 3, 4, 5, 6)) return null
+            if (schemaVersion !in setOf(2, 3, 4, 5, 6, 7)) return null
             if (schemaVersion >= 6) {
-                require(root.getValue("schemaVersion") == kotlinx.serialization.json.JsonPrimitive(6))
+                require(root.getValue("schemaVersion") == kotlinx.serialization.json.JsonPrimitive(schemaVersion))
                 require(root.getValue("inputBinarySha256").jsonPrimitive.isString)
                 require(root.getValue("profileSha256").jsonPrimitive.isString)
                 require(!root.getValue("modelSchemaVersion").jsonPrimitive.isString)
@@ -1310,17 +1373,14 @@ object SourceTreeGenerator {
                     root["executionReleaseComplete"]?.jsonPrimitive?.booleanOrNull
                 } else null,
                 compilation = root["compilation"]?.takeUnless { it is JsonNull }?.jsonObject?.let { compilation ->
-                    ModuleCompilationEvidence(
-                        sourceSha256 = compilation.getValue("sourceSha256").jsonPrimitive.content,
-                        command = compilation.getValue("command").jsonArray.map { it.jsonPrimitive.content },
-                        outcome = compilation.getValue("outcome").jsonPrimitive.content,
-                        returnCode = compilation["returnCode"]?.jsonPrimitive?.intOrNull,
-                        diagnosticsSha256 = compilation.getValue("diagnosticsSha256").jsonPrimitive.content,
-                        diagnosticsBytes = compilation.getValue("diagnosticsBytes").jsonPrimitive.content.toLong(),
-                    )
+                    ModuleCompilationEvidence.decode(compilation, schemaVersion, profile, module.sourcePath,
+                        root.getValue("sourceSha256").jsonPrimitive.content, root.getValue("accepted").jsonPrimitive.boolean)
                 },
             )
-        }.getOrNull()
+        } catch (failure: Exception) {
+            if (failure is InterruptedException || Thread.currentThread().isInterrupted) throw failure
+            null
+        }
     }
 
     private data class PersistedReconstructionExecutionEvidence(
@@ -1367,6 +1427,41 @@ object SourceTreeGenerator {
         return sha256(bytes) to bytes.size.toLong()
     }
 
+    private fun writeValidationFailureReport(
+        path: Path,
+        module: PlannedModule,
+        fingerprint: String,
+        reconstructorIdentity: String,
+        candidateSourceSha256: String,
+        previousAccepted: ModuleCheckpoint?,
+        failure: Exception,
+        executionEvidence: PersistedReconstructionExecutionEvidence?,
+        compilationOnly: Boolean = false,
+    ) {
+        // This is an attempt disposition, not compiler proof. No exit status or pass is
+        // invented when validation fails before returning its typed result.
+        val report = kotlinx.serialization.json.buildJsonObject {
+            put("schemaVersion", JsonPrimitive(1))
+            put("kind", JsonPrimitive("module-compilation-failure"))
+            put("attemptKind", JsonPrimitive(if (compilationOnly) "compiler-revalidation" else "reconstruction"))
+            put("moduleId", JsonPrimitive(module.id))
+            put("fingerprint", JsonPrimitive(fingerprint))
+            put("reconstructorIdentity", JsonPrimitive(reconstructorIdentity))
+            put("status", JsonPrimitive("validation-failed"))
+            put("candidateSourceSha256", JsonPrimitive(candidateSourceSha256))
+            put("previousAcceptedSourceSha256", previousAccepted?.sourceSha256
+                ?.let(::JsonPrimitive) ?: JsonNull)
+            put("failureType", JsonPrimitive(failure.javaClass.name))
+            put("executionEvidencePath", executionEvidence?.path?.let(::JsonPrimitive) ?: JsonNull)
+            put("executionEvidenceSha256", executionEvidence?.sha256?.let(::JsonPrimitive) ?: JsonNull)
+            put("executionRequestSha256", executionEvidence?.requestSha256?.let(::JsonPrimitive) ?: JsonNull)
+            put("executionTerminalOutcome", executionEvidence?.terminalOutcome?.let(::JsonPrimitive) ?: JsonNull)
+            put("entityIds", kotlinx.serialization.json.JsonArray(
+                (module.functionIds + module.globalIds).sorted().map(::JsonPrimitive)))
+        }
+        writeAtomically(path, report.toString() + "\n")
+    }
+
     private fun writeInterruptionReport(
         path: Path,
         module: PlannedModule,
@@ -1376,6 +1471,7 @@ object SourceTreeGenerator {
         previousCheckpoint: ModuleCheckpoint?,
         interruption: ModuleReconstructionInterruptedException,
         executionEvidence: PersistedReconstructionExecutionEvidence?,
+        compilationOnly: Boolean = false,
     ) {
         val currentSourceSha256 = sourcePath.takeIf { it.exists() }?.readBytes()?.let(::sha256)
         val report = buildString {
@@ -1384,6 +1480,7 @@ object SourceTreeGenerator {
             append("\n  \"fingerprint\": \"").append(fingerprint).append("\",")
             append("\n  \"reconstructorIdentity\": \"").append(reconstructorIdentity.jsonEscape()).append("\",")
             append("\n  \"status\": \"interrupted\",")
+            append("\n  \"attemptKind\": \"").append(if (compilationOnly) "compiler-revalidation" else "reconstruction").append("\",")
             append("\n  \"stopReason\": \"").append(interruption.stopReason.name.lowercase()).append("\",")
             val summaryCommitment = interruption.agentSummary?.let(::executionTextCommitment)
             append("\n  \"summarySha256\": ")

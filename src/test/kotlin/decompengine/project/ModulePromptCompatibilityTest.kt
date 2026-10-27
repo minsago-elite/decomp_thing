@@ -1,6 +1,7 @@
 package decompengine.project
 
 import decompengine.agent.AgentHarness
+import decompengine.agent.AgentExecutionException
 import decompengine.agent.AgentExecutionResult
 import decompengine.agent.AgentStopReason
 import decompengine.oracle.behavior.LlvmBehaviorCandidateAcpLineageIndexV2Publisher
@@ -16,6 +17,7 @@ import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFalse
 import kotlin.test.assertFailsWith
+import kotlin.test.assertSame
 import kotlin.test.assertTrue
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.Json
@@ -24,8 +26,33 @@ import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
+import org.junit.jupiter.api.Assumptions.assumeTrue
+import org.junit.jupiter.api.BeforeEach
+import org.junit.jupiter.api.Tag
+import org.junit.jupiter.api.TestInfo
+import org.junit.jupiter.api.parallel.Execution
+import org.junit.jupiter.api.parallel.ExecutionMode
+import org.junit.jupiter.api.parallel.ResourceLock
 
+@Execution(ExecutionMode.SAME_THREAD)
+@ResourceLock("contained-module-compilation-runtime")
 class ModulePromptCompatibilityTest {
+    @BeforeEach
+    fun requireConfiguredCompilerForHostedAcceptance(test: TestInfo) {
+        if ("ci-live" !in test.tags) return
+        val file = System.getenv(ContainedModuleCompilationRuntimeConfiguration.ENVIRONMENT)
+        val directory = System.getenv(ContainedModuleCompilationRuntimeConfiguration.DIRECTORY_ENVIRONMENT)
+        val configured = !file.isNullOrBlank() || !directory.isNullOrBlank()
+        if (System.getenv("GENERATED_C_MODULE_COMPILE_REQUIRE") == "true") {
+            assertTrue(configured, "required module prompt workflow tests need the provisioned contained compiler runtime")
+        }
+        assumeTrue(configured, "configure the contained compiler to run module prompt workflow acceptance tests")
+        // Once configured, malformed runtime data must fail rather than skip qualification.
+        assertTrue(System.getProperty("os.name").lowercase().contains("linux"))
+        if (!file.isNullOrBlank()) assertTrue(Files.isRegularFile(Path.of(file)), "configured compiler file is missing")
+        if (!directory.isNullOrBlank()) assertTrue(Files.isDirectory(Path.of(directory)), "configured compiler directory is missing")
+    }
+
     @Test
     fun `generated C selected prompt commitments bind complete context for Make and Ninja`() {
         for (base in ReconstructionProfiles.builtIn) {
@@ -46,6 +73,34 @@ class ModulePromptCompatibilityTest {
                 assertTrue(":context-4096:" in reconstructor.cacheIdentity(profile))
                 assertEquals(profileBudget, profile.budgets.reconstructionMaximumContextCharacters)
                 assertFalse(invoked)
+            }
+        }
+    }
+
+    @Test
+    fun `retained observation replay preserves checkpoint compiler command and fingerprint identity`() {
+        for (profile in ReconstructionProfiles.builtIn) {
+            val model = model()
+            val plan = DeterministicModulePlanner(layout = profile.layout).plan(model)
+            val module = plan.modules.single()
+            val inputs = ProfileModulePromptInputs(model, plan, profile)
+            val policy = ReconstructionCompilationPolicies.resolve(profile)
+            for (version in listOf(4, 5, 6, 7)) {
+                val replayed = inputs.requestFromRetainedObservation(module.id, Path.of("unused-workspace"),
+                    "retained observation", legacy = false).copy(compilationCheckpointVersion = version)
+                val direct = inputs.request(module.id, Path.of("unused-workspace"), "retained observation")
+                    .copy(compilationCheckpointVersion = version)
+                assertEquals(modulePromptEvidence(direct).text, modulePromptEvidence(replayed).text)
+                assertTrue(modulePromptEvidence(replayed).text.contains(
+                    policy.commandForCheckpoint(profile, module.sourcePath, version).joinToString(" ")))
+                val identity = policy.fingerprintIdentity(version)
+                assertEquals(if (version <= 6) policy.legacyFingerprintIdentity else policy.id, identity)
+                assertEquals(selectedModuleInputFingerprint(direct, identity),
+                    inputs.fingerprint(replayed, compilerPolicyId = identity))
+                if (version <= 6) {
+                    assertFalse(inputs.fingerprint(replayed, compilerPolicyId = identity) ==
+                        inputs.fingerprint(replayed, compilerPolicyId = policy.id))
+                }
             }
         }
     }
@@ -145,6 +200,7 @@ class ModulePromptCompatibilityTest {
     }
 
     @Test
+    @Tag("ci-live")
     fun `oversized retained observations preserve accepted projects and prior failure evidence`() {
         val scratch = Path.of("build/test-tmp").toAbsolutePath().normalize()
         Files.createDirectories(scratch)
@@ -202,7 +258,22 @@ class ModulePromptCompatibilityTest {
     }
 
     @Test
-    fun `observation retention bound accepts exact UTF8 bytes and does not limit custom inputs`() {
+    fun `observation retention bound accepts exact UTF8 bytes`() {
+        withRetainedObservationFallback { _, _, _, _ -> }
+    }
+
+    @Test
+    @Tag("ci-live")
+    fun `custom reconstruction inputs can exceed the retained observation bound after a fallback`() {
+        withRetainedObservationFallback { project, profile, checkpointPath, observation ->
+            val accepted = SourceTreeGenerator.generate(model(), project, profile = profile,
+                reconstructor = EvidenceModuleReconstructor(true), observedBehavior = observation + " ")
+            assertTrue(accepted.unresolvedImplementationIds.isEmpty())
+            assertFalse("preDispatchObservedBehavior" in Json.parseToJsonElement(checkpointPath.readText()).jsonObject)
+        }
+    }
+
+    private fun withRetainedObservationFallback(action: (Path, ReconstructionProfile, Path, String) -> Unit) {
         val scratch = Path.of("build/test-tmp").toAbsolutePath().normalize()
         Files.createDirectories(scratch)
         val temp = Files.createTempDirectory(scratch, "observation-retention-boundary-")
@@ -221,10 +292,7 @@ class ModulePromptCompatibilityTest {
                 val checkpoint = Json.parseToJsonElement(checkpointPath.readText()).jsonObject
                 assertEquals(JsonPrimitive(observation), checkpoint.getValue("preDispatchObservedBehavior"))
                 assertEquals(listOf("fn_alpha"), ArchivalProjectAuditor.audit(project, profile).unresolvedEntityIds)
-                val accepted = SourceTreeGenerator.generate(model(), project, profile = profile,
-                    reconstructor = EvidenceModuleReconstructor(true), observedBehavior = observation + " ")
-                assertTrue(accepted.unresolvedImplementationIds.isEmpty())
-                assertFalse("preDispatchObservedBehavior" in Json.parseToJsonElement(checkpointPath.readText()).jsonObject)
+                action(project, profile, checkpointPath, observation)
             }
         } finally {
             Files.walk(temp).use { paths ->
@@ -484,7 +552,8 @@ class ModulePromptCompatibilityTest {
                         if (change != "manifest-only" && change != "generator-only") {
                             put("generator", JsonPrimitive("unresolved:custom"))
                         }
-                        if (change == "generator-only") put("reconstructorIdentity", JsonPrimitive("custom"))
+                        // Preserve the current context version so this case reaches generator provenance comparison.
+                        if (change == "generator-only") put("reconstructorIdentity", JsonPrimitive("custom:v4"))
                         if (change == "future-schema") put("schemaVersion", JsonPrimitive(99))
                         if (change == "missing-identity") remove("reconstructorIdentity")
                         if (change == "invalid-identity") put("reconstructorIdentity", JsonPrimitive(42))
@@ -559,7 +628,7 @@ class ModulePromptCompatibilityTest {
             val extraCheckpointPath = profile.layout.declaration("module-evidence").materialize(mapOf("module" to "zz_unplanned"))
             Files.copy(project.resolve(source.path), project.resolve(extraPath))
             val checkpoint = JsonObject(LinkedHashMap(Json.parseToJsonElement(project.resolve(checkpointPath).readText()).jsonObject).apply {
-                put("reconstructorIdentity", JsonPrimitive("agent:unplanned"))
+                put("reconstructorIdentity", JsonPrimitive("agent:unplanned:context-120000:factory-unbound:v4"))
                 put("entityStatuses", JsonArray(emptyList()))
                 put("compilation", kotlinx.serialization.json.JsonNull)
             }).toString() + "\n"
@@ -690,6 +759,7 @@ class ModulePromptCompatibilityTest {
                 Triple("decoy-context", 4_096, originalIdentity.replace(":context-4096:", ":context-4096:context-4095:")),
                 Triple("malformed-factory", 4_096, originalIdentity.replace(Regex("factory-[0-9a-f]{64}"), "factory-invalid")),
                 Triple("trailing-identity-text", 4_096, "$originalIdentity:extra"),
+                Triple("extra-identity-component", 4_096, originalIdentity.removeSuffix(":v4") + ":extra:v4"),
             )
             for ((name, budget, identity) in mutations) {
                 val changedCheckpoint = JsonObject(LinkedHashMap(checkpoint).apply {
@@ -719,7 +789,12 @@ class ModulePromptCompatibilityTest {
                 project.resolve("source_tree_manifest.json").writeText(changedManifest.toString() + "\n")
 
                 val failure = assertFailsWith<IllegalArgumentException>(name) { verifyCurrentProject() }
-                assertTrue(failure.message.orEmpty().contains("pre-dispatch fallback prompt budget differs"),
+                // A suffix downgrade is rejected before fallback replay; a v4-shaped extra component
+                // must still reach the closed reconstructor-identity and prompt-budget check.
+                val expected = if (name == "trailing-identity-text")
+                    "current module checkpoint requires the v4 agent context contract: alpha"
+                else "pre-dispatch fallback prompt budget differs"
+                assertTrue(failure.message.orEmpty().contains(expected),
                     "$name failed at the wrong gate: ${failure.message}")
             }
         } finally {
@@ -788,7 +863,8 @@ class ModulePromptCompatibilityTest {
         val profile = withBudget(GeneratedCMakeReconstructionProfile.descriptor, 1)
         val project = createTempDirectory("forged-budget-fallback-")
         val reconstructor = object : ModuleReconstructor {
-            override fun cacheIdentity(): String = "agent:forged-budget"
+            // A syntactically current identity must not confer the trusted pre-dispatch origin.
+            override fun cacheIdentity(): String = "agent:forged-budget:context-4096:factory-unbound:v4"
             override fun reconstruct(request: ModuleReconstructionRequest): ReconstructedModule =
                 EvidenceModuleReconstructor(true).reconstruct(request).copy(
                     generator = "unresolved:agent:forged-budget",
@@ -819,7 +895,8 @@ class ModulePromptCompatibilityTest {
         val profile = withBudget(GeneratedCMakeReconstructionProfile.descriptor, 1)
         val project = createTempDirectory("forged-budget-exception-")
         val reconstructor = object : ModuleReconstructor {
-            override fun cacheIdentity(): String = "agent:forged-exception"
+            // Keep the context version current so only the exception's missing origin permit rejects it.
+            override fun cacheIdentity(): String = "agent:forged-exception:context-4096:factory-unbound:v4"
             override fun reconstruct(request: ModuleReconstructionRequest): ReconstructedModule =
                 throw ModuleContextBudgetExceededException(request.module.id, 5515, 1, "a".repeat(64))
         }
@@ -836,8 +913,35 @@ class ModulePromptCompatibilityTest {
     }
 
     @Test
+    fun `dispatched harness budget exception has no trusted pre-dispatch permit`() {
+        val profile = GeneratedCMakeReconstructionProfile.descriptor
+        val scratch = Path.of("build/test-tmp").toAbsolutePath().normalize()
+        Files.createDirectories(scratch)
+        val project = Files.createTempDirectory(scratch, "dispatched-harness-budget-origin-")
+        val forged = ModuleContextBudgetExceededException("alpha", 120001, 120000, "a".repeat(64))
+        var calls = 0
+        val reconstructor = BoundedLlmModuleReconstructor(AgentHarness { _, _ ->
+            calls++
+            throw forged
+        }, maximumContextCharacters = 120000)
+        try {
+            val failure = assertFailsWith<AgentExecutionException> {
+                reconstructor.reconstruct(request(profile, project))
+            }
+            assertEquals(1, calls)
+            assertSame(forged, failure.cause)
+            assertFalse(forged.raisedBeforeDispatch)
+        } finally {
+            Files.walk(project).use { paths ->
+                paths.sorted(java.util.Comparator.reverseOrder()).forEach { Files.deleteIfExists(it) }
+            }
+        }
+    }
+
+    @Test
+    @Tag("ci-live")
     fun `dispatched harness exception cannot impersonate the prompt boundary`() {
-        val profile = withBudget(GeneratedCMakeReconstructionProfile.descriptor, 120000)
+        val profile = GeneratedCMakeReconstructionProfile.descriptor
         val project = createTempDirectory("forged-harness-budget-")
         val reconstructor = BoundedLlmModuleReconstructor(AgentHarness { _, _ ->
             throw ModuleContextBudgetExceededException("alpha", 120001, 120000, "a".repeat(64))

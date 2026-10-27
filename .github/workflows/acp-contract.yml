@@ -12,12 +12,22 @@ concurrency:
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
+  contained-module-acceptance:
+    uses: ./.github/workflows/module-compilation-qualification.yml
   required-contract:
+    needs: contained-module-acceptance
+    if: always()
     env:
+      DECOMP_MODULE_COMPILATION_PREREQUISITE_RESULT: ${{ needs.contained-module-acceptance.result }}
+      DECOMP_MODULE_COMPILATION_INVENTORY_SHA256: ${{ needs.contained-module-acceptance.outputs.inventory-sha256 }}
       NPM_CONFIG_CACHE: ${{ github.workspace }}/build/npm-download-cache
     runs-on: ubuntu-24.04
     timeout-minutes: 25
     steps:
+      - name: Require successful exact module acceptance prerequisite
+        run: |
+          test "$DECOMP_MODULE_COMPILATION_PREREQUISITE_RESULT" = success
+          [[ "$DECOMP_MODULE_COMPILATION_INVENTORY_SHA256" =~ ^[0-9a-f]{64}$ ]]
       - uses: actions/checkout@v7
         with:
           submodules: recursive
@@ -53,11 +63,14 @@ jobs:
       - name: Prepare required live ACP sandbox host
         run: scripts/ci-prepare-acp-sandbox.sh
       - name: Prepare finite ACP quota fixture
+        id: prepare-quota
         run: bash scripts/ci-prepare-acp-quota.sh
       - name: Qualify every required ACP and shared-agent suite
         run: bash scripts/validate-acp-contract.sh
       - name: Release finite ACP quota fixture
-        if: always()
+        # A failed prerequisite stops before checkout or quota preparation. Still clean up
+        # after failed/cancelled preparation, which can leave a partially acquired fixture.
+        if: ${{ always() && steps.prepare-quota.outcome != 'skipped' && steps.prepare-quota.outcome != '' }}
         run: bash scripts/ci-release-acp-quota.sh
       - uses: actions/upload-artifact@v7
         if: always()

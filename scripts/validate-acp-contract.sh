@@ -8,13 +8,19 @@ if (($# != 0)); then
 fi
 : "${DECOMP_TEST_ACP_QUOTA_TMPFS:?provision the dedicated finite ACP quota fixture first}"
 export DECOMP_REQUIRE_LIVE_ACP_CONTRACT=1
+# The same-head reusable workflow must execute the original archive positive before
+# this lane may transfer only its narrow tag. All remaining ACP controls stay no-skip.
+[[ "${DECOMP_MODULE_COMPILATION_PREREQUISITE_RESULT:-}" == success ]]
+[[ "${DECOMP_MODULE_COMPILATION_INVENTORY_SHA256:-}" =~ ^[0-9a-f]{64}$ ]]
 # The full oracle CI role owns GCC planning's isolated JVM. This qualifier's
 # required inventory below covers ACP and shared-agent suites only.
-./gradlew --no-daemon test --tests 'decompengine.acp.*' --tests 'decompengine.agent.*' \
+./gradlew --no-daemon -I scripts/module-compilation-qualification.init.gradle \
+  -PdeferContainedModuleAcceptance=true test --tests 'decompengine.acp.*' --tests 'decompengine.agent.*' \
   --exclude-task :gccCompilerEnginePlanningIsolated
 
 python3 - <<'PY'
 import json
+import os
 import pathlib
 import subprocess
 import xml.etree.ElementTree as ET
@@ -48,6 +54,15 @@ record = {
     'schemaVersion': 1,
     'commit': subprocess.check_output(['git', 'rev-parse', 'HEAD'], text=True).strip(),
     'requiredLiveHost': True,
+    'containedModulePrerequisite': {
+        'result': os.environ['DECOMP_MODULE_COMPILATION_PREREQUISITE_RESULT'],
+        'compiledInventorySha256': os.environ['DECOMP_MODULE_COMPILATION_INVENTORY_SHA256'],
+        'requiredJob': 'contained-module-acceptance',
+        'transferredRequiredTests': [{
+            'class': 'decompengine.acp.AcpAgentHarnessTest',
+            'method': 'public Make and Ninja archival reconstruction follows ACP file roles through verified rebuild',
+        }],
+    },
     'totals': totals,
     'missingRequiredSuites': missing,
     'suites': suites,

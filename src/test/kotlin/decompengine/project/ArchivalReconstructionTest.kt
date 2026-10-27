@@ -10,6 +10,16 @@ import decompengine.agent.AgentWorkspacePath
 import decompengine.agent.AgentWorkflowProgress
 import decompengine.agent.AgentWorkflowPhase
 
+import java.nio.file.Files
+import java.nio.file.Path
+import org.junit.jupiter.api.Assumptions.assumeTrue
+import org.junit.jupiter.api.BeforeEach
+import org.junit.jupiter.api.Tag
+import org.junit.jupiter.api.TestInfo
+import org.junit.jupiter.api.parallel.Execution
+import org.junit.jupiter.api.parallel.ExecutionMode
+import org.junit.jupiter.api.parallel.ResourceLock
+
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonArray
@@ -27,8 +37,27 @@ import kotlin.test.assertTrue
 import kotlin.test.assertFailsWith
 import kotlin.test.assertFalse
 
+@Execution(ExecutionMode.SAME_THREAD)
+@ResourceLock("contained-module-compilation-runtime")
 class ArchivalReconstructionTest {
+    @BeforeEach
+    fun requireConfiguredCompilerForHostedWorkflow(test: TestInfo) {
+        if ("ci-live" !in test.tags) return
+        val file = System.getenv("GENERATED_C_MODULE_COMPILE_CONFIG_FILE")
+        val directory = System.getenv("GENERATED_C_MODULE_COMPILE_CONFIG_DIRECTORY")
+        val configured = !file.isNullOrBlank() || !directory.isNullOrBlank()
+        if (System.getenv("GENERATED_C_MODULE_COMPILE_REQUIRE") == "true") {
+            assertTrue(configured, "required archival workflow tests need the provisioned contained compiler runtime")
+        }
+        assumeTrue(configured, "configure the contained compiler to run archival dispatch qualification")
+        // A malformed or mismatched configured runtime must fail the real workflow.
+        assertTrue(System.getProperty("os.name").lowercase().contains("linux"))
+        if (!file.isNullOrBlank()) assertTrue(Files.isRegularFile(Path.of(file)), "configured compiler file is missing")
+        if (!directory.isNullOrBlank()) assertTrue(Files.isDirectory(Path.of(directory)), "configured compiler directory is missing")
+    }
+
     @Test
+    @Tag("ci-live")
     fun `archival Make and Ninja workflows enforce role policy and reject unauthenticated agent archives`() {
         for (base in ReconstructionProfiles.builtIn) {
             val profile = base

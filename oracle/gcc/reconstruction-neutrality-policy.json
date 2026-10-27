@@ -156,6 +156,18 @@
     {
       "path": "src/main/kotlin/decompengine/project/LinuxGeneratedCRepairValidationBoundary.kt",
       "reason": "Linux generated-C repair build validation implementation."
+    },
+    {
+      "path": "src/main/kotlin/decompengine/project/ContainedModuleCompilationPolicy.kt",
+      "reason": "Generated-C adapter-owned exact module compiler policy; generic SourceTree selects the policy through its adapter contract."
+    },
+    {
+      "path": "src/main/kotlin/decompengine/project/ContainedModuleCompilationRuntimeConfiguration.kt",
+      "reason": "Generated-C adapter-owned compiler deployment configuration for the closed Make and Ninja profile registrations."
+    },
+    {
+      "path": "src/main/kotlin/decompengine/project/ContainedModuleCompilerProtocol.kt",
+      "reason": "Generated-C adapter-owned source/header compilation protocol derives fixed flags and declared layout paths from its selected profile."
     }
   ],
   "allowances": [
@@ -295,9 +307,23 @@
     {
       "path": "scripts/ci-prepare-generated-c-validation.py",
       "rule": "benchmark-target",
-      "fragment": "gcc_runtime / 'cc1'",
+      "fragment": "COMPILER_SUBPROGRAMS = ('cc1', 'collect2')",
       "count": 1,
       "reason": "Inventories the installed compiler runtime for generated-C provisioning; this expression does not select a benchmark artifact. Version and digest checks remain active."
+    },
+    {
+      "path": "scripts/test-ci-prepare-generated-c-validation.py",
+      "rule": "benchmark-target",
+      "fragment": "'cc1'",
+      "count": 14,
+      "reason": "Mocked provider-role fixtures verify exact compiler subprocess discovery, copying and refusal. Their authored bytes are never executed and do not select a benchmark corpus."
+    },
+    {
+      "path": "scripts/test-ci-prepare-generated-c-validation.py",
+      "rule": "benchmark-target",
+      "fragment": "'cc1plus'",
+      "count": 1,
+      "reason": "The mocked provider-role fixture verifies that an unreviewed compiler subprocess is refused before any command runs; it does not select a benchmark corpus."
     },
     {
       "path": "src/main/kotlin/decompengine/mvp/MvpPatchWorkflow.kt",
@@ -361,6 +387,27 @@
       "fragment": "        val prefix = listOf(compilerPath, \"-std=c11\", \"-O2\", \"-static\", \"-no-pie\", \"-Wall\", \"-Wextra\", \"-Werror\",\n            \"-Wformat=2\", \"-Wl,--build-id=none\")",
       "count": 1,
       "reason": "Installed endpoint build-record authentication checks this complete compiler prefix against the fixed helper recipe before accepting the defining application resource tuple."
+    },
+    {
+      "path": "src/test/kotlin/decompengine/project/ContainedModuleCompilationLiveTest.kt",
+      "rule": "benchmark-target",
+      "fragment": "\"cc1\"",
+      "count": 1,
+      "reason": "Names an actual configured compiler subprocess for tool staging or cancellation observation; does not select a benchmark corpus or grant acceptance authority."
+    },
+    {
+      "path": "src/test/kotlin/decompengine/project/ContainedModuleCompilationLiveTest.kt",
+      "rule": "benchmark-target",
+      "fragment": "\"cc1plus\"",
+      "count": 1,
+      "reason": "Names an actual configured compiler subprocess for tool staging or cancellation observation; does not select a benchmark corpus or grant acceptance authority."
+    },
+    {
+      "path": "src/test/kotlin/decompengine/project/ContainedModuleCompilerWorkerTest.kt",
+      "rule": "benchmark-target",
+      "fragment": "\"cc1\"",
+      "count": 1,
+      "reason": "Names an actual configured compiler subprocess for tool staging or cancellation observation; does not select a benchmark corpus or grant acceptance authority."
     }
   ],
   "benchmarkCatalog": "oracle/gcc/reconstruction-neutrality-identities.json"

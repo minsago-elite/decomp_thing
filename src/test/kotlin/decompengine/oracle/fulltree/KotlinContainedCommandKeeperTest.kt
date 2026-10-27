@@ -7,6 +7,7 @@ import java.nio.file.Files
 import java.nio.file.LinkOption
 import java.nio.file.Path
 import java.nio.file.StandardCopyOption
+import java.nio.file.StandardOpenOption
 import java.nio.file.attribute.PosixFilePermissions
 import java.util.concurrent.TimeUnit
 import javax.crypto.Mac
@@ -137,6 +138,56 @@ class KotlinContainedCommandKeeperTest {
             assertTrue(process.isAlive, "keeper did not remain for host observation")
             assertFalse(process.descendants().use { it.findAny().isPresent }, "known child remained after authenticated exit")
             assertFalse(process.waitFor(100L, TimeUnit.MILLISECONDS), "local keeper exited before explicit test cleanup")
+        }
+    }
+
+    @Test
+    fun `strict local keeper authenticates pipe bytes after child substitutes equal length retained logs`() {
+        withLocalKeeper(tamperCapturedLogs = true) { process, request, secret ->
+            assertEquals(JsonPrimitive(3), document(request.canonicalBytes)["schemaVersion"])
+            val boot = awaitLocalProtocol(process, request.runDirectory, KotlinContainedCommandProtocol.BOOT_FILE)
+            val keeper = KotlinContainedCommandProtocol.requireBoot(boot, secret, request)
+            publishLocalStart(request, KotlinContainedCommandProtocol.start(secret, request, keeper))
+            val bytes = awaitLocalProtocol(process, request.runDirectory, KotlinContainedCommandProtocol.OUTCOME_FILE)
+            val outcome = KotlinContainedCommandProtocol.requireOutcome(bytes, secret, request, keeper)
+            outcome.requireSuccessful()
+            assertEquals("EXITED", outcome.status)
+            assertEquals(0, outcome.exitCode)
+            val wire = document(bytes)
+            assertEquals(JsonPrimitive(2), wire["schemaVersion"])
+            assertEquals(JsonPrimitive("kotlin-contained-command-protocol-v2"), wire["provider"])
+
+            val pipeStdout = KotlinContainedCommandLogSubstitutionFixture.PIPE_STDOUT.toByteArray(Charsets.UTF_8)
+            val pipeStderr = KotlinContainedCommandLogSubstitutionFixture.PIPE_STDERR.toByteArray(Charsets.UTF_8)
+            val capturedStdout = Files.readAllBytes(request.runDirectory.resolve("reports/${KotlinContainedCommandProtocol.STDOUT_FILE}"))
+            val capturedStderr = Files.readAllBytes(request.runDirectory.resolve("reports/${KotlinContainedCommandProtocol.STDERR_FILE}"))
+            assertContentEquals(KotlinContainedCommandLogSubstitutionFixture.FORGED_STDOUT.toByteArray(Charsets.UTF_8), capturedStdout)
+            assertContentEquals(KotlinContainedCommandLogSubstitutionFixture.FORGED_STDERR.toByteArray(Charsets.UTF_8), capturedStderr)
+            assertEquals(pipeStdout.size, capturedStdout.size)
+            assertEquals(pipeStderr.size, capturedStderr.size)
+            assertEquals(pipeStdout.size.toLong(), outcome.stdoutBytes)
+            assertEquals(pipeStderr.size.toLong(), outcome.stderrBytes)
+            assertEquals(OracleArtifacts.sha256(pipeStdout), outcome.stdoutSha256)
+            assertEquals(OracleArtifacts.sha256(pipeStderr), outcome.stderrSha256)
+            assertNotEquals(OracleArtifacts.sha256(capturedStdout), outcome.stdoutSha256)
+            assertNotEquals(OracleArtifacts.sha256(capturedStderr), outcome.stderrSha256)
+
+            ContainedCommandTerminalResourceEvidence.requireCapturedOutput(wire, pipeStdout, pipeStderr)
+            for ((stdout, stderr) in listOf(capturedStdout to pipeStderr, pipeStdout to capturedStderr,
+                capturedStdout to capturedStderr)) {
+                assertFailsWith<IllegalArgumentException> {
+                    ContainedCommandTerminalResourceEvidence.requireCapturedOutput(wire, stdout, stderr)
+                }
+            }
+            for ((field, forged) in listOf("stdoutSha256" to capturedStdout, "stderrSha256" to capturedStderr)) {
+                assertFailsWith<IllegalArgumentException>("$field must remain authenticated") {
+                    KotlinContainedCommandProtocol.requireOutcome(
+                        replace(wire, field, JsonPrimitive(OracleArtifacts.sha256(forged))), secret, request, keeper,
+                    )
+                }
+            }
+            assertTrue(process.isAlive, "keeper must retain the authenticated outcome for observation")
+            assertFalse(process.descendants().use { it.findAny().isPresent }, "log-substitution child was not reaped")
         }
     }
 
@@ -375,10 +426,19 @@ class KotlinContainedCommandKeeperTest {
         environment: Map<String, String> = mapOf("LANG" to "C.UTF-8", "LC_ALL" to "C.UTF-8", "TZ" to "UTC"),
         startSeconds: Long = 30L, wallSeconds: Long = 30L, stdoutBytes: Long = 4096L, stderrBytes: Long = 4096L,
         allowInterruption: Boolean = false,
-    ) = KotlinContainedCommandRequest(root, nonce, command, environment, startSeconds, wallSeconds, stdoutBytes, stderrBytes, allowInterruption)
+        terminalResourcePolicySha256: String? = null,
+    ) = KotlinContainedCommandRequest(root, nonce, command, environment, startSeconds, wallSeconds, stdoutBytes, stderrBytes,
+        allowInterruption, terminalResourcePolicySha256)
 
-    private fun withLocalKeeper(waitingChild: Boolean = false, action: (Process, KotlinContainedCommandRequest, ByteArray) -> Unit) {
-        val fixture = Files.createTempDirectory("contained-command-local-test-").toRealPath()
+    private fun withLocalKeeper(
+        waitingChild: Boolean = false,
+        tamperCapturedLogs: Boolean = false,
+        action: (Process, KotlinContainedCommandRequest, ByteArray) -> Unit,
+    ) {
+        require(!waitingChild || !tamperCapturedLogs)
+        val temporaryRoot = Path.of("build", "tmp").toAbsolutePath().normalize()
+        Files.createDirectories(temporaryRoot)
+        val fixture = Files.createTempDirectory(temporaryRoot, "contained-command-local-test-").toRealPath()
         Files.setPosixFilePermissions(fixture, PosixFilePermissions.fromString("rwx------"))
         var process: Process? = null
         try {
@@ -389,8 +449,16 @@ class KotlinContainedCommandKeeperTest {
             val java = Path.of(System.getProperty("java.home"), "bin", "java").toRealPath()
             val classPath = System.getProperty("java.class.path").split(File.pathSeparator).filter(String::isNotEmpty)
                 .joinToString(File.pathSeparator) { Path.of(it).toAbsolutePath().normalize().toString() }
-            val command = if (waitingChild) listOf(java.toString(), "-classpath", classPath, KotlinContainedCommandTestSleeper::class.java.name) else listOf(java.toString(), "-version")
-            val request = request(root = run, command = command, startSeconds = 30L, wallSeconds = 30L, allowInterruption = waitingChild)
+            val childJvm = listOf(java.toString(), "-XX:-UsePerfData", "-Djava.io.tmpdir=${run.resolve("tmp")}",
+                "-Duser.home=${run.resolve("tmp")}")
+            val command = childJvm + when {
+                waitingChild -> listOf("-classpath", classPath, KotlinContainedCommandTestSleeper::class.java.name)
+                tamperCapturedLogs -> listOf("-classpath", classPath, KotlinContainedCommandLogSubstitutionFixture::class.java.name)
+                else -> listOf("-version")
+            }
+            val request = request(root = run, command = command, startSeconds = 30L, wallSeconds = 30L,
+                allowInterruption = waitingChild,
+                terminalResourcePolicySha256 = if (tamperCapturedLogs) ContainedCommandTerminalResourceEvidence.policySha256 else null)
             val requestPath = run.resolve("runtime/${KotlinContainedCommandRequest.REQUEST_FILE}")
             Files.write(requestPath, request.canonicalBytes)
             Files.setPosixFilePermissions(requestPath, PosixFilePermissions.fromString("r--------"))
@@ -479,5 +547,44 @@ object KotlinContainedCommandTestSleeper {
     fun main(args: Array<String>) {
         Files.writeString(Path.of("reports/child-ready"), "ready")
         Thread.sleep(60_000L)
+    }
+}
+
+/** Equal-length child-owned log replacement; this local fixture grants no containment authority. */
+object KotlinContainedCommandLogSubstitutionFixture {
+    const val PIPE_STDOUT = "pipe-out-before\n"
+    const val PIPE_STDERR = "pipe-err-before\n"
+    const val FORGED_STDOUT = "file-out-forged\n"
+    const val FORGED_STDERR = "file-err-forged\n"
+
+    @JvmStatic
+    fun main(args: Array<String>) {
+        val stdout = PIPE_STDOUT.toByteArray(Charsets.UTF_8)
+        val stderr = PIPE_STDERR.toByteArray(Charsets.UTF_8)
+        System.out.write(stdout)
+        System.out.flush()
+        System.err.write(stderr)
+        System.err.flush()
+        overwriteAfterCapture(Path.of("reports", KotlinContainedCommandProtocol.STDOUT_FILE), stdout,
+            FORGED_STDOUT.toByteArray(Charsets.UTF_8))
+        overwriteAfterCapture(Path.of("reports", KotlinContainedCommandProtocol.STDERR_FILE), stderr,
+            FORGED_STDERR.toByteArray(Charsets.UTF_8))
+    }
+
+    private fun overwriteAfterCapture(path: Path, expected: ByteArray, forged: ByteArray) {
+        require(expected.size == forged.size && !expected.contentEquals(forged))
+        val deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(10L)
+        while (System.nanoTime() < deadline) {
+            if (Files.isRegularFile(path, LinkOption.NOFOLLOW_LINKS) && Files.size(path) == expected.size.toLong()) {
+                val captured = Files.newInputStream(path, LinkOption.NOFOLLOW_LINKS).use { it.readNBytes(expected.size + 1) }
+                if (captured.contentEquals(expected)) {
+                    Files.write(path, forged, StandardOpenOption.WRITE)
+                    check(Files.size(path) == expected.size.toLong())
+                    return
+                }
+            }
+            Thread.sleep(10L)
+        }
+        error("keeper did not retain the exact fixture pipe bytes before replacement")
     }
 }

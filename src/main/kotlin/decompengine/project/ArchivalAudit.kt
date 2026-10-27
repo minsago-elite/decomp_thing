@@ -516,7 +516,9 @@ object ArchivalProjectAuditor {
                     val checkpointText = snapshot.bytes.decodeToString(throwOnInvalidSequence = true)
                     UniqueJsonObjectKeyValidator(checkpointText).validate()
                     val checkpoint = Json.parseToJsonElement(checkpointText).jsonObject
-                    require(checkpoint.getValue("schemaVersion") == JsonPrimitive(6)) {
+                    val checkpointVersion = (checkpoint["schemaVersion"] as? JsonPrimitive)
+                        ?.takeUnless { it.isString }?.intOrNull
+                    require(checkpointVersion in setOf(6, 7)) {
                         "module checkpoint lacks the supported compiler acceptance schema"
                     }
                     require(checkpoint.string("inputBinarySha256") == model.inputSha256 &&
@@ -555,27 +557,10 @@ object ArchivalProjectAuditor {
                     acceptedInputFingerprintProviders[identifier] =
                         archivedModuleInputFingerprintProvider(checkpoint.string("reconstructorIdentity"))
                     val compilation = checkpoint.getValue("compilation").jsonObject
-                    require(compilation.string("sourceSha256") == hashes.getValue(source)) { "compiler evidence does not bind the current source" }
-                    require(compilation.string("outcome") == "passed" && compilation.getValue("returnCode") == JsonPrimitive(0)) {
-                        "module compiler gate did not pass"
-                    }
-                    val command = compilation.getValue("command").jsonArray.map {
-                        require(it.jsonPrimitive.isString) { "compiler argument must be a string" }
-                        it.jsonPrimitive.content
-                    }
-                    require(command == ReconstructionCompilationPolicies.resolve(profile).command(profile, source)) {
-                        "compiler command differs from the reconstruction profile"
-                    }
-                    require(compilation.keys == setOf("sourceSha256", "command", "outcome", "returnCode", "diagnosticsSha256", "diagnosticsBytes")) {
-                        "compiler evidence has unsupported fields"
-                    }
-                    require(compilation.string("diagnosticsSha256").matches(Regex("[0-9a-f]{64}"))) {
-                        "compiler diagnostic commitment is invalid"
-                    }
-                    val diagnosticBytes = compilation.getValue("diagnosticsBytes").jsonPrimitive
-                    require(!diagnosticBytes.isString && diagnosticBytes.longOrNull?.let {
-                        it in 0..profile.budgets.buildMaximumOutputBytes
-                    } == true) { "compiler diagnostic byte count is invalid" }
+                    val decodedCompilation = ModuleCompilationEvidence.decode(
+                        compilation, requireNotNull(checkpointVersion), profile, source,
+                        hashes.getValue(source), accepted = true,
+                    )
                     compilationEvidence[identifier] = JsonObject(linkedMapOf(
                         "sourcePath" to JsonPrimitive(source),
                         "sourceSha256" to JsonPrimitive(hashes.getValue(source)),
@@ -584,6 +569,8 @@ object ArchivalProjectAuditor {
                         "inputBinarySha256" to JsonPrimitive(model.inputSha256),
                         "modelSchemaVersion" to JsonPrimitive(model.schemaVersion),
                         "profileSha256" to JsonPrimitive(profile.sha256),
+                        // Retained proof is provenance, never a live coordinator acceptance permit.
+                        "recordedAssurance" to JsonPrimitive(decodedCompilation.recordedAssurance),
                         "compilation" to compilation,
                     ))
                 } catch (failure: Exception) {
