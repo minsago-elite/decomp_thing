@@ -17,7 +17,7 @@ export async function seedGit(scratchParent) {
   const previous = process.env.TMPDIR;
   process.env.TMPDIR = scratch;
   let repository;
-  try { repository = await createWebGitFixture({ poisonHooks: true }); }
+  try { repository = await createWebGitFixture({ poisonHooks: true, historyLength: 1001 }); }
   catch (error) { await fs.rm(scratch, { recursive: true, force: true }); throw error; }
   finally { if (previous === undefined) delete process.env.TMPDIR; else process.env.TMPDIR = previous; }
   return { repository, importRoot: repository.paths.root, scratch,
@@ -97,7 +97,26 @@ export async function qualifyGit({ fixture, makeTarget, cdp, evaluate, ready, br
 
   await setField(evaluate, tab, `[...document.querySelectorAll('label')].find(label => label.textContent.startsWith('Repository name')).querySelector('input')`, 'local');
   await key(cdp, tab, 'Enter', 'Enter', 13, '\r');
-  await ready(tab, `document.body.innerText.includes('Branch main') && document.body.innerText.includes('fixture: local branch')`, 'imported repository status and history');
+  await ready(tab, `document.body.innerText.includes('Branch main') && document.body.innerText.includes('fixture: history 1000')`, 'imported repository status and history');
+  const historyRows = `document.querySelectorAll('ol[aria-label="History"] li')`;
+  assert.equal(await evaluate(tab, `${historyRows}.length`), 20, 'History must start with one bounded page');
+  const historyStart = tab.requests.length;
+  let historyPages = 1;
+  for (let count = 20; count < fixture.repository.historyLength; count += 20) {
+    await evaluate(tab, `${button('Older commits')}.focus()`);
+    await key(cdp, tab, 'Enter', 'Enter', 13, '\r');
+    await ready(tab, `${historyRows}.length === ${Math.min(count + 20, fixture.repository.historyLength)}`, 'next anchored history page');
+    historyPages++;
+  }
+  const historyIds = await evaluate(tab, `[...${historyRows}].map(row => row.querySelector('code').title)`);
+  assert.equal(new Set(historyIds).size, fixture.repository.historyLength, 'History repeats a commit');
+  assert.deepEqual(historyIds, fixture.repository.git('local', ['rev-list', 'main']).stdout.trim().split('\n'),
+    'Every displayed history page must match the admitted repository, in order');
+  assert.equal(historyIds[0], fixture.repository.commits.local);
+  assert.equal(historyIds.at(-1), fixture.repository.commits.base);
+  assert.equal(await evaluate(tab, `!!${button('Older commits')}`), false, 'Exhausted history must not offer another page');
+  assert.ok(tab.requests.slice(historyStart).every(request => ['GET', 'HEAD'].includes(request.method)), 'History pagination sent a mutation');
+  assert.equal(tab.requests.slice(historyStart).filter(request => request.url.includes('/history?cursor=')).length, historyPages - 1);
   assert.ok(await evaluate(tab, `document.body.innerText.includes('fixture: baseline') && document.body.innerText.includes('Not mapped to a reconstruction revision')`));
   assert.equal(fixture.repository.git('local', ['rev-parse', 'main']).stdout.trim(), fixture.repository.commits.local, 'Import changed the admitted repository');
 
@@ -153,6 +172,7 @@ export async function qualifyGit({ fixture, makeTarget, cdp, evaluate, ready, br
   const mutations = tab.requests.slice(beforeView).filter(request => !['GET', 'HEAD'].includes(request.method));
   assert.equal(mutations.length, 3, 'Expected exactly the import, stage and commit requests');
   return { path, objectId, exportSha256: shown, exportEntries: names, viewReadRequests: viewRequests.length, mutationRequests: mutations.length,
+    historyCommits: historyIds.length, historyPages, historyKeyboardPagination: true,
     keyboardSelection: true, keyboardActivation: true, hooksInert: true, sourceRepositoryUnchanged: true, policyExcludedCounted: 1 };
 }
 

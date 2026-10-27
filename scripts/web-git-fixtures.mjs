@@ -36,7 +36,7 @@ function runGit(cwd, args, { date = '2026-01-01T00:00:00Z', expectStatus = 0 } =
 function allowedInspection(args) {
   if (!Array.isArray(args) || args.some(arg => typeof arg !== 'string')) return false;
   const exact = [
-    ['status'], ['status', '--porcelain'],
+    ['status'], ['status', '--porcelain'], ['rev-list', 'main'],
     ['rev-list', '--left-right', '--count', 'main...origin/main'],
     ['merge-base', 'main', 'origin/main'],
     ['diff', '--name-only', '--diff-filter=U'],
@@ -60,8 +60,9 @@ function allowedInspection(args) {
  * peer branches diverge; `conflicted` additionally leaves an unmerged index.
  * Call dispose() when finished. No test data is created outside its private root.
  */
-export async function createWebGitFixture({ state = 'diverged', poisonHooks = false } = {}) {
-  if (!['diverged', 'conflicted'].includes(state) || typeof poisonHooks !== 'boolean') throw new Error('Unknown Git fixture state');
+export async function createWebGitFixture({ state = 'diverged', poisonHooks = false, historyLength = 2 } = {}) {
+  if (!['diverged', 'conflicted'].includes(state) || typeof poisonHooks !== 'boolean' ||
+      !Number.isInteger(historyLength) || historyLength < 2 || historyLength > 1001) throw new Error('Unknown Git fixture state');
   const root = await mkdtemp(join(tmpdir(), 'decomp-web-git-'));
   if (!isAbsolute(root)) throw new Error('Temporary Git fixture root must be absolute');
   const paths = Object.freeze({ root, local: join(root, 'local'), peer: join(root, 'peer'), remote: join(root, 'remote.git') });
@@ -98,6 +99,11 @@ export async function createWebGitFixture({ state = 'diverged', poisonHooks = fa
     const changed = state === 'conflicted' ? 'shared.txt' : 'local.txt';
     runGit(paths.local, ['add', '--', changed]);
     runGit(paths.local, ['commit', '-m', 'fixture: local branch'], { date: '2026-01-01T00:00:01Z' });
+    // Empty commits isolate history pagination from source/export size and keep object IDs deterministic.
+    for (let index = 2; index < historyLength; index++) {
+      runGit(paths.local, ['commit', '--allow-empty', '-m', `fixture: history ${index}`],
+        { date: new Date(Date.parse('2026-01-01T00:00:00Z') + index * 1000).toISOString() });
+    }
     const remoteChanged = state === 'conflicted' ? 'shared.txt' : 'remote.txt';
     runGit(paths.peer, ['add', '--', remoteChanged]);
     runGit(paths.peer, ['commit', '-m', 'fixture: remote branch'], { date: '2026-01-01T00:00:02Z' });
@@ -110,7 +116,7 @@ export async function createWebGitFixture({ state = 'diverged', poisonHooks = fa
       remote: git('local', ['rev-parse', 'origin/main']).stdout.trim(),
     });
     if (state === 'conflicted') runGit(paths.local, ['merge', '--no-edit', 'origin/main'], { expectStatus: 1 });
-    return Object.freeze({ state, paths, branches: Object.freeze({ base: 'main', head: 'feature' }), commits, git, async dispose() {
+    return Object.freeze({ state, historyLength, paths, branches: Object.freeze({ base: 'main', head: 'feature' }), commits, git, async dispose() {
       if (disposed) return;
       disposed = true;
       await rm(root, { recursive: true });
