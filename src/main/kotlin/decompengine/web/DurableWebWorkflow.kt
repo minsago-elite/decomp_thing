@@ -136,7 +136,7 @@ sealed interface DurableWebWorkflowOutcome {
     }
     data class Failed(val reason: WorkflowTerminalReason = WorkflowTerminalReason.FAILED,
         val candidate: WorkflowCandidate? = null, val usage: WorkflowUsage? = null) : DurableWebWorkflowOutcome {
-        init { require(reason in setOf(WorkflowTerminalReason.FAILED, WorkflowTerminalReason.REFUSED, WorkflowTerminalReason.LIMIT_EXHAUSTED)) }
+        init { require(reason in setOf(WorkflowTerminalReason.FAILED, WorkflowTerminalReason.REFUSED, WorkflowTerminalReason.LIMIT_EXHAUSTED, WorkflowTerminalReason.TIMED_OUT)) }
     }
 }
 

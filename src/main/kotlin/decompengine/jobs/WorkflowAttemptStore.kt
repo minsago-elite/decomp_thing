@@ -43,7 +43,12 @@ enum class WorkflowRunState(val wireName: String) {
     QUEUED("queued"), RUNNING("running"), CANCELLING("cancelling"), COMPLETED("completed"), FAILED("failed"), CANCELLED("cancelled"), INTERRUPTED("interrupted");
     val terminal: Boolean get() = this in setOf(COMPLETED, FAILED, CANCELLED, INTERRUPTED)
 }
-enum class WorkflowTerminalReason { COMPLETED, NO_CHANGES, REFUSED, CANCELLED, LIMIT_EXHAUSTED, FAILED, PROCESS_INTERRUPTED }
+/**
+ * Stop outcomes stay distinct: LIMIT_EXHAUSTED is a budget (tool calls, output, tokens), TIMED_OUT a
+ * wall-clock or idle deadline, CANCELLED a recorded user request, FAILED a workflow-reported failure,
+ * INFRASTRUCTURE_FAILED an adapter that could not report any outcome and PROCESS_INTERRUPTED a stopped service.
+ */
+enum class WorkflowTerminalReason { COMPLETED, NO_CHANGES, REFUSED, CANCELLED, LIMIT_EXHAUSTED, TIMED_OUT, FAILED, INFRASTRUCTURE_FAILED, PROCESS_INTERRUPTED }
 
 data class WorkflowExecutionLimits(val wallClockMs: ULong, val idleMs: ULong, val maxOutputBytes: ULong, val maxToolCalls: ULong) {
     init { require(wallClockMs > 0uL && idleMs > 0uL && idleMs <= wallClockMs && maxOutputBytes > 0uL) { "invalid workflow execution limits" } }
@@ -709,7 +714,8 @@ class WorkflowAttemptStore private constructor(
         private fun validateTerminal(state: WorkflowRunState, reason: WorkflowTerminalReason) {
             val valid = when (state) {
                 WorkflowRunState.COMPLETED -> reason in setOf(WorkflowTerminalReason.COMPLETED, WorkflowTerminalReason.NO_CHANGES)
-                WorkflowRunState.FAILED -> reason in setOf(WorkflowTerminalReason.FAILED, WorkflowTerminalReason.REFUSED, WorkflowTerminalReason.LIMIT_EXHAUSTED)
+                WorkflowRunState.FAILED -> reason in setOf(WorkflowTerminalReason.FAILED, WorkflowTerminalReason.REFUSED, WorkflowTerminalReason.LIMIT_EXHAUSTED,
+                    WorkflowTerminalReason.TIMED_OUT, WorkflowTerminalReason.INFRASTRUCTURE_FAILED)
                 WorkflowRunState.CANCELLED -> reason == WorkflowTerminalReason.CANCELLED
                 WorkflowRunState.INTERRUPTED -> reason == WorkflowTerminalReason.PROCESS_INTERRUPTED
                 else -> false
