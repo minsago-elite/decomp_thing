@@ -74,6 +74,25 @@ attempt. Keep the full output directory for continuation; the observation log al
 History is retained until explicitly removed. A 256 MiB per-attempt quota prevents unlimited growth; exhaustion
 is reported as `logging-failed` with `complete=false`, rather than silently dropping historical events.
 
+The same output directory can be used for different input binaries. Reconstruction holds an exclusive output
+lease and preserves the previous generated analysis, source tree, archive, progress summary, and compiler feedback
+under `input-cache/<input-sha256>/`. Returning to that input restores its state to the original active paths before
+checking its checkpoints, preserving path-bound receipts. Interrupted switches resume from a bounded transaction
+record; conflicting or malformed state is refused without overwriting either copy. Per-run histories stay shared
+at the output root so runs across inputs can be monitored and replayed together.
+
+Failed compiler diagnostics are retained privately under `.compiler-feedback/` and supplied only to a correction
+attempt whose input, profile, source bytes, and transitive interface context still match. These diagnostic artifacts
+can contain snippets of the candidate source; they are not echoed into the general event log and do not authorize
+acceptance or relax compiler warnings.
+
+To qualify all numbered inputs through a shared output, with a second round verifying continuation:
+
+```sh
+python3 scripts/qualify-chatgpt-corpus.py --input-directory ~/c-vul/build \
+  --output-directory ~/bin01_repair --reports /tmp/reconstruction-qualification --rounds 2
+```
+
 ### Docker qualification profile
 
 Host-native execution under a dedicated service UID is the primary supported ACP deployment. Compose exposes an

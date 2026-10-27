@@ -119,6 +119,11 @@ private fun runReconstruct(args: List<String>) {
             ArchivalReconstructionService(
                 GhidraHeadlessProgramModelAnalyzer.bundled(), strategy.reconstructor, progress = progress,
             ).reconstruct(binary, output)
+        } catch (failure: decompengine.project.ReconstructionOutputBusyException) {
+            progress.phase(AgentWorkflowPhase.FAILED)
+            System.err.println(failure.message)
+            progress.close()
+            kotlin.system.exitProcess(2)
         } catch (failure: ReconstructionIncompleteException) {
             progress.phase(AgentWorkflowPhase.UNRESOLVED)
             System.err.println(failure.message)

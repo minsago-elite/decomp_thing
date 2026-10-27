@@ -16,6 +16,7 @@ internal data class ModuleCompilationEvidence(
     val returnCode: Int?,
     val diagnosticsSha256: String,
     val diagnosticsBytes: Long,
+    val diagnosticsPrefix: String = "",
 ) {
     val passed: Boolean get() = outcome == "passed" && returnCode == 0
 
@@ -105,6 +106,7 @@ internal object GeneratedCModuleValidation {
         val diagnostics = output.toByteArray()
         return ModuleCompilationEvidence(
             before, command, outcome, returnCode, sha256(diagnostics), diagnostics.size.toLong(),
+            diagnostics.copyOfRange(0, minOf(diagnostics.size, 16_384)).toString(Charsets.UTF_8),
         )
     }
 }

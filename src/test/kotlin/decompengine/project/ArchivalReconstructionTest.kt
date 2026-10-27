@@ -43,7 +43,11 @@ class ArchivalReconstructionTest {
             override fun requestRepair(request: decompengine.repair.RepairRequest,
                 invocation: decompengine.repair.RepairClientInvocation): decompengine.repair.RepairResponse {
                 calls++
-                if (calls > 1) assertTrue(request.prompt.contains("Previous candidate assessment"))
+                if (calls > 1) {
+                    assertTrue(request.prompt.contains("Previous candidate assessment"))
+                    assertTrue(request.prompt.contains("Compiler diagnostics for the captured candidate"))
+                    assertTrue(request.prompt.contains("missing_symbol"))
+                }
                 return decompengine.repair.RepairResponse("candidate", listOf(decompengine.repair.SourcePatch(
                     "src/modules/decomp.c", "/* fn_1000 */\nint decomp_engine_main(void) { return ${if (calls == 1) "missing_symbol" else "17"}; }\n")))
             }

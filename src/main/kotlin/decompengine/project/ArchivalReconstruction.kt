@@ -284,8 +284,13 @@ class ArchivalReconstructionService(
 
     fun reconstruct(binaryPath: Path, outputDir: Path): ArchivalReconstructionResult {
         outputDir.createDirectories()
+        ReconstructionOutputWorkspace.open(outputDir, binaryPath).use { workspace ->
+        progress.diagnostic("active reconstruction inputSha256=${workspace.inputSha256}")
         progress.phase(AgentWorkflowPhase.ANALYZING)
         val model = analyzer.analyze(binaryPath, outputDir.resolve("analysis"))
+        require(!model.inputSha256.matches(Regex("[0-9a-f]{64}")) || model.inputSha256 == workspace.inputSha256) {
+            "analyzed model does not match the selected input identity"
+        }
         progress.runContext(model.inputSha256, profile.sha256)
         val project = outputDir.resolve("source-tree")
         val progressPath = outputDir.resolve("reconstruction_progress.json")
@@ -300,6 +305,7 @@ class ArchivalReconstructionService(
             maximumDependencyEdges = profile.budgets.plannerMaximumDependencyEdges,
             maximumWorkUnits = profile.budgets.plannerMaximumWorkUnits,
         )
+        val compilerFeedback = ModuleCompilerFeedbackStore(outputDir, model.inputSha256, profile.sha256)
         fun generatePass(pass: Int): SourceTreeManifest {
             val message = "reconstruction: generation pass=$pass/3; accepted checkpoints remain authoritative"
             System.err.println(message)
@@ -312,6 +318,8 @@ class ArchivalReconstructionService(
                 observedBehavior = observedBehavior,
                 profile = profile,
                 progress = progress,
+                compilerFeedback = compilerFeedback::read,
+                onCompilerFeedback = compilerFeedback::write,
             ) { completed, total, module ->
                 moduleTotal = total
                 progressPath.writeText("{\"phase\":\"modules\",\"completed\":$completed,\"total\":$total,\"module\":\"$module\"}\n")
@@ -388,5 +396,6 @@ class ArchivalReconstructionService(
             """.trimIndent() + "\n",
         )
         return ArchivalReconstructionResult(project, build, bundle)
+        }
     }
 }

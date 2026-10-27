@@ -70,6 +70,7 @@ data class ModuleReconstructionRequest(
     val sessionEvidenceFingerprint: String? = null,
     val acceptedSourceSha256: String? = null,
     val priorAssessment: String? = null,
+    val compilerDiagnostics: String? = null,
 )
 
 data class ReconstructedModule(
@@ -332,7 +333,8 @@ class BoundedLlmModuleReconstructor(
             "#include \"$relative\""
         }
         val effectiveObjective = objective + "\n\nUse these exact relative include paths from the target source directory:\n" + includeInstructions +
-            (request.priorAssessment?.let { "\n\nPrevious candidate assessment:\n$it\nCorrect the captured candidate where the evidence permits; do not fabricate missing behavior." } ?: "")
+            (request.priorAssessment?.let { "\n\nPrevious candidate assessment:\n$it\nCorrect the captured candidate where the evidence permits; do not fabricate missing behavior." } ?: "") +
+            (request.compilerDiagnostics?.let { "\n\nCompiler diagnostics for the captured candidate (bounded prior attempt):\n$it" } ?: "")
         val observed = request.observedBehavior ?: "<not yet available; report this limitation>"
         val promptEvidence = buildString {
             append(effectiveObjective).append("\n\n").append(evidence).append("\n\n").append(observed)
@@ -705,6 +707,8 @@ object SourceTreeGenerator {
         observedBehavior: String? = null,
         profile: ReconstructionProfile = GeneratedCMakeReconstructionProfile.descriptor,
         progress: AgentWorkflowProgress = AgentWorkflowProgress.NONE,
+        compilerFeedback: (moduleId: String) -> ModuleCompilerFeedback? = { null },
+        onCompilerFeedback: (ModuleCompilerFeedback) -> Unit = {},
         onModuleProgress: (completed: Int, total: Int, moduleId: String) -> Unit = { _, _, _ -> },
     ): SourceTreeManifest {
         val plan = planner.plan(model, overrides)
@@ -827,6 +831,9 @@ object SourceTreeGenerator {
                 priorAssessment = recordedCheckpoint?.takeIf { !it.accepted }?.issues?.take(8)
                     ?.map { it.code }?.filter { it.matches(Regex("[a-z0-9-]{1,128}")) }
                     ?.joinToString(", ")?.takeIf(String::isNotEmpty),
+                compilerDiagnostics = compilerFeedback(module.id)?.takeIf {
+                    it.contextSha256 == fingerprint && sourcePath.exists() && it.sourceSha256 == sha256(sourcePath.readBytes())
+                }?.diagnostics,
             )
             val cacheIdentity = reconstructor.cacheIdentity()
             val cached = recordedCheckpoint?.takeIf { checkpoint ->
@@ -895,6 +902,8 @@ object SourceTreeGenerator {
                 val compilation = if (issues.isEmpty()) {
                     progress.phase(AgentWorkflowPhase.BUILD_VALIDATING, module.id)
                     GeneratedCModuleValidation.validate(projectDir, module.sourcePath, profile).also { validation ->
+                        if (!validation.passed) onCompilerFeedback(ModuleCompilerFeedback(module.id,
+                            validation.sourceSha256, fingerprint, validation.diagnosticsSha256, validation.diagnosticsPrefix))
                         if (!validation.passed) issues += ModuleReconstructionIssue(
                             "module-compilation-${validation.outcome}",
                             "module compiler gate ${validation.outcome}; diagnostics SHA-256=${validation.diagnosticsSha256}",
