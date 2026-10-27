@@ -7,9 +7,9 @@ captured from real GCC 16.2.0 by `scripts/capture-gcc-preprocessing-reference.py
 
 ## Execution environment
 
-Preprocessing, dependency-generation and phase-orchestration cases run the installed
-`/usr/local/bin/gcc` and its `cc1`. All metadata cases run the oracle driver
-described below instead. Every case runs inside the pinned
+Preprocessing and dependency-generation cases run the installed
+`/usr/local/bin/gcc` and its `cc1`. Metadata and phase-orchestration cases run the
+manifest-pinned oracle driver and frontend described below. Every case runs inside the pinned
 official image `docker.io/library/gcc@sha256:2e6f4ae27ab8ad6f9617b46f0468889d368fdd91f2ea29aff98e4d5d1a3637f0`
 (config `sha256:103614947d5e…`), which is the base image of
 `oracle/gcc/16.2.0/build-toolchain.Dockerfile`. The container has no network, a
@@ -73,7 +73,11 @@ diagnostic prefixes, the `--version` banner and the `--help` usage text; the
 invocation `argv[0]` in the `-v` `COLLECT_GCC=` line; and the install prefix in
 path output and the complete `--prefix=` configure argument in `-v`. The capture
 re-runs every metadata case through a symlinked driver named `candidate-cc` and fails unless the driver-name substitutions account for
-every difference. Everything else must match byte-for-byte.
+every difference. Substitutions match the original output only; replacement values
+are not searched again. Earlier rules own overlapping spans, so an explicitly
+substituted `argv[0]` remains independent of the configured install prefix even
+when the invocation path contains the original prefix. Everything else must
+match byte-for-byte.
 
 Phase orchestration (`oracle/gcc/16.2.0/orchestration-phase-reference.json`,
 issue #712): compile to assembly, compile to object (plain, `-pipe`,
@@ -93,6 +97,15 @@ gets a tmpfs `/tmp`, so Docker and Podman pick the same temporary directory.
 Each phase records its `argv` without the driver's trailing ` |` pipeline
 connector; `stdoutPipedToNextPhase` says whether its output feeds the next
 phase. These cases do not pass `-nostdinc`.
+
+Orchestration executes the original `gcc-driver.stripped` and manifest-pinned
+`cc1`, mounted at their configured oracle paths. The cleared environment fixes
+`PATH`, locale, timezone and source epoch. `COMPILER_PATH` selects the original
+frontend directory first, then the pinned image's helper directory;
+`LIBRARY_PATH` selects the pinned image's GCC and system runtime objects, and
+`C_INCLUDE_PATH` explicitly supplies its builtin headers. The selected helpers,
+library environment and include directory are part of the reference contract;
+the original unretained install tree is not silently substituted.
 
 Every container invocation first verifies the pinned image config, including
 identity queries. The orchestration reference accepts only its fixed case
@@ -121,8 +134,41 @@ the cases.
 
 These checks establish the reference invocation contract. GCC's verbose report
 does not independently observe internal `collect2` to `ld` execution or plugin
-loading. Authenticated Kotlin-owned phase receipts and enforcement for an
-untrusted reconstructed candidate remain required by issues #53, #136 and #712.
+loading. Execution receipts and enforcement for an untrusted reconstructed
+candidate belong to the downstream qualification in issues #713–#715; candidate
+comparison is not a prerequisite for the reference declaration in #712. The
+separate Kotlin-only release migration in #136 retains its authority boundary;
+this reference capture does not itself certify a Kotlin-only release.
+
+## Closed orchestration declaration
+
+`orchestration-identity-contract.json` version 2 replaces the earlier mock-tool
+declaration. It binds the original driver and frontend manifests, their source
+and build inputs, the real reference capture, the source-defined case inventory,
+phase executable identities, startup dependencies and exact required argument
+vectors. The historical `behavior-corpus.json` and its forwarding observations
+retain their original scope.
+
+The verifier takes expected facts from the reviewed reference digest and current
+repository-owned case definitions, not from a proposed contract. It reparses the
+retained plan and verbose transcripts and requires the declared phases and pipe
+edges to match. Verbose compiler commands may add only the documented positional
+`-v` and `-version` flags; assembler commands may add `-v` immediately after the
+executable, and linker arguments must match exactly. Failed cases may stop at a
+nonempty prefix of the plan; successful cases must include every planned phase.
+Unknown paths, additional arguments, reordered inputs, changed environment and
+self-rehashed reference substitutions fail closed.
+
+Verify the checked declaration with:
+
+```sh
+python3 -m oracle.gcc.orchestration_contract
+```
+
+Changing reference expectations requires a new reviewed real capture and live
+replay before updating the separately pinned reference digest and regenerating
+the declaration. This gate validates the reference declaration; downstream
+candidate execution and acceptance remain separate.
 
 ## Reproduction
 
