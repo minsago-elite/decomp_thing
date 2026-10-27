@@ -12,6 +12,42 @@ import kotlin.test.assertNull
 import kotlin.test.assertTrue
 
 class GitReadsTest {
+    @Test fun `every read invocation enforces hard and soft child memory limits and fails closed without a limiter`(): Unit = GitTestRepositories().use { f ->
+        val (gitDir, workTree) = f.managed("read-memory")
+        f.write(workTree, "main.c", "int base;\n")
+        val base = f.commitAll(gitDir, workTree, "base")
+        f.write(workTree, "main.c", "int changed;\n")
+        f.raw(gitDir, workTree, "add", "--", "main.c")
+        // Test-only wrapper observes the actual exec-time limits, then delegates to trusted Git.
+        // No large allocation is needed to prove every read path uses the resource launcher.
+        val limits = f.root.resolve("observed-memory-limits")
+        val executable = f.root.resolve("bounded-read-git")
+        Files.writeString(executable, "#!/bin/sh\n{ ulimit -Sv; ulimit -Hv; } >> '$limits'\nexec '${f.runner.executable}' \"\$@\"\n")
+        Files.setPosixFilePermissions(executable, java.nio.file.attribute.PosixFilePermissions.fromString("rwx------"))
+        val runner = GitCommandRunner(executable, f.environment)
+        GitReads.status(runner, gitDir, workTree)
+        GitReads.history(runner, gitDir, GitObjectFormat.SHA1, base, 0, 1)
+        val diff = GitReads.diff(runner, gitDir, workTree, GitObjectFormat.SHA1, GitDiffScope.STAGED, null, null)
+        val file = diff.files.single()
+        assertTrue(GitReads.patch(runner, gitDir, workTree, GitDiffScope.STAGED, null, null, file).text.contains("+int changed;"))
+        GitReads.refsPage(runner, gitDir, GitObjectFormat.SHA1, 0, 1)
+        // status, history, raw diff, numstat, object sizes, selected patch and refs: seven children.
+        assertEquals(List(14) { "524288" }, Files.readAllLines(limits))
+        val unavailable = GitCommandRunner(executable, f.environment, memoryLimiter = null)
+        val reads: List<() -> Unit> = listOf(
+            { GitReads.status(unavailable, gitDir, workTree); Unit },
+            { GitReads.history(unavailable, gitDir, GitObjectFormat.SHA1, base, 0, 1); Unit },
+            { GitReads.diff(unavailable, gitDir, workTree, GitObjectFormat.SHA1, GitDiffScope.STAGED, null, null); Unit },
+            { GitReads.objectSizes(unavailable, gitDir, listOf(file.newObjectId!!)); Unit },
+            { GitReads.patch(unavailable, gitDir, workTree, GitDiffScope.STAGED, null, null, file); Unit },
+            { GitReads.refsPage(unavailable, gitDir, GitObjectFormat.SHA1, 0, 1); Unit },
+        )
+        for (read in reads) {
+            assertEquals(GitCommandException.Kind.START_FAILED, kotlin.test.assertFailsWith<GitCommandException> { read() }.kind)
+        }
+        assertEquals(14, Files.readAllLines(limits).size, "No unbounded child may run when enforcement is unavailable")
+    }
+
     private fun GitTestRepositories.write(workTree: Path, name: String, text: String) {
         val file = workTree.resolve(name)
         Files.createDirectories(file.parent)

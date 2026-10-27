@@ -808,6 +808,10 @@ single initialization action from the latest attempt's candidate. The full Git U
 They accept only their listed query parameters, each at most once. `limit` is 1-200 and defaults
 to 50, and pages also stop early at a 256 KiB rendering budget. No read runs a hook, filter,
 textconv, external diff tool or submodule command, and no read refreshes the index with a lock.
+Every GitReads child also has a hard and soft 512 MiB address-space ceiling, including raw/numstat
+comparisons, selected patches and object-size reads. Enforcement is fail-closed; a missing limiter
+or an allocation failure returns an explicit repository-unavailable/corrupt error, never an
+unbounded retry.
 
 - `status` (`gitStatus`) parses `git status --porcelain=v2 -z --untracked-files=all
   --ignored=matching --find-renames` byte by byte. Each entry reports its `staged` and `unstaged`
@@ -817,13 +821,15 @@ textconv, external diff tool or submodule command, and no read refreshes the ind
   `notices` explain the current state and its available next steps: clean, dirty, unborn,
   detached, conflicted, busy (a queued or running operation) and incomplete (status output
   exceeded 4 MiB). The read itself stays usable in every one of those states. The cursor is bound to
-  `worktreeVersion`; once anything observable changes, a later page answers `409 REF_CHANGED`.
+  `worktreeVersion` plus all listed paths/states, including ignored entries; observable listing
+  changes cause a later page to answer `409 REF_CHANGED`.
 - `worktreeVersion` now digests HEAD plus every non-ignored status entry. That includes the
   entry's index blob and the work-tree file's size and modification time, so re-editing an
   already modified file or re-staging different content changes it. Native invalid-UTF-8 names
   are observed using their exact filesystem bytes, not their escaped display names. Observation
   errors other than a missing file fail explicitly rather than supplying a stable placeholder.
-  Ignored files never change this version.
+  Ignored files never change this version. This is a bounded read fingerprint, not a source-content
+  identity: edits preserving size/mtime or beyond the status output bound may leave it unchanged.
 - `history` (`gitHistory`) lists commits from an exact `start` object (default HEAD; an unborn
   branch has none). The output is NUL-delimited `git log` with full object IDs, all parents (merges
   included), author, timestamps and a 200-character subject with an explicit truncation flag.
