@@ -845,7 +845,7 @@ class UploadServer(
             }
 
             legacyError(exchange, exception.status, exception.code, exception.message ?: "The request was invalid.", requestDiagnosticOutput) {
-                renderErrorPage(exception.status, "Invalid request", exception.message ?: "The request was invalid.")
+                renderErrorPage(exception.status, "Invalid request", "${exception.code}: ${exception.message ?: "The request was invalid."}")
             }
         } catch (exception: WebJobServiceException) {
             val status = if (exception.code in setOf("JOB_NOT_FOUND", "RUN_NOT_FOUND")) 404 else 503
