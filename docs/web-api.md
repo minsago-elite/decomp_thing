@@ -725,6 +725,18 @@ not the old recording's append cursor. Deliberate navigation supersedes pending 
 scrolling away also invalidates in-flight follow reads so they cannot evict the paused window.
 Leaving the view aborts reads, clears the follow timer and drops the buffer.
 
+The packaged-browser CI job runs `check-packaged-web-browser.mjs --mode logs` against the
+source-built distribution. Its inert terminal attempt has a 20,002-line hostile recording with
+invalid UTF-8 and long lines. The journey checks nested direct/reload routes, real paging beyond
+the buffer bound, deep-scroll filtering, literal search/jumps, range/download redaction parity,
+mounted atomic replacement and twelve large-publication/SPA-unmount cycles. It records GC heap,
+DOM node and listener samples in the sanitized archive-bound `report.json`; after warm-up, retained
+heap must recover within 8 MiB, nodes within 200 and listeners within 20. No production timer or
+HTTP response is mocked. Root and nested log shell routing also have HTTP/CSP regressions.
+These are executable qualification requirements, not a hosted pass claim. Terminal authored
+recordings do not qualify active-worker follow or complete #174/#178 long-session integration;
+those acceptance gates remain open until the corresponding source-bound evidence exists.
+
 ### Attempt queue position and stop reasons
 
 `GET jobs/J/runs/R/queue-position` samples one attempt's place in this process's executor queue.
