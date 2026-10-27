@@ -89,6 +89,8 @@ class WebRedactionPolicyTest {
             "\"Authorization\": Basic $credential",
             "Authorization: \"Bearer $credential\"",
             "\"Authorization\": \"Digest username=alpha, response=bravo charlie\"",
+            "Authorization: Digest username=\"Mufasa\", nonce=\"nonce-secret\", response=\"response-secret\"",
+            "Proxy-Authorization: Digest username=alice, realm=example, nonce=n-123, uri=/private, response=r-456, algorithm=MD5, qop=auth, nc=00000001, cnonce=c-789",
         )) {
             val report = "request headers: {$header}"
             val safe = policy.text(report)

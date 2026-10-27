@@ -219,6 +219,9 @@ internal class WebRedactionPolicy private constructor(
         private val DOCUMENT_CREDENTIAL_KEY = Regex("(?i)(?:$CREDENTIAL_KEYS|cookie|set-cookie)")
         private val URL_USER_INFO =Regex("(?i)\\b([a-z][a-z0-9+.-]{1,31}://)[^/\\s:@\"'<>]{1,256}:[^/\\s@\"'<>]{1,512}@")
         private val CREDENTIAL_PATTERNS = listOf(
+            // Digest is a comma-separated parameter list and quoted values may contain spaces;
+            // redact to the line boundary rather than stopping at the first comma or quote.
+            Regex("(?i)\\b((?:proxy-)?authorization[\"']?\\s*[:=]\\s*)digest\\s+[^\\r\\n<>]+") to true,
             Regex("(?i)\\b((?:proxy-)?authorization[\"']?\\s*[:=]\\s*)(?:basic|bearer|token|digest)\\s+[^\\s,;\"'<>]+") to true,
             Regex("(?i)\\b(bearer\\s+)[A-Za-z0-9._~+/=-]{8,}") to true,
             // Consume escaped quotes and the full bounded input, including unterminated previews.
