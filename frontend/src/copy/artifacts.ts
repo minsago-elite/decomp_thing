@@ -11,7 +11,7 @@ export const artifactCopy = {
   busy: 'Another read is using the artifact capacity. Refresh the list later.',
   empty: 'No retained file of the cataloged families was found for this selection.',
   page: 'Showing {count} artifacts on this page.',
-  unavailable: '{count} retained files could not be read consistently and are not listed. They may be changing or exceed the 4 GiB catalog limit.',
+  unavailable: '{count} retained files could not be read consistently and are not listed. They may be changing or exceed the 512 MiB per-file catalog ceiling. Detail reads and downloads have a separate 4 GiB ceiling.',
   next: 'Next artifact page',
   first: 'First artifact page',
   family: {
