@@ -142,7 +142,7 @@ data class GitRetentionReason(val code: String, val message: String) {
         val UNCOMMITTED_CHANGES = GitRetentionReason("GIT_UNCOMMITTED_CHANGES",
             "A managed Git work tree has uncommitted changes. Commit or remove them before deleting the job.")
         val UNPUSHED_COMMITS = GitRetentionReason("GIT_UNPUSHED_COMMITS",
-            "A managed Git branch has commits that no remote-tracking branch contains. Push them before deleting the job.")
+            "Managed Git history has commits that no remote-tracking branch contains. Preserve them before deleting the job.")
         val UNREADABLE = GitRetentionReason("GIT_STATE_UNAVAILABLE",
             "A managed Git repository could not be inspected, so its work is retained. Check Git on the server.")
     }
@@ -283,7 +283,7 @@ class ManagedGitRepositories(
                         unchangedInitialization(record, directory.resolve(WORK_TREE)))) {
                     reasons += GitRetentionReason.UNCOMMITTED_CHANGES
                 }
-                if (unpushed(runner, directory.resolve(GIT_DIR))) reasons += GitRetentionReason.UNPUSHED_COMMITS
+                if (unpushed(runner, directory.resolve(GIT_DIR), observation.head.objectId)) reasons += GitRetentionReason.UNPUSHED_COMMITS
             } catch (_: Exception) {
                 reasons += GitRetentionReason.UNREADABLE
             }
@@ -314,16 +314,16 @@ class ManagedGitRepositories(
     }
 
     /**
-     * A branch tip that no remote-tracking ref contains. A repository without any remote-tracking
-     * ref has nothing to push to, so it has no unpushed commits.
+     * Local history is expendable only when a remote-tracking ref contains every tip, including
+     * detached HEAD and tag-only history. No configured remote is not evidence of a push. Git's
+     * contains check peels annotated tags; non-commit tags fail closed through the unreadable hold.
      */
-    private fun unpushed(runner: GitCommandRunner, gitDir: Path): Boolean {
+    private fun unpushed(runner: GitCommandRunner, gitDir: Path, headObjectId: String?): Boolean {
         fun refs(vararg arguments: String) = runner.run(GitInvocation("for-each-ref", listOf(*arguments), gitDir = gitDir))
             .text.lines().filter { it.isNotBlank() }
-        if (refs("--count=1", "--format=%(refname)", "refs/remotes/").isEmpty()) return false
-        val tips = refs("--count=${MAX_RETENTION_BRANCHES + 1}", "--format=%(objectname)", "refs/heads/")
+        val tips = refs("--count=${MAX_RETENTION_BRANCHES + 1}", "--format=%(objectname)", "refs/heads/", "refs/tags/")
         if (tips.size > MAX_RETENTION_BRANCHES) return true
-        return tips.distinct().any { tip ->
+        return (tips + listOfNotNull(headObjectId)).distinct().any { tip ->
             refs("--count=1", "--format=%(refname)", "--contains", tip, "refs/remotes/").isEmpty()
         }
     }
@@ -720,7 +720,7 @@ class ManagedGitRepositories(
         const val MAX_LISTED_OPERATIONS = 20
         const val MAX_QUEUED = 8
         const val MAX_RECORD_BYTES = 16 * 1024
-        /** Branches inspected for unpushed work; a repository with more is retained conservatively. */
+        /** Local branch/tag tips inspected for unpushed work; excess tips retain conservatively. */
         const val MAX_RETENTION_BRANCHES = 256
         val JOB_ID = Regex("[a-f0-9]{32}")
         val ID = Regex("[A-Za-z0-9][A-Za-z0-9_-]{0,127}")

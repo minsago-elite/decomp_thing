@@ -1522,8 +1522,10 @@ source `git`. It reports these reasons:
   initialization has no commit yet. While its work tree still holds exactly the recorded candidate
   source it was copied from, it contains no user work, so it does not hold deletion. Any added,
   modified or deleted file does hold it; `build/` output is excluded, as it is from the copy.
-- `GIT_UNPUSHED_COMMITS`: a branch tip is contained by no remote-tracking ref. A repository without
-  remote-tracking refs has nothing to push to.
+- `GIT_UNPUSHED_COMMITS`: a local branch/tag tip or detached HEAD is contained by no remote-tracking
+  ref. A repository without remote-tracking refs retains all committed history: absence of a remote
+  does not prove that work was pushed. An unchanged unborn initialization still has no commit to retain.
+  Annotated tags are peeled for containment; uninspectable tag targets retain the repository conservatively.
 - `GIT_STATE_UNAVAILABLE`: a repository could not be inspected, so it is retained.
 
 Git admission takes the job service's lock before the Git service's lock, and deletion decides

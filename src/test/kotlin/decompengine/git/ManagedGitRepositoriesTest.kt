@@ -118,6 +118,29 @@ class ManagedGitRepositoriesTest {
         }.code)
     }
 
+    @Test fun `retention protects commits without remotes and detached or tag-only unpushed work`(): Unit = Fixture().use { f ->
+        val service = f.open()
+        val completed = service.settle(service.request(jobId, GitRepositoryRequest.Init("run_1", "revision_1", null), "retention_request_0001"))
+        val directory = f.repositoryDirectory(completed.repositoryId)
+        val gitDir = directory.resolve("repository.git")
+        val workTree = directory.resolve("worktree")
+        fun codes() = service.retentionHolds(jobId).map { it.code }
+        assertTrue(codes().isEmpty(), "unchanged unborn initialization contains no user commits")
+        val baseline = f.repositories.commitAll(gitDir, workTree, "local baseline")
+        assertEquals(listOf("GIT_UNPUSHED_COMMITS"), codes(), "absence of a remote is not proof of a push")
+        f.repositories.git("--git-dir=$gitDir", "update-ref", "refs/remotes/origin/trunk", baseline)
+        assertTrue(codes().isEmpty(), "a clean commit contained by a remote-tracking ref is retained elsewhere")
+        f.repositories.git("--git-dir=$gitDir", "--work-tree=$workTree", "checkout", "-q", "--detach", baseline)
+        Files.writeString(workTree.resolve("new.c"), "int unpushed;\n")
+        val detached = f.repositories.commitAll(gitDir, workTree, "detached work")
+        assertEquals(listOf("GIT_UNPUSHED_COMMITS"), codes(), "detached commits are still user work")
+        f.repositories.git("--git-dir=$gitDir", "tag", "-a", "keep", "-m", "keep detached work", detached)
+        f.repositories.git("--git-dir=$gitDir", "--work-tree=$workTree", "checkout", "-q", "trunk")
+        assertEquals(listOf("GIT_UNPUSHED_COMMITS"), codes(), "tag-only history must not be discarded")
+        f.repositories.git("--git-dir=$gitDir", "tag", "-d", "keep")
+        assertTrue(codes().isEmpty())
+    }
+
     @Test fun `a retained snapshot that no longer matches its commitments is never published`(): Unit {
         for (change in listOf("modify", "delete")) Fixture().use { f ->
             if (change == "modify") f.write("src/main file.c", "int main(void) { return 1; }\r\n")

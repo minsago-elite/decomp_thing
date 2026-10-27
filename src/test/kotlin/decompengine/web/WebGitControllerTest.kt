@@ -344,6 +344,9 @@ class WebGitControllerTest {
         val repository = f.root.resolve(job.id).resolve("git/repositories").resolve(operation.getValue("repositoryId").jsonPrimitive.content)
         val gitDir = Files.list(repository).use { entries -> entries.filter { Files.exists(it.resolve("HEAD")) && Files.isDirectory(it.resolve("objects")) }.toList().single() }
         val workTree = Files.list(repository).use { entries -> entries.filter { Files.exists(it.resolve("unit.c")) }.toList().single() }
+        // Import strips remote configuration/tracking refs. That absence never proves a safe push.
+        assertEquals(listOf("GIT_UNPUSHED_COMMITS"), retentionCodes(f.delete("delete_git_no_remote_01", job.id)))
+        assertTrue(Files.exists(repository), "unpushed imported history must survive a deletion request")
         // A remote-tracking ref that does not contain the branch tip: the newest commit is unpushed.
         git("--git-dir=$gitDir", "update-ref", "refs/remotes/origin/main", "HEAD~1")
         assertEquals(listOf("GIT_UNPUSHED_COMMITS"), retentionCodes(f.delete("delete_git_unpushed_01", job.id)))
