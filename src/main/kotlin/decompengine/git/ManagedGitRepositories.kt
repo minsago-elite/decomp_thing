@@ -671,7 +671,13 @@ class ManagedGitRepositories(
                         }
                         if (request.stage) GitWorkspaceMutations.stage(runner, located.gitDir, located.workTree, entries, reviewed, staging, index) {
                             crash(GitOperationCrashPoint.AFTER_WORKSPACE_CAPTURE)
-                        } else GitWorkspaceMutations.unstage(runner, located.gitDir, located.workTree, entries, request.guards.expectedHeadObjectId, index)
+                        } else {
+                            // Ordinary status deliberately hides gitlinks. Reset uses pathspec
+                            // semantics, so hidden staged gitlinks must block publication too.
+                            GitWorkspaceMutations.requireNoStagedGitlinks(runner, located.gitDir, located.workTree,
+                                request.guards.expectedHeadObjectId, index)
+                            GitWorkspaceMutations.unstage(runner, located.gitDir, located.workTree, entries, request.guards.expectedHeadObjectId, index)
+                        }
                         if (GitRepositoryInspector.head(runner, located.gitDir, reviewed.objectFormat) != reviewed.head) {
                             GitWorkspaceMutations.refuse("REF_CHANGED", "The reviewed HEAD changed. Nothing was staged; read the current state first.")
                         }

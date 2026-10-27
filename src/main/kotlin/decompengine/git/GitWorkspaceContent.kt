@@ -1,5 +1,7 @@
 package decompengine.git
 
+import decompengine.acp.LinuxDescriptor
+import decompengine.acp.LinuxFilesystemSyscalls
 import decompengine.git.GitStorage.hex
 import java.io.OutputStream
 import java.nio.file.Files
@@ -14,7 +16,8 @@ internal object GitWorkspaceContent {
     class Budget(var remaining: Long = GitSourceCopy.MAX_BYTES)
 
     /** Never follow a leaf link. The optional destination receives exactly the hashed bytes. */
-    fun fingerprint(root: Path, file: Path, budget: Budget, destination: Path? = null): String {
+    fun fingerprint(root: Path, file: Path, budget: Budget, destination: Path? = null,
+        beforeOpen: (Path) -> Unit = {}): String {
         val stat = GitRepositoryInspector.worktreeStat(root, file) ?: return "absent"
         if (stat.isDirectory) return "directory"
         if (!stat.isRegularFile && !stat.isSymbolicLink) unavailable()
@@ -35,22 +38,64 @@ internal object GitWorkspaceContent {
                 consume(bytes, bytes.size, budget, digest, output)
             } else {
                 if (stat.size() > budget.remaining) unavailable()
-                Files.newInputStream(file, NOFOLLOW_LINKS).use { input ->
-                    val buffer = ByteArray(64 * 1024)
-                    var size = 0L
-                    while (true) {
+                try {
+                    LinuxFilesystemSyscalls.requireSupported(root)
+                    openPinnedParent(root, file.parent).use { parent ->
+                        beforeOpen(file)
                         GitStorage.checkInterrupted()
-                        val count = input.read(buffer)
-                        if (count < 0) break
-                        size += count
-                        if (size > stat.size()) unavailable()
-                        consume(buffer, count, budget, digest, output)
+                        // O_PATH authenticates the opened inode as a regular file before an
+                        // O_NONBLOCK readable descriptor is reopened from that same inode.
+                        LinuxFilesystemSyscalls.openRegularFileAtOrNull(parent.fd, file.fileName.toString())
+                            ?.use { pinned ->
+                                val pinnedPath = LinuxFilesystemSyscalls.descriptorPath(pinned)
+                                val openedSize = Files.size(pinnedPath)
+                                if (openedSize != stat.size()) unavailable()
+                                val openedMode = if (pinned.identity.mode and 0x49 != 0) "100755" else "100644"
+                                if (openedMode != mode) unavailable()
+                                val hashingOutput = object : OutputStream() {
+                                    override fun write(value: Int) {
+                                        val one = byteArrayOf(value.toByte())
+                                        if (budget.remaining < 1) unavailable()
+                                        budget.remaining--
+                                        digest.update(one)
+                                        output?.write(value)
+                                    }
+                                    override fun write(bytes: ByteArray, offset: Int, length: Int) {
+                                        if (length > budget.remaining) unavailable()
+                                        budget.remaining -= length
+                                        digest.update(bytes, offset, length)
+                                        output?.write(bytes, offset, length)
+                                    }
+                                }
+                                val copied = LinuxFilesystemSyscalls.copyReadableTo(pinned, hashingOutput, stat.size(),
+                                    cancellationCheck = GitStorage::checkInterrupted)
+                                if (copied != stat.size()) unavailable()
+                            } ?: unavailable()
                     }
-                    if (size != stat.size()) unavailable()
-                }
+                } catch (_: java.io.IOException) { unavailable() }
             }
         } finally { output?.close() }
         return "$mode:${digest.digest().hex()}"
+    }
+
+    /** Pin each directory component before opening a leaf; callers own the returned descriptor. */
+    private fun openPinnedParent(root: Path, parent: Path): LinuxDescriptor {
+        val absoluteRoot = root.toAbsolutePath().normalize()
+        val absoluteParent = parent.toAbsolutePath().normalize()
+        if (!absoluteParent.startsWith(absoluteRoot)) unavailable()
+        var current = LinuxFilesystemSyscalls.openRoot(absoluteRoot.root)
+        try {
+            for (component in absoluteRoot.root.relativize(absoluteParent)) {
+                GitStorage.checkInterrupted()
+                val next = LinuxFilesystemSyscalls.openDirectoryAt(current.fd, component.toString())
+                current.close()
+                current = next
+            }
+            return current
+        } catch (failure: Throwable) {
+            current.close()
+            throw failure
+        }
     }
 
     private fun consume(bytes: ByteArray, count: Int, budget: Budget, digest: MessageDigest, output: OutputStream?) {
