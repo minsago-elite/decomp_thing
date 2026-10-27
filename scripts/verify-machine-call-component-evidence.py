@@ -532,8 +532,11 @@ def retained_symbol_populations(inventory: dict, symbols: dict) -> None:
         assert strings is not None
         string_size = address(strings["size"])
         assert string_size is not None
+        encoded_name = symbol["name"].encode("utf-8")
         require(symbol["nameOffset"] <= 0xffffffff and symbol["nameOffset"] < string_size and
-                (symbol["nameOffset"] != 0 or symbol["name"] == ""), "retained symbol string offset/linkage differs")
+                symbol["nameOffset"] + len(encoded_name) + 1 <= string_size and
+                (symbol["nameOffset"] != 0 or symbol["name"] == ""),
+                "retained symbol name exceeds linked string table")
         require(symbol["info"] <= 255 and symbol["other"] <= 255 and symbol["type"] == symbol["info"] & 15 and
                 symbol["binding"] == symbol["info"] >> 4 and symbol["visibility"] == symbol["other"] & 3 and
                 (symbol["binding"] == 0) == (index < table["info"]), "retained DYNSYM local-symbol boundary/encoding differs")

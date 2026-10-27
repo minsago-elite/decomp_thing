@@ -1035,6 +1035,7 @@ class ExternalCallComponentEvidenceTest(unittest.TestCase):
             "dynsym-owner": lambda inv: inv["dynamicSymbols"][1].update(tableSectionIndex=3),
             "name-outside": lambda inv: inv["dynamicSymbols"][1].update(nameOffset=0xffffffff),
             "name-at-end": lambda inv: inv["dynamicSymbols"][1].update(nameOffset=64),
+            "name-truncated": lambda inv: inv["dynamicSymbols"][1].update(nameOffset=63),
             "name-zero": lambda inv: inv["dynamicSymbols"][1].update(nameOffset=0),
             "pt-empty": lambda inv: next(row for row in inv["programHeaders"] if row["type"] == 2).update(fileSize="0x0"),
             "pt-duplicate": lambda inv: inv["programHeaders"].append(next(row for row in inv["programHeaders"] if row["type"] == 2) | {"index": 30}),
@@ -1335,7 +1336,8 @@ class RetainedExternalEvidenceRegressionTest(unittest.TestCase):
             output = Path(temporary)
             (output / "driver-request.json").write_bytes((directory / "driver-request.json").read_bytes())
             for mutation, error in (("strtab-pointer", "dynamic string tags"), ("strtab-size", "dynamic string tags"),
-                                    ("dynsym-storage", "DYNSYM section population"), ("dynsym-name-offset", "symbol string offset"),
+                                    ("dynsym-storage", "DYNSYM section population"), ("dynsym-name-offset", "symbol name exceeds linked string table"),
+                                    ("dynsym-name-truncated", "symbol name exceeds linked string table"),
                                     ("pt-dynamic-empty", "dynamic section/program population"),
                                     ("sht-dynamic-empty", "dynamic section/program population"),
                                     ("dynamic-entry-outside", "dynamic entry index/file offset"),
@@ -1363,6 +1365,12 @@ class RetainedExternalEvidenceRegressionTest(unittest.TestCase):
                         next(row for row in report["dynamicInventory"]["sections"] if row["type"] == 11)["size"] = "0x18"
                     elif mutation == "dynsym-name-offset":
                         next(row for row in report["dynamicInventory"]["dynamicSymbols"] if row["name"] == "strlen")["nameOffset"] = 0xffffffff
+                    elif mutation == "dynsym-name-truncated":
+                        inventory = report["dynamicInventory"]
+                        symbol = next(row for row in inventory["dynamicSymbols"] if row["name"] == "strlen")
+                        strings = next(row for row in inventory["sections"] if row["index"] == next(
+                            section["link"] for section in inventory["sections"] if section["type"] == 11))
+                        symbol["nameOffset"] = int(strings["size"], 16) - 1
                     elif mutation == "pt-dynamic-empty":
                         next(row for row in report["dynamicInventory"]["programHeaders"] if row["type"] == 2)["fileSize"] = "0x0"
                     elif mutation == "sht-dynamic-empty":
