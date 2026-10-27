@@ -102,3 +102,82 @@ Bundled Ghidra remains an independent application-owned Java-API dependency.
 Production analysis must continue to use the bundled runtime with `GHIDRA_HOME`
 unset and must not fall back to an external `analyzeHeadless` installation. ACP
 may consume completed evidence read-only; it cannot issue or mutate this lease.
+
+## Trusted retained-slot reset transaction
+
+The focused provisioner for [#933](https://github.com/minsago-elite/decomp_thing/issues/933)
+uses a fixed root-private deployment at `/var/lib/decomp-oracle-ext4-reset-ci`.
+[`oracle-ext4-reset.py`](../scripts/oracle-ext4-reset.py) accepts only the recorded
+slot generation or existing intent. Its root-private image is allocated at
+creation, bound to one non-autoclear loop, and never detached, rebound, deleted,
+or credited as released by reset. Existing runner-owned images cannot be
+promoted into this authority. The trust boundary excludes an administrator
+retaining or transferring raw image/block descriptors to another principal.
+The Kotlin oracle principal has no raw-image, raw-device, state, or reset access.
+
+The broker durably records a bounded intent before asking the fixed custodian
+service to run. The service authenticates that intent under the root lock;
+active service or cgroup custody prevents a competing reset. An ordering-only
+retention target keeps the completed service invocation and exit status
+observable without activating or restarting it. Finalization requires the exact
+successful invocation and an empty cgroup. The target stays active through
+retained final evidence and disposal of the ephemeral hosted VM.
+
+The transaction acquires the production cooperative mount lock, closes the old
+generation gate, moves and unmounts only the authenticated mount, and formats
+through the same pinned loop. The supported e2fsprogs package and its complete
+installed tool closure are recorded. Before creating any reset fixture, the
+hosted bootstrap may restore the one observed runner-image modification to
+`/etc/systemd/system.conf`. It refuses any other systemd verification output,
+retains the original file and intent under a new root-private package-evidence
+directory, and uses signature-enforced APT to reinstall the exact installed
+systemd version with `--force-confmiss`. It then requires **empty** `dpkg --verify`
+output and reexecutes the manager before any fixture service exists. Interrupted
+or preexisting package setup is refused; there is no automatic rollback or
+blanket configuration exemption. The ordinary installer still rejects any
+modification in every required package. This is disposable-host preparation,
+not a runtime reset/repair authority or mounted qualification result.
+
+The fixed formatter arguments and config
+require its exclusive block open before any discard, zero, or write; a hidden
+namespace mount must cause an actual `EBUSY` refusal. No recursive walk of old
+filesystem contents is used, so sparse logical size and directory depth do not
+set cleanup work. A fresh UUID and generation path prevent stale evidence from
+being admitted as the replacement filesystem.
+
+Durable `MOUNT_INTENT` records the protected candidate location before mounting.
+Recovery reconciles only the recorded block/UUID and owned location. The
+`EXPOSURE_INTENT` transition is irreversible: once publication may have exposed
+the candidate, recovery cannot reformat it or require it to be empty. An
+unrecognized replacement, ambiguous start submission, changed boot, or missing
+identity remains fenced and reserved. Safe refusal at an interrupted directory
+creation/removal window is not claimed as successful convergence.
+
+The service retains finite 10-second / 5-start rate semantics, a 60-second
+manager runtime bound, and the existing 45-second internal action bound. The
+hosted fixture separately persists at most 64 conservatively charged submission
+attempts per session and paces each eligible submission at least 2.1 seconds
+after the previous verified terminal/empty-cgroup observation. A rate-limit
+refusal fails qualification; the fixture never clears service failure counters.
+The durable formatter launch-attempt count is conservative bookkeeping, not an
+assertion that every recorded attempt reached `execve`.
+
+[`FullTreeDiskScratchResetMountedTest.kt`](../src/test/kotlin/decompengine/oracle/fulltree/FullTreeDiskScratchResetMountedTest.kt)
+contains 32 named hosted controls. They cover real unprivileged admission,
+lease contention, killed workers, exhaustion, sparse/deep residue, held
+filesystem descriptors, hidden namespace mounts, actual controller/custodian/
+formatter deaths, durable cutpoints, replacement canaries, and irreversible
+candidate exposure. The report gate requires each exact JUnit method once with
+zero skips, actual raw syscall/service evidence, and the 13 committed source
+identities including the service, retention target, fixture, and gate.
+Unprivileged helper tests, compilation, and synthesized report mutation tests
+supply no mounted-kernel qualification evidence.
+
+The final fixture action refuses an alien mount replacement, then fences and
+unmounts only the authenticated public scratch. Its result is
+`RESERVED_UNMOUNTED`: the original image and bound loop, any explicitly reserved
+qualification companion, and service/target installation remain owned until VM
+disposal. Zero displayed availability is not capacity credit. This transaction
+does not authorize worker START, operation absence, output acceptance, journal
+terminal release, or aggregate active-plus-residue accounting. Those parent
+contracts and their issue gates remain independent.
