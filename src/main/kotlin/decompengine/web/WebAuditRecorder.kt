@@ -98,6 +98,7 @@ internal class WebAuditRecorder(
                 resource == "jobs" && method == "POST" -> WebAuditAction.JOB_UPLOAD
                 resource == "agent/preflight" && method == "POST" -> WebAuditAction.AGENT_PREFLIGHT
                 resource == "support-export" && method == "GET" -> WebAuditAction.SUPPORT_EXPORT
+                parts.size == 3 && parts[0] == "jobs" && parts[2] == "repositories" && method == "POST" -> WebAuditAction.GIT_REPOSITORY_MUTATION
                 parts.size == 2 && parts[0] == "jobs" && method == "PATCH" -> WebAuditAction.JOB_UPDATE
                 parts.size == 2 && parts[0] == "jobs" && method == "DELETE" -> WebAuditAction.JOB_DELETE
                 parts.size == 3 && parts[0] == "jobs" && parts[2] == "runs" && method == "POST" -> WebAuditAction.RUN_START

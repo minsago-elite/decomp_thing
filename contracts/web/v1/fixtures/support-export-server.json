@@ -88,7 +88,7 @@
                 "kind": "browser_session",
                 "sessionDigest": "abababababababababababababababababababababababababababababababab"
               },
-              "action": "run.cancel",
+              "action": "git.repository-mutate",
               "target": {
                 "jobId": "1234567890abcdef1234567890abcdef",
                 "runId": "run_example_1",

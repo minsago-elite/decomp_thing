@@ -295,6 +295,9 @@ class WebAuditLogTest {
         assertEquals(WebAuditAction.RUN_CANCEL to WebAuditTarget(job, "run_1"), run)
         assertEquals(WebAuditAction.JOB_DELETE, WebAuditRecorder.versionedAction("DELETE", "jobs/$job")?.first)
         assertEquals(WebAuditAction.JOB_UPDATE, WebAuditRecorder.versionedAction("PATCH", "jobs/$job")?.first)
+        assertEquals(WebAuditAction.GIT_REPOSITORY_MUTATION to WebAuditTarget(job),
+            WebAuditRecorder.versionedAction("POST", "jobs/$job/repositories"))
+        assertNull(WebAuditRecorder.versionedAction("GET", "jobs/$job/repositories"))
         assertEquals(WebAuditAction.RUN_RECOVER, WebAuditRecorder.versionedAction("POST", "jobs/$job/runs/r/recover")?.first)
         assertEquals(WebAuditAction.PROGRESS_PIN, WebAuditRecorder.versionedAction("PUT", "jobs/$job/runs/r/progress-pin")?.first)
         assertEquals(WebAuditTarget(null, "r"), WebAuditRecorder.versionedAction("PUT", "jobs/../runs/r/progress-pin")?.second)

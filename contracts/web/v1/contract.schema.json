@@ -5326,7 +5326,8 @@
             "agent.preflight",
             "operator.auth-inspection",
             "operator.auth-inspection-cancel",
-            "support.export"
+            "support.export",
+            "git.repository-mutate"
           ]
         },
         "target": {

@@ -1429,8 +1429,10 @@ requested or displayed (the activity view shows "Not reported").
 **Audit.** Every sensitive action is recorded durably in `<store>/.web-audit/` before the request thread
 finishes, including refused and failed requests: `session.start`, `session.end`, `job.upload`, `job.update`,
 `job.delete`, `run.start`, `run.cancel`, `run.recover`, `run.progress-pin`, `agent.preflight`,
-`operator.auth-inspection` and `operator.auth-inspection-cancel` (legacy) and `support.export`. An entry records a sequence, time, the response request
-ID, the actor (`browser_session` with a domain-separated SHA-256 digest of the authorization-owned session
+`operator.auth-inspection` and `operator.auth-inspection-cancel` (legacy), `support.export`, and
+`git.repository-mutate` for managed repository creation/attachment. This Git mutation entry is
+scoped to the validated job ID from `POST /api/v1/jobs/{jobId}/repositories`. An entry records a
+sequence, time, the response request ID, the actor (`browser_session` with a domain-separated SHA-256 digest of the authorization-owned session
 identity, or `unauthenticated`), the action, the target job/run, an `ifmatch_`-prefixed, domain-separated SHA-256
 commitment to a bounded strong `If-Match` value (never the caller's header bytes), and the server version the
 response reported, the outcome (`accepted`, `replayed`, `rejected` for 4xx, `failed` for 5xx) with its

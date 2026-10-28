@@ -50,7 +50,7 @@ class WebGitControllerTest {
     private val schema = Json.parseToJsonElement(Files.readString(Path.of("contracts/web/v1/contract.schema.json")))
         .jsonObject.getValue("definitions").jsonObject
 
-    private class Fixture(availability: GitAvailability = GitRuntime.detect()) : AutoCloseable {
+    private class Fixture(availability: GitAvailability = GitRuntime.detect(), audited: Boolean = false) : AutoCloseable {
         val root: Path = Files.createTempDirectory(Files.createDirectories(Path.of("build/test-tmp/git").toAbsolutePath()), "web git http ")
         val store = JobStore(root)
         val job = store.createFromUpload("inert.elf", elfFixture())
@@ -58,6 +58,7 @@ class WebGitControllerTest {
         val service = WebJobService(store, JobAnalyzer { _, _ -> error("Unexpected analysis") }, JobReconstructor { _, _ -> error("Unexpected reconstruction") },
             attemptStoreFactory = { WorkflowAttemptStore.open(it).also { opened -> owner = opened } })
         val repositories = ManagedGitRepositories(root, availability, service::gitSourceSnapshot)
+        val audit = if (audited) WebAuditLog(root) else null
         val server: HttpServer = HttpServer.create(InetSocketAddress("127.0.0.1", 0), 0)
         val origin = "http://127.0.0.1:${server.address.port}"
         val access = LocalWebAccess(LocalWebAccessConfiguration(origin))
@@ -77,7 +78,7 @@ class WebGitControllerTest {
                 WorkflowTerminalReason.COMPLETED, WorkflowCandidate("revision_one", recordedSourceDigest(SOURCES)))).attempt
             sourceTree = recordSourceTree(root.resolve("${job.id}/reports/runs/${run.runId}/source-tree"), elfFixture(), SOURCES)
             val api = WebApiController(access, EmbeddedWebAssets.load(basePath = "/workbench/"), service,
-                WebJobMutationBoundary(access, service), resources, git = WebGitCapability(availability, repositories))
+                WebJobMutationBoundary(access, service), resources, audit = audit, git = WebGitCapability(availability, repositories))
             server.executor = workers; server.createContext("/") { check(api.route(it)) }; server.start()
             val token = access.issueBootstrap().token
             val session = send("POST", "{\"token\":\"$token\"}", mapOf("Origin" to origin, "Content-Type" to "application/json"), "/workbench/api/v1/session")
@@ -145,7 +146,7 @@ class WebGitControllerTest {
         assertFalse(bootstrap.toString().contains(f.root.toString()))
     }
 
-    @Test fun `initialization is admitted once, published atomically and replayed without repetition`(): Unit = Fixture().use { f ->
+    @Test fun `initialization and refused repository mutations appear in server and job audit exports`(): Unit = Fixture(audited = true).use { f ->
         val empty = data(f.read(), 200, "gitRepositories")
         assertEquals(JsonArray(emptyList()), empty["repositories"]); assertEquals(JsonArray(emptyList()), empty["operations"])
         val before = Files.readAllBytes(f.sourceTree.resolve("src/modules/unit.c"))
@@ -180,6 +181,28 @@ class WebGitControllerTest {
         error(f.send("POST", f.init(), f.headers(key = "http_git_second_intent")), 409, "REPOSITORY_EXISTS")
         error(f.read("${f.collection}/repository_${"0".repeat(32)}"), 404, "NOT_FOUND")
         error(f.read("${f.collection}/${summary.getValue("repositoryId").jsonPrimitive.content}/operations/operation_${"0".repeat(32)}"), 404, "NOT_FOUND")
+
+        fun repositoryMutations(target: String): List<JsonObject> {
+            val export = data(f.read(target), 200, "supportExport")
+            val audit = export.getValue("sections").jsonArray.map { it.jsonObject }
+                .single { it.getValue("id").jsonPrimitive.content == "audit" }
+                .getValue("content").jsonObject.getValue("entries").jsonArray
+            return audit.map { it.jsonObject }.filter {
+                it.getValue("action").jsonPrimitive.content == WebAuditAction.GIT_REPOSITORY_MUTATION.wireName
+            }
+        }
+        val expectedOutcomes = listOf("accepted:202", "replayed:202", "rejected:409", "rejected:409").sorted()
+        for (entries in listOf(
+            repositoryMutations("/workbench/api/v1/support-export?scope=server"),
+            repositoryMutations("/workbench/api/v1/support-export?scope=job&jobId=${f.job.id}"),
+        )) {
+            assertEquals(expectedOutcomes, entries.map {
+                "${it.getValue("outcome").jsonPrimitive.content}:${it.getValue("status").jsonPrimitive.content}"
+            }.sorted())
+            assertTrue(entries.all {
+                it.getValue("target").jsonObject.getValue("jobId").jsonPrimitive.content == f.job.id
+            })
+        }
     }
 
     /** Track directories too: empty runtime/staging directory changes are still writes. */

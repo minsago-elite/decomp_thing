@@ -40,6 +40,7 @@ internal enum class WebAuditAction(val wireName: String) {
     OPERATOR_INSPECTION("operator.auth-inspection"),
     OPERATOR_INSPECTION_CANCEL("operator.auth-inspection-cancel"),
     SUPPORT_EXPORT("support.export"),
+    GIT_REPOSITORY_MUTATION("git.repository-mutate"),
     ;
 
     companion object {
